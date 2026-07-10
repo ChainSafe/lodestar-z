@@ -435,7 +435,7 @@ fn advanceTo(self: *Clock, target: Slot) AdvanceIterator {
     };
 }
 
-/// Walk the cursor to `target`, emitting each event. 
+/// Walk the cursor to `target`, emitting each event.
 fn dispatchTo(self: *Clock, target: Slot) void {
     std.debug.assert(self.dispatching);
     var iter = self.advanceTo(target);
@@ -559,6 +559,8 @@ test "waitForSlot resolves immediately when at target" {
 
     const current = clock.currentSlotOrGenesis();
     try clock.waitForSlot(current);
+    // Fast path: resolved without ever enqueuing a waiter.
+    try testing.expectEqual(@as(usize, 0), clock.waiters.count());
 }
 
 test "waitForSlot returns aborted on stop" {
@@ -1194,7 +1196,7 @@ const SlowCallbackCtx = struct {
     }
 };
 
-test "currentSlot returns the reading its catch-up flushed to" {
+test "currentSlot returns the wall slot its catch-up flushed to" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -1210,7 +1212,7 @@ test "currentSlot returns the reading its catch-up flushed to" {
     _ = try clock.onSlot(SlowCallbackCtx.onSlot, &ctx);
 
     // Wall slot 2: catch-up emits slots 1 and 2, burning the wall to
-    // 112_000 ms (slot 12). The result must stay at the flushed reading.
+    // 112_000 ms (slot 12). The result must stay at the wall slot it read.
     fake.ms = 102_000;
     const returned = clock.currentSlot();
 
@@ -1219,7 +1221,7 @@ test "currentSlot returns the reading its catch-up flushed to" {
     try testing.expect(ctx.last_emitted.? <= returned.?);
 }
 
-test "currentSlotWithGossipDisparity bases its slot on the caught-up reading" {
+test "currentSlotWithGossipDisparity bases its slot on the caught-up wall time" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -1235,7 +1237,7 @@ test "currentSlotWithGossipDisparity bases its slot on the caught-up reading" {
 
     // 300 ms into slot 2 — outside the 500 ms disparity window — while the
     // slow callbacks burn the wall to 112_300 ms (slot 12). The base slot
-    // must come from the caught-up reading, not a fresh read.
+    // must come from the caught-up wall time, not a fresh read.
     fake.ms = 102_300;
     const returned = clock.currentSlotWithGossipDisparity();
 
@@ -1243,7 +1245,7 @@ test "currentSlotWithGossipDisparity bases its slot on the caught-up reading" {
     try testing.expectEqual(@as(?Slot, 2), ctx.last_emitted);
 }
 
-test "currentEpoch returns the epoch of the reading its catch-up flushed to" {
+test "currentEpoch returns the epoch of the wall slot its catch-up flushed to" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -1267,7 +1269,7 @@ test "currentEpoch returns the epoch of the reading its catch-up flushed to" {
     try testing.expectEqual(@as(?Slot, 2), ctx.last_emitted);
 }
 
-test "isCurrentSlotGivenGossipDisparity judges the caught-up reading" {
+test "isCurrentSlotGivenGossipDisparity judges the caught-up wall time" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -1367,7 +1369,7 @@ test "stop() from a catchUp callback still resolves a reached wait" {
     try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
 }
 
-test "waitForSlot reached-check consults the cursor, not the catch-up reading" {
+test "waitForSlot reached-check consults the cursor, not the wall time" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -1382,7 +1384,7 @@ test "waitForSlot reached-check consults the cursor, not the catch-up reading" {
     _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
 
     // Backlog to slot 3 with the listener stopping the clock at slot 1: the
-    // catch-up reading (3) reaches the target but the cursor stops at 1, and
+    // caught-up wall slot (3) reaches the target but the cursor stops at 1, and
     // slot 2's event is suppressed. The reached-check must consult the cursor,
     // so the wait aborts synchronously instead of resolving.
     fake.ms = 103_000;
@@ -1677,7 +1679,7 @@ const RunAheadB = struct {
     }
 };
 
-test "a mid-emit query returns a reading ahead of deferred delivery" {
+test "a mid-emit query returns the wall slot ahead of deferred delivery" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -1694,7 +1696,7 @@ test "a mid-emit query returns a reading ahead of deferred delivery" {
     _ = try clock.onSlot(RunAheadA.onSlot, &ctx_a);
     _ = try clock.onSlot(RunAheadB.onSlot, &ctx_b);
 
-    // Backlog 1..3. While emitting slot 1, A queries: the reading returns 3
+    // Backlog 1..3. While emitting slot 1, A queries and gets 3
     // (the wall) though only slot 1 has been delivered. B then gets slot 1, and
     // the drain delivers 2 and 3 to both after A's callback returns.
     fake.ms = 103_000;
@@ -1791,14 +1793,14 @@ test "stop() after a mid-emit query leaves no pending target behind" {
     _ = try clock.onSlot(QueryThenStopCtx.onSlot, &ctx);
 
     // Backlog 1..3: at slot 1 the callback queries (recording pending target
-    // 3, reading 3) and then stops. The exit backstop must clear the recorded
+    // 3, returning 3) and then stops. The exit backstop must clear the recorded
     // pending or the next accessor's catchUp would trip the
     // `pending_target == null` assert.
     fake.ms = 103_000;
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
     try testing.expectEqual(@as(?Slot, 3), ctx.queried_slot);
 
-    // The post-stop accessor dispatches nothing and stays a pure reading:
+    // The post-stop accessor dispatches nothing and stays a pure read:
     // cursor unchanged, suppressed slots 2..3 never delivered.
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
     try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
