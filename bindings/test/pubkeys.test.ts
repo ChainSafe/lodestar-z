@@ -102,4 +102,19 @@ describe("pubkeys", () => {
     expect(pubkeyCache.get(0)).toBeUndefined();
     expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBeNull();
   });
+
+  it("exposes native capacity", () => {
+    expect(pubkeyCache.capacity).toBe(1_000);
+  });
+
+  it("doubles capacity on growth when no growth step is configured", () => {
+    pubkeyCache.set(1_000, keypairs[0].pubkeyBytes);
+    expect(pubkeyCache.capacity).toBe(2_000);
+  });
+
+  it("grows capacity by the configured growth step", () => {
+    pubkeyCache.ensureCapacity(pubkeyCache.capacity, 8);
+    pubkeyCache.set(2_000, keypairs[1].pubkeyBytes);
+    expect(pubkeyCache.capacity).toBe(2_008);
+  });
 });

@@ -16,6 +16,8 @@ const max_stack_aggregate_pubkeys = 512;
 pub const State = struct {
     pubkey2index: PubkeyIndexMap = undefined,
     index2pubkey: Index2PubkeyCache = undefined,
+    /// Capacity added when a set() outgrows the current capacity, doubles when 0
+    growth_step: u32 = 0,
     initialized: bool = false,
 
     pub fn init(self: *State) !void {
@@ -128,14 +130,14 @@ pub fn load(file_path: js.String) !void {
     }
 
     const len = std.mem.readInt(u32, header[4..8], .little);
-    const capacity = std.mem.readInt(u32, header[8..12], .little);
+    const saved_capacity = std.mem.readInt(u32, header[8..12], .little);
 
     const file_size = try file.length(io);
 
     state.pubkey2index = PubkeyIndexMap.init(allocator);
-    try state.pubkey2index.ensureTotalCapacity(capacity);
+    try state.pubkey2index.ensureTotalCapacity(saved_capacity);
     errdefer state.pubkey2index.deinit();
-    state.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, capacity);
+    state.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, saved_capacity);
     errdefer state.index2pubkey.deinit(allocator);
     try state.index2pubkey.resize(allocator, len);
 
@@ -151,7 +153,7 @@ pub fn load(file_path: js.String) !void {
     try file_reader.interface.readSliceAll(ptr[0..p2i_size]);
 
     state.pubkey2index.unmanaged.size = len;
-    state.pubkey2index.unmanaged.available = capacity - len;
+    state.pubkey2index.unmanaged.available = saved_capacity - len;
 
     // Read index2pubkey entries
     try file_reader.interface.readSliceAll(std.mem.sliceAsBytes(state.index2pubkey.items));
@@ -240,9 +242,11 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
 
     // Ensure capacity if needed
     if (idx >= state.index2pubkey.capacity) {
-        const new_cap: u32 = @intCast(@max(idx + 1, state.index2pubkey.capacity * 2));
+        const current = state.index2pubkey.capacity;
+        const grown = if (state.growth_step > 0) current + state.growth_step else current * 2;
+        const new_cap: u32 = @intCast(@max(idx + 1, grown));
         try state.pubkey2index.ensureTotalCapacity(new_cap);
-        try state.index2pubkey.ensureTotalCapacity(allocator, new_cap);
+        try state.index2pubkey.ensureTotalCapacityPrecise(allocator, new_cap);
     }
 
     // Extend length if needed
@@ -264,14 +268,25 @@ pub fn size() !js.Number {
     return js.Number.from(@as(u32, @intCast(state.index2pubkey.items.len)));
 }
 
-/// JS: pubkeys.ensureCapacity(newSize)
-pub fn ensureCapacity(new_size: js.Number) !void {
+/// JS: pubkeys.ensureCapacity(newSize, growthStep?)
+pub fn ensureCapacity(new_size: js.Number, growth_step: ?js.Number) !void {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
+    if (growth_step) |step| {
+        state.growth_step = try step.toU32();
+    }
 
     const requested = try new_size.toU32();
     const old_size = state.index2pubkey.capacity;
     if (requested <= old_size) return;
 
     try state.pubkey2index.ensureTotalCapacity(requested);
-    try state.index2pubkey.ensureTotalCapacity(allocator, requested);
+    try state.index2pubkey.ensureTotalCapacityPrecise(allocator, requested);
+}
+
+/// JS: pubkeys.capacity() → number
+/// Note: zapi DSL does not yet support namespace-level getters, so this is a function.
+pub fn capacity() !js.Number {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+    return js.Number.from(@as(u32, @intCast(state.index2pubkey.capacity)));
 }

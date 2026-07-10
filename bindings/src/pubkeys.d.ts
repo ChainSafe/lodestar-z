@@ -13,14 +13,19 @@ export interface PubkeyCache {
   set(index: number, pubkey: Uint8Array): void;
   /** Number of entries */
   readonly size: number;
+  /** Allocated native capacity */
+  readonly capacity: number;
   /** Load cache from a PKIX file (clears JS-level cache) */
   load(filepath: string): void;
   /** Clear native and JS-level cache contents */
   reset(): void;
   /** Save cache to a PKIX file */
   save(filepath: string): void;
-  /** Pre-allocate native capacity */
-  ensureCapacity(capacity: number): void;
+  /**
+   * Pre-allocate native capacity. `growthStep` sets how much extra capacity is reserved
+   * when a set() outgrows the current capacity, capacity doubles if never configured.
+   */
+  ensureCapacity(capacity: number, growthStep?: number): void;
 }
 
 export declare const pubkeyCache: PubkeyCache;
