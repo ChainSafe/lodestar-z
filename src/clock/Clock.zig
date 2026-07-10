@@ -6,9 +6,6 @@
 //! loop runs as a single cooperative fiber.
 //!
 //! Designed for a cooperative single-fiber `std.Io` backend (e.g. zio).
-//! `start()` uses `std.Io.concurrent` so a backend that can't guarantee
-//! concurrent execution surfaces as `error.ConcurrencyUnavailable` rather
-//! than deadlocking.
 //!
 //! No mutex is used: under a single-fiber backend the only context switches
 //! are at `await`/`sleep` yield points, and every read-modify of shared state
@@ -21,10 +18,16 @@
 //!      `waitForSlot` suspends the caller, so it must NEVER be called from a
 //!      listener callback.
 //!      A query while the cache lags the wall (a backlog) does not nest a
-//!      dispatch: it returns a fresh reading (which may run ahead of the
-//!      events delivered so far), and the dispatch already on the stack
-//!      delivers the rest in order, exactly once per (listener, event), on
-//!      O(1) stack.
+//!      dispatch. It returns the fresh wall time — possibly ahead of the
+//!      events delivered so far — and the frame already emitting delivers
+//!      the rest, in order, exactly once per (listener, event). E.g. the
+//!      wall reaches slot 3 while slot 1 is still being emitted:
+//!
+//!        emit 1
+//!          callback: currentSlot() returns 3; instead of emitting 2 and 3
+//!                    itself, it stores pending_target = 3
+//!        emit 2      ← the emitting frame sees pending_target and continues
+//!        emit 3
 //!   2. A wake-up pops its waiter from the queue *before* setting the event, so
 //!      a resuming `waitForSlot` frame is never still referenced by the queue.
 //! A multi-executor backend (zio with `executors > 1`, or `std.Io.Threaded`)
@@ -62,7 +65,6 @@ pub const ListenerId = u64;
 
 pub const max_slot_listeners: u32 = 16;
 pub const max_epoch_listeners: u32 = 16;
-/// Generous cap on concurrently suspended waitForSlot callers.
 pub const max_waiters: u32 = 1024;
 
 pub const Error = error{
@@ -105,8 +107,8 @@ const WaiterQueue = std.PriorityQueue(WaiterEntry, void, struct {
 pub fn init(
     self: *Clock,
     allocator: Allocator,
-    config: ClockConfig,
     io_handle: std.Io,
+    config: ClockConfig,
 ) Error!void {
     try config.validate();
     self.* = .{
@@ -142,7 +144,6 @@ pub fn join(self: *Clock) void {
     self.loop_future = null;
     if (maybe_future) |*future| {
         future.cancel(self.io);
-        future.await(self.io);
     }
 }
 
@@ -211,8 +212,9 @@ pub fn offEpoch(self: *Clock, id: ListenerId) bool {
     return false;
 }
 
-// Each "current" accessor derives from catchUp()'s single wall reading;
-// see catchUp for why a second read is unsafe.
+// Each "current" accessor derives from catchUp()'s single wall-clock read; a
+// separate time.nowMs (the pure-read shape below) could land in a slot whose
+// events have not been delivered yet.
 
 pub fn currentSlot(self: *Clock) ?Slot {
     return self.catchUp().slot;
@@ -280,50 +282,68 @@ pub fn msFromSlot(self: *const Clock, slot: Slot, to_ms: ?u64) i64 {
 pub fn waitForSlot(self: *Clock, target: Slot) Error!void {
     if (self.stopped) return error.Aborted;
     _ = self.catchUp();
+    // Reached is judged by the cursor, not the wall time catchUp returned. A
+    // stop during the drain suppresses events past the cursor, and a wait for
+    // a suppressed slot must abort rather than resolve.
     if (self.current_slot) |slot| {
         if (slot >= target) return;
     }
     if (self.waiters.count() >= max_waiters) return error.WaiterLimitReached;
-    // catchUp ran listener callbacks that may have called stop(); re-check
-    // after the reached-check so a callback that both advanced past target and
-    // stopped still resolves, while anything still pending here aborts.
+    // A catchUp callback may have called stop(); checked after the
+    // reached-check so a wait that reached its target still resolves.
     if (self.stopped) return error.Aborted;
 
     var waiter: WaitState = .{};
-    // Capacity was reserved at init and count < max_waiters here, so the push
-    // neither allocates nor fails.
+    // Capacity was reserved at init and count < max_waiters here.
     self.waiters.push(self.allocator, .{ .target = target, .state = &waiter }) catch unreachable;
-    // Best-effort tripwire for the forbidden waitForSlot-from-callback:
-    // outside a dispatch the queue head must still be ahead of the cursor.
+    // Checks that waitForSlot was not called from a listener callback.
     if (self.current_slot) |cs| std.debug.assert(self.waiters.peek().?.target > cs);
 
     waiter.event.waitUncancelable(self.io);
     return if (waiter.aborted) error.Aborted else {};
 }
 
-const Reading = struct { now_ms: u64, slot: ?Slot };
+const WallTime = struct { now_ms: u64, slot: ?Slot };
 
 /// Advance to wall-clock time, emitting any pending slot/epoch events, and
-/// return the reading used. Emits nothing if already caught up or pre-genesis.
+/// return the wall time it used. Emits nothing if already caught up or pre-genesis.
 ///
-/// Accessors must derive from this reading, not a fresh clock read: a slow
-/// callback can cross a slot boundary mid-dispatch, so a second read could
-/// name a slot the just-emitted events haven't reached. At top level the
-/// reading names the slot the events reached; inside a callback it may run
-/// ahead of the events delivered so far, which the in-progress dispatch
-/// delivers after the callback returns. waitForSlot's reached-check consults the
-/// cursor, not this reading, so a stop mid-drain never resolves a wait for a
-/// slot whose events were suppressed.
-fn catchUp(self: *Clock) Reading {
+/// Normally catchUp drains every pending event before returning, so the
+/// returned slot is never ahead of delivery. The two exceptions are a query
+/// from inside a listener callback (see the reentrancy notes in the module
+/// header) and a stop() from a callback, which freezes the cursor and
+/// suppresses the slots past it.
+fn catchUp(self: *Clock) WallTime {
     const now_ms = time.nowMs(self.io);
     const slot = slot_math.slotAtMs(self.config, now_ms);
-    if (slot) |wall_slot| self.advanceAndDispatch(wall_slot);
-    return .{ .now_ms = now_ms, .slot = slot };
+    const wall_time: WallTime = .{ .now_ms = now_ms, .slot = slot };
+    const target = slot orelse return wall_time;
+
+    if (self.dispatching) {
+        // A reentrant query only records the target; the frame that set
+        // `dispatching` drains it. @max: a wall step-back (NTP) must not
+        // regress a recorded target.
+        self.pending_target = @max(self.pending_target orelse target, target);
+        return wall_time;
+    }
+    self.dispatching = true;
+    defer self.dispatching = false;
+    // The pending defer runs before the dispatching defer, so pending is null
+    // whenever dispatching is false.
+    std.debug.assert(self.pending_target == null);
+    self.pending_target = target;
+    // Backstop: a stopped exit leaves the loop with pending still set.
+    defer self.pending_target = null;
+    while (!self.stopped) {
+        const drain_target = self.pending_target orelse break;
+        self.pending_target = null;
+        self.dispatchTo(drain_target);
+    }
+    return wall_time;
 }
 
 fn emitSlot(self: *Clock, slot: Slot) void {
     std.debug.assert(self.dispatching);
-    // Copy, not &: a callback's on/off mutates the member list, not this snapshot.
     var snapshot = self.slot_listeners;
     for (snapshot.slice()) |listener| {
         listener.callback(listener.ctx, slot);
@@ -344,8 +364,7 @@ fn dispatchWaiters(self: *Clock, current_slot: ?Slot) void {
     while (self.waiters.peek()) |head| {
         if (head.target > slot) break;
         const waiter = self.waiters.pop().?;
-        // The stack WaitState is single-use and starts false; only
-        // abortAllWaiters sets aborted, and only after popping.
+        // Checks that nothing set aborted while the entry was still queued.
         std.debug.assert(!waiter.state.aborted);
         waiter.state.event.set(self.io);
     }
@@ -405,9 +424,9 @@ const AdvanceIterator = struct {
     }
 };
 
-/// Advances the clock toward `target` one event at a time.  The caller may
-/// drop the iterator mid-walk; the clock is then left at the last slot the
-/// iterator returned (i.e. partial advancement is observable).
+/// Advances the clock toward `target` one event at a time.  Stopping early
+/// is legal: the cursor simply stays at the last slot the iterator yielded,
+/// nothing rolls back.
 fn advanceTo(self: *Clock, target: Slot) AdvanceIterator {
     return .{
         .config = self.config,
@@ -416,38 +435,21 @@ fn advanceTo(self: *Clock, target: Slot) AdvanceIterator {
     };
 }
 
-fn advanceAndDispatch(self: *Clock, target: Slot) void {
-    if (self.dispatching) {
-        // A reentrant query only records the target; the frame that set
-        // `dispatching` drains it. @max: a wall step-back (NTP) must not
-        // regress a recorded target.
-        self.pending_target = @max(self.pending_target orelse target, target);
-        return;
-    }
-    self.dispatching = true;
-    defer self.dispatching = false;
-    // The pending defer runs before the dispatching defer, so pending is null
-    // whenever dispatching is false.
-    std.debug.assert(self.pending_target == null);
-    self.pending_target = target;
-    // Backstop: a stopped exit leaves the loop with pending still set.
-    defer self.pending_target = null;
-    while (!self.stopped) {
-        const drain_target = self.pending_target orelse break;
-        self.pending_target = null;
-        var iter = self.advanceTo(drain_target);
-        // Check `stopped` *before* iter.next() so a callback that calls stop()
-        // can't leave current_slot one ahead of the last-emitted slot.
-        while (true) {
-            if (self.stopped) break;
-            const event = iter.next() orelse break;
-            switch (event) {
-                .slot => |s| {
-                    self.emitSlot(s);
-                    self.dispatchWaiters(s);
-                },
-                .epoch => |e| self.emitEpoch(e),
-            }
+/// Walk the cursor to `target`, emitting each event. 
+fn dispatchTo(self: *Clock, target: Slot) void {
+    std.debug.assert(self.dispatching);
+    var iter = self.advanceTo(target);
+    // Check `stopped` before iter.next() so a callback that calls stop()
+    // can't leave current_slot one ahead of the last-emitted slot.
+    while (true) {
+        if (self.stopped) break;
+        const event = iter.next() orelse break;
+        switch (event) {
+            .slot => |s| {
+                self.emitSlot(s);
+                self.dispatchWaiters(s);
+            },
+            .epoch => |e| self.emitEpoch(e),
         }
     }
 }
@@ -520,11 +522,11 @@ test "lifecycle: init -> register -> start -> receive events -> stop" {
     const base_now = time.nowSec(io_handle);
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = base_now,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     var trace = EventTraceState{};
@@ -548,11 +550,11 @@ test "waitForSlot resolves immediately when at target" {
     const base_now = time.nowSec(io_handle);
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = base_now,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     const current = clock.currentSlotOrGenesis();
@@ -565,11 +567,11 @@ test "waitForSlot returns aborted on stop" {
     const io_handle = rt.io();
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = time.nowSec(io_handle) + 2,
         .slot_duration_ms = 2_000,
         .slots_per_epoch = 8,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     var fut = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, 100 });
@@ -584,11 +586,11 @@ test "waitForSlot on a stopped clock returns error.Aborted" {
     const io_handle = rt.io();
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     clock.stop();
@@ -597,16 +599,13 @@ test "waitForSlot on a stopped clock returns error.Aborted" {
 }
 
 test "offSlot/offEpoch stop event delivery" {
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-    const io_handle = rt.io();
-
+    var fake = FakeClockIo{ .ms = 99_000 };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
-        .genesis_time_sec = time.nowSec(io_handle) + 2,
+    try clock.init(testing.allocator, fake.io(), .{
+        .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     var trace = EventTraceState{};
@@ -615,7 +614,9 @@ test "offSlot/offEpoch stop event delivery" {
     try testing.expect(clock.offSlot(slot_id));
     try testing.expect(clock.offEpoch(epoch_id));
 
-    clock.advanceAndDispatch(6);
+    // Backlog slots 0..6 (epoch 1 at slot 4) with both listeners removed.
+    fake.ms = 106_000;
+    try testing.expectEqual(@as(?Slot, 6), clock.currentSlot());
     try testing.expectEqual(@as(usize, 0), trace.slot_len);
     try testing.expectEqual(@as(usize, 0), trace.epoch_len);
 }
@@ -626,11 +627,11 @@ test "stop/join are idempotent" {
     const io_handle = rt.io();
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = time.nowSec(io_handle) + 2,
         .slot_duration_ms = 2_000,
         .slots_per_epoch = 8,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     clock.stop();
@@ -640,23 +641,22 @@ test "stop/join are idempotent" {
 }
 
 test "epoch event is delivered when crossing epoch boundary" {
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-    const io_handle = rt.io();
-
+    var fake = FakeClockIo{ .ms = 99_000 };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
-        .genesis_time_sec = time.nowSec(io_handle) + 2,
+    try clock.init(testing.allocator, fake.io(), .{
+        .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     var trace = EventTraceState{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
     _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
 
-    clock.advanceAndDispatch(5);
+    // Backlog slots 0..5; the epoch-1 boundary is crossed at slot 4.
+    fake.ms = 105_000;
+    try testing.expectEqual(@as(?Slot, 5), clock.currentSlot());
 
     try testing.expect(trace.slot_len > 0);
     try testing.expect(trace.epoch_len > 0);
@@ -668,12 +668,13 @@ test "multiple waiters are dispatched in target-slot order" {
     defer rt.deinit();
     const io_handle = rt.io();
 
+    var fake = FakeClockIo{ .ms = 99_000, .inner = io_handle };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
-        .genesis_time_sec = time.nowSec(io_handle) + 10,
+    try clock.init(testing.allocator, fake.io(), .{
+        .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     // Spawn the waiters as fibers (targets out of order) and rendezvous so all
@@ -683,7 +684,8 @@ test "multiple waiters are dispatched in target-slot order" {
     var fut1 = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, 1 });
     try rendezvousWaiters(&clock, io_handle, 3);
 
-    clock.advanceAndDispatch(3);
+    fake.ms = 103_000;
+    _ = clock.currentSlot();
 
     try fut1.await(io_handle);
     try fut3.await(io_handle);
@@ -698,11 +700,11 @@ test "real-time: no slot events emitted before genesis" {
     const io_handle = rt.io();
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = time.nowSec(io_handle) + 5,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     var trace = EventTraceState{};
@@ -723,11 +725,11 @@ test "real-time: slot events fire with correct timing" {
     const base_now = time.nowSec(io_handle);
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = base_now,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     var trace = EventTraceState{};
@@ -753,11 +755,11 @@ test "real-time: multi-slot advancement delivers ordered events" {
     const base_now = time.nowSec(io_handle);
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = base_now,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     var trace = EventTraceState{};
@@ -780,11 +782,11 @@ test "real-time: stop+join cancels promptly" {
     const io_handle = rt.io();
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = time.nowSec(io_handle) + 100,
         .slot_duration_ms = 12_000,
         .slots_per_epoch = 32,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     try clock.start();
@@ -810,11 +812,11 @@ test "real-time: epoch boundary event fires" {
     const base_now = time.nowSec(io_handle);
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = base_now,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 2,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     var trace = EventTraceState{};
@@ -860,16 +862,13 @@ const ReentrancyCtx = struct {
 };
 
 test "reentrancy: callback can offSlot itself mid-dispatch" {
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-    const io_handle = rt.io();
-
+    var fake = FakeClockIo{ .ms = 99_000 };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
-        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+    try clock.init(testing.allocator, fake.io(), .{
+        .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     var ctx_a = ReentrancyCtx{ .clock = &clock };
@@ -878,30 +877,33 @@ test "reentrancy: callback can offSlot itself mid-dispatch" {
     ctx_a.self_id = id_a;
     _ = try clock.onSlot(ReentrancyCtx.justCount, &ctx_b);
 
-    clock.advanceAndDispatch(0);
-    clock.advanceAndDispatch(2);
+    // Slot 0 fires both; A removes itself. Slots 1..2 then fire only B.
+    fake.ms = 100_000;
+    _ = clock.currentSlot();
+    fake.ms = 102_000;
+    _ = clock.currentSlot();
 
     try testing.expectEqual(@as(usize, 1), ctx_a.fired_count);
     try testing.expectEqual(@as(usize, 3), ctx_b.fired_count);
 }
 
 test "reentrancy: callback can stop the clock; no further slots emitted" {
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-    const io_handle = rt.io();
-
+    var fake = FakeClockIo{ .ms = 99_000 };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
-        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+    try clock.init(testing.allocator, fake.io(), .{
+        .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     var ctx = ReentrancyCtx{ .clock = &clock };
     _ = try clock.onSlot(ReentrancyCtx.stopClock, &ctx);
 
-    clock.advanceAndDispatch(5);
+    // Backlog slots 0..5; the slot-0 callback stops the clock, so the drain
+    // exits with the cursor still at 0 and no further slots emitted.
+    fake.ms = 105_000;
+    _ = clock.currentSlot();
 
     try testing.expectEqual(@as(usize, 1), ctx.fired_count);
     try testing.expect(clock.stopped);
@@ -923,12 +925,13 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
     defer rt.deinit();
     const io_handle = rt.io();
 
+    var fake = FakeClockIo{ .ms = 99_000, .inner = io_handle };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
-        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+    try clock.init(testing.allocator, fake.io(), .{
+        .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     // Listener calls stop() while slot `target` is being emitted, i.e.
@@ -941,7 +944,8 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
     var fut_future = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, target + 1 });
     try rendezvousWaiters(&clock, io_handle, 2);
 
-    clock.advanceAndDispatch(target);
+    fake.ms = slot_math.slotStartMs(clock.config, target);
+    _ = clock.currentSlot();
 
     try testing.expect(clock.stopped);
     try testing.expectEqual(@as(?Slot, target), clock.current_slot);
@@ -957,11 +961,11 @@ test "ListenerLimitReached: onSlot/onEpoch reject the (limit+1)th registration" 
     const io_handle = rt.io();
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     for (0..max_slot_listeners) |_| {
@@ -981,11 +985,11 @@ test "WaiterLimitReached: waitForSlot rejects the (limit+1)th waiter" {
     const io_handle = rt.io();
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, io_handle, .{
         .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     // Seed the queue to its limit directly rather than spawning 1024 fibers:
@@ -1005,12 +1009,13 @@ test "many waiters at same target slot all resolve on advance" {
     defer rt.deinit();
     const io_handle = rt.io();
 
+    var fake = FakeClockIo{ .ms = 99_000, .inner = io_handle };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
-        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+    try clock.init(testing.allocator, fake.io(), .{
+        .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
-    }, io_handle);
+    });
     defer clock.deinit();
 
     const N = 16;
@@ -1018,23 +1023,40 @@ test "many waiters at same target slot all resolve on advance" {
     for (&futs) |*f| f.* = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, 5 });
     try rendezvousWaiters(&clock, io_handle, N);
 
-    clock.advanceAndDispatch(5);
+    fake.ms = 105_000;
+    _ = clock.currentSlot();
 
     for (&futs) |*f| try f.await(io_handle);
 }
 
-// Drives accessor and advance tests without start(): only the `now` vtable
-// entry is exercised, and deinit is safe with no pending waiters.
+// Test io with a steerable wall clock. With `inner` null (the default) any
+// call besides `now` crashes — the test must stay synchronous. Fiber tests
+// set `inner` to a real zio io: the two futex entries forward to it so
+// waitForSlot fibers genuinely suspend and wake; everything else still crashes.
 const FakeClockIo = struct {
     ms: u64 = 0,
+    inner: ?std.Io = null,
+
     fn vtableNow(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
         _ = clock;
         const self: *const FakeClockIo = @ptrCast(@alignCast(userdata.?));
         return std.Io.Timestamp.fromNanoseconds(@as(i96, @intCast(self.ms)) * std.time.ns_per_ms);
     }
+    fn vtableFutexWaitUncancelable(userdata: ?*anyopaque, ptr: *const u32, expected: u32) void {
+        const self: *const FakeClockIo = @ptrCast(@alignCast(userdata.?));
+        const inner = self.inner.?;
+        inner.vtable.futexWaitUncancelable(inner.userdata, ptr, expected);
+    }
+    fn vtableFutexWake(userdata: ?*anyopaque, ptr: *const u32, max: u32) void {
+        const self: *const FakeClockIo = @ptrCast(@alignCast(userdata.?));
+        const inner = self.inner.?;
+        inner.vtable.futexWake(inner.userdata, ptr, max);
+    }
     const vtable: std.Io.VTable = blk: {
         var vt: std.Io.VTable = undefined;
         vt.now = vtableNow;
+        vt.futexWaitUncancelable = vtableFutexWaitUncancelable;
+        vt.futexWake = vtableFutexWake;
         break :blk vt;
     };
     fn io(self: *const FakeClockIo) std.Io {
@@ -1052,7 +1074,7 @@ const test_cfg = ClockConfig{
 test "pre-genesis returns null, genesis fallback returns zero" {
     var fake = FakeClockIo{ .ms = 99_000 };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, test_cfg, fake.io());
+    try clock.init(testing.allocator, fake.io(), test_cfg);
     defer clock.deinit();
 
     try testing.expectEqual(@as(?Slot, null), clock.currentSlot());
@@ -1064,7 +1086,7 @@ test "pre-genesis returns null, genesis fallback returns zero" {
 test "currentSlot at genesis and advancing" {
     var fake = FakeClockIo{ .ms = 100_000 };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, test_cfg, fake.io());
+    try clock.init(testing.allocator, fake.io(), test_cfg);
     defer clock.deinit();
 
     try testing.expectEqual(@as(?Slot, 0), clock.currentSlot());
@@ -1079,7 +1101,7 @@ test "currentSlot at genesis and advancing" {
 test "currentEpoch" {
     var fake = FakeClockIo{ .ms = 100_000 + 32 * 12 * 1000 };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, test_cfg, fake.io());
+    try clock.init(testing.allocator, fake.io(), test_cfg);
     defer clock.deinit();
 
     try testing.expectEqual(@as(?Epoch, 1), clock.currentEpoch());
@@ -1088,7 +1110,7 @@ test "currentEpoch" {
 test "advanceTo produces correct slot events" {
     var fake = FakeClockIo{ .ms = 100_000 };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, test_cfg, fake.io());
+    try clock.init(testing.allocator, fake.io(), test_cfg);
     defer clock.deinit();
 
     var events: [16]Event = undefined;
@@ -1109,7 +1131,7 @@ test "advanceTo produces correct slot events" {
 test "advanceTo across epoch boundary emits slot then epoch" {
     var fake = FakeClockIo{ .ms = 100_000 };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, test_cfg, fake.io());
+    try clock.init(testing.allocator, fake.io(), test_cfg);
     defer clock.deinit();
     clock.current_slot = 31;
 
@@ -1130,7 +1152,7 @@ test "advanceTo across epoch boundary emits slot then epoch" {
 test "advanceTo from null (pre-genesis)" {
     var fake = FakeClockIo{ .ms = 99_000 };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, test_cfg, fake.io());
+    try clock.init(testing.allocator, fake.io(), test_cfg);
     defer clock.deinit();
     try testing.expectEqual(@as(?Slot, null), clock.current_slot);
 
@@ -1151,7 +1173,7 @@ test "advanceTo from null (pre-genesis)" {
 test "advanceTo already at target returns nothing" {
     var fake = FakeClockIo{ .ms = 112_000 };
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, test_cfg, fake.io());
+    try clock.init(testing.allocator, fake.io(), test_cfg);
     defer clock.deinit();
 
     var count: usize = 0;
@@ -1176,11 +1198,11 @@ test "currentSlot returns the reading its catch-up flushed to" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     // Each emit burns 5 slots of wall time, simulating a slow callback.
@@ -1201,11 +1223,11 @@ test "currentSlotWithGossipDisparity bases its slot on the caught-up reading" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var ctx = SlowCallbackCtx{ .fake = &fake, .advance_ms = 5_000 };
@@ -1225,11 +1247,11 @@ test "currentEpoch returns the epoch of the reading its catch-up flushed to" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 2,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     // Each emit burns 5 slots (2.5 epochs) of wall time.
@@ -1249,11 +1271,11 @@ test "isCurrentSlotGivenGossipDisparity judges the caught-up reading" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var ctx = SlowCallbackCtx{ .fake = &fake, .advance_ms = 5_000 };
@@ -1270,11 +1292,11 @@ test "tolerance and from-slot forwards are pure reads: no catch-up" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 12_000,
         .slots_per_epoch = 32,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var trace = EventTraceState{};
@@ -1301,17 +1323,17 @@ test "stop() from a catchUp callback aborts the wait before enqueue" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     // A slot listener stops the clock mid-catchUp, after current_slot has
     // advanced but before it reaches `target`. The post-catchUp re-check must
-    // abort synchronously: reaching the enqueue+suspend would call
-    // waitUncancelable through FakeClockIo's undefined futex vtable.
+    // abort synchronously: reaching the enqueue+suspend would panic in
+    // FakeClockIo's futex forwarder (`inner` is unset here).
     var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = 1 };
     _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
 
@@ -1326,11 +1348,11 @@ test "stop() from a catchUp callback still resolves a reached wait" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     // The listener stops the clock while slot 1 — the wait target — is being
@@ -1349,11 +1371,11 @@ test "waitForSlot reached-check consults the cursor, not the catch-up reading" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = 1 };
@@ -1395,11 +1417,11 @@ test "listener mutations mid-emit preserve the per-emit snapshot; a query defers
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var ctx_l2 = EventTraceState{};
@@ -1447,11 +1469,11 @@ test "epoch listener mutations mid-emit preserve the epoch snapshot" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 2,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var ctx_e2 = EventTraceState{};
@@ -1492,11 +1514,11 @@ test "backlog query-from-callback delivers every (listener, slot) exactly once i
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var ctx_q = QueryAtSlotCtx{ .clock = &clock, .fake = &fake, .query_at = 1 };
@@ -1519,11 +1541,11 @@ test "non-backlog query-from-callback is a no-op" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var ctx_q = QueryAtSlotCtx{ .clock = &clock, .fake = &fake, .query_at = 1 };
@@ -1543,11 +1565,11 @@ test "epoch events under deferred dispatch arrive in order exactly once" {
     var fake = FakeClockIo{ .ms = 102_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var ctx_q = QueryAtSlotCtx{
@@ -1596,11 +1618,11 @@ test "big backlog drains in a flat loop without per-slot nesting" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 32,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var ctx = BacklogWitnessCtx{ .clock = &clock };
@@ -1659,11 +1681,11 @@ test "a mid-emit query returns a reading ahead of deferred delivery" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var log = RunAheadLog{};
@@ -1694,11 +1716,11 @@ test "successive mid-emit queries coalesce to the furthest pending target" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var ctx_l1 = QueryAtSlotCtx{
@@ -1758,11 +1780,11 @@ test "stop() after a mid-emit query leaves no pending target behind" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
+    try clock.init(testing.allocator, fake.io(), .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
-    }, fake.io());
+    });
     defer clock.deinit();
 
     var ctx = QueryThenStopCtx{ .clock = &clock };
@@ -1770,7 +1792,7 @@ test "stop() after a mid-emit query leaves no pending target behind" {
 
     // Backlog 1..3: at slot 1 the callback queries (recording pending target
     // 3, reading 3) and then stops. The exit backstop must clear the recorded
-    // pending or the next accessor's advanceAndDispatch would trip the
+    // pending or the next accessor's catchUp would trip the
     // `pending_target == null` assert.
     fake.ms = 103_000;
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
@@ -1781,6 +1803,32 @@ test "stop() after a mid-emit query leaves no pending target behind" {
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
     try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
     try expectEqualSlices(Slot, &.{1}, ctx.slots[0..ctx.slot_len]);
+}
+
+test "top-level wall step-back never regresses the cursor or emits" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, fake.io(), .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    });
+    defer clock.deinit();
+
+    var trace = EventTraceState{};
+    _ = try clock.onSlot(EventTraceState.onSlot, &trace);
+
+    // Advance to slot 3, then step the wall back to slot 1. The returned slot
+    // follows the wall down; the walk target is behind the cursor, so nothing
+    // re-emits and the cursor holds at 3.
+    fake.ms = 103_000;
+    try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
+
+    fake.ms = 101_000;
+    try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
+    try testing.expectEqual(@as(?Slot, 3), clock.current_slot);
+    try expectEqualSlices(Slot, &.{ 1, 2, 3 }, trace.slots[0..trace.slot_len]);
 }
 
 const PropertyTracker = struct {
@@ -1822,6 +1870,7 @@ const PropertyWaiter = struct {
 const PropertyState = struct {
     spe: u64,
     io: std.Io,
+    fake: *FakeClockIo,
     model_current_slot: ?Slot = null,
     model_stopped: bool = false,
     clock: *Clock,
@@ -1941,7 +1990,8 @@ const PropertyState = struct {
                     if (s == s_last) break;
                 }
                 self.model_current_slot = s_last;
-                self.clock.advanceAndDispatch(s_last);
+                self.fake.ms = slot_math.slotStartMs(self.clock.config, s_last);
+                _ = self.clock.currentSlot();
 
                 for (self.waiters.items) |*w| {
                     if (w.target <= s_last) w.expected_aborted = false;
@@ -2043,17 +2093,17 @@ fn runPropertyScenario(seed: u64, op_count: u32, io: std.Io) !void {
     const rng = prng.random();
 
     const spe: u64 = 4;
-    const now_sec = time.nowSec(io);
+    var fake = FakeClockIo{ .ms = 99_000, .inner = io };
     var clock: Clock = undefined;
-    // Genesis far in future → wall-clock never advances; advanceAndDispatch owns time.
-    try clock.init(testing.allocator, .{
-        .genesis_time_sec = now_sec + 1_000_000,
+    // Fake time moves only inside .advance_by, so the model owns every advance.
+    try clock.init(testing.allocator, fake.io(), .{
+        .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = spe,
-    }, io);
+    });
     defer clock.deinit();
 
-    var state = PropertyState{ .spe = spe, .io = io, .clock = &clock };
+    var state = PropertyState{ .spe = spe, .io = io, .fake = &fake, .clock = &clock };
     defer state.deinit();
 
     var i: u32 = 0;
