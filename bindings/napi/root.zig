@@ -12,6 +12,9 @@ pub const pubkeys = @import("./pubkeys.zig");
 
 const options = @import("bls_options");
 const napi_io = @import("./io.zig");
+// Imported privately (not `pub`) so zapi's exporter doesn't try to export its
+// non-DSL lifecycle functions. See blst_pool.zig for why they live outside blst.zig.
+const blst_pool = @import("./blst_pool.zig");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
@@ -32,7 +35,7 @@ fn init(old_ref_count: u32) !void {
         }
 
         const n_workers = @min(cpu_count, @import("bls").ThreadPool.MAX_WORKERS);
-        try blst.initThreadPool(@intCast(n_workers));
+        try blst_pool.init(@intCast(n_workers));
         try pool.state.init();
         try pubkeys.state.init();
         config.state.init();
@@ -55,7 +58,7 @@ fn detectCpuCount() !usize {
 fn cleanup(new_ref_count: u32) void {
     if (new_ref_count == 0) {
         // Last environment — tear down shared state.
-        blst.deinitThreadPool();
+        blst_pool.deinit();
         config.state.deinit();
         pubkeys.state.deinit();
         pool.state.deinit();

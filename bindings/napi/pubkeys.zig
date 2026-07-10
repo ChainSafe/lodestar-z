@@ -13,7 +13,8 @@ const allocator = std.heap.page_allocator;
 const default_initial_capacity: u32 = 0;
 const max_stack_aggregate_pubkeys = 512;
 
-pub const State = struct {
+// Not `pub`: internal helper (see pool.zig). Only the `state` value below is pub.
+const State = struct {
     pubkey2index: PubkeyIndexMap = undefined,
     index2pubkey: Index2PubkeyCache = undefined,
     initialized: bool = false,

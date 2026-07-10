@@ -16,6 +16,9 @@ const js = zapi.js;
 const napi = zapi.napi;
 const bls = @import("bls");
 const napi_io = @import("./io.zig");
+// Thread-pool lifecycle lives in a privately-imported module so zapi's exporter
+// (which rejects non-DSL `pub fn`s like `initThreadPool(u16)`) never sees it.
+const blst_pool = @import("./blst_pool.zig");
 
 const NativePublicKey = bls.PublicKey;
 const NativeSignature = bls.Signature;
@@ -23,7 +26,6 @@ const NativeSecretKey = bls.SecretKey;
 const Pairing = bls.Pairing;
 const AggregatePublicKey = bls.AggregatePublicKey;
 const AggregateSignature = bls.AggregateSignature;
-const ThreadPool = bls.ThreadPool;
 const DST = bls.DST;
 const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 
@@ -35,29 +37,8 @@ const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 /// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
 const BATCH_VERIFY_SIZE = 32;
 
-/// Cached thread pool reference for parallel verification.
-/// Initialized lazily on first use, torn down via `deinitThreadPool`.
-var thread_pool: ?*ThreadPool = null;
-
-pub fn initThreadPool(n_workers: u16) !void {
-    if (thread_pool != null) return error.PoolExists;
-    thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
-}
-
-/// Closes the `ThreadPool` used for blst operations.
-///
-/// Note: this can invalidate any inflight verification requests. Consumer is responsible
-/// for the lifecycle of their program and should only call this when all work is done.
-///
-/// This note is however application dependent. For the use case of lodestar,
-/// it's likely that this would not be called at all.
-/// Same goes for any other long-lived processes.
-pub fn deinitThreadPool() void {
-    if (thread_pool) |p| {
-        p.deinit(napi_io.get());
-        thread_pool = null;
-    }
-}
+// Thread-pool lifecycle (`init`/`deinit`) and the cached pool reference live in
+// `blst_pool.zig`. Use `blst_pool.get()` to reach the current pool.
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -373,7 +354,7 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
         pk_ptrs[i] = &wrapped_pk.raw;
     }
 
-    const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
+    const pool = blst_pool.get() orelse return error.ThreadPoolNotInitialized;
     const result = pool.aggregateVerify(
         napi_io.get(),
         &sig.raw,
@@ -501,7 +482,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         @memset(rands[i][8..], 0);
     }
 
-    const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
+    const pool = blst_pool.get() orelse return error.ThreadPoolNotInitialized;
     const result = pool.verifyMultipleAggregateSignatures(
         napi_io.get(),
         n_elems,
@@ -715,7 +696,7 @@ const AsyncAggRandData = struct {
 ///
 /// Note: MUST NOT call any napi APIs.
 fn asyncAggRand_execute(_: napi.Env, data: *AsyncAggRandData) void {
-    const pool = thread_pool orelse {
+    const pool = blst_pool.get() orelse {
         data.err = error.PoolNotInitialized;
         return;
     };
@@ -803,7 +784,7 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
 
     if (n == 0) return error.EmptyArray;
     if (n > MAX_AGGREGATE_PER_JOB) return error.TooManySets;
-    if (thread_pool == null) return error.PoolNotInitialized;
+    if (blst_pool.get() == null) return error.PoolNotInitialized;
 
     const env = js.env();
 
