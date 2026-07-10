@@ -12,7 +12,7 @@ pub const Index2PubkeyCache = std.ArrayList(bls.PublicKey);
 
 const headroom_epochs = (90 * 24 * 60 * 60) / (preset.SECONDS_PER_SLOT * preset.SLOTS_PER_EPOCH);
 
-// Reserve headroom so the native cache does not realloc on growth. Reallocs are unsafe
+/// Reserve headroom so the native cache does not realloc on growth. Reallocs are unsafe
 /// while the historical state worker reads the cache, until lodestar-z adds locking.
 /// Registry growth is capped at MAX_PENDING_DEPOSITS_PER_EPOCH new validators per epoch,
 /// reserve 3 months of worst-case growth, over a year at organic rates
