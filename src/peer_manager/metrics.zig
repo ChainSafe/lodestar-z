@@ -82,7 +82,7 @@ pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !vo
         allocator,
         io,
         "lodestar_peer_manager_peers_pruned_total",
-        .{ .help = "Total peers the peer manager intends to disconnect, labeled by reason" },
+        .{ .help = "Total peers the peer manager intends to disconnect, labeled by reason (incl. bad-score and prioritization reasons)" },
         opts,
     );
     errdefer peers_pruned_total.deinit();
@@ -124,14 +124,14 @@ pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !vo
         ),
         .peers_evaluated_count = Metrics.PeersEvaluated.init(
             "lodestar_peer_manager_peers_evaluated_count",
-            .{ .help = "Number of connected healthy peers evaluated by prioritizePeers per heartbeat" },
+            .{ .help = "Number of connected healthy peers evaluated by prioritizePeers per heartbeat, denominator for prioritize_peers_seconds" },
             opts,
         ),
         .peers_pruned_total = peers_pruned_total,
         .peers_per_active_subnet = peers_per_active_subnet,
         .outbound_peers_ratio = Metrics.RatioGauge.init(
             "lodestar_peer_manager_outbound_peers_ratio",
-            .{ .help = "Ratio of outbound peers to total connected healthy peers" },
+            .{ .help = "Ratio of outbound peers to total connected healthy peers, verifies the outbound peers invariant" },
             opts,
         ),
         .score_state_transitions_total = score_state_transitions_total,
@@ -142,7 +142,7 @@ pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !vo
         ),
         .connected_peers_map_size = Metrics.SizeGauge.init(
             "lodestar_peer_manager_connected_peers_map_size",
-            .{ .help = "Current number of entries in the peer manager connected peers map" },
+            .{ .help = "Current number of entries in the peer manager connectedPeers map" },
             opts,
         ),
         .relevance_check_total = relevance_check_total,
