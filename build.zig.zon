@@ -40,7 +40,7 @@
             .hash = "zig_yaml-0.1.0-C1161kFWAwDxjKAFmklKwWVDvz2mmq0Q__bDhGGjeyd3",
         },
         .zapi = .{
-            .url = "https://github.com/ChainSafe/zapi/archive/refs/tags/zapi-v2.2.0.tar.gz",
+            .url = "git+https://github.com/chainsafe/zapi.git?ref=zapi-v2.x.0#92fe4babe4022ceb94a5cb24022a18fe27417d69",
             .hash = "zapi-2.2.0-rIqzUXBaBADUsvvvB2N5kOBdLEO0rGPhowTqmIXe3qVh",
         },
         .zbench = .{
