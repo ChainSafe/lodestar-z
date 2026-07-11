@@ -723,6 +723,13 @@ pub fn getAllValidators(self: *const BeaconStateView) !js.Array {
     return js_types.wrap(js.Array, result);
 }
 
+/// Get the number of builders in the registry (Gloas+). Throws on pre-Gloas states.
+pub fn getBuildersLength(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    const count = try cached_state.state.buildersLength();
+    return js.Number.from(count);
+}
+
 /// Get all balances in the registry.
 pub fn getAllBalances(self: *const BeaconStateView) !js.Array {
     const env = js.env();
@@ -1108,15 +1115,30 @@ pub fn loadOtherState(
         state_bytes_slice,
         seed_validators_bytes_slice,
     );
-    errdefer loaded.state.deinit();
+    var loaded_state_moved = false;
+    errdefer if (!loaded_state_moved) loaded.state.deinit();
     defer allocator.free(loaded.modified_validators);
 
+    const new_state = try allocator.create(AnyBeaconState);
+    var new_cached_state_initialized = false;
+    errdefer if (!new_cached_state_initialized) {
+        new_state.deinit();
+        allocator.destroy(new_state);
+    };
+    new_state.* = loaded.state;
+    loaded_state_moved = true;
+
     const new_cached_state = try allocator.create(CachedBeaconState);
-    errdefer allocator.destroy(new_cached_state);
+    errdefer {
+        if (new_cached_state_initialized) {
+            new_cached_state.deinit();
+        }
+        allocator.destroy(new_cached_state);
+    }
 
     try new_cached_state.init(
         allocator,
-        &loaded.state,
+        new_state,
         .{
             .config = &config.state.config,
             .index_to_pubkey = &pubkey.state.index2pubkey,
@@ -1124,6 +1146,7 @@ pub fn loadOtherState(
         },
         null,
     );
+    new_cached_state_initialized = true;
 
     if (opts) |value| {
         const raw = value.toValue();
@@ -1134,16 +1157,18 @@ pub fn loadOtherState(
             // This doesn't matter for typescript lodestar because GC clears it anyway,
             // but we're losing some savings here. Consider implementating something like
             // a `prefetchAll` that only does `populateAllNodes` that returns void
-            var validators_view = try new_cached_state.state.validators();
-            _ = validators_view.getAllReadonlyValues(allocator) catch |err| {
+            const validators_view = try new_cached_state.state.validators();
+            const validators = validators_view.getAllReadonlyValues(allocator) catch |err| {
                 try js.env().throwError("STATE_ERROR", "Failed to preload validators");
                 return err;
             };
-            var balances_view = try new_cached_state.state.balances();
-            _ = balances_view.getAll(allocator) catch |err| {
+            allocator.free(validators);
+            const balances_view = try new_cached_state.state.balances();
+            const balances = balances_view.getAll(allocator) catch |err| {
                 try js.env().throwError("STATE_ERROR", "Failed to preload balances");
                 return err;
             };
+            allocator.free(balances);
         }
     }
 
@@ -1239,11 +1264,25 @@ pub fn hashTreeRoot(self: *const BeaconStateView) !js.Uint8Array {
 ///
 /// Arguments:
 /// - arg 0: target slot (number)
-/// - arg 1: options object (optional) with `transferCache` boolean
+/// - arg 1: options object (optional) with Lodestar's `dontTransferCache` boolean
 pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: ?js.Value) !BeaconStateView {
     const cached_state = try self.requireState();
     const slot_value: u64 = @intCast(try slot_arg.toI64());
-    const transfer_cache = try optionalBool(options, "transferCache", false);
+
+    var transfer_cache = true;
+    if (options) |value| {
+        const raw = value.toValue();
+        if (try raw.typeof() == .object) {
+            // TODO(bing): we should rename dontTransferCache to transferCache on TS-side to
+            // avoid double negative, it's harder to read dontTransferCache = true versus
+            // transferCache = false
+            if (try raw.hasNamedProperty("dontTransferCache")) {
+                transfer_cache = !(try (try raw.getNamedProperty("dontTransferCache")).getValueBool());
+            } else if (try raw.hasNamedProperty("transferCache")) {
+                transfer_cache = try (try raw.getNamedProperty("transferCache")).getValueBool();
+            }
+        }
+    }
     const post_state = try cached_state.clone(allocator, .{ .transfer_cache = transfer_cache });
     errdefer {
         post_state.deinit();

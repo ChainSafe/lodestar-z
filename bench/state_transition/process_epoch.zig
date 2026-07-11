@@ -658,7 +658,7 @@ fn runBenchmark(
     state_bytes: []const u8,
     chain_config: config.ChainConfig,
 ) !void {
-    defer state_transition.deinitStateTransition(io);
+    defer state_transition.deinitReusedEpochTransitionCache(io);
 
     var beacon_state: ?*AnyBeaconState = try loadState(fork, allocator, pool, state_bytes);
     defer if (beacon_state) |state| {

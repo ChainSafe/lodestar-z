@@ -253,24 +253,36 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             }
 
             /// Get the next element as an SSZ value type.
-            pub fn nextValue(self: *ReadonlyIterator, allocator: Allocator) !ST.Element.Type {
+            /// Picks between the non-allocating version for fixed types or
+            /// the allocating version for variable-length types.
+            pub const nextValue = if (isFixedType(ST.Element))
+                nextValueFixed
+            else
+                nextValueAlloc;
+
+            /// Inner function to get the next element as an SSZ value type.
+            fn nextValueFixed(self: *ReadonlyIterator) !ST.Element.Type {
                 const node = try self.depth_iterator.next();
-                if (comptime isFixedType(ST.Element)) {
-                    var value: ST.Element.Type = undefined;
-                    try ST.Element.tree.toValue(node, self.tree_view.chunks.state.pool, &value);
-                    self.elem_index += 1;
-                    return value;
-                } else {
-                    // Variable-size elements: toValue reads `out` (it resizes embedded ArrayLists),
-                    // so initialize it before the call.
-                    var value: ST.Element.Type = if (comptime @hasDecl(ST.Element, "default_value"))
-                        ST.Element.default_value
-                    else
-                        std.mem.zeroes(ST.Element.Type);
-                    try ST.Element.tree.toValue(allocator, node, self.tree_view.chunks.state.pool, &value);
-                    self.elem_index += 1;
-                    return value;
-                }
+                var value: ST.Element.Type = undefined;
+                try ST.Element.tree.toValue(node, self.tree_view.chunks.state.pool, &value);
+                self.elem_index += 1;
+                return value;
+            }
+
+            /// Inner function to get the next element as an SSZ value type.
+            ///
+            /// Requires an allocator for `toValue`.
+            fn nextValueAlloc(self: *ReadonlyIterator, allocator: Allocator) !ST.Element.Type {
+                const node = try self.depth_iterator.next();
+                // Variable-size elements: toValue reads `out` (it resizes embedded ArrayLists),
+                // so initialize it before the call.
+                var value: ST.Element.Type = if (comptime @hasDecl(ST.Element, "default_value"))
+                    ST.Element.default_value
+                else
+                    std.mem.zeroes(ST.Element.Type);
+                try ST.Element.tree.toValue(allocator, node, self.tree_view.chunks.state.pool, &value);
+                self.elem_index += 1;
+                return value;
             }
 
             /// Read-only pointer to the next element's value without copying.

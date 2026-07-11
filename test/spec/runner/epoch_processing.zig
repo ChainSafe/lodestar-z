@@ -77,7 +77,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                 post.deinit();
                 self.pre.allocator.destroy(post);
             }
-            state_transition.deinitStateTransition(std.testing.io);
+            state_transition.deinitReusedEpochTransitionCache(std.testing.io);
         }
 
         fn runTest(self: *Self) !void {

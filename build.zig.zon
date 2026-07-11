@@ -28,8 +28,8 @@
             },
         },
         .hashtree = .{
-            .url = "git+https://github.com/ChainSafe/hashtree-z.git#81b7303f72e202e966f71eedf4be1d8d33e2fcaa",
-            .hash = "hashtree-0.1.0-sBOoviYWAAA1HcTLhxWt0TtrLFXvYM5gOvxpu_Rreiiw",
+            .url = "git+https://github.com/ChainSafe/hashtree-z.git#f5c1b81da167f84376fb94aef29a57fc6c08dc28",
+            .hash = "hashtree-0.1.0-sBOovj8WAAAGCN62cybnffy7b4ITTQsog2oOG2AQZl9L",
         },
         .snappy = .{
             .url = "git+https://github.com/ChainSafe/snappy.zig#713942410426051da6107a955b29f3f152815622",
@@ -40,7 +40,7 @@
             .hash = "zig_yaml-0.1.0-C1161kFWAwDxjKAFmklKwWVDvz2mmq0Q__bDhGGjeyd3",
         },
         .zapi = .{
-            .url = "https://github.com/ChainSafe/zapi/archive/refs/tags/zapi-v2.2.0.tar.gz",
+            .url = "git+https://github.com/chainsafe/zapi.git?ref=zapi-v2.x.0#92fe4babe4022ceb94a5cb24022a18fe27417d69",
             .hash = "zapi-2.2.0-rIqzUXBaBADUsvvvB2N5kOBdLEO0rGPhowTqmIXe3qVh",
         },
         .zbench = .{
@@ -210,6 +210,10 @@
         .fork_choice = .{
             .root_source_file = "src/fork_choice/root.zig",
             .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants, .metrics, .time },
+        },
+        .beacon_node = .{
+            .root_source_file = "src/beacon_node/root.zig",
+            .imports = .{ .consensus_types, .state_transition, .persistent_merkle_tree, .testing_allocators, .metrics, .hex, .time },
         },
     },
     .executables = .{
@@ -385,6 +389,7 @@
         .era = .{ .root_module = .era },
         .fork_choice = .{ .root_module = .fork_choice },
         .clock = .{ .root_module = .clock },
+        .beacon_node = .{ .root_module = .beacon_node },
 
         .int = .{
             .root_module = .{
