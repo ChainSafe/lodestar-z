@@ -54,7 +54,7 @@ const signedBlockBytes = (await printDurationAsync("read serialized block", () =
   nextReader.readSerializedBlock(state.slot + 1)
 )) as Uint8Array;
 
-printDuration("state transition", () => bindings.stateTransition.stateTransition(state, signedBlockBytes));
+printDuration("state transition", () => state.stateTransition(signedBlockBytes));
 
 printDuration("write pkix to disk", () => pubkeyCache.save(PKIX_FILE));
 

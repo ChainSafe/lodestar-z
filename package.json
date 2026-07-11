@@ -23,6 +23,10 @@
     "./state-transition": {
       "import": "./bindings/src/state-transition.js",
       "types": "./bindings/src/state-transition.d.ts"
+    },
+    "./metrics": {
+      "import": "./bindings/src/metrics.js",
+      "types": "./bindings/src/metrics.d.ts"
     }
   },
   "scripts": {
@@ -46,14 +50,18 @@
     "targets": [
       "aarch64-apple-darwin",
       "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
       "x86_64-apple-darwin",
       "x86_64-unknown-linux-gnu",
       "x86_64-unknown-linux-musl"
     ]
   },
   "dependencies": {
-    "@chainsafe/zapi": "2.0.0"
+    "@chainsafe/zapi": "github:ChainSafe/zapi#6649cef91b19bcd9854aa1ffa4d0c1aed7270f55"
   },
+  "bundleDependencies": [
+    "@chainsafe/zapi"
+  ],
   "devDependencies": {
     "@biomejs/biome": "^2.3.11",
     "@chainsafe/benchmark": "^2.0.1",

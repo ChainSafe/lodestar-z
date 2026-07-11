@@ -166,7 +166,6 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                 @memcpy(std.mem.sliceAsBytes(out.items[0..len]), data);
                 return;
             }
-            @memset(out.items[0..len], Element.default_value);
             for (0..len) |i| {
                 try Element.deserializeFromBytes(
                     data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],

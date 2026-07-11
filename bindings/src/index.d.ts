@@ -269,6 +269,7 @@ export declare class BeaconStateView {
   getBalance(index: number): number;
   getValidator(index: number): Validator;
   getAllValidators(): Validator[];
+  getBuildersLength(): number;
   getAllBalances(): number[];
   getValidatorsByStatus(statuses: Set<string>, currentEpoch: number): Validator[];
   // TODO wrong function
@@ -364,6 +365,7 @@ export declare class BeaconStateView {
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
+  stateTransition(signedBlockBytes: Uint8Array, options?: TransitionOpts): BeaconStateView;
 }
 
 declare const bindings: {
@@ -377,11 +379,7 @@ declare const bindings: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
   stateTransition: {
-    stateTransition: (
-      preState: BeaconStateView,
-      signedBlockBytes: Uint8Array,
-      options?: TransitionOpts
-    ) => BeaconStateView;
+    deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
     init: () => void;

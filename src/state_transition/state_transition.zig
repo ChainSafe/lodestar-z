@@ -22,13 +22,14 @@ const EpochTransitionCache = @import("cache/epoch_transition_cache.zig").EpochTr
 const processEpoch = @import("epoch/process_epoch.zig").processEpoch;
 const computeEpochAtSlot = @import("utils/epoch.zig").computeEpochAtSlot;
 const processSlot = @import("slot/process_slot.zig").processSlot;
-const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 const upgradeStateToAltair = @import("slot/upgrade_state_to_altair.zig").upgradeStateToAltair;
 const upgradeStateToBellatrix = @import("slot/upgrade_state_to_bellatrix.zig").upgradeStateToBellatrix;
 const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 const upgradeStateToElectra = @import("slot/upgrade_state_to_electra.zig").upgradeStateToElectra;
 const upgradeStateToFulu = @import("slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+
+pub const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 
 pub const ExecutionPayloadStatus = enum(u8) {
     invalid,
@@ -138,6 +139,8 @@ pub fn processSlots(
             try state.setSlot(next_slot);
         }
     }
+
+    try state.commit();
 }
 
 pub const TransitionOpts = struct {
@@ -233,11 +236,9 @@ pub fn stateTransition(
     }
     metrics.state_transition.process_block.observe(time.durationSeconds(time.since(io, timer)));
 
-    //
-    // TODO(bing): commit
-    //  const processBlockCommitTimer = metrics?.processBlockCommitTime.startTimer();
-    //  postState.commit();
-    //  processBlockCommitTimer?.();
+    timer = time.start(io);
+    try post_state.commit();
+    metrics.state_transition.process_block_commit.observe(time.durationSeconds(time.since(io, timer)));
 
     try metrics.state_transition.onPostState(post_cached_state);
 
@@ -245,22 +246,15 @@ pub fn stateTransition(
     if (opts.verify_state_root) {
         timer = time.start(io);
         const post_state_root = try post_state.hashTreeRoot();
-        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, time.durationSeconds(time.since(io, timer)));
+        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .state_transition }, time.durationSeconds(time.since(io, timer)));
 
         const block_state_root = block.stateRoot();
         if (!std.mem.eql(u8, post_state_root, block_state_root)) {
             return error.InvalidStateRoot;
         }
-    } else {
-        // Even if we don't verify the state_root, commit the tree changes
-        try post_state.commit();
     }
 
     return post_cached_state;
-}
-
-pub fn deinitStateTransition(io: std.Io) void {
-    deinitReusedEpochTransitionCache(io);
 }
 
 const TestCase = struct {
@@ -323,14 +317,14 @@ test "state transition - electra block" {
         }
     }
 
-    defer deinitStateTransition(std.testing.io);
+    deinitReusedEpochTransitionCache(std.testing.io);
 }
 
 test "state transition - a rejected block leaves the pre-state unchanged" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 * 5 });
     defer pool.deinit();
-    defer deinitStateTransition(std.testing.io);
+    defer deinitReusedEpochTransitionCache(std.testing.io);
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();

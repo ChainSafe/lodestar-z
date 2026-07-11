@@ -450,6 +450,12 @@ describe("BeaconStateView", () => {
     });
   });
 
+  describe("gloas+ fields", () => {
+    it("getBuildersLength should throw on a pre-Gloas state", () => {
+      expect(() => state.getBuildersLength()).toThrow();
+    });
+  });
+
   describe("block and state roots", () => {
     it("getBlockRoot should return 32 bytes", () => {
       const blockRoot = state.getBlockRoot(state.epoch - 1);
@@ -684,7 +690,7 @@ describe("BeaconStateView", () => {
       const newState = state.processSlots(originalSlot + 1, {dontTransferCache: false});
 
       expect(newState.slot).toBe(originalSlot + 1);
-      expect(newState.createdWithTransferCache).toBe(false);
+      expect(newState.createdWithTransferCache).toBe(true);
     });
   });
 
@@ -699,15 +705,13 @@ describe("BeaconStateView", () => {
         {dataAvailabilityStatus: "available"}, // TS enum value is "Available"
       ];
       for (const opts of invalidOpts) {
-        expect(() => bindings.stateTransition.stateTransition(state, dummyBlockBytes, opts)).toThrow();
+        expect(() => state.stateTransition(dummyBlockBytes, opts)).toThrow();
       }
     });
 
     // TODO: remove once Zig models DataAvailabilityStatus.NotRequired
     it("rejects gloas-only NotRequired", () => {
-      expect(() =>
-        bindings.stateTransition.stateTransition(state, dummyBlockBytes, {dataAvailabilityStatus: "NotRequired"})
-      ).toThrow();
+      expect(() => state.stateTransition(dummyBlockBytes, {dataAvailabilityStatus: "NotRequired"})).toThrow();
     });
   });
 
