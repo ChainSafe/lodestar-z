@@ -46,17 +46,16 @@ test "real-time: the auto-loop delivers ordered slot events promptly" {
     try clock.waitForSlot(target);
     const after_ms = time.nowMs(io_handle);
 
-    // Never early: the wall must actually have reached the target's start.
+    // On wake-up the wall has reached the target slot's start.
     try testing.expect(after_ms >= slot_math.slotStartMs(clock.config, target));
-    // Never late: two 1 s boundaries take under 2 s; one more second of
-    // scheduler headroom.
+    // Two 1 s boundaries pass in under 2 s; the third second is scheduler
+    // headroom.
     try testing.expect(after_ms - before_ms < 3000);
-    // >= not ==: an extra slot may deliver depending on where inside the
-    // current second the test started.
+    // The wait spans two slot boundaries, so at least two slots arrive.
     try testing.expect(trace.slot_len >= 2);
-    // >= not ==: another boundary can land between the wake-up and this line.
+    // Delivery reached the target; a further boundary may have added more.
     try testing.expect(trace.slots[trace.slot_len - 1] >= target);
-    // Strictly increasing: no duplicate and no reordered delivery.
+    // Slots arrive in order, each once.
     for (1..trace.slot_len) |i| {
         try testing.expect(trace.slots[i] > trace.slots[i - 1]);
     }
