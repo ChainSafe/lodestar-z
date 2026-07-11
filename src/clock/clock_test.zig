@@ -48,8 +48,8 @@ test "real-time: the auto-loop delivers ordered slot events promptly" {
 
     // On wake-up the wall has reached the target slot's start.
     try testing.expect(after_ms >= slot_math.slotStartMs(clock.config, target));
-    // Two 1 s boundaries pass in under 2 s; the third second is scheduler
-    // headroom.
+    // With slot_duration_ms = 1 s, the two boundaries to the target pass in
+    // under 2 s; the third second is scheduler headroom.
     try testing.expect(after_ms - before_ms < 3000);
     // The wait spans two slot boundaries, so at least two slots arrive.
     try testing.expect(trace.slot_len >= 2);
