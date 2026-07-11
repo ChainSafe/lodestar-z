@@ -78,7 +78,8 @@ test "waitForSlot resolves immediately when at target" {
 
     const current = clock.currentSlotOrGenesis();
     try clock.waitForSlot(current);
-    // Fast path: resolved without ever enqueuing a waiter.
+    // The count peek guards the fast path: a waiter enqueued here is a stack
+    // local that would dangle once this frame returns.
     try testing.expectEqual(@as(usize, 0), clock.waiters.count());
 }
 
@@ -365,8 +366,6 @@ test "reentrancy: callback can stop the clock; no further slots emitted" {
     _ = clock.currentSlot();
 
     try testing.expectEqual(@as(usize, 1), ctx.fired_count);
-    try testing.expect(clock.stopped);
-    try testing.expectEqual(@as(?Slot, 0), clock.current_slot);
 }
 
 const StopAtSlotCtx = struct {
@@ -406,8 +405,6 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
     fake.ms = slot_math.slotStartMs(clock.config, target);
     _ = clock.currentSlot();
 
-    try testing.expect(clock.stopped);
-    try testing.expectEqual(@as(?Slot, target), clock.current_slot);
     // Reached slot happened, so the wait must resolve, not abort.
     try fut_reached.await(io_handle);
     // Future slot can never be emitted after stop, so it aborts.
@@ -573,7 +570,11 @@ test "tolerance and from-slot forwards are pure reads: no catch-up" {
     try testing.expectEqual(@as(i64, -12_000), clock.msFromSlot(1, 100_000));
 
     try testing.expectEqual(@as(usize, 0), trace.slot_len);
-    try testing.expectEqual(@as(?Slot, 0), clock.current_slot);
+
+    // Delivery is still at slot 0: currentSlot now catches up the intact
+    // backlog, emitting only slot 1 - the pure reads advanced nothing.
+    try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
+    try expectEqualSlices(Slot, &.{1}, trace.slots[0..trace.slot_len]);
 }
 
 test "stop() from a catchUp callback aborts the wait before enqueue" {
@@ -597,8 +598,6 @@ test "stop() from a catchUp callback aborts the wait before enqueue" {
     // Backlog slots 1..5 so catchUp fires the listener while short of target 10.
     fake.ms = 105_000;
     try testing.expectError(error.Aborted, clock.waitForSlot(10));
-    try testing.expect(clock.stopped);
-    try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
 }
 
 test "stop() from a catchUp callback still resolves a reached wait" {
@@ -620,11 +619,9 @@ test "stop() from a catchUp callback still resolves a reached wait" {
 
     fake.ms = 101_000;
     try clock.waitForSlot(1);
-    try testing.expect(clock.stopped);
-    try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
 }
 
-test "waitForSlot reached-check consults the cursor, not the wall time" {
+test "waitForSlot judges reached by delivery progress, not the wall clock" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -639,13 +636,11 @@ test "waitForSlot reached-check consults the cursor, not the wall time" {
     _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
 
     // Backlog to slot 3 with the listener stopping the clock at slot 1: the
-    // caught-up wall slot (3) reaches the target but the cursor stops at 1, and
-    // slot 2's event is suppressed. The reached-check must consult the cursor,
-    // so the wait aborts synchronously instead of resolving.
+    // caught-up wall slot (3) reaches the target but delivery stops at slot 1,
+    // and slot 2's event is suppressed. The reached-check must consult delivery
+    // progress, so the wait aborts synchronously instead of resolving.
     fake.ms = 103_000;
     try testing.expectError(error.Aborted, clock.waitForSlot(2));
-    try testing.expect(clock.stopped);
-    try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
 }
 
 const MutateAndQueryCtx = struct {
@@ -878,7 +873,6 @@ test "big backlog drains in a flat loop without per-slot nesting" {
     try testing.expect(ctx.order_ok);
     try testing.expectEqual(@as(u64, 32_768), ctx.slot_count);
     try testing.expectEqual(@as(u64, 1_024), ctx.epoch_count);
-    try testing.expectEqual(@as(?Slot, 32_768), clock.current_slot);
 }
 
 const RunAheadLog = struct {
@@ -951,7 +945,7 @@ test "a mid-emit query returns the wall slot ahead of deferred delivery" {
     }, log.entries[0..log.len]);
 }
 
-test "successive mid-emit queries coalesce to the furthest pending target" {
+test "successive mid-emit queries drain to the furthest queried wall slot" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -985,8 +979,8 @@ test "successive mid-emit queries coalesce to the furthest pending target" {
     _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_l3);
 
     // Emitting slot 1, the three queries burn the wall to slots 3, 5, then
-    // BACK to 4. @max holds pending at 5: keeping the first target would
-    // stall the drain at 3, and a plain overwrite would regress it to 4.
+    // BACK to 4. @max holds the recorded target at 5: keeping the first target
+    // would stall the drain at 3, and a plain overwrite would regress it to 4.
     fake.ms = 101_000;
     try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
 
@@ -996,10 +990,9 @@ test "successive mid-emit queries coalesce to the furthest pending target" {
     try testing.expectEqual(@as(?Slot, 3), ctx_l1.queried_slot);
     try testing.expectEqual(@as(?Slot, 5), ctx_l2.queried_slot);
     try testing.expectEqual(@as(?Slot, 4), ctx_l3.queried_slot);
-    try testing.expectEqual(@as(?Slot, 5), clock.current_slot);
 }
 
-test "stop() after a mid-emit query leaves no pending target behind" {
+test "stop() after a mid-emit query leaves the next read clean" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -1013,22 +1006,21 @@ test "stop() after a mid-emit query leaves no pending target behind" {
     var ctx = QueryAtSlotCtx{ .clock = &clock, .fake = &fake, .query_at = 1 };
     _ = try clock.onSlot(QueryAtSlotCtx.onSlotThenStop, &ctx);
 
-    // Backlog 1..3: at slot 1 the callback queries (recording pending target
-    // 3, returning 3) and then stops. The exit backstop must clear the recorded
-    // pending or the next accessor's catchUp would trip the
+    // Backlog 1..3: at slot 1 the callback queries (recording target 3,
+    // returning 3) and then stops. The exit backstop must clear the recorded
+    // target or the next accessor's catchUp would trip the
     // `pending_target == null` assert.
     fake.ms = 103_000;
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
     try testing.expectEqual(@as(?Slot, 3), ctx.queried_slot);
 
-    // The post-stop accessor dispatches nothing and stays a pure read:
-    // cursor unchanged, suppressed slots 2..3 never delivered.
+    // The post-stop accessor dispatches nothing and stays a pure read: it
+    // returns the wall slot, and the suppressed slots 2..3 stay undelivered.
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
-    try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
     try expectEqualSlices(Slot, &.{1}, ctx.slots[0..ctx.slot_len]);
 }
 
-test "top-level wall step-back never regresses the cursor or emits" {
+test "top-level wall step-back never re-emits or regresses delivery" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -1043,13 +1035,96 @@ test "top-level wall step-back never regresses the cursor or emits" {
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
     // Advance to slot 3, then step the wall back to slot 1. The returned slot
-    // follows the wall down; the walk target is behind the cursor, so nothing
-    // re-emits and the cursor holds at 3.
+    // follows the wall down, but the walk target is behind delivery, so the
+    // step-back re-emits nothing.
     fake.ms = 103_000;
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
 
     fake.ms = 101_000;
     try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
-    try testing.expectEqual(@as(?Slot, 3), clock.current_slot);
     try expectEqualSlices(Slot, &.{ 1, 2, 3 }, trace.slots[0..trace.slot_len]);
+
+    // Advancing forward again resumes past slot 3: had the step-back regressed
+    // delivery to slot 1, the drive to slot 5 would re-emit 2 and 3, so the
+    // continued trace pins the intact ordered sequence.
+    fake.ms = 105_000;
+    try testing.expectEqual(@as(?Slot, 5), clock.currentSlot());
+    try expectEqualSlices(Slot, &.{ 1, 2, 3, 4, 5 }, trace.slots[0..trace.slot_len]);
+}
+
+test "first delivery from a pre-genesis start begins at slot 0" {
+    var fake = FakeClockIo{ .ms = 99_000 };
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, fake.io(), .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    });
+    defer clock.deinit();
+
+    // Pre-genesis, so no slot is current yet and nothing has been delivered.
+    try testing.expectEqual(@as(?Slot, null), clock.currentSlot());
+
+    var trace = EventTraceState{};
+    _ = try clock.onSlot(EventTraceState.onSlot, &trace);
+
+    // Wall slot 2: the first catch-up from a pre-genesis start opens delivery
+    // at slot 0, so the backlog arrives as 0, 1, 2.
+    fake.ms = 102_000;
+    try testing.expectEqual(@as(?Slot, 2), clock.currentSlot());
+    try expectEqualSlices(Slot, &.{ 0, 1, 2 }, trace.slots[0..trace.slot_len]);
+}
+
+const SlotEpochLog = struct {
+    const Tag = enum { slot, epoch };
+    const Entry = struct { tag: Tag, value: u64 };
+
+    entries: [16]Entry = undefined,
+    len: usize = 0,
+
+    fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
+        record(ctx, .slot, slot);
+    }
+
+    fn onEpoch(ctx: ?*anyopaque, epoch: Epoch) void {
+        record(ctx, .epoch, epoch);
+    }
+
+    fn record(ctx: ?*anyopaque, tag: Tag, value: u64) void {
+        const self: *SlotEpochLog = @ptrCast(@alignCast(ctx.?));
+        if (self.len >= self.entries.len) return;
+        self.entries[self.len] = .{ .tag = tag, .value = value };
+        self.len += 1;
+    }
+};
+
+test "epoch delivery interleaves after its boundary slot, before the next slot" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, fake.io(), .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 2,
+    });
+    defer clock.deinit();
+
+    var log = SlotEpochLog{};
+    _ = try clock.onSlot(SlotEpochLog.onSlot, &log);
+    _ = try clock.onEpoch(SlotEpochLog.onEpoch, &log);
+
+    // Cursor starts at slot 0. Driving to slot 3 crosses the epoch-1 boundary
+    // at slot 2: each slot is delivered first, then the epoch event once its
+    // boundary is crossed - so slot 2 lands before epoch 1, and slot 3 after.
+    fake.ms = 103_000;
+    try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
+
+    const E = SlotEpochLog.Entry;
+    try expectEqualSlices(E, &.{
+        .{ .tag = .slot, .value = 1 },
+        .{ .tag = .slot, .value = 2 },
+        .{ .tag = .epoch, .value = 1 },
+        .{ .tag = .slot, .value = 3 },
+    }, log.entries[0..log.len]);
 }

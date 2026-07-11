@@ -521,10 +521,10 @@ test "WaiterLimitReached: waitForSlot rejects the (limit+1)th waiter" {
     });
     defer clock.deinit();
 
-    // Seed the queue to its limit directly rather than spawning 1024 fibers:
-    // waitForSlot rejects synchronously once the queue is full, before any
-    // suspend. deinit's abortAllWaiters then sets each dummy event harmlessly
-    // on the real zio io.
+    // Setup shortcut: filling the private queue directly spares max_waiters
+    // real fibers. waitForSlot rejects synchronously once the queue is full,
+    // before any suspend; deinit's abortAllWaiters then sets each dummy event
+    // harmlessly on the real zio io.
     var dummies = [_]WaitState{.{}} ** max_waiters;
     for (&dummies) |*d| {
         clock.waiters.push(testing.allocator, .{ .target = 999_999, .state = d }) catch unreachable;
@@ -545,7 +545,7 @@ test "pre-genesis returns null, genesis fallback returns zero" {
     try testing.expectEqual(@as(Epoch, 0), clock.currentEpochOrGenesis());
 }
 
-test "init fails cleanly when the waiter reservation cannot allocate" {
+test "init fails cleanly when its only allocation fails" {
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
     var fake = FakeClockIo{ .ms = 100_000 };
 
@@ -578,79 +578,4 @@ test "currentEpoch" {
     defer clock.deinit();
 
     try testing.expectEqual(@as(?Epoch, 1), clock.currentEpoch());
-}
-
-test "advanceTo produces correct slot events" {
-    var fake = FakeClockIo{ .ms = 100_000 };
-    var clock: Clock = undefined;
-    try clock.init(testing.allocator, fake.io(), test_cfg);
-    defer clock.deinit();
-
-    var events: [16]Event = undefined;
-    var count: usize = 0;
-    var iter = clock.advanceTo(3);
-    while (iter.next()) |e| {
-        events[count] = e;
-        count += 1;
-    }
-
-    try testing.expectEqual(@as(usize, 3), count);
-    try testing.expect(events[0] == .slot and events[0].slot == 1);
-    try testing.expect(events[1] == .slot and events[1].slot == 2);
-    try testing.expect(events[2] == .slot and events[2].slot == 3);
-    try testing.expectEqual(@as(?Slot, 3), clock.current_slot);
-}
-
-test "advanceTo across epoch boundary emits slot then epoch" {
-    var fake = FakeClockIo{ .ms = 100_000 };
-    var clock: Clock = undefined;
-    try clock.init(testing.allocator, fake.io(), test_cfg);
-    defer clock.deinit();
-    clock.current_slot = 31;
-
-    var events: [16]Event = undefined;
-    var count: usize = 0;
-    var iter = clock.advanceTo(33);
-    while (iter.next()) |e| {
-        events[count] = e;
-        count += 1;
-    }
-
-    try testing.expectEqual(@as(usize, 3), count);
-    try testing.expect(events[0] == .slot and events[0].slot == 32);
-    try testing.expect(events[1] == .epoch and events[1].epoch == 1);
-    try testing.expect(events[2] == .slot and events[2].slot == 33);
-}
-
-test "advanceTo from null (pre-genesis)" {
-    var fake = FakeClockIo{ .ms = 99_000 };
-    var clock: Clock = undefined;
-    try clock.init(testing.allocator, fake.io(), test_cfg);
-    defer clock.deinit();
-    try testing.expectEqual(@as(?Slot, null), clock.current_slot);
-
-    var events: [16]Event = undefined;
-    var count: usize = 0;
-    var iter = clock.advanceTo(2);
-    while (iter.next()) |e| {
-        events[count] = e;
-        count += 1;
-    }
-
-    try testing.expectEqual(@as(usize, 3), count);
-    try testing.expect(events[0] == .slot and events[0].slot == 0);
-    try testing.expect(events[1] == .slot and events[1].slot == 1);
-    try testing.expect(events[2] == .slot and events[2].slot == 2);
-}
-
-test "advanceTo already at target returns nothing" {
-    var fake = FakeClockIo{ .ms = 112_000 };
-    var clock: Clock = undefined;
-    try clock.init(testing.allocator, fake.io(), test_cfg);
-    defer clock.deinit();
-
-    var count: usize = 0;
-    var iter = clock.advanceTo(1);
-    while (iter.next()) |_| count += 1;
-    try testing.expectEqual(@as(usize, 0), count);
 }
