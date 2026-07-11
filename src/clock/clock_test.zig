@@ -44,16 +44,19 @@ test "real-time: the auto-loop delivers ordered slot events promptly" {
     // The auto-loop advances the clock on its own fiber, so this direct wait
     // suspends the main fiber and is woken by the loop's dispatch.
     try clock.waitForSlot(target);
-    const elapsed = time.nowMs(io_handle) - before_ms;
+    const after_ms = time.nowMs(io_handle);
 
-    // Real wall clock, so exact counts would encode where inside the current
-    // second the test started; only the bounds hold. Crossing two 1 s
-    // boundaries takes under 2 s plus 1 s of scheduler headroom, at least
-    // two slots get delivered, delivery reaches at least the target (another
-    // boundary may land before we assert), and order strictly increases.
-    try testing.expect(elapsed < 3000);
+    // Never early: the wall must actually have reached the target's start.
+    try testing.expect(after_ms >= slot_math.slotStartMs(clock.config, target));
+    // Never late: two 1 s boundaries take under 2 s; one more second of
+    // scheduler headroom.
+    try testing.expect(after_ms - before_ms < 3000);
+    // >= not ==: an extra slot may deliver depending on where inside the
+    // current second the test started.
     try testing.expect(trace.slot_len >= 2);
+    // >= not ==: another boundary can land between the wake-up and this line.
     try testing.expect(trace.slots[trace.slot_len - 1] >= target);
+    // Strictly increasing: no duplicate and no reordered delivery.
     for (1..trace.slot_len) |i| {
         try testing.expect(trace.slots[i] > trace.slots[i - 1]);
     }
