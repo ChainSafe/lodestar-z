@@ -481,58 +481,6 @@ const test_io = @import("test_io.zig");
 const FakeClockIo = test_io.FakeClockIo;
 const test_cfg = test_io.test_cfg;
 
-fn nopSlot(_: ?*anyopaque, _: Slot) void {}
-fn nopEpoch(_: ?*anyopaque, _: Epoch) void {}
-
-test "ListenerLimitReached: onSlot/onEpoch reject the (limit+1)th registration" {
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-    const io_handle = rt.io();
-
-    var clock: Clock = undefined;
-    try clock.init(testing.allocator, io_handle, .{
-        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
-        .slot_duration_ms = 1_000,
-        .slots_per_epoch = 4,
-    });
-    defer clock.deinit();
-
-    for (0..max_slot_listeners) |_| {
-        _ = try clock.onSlot(nopSlot, null);
-    }
-    try testing.expectError(error.ListenerLimitReached, clock.onSlot(nopSlot, null));
-
-    for (0..max_epoch_listeners) |_| {
-        _ = try clock.onEpoch(nopEpoch, null);
-    }
-    try testing.expectError(error.ListenerLimitReached, clock.onEpoch(nopEpoch, null));
-}
-
-test "WaiterLimitReached: waitForSlot rejects the (limit+1)th waiter" {
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-    const io_handle = rt.io();
-
-    var clock: Clock = undefined;
-    try clock.init(testing.allocator, io_handle, .{
-        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
-        .slot_duration_ms = 1_000,
-        .slots_per_epoch = 4,
-    });
-    defer clock.deinit();
-
-    // Setup shortcut: filling the private queue directly spares max_waiters
-    // real fibers. waitForSlot rejects synchronously once the queue is full,
-    // before any suspend; deinit's abortAllWaiters then sets each dummy event
-    // harmlessly on the real zio io.
-    var dummies = [_]WaitState{.{}} ** max_waiters;
-    for (&dummies) |*d| {
-        clock.waiters.push(testing.allocator, .{ .target = 999_999, .state = d }) catch unreachable;
-    }
-
-    try testing.expectError(error.WaiterLimitReached, clock.waitForSlot(999_999));
-}
-
 test "pre-genesis returns null, genesis fallback returns zero" {
     var fake = FakeClockIo{ .ms = 99_000 };
     var clock: Clock = undefined;

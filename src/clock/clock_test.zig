@@ -185,6 +185,64 @@ test "epoch event is delivered when crossing epoch boundary" {
     try testing.expectEqual(@as(u64, 1), trace.epochs[0]);
 }
 
+fn nopSlot(_: ?*anyopaque, _: Slot) void {}
+fn nopEpoch(_: ?*anyopaque, _: Epoch) void {}
+
+test "ListenerLimitReached: onSlot/onEpoch reject the (limit+1)th registration" {
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, io_handle, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    });
+    defer clock.deinit();
+
+    for (0..Clock.max_slot_listeners) |_| {
+        _ = try clock.onSlot(nopSlot, null);
+    }
+    try testing.expectError(error.ListenerLimitReached, clock.onSlot(nopSlot, null));
+
+    for (0..Clock.max_epoch_listeners) |_| {
+        _ = try clock.onEpoch(nopEpoch, null);
+    }
+    try testing.expectError(error.ListenerLimitReached, clock.onEpoch(nopEpoch, null));
+}
+
+test "WaiterLimitReached: waitForSlot rejects the (limit+1)th waiter" {
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, io_handle, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    });
+    defer clock.deinit();
+
+    var futs: [Clock.max_waiters]std.Io.Future(Error!void) = undefined;
+    for (&futs) |*f| {
+        f.* = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, 999_999 });
+    }
+    var polls: usize = 0;
+    while (clock.waiters.count() < Clock.max_waiters) : (polls += 1) {
+        if (polls >= 100_000) return error.RendezvousTimeout;
+        std.Io.sleep(io_handle, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+
+    try testing.expectError(error.WaiterLimitReached, clock.waitForSlot(999_999));
+
+    clock.stop();
+    for (&futs) |*f| {
+        try testing.expectError(error.Aborted, f.await(io_handle));
+    }
+}
+
 test "multiple waiters are dispatched in target-slot order" {
     const rt = try zio.Runtime.init(testing.allocator, .{});
     defer rt.deinit();
