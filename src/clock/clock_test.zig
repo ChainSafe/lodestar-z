@@ -316,9 +316,7 @@ test "an epoch tick reading mid-drain sees the wall, and delivery is undisturbed
 
     // The host was suspended for five slots, so one catch-up drains 1..5. The
     // sync service's epoch tick (fired right after slot 4) reads the clock and
-    // legitimately sees slot 5 - a slot whose event has not gone out yet. The
-    // read must not nest a dispatch: the frame already emitting delivers slot 5
-    // afterwards, in order, exactly once.
+    // legitimately sees slot 5 - a slot whose event has not gone out yet.
     fake.ms = slot_math.slotStartMs(cfg, 5);
     try testing.expectEqual(@as(?Slot, 5), clock.currentSlot());
 
