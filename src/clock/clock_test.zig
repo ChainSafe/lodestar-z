@@ -24,7 +24,7 @@ test "waitForSlot resolves immediately when at target" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
@@ -62,7 +62,7 @@ test "waitForSlot on a stopped clock returns error.Aborted" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
     };
-    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
+    var fake: FakeClockIo = .{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
@@ -80,12 +80,12 @@ test "offSlot/offEpoch stop event delivery" {
         .slots_per_epoch = 4,
     };
     // One slot before genesis, so the cursor initializes to null.
-    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
+    var fake: FakeClockIo = .{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var trace = EventTraceState{};
+    var trace: EventTraceState = .{};
     const slot_id = try clock.onSlot(EventTraceState.onSlot, &trace);
     const epoch_id = try clock.onEpoch(EventTraceState.onEpoch, &trace);
 
@@ -113,7 +113,7 @@ test "stop/join are idempotent" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
+    var fake: FakeClockIo = .{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
@@ -131,12 +131,12 @@ test "epoch event is delivered when crossing epoch boundary" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
     };
-    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
+    var fake: FakeClockIo = .{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var trace = EventTraceState{};
+    var trace: EventTraceState = .{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
     _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
 
@@ -158,7 +158,7 @@ test "ListenerLimitReached: onSlot/onEpoch reject the (limit+1)th registration" 
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
     };
-    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
+    var fake: FakeClockIo = .{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
@@ -216,7 +216,7 @@ test "multiple waiters are dispatched in target-slot order" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms, .inner = io_handle };
+    var fake: FakeClockIo = .{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms, .inner = io_handle };
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
@@ -270,13 +270,13 @@ test "reentrancy: callback can offSlot itself mid-dispatch" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
     };
-    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
+    var fake: FakeClockIo = .{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx_a = ReentrancyCtx{ .clock = &clock };
-    var ctx_b = ReentrancyCtx{ .clock = &clock };
+    var ctx_a: ReentrancyCtx = .{ .clock = &clock };
+    var ctx_b: ReentrancyCtx = .{ .clock = &clock };
     const id_a = try clock.onSlot(ReentrancyCtx.offSelf, &ctx_a);
     ctx_a.self_id = id_a;
     _ = try clock.onSlot(ReentrancyCtx.justCount, &ctx_b);
@@ -297,12 +297,12 @@ test "reentrancy: callback can stop the clock; no further slots emitted" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
     };
-    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
+    var fake: FakeClockIo = .{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx = ReentrancyCtx{ .clock = &clock };
+    var ctx: ReentrancyCtx = .{ .clock = &clock };
     _ = try clock.onSlot(ReentrancyCtx.stopClock, &ctx);
 
     // Backlog slots 0..5; the slot-0 callback stops the clock, so the drain
@@ -333,7 +333,7 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
     };
-    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms, .inner = io_handle };
+    var fake: FakeClockIo = .{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms, .inner = io_handle };
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
@@ -341,7 +341,7 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
     // Listener calls stop() while slot `target` is being emitted, i.e.
     // after current_slot reaches `target` but before dispatchWaiters runs.
     const target: Slot = 3;
-    var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = target };
+    var ctx: StopAtSlotCtx = .{ .clock = &clock, .stop_at = target };
     _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
 
     var fut_reached = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, target });
@@ -367,7 +367,7 @@ test "many waiters at same target slot all resolve on advance" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
     };
-    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms, .inner = io_handle };
+    var fake: FakeClockIo = .{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms, .inner = io_handle };
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
@@ -401,14 +401,14 @@ test "currentSlot returns the wall slot its catch-up flushed to" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
     // Each emit burns 5 slots of wall time, simulating a slow callback.
-    var ctx = SlowCallbackCtx{ .fake = &fake, .advance_ms = 5 * cfg.slot_duration_ms };
+    var ctx: SlowCallbackCtx = .{ .fake = &fake, .advance_ms = 5 * cfg.slot_duration_ms };
     _ = try clock.onSlot(SlowCallbackCtx.onSlot, &ctx);
 
     // Wall slot 2: catch-up emits slots 1 and 2, burning the wall to
@@ -427,13 +427,13 @@ test "currentSlotWithGossipDisparity bases its slot on the caught-up wall time" 
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx = SlowCallbackCtx{ .fake = &fake, .advance_ms = 5 * cfg.slot_duration_ms };
+    var ctx: SlowCallbackCtx = .{ .fake = &fake, .advance_ms = 5 * cfg.slot_duration_ms };
     _ = try clock.onSlot(SlowCallbackCtx.onSlot, &ctx);
 
     // 300 ms into slot 2 - outside the 500 ms disparity window - while the
@@ -452,14 +452,14 @@ test "currentEpoch returns the epoch of the wall slot its catch-up flushed to" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 2,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
     // Each emit burns 5 slots (2.5 epochs) of wall time.
-    var ctx = SlowCallbackCtx{ .fake = &fake, .advance_ms = 5 * cfg.slot_duration_ms };
+    var ctx: SlowCallbackCtx = .{ .fake = &fake, .advance_ms = 5 * cfg.slot_duration_ms };
     _ = try clock.onSlot(SlowCallbackCtx.onSlot, &ctx);
 
     // Wall slot 2 (epoch 1): catch-up emits slots 1 and 2, burning the wall
@@ -477,13 +477,13 @@ test "isCurrentSlotGivenGossipDisparity judges the caught-up wall time" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx = SlowCallbackCtx{ .fake = &fake, .advance_ms = 5 * cfg.slot_duration_ms };
+    var ctx: SlowCallbackCtx = .{ .fake = &fake, .advance_ms = 5 * cfg.slot_duration_ms };
     _ = try clock.onSlot(SlowCallbackCtx.onSlot, &ctx);
 
     // 300 ms into slot 2 while the slow callbacks burn the wall to
@@ -499,13 +499,13 @@ test "tolerance and from-slot forwards are pure reads: no catch-up" {
         .slot_duration_ms = 12_000,
         .slots_per_epoch = 32,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var trace = EventTraceState{};
+    var trace: EventTraceState = .{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
     // Wall slot 1 with the cache at 0: a catchUp-backed accessor would flush
@@ -535,7 +535,7 @@ test "stop() from a catchUp callback aborts the wait before enqueue" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
@@ -545,7 +545,7 @@ test "stop() from a catchUp callback aborts the wait before enqueue" {
     // advanced but before it reaches `target`. The post-catchUp re-check must
     // abort synchronously: reaching the enqueue+suspend would panic in
     // FakeClockIo's futex forwarder (`inner` is unset here).
-    var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = 1 };
+    var ctx: StopAtSlotCtx = .{ .clock = &clock, .stop_at = 1 };
     _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
 
     // Backlog slots 1..5 so catchUp fires the listener while short of target 10.
@@ -559,7 +559,7 @@ test "stop() from a catchUp callback still resolves a reached wait" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
@@ -568,7 +568,7 @@ test "stop() from a catchUp callback still resolves a reached wait" {
     // The listener stops the clock while slot 1 - the wait target - is being
     // emitted. The reached-check runs before the stopped re-check, so the wait
     // must return success synchronously, never suspending.
-    var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = 1 };
+    var ctx: StopAtSlotCtx = .{ .clock = &clock, .stop_at = 1 };
     _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
 
     fake.ms = slot_math.slotStartMs(cfg, 1);
@@ -581,13 +581,13 @@ test "waitForSlot judges reached by delivery progress, not the wall clock" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = 1 };
+    var ctx: StopAtSlotCtx = .{ .clock = &clock, .stop_at = 1 };
     _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
 
     // Backlog to slot 3 with the listener stopping the clock at slot 1: the
@@ -626,16 +626,16 @@ test "listener mutations mid-emit preserve the per-emit snapshot; a query defers
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx_l2 = EventTraceState{};
-    var ctx_l3 = EventTraceState{};
-    var ctx_l4 = EventTraceState{};
-    var ctx_l1 = MutateAndQueryCtx{ .clock = &clock, .fake = &fake, .add_ctx = &ctx_l4 };
+    var ctx_l2: EventTraceState = .{};
+    var ctx_l3: EventTraceState = .{};
+    var ctx_l4: EventTraceState = .{};
+    var ctx_l1: MutateAndQueryCtx = .{ .clock = &clock, .fake = &fake, .add_ctx = &ctx_l4 };
     _ = try clock.onSlot(MutateAndQueryCtx.onSlot, &ctx_l1);
     const id_l2 = try clock.onSlot(EventTraceState.onSlot, &ctx_l2);
     _ = try clock.onSlot(EventTraceState.onSlot, &ctx_l3);
@@ -679,15 +679,15 @@ test "epoch listener mutations mid-emit preserve the epoch snapshot" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 2,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx_e2 = EventTraceState{};
-    var ctx_e3 = EventTraceState{};
-    var ctx_e1 = EpochMutateCtx{ .clock = &clock, .add_ctx = &ctx_e3 };
+    var ctx_e2: EventTraceState = .{};
+    var ctx_e3: EventTraceState = .{};
+    var ctx_e1: EpochMutateCtx = .{ .clock = &clock, .add_ctx = &ctx_e3 };
     _ = try clock.onEpoch(EpochMutateCtx.onEpoch, &ctx_e1);
     const id_e2 = try clock.onEpoch(EventTraceState.onEpoch, &ctx_e2);
     ctx_e1.remove_id = id_e2;
@@ -734,14 +734,14 @@ test "non-backlog query-from-callback is a no-op" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx_q = QueryAtSlotCtx{ .clock = &clock, .fake = &fake, .query_at = 1 };
-    var ctx_r = EventTraceState{};
+    var ctx_q: QueryAtSlotCtx = .{ .clock = &clock, .fake = &fake, .query_at = 1 };
+    var ctx_r: EventTraceState = .{};
     _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_q);
     _ = try clock.onSlot(EventTraceState.onSlot, &ctx_r);
 
@@ -759,19 +759,19 @@ test "epoch events under deferred dispatch arrive in order exactly once" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 2) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 2) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx_q = QueryAtSlotCtx{
+    var ctx_q: QueryAtSlotCtx = .{
         .clock = &clock,
         .fake = &fake,
         .query_at = 4,
         .burn_to_ms = slot_math.slotStartMs(cfg, 8),
     };
-    var trace = EventTraceState{};
+    var trace: EventTraceState = .{};
     _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_q);
     _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
 
@@ -813,13 +813,13 @@ test "big backlog drains in a flat loop without per-slot nesting" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 32,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx = BacklogWitnessCtx{ .clock = &clock };
+    var ctx: BacklogWitnessCtx = .{ .clock = &clock };
     _ = try clock.onSlot(BacklogWitnessCtx.onSlot, &ctx);
     _ = try clock.onEpoch(BacklogWitnessCtx.onEpoch, &ctx);
 
@@ -876,15 +876,15 @@ test "a mid-emit query returns the wall slot ahead of deferred delivery" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var log = RunAheadLog{};
-    var ctx_a = RunAheadA{ .clock = &clock, .log = &log };
-    var ctx_b = RunAheadB{ .log = &log };
+    var log: RunAheadLog = .{};
+    var ctx_a: RunAheadA = .{ .clock = &clock, .log = &log };
+    var ctx_b: RunAheadB = .{ .log = &log };
     _ = try clock.onSlot(RunAheadA.onSlot, &ctx_a);
     _ = try clock.onSlot(RunAheadB.onSlot, &ctx_b);
 
@@ -912,25 +912,25 @@ test "successive mid-emit queries drain to the furthest queried wall slot" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx_l1 = QueryAtSlotCtx{
+    var ctx_l1: QueryAtSlotCtx = .{
         .clock = &clock,
         .fake = &fake,
         .query_at = 1,
         .burn_to_ms = slot_math.slotStartMs(cfg, 3),
     };
-    var ctx_l2 = QueryAtSlotCtx{
+    var ctx_l2: QueryAtSlotCtx = .{
         .clock = &clock,
         .fake = &fake,
         .query_at = 1,
         .burn_to_ms = slot_math.slotStartMs(cfg, 5),
     };
-    var ctx_l3 = QueryAtSlotCtx{
+    var ctx_l3: QueryAtSlotCtx = .{
         .clock = &clock,
         .fake = &fake,
         .query_at = 1,
@@ -960,13 +960,13 @@ test "stop() after a mid-emit query leaves the next read clean" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var ctx = QueryAtSlotCtx{ .clock = &clock, .fake = &fake, .query_at = 1 };
+    var ctx: QueryAtSlotCtx = .{ .clock = &clock, .fake = &fake, .query_at = 1 };
     _ = try clock.onSlot(QueryAtSlotCtx.onSlotThenStop, &ctx);
 
     // Backlog 1..3: at slot 1 the callback queries (recording target 3,
@@ -989,13 +989,13 @@ test "top-level wall step-back never re-emits or regresses delivery" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var trace = EventTraceState{};
+    var trace: EventTraceState = .{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
     // Advance to slot 3, then step the wall back to slot 1. The returned slot
@@ -1022,13 +1022,13 @@ test "first delivery from a pre-genesis start begins at slot 0" {
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
     };
-    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
+    var fake: FakeClockIo = .{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var trace = EventTraceState{};
+    var trace: EventTraceState = .{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
     // Pre-genesis, so no slot is current yet and nothing is delivered.
@@ -1048,7 +1048,7 @@ test "epoch delivery interleaves after its boundary slot, before the next slot" 
         .slot_duration_ms = 1_000,
         .slots_per_epoch = 2,
     };
-    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(cfg, 0) };
+    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
 
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), cfg);
@@ -1072,7 +1072,7 @@ test "epoch delivery interleaves after its boundary slot, before the next slot" 
             self.len += 1;
         }
     };
-    var log = Log{};
+    var log: Log = .{};
     _ = try clock.onSlot(Log.onSlot, &log);
     _ = try clock.onEpoch(Log.onEpoch, &log);
 

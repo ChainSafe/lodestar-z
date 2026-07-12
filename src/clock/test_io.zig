@@ -41,7 +41,7 @@ pub const FakeClockIo = struct {
     }
 };
 
-pub const test_cfg = ClockConfig{
+pub const test_cfg: ClockConfig = .{
     .genesis_time_sec = 100,
     .slot_duration_ms = 12_000,
     .slots_per_epoch = 32,

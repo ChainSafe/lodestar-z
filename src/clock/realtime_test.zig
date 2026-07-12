@@ -27,7 +27,7 @@ test "real-time: the auto-loop delivers ordered slot events promptly" {
     });
     defer clock.deinit();
 
-    var trace = EventTraceState{};
+    var trace: EventTraceState = .{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
     try clock.start();
@@ -68,7 +68,7 @@ test "real-time: no slot events emitted before genesis" {
     });
     defer clock.deinit();
 
-    var trace = EventTraceState{};
+    var trace: EventTraceState = .{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
     try clock.start();
@@ -121,7 +121,7 @@ test "real-time: epoch boundary event fires" {
     });
     defer clock.deinit();
 
-    var trace = EventTraceState{};
+    var trace: EventTraceState = .{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
     _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
 

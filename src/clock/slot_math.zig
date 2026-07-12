@@ -185,7 +185,7 @@ pub fn msFromSlot(config: ClockConfig, slot: Slot, to_ms: u64) i64 {
 
 const testing = std.testing;
 
-const mainnet = ClockConfig{
+const mainnet: ClockConfig = .{
     .genesis_time_sec = 1_606_824_023,
     .slot_duration_ms = 12_000,
     .slots_per_epoch = 32,
@@ -317,7 +317,7 @@ test "config validate" {
     }).validate());
 }
 
-const eip7782 = ClockConfig{
+const eip7782: ClockConfig = .{
     .genesis_time_sec = 1_000_000,
     .slot_duration_ms = 12_000,
     .duration_transitions = forkTransitions(&.{.{ .from_slot = 1024, .new_duration_ms = 6_000 }}),
@@ -366,7 +366,7 @@ test "fork-aware: msUntilNextSlot across boundary" {
     try testing.expectEqual(@as(u64, 3_000), msUntilNextSlot(eip7782, fork_ms + 3_000));
 }
 
-const two_fork = ClockConfig{
+const two_fork: ClockConfig = .{
     .genesis_time_sec = 1_000_000,
     .slot_duration_ms = 12_000,
     .duration_transitions = forkTransitions(&.{
@@ -396,7 +396,7 @@ test "fork-aware: two transitions" {
     try testing.expectEqual(@as(?Slot, 8193), slotAtMs(two_fork, f2_ms + 4_000));
 }
 
-const test_cfg = ClockConfig{
+const test_cfg: ClockConfig = .{
     .genesis_time_sec = 100,
     .slot_duration_ms = 12_000,
     .slots_per_epoch = 32,
@@ -462,7 +462,7 @@ test "gossip disparity: pre-genesis slot 0 only within disparity of genesis" {
 test "gossip disparity: pre-genesis with sub-disparity slot duration never advances past 0" {
     // Degenerate config (slot_duration 400 ms < disparity 500 ms): a
     // pre-genesis clamp to slot 0 must not spuriously report slot 1.
-    const cfg = ClockConfig{
+    const cfg: ClockConfig = .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 400,
         .slots_per_epoch = 8,
