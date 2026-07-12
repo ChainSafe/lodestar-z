@@ -1028,11 +1028,12 @@ test "first delivery from a pre-genesis start begins at slot 0" {
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    // Pre-genesis, so no slot is current yet and nothing has been delivered.
-    try testing.expectEqual(@as(?Slot, null), clock.currentSlot());
-
     var trace = EventTraceState{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
+
+    // Pre-genesis, so no slot is current yet and nothing is delivered.
+    try testing.expectEqual(@as(?Slot, null), clock.currentSlot());
+    try testing.expectEqual(@as(usize, 0), trace.slot_len);
 
     // Wall slot 2: the first catch-up from a pre-genesis start opens delivery
     // at slot 0, so the backlog arrives as 0, 1, 2.
