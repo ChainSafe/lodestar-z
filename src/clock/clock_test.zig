@@ -128,13 +128,14 @@ const SyncService = struct {
     }
 };
 
-/// The chain's slot tick on a saturated main thread: the work for `overrun_at`
-/// runs past the slot boundary, so by the time the callback returns the wall
-/// stands at `wall_after_ms` - which may be *behind* the wall it started from,
-/// if NTP corrected the host clock while it ran. `onSlotThenRead` then asks the
-/// clock which slot the node is really in now.
+/// Not one specific service - the condition any listener can hit: its work for
+/// `overrun_at` runs past the slot boundary (a heavy state transition, or just
+/// the sum of every service's tick), so by the time the callback returns the
+/// wall stands at `wall_after_ms` - possibly *behind* where it started, if NTP
+/// corrected the host clock while it ran. `onSlotThenRead` then asks the clock
+/// which slot the node is really in now.
 // Models: https://github.com/ChainSafe/lodestar/blob/551b8b0a3d22a678ca16a5ab0d5893d27776dba6/packages/beacon-node/src/util/clock.ts#L190
-const SaturatedChainListener = struct {
+const SaturatedListener = struct {
     clock: *Clock,
     fake: *FakeClockIo,
     overrun_at: Slot,
@@ -144,27 +145,27 @@ const SaturatedChainListener = struct {
     slot_len: usize = 0,
 
     fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
-        const self: *SaturatedChainListener = @ptrCast(@alignCast(ctx.?));
+        const self: *SaturatedListener = @ptrCast(@alignCast(ctx.?));
         self.record(slot);
         if (slot != self.overrun_at) return;
         self.fake.ms = self.wall_after_ms;
     }
 
     fn onSlotThenRead(ctx: ?*anyopaque, slot: Slot) void {
-        const self: *SaturatedChainListener = @ptrCast(@alignCast(ctx.?));
+        const self: *SaturatedListener = @ptrCast(@alignCast(ctx.?));
         self.record(slot);
         if (slot != self.overrun_at) return;
         self.fake.ms = self.wall_after_ms;
         self.wall_slot_seen = self.clock.currentSlot();
     }
 
-    fn record(self: *SaturatedChainListener, slot: Slot) void {
+    fn record(self: *SaturatedListener, slot: Slot) void {
         if (self.slot_len >= self.slots.len) return;
         self.slots[self.slot_len] = slot;
         self.slot_len += 1;
     }
 
-    fn seen(self: *const SaturatedChainListener) []const Slot {
+    fn seen(self: *const SaturatedListener) []const Slot {
         return self.slots[0..self.slot_len];
     }
 };
@@ -349,7 +350,7 @@ test "the attnets tick's pure read sees the wall without advancing delivery" {
 
     // The chain's work for slot 1 overruns on a saturated main thread: by the
     // time attnets runs, the wall has reached slot 5.
-    var chain: SaturatedChainListener = .{
+    var chain: SaturatedListener = .{
         .clock = &clock,
         .fake = &fake,
         .overrun_at = 1,
@@ -357,7 +358,7 @@ test "the attnets tick's pure read sees the wall without advancing delivery" {
     };
     var attnets: AttnetsService = .{ .clock = &clock };
     var fork_choice: ForkChoiceTicker = .{};
-    _ = try clock.onSlot(SaturatedChainListener.onSlot, &chain);
+    _ = try clock.onSlot(SaturatedListener.onSlot, &chain);
     _ = try clock.onSlot(AttnetsService.onSlot, &attnets);
     _ = try clock.onSlot(ForkChoiceTicker.onSlot, &fork_choice);
 
@@ -425,13 +426,13 @@ test "currentSlot returns the wall slot its catch-up flushed to" {
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var chain: SaturatedChainListener = .{
+    var chain: SaturatedListener = .{
         .clock = &clock,
         .fake = &fake,
         .overrun_at = 1,
         .wall_after_ms = slot_math.slotStartMs(cfg, 12),
     };
-    _ = try clock.onSlot(SaturatedChainListener.onSlot, &chain);
+    _ = try clock.onSlot(SaturatedListener.onSlot, &chain);
 
     // The wall says slot 2, so the catch-up emits slots 1 and 2 - but the tick
     // for slot 1 overruns and leaves the wall at slot 12. The accessor must
@@ -453,13 +454,13 @@ test "currentSlotWithGossipDisparity bases its slot on the caught-up wall time" 
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var chain: SaturatedChainListener = .{
+    var chain: SaturatedListener = .{
         .clock = &clock,
         .fake = &fake,
         .overrun_at = 1,
         .wall_after_ms = slot_math.slotStartMs(cfg, 12),
     };
-    _ = try clock.onSlot(SaturatedChainListener.onSlot, &chain);
+    _ = try clock.onSlot(SaturatedListener.onSlot, &chain);
 
     // 300 ms into slot 2 - outside the 500 ms disparity window - while the
     // overrunning tick leaves the wall at slot 12. The base slot must come from
@@ -481,13 +482,13 @@ test "currentEpoch returns the epoch of the wall slot its catch-up flushed to" {
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var chain: SaturatedChainListener = .{
+    var chain: SaturatedListener = .{
         .clock = &clock,
         .fake = &fake,
         .overrun_at = 1,
         .wall_after_ms = slot_math.slotStartMs(cfg, 12),
     };
-    _ = try clock.onSlot(SaturatedChainListener.onSlot, &chain);
+    _ = try clock.onSlot(SaturatedListener.onSlot, &chain);
 
     // Wall slot 2 is epoch 1 (spe = 2); the overrun leaves the wall at slot 12,
     // epoch 6. The result must stay at epoch 1.
@@ -508,13 +509,13 @@ test "isCurrentSlotGivenGossipDisparity judges the caught-up wall time" {
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var chain: SaturatedChainListener = .{
+    var chain: SaturatedListener = .{
         .clock = &clock,
         .fake = &fake,
         .overrun_at = 1,
         .wall_after_ms = slot_math.slotStartMs(cfg, 12),
     };
-    _ = try clock.onSlot(SaturatedChainListener.onSlot, &chain);
+    _ = try clock.onSlot(SaturatedListener.onSlot, &chain);
 
     // 300 ms into slot 2 while the overrunning tick leaves the wall at slot 12:
     // a fresh second read would judge the gossip on slot 2 stale.
@@ -535,27 +536,27 @@ test "a saturated emit drains to the furthest wall a tick saw; a step-back never
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var first: SaturatedChainListener = .{
+    var first: SaturatedListener = .{
         .clock = &clock,
         .fake = &fake,
         .overrun_at = 1,
         .wall_after_ms = slot_math.slotStartMs(cfg, 3),
     };
-    var second: SaturatedChainListener = .{
+    var second: SaturatedListener = .{
         .clock = &clock,
         .fake = &fake,
         .overrun_at = 1,
         .wall_after_ms = slot_math.slotStartMs(cfg, 5),
     };
-    var third: SaturatedChainListener = .{
+    var third: SaturatedListener = .{
         .clock = &clock,
         .fake = &fake,
         .overrun_at = 1,
         .wall_after_ms = slot_math.slotStartMs(cfg, 4),
     };
-    _ = try clock.onSlot(SaturatedChainListener.onSlotThenRead, &first);
-    _ = try clock.onSlot(SaturatedChainListener.onSlotThenRead, &second);
-    _ = try clock.onSlot(SaturatedChainListener.onSlotThenRead, &third);
+    _ = try clock.onSlot(SaturatedListener.onSlotThenRead, &first);
+    _ = try clock.onSlot(SaturatedListener.onSlotThenRead, &second);
+    _ = try clock.onSlot(SaturatedListener.onSlotThenRead, &third);
 
     // The main thread is saturated: each tick's work for slot 1 spans slot
     // boundaries, and each reads the clock afterwards to see where the wall now
@@ -586,14 +587,14 @@ test "epoch events under a deferred drain arrive in order, exactly once" {
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var chain: SaturatedChainListener = .{
+    var chain: SaturatedListener = .{
         .clock = &clock,
         .fake = &fake,
         .overrun_at = 4,
         .wall_after_ms = slot_math.slotStartMs(cfg, 8),
     };
     var sync: SyncService = .{ .clock = &clock };
-    _ = try clock.onSlot(SaturatedChainListener.onSlotThenRead, &chain);
+    _ = try clock.onSlot(SaturatedListener.onSlotThenRead, &chain);
     _ = try clock.onEpoch(SyncService.onEpoch, &sync);
 
     // Slot 4 crosses into epoch 1 (spe = 4). The tick for it overruns to slot 8
