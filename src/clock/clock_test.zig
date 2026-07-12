@@ -1041,29 +1041,6 @@ test "first delivery from a pre-genesis start begins at slot 0" {
     try expectEqualSlices(Slot, &.{ 0, 1, 2 }, trace.slots[0..trace.slot_len]);
 }
 
-const SlotEpochLog = struct {
-    const Tag = enum { slot, epoch };
-    const Entry = struct { tag: Tag, value: u64 };
-
-    entries: [16]Entry = undefined,
-    len: usize = 0,
-
-    fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
-        record(ctx, .slot, slot);
-    }
-
-    fn onEpoch(ctx: ?*anyopaque, epoch: Epoch) void {
-        record(ctx, .epoch, epoch);
-    }
-
-    fn record(ctx: ?*anyopaque, tag: Tag, value: u64) void {
-        const self: *SlotEpochLog = @ptrCast(@alignCast(ctx.?));
-        if (self.len >= self.entries.len) return;
-        self.entries[self.len] = .{ .tag = tag, .value = value };
-        self.len += 1;
-    }
-};
-
 test "epoch delivery interleaves after its boundary slot, before the next slot" {
     const cfg: Clock.ClockConfig = .{
         .genesis_time_sec = 100,
@@ -1076,9 +1053,27 @@ test "epoch delivery interleaves after its boundary slot, before the next slot" 
     try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
-    var log = SlotEpochLog{};
-    _ = try clock.onSlot(SlotEpochLog.onSlot, &log);
-    _ = try clock.onEpoch(SlotEpochLog.onEpoch, &log);
+    // One log fed by both listeners, so the slot/epoch order is observable.
+    const Log = struct {
+        const Entry = struct { tag: enum { slot, epoch }, value: u64 };
+        entries: [8]Entry = undefined,
+        len: usize = 0,
+
+        fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.entries[self.len] = .{ .tag = .slot, .value = slot };
+            self.len += 1;
+        }
+
+        fn onEpoch(ctx: ?*anyopaque, epoch: Epoch) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.entries[self.len] = .{ .tag = .epoch, .value = epoch };
+            self.len += 1;
+        }
+    };
+    var log = Log{};
+    _ = try clock.onSlot(Log.onSlot, &log);
+    _ = try clock.onEpoch(Log.onEpoch, &log);
 
     // Cursor starts at slot 0. Driving to slot 3 crosses the epoch-1 boundary
     // at slot 2: each slot is delivered first, then the epoch event once its
@@ -1086,7 +1081,7 @@ test "epoch delivery interleaves after its boundary slot, before the next slot" 
     fake.ms = slot_math.slotStartMs(cfg, 3);
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
 
-    const E = SlotEpochLog.Entry;
+    const E = Log.Entry;
     try expectEqualSlices(E, &.{
         .{ .tag = .slot, .value = 1 },
         .{ .tag = .slot, .value = 2 },
