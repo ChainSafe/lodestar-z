@@ -43,6 +43,7 @@ const DeliveryLog = struct {
 /// The chain's fork-choice tick: it advances fork choice's own notion of time
 /// and returns. Synchronous, and it never reads the clock. The network
 /// processor's tick has the same shape, so a second instance stands in for it.
+// Models: https://github.com/ChainSafe/lodestar/blob/551b8b0a3d22a678ca16a5ab0d5893d27776dba6/packages/beacon-node/src/chain/chain.ts#L1458-L1466
 const ForkChoiceTicker = struct {
     log: ?*DeliveryLog = null,
     slots: [16]Slot = undefined,
@@ -66,6 +67,8 @@ const ForkChoiceTicker = struct {
 /// `secFromSlot` is a pure read, so it must neither advance the cursor nor
 /// emit. Its epoch tick recomputes the subnet subscriptions from the epoch it
 /// reads back out of the clock.
+// Models: https://github.com/ChainSafe/lodestar/blob/551b8b0a3d22a678ca16a5ab0d5893d27776dba6/packages/beacon-node/src/network/subnets/attnetsService.ts#L223-L225
+// Models: https://github.com/ChainSafe/lodestar/blob/551b8b0a3d22a678ca16a5ab0d5893d27776dba6/packages/beacon-node/src/network/subnets/attnetsService.ts#L239-L258
 const AttnetsService = struct {
     clock: *Clock,
     sec_into_slot: [8]i64 = undefined,
@@ -98,6 +101,8 @@ const AttnetsService = struct {
 /// clock, so it reads `currentSlot`/`currentEpoch` from inside the callback.
 /// It reads before it records, so a dispatch nested inside that read would land
 /// in the log ahead of its own entry.
+// Models: https://github.com/ChainSafe/lodestar/blob/551b8b0a3d22a678ca16a5ab0d5893d27776dba6/packages/beacon-node/src/sync/sync.ts#L276-L282
+// Models: https://github.com/ChainSafe/lodestar/blob/551b8b0a3d22a678ca16a5ab0d5893d27776dba6/packages/beacon-node/src/sync/sync.ts#L140-L141
 const SyncService = struct {
     clock: *Clock,
     log: ?*DeliveryLog = null,
@@ -128,6 +133,7 @@ const SyncService = struct {
 /// stands at `wall_after_ms` - which may be *behind* the wall it started from,
 /// if NTP corrected the host clock while it ran. `onSlotThenRead` then asks the
 /// clock which slot the node is really in now.
+// Models: https://github.com/ChainSafe/lodestar/blob/551b8b0a3d22a678ca16a5ab0d5893d27776dba6/packages/beacon-node/src/util/clock.ts#L190
 const SaturatedChainListener = struct {
     clock: *Clock,
     fake: *FakeClockIo,
@@ -167,6 +173,7 @@ const SaturatedChainListener = struct {
 /// clock to record how far the wall had run, then shuts the node down from
 /// inside the callback. `stop` is callback-safe; the drain must deliver nothing
 /// past the slot that failed.
+// Models: https://github.com/ChainSafe/lodestar/blob/551b8b0a3d22a678ca16a5ab0d5893d27776dba6/packages/beacon-node/src/chain/chain.ts#L1461-L1464
 const ForkChoiceFailure = struct {
     clock: *Clock,
     fail_at: Slot,
@@ -196,6 +203,8 @@ const ForkChoiceFailure = struct {
 /// drain behind them, keep running. The preparation itself suspends (it waits
 /// out most of the slot before building the block), which a callback may never
 /// do - it runs on the emitting fiber's stack.
+// Models: https://github.com/ChainSafe/lodestar/blob/551b8b0a3d22a678ca16a5ab0d5893d27776dba6/packages/beacon-node/src/chain/prepareNextSlot.ts#L65
+// Models: https://github.com/ChainSafe/lodestar/blob/551b8b0a3d22a678ca16a5ab0d5893d27776dba6/packages/beacon-node/src/chain/prepareNextSlot.ts#L81
 const PrepareNextSlot = struct {
     io: std.Io,
     handoff: std.Io.Event = .unset,
