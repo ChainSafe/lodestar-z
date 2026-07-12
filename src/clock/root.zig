@@ -21,5 +21,6 @@ test {
     _ = slot_math;
     _ = Clock;
     _ = @import("clock_test.zig");
+    _ = @import("realtime_test.zig");
     _ = @import("property_test.zig");
 }

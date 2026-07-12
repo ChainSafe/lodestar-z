@@ -482,7 +482,7 @@ const FakeClockIo = test_io.FakeClockIo;
 const test_cfg = test_io.test_cfg;
 
 test "pre-genesis returns null, genesis fallback returns zero" {
-    var fake = FakeClockIo{ .ms = 99_000 };
+    var fake = FakeClockIo{ .ms = test_cfg.genesis_time_sec * 1000 - 1_000 };
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), test_cfg);
     defer clock.deinit();
@@ -495,7 +495,7 @@ test "pre-genesis returns null, genesis fallback returns zero" {
 
 test "init fails cleanly when its only allocation fails" {
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    var fake = FakeClockIo{ .ms = 100_000 };
+    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(test_cfg, 0) };
 
     var clock: Clock = undefined;
     try testing.expectError(
@@ -505,22 +505,22 @@ test "init fails cleanly when its only allocation fails" {
 }
 
 test "currentSlot at genesis and advancing" {
-    var fake = FakeClockIo{ .ms = 100_000 };
+    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(test_cfg, 0) };
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), test_cfg);
     defer clock.deinit();
 
     try testing.expectEqual(@as(?Slot, 0), clock.currentSlot());
 
-    fake.ms = 112_000;
+    fake.ms = slot_math.slotStartMs(test_cfg, 1);
     try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
 
-    fake.ms = 124_000;
+    fake.ms = slot_math.slotStartMs(test_cfg, 2);
     try testing.expectEqual(@as(?Slot, 2), clock.currentSlot());
 }
 
 test "currentEpoch" {
-    var fake = FakeClockIo{ .ms = 100_000 + 32 * 12 * 1000 };
+    var fake = FakeClockIo{ .ms = slot_math.slotStartMs(test_cfg, test_cfg.slots_per_epoch) };
     var clock: Clock = undefined;
     try clock.init(testing.allocator, fake.io(), test_cfg);
     defer clock.deinit();

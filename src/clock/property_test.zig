@@ -276,14 +276,15 @@ fn runPropertyScenario(seed: u64, op_count: u32, io: std.Io) !void {
     const rng = prng.random();
 
     const spe: u64 = 4;
-    var fake = FakeClockIo{ .ms = 99_000, .inner = io };
-    var clock: Clock = undefined;
-    // Fake time moves only inside .advance_by, so the model owns every advance.
-    try clock.init(testing.allocator, fake.io(), .{
+    const cfg: Clock.ClockConfig = .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
         .slots_per_epoch = spe,
-    });
+    };
+    var fake = FakeClockIo{ .ms = cfg.genesis_time_sec * 1000 - cfg.slot_duration_ms, .inner = io };
+    var clock: Clock = undefined;
+    // Fake time moves only inside .advance_by, so the model owns every advance.
+    try clock.init(testing.allocator, fake.io(), cfg);
     defer clock.deinit();
 
     var state = PropertyState{ .spe = spe, .io = io, .fake = &fake, .clock = &clock };
