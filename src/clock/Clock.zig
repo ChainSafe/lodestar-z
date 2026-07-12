@@ -11,12 +11,20 @@
 //! are at `await`/`sleep` yield points, and every read-modify of shared state
 //! (listeners, waiter queue, `stopped`) completes synchronously between yields.
 //! Two invariants make this safe:
-//!   1. Listener callbacks run to completion inside an emit and must NOT
-//!      yield (no `await`/`sleep`). Safe to call from a callback:
+//!   1. Listener callbacks run to completion inside an emit. They run on the
+//!      emitting fiber's stack, so a callback must never suspend it: that
+//!      stalls the remaining listeners of that slot and the whole drain.
+//!      Safe to call from a callback:
 //!        - onSlot / offSlot / onEpoch / offEpoch and stop;
 //!        - any current* / isCurrent* accessor and the pure-read helpers.
-//!      `waitForSlot` suspends the caller, so it must NEVER be called from a
-//!      listener callback.
+//!      Forbidden from a callback:
+//!        - `await` and `sleep`, and `waitForSlot`, which suspends its caller;
+//!        - spawning (`std.Io.async` / `std.Io.concurrent` / `Group.async`):
+//!          task registration can reschedule-yield, which is the same
+//!          suspension.
+//!      Work that must await belongs on its own fiber: either a worker woken by
+//!      a yield-free handoff (`std.Io.Event.set` does not yield), or a fiber
+//!      that loops on `waitForSlot`.
 //!      A query while the cache lags the wall (a backlog) does not nest a
 //!      dispatch. It returns the fresh wall time - possibly ahead of the
 //!      events delivered so far - and the frame already emitting delivers

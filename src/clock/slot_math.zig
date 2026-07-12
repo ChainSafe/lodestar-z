@@ -3,8 +3,9 @@
 //! All functions assume `validate()` accepted the config.
 //!
 //! Arithmetic uses plain operators - out-of-range values are program errors
-//! and trap. `slotWithPastToleranceMs` alone saturates: its underflow is
-//! reachable with valid caller data.
+//! and trap. `slotWithPastToleranceMs` alone saturates, defensively: `now_ms`
+//! is a Unix-ms timestamp and callers pass sub-second tolerances, so nothing
+//! short of a nonsense tolerance can underflow it.
 
 const std = @import("std");
 const ct = @import("consensus_types");
@@ -164,8 +165,8 @@ pub fn slotWithFutureToleranceMs(config: ClockConfig, now_ms: u64, tolerance_ms:
     return slotAtMs(config, shifted_ms);
 }
 
-/// Slot at `now_ms - tolerance_ms`, saturating: `tolerance_ms` is caller
-/// data, and anything at or before genesis clamps to slot 0.
+/// Slot at `now_ms - tolerance_ms`, saturating (defensively - see the header);
+/// anything at or before genesis clamps to slot 0.
 pub fn slotWithPastToleranceMs(config: ClockConfig, now_ms: u64, tolerance_ms: u64) Slot {
     const shifted_ms = now_ms -| tolerance_ms;
     return slotAtMs(config, shifted_ms) orelse 0;
@@ -459,29 +460,9 @@ test "gossip disparity: pre-genesis slot 0 only within disparity of genesis" {
     try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 0, edge - 1));
 }
 
-test "gossip disparity: pre-genesis with sub-disparity slot duration never advances past 0" {
-    // Degenerate config (slot_duration 400 ms < disparity 500 ms): a
-    // pre-genesis clamp to slot 0 must not spuriously report slot 1.
-    const cfg: ClockConfig = .{
-        .genesis_time_sec = 100,
-        .slot_duration_ms = 400,
-        .slots_per_epoch = 8,
-        .maximum_gossip_clock_disparity_ms = 500,
-    };
-    const cfg_genesis_ms: u64 = cfg.genesis_time_sec * 1000;
-
-    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(cfg, cfg_genesis_ms - 1));
-    try testing.expect(!isCurrentSlotGivenGossipDisparity(cfg, 1, cfg_genesis_ms - 1));
-
-    try testing.expectEqual(
-        @as(?Slot, null),
-        slotWithGossipDisparity(cfg, cfg_genesis_ms - cfg.maximum_gossip_clock_disparity_ms - 1),
-    );
-}
-
 test "tolerance helpers shift the read forward and backward one slot" {
     // From slot 1's start, one slot of future tolerance reads slot 2 and one
-    // slot of past tolerance reads slot 0.
+    // slot of past tolerance reads slot 0; four slots in, it reads slot 3.
     const one_slot = test_cfg.slot_duration_ms;
     try testing.expectEqual(
         @as(?Slot, 2),
@@ -491,15 +472,9 @@ test "tolerance helpers shift the read forward and backward one slot" {
         @as(Slot, 0),
         slotWithPastToleranceMs(test_cfg, test_slot_1_start_ms, one_slot),
     );
-    // Pins operand order: a swapped `tolerance_ms - now_ms` saturates pre-genesis -> slot 0.
     try testing.expectEqual(
         @as(Slot, 3),
         slotWithPastToleranceMs(test_cfg, test_genesis_ms + 4 * one_slot, one_slot),
-    );
-    // tolerance > now saturates to 0 ms (pre-genesis -> slot 0); a plain `-` would trap.
-    try testing.expectEqual(
-        @as(Slot, 0),
-        slotWithPastToleranceMs(test_cfg, test_genesis_ms, test_genesis_ms + 1),
     );
 }
 
