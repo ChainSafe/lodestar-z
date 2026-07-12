@@ -347,7 +347,7 @@ test "the attnets tick's pure read sees the wall without advancing delivery" {
     defer clock.deinit();
 
     // The chain's work for slot 1 overruns on a saturated main thread: by the
-    // time attnets runs, the wall has reached slot 5. 
+    // time attnets runs, the wall has reached slot 5.
     var chain: SaturatedListener = .{
         .clock = &clock,
         .fake = &fake,
