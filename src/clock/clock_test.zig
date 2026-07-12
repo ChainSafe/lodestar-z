@@ -1004,13 +1004,12 @@ test "stop() from a catchUp callback aborts the wait before enqueue" {
 
     // The catch-up this wait triggers runs the fork-choice tick, which fails on
     // slot 1 and stops the node - after current_slot has advanced but before it
-    // reaches the target. The post-catchUp re-check must abort synchronously:
-    // reaching the enqueue+suspend would panic in FakeClockIo's futex forwarder
-    // (`inner` is unset here).
+    // reaches the target. The post-catchUp re-check must abort synchronously.
     var fork_choice: ForkChoiceFailure = .{ .clock = &clock, .fail_at = 1 };
     _ = try clock.onSlot(ForkChoiceFailure.onSlot, &fork_choice);
 
-    // Backlog slots 1..5 so the catch-up fires the tick while short of target 10.
+    // Backlog slots 1..5: the tick stops the clock at slot 1, so delivery ends
+    // there and target 10 is never reached - the only legal outcome is Aborted.
     fake.ms = slot_math.slotStartMs(cfg, 5);
     try testing.expectError(error.Aborted, clock.waitForSlot(10));
 }
@@ -1035,7 +1034,7 @@ test "stop() from a catchUp callback still resolves a reached wait" {
 
     fake.ms = slot_math.slotStartMs(cfg, 1);
     // The try is the assertion: a stopped-check running first would return
-    // error.Aborted, and a wrongful suspend would panic on the fake io.
+    // error.Aborted. 
     try clock.waitForSlot(1);
 }
 
