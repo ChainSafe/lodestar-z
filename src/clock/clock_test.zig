@@ -1034,7 +1034,7 @@ test "stop() from a catchUp callback still resolves a reached wait" {
 
     fake.ms = slot_math.slotStartMs(cfg, 1);
     // The try is the assertion: a stopped-check running first would return
-    // error.Aborted. 
+    // error.Aborted.
     try clock.waitForSlot(1);
 }
 
