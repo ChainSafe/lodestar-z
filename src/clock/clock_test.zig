@@ -347,8 +347,7 @@ test "the attnets tick's pure read sees the wall without advancing delivery" {
     defer clock.deinit();
 
     // The chain's work for slot 1 overruns on a saturated main thread: by the
-    // time attnets runs, the wall has reached slot 5. Its own trace is not
-    // asserted - it exists to move the wall.
+    // time attnets runs, the wall has reached slot 5. 
     var chain: SaturatedListener = .{
         .clock = &clock,
         .fake = &fake,
@@ -1035,6 +1034,8 @@ test "stop() from a catchUp callback still resolves a reached wait" {
     _ = try clock.onSlot(ForkChoiceFailure.onSlot, &fork_choice);
 
     fake.ms = slot_math.slotStartMs(cfg, 1);
+    // The try is the assertion: a stopped-check running first would return
+    // error.Aborted, and a wrongful suspend would panic on the fake io.
     try clock.waitForSlot(1);
 }
 
