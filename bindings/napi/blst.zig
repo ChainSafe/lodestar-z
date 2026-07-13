@@ -286,8 +286,8 @@ pub const SecretKey = struct {
         }
 
         var bytes_buf: [NativeSecretKey.serialize_size]u8 = undefined;
-        _ = try std.fmt.hexToBytes(&bytes_buf, hex);
-        const sk = NativeSecretKey.deserialize(&bytes_buf) catch
+        const bytes = try std.fmt.hexToBytes(&bytes_buf, hex);
+        const sk = NativeSecretKey.deserialize(bytes[0..NativeSecretKey.serialize_size]) catch
             return error.DeserializationFailed;
         return .{ .raw = sk };
     }
