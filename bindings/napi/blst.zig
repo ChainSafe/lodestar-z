@@ -272,12 +272,22 @@ pub const SecretKey = struct {
 
     /// Creates a `SecretKey` from a hex string.
     pub fn fromHex(hex_string: js.String) !SecretKey {
+        switch (try hex_string.len()) {
+            NativeSecretKey.serialize_size * 2,
+            NativeSecretKey.serialize_size * 2 + 2,
+            => {},
+            else => return error.InvalidSecretKeyLength,
+        }
+
         var hex_buf: [NativeSecretKey.serialize_size * 2 + 3]u8 = undefined;
         const hex = try hexFromString(hex_string, &hex_buf);
+        if (hex.len != NativeSecretKey.serialize_size * 2) {
+            return error.InvalidSecretKeyLength;
+        }
 
         var bytes_buf: [NativeSecretKey.serialize_size]u8 = undefined;
-        const bytes = try std.fmt.hexToBytes(&bytes_buf, hex);
-        const sk = NativeSecretKey.deserialize(bytes[0..NativeSecretKey.serialize_size]) catch
+        _ = try std.fmt.hexToBytes(&bytes_buf, hex);
+        const sk = NativeSecretKey.deserialize(&bytes_buf) catch
             return error.DeserializationFailed;
         return .{ .raw = sk };
     }
