@@ -838,9 +838,10 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         data.sig_ptrs[i] = &data.sigs[i];
     }
 
-    data.deferred = try env.createPromise();
-
+    const deferred_cleanup_value = try env.getUndefined();
     const resource_name = try env.createStringUtf8("asyncAggregateWithRandomness");
+
+    // Until queue succeeds, this function owns the unqueued work handle.
     const work = try env.createAsyncWork(
         AsyncAggRandData,
         null,
@@ -849,9 +850,17 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         asyncAggRand_complete,
         data,
     );
+    errdefer work.delete() catch unreachable;
+
     data.work = work.work;
 
+    // Resolve the unreturned Promise so Node can release its deferred handle.
+    data.deferred = try env.createPromise();
+    errdefer data.deferred.resolve(deferred_cleanup_value) catch unreachable;
+
     try work.queue();
+
+    errdefer comptime unreachable;
 
     return .{ .val = data.deferred.getPromise() };
 }
