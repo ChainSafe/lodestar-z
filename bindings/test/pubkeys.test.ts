@@ -103,6 +103,20 @@ describe("pubkeys", () => {
     expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBeNull();
   });
 
+  it("set leaves the cache unchanged when pubkey decoding fails", () => {
+    pubkeyCache.reset();
+    const invalidPubkey = new Uint8Array(48);
+
+    expect(() => pubkeyCache.set(0, invalidPubkey)).toThrow("BadEncoding");
+    expect(pubkeyCache.size).toBe(0);
+    expect(pubkeyCache.get(0)).toBeUndefined();
+    expect(pubkeyCache.getIndex(invalidPubkey)).toBeNull();
+
+    pubkeyCache.set(0, keypairs[0].pubkeyBytes);
+    expect(pubkeyCache.size).toBe(1);
+    expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBe(0);
+  });
+
   it("exposes native capacity", () => {
     expect(pubkeyCache.capacity).toBeGreaterThanOrEqual(1_000);
   });

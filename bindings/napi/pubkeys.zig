@@ -249,6 +249,7 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
 
     const pubkey_bytes = pubkey_slice[0..48];
+    const native_pubkey = try bls.PublicKey.uncompress(pubkey_bytes);
 
     // Ensure capacity if needed
     if (idx >= state.index2pubkey.capacity) {
@@ -256,17 +257,16 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
         try state.pubkey2index.ensureTotalCapacity(new_cap);
         try state.index2pubkey.ensureTotalCapacityPrecise(allocator, new_cap);
     }
+    state.pubkey2index.ensureUnusedCapacity(1) catch
+        return error.PubkeyIndexInsertFailed;
 
     // Extend length if needed
     if (idx >= state.index2pubkey.items.len) {
         try state.index2pubkey.resize(allocator, idx + 1);
     }
 
-    // Set pubkey2index
-    state.pubkey2index.put(pubkey_bytes.*, @intCast(idx)) catch return error.PubkeyIndexInsertFailed;
-
-    // Deserialize and set index2pubkey
-    state.index2pubkey.items[@intCast(idx)] = try bls.PublicKey.uncompress(pubkey_bytes);
+    state.index2pubkey.items[@intCast(idx)] = native_pubkey;
+    state.pubkey2index.putAssumeCapacity(pubkey_bytes.*, @intCast(idx));
 }
 
 /// JS: pubkeys.size() → number
