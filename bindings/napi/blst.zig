@@ -16,8 +16,6 @@ const js = zapi.js;
 const napi = zapi.napi;
 const bls = @import("bls");
 const napi_io = @import("./io.zig");
-// Thread-pool lifecycle lives in a privately-imported module so zapi's exporter
-// (which rejects non-DSL `pub fn`s like `initThreadPool(u16)`) never sees it.
 const blst_pool = @import("./blst_pool.zig");
 
 const NativePublicKey = bls.PublicKey;
@@ -36,9 +34,6 @@ const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 ///
 /// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
 const BATCH_VERIFY_SIZE = 32;
-
-// Thread-pool lifecycle (`init`/`deinit`) and the cached pool reference live in
-// `blst_pool.zig`. Use `blst_pool.get()` to reach the current pool.
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)

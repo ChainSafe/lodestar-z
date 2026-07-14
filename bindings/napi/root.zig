@@ -10,10 +10,10 @@ pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const pubkeys = @import("./pubkeys.zig");
 
+// The below imports are not `pub` so zapi's exporter doesn't try to export its
+// non-DSL lifecycle functions.
 const options = @import("bls_options");
 const napi_io = @import("./io.zig");
-// Imported privately (not `pub`) so zapi's exporter doesn't try to export its
-// non-DSL lifecycle functions. See blst_pool.zig for why they live outside blst.zig.
 const blst_pool = @import("./blst_pool.zig");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;

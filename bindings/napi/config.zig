@@ -9,7 +9,6 @@ const Preset = @import("preset").Preset;
 
 const max_blob_schedule_entries = 16;
 
-// Not `pub`: internal helper (see pool.zig). Only the `state` value below is pub.
 const State = struct {
     config: BeaconConfig = undefined,
     initialized: bool = false,
@@ -72,8 +71,6 @@ pub fn set(object: js.Value, genesis_root: js.Uint8Array) !void {
     state.initialized = true;
 }
 
-// Not `pub`: internal helper called only by `set` above. Takes `napi.Env`,
-// which is not a zapi DSL type, so it must not be an exported module function.
 fn chainConfigFromObject(env: napi.Env, obj: napi.Value) !ChainConfig {
     var chain_config: ChainConfig = undefined;
 
