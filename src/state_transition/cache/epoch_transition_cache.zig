@@ -13,7 +13,6 @@ const BeaconState = @import("fork_types").BeaconState;
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
-const deinitStateTransition = @import("../root.zig").deinitStateTransition;
 
 const attester_status = @import("../utils/attester_status.zig");
 const FLAG_CURR_HEAD_ATTESTER = attester_status.FLAG_CURR_HEAD_ATTESTER;
@@ -625,5 +624,5 @@ test "EpochTransitionCache.beforeProcessEpoch" {
         defer epoch_transition_cache.deinit(allocator);
     }
 
-    deinitStateTransition(std.testing.io);
+    deinitReusedEpochTransitionCache(std.testing.io);
 }

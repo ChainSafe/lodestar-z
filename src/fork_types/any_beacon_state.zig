@@ -382,6 +382,16 @@ pub const AnyBeaconState = union(ForkSeq) {
         try self.setEth1DepositIndex(try self.eth1DepositIndex() + 1);
     }
 
+    pub fn buildersLength(self: *AnyBeaconState) !usize {
+        return switch (self.*) {
+            .phase0, .altair, .bellatrix, .capella, .deneb, .electra, .fulu => error.InvalidAtFork,
+            inline else => |state| {
+                var builders_view = try state.getReadonly("builders");
+                return builders_view.length();
+            },
+        };
+    }
+
     pub fn validators(self: *AnyBeaconState) !*ct.phase0.Validators.TreeView {
         return switch (self.*) {
             inline else => |state| try state.get("validators"),

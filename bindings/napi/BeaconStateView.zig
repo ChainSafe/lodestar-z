@@ -722,6 +722,13 @@ pub fn getAllValidators(self: *const BeaconStateView) !js.Array {
     return js_types.wrap(js.Array, result);
 }
 
+/// Get the number of builders in the registry (Gloas+). Throws on pre-Gloas states.
+pub fn getBuildersLength(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    const count = try cached_state.state.buildersLength();
+    return js.Number.from(count);
+}
+
 /// Get all balances in the registry.
 pub fn getAllBalances(self: *const BeaconStateView) !js.Array {
     const env = js.env();
@@ -1149,16 +1156,18 @@ pub fn loadOtherState(
             // This doesn't matter for typescript lodestar because GC clears it anyway,
             // but we're losing some savings here. Consider implementating something like
             // a `prefetchAll` that only does `populateAllNodes` that returns void
-            var validators_view = try new_cached_state.state.validators();
-            _ = validators_view.getAllReadonlyValues(allocator) catch |err| {
+            const validators_view = try new_cached_state.state.validators();
+            const validators = validators_view.getAllReadonlyValues(allocator) catch |err| {
                 try js.env().throwError("STATE_ERROR", "Failed to preload validators");
                 return err;
             };
-            var balances_view = try new_cached_state.state.balances();
-            _ = balances_view.getAll(allocator) catch |err| {
+            allocator.free(validators);
+            const balances_view = try new_cached_state.state.balances();
+            const balances = balances_view.getAll(allocator) catch |err| {
                 try js.env().throwError("STATE_ERROR", "Failed to preload balances");
                 return err;
             };
+            allocator.free(balances);
         }
     }
 

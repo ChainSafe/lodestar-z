@@ -5,6 +5,7 @@ pub const pool = @import("./pool.zig");
 pub const shuffle = @import("./shuffle.zig");
 pub const config = @import("./config.zig");
 pub const metrics = @import("./metrics.zig");
+pub const stateTransition = @import("./stateTransition.zig");
 pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const pubkeys = @import("./pubkeys.zig");
@@ -20,7 +21,7 @@ fn init(old_ref_count: u32) !void {
         var cpu_count: u64 = options.thread_count;
         if (options.thread_count == 0) {
             cpu_count = @max(try detectCpuCount(), 2) - 1;
-            std.debug.print(
+            std.log.debug(
                 "Note: no -Dthread-count set, using cgroup-aware CPU count minus 1: {}\n",
                 .{cpu_count},
             );
@@ -39,7 +40,7 @@ fn init(old_ref_count: u32) !void {
 /// count (what `std.Thread.getCpuCount()` reports).
 fn detectCpuCount() !usize {
     return @import("cpu_count").getNumCpus(allocator, js.io()) catch |err| {
-        std.debug.print(
+        std.log.debug(
             "Warning: cgroup CPU detection failed ({s}), using affinity count\n",
             .{@errorName(err)},
         );
