@@ -5,6 +5,7 @@ const blst_bindings = @import("./blst.zig");
 const PubkeyIndexMap = @import("state_transition").PubkeyIndexMap;
 const Index2PubkeyCache = @import("state_transition").Index2PubkeyCache;
 const napi_io = @import("./io.zig");
+const preset = @import("preset").preset;
 
 /// Uses page allocator for internal allocations.
 /// It's recommended to never reallocate the pubkey2index after initialization.
@@ -13,7 +14,11 @@ const allocator = std.heap.page_allocator;
 const default_initial_capacity: u32 = 0;
 const max_stack_aggregate_pubkeys = 512;
 
-// Not `pub`: internal helper (see pool.zig). Only the `state` value below is pub.
+/// Capacity added when a set() outgrows the current capacity. Covers ~3 months of
+/// worst-case validator registry growth (MAX_PENDING_DEPOSITS_PER_EPOCH new validators
+/// per epoch at 12s slots), so growth stays proportionate at any network scale.
+const growth_step: u32 = preset.MAX_PENDING_DEPOSITS_PER_EPOCH * ((90 * 24 * 60 * 60) / (12 * preset.SLOTS_PER_EPOCH));
+
 const State = struct {
     pubkey2index: PubkeyIndexMap = undefined,
     index2pubkey: Index2PubkeyCache = undefined,
@@ -129,14 +134,14 @@ pub fn load(file_path: js.String) !void {
     }
 
     const len = std.mem.readInt(u32, header[4..8], .little);
-    const capacity = std.mem.readInt(u32, header[8..12], .little);
+    const saved_capacity = std.mem.readInt(u32, header[8..12], .little);
 
     const file_size = try file.length(io);
 
     state.pubkey2index = PubkeyIndexMap.init(allocator);
-    try state.pubkey2index.ensureTotalCapacity(capacity);
+    try state.pubkey2index.ensureTotalCapacity(saved_capacity);
     errdefer state.pubkey2index.deinit();
-    state.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, capacity);
+    state.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, saved_capacity);
     errdefer state.index2pubkey.deinit(allocator);
     try state.index2pubkey.resize(allocator, len);
 
@@ -152,7 +157,7 @@ pub fn load(file_path: js.String) !void {
     try file_reader.interface.readSliceAll(ptr[0..p2i_size]);
 
     state.pubkey2index.unmanaged.size = len;
-    state.pubkey2index.unmanaged.available = capacity - len;
+    state.pubkey2index.unmanaged.available = saved_capacity - len;
 
     // Read index2pubkey entries
     try file_reader.interface.readSliceAll(std.mem.sliceAsBytes(state.index2pubkey.items));
@@ -234,6 +239,12 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
     const idx = try index.toU32();
+
+    // Since the cache is append only, if the index is less than
+    // the cache's items length, we assume it already exists
+    if (idx < state.index2pubkey.items.len)
+        return;
+
     const pubkey_slice = try pubkey.toSlice();
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
 
@@ -241,9 +252,9 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
 
     // Ensure capacity if needed
     if (idx >= state.index2pubkey.capacity) {
-        const new_cap: u32 = @intCast(@max(idx + 1, state.index2pubkey.capacity * 2));
+        const new_cap: u32 = @intCast(@max(idx + 1, state.index2pubkey.capacity + growth_step));
         try state.pubkey2index.ensureTotalCapacity(new_cap);
-        try state.index2pubkey.ensureTotalCapacity(allocator, new_cap);
+        try state.index2pubkey.ensureTotalCapacityPrecise(allocator, new_cap);
     }
 
     // Extend length if needed
@@ -274,5 +285,15 @@ pub fn ensureCapacity(new_size: js.Number) !void {
     if (requested <= old_size) return;
 
     try state.pubkey2index.ensureTotalCapacity(requested);
+    // Not precise on purpose, the growth curve overshoot leaves slack for states with
+    // slightly more validators than reserved, which the zig-side syncPubkeys cannot
+    // grow safely (it does not own the backing allocator)
     try state.index2pubkey.ensureTotalCapacity(allocator, requested);
+}
+
+/// JS: pubkeys.capacity() → number
+/// Note: zapi DSL does not yet support namespace-level getters, so this is a function.
+pub fn capacity() !js.Number {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+    return js.Number.from(@as(u32, @intCast(state.index2pubkey.capacity)));
 }
