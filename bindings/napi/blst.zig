@@ -647,11 +647,13 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
         sca_ptrs[i] = &scalars[i * nbytes];
     }
 
-    const scratch_size = @max(
+    const scratch_size_bytes = @max(
         bls.c.blst_p1s_mult_pippenger_scratch_sizeof(n),
         bls.c.blst_p2s_mult_pippenger_scratch_sizeof(n),
     );
-    const scratch = try allocator.alloc(u64, scratch_size);
+    const scratch_len = @divExact(scratch_size_bytes, @sizeOf(u64));
+
+    const scratch = try allocator.alloc(u64, scratch_len);
     defer allocator.free(scratch);
 
     // Pippenger multi-scalar multiplication on G1 (pubkeys)
