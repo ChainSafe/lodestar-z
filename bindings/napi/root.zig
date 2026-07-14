@@ -32,9 +32,19 @@ fn init(old_ref_count: u32) !void {
         }
 
         const n_workers = @min(cpu_count, @import("bls").ThreadPool.MAX_WORKERS);
+
         try blst.initThreadPool(@intCast(n_workers));
+        errdefer blst.deinitThreadPool();
+
         try pool.state.init();
+        errdefer pool.state.deinit();
+
         try pubkeys.state.init();
+
+        // All remaining initialization must stay infallible because the earlier errdefers no
+        // longer cover every initialized global.
+        errdefer comptime unreachable;
+
         config.state.init();
     }
 }
