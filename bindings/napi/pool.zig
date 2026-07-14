@@ -9,9 +9,6 @@ const allocator = std.heap.page_allocator;
 
 const default_pool_size: u32 = 0;
 
-/// Not `pub`: zapi's `exportModule` walks pub type decls and rejects their
-/// non-DSL pub fns. Cross-file consumers reach this type through the pub
-/// `state` var (e.g. `@TypeOf(pool.state.pool_rc)`).
 const PoolRc = RefCount(Node.Pool);
 
 /// Pool is wrapped in `RefCount` so binding objects holding pool refs at

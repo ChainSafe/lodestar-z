@@ -38,9 +38,8 @@ const BATCH_VERIFY_SIZE = 32;
 /// Initialized lazily on first use, torn down via `deinitThreadPool`.
 var thread_pool: ?*ThreadPool = null;
 
-/// Native-only thread pool lifecycle, reached from `root.zig` through the pub
-/// `lifecycle` var. Not a pub type: zapi's `exportModule` walks pub type decls
-/// and rejects their non-DSL pub fns, while pub vars are skipped.
+/// Native-only thread pool lifecycle, reached from `root.zig` through the
+/// pub `lifecycle` var so it is not part of the JS module surface.
 const Lifecycle = struct {
     pub fn initThreadPool(_: *Lifecycle, n_workers: u16) !void {
         if (thread_pool != null) return error.PoolExists;
