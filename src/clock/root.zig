@@ -1,24 +1,25 @@
-//! Beacon clock - slot/epoch timing for Ethereum consensus.
+//! Zig beacon clock – slot/epoch timing for Ethereum consensus.
 //!
-//! Public surface:
-//!   `config`    - `ClockConfig`
-//!   `slot_math` - pure arithmetic, comptime-compatible
-//!   `Clock`     - event-driven beacon clock with listeners and waiters
+//! Three-layer architecture:
+//!   Layer 0 (`slot_math`)   – pure arithmetic, comptime-compatible
+//!   Layer 1 (`SlotClock`)   – stateful slot clock reading wall-clock time via `std.Io`
+//!   Layer 2 (`EventClock`)  – async event loop with listeners and waiters
 
 pub const config = @import("config.zig");
 pub const slot_math = @import("slot_math.zig");
-pub const Clock = @import("Clock.zig");
+pub const SlotClock = @import("SlotClock.zig");
+pub const EventClock = @import("EventClock.zig");
 
 pub const ClockConfig = config.ClockConfig;
-pub const Slot = slot_math.Slot;
-pub const Epoch = slot_math.Epoch;
+pub const Slot = SlotClock.Slot;
+pub const Epoch = SlotClock.Epoch;
 
-pub const ListenerId = Clock.ListenerId;
-pub const Error = Clock.Error;
+pub const ListenerId = EventClock.ListenerId;
+pub const Error = EventClock.Error;
 
 test {
     _ = config;
     _ = slot_math;
-    _ = Clock;
-    _ = @import("clock_test.zig");
+    _ = SlotClock;
+    _ = EventClock;
 }
