@@ -114,7 +114,7 @@ test uncompress {
 
     // Invalid lengths must be rejected, even with the compression bit set.
     try std.testing.expectError(BlstError.BadEncoding, uncompress(&[_]u8{}));
-    try std.testing.expectError(BlstError.BadEncoding, uncompress(pk_comp[0..COMPRESS_SIZE - 1]));
+    try std.testing.expectError(BlstError.BadEncoding, uncompress(pk_comp[0 .. COMPRESS_SIZE - 1]));
     var too_long = [_]u8{0} ** (COMPRESS_SIZE + 1);
     @memcpy(too_long[0..COMPRESS_SIZE], &pk_comp);
     try std.testing.expectError(BlstError.BadEncoding, uncompress(&too_long));
