@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import {Worker} from "node:worker_threads";
 import {describe, expect, it} from "vitest";
 import {PublicKey, SecretKey, Signature, verify} from "../src/blst.js";
+import {pubkeyCache} from "../src/pubkeys.js";
 
 /**
  * Tests that the per-context instance data (blst InstanceData) and
@@ -52,9 +53,23 @@ describe("worker isolation", () => {
       expect(verify(msg, pk, sig)).toBe(true);
     }
   });
+
+  it("isolates the native pubkey cache between worker environments", async () => {
+    pubkeyCache.reset();
+    const ikm = new Uint8Array(32);
+    ikm[0] = 1;
+    pubkeyCache.set(0, SecretKey.fromKeygen(ikm).toPublicKey().toBytes());
+
+    const workerResult = await runPubkeyWorker();
+
+    expect(workerResult).toEqual({hasIndexZero: false, size: 0});
+    expect(pubkeyCache.size).toBe(1);
+    expect(pubkeyCache.get(0)).toBeDefined();
+  });
 });
 
 const blstModulePath = new URL("../src/blst.js", import.meta.url).href;
+const pubkeysModulePath = new URL("../src/pubkeys.js", import.meta.url).href;
 
 function runWorker(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -78,6 +93,29 @@ function runWorker(): Promise<string> {
       } catch (e) {
         parentPort.postMessage("error: " + e.message);
       }
+      `,
+      {eval: true}
+    );
+
+    worker.on("message", resolve);
+    worker.on("error", reject);
+    worker.on("exit", (code) => {
+      if (code !== 0) reject(new Error(`Worker exited with code ${code}`));
+    });
+  });
+}
+
+function runPubkeyWorker(): Promise<{size: number; hasIndexZero: boolean}> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(
+      `
+      import {parentPort} from "node:worker_threads";
+      import {pubkeyCache} from "${pubkeysModulePath}";
+
+      parentPort.postMessage({
+        size: pubkeyCache.size,
+        hasIndexZero: pubkeyCache.get(0) !== undefined,
+      });
       `,
       {eval: true}
     );

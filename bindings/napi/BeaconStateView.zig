@@ -95,6 +95,7 @@ pub fn deinit(self: *BeaconStateView) void {
 // Class Methods
 // -------------------------
 pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
+    const pubkey_state = try pubkey.env_state.get(js.env());
     const state = try allocator.create(AnyBeaconState);
     errdefer allocator.destroy(state);
 
@@ -112,8 +113,8 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
         state,
         .{
             .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
+            .index_to_pubkey = &pubkey_state.index2pubkey,
+            .pubkey_to_index = &pubkey_state.pubkey2index,
         },
         null,
     );
@@ -1103,6 +1104,7 @@ pub fn loadOtherState(
     seed_validators_bytes: ?js.Uint8Array,
     opts: ?js.Value,
 ) !BeaconStateView {
+    const pubkey_state = try pubkey.env_state.get(js.env());
     const old_cached_state = try self.requireState();
     const state_bytes_slice = try state_bytes.toSlice();
     const seed_validators_bytes_slice: ?[]const u8 =
@@ -1141,8 +1143,8 @@ pub fn loadOtherState(
         new_state,
         .{
             .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
+            .index_to_pubkey = &pubkey_state.index2pubkey,
+            .pubkey_to_index = &pubkey_state.pubkey2index,
         },
         null,
     );

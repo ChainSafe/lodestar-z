@@ -17,6 +17,8 @@ var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
 fn init(old_ref_count: u32) !void {
+    try pubkeys.env_state.init(js.env());
+
     if (old_ref_count == 0) {
         // First environment — initialize shared state in your threadpool init.
         try napi_io.init();
@@ -34,7 +36,6 @@ fn init(old_ref_count: u32) !void {
         const n_workers = @min(cpu_count, @import("bls").ThreadPool.MAX_WORKERS);
         try blst.lifecycle.initThreadPool(@intCast(n_workers));
         try pool.state.init();
-        try pubkeys.state.init();
         config.state.init();
     }
 }
@@ -57,7 +58,6 @@ fn cleanup(new_ref_count: u32) void {
         // Last environment — tear down shared state.
         blst.lifecycle.deinitThreadPool();
         config.state.deinit();
-        pubkeys.state.deinit();
         pool.state.deinit();
         metrics.deinit();
         napi_io.deinit();
