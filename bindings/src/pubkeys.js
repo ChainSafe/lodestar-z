@@ -2,67 +2,76 @@ import bindings from "./bindings.js";
 
 const native = bindings.pubkeys;
 
-/** @type {Map<number, import("./blst.js").PublicKey>} */
-const pkCache = new Map();
+/** Create a cache whose native and JS storage belongs to one validator registry. */
+export function createPubkeyCache() {
+  const nativeCache = new native.PubkeyCache();
+  /** @type {Map<number, import("./blst.js").PublicKey>} */
+  const pkCache = new Map();
 
-/** @type {import("./pubkeys.d.ts").PubkeyCache} */
-export const pubkeyCache = {
-  get(index) {
-    let pk = pkCache.get(index);
-    if (pk !== undefined) return pk;
-    pk = native.get(index);
-    if (pk !== undefined) {
-      pkCache.set(index, pk);
-    }
-    return pk;
-  },
+  /** @type {import("./pubkeys.d.ts").PubkeyCache} */
+  const pubkeyCache = {
+    createBeaconStateView(bytes) {
+      return bindings.BeaconStateView.createFromBytes(bytes, nativeCache);
+    },
 
-  getOrThrow(index) {
-    const pk = pubkeyCache.get(index);
-    if (pk === undefined) {
-      throw Error(`pubkeyCache: index ${index} not found`);
-    }
-    return pk;
-  },
+    get(index) {
+      let pk = pkCache.get(index);
+      if (pk !== undefined) return pk;
+      pk = nativeCache.get(index);
+      if (pk !== undefined) {
+        pkCache.set(index, pk);
+      }
+      return pk;
+    },
 
-  aggregate(indices) {
-    if (indices.length === 1) return pubkeyCache.getOrThrow(indices[0]);
-    return native.aggregate(indices);
-  },
+    getOrThrow(index) {
+      const pk = pubkeyCache.get(index);
+      if (pk === undefined) {
+        throw Error(`pubkeyCache: index ${index} not found`);
+      }
+      return pk;
+    },
 
-  getIndex(pubkey) {
-    return native.getIndex(pubkey);
-  },
+    aggregate(indices) {
+      if (indices.length === 1) return pubkeyCache.getOrThrow(indices[0]);
+      return nativeCache.aggregate(indices);
+    },
 
-  set(index, pubkey) {
-    native.set(index, pubkey);
-    // Invalidate cached JS object so next get() picks up the new native value
-    pkCache.delete(index);
-  },
+    getIndex(pubkey) {
+      return nativeCache.getIndex(pubkey);
+    },
 
-  get size() {
-    return native.size();
-  },
+    set(index, pubkey) {
+      nativeCache.set(index, pubkey);
+      pkCache.delete(index);
+    },
 
-  get capacity() {
-    return native.capacity();
-  },
+    get size() {
+      return nativeCache.size;
+    },
 
-  load(filepath) {
-    pkCache.clear();
-    native.load(filepath);
-  },
+    get capacity() {
+      return nativeCache.capacity;
+    },
 
-  reset() {
-    pkCache.clear();
-    native.reset();
-  },
+    load(filepath) {
+      pkCache.clear();
+      nativeCache.load(filepath);
+    },
 
-  save(filepath) {
-    native.save(filepath);
-  },
+    reset() {
+      pkCache.clear();
+      nativeCache.reset();
+    },
 
-  ensureCapacity(capacity) {
-    native.ensureCapacity(capacity);
-  },
-};
+    save(filepath) {
+      nativeCache.save(filepath);
+    },
+
+    ensureCapacity(capacity) {
+      nativeCache.ensureCapacity(capacity);
+    },
+  };
+
+  return pubkeyCache;
+}

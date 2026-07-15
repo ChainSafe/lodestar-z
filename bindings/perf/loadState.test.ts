@@ -4,6 +4,7 @@ import * as era from "@lodestar/era";
 import {loadState as loadStateTS} from "@lodestar/state-transition";
 import {ssz} from "@lodestar/types";
 import bindings from "../src/index.js";
+import {createPubkeyCache} from "../src/pubkeys.js";
 import {getFirstEraFilePath} from "../test/eraFiles.ts";
 
 const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
@@ -11,14 +12,15 @@ const stateBytes = await reader.readSerializedState();
 await reader.close();
 
 bindings.pool.ensureCapacity(10_000_000);
-bindings.pubkeys.ensureCapacity(2_000_000);
+const pubkeyCache = createPubkeyCache();
+pubkeyCache.ensureCapacity(2_000_000);
 try {
-  bindings.pubkeys.load("./mainnet.pkix");
+  pubkeyCache.load("./mainnet.pkix");
 } catch (_e) {
   // ignore
 }
 
-const seedState = bindings.BeaconStateView.createFromBytes(stateBytes);
+const seedState = pubkeyCache.createBeaconStateView(stateBytes);
 const seedValidatorsBytes = seedState.serializeValidators();
 
 const tsSeedState = ssz.fulu.BeaconState.deserializeToViewDU(stateBytes);

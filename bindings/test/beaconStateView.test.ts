@@ -5,7 +5,10 @@ import {computeEpochAtSlot} from "@lodestar/state-transition";
 import {ssz} from "@lodestar/types";
 import {beforeAll, describe, expect, it} from "vitest";
 import bindings from "../src/index.js";
+import {createPubkeyCache} from "../src/pubkeys.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
+
+const pubkeyCache = createPubkeyCache();
 
 // TODO(bing): it's kinda annoying to have to do this, i guess we
 // expose the config somehow maybe?
@@ -171,13 +174,13 @@ describe("BeaconStateView", () => {
 
     // Phase 2: Create native BeaconStateView
     bindings.pool.ensureCapacity(10_000_000);
-    bindings.pubkeys.ensureCapacity(2_000_000);
+    pubkeyCache.ensureCapacity(2_000_000);
     try {
-      bindings.pubkeys.load("./mainnet.pkix");
+      pubkeyCache.load("./mainnet.pkix");
     } catch (_e) {
       // ignore error
     }
-    state = bindings.BeaconStateView.createFromBytes(stateBytes);
+    state = pubkeyCache.createBeaconStateView(stateBytes);
   }, 120_000); // 2 minute timeout for loading era file
 
   describe("basic properties", () => {
@@ -342,8 +345,8 @@ describe("BeaconStateView", () => {
     bellatrixState.previousEpochParticipation = Array.from({length: VALIDATOR_COUNT}, () => 0);
     bellatrixState.currentEpochParticipation = Array.from({length: VALIDATOR_COUNT}, () => 0);
 
-    const phase0View = bindings.BeaconStateView.createFromBytes(ssz.phase0.BeaconState.serialize(phase0State));
-    const bellatrixView = bindings.BeaconStateView.createFromBytes(ssz.bellatrix.BeaconState.serialize(bellatrixState));
+    const phase0View = pubkeyCache.createBeaconStateView(ssz.phase0.BeaconState.serialize(phase0State));
+    const bellatrixView = pubkeyCache.createBeaconStateView(ssz.bellatrix.BeaconState.serialize(bellatrixState));
 
     it("should true on post-merge state without reading the block", () => {
       // body is empty — binding short-circuits before touching it.

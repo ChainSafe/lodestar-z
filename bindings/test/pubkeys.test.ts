@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import {afterAll, beforeAll, describe, expect, it} from "vitest";
 import {SecretKey, aggregatePublicKeys} from "../src/blst.js";
-import {pubkeyCache} from "../src/pubkeys.js";
+import {createPubkeyCache} from "../src/pubkeys.js";
+
+const pubkeyCache = createPubkeyCache();
 
 // Generate deterministic valid BLS keypairs for testing
 const keypairs = Array.from({length: 3}, (_, i) => {

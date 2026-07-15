@@ -73,6 +73,7 @@ pub const js_meta = js.class(.{ .properties = .{
 
 cached_state: ?*CachedBeaconState = null,
 pool_rc: @TypeOf(pool.state.pool_rc) = null,
+pubkey_cache_ref: ?napi.Ref = null,
 const BeaconStateView = @This();
 
 pub fn init() BeaconStateView {
@@ -89,12 +90,20 @@ pub fn deinit(self: *BeaconStateView) void {
         rc.unref();
         self.pool_rc = null;
     }
+    if (self.pubkey_cache_ref) |cache_ref| {
+        cache_ref.delete() catch {};
+        self.pubkey_cache_ref = null;
+    }
 }
 
 // -------------------------
 // Class Methods
 // -------------------------
-pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
+pub fn createFromBytes(bytes: js.Uint8Array, pubkey_cache_value: js.Value) !BeaconStateView {
+    const env = js.env();
+    const pubkey_cache = try env.unwrap(pubkey.PubkeyCache, pubkey_cache_value.toValue());
+    const pubkey_cache_ref = try env.createReference(pubkey_cache_value.toValue(), 1);
+    errdefer pubkey_cache_ref.delete() catch {};
     const state = try allocator.create(AnyBeaconState);
     errdefer allocator.destroy(state);
 
@@ -112,8 +121,8 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
         state,
         .{
             .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
+            .index_to_pubkey = &pubkey_cache.state.index2pubkey,
+            .pubkey_to_index = &pubkey_cache.state.pubkey2index,
         },
         null,
     );
@@ -121,6 +130,7 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     return .{
         .cached_state = cached_state,
         .pool_rc = pool.state.poolRc().ref(),
+        .pubkey_cache_ref = pubkey_cache_ref,
     };
 }
 
@@ -1103,6 +1113,8 @@ pub fn loadOtherState(
     seed_validators_bytes: ?js.Uint8Array,
     opts: ?js.Value,
 ) !BeaconStateView {
+    const pubkey_cache_value = try self.pubkey_cache_ref.?.getValue();
+    const pubkey_cache = try js.env().unwrap(pubkey.PubkeyCache, pubkey_cache_value);
     const old_cached_state = try self.requireState();
     const state_bytes_slice = try state_bytes.toSlice();
     const seed_validators_bytes_slice: ?[]const u8 =
@@ -1141,8 +1153,8 @@ pub fn loadOtherState(
         new_state,
         .{
             .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
+            .index_to_pubkey = &pubkey_cache.state.index2pubkey,
+            .pubkey_to_index = &pubkey_cache.state.pubkey2index,
         },
         null,
     );
@@ -1175,6 +1187,7 @@ pub fn loadOtherState(
     return .{
         .cached_state = new_cached_state,
         .pool_rc = pool.state.poolRc().ref(),
+        .pubkey_cache_ref = try js.env().createReference(pubkey_cache_value, 1),
     };
 }
 
@@ -1267,6 +1280,8 @@ pub fn hashTreeRoot(self: *const BeaconStateView) !js.Uint8Array {
 /// - arg 1: options object (optional) with Lodestar's `dontTransferCache` boolean
 pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: ?js.Value) !BeaconStateView {
     const cached_state = try self.requireState();
+    const pubkey_cache_ref = try js.env().createReference(try self.pubkey_cache_ref.?.getValue(), 1);
+    errdefer pubkey_cache_ref.delete() catch {};
     const slot_value: u64 = @intCast(try slot_arg.toI64());
 
     var transfer_cache = true;
@@ -1293,6 +1308,7 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
+        .pubkey_cache_ref = pubkey_cache_ref,
     };
 }
 
@@ -1304,6 +1320,8 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
 /// - arg 1: options (optional): parse `TransitionOpts`
 pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint8Array, options: ?js.Value) !BeaconStateView {
     const cached_state = try self.requireState();
+    const pubkey_cache_ref = try js.env().createReference(try self.pubkey_cache_ref.?.getValue(), 1);
+    errdefer pubkey_cache_ref.delete() catch {};
     const opts = try @import("./transition_opts.zig").parseOptions(options);
 
     const bytes = try signed_block_bytes.toSlice();
@@ -1322,6 +1340,7 @@ pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
+        .pubkey_cache_ref = pubkey_cache_ref,
     };
 }
 

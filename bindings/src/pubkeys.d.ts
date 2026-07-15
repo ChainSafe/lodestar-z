@@ -1,6 +1,9 @@
 import type {PublicKey} from "./blst.js";
+import type {BeaconStateView} from "./index.js";
 
 export interface PubkeyCache {
+  /** Create a state view backed by this registry's native pubkey cache. */
+  createBeaconStateView(bytes: Uint8Array): BeaconStateView;
   /** Get deserialized PublicKey by validator index (cached at JS level) */
   get(index: number): PublicKey | undefined;
   /** Same as get(), but throws if the index is not in the cache */
@@ -28,4 +31,5 @@ export interface PubkeyCache {
   ensureCapacity(capacity: number): void;
 }
 
-export declare const pubkeyCache: PubkeyCache;
+/** Create an independent cache for one validator registry. */
+export declare function createPubkeyCache(): PubkeyCache;

@@ -2,8 +2,10 @@ import * as fs from "node:fs";
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import bindings from "../src/index.js";
-import {pubkeyCache} from "../src/pubkeys.js";
+import {createPubkeyCache} from "../src/pubkeys.js";
 import {getEraFilePaths, getFirstEraFilePath} from "./eraFiles.ts";
+
+const pubkeyCache = createPubkeyCache();
 
 console.log("loaded bindings");
 
@@ -48,7 +50,7 @@ const nextReader = await printDurationAsync("load era reader", () =>
 
 const stateBytes = await printDurationAsync("read serialized state", () => reader.readSerializedState());
 
-const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes(stateBytes));
+const state = printDuration("create state view", () => pubkeyCache.createBeaconStateView(stateBytes));
 
 const signedBlockBytes = (await printDurationAsync("read serialized block", () =>
   nextReader.readSerializedBlock(state.slot + 1)

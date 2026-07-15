@@ -184,7 +184,8 @@ export type VoluntaryExitValidity =
   | "invalid_signature";
 
 export declare class BeaconStateView {
-  static createFromBytes(bytes: Uint8Array): BeaconStateView;
+  /** @internal Prefer PubkeyCache.createBeaconStateView() to retain cache ownership. */
+  static createFromBytes(bytes: Uint8Array, nativePubkeyCache: object): BeaconStateView;
 
   slot: number;
   fork: Fork;
