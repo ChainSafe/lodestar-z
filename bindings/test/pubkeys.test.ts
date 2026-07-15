@@ -118,4 +118,15 @@ describe("pubkeys", () => {
     const cap2 = pubkeyCache.capacity;
     expect(cap2 - cap1).toBe(step);
   });
+
+  it("rejects reads and aggregates through sparse cache holes", () => {
+    pubkeyCache.reset();
+    pubkeyCache.set(10, keypairs[0].pubkeyBytes);
+
+    expect(pubkeyCache.size).toBe(11);
+    expect(pubkeyCache.get(5)).toBeUndefined();
+    expect(() => pubkeyCache.getOrThrow(5)).toThrow("index 5 not found");
+    expect(() => pubkeyCache.aggregate([10, 5])).toThrow();
+    expect(() => pubkeyCache.save(tempPkixPath)).toThrow();
+  });
 });

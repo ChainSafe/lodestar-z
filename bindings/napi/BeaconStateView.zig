@@ -117,6 +117,8 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
         },
         null,
     );
+    errdefer cached_state.deinit();
+    try pubkey.state.syncPopulated();
 
     return .{
         .cached_state = cached_state,
@@ -1147,6 +1149,7 @@ pub fn loadOtherState(
         null,
     );
     new_cached_state_initialized = true;
+    try pubkey.state.syncPopulated();
 
     if (opts) |value| {
         const raw = value.toValue();
@@ -1319,6 +1322,11 @@ pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint
     defer signed_block.deinit(allocator);
 
     const post_state = try st.stateTransition(allocator, napi_io.get(), cached_state, signed_block, opts);
+    errdefer {
+        post_state.deinit();
+        allocator.destroy(post_state);
+    }
+    try pubkey.state.syncPopulated();
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),

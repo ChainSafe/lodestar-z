@@ -22,13 +22,17 @@ const growth_step: u32 = preset.MAX_PENDING_DEPOSITS_PER_EPOCH * ((90 * 24 * 60 
 const State = struct {
     pubkey2index: PubkeyIndexMap = undefined,
     index2pubkey: Index2PubkeyCache = undefined,
+    populated: std.DynamicBitSet = undefined,
     initialized: bool = false,
 
     pub fn init(self: *State) !void {
         if (self.initialized) return;
         self.pubkey2index = PubkeyIndexMap.init(allocator);
+        errdefer self.pubkey2index.deinit();
         try self.pubkey2index.ensureTotalCapacity(default_initial_capacity);
         self.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, default_initial_capacity);
+        errdefer self.index2pubkey.deinit(allocator);
+        self.populated = try std.DynamicBitSet.initEmpty(allocator, 0);
         self.initialized = true;
     }
 
@@ -36,6 +40,7 @@ const State = struct {
         if (!self.initialized) return;
         self.pubkey2index.deinit();
         self.index2pubkey.deinit(allocator);
+        self.populated.deinit();
         self.initialized = false;
     }
 
@@ -44,6 +49,24 @@ const State = struct {
 
         self.pubkey2index.clearRetainingCapacity();
         self.index2pubkey.shrinkRetainingCapacity(0);
+        try self.populated.resize(0, false);
+    }
+
+    /// Reconcile slots populated by native state-cache synchronization. New
+    /// validator indices are append-only; the map scan is only needed if a
+    /// native operation filled an existing hole or otherwise broke that shape.
+    pub fn syncPopulated(self: *State) !void {
+        const len = self.index2pubkey.items.len;
+        const old_len = self.populated.capacity();
+        try self.populated.resize(len, len > old_len);
+
+        if (self.populated.count() != self.pubkey2index.count()) {
+            self.populated.setRangeValue(.{ .start = 0, .end = len }, false);
+            var values = self.pubkey2index.valueIterator();
+            while (values.next()) |index| {
+                if (index.* < len) self.populated.set(@intCast(index.*));
+            }
+        }
     }
 };
 
@@ -85,6 +108,9 @@ fn pubkey2indexWrittenSize() usize {
 
 /// JS: pubkeys.save(filePath)
 pub fn save(file_path: js.String) !void {
+    // PKIX stores a dense index array and has no representation for holes.
+    if (state.populated.count() != state.index2pubkey.items.len) return error.SparsePubkeyCache;
+
     var file_path_buf: [1024]u8 = undefined;
     const path = try file_path.toSlice(&file_path_buf);
     const io = napi_io.get();
@@ -144,6 +170,8 @@ pub fn load(file_path: js.String) !void {
     state.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, saved_capacity);
     errdefer state.index2pubkey.deinit(allocator);
     try state.index2pubkey.resize(allocator, len);
+    state.populated = try std.DynamicBitSet.initFull(allocator, len);
+    errdefer state.populated.deinit();
 
     const p2i_size = pubkey2indexWrittenSize();
     const i2p_size = @sizeOf(bls.PublicKey) * len;
@@ -189,7 +217,7 @@ pub fn get(index: js.Number) !?blst_bindings.PublicKey {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
     const idx = try index.toU32();
-    if (idx >= state.index2pubkey.items.len) return null;
+    if (idx >= state.index2pubkey.items.len or !state.populated.isSet(idx)) return null;
 
     return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
 }
@@ -209,7 +237,7 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
 
     if (len == 1) {
         const idx = try (try indices.getNumber(0)).toU32();
-        if (idx >= state.index2pubkey.items.len) return error.PubkeyIndexNotFound;
+        if (idx >= state.index2pubkey.items.len or !state.populated.isSet(idx)) return error.PubkeyIndexNotFound;
         return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
     }
 
@@ -224,7 +252,7 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
 
     for (0..len) |i| {
         const idx = try (try indices.getNumber(@intCast(i))).toU32();
-        if (idx >= state.index2pubkey.items.len) return error.PubkeyIndexNotFound;
+        if (idx >= state.index2pubkey.items.len or !state.populated.isSet(idx)) return error.PubkeyIndexNotFound;
         pks[i] = state.index2pubkey.items[@intCast(idx)];
     }
 
@@ -240,15 +268,14 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
 
     const idx = try index.toU32();
 
-    // Since the cache is append only, if the index is less than
-    // the cache's items length, we assume it already exists
-    if (idx < state.index2pubkey.items.len)
+    if (idx < state.index2pubkey.items.len and state.populated.isSet(idx))
         return;
 
     const pubkey_slice = try pubkey.toSlice();
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
 
     const pubkey_bytes = pubkey_slice[0..48];
+    const public_key = try bls.PublicKey.uncompress(pubkey_bytes);
 
     // Ensure capacity if needed
     if (idx >= state.index2pubkey.capacity) {
@@ -259,14 +286,15 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
 
     // Extend length if needed
     if (idx >= state.index2pubkey.items.len) {
+        try state.populated.resize(idx + 1, false);
         try state.index2pubkey.resize(allocator, idx + 1);
     }
 
     // Set pubkey2index
     state.pubkey2index.put(pubkey_bytes.*, @intCast(idx)) catch return error.PubkeyIndexInsertFailed;
 
-    // Deserialize and set index2pubkey
-    state.index2pubkey.items[@intCast(idx)] = try bls.PublicKey.uncompress(pubkey_bytes);
+    state.index2pubkey.items[@intCast(idx)] = public_key;
+    state.populated.set(idx);
 }
 
 /// JS: pubkeys.size() → number
