@@ -72,7 +72,7 @@ pub const js_meta = js.class(.{ .properties = .{
 } });
 
 cached_state: ?*CachedBeaconState = null,
-pool_rc: ?*pool.PoolRc = null,
+pool_rc: @TypeOf(pool.state.pool_rc) = null,
 const BeaconStateView = @This();
 
 pub fn init() BeaconStateView {
