@@ -24,18 +24,10 @@ pub const AggregatedSignatureSet = struct {
     signature: BLSSignature,
 };
 
-fn uncompressAndGroupCheck(encoded: *const BLSSignature) !?Signature {
-    const signature = try Signature.uncompress(encoded);
-    signature.validate(false) catch |err| {
-        if (err == bls.BlstError.PointNotInGroup) return null;
-        return err;
-    };
-    return signature;
-}
-
 pub fn verifySingleSignatureSet(set: *const SingleSignatureSet) !bool {
-    const signature = try uncompressAndGroupCheck(&set.signature) orelse return false;
-    if (verify(&set.signing_root, &set.pubkey, &signature, .{ .sig_groupcheck = false })) {
+    // All signatures are not trusted and must be group checked (p2.subgroup_check)
+    const signature = try Signature.uncompress(&set.signature);
+    if (verify(&set.signing_root, &set.pubkey, &signature, .{ .sig_groupcheck = true })) {
         return true;
     } else |_| {
         return false;
@@ -43,12 +35,13 @@ pub fn verifySingleSignatureSet(set: *const SingleSignatureSet) !bool {
 }
 
 pub fn verifyAggregatedSignatureSet(set: *const AggregatedSignatureSet) !bool {
-    const signature = try uncompressAndGroupCheck(&set.signature) orelse return false;
+    // All signatures are not trusted and must be group checked (p2.subgroup_check)
+    const signature = try Signature.uncompress(&set.signature);
     return fastAggregateVerify(
         &set.signing_root,
         set.pubkeys,
         &signature,
-        .{ .sig_groupcheck = false },
+        .{ .sig_groupcheck = true },
     );
 }
 
@@ -88,11 +81,8 @@ test "signature sets reject signatures outside G2 subgroup" {
     const forged_signature = try Signature.uncompress(&forged_signature_bytes);
     try std.testing.expect(!forged_signature.subgroupCheck());
 
-    // Check the validation boundary directly because final verification also rejects this vector
-    // when subgroup checking is disabled.
-    try std.testing.expect((try uncompressAndGroupCheck(&forged_signature_bytes)) == null);
-    try std.testing.expect((try uncompressAndGroupCheck(&valid_signature_bytes)) != null);
-
+    // The forged signature adds a torsion component, so decoding succeeds but subgroup validation
+    // must reject it.
     const public_keys = [_]PublicKey{public_key};
 
     const single_forged = SingleSignatureSet{
