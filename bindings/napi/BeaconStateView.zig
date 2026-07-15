@@ -107,6 +107,8 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     const cached_state = try allocator.create(CachedBeaconState);
     errdefer allocator.destroy(cached_state);
 
+    pubkey.state.lockExclusive();
+    defer pubkey.state.unlockExclusive();
     try cached_state.init(
         allocator,
         state,
@@ -879,6 +881,8 @@ pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_value:
         return throwNullAs(js.String, "INVALID_ARG", "Failed to read SignedVoluntaryExit from JS object");
     };
 
+    pubkey.state.lockShared();
+    defer pubkey.state.unlockShared();
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.getVoluntaryExitValidity(
             f,
@@ -905,6 +909,8 @@ pub fn isValidVoluntaryExit(self: *const BeaconStateView, signed_exit_value: js.
         return throwNullAs(js.Boolean, "INVALID_ARG", "Failed to read SignedVoluntaryExit from JS object");
     };
 
+    pubkey.state.lockShared();
+    defer pubkey.state.unlockShared();
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.isValidVoluntaryExit(
             f,
@@ -1136,6 +1142,8 @@ pub fn loadOtherState(
         allocator.destroy(new_cached_state);
     }
 
+    pubkey.state.lockExclusive();
+    defer pubkey.state.unlockExclusive();
     try new_cached_state.init(
         allocator,
         new_state,
@@ -1289,6 +1297,8 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
         allocator.destroy(post_state);
     }
 
+    pubkey.state.lockExclusive();
+    defer pubkey.state.unlockExclusive();
     try st.processSlots(allocator, napi_io.get(), post_state, slot_value, .{});
     return .{
         .cached_state = post_state,
@@ -1318,6 +1328,8 @@ pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint
     const signed_block = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, bytes);
     defer signed_block.deinit(allocator);
 
+    pubkey.state.lockExclusive();
+    defer pubkey.state.unlockExclusive();
     const post_state = try st.stateTransition(allocator, napi_io.get(), cached_state, signed_block, opts);
     return .{
         .cached_state = post_state,

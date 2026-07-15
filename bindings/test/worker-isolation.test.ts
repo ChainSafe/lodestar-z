@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import {Worker} from "node:worker_threads";
 import {describe, expect, it} from "vitest";
 import {PublicKey, SecretKey, Signature, verify} from "../src/blst.js";
+import {pubkeyCache} from "../src/pubkeys.js";
 
 /**
  * Tests that the per-context instance data (blst InstanceData) and
@@ -52,9 +53,68 @@ describe("worker isolation", () => {
       expect(verify(msg, pk, sig)).toBe(true);
     }
   });
+
+  it("shares the singleton cache safely while a worker reads and the main thread grows it", async () => {
+    pubkeyCache.reset();
+    pubkeyCache.ensureCapacity(1);
+    const pubkeyBytes = SecretKey.fromKeygen(crypto.randomBytes(32)).toPublicKey().toBytes();
+    pubkeyCache.set(0, pubkeyBytes);
+
+    const coordination = new SharedArrayBuffer(2 * Int32Array.BYTES_PER_ELEMENT);
+    const reader = new Worker(
+      `
+      import {parentPort, workerData} from "node:worker_threads";
+      import {pubkeyCache} from "${new URL("../src/pubkeys.js", import.meta.url).href}";
+
+      parentPort.postMessage({ready: true, size: pubkeyCache.size});
+      const coordination = new Int32Array(workerData.coordination);
+      Atomics.wait(coordination, 0, 0);
+
+      for (let i = 0; i < 2_000; i++) {
+        if (pubkeyCache.get(0) === undefined) throw new Error("shared key disappeared");
+        pubkeyCache.aggregate([0, 0, 0, 0]);
+      }
+      Atomics.wait(coordination, 1, 0);
+      parentPort.postMessage({done: true, size: pubkeyCache.size});
+      `,
+      {eval: true, workerData: {coordination}}
+    );
+    const exited = workerExit(reader);
+
+    const ready = await nextWorkerMessage(reader);
+    expect(ready).toEqual({ready: true, size: 1});
+    const doneMessage = nextWorkerMessage(reader);
+    const coordinationView = new Int32Array(coordination);
+    Atomics.store(coordinationView, 0, 1);
+    Atomics.notify(coordinationView, 0);
+
+    for (let index = 1; index <= 5_000; index++) {
+      pubkeyCache.set(index, pubkeyBytes);
+    }
+    Atomics.store(coordinationView, 1, 1);
+    Atomics.notify(coordinationView, 1);
+
+    const done = await doneMessage;
+    expect(done).toEqual({done: true, size: 5_001});
+    await exited;
+  }, 30_000);
 });
 
 const blstModulePath = new URL("../src/blst.js", import.meta.url).href;
+
+function nextWorkerMessage(worker: Worker): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    worker.once("message", resolve);
+    worker.once("error", reject);
+  });
+}
+
+function workerExit(worker: Worker): Promise<void> {
+  return new Promise((resolve, reject) => {
+    worker.once("exit", (code) => (code === 0 ? resolve() : reject(new Error(`Worker exited with code ${code}`))));
+    worker.once("error", reject);
+  });
+}
 
 function runWorker(): Promise<string> {
   return new Promise((resolve, reject) => {

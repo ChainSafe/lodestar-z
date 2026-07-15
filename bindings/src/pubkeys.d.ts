@@ -1,6 +1,7 @@
 import type {PublicKey} from "./blst.js";
 
 export interface PubkeyCache {
+  /** This native cache is a process-wide singleton shared by Node workers. */
   /** Get deserialized PublicKey by validator index (cached at JS level) */
   get(index: number): PublicKey | undefined;
   /** Same as get(), but throws if the index is not in the cache */

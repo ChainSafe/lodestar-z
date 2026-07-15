@@ -20,6 +20,10 @@ const max_stack_aggregate_pubkeys = 512;
 const growth_step: u32 = preset.MAX_PENDING_DEPOSITS_PER_EPOCH * ((90 * 24 * 60 * 60) / (12 * preset.SLOTS_PER_EPOCH));
 
 const State = struct {
+    /// The cache is intentionally process-global and shared by Node workers.
+    /// Every access to either direction must hold this lock because growth can
+    /// replace and unmap both backing allocations.
+    lock: std.Io.RwLock = .init,
     pubkey2index: PubkeyIndexMap = undefined,
     index2pubkey: Index2PubkeyCache = undefined,
     initialized: bool = false,
@@ -44,6 +48,22 @@ const State = struct {
 
         self.pubkey2index.clearRetainingCapacity();
         self.index2pubkey.shrinkRetainingCapacity(0);
+    }
+
+    pub fn lockShared(self: *State) void {
+        self.lock.lockSharedUncancelable(napi_io.get());
+    }
+
+    pub fn unlockShared(self: *State) void {
+        self.lock.unlockShared(napi_io.get());
+    }
+
+    pub fn lockExclusive(self: *State) void {
+        self.lock.lockUncancelable(napi_io.get());
+    }
+
+    pub fn unlockExclusive(self: *State) void {
+        self.lock.unlock(napi_io.get());
     }
 };
 
@@ -88,6 +108,8 @@ pub fn save(file_path: js.String) !void {
     var file_path_buf: [1024]u8 = undefined;
     const path = try file_path.toSlice(&file_path_buf);
     const io = napi_io.get();
+    state.lockShared();
+    defer state.unlockShared();
     const file = try std.Io.Dir.createFile(.cwd(), io, path, .{});
     defer file.close(io);
 
@@ -119,6 +141,9 @@ pub fn load(file_path: js.String) !void {
     const io = napi_io.get();
     const file = try std.Io.Dir.openFile(.cwd(), io, path, .{});
     defer file.close(io);
+
+    state.lockExclusive();
+    defer state.unlockExclusive();
 
     if (state.initialized) {
         state.deinit();
@@ -167,15 +192,19 @@ pub fn load(file_path: js.String) !void {
 
 /// JS: pubkeys.reset()
 pub fn reset() !void {
+    state.lockExclusive();
+    defer state.unlockExclusive();
     try state.reset();
 }
 
 /// JS: pubkeys.getIndex(pubkeyBytes) → number | null
 pub fn getIndex(pubkey: js.Uint8Array) !js.Value {
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
-
     const pubkey_slice = try pubkey.toSlice();
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
+
+    state.lockShared();
+    defer state.unlockShared();
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
     const e = js.env();
     if (state.pubkey2index.get(pubkey_slice[0..48].*)) |index| {
@@ -186,9 +215,10 @@ pub fn getIndex(pubkey: js.Uint8Array) !js.Value {
 
 /// JS: pubkeys.get(index) → PublicKey | undefined
 pub fn get(index: js.Number) !?blst_bindings.PublicKey {
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
-
     const idx = try index.toU32();
+    state.lockShared();
+    defer state.unlockShared();
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
     if (idx >= state.index2pubkey.items.len) return null;
 
     return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
@@ -202,13 +232,14 @@ pub fn get(index: js.Number) !?blst_bindings.PublicKey {
 ///
 /// JS: pubkeys.aggregate(indices) → PublicKey
 pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
-
     const len = try indices.length();
     if (len == 0) return error.EmptyPublicKeyArray;
 
     if (len == 1) {
         const idx = try (try indices.getNumber(0)).toU32();
+        state.lockShared();
+        defer state.unlockShared();
+        if (!state.initialized) return error.PubkeyIndexNotInitialized;
         if (idx >= state.index2pubkey.items.len) return error.PubkeyIndexNotFound;
         return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
     }
@@ -222,10 +253,16 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
     };
     defer if (len > pks_stack.len) allocator.free(pks);
 
-    for (0..len) |i| {
-        const idx = try (try indices.getNumber(@intCast(i))).toU32();
-        if (idx >= state.index2pubkey.items.len) return error.PubkeyIndexNotFound;
-        pks[i] = state.index2pubkey.items[@intCast(idx)];
+    {
+        state.lockShared();
+        defer state.unlockShared();
+        if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
+        for (0..len) |i| {
+            const idx = try (try indices.getNumber(@intCast(i))).toU32();
+            if (idx >= state.index2pubkey.items.len) return error.PubkeyIndexNotFound;
+            pks[i] = state.index2pubkey.items[@intCast(idx)];
+        }
     }
 
     const agg_pk = bls.AggregatePublicKey.aggregate(pks, false) catch
@@ -236,19 +273,19 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
 
 /// JS: pubkeys.set(index, pubkeyBytes)
 pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
-
     const idx = try index.toU32();
-
-    // Since the cache is append only, if the index is less than
-    // the cache's items length, we assume it already exists
-    if (idx < state.index2pubkey.items.len)
-        return;
-
     const pubkey_slice = try pubkey.toSlice();
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
 
     const pubkey_bytes = pubkey_slice[0..48];
+    const public_key = try bls.PublicKey.uncompress(pubkey_bytes);
+
+    state.lockExclusive();
+    defer state.unlockExclusive();
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
+    // Validator registries are append-only, so occupied indices are immutable.
+    if (idx < state.index2pubkey.items.len) return;
 
     // Ensure capacity if needed
     if (idx >= state.index2pubkey.capacity) {
@@ -265,22 +302,24 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
     // Set pubkey2index
     state.pubkey2index.put(pubkey_bytes.*, @intCast(idx)) catch return error.PubkeyIndexInsertFailed;
 
-    // Deserialize and set index2pubkey
-    state.index2pubkey.items[@intCast(idx)] = try bls.PublicKey.uncompress(pubkey_bytes);
+    state.index2pubkey.items[@intCast(idx)] = public_key;
 }
 
 /// JS: pubkeys.size() → number
 /// Note: zapi DSL does not yet support namespace-level getters, so this is a function.
 pub fn size() !js.Number {
+    state.lockShared();
+    defer state.unlockShared();
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
     return js.Number.from(@as(u32, @intCast(state.index2pubkey.items.len)));
 }
 
 /// JS: pubkeys.ensureCapacity(newSize)
 pub fn ensureCapacity(new_size: js.Number) !void {
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
-
     const requested = try new_size.toU32();
+    state.lockExclusive();
+    defer state.unlockExclusive();
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
     const old_size = state.index2pubkey.capacity;
     if (requested <= old_size) return;
 
@@ -294,6 +333,8 @@ pub fn ensureCapacity(new_size: js.Number) !void {
 /// JS: pubkeys.capacity() → number
 /// Note: zapi DSL does not yet support namespace-level getters, so this is a function.
 pub fn capacity() !js.Number {
+    state.lockShared();
+    defer state.unlockShared();
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
     return js.Number.from(@as(u32, @intCast(state.index2pubkey.capacity)));
 }

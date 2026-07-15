@@ -2,6 +2,9 @@ import bindings from "./bindings.js";
 
 const native = bindings.pubkeys;
 
+// The native cache is intentionally process-wide and shared by Node workers.
+// Reads and append-only growth are synchronized natively. load() and reset() are
+// lifecycle operations: callers must not retain JS-level entries across them.
 /** @type {Map<number, import("./blst.js").PublicKey>} */
 const pkCache = new Map();
 
