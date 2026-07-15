@@ -11,8 +11,6 @@ const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const preset = @import("preset").preset;
 const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
-const Node = @import("persistent_merkle_tree").Node;
-const PoolRc = st.RefCount(Node.Pool);
 const config = @import("./config.zig");
 const pubkey = @import("./pubkeys.zig");
 const js_types = @import("./js_types.zig");
@@ -74,7 +72,7 @@ pub const js_meta = js.class(.{ .properties = .{
 } });
 
 cached_state: ?*CachedBeaconState = null,
-pool_rc: ?*PoolRc = null,
+pool_rc: @TypeOf(pool.state.pool_rc) = null,
 const BeaconStateView = @This();
 
 pub fn init() BeaconStateView {
