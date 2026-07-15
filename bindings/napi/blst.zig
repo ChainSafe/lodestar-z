@@ -39,25 +39,31 @@ const BATCH_VERIFY_SIZE = 32;
 /// Initialized lazily on first use, torn down via `deinitThreadPool`.
 var thread_pool: ?*ThreadPool = null;
 
-pub fn initThreadPool(n_workers: u16) !void {
-    if (thread_pool != null) return error.PoolExists;
-    thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
-}
-
-/// Closes the `ThreadPool` used for blst operations.
-///
-/// Note: this can invalidate any inflight verification requests. Consumer is responsible
-/// for the lifecycle of their program and should only call this when all work is done.
-///
-/// This note is however application dependent. For the use case of lodestar,
-/// it's likely that this would not be called at all.
-/// Same goes for any other long-lived processes.
-pub fn deinitThreadPool() void {
-    if (thread_pool) |p| {
-        p.deinit(napi_io.get());
-        thread_pool = null;
+/// Native-only thread pool lifecycle, reached from `root.zig` through the
+/// pub `lifecycle` var so it is not part of the JS module surface.
+const Lifecycle = struct {
+    pub fn initThreadPool(_: *Lifecycle, n_workers: u16) !void {
+        if (thread_pool != null) return error.PoolExists;
+        thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
     }
-}
+
+    /// Closes the `ThreadPool` used for blst operations.
+    ///
+    /// Note: this can invalidate any inflight verification requests. Consumer is responsible
+    /// for the lifecycle of their program and should only call this when all work is done.
+    ///
+    /// This note is however application dependent. For the use case of lodestar,
+    /// it's likely that this would not be called at all.
+    /// Same goes for any other long-lived processes.
+    pub fn deinitThreadPool(_: *Lifecycle) void {
+        if (thread_pool) |p| {
+            p.deinit(napi_io.get());
+            thread_pool = null;
+        }
+    }
+};
+
+pub var lifecycle: Lifecycle = .{};
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
