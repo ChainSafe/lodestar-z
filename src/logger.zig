@@ -51,7 +51,7 @@ const Colors = struct {
     const gray = "\x1b[90m";
 };
 
-fn formatLine(buf: []u8, module: ?[]const u8, secs: f64, level: LogLevel, comptime fmt: []const u8, args: anytype) ![]const u8 {
+fn formatLine(buf: []u8, module: ?[]const u8, secs: f64, level: LogLevel, comptime fmt: []const u8, args: anytype) []const u8 {
     const marker = "…[trunc]\n";
     var w = std.Io.Writer.fixed(buf[0 .. buf.len - marker.len]);
     const padding_between_info = 30;
@@ -92,7 +92,7 @@ pub const LoggerConfig = struct {
         if (!level.enabled(self.active_level)) return;
         var buf: [4096]u8 = undefined;
         const secs = time.durationSeconds(time.since(defaultIo(), self.start));
-        const line = formatLine(&buf, module, secs, level, fmt, args) catch return;
+        const line = formatLine(&buf, module, secs, level, fmt, args);
         writeStderr(line);
     }
 
@@ -147,15 +147,15 @@ test "asText" {
 test "formatLine" {
     var buf: [256]u8 = undefined;
     const secs = 2.347;
-    const line = try formatLine(&buf, "test-module", secs, .info, "hello {s} {d}", .{ "world", 42 });
+    const line = formatLine(&buf, "test-module", secs, .info, "hello {s} {d}", .{ "world", 42 });
     try std.testing.expectEqualStrings("[2.347s] [test-module] " ++ (" " ** 15) ++ Colors.green ++ "info:" ++ Colors.reset ++ " hello world 42\n", line);
-    const line_no_module = try formatLine(&buf, null, secs, .info, "hello {s} {d}", .{ "world", 42 });
+    const line_no_module = formatLine(&buf, null, secs, .info, "hello {s} {d}", .{ "world", 42 });
     try std.testing.expectEqualStrings("[2.347s] [] " ++ (" " ** 26) ++ Colors.green ++ "info:" ++ Colors.reset ++ " hello world 42\n", line_no_module);
 }
 
 test "formatLine truncates" {
     var buf: [64]u8 = undefined;
-    const line = try formatLine(&buf, null, 2.347, .info, "{s}", .{"x" ** 200});
+    const line = formatLine(&buf, null, 2.347, .info, "{s}", .{"x" ** 200});
     try std.testing.expect(std.mem.endsWith(u8, line, "…[trunc]\n"));
     try std.testing.expect(line.len <= buf.len);
 }
