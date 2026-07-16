@@ -88,6 +88,18 @@ describe("blst", () => {
       });
     });
 
+    describe("fromHex()", () => {
+      const G2_POINT_AT_INFINITY = `c0${"00".repeat(95)}`;
+
+      it("should check infinity by default", () => {
+        expect(() => Signature.fromHex(G2_POINT_AT_INFINITY, true)).toThrow("PkIsInfinity");
+      });
+
+      it("should skip the infinity check when explicitly disabled", () => {
+        expect(Signature.fromHex(G2_POINT_AT_INFINITY, true, false)).toBeInstanceOf(Signature);
+      });
+    });
+
     it("should serialize to bytes", () => {
       const sig = Signature.fromBytes(fromHex(TEST_VECTORS.signature.compressed));
       const bytes = sig.toBytes();
