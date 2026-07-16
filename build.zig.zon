@@ -1,5 +1,5 @@
 .{
-    .name = .state_transition_z,
+    .name = .lodestar_z,
     .version = "0.0.0",
     .fingerprint = 0xd1ddb6abe067ee04,
     .minimum_zig_version = "0.16.0",
