@@ -88,6 +88,18 @@ describe("blst", () => {
       });
     });
 
+    describe("fromHex()", () => {
+      const G2_POINT_AT_INFINITY = `c0${"00".repeat(95)}`;
+
+      it("should check infinity by default", () => {
+        expect(() => Signature.fromHex(G2_POINT_AT_INFINITY, true)).toThrow("PkIsInfinity");
+      });
+
+      it("should skip the infinity check when explicitly disabled", () => {
+        expect(Signature.fromHex(G2_POINT_AT_INFINITY, true, false)).toBeInstanceOf(Signature);
+      });
+    });
+
     it("should serialize to bytes", () => {
       const sig = Signature.fromBytes(fromHex(TEST_VECTORS.signature.compressed));
       const bytes = sig.toBytes();
@@ -153,6 +165,30 @@ describe("blst", () => {
             expect(() => SecretKey.fromBytes(invalid)).to.throw();
           });
         }
+      });
+    });
+    describe("SecretKey.fromHex", () => {
+      for (const prefix of ["", "0x"]) {
+        it(`should round-trip a valid key with prefix '${prefix}'`, () => {
+          const hex = `${prefix}${Buffer.from(SECRET_KEY_BYTES).toString("hex")}`;
+          expectEqualHex(SecretKey.fromHex(hex).toBytes(), SECRET_KEY_BYTES);
+        });
+      }
+
+      for (const byteLength of [0, 1, 31, 33]) {
+        for (const prefix of ["", "0x"]) {
+          it(`should throw on ${byteLength}-byte input with prefix '${prefix}'`, () => {
+            expect(() => SecretKey.fromHex(`${prefix}${"00".repeat(byteLength)}`)).toThrow("InvalidSecretKeyLength");
+          });
+        }
+      }
+
+      it("should throw on an odd number of hex characters", () => {
+        expect(() => SecretKey.fromHex("0".repeat(63))).toThrow("InvalidSecretKeyLength");
+      });
+
+      it("should throw on non-hex UTF-8 input without aborting", () => {
+        expect(() => SecretKey.fromHex("é".repeat(32))).toThrow();
       });
     });
     describe("instance methods", () => {

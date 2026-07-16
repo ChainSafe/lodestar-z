@@ -19,7 +19,7 @@ const max_stack_aggregate_pubkeys = 512;
 /// per epoch at 12s slots), so growth stays proportionate at any network scale.
 const growth_step: u32 = preset.MAX_PENDING_DEPOSITS_PER_EPOCH * ((90 * 24 * 60 * 60) / (12 * preset.SLOTS_PER_EPOCH));
 
-pub const State = struct {
+const State = struct {
     pubkey2index: PubkeyIndexMap = undefined,
     index2pubkey: Index2PubkeyCache = undefined,
     initialized: bool = false,

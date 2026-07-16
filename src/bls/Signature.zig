@@ -222,15 +222,37 @@ const Pairing = @import("Pairing.zig");
 
 const SecretKey = @import("SecretKey.zig");
 const DST = @import("root.zig").DST;
+const ikm: [32]u8 = [_]u8{
+    0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
+    0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
+    0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
+    0x48, 0x99,
+};
+
+test uncompress {
+    const sk = try SecretKey.keyGen(&ikm, null);
+    const sig = sk.sign("hello foo", DST, null);
+    const sig_comp = sig.compress();
+
+    // Valid compressed bytes round-trip.
+    const sig_uncomp = try uncompress(&sig_comp);
+    try std.testing.expect(sig.isEqual(&sig_uncomp));
+
+    // Invalid lengths must be rejected, even with the compression bit set.
+    try std.testing.expectError(BlstError.BadEncoding, uncompress(&[_]u8{}));
+    try std.testing.expectError(BlstError.BadEncoding, uncompress(sig_comp[0 .. COMPRESS_SIZE - 1]));
+    var too_long = [_]u8{0} ** (COMPRESS_SIZE + 1);
+    @memcpy(too_long[0..COMPRESS_SIZE], &sig_comp);
+    try std.testing.expectError(BlstError.BadEncoding, uncompress(&too_long));
+
+    // Correct length without the compression bit must be rejected.
+    var no_comp_bit = sig_comp;
+    no_comp_bit[0] &= 0x7f;
+    try std.testing.expectError(BlstError.BadEncoding, uncompress(&no_comp_bit));
+}
 
 test "test_sign_n_verify" {
     // sample code for consumer like on Readme
-    const ikm: [32]u8 = [_]u8{
-        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
-        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
-        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
-        0x48, 0x99,
-    };
     const sk = try SecretKey.keyGen(&ikm, null);
     const pk = sk.toPublicKey();
 
@@ -250,13 +272,6 @@ test "test_sign_n_verify" {
 }
 
 test aggregateVerify {
-    const ikm: [32]u8 = [_]u8{
-        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
-        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
-        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
-        0x48, 0x99,
-    };
-
     const dst = DST;
     // aug is null
 
