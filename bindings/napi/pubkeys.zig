@@ -222,7 +222,7 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
         return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
     }
 
-    // SAFETY: This is deliberate set in this scope at comptime so we
+    // SAFETY: This is deliberately set in this scope at comptime so we
     // do not accidentally misuse allocators between cache and aggregation
     const aggregation_allocator = if (builtin.mode == .Debug)
         aggregation_gpa.allocator()
