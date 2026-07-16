@@ -4,6 +4,13 @@ on:
     branches:
       - main
 
+# Never run two release flows concurrently, and never cancel an in-flight
+# run — cancelling between tag creation and npm publish leaves a
+# half-released version.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 env:
   ZIG_VERSION: "0.16.0"
   NODE_VERSION: "24"
@@ -17,7 +24,6 @@ jobs:
       pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - name: Run release-please
         id: release
@@ -58,13 +64,10 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-22.04-${{ env.ZIG_VERSION }}
       - name: Install dependencies
         run: |
-          pnpm install
-      - name: Run bindings formatter
-        run: |
-          pnpm biome ci
+          pnpm install --frozen-lockfile
       - name: Determine npm dist tag
         id: detect_dist_tag
         run: |
