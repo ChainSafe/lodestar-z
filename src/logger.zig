@@ -52,7 +52,7 @@ const Colors = struct {
 };
 
 fn formatLine(buf: []u8, module: ?[]const u8, secs: f64, level: LogLevel, comptime fmt: []const u8, args: anytype) []const u8 {
-    const marker = "…[trunc]\n";
+    const marker = Colors.reset ++ "…[trunc]\n";
     var w = std.Io.Writer.fixed(buf[0 .. buf.len - marker.len]);
     const padding_between_info = 30;
     const m = module orelse "";
@@ -156,7 +156,7 @@ test "formatLine" {
 test "formatLine truncates" {
     var buf: [64]u8 = undefined;
     const line = formatLine(&buf, null, 2.347, .info, "{s}", .{"x" ** 200});
-    try std.testing.expect(std.mem.endsWith(u8, line, "…[trunc]\n"));
+    try std.testing.expect(std.mem.endsWith(u8, line, Colors.reset ++ "…[trunc]\n"));
     try std.testing.expect(line.len <= buf.len);
 }
 
