@@ -4,7 +4,7 @@
   "release-type": "node",
   "include-component-in-tag": false,
   "include-v-in-tag": true,
-  "versioning": "prerelease",
+  "versioning": "default",
   "prerelease": false,
   "prerelease-type": "rc",
   "bump-minor-pre-major": true,
@@ -64,12 +64,6 @@
       "type": "docs",
       "section": "Documentation",
       "hidden": true
-    }
-  ],
-  "extra-files": [
-    {
-      "type": "generic",
-      "path": "build.zig.zon"
     }
   ],
   "packages": {
