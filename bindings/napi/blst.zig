@@ -39,25 +39,31 @@ const BATCH_VERIFY_SIZE = 32;
 /// Initialized lazily on first use, torn down via `deinitThreadPool`.
 var thread_pool: ?*ThreadPool = null;
 
-pub fn initThreadPool(n_workers: u16) !void {
-    if (thread_pool != null) return error.PoolExists;
-    thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
-}
-
-/// Closes the `ThreadPool` used for blst operations.
-///
-/// Note: this can invalidate any inflight verification requests. Consumer is responsible
-/// for the lifecycle of their program and should only call this when all work is done.
-///
-/// This note is however application dependent. For the use case of lodestar,
-/// it's likely that this would not be called at all.
-/// Same goes for any other long-lived processes.
-pub fn deinitThreadPool() void {
-    if (thread_pool) |p| {
-        p.deinit(napi_io.get());
-        thread_pool = null;
+/// Native-only thread pool lifecycle, reached from `root.zig` through the
+/// pub `lifecycle` var so it is not part of the JS module surface.
+const Lifecycle = struct {
+    pub fn initThreadPool(_: *Lifecycle, n_workers: u16) !void {
+        if (thread_pool != null) return error.PoolExists;
+        thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
     }
-}
+
+    /// Closes the `ThreadPool` used for blst operations.
+    ///
+    /// Note: this can invalidate any inflight verification requests. Consumer is responsible
+    /// for the lifecycle of their program and should only call this when all work is done.
+    ///
+    /// This note is however application dependent. For the use case of lodestar,
+    /// it's likely that this would not be called at all.
+    /// Same goes for any other long-lived processes.
+    pub fn deinitThreadPool(_: *Lifecycle) void {
+        if (thread_pool) |p| {
+            p.deinit(napi_io.get());
+            thread_pool = null;
+        }
+    }
+};
+
+pub var lifecycle: Lifecycle = .{};
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -198,7 +204,7 @@ pub const Signature = struct {
 
         var sig = NativeSignature.deserialize(bytes) catch return error.DeserializationFailed;
         if (try boolOrDefault(sig_validate, false)) {
-            try sig.validate(try boolOrDefault(sig_infcheck, false));
+            try sig.validate(try boolOrDefault(sig_infcheck, true));
         }
         return .{ .raw = sig };
     }
@@ -641,11 +647,13 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
         sca_ptrs[i] = &scalars[i * nbytes];
     }
 
-    const scratch_size = @max(
+    const scratch_size_bytes = @max(
         bls.c.blst_p1s_mult_pippenger_scratch_sizeof(n),
         bls.c.blst_p2s_mult_pippenger_scratch_sizeof(n),
     );
-    const scratch = try allocator.alloc(u64, scratch_size);
+    const scratch_len = @divExact(scratch_size_bytes, @sizeOf(u64));
+
+    const scratch = try allocator.alloc(u64, scratch_len);
     defer allocator.free(scratch);
 
     // Pippenger multi-scalar multiplication on G1 (pubkeys)

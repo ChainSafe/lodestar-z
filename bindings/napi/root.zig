@@ -25,14 +25,14 @@ fn init(old_ref_count: u32) !void {
         var cpu_count: u64 = options.thread_count;
         if (options.thread_count == 0) {
             cpu_count = @max(try detectCpuCount(), 2) - 1;
-            std.debug.print(
+            std.log.debug(
                 "Note: no -Dthread-count set, using cgroup-aware CPU count minus 1: {}\n",
                 .{cpu_count},
             );
         }
 
         const n_workers = @min(cpu_count, @import("bls").ThreadPool.MAX_WORKERS);
-        try blst.initThreadPool(@intCast(n_workers));
+        try blst.lifecycle.initThreadPool(@intCast(n_workers));
         try pool.state.init();
         try pubkeys.state.init();
         config.state.init();
@@ -44,7 +44,7 @@ fn init(old_ref_count: u32) !void {
 /// count (what `std.Thread.getCpuCount()` reports).
 fn detectCpuCount() !usize {
     return @import("cpu_count").getNumCpus(allocator, napi_io.get()) catch |err| {
-        std.debug.print(
+        std.log.debug(
             "Warning: cgroup CPU detection failed ({s}), using affinity count\n",
             .{@errorName(err)},
         );
@@ -55,7 +55,7 @@ fn detectCpuCount() !usize {
 fn cleanup(new_ref_count: u32) void {
     if (new_ref_count == 0) {
         // Last environment — tear down shared state.
-        blst.deinitThreadPool();
+        blst.lifecycle.deinitThreadPool();
         config.state.deinit();
         pubkeys.state.deinit();
         pool.state.deinit();

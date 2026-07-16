@@ -44,6 +44,10 @@ export const pubkeyCache = {
     return native.size();
   },
 
+  get capacity() {
+    return native.capacity();
+  },
+
   load(filepath) {
     pkCache.clear();
     native.load(filepath);
