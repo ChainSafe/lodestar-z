@@ -1,13 +1,13 @@
 //! NAPI bindings for BLS (blst) cryptographic operations used by lodestar.
 //!
-//! This module uses a **Zig ThreadPool** (`thread_pool`) — a fixed-size pool of OS threads
-//! initialized once via `initThreadPool`. Used by synchronous NAPI functions (`aggregateVerify`,
+//! This module uses a **Zig ThreadPool** (`state.thread_pool`) — a fixed-size pool of OS threads
+//! initialized once via `state.init`. Used by synchronous NAPI functions (`aggregateVerify`,
 //! `verifyMultipleAggregateSignatures`) to fan out pairing checks across worker threads. The
 //! call still blocks the JS thread while it waits for the pool to finish, but the crypto work
 //! itself is parallelized.
 //!
 //! `aggregateWithRandomness` runs synchronously on the calling thread and does not
-//! rely on the native `thread_pool`. In lodestar, this is called from a Node.js
+//! rely on the native `state.thread_pool`. In lodestar, this is called from a Node.js
 //! worker thread (BLS thread pool), not the main thread.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -35,16 +35,15 @@ const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 /// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
 const BATCH_VERIFY_SIZE = 32;
 
-/// Cached thread pool reference for parallel verification.
-/// Initialized lazily on first use, torn down via `deinitThreadPool`.
-var thread_pool: ?*ThreadPool = null;
+/// Native-only thread pool state, reached from `root.zig` through the
+/// pub `state` var so it is not part of the JS module surface.
+const State = struct {
+    /// Cached thread pool reference for parallel verification.
+    thread_pool: ?*ThreadPool = null,
 
-/// Native-only thread pool lifecycle, reached from `root.zig` through the
-/// pub `lifecycle` var so it is not part of the JS module surface.
-const Lifecycle = struct {
-    pub fn initThreadPool(_: *Lifecycle, n_workers: u16) !void {
-        if (thread_pool != null) return error.PoolExists;
-        thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
+    pub fn init(self: *State, n_workers: u16) !void {
+        if (self.thread_pool != null) return error.PoolExists;
+        self.thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
     }
 
     /// Closes the `ThreadPool` used for blst operations.
@@ -55,15 +54,15 @@ const Lifecycle = struct {
     /// This note is however application dependent. For the use case of lodestar,
     /// it's likely that this would not be called at all.
     /// Same goes for any other long-lived processes.
-    pub fn deinitThreadPool(_: *Lifecycle) void {
-        if (thread_pool) |p| {
+    pub fn deinit(self: *State) void {
+        if (self.thread_pool) |p| {
             p.deinit(napi_io.get());
-            thread_pool = null;
+            self.thread_pool = null;
         }
     }
 };
 
-pub var lifecycle: Lifecycle = .{};
+pub var state: State = .{};
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -278,8 +277,18 @@ pub const SecretKey = struct {
 
     /// Creates a `SecretKey` from a hex string.
     pub fn fromHex(hex_string: js.String) !SecretKey {
+        switch (try hex_string.len()) {
+            NativeSecretKey.serialize_size * 2,
+            NativeSecretKey.serialize_size * 2 + 2,
+            => {},
+            else => return error.InvalidSecretKeyLength,
+        }
+
         var hex_buf: [NativeSecretKey.serialize_size * 2 + 3]u8 = undefined;
         const hex = try hexFromString(hex_string, &hex_buf);
+        if (hex.len != NativeSecretKey.serialize_size * 2) {
+            return error.InvalidSecretKeyLength;
+        }
 
         var bytes_buf: [NativeSecretKey.serialize_size]u8 = undefined;
         const bytes = try std.fmt.hexToBytes(&bytes_buf, hex);
@@ -379,7 +388,7 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
         pk_ptrs[i] = &wrapped_pk.raw;
     }
 
-    const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
+    const pool = state.thread_pool orelse return error.ThreadPoolNotInitialized;
     const result = pool.aggregateVerify(
         napi_io.get(),
         &sig.raw,
@@ -507,7 +516,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         @memset(rands[i][8..], 0);
     }
 
-    const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
+    const pool = state.thread_pool orelse return error.ThreadPoolNotInitialized;
     const result = pool.verifyMultipleAggregateSignatures(
         napi_io.get(),
         n_elems,
@@ -723,7 +732,7 @@ const AsyncAggRandData = struct {
 ///
 /// Note: MUST NOT call any napi APIs.
 fn asyncAggRand_execute(_: napi.Env, data: *AsyncAggRandData) void {
-    const pool = thread_pool orelse {
+    const pool = state.thread_pool orelse {
         data.err = error.PoolNotInitialized;
         return;
     };
@@ -811,7 +820,7 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
 
     if (n == 0) return error.EmptyArray;
     if (n > MAX_AGGREGATE_PER_JOB) return error.TooManySets;
-    if (thread_pool == null) return error.PoolNotInitialized;
+    if (state.thread_pool == null) return error.PoolNotInitialized;
 
     const env = js.env();
 
