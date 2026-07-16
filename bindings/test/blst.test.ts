@@ -167,6 +167,30 @@ describe("blst", () => {
         }
       });
     });
+    describe("SecretKey.fromHex", () => {
+      for (const prefix of ["", "0x"]) {
+        it(`should round-trip a valid key with prefix '${prefix}'`, () => {
+          const hex = `${prefix}${Buffer.from(SECRET_KEY_BYTES).toString("hex")}`;
+          expectEqualHex(SecretKey.fromHex(hex).toBytes(), SECRET_KEY_BYTES);
+        });
+      }
+
+      for (const byteLength of [0, 1, 31, 33]) {
+        for (const prefix of ["", "0x"]) {
+          it(`should throw on ${byteLength}-byte input with prefix '${prefix}'`, () => {
+            expect(() => SecretKey.fromHex(`${prefix}${"00".repeat(byteLength)}`)).toThrow("InvalidSecretKeyLength");
+          });
+        }
+      }
+
+      it("should throw on an odd number of hex characters", () => {
+        expect(() => SecretKey.fromHex("0".repeat(63))).toThrow("InvalidSecretKeyLength");
+      });
+
+      it("should throw on non-hex UTF-8 input without aborting", () => {
+        expect(() => SecretKey.fromHex("é".repeat(32))).toThrow();
+      });
+    });
     describe("instance methods", () => {
       let key: SecretKey;
       describe("toBytes", () => {

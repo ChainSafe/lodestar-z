@@ -32,8 +32,8 @@ fn init(old_ref_count: u32) !void {
         }
 
         const n_workers = @min(cpu_count, @import("bls").ThreadPool.MAX_WORKERS);
-        try blst.lifecycle.initThreadPool(@intCast(n_workers));
-        errdefer blst.lifecycle.deinitThreadPool();
+        try blst.state.init(@intCast(n_workers));
+        errdefer blst.state.deinit();
 
         try pool.state.init();
         errdefer pool.state.deinit();
@@ -64,7 +64,7 @@ fn detectCpuCount() !usize {
 fn cleanup(new_ref_count: u32) void {
     if (new_ref_count == 0) {
         // Last environment — tear down shared state.
-        blst.lifecycle.deinitThreadPool();
+        blst.state.deinit();
         config.state.deinit();
         pubkeys.state.deinit();
         pool.state.deinit();
