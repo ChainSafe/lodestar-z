@@ -440,7 +440,7 @@ jobs:
   bindings-artifacts:
     name: bindings - build artifacts
     # Runs the exact multi-target build the Release workflow publishes
-    # (see publish-bindings.yml), so cross-compile breakage is caught
+    # (see release.yml), so cross-compile breakage is caught
     # pre-merge instead of after a release tag already exists.
     runs-on: ubuntu-latest
     steps:
