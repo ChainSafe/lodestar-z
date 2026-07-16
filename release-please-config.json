@@ -7,8 +7,6 @@
   "versioning": "default",
   "prerelease": false,
   "prerelease-type": "rc",
-  "bump-minor-pre-major": true,
-  "bump-patch-for-minor-pre-major": true,
   "pull-request-title-pattern": "chore(release): v${version}",
   "changelog-sections": [
     {
