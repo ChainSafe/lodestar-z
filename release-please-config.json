@@ -7,7 +7,7 @@
   "versioning": "default",
   "prerelease": false,
   "prerelease-type": "rc",
-  "pull-request-title-pattern": "chore(release): v${version}",
+  "pull-request-title-pattern": "chore: release ${version}",
   "changelog-sections": [
     {
       "type": "feat",
