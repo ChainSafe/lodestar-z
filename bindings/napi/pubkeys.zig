@@ -14,13 +14,6 @@ const preset = @import("preset").preset;
 /// See note above `growth_step`.
 const cache_allocator = std.heap.page_allocator;
 
-/// Owns the short-lived aggregation allocations, if compiled
-/// in Debug mode.
-///
-/// in Release{Safe|Fast} modes, this is `std.heap.c_allocator`. See
-/// `aggregation_allocator` for details.
-var aggregation_gpa: std.heap.DebugAllocator(.{}) = .init;
-
 const default_initial_capacity: u32 = 0;
 
 /// Capacity added when a set() outgrows the current capacity. Covers ~3 months of
@@ -222,8 +215,14 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
         return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
     }
 
-    // SAFETY: This is deliberately set in this scope at comptime so we
-    // do not accidentally misuse allocators between cache and aggregation
+    // SAFETY: Allocator is deliberately set in this scope at comptime so we
+    // do not accidentally misuse allocators between cache and aggregation.
+    var aggregation_gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer if (builtin.mode == .Debug) {
+        std.debug.assert(aggregation_gpa.deinit() == .ok);
+    };
+    // Owns the short-lived aggregation allocations.
+    // Do not use for cache allocations.
     const aggregation_allocator = if (builtin.mode == .Debug)
         aggregation_gpa.allocator()
     else
