@@ -86,7 +86,8 @@ fn formatHex(bytes: []const u8) !js.String {
 }
 
 fn unwrapClass(comptime T: type, value: js.Value) !*T {
-    return js.env().unwrap(T, value.toValue());
+    const raw = value.toValue();
+    return js.convertArg(*T, raw.value, raw.env);
 }
 
 /// Reads a Uint8Array slice from a generic `js.Value`.
@@ -493,7 +494,6 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
     const rand = prng.random();
 
-    const e = js.env();
     for (0..n_elems) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
 
@@ -503,11 +503,11 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         msgs[i] = msg_bytes;
 
         const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try e.unwrap(PublicKey, pk_napi);
+        const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
         pks[i] = &wrapped_pk.raw;
 
         const sig_napi = try set.getNamedProperty("sig");
-        const wrapped_sig = try e.unwrap(Signature, sig_napi);
+        const wrapped_sig = try unwrapClass(Signature, .{ .val = sig_napi });
         sigs[i] = &wrapped_sig.raw;
 
         var scalar = rand.int(u64);
@@ -641,7 +641,7 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
         const set = (try sets.get(@intCast(i))).toValue();
 
         const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try env.unwrap(PublicKey, pk_napi);
+        const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
         pk_ptrs[i] = &wrapped_pk.raw;
 
         const sig_napi = try set.getNamedProperty("sig");
@@ -839,7 +839,7 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         const set = (try sets.get(@intCast(i))).toValue();
 
         const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try env.unwrap(PublicKey, pk_napi);
+        const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
         data.pks[i] = wrapped_pk.raw;
         data.pk_ptrs[i] = &data.pks[i];
 
