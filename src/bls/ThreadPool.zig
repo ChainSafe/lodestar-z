@@ -477,10 +477,11 @@ pub fn aggregateWithRandomness(
 
     var pk_proj: c.blst_p1 = undefined;
     try pippenger.parallelMSMG1(pool, io, pks, scalars_refs[0..pks.len], 64, &pk_proj);
-    c.blst_p1_to_affine(&pk_out.point, &pk_proj);
 
     var sig_proj: c.blst_p2 = undefined;
     try pippenger.parallelMSMG2(pool, io, sigs, scalars_refs[0..sigs.len], 64, &sig_proj);
+
+    c.blst_p1_to_affine(&pk_out.point, &pk_proj);
     c.blst_p2_to_affine(&sig_out.point, &sig_proj);
 }
 
@@ -645,4 +646,54 @@ test "aggregateWithRandomness multi-threaded" {
     );
 
     try agg_sig.verify(true, &msg, blst.DST, null, &agg_pk, true);
+}
+
+test "aggregateWithRandomness preserves outputs when signature MSM allocation fails" {
+    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 1 });
+    defer pool.deinit(std.testing.io);
+
+    // Let the G1 scratch allocation succeed, then fail the G2 scratch allocation.
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 1,
+    });
+    const pool_allocator = pool.allocator;
+    pool.allocator = failing_allocator.allocator();
+    defer pool.allocator = pool_allocator;
+
+    const ikm: [32]u8 = .{
+        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
+        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
+        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
+        0x48, 0x99,
+    };
+    const msg = [_]u8{0x42} ** 32;
+    const sk = try SecretKey.keyGen(&ikm, null);
+    const pk = sk.toPublicKey();
+    const sig = sk.sign(&msg, blst.DST, null);
+    var pk_refs = [_]*const PublicKey{&pk};
+    var sig_refs = [_]*const Signature{&sig};
+    const randomness = [_]u8{0} ** 32;
+
+    var pk_out = pk;
+    var sig_out = sig;
+    const pk_before = pk_out.serialize();
+    const sig_before = sig_out.serialize();
+
+    try std.testing.expectError(error.OutOfMemory, pool.aggregateWithRandomness(
+        std.testing.io,
+        &pk_refs,
+        &sig_refs,
+        &randomness,
+        false,
+        false,
+        &pk_out,
+        &sig_out,
+    ));
+
+    const pk_after = pk_out.serialize();
+    const sig_after = sig_out.serialize();
+    try std.testing.expectEqualSlices(u8, &pk_before, &pk_after);
+    try std.testing.expectEqualSlices(u8, &sig_before, &sig_after);
+    try std.testing.expect(failing_allocator.has_induced_failure);
+    try std.testing.expectEqual(failing_allocator.allocated_bytes, failing_allocator.freed_bytes);
 }
