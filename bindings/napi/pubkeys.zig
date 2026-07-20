@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const js = @import("zapi:zapi").js;
 const bls = @import("bls");
@@ -7,12 +8,13 @@ const Index2PubkeyCache = @import("state_transition").Index2PubkeyCache;
 const napi_io = @import("./io.zig");
 const preset = @import("preset").preset;
 
-/// Uses page allocator for internal allocations.
-/// It's recommended to never reallocate the pubkey2index after initialization.
-const allocator = std.heap.page_allocator;
+/// Owns the long-lived pubkey cache allocations.
+///
+/// NOTE: we should ideally never reallocate the pubkey2index after initialization.
+/// See note above `growth_step`.
+const cache_allocator = std.heap.page_allocator;
 
 const default_initial_capacity: u32 = 0;
-const max_stack_aggregate_pubkeys = 512;
 
 /// Capacity added when a set() outgrows the current capacity. Covers ~3 months of
 /// worst-case validator registry growth (MAX_PENDING_DEPOSITS_PER_EPOCH new validators
@@ -26,16 +28,16 @@ const State = struct {
 
     pub fn init(self: *State) !void {
         if (self.initialized) return;
-        self.pubkey2index = PubkeyIndexMap.init(allocator);
+        self.pubkey2index = PubkeyIndexMap.init(cache_allocator);
         try self.pubkey2index.ensureTotalCapacity(default_initial_capacity);
-        self.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, default_initial_capacity);
+        self.index2pubkey = try Index2PubkeyCache.initCapacity(cache_allocator, default_initial_capacity);
         self.initialized = true;
     }
 
     pub fn deinit(self: *State) void {
         if (!self.initialized) return;
         self.pubkey2index.deinit();
-        self.index2pubkey.deinit(allocator);
+        self.index2pubkey.deinit(cache_allocator);
         self.initialized = false;
     }
 
@@ -138,12 +140,12 @@ pub fn load(file_path: js.String) !void {
 
     const file_size = try file.length(io);
 
-    state.pubkey2index = PubkeyIndexMap.init(allocator);
+    state.pubkey2index = PubkeyIndexMap.init(cache_allocator);
     try state.pubkey2index.ensureTotalCapacity(saved_capacity);
     errdefer state.pubkey2index.deinit();
-    state.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, saved_capacity);
-    errdefer state.index2pubkey.deinit(allocator);
-    try state.index2pubkey.resize(allocator, len);
+    state.index2pubkey = try Index2PubkeyCache.initCapacity(cache_allocator, saved_capacity);
+    errdefer state.index2pubkey.deinit(cache_allocator);
+    try state.index2pubkey.resize(cache_allocator, len);
 
     const p2i_size = pubkey2indexWrittenSize();
     const i2p_size = @sizeOf(bls.PublicKey) * len;
@@ -213,14 +215,21 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
         return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
     }
 
-    var pks_stack: [max_stack_aggregate_pubkeys]bls.PublicKey = undefined;
-    const pks = if (len <= pks_stack.len)
-        pks_stack[0..len]
-    else blk: {
-        const buf = try allocator.alloc(bls.PublicKey, len);
-        break :blk buf;
+    // SAFETY: Allocator is deliberately set in this scope at comptime so we
+    // do not accidentally misuse allocators between cache and aggregation.
+    var aggregation_gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer if (builtin.mode == .Debug) {
+        std.debug.assert(aggregation_gpa.deinit() == .ok);
     };
-    defer if (len > pks_stack.len) allocator.free(pks);
+    // Owns the short-lived aggregation allocations.
+    // Do not use for cache allocations.
+    const aggregation_allocator = if (builtin.mode == .Debug)
+        aggregation_gpa.allocator()
+    else
+        std.heap.c_allocator;
+
+    const pks = try aggregation_allocator.alloc(bls.PublicKey, len);
+    defer aggregation_allocator.free(pks);
 
     for (0..len) |i| {
         const idx = try (try indices.getNumber(@intCast(i))).toU32();
@@ -254,12 +263,12 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
     if (idx >= state.index2pubkey.capacity) {
         const new_cap: u32 = @intCast(@max(idx + 1, state.index2pubkey.capacity + growth_step));
         try state.pubkey2index.ensureTotalCapacity(new_cap);
-        try state.index2pubkey.ensureTotalCapacityPrecise(allocator, new_cap);
+        try state.index2pubkey.ensureTotalCapacityPrecise(cache_allocator, new_cap);
     }
 
     // Extend length if needed
     if (idx >= state.index2pubkey.items.len) {
-        try state.index2pubkey.resize(allocator, idx + 1);
+        try state.index2pubkey.resize(cache_allocator, idx + 1);
     }
 
     // Set pubkey2index
@@ -288,7 +297,7 @@ pub fn ensureCapacity(new_size: js.Number) !void {
     // Not precise on purpose, the growth curve overshoot leaves slack for states with
     // slightly more validators than reserved, which the zig-side syncPubkeys cannot
     // grow safely (it does not own the backing allocator)
-    try state.index2pubkey.ensureTotalCapacity(allocator, requested);
+    try state.index2pubkey.ensureTotalCapacity(cache_allocator, requested);
 }
 
 /// JS: pubkeys.capacity() → number
