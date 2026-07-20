@@ -47,7 +47,11 @@ pub fn aggregateWithRandomness(
     scratch: []u64,
 ) BlstError!Self {
     if (sigs_groupcheck) for (sigs) |sig| try sig.validate(false);
-    if (scratch.len < c.blst_p2s_mult_pippenger_scratch_sizeof(sigs.len)) {
+    const scratch_len = @divExact(
+        c.blst_p2s_mult_pippenger_scratch_sizeof(sigs.len),
+        @sizeOf(u64),
+    );
+    if (scratch.len < scratch_len) {
         return BlstError.AggrTypeMismatch;
     }
 
@@ -85,10 +89,21 @@ test aggregateWithRandomness {
     var pks: [num_sigs]PublicKey = undefined;
     var sigs: [num_sigs]Signature = undefined;
 
-    const m = c.blst_p2s_mult_pippenger_scratch_sizeof(num_sigs) * 64;
+    const pk_scratch_len = @divExact(
+        c.blst_p1s_mult_pippenger_scratch_sizeof(num_sigs),
+        @sizeOf(u64),
+    );
+    const sig_scratch_len = @divExact(
+        c.blst_p2s_mult_pippenger_scratch_sizeof(num_sigs),
+        @sizeOf(u64),
+    );
     const allocator = std.testing.allocator;
-    var scratch = try std.testing.allocator.alloc(u64, m);
-    defer allocator.free(scratch);
+
+    const pk_scratch = try allocator.alloc(u64, pk_scratch_len);
+    defer allocator.free(pk_scratch);
+
+    const sig_scratch = try allocator.alloc(u64, sig_scratch_len);
+    defer allocator.free(sig_scratch);
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
@@ -119,13 +134,18 @@ test aggregateWithRandomness {
         pks_refs[i] = &pks[i];
     }
 
-    const agg_pk = try AggregatePublicKey.aggregateWithRandomness(pks_refs[0..], &rands, true, scratch[0..]);
+    const agg_pk = try AggregatePublicKey.aggregateWithRandomness(
+        pks_refs[0..],
+        &rands,
+        true,
+        pk_scratch,
+    );
     const pk = agg_pk.toPublicKey();
     const agg_sig = try aggregateWithRandomness(
         &sigs_refs,
         &rands,
         true,
-        scratch[0..],
+        sig_scratch,
     );
     const sig = agg_sig.toSignature();
     try sig.verify(true, &msgs[0], dst, null, &pk, true);

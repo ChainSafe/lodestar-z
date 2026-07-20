@@ -121,14 +121,20 @@ pub fn init(allocator_: Allocator, io: std.Io, opts: Opts) (Allocator.Error || s
     std.debug.assert(opts.n_workers <= MAX_WORKERS);
 
     const pool = try allocator_.create(ThreadPool);
+    errdefer pool.deinit(io);
+
     pool.* = .{
         .allocator = allocator_,
-        .n_workers = opts.n_workers,
+        .n_workers = 0,
         .queue = .{},
     };
-    for (0..pool.n_workers) |i| {
+
+    for (0..opts.n_workers) |i| {
         pool.threads[i] = try std.Thread.spawn(.{}, workerLoop, .{ pool, io });
+        pool.n_workers += 1;
     }
+    std.debug.assert(pool.n_workers == opts.n_workers);
+
     return pool;
 }
 
