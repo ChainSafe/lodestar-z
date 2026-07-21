@@ -172,20 +172,17 @@ pub fn addValidatorToRegistry(
         .slashed = false,
     };
 
-    // Publish the unforkable pubkey before mutating state. Capacity or BLS
-    // failures must not leave the validator registry partially updated. If a
-    // later allocation fails, retaining this future lookup is safe because the
-    // cache is append-only and is never used as the validator-set length.
-    const validator_index = try validators.length();
-    try epoch_cache.pubkey_cache.append(io, pubkey.*, validator_index);
     try validators.pushValue(&validator);
 
+    const validator_index = (try validators.length()) - 1;
     // In Electra, new validators start with amount=0 (actual deposit goes through pendingDeposits)
     // Updating here is better than updating at once on epoch transition
     // - Simplify genesis fn applyDeposits(): effectiveBalanceIncrements is populated immediately
     // - Keep related code together to reduce risk of breaking this cache
     // - Should have equal performance since it sets a value in a flat array
     try epoch_cache.effectiveBalanceIncrementsSet(allocator, validator_index, effective_balance);
+
+    try epoch_cache.pubkey_cache.append(io, pubkey.*, validator_index);
 
     // Only after altair:
     if (comptime fork.gte(.altair)) {
