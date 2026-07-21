@@ -36,7 +36,14 @@ fn init(old_ref_count: u32) !void {
         errdefer blst.state.deinit();
 
         try pool.state.init();
+        errdefer pool.state.deinit();
+
         try pubkeys.state.init();
+
+        // All remaining initialization must stay infallible because the earlier errdefers no
+        // longer cover every initialized global.
+        errdefer comptime unreachable;
+
         config.state.init();
     }
 }
