@@ -20,6 +20,23 @@ pub fn validate(self: *const Self) BlstError!void {
     if (!c.blst_p1_affine_in_g1(&self.point)) return BlstError.PointNotInGroup;
 }
 
+/// Check that a raw affine point has a canonical, on-curve native
+/// representation and the expected compressed encoding. This intentionally
+/// does not perform the much more expensive subgroup check; callers needing
+/// full BLS key validation must call `validate` as well.
+pub fn matchesCompressed(self: *const Self, compressed: *const [COMPRESS_SIZE]u8) bool {
+    if (c.blst_p1_affine_is_inf(&self.point)) return false;
+    const serialized = self.serialize();
+    const canonical = Self.deserialize(&serialized) catch return false;
+    if (!std.mem.eql(c.limb_t, &self.point.x.l, &canonical.point.x.l) or
+        !std.mem.eql(c.limb_t, &self.point.y.l, &canonical.point.y.l))
+    {
+        return false;
+    }
+    const actual = canonical.compress();
+    return std.mem.eql(u8, &actual, compressed);
+}
+
 /// Validate a serialized public key.
 ///
 /// Returns the `PublicKey` on success, `BlstError` on failure.

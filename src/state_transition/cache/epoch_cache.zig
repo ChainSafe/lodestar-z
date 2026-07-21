@@ -4,7 +4,6 @@ const preset = @import("preset").preset;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const types = @import("consensus_types");
 const c = @import("constants");
-const bls = @import("bls");
 const Epoch = types.primitive.Epoch.Type;
 const Slot = types.primitive.Slot.Type;
 const BLSSignature = types.primitive.BLSSignature.Type;
@@ -12,8 +11,7 @@ const SyncPeriod = types.primitive.SyncPeriod.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const CommitteeIndex = types.primitive.CommitteeIndex.Type;
 const BeaconConfig = @import("config").BeaconConfig;
-const PubkeyIndexMap = @import("./pubkey_cache.zig").PubkeyIndexMap;
-const Index2PubkeyCache = @import("./pubkey_cache.zig").Index2PubkeyCache;
+const PubkeyCache = @import("./pubkey_cache.zig").PubkeyCache;
 const EpochShuffling = @import("../utils//epoch_shuffling.zig").EpochShuffling;
 const EpochShufflingRc = @import("../utils/epoch_shuffling.zig").EpochShufflingRc;
 const EffectiveBalanceIncrementsRc = @import("./effective_balance_increments.zig").EffectiveBalanceIncrementsRc;
@@ -47,12 +45,9 @@ const getActivationChurnLimit = @import("../utils/validator.zig").getActivationC
 const ForkSeq = @import("config").ForkSeq;
 const ForkTypes = @import("fork_types").ForkTypes;
 
-const syncPubkeys = @import("./pubkey_cache.zig").syncPubkeys;
-
 pub const EpochCacheImmutableData = struct {
     config: *const BeaconConfig,
-    pubkey_to_index: *PubkeyIndexMap,
-    index_to_pubkey: *Index2PubkeyCache,
+    pubkey_cache: *PubkeyCache,
 };
 
 pub const EpochCacheOpts = struct {
@@ -70,11 +65,8 @@ pub const EpochCache = struct {
 
     config: *const BeaconConfig,
 
-    // this is shared across applications, EpochCache does not own this field so should not deinit()
-    pubkey_to_index: *PubkeyIndexMap,
-
-    // this is shared across applications, EpochCache does not own this field so should not deinit()
-    index_to_pubkey: *Index2PubkeyCache,
+    /// Application-wide pubkey cache; EpochCache does not own it.
+    pubkey_cache: *PubkeyCache,
 
     proposers: [preset.SLOTS_PER_EPOCH]ValidatorIndex,
 
@@ -161,7 +153,8 @@ pub const EpochCache = struct {
     fn initCurrentSyncCommitteeCacheRc(
         allocator: Allocator,
         state: *AnyBeaconState,
-        pubkey_to_index: *const PubkeyIndexMap,
+        pubkey_cache: *const PubkeyCache,
+        io: std.Io,
         skip_sync_committee_cache: bool,
     ) !*SyncCommitteeCacheRc {
         var sync_committee_cache = blk: {
@@ -169,7 +162,7 @@ pub const EpochCache = struct {
             var sync_committee_view = try state.currentSyncCommittee();
             var sync_committee: types.altair.SyncCommittee.Type = undefined;
             try sync_committee_view.toValue(allocator, &sync_committee);
-            break :blk try SyncCommitteeCacheAllForks.initSyncCommittee(allocator, &sync_committee, pubkey_to_index);
+            break :blk try SyncCommitteeCacheAllForks.initSyncCommittee(allocator, &sync_committee, pubkey_cache, io);
         };
         errdefer sync_committee_cache.deinit();
 
@@ -179,7 +172,8 @@ pub const EpochCache = struct {
     fn initNextSyncCommitteeCacheRc(
         allocator: Allocator,
         state: *AnyBeaconState,
-        pubkey_to_index: *const PubkeyIndexMap,
+        pubkey_cache: *const PubkeyCache,
+        io: std.Io,
         skip_sync_committee_cache: bool,
     ) !*SyncCommitteeCacheRc {
         var sync_committee_cache = blk: {
@@ -187,17 +181,22 @@ pub const EpochCache = struct {
             var sync_committee_view = try state.nextSyncCommittee();
             var sync_committee: types.altair.SyncCommittee.Type = undefined;
             try sync_committee_view.toValue(allocator, &sync_committee);
-            break :blk try SyncCommitteeCacheAllForks.initSyncCommittee(allocator, &sync_committee, pubkey_to_index);
+            break :blk try SyncCommitteeCacheAllForks.initSyncCommittee(allocator, &sync_committee, pubkey_cache, io);
         };
         errdefer sync_committee_cache.deinit();
 
         return try SyncCommitteeCacheRc.init(allocator, sync_committee_cache);
     }
 
-    pub fn createFromState(allocator: Allocator, state: *AnyBeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*EpochCache {
+    pub fn createFromState(
+        allocator: Allocator,
+        io: std.Io,
+        state: *AnyBeaconState,
+        immutable_data: EpochCacheImmutableData,
+        option: ?EpochCacheOpts,
+    ) !*EpochCache {
         const config = immutable_data.config;
-        const pubkey_to_index = immutable_data.pubkey_to_index;
-        const index_to_pubkey = immutable_data.index_to_pubkey;
+        const pubkey_cache = immutable_data.pubkey_cache;
 
         const current_epoch = computeEpochAtSlot(try state.slot());
         const is_genesis = current_epoch == GENESIS_EPOCH;
@@ -213,11 +212,11 @@ pub const EpochCache = struct {
 
         const validator_count = validators.len;
 
-        // syncPubkeys here to ensure EpochCacheImmutableData is popualted before computing the rest of caches
-        // - computeSyncCommitteeCache() needs a fully populated pubkey2index cache
+        // Sync before computing the remaining caches: sync committee indexing
+        // needs a fully populated pubkey cache.
         const skip_sync_pubkeys = if (option) |opt| opt.skip_sync_pubkeys else false;
         if (!skip_sync_pubkeys) {
-            try syncPubkeys(allocator, validators, pubkey_to_index, index_to_pubkey);
+            try pubkey_cache.syncPubkeys(io, validators);
         }
 
         const effective_balance_increments_rc = try initEffectiveBalanceIncrementsRc(allocator, validator_count);
@@ -376,7 +375,8 @@ pub const EpochCache = struct {
         const current_sync_committee_indexed = try initCurrentSyncCommitteeCacheRc(
             allocator,
             state,
-            pubkey_to_index,
+            pubkey_cache,
+            io,
             skip_sync_committee_cache,
         );
         errdefer current_sync_committee_indexed.unref();
@@ -384,7 +384,8 @@ pub const EpochCache = struct {
         const next_sync_committee_indexed = try initNextSyncCommitteeCacheRc(
             allocator,
             state,
-            pubkey_to_index,
+            pubkey_cache,
+            io,
             skip_sync_committee_cache,
         );
         errdefer next_sync_committee_indexed.unref();
@@ -440,8 +441,7 @@ pub const EpochCache = struct {
         epoch_cache_ptr.* = .{
             .allocator = allocator,
             .config = config,
-            .pubkey_to_index = pubkey_to_index,
-            .index_to_pubkey = index_to_pubkey,
+            .pubkey_cache = pubkey_cache,
             .proposers = proposers,
             // On first epoch, set to null to prevent unnecessary work since this is only used for metrics
             .proposers_prev_epoch = null,
@@ -474,7 +474,7 @@ pub const EpochCache = struct {
     }
 
     pub fn deinit(self: *EpochCache) void {
-        // pubkey_to_index and index_to_pubkey are shared across applications, EpochCache does not own this field so should not deinit()
+        // EpochCache does not own the application-wide pubkey cache.
 
         // unref the epoch shufflings
         self.previous_shuffling.unref();
@@ -495,8 +495,7 @@ pub const EpochCache = struct {
             .allocator = allocator,
             .config = self.config,
             // Common append-only structures shared with all states, no need to clone
-            .pubkey_to_index = self.pubkey_to_index,
-            .index_to_pubkey = self.index_to_pubkey,
+            .pubkey_cache = self.pubkey_cache,
             // Immutable data
             .proposers = self.proposers,
             .proposers_prev_epoch = self.proposers_prev_epoch,
@@ -830,27 +829,6 @@ pub const EpochCache = struct {
     pub fn isAggregator(self: *const EpochCache, slot: Slot, index: CommitteeIndex, slot_signature: BLSSignature) !bool {
         const committee = try self.getBeaconCommittee(slot, index);
         return isAggregatorFromCommitteeLength(committee.length, slot_signature);
-    }
-
-    pub fn getValidatorIndex(self: *const EpochCache, pubkey: *const types.primitive.BLSPubkey.Type) ?ValidatorIndex {
-        return self.pubkey_to_index.get(pubkey.*);
-    }
-
-    /// Sets `index` at `PublicKey` within the index to pubkey map and allocates and puts a new `PublicKey` at `index` within the set of validators.
-    pub fn addPubkey(self: *EpochCache, index: ValidatorIndex, pubkey: *const types.primitive.BLSPubkey.Type) !void {
-        std.debug.assert(index <= self.index_to_pubkey.items.len);
-        const appending = index == self.index_to_pubkey.items.len;
-
-        const public_key = try bls.PublicKey.uncompress(pubkey);
-        try self.pubkey_to_index.ensureUnusedCapacity(1);
-        if (appending) try self.index_to_pubkey.ensureUnusedCapacity(self.allocator, 1);
-
-        self.pubkey_to_index.putAssumeCapacity(pubkey.*, index);
-        if (appending) {
-            self.index_to_pubkey.appendAssumeCapacity(public_key);
-        } else {
-            self.index_to_pubkey.items[index] = public_key;
-        }
     }
 
     // TODO: getBeaconCommittee

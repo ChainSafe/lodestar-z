@@ -17,13 +17,14 @@ import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
+import {getPubkeyCacheCapacityForState} from "./serializedState.ts";
 
 const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
 const stateBytes = await reader.readSerializedState();
 await reader.close();
 
 bindings.pool.ensureCapacity(10_000_000);
-bindings.pubkeys.ensureCapacity(2_000_000);
+bindings.pubkeys.ensureCapacity(getPubkeyCacheCapacityForState(stateBytes));
 
 const seedState = bindings.BeaconStateView.createFromBytes(stateBytes);
 console.log("slot=" + seedState.slot);

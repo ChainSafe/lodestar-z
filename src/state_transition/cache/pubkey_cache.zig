@@ -3,254 +3,332 @@ const bls = @import("bls");
 const types = @import("consensus_types");
 const Validator = types.phase0.Validator.Type;
 
-/// Map from pubkey to validator index
-pub const PubkeyIndexMap = std.AutoHashMap([48]u8, u64);
+const HashKey = [std.hash.SipHash64(1, 3).key_length]u8;
 
-/// Map from validator index to pubkey
-pub const Index2PubkeyCache = std.ArrayList(bls.PublicKey);
+/// Keyed hashing prevents an untrusted set of compressed pubkeys from forcing
+/// pathological probe chains in the reverse lookup.
+pub const PubkeyHashContext = struct {
+    hash_key: HashKey,
 
-/// Populate `pubkey_to_index` and `index_to_pubkey` caches from validators list.
+    pub fn hash(self: PubkeyHashContext, pubkey: [48]u8) u32 {
+        return @truncate(std.hash.SipHash64(1, 3).toInt(&pubkey, &self.hash_key));
+    }
+
+    pub fn eql(
+        _: PubkeyHashContext,
+        lhs: [48]u8,
+        rhs: [48]u8,
+        rhs_index: usize,
+    ) bool {
+        _ = rhs_index;
+        return std.mem.eql(u8, &lhs, &rhs);
+    }
+};
+
+/// The dense entry index is the validator index. Production code only appends,
+/// so insertion order permanently supplies both lookup directions:
+/// compressed pubkey -> validator index and validator index -> affine pubkey.
+pub const PubkeyMap = std.ArrayHashMapUnmanaged(
+    [48]u8,
+    bls.PublicKey,
+    PubkeyHashContext,
+    true,
+);
+
+// Leave room for ArrayHashMap's geometric growth and for the dense allocation
+// size multiplication on 32-bit targets.
+const dense_capacity_limit =
+    std.math.maxInt(usize) / PubkeyMap.DataList.capacityInBytes(1);
+pub const max_capacity: usize = @min(
+    @as(usize, std.math.maxInt(u32)),
+    dense_capacity_limit / 2,
+);
+
+/// Append-only pubkey cache.
 ///
-/// Runs serially on the current thread. For parallel decompression over a
-/// worker pool, see `syncPubkeysParallel`.
-pub fn syncPubkeys(
+/// ArrayHashMap storage may move when it grows, so every access is protected by
+/// the cache-owned read/write lock. Readers copy values out before releasing
+/// the shared lock; no pointer into the map escapes. Production mutations only
+/// append (and occasionally grow). `clear` exists for tests/API compatibility
+/// and retains all allocated capacity.
+pub const PubkeyCache = struct {
     allocator: std.mem.Allocator,
-    validators: []const *const Validator,
-    pubkey_to_index: *PubkeyIndexMap,
-    index_to_pubkey: *Index2PubkeyCache,
-) !void {
-    const old_len = index_to_pubkey.items.len;
-    if (pubkey_to_index.count() != old_len) {
-        return error.InconsistentCache;
-    }
+    entries: PubkeyMap,
+    hash_key: HashKey,
+    /// Defensively enforces the application's single-writer contract and
+    /// serializes cache allocator use.
+    writer_mutex: std.Io.Mutex,
+    /// Guards movable map storage; acquired after writer_mutex when both are needed.
+    lock: std.Io.RwLock,
 
-    const new_count = validators.len;
-    if (new_count <= old_len) {
-        return;
-    }
-
-    try index_to_pubkey.resize(allocator, new_count);
-    try pubkey_to_index.ensureTotalCapacity(@intCast(new_count));
-
-    for (old_len..new_count) |i| {
-        const pubkey = &validators[i].pubkey;
-        pubkey_to_index.putAssumeCapacity(pubkey.*, @intCast(i));
-        index_to_pubkey.items[i] = try bls.PublicKey.uncompress(pubkey);
-    }
-}
-
-fn uncompressPubkeys(
-    start_index: usize,
-    end_index_exclusive: usize,
-    validators: []const *const Validator,
-    index_to_pubkey: *Index2PubkeyCache,
-    uncompress_error: *std.atomic.Value(bool),
-) void {
-    std.debug.assert(start_index <= end_index_exclusive);
-    std.debug.assert(end_index_exclusive <= validators.len);
-    std.debug.assert(end_index_exclusive <= index_to_pubkey.items.len);
-
-    for (start_index..end_index_exclusive) |i| {
-        if (uncompress_error.load(.monotonic)) return;
-        const pubkey = &validators[i].pubkey;
-        index_to_pubkey.items[i] = bls.PublicKey.uncompress(pubkey) catch {
-            uncompress_error.store(true, .release);
-            return;
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) PubkeyCache {
+        var hash_key: HashKey = undefined;
+        io.random(&hash_key);
+        return .{
+            .allocator = allocator,
+            .entries = .empty,
+            .hash_key = hash_key,
+            .writer_mutex = .init,
+            .lock = .init,
         };
     }
-}
 
-/// Populate `pubkey_to_index` and `index_to_pubkey` caches from validators list,
-/// parallelizing BLS pubkey decompression across the `io` executor's worker pool
-/// via `std.Io.Group.concurrent`. The `pubkey_to_index` HashMap is updated
-/// single-threaded at the end (HashMap is not thread-safe).
-pub fn syncPubkeysParallel(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    validators: []const *const Validator,
-    pubkey_to_index: *PubkeyIndexMap,
-    index_to_pubkey: *Index2PubkeyCache,
-) !void {
-    const old_len = index_to_pubkey.items.len;
-    if (pubkey_to_index.count() != old_len) {
-        return error.InconsistentCache;
+    pub fn initCapacity(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        initial_capacity: usize,
+    ) !PubkeyCache {
+        try validateCapacity(initial_capacity);
+
+        var self = init(allocator, io);
+        errdefer self.deinit();
+        try self.entries.ensureTotalCapacityContext(
+            allocator,
+            initial_capacity,
+            self.hashContext(),
+        );
+        return self;
     }
 
-    const new_count = validators.len;
-    if (new_count <= old_len) {
-        return;
+    /// The owner must exclude concurrent users before destroying the cache.
+    pub fn deinit(self: *PubkeyCache) void {
+        self.entries.deinit(self.allocator);
+        self.* = undefined;
     }
 
-    try index_to_pubkey.resize(allocator, new_count);
-    errdefer index_to_pubkey.shrinkRetainingCapacity(old_len);
-
-    try pubkey_to_index.ensureTotalCapacity(@intCast(new_count));
-
-    var uncompress_error = std.atomic.Value(bool).init(false);
-
-    var group: std.Io.Group = .init;
-    errdefer group.cancel(io);
-
-    const batch_size = 1000;
-    var i = old_len;
-    while (i < new_count) : (i += batch_size) {
-        const end = @min(i + batch_size, new_count);
-        try group.concurrent(io, uncompressPubkeys, .{
-            i,
-            end,
-            validators,
-            index_to_pubkey,
-            &uncompress_error,
-        });
+    pub fn hashContext(self: *const PubkeyCache) PubkeyHashContext {
+        return .{ .hash_key = self.hash_key };
     }
 
-    try group.await(io);
+    /// Reserve enough room for `new_capacity` entries. Existing entries remain
+    /// valid by index after a growth; their addresses are deliberately not part
+    /// of the public contract.
+    pub fn ensureTotalCapacity(
+        self: *PubkeyCache,
+        io: std.Io,
+        new_capacity: usize,
+    ) !void {
+        try validateCapacity(new_capacity);
+        try self.writer_mutex.lock(io);
+        defer self.writer_mutex.unlock(io);
+        try self.lock.lock(io);
+        defer self.lock.unlock(io);
 
-    if (uncompress_error.load(.acquire)) {
-        return error.InvalidPubkey;
+        try self.ensureTotalCapacityUnlocked(new_capacity);
     }
 
-    // HashMap updates must run single-threaded.
-    for (old_len..new_count) |j| {
-        pubkey_to_index.putAssumeCapacity(validators[j].pubkey, @intCast(j));
-    }
-}
-
-const testing = std.testing;
-const interop = @import("../test_utils/interop_pubkeys.zig");
-
-test "syncPubkeys populates both caches" {
-    const allocator = testing.allocator;
-    const count = 4;
-
-    var pubkeys: [count]types.primitive.BLSPubkey.Type = undefined;
-    try interop.interopPubkeysCached(count, &pubkeys);
-
-    var validators: [count]Validator = undefined;
-    var validator_ptrs: [count]*const Validator = undefined;
-    for (0..count) |i| {
-        validators[i] = std.mem.zeroes(Validator);
-        validators[i].pubkey = pubkeys[i];
-        validator_ptrs[i] = &validators[i];
+    /// Test/reset API. Production operation is append-only and does not call
+    /// this method. Capacity is retained to avoid turning reset into a resize.
+    pub fn clear(self: *PubkeyCache, io: std.Io) !void {
+        try self.writer_mutex.lock(io);
+        defer self.writer_mutex.unlock(io);
+        try self.lock.lock(io);
+        defer self.lock.unlock(io);
+        self.entries.clearRetainingCapacity();
     }
 
-    var pubkey_to_index = PubkeyIndexMap.init(allocator);
-    defer pubkey_to_index.deinit();
-    var index_to_pubkey: Index2PubkeyCache = .empty;
-    defer index_to_pubkey.deinit(allocator);
-
-    try syncPubkeys(allocator, &validator_ptrs, &pubkey_to_index, &index_to_pubkey);
-
-    try testing.expectEqual(@as(usize, count), index_to_pubkey.items.len);
-    try testing.expectEqual(@as(u32, count), pubkey_to_index.count());
-
-    for (0..count) |i| {
-        const idx = pubkey_to_index.get(pubkeys[i]).?;
-        try testing.expectEqual(@as(u64, i), idx);
-    }
-}
-
-test "syncPubkeys incremental sync adds only new validators" {
-    const allocator = testing.allocator;
-    const initial_count = 2;
-    const total_count = 4;
-
-    var pubkeys: [total_count]types.primitive.BLSPubkey.Type = undefined;
-    try interop.interopPubkeysCached(total_count, &pubkeys);
-
-    var validators: [total_count]Validator = undefined;
-    var validator_ptrs: [total_count]*const Validator = undefined;
-    for (0..total_count) |i| {
-        validators[i] = std.mem.zeroes(Validator);
-        validators[i].pubkey = pubkeys[i];
-        validator_ptrs[i] = &validators[i];
+    pub fn count(self: *const PubkeyCache, io: std.Io) u32 {
+        self.lockShared(io);
+        defer self.unlockShared(io);
+        return @intCast(self.entries.count());
     }
 
-    var pubkey_to_index = PubkeyIndexMap.init(allocator);
-    defer pubkey_to_index.deinit();
-    var index_to_pubkey: Index2PubkeyCache = .empty;
-    defer index_to_pubkey.deinit(allocator);
-
-    try syncPubkeys(allocator, validator_ptrs[0..initial_count], &pubkey_to_index, &index_to_pubkey);
-    try testing.expectEqual(@as(usize, initial_count), index_to_pubkey.items.len);
-
-    try syncPubkeys(allocator, &validator_ptrs, &pubkey_to_index, &index_to_pubkey);
-    try testing.expectEqual(@as(usize, total_count), index_to_pubkey.items.len);
-    try testing.expectEqual(@as(u32, total_count), pubkey_to_index.count());
-
-    for (0..total_count) |i| {
-        const idx = pubkey_to_index.get(pubkeys[i]).?;
-        try testing.expectEqual(@as(u64, i), idx);
-    }
-}
-
-test "syncPubkeys no-op when already synced" {
-    const allocator = testing.allocator;
-    const count = 2;
-
-    var pubkeys: [count]types.primitive.BLSPubkey.Type = undefined;
-    try interop.interopPubkeysCached(count, &pubkeys);
-
-    var validators: [count]Validator = undefined;
-    var validator_ptrs: [count]*const Validator = undefined;
-    for (0..count) |i| {
-        validators[i] = std.mem.zeroes(Validator);
-        validators[i].pubkey = pubkeys[i];
-        validator_ptrs[i] = &validators[i];
+    pub fn capacity(self: *const PubkeyCache, io: std.Io) usize {
+        self.lockShared(io);
+        defer self.unlockShared(io);
+        return self.entries.capacity();
     }
 
-    var pubkey_to_index = PubkeyIndexMap.init(allocator);
-    defer pubkey_to_index.deinit();
-    var index_to_pubkey: Index2PubkeyCache = .empty;
-    defer index_to_pubkey.deinit(allocator);
-
-    try syncPubkeys(allocator, &validator_ptrs, &pubkey_to_index, &index_to_pubkey);
-    try syncPubkeys(allocator, &validator_ptrs, &pubkey_to_index, &index_to_pubkey);
-    try testing.expectEqual(@as(usize, count), index_to_pubkey.items.len);
-}
-
-test "syncPubkeys no-op when validator count shrinks" {
-    const allocator = testing.allocator;
-    const initial_count = 4;
-    const shrunk_count = 2;
-
-    var pubkeys: [initial_count]types.primitive.BLSPubkey.Type = undefined;
-    try interop.interopPubkeysCached(initial_count, &pubkeys);
-
-    var validators: [initial_count]Validator = undefined;
-    var validator_ptrs: [initial_count]*const Validator = undefined;
-    for (0..initial_count) |i| {
-        validators[i] = std.mem.zeroes(Validator);
-        validators[i].pubkey = pubkeys[i];
-        validator_ptrs[i] = &validators[i];
+    /// Get the validator index for a compressed pubkey, if cached.
+    pub fn get(self: *const PubkeyCache, io: std.Io, pubkey: [48]u8) ?u64 {
+        self.lockShared(io);
+        defer self.unlockShared(io);
+        const index = self.entries.getIndexContext(pubkey, self.hashContext()) orelse
+            return null;
+        return @intCast(index);
     }
 
-    var pubkey_to_index = PubkeyIndexMap.init(allocator);
-    defer pubkey_to_index.deinit();
-    var index_to_pubkey: Index2PubkeyCache = .empty;
-    defer index_to_pubkey.deinit(allocator);
+    /// Get the affine pubkey for a validator index. A value is returned so no
+    /// pointer into movable map storage escapes the shared lock.
+    pub fn getPubkey(
+        self: *const PubkeyCache,
+        io: std.Io,
+        index: u64,
+    ) ?bls.PublicKey {
+        self.lockShared(io);
+        defer self.unlockShared(io);
+        if (index >= self.entries.count()) return null;
+        return self.entries.values()[@intCast(index)];
+    }
 
-    try syncPubkeys(allocator, &validator_ptrs, &pubkey_to_index, &index_to_pubkey);
-    try syncPubkeys(allocator, validator_ptrs[0..shrunk_count], &pubkey_to_index, &index_to_pubkey);
+    /// Copy affine pubkeys for a batch of validator indices while holding one
+    /// shared lock. The output is left unchanged when an index is invalid.
+    pub fn getPubkeys(
+        self: *const PubkeyCache,
+        io: std.Io,
+        indices: []const u64,
+        out: []bls.PublicKey,
+    ) !void {
+        if (indices.len != out.len) return error.InvalidLength;
 
-    try testing.expectEqual(@as(usize, initial_count), index_to_pubkey.items.len);
-    try testing.expectEqual(@as(u32, initial_count), pubkey_to_index.count());
-}
+        self.lockShared(io);
+        defer self.unlockShared(io);
 
-test "syncPubkeys detects inconsistent cache" {
-    const allocator = testing.allocator;
+        const values = self.entries.values();
+        for (indices) |index| {
+            if (index >= values.len) return error.InvalidIndex;
+        }
+        for (indices, out) |index, *pubkey| {
+            pubkey.* = values[@intCast(index)];
+        }
+    }
 
-    var pubkey_to_index = PubkeyIndexMap.init(allocator);
-    defer pubkey_to_index.deinit();
-    var index_to_pubkey: Index2PubkeyCache = .empty;
-    defer index_to_pubkey.deinit(allocator);
+    /// Resolve a batch of compressed pubkeys to validator indices while
+    /// holding one shared lock.
+    pub fn getValidatorIndices(
+        self: *const PubkeyCache,
+        io: std.Io,
+        pubkeys: []const [48]u8,
+        out: []u64,
+    ) !void {
+        if (pubkeys.len != out.len) return error.InvalidLength;
 
-    const dummy_key = [_]u8{0} ** 48;
-    try pubkey_to_index.put(dummy_key, 0);
+        self.lockShared(io);
+        defer self.unlockShared(io);
 
-    var validators: [1]Validator = undefined;
-    validators[0] = std.mem.zeroes(Validator);
-    var validator_ptrs: [1]*const Validator = .{&validators[0]};
+        const context = self.hashContext();
+        for (pubkeys, out) |pubkey, *index| {
+            index.* = @intCast(self.entries.getIndexContext(pubkey, context) orelse
+                return error.PubkeyNotFound);
+        }
+    }
 
-    try testing.expectError(error.InconsistentCache, syncPubkeys(allocator, &validator_ptrs, &pubkey_to_index, &index_to_pubkey));
-}
+    /// Aggregate the pubkeys at the requested validator indices.
+    pub fn aggregate(
+        self: *const PubkeyCache,
+        io: std.Io,
+        indices: []const u64,
+    ) !bls.PublicKey {
+        self.lockShared(io);
+        defer self.unlockShared(io);
+
+        if (indices.len == 0) return error.InvalidLength;
+        const values = self.entries.values();
+        if (indices[0] >= values.len) return error.InvalidIndex;
+        var aggregate_pubkey = values[@intCast(indices[0])].toAggregate();
+        for (indices[1..]) |index| {
+            if (index >= values.len) return error.InvalidIndex;
+            aggregate_pubkey.add(&values[@intCast(index)]);
+        }
+        return aggregate_pubkey.toPublicKey();
+    }
+
+    /// Append a compressed pubkey at the next validator index. Supplying an
+    /// already-cached index is an idempotent consistency check.
+    pub fn append(
+        self: *PubkeyCache,
+        io: std.Io,
+        pubkey: [48]u8,
+        index: u64,
+    ) !void {
+        try self.writer_mutex.lock(io);
+        defer self.writer_mutex.unlock(io);
+
+        const old_len = current_len: {
+            self.lockShared(io);
+            defer self.unlockShared(io);
+            const current_len = self.entries.count();
+            if (index < current_len) {
+                if (!std.mem.eql(
+                    u8,
+                    &self.entries.keys()[@intCast(index)],
+                    &pubkey,
+                )) return error.ConflictingPubkey;
+                return;
+            }
+            if (index > current_len) return error.InvalidIndexToAppend;
+            if (self.entries.getIndexContext(pubkey, self.hashContext()) != null) {
+                return error.DuplicatePubkey;
+            }
+            break :current_len current_len;
+        };
+
+        try validateCapacity(old_len + 1);
+        const affine = try bls.PublicKey.uncompress(&pubkey);
+
+        try self.lock.lock(io);
+        defer self.lock.unlock(io);
+
+        std.debug.assert(self.entries.count() == old_len);
+        try self.ensureTotalCapacityUnlocked(old_len + 1);
+        self.entries.putAssumeCapacityNoClobberContext(
+            pubkey,
+            affine,
+            self.hashContext(),
+        );
+    }
+
+    /// Populate the cache from the missing suffix of a validator list. Existing
+    /// entries are trusted as the application's unforkable singleton history.
+    /// Decompression happens before taking the exclusive map lock.
+    pub fn syncPubkeys(
+        self: *PubkeyCache,
+        io: std.Io,
+        validators: []const *const Validator,
+    ) !void {
+        try validateCapacity(validators.len);
+        try self.writer_mutex.lock(io);
+        defer self.writer_mutex.unlock(io);
+
+        self.lockShared(io);
+        const old_len = self.entries.count();
+        self.unlockShared(io);
+        if (validators.len <= old_len) return;
+
+        const suffix = validators[old_len..];
+        const prepared = try self.allocator.alloc(bls.PublicKey, suffix.len);
+        defer self.allocator.free(prepared);
+        for (suffix, prepared) |validator, *affine| {
+            affine.* = try bls.PublicKey.uncompress(&validator.pubkey);
+        }
+
+        try self.lock.lock(io);
+        defer self.lock.unlock(io);
+
+        std.debug.assert(self.entries.count() == old_len);
+        try self.ensureTotalCapacityUnlocked(validators.len);
+
+        const context = self.hashContext();
+        for (suffix, prepared) |validator, affine| {
+            const result = self.entries.getOrPutAssumeCapacityContext(
+                validator.pubkey,
+                context,
+            );
+            if (result.found_existing) {
+                self.entries.shrinkRetainingCapacityContext(old_len, context);
+                return error.DuplicatePubkey;
+            }
+            result.value_ptr.* = affine;
+        }
+    }
+
+    fn validateCapacity(requested_capacity: usize) !void {
+        if (requested_capacity > max_capacity) return error.CapacityOverflow;
+    }
+
+    fn ensureTotalCapacityUnlocked(self: *PubkeyCache, new_capacity: usize) !void {
+        try self.entries.ensureTotalCapacityContext(
+            self.allocator,
+            new_capacity,
+            self.hashContext(),
+        );
+    }
+
+    fn lockShared(self: *const PubkeyCache, io: std.Io) void {
+        @constCast(&self.lock).lockSharedUncancelable(io);
+    }
+
+    fn unlockShared(self: *const PubkeyCache, io: std.Io) void {
+        @constCast(&self.lock).unlockShared(io);
+    }
+};

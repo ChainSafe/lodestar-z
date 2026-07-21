@@ -31,6 +31,7 @@ import { config } from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import bindings from "../bindings/src/index.js";
 import { getFirstEraFilePath, getEraFilePaths } from "../bindings/test/eraFiles.ts";
+import { getPubkeyCacheCapacityForState } from "../bindings/test/serializedState.ts";
 
 const PORT = 8008;
 const PKIX_FILE = "./mainnet.pkix";
@@ -44,14 +45,8 @@ const hasPkix = (() => {
   }
 })();
 
-if (hasPkix) {
-  console.log("Loading pkix cache from disk...");
-  bindings.pubkeys.load(PKIX_FILE);
-} else {
-  console.log("No pkix cache found, initializing pool and pkix cache...");
-  bindings.pool.ensureCapacity(10_000_000);
-  bindings.pubkeys.ensureCapacity(2_000_000);
-}
+console.log("Initializing pool...");
+bindings.pool.ensureCapacity(10_000_000);
 
 console.log("Initializing metrics...");
 bindings.metrics.init();
@@ -62,11 +57,32 @@ const nextReader = await era.era.EraReader.open(config, getEraFilePaths()[1]);
 
 console.log("Reading serialized state...");
 const stateBytes = await reader.readSerializedState();
+const requiredPubkeyCapacity = getPubkeyCacheCapacityForState(stateBytes);
 
+let loadedPkix = false;
+if (hasPkix) {
+  console.log("Loading pkix cache from disk...");
+  try {
+    bindings.pubkeys.load(PKIX_FILE, requiredPubkeyCapacity);
+    loadedPkix = true;
+  } catch (error) {
+    console.warn("PKIX cache is incompatible or corrupt; rebuilding it from state", error);
+  }
+}
+
+let pkixNeedsSave = !loadedPkix;
+if (!loadedPkix || bindings.pubkeys.capacity() < requiredPubkeyCapacity) {
+  console.log("Reserving pubkey cache...");
+  bindings.pubkeys.ensureCapacity(requiredPubkeyCapacity);
+  pkixNeedsSave = true;
+}
+
+const cachedPubkeyCount = bindings.pubkeys.size();
 console.log("Creating BeaconStateView...");
 var state = bindings.BeaconStateView.createFromBytes(stateBytes);
+pkixNeedsSave ||= bindings.pubkeys.size() !== cachedPubkeyCount;
 
-if (!hasPkix) {
+if (pkixNeedsSave) {
   console.log("Saving pkix cache to disk...");
   bindings.pubkeys.save(PKIX_FILE);
 }

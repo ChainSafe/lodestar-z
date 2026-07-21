@@ -12,6 +12,11 @@ pub fn toPublicKey(self: *const Self) PublicKey {
     return pk;
 }
 
+/// Aggregate a single public key into an aggregate public key.
+pub fn add(self: *Self, other: *const PublicKey) void {
+    c.blst_p1_add_or_double_affine(&self.point, &self.point, &other.point);
+}
+
 /// Aggregates multiple public keys into a single aggregate public key.
 /// If pks_validate is true, validates each public key before aggregation.
 ///

@@ -38,7 +38,7 @@ fn init(old_ref_count: u32) !void {
         try pool.state.init();
         errdefer pool.state.deinit();
 
-        try pubkeys.state.init();
+        try pubkeys.state.init(js.env());
 
         // All remaining initialization must stay infallible because the earlier errdefers no
         // longer cover every initialized global.

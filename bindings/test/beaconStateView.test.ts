@@ -1,4 +1,6 @@
-import {SecretKey} from "@chainsafe/blst";
+import {spawnSync} from "node:child_process";
+import {unlinkSync, writeFileSync} from "node:fs";
+import {join} from "node:path";
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import {computeEpochAtSlot} from "@lodestar/state-transition";
@@ -6,43 +8,7 @@ import {ssz} from "@lodestar/types";
 import {beforeAll, describe, expect, it} from "vitest";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
-
-// TODO(bing): it's kinda annoying to have to do this, i guess we
-// expose the config somehow maybe?
-/* Mainnet preset constants the binding is compiled against. */
-const SYNC_COMMITTEE_SIZE = 512;
-const FAR_FUTURE_EPOCH = Number.MAX_SAFE_INTEGER;
-const MAX_EFFECTIVE_BALANCE = 32_000_000_000;
-
-const VALIDATOR_COUNT = 16;
-
-interface Validator {
-  pubkey: Uint8Array;
-  withdrawalCredentials: Uint8Array;
-  effectiveBalance: number;
-  slashed: boolean;
-  activationEligibilityEpoch: number;
-  activationEpoch: number;
-  exitEpoch: number;
-  withdrawableEpoch: number;
-}
-
-function makeValidators(count: number): Validator[] {
-  return Array.from({length: count}, (_, i) => {
-    const seed = new Uint8Array(32);
-    new DataView(seed.buffer).setUint32(0, i + 1);
-    return {
-      activationEligibilityEpoch: 0,
-      activationEpoch: 0,
-      effectiveBalance: MAX_EFFECTIVE_BALANCE,
-      exitEpoch: FAR_FUTURE_EPOCH,
-      pubkey: SecretKey.fromKeygen(seed).toPublicKey().toBytes(),
-      slashed: false,
-      withdrawableEpoch: FAR_FUTURE_EPOCH,
-      withdrawalCredentials: new Uint8Array(32),
-    };
-  });
-}
+import {DEFAULT_PUBKEY_CACHE_HEADROOM} from "./serializedState.ts";
 
 describe("BeaconStateView", () => {
   let state: InstanceType<typeof bindings.BeaconStateView>;
@@ -171,11 +137,18 @@ describe("BeaconStateView", () => {
 
     // Phase 2: Create native BeaconStateView
     bindings.pool.ensureCapacity(10_000_000);
-    bindings.pubkeys.ensureCapacity(2_000_000);
+    let loadedPkix = false;
     try {
-      bindings.pubkeys.load("./mainnet.pkix");
+      bindings.pubkeys.load("./mainnet.pkix", expected.validatorCount + DEFAULT_PUBKEY_CACHE_HEADROOM);
+      loadedPkix = true;
     } catch (_e) {
-      // ignore error
+      // Rebuild incompatible or corrupt snapshots from the serialized state.
+    }
+    if (!loadedPkix || bindings.pubkeys.capacity() < expected.validatorCount) {
+      if (loadedPkix) bindings.pubkeys.reset();
+      // This test never adds validators, so reserve exactly the registry prefix
+      // measured above instead of relying on a stale mainnet-size estimate.
+      bindings.pubkeys.ensureCapacity(expected.validatorCount);
     }
     state = bindings.BeaconStateView.createFromBytes(stateBytes);
   }, 120_000); // 2 minute timeout for loading era file
@@ -319,31 +292,90 @@ describe("BeaconStateView", () => {
   });
 
   describe("isExecutionEnabled", () => {
-    const validators = makeValidators(VALIDATOR_COUNT);
-
-    // Each sync-committee pubkey must be in the global pubkey_to_index map or
-    // EpochCache.createFromState throws PubkeyNotFound. Round-robin our 16 validators
-    // across the 512 slots — repeated pubkeys are fine for the lookup.
-    const syncCommitteePubkeys = Array.from(
-      {length: SYNC_COMMITTEE_SIZE},
-      (_, i) => validators[i % VALIDATOR_COUNT].pubkey
-    );
-    const syncCommittee = {
-      aggregatePubkey: validators[0].pubkey,
-      pubkeys: syncCommitteePubkeys,
+    let syntheticResults: {
+      bellatrixBlinded: boolean;
+      bellatrixWithPayload: boolean;
+      phase0WithPayload: boolean;
     };
 
-    const phase0State = ssz.phase0.BeaconState.defaultValue();
-    const bellatrixState = ssz.bellatrix.BeaconState.defaultValue();
-    bellatrixState.slot = 144896 * 32; // BELLATRIX_FORK_EPOCH * SLOTS_PER_EPOCH (mainnet)
-    bellatrixState.validators = validators;
-    bellatrixState.currentSyncCommittee = syncCommittee;
-    bellatrixState.nextSyncCommittee = syncCommittee;
-    bellatrixState.previousEpochParticipation = Array.from({length: VALIDATOR_COUNT}, () => 0);
-    bellatrixState.currentEpochParticipation = Array.from({length: VALIDATOR_COUNT}, () => 0);
+    beforeAll(() => {
+      const projectRoot = join(import.meta.dirname, "../..");
+      const fixturePath = join(projectRoot, `bindings/test/.tmp-execution-enabled-${process.pid}.mjs`);
 
-    const phase0View = bindings.BeaconStateView.createFromBytes(ssz.phase0.BeaconState.serialize(phase0State));
-    const bellatrixView = bindings.BeaconStateView.createFromBytes(ssz.bellatrix.BeaconState.serialize(bellatrixState));
+      writeFileSync(
+        fixturePath,
+        `
+import {SecretKey} from "@chainsafe/blst";
+import {ssz} from "@lodestar/types";
+import bindings from "../src/index.js";
+
+const VALIDATOR_COUNT = 16;
+const validators = Array.from({length: VALIDATOR_COUNT}, (_, i) => {
+  const seed = new Uint8Array(32);
+  new DataView(seed.buffer).setUint32(0, i + 1);
+  return {
+    activationEligibilityEpoch: 0,
+    activationEpoch: 0,
+    effectiveBalance: 32_000_000_000,
+    exitEpoch: Number.MAX_SAFE_INTEGER,
+    pubkey: SecretKey.fromKeygen(seed).toPublicKey().toBytes(),
+    slashed: false,
+    withdrawableEpoch: Number.MAX_SAFE_INTEGER,
+    withdrawalCredentials: new Uint8Array(32),
+  };
+});
+const syncCommittee = {
+  aggregatePubkey: validators[0].pubkey,
+  pubkeys: Array.from({length: 512}, (_, i) => validators[i % VALIDATOR_COUNT].pubkey),
+};
+
+const bellatrixState = ssz.bellatrix.BeaconState.defaultValue();
+bellatrixState.slot = 144896 * 32;
+bellatrixState.validators = validators;
+bellatrixState.currentSyncCommittee = syncCommittee;
+bellatrixState.nextSyncCommittee = syncCommittee;
+bellatrixState.previousEpochParticipation = Array.from({length: VALIDATOR_COUNT}, () => 0);
+bellatrixState.currentEpochParticipation = Array.from({length: VALIDATOR_COUNT}, () => 0);
+
+bindings.pool.ensureCapacity(100_000);
+bindings.pubkeys.ensureCapacity(VALIDATOR_COUNT);
+const phase0View = bindings.BeaconStateView.createFromBytes(
+  ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
+);
+const bellatrixView = bindings.BeaconStateView.createFromBytes(
+  ssz.bellatrix.BeaconState.serialize(bellatrixState)
+);
+const payload = ssz.bellatrix.ExecutionPayload.defaultValue();
+payload.blockNumber = 1;
+
+console.log("EXECUTION_ENABLED_RESULTS=" + JSON.stringify({
+  bellatrixBlinded: bellatrixView.isExecutionEnabled({body: {executionPayloadHeader: {}}}),
+  bellatrixWithPayload: bellatrixView.isExecutionEnabled({body: {executionPayload: payload}}),
+  phase0WithPayload: phase0View.isExecutionEnabled({body: {executionPayload: payload}}),
+}));
+`
+      );
+
+      try {
+        const result = spawnSync(process.execPath, ["--experimental-strip-types", fixturePath], {
+          cwd: projectRoot,
+          encoding: "utf-8",
+          timeout: 30_000,
+        });
+        expect(result.status, `stdout=${result.stdout} stderr=${result.stderr}`).toBe(0);
+        const resultLine = result.stdout.split("\n").find((line) => line.startsWith("EXECUTION_ENABLED_RESULTS="));
+        if (resultLine === undefined) {
+          throw new Error(`child did not report results: stdout=${result.stdout} stderr=${result.stderr}`);
+        }
+        syntheticResults = JSON.parse(resultLine.slice("EXECUTION_ENABLED_RESULTS=".length));
+      } finally {
+        try {
+          unlinkSync(fixturePath);
+        } catch (_e) {
+          // ignore
+        }
+      }
+    }, 40_000);
 
     it("should true on post-merge state without reading the block", () => {
       // body is empty — binding short-circuits before touching it.
@@ -351,21 +383,17 @@ describe("BeaconStateView", () => {
     });
 
     it("returns false even when block carries a non-default executionPayload", () => {
-      const payload = ssz.bellatrix.ExecutionPayload.defaultValue();
-      payload.blockNumber = 1;
-      expect(phase0View.isExecutionEnabled({body: {executionPayload: payload}})).toBe(false);
+      expect(syntheticResults.phase0WithPayload).toBe(false);
     });
 
     it("returns true after walking block for non-default payload", () => {
-      const payload = ssz.bellatrix.ExecutionPayload.defaultValue();
-      payload.blockNumber = 1;
-      expect(bellatrixView.isExecutionEnabled({body: {executionPayload: payload}})).toBe(true);
+      expect(syntheticResults.bellatrixWithPayload).toBe(true);
     });
 
     it("returns false when block is blinded (body has executionPayloadHeader)", () => {
       // Lodestar treats blinded pre-merge Bellatrix blocks as not-yet-merged because the
       // state header is still default. The Zig short-circuits on the presence of the field.
-      expect(bellatrixView.isExecutionEnabled({body: {executionPayloadHeader: {}}})).toBe(false);
+      expect(syntheticResults.bellatrixBlinded).toBe(false);
     });
   });
 
