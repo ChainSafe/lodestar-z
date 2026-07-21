@@ -1,5 +1,4 @@
 // biome-ignore-all lint/style/useNamingConvention: spec-canonical fork names in `ForkName`
-import type {PublicKey} from "./blst.js";
 
 interface BeaconBlockHeader {
   slot: number;
@@ -373,18 +372,6 @@ export declare class BeaconStateView {
 declare const bindings: {
   pool: {
     ensureCapacity: (capacity: number) => void;
-  };
-  pubkeys: {
-    save: (filepath: string) => void;
-    load: (filepath: string, maxCapacity: number) => void;
-    reset: () => void;
-    getIndex: (pubkey: Uint8Array) => number | null;
-    get: (index: number) => PublicKey | undefined;
-    aggregate: (indices: number[]) => PublicKey;
-    set: (index: number, pubkey: Uint8Array) => void;
-    size: () => number;
-    ensureCapacity: (capacity: number) => void;
-    capacity: () => number;
   };
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
