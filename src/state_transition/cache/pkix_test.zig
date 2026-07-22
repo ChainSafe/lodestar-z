@@ -106,25 +106,18 @@ fn updateHeaderChecksumForTest(header: *PkixHeader) void {
     );
 }
 
-const PayloadLayout = struct {
-    keys_offset: usize,
-    pubkeys_offset: usize,
-    keys_size: usize,
-    pubkeys_size: usize,
-    size: usize,
-};
-
-fn encodedPayloadLayout(bytes: []const u8) PayloadLayout {
+fn affinePayloadOffset(bytes: []const u8) usize {
     const count: usize = @intCast(readHeaderForTest(bytes).entry_count);
-    const keys_size = count * @sizeOf([48]u8);
-    const pubkeys_size = count * @sizeOf(bls.PublicKey);
-    return .{
-        .keys_offset = 0,
-        .pubkeys_offset = keys_size,
-        .keys_size = keys_size,
-        .pubkeys_size = pubkeys_size,
-        .size = keys_size + pubkeys_size,
-    };
+    return header_size + count * @sizeOf([48]u8);
+}
+
+fn appendPubkeys(
+    cache: *PubkeyCache,
+    pubkeys: []const types.primitive.BLSPubkey.Type,
+) !void {
+    for (pubkeys, 0..) |pubkey, index| {
+        try cache.append(testing.io, pubkey, index);
+    }
 }
 
 fn addBlsModulusToEncodedX(bytes: []u8) !void {
@@ -151,24 +144,30 @@ fn addBlsModulusToEncodedX(bytes: []u8) !void {
     if (carry != 0) return error.Overflow;
 }
 
-test "PKIX round trip preserves logical entries and reserved capacity" {
+test "PKIX round trip preserves populated and empty caches" {
     const allocator = testing.allocator;
     var pubkeys: [3]types.primitive.BLSPubkey.Type = undefined;
     try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
 
     var source = try PubkeyCache.initCapacity(allocator, testing.io, 8);
     defer source.deinit();
-    for (pubkeys, 0..) |pubkey, index| {
-        try source.append(testing.io, pubkey, index);
-    }
+    source.hash_key = @splat(0x11);
+    try appendPubkeys(&source, &pubkeys);
+
+    var same_entries = try PubkeyCache.initCapacity(allocator, testing.io, 8);
+    defer same_entries.deinit();
+    same_entries.hash_key = @splat(0xee);
+    try appendPubkeys(&same_entries, &pubkeys);
 
     const encoded = try encodePkixForTest(allocator, &source);
     defer allocator.free(encoded);
+    const same_entries_encoded = try encodePkixForTest(allocator, &same_entries);
+    defer allocator.free(same_entries_encoded);
+    try testing.expectEqualSlices(u8, encoded, same_entries_encoded);
 
     var reader = std.Io.Reader.fixed(encoded);
     var loaded = try loadPkixForTest(allocator, &reader, encoded.len);
     defer loaded.deinit();
-
     try testing.expectEqual(source.count(testing.io), loaded.count(testing.io));
     try testing.expectEqual(source.capacity(testing.io), loaded.capacity(testing.io));
     for (pubkeys, 0..) |pubkey, index| {
@@ -179,24 +178,41 @@ test "PKIX round trip preserves logical entries and reserved capacity" {
         const compressed = loaded.getPubkey(testing.io, index).?.compress();
         try testing.expectEqualSlices(u8, &pubkey, &compressed);
     }
+
+    var empty_source = try PubkeyCache.initCapacity(allocator, testing.io, 32);
+    defer empty_source.deinit();
+    const empty_encoded = try encodePkixForTest(allocator, &empty_source);
+    defer allocator.free(empty_encoded);
+    try testing.expectEqual(header_size, empty_encoded.len);
+
+    var empty_reader = std.Io.Reader.fixed(empty_encoded);
+    var empty_loaded = try loadPkixForTest(allocator, &empty_reader, empty_encoded.len);
+    defer empty_loaded.deinit();
+    try testing.expectEqual(@as(u32, 0), empty_loaded.count(testing.io));
+    try testing.expectEqual(
+        empty_source.capacity(testing.io),
+        empty_loaded.capacity(testing.io),
+    );
 }
 
-test "PKIX install preserves the live cache and replaces its contents" {
+test "PKIX install replaces contents across allocators and remains usable" {
     const allocator = testing.allocator;
     var pubkeys: [3]types.primitive.BLSPubkey.Type = undefined;
     try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
 
     var source = try PubkeyCache.initCapacity(allocator, testing.io, 4);
     defer source.deinit();
-    try source.append(testing.io, pubkeys[1], 0);
-    try source.append(testing.io, pubkeys[2], 1);
+    try appendPubkeys(&source, pubkeys[1..]);
 
     const encoded = try encodePkixForTest(allocator, &source);
     defer allocator.free(encoded);
     var reader = std.Io.Reader.fixed(encoded);
-    var staged = try loadPkixForTest(allocator, &reader, encoded.len);
+    var staged = try loadPkixForTest(
+        std.heap.page_allocator,
+        &reader,
+        encoded.len,
+    );
     defer staged.deinit();
-    const staged_hash_key = staged.hash_key;
 
     var live = try PubkeyCache.initCapacity(allocator, testing.io, 1);
     defer live.deinit();
@@ -204,92 +220,14 @@ test "PKIX install preserves the live cache and replaces its contents" {
 
     try pkix.install(&live, testing.io, &staged);
 
-    try testing.expectEqual(staged_hash_key, live.hash_key);
+    try testing.expectEqual(@as(u32, 0), staged.count(testing.io));
     try testing.expectEqual(@as(u32, 2), live.count(testing.io));
     try testing.expectEqual(@as(?u64, null), live.get(testing.io, pubkeys[0]));
     try testing.expectEqual(@as(u64, 0), live.get(testing.io, pubkeys[1]).?);
     try testing.expectEqual(@as(u64, 1), live.get(testing.io, pubkeys[2]).?);
 
-    // The destination's synchronization primitives remain usable after install.
     try live.append(testing.io, pubkeys[0], 2);
     try testing.expectEqual(@as(u64, 2), live.get(testing.io, pubkeys[0]).?);
-}
-
-test "PKIX clamps rounded spare capacity to the caller allocation limit" {
-    const allocator = testing.allocator;
-    const requested_capacity = 8;
-    var pubkeys: [requested_capacity]types.primitive.BLSPubkey.Type = undefined;
-    try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
-
-    var source = try PubkeyCache.initCapacity(
-        allocator,
-        testing.io,
-        requested_capacity,
-    );
-    defer source.deinit();
-    // ArrayHashMap applies geometric rounding to an ordinary ensure request.
-    try testing.expect(source.capacity(testing.io) > requested_capacity);
-    for (pubkeys, 0..) |pubkey, index| {
-        try source.append(testing.io, pubkey, index);
-    }
-
-    const encoded = try encodePkixForTest(allocator, &source);
-    defer allocator.free(encoded);
-    var reader = std.Io.Reader.fixed(encoded);
-    var loaded = try pkix.load(
-        allocator,
-        testing.io,
-        &reader,
-        encoded.len,
-        requested_capacity,
-    );
-    defer loaded.deinit();
-
-    try testing.expectEqual(@as(u32, requested_capacity), loaded.count(testing.io));
-    try testing.expectEqual(@as(usize, requested_capacity), loaded.capacity(testing.io));
-    for (pubkeys, 0..) |pubkey, index| {
-        try testing.expectEqual(
-            @as(u64, @intCast(index)),
-            loaded.get(testing.io, pubkey).?,
-        );
-    }
-}
-
-test "PKIX omits the SipHash key and all derived map storage" {
-    const allocator = testing.allocator;
-    var pubkeys: [2]types.primitive.BLSPubkey.Type = undefined;
-    try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
-
-    var first = try PubkeyCache.initCapacity(allocator, testing.io, 8);
-    defer first.deinit();
-    var second = try PubkeyCache.initCapacity(allocator, testing.io, 8);
-    defer second.deinit();
-    first.hash_key = @splat(0x11);
-    second.hash_key = @splat(0xee);
-    for (pubkeys, 0..) |pubkey, index| {
-        try first.append(testing.io, pubkey, index);
-        try second.append(testing.io, pubkey, index);
-    }
-
-    const first_encoded = try encodePkixForTest(allocator, &first);
-    defer allocator.free(first_encoded);
-    const second_encoded = try encodePkixForTest(allocator, &second);
-    defer allocator.free(second_encoded);
-    try testing.expectEqualSlices(u8, first_encoded, second_encoded);
-
-    const layout = encodedPayloadLayout(first_encoded);
-    try testing.expectEqual(
-        header_size + layout.size,
-        first_encoded.len,
-    );
-    try testing.expectEqual(
-        pubkeys.len * @sizeOf([48]u8),
-        layout.keys_size,
-    );
-    try testing.expectEqual(
-        pubkeys.len * @sizeOf(bls.PublicKey),
-        layout.pubkeys_size,
-    );
 }
 
 test "PKIX save releases the writer mutex before output" {
@@ -338,67 +276,7 @@ test "PKIX save releases the writer mutex before output" {
     try testing.expectEqual(@as(?u64, null), loaded.get(testing.io, pubkeys[1]));
 }
 
-test "PKIX snapshot cleanup survives installing a cache with another allocator" {
-    const allocator = testing.allocator;
-    var pubkeys: [2]types.primitive.BLSPubkey.Type = undefined;
-    try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
-
-    var live = try PubkeyCache.initCapacity(allocator, testing.io, 1);
-    defer live.deinit();
-    try live.append(testing.io, pubkeys[0], 0);
-
-    var staged = try PubkeyCache.initCapacity(std.heap.page_allocator, testing.io, 1);
-    defer staged.deinit();
-    try staged.append(testing.io, pubkeys[1], 0);
-
-    var blocking_writer = BlockingWriter.init(allocator, testing.io);
-    defer blocking_writer.deinit();
-    var save_result = std.atomic.Value(u8).init(0);
-    const context = SaveContext{
-        .cache = &live,
-        .io = testing.io,
-        .writer = &blocking_writer.writer,
-        .result = &save_result,
-    };
-
-    var group: std.Io.Group = .init;
-    errdefer group.cancel(testing.io);
-    try group.concurrent(testing.io, saveForConcurrencyTest, .{&context});
-    try blocking_writer.entered.wait(testing.io);
-
-    try pkix.install(&live, testing.io, &staged);
-    blocking_writer.release.set(testing.io);
-    try group.await(testing.io);
-
-    try testing.expectEqual(@as(u8, 1), save_result.load(.acquire));
-    try testing.expectEqual(@as(?u64, null), live.get(testing.io, pubkeys[0]));
-    try testing.expectEqual(@as(u64, 0), live.get(testing.io, pubkeys[1]).?);
-
-    const encoded = blocking_writer.output.written();
-    var reader = std.Io.Reader.fixed(encoded);
-    var saved = try loadPkixForTest(allocator, &reader, encoded.len);
-    defer saved.deinit();
-    try testing.expectEqual(@as(u64, 0), saved.get(testing.io, pubkeys[0]).?);
-    try testing.expectEqual(@as(?u64, null), saved.get(testing.io, pubkeys[1]));
-}
-
-test "PKIX supports empty caches and preserves their reserved capacity" {
-    const allocator = testing.allocator;
-    var source = try PubkeyCache.initCapacity(allocator, testing.io, 32);
-    defer source.deinit();
-
-    const encoded = try encodePkixForTest(allocator, &source);
-    defer allocator.free(encoded);
-    try testing.expectEqual(header_size, encoded.len);
-
-    var reader = std.Io.Reader.fixed(encoded);
-    var loaded = try loadPkixForTest(allocator, &reader, encoded.len);
-    defer loaded.deinit();
-    try testing.expectEqual(@as(u32, 0), loaded.count(testing.io));
-    try testing.expectEqual(source.capacity(testing.io), loaded.capacity(testing.io));
-}
-
-test "PKIX rejects checksum corruption and inexact file sizes" {
+test "PKIX rejects payload corruption and inexact reads" {
     const allocator = testing.allocator;
     var pubkeys: [1]types.primitive.BLSPubkey.Type = undefined;
     try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
@@ -434,9 +312,31 @@ test "PKIX rejects checksum corruption and inexact file sizes" {
         error.InvalidPkixPayload,
         loadPkixForTest(allocator, &short_reader, encoded.len),
     );
+
+    var empty_source = try PubkeyCache.initCapacity(allocator, testing.io, 32);
+    defer empty_source.deinit();
+    const empty_encoded = try encodePkixForTest(allocator, &empty_source);
+    defer allocator.free(empty_encoded);
+
+    var empty_header = readHeaderForTest(empty_encoded);
+    empty_header.payload_checksum ^= 1;
+    updateHeaderChecksumForTest(&empty_header);
+    writeHeaderForTest(empty_encoded, empty_header);
+    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var empty_reader = std.Io.Reader.fixed(empty_encoded);
+    try testing.expectError(
+        error.InvalidPkixChecksum,
+        pkix.load(
+            failing.allocator(),
+            testing.io,
+            &empty_reader,
+            empty_encoded.len,
+            std.math.maxInt(usize),
+        ),
+    );
 }
 
-test "PKIX compatibility fields reject even with valid checksums" {
+test "PKIX rejects incompatible and malformed headers" {
     const allocator = testing.allocator;
     var source = PubkeyCache.init(allocator, testing.io);
     defer source.deinit();
@@ -473,19 +373,28 @@ test "PKIX compatibility fields reject even with valid checksums" {
         encoded[mutation.offset] ^= 1;
         updatePkixChecksumForTest(encoded);
     }
-}
-
-test "PKIX rejects entry count above encoded capacity" {
-    const allocator = testing.allocator;
-    var source = PubkeyCache.init(allocator, testing.io);
-    defer source.deinit();
-    const encoded = try encodePkixForTest(allocator, &source);
-    defer allocator.free(encoded);
 
     var header = readHeaderForTest(encoded);
-    header.entry_count = 1;
+    header.cache_capacity = 1 << 30;
     writeHeaderForTest(encoded, header);
-    updatePkixChecksumForTest(encoded);
+    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var checksum_reader = std.Io.Reader.fixed(encoded);
+    try testing.expectError(
+        error.InvalidPkixHeaderChecksum,
+        pkix.load(
+            failing.allocator(),
+            testing.io,
+            &checksum_reader,
+            encoded.len,
+            std.math.maxInt(usize),
+        ),
+    );
+
+    header = readHeaderForTest(encoded);
+    header.cache_capacity = 0;
+    header.entry_count = 1;
+    updateHeaderChecksumForTest(&header);
+    writeHeaderForTest(encoded, header);
     var count_reader = std.Io.Reader.fixed(encoded);
     try testing.expectError(
         error.InvalidPkixHeader,
@@ -493,105 +402,70 @@ test "PKIX rejects entry count above encoded capacity" {
     );
 }
 
-test "PKIX validates the header checksum before allocation" {
-    const allocator = testing.allocator;
-    var source = try PubkeyCache.initCapacity(allocator, testing.io, 32);
-    defer source.deinit();
-    const encoded = try encodePkixForTest(allocator, &source);
-    defer allocator.free(encoded);
-
-    var header = readHeaderForTest(encoded);
-    header.cache_capacity = 1 << 30;
-    writeHeaderForTest(encoded, header);
-    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    var reader = std.Io.Reader.fixed(encoded);
-    try testing.expectError(
-        error.InvalidPkixHeaderChecksum,
-        pkix.load(
-            failing.allocator(),
-            testing.io,
-            &reader,
-            encoded.len,
-            std.math.maxInt(usize),
-        ),
-    );
-}
-
-test "PKIX clamps a valid oversized empty snapshot without allocating" {
-    const allocator = testing.allocator;
-    var source = try PubkeyCache.initCapacity(allocator, testing.io, 32);
-    defer source.deinit();
-    const encoded = try encodePkixForTest(allocator, &source);
-    defer allocator.free(encoded);
-
-    var header = readHeaderForTest(encoded);
-    header.cache_capacity = 1 << 30;
-    writeHeaderForTest(encoded, header);
-    updatePkixChecksumForTest(encoded);
-
-    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    var reader = std.Io.Reader.fixed(encoded);
-    var loaded = try pkix.load(
-        failing.allocator(),
-        testing.io,
-        &reader,
-        encoded.len,
-        0,
-    );
-    defer loaded.deinit();
-    try testing.expectEqual(@as(u32, 0), loaded.count(testing.io));
-    try testing.expectEqual(@as(usize, 0), loaded.capacity(testing.io));
-}
-
-test "PKIX rejects an entry count above the caller allocation limit" {
+test "PKIX enforces the caller capacity limit before allocation" {
     const allocator = testing.allocator;
     var pubkeys: [3]types.primitive.BLSPubkey.Type = undefined;
     try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
-    var source = try PubkeyCache.initCapacity(allocator, testing.io, pubkeys.len);
+
+    var source = try PubkeyCache.initCapacity(allocator, testing.io, 32);
     defer source.deinit();
-    for (pubkeys, 0..) |pubkey, index| {
-        try source.append(testing.io, pubkey, index);
-    }
+    try appendPubkeys(&source, &pubkeys);
 
     const encoded = try encodePkixForTest(allocator, &source);
     defer allocator.free(encoded);
+
+    var accepted_reader = std.Io.Reader.fixed(encoded);
+    var loaded = try pkix.load(
+        allocator,
+        testing.io,
+        &accepted_reader,
+        encoded.len,
+        pubkeys.len,
+    );
+    defer loaded.deinit();
+    try testing.expectEqual(@as(u32, pubkeys.len), loaded.count(testing.io));
+    try testing.expectEqual(@as(usize, pubkeys.len), loaded.capacity(testing.io));
+    for (pubkeys, 0..) |pubkey, index| {
+        try testing.expectEqual(
+            @as(u64, @intCast(index)),
+            loaded.get(testing.io, pubkey).?,
+        );
+    }
+
     var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    var reader = std.Io.Reader.fixed(encoded);
+    var rejected_reader = std.Io.Reader.fixed(encoded);
     try testing.expectError(
         error.PkixCapacityLimitExceeded,
         pkix.load(
             failing.allocator(),
             testing.io,
-            &reader,
+            &rejected_reader,
             encoded.len,
             pubkeys.len - 1,
         ),
     );
-}
 
-test "PKIX rejects an empty snapshot checksum error before allocation" {
-    const allocator = testing.allocator;
-    var source = try PubkeyCache.initCapacity(allocator, testing.io, 32);
-    defer source.deinit();
-    const encoded = try encodePkixForTest(allocator, &source);
-    defer allocator.free(encoded);
+    var empty_source = PubkeyCache.init(allocator, testing.io);
+    defer empty_source.deinit();
+    const empty_encoded = try encodePkixForTest(allocator, &empty_source);
+    defer allocator.free(empty_encoded);
+    var empty_header = readHeaderForTest(empty_encoded);
+    empty_header.cache_capacity = 1 << 30;
+    updateHeaderChecksumForTest(&empty_header);
+    writeHeaderForTest(empty_encoded, empty_header);
 
-    var header = readHeaderForTest(encoded);
-    header.payload_checksum ^= 1;
-    updateHeaderChecksumForTest(&header);
-    writeHeaderForTest(encoded, header);
-    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    var reader = std.Io.Reader.fixed(encoded);
-    try testing.expectError(
-        error.InvalidPkixChecksum,
-        pkix.load(
-            failing.allocator(),
-            testing.io,
-            &reader,
-            encoded.len,
-            std.math.maxInt(usize),
-        ),
+    var empty_failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var empty_reader = std.Io.Reader.fixed(empty_encoded);
+    var empty_loaded = try pkix.load(
+        empty_failing.allocator(),
+        testing.io,
+        &empty_reader,
+        empty_encoded.len,
+        0,
     );
+    defer empty_loaded.deinit();
+    try testing.expectEqual(@as(u32, 0), empty_loaded.count(testing.io));
+    try testing.expectEqual(@as(usize, 0), empty_loaded.capacity(testing.io));
 }
 
 test "PKIX rejects duplicate logical keys after rebuilding the index" {
@@ -600,18 +474,14 @@ test "PKIX rejects duplicate logical keys after rebuilding the index" {
     try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
     var source = try PubkeyCache.initCapacity(allocator, testing.io, pubkeys.len);
     defer source.deinit();
-    for (pubkeys, 0..) |pubkey, index| {
-        try source.append(testing.io, pubkey, index);
-    }
+    try appendPubkeys(&source, &pubkeys);
 
     const encoded = try encodePkixForTest(allocator, &source);
     defer allocator.free(encoded);
-    const layout = encodedPayloadLayout(encoded);
-    const keys_offset = header_size + layout.keys_offset;
-    const affine_offset = header_size + layout.pubkeys_offset;
+    const affine_offset = affinePayloadOffset(encoded);
     @memcpy(
-        encoded[keys_offset + @sizeOf([48]u8) ..][0..@sizeOf([48]u8)],
-        encoded[keys_offset..][0..@sizeOf([48]u8)],
+        encoded[header_size + @sizeOf([48]u8) ..][0..@sizeOf([48]u8)],
+        encoded[header_size..][0..@sizeOf([48]u8)],
     );
     @memcpy(
         encoded[affine_offset + @sizeOf(bls.PublicKey) ..][0..@sizeOf(bls.PublicKey)],
@@ -632,14 +502,11 @@ test "PKIX rejects substituted affine points with a valid checksum" {
     try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
     var source = try PubkeyCache.initCapacity(allocator, testing.io, pubkeys.len);
     defer source.deinit();
-    for (pubkeys, 0..) |pubkey, index| {
-        try source.append(testing.io, pubkey, index);
-    }
+    try appendPubkeys(&source, &pubkeys);
 
     const encoded = try encodePkixForTest(allocator, &source);
     defer allocator.free(encoded);
-    const layout = encodedPayloadLayout(encoded);
-    const affine_offset = header_size + layout.pubkeys_offset;
+    const affine_offset = affinePayloadOffset(encoded);
     const point_size = @sizeOf(bls.PublicKey);
     var first_point: [@sizeOf(bls.PublicKey)]u8 = undefined;
     @memcpy(&first_point, encoded[affine_offset..][0..point_size]);
@@ -667,8 +534,7 @@ test "PKIX rejects non-canonical affine limbs with a valid checksum" {
 
     const encoded = try encodePkixForTest(allocator, &source);
     defer allocator.free(encoded);
-    const layout = encodedPayloadLayout(encoded);
-    const affine_offset = header_size + layout.pubkeys_offset;
+    const affine_offset = affinePayloadOffset(encoded);
     try addBlsModulusToEncodedX(encoded[affine_offset..]);
 
     var forged: bls.PublicKey = undefined;

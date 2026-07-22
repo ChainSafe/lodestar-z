@@ -1,18 +1,18 @@
-import {spawnSync} from "node:child_process";
-import {unlinkSync, writeFileSync} from "node:fs";
-import {join} from "node:path";
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import {computeEpochAtSlot} from "@lodestar/state-transition";
-import {ssz} from "@lodestar/types";
+import {type phase0, ssz} from "@lodestar/types";
 import {beforeAll, describe, expect, it} from "vitest";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
-import {DEFAULT_PUBKEY_CACHE_HEADROOM} from "./serializedState.ts";
+
+const MAINNET_PUBKEY_CACHE_LIMIT = 2_000_000;
+const SYNTHETIC_VALIDATOR_COUNT = 16;
 
 describe("BeaconStateView", () => {
   let state: InstanceType<typeof bindings.BeaconStateView>;
   let stateBytes: Uint8Array;
+  let syntheticValidators: phase0.Validator[];
   let expected: {
     slot: number;
     genesisTime: number;
@@ -68,7 +68,20 @@ describe("BeaconStateView", () => {
     // before creating the native state to avoid OOM on CI.
     {
       const lodestarState = ssz.fulu.BeaconState.deserializeToView(stateBytes);
-      const v0 = lodestarState.validators.get(0);
+      syntheticValidators = Array.from({length: SYNTHETIC_VALIDATOR_COUNT}, (_, index) => {
+        const validator = lodestarState.validators.get(index);
+        return {
+          activationEligibilityEpoch: validator.activationEligibilityEpoch,
+          activationEpoch: validator.activationEpoch,
+          effectiveBalance: validator.effectiveBalance,
+          exitEpoch: validator.exitEpoch,
+          pubkey: Uint8Array.from(validator.pubkey),
+          slashed: validator.slashed,
+          withdrawableEpoch: validator.withdrawableEpoch,
+          withdrawalCredentials: Uint8Array.from(validator.withdrawalCredentials),
+        };
+      });
+      const v0 = syntheticValidators[0];
       expected = {
         balance0: lodestarState.balances.get(0),
         balance100: lodestarState.balances.get(100),
@@ -119,16 +132,7 @@ describe("BeaconStateView", () => {
           root: Uint8Array.from(lodestarState.previousJustifiedCheckpoint.root),
         },
         slot: lodestarState.slot,
-        validator0: {
-          activationEligibilityEpoch: v0.activationEligibilityEpoch,
-          activationEpoch: v0.activationEpoch,
-          effectiveBalance: v0.effectiveBalance,
-          exitEpoch: v0.exitEpoch,
-          pubkey: Uint8Array.from(v0.pubkey),
-          slashed: v0.slashed,
-          withdrawableEpoch: v0.withdrawableEpoch,
-          withdrawalCredentials: Uint8Array.from(v0.withdrawalCredentials),
-        },
+        validator0: v0,
         validatorCount: lodestarState.validators.length,
       };
     }
@@ -137,18 +141,11 @@ describe("BeaconStateView", () => {
 
     // Phase 2: Create native BeaconStateView
     bindings.pool.ensureCapacity(10_000_000);
-    let loadedPkix = false;
     try {
-      bindings.pubkeys.load("./mainnet.pkix", expected.validatorCount + DEFAULT_PUBKEY_CACHE_HEADROOM);
-      loadedPkix = true;
+      bindings.pubkeys.load("./mainnet.pkix", MAINNET_PUBKEY_CACHE_LIMIT);
     } catch (_e) {
       // Rebuild incompatible or corrupt snapshots from the serialized state.
-    }
-    if (!loadedPkix || bindings.pubkeys.capacity() < expected.validatorCount) {
-      if (loadedPkix) bindings.pubkeys.reset();
-      // This test never adds validators, so reserve exactly the registry prefix
-      // measured above instead of relying on a stale mainnet-size estimate.
-      bindings.pubkeys.ensureCapacity(expected.validatorCount);
+      bindings.pubkeys.ensureCapacity(MAINNET_PUBKEY_CACHE_LIMIT);
     }
     state = bindings.BeaconStateView.createFromBytes(stateBytes);
   }, 120_000); // 2 minute timeout for loading era file
@@ -292,90 +289,27 @@ describe("BeaconStateView", () => {
   });
 
   describe("isExecutionEnabled", () => {
-    let syntheticResults: {
-      bellatrixBlinded: boolean;
-      bellatrixWithPayload: boolean;
-      phase0WithPayload: boolean;
-    };
+    let phase0View: InstanceType<typeof bindings.BeaconStateView>;
+    let bellatrixView: InstanceType<typeof bindings.BeaconStateView>;
 
     beforeAll(() => {
-      const projectRoot = join(import.meta.dirname, "../..");
-      const fixturePath = join(projectRoot, `bindings/test/.tmp-execution-enabled-${process.pid}.mjs`);
+      const syncCommittee = {
+        aggregatePubkey: syntheticValidators[0].pubkey,
+        pubkeys: Array.from({length: 512}, (_, index) => syntheticValidators[index % SYNTHETIC_VALIDATOR_COUNT].pubkey),
+      };
+      const bellatrixState = ssz.bellatrix.BeaconState.defaultValue();
+      bellatrixState.slot = 144896 * 32;
+      bellatrixState.validators = syntheticValidators;
+      bellatrixState.currentSyncCommittee = syncCommittee;
+      bellatrixState.nextSyncCommittee = syncCommittee;
+      bellatrixState.previousEpochParticipation = Array.from({length: SYNTHETIC_VALIDATOR_COUNT}, () => 0);
+      bellatrixState.currentEpochParticipation = Array.from({length: SYNTHETIC_VALIDATOR_COUNT}, () => 0);
 
-      writeFileSync(
-        fixturePath,
-        `
-import {SecretKey} from "@chainsafe/blst";
-import {ssz} from "@lodestar/types";
-import bindings from "../src/index.js";
-
-const VALIDATOR_COUNT = 16;
-const validators = Array.from({length: VALIDATOR_COUNT}, (_, i) => {
-  const seed = new Uint8Array(32);
-  new DataView(seed.buffer).setUint32(0, i + 1);
-  return {
-    activationEligibilityEpoch: 0,
-    activationEpoch: 0,
-    effectiveBalance: 32_000_000_000,
-    exitEpoch: Number.MAX_SAFE_INTEGER,
-    pubkey: SecretKey.fromKeygen(seed).toPublicKey().toBytes(),
-    slashed: false,
-    withdrawableEpoch: Number.MAX_SAFE_INTEGER,
-    withdrawalCredentials: new Uint8Array(32),
-  };
-});
-const syncCommittee = {
-  aggregatePubkey: validators[0].pubkey,
-  pubkeys: Array.from({length: 512}, (_, i) => validators[i % VALIDATOR_COUNT].pubkey),
-};
-
-const bellatrixState = ssz.bellatrix.BeaconState.defaultValue();
-bellatrixState.slot = 144896 * 32;
-bellatrixState.validators = validators;
-bellatrixState.currentSyncCommittee = syncCommittee;
-bellatrixState.nextSyncCommittee = syncCommittee;
-bellatrixState.previousEpochParticipation = Array.from({length: VALIDATOR_COUNT}, () => 0);
-bellatrixState.currentEpochParticipation = Array.from({length: VALIDATOR_COUNT}, () => 0);
-
-bindings.pool.ensureCapacity(100_000);
-bindings.pubkeys.ensureCapacity(VALIDATOR_COUNT);
-const phase0View = bindings.BeaconStateView.createFromBytes(
-  ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
-);
-const bellatrixView = bindings.BeaconStateView.createFromBytes(
-  ssz.bellatrix.BeaconState.serialize(bellatrixState)
-);
-const payload = ssz.bellatrix.ExecutionPayload.defaultValue();
-payload.blockNumber = 1;
-
-console.log("EXECUTION_ENABLED_RESULTS=" + JSON.stringify({
-  bellatrixBlinded: bellatrixView.isExecutionEnabled({body: {executionPayloadHeader: {}}}),
-  bellatrixWithPayload: bellatrixView.isExecutionEnabled({body: {executionPayload: payload}}),
-  phase0WithPayload: phase0View.isExecutionEnabled({body: {executionPayload: payload}}),
-}));
-`
+      phase0View = bindings.BeaconStateView.createFromBytes(
+        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
       );
-
-      try {
-        const result = spawnSync(process.execPath, ["--experimental-strip-types", fixturePath], {
-          cwd: projectRoot,
-          encoding: "utf-8",
-          timeout: 30_000,
-        });
-        expect(result.status, `stdout=${result.stdout} stderr=${result.stderr}`).toBe(0);
-        const resultLine = result.stdout.split("\n").find((line) => line.startsWith("EXECUTION_ENABLED_RESULTS="));
-        if (resultLine === undefined) {
-          throw new Error(`child did not report results: stdout=${result.stdout} stderr=${result.stderr}`);
-        }
-        syntheticResults = JSON.parse(resultLine.slice("EXECUTION_ENABLED_RESULTS=".length));
-      } finally {
-        try {
-          unlinkSync(fixturePath);
-        } catch (_e) {
-          // ignore
-        }
-      }
-    }, 40_000);
+      bellatrixView = bindings.BeaconStateView.createFromBytes(ssz.bellatrix.BeaconState.serialize(bellatrixState));
+    });
 
     it("should true on post-merge state without reading the block", () => {
       // body is empty — binding short-circuits before touching it.
@@ -383,17 +317,21 @@ console.log("EXECUTION_ENABLED_RESULTS=" + JSON.stringify({
     });
 
     it("returns false even when block carries a non-default executionPayload", () => {
-      expect(syntheticResults.phase0WithPayload).toBe(false);
+      const payload = ssz.bellatrix.ExecutionPayload.defaultValue();
+      payload.blockNumber = 1;
+      expect(phase0View.isExecutionEnabled({body: {executionPayload: payload}})).toBe(false);
     });
 
     it("returns true after walking block for non-default payload", () => {
-      expect(syntheticResults.bellatrixWithPayload).toBe(true);
+      const payload = ssz.bellatrix.ExecutionPayload.defaultValue();
+      payload.blockNumber = 1;
+      expect(bellatrixView.isExecutionEnabled({body: {executionPayload: payload}})).toBe(true);
     });
 
     it("returns false when block is blinded (body has executionPayloadHeader)", () => {
       // Lodestar treats blinded pre-merge Bellatrix blocks as not-yet-merged because the
       // state header is still default. The Zig short-circuits on the presence of the field.
-      expect(syntheticResults.bellatrixBlinded).toBe(false);
+      expect(bellatrixView.isExecutionEnabled({body: {executionPayloadHeader: {}}})).toBe(false);
     });
   });
 
