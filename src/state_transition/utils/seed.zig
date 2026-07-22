@@ -155,36 +155,29 @@ pub fn computePayloadTimelinessCommitteesForEpoch(
     allocator: Allocator,
     state: *BeaconState(fork),
     epoch: Epoch,
-    epoch_cache: *const @import("../cache/epoch_cache.zig").EpochCache,
+    committees: []const []const []const ValidatorIndex,
+    effective_balance_increments: []const u16,
 ) ![preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex {
     var epoch_seed: [32]u8 = undefined;
     try getSeed(fork, state, epoch, c.DOMAIN_PTC_ATTESTER, &epoch_seed);
 
     const start_slot = computeStartSlotAtEpoch(epoch);
-
     var slot_seed_input: [40]u8 = undefined;
     @memcpy(slot_seed_input[0..32], &epoch_seed);
 
     var result: [preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex = undefined;
-
     for (0..preset.SLOTS_PER_EPOCH) |i| {
-        const slot = start_slot + i;
-        std.mem.writeInt(u64, slot_seed_input[32..][0..8], slot, .little);
+        std.mem.writeInt(u64, slot_seed_input[32..][0..8], start_slot + i, .little);
 
         var slot_seed: [32]u8 = undefined;
         Sha256.hash(&slot_seed_input, &slot_seed, .{});
-
-        const committees_per_slot = try epoch_cache.getCommitteeCountPerSlot(epoch);
-        const slot_committees = try allocator.alloc([]const ValidatorIndex, committees_per_slot);
-        defer allocator.free(slot_committees);
-
-        for (0..committees_per_slot) |ci| {
-            slot_committees[ci] = try epoch_cache.getBeaconCommittee(slot, ci);
-        }
-
-        result[i] = try computePayloadTimelinessCommitteeForSlot(allocator, &slot_seed, slot_committees, epoch_cache.effective_balance_increments.get().items);
+        result[i] = try computePayloadTimelinessCommitteeForSlot(
+            allocator,
+            &slot_seed,
+            committees[i],
+            effective_balance_increments,
+        );
     }
-
     return result;
 }
 

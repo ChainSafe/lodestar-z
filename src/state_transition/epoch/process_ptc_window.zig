@@ -6,8 +6,7 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const ct = @import("consensus_types");
 const preset = @import("preset").preset;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
-const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
-const computePtc = @import("../utils/gloas.zig").computePtc;
+const computePayloadTimelinessCommitteesForEpoch = @import("../utils/seed.zig").computePayloadTimelinessCommitteesForEpoch;
 const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 
 /// Update the `ptc_window` field in the beacon state by shifting out the oldest epoch's
@@ -32,18 +31,17 @@ pub fn processPtcWindow(
     }
 
     const next_epoch = computeEpochAtSlot(try state.slot()) + preset.MIN_SEED_LOOKAHEAD + 1;
-    const start_slot = computeStartSlotAtEpoch(next_epoch);
     const next_shuffling = try epoch_transition_cache.getNextShuffling(allocator, .gloas, state);
 
-    var next_epoch_payload_timeliness_committees: [preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex = undefined;
+    const next_epoch_payload_timeliness_committees = try computePayloadTimelinessCommitteesForEpoch(
+        .gloas,
+        allocator,
+        state,
+        next_epoch,
+        &next_shuffling.committees,
+        epoch_cache.effective_balance_increments.get().items,
+    );
     for (0..preset.SLOTS_PER_EPOCH) |slot_offset| {
-        next_epoch_payload_timeliness_committees[slot_offset] = try computePtc(
-            allocator,
-            state,
-            start_slot + slot_offset,
-            next_shuffling,
-            epoch_cache.effective_balance_increments.get().items,
-        );
         try ptc_window.setValue(
             ptc_window_len - preset.SLOTS_PER_EPOCH + slot_offset,
             &next_epoch_payload_timeliness_committees[slot_offset],

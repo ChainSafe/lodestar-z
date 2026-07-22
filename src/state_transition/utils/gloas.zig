@@ -325,12 +325,39 @@ pub fn initializePtcWindow(
     var ptcs: [(1 + preset.MIN_SEED_LOOKAHEAD) * preset.SLOTS_PER_EPOCH][ptc_size]ValidatorIndex = undefined;
     for (0..1 + preset.MIN_SEED_LOOKAHEAD) |epoch_offset| {
         const epoch = current_epoch + epoch_offset;
+        var owned_shuffling: ?*EpochShuffling = null;
+        defer if (owned_shuffling) |shuffling| shuffling.deinit();
+
+        const shuffling = epoch_cache.getShufflingAtEpochOrNull(epoch) orelse blk: {
+            var validators = try state.validators();
+            const validator_count = try validators.length();
+            var active_indices: std.ArrayList(ValidatorIndex) = .empty;
+            defer active_indices.deinit(allocator);
+
+            for (0..validator_count) |i| {
+                var validator: ct.phase0.Validator.Type = undefined;
+                try validators.getValue(undefined, i, &validator);
+                if (isActiveValidator(&validator, epoch)) {
+                    try active_indices.append(allocator, @intCast(i));
+                }
+            }
+
+            var any_state = @unionInit(AnyBeaconState, @tagName(fork), state.inner);
+            owned_shuffling = try computeEpochShuffling(
+                allocator,
+                &any_state,
+                try active_indices.toOwnedSlice(allocator),
+                epoch,
+            );
+            break :blk owned_shuffling.?;
+        };
         const epoch_committees = try computePayloadTimelinessCommitteesForEpoch(
             fork,
             allocator,
             state,
             epoch,
-            epoch_cache,
+            &shuffling.committees,
+            epoch_cache.effective_balance_increments.get().items,
         );
         for (0..preset.SLOTS_PER_EPOCH) |slot_index| {
             ptcs[epoch_offset * preset.SLOTS_PER_EPOCH + slot_index] = epoch_committees[slot_index];
