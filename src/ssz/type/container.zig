@@ -5,6 +5,7 @@ const TypeKind = @import("type_kind.zig").TypeKind;
 
 const isFixedType = @import("type_kind.zig").isFixedType;
 const isBasicType = @import("type_kind.zig").isBasicType;
+const tree_api = @import("tree_api.zig");
 
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
@@ -464,12 +465,19 @@ pub fn VariableContainerType(comptime ST: type) type {
         _offsets[i] = _fixed_end;
         if (comptime isFixedType(field.type)) {
             _min_size += field.type.fixed_size;
-            _max_size += field.type.fixed_size;
+            if (_max_size != std.math.maxInt(usize)) {
+                _max_size += field.type.fixed_size;
+            }
             _fixed_end += field.type.fixed_size;
             _fixed_count += 1;
         } else {
             _min_size += field.type.min_size + 4;
-            _max_size += field.type.max_size + 4;
+            // Handle unbounded types (max_size == maxInt(usize))
+            if (field.type.max_size == std.math.maxInt(usize) or _max_size == std.math.maxInt(usize)) {
+                _max_size = std.math.maxInt(usize);
+            } else {
+                _max_size += field.type.max_size + 4;
+            }
             _fixed_end += 4;
         }
 
@@ -806,7 +814,7 @@ pub fn VariableContainerType(comptime ST: type) type {
 
                 inline for (fields, 0..) |field, i| {
                     const field_value = &@field(value, field.name);
-                    nodes[i] = try field.type.tree.fromValue(pool, field_value);
+                    nodes[i] = try tree_api.fromValue(field.type, pool.allocator, pool, field_value);
                 }
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }

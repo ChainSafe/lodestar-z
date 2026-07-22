@@ -6,6 +6,7 @@ const ssz = @import("ssz");
 const Node = @import("persistent_merkle_tree").Node;
 
 const Allocator = std.mem.Allocator;
+const tree_api = ssz.treeApi;
 
 pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST.Type) !void {
     if (comptime ssz.isBitVectorType(ST)) {
@@ -14,9 +15,33 @@ pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST
         const bytes = try hex.hexToBytes(bytes_buf, yaml_bytes);
         out.* = ST.Type{ .data = bytes[0..ST.byte_length].* };
         return;
-    } else if (comptime ssz.isBitListType(ST)) {
-        const bytes_buf = try allocator.alloc(u8, ((ST.limit + 7) / 8) + 2);
+    } else if (comptime ST.kind == .compatible_union) {
+        const map = try y.docs.items[0].asMap();
+
+        // Parse selector field
+        y.docs.items[0] = map.get("selector").?;
+        const selector_str = try y.parse(allocator, []const u8);
+        const selector = try std.fmt.parseInt(u8, selector_str, 10);
+
+        // Parse data field based on selector
+        y.docs.items[0] = map.get("data").?;
+        inline for (ST._union_options) |option| {
+            const option_selector = option.@"0";
+            if (selector == option_selector) {
+                const option_type = option.@"1";
+                const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option_selector});
+
+                // Initialize union field and parse in-place to avoid intermediate copy
+                out.* = @unionInit(ST.Type, field_name, option_type.default_value);
+                try parseYaml(option_type, allocator, y, &@field(out.*, field_name));
+
+                return;
+            }
+        }
+        return error.InvalidSelector;
+    } else if (comptime ssz.isBitListType(ST) or ssz.isProgressiveBitListType(ST)) {
         const yaml_bytes = try y.parse(allocator, []const u8);
+        const bytes_buf = try allocator.alloc(u8, hex.hexByteLen(yaml_bytes));
         const data = try hex.hexToBytes(bytes_buf, yaml_bytes);
         // we need to find the padding bit to find the bit_len, and then remove it
         // do this manually, otherwise we're testing the deserialization codepath against itself
@@ -39,14 +64,14 @@ pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST
 
         out.* = bl;
         return;
-    } else if (ST.kind == .container) {
+    } else if (ST.kind == .container or ST.kind == .progressive_container) {
         const map = try y.docs.items[0].asMap();
         inline for (ST.fields) |field| {
             y.docs.items[0] = map.get(field.name).?;
             try parseYaml(field.type, allocator, y, &@field(out, field.name));
         }
         return;
-    } else if (ST.kind == .list) {
+    } else if (ST.kind == .list or ST.kind == .progressive_list) {
         if (comptime ssz.isByteListType(ST)) {
             const hex_bytes = try y.parse(allocator, []u8);
             const bytes_buf = try allocator.alloc(u8, (hex_bytes.len - 2) / 2);
@@ -273,7 +298,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
 
     // test conversion between tree and value
     {
-        const node = try ST.tree.fromValue(&pool, value_expected);
+        const node = try tree_api.fromValue(ST, allocator, &pool, value_expected);
         defer pool.unref(node);
 
         try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));
@@ -290,8 +315,8 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
     }
 
     // test conversion between tree and serialized
-    {
-        const node = try ST.tree.deserializeFromBytes(&pool, serialized_expected);
+    if (comptime tree_api.supportsDeserializeFromBytes(ST)) {
+        const node = try tree_api.deserializeFromBytes(ST, allocator, &pool, serialized_expected);
         defer pool.unref(node);
 
         try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));
