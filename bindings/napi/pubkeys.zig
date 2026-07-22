@@ -183,8 +183,6 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
     const pubkey_bytes = pubkey_slice[0..48].*;
 
-    // `append` checks the current count after joining the cache's writer queue,
-    // so sequential concurrent inserts cannot be rejected using a stale count.
     try state.cache.append(io, pubkey_bytes, idx);
 }
 

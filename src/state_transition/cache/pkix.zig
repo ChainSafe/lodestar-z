@@ -30,8 +30,15 @@ const Header = extern struct {
         };
     }
 
-    fn finish(self: *Header, payload: []const u8) void {
-        self.payload_checksum = payloadChecksum(payload);
+    fn finish(
+        self: *Header,
+        key_bytes: []const u8,
+        affine_bytes: []const u8,
+    ) void {
+        var checksum = std.hash.XxHash3.init(payload_checksum_seed);
+        checksum.update(key_bytes);
+        checksum.update(affine_bytes);
+        self.payload_checksum = checksum.final();
         self.header_checksum = headerChecksum(self);
     }
 
@@ -165,57 +172,27 @@ fn validateLoadedEntries(cache: *PubkeyCache) !void {
     }
 }
 
-const Snapshot = struct {
-    header: Header,
-    payload: []u8,
-    allocator: std.mem.Allocator,
-
-    fn deinit(self: *Snapshot, cache: *PubkeyCache, io: std.Io) void {
-        cache.writer_mutex.lockUncancelable(io);
-        defer cache.writer_mutex.unlock(io);
-        self.allocator.free(self.payload);
-        self.* = undefined;
-    }
-};
-
-fn captureSnapshot(cache: *PubkeyCache, io: std.Io) !Snapshot {
-    try cache.writer_mutex.lock(io);
-    defer cache.writer_mutex.unlock(io);
-
-    // Every operation that can move map storage takes writer_mutex.
-    const entry_count: u32 = @intCast(cache.entries.count());
-    const cache_capacity: u32 = @intCast(cache.entries.capacity());
-    std.debug.assert(entry_count <= cache_capacity);
-
-    const layout = PayloadLayout.init(entry_count);
-    const payload = try cache.allocator.alloc(u8, layout.size);
-    @memcpy(
-        payload[0..layout.keys_size],
-        std.mem.sliceAsBytes(cache.entries.keys()),
-    );
-    @memcpy(
-        payload[layout.keys_size..],
-        std.mem.sliceAsBytes(cache.entries.values()),
-    );
-
-    return .{
-        .header = .init(entry_count, cache_capacity),
-        .payload = payload,
-        .allocator = cache.allocator,
-    };
-}
-
 /// Write a native, ABI-locked PKIX snapshot.
 ///
 /// The payload contains insertion-ordered compressed keys followed by affine
 /// public keys. Runtime hash state is rebuilt on load and is never persisted.
+/// The shared lock spans output, so the writer must not mutate the cache.
 pub fn save(cache: *PubkeyCache, io: std.Io, writer: *std.Io.Writer) !void {
-    var snapshot = try captureSnapshot(cache, io);
-    defer snapshot.deinit(cache, io);
+    try cache.lock.lockShared(io);
+    defer cache.lock.unlockShared(io);
 
-    snapshot.header.finish(snapshot.payload);
-    try writer.writeAll(std.mem.asBytes(&snapshot.header));
-    try writer.writeAll(snapshot.payload);
+    const entry_count: u32 = @intCast(cache.entries.count());
+    const cache_capacity: u32 = @intCast(cache.entries.capacity());
+    std.debug.assert(entry_count <= cache_capacity);
+
+    const key_bytes = std.mem.sliceAsBytes(cache.entries.keys());
+    const affine_bytes = std.mem.sliceAsBytes(cache.entries.values());
+    var header = Header.init(entry_count, cache_capacity);
+    header.finish(key_bytes, affine_bytes);
+
+    try writer.writeAll(std.mem.asBytes(&header));
+    try writer.writeAll(key_bytes);
+    try writer.writeAll(affine_bytes);
 }
 
 /// Load a native PKIX snapshot into a fresh cache.
@@ -289,18 +266,12 @@ pub fn load(
 pub fn install(cache: *PubkeyCache, io: std.Io, staged: *PubkeyCache) !void {
     std.debug.assert(cache != staged);
 
-    try cache.writer_mutex.lock(io);
-    defer cache.writer_mutex.unlock(io);
+    try cache.lock.lock(io);
+    defer cache.lock.unlock(io);
 
-    {
-        try cache.lock.lock(io);
-        defer cache.lock.unlock(io);
-
-        std.mem.swap(@TypeOf(cache.allocator), &cache.allocator, &staged.allocator);
-        std.mem.swap(@TypeOf(cache.entries), &cache.entries, &staged.entries);
-        std.mem.swap(@TypeOf(cache.hash_key), &cache.hash_key, &staged.hash_key);
-    }
-
+    std.mem.swap(@TypeOf(cache.allocator), &cache.allocator, &staged.allocator);
+    std.mem.swap(@TypeOf(cache.entries), &cache.entries, &staged.entries);
+    std.mem.swap(@TypeOf(cache.hash_key), &cache.hash_key, &staged.hash_key);
     staged.entries.deinit(staged.allocator);
     staged.entries = .empty;
 }

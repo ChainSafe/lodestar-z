@@ -31,54 +31,6 @@ fn encodePkixForTest(allocator: std.mem.Allocator, cache: *PubkeyCache) ![]u8 {
     return allocating_writer.toOwnedSlice();
 }
 
-const BlockingWriter = struct {
-    io: std.Io,
-    entered: std.Io.Event = .unset,
-    release: std.Io.Event = .unset,
-    output: std.Io.Writer.Allocating,
-    writer: std.Io.Writer = .{
-        .buffer = &.{},
-        .vtable = &.{ .drain = drain },
-    },
-
-    fn init(allocator: std.mem.Allocator, io: std.Io) BlockingWriter {
-        return .{
-            .io = io,
-            .output = .init(allocator),
-        };
-    }
-
-    fn deinit(self: *BlockingWriter) void {
-        self.output.deinit();
-    }
-
-    fn drain(
-        io_writer: *std.Io.Writer,
-        data: []const []const u8,
-        splat: usize,
-    ) std.Io.Writer.Error!usize {
-        const self: *BlockingWriter = @alignCast(@fieldParentPtr("writer", io_writer));
-        self.entered.set(self.io);
-        self.release.wait(self.io) catch return error.WriteFailed;
-        return self.output.writer.vtable.drain(&self.output.writer, data, splat);
-    }
-};
-
-const SaveContext = struct {
-    cache: *PubkeyCache,
-    io: std.Io,
-    writer: *std.Io.Writer,
-    result: *std.atomic.Value(u8),
-};
-
-fn saveForConcurrencyTest(context: *const SaveContext) void {
-    pkix.save(context.cache, context.io, context.writer) catch {
-        context.result.store(2, .release);
-        return;
-    };
-    context.result.store(1, .release);
-}
-
 fn updatePkixChecksumForTest(bytes: []u8) void {
     var header = readHeaderForTest(bytes);
     header.payload_checksum = std.hash.XxHash3.hash(
@@ -164,6 +116,10 @@ test "PKIX round trip preserves populated and empty caches" {
     const same_entries_encoded = try encodePkixForTest(allocator, &same_entries);
     defer allocator.free(same_entries_encoded);
     try testing.expectEqualSlices(u8, encoded, same_entries_encoded);
+    try testing.expectEqual(
+        std.hash.XxHash3.hash(pkix.testing.payload_seed, encoded[header_size..]),
+        readHeaderForTest(encoded).payload_checksum,
+    );
 
     var reader = std.Io.Reader.fixed(encoded);
     var loaded = try loadPkixForTest(allocator, &reader, encoded.len);
@@ -228,52 +184,6 @@ test "PKIX install replaces contents across allocators and remains usable" {
 
     try live.append(testing.io, pubkeys[0], 2);
     try testing.expectEqual(@as(u64, 2), live.get(testing.io, pubkeys[0]).?);
-}
-
-test "PKIX save releases the writer mutex before output" {
-    const allocator = testing.allocator;
-    var pubkeys: [2]types.primitive.BLSPubkey.Type = undefined;
-    try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
-
-    var source = try PubkeyCache.initCapacity(allocator, testing.io, pubkeys.len);
-    defer source.deinit();
-    try source.append(testing.io, pubkeys[0], 0);
-
-    var blocking_writer = BlockingWriter.init(allocator, testing.io);
-    defer blocking_writer.deinit();
-    var save_result = std.atomic.Value(u8).init(0);
-    const context = SaveContext{
-        .cache = &source,
-        .io = testing.io,
-        .writer = &blocking_writer.writer,
-        .result = &save_result,
-    };
-
-    var group: std.Io.Group = .init;
-    errdefer group.cancel(testing.io);
-    try group.concurrent(testing.io, saveForConcurrencyTest, .{&context});
-    try blocking_writer.entered.wait(testing.io);
-
-    const writer_mutex_released = source.writer_mutex.tryLock();
-    if (writer_mutex_released) {
-        source.writer_mutex.unlock(testing.io);
-        try source.append(testing.io, pubkeys[1], 1);
-    }
-    blocking_writer.release.set(testing.io);
-    try group.await(testing.io);
-
-    try testing.expect(writer_mutex_released);
-    try testing.expectEqual(@as(u8, 1), save_result.load(.acquire));
-    try testing.expectEqual(@as(u32, 2), source.count(testing.io));
-
-    // Output is the coherent prefix captured before the live append.
-    const encoded = blocking_writer.output.written();
-    var reader = std.Io.Reader.fixed(encoded);
-    var loaded = try loadPkixForTest(allocator, &reader, encoded.len);
-    defer loaded.deinit();
-    try testing.expectEqual(@as(u32, 1), loaded.count(testing.io));
-    try testing.expectEqual(@as(u64, 0), loaded.get(testing.io, pubkeys[0]).?);
-    try testing.expectEqual(@as(?u64, null), loaded.get(testing.io, pubkeys[1]));
 }
 
 test "PKIX rejects payload corruption and inexact reads" {
