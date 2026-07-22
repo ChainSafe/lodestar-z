@@ -98,7 +98,8 @@ test "syncPubkeys rejects a duplicate without publishing a partial suffix" {
     try testing.expectEqual(@as(?u64, null), cache.get(testing.io, pubkeys[1]));
 }
 
-test "syncPubkeys rejects an invalid key without publishing earlier suffix entries" {
+test "syncPubkeys rejects an invalid key without publishing across batches" {
+    const batch_size = cache_module.uncompress_batch_size;
     var pubkeys: [2]types.primitive.BLSPubkey.Type = undefined;
     try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
 
@@ -110,11 +111,10 @@ test "syncPubkeys rejects an invalid key without publishing earlier suffix entri
     validators[0].pubkey = pubkeys[0];
     validators[1].pubkey = pubkeys[1];
     validators[2].pubkey = std.mem.zeroes([48]u8);
-    const validator_ptrs = [_]*const Validator{
-        &validators[0],
-        &validators[1],
-        &validators[2],
-    };
+    var validator_ptrs: [batch_size + 2]*const Validator = undefined;
+    validator_ptrs[0] = &validators[0];
+    @memset(validator_ptrs[1 .. batch_size + 1], &validators[1]);
+    validator_ptrs[batch_size + 1] = &validators[2];
 
     var cache = PubkeyCache.init(testing.allocator, testing.io);
     defer cache.deinit();

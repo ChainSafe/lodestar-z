@@ -4,6 +4,23 @@ const types = @import("consensus_types");
 const Validator = types.phase0.Validator.Type;
 
 const HashKey = [std.hash.SipHash64(1, 3).key_length]u8;
+pub const uncompress_batch_size = 1000;
+
+fn uncompressBatch(
+    validators: []const *const Validator,
+    prepared: []bls.PublicKey,
+    batch_error: *?bls.BlstError,
+) void {
+    std.debug.assert(validators.len == prepared.len);
+    std.debug.assert(validators.len <= uncompress_batch_size);
+
+    for (validators, prepared) |validator, *affine| {
+        affine.* = bls.PublicKey.uncompress(&validator.pubkey) catch |err| {
+            batch_error.* = err;
+            return;
+        };
+    }
+}
 
 /// Keyed hashing prevents an untrusted set of compressed pubkeys from forcing
 /// pathological probe chains in the reverse lookup.
@@ -274,8 +291,28 @@ pub const PubkeyCache = struct {
         const suffix = validators[old_len..];
         const prepared = try self.allocator.alloc(bls.PublicKey, suffix.len);
         defer self.allocator.free(prepared);
-        for (suffix, prepared) |validator, *affine| {
-            affine.* = try bls.PublicKey.uncompress(&validator.pubkey);
+
+        const batch_count = (suffix.len - 1) / uncompress_batch_size + 1;
+        const batch_errors = try self.allocator.alloc(?bls.BlstError, batch_count);
+        defer self.allocator.free(batch_errors);
+        @memset(batch_errors, null);
+
+        var group: std.Io.Group = .init;
+        errdefer group.cancel(io);
+        // `async` bounds worker growth and runs excess batches on the caller.
+        for (batch_errors, 0..) |*batch_error, batch_index| {
+            const batch_start = batch_index * uncompress_batch_size;
+            const batch_end = @min(batch_start + uncompress_batch_size, suffix.len);
+            group.async(io, uncompressBatch, .{
+                suffix[batch_start..batch_end],
+                prepared[batch_start..batch_end],
+                batch_error,
+            });
+        }
+        try group.await(io);
+
+        for (batch_errors) |batch_error| {
+            if (batch_error) |err| return err;
         }
 
         try self.ensureTotalCapacityUnlocked(validators.len);
