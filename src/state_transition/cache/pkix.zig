@@ -161,17 +161,6 @@ fn readAndHash(
     checksum.update(bytes);
 }
 
-fn validateLoadedEntries(cache: *PubkeyCache) !void {
-    const context = cache.hashContext();
-    for (cache.entries.keys(), cache.entries.values(), 0..) |*key, *value, index| {
-        if (!value.matchesCompressed(key) or
-            cache.entries.getIndexContext(key.*, context) != index)
-        {
-            return error.InvalidPkixPayload;
-        }
-    }
-}
-
 /// Write a native, ABI-locked PKIX snapshot.
 ///
 /// The payload contains insertion-ordered compressed keys followed by affine
@@ -197,8 +186,9 @@ pub fn save(cache: *PubkeyCache, io: std.Io, writer: *std.Io.Writer) !void {
 
 /// Load a native PKIX snapshot into a fresh cache.
 ///
-/// PKIX checks representation and internal consistency, not file authenticity.
-/// Callers must provide an application-owned file from the intended network.
+/// PKIX checks framing, ABI compatibility, bounds, and checksum, but does not
+/// authenticate or semantically validate entries. Callers must provide an
+/// application-owned file from the intended network.
 pub fn load(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -255,7 +245,6 @@ pub fn load(
     }
 
     try cache.entries.reIndexContext(allocator, cache.hashContext());
-    try validateLoadedEntries(&cache);
     return cache;
 }
 

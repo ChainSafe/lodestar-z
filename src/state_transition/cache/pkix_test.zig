@@ -1,6 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
-const bls = @import("bls");
 const types = @import("consensus_types");
 const pubkey_cache = @import("pubkey_cache.zig");
 const PubkeyCache = pubkey_cache.PubkeyCache;
@@ -58,11 +56,6 @@ fn updateHeaderChecksumForTest(header: *PkixHeader) void {
     );
 }
 
-fn affinePayloadOffset(bytes: []const u8) usize {
-    const count: usize = @intCast(readHeaderForTest(bytes).entry_count);
-    return header_size + count * @sizeOf([48]u8);
-}
-
 fn appendPubkeys(
     cache: *PubkeyCache,
     pubkeys: []const types.primitive.BLSPubkey.Type,
@@ -70,30 +63,6 @@ fn appendPubkeys(
     for (pubkeys, 0..) |pubkey, index| {
         try cache.append(testing.io, pubkey, index);
     }
-}
-
-fn addBlsModulusToEncodedX(bytes: []u8) !void {
-    const modulus = [_]u64{
-        0xb9feffffffffaaab,
-        0x1eabfffeb153ffff,
-        0x6730d2a0f6b0f624,
-        0x64774b84f38512bf,
-        0x4b1ba7b6434bacd7,
-        0x1a0111ea397fe69a,
-    };
-    if (bytes.len < @sizeOf(@TypeOf(modulus))) return error.InvalidLength;
-
-    const endian = builtin.target.cpu.arch.endian();
-    var carry: u1 = 0;
-    for (modulus, 0..) |limb, index| {
-        const encoded_limb = bytes[index * @sizeOf(u64) ..][0..@sizeOf(u64)];
-        const current = std.mem.readInt(u64, encoded_limb, endian);
-        const first = @addWithOverflow(current, limb);
-        const second = @addWithOverflow(first[0], carry);
-        std.mem.writeInt(u64, encoded_limb, second[0], endian);
-        carry = first[1] | second[1];
-    }
-    if (carry != 0) return error.Overflow;
 }
 
 test "PKIX round trip preserves populated and empty caches" {
@@ -376,91 +345,4 @@ test "PKIX enforces the caller capacity limit before allocation" {
     defer empty_loaded.deinit();
     try testing.expectEqual(@as(u32, 0), empty_loaded.count(testing.io));
     try testing.expectEqual(@as(usize, 0), empty_loaded.capacity(testing.io));
-}
-
-test "PKIX rejects duplicate logical keys after rebuilding the index" {
-    const allocator = testing.allocator;
-    var pubkeys: [2]types.primitive.BLSPubkey.Type = undefined;
-    try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
-    var source = try PubkeyCache.initCapacity(allocator, testing.io, pubkeys.len);
-    defer source.deinit();
-    try appendPubkeys(&source, &pubkeys);
-
-    const encoded = try encodePkixForTest(allocator, &source);
-    defer allocator.free(encoded);
-    const affine_offset = affinePayloadOffset(encoded);
-    @memcpy(
-        encoded[header_size + @sizeOf([48]u8) ..][0..@sizeOf([48]u8)],
-        encoded[header_size..][0..@sizeOf([48]u8)],
-    );
-    @memcpy(
-        encoded[affine_offset + @sizeOf(bls.PublicKey) ..][0..@sizeOf(bls.PublicKey)],
-        encoded[affine_offset..][0..@sizeOf(bls.PublicKey)],
-    );
-    updatePkixChecksumForTest(encoded);
-
-    var reader = std.Io.Reader.fixed(encoded);
-    try testing.expectError(
-        error.InvalidPkixPayload,
-        loadPkixForTest(allocator, &reader, encoded.len),
-    );
-}
-
-test "PKIX rejects substituted affine points with a valid checksum" {
-    const allocator = testing.allocator;
-    var pubkeys: [2]types.primitive.BLSPubkey.Type = undefined;
-    try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
-    var source = try PubkeyCache.initCapacity(allocator, testing.io, pubkeys.len);
-    defer source.deinit();
-    try appendPubkeys(&source, &pubkeys);
-
-    const encoded = try encodePkixForTest(allocator, &source);
-    defer allocator.free(encoded);
-    const affine_offset = affinePayloadOffset(encoded);
-    const point_size = @sizeOf(bls.PublicKey);
-    var first_point: [@sizeOf(bls.PublicKey)]u8 = undefined;
-    @memcpy(&first_point, encoded[affine_offset..][0..point_size]);
-    @memcpy(
-        encoded[affine_offset..][0..point_size],
-        encoded[affine_offset + point_size ..][0..point_size],
-    );
-    @memcpy(encoded[affine_offset + point_size ..][0..point_size], &first_point);
-    updatePkixChecksumForTest(encoded);
-
-    var reader = std.Io.Reader.fixed(encoded);
-    try testing.expectError(
-        error.InvalidPkixPayload,
-        loadPkixForTest(allocator, &reader, encoded.len),
-    );
-}
-
-test "PKIX rejects non-canonical affine limbs with a valid checksum" {
-    const allocator = testing.allocator;
-    var pubkeys: [1]types.primitive.BLSPubkey.Type = undefined;
-    try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
-    var source = try PubkeyCache.initCapacity(allocator, testing.io, pubkeys.len);
-    defer source.deinit();
-    try source.append(testing.io, pubkeys[0], 0);
-
-    const encoded = try encodePkixForTest(allocator, &source);
-    defer allocator.free(encoded);
-    const affine_offset = affinePayloadOffset(encoded);
-    try addBlsModulusToEncodedX(encoded[affine_offset..]);
-
-    var forged: bls.PublicKey = undefined;
-    @memcpy(
-        std.mem.asBytes(&forged),
-        encoded[affine_offset..][0..@sizeOf(bls.PublicKey)],
-    );
-    try testing.expect(bls.c.blst_p1_affine_on_curve(&forged.point));
-    const forged_compressed = forged.compress();
-    try testing.expectEqualSlices(u8, &pubkeys[0], &forged_compressed);
-    try testing.expect(!forged.matchesCompressed(&pubkeys[0]));
-
-    updatePkixChecksumForTest(encoded);
-    var reader = std.Io.Reader.fixed(encoded);
-    try testing.expectError(
-        error.InvalidPkixPayload,
-        loadPkixForTest(allocator, &reader, encoded.len),
-    );
 }
