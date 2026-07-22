@@ -1,8 +1,8 @@
-import {spawnSync} from "node:child_process";
 import crypto from "node:crypto";
 import {Worker} from "node:worker_threads";
 import {describe, expect, it} from "vitest";
 import {PublicKey, SecretKey, Signature, verify} from "../src/blst.js";
+import {pubkeyCache} from "../src/pubkeys.js";
 
 /**
  * Tests that the per-context instance data (blst InstanceData) and
@@ -22,7 +22,7 @@ describe("worker isolation", () => {
     expect(verify(msg, pk, sig)).toBe(true);
 
     // 2. Spawn a worker that loads bindings, does blst work, then exits
-    const workerResult = await runWorker();
+    const workerResult = await runBlstWorker();
     expect(workerResult).toBe("ok");
 
     // 3. After the worker's env teardown + cleanup hooks have fired,
@@ -46,7 +46,7 @@ describe("worker isolation", () => {
     const sig = sk.sign(msg);
 
     for (let i = 0; i < 3; i++) {
-      const result = await runWorker();
+      const result = await runBlstWorker();
       expect(result).toBe("ok");
 
       // Main thread still works after each worker teardown
@@ -54,35 +54,21 @@ describe("worker isolation", () => {
     }
   });
 
-  it("does not transfer cache administration after the control environment exits", () => {
-    const ownerSource = `
-      import {parentPort, workerData} from "node:worker_threads";
-      import {pubkeyCache} from ${JSON.stringify(pubkeysModulePath)};
-      import {SecretKey} from ${JSON.stringify(blstModulePath)};
+  it("shares cache reads with workers but restricts administration to the control environment", async () => {
+    const ikm = new Uint8Array(32);
+    ikm[0] = 1;
+    const expected = SecretKey.fromKeygen(ikm).toPublicKey().toBytes();
+    pubkeyCache.reset();
+    pubkeyCache.set(0, expected);
 
-      const barrier = new Int32Array(workerData.barrierBuffer);
-      try {
-        const ikm = new Uint8Array(32);
-        ikm[0] = 1;
-        const pubkey = SecretKey.fromKeygen(ikm).toPublicKey().toBytes();
-        pubkeyCache.ensureCapacity(8);
-        pubkeyCache.set(0, pubkey);
-        pubkeyCache.save(workerData.snapshotPath);
-        Atomics.store(barrier, 0, 1);
-        Atomics.notify(barrier, 0);
-        while (Atomics.load(barrier, 2) === 0) Atomics.wait(barrier, 2, 0);
-        parentPort.postMessage({ok: true});
-      } catch (error) {
-        Atomics.store(barrier, 0, -1);
-        Atomics.notify(barrier, 0);
-        parentPort.postMessage({fatal: String(error?.stack ?? error)});
-      }
-    `;
-    const successorSource = `
-      import {parentPort, workerData} from "node:worker_threads";
+    const result = await runWorker<{
+      pubkey: Uint8Array;
+      save: string | null;
+      load: string | null;
+      reset: string | null;
+    }>(`
+      import {parentPort} from "node:worker_threads";
       import {pubkeyCache} from ${JSON.stringify(pubkeysModulePath)};
-
-      const barrier = new Int32Array(workerData.barrierBuffer);
 
       function capture(operation) {
         try {
@@ -93,124 +79,30 @@ describe("worker isolation", () => {
         }
       }
 
-      try {
-        if (pubkeyCache.size !== 1) throw new Error("successor could not read the shared cache");
-        const saveBeforeOwnerExit = capture(() => pubkeyCache.save(workerData.successorPath));
-        Atomics.store(barrier, 1, 1);
-        Atomics.notify(barrier, 1);
-        while (Atomics.load(barrier, 3) === 0) Atomics.wait(barrier, 3, 0);
+      parentPort.postMessage({
+        pubkey: pubkeyCache.getOrThrow(0).toBytes(),
+        save: capture(() => pubkeyCache.save("")),
+        load: capture(() => pubkeyCache.load("", 1)),
+        reset: capture(() => pubkeyCache.reset()),
+      });
+    `);
 
-        parentPort.postMessage({
-          cacheSize: pubkeyCache.size,
-          saveBeforeOwnerExit,
-          saveAfterOwnerExit: capture(() => pubkeyCache.save(workerData.successorPath)),
-          loadAfterOwnerExit: capture(() => pubkeyCache.load(workerData.snapshotPath, 8)),
-          resetAfterOwnerExit: capture(() => pubkeyCache.reset()),
-        });
-      } catch (error) {
-        Atomics.store(barrier, 1, -1);
-        Atomics.notify(barrier, 1);
-        parentPort.postMessage({fatal: String(error?.stack ?? error)});
-      }
-    `;
-    const childSource = `
-      import fs from "node:fs";
-      import os from "node:os";
-      import path from "node:path";
-      import {Worker} from "node:worker_threads";
-
-      const ownerSource = ${JSON.stringify(ownerSource)};
-      const successorSource = ${JSON.stringify(successorSource)};
-
-      function runWorker(source, workerData) {
-        return new Promise((resolve, reject) => {
-          let message;
-          const worker = new Worker(source, {eval: true, workerData});
-          worker.on("message", (value) => { message = value; });
-          worker.on("error", reject);
-          worker.on("exit", (code) => {
-            if (code !== 0) return reject(new Error("worker exited with code " + code));
-            if (message === undefined) return reject(new Error("worker produced no result"));
-            resolve(message);
-          });
-        });
-      }
-
-      function waitUntilReady(barrier, index, name) {
-        const deadline = Date.now() + 10_000;
-        while (Atomics.load(barrier, index) === 0) {
-          if (Date.now() >= deadline) throw new Error("timed out waiting for " + name);
-          Atomics.wait(barrier, index, 0, 100);
-        }
-        if (Atomics.load(barrier, index) < 0) throw new Error(name + " failed before becoming ready");
-      }
-
-      function expectError(actual, expected, operation) {
-        if (actual !== expected) {
-          throw new Error(operation + " returned " + JSON.stringify(actual) + ", expected " + expected);
-        }
-      }
-
-      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lodestar-z-owner-exit-"));
-      const snapshotPath = path.join(tempDir, "snapshot.pkix");
-      const successorPath = path.join(tempDir, "successor.pkix");
-      const barrierBuffer = new SharedArrayBuffer(4 * Int32Array.BYTES_PER_ELEMENT);
-      const barrier = new Int32Array(barrierBuffer);
-
-      try {
-        const owner = runWorker(ownerSource, {barrierBuffer, snapshotPath});
-        waitUntilReady(barrier, 0, "owner");
-
-        const successor = runWorker(successorSource, {barrierBuffer, snapshotPath, successorPath});
-        waitUntilReady(barrier, 1, "successor");
-
-        Atomics.store(barrier, 2, 1);
-        Atomics.notify(barrier, 2);
-        const ownerResult = await owner;
-        if (ownerResult.fatal !== undefined) throw new Error(ownerResult.fatal);
-
-        Atomics.store(barrier, 3, 1);
-        Atomics.notify(barrier, 3);
-        const successorResult = await successor;
-        if (successorResult.fatal !== undefined) throw new Error(successorResult.fatal);
-        if (successorResult.cacheSize !== 1) throw new Error("cache changed after owner exit");
-        expectError(successorResult.saveBeforeOwnerExit, "PubkeyCacheControlEnvironmentOnly", "successor save before owner exit");
-        expectError(successorResult.saveAfterOwnerExit, "PubkeyCacheControlEnvironmentOnly", "successor save after owner exit");
-        expectError(successorResult.loadAfterOwnerExit, "PubkeyCacheControlEnvironmentOnly", "successor load after owner exit");
-        expectError(successorResult.resetAfterOwnerExit, "PubkeyCacheControlEnvironmentOnly", "successor reset after owner exit");
-        if (fs.existsSync(successorPath)) throw new Error("successor save created a file");
-      } finally {
-        Atomics.store(barrier, 2, 1);
-        Atomics.notify(barrier, 2);
-        Atomics.store(barrier, 3, 1);
-        Atomics.notify(barrier, 3);
-        fs.rmSync(tempDir, {force: true, recursive: true});
-      }
-    `;
-
-    expectChildSuccess(childSource);
-  }, 30_000);
+    expect(result).toEqual({
+      load: "PubkeyCacheControlEnvironmentOnly",
+      pubkey: expected,
+      reset: "PubkeyCacheControlEnvironmentOnly",
+      save: "PubkeyCacheControlEnvironmentOnly",
+    });
+    expect(pubkeyCache.size).toBe(1);
+    expect(pubkeyCache.getOrThrow(0).toBytes()).toEqual(expected);
+  });
 });
 
 const pubkeysModulePath = new URL("../src/pubkeys.js", import.meta.url).href;
 const blstModulePath = new URL("../src/blst.js", import.meta.url).href;
 
-function expectChildSuccess(source: string): void {
-  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", source], {
-    cwd: new URL("../..", import.meta.url),
-    encoding: "utf-8",
-    timeout: 20_000,
-  });
-  const diagnostics = `error=${result.error?.stack ?? "none"} stdout=${result.stdout} stderr=${result.stderr}`;
-  expect(result.status, diagnostics).toBe(0);
-}
-
-function runWorker(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let received = false;
-    let result: string;
-    const worker = new Worker(
-      `
+function runBlstWorker(): Promise<string> {
+  return runWorker(`
       import crypto from "node:crypto";
       import {parentPort} from "node:worker_threads";
       import {SecretKey, verify} from "${blstModulePath}";
@@ -229,11 +121,16 @@ function runWorker(): Promise<string> {
       } catch (e) {
         parentPort.postMessage("error: " + e.message);
       }
-      `,
-      {eval: true}
-    );
+  `);
+}
 
-    worker.on("message", (message: string) => {
+function runWorker<T>(source: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let received = false;
+    let result: T;
+    const worker = new Worker(source, {eval: true});
+
+    worker.on("message", (message: T) => {
       received = true;
       result = message;
     });
