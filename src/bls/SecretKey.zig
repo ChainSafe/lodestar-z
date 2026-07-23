@@ -46,9 +46,13 @@ pub fn keyGenV3(ikm: []const u8, info: ?[]const u8) BlstError!Self {
 
 /// Generate a `SecretKey` using HKDF key derivation (version 4.5).
 ///
+/// `salt` must not be empty.
 /// Returns `SecretKey` on success, `BlstError` on failure.
 pub fn keyGenV45(ikm: []const u8, salt: []const u8, info: ?[]const u8) BlstError!Self {
     if (ikm.len < 32) {
+        return BlstError.BadEncoding;
+    }
+    if (salt.len == 0) {
         return BlstError.BadEncoding;
     }
 
@@ -57,7 +61,7 @@ pub fn keyGenV45(ikm: []const u8, salt: []const u8, info: ?[]const u8) BlstError
         &sk.value,
         &ikm[0],
         ikm.len,
-        &salt[0],
+        salt.ptr,
         salt.len,
         if (info) |i| i.ptr else null,
         if (info) |i| i.len else 0,
@@ -67,9 +71,13 @@ pub fn keyGenV45(ikm: []const u8, salt: []const u8, info: ?[]const u8) BlstError
 
 /// Generate a `SecretKey` using HKDF key derivation (version 5).
 ///
+/// `salt` must not be empty.
 /// Returns `SecretKey` on success, `BlstError` on failure.
 pub fn keyGenV5(ikm: []const u8, salt: []const u8, info: ?[]const u8) BlstError!Self {
     if (ikm.len < 32) {
+        return BlstError.BadEncoding;
+    }
+    if (salt.len == 0) {
         return BlstError.BadEncoding;
     }
 
@@ -78,7 +86,7 @@ pub fn keyGenV5(ikm: []const u8, salt: []const u8, info: ?[]const u8) BlstError!
         &sk.value,
         &ikm[0],
         ikm.len,
-        &salt[0],
+        salt.ptr,
         salt.len,
         if (info) |i| i.ptr else null,
         if (info) |i| i.len else 0,
@@ -157,3 +165,11 @@ const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
 
 const c = @import("root.zig").c;
+
+test "key generation rejects an empty salt" {
+    const ikm = [_]u8{0x42} ** 32;
+    const salt: []const u8 = &.{};
+
+    try std.testing.expectError(BlstError.BadEncoding, keyGenV45(&ikm, salt, null));
+    try std.testing.expectError(BlstError.BadEncoding, keyGenV5(&ikm, salt, null));
+}
