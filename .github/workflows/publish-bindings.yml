@@ -7,8 +7,8 @@ env:
   NODE_VERSION: "24"
 
 jobs:
-  publish-bindings:
-    name: publish bindings
+  build-bindings:
+    name: build bindings
     # [Lodestar CI] still runs on Ubuntu 22.04, which ships an incompatible GLIBC version
     # compared to ubuntu-latest runners.
     # This [incompatibility] causes DLOPEN to fail when loading bindings on those runners.
@@ -21,8 +21,8 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-      id-token: write
     steps:
+      # Check out the exact source revision selected for this release.
       - name: Checkout Repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Setup pnpm
@@ -31,37 +31,112 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          registry-url: "https://registry.npmjs.org"
           cache: pnpm
+      # Install the pinned Zig compiler and restore its content-addressed cache.
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      # Install only lockfile-pinned dependencies without lifecycle scripts.
       - name: Install dependencies
         run: |
-          pnpm install
+          pnpm install --frozen-lockfile --ignore-scripts
+      # Reject formatting or lint problems before building release artifacts.
       - name: Run bindings formatter
         run: |
           pnpm biome ci
-      - name: Determine npm dist tag
-        id: detect_dist_tag 
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          if [[ "$VERSION" == *-* ]]; then
-            # Prerelease: derive tag from the prerelease identifier (e.g. 0.1.2-rc.0 -> rc)
-            TAG="${VERSION#*-}"
-            TAG="${TAG%%.*}"
-            echo "Prerelease version $VERSION.$TAG"
-            echo "tag_flag=--tag $TAG" >> "$GITHUB_OUTPUT"
-          else
-            echo "Stable version $VERSION -> npm default dist-tag"
-            echo "tag_flag=" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Build and publish to npm
+      # Build and pack every platform package with lifecycle scripts disabled.
+      - name: Build npm packages
         run: |
           pnpm zapi build-artifacts --optimize ReleaseSafe
           pnpm zapi prepublish
-          rm -rf zig-out/lib
-          pnpm zapi publish --access public -- --ignore-scripts --provenance ${{ steps.detect_dist_tag.outputs.tag_flag }}
 
+          mkdir -p publish
+          for package_dir in npm/*; do
+            (
+              cd "$package_dir"
+              pnpm --config.ignore-scripts=true pack --pack-destination "$GITHUB_WORKSPACE/publish"
+            )
+          done
+
+          rm -rf zig-out/lib
+          pnpm --config.ignore-scripts=true pack --pack-destination publish
+
+          (cd publish && sha256sum ./*.tgz > SHA256SUMS)
+      # Store the candidate tarballs as an immutable workflow artifact.
+      - name: Upload npm packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-packages
+          path: publish/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-bindings:
+    name: publish bindings
+    needs: build-bindings
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Configure Node.js and npm for trusted publication to the public registry.
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+      # Download the exact immutable tarballs produced by the build job.
+      - name: Download npm packages
+        uses: actions/download-artifact@v4
+        with:
+          name: publish-packages
+          path: publish
+      # Recheck transfer integrity before contacting the registry.
+      - name: Verify npm packages
+        run: |
+          (cd publish && sha256sum -c SHA256SUMS)
+      # Publish verified tarballs with provenance and all scripts disabled.
+      - name: Publish to npm
+        shell: bash
+        run: |
+          main_package="@chainsafe/lodestar-z"
+          main_tarball=""
+
+          for tarball in publish/*.tgz; do
+            package_name="$(
+              tar -xOf "$tarball" package/package.json |
+                node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => console.log(JSON.parse(input).name));'
+            )"
+            if [[ "$package_name" == "$main_package" ]]; then
+              main_tarball="$tarball"
+            fi
+          done
+
+          if [[ -z "$main_tarball" ]]; then
+            echo "Main package tarball not found" >&2
+            exit 1
+          fi
+
+          version="$(
+            tar -xOf "$main_tarball" package/package.json |
+              node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => console.log(JSON.parse(input).version));'
+          )"
+
+          publish_args=(--access public --ignore-scripts --provenance)
+          if [[ "$version" == *-* ]]; then
+            tag="${version#*-}"
+            tag="${tag%%.*}"
+            if [[ ! "$tag" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+              echo "Invalid npm dist tag: $tag" >&2
+              exit 1
+            fi
+            publish_args+=(--tag "$tag")
+          fi
+
+          for tarball in publish/*.tgz; do
+            [[ "$tarball" == "$main_tarball" ]] && continue
+            npm publish "$tarball" "${publish_args[@]}"
+          done
+          npm publish "$main_tarball" "${publish_args[@]}"
