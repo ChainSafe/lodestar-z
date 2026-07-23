@@ -477,10 +477,11 @@ pub fn aggregateWithRandomness(
 
     var pk_proj: c.blst_p1 = undefined;
     try pippenger.parallelMSMG1(pool, io, pks, scalars_refs[0..pks.len], 64, &pk_proj);
-    c.blst_p1_to_affine(&pk_out.point, &pk_proj);
 
     var sig_proj: c.blst_p2 = undefined;
     try pippenger.parallelMSMG2(pool, io, sigs, scalars_refs[0..sigs.len], 64, &sig_proj);
+
+    c.blst_p1_to_affine(&pk_out.point, &pk_proj);
     c.blst_p2_to_affine(&sig_out.point, &sig_proj);
 }
 
