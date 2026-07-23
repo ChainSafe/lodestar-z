@@ -34,8 +34,8 @@ export const pubkeyCache = {
     return native.getIndex(pubkey);
   },
 
-  set(index, pubkey) {
-    native.set(index, pubkey);
+  append(index, pubkey) {
+    native.append(index, pubkey);
   },
 
   get size() {

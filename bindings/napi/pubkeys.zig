@@ -170,14 +170,11 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
     return .{ .raw = aggregate_pubkey };
 }
 
-/// JS: pubkeys.set(index, pubkeyBytes)
-pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
+/// JS: pubkeys.append(index, pubkeyBytes)
+pub fn append(index: js.Number, pubkey: js.Uint8Array) !void {
     const idx = try index.toU32();
     const io = napi_io.get();
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
-
-    // Existing entries are immutable, so replayed indices need no validation.
-    if (idx < state.cache.count(io)) return;
 
     const pubkey_slice = try pubkey.toSlice();
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;

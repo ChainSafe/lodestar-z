@@ -35,9 +35,8 @@ pub const PubkeyHashContext = struct {
         _: PubkeyHashContext,
         lhs: [48]u8,
         rhs: [48]u8,
-        rhs_index: usize,
+        _: usize,
     ) bool {
-        _ = rhs_index;
         return std.mem.eql(u8, &lhs, &rhs);
     }
 };
@@ -45,7 +44,7 @@ pub const PubkeyHashContext = struct {
 /// The dense entry index is the validator index. Production code only appends,
 /// so insertion order permanently supplies both lookup directions:
 /// compressed pubkey -> validator index and validator index -> affine pubkey.
-pub const PubkeyMap = std.ArrayHashMapUnmanaged(
+pub const PubkeyMap = std.array_hash_map.Custom(
     [48]u8,
     bls.PublicKey,
     PubkeyHashContext,
@@ -218,10 +217,11 @@ pub const PubkeyCache = struct {
         io: std.Io,
         indices: []const u64,
     ) !bls.PublicKey {
+        if (indices.len == 0) return error.InvalidLength;
+
         self.lockShared(io);
         defer self.unlockShared(io);
 
-        if (indices.len == 0) return error.InvalidLength;
         const values = self.entries.values();
         if (indices[0] >= values.len) return error.InvalidIndex;
         var aggregate_pubkey = values[@intCast(indices[0])].toAggregate();

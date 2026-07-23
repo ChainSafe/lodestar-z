@@ -59,7 +59,7 @@ describe("worker isolation", () => {
     ikm[0] = 1;
     const expected = SecretKey.fromKeygen(ikm).toPublicKey().toBytes();
     pubkeyCache.reset();
-    pubkeyCache.set(0, expected);
+    pubkeyCache.append(0, expected);
 
     const result = await runWorker<{
       pubkey: Uint8Array;

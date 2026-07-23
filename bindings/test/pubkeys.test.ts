@@ -20,7 +20,7 @@ function seedCache(count = keypairs.length): void {
   pubkeyCache.reset();
   pubkeyCache.ensureCapacity(2_000);
   for (const {index, pubkeyBytes} of keypairs.slice(0, count)) {
-    pubkeyCache.set(index, pubkeyBytes);
+    pubkeyCache.append(index, pubkeyBytes);
   }
 }
 
@@ -45,10 +45,10 @@ describe("pubkeys", () => {
     fs.rmSync(tempDir, {force: true, recursive: true});
   });
 
-  it("set populates both directions and updates size", () => {
+  it("append populates both directions and updates size", () => {
     pubkeyCache.reset();
     for (const {index, pubkeyBytes} of keypairs) {
-      pubkeyCache.set(index, pubkeyBytes);
+      pubkeyCache.append(index, pubkeyBytes);
     }
     expect(pubkeyCache.size).toBe(keypairs.length);
 
@@ -86,10 +86,11 @@ describe("pubkeys", () => {
     expect(() => pubkeyCache.getIndex(new Uint8Array(47))).toThrow();
   });
 
-  it("ignores sets for already-cached indices", () => {
+  it("accepts identical replays and rejects conflicting replays", () => {
     const before = pubkeyCache.getOrThrow(0);
-    pubkeyCache.set(0, keypairs[1].pubkeyBytes);
-    pubkeyCache.set(0, new Uint8Array(1));
+    pubkeyCache.append(0, keypairs[0].pubkeyBytes);
+    expect(() => pubkeyCache.append(0, keypairs[1].pubkeyBytes)).toThrow("ConflictingPubkey");
+    expect(() => pubkeyCache.append(0, new Uint8Array(1))).toThrow("InvalidPubkeyLength");
 
     const after = pubkeyCache.getOrThrow(0);
     expect(after).toBe(before);
@@ -104,7 +105,7 @@ describe("pubkeys", () => {
     expect(pubkeyCache.get(0)).toBeUndefined();
     expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBeNull();
 
-    pubkeyCache.set(0, keypairs[1].pubkeyBytes);
+    pubkeyCache.append(0, keypairs[1].pubkeyBytes);
 
     const after = pubkeyCache.getOrThrow(0);
     expect(after).not.toBe(before);
@@ -116,7 +117,7 @@ describe("pubkeys", () => {
     pubkeyCache.save(tempPkixPath);
 
     pubkeyCache.reset();
-    pubkeyCache.set(0, keypairs[1].pubkeyBytes);
+    pubkeyCache.append(0, keypairs[1].pubkeyBytes);
     const beforeLoad = pubkeyCache.getOrThrow(0);
 
     pubkeyCache.load(tempPkixPath, pubkeyCache.capacity);
@@ -203,7 +204,7 @@ describe("pubkeys", () => {
 
   it("rejects sparse inserts without changing the cache", () => {
     const sizeBefore = pubkeyCache.size;
-    expect(() => pubkeyCache.set(pubkeyCache.capacity, keypairs[0].pubkeyBytes)).toThrow();
+    expect(() => pubkeyCache.append(pubkeyCache.capacity, keypairs[0].pubkeyBytes)).toThrow();
     expect(pubkeyCache.size).toBe(sizeBefore);
   });
 });

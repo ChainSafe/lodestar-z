@@ -9,11 +9,11 @@ export interface PubkeyCache {
   aggregate(indices: number[]): PublicKey;
   /** Get validator index by pubkey bytes */
   getIndex(pubkey: Uint8Array): number | null;
-  /** Append the next pubkey; already-cached indices are ignored. */
-  set(index: number, pubkey: Uint8Array): void;
-  /** Number of entries */
+  /** Append at the next index. Exact replays are no-ops; invalid, conflicting, duplicate, or sparse entries throw. */
+  append(index: number, pubkey: Uint8Array): void;
+  /** Current number of cached entries. */
   readonly size: number;
-  /** Current allocated native capacity */
+  /** Number of entries the current native allocation can hold without growing. */
   readonly capacity: number;
   /**
    * Load a compatible PKIX file from the control environment while no workers are using the cache.
