@@ -211,6 +211,10 @@
             .root_source_file = "src/fork_choice/root.zig",
             .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants, .metrics, .time },
         },
+        .peer_manager = .{
+            .root_source_file = "src/peer_manager/root.zig",
+            .imports = .{.metrics},
+        },
         .beacon_node = .{
             .root_source_file = "src/beacon_node/root.zig",
             .imports = .{ .consensus_types, .state_transition, .persistent_merkle_tree, .testing_allocators, .metrics, .hex, .time },
@@ -363,6 +367,7 @@
                     .fork_types,
                     .state_transition,
                     .hex,
+                    .peer_manager,
                     "zapi:zapi",
                 },
             },
@@ -388,6 +393,7 @@
         .state_transition = .{ .root_module = .state_transition },
         .era = .{ .root_module = .era },
         .fork_choice = .{ .root_module = .fork_choice },
+        .peer_manager = .{ .root_module = .peer_manager },
         .clock = .{ .root_module = .clock },
         .beacon_node = .{ .root_module = .beacon_node },
 
