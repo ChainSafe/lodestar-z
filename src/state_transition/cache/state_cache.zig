@@ -8,8 +8,6 @@ const EpochCacheImmutableData = @import("./epoch_cache.zig").EpochCacheImmutable
 const EpochCacheOpts = @import("./epoch_cache.zig").EpochCacheOpts;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const PubkeyIndexMap = @import("pubkey_cache.zig").PubkeyIndexMap(ValidatorIndex);
-const Index2PubkeyCache = @import("pubkey_cache.zig").Index2PubkeyCache;
 const CloneOpts = @import("ssz").CloneOpts;
 const SlashingsCache = @import("./slashings_cache.zig").SlashingsCache;
 const Node = @import("persistent_merkle_tree").Node;
@@ -37,23 +35,37 @@ pub const CachedBeaconState = struct {
     created_with_transfer_cache: bool = false,
 
     /// This class takes ownership of state after this function and has responsibility to deinit it
-    pub fn createCachedBeaconState(allocator: Allocator, state: *AnyBeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
+    pub fn createCachedBeaconState(
+        allocator: Allocator,
+        io: std.Io,
+        state: *AnyBeaconState,
+        immutable_data: EpochCacheImmutableData,
+        option: ?EpochCacheOpts,
+    ) !*CachedBeaconState {
         const cached_state = try allocator.create(CachedBeaconState);
         errdefer allocator.destroy(cached_state);
 
-        try cached_state.init(allocator, state, immutable_data, option);
+        try cached_state.init(allocator, io, state, immutable_data, option);
 
         return cached_state;
     }
 
-    pub fn init(self: *CachedBeaconState, allocator: Allocator, state: *AnyBeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !void {
-        const epoch_cache = try EpochCache.createFromState(allocator, state, immutable_data, option);
+    pub fn init(
+        self: *CachedBeaconState,
+        allocator: Allocator,
+        io: std.Io,
+        state: *AnyBeaconState,
+        immutable_data: EpochCacheImmutableData,
+        option: ?EpochCacheOpts,
+    ) !void {
+        const epoch_cache = try EpochCache.createFromState(allocator, io, state, immutable_data, option);
         errdefer epoch_cache.deinit();
+        const slashings_cache = try SlashingsCache.initEmpty(allocator);
         self.* = .{
             .allocator = allocator,
             .config = immutable_data.config,
             .epoch_cache = epoch_cache,
-            .slashings_cache = try SlashingsCache.initEmpty(allocator),
+            .slashings_cache = slashings_cache,
             .state = state,
             .proposer_rewards = .{},
         };

@@ -34,10 +34,8 @@ export const pubkeyCache = {
     return native.getIndex(pubkey);
   },
 
-  set(index, pubkey) {
-    native.set(index, pubkey);
-    // Invalidate cached JS object so next get() picks up the new native value
-    pkCache.delete(index);
+  append(index, pubkey) {
+    native.append(index, pubkey);
   },
 
   get size() {
@@ -48,14 +46,14 @@ export const pubkeyCache = {
     return native.capacity();
   },
 
-  load(filepath) {
+  load(filepath, maxCapacity) {
+    native.load(filepath, maxCapacity);
     pkCache.clear();
-    native.load(filepath);
   },
 
   reset() {
-    pkCache.clear();
     native.reset();
+    pkCache.clear();
   },
 
   save(filepath) {

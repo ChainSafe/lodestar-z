@@ -14,13 +14,14 @@ const FAR_FUTURE_EPOCH = c.FAR_FUTURE_EPOCH;
 
 pub fn processVoluntaryExit(
     comptime fork: ForkSeq,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
     signed_voluntary_exit: *const SignedVoluntaryExit,
     verify_signature: bool,
 ) !void {
-    if (!try isValidVoluntaryExit(fork, config, epoch_cache, state, signed_voluntary_exit, verify_signature)) {
+    if (!try isValidVoluntaryExit(fork, io, config, epoch_cache, state, signed_voluntary_exit, verify_signature)) {
         return error.InvalidVoluntaryExit;
     }
 
@@ -31,13 +32,14 @@ pub fn processVoluntaryExit(
 
 pub fn isValidVoluntaryExit(
     comptime fork: ForkSeq,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
     signed_voluntary_exit: *const SignedVoluntaryExit,
     verify_signature: bool,
 ) !bool {
-    return try getVoluntaryExitValidity(fork, config, epoch_cache, state, signed_voluntary_exit, verify_signature) == .valid;
+    return try getVoluntaryExitValidity(fork, io, config, epoch_cache, state, signed_voluntary_exit, verify_signature) == .valid;
 }
 
 pub const VoluntaryExitValidity = enum {
@@ -52,6 +54,7 @@ pub const VoluntaryExitValidity = enum {
 
 pub fn getVoluntaryExitValidity(
     comptime fork: ForkSeq,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
@@ -100,7 +103,7 @@ pub fn getVoluntaryExitValidity(
 
     // verify signature
     if (verify_signature) {
-        if (!try verifyVoluntaryExitSignature(config, epoch_cache, signed_voluntary_exit)) {
+        if (!try verifyVoluntaryExitSignature(io, config, epoch_cache, signed_voluntary_exit)) {
             return .invalid_signature;
         }
     }
@@ -137,6 +140,7 @@ test "voluntary exit - valid" {
 
     const result = try getVoluntaryExitValidity(
         .electra,
+        std.testing.io,
         test_state.config,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
@@ -160,6 +164,7 @@ test "voluntary exit - inactive validator (out of bounds index)" {
 
     const result = try getVoluntaryExitValidity(
         .electra,
+        std.testing.io,
         test_state.config,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
@@ -190,6 +195,7 @@ test "voluntary exit - inactive validator (not active in current epoch)" {
 
     const result = try getVoluntaryExitValidity(
         .electra,
+        std.testing.io,
         test_state.config,
         test_state.cached_state.epoch_cache,
         state,
@@ -220,6 +226,7 @@ test "voluntary exit - already exited validator" {
 
     const result = try getVoluntaryExitValidity(
         .electra,
+        std.testing.io,
         test_state.config,
         test_state.cached_state.epoch_cache,
         state,
@@ -245,6 +252,7 @@ test "voluntary exit - early epoch" {
 
     const result = try getVoluntaryExitValidity(
         .electra,
+        std.testing.io,
         test_state.config,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
@@ -275,6 +283,7 @@ test "voluntary exit - short time active" {
 
     const result = try getVoluntaryExitValidity(
         .electra,
+        std.testing.io,
         test_state.config,
         test_state.cached_state.epoch_cache,
         state,

@@ -18,11 +18,9 @@ const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("../root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
-const PubkeyIndexMap = state_transition.PubkeyIndexMap;
-const Index2PubkeyCache = state_transition.Index2PubkeyCache;
+const PubkeyCache = state_transition.PubkeyCache;
 const EffectiveBalanceIncrements = state_transition.EffectiveBalanceIncrements;
 const getNextSyncCommitteeIndices = state_transition.getNextSyncCommitteeIndices;
-const syncPubkeys = state_transition.syncPubkeys;
 const interopPubkeysCached = @import("./interop_pubkeys.zig").interopPubkeysCached;
 const EFFECTIVE_BALANCE_INCREMENT = 32;
 const EFFECTIVE_BALANCE = 32 * 1e9;
@@ -168,8 +166,7 @@ pub const TestCachedBeaconState = struct {
     allocator: Allocator,
     pool: *Node.Pool,
     config: *BeaconConfig,
-    pubkey_index_map: *PubkeyIndexMap,
-    index_pubkey_cache: *Index2PubkeyCache,
+    pubkey_cache: *PubkeyCache,
     cached_state: *CachedBeaconState,
     epoch_transition_cache: *state_transition.EpochTransitionCache,
 
@@ -186,33 +183,29 @@ pub const TestCachedBeaconState = struct {
     }
 
     pub fn initFromState(allocator: Allocator, pool: *Node.Pool, state: *AnyBeaconState, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconState {
-        const pubkey_index_map = try allocator.create(PubkeyIndexMap);
-        pubkey_index_map.* = PubkeyIndexMap.init(allocator);
-        errdefer {
-            pubkey_index_map.deinit();
-            allocator.destroy(pubkey_index_map);
-        }
-        const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
-        errdefer allocator.destroy(index_pubkey_cache);
-        index_pubkey_cache.* = Index2PubkeyCache.empty;
-        errdefer index_pubkey_cache.deinit(allocator);
+        const pubkey_cache = try allocator.create(PubkeyCache);
+        errdefer allocator.destroy(pubkey_cache);
+        pubkey_cache.* = try PubkeyCache.initCapacity(
+            allocator,
+            std.testing.io,
+            try std.math.add(
+                usize,
+                try state.validatorsCount(),
+                preset.MAX_PENDING_DEPOSITS_PER_EPOCH,
+            ),
+        );
+        errdefer pubkey_cache.deinit();
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
         const config = try allocator.create(BeaconConfig);
         errdefer allocator.destroy(config);
         config.* = BeaconConfig.init(chain_config, (try state.genesisValidatorsRoot()).*);
 
-        const validators = try state.validatorsPtrSlice(allocator);
-        defer allocator.free(validators);
-
-        try syncPubkeys(allocator, validators, pubkey_index_map, index_pubkey_cache);
-
         const immutable_data = state_transition.EpochCacheImmutableData{
             .config = config,
-            .index_to_pubkey = index_pubkey_cache,
-            .pubkey_to_index = pubkey_index_map,
+            .pubkey_cache = pubkey_cache,
         };
         // cached_state takes ownership of state and will deinit there
-        const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, state, immutable_data, .{
+        const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, std.testing.io, state, immutable_data, .{
             .skip_sync_committee_cache = state.forkSeq() == .phase0,
             .skip_sync_pubkeys = false,
         });
@@ -231,8 +224,7 @@ pub const TestCachedBeaconState = struct {
             .allocator = allocator,
             .pool = pool,
             .config = config,
-            .pubkey_index_map = pubkey_index_map,
-            .index_pubkey_cache = index_pubkey_cache,
+            .pubkey_cache = pubkey_cache,
             .cached_state = cached_state,
             .epoch_transition_cache = epoch_transition_cache,
         };
@@ -241,13 +233,11 @@ pub const TestCachedBeaconState = struct {
     pub fn deinit(self: *TestCachedBeaconState) void {
         self.cached_state.deinit();
         self.allocator.destroy(self.cached_state);
-        self.pubkey_index_map.deinit();
-        self.allocator.destroy(self.pubkey_index_map);
-        self.index_pubkey_cache.deinit(self.allocator);
+        self.pubkey_cache.deinit();
+        self.allocator.destroy(self.pubkey_cache);
         self.epoch_transition_cache.deinit(self.allocator);
         @import("../state_transition.zig").deinitReusedEpochTransitionCache(std.testing.io);
         self.allocator.destroy(self.epoch_transition_cache);
-        self.allocator.destroy(self.index_pubkey_cache);
         self.allocator.destroy(self.config);
     }
 };

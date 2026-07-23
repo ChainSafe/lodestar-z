@@ -1,4 +1,5 @@
 // biome-ignore-all lint/style/useNamingConvention: spec-canonical fork names in `ForkName`
+
 interface BeaconBlockHeader {
   slot: number;
   proposerIndex: number;

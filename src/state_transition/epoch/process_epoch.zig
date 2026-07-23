@@ -62,7 +62,7 @@ pub fn processEpoch(
 
     if (comptime fork.gte(.electra)) {
         timer = time.start(io);
-        try processPendingDeposits(fork, allocator, config, epoch_cache, state, cache);
+        try processPendingDeposits(fork, allocator, io, config, epoch_cache, state, cache);
         try observeEpochTransitionStep(.{ .step = .process_pending_deposits }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
         timer = time.start(io);

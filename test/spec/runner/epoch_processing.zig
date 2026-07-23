@@ -128,7 +128,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                 .slashings_reset => try state_transition.processSlashingsReset(fork, epoch_cache, fork_state, &epoch_transition_cache),
                 .sync_committee_updates => try state_transition.processSyncCommitteeUpdates(fork, allocator, epoch_cache, fork_state),
                 .historical_summaries_update => try state_transition.processHistoricalSummariesUpdate(fork, fork_state, &epoch_transition_cache),
-                .pending_deposits => try state_transition.processPendingDeposits(fork, allocator, config, epoch_cache, fork_state, &epoch_transition_cache),
+                .pending_deposits => try state_transition.processPendingDeposits(fork, allocator, std.testing.io, config, epoch_cache, fork_state, &epoch_transition_cache),
                 .pending_consolidations => try state_transition.processPendingConsolidations(fork, epoch_cache, fork_state, &epoch_transition_cache),
                 .proposer_lookahead => {
                     try state_transition.processProposerLookahead(fork, allocator, epoch_cache, fork_state, &epoch_transition_cache);
