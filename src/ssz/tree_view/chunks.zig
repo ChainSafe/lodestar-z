@@ -519,6 +519,24 @@ pub fn CompositeChunks(
 
         /// Fills `values` with all element values.
         pub fn getAllValuesInto(self: *Self, allocator: Allocator, values: []Value) ![]Value {
+            return self.getValuesByRangeIntoImpl(allocator, 0, values);
+        }
+
+        /// Fills `values` with element values starting at `start_index`.
+        pub const getValuesByRangeInto = if (isFixedType(ST.Element))
+            getValuesByRangeIntoFixed
+        else
+            getValuesByRangeIntoAlloc;
+
+        fn getValuesByRangeIntoFixed(self: *Self, start_index: usize, values: []Value) ![]Value {
+            return self.getValuesByRangeIntoImpl(self.state.allocator, start_index, values);
+        }
+
+        fn getValuesByRangeIntoAlloc(self: *Self, allocator: Allocator, start_index: usize, values: []Value) ![]Value {
+            return self.getValuesByRangeIntoImpl(allocator, start_index, values);
+        }
+
+        fn getValuesByRangeIntoImpl(self: *Self, allocator: Allocator, start_index: usize, values: []Value) ![]Value {
             const len = values.len;
             if (len == 0) return values;
 
@@ -526,10 +544,10 @@ pub fn CompositeChunks(
                 return error.MustCommitBeforeBulkRead;
             }
 
-            const nodes = try allocator.alloc(Node.Id, len);
-            defer allocator.free(nodes);
+            const nodes = try self.state.allocator.alloc(Node.Id, len);
+            defer self.state.allocator.free(nodes);
 
-            try self.state.root.getNodesAtDepth(self.state.pool, chunk_depth, 0, nodes);
+            try self.state.root.getNodesAtDepth(self.state.pool, chunk_depth, start_index, nodes);
 
             for (nodes, 0..) |node, i| {
                 if (comptime @hasDecl(ST.Element, "deinit")) {

@@ -148,6 +148,21 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
             return self.chunks.getAllValues(allocator, length);
         }
 
+        pub const getValuesByRangeInto = if (isFixedType(ST.Element))
+            getValuesByRangeIntoFixed
+        else
+            getValuesByRangeIntoAlloc;
+
+        fn getValuesByRangeIntoFixed(self: *Self, start_index: usize, out: []ST.Element.Type) ![]ST.Element.Type {
+            if (start_index > length or out.len > length - start_index) return error.IndexOutOfBounds;
+            return self.chunks.getValuesByRangeInto(start_index, out);
+        }
+
+        fn getValuesByRangeIntoAlloc(self: *Self, allocator: Allocator, start_index: usize, out: []ST.Element.Type) ![]ST.Element.Type {
+            if (start_index > length or out.len > length - start_index) return error.IndexOutOfBounds;
+            return self.chunks.getValuesByRangeInto(allocator, start_index, out);
+        }
+
         /// Serialize the tree view into a provided buffer.
         /// Returns the number of bytes written.
         pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
@@ -245,6 +260,29 @@ test "TreeView vector composite index bounds" {
     const replacement_view: ?*Inner.TreeView = try Inner.TreeView.init(allocator, &pool, replacement_root);
     defer if (replacement_view) |v| v.deinit();
     try std.testing.expectError(error.IndexOutOfBounds, view.set(2, replacement_view.?));
+}
+
+test "TreeView vector composite getValuesByRangeInto reads values without changing view" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
+    defer pool.deinit();
+
+    const Inner = FixedContainerType(struct { x: UintType(64) });
+    const VectorType = FixedVectorType(Inner, 4, .{});
+    const original: VectorType.Type = .{ .{ .x = 1 }, .{ .x = 2 }, .{ .x = 3 }, .{ .x = 4 } };
+
+    const root_node = try VectorType.tree.fromValue(&pool, &original);
+    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    var out: [2]Inner.Type = undefined;
+    _ = try view.getValuesByRangeInto(1, out[0..]);
+
+    try std.testing.expectEqual(@as(u64, 2), out[0].x);
+    try std.testing.expectEqual(@as(u64, 3), out[1].x);
+    try std.testing.expectEqual(@as(usize, 0), view.chunks.state.changed.count());
+
+    try std.testing.expectError(error.IndexOutOfBounds, view.getValuesByRangeInto(3, out[0..]));
 }
 
 test "TreeView vector composite clearCache does not break subsequent commits" {
