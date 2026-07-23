@@ -51,8 +51,8 @@ pub const PubkeyMap = std.array_hash_map.Custom(
     true,
 );
 
-// Leave room for ArrayHashMap's geometric growth and for the dense allocation
-// size multiplication on 32-bit targets.
+// Bound capacity by both the map's u32 index space and the largest dense
+// allocation that can grow without overflowing usize.
 const dense_capacity_limit =
     std.math.maxInt(usize) / PubkeyMap.DataList.capacityInBytes(1);
 pub const max_capacity: usize = @min(
