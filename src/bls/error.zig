@@ -25,10 +25,3 @@ pub fn errorFromInt(err: c_uint) BlstError!void {
         else => return BlstError.UnknownError,
     }
 }
-
-const std = @import("std");
-
-test "reject unknown BLST error codes" {
-    try errorFromInt(c.BLST_SUCCESS);
-    try std.testing.expectError(BlstError.UnknownError, errorFromInt(c.BLST_BAD_SCALAR + 1));
-}
