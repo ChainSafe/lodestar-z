@@ -25,7 +25,7 @@ export interface PubkeyCache {
   reset(): void;
   /** Save from the control environment. */
   save(filepath: string): void;
-  /** Reserve native capacity. This may grow an already populated cache. */
+  /** Reserve exact native capacity when growing; existing larger capacity is retained. */
   ensureCapacity(capacity: number): void;
 }
 

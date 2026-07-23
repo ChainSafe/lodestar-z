@@ -158,6 +158,7 @@ test "append and clear preserve dense storage invariants" {
         cache.append(testing.io, pubkeys[1], 0),
     );
     try testing.expectEqual(@as(u32, 3), cache.count(testing.io));
+    try testing.expect(cache.capacity(testing.io) > cache.count(testing.io));
 
     const capacity = cache.capacity(testing.io);
     try cache.clear(testing.io);
@@ -167,15 +168,22 @@ test "append and clear preserve dense storage invariants" {
     try testing.expectEqual(@as(u64, 0), cache.get(testing.io, pubkeys[3]).?);
 }
 
-test "capacity guard rejects oversized reservations" {
+test "explicit capacity is exact, non-shrinking, and guarded" {
     const unsupported = cache_module.max_capacity + 1;
     try testing.expectError(
         error.CapacityOverflow,
         PubkeyCache.initCapacity(testing.allocator, testing.io, unsupported),
     );
 
-    var cache = PubkeyCache.init(testing.allocator, testing.io);
+    var cache = try PubkeyCache.initCapacity(testing.allocator, testing.io, 8);
     defer cache.deinit();
+    try testing.expectEqual(@as(usize, 8), cache.capacity(testing.io));
+
+    try cache.ensureTotalCapacity(testing.io, 9);
+    try testing.expectEqual(@as(usize, 9), cache.capacity(testing.io));
+    try cache.ensureTotalCapacity(testing.io, 8);
+    try testing.expectEqual(@as(usize, 9), cache.capacity(testing.io));
+
     try testing.expectError(
         error.CapacityOverflow,
         cache.ensureTotalCapacity(testing.io, unsupported),

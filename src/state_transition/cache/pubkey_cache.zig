@@ -94,11 +94,7 @@ pub const PubkeyCache = struct {
 
         var self = init(allocator, io);
         errdefer self.deinit();
-        try self.entries.ensureTotalCapacityContext(
-            allocator,
-            initial_capacity,
-            self.hashContext(),
-        );
+        try self.ensureTotalCapacityExactUnlocked(initial_capacity);
         return self;
     }
 
@@ -112,9 +108,8 @@ pub const PubkeyCache = struct {
         return .{ .hash_key = self.hash_key };
     }
 
-    /// Reserve enough room for `new_capacity` entries. Existing entries remain
-    /// valid by index after a growth; their addresses are deliberately not part
-    /// of the public contract.
+    /// Reserve exactly `new_capacity` entries when growing dense storage.
+    /// Existing larger capacity is retained.
     pub fn ensureTotalCapacity(
         self: *PubkeyCache,
         io: std.Io,
@@ -124,7 +119,7 @@ pub const PubkeyCache = struct {
         try self.lock.lock(io);
         defer self.lock.unlock(io);
 
-        try self.ensureTotalCapacityUnlocked(new_capacity);
+        try self.ensureTotalCapacityExactUnlocked(new_capacity);
     }
 
     /// Test/reset API. Production operation is append-only and does not call
@@ -260,7 +255,7 @@ pub const PubkeyCache = struct {
         }
 
         try validateCapacity(current_len + 1);
-        try self.ensureTotalCapacityUnlocked(current_len + 1);
+        try self.ensureTotalCapacityAmortizedUnlocked(current_len + 1);
         self.entries.putAssumeCapacityNoClobberContext(
             pubkey,
             affine,
@@ -315,7 +310,7 @@ pub const PubkeyCache = struct {
             if (batch_error) |err| return err;
         }
 
-        try self.ensureTotalCapacityUnlocked(validators.len);
+        try self.ensureTotalCapacityAmortizedUnlocked(validators.len);
 
         const context = self.hashContext();
         for (suffix, prepared) |validator, affine| {
@@ -335,7 +330,25 @@ pub const PubkeyCache = struct {
         if (requested_capacity > max_capacity) return error.CapacityOverflow;
     }
 
-    fn ensureTotalCapacityUnlocked(self: *PubkeyCache, new_capacity: usize) !void {
+    fn ensureTotalCapacityAmortizedUnlocked(
+        self: *PubkeyCache,
+        new_capacity: usize,
+    ) !void {
+        try self.entries.ensureTotalCapacityContext(
+            self.allocator,
+            new_capacity,
+            self.hashContext(),
+        );
+    }
+
+    fn ensureTotalCapacityExactUnlocked(
+        self: *PubkeyCache,
+        new_capacity: usize,
+    ) !void {
+        if (new_capacity <= self.entries.capacity()) return;
+        if (new_capacity > self.entries.entries.capacity) {
+            try self.entries.entries.setCapacity(self.allocator, new_capacity);
+        }
         try self.entries.ensureTotalCapacityContext(
             self.allocator,
             new_capacity,

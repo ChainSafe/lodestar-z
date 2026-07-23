@@ -194,11 +194,12 @@ describe("pubkeys", () => {
     }
   );
 
-  it("grows capacity after publishing entries without changing the cache", () => {
+  it("reserves exact capacity after publishing entries without changing the cache", () => {
     const capacityBefore = pubkeyCache.capacity;
+    const requestedCapacity = capacityBefore + 1;
 
-    pubkeyCache.ensureCapacity(capacityBefore + 1);
-    expect(pubkeyCache.capacity).toBeGreaterThanOrEqual(capacityBefore + 1);
+    pubkeyCache.ensureCapacity(requestedCapacity);
+    expect(pubkeyCache.capacity).toBe(requestedCapacity);
     expectCacheContents();
   });
 
