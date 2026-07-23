@@ -258,24 +258,26 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
 
     const pubkey_bytes = pubkey_slice[0..48];
+    // Decode before resize; otherwise a failure would leave the append-only cache half-updated.
+    const native_pubkey = try bls.PublicKey.uncompress(pubkey_bytes);
 
-    // Ensure capacity if needed
     if (idx >= state.index2pubkey.capacity) {
         const new_cap: u32 = @intCast(@max(idx + 1, state.index2pubkey.capacity + growth_step));
         try state.pubkey2index.ensureTotalCapacity(new_cap);
         try state.index2pubkey.ensureTotalCapacityPrecise(cache_allocator, new_cap);
     }
+    // Reserve the map before resize so the reverse-index write cannot fail afterward.
+    state.pubkey2index.ensureUnusedCapacity(1) catch
+        return error.PubkeyIndexInsertFailed;
 
-    // Extend length if needed
     if (idx >= state.index2pubkey.items.len) {
         try state.index2pubkey.resize(cache_allocator, idx + 1);
     }
+    // After resize, both cache writes must remain infallible.
+    errdefer comptime unreachable;
 
-    // Set pubkey2index
-    state.pubkey2index.put(pubkey_bytes.*, @intCast(idx)) catch return error.PubkeyIndexInsertFailed;
-
-    // Deserialize and set index2pubkey
-    state.index2pubkey.items[@intCast(idx)] = try bls.PublicKey.uncompress(pubkey_bytes);
+    state.index2pubkey.items[@intCast(idx)] = native_pubkey;
+    state.pubkey2index.putAssumeCapacity(pubkey_bytes.*, @intCast(idx));
 }
 
 /// JS: pubkeys.size() → number
