@@ -5,7 +5,6 @@ const bls = @import("bls");
 const blst_bindings = @import("./blst.zig");
 const PubkeyIndexMap = @import("state_transition").PubkeyIndexMap;
 const Index2PubkeyCache = @import("state_transition").Index2PubkeyCache;
-const napi_io = @import("./io.zig");
 const preset = @import("preset").preset;
 
 /// Owns the long-lived pubkey cache allocations.
@@ -89,7 +88,7 @@ fn pubkey2indexWrittenSize() usize {
 pub fn save(file_path: js.String) !void {
     var file_path_buf: [1024]u8 = undefined;
     const path = try file_path.toSlice(&file_path_buf);
-    const io = napi_io.get();
+    const io = js.io();
     const file = try std.Io.Dir.createFile(.cwd(), io, path, .{});
     defer file.close(io);
 
@@ -118,7 +117,7 @@ pub fn save(file_path: js.String) !void {
 pub fn load(file_path: js.String) !void {
     var file_path_buf: [1024]u8 = undefined;
     const path = try file_path.toSlice(&file_path_buf);
-    const io = napi_io.get();
+    const io = js.io();
     const file = try std.Io.Dir.openFile(.cwd(), io, path, .{});
     defer file.close(io);
 

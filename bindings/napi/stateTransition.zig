@@ -1,6 +1,6 @@
-const napi_io = @import("./io.zig");
+const js = @import("zapi:zapi").js;
 const st = @import("state_transition");
 
 pub fn deinitReusedEpochTransitionCache() void {
-    st.deinitReusedEpochTransitionCache(napi_io.get());
+    st.deinitReusedEpochTransitionCache(js.io());
 }
