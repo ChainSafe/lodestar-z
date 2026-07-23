@@ -101,7 +101,7 @@ test "process execution payload - sanity" {
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256, .{});
     defer test_state.deinit();
 
     var execution_payload: types.electra.ExecutionPayload.Type = types.electra.ExecutionPayload.default_value;
@@ -133,7 +133,7 @@ test "process execution payload - blinded" {
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256, .{});
     defer test_state.deinit();
 
     const beacon_config = test_state.cached_state.config;
