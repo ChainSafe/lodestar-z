@@ -17,6 +17,7 @@ const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
 const napi_io = @import("./io.zig");
+const validator_monitor = @import("./validator_monitor.zig");
 
 /// Allocator used for all BeaconStateView instances.
 var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -1289,7 +1290,14 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
         allocator.destroy(post_state);
     }
 
-    try st.processSlots(allocator, napi_io.get(), post_state, slot_value, .{});
+    try st.processSlots(
+        allocator,
+        napi_io.get(),
+        post_state,
+        slot_value,
+        .{},
+        validator_monitor.get(),
+    );
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
@@ -1318,7 +1326,14 @@ pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint
     const signed_block = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, bytes);
     defer signed_block.deinit(allocator);
 
-    const post_state = try st.stateTransition(allocator, napi_io.get(), cached_state, signed_block, opts);
+    const post_state = try st.stateTransition(
+        allocator,
+        napi_io.get(),
+        cached_state,
+        signed_block,
+        opts,
+        validator_monitor.get(),
+    );
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
