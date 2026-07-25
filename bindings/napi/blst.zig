@@ -35,6 +35,10 @@ const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 /// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
 const BATCH_VERIFY_SIZE = 32;
 
+/// A zero coefficient would omit one input from the random linear combination.
+/// Eight attempts bound the retry loop while making generation failure negligible.
+const RANDOM_SCALAR_ATTEMPTS_MAX = 8;
+
 /// Native-only thread pool state, reached from `root.zig` through the
 /// pub `state` var so it is not part of the JS module surface.
 const State = struct {
@@ -833,7 +837,20 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     data.err = null;
     data.deferred = undefined;
     data.work = undefined;
-    napi_io.get().random(data.randomness[0 .. n * 32]);
+
+    const io = napi_io.get();
+    for (0..n) |i| {
+        const randomness = data.randomness[i * 32 ..][0..32];
+        var generated = false;
+        for (0..RANDOM_SCALAR_ATTEMPTS_MAX) |_| {
+            io.random(randomness);
+            if (!std.mem.allEqual(u8, randomness[0..8], 0)) {
+                generated = true;
+                break;
+            }
+        }
+        if (!generated) return error.RandomScalarGenerationFailed;
+    }
 
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
@@ -849,9 +866,11 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         data.sig_ptrs[i] = &data.sigs[i];
     }
 
-    data.deferred = try env.createPromise();
-
+    const deferred_cleanup_value = try env.getUndefined();
     const resource_name = try env.createStringUtf8("asyncAggregateWithRandomness");
+
+    // Until queue succeeds, this function owns the unqueued work handle. A valid,
+    // unqueued work handle must always be deletable.
     const work = try env.createAsyncWork(
         AsyncAggRandData,
         null,
@@ -860,9 +879,20 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         asyncAggRand_complete,
         data,
     );
+    errdefer work.delete() catch unreachable;
+
     data.work = work.work;
 
+    // Settle the unreturned Promise so Node can release its deferred handle.
+    data.deferred = try env.createPromise();
+    errdefer data.deferred.resolve(deferred_cleanup_value) catch |err| {
+        std.log.err("failed to settle unreturned async BLS promise: {s}", .{@errorName(err)});
+    };
+
     try work.queue();
+
+    // The completion callback owns the queued work, Promise, and data allocation.
+    errdefer comptime unreachable;
 
     return .{ .val = data.deferred.getPromise() };
 }
