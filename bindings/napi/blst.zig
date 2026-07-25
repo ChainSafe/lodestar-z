@@ -851,7 +851,9 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
 
     const resource_name = try env.createStringUtf8("asyncAggregateWithRandomness");
 
-    // Until queue succeeds, this function owns the unqueued work handle.
+    // Until queue succeeds, this function owns the unqueued work handle. Deletion should
+    // not fail after successful creation. If that invariant breaks, later error cleanup may
+    // free `data` while the work handle still points to it.
     const work = try env.createAsyncWork(
         AsyncAggRandData,
         null,
