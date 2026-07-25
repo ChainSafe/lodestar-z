@@ -22,7 +22,10 @@ pub fn init() !void {
 /// JS: metrics.scrapeMetrics() → string
 pub fn scrapeMetrics() !js.String {
     var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
     try state_transition.metrics.write(&aw.writer);
+
     var list = aw.toArrayList();
     defer list.deinit(allocator);
     return js.String.from(list.items);
