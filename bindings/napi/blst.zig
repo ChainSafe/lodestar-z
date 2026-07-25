@@ -849,7 +849,6 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         data.sig_ptrs[i] = &data.sigs[i];
     }
 
-    const deferred_cleanup_value = try env.getUndefined();
     const resource_name = try env.createStringUtf8("asyncAggregateWithRandomness");
 
     // Until queue succeeds, this function owns the unqueued work handle.
@@ -868,15 +867,13 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     data.work = work.work;
 
     // Settle the unreturned Promise so Node can release its deferred handle.
+    const deferred_cleanup_value = try env.getUndefined();
     data.deferred = try env.createPromise();
     errdefer data.deferred.resolve(deferred_cleanup_value) catch |err| {
         std.log.err("failed to settle unreturned async BLS promise: {s}", .{@errorName(err)});
     };
 
     try work.queue();
-
-    // The completion callback owns the queued work, Promise, and data allocation.
-    errdefer comptime unreachable;
 
     return .{ .val = data.deferred.getPromise() };
 }
