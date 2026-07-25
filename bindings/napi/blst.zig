@@ -627,14 +627,10 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
     var sigs: [MAX_AGGREGATE_PER_JOB]NativeSignature = undefined;
     var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativeSignature = undefined;
 
-    var seed_bytes: [8]u8 = undefined;
     const io = napi_io.get();
-    io.random(&seed_bytes);
-    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
-    const rand = prng.random();
     var scalars: [8 * MAX_AGGREGATE_PER_JOB]u8 = undefined;
     var sca_ptrs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
-    rand.bytes(scalars[0 .. n * nbytes]);
+    io.random(scalars[0 .. n * nbytes]);
 
     const env = js.env();
     for (0..n) |i| {
@@ -650,9 +646,8 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
         sigs[i].validate(true) catch return error.InvalidSignature;
         sig_ptrs[i] = &sigs[i];
 
-        while (std.mem.allEqual(u8, scalars[i * nbytes ..][0..nbytes], 0)) {
-            rand.bytes(scalars[i * nbytes ..][0..nbytes]);
-        }
+        const scalar = scalars[i * nbytes ..][0..nbytes];
+        while (std.mem.allEqual(u8, scalar, 0)) io.random(scalar);
         sca_ptrs[i] = &scalars[i * nbytes];
     }
 
