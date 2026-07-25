@@ -852,8 +852,7 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     const deferred_cleanup_value = try env.getUndefined();
     const resource_name = try env.createStringUtf8("asyncAggregateWithRandomness");
 
-    // Until queue succeeds, this function owns the unqueued work handle. A valid,
-    // unqueued work handle must always be deletable.
+    // Until queue succeeds, this function owns the unqueued work handle.
     const work = try env.createAsyncWork(
         AsyncAggRandData,
         null,
@@ -862,7 +861,9 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         asyncAggRand_complete,
         data,
     );
-    errdefer work.delete() catch unreachable;
+    errdefer work.delete() catch |err| {
+        std.log.err("failed to delete unqueued async BLS work: {s}", .{@errorName(err)});
+    };
 
     data.work = work.work;
 
