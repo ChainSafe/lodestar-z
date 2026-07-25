@@ -833,7 +833,17 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     data.err = null;
     data.deferred = undefined;
     data.work = undefined;
-    napi_io.get().random(data.randomness[0 .. n * 32]);
+
+    const io = napi_io.get();
+    io.random(data.randomness[0 .. n * 32]);
+
+    // A zero scalar would omit its input from the random linear combination.
+    for (0..n) |i| {
+        const scalar = data.randomness[i * 32 ..][0..8];
+        while (std.mem.allEqual(u8, scalar, 0)) {
+            io.random(scalar);
+        }
+    }
 
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
