@@ -3,8 +3,8 @@ ctx: *c.blst_pairing,
 
 const Self = @This();
 
-/// Required alignment for the pairing buffer. BLST fields require at most
-/// 8-byte alignment.
+/// Required alignment for the pairing buffer. The opaque C struct contains
+/// `uptr_t` (64-bit) fields that require 8-byte alignment.
 pub const buf_align = 8;
 
 /// Initializes a pairing context with the provided `buffer` and other parameters.
