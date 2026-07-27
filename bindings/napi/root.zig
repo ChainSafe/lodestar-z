@@ -11,7 +11,6 @@ pub const blst = @import("./blst.zig");
 pub const pubkeys = @import("./pubkeys.zig");
 
 const options = @import("bls_options");
-const napi_io = @import("./io.zig");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
@@ -19,9 +18,6 @@ const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_al
 fn init(old_ref_count: u32) !void {
     if (old_ref_count == 0) {
         // First environment — initialize shared state in your threadpool init.
-        try napi_io.init();
-        errdefer napi_io.deinit();
-
         var cpu_count: u64 = options.thread_count;
         if (options.thread_count == 0) {
             cpu_count = @max(try detectCpuCount(), 2) - 1;
@@ -52,7 +48,7 @@ fn init(old_ref_count: u32) !void {
 /// not prevent the module from loading: warn and fall back to the affinity
 /// count (what `std.Thread.getCpuCount()` reports).
 fn detectCpuCount() !usize {
-    return @import("cpu_count").getNumCpus(allocator, napi_io.get()) catch |err| {
+    return @import("cpu_count").getNumCpus(allocator, js.io()) catch |err| {
         std.log.debug(
             "Warning: cgroup CPU detection failed ({s}), using affinity count\n",
             .{@errorName(err)},
@@ -69,7 +65,6 @@ fn cleanup(new_ref_count: u32) void {
         pubkeys.state.deinit();
         pool.state.deinit();
         metrics.deinit();
-        napi_io.deinit();
     }
 }
 
