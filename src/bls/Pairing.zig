@@ -3,8 +3,8 @@ ctx: *c.blst_pairing,
 
 const Self = @This();
 
-/// Required alignment for the pairing buffer. The opaque C struct contains
-/// `uptr_t` (64-bit) fields that require 8-byte alignment.
+/// Required alignment for the pairing buffer. BLST fields require at most
+/// 8-byte alignment.
 pub const buf_align = 8;
 
 /// Initializes a pairing context with the provided `buffer` and other parameters.
@@ -26,7 +26,16 @@ pub fn init(buffer: *align(buf_align) [Self.sizeOf()]u8, hash_or_encode: bool, d
 ///
 /// This is safe because blst is statically linked to this binding.
 pub fn sizeOf() usize {
-    const vec384_size = 384 / @sizeOf(usize);
+    return sizeOfForPointerSize(@sizeOf(usize));
+}
+
+fn sizeOfForPointerSize(comptime pointer_size_bytes: usize) usize {
+    switch (pointer_size_bytes) {
+        4, 8 => {},
+        else => @compileError("unsupported pointer size"),
+    }
+
+    const vec384_size = 384 / std.mem.byte_size_in_bits;
     const vec384fp12_size = vec384_size * 12;
 
     const point_e1_affine_size = vec384_size * 2;
@@ -37,7 +46,7 @@ pub fn sizeOf() usize {
 
     const p: usize =
         @sizeOf(c_int) * 2 + // ctrl and nelems
-        @sizeOf(usize) * 2 + // DST and DST_len
+        pointer_size_bytes * 2 + // DST and DST_len
         vec384fp12_size + // GT
         point_e2_size + // AggrSignaturen
         point_e2_affine_size * N_MAX + // Q
@@ -144,6 +153,11 @@ test "sizeOf Pairing" {
         c.blst_pairing_sizeof(),
         @This().sizeOf(),
     );
+}
+
+test "sizeOf Pairing for supported pointer widths" {
+    try std.testing.expectEqual(@as(usize, 3184), sizeOfForPointerSize(4));
+    try std.testing.expectEqual(@as(usize, 3192), sizeOfForPointerSize(8));
 }
 
 const std = @import("std");
