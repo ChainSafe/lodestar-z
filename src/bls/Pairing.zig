@@ -26,15 +26,6 @@ pub fn init(buffer: *align(buf_align) [Self.sizeOf()]u8, hash_or_encode: bool, d
 ///
 /// This is safe because blst is statically linked to this binding.
 pub fn sizeOf() usize {
-    return sizeOfForPointerSize(@sizeOf(usize));
-}
-
-fn sizeOfForPointerSize(comptime pointer_size_bytes: usize) usize {
-    switch (pointer_size_bytes) {
-        4, 8 => {},
-        else => @compileError("unsupported pointer size"),
-    }
-
     const vec384_size = 384 / std.mem.byte_size_in_bits;
     const vec384fp12_size = vec384_size * 12;
 
@@ -46,7 +37,7 @@ fn sizeOfForPointerSize(comptime pointer_size_bytes: usize) usize {
 
     const p: usize =
         @sizeOf(c_int) * 2 + // ctrl and nelems
-        pointer_size_bytes * 2 + // DST and DST_len
+        @sizeOf(usize) * 2 + // DST and DST_len
         vec384fp12_size + // GT
         point_e2_size + // AggrSignaturen
         point_e2_affine_size * N_MAX + // Q
@@ -153,11 +144,6 @@ test "sizeOf Pairing" {
         c.blst_pairing_sizeof(),
         @This().sizeOf(),
     );
-}
-
-test "sizeOf Pairing for supported pointer widths" {
-    try std.testing.expectEqual(@as(usize, 3184), sizeOfForPointerSize(4));
-    try std.testing.expectEqual(@as(usize, 3192), sizeOfForPointerSize(8));
 }
 
 const std = @import("std");
