@@ -15,7 +15,6 @@ const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
 const bls = @import("bls");
-const napi_io = @import("./io.zig");
 
 const NativePublicKey = bls.PublicKey;
 const NativeSignature = bls.Signature;
@@ -43,7 +42,7 @@ const State = struct {
 
     pub fn init(self: *State, n_workers: u16) !void {
         if (self.thread_pool != null) return error.PoolExists;
-        self.thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
+        self.thread_pool = try ThreadPool.init(std.heap.page_allocator, js.io(), .{ .n_workers = n_workers });
     }
 
     /// Closes the `ThreadPool` used for blst operations.
@@ -56,7 +55,7 @@ const State = struct {
     /// Same goes for any other long-lived processes.
     pub fn deinit(self: *State) void {
         if (self.thread_pool) |p| {
-            p.deinit(napi_io.get());
+            p.deinit(js.io());
             self.thread_pool = null;
         }
     }
@@ -391,7 +390,7 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
 
     const pool = state.thread_pool orelse return error.ThreadPoolNotInitialized;
     const result = pool.aggregateVerify(
-        napi_io.get(),
+        js.io(),
         &sig.raw,
         try boolOrDefault(sig_groupcheck, false),
         msg_bufs,
@@ -489,7 +488,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     };
 
     var seed_bytes: [8]u8 = undefined;
-    const io = napi_io.get();
+    const io = js.io();
     io.random(&seed_bytes);
     var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
     const rand = prng.random();
@@ -518,7 +517,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
 
     const pool = state.thread_pool orelse return error.ThreadPoolNotInitialized;
     const result = pool.verifyMultipleAggregateSignatures(
-        napi_io.get(),
+        js.io(),
         n_elems,
         msgs,
         DST,
@@ -628,7 +627,7 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
     var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativeSignature = undefined;
 
     var seed_bytes: [8]u8 = undefined;
-    const io = napi_io.get();
+    const io = js.io();
     io.random(&seed_bytes);
     var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
     const rand = prng.random();
@@ -737,7 +736,7 @@ fn asyncAggRand_execute(_: napi.Env, data: *AsyncAggRandData) void {
         return;
     };
     pool.aggregateWithRandomness(
-        napi_io.get(),
+        js.io(),
         data.pk_ptrs[0..data.n],
         data.sig_ptrs[0..data.n],
         data.randomness[0 .. data.n * 32],
@@ -833,7 +832,7 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     data.err = null;
     data.deferred = undefined;
     data.work = undefined;
-    napi_io.get().random(data.randomness[0 .. n * 32]);
+    js.io().random(data.randomness[0 .. n * 32]);
 
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
