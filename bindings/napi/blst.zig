@@ -858,9 +858,12 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         data.sig_ptrs[i] = &data.sigs[i];
     }
 
-    data.deferred = try env.createPromise();
-
+    const deferred_cleanup_value = try env.getUndefined();
     const resource_name = try env.createStringUtf8("asyncAggregateWithRandomness");
+
+    // Until queue succeeds, this function owns the unqueued work handle. Deletion should
+    // not fail after successful creation. If that invariant breaks, later error cleanup may
+    // free `data` while the work handle still points to it.
     const work = try env.createAsyncWork(
         AsyncAggRandData,
         null,
@@ -869,7 +872,17 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         asyncAggRand_complete,
         data,
     );
+    errdefer work.delete() catch |err| {
+        std.log.err("failed to delete unqueued async BLS work: {s}", .{@errorName(err)});
+    };
+
     data.work = work.work;
+
+    // Settle the unreturned Promise so Node can release its deferred handle.
+    data.deferred = try env.createPromise();
+    errdefer data.deferred.resolve(deferred_cleanup_value) catch |err| {
+        std.log.err("failed to settle unreturned async BLS promise: {s}", .{@errorName(err)});
+    };
 
     try work.queue();
 
