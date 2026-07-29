@@ -108,6 +108,7 @@ fn loadStateForFork(
     state_bytes: []const u8,
     seed_validators_bytes: ?[]const u8,
 ) !MigrateStateOutput {
+    if (state_bytes.len < StateST.min_size) return error.InvalidSize;
     const ranges = try StateST.readFieldRanges(state_bytes);
 
     const validators_field_index = comptime StateST.getFieldIndex("validators");
@@ -222,9 +223,8 @@ fn loadValidators(
     var serialized_seed: ?[]u8 = null;
     defer if (serialized_seed) |bytes| allocator.free(bytes);
 
-    // 80% of validators serialization time comes from memory allocation.
-    // seed_state_validators_bytes is an optimization at the beacon-node side to avoid
-    // memory allocation here.
+    // 80% of validators serialization time comes from memory allocation; the caller can pass
+    // `seed_state_validators_bytes` (pre-serialized seed) to avoid this allocation here.
     const seed_bytes: []const u8 = seed_state_validators_bytes orelse blk: {
         const size = try seed_validators.serializedSize();
         const out = try allocator.alloc(u8, size);

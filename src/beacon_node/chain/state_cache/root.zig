@@ -13,6 +13,7 @@ pub const key = @import("key.zig");
 pub const block_state_cache = @import("block_state_cache.zig");
 pub const cp_datastore = @import("cp_datastore.zig");
 pub const metrics = @import("metrics.zig");
+pub const checkpoint_state_cache = @import("checkpoint_state_cache.zig");
 
 pub const CheckpointContext = key.CheckpointContext;
 pub const DatastoreKey = key.DatastoreKey;
@@ -21,6 +22,8 @@ pub const Checkpoint = key.Checkpoint;
 
 pub const BlockStateCache = block_state_cache.BlockStateCache;
 pub const DEFAULT_MAX_BLOCK_STATES = block_state_cache.DEFAULT_MAX_BLOCK_STATES;
+
+pub const PersistentCheckpointStateCache = checkpoint_state_cache.PersistentCheckpointStateCache;
 
 pub const CPStateDatastore = cp_datastore.CPStateDatastore;
 pub const InMemoryCPStateDatastore = cp_datastore.InMemoryCPStateDatastore;

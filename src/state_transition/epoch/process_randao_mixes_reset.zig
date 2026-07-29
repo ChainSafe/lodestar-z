@@ -31,7 +31,7 @@ test "processRandaoMixesReset - sanity" {
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000, .{});
     defer test_state.deinit();
 
     try processRandaoMixesReset(
