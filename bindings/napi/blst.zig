@@ -34,6 +34,9 @@ const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 /// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
 const BATCH_VERIFY_SIZE = 32;
 
+/// A broken random source must fail instead of retrying forever.
+const RANDOM_SCALAR_RETRIES_MAX = 8;
+
 /// Native-only thread pool state, reached from `root.zig` through the
 /// pub `state` var so it is not part of the JS module surface.
 const State = struct {
@@ -68,6 +71,17 @@ const allocator = if (builtin.mode == .Debug)
     gpa.allocator()
 else
     std.heap.c_allocator;
+
+/// A zero coefficient would omit its input from the random linear combination.
+fn ensureNonzeroRandomScalar(io: std.Io, scalar: *[8]u8) !void {
+    if (!std.mem.allEqual(u8, scalar, 0)) return;
+
+    for (0..RANDOM_SCALAR_RETRIES_MAX) |_| {
+        io.random(scalar);
+        if (!std.mem.allEqual(u8, scalar, 0)) return;
+    }
+    return error.RandomScalarGenerationFailed;
+}
 
 fn boolOrDefault(value: ?js.Boolean, default: bool) !bool {
     return if (value) |v| try v.toBool() else default;
@@ -487,11 +501,11 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         break :blk buf;
     };
 
-    var seed_bytes: [8]u8 = undefined;
     const io = js.io();
-    io.random(&seed_bytes);
-    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
-    const rand = prng.random();
+    io.random(std.mem.sliceAsBytes(rands));
+    for (rands) |*randomness| {
+        try ensureNonzeroRandomScalar(io, randomness[0..8]);
+    }
 
     for (0..n_elems) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
@@ -508,11 +522,6 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         const sig_napi = try set.getNamedProperty("sig");
         const wrapped_sig = try unwrapClass(Signature, .{ .val = sig_napi });
         sigs[i] = &wrapped_sig.raw;
-
-        var scalar = rand.int(u64);
-        while (scalar == 0) scalar = rand.int(u64);
-        std.mem.writeInt(u64, rands[i][0..8], scalar, .little);
-        @memset(rands[i][8..], 0);
     }
 
     const pool = state.thread_pool orelse return error.ThreadPoolNotInitialized;
@@ -626,14 +635,10 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
     var sigs: [MAX_AGGREGATE_PER_JOB]NativeSignature = undefined;
     var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativeSignature = undefined;
 
-    var seed_bytes: [8]u8 = undefined;
     const io = js.io();
-    io.random(&seed_bytes);
-    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
-    const rand = prng.random();
     var scalars: [8 * MAX_AGGREGATE_PER_JOB]u8 = undefined;
     var sca_ptrs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
-    rand.bytes(scalars[0 .. n * nbytes]);
+    io.random(scalars[0 .. n * nbytes]);
 
     const env = js.env();
     for (0..n) |i| {
@@ -649,9 +654,8 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
         sigs[i].validate(true) catch return error.InvalidSignature;
         sig_ptrs[i] = &sigs[i];
 
-        while (std.mem.allEqual(u8, scalars[i * nbytes ..][0..nbytes], 0)) {
-            rand.bytes(scalars[i * nbytes ..][0..nbytes]);
-        }
+        const scalar = scalars[i * nbytes ..][0..nbytes];
+        try ensureNonzeroRandomScalar(io, scalar);
         sca_ptrs[i] = &scalars[i * nbytes];
     }
 
@@ -832,7 +836,13 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     data.err = null;
     data.deferred = undefined;
     data.work = undefined;
-    js.io().random(data.randomness[0 .. n * 32]);
+
+    const io = js.io();
+    io.random(data.randomness[0 .. n * 32]);
+    for (0..n) |i| {
+        const scalar = data.randomness[i * 32 ..][0..8];
+        try ensureNonzeroRandomScalar(io, scalar);
+    }
 
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
@@ -848,9 +858,12 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         data.sig_ptrs[i] = &data.sigs[i];
     }
 
-    data.deferred = try env.createPromise();
-
+    const deferred_cleanup_value = try env.getUndefined();
     const resource_name = try env.createStringUtf8("asyncAggregateWithRandomness");
+
+    // Until queue succeeds, this function owns the unqueued work handle. Deletion should
+    // not fail after successful creation. If that invariant breaks, later error cleanup may
+    // free `data` while the work handle still points to it.
     const work = try env.createAsyncWork(
         AsyncAggRandData,
         null,
@@ -859,7 +872,17 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         asyncAggRand_complete,
         data,
     );
+    errdefer work.delete() catch |err| {
+        std.log.err("failed to delete unqueued async BLS work: {s}", .{@errorName(err)});
+    };
+
     data.work = work.work;
+
+    // Settle the unreturned Promise so Node can release its deferred handle.
+    data.deferred = try env.createPromise();
+    errdefer data.deferred.resolve(deferred_cleanup_value) catch |err| {
+        std.log.err("failed to settle unreturned async BLS promise: {s}", .{@errorName(err)});
+    };
 
     try work.queue();
 
