@@ -123,7 +123,7 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     const cached_state = try allocator.create(CachedBeaconState);
     errdefer allocator.destroy(cached_state);
 
-    const io = napi_io.get();
+    const io = js.io();
     try initCachedState(cached_state, io, state);
 
     return .{
@@ -890,7 +890,7 @@ pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_value:
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.getVoluntaryExitValidity(
             f,
-            napi_io.get(),
+            js.io(),
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state.castToFork(f),
@@ -917,7 +917,7 @@ pub fn isValidVoluntaryExit(self: *const BeaconStateView, signed_exit_value: js.
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.isValidVoluntaryExit(
             f,
-            napi_io.get(),
+            js.io(),
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state.castToFork(f),
@@ -1146,7 +1146,7 @@ pub fn loadOtherState(
         allocator.destroy(new_cached_state);
     }
 
-    const io = napi_io.get();
+    const io = js.io();
     try initCachedState(new_cached_state, io, new_state);
     new_cached_state_initialized = true;
 
