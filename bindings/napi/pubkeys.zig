@@ -46,13 +46,12 @@ pub var state: State = .{};
 
 /// JS: pubkeys.save(filePath)
 pub fn save(file_path: js.String) !void {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
     try state.requireControlEnvironment(js.env());
 
     const path = try file_path.toOwnedSlice(allocator);
     defer allocator.free(path);
     const io = js.io();
-
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
     // `createFileAtomic` creates a sibling temporary file so replacement cannot
     // cross filesystems. `deinit` removes the temporary file on every failure.
@@ -70,14 +69,13 @@ pub fn save(file_path: js.String) !void {
 
 /// JS: pubkeys.load(filePath, maxCapacity)
 pub fn load(file_path: js.String, max_capacity: js.Number) !void {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
     try state.requireControlEnvironment(js.env());
 
     const path = try file_path.toOwnedSlice(allocator);
     defer allocator.free(path);
     const capacity_limit = try max_capacity.toU32();
     const io = js.io();
-
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
     const file = try std.Io.Dir.openFile(.cwd(), io, path, .{});
     defer file.close(io);
@@ -100,20 +98,20 @@ pub fn load(file_path: js.String, max_capacity: js.Number) !void {
 
 /// JS: pubkeys.reset()
 pub fn reset() !void {
-    try state.requireControlEnvironment(js.env());
-
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
+    try state.requireControlEnvironment(js.env());
     try state.cache.clear(js.io());
 }
 
 /// JS: pubkeys.getIndex(pubkeyBytes) → number | null
 pub fn getIndex(pubkey: js.Uint8Array) !js.Value {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
     const pubkey_slice = try pubkey.toSlice();
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
     const pubkey_bytes = pubkey_slice[0..48].*;
 
     const io = js.io();
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
     const index = state.cache.get(io, pubkey_bytes);
 
     const e = js.env();
@@ -125,9 +123,10 @@ pub fn getIndex(pubkey: js.Uint8Array) !js.Value {
 
 /// JS: pubkeys.get(index) → PublicKey | undefined
 pub fn get(index: js.Number) !?blst_bindings.PublicKey {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
     const idx = try index.toU32();
     const io = js.io();
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
     const public_key = state.cache.getPubkey(io, idx) orelse return null;
     return .{ .raw = public_key };
 }
@@ -140,6 +139,8 @@ pub fn get(index: js.Number) !?blst_bindings.PublicKey {
 ///
 /// JS: pubkeys.aggregate(indices) → PublicKey
 pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
     const len = try indices.length();
     if (len == 0) return error.EmptyPublicKeyArray;
 
@@ -157,7 +158,6 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
     }
 
     const io = js.io();
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
     const aggregate_pubkey = if (exact_indices.len == 1)
         state.cache.getPubkey(io, exact_indices[0]) orelse return error.PubkeyIndexNotFound
     else
@@ -171,9 +171,10 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
 
 /// JS: pubkeys.append(index, pubkeyBytes)
 pub fn append(index: js.Number, pubkey: js.Uint8Array) !void {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
     const idx = try index.toU32();
     const io = js.io();
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
     const pubkey_slice = try pubkey.toSlice();
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
@@ -185,24 +186,25 @@ pub fn append(index: js.Number, pubkey: js.Uint8Array) !void {
 /// JS: pubkeys.size() → number
 /// Note: zapi DSL does not yet support namespace-level getters, so this is a function.
 pub fn size() !js.Number {
-    const io = js.io();
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
+    const io = js.io();
     return js.Number.from(state.cache.count(io));
 }
 
 /// JS: pubkeys.ensureCapacity(newSize)
 pub fn ensureCapacity(new_size: js.Number) !void {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
     const requested = try new_size.toU32();
     const io = js.io();
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
     try state.cache.ensureTotalCapacity(io, requested);
 }
 
 /// JS: pubkeys.capacity() → number
 /// Note: zapi DSL does not yet support namespace-level getters, so this is a function.
 pub fn capacity() !js.Number {
-    const io = js.io();
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
+    const io = js.io();
     const current_capacity: u32 = @intCast(state.cache.capacity(io));
     return js.Number.from(current_capacity);
 }

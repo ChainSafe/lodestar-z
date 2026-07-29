@@ -123,20 +123,10 @@ const abi_fingerprint = std.hash.XxHash3.hash(
     abi_description,
 );
 
-const PayloadLayout = struct {
-    keys_size: usize,
-    size: usize,
-
-    fn init(entry_count: u32) PayloadLayout {
-        const count: usize = @intCast(entry_count);
-        const keys_size = count * @sizeOf([48]u8);
-        const pubkeys_size = count * @sizeOf(bls.PublicKey);
-        return .{
-            .keys_size = keys_size,
-            .size = keys_size + pubkeys_size,
-        };
-    }
-};
+fn payloadSize(entry_count: u32) usize {
+    const count: usize = @intCast(entry_count);
+    return count * (@sizeOf([48]u8) + @sizeOf(bls.PublicKey));
+}
 
 fn payloadChecksum(payload: []const u8) u64 {
     return std.hash.XxHash3.hash(payload_checksum_seed, payload);
@@ -218,12 +208,12 @@ pub fn load(
         max_capacity,
         pubkey_cache.max_capacity,
     );
-    const layout = PayloadLayout.init(header.entry_count);
-    const expected_file_size: u64 = @intCast(header_size + layout.size);
+    const payload_size = payloadSize(header.entry_count);
+    const expected_file_size: u64 = @intCast(header_size + payload_size);
     if (file_size != expected_file_size) return error.InvalidPkixHeader;
 
     // An empty payload can be checked before its reserved capacity is allocated.
-    if (layout.size == 0 and header.payload_checksum != payloadChecksum(&.{})) {
+    if (payload_size == 0 and header.payload_checksum != payloadChecksum(&.{})) {
         return error.InvalidPkixChecksum;
     }
 
