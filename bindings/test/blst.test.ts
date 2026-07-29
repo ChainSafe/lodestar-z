@@ -122,6 +122,16 @@ describe("blst", () => {
     it("should throw on invalid length", () => {
       expect(() => Signature.fromBytes(new Uint8Array(95))).toThrow();
     });
+
+    it("should reject PublicKey objects when aggregating", () => {
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+      expect(() => Signature.aggregate([pk as unknown as Signature], false)).toThrow("TypeMismatch");
+    });
+
+    it("should aggregate Signature objects", () => {
+      const signatures = getTestSets(2).map((set) => set.sig);
+      expect(Signature.aggregate(signatures, false)).toBeInstanceOf(Signature);
+    });
   });
 
   describe("SecretKey", () => {
@@ -309,6 +319,23 @@ describe("blst", () => {
       sets[0].sig = sets[1].sig;
       expect(verifyMultipleAggregateSignatures(sets, false, false)).to.be.false;
     });
+
+    it("should reject objects of the wrong class", () => {
+      const [{msg, pk, sig, sk}] = getTestSets(1);
+      expect(() =>
+        verifyMultipleAggregateSignatures([{msg, pk: sk as unknown as PublicKey, sig}], false, false)
+      ).toThrow("TypeMismatch");
+      expect(() =>
+        verifyMultipleAggregateSignatures([{msg, pk, sig: pk as unknown as Signature}], false, false)
+      ).toThrow("TypeMismatch");
+    });
+  });
+
+  describe("aggregatePublicKeys", () => {
+    it("should reject SecretKey objects", () => {
+      const sk = SecretKey.fromBytes(SECRET_KEY_BYTES);
+      expect(() => aggregatePublicKeys([sk as unknown as PublicKey])).toThrow("TypeMismatch");
+    });
   });
 
   describe("aggregateSerializedPublicKeys", () => {
@@ -393,6 +420,12 @@ describe("blst", () => {
       input[2].sig = new Uint8Array(96).fill(0xff);
       expect(() => aggregateWithRandomness(input)).toThrow();
     });
+
+    it("should reject objects of the wrong class", () => {
+      const {sets} = getTestSetsSameMessage(1);
+      const input = [{pk: sets[0].sk as unknown as PublicKey, sig: sets[0].sig.toBytes()}];
+      expect(() => aggregateWithRandomness(input)).toThrow("TypeMismatch");
+    });
   });
 
   describe("asyncAggregateWithRandomness", () => {
@@ -467,6 +500,12 @@ describe("blst", () => {
       const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
       input[2].sig = new Uint8Array(96).fill(0xff);
       await expect(Promise.resolve().then(() => asyncAggregateWithRandomness(input))).rejects.toThrow();
+    });
+
+    it("should reject objects of the wrong class", async () => {
+      const {sets} = getTestSetsSameMessage(1);
+      const input = [{pk: sets[0].sk as unknown as PublicKey, sig: sets[0].sig.toBytes()}];
+      await expect(Promise.resolve().then(() => asyncAggregateWithRandomness(input))).rejects.toThrow("TypeMismatch");
     });
 
     it("should resolve concurrent invocations correctly", async () => {
