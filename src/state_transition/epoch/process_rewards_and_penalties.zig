@@ -29,7 +29,8 @@ pub fn processRewardsAndPenalties(
     try getRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache, rewards, penalties);
 
     const balances = try state.balancesSlice(allocator);
-    errdefer allocator.free(balances);
+    var new_balances: std.ArrayList(u64) = .fromOwnedSlice(balances);
+    errdefer new_balances.deinit(allocator);
 
     if (slashing_penalties) |slashings| {
         for (rewards, penalties, balances, 0..) |reward, penalty, *balance, i| {
@@ -43,13 +44,13 @@ pub fn processRewardsAndPenalties(
     }
 
     // The state tree copies the values, so the source allocation can move into the cache.
-    var new_balances: std.ArrayList(u64) = .fromOwnedSlice(balances);
     try state.setBalances(&new_balances);
 
     if (cache.balances) |*old_balances| {
         old_balances.deinit(allocator);
     }
     cache.balances = new_balances;
+    new_balances = .empty;
 }
 
 pub fn getRewardsAndPenalties(

@@ -201,12 +201,7 @@ fn ProcessEffectiveBalanceUpdatesBench(comptime fork: ForkSeq) type {
 
         pub fn beforeEach() void {
             BenchState.beforeEach();
-            BenchState.cloned_cached_state.epoch_cache.beforeEpochTransition() catch |err| {
-                std.debug.panic(
-                    "failed to clone effective balance increments: {s}",
-                    .{@errorName(err)},
-                );
-            };
+            BenchState.cloned_cached_state.epoch_cache.beforeEpochTransition() catch unreachable;
         }
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
