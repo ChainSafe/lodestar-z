@@ -38,6 +38,10 @@ export const pubkeyCache = {
     native.append(index, pubkey);
   },
 
+  syncPubkeys(validators) {
+    native.syncPubkeys(validators);
+  },
+
   get size() {
     return native.size();
   },

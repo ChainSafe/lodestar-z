@@ -6,6 +6,8 @@ const blst_bindings = @import("./blst.zig");
 const state_transition = @import("state_transition");
 const PubkeyCache = state_transition.PubkeyCache;
 const pkix = state_transition.pkix;
+const NativeValidator = @import("consensus_types").phase0.Validator.Type;
+const Validator = js.Object(struct { pubkey: js.Uint8Array });
 
 /// Uses the page allocator for the process-wide cache's internal allocations.
 const allocator = std.heap.page_allocator;
@@ -181,6 +183,40 @@ pub fn append(index: js.Number, pubkey: js.Uint8Array) !void {
     const pubkey_bytes = pubkey_slice[0..48].*;
 
     try state.cache.append(io, pubkey_bytes, idx);
+}
+
+/// JS: pubkeys.syncPubkeys(validators)
+pub fn syncPubkeys(validators: js.Array) !void {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
+    const validator_count = try validators.length();
+    const io = js.io();
+    const cached_count = state.cache.count(io);
+    if (validator_count <= cached_count) return;
+
+    const missing_count = validator_count - cached_count;
+    const native_validators = try allocator.alloc(NativeValidator, missing_count);
+    defer allocator.free(native_validators);
+    const validator_ptrs = try allocator.alloc(*const NativeValidator, validator_count);
+    defer allocator.free(validator_ptrs);
+
+    // These are ignored by the native syncPubkeys. We skip work by
+    // just filling with dummy pointers
+    @memset(validator_ptrs[0..cached_count], &native_validators[0]);
+    for (cached_count..validator_count) |index| {
+        const value = try validators.get(@intCast(index));
+        try Validator.validateArg(value.val);
+        const validator = try (Validator{ .val = value.val }).get();
+        const pubkey = try validator.pubkey.toSlice();
+        if (pubkey.len != blst_bindings.PublicKey.COMPRESS_SIZE) return error.InvalidPubkeyLength;
+
+        const missing_index = index - cached_count;
+        native_validators[missing_index] = undefined;
+        native_validators[missing_index].pubkey = pubkey[0..48].*;
+        validator_ptrs[index] = &native_validators[missing_index];
+    }
+
+    try state.cache.syncPubkeys(io, validator_ptrs);
 }
 
 /// JS: pubkeys.size() → number

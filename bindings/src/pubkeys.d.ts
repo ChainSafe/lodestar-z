@@ -11,6 +11,8 @@ export interface PubkeyCache {
   getIndex(pubkey: Uint8Array): number | null;
   /** Append at the next index. Exact replays are no-ops; invalid, conflicting, duplicate, or sparse entries throw. */
   append(index: number, pubkey: Uint8Array): void;
+  /** Populate the cache from the missing suffix of a validator list. */
+  syncPubkeys(validators: {pubkey: Uint8Array}[]): void;
   /** Current number of cached entries. */
   readonly size: number;
   /** Number of entries the current native allocation can hold without growing. */
