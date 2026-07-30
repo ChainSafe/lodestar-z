@@ -29,8 +29,8 @@ pub fn processRewardsAndPenalties(
     try getRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache, rewards, penalties);
 
     const balances = try state.balancesSlice(allocator);
-    var new_balances: std.ArrayList(u64) = .fromOwnedSlice(balances);
-    errdefer new_balances.deinit(allocator);
+    errdefer allocator.free(balances);
+    const new_balances: std.ArrayList(u64) = .fromOwnedSlice(balances);
 
     if (slashing_penalties) |slashings| {
         for (rewards, penalties, balances, 0..) |reward, penalty, *balance, i| {
@@ -50,7 +50,6 @@ pub fn processRewardsAndPenalties(
         old_balances.deinit(allocator);
     }
     cache.balances = new_balances;
-    new_balances = .empty;
 }
 
 pub fn getRewardsAndPenalties(
