@@ -7,7 +7,6 @@ const state_transition = @import("state_transition");
 const PubkeyCache = state_transition.PubkeyCache;
 const pkix = state_transition.pkix;
 const NativeValidator = @import("consensus_types").phase0.Validator.Type;
-const Validator = js.Object(struct { pubkey: js.Uint8Array });
 
 /// Uses the page allocator for the process-wide cache's internal allocations.
 const allocator = std.heap.page_allocator;
@@ -204,9 +203,8 @@ pub fn syncPubkeys(validators: js.Array) !void {
 
     for (cached_count..validator_count) |index| {
         const value = try validators.get(@intCast(index));
-        try Validator.validateArg(value.val);
-        const validator = try (Validator{ .val = value.val }).get();
-        const pubkey = try validator.pubkey.toSlice();
+        const partial_validator = try (try value.asObject(struct { pubkey: js.Uint8Array })).get();
+        const pubkey = try partial_validator.pubkey.toSlice();
         if (pubkey.len != blst_bindings.PublicKey.COMPRESS_SIZE) return error.InvalidPubkeyLength;
 
         const missing_index = index - cached_count;
