@@ -197,12 +197,11 @@ pub fn syncPubkeys(validators: js.Array) !void {
     const missing_count = validator_count - cached_count;
     const native_validators = try allocator.alloc(NativeValidator, missing_count);
     defer allocator.free(native_validators);
+    // SAFETY: the first `cached_count` validator ptrs are intentionally left undefined,
+    // because syncPubkeys only deal with the suffix.
     const validator_ptrs = try allocator.alloc(*const NativeValidator, validator_count);
     defer allocator.free(validator_ptrs);
 
-    // These are ignored by the native syncPubkeys. We skip work by
-    // just filling with dummy pointers
-    @memset(validator_ptrs[0..cached_count], &native_validators[0]);
     for (cached_count..validator_count) |index| {
         const value = try validators.get(@intCast(index));
         try Validator.validateArg(value.val);
