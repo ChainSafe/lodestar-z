@@ -212,7 +212,7 @@ pub fn syncPubkeys(validators: js.Array) !void {
 
         const missing_index = index - cached_count;
         native_validators[missing_index] = undefined;
-        native_validators[missing_index].pubkey = pubkey[0..48].*;
+        native_validators[missing_index].pubkey = pubkey[0..blst_bindings.PublicKey.COMPRESS_SIZE].*;
         validator_ptrs[index] = &native_validators[missing_index];
     }
 
