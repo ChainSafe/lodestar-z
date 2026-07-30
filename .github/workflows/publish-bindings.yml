@@ -1,14 +1,38 @@
-name: Publish NAPI Bindings
+name: Release
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+# Never run two release flows concurrently, and never cancel an in-flight
+# run — cancelling between tag creation and npm publish leaves a
+# half-released version.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 env:
   ZIG_VERSION: "0.16.0"
   NODE_VERSION: "24"
 
 jobs:
+  release-please:
+    name: release please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+
   publish-bindings:
     name: publish bindings
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
     # [Lodestar CI] still runs on Ubuntu 22.04, which ships an incompatible GLIBC version
     # compared to ubuntu-latest runners.
     # This [incompatibility] causes DLOPEN to fail when loading bindings on those runners.
@@ -37,15 +61,12 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-22.04-${{ env.ZIG_VERSION }}
       - name: Install dependencies
         run: |
-          pnpm install
-      - name: Run bindings formatter
-        run: |
-          pnpm biome ci
+          pnpm install --frozen-lockfile
       - name: Determine npm dist tag
-        id: detect_dist_tag 
+        id: detect_dist_tag
         run: |
           VERSION=$(node -p "require('./package.json').version")
           if [[ "$VERSION" == *-* ]]; then
@@ -64,4 +85,3 @@ jobs:
           pnpm zapi prepublish
           rm -rf zig-out/lib
           pnpm zapi publish --access public -- --ignore-scripts --provenance ${{ steps.detect_dist_tag.outputs.tag_flag }}
-
