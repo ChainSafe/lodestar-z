@@ -208,11 +208,9 @@ pub fn syncPubkeys(validators: js.Array) !void {
     for (num_cached..validator_count, 0..) |new_index, i| {
         const value = try validators.get(@intCast(new_index));
         const partial_validator = try (try value.asObject(struct { pubkey: js.Uint8Array })).get();
-        const pubkey = try partial_validator.pubkey.toSlice();
-        if (pubkey.len != blst_bindings.PublicKey.COMPRESS_SIZE) return error.InvalidPubkeyLength;
 
         new_validators[i] = undefined;
-        new_validators[i].pubkey = pubkey[0..blst_bindings.PublicKey.COMPRESS_SIZE].*;
+        new_validators[i].pubkey = try partial_validator.pubkey.toArray(blst_bindings.PublicKey.COMPRESS_SIZE);
         validator_ptrs[new_index] = &new_validators[i];
     }
 
