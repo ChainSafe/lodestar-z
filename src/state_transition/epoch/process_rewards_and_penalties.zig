@@ -70,7 +70,7 @@ pub fn getRewardsAndPenalties(
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 
-test "processRewardsAndPenalties replaces cached balances without leaking" {
+test "processRewardsAndPenalties - sanity" {
     const allocator = std.testing.allocator;
     const pool_size = 10_000 * 5;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
@@ -89,6 +89,7 @@ test "processRewardsAndPenalties replaces cached balances without leaking" {
         null,
     );
 
+    // Verify replacing the old cached balances does not leak.
     try processRewardsAndPenalties(
         .electra,
         allocator,
