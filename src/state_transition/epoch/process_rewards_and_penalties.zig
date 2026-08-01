@@ -42,7 +42,9 @@ pub fn processRewardsAndPenalties(
         }
     }
 
-    // The state tree copies the values, so the source allocation can move into the cache.
+    // Populate cache.balances for reuse by the validator monitor and
+    // more importantly processEffectiveBalanceUpdates() doesn't need to
+    // get from tree view state which has to commit.
     var new_balances: std.ArrayList(u64) = .fromOwnedSlice(balances);
     try state.setBalances(&new_balances);
 
