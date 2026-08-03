@@ -26,7 +26,7 @@ pub fn init(buffer: *align(buf_align) [Self.sizeOf()]u8, hash_or_encode: bool, d
 ///
 /// This is safe because blst is statically linked to this binding.
 pub fn sizeOf() usize {
-    const vec384_size = 384 / @sizeOf(usize);
+    const vec384_size = 384 / std.mem.byte_size_in_bits;
     const vec384fp12_size = vec384_size * 12;
 
     const point_e1_affine_size = vec384_size * 2;
