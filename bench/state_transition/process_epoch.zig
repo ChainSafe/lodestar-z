@@ -201,6 +201,11 @@ fn ProcessEffectiveBalanceUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
+        pub fn beforeEach() void {
+            BenchState.beforeEach();
+            BenchState.cloned_cached_state.epoch_cache.beforeEpochTransition() catch unreachable;
+        }
+
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
 
@@ -716,6 +721,10 @@ fn runBenchmark(
     try stdout.print("\nStarting process_epoch benchmarks for {s} fork...\n\n", .{@tagName(fork)});
 
     const hooks: zbench.Hooks = .{ .before_each = BenchState.beforeEach, .after_each = BenchState.afterEach };
+    const effective_balance_hooks: zbench.Hooks = .{
+        .before_each = ProcessEffectiveBalanceUpdatesBench(fork).beforeEach,
+        .after_each = BenchState.afterEach,
+    };
 
     var bench = zbench.Benchmark.init(allocator, .{ .iterations = 50 });
     defer bench.deinit();
@@ -762,7 +771,7 @@ fn runBenchmark(
 
     try bench.addParam("effective_balance_updates", &ProcessEffectiveBalanceUpdatesBench(fork){
         .epoch_transition_cache = &epoch_transition_cache,
-    }, .{ .hooks = hooks });
+    }, .{ .hooks = effective_balance_hooks });
 
     try bench.addParam("slashings_reset", &ProcessSlashingsResetBench(fork){
         .epoch_transition_cache = &epoch_transition_cache,
