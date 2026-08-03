@@ -20,6 +20,7 @@ const slashValidator = @import("./slash_validator.zig").slashValidator;
 pub fn processAttesterSlashing(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
@@ -32,6 +33,7 @@ pub fn processAttesterSlashing(
     try assertValidAttesterSlashing(
         fork,
         allocator,
+        io,
         config,
         epoch_cache,
         try state.validatorsCount(),
@@ -73,6 +75,7 @@ pub fn processAttesterSlashing(
 pub fn assertValidAttesterSlashing(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     validators_count: usize,
@@ -87,6 +90,7 @@ pub fn assertValidAttesterSlashing(
     if (!try isValidIndexedAttestation(
         fork,
         allocator,
+        io,
         config,
         epoch_cache,
         validators_count,
@@ -98,6 +102,7 @@ pub fn assertValidAttesterSlashing(
     if (!try isValidIndexedAttestation(
         fork,
         allocator,
+        io,
         config,
         epoch_cache,
         validators_count,

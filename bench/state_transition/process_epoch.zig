@@ -17,11 +17,11 @@ const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const ForkSeq = config.ForkSeq;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const EpochTransitionCache = state_transition.EpochTransitionCache;
-const Index2PubkeyCache = state_transition.Index2PubkeyCache;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const slotFromStateBytes = @import("utils.zig").slotFromStateBytes;
 const loadState = @import("utils.zig").loadState;
 const BenchState = @import("utils.zig").BenchState;
+const preset = state_transition.preset;
 
 fn ProcessJustificationAndFinalizationBench(comptime fork: ForkSeq) type {
     return struct {
@@ -161,6 +161,7 @@ fn ProcessEth1DataResetBench(comptime fork: ForkSeq) type {
 fn ProcessPendingDepositsBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
+        io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
@@ -168,6 +169,7 @@ fn ProcessPendingDepositsBench(comptime fork: ForkSeq) type {
             state_transition.processPendingDeposits(
                 fork,
                 allocator,
+                self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
@@ -490,6 +492,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 state_transition.processPendingDeposits(
                     fork,
                     allocator,
+                    io,
                     BenchState.cloned_cached_state.config,
                     epoch_cache,
                     fork_state,
@@ -673,28 +676,23 @@ fn runBenchmark(
 
     const beacon_config = config.BeaconConfig.init(chain_config, (try beacon_state.?.genesisValidatorsRoot()).*);
 
-    var pubkey_index_map = state_transition.PubkeyIndexMap.init(allocator);
-    defer pubkey_index_map.deinit();
-
-    const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
-    index_pubkey_cache.* = Index2PubkeyCache.empty;
-    defer {
-        index_pubkey_cache.deinit(allocator);
-        allocator.destroy(index_pubkey_cache);
-    }
-
-    const validators = try beacon_state.?.validatorsPtrSlice(allocator);
-    defer allocator.free(validators);
-
-    try state_transition.syncPubkeys(allocator, validators, &pubkey_index_map, index_pubkey_cache);
+    var pubkey_cache = try state_transition.PubkeyCache.initCapacity(
+        allocator,
+        io,
+        try std.math.add(
+            usize,
+            try beacon_state.?.validatorsCount(),
+            preset.MAX_PENDING_DEPOSITS_PER_EPOCH,
+        ),
+    );
+    defer pubkey_cache.deinit();
 
     const immutable_data = state_transition.EpochCacheImmutableData{
         .config = &beacon_config,
-        .index_to_pubkey = index_pubkey_cache,
-        .pubkey_to_index = &pubkey_index_map,
+        .pubkey_cache = &pubkey_cache,
     };
 
-    const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, beacon_state.?, immutable_data, .{
+    const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, io, beacon_state.?, immutable_data, .{
         .skip_sync_committee_cache = !comptime fork.gte(.altair),
         .skip_sync_pubkeys = false,
     });
@@ -754,6 +752,7 @@ fn runBenchmark(
     if (comptime fork.gte(.electra)) {
         try bench.addParam("pending_deposits", &ProcessPendingDepositsBench(fork){
             .epoch_transition_cache = &epoch_transition_cache,
+            .io = io,
         }, .{ .hooks = hooks });
 
         try bench.addParam("pending_consolidations", &ProcessPendingConsolidationsBench(fork){

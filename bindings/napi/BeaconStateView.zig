@@ -90,6 +90,23 @@ pub fn deinit(self: *BeaconStateView) void {
     }
 }
 
+fn initCachedState(
+    cached_state: *CachedBeaconState,
+    io: std.Io,
+    state: *AnyBeaconState,
+) !void {
+    try cached_state.init(
+        allocator,
+        io,
+        state,
+        .{
+            .config = &config.state.config,
+            .pubkey_cache = &pubkey.state.cache,
+        },
+        null,
+    );
+}
+
 // -------------------------
 // Class Methods
 // -------------------------
@@ -106,16 +123,8 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     const cached_state = try allocator.create(CachedBeaconState);
     errdefer allocator.destroy(cached_state);
 
-    try cached_state.init(
-        allocator,
-        state,
-        .{
-            .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
-        },
-        null,
-    );
+    const io = js.io();
+    try initCachedState(cached_state, io, state);
 
     return .{
         .cached_state = cached_state,
@@ -881,6 +890,7 @@ pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_value:
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.getVoluntaryExitValidity(
             f,
+            js.io(),
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state.castToFork(f),
@@ -907,6 +917,7 @@ pub fn isValidVoluntaryExit(self: *const BeaconStateView, signed_exit_value: js.
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.isValidVoluntaryExit(
             f,
+            js.io(),
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state.castToFork(f),
@@ -1135,16 +1146,8 @@ pub fn loadOtherState(
         allocator.destroy(new_cached_state);
     }
 
-    try new_cached_state.init(
-        allocator,
-        new_state,
-        .{
-            .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
-        },
-        null,
-    );
+    const io = js.io();
+    try initCachedState(new_cached_state, io, new_state);
     new_cached_state_initialized = true;
 
     if (opts) |value| {

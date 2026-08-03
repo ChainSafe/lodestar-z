@@ -1,7 +1,7 @@
 import type {PublicKey} from "./blst.js";
 
 export interface PubkeyCache {
-  /** Get deserialized PublicKey by validator index (cached at JS level) */
+  /** Get a cached, deserialized PublicKey. */
   get(index: number): PublicKey | undefined;
   /** Same as get(), but throws if the index is not in the cache */
   getOrThrow(index: number): PublicKey;
@@ -9,22 +9,23 @@ export interface PubkeyCache {
   aggregate(indices: number[]): PublicKey;
   /** Get validator index by pubkey bytes */
   getIndex(pubkey: Uint8Array): number | null;
-  /** Set both directions atomically — impl owns the PublicKey.fromBytes() deserialization */
-  set(index: number, pubkey: Uint8Array): void;
-  /** Number of entries */
+  /** Append at the next index. Exact replays are no-ops; invalid, conflicting, duplicate, or sparse entries throw. */
+  append(index: number, pubkey: Uint8Array): void;
+  /** Current number of cached entries. */
   readonly size: number;
-  /** Allocated native capacity */
+  /** Number of entries the current native allocation can hold without growing. */
   readonly capacity: number;
-  /** Load cache from a PKIX file (clears JS-level cache) */
-  load(filepath: string): void;
-  /** Clear native and JS-level cache contents */
-  reset(): void;
-  /** Save cache to a PKIX file */
-  save(filepath: string): void;
   /**
-   * Pre-allocate native capacity. When a set() outgrows the current capacity, it grows
-   * by a fixed step covering ~3 months of worst-case validator registry growth.
+   * Load a compatible PKIX file from the control environment while no workers are using the cache.
+   * The explicit capacity limit bounds both the entry count and native allocation;
+   * spare capacity recorded in the file is discarded above this limit.
    */
+  load(filepath: string, maxCapacity: number): void;
+  /** Testing-only reset from the control environment while no workers are using the cache. */
+  reset(): void;
+  /** Save from the control environment. */
+  save(filepath: string): void;
+  /** Reserve exact native capacity when growing; existing larger capacity is retained. */
   ensureCapacity(capacity: number): void;
 }
 
