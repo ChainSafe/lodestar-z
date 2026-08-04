@@ -6,6 +6,7 @@ const blst_bindings = @import("./blst.zig");
 const state_transition = @import("state_transition");
 const PubkeyCache = state_transition.PubkeyCache;
 const pkix = state_transition.pkix;
+const Validator = @import("consensus_types").phase0.Validator.Type;
 
 /// Uses the page allocator for the process-wide cache's internal allocations.
 const allocator = std.heap.page_allocator;
@@ -181,6 +182,39 @@ pub fn append(index: js.Number, pubkey: js.Uint8Array) !void {
     const pubkey_bytes = pubkey_slice[0..48].*;
 
     try state.cache.append(io, pubkey_bytes, idx);
+}
+
+/// JS: pubkeys.syncPubkeys(validators)
+pub fn syncPubkeys(validators: js.Array) !void {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
+    const validator_count = try validators.length();
+    const io = js.io();
+    const num_cached = state.cache.count(io);
+    if (validator_count <= num_cached) return;
+
+    const num_new_validators = validator_count - num_cached;
+
+    // SAFETY: the first `num_cached` validator ptrs are intentionally left undefined,
+    // because syncPubkeys only has to append the last `num_new_validators` pubkeys.
+    const validator_ptrs = try allocator.alloc(*const Validator, validator_count);
+    defer allocator.free(validator_ptrs);
+
+    const new_validators = try allocator.alloc(Validator, num_new_validators);
+    defer allocator.free(new_validators);
+
+    // `new_index` is the index of the soon-to-be added pubkey of a new validator.
+    // `i` is the local-only index of the temporary backing memory `new_validators`.
+    for (num_cached..validator_count, 0..) |new_index, i| {
+        const value = try validators.get(@intCast(new_index));
+        const partial_validator = try (try value.asObject(struct { pubkey: js.Uint8Array })).get();
+
+        new_validators[i] = undefined;
+        new_validators[i].pubkey = try partial_validator.pubkey.toArray(blst_bindings.PublicKey.COMPRESS_SIZE);
+        validator_ptrs[new_index] = &new_validators[i];
+    }
+
+    try state.cache.syncPubkeys(io, validator_ptrs);
 }
 
 /// JS: pubkeys.size() → number

@@ -58,6 +58,33 @@ describe("pubkeys", () => {
     }
   });
 
+  it("syncPubkeys incrementally populates both lookup directions", () => {
+    pubkeyCache.reset();
+    const validators = keypairs.map(({pubkeyBytes}) => ({pubkey: pubkeyBytes}));
+
+    pubkeyCache.syncPubkeys(validators.slice(0, 1));
+    pubkeyCache.syncPubkeys(validators);
+
+    expectCacheContents();
+  });
+
+  it("syncPubkeys accepts a historical validator list", () => {
+    const validators = keypairs.map(({pubkeyBytes}) => ({pubkey: pubkeyBytes}));
+
+    pubkeyCache.syncPubkeys(validators.slice(0, 1));
+
+    expectCacheContents();
+  });
+
+  it("syncPubkeys rejects an invalid suffix without publishing valid entries", () => {
+    pubkeyCache.reset();
+    const validators = [{pubkey: keypairs[0].pubkeyBytes}, {pubkey: new Uint8Array(48)}];
+
+    expect(() => pubkeyCache.syncPubkeys(validators)).toThrow();
+    expect(pubkeyCache.size).toBe(0);
+    expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBeNull();
+  });
+
   it("get caches deserialized values", () => {
     const pk1 = pubkeyCache.getOrThrow(0);
     const pk2 = pubkeyCache.getOrThrow(0);
