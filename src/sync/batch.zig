@@ -53,8 +53,10 @@ pub const Batch = struct {
     processing_started_ns: i128,
     /// Generation counter — incremented on each download attempt.
     generation: u32,
-    /// Peer currently downloading this batch (valid when status == downloading).
-    download_peer: ?[]const u8,
+    /// Owned copy of the peer currently downloading this batch (valid when
+    /// status == downloading). This remains valid even if the peer leaves the
+    /// sync peer map while the request is in flight.
+    download_peer: ?[]u8,
     /// Last peer whose download failed. Used as a soft exclusion on retry.
     last_failed_peer: ?[]u8,
     /// Owned copy of the peer that supplied the currently retained batch data.
@@ -123,6 +125,7 @@ pub const Batch = struct {
     /// Release all owned resources.
     pub fn deinit(self: *Batch) void {
         self.freeBlocks();
+        self.clearPeerMemory(&self.download_peer);
         self.clearPeerMemory(&self.last_failed_peer);
         self.clearPeerMemory(&self.current_attempt_peer);
         self.clearDeferredPeers();
@@ -246,10 +249,12 @@ pub const Batch = struct {
         return self.blocks;
     }
 
-    /// Transition to downloading state — assigns a peer and bumps generation.
-    pub fn startDownload(self: *Batch, peer_id: []const u8) void {
+    /// Transition to downloading state after successfully owning the peer ID.
+    pub fn startDownload(self: *Batch, peer_id: []const u8) std.mem.Allocator.Error!void {
+        const owned_peer = try self.allocator.dupe(u8, peer_id);
+        self.clearPeerMemory(&self.download_peer);
+        self.download_peer = owned_peer;
         self.status = .downloading;
-        self.download_peer = peer_id;
         self.download_started_ns = nowNs(self.io);
         self.generation +%= 1;
     }
@@ -262,6 +267,7 @@ pub const Batch = struct {
 
         if (!self.rememberDownloadedBlocks(blocks)) return false;
         self.rememberCurrentAttemptPeer();
+        self.clearPeerMemory(&self.download_peer);
         self.clearPeerMemory(&self.last_failed_peer);
         self.clearDeferredPeers();
         self.status = .awaiting_processing;
@@ -275,7 +281,7 @@ pub const Batch = struct {
         if (self.status != .downloading) return false;
         self.download_failures += 1;
         self.rememberPeer(&self.last_failed_peer);
-        self.download_peer = null;
+        self.clearPeerMemory(&self.download_peer);
         self.status = .awaiting_download;
         return true;
     }
@@ -290,7 +296,7 @@ pub const Batch = struct {
 
         self.clearPeerMemory(&self.last_failed_peer);
         self.rememberDeferredPeer();
-        self.download_peer = null;
+        self.clearPeerMemory(&self.download_peer);
         self.status = .awaiting_download;
         return true;
     }
@@ -316,7 +322,7 @@ pub const Batch = struct {
         self.rememberFailedProcessingPeer();
         self.freeBlocks();
         self.status = .awaiting_download;
-        self.download_peer = null;
+        self.clearPeerMemory(&self.download_peer);
     }
 
     /// Called when a later batch shows this processed batch must be retried.
@@ -387,7 +393,7 @@ test "Batch: lifecycle" {
     try std.testing.expectEqual(@as(u64, 163), b.endSlot());
 
     // Start download — generation bumps to 1.
-    b.startDownload("peer_a");
+    try b.startDownload("peer_a");
     try std.testing.expectEqual(BatchStatus.downloading, b.status);
     try std.testing.expectEqual(@as(u32, 1), b.generation);
 
@@ -411,18 +417,33 @@ test "Batch: lifecycle" {
 test "Batch: download error retry" {
     var b = Batch.init(std.testing.io, 1, 0, 32, std.testing.allocator);
     defer b.deinit();
-    b.startDownload("peer_b");
+    try b.startDownload("peer_b");
     const gen = b.generation;
     try std.testing.expect(b.onDownloadError(gen));
     try std.testing.expectEqual(BatchStatus.awaiting_download, b.status);
     try std.testing.expectEqual(@as(u8, 1), b.download_failures);
 }
 
+test "Batch: in-flight download peer survives source peer removal" {
+    var b = Batch.init(std.testing.io, 5, 0, 32, std.testing.allocator);
+    defer b.deinit();
+
+    const transient_peer = try std.testing.allocator.dupe(u8, "peer_removed_before_error");
+    try b.startDownload(transient_peer);
+    const gen = b.generation;
+    std.testing.allocator.free(transient_peer);
+
+    try std.testing.expect(b.onDownloadError(gen));
+    try std.testing.expectEqual(BatchStatus.awaiting_download, b.status);
+    try std.testing.expectEqual(@as(u8, 1), b.download_failures);
+    try std.testing.expectEqualStrings("peer_removed_before_error", b.last_failed_peer.?);
+}
+
 test "Batch: download deferred does not consume retry budget" {
     var b = Batch.init(std.testing.io, 3, 0, 32, std.testing.allocator);
     defer b.deinit();
 
-    b.startDownload("peer_e");
+    try b.startDownload("peer_e");
     const gen = b.generation;
     const blocks = [_]BatchBlock{.{ .slot = 1, .block_bytes = "b1" }};
     try std.testing.expect(b.onDownloadDeferred(gen, &blocks));
@@ -436,11 +457,11 @@ test "Batch: download deferred does not consume retry budget" {
 test "Batch: generation prevents stale error" {
     var b = Batch.init(std.testing.io, 2, 50, 10, std.testing.allocator);
     defer b.deinit();
-    b.startDownload("peer_c");
+    try b.startDownload("peer_c");
     const old_gen = b.generation;
 
     // Re-assign to new peer — new generation.
-    b.startDownload("peer_d");
+    try b.startDownload("peer_d");
     const new_gen = b.generation;
     try std.testing.expect(old_gen != new_gen);
 
@@ -453,7 +474,7 @@ test "Batch: validation error retries processed batch" {
     var b = Batch.init(std.testing.io, 4, 0, 32, std.testing.allocator);
     defer b.deinit();
 
-    b.startDownload("peer_f");
+    try b.startDownload("peer_f");
     const gen = b.generation;
     const blocks = [_]BatchBlock{.{ .slot = 1, .block_bytes = "b1" }};
     try std.testing.expect(b.onDownloadSuccess(gen, &blocks));
@@ -477,14 +498,14 @@ test "Batch: deferred blocks are reused on successful retry" {
         .{ .slot = 65, .block_bytes = "b65" },
     };
 
-    b.startDownload("peer_a");
+    try b.startDownload("peer_a");
     const first_gen = b.generation;
     try std.testing.expect(b.onDownloadDeferred(first_gen, &blocks));
 
     const retained = b.getBlocks();
     const retained_ptr = retained.ptr;
 
-    b.startDownload("peer_b");
+    try b.startDownload("peer_b");
     const second_gen = b.generation;
     try std.testing.expect(b.onDownloadSuccess(second_gen, retained));
     try std.testing.expectEqual(BatchStatus.awaiting_processing, b.status);
@@ -495,7 +516,7 @@ test "Batch: processing error remembers batch producer" {
     var b = Batch.init(std.testing.io, 6, 0, 32, std.testing.allocator);
     defer b.deinit();
 
-    b.startDownload("peer_g");
+    try b.startDownload("peer_g");
     const gen = b.generation;
     const blocks = [_]BatchBlock{.{ .slot = 1, .block_bytes = "b1" }};
     try std.testing.expect(b.onDownloadSuccess(gen, &blocks));

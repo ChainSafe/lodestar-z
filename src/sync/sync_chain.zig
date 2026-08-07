@@ -527,8 +527,9 @@ pub const SyncChain = struct {
         return active_downloads;
     }
 
-    /// Dispatch download requests for all awaiting_download batches.
+    /// Dispatch awaiting downloads while preserving the active request/processing cap.
     fn dispatchDownloads(self: *SyncChain) void {
+        var active_count = self.activeDispatchCount();
         for (self.batches.items) |*b| {
             if (b.status == .awaiting_download) {
                 if (b.isDownloadExhausted()) {
@@ -536,16 +537,18 @@ pub const SyncChain = struct {
                     b.status = .awaiting_validation;
                     continue;
                 }
+                if (active_count >= sync_types.MAX_PENDING_BATCHES) return;
                 const peer = self.selectPeer(b) orelse continue;
+                b.startDownload(peer) catch continue;
                 scoped_log.debug("SyncChain dispatch: chain={d} batch={d} gen={d} slots={d}..{d} peer={s}", .{
                     self.id,
                     b.id,
-                    b.generation +% 1,
+                    b.generation,
                     b.start_slot,
                     b.endSlot(),
                     peer,
                 });
-                b.startDownload(peer);
+                active_count += 1;
                 self.cumulative_metrics.download_requests_total += 1;
                 self.callbacks.downloadByRange(
                     self.id,
@@ -559,9 +562,26 @@ pub const SyncChain = struct {
         }
     }
 
-    /// Fill the batch window up to MAX_PENDING_BATCHES.
+    fn activeDispatchCount(self: *const SyncChain) usize {
+        var count: usize = 0;
+        for (self.batches.items) |batch| {
+            switch (batch.status) {
+                .downloading, .awaiting_processing, .processing => count += 1,
+                .awaiting_download, .awaiting_validation => {},
+            }
+        }
+        return count;
+    }
+
+    /// Fill the active download/processing window up to MAX_PENDING_BATCHES.
+    ///
+    /// Match Lodestar-TS range sync: batches that are already
+    /// AwaitingValidation must not count against the buffer, otherwise a long
+    /// run of empty/skip-slot batches can fill the whole window and prevent the
+    /// next batch from being downloaded to validate that prefix.
     fn fillBatchWindow(self: *SyncChain) void {
-        while (self.batches.items.len < sync_types.MAX_PENDING_BATCHES and
+        var active_buffered = self.activeBufferedBatchCount();
+        while (active_buffered < sync_types.MAX_PENDING_BATCHES and
             self.next_batch_start <= self.target.slot)
         {
             const remaining = self.target.slot - self.next_batch_start + 1;
@@ -571,8 +591,17 @@ pub const SyncChain = struct {
             self.next_batch_id +%= 1;
 
             self.batches.append(self.allocator, Batch.init(self.io, id, self.next_batch_start, count, self.allocator)) catch return;
+            active_buffered += 1;
             self.next_batch_start += count;
         }
+    }
+
+    fn activeBufferedBatchCount(self: *const SyncChain) usize {
+        var count: usize = 0;
+        for (self.batches.items) |batch| {
+            if (batch.status != .awaiting_validation) count += 1;
+        }
+        return count;
     }
 
     fn nextProcessableBatchIndex(self: *const SyncChain) ?usize {
@@ -972,6 +1001,133 @@ test "SyncChain: pending processing waits for completion callback" {
     const done_after_completion = try chain.tick();
     try std.testing.expect(done_after_completion);
     try std.testing.expectEqual(SyncChainStatus.done, chain.status);
+}
+
+test "SyncChain: awaiting-validation window does not block next download" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncCallbacks{};
+    var chain = SyncChain.init(
+        allocator,
+        std.testing.io,
+        0,
+        .finalized,
+        0,
+        .{ .slot = sync_types.BATCH_SIZE * (sync_types.MAX_PENDING_BATCHES + 1), .root = [_]u8{0x88} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    try chain.addPeer("p1", .{ .slot = sync_types.BATCH_SIZE * (sync_types.MAX_PENDING_BATCHES + 1), .root = [_]u8{0x88} ** 32 }, null);
+    chain.startSyncing();
+
+    _ = try chain.tick();
+    try std.testing.expectEqual(@as(usize, sync_types.MAX_PENDING_BATCHES), chain.batches.items.len);
+    const initial_downloads = tc.downloaded_count;
+    try std.testing.expectEqual(@as(u32, sync_types.MAX_PENDING_BATCHES), initial_downloads);
+
+    var batch_ids: [sync_types.MAX_PENDING_BATCHES]BatchId = undefined;
+    var generations: [sync_types.MAX_PENDING_BATCHES]u32 = undefined;
+    for (chain.batches.items, 0..) |batch, index| {
+        batch_ids[index] = batch.id;
+        generations[index] = batch.generation;
+    }
+
+    const no_blocks = [_]BatchBlock{};
+    for (batch_ids, generations) |batch_id, generation| {
+        chain.onBatchResponse(batch_id, generation, &no_blocks);
+    }
+
+    try std.testing.expectEqual(@as(usize, sync_types.MAX_PENDING_BATCHES), chain.batches.items.len);
+    for (chain.batches.items) |batch| {
+        try std.testing.expectEqual(BatchStatus.awaiting_validation, batch.status);
+    }
+
+    _ = try chain.tick();
+    try std.testing.expect(tc.downloaded_count > initial_downloads);
+    try std.testing.expect(chain.batches.items.len > sync_types.MAX_PENDING_BATCHES);
+}
+
+test "SyncChain: rewind does not exceed pending dispatch window" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncCallbacks{};
+    const target_slot = sync_types.BATCH_SIZE * (sync_types.MAX_PENDING_BATCHES * 2);
+    var chain = SyncChain.init(
+        allocator,
+        std.testing.io,
+        0,
+        .finalized,
+        0,
+        .{ .slot = target_slot, .root = [_]u8{0x99} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    try chain.addPeer("p1", .{ .slot = target_slot, .root = [_]u8{0x99} ** 32 }, null);
+    chain.startSyncing();
+
+    _ = try chain.tick();
+    var prefix_ids: [sync_types.MAX_PENDING_BATCHES]BatchId = undefined;
+    var prefix_generations: [sync_types.MAX_PENDING_BATCHES]u32 = undefined;
+    for (chain.batches.items, 0..) |batch, index| {
+        prefix_ids[index] = batch.id;
+        prefix_generations[index] = batch.generation;
+    }
+    for (prefix_ids, prefix_generations) |batch_id, generation| {
+        chain.onBatchResponse(batch_id, generation, &.{});
+    }
+
+    _ = try chain.tick();
+    try std.testing.expectEqual(@as(usize, sync_types.MAX_PENDING_BATCHES * 2), chain.batches.items.len);
+
+    const validating_index = sync_types.MAX_PENDING_BATCHES;
+    const validating_batch = chain.batches.items[validating_index];
+    const blocks = [_]BatchBlock{.{ .slot = validating_batch.start_slot, .block_bytes = "invalid" }};
+    tc.should_fail_processing = true;
+    chain.onBatchResponse(validating_batch.id, validating_batch.generation, &blocks);
+    tc.should_fail_processing = false;
+
+    _ = try chain.tick();
+    var active_count: usize = 0;
+    var queued_count: usize = 0;
+    for (chain.batches.items) |batch| {
+        switch (batch.status) {
+            .downloading, .awaiting_processing, .processing => active_count += 1,
+            .awaiting_download => queued_count += 1,
+            .awaiting_validation => {},
+        }
+    }
+    try std.testing.expect(active_count <= sync_types.MAX_PENDING_BATCHES);
+    try std.testing.expect(queued_count > 0);
+}
+
+test "SyncChain: peer ownership failure does not dispatch download" {
+    var failing_allocator_state = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing_allocator_state.allocator();
+    var tc = TestSyncCallbacks{};
+    var chain = SyncChain.init(
+        allocator,
+        std.testing.io,
+        0,
+        .finalized,
+        0,
+        .{ .slot = sync_types.BATCH_SIZE - 1, .root = [_]u8{0xA5} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    chain.startSyncing();
+    _ = try chain.tick();
+    try std.testing.expectEqual(@as(usize, 1), chain.batches.items.len);
+    try chain.addPeer("p1", .{ .slot = sync_types.BATCH_SIZE - 1, .root = [_]u8{0xA5} ** 32 }, null);
+
+    failing_allocator_state.fail_index = failing_allocator_state.alloc_index;
+    _ = try chain.tick();
+
+    try std.testing.expect(failing_allocator_state.has_induced_failure);
+    try std.testing.expectEqual(@as(u32, 0), tc.downloaded_count);
+    try std.testing.expectEqual(BatchStatus.awaiting_download, chain.batches.items[0].status);
+    try std.testing.expectEqual(@as(u32, 0), chain.batches.items[0].generation);
+    try std.testing.expectEqual(@as(?[]u8, null), chain.batches.items[0].download_peer);
 }
 
 test "SyncChain: later batch validates earlier batch" {
