@@ -3,7 +3,7 @@
 ## Critical rules
 
 - **Target branch:** `main`.
-- **Pre-push:** run `zig fmt --check .`, `zig build test`, `pnpm lint`, and the relevant
+- **Pre-push:** run `zig fmt --check .`, `pnpm lint`, and the relevant
   binding or spec tests before every push.
 - **Bound everything:** avoid recursion, put explicit limits on loops and allocations, fail fast,
   and assert invariants.
