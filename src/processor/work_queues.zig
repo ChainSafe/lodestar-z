@@ -677,10 +677,12 @@ pub const WorkQueues = struct {
         if (self.api_request_p0.pop()) |w| return .{ .api_request_p0 = w };
 
         // Priority 15-18: recovered unknown-root fast lanes.
-        if (self.recovered_unknown_block_aggregate.len > 0 and self.recoveredUnknownBlockAggregateBatchReady(now_ns)) {
+        // These paths perform gossip BLS verification too, so they must obey
+        // the same dispatch gate as ordinary aggregate/attestation batches.
+        if (self.aggregate_dispatch_enabled and self.recovered_unknown_block_aggregate.len > 0 and self.recoveredUnknownBlockAggregateBatchReady(now_ns)) {
             return self.formRecoveredUnknownBlockAggregateBatch();
         }
-        if (self.recovered_unknown_block_attestation.len > 0 and self.recoveredUnknownBlockAttestationBatchReady(now_ns)) {
+        if (self.attestation_dispatch_enabled and self.recovered_unknown_block_attestation.len > 0 and self.recoveredUnknownBlockAttestationBatchReady(now_ns)) {
             return self.formRecoveredUnknownBlockAttestationBatch();
         }
 
@@ -1315,6 +1317,9 @@ test "WorkQueues: gossip bls dispatch gate defers attestation and aggregate work
 
     wq.setGossipBlsBatchDispatchEnabled(false);
     wq.routeToQueue(.{ .attestation = testAttestationWork(1, 0, 1_000) });
+    wq.routeToQueue(.{ .aggregate = testAggregateWork(2, 1_100) });
+    wq.routeToQueue(.{ .recovered_unknown_block_attestation = testAttestationWork(3, 0, 1_200) });
+    wq.routeToQueue(.{ .recovered_unknown_block_aggregate = testAggregateWork(4, 1_300) });
     wq.routeToQueue(.{ .status = .{
         .peer_id = testPeerId(1),
         .request = testOpaqueHandle(2),
@@ -1325,6 +1330,9 @@ test "WorkQueues: gossip bls dispatch gate defers attestation and aggregate work
     try testing.expectEqual(WorkType.status, first.workType());
     try testing.expect(wq.popHighestPriorityAt(10_000) == null);
     try testing.expectEqual(@as(u32, 1), wq.attestation.len);
+    try testing.expectEqual(@as(u32, 1), wq.aggregate.len);
+    try testing.expectEqual(@as(u32, 1), wq.recovered_unknown_block_attestation.len);
+    try testing.expectEqual(@as(u32, 1), wq.recovered_unknown_block_aggregate.len);
 }
 
 test "WorkQueues: sync message batching holds briefly for a fuller batch" {
