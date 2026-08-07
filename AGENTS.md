@@ -96,7 +96,7 @@ zig build test:ssz -Dtest:ssz.filters="test name"
 zig build test -- --test-filter "test name"
 ```
 
-Prefer a targeted module test while iterating, then run `zig build test` before pushing.
+Prefer a targeted module test while iterating, do not run `zig build test` unless necessary.
 
 ### Spec tests
 
