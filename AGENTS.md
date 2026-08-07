@@ -284,7 +284,7 @@ implementation was primarily AI-authored or whether AI was used only for codebas
 ### Pre-push checklist
 
 1. `zig fmt --check .`
-2. `zig build test`
+2. Run relevant tests, avoid slow `zig build test` unless necessary
 3. Relevant spec tests for consensus, SSZ, or BLS changes
 4. `pnpm lint` for binding source changes
 5. Rebuild bindings and run `pnpm test` for binding or NAPI changes
