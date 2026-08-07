@@ -28,6 +28,26 @@ const ReqRespContext = networking.ReqRespContext;
 const ConnectionDirection = networking.ConnectionDirection;
 const GoodbyeReason = networking.GoodbyeReason;
 const PeerAction = networking.PeerAction;
+test "data column subnet subscriptions use actual custody columns" {
+    const custody_columns = [_]u64{ 3, 46, 70, 81 };
+    const subnets = try dataColumnSubnetsForCustodyColumns(std.testing.allocator, &custody_columns);
+    defer std.testing.allocator.free(subnets);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 3, 46, 70, 81 }, subnets);
+}
+
+fn dataColumnSubnetsForCustodyColumns(allocator: std.mem.Allocator, custody_columns: []const u64) ![]u8 {
+    const subnet_count = networking.gossip_topics.MAX_DATA_COLUMN_SIDECAR_SUBNET_ID;
+    var selected = std.StaticBitSet(subnet_count).initEmpty();
+    for (custody_columns) |column_index| selected.set(@intCast(column_index % subnet_count));
+    const subnets = try allocator.alloc(u8, selected.count());
+    var out_i: usize = 0;
+    for (0..subnet_count) |subnet_id| {
+        if (!selected.isSet(subnet_id)) continue;
+        subnets[out_i] = @intCast(subnet_id);
+        out_i += 1;
+    }
+    return subnets;
+}
 const peer_scoring = networking.peer_scoring;
 const StatusMessage = networking.messages.StatusMessage;
 const StatusMessageV2 = networking.messages.StatusMessageV2;
@@ -146,6 +166,48 @@ const OutboundDialEvent = union(enum) {
     dial: OutboundDialAttemptResult,
     timeout: TimeoutWaitResult,
 };
+
+const ReqRespOpenAttemptResult = union(enum) {
+    success: networking.QuicStream,
+    failure: anyerror,
+    canceled,
+};
+const ReqRespOpenEvent = union(enum) {
+    dial: ReqRespOpenAttemptResult,
+    timeout: TimeoutWaitResult,
+};
+const ResponseReadAttemptResult = union(enum) {
+    success: ?networking.req_resp_encoding.DecodedResponseChunk,
+    failure: anyerror,
+    canceled,
+};
+const ResponseReadEvent = union(enum) {
+    read: ResponseReadAttemptResult,
+    timeout: TimeoutWaitResult,
+};
+
+fn freeReqRespOpenEvent(io: std.Io, event: ReqRespOpenEvent) void {
+    switch (event) {
+        .dial => |result| switch (result) {
+            .success => |stream| {
+                var owned_stream = stream;
+                closeOwnedQuicStream(io, &owned_stream);
+            },
+            .failure, .canceled => {},
+        },
+        .timeout => {},
+    }
+}
+
+fn freeResponseReadEvent(allocator: std.mem.Allocator, event: ResponseReadEvent) void {
+    switch (event) {
+        .read => |result| switch (result) {
+            .success => |maybe_chunk| if (maybe_chunk) |chunk| allocator.free(chunk.ssz_bytes),
+            .failure, .canceled => {},
+        },
+        .timeout => {},
+    }
+}
 
 fn freeOutboundDialEvent(allocator: std.mem.Allocator, event: OutboundDialEvent) void {
     switch (event) {
@@ -557,6 +619,84 @@ test "outbound dial helper times out hung dial attempts" {
             .{ std.testing.io, 50 },
         ),
     );
+}
+
+test "req/resp protocol open timeout is shorter than connection dial timeout" {
+    try std.testing.expect(reqresp_open_timeout_ms < outbound_dial_timeout_ms);
+    try std.testing.expectEqual(optional_reqresp_timeout_ms, reqresp_open_timeout_ms);
+}
+
+test "goodbye req/resp open timeout is shorter than regular req/resp open timeout" {
+    try std.testing.expect(goodbye_reqresp_open_timeout_ms < reqresp_open_timeout_ms);
+}
+
+fn sleepingResponseReadAttemptTask(io: std.Io, delay_ms: u64) ResponseReadAttemptResult {
+    const sleep_timeout: std.Io.Timeout = .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(delay_ms)),
+        .clock = .awake,
+    } };
+    sleep_timeout.sleep(io) catch |err| switch (err) {
+        error.Canceled => return .canceled,
+    };
+    return .{ .failure = error.TestUnexpectedResult };
+}
+
+fn delayedResponseChunkReadAttemptTask(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    delay_ms: u64,
+) ResponseReadAttemptResult {
+    const sleep_timeout: std.Io.Timeout = .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(delay_ms)),
+        .clock = .awake,
+    } };
+    sleep_timeout.sleep(io) catch |err| switch (err) {
+        error.Canceled => return .canceled,
+    };
+    const ssz_bytes = allocator.dupe(u8, "chunk") catch |err| return .{ .failure = err };
+    return .{ .success = .{
+        .result = .success,
+        .context_bytes = null,
+        .ssz_bytes = ssz_bytes,
+        .bytes_consumed = ssz_bytes.len,
+    } };
+}
+
+test "req/resp response deadline bounds complete multi-chunk transfer" {
+    const deadline = reqRespResponseDeadline(std.testing.io, 100);
+
+    const first = (try awaitResponseReadWithDeadline(
+        std.testing.allocator,
+        std.testing.io,
+        deadline,
+        delayedResponseChunkReadAttemptTask,
+        .{ std.testing.allocator, std.testing.io, 60 },
+    )).?;
+    defer std.testing.allocator.free(first.ssz_bytes);
+    try std.testing.expectEqualStrings("chunk", first.ssz_bytes);
+
+    try std.testing.expectError(error.Timeout, awaitResponseReadWithDeadline(
+        std.testing.allocator,
+        std.testing.io,
+        deadline,
+        delayedResponseChunkReadAttemptTask,
+        .{ std.testing.allocator, std.testing.io, 60 },
+    ));
+}
+
+test "req/resp response read helper times out hung response streams" {
+    try std.testing.expectError(error.Timeout, awaitResponseReadWithTimeout(
+        std.testing.allocator,
+        std.testing.io,
+        5,
+        sleepingResponseReadAttemptTask,
+        .{ std.testing.io, 50 },
+    ));
+}
+
+test "req/resp response timeout matches Lodestar response transfer timeout" {
+    try std.testing.expect(reqresp_response_timeout_ms > reqresp_open_timeout_ms);
+    try std.testing.expectEqual(@as(u64, 10_000), reqresp_response_timeout_ms);
 }
 
 test "peerNeedsMetadata distinguishes unknown metadata from seq zero" {
@@ -993,17 +1133,18 @@ fn subscribeInitialSubnets(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
         log.info("Attestation subnet gossip subscriptions will follow validator subnet demand", .{});
     }
 
-    const custody_group_count = @min(
-        self.chain_runtime.custody_columns.len,
-        @as(usize, gossip_topics.MAX_DATA_COLUMN_SIDECAR_SUBNET_ID),
-    );
-    var data_column_subnet: u8 = 0;
-    while (@as(usize, data_column_subnet) < custody_group_count) : (data_column_subnet += 1) {
+    const data_column_subnets = dataColumnSubnetsForCustodyColumns(self.allocator, self.chain_runtime.custody_columns) catch |err| {
+        log.warn("Failed to compute local data column custody subnets: {}", .{err});
+        return;
+    };
+    defer self.allocator.free(data_column_subnets);
+
+    for (data_column_subnets) |data_column_subnet| {
         svc.subscribeSubnet(io, .data_column_sidecar, data_column_subnet) catch |err| {
             log.warn("Failed to subscribe to data column subnet {d}: {}", .{ data_column_subnet, err });
         };
     }
-    log.info("Subscribed to {d} data column subnets (local custody groups)", .{custody_group_count});
+    log.info("Subscribed to {d} data column subnets (local custody columns)", .{data_column_subnets.len});
 }
 
 fn setInitialSubnetSubscriptionsEnabled(
@@ -1029,12 +1170,13 @@ fn setInitialSubnetSubscriptionsEnabled(
         }
     }
 
-    const custody_group_count = @min(
-        self.chain_runtime.custody_columns.len,
-        @as(usize, gossip_topics.MAX_DATA_COLUMN_SIDECAR_SUBNET_ID),
-    );
-    var data_column_subnet: u8 = 0;
-    while (@as(usize, data_column_subnet) < custody_group_count) : (data_column_subnet += 1) {
+    const data_column_subnets = dataColumnSubnetsForCustodyColumns(self.allocator, self.chain_runtime.custody_columns) catch |err| {
+        log.warn("Failed to compute local data column custody subnets: {}", .{err});
+        return;
+    };
+    defer self.allocator.free(data_column_subnets);
+
+    for (data_column_subnets) |data_column_subnet| {
         if (enabled) {
             svc.subscribeSubnet(io, .data_column_sidecar, data_column_subnet) catch |err| {
                 log.warn("Failed to subscribe to data column subnet {d}: {}", .{ data_column_subnet, err });
@@ -1109,6 +1251,7 @@ const OpenedReqRespRequest = struct {
     request_payload_bytes: u64 = 0,
     response_payload_bytes: u64 = 0,
     response_chunks: u64 = 0,
+    response_deadline: ?std.Io.Clock.Timestamp = null,
     finished: bool = false,
 
     fn noteRequestPayload(self: *OpenedReqRespRequest, payload_bytes: usize) void {
@@ -1118,6 +1261,13 @@ const OpenedReqRespRequest = struct {
     fn noteResponseChunk(self: *OpenedReqRespRequest, payload_bytes: usize) void {
         self.response_chunks +|= 1;
         self.response_payload_bytes +|= @as(u64, @intCast(payload_bytes));
+    }
+
+    fn responseDeadline(self: *OpenedReqRespRequest, io: std.Io) std.Io.Clock.Timestamp {
+        if (self.response_deadline == null) {
+            self.response_deadline = reqRespResponseDeadline(io, reqresp_response_timeout_ms);
+        }
+        return self.response_deadline.?;
     }
 
     fn finish(self: *OpenedReqRespRequest, io: std.Io, outcome: networking.ReqRespRequestOutcome) void {
@@ -1156,13 +1306,14 @@ fn responseCodeOutcome(code: networking.ResponseCode) networking.ReqRespRequestO
     return networking.ReqRespRequestOutcome.fromResponseCode(code);
 }
 
-fn openReqRespRequest(
+fn openReqRespRequestWithTimeout(
     self: *BeaconNode,
     io: std.Io,
     svc: *networking.P2pService,
     peer_id: []const u8,
     method: networking.rate_limiter.SelfRateLimitMethod,
     protocol_id: []const u8,
+    timeout_ms: u64,
 ) !OpenedReqRespRequest {
     const started_ns = std.Io.Clock.awake.now(io).nanoseconds;
     const req_resp_method = reqRespMethodFromSelfLimitMethod(method);
@@ -1187,7 +1338,7 @@ fn openReqRespRequest(
         protocol_id,
     });
 
-    const stream = svc.dialProtocol(io, peer_id, protocol_id) catch |err| {
+    const stream = dialReqRespProtocolWithTimeout(io, svc, peer_id, protocol_id, timeout_ms) catch |err| {
         if (self.metrics) |metrics| {
             metrics.observeReqRespOutbound(req_resp_method, .transport_error, reqRespElapsedSeconds(io, started_ns), 0, 0, 0);
         }
@@ -1200,6 +1351,17 @@ fn openReqRespRequest(
         .method = req_resp_method,
         .started_ns = started_ns,
     };
+}
+
+fn openReqRespRequest(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+    method: networking.rate_limiter.SelfRateLimitMethod,
+    protocol_id: []const u8,
+) !OpenedReqRespRequest {
+    return openReqRespRequestWithTimeout(self, io, svc, peer_id, method, protocol_id, reqresp_open_timeout_ms);
 }
 
 fn bootstrapBootnodes(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
@@ -1253,6 +1415,9 @@ const direct_peer_redial_max_backoff_ms: u64 = 30_000;
 // paths have the same bounded behavior.
 const outbound_dial_timeout_ms: u64 = 30_000;
 const optional_reqresp_timeout_ms: u64 = 3_000;
+const reqresp_open_timeout_ms: u64 = optional_reqresp_timeout_ms;
+const goodbye_reqresp_open_timeout_ms: u64 = 1_000;
+const reqresp_response_timeout_ms: u64 = 10_000;
 
 const TimeoutWaitResult = enum {
     fired,
@@ -3128,6 +3293,155 @@ fn outboundDialAttemptTask(
     return .{ .success = peer_id };
 }
 
+fn awaitReqRespOpenWithTimeout(
+    io: std.Io,
+    timeout_ms: u64,
+    comptime AttemptTask: anytype,
+    attempt_args: anytype,
+) !networking.QuicStream {
+    var events_buf: [2]ReqRespOpenEvent = undefined;
+    var select = std.Io.Select(ReqRespOpenEvent).init(io, &events_buf);
+    errdefer while (select.cancel()) |event| freeReqRespOpenEvent(io, event);
+
+    try select.concurrent(.dial, AttemptTask, attempt_args);
+    select.async(.timeout, waitTimeout, .{ io, .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
+        .clock = .awake,
+    } } });
+
+    while (true) {
+        const event = try select.await();
+        switch (event) {
+            .dial => |result| {
+                while (select.cancel()) |pending| freeReqRespOpenEvent(io, pending);
+                return switch (result) {
+                    .success => |stream| stream,
+                    .failure => |err| err,
+                    .canceled => error.Canceled,
+                };
+            },
+            .timeout => |result| switch (result) {
+                .fired => {
+                    while (select.cancel()) |pending| freeReqRespOpenEvent(io, pending);
+                    return error.Timeout;
+                },
+                .canceled => {},
+            },
+        }
+    }
+}
+
+fn reqRespResponseDeadline(io: std.Io, timeout_ms: u64) std.Io.Clock.Timestamp {
+    return .{
+        .raw = std.Io.Clock.awake.now(io).addDuration(std.Io.Duration.fromMilliseconds(@intCast(timeout_ms))),
+        .clock = .awake,
+    };
+}
+
+fn awaitResponseReadWithDeadline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+    comptime AttemptTask: anytype,
+    attempt_args: anytype,
+) !?networking.req_resp_encoding.DecodedResponseChunk {
+    var events_buf: [2]ResponseReadEvent = undefined;
+    var select = std.Io.Select(ResponseReadEvent).init(io, &events_buf);
+    errdefer while (select.cancel()) |event| freeResponseReadEvent(allocator, event);
+
+    try select.concurrent(.read, AttemptTask, attempt_args);
+    select.async(.timeout, waitTimeout, .{ io, .{ .deadline = deadline } });
+
+    while (true) {
+        const event = try select.await();
+        switch (event) {
+            .read => |result| {
+                while (select.cancel()) |pending| freeResponseReadEvent(allocator, pending);
+                return switch (result) {
+                    .success => |maybe_chunk| maybe_chunk,
+                    .failure => |err| err,
+                    .canceled => error.Canceled,
+                };
+            },
+            .timeout => |result| switch (result) {
+                .fired => {
+                    while (select.cancel()) |pending| freeResponseReadEvent(allocator, pending);
+                    return error.Timeout;
+                },
+                .canceled => {},
+            },
+        }
+    }
+}
+
+fn awaitResponseReadWithTimeout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    timeout_ms: u64,
+    comptime AttemptTask: anytype,
+    attempt_args: anytype,
+) !?networking.req_resp_encoding.DecodedResponseChunk {
+    return awaitResponseReadWithDeadline(
+        allocator,
+        io,
+        reqRespResponseDeadline(io, timeout_ms),
+        AttemptTask,
+        attempt_args,
+    );
+}
+
+fn responseChunkReadAttemptTask(
+    io: std.Io,
+    reader: *networking.req_resp_encoding.ResponseChunkStreamReader,
+    stream: *networking.QuicStream,
+) ResponseReadAttemptResult {
+    const maybe_chunk = reader.next(io, stream) catch |err| switch (err) {
+        error.Canceled => return .canceled,
+        else => return .{ .failure = err },
+    };
+    return .{ .success = maybe_chunk };
+}
+
+fn nextResponseChunkWithTimeout(
+    self: *BeaconNode,
+    io: std.Io,
+    reader: *networking.req_resp_encoding.ResponseChunkStreamReader,
+    outbound: *OpenedReqRespRequest,
+) !?networking.req_resp_encoding.DecodedResponseChunk {
+    return awaitResponseReadWithDeadline(
+        self.allocator,
+        io,
+        outbound.responseDeadline(io),
+        responseChunkReadAttemptTask,
+        .{ io, reader, &outbound.stream },
+    );
+}
+
+fn reqRespOpenAttemptTask(
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+    protocol_id: []const u8,
+) ReqRespOpenAttemptResult {
+    const stream = svc.dialProtocol(io, peer_id, protocol_id) catch |err| return .{ .failure = err };
+    return .{ .success = stream };
+}
+
+fn dialReqRespProtocolWithTimeout(
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+    protocol_id: []const u8,
+    timeout_ms: u64,
+) !networking.QuicStream {
+    return awaitReqRespOpenWithTimeout(
+        io,
+        timeout_ms,
+        reqRespOpenAttemptTask,
+        .{ io, svc, peer_id, protocol_id },
+    );
+}
+
 fn awaitOutboundDialAttemptWithTimeout(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -4113,7 +4427,7 @@ fn fetchBlobSidecarsByRangeForMetas(
     };
     defer reader.deinit();
 
-    while (try reader.next(io, &outbound.stream)) |decoded| {
+    while (try nextResponseChunkWithTimeout(self, io, &reader, &outbound)) |decoded| {
         outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
@@ -4249,7 +4563,7 @@ fn fetchBlobSidecarsByRootForMeta(
     };
     defer reader.deinit();
 
-    while (try reader.next(io, &outbound.stream)) |decoded| {
+    while (try nextResponseChunkWithTimeout(self, io, &reader, &outbound)) |decoded| {
         outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
@@ -4428,7 +4742,7 @@ fn fetchDataColumnsByRangeOnce(
     };
     defer reader.deinit();
 
-    while (try reader.next(io, &outbound.stream)) |decoded| {
+    while (try nextResponseChunkWithTimeout(self, io, &reader, &outbound)) |decoded| {
         outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
@@ -4702,7 +5016,7 @@ fn fetchDataColumnsByRootOnceForMetas(
     };
     defer reader.deinit();
 
-    while (try reader.next(io, &outbound.stream)) |decoded| {
+    while (try nextResponseChunkWithTimeout(self, io, &reader, &outbound)) |decoded| {
         outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
@@ -4812,7 +5126,7 @@ fn fetchDataColumnsByRootOnce(
 
     const blob_commitments = try meta.any_signed.beaconBlock().beaconBlockBody().blobKzgCommitments();
 
-    while (try reader.next(io, &outbound.stream)) |decoded| {
+    while (try nextResponseChunkWithTimeout(self, io, &reader, &outbound)) |decoded| {
         outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
@@ -5094,7 +5408,7 @@ fn fetchBlockByRoot(
     };
     defer reader.deinit();
 
-    const decoded = (try reader.next(io, &outbound.stream)) orelse return error.NoBlockReturned;
+    const decoded = (try nextResponseChunkWithTimeout(self, io, &reader, &outbound)) orelse return error.NoBlockReturned;
     outbound.noteResponseChunk(decoded.ssz_bytes.len);
     if (decoded.result != .success) {
         self.allocator.free(decoded.ssz_bytes);
@@ -5149,7 +5463,7 @@ fn fetchRawBlocksByRange(
     var previous_chunk: ?ValidatedBlockRangeChunk = null;
 
     while (blocks_received < count) {
-        const decoded = reader.next(io, &outbound.stream) catch |err| {
+        const decoded = nextResponseChunkWithTimeout(self, io, &reader, &outbound) catch |err| {
             if (err == error.UnexpectedEof and result.items.len > 0) {
                 log.debug("blocks-by-range from {s}: salvaging {d} block(s) after unexpected EOF", .{
                     peer_id,
@@ -5180,7 +5494,7 @@ fn fetchRawBlocksByRange(
     }
 
     if (blocks_received == count) {
-        const extra = reader.next(io, &outbound.stream) catch |err| {
+        const extra = nextResponseChunkWithTimeout(self, io, &reader, &outbound) catch |err| {
             if (err == error.UnexpectedEof) return error.MalformedBlockBytes;
             return err;
         };
@@ -5304,7 +5618,7 @@ fn sendStatus(
     };
     defer reader.deinit();
 
-    const decoded = (try reader.next(io, &outbound.stream)) orelse {
+    const decoded = (try nextResponseChunkWithTimeout(self, io, &reader, &outbound)) orelse {
         log.debug("Status: peer sent empty response", .{});
         return error.EmptyResponse;
     };
@@ -5403,7 +5717,7 @@ fn requestPeerPing(
     };
     defer reader.deinit();
 
-    const decoded = (try reader.next(io, &outbound.stream)) orelse return error.EmptyResponse;
+    const decoded = (try nextResponseChunkWithTimeout(self, io, &reader, &outbound)) orelse return error.EmptyResponse;
     outbound.noteResponseChunk(decoded.ssz_bytes.len);
     defer self.allocator.free(decoded.ssz_bytes);
 
@@ -5523,7 +5837,7 @@ fn requestPeerMetadataAttempt(
     };
     defer reader.deinit();
 
-    const decoded = (reader.next(io, &outbound.stream) catch |err| {
+    const decoded = (nextResponseChunkWithTimeout(self, io, &reader, &outbound) catch |err| {
         log.debug(
             "Metadata reader failed for {s}: {} buffered={d} eof={}",
             .{
@@ -5753,7 +6067,15 @@ fn sendGoodbye(
     const goodbye_protocol_id = "/eth2/beacon_chain/req/goodbye/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var outbound = try openReqRespRequest(self, io, svc, peer_id, .goodbye, goodbye_protocol_id);
+    var outbound = try openReqRespRequestWithTimeout(
+        self,
+        io,
+        svc,
+        peer_id,
+        .goodbye,
+        goodbye_protocol_id,
+        goodbye_reqresp_open_timeout_ms,
+    );
     defer outbound.deinit(io);
     var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
     defer outbound.finish(io, request_outcome);
