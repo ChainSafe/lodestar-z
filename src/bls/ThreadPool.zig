@@ -17,6 +17,7 @@ const Pairing = @import("Pairing.zig");
 const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
+const SigningRoot = blst.SigningRoot;
 const AggregatePublicKey = blst.AggregatePublicKey;
 const AggregateSignature = blst.AggregateSignature;
 const BlstError = @import("error.zig").BlstError;
@@ -202,7 +203,7 @@ pub fn submitAndWait(pool: *ThreadPool, io: std.Io, items: []*WorkItem) (PoolErr
 const VerifyMultiJob = struct {
     pks: []const *PublicKey,
     sigs: []const *Signature,
-    msgs: []const []const u8,
+    msgs: []const SigningRoot,
     rands: []const [32]u8,
     dst: []const u8,
     pks_validate: bool,
@@ -237,7 +238,7 @@ const VerifyMultiWorkItem = struct {
                 job.sigs_groupcheck,
                 &job.rands[i],
                 RAND_BITS,
-                job.msgs[i],
+                &job.msgs[i],
             ) catch {
                 job.err_flag.store(true, .release);
                 break;
@@ -257,7 +258,7 @@ pub fn verifyMultipleAggregateSignatures(
     pool: *ThreadPool,
     io: std.Io,
     n_elems: usize,
-    msgs: []const []const u8,
+    msgs: []const SigningRoot,
     dst: []const u8,
     pks: []const *PublicKey,
     pks_validate: bool,
@@ -310,7 +311,7 @@ pub fn verifyMultipleAggregateSignatures(
 
 const AggVerifyJob = struct {
     pks: []const *PublicKey,
-    msgs: []const [32]u8,
+    msgs: []const SigningRoot,
     dst: []const u8,
     pks_validate: bool,
     n_elems: usize,
@@ -365,7 +366,7 @@ pub fn aggregateVerify(
     io: std.Io,
     sig: *const Signature,
     sig_groupcheck: bool,
-    msgs: []const [32]u8,
+    msgs: []const SigningRoot,
     dst: []const u8,
     pks: []const *PublicKey,
     pks_validate: bool,
@@ -498,8 +499,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
 
     const num_sigs = 16;
 
-    var msgs: [num_sigs][32]u8 = undefined;
-    var msg_refs: [num_sigs][]const u8 = undefined;
+    var msgs: [num_sigs]SigningRoot = undefined;
     var pks: [num_sigs]PublicKey = undefined;
     var sigs: [num_sigs]Signature = undefined;
     var pk_ptrs: [num_sigs]*PublicKey = undefined;
@@ -519,7 +519,6 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
         const sk = try SecretKey.keyGen(&ikm_i, null);
         pks[i] = sk.toPublicKey();
         sigs[i] = sk.sign(&msgs[i], blst.DST, null);
-        msg_refs[i] = &msgs[i];
         pk_ptrs[i] = &pks[i];
         sig_ptrs[i] = &sigs[i];
     }
@@ -530,7 +529,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
     const result = try pool.verifyMultipleAggregateSignatures(
         std.testing.io,
         num_sigs,
-        &msg_refs,
+        &msgs,
         blst.DST,
         &pk_ptrs,
         true,

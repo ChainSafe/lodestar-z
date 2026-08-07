@@ -234,11 +234,18 @@ describe("blst", () => {
         });
       });
       describe("sign", () => {
-        it("should create a valid Signature", () => {
-          const sig = SecretKey.fromKeygen(KEY_MATERIAL, undefined).sign(Buffer.from("some fancy message"));
+        it("should create a valid Signature for a 32-byte signing root", () => {
+          const sig = SecretKey.fromKeygen(KEY_MATERIAL, undefined).sign(new Uint8Array(32));
           expect(sig).to.be.instanceOf(Signature);
           expect(sig.validate(false)).to.be.undefined;
         });
+
+        for (const length of [31, 33]) {
+          it(`should throw InvalidMessageLength for a ${length}-byte signing root`, () => {
+            const sk = SecretKey.fromKeygen(KEY_MATERIAL, undefined);
+            expect(() => sk.sign(new Uint8Array(length))).toThrow("InvalidMessageLength");
+          });
+        }
       });
     });
   });
@@ -258,6 +265,14 @@ describe("blst", () => {
       const result = verify(wrongMessage, pk, sig, false, false);
       expect(result).toBe(false);
     });
+
+    for (const length of [31, 33]) {
+      it(`should throw InvalidMessageLength for a ${length}-byte signing root`, () => {
+        const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+        const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
+        expect(() => verify(new Uint8Array(length), pk, sig, false, false)).toThrow("InvalidMessageLength");
+      });
+    }
   });
 
   describe("aggregateVerify", () => {
@@ -278,6 +293,14 @@ describe("blst", () => {
       const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
       expect(aggregateVerify([TEST_VECTORS.message], [pk], sig)).to.be.true;
     });
+
+    for (const length of [31, 33]) {
+      it(`should throw InvalidMessageLength for a ${length}-byte signing root`, () => {
+        const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+        const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
+        expect(() => aggregateVerify([new Uint8Array(length)], [pk], sig)).toThrow("InvalidMessageLength");
+      });
+    }
   });
 
   describe("fastAggregateVerify", () => {
@@ -302,11 +325,13 @@ describe("blst", () => {
       expect(result).toBe(false);
     });
 
-    it("should throw on wrong message length", () => {
-      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
-      const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
-      expect(() => fastAggregateVerify(new Uint8Array(31), [pk], sig, false)).toThrow();
-    });
+    for (const length of [31, 33]) {
+      it(`should throw InvalidMessageLength for a ${length}-byte signing root`, () => {
+        const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+        const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
+        expect(() => fastAggregateVerify(new Uint8Array(length), [pk], sig, false)).toThrow("InvalidMessageLength");
+      });
+    }
   });
 
   describe("verifyMultipleAggregateSignatures", () => {
@@ -329,6 +354,15 @@ describe("blst", () => {
         verifyMultipleAggregateSignatures([{msg, pk, sig: pk as unknown as Signature}], false, false)
       ).toThrow("TypeMismatch");
     });
+
+    for (const length of [31, 33]) {
+      it(`should throw InvalidMessageLength for a ${length}-byte signing root`, () => {
+        const [set] = getTestSets(1);
+        expect(() => verifyMultipleAggregateSignatures([{...set, msg: new Uint8Array(length)}], false, false)).toThrow(
+          "InvalidMessageLength"
+        );
+      });
+    }
   });
 
   describe("aggregatePublicKeys", () => {

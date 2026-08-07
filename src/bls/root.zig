@@ -15,6 +15,9 @@ pub const AggregatePublicKey = @import("AggregatePublicKey.zig");
 pub const AggregateSignature = @import("AggregateSignature.zig");
 pub const BlstError = @import("error.zig").BlstError;
 
+/// Ethereum consensus BLS messages are fixed-size signing roots.
+pub const SigningRoot = [32]u8;
+
 pub const verifyMultipleAggregateSignatures = @import("fast_verify.zig").verifyMultipleAggregateSignatures;
 pub const ThreadPool = @import("ThreadPool.zig");
 pub const pippenger = @import("pippenger.zig");
