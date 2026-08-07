@@ -15,6 +15,7 @@ pub const AggregatePublicKey = @import("AggregatePublicKey.zig");
 pub const AggregateSignature = @import("AggregateSignature.zig");
 pub const BlstError = @import("error.zig").BlstError;
 
+pub const BatchVerifyItem = @import("fast_verify.zig").BatchVerifyItem;
 pub const verifyMultipleAggregateSignatures = @import("fast_verify.zig").verifyMultipleAggregateSignatures;
 pub const ThreadPool = @import("ThreadPool.zig");
 pub const pippenger = @import("pippenger.zig");
