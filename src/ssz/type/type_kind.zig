@@ -3,7 +3,11 @@ pub const TypeKind = enum {
     bool,
     vector,
     list,
+    progressive_list,
+    progressive_bit_list,
     container,
+    progressive_container,
+    compatible_union,
 };
 
 /// Basic types are primitives
@@ -27,9 +31,9 @@ pub fn canMemcpySsz(comptime T: type) bool {
 pub fn isFixedType(T: type) bool {
     return switch (T.kind) {
         .uint, .bool => true,
-        .list => false,
+        .list, .progressive_list, .progressive_bit_list, .compatible_union => false,
         .vector => isFixedType(T.Element),
-        .container => {
+        .container, .progressive_container => {
             inline for (T.fields) |field| {
                 if (!isFixedType(field.type)) {
                     return false;
@@ -38,4 +42,14 @@ pub fn isFixedType(T: type) bool {
             return true;
         },
     };
+}
+
+// Progressive list types
+pub fn isProgressiveListType(T: type) bool {
+    return T.kind == .progressive_list;
+}
+
+// Compatible union types
+pub fn isCompatibleUnionType(T: type) bool {
+    return T.kind == .compatible_union;
 }

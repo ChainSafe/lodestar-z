@@ -1,6 +1,8 @@
 pub const TypeKind = @import("type_kind.zig").TypeKind;
 pub const isBasicType = @import("type_kind.zig").isBasicType;
 pub const isFixedType = @import("type_kind.zig").isFixedType;
+pub const isProgressiveListType = @import("type_kind.zig").isProgressiveListType;
+pub const isCompatibleUnionType = @import("type_kind.zig").isCompatibleUnionType;
 
 pub const BoolType = @import("bool.zig").BoolType;
 pub const UintType = @import("uint.zig").UintType;
@@ -35,6 +37,19 @@ pub const itemsPerChunk = chunk.itemsPerChunk;
 pub const chunkCount = chunk.chunkCount;
 pub const chunkDepth = chunk.chunkDepth;
 pub const getPathGindex = @import("path.zig").getPathGindex;
+pub const treeApi = @import("tree_api.zig");
+
+pub const FixedProgressiveContainerType = @import("progressive_container.zig").FixedProgressiveContainerType;
+pub const VariableProgressiveContainerType = @import("progressive_container.zig").VariableProgressiveContainerType;
+
+pub const FixedProgressiveListType = @import("progressive_list.zig").FixedProgressiveListType;
+pub const VariableProgressiveListType = @import("progressive_list.zig").VariableProgressiveListType;
+
+pub const CompatibleUnionType = @import("compatible_union.zig").CompatibleUnionType;
+
+pub const ProgressiveBitListType = @import("progressive_bit_list.zig").ProgressiveBitListType;
+pub const ProgressiveBitList = @import("progressive_bit_list.zig").ProgressiveBitList;
+pub const isProgressiveBitListType = @import("progressive_bit_list.zig").isProgressiveBitListType;
 
 test {
     _ = @import("bool.zig");
@@ -45,6 +60,11 @@ test {
     _ = @import("byte_list.zig");
     _ = @import("byte_vector.zig");
     _ = @import("list.zig");
+    _ = @import("progressive_list.zig");
+    _ = @import("progressive_bit_list.zig");
     _ = @import("container.zig");
+    _ = @import("progressive_container.zig");
+    _ = @import("compatible_union.zig");
     _ = @import("path.zig");
+    _ = @import("tree_api.zig");
 }
