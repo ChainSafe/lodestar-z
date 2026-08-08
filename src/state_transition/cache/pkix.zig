@@ -1,3 +1,34 @@
+//! PKIX is the on-disk snapshot format for `PubkeyCache`.
+//!
+//! # Trust boundary
+//!
+//! A PKIX file is application-owned local cache data. It is in the same trust
+//! class as the application's database files or its persisted ENR. It is not
+//! operator-supplied input, not network input, and not a portable interchange
+//! format.
+//!
+//! The application must guarantee all of the following:
+//!
+//! - The file lives under a private, application-owned cache directory.
+//! - The path is scoped to one network, exactly as other persisted application
+//!   state is scoped. PKIX stores no network identifier and cannot detect a
+//!   file written for a different network.
+//! - Only the application writes the file, through `save`.
+//!
+//! # What load does and does not check
+//!
+//! `load` checks framing, format version, ABI compatibility, capacity bounds,
+//! the exact file size, and a checksum over the whole payload. Those checks
+//! exist to detect accidental corruption, a partial write, and a snapshot
+//! written by an incompatible build. They run before the payload is allocated,
+//! so a crafted header cannot force an unbounded allocation.
+//!
+//! `load` does not authenticate the file and does not semantically validate the
+//! restored affine points. Separate point validation is unnecessary inside the
+//! cache boundary above, because the payload checksum already covers every
+//! restored byte. Do not relax the boundary and rely on these checks: PKIX is
+//! not a substitute for validating untrusted input.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const bls = @import("bls");
@@ -178,7 +209,13 @@ pub fn save(cache: *PubkeyCache, io: std.Io, writer: *std.Io.Writer) !void {
 ///
 /// PKIX checks framing, ABI compatibility, bounds, and checksum, but does not
 /// authenticate or semantically validate entries. Callers must provide an
-/// application-owned file from the intended network.
+/// application-owned file from the intended network. See the module doc comment
+/// for the full trust boundary.
+///
+/// `max_capacity` is the caller's allocation bound. It caps both the restored
+/// entry count and the reserved spare capacity, so a crafted header cannot make
+/// this function allocate more than the caller allows. Every bound is checked
+/// before the first allocation.
 pub fn load(
     allocator: std.mem.Allocator,
     io: std.Io,

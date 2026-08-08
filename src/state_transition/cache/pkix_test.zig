@@ -65,6 +65,41 @@ fn appendPubkeys(
     }
 }
 
+/// Assert that `pkix.load` rejects `encoded` without allocating.
+///
+/// `fail_index = 0` makes the first allocation attempt fail. The counters then
+/// prove the rejection happened before that attempt, not because of it.
+fn expectLoadRejectedWithoutAllocation(
+    encoded: []const u8,
+    file_size: u64,
+    max_capacity: usize,
+    expected_error: anyerror,
+) !void {
+    var failing = testing.FailingAllocator.init(
+        testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var reader = std.Io.Reader.fixed(encoded);
+    try testing.expectError(expected_error, pkix.load(
+        failing.allocator(),
+        testing.io,
+        &reader,
+        file_size,
+        max_capacity,
+    ));
+    try testing.expectEqual(@as(usize, 0), failing.allocations);
+    try testing.expect(!failing.has_induced_failure);
+}
+
+/// Assert that `pkix.load` rejects `encoded` with a checksum error.
+fn expectLoadRejectedByChecksum(encoded: []const u8, expected_error: anyerror) !void {
+    var reader = std.Io.Reader.fixed(encoded);
+    try testing.expectError(
+        expected_error,
+        loadPkixForTest(testing.allocator, &reader, encoded.len),
+    );
+}
+
 test "PKIX round trip preserves populated and empty caches" {
     const allocator = testing.allocator;
     var pubkeys: [3]types.primitive.BLSPubkey.Type = undefined;
@@ -345,4 +380,200 @@ test "PKIX enforces the caller capacity limit before allocation" {
     defer empty_loaded.deinit();
     try testing.expectEqual(@as(u32, 0), empty_loaded.count(testing.io));
     try testing.expectEqual(@as(usize, 0), empty_loaded.capacity(testing.io));
+}
+
+test "PKIX crafted headers cannot force an allocation" {
+    const allocator = testing.allocator;
+    var source = PubkeyCache.init(allocator, testing.io);
+    defer source.deinit();
+    const encoded = try encodePkixForTest(allocator, &source);
+    defer allocator.free(encoded);
+    try testing.expectEqual(header_size, encoded.len);
+
+    const Case = struct {
+        entry_count: u32,
+        cache_capacity: u32,
+        max_capacity: usize,
+        expected_error: anyerror,
+    };
+
+    // Every case is a header-only file that claims a payload it does not have.
+    // The largest encodable entry count claims about 618 GiB of entries.
+    const cases = [_]Case{
+        .{
+            .entry_count = std.math.maxInt(u32),
+            .cache_capacity = std.math.maxInt(u32),
+            .max_capacity = std.math.maxInt(usize),
+            .expected_error = error.InvalidPkixHeader,
+        },
+        .{
+            .entry_count = std.math.maxInt(u32),
+            .cache_capacity = std.math.maxInt(u32),
+            .max_capacity = 8,
+            .expected_error = error.PkixCapacityLimitExceeded,
+        },
+        .{
+            .entry_count = 1_000_000,
+            .cache_capacity = std.math.maxInt(u32),
+            .max_capacity = std.math.maxInt(usize),
+            .expected_error = error.InvalidPkixHeader,
+        },
+        .{
+            .entry_count = 1,
+            .cache_capacity = std.math.maxInt(u32),
+            .max_capacity = std.math.maxInt(usize),
+            .expected_error = error.InvalidPkixHeader,
+        },
+        .{
+            .entry_count = 1,
+            .cache_capacity = 0,
+            .max_capacity = std.math.maxInt(usize),
+            .expected_error = error.InvalidPkixHeader,
+        },
+    };
+
+    for (cases) |case| {
+        var header = readHeaderForTest(encoded);
+        header.entry_count = case.entry_count;
+        header.cache_capacity = case.cache_capacity;
+        updateHeaderChecksumForTest(&header);
+        writeHeaderForTest(encoded, header);
+        try expectLoadRejectedWithoutAllocation(
+            encoded,
+            encoded.len,
+            case.max_capacity,
+            case.expected_error,
+        );
+    }
+
+    // A file shorter than the header and an all-zero file must also allocate
+    // nothing.
+    const zeroed = try allocator.alloc(u8, header_size);
+    defer allocator.free(zeroed);
+    @memset(zeroed, 0);
+    try expectLoadRejectedWithoutAllocation(
+        zeroed,
+        zeroed.len,
+        std.math.maxInt(usize),
+        error.InvalidPkixMagic,
+    );
+    try expectLoadRejectedWithoutAllocation(
+        zeroed[0 .. header_size - 1],
+        header_size - 1,
+        std.math.maxInt(usize),
+        error.InvalidPkixHeader,
+    );
+}
+
+test "PKIX clamps crafted spare capacity to the caller limit" {
+    const allocator = testing.allocator;
+    var pubkeys: [2]types.primitive.BLSPubkey.Type = undefined;
+    try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
+
+    var source = try PubkeyCache.initCapacity(allocator, testing.io, pubkeys.len);
+    defer source.deinit();
+    try appendPubkeys(&source, &pubkeys);
+
+    const encoded = try encodePkixForTest(allocator, &source);
+    defer allocator.free(encoded);
+
+    // The header claims spare capacity for about 1 billion entries. The entry
+    // count stays valid, so the load succeeds, but the reserved capacity must
+    // follow the caller limit instead of the file.
+    const caller_limit = 4;
+    var header = readHeaderForTest(encoded);
+    header.cache_capacity = 1 << 30;
+    updateHeaderChecksumForTest(&header);
+    writeHeaderForTest(encoded, header);
+
+    var reader = std.Io.Reader.fixed(encoded);
+    var loaded = try pkix.load(
+        allocator,
+        testing.io,
+        &reader,
+        encoded.len,
+        caller_limit,
+    );
+    defer loaded.deinit();
+    try testing.expectEqual(@as(u32, pubkeys.len), loaded.count(testing.io));
+    try testing.expectEqual(@as(usize, caller_limit), loaded.capacity(testing.io));
+    for (pubkeys, 0..) |pubkey, index| {
+        try testing.expectEqual(
+            @as(u64, @intCast(index)),
+            loaded.get(testing.io, pubkey).?,
+        );
+    }
+}
+
+test "PKIX rejects corruption in every payload and header region" {
+    const allocator = testing.allocator;
+    var pubkeys: [3]types.primitive.BLSPubkey.Type = undefined;
+    try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
+
+    var source = try PubkeyCache.initCapacity(allocator, testing.io, pubkeys.len);
+    defer source.deinit();
+    try appendPubkeys(&source, &pubkeys);
+
+    const encoded = try encodePkixForTest(allocator, &source);
+    defer allocator.free(encoded);
+
+    const key_size = 48;
+    const key_start = header_size;
+    const affine_start = key_start + pubkeys.len * key_size;
+    try testing.expect(affine_start < encoded.len);
+
+    // One flipped bit anywhere in the payload must fail the checksum.
+    const payload_offsets = [_]usize{
+        key_start,
+        key_start + key_size - 1,
+        affine_start - 1,
+        affine_start,
+        encoded.len - 1,
+    };
+    for (payload_offsets) |offset| {
+        encoded[offset] ^= 1;
+        try expectLoadRejectedByChecksum(encoded, error.InvalidPkixChecksum);
+        encoded[offset] ^= 1;
+    }
+
+    // Reordering two entries keeps every byte but changes their order, so the
+    // payload checksum must still reject the file.
+    var swapped_key: [key_size]u8 = undefined;
+    @memcpy(&swapped_key, encoded[key_start..][0..key_size]);
+    @memcpy(
+        encoded[key_start..][0..key_size],
+        encoded[key_start + key_size ..][0..key_size],
+    );
+    @memcpy(encoded[key_start + key_size ..][0..key_size], &swapped_key);
+    try expectLoadRejectedByChecksum(encoded, error.InvalidPkixChecksum);
+    @memcpy(&swapped_key, encoded[key_start..][0..key_size]);
+    @memcpy(
+        encoded[key_start..][0..key_size],
+        encoded[key_start + key_size ..][0..key_size],
+    );
+    @memcpy(encoded[key_start + key_size ..][0..key_size], &swapped_key);
+
+    // The round trip still works after every mutation is reverted.
+    var restored_reader = std.Io.Reader.fixed(encoded);
+    var restored = try loadPkixForTest(allocator, &restored_reader, encoded.len);
+    defer restored.deinit();
+    try testing.expectEqual(@as(u32, pubkeys.len), restored.count(testing.io));
+
+    // A corrupt payload checksum field fails even though the payload is intact.
+    var header = readHeaderForTest(encoded);
+    header.payload_checksum ^= 1;
+    updateHeaderChecksumForTest(&header);
+    writeHeaderForTest(encoded, header);
+    try expectLoadRejectedByChecksum(encoded, error.InvalidPkixChecksum);
+
+    // A corrupt header checksum field is caught before any bound is read.
+    header = readHeaderForTest(encoded);
+    header.header_checksum ^= 1;
+    writeHeaderForTest(encoded, header);
+    try expectLoadRejectedWithoutAllocation(
+        encoded,
+        encoded.len,
+        std.math.maxInt(usize),
+        error.InvalidPkixHeaderChecksum,
+    );
 }
