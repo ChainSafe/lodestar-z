@@ -3,7 +3,7 @@
 ## Critical rules
 
 - **Target branch:** `main`.
-- **Pre-push:** run `zig fmt --check .`, `zig build test`, `pnpm lint`, and the relevant
+- **Pre-push:** run `zig fmt --check .`, `pnpm lint`, and the relevant
   binding or spec tests before every push.
 - **Bound everything:** avoid recursion, put explicit limits on loops and allocations, fail fast,
   and assert invariants.
@@ -96,7 +96,7 @@ zig build test:ssz -Dtest:ssz.filters="test name"
 zig build test -- --test-filter "test name"
 ```
 
-Prefer a targeted module test while iterating, then run `zig build test` before pushing.
+Prefer a targeted module test while iterating, do not run `zig build test` unless necessary.
 
 ### Spec tests
 
@@ -284,7 +284,7 @@ implementation was primarily AI-authored or whether AI was used only for codebas
 ### Pre-push checklist
 
 1. `zig fmt --check .`
-2. `zig build test`
+2. Run relevant tests, never run slow `zig build test` unless changes touch spec logic
 3. Relevant spec tests for consensus, SSZ, or BLS changes
 4. `pnpm lint` for binding source changes
 5. Rebuild bindings and run `pnpm test` for binding or NAPI changes
