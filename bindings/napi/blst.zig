@@ -120,7 +120,7 @@ fn uint8SliceFromValue(value: js.Value) ![]u8 {
 /// Validates a dynamic N-API byte slice and narrows it to the fixed BLS message type.
 fn signingRootFromBytes(bytes: []const u8) !*const SigningRoot {
     if (bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
-    return @ptrCast(bytes.ptr);
+    return bytes[0..@sizeOf(SigningRoot)];
 }
 
 pub const PublicKey = struct {
