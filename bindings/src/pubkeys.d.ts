@@ -22,11 +22,8 @@ export interface PubkeyCache {
    * The explicit capacity limit bounds both the entry count and native allocation;
    * spare capacity recorded in the file is discarded above this limit.
    *
-   * The file is application-owned local cache data, in the same trust class as the application's
-   * database files. The caller must keep it under a private cache directory and must scope the path
-   * to one network. PKIX stores no network identifier. The loader checks framing, ABI
-   * compatibility, bounds, and a checksum to detect corruption or an incompatible build.
-   * It does not authenticate the file. Do not pass an operator-supplied or network-sourced path.
+   * The file is application-owned local cache data. See the top-level doc comment in
+   * `src/state_transition/cache/pkix.zig` for the trust assumptions the caller must meet.
    */
   load(filepath: string, maxCapacity: number): void;
   /** Testing-only reset from the control environment while no workers are using the cache. */
