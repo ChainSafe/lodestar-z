@@ -117,7 +117,7 @@ pub fn fastAggregateVerify(
     return try self.aggregateVerify(
         sig_groupcheck,
         buffer,
-        @as([*]const SigningRoot, @ptrCast(msg))[0..1],
+        @ptrCast(msg),
         dst,
         &[_]PublicKey{pk},
         false,
