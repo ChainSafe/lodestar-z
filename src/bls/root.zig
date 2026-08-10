@@ -18,6 +18,7 @@ pub const BlstError = @import("error.zig").BlstError;
 /// Ethereum consensus BLS messages are fixed-size signing roots.
 pub const SigningRoot = [32]u8;
 
+pub const BatchVerifyItem = @import("fast_verify.zig").BatchVerifyItem;
 pub const verifyMultipleAggregateSignatures = @import("fast_verify.zig").verifyMultipleAggregateSignatures;
 pub const ThreadPool = @import("ThreadPool.zig");
 pub const pippenger = @import("pippenger.zig");
