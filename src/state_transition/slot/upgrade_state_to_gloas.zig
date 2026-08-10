@@ -23,6 +23,7 @@ const PendingDepositsLookup = @import("../utils/pending_deposits_lookup.zig").Pe
 /// Upgrade a state from Fulu to Gloas.
 pub fn upgradeStateToGloas(
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     fulu_state: *BeaconState(.fulu),
@@ -59,7 +60,7 @@ pub fn upgradeStateToGloas(
     const ptc_window = try initializePtcWindow(.gloas, allocator, epoch_cache, &state);
     try state.inner.setValue("ptc_window", &ptc_window);
 
-    try onboardBuildersFromPendingDeposits(allocator, config, epoch_cache, &state);
+    try onboardBuildersFromPendingDeposits(allocator, io, config, epoch_cache, &state);
 
     fulu_state.deinit();
     return state;
@@ -69,6 +70,7 @@ pub fn upgradeStateToGloas(
 /// Spec: https://github.com/ethereum/consensus-specs/blob/v1.7.0-alpha.8/specs/gloas/fork.md#new-onboard_builders_from_pending_deposits
 fn onboardBuildersFromPendingDeposits(
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(.gloas),
@@ -86,7 +88,7 @@ fn onboardBuildersFromPendingDeposits(
     for (0..pending_deposits_len) |_| {
         const deposit = try pending_it.nextValue();
 
-        const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey);
+        const validator_index = epoch_cache.pubkey_cache.get(io, deposit.pubkey);
         if (try isValidatorKnown(.gloas, state, validator_index)) {
             try remaining_pending_deposits.append(allocator, deposit);
             try pending_deposits_lookup.add(&deposit);

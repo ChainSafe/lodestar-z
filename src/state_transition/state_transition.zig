@@ -135,7 +135,7 @@ pub fn processSlots(
             }
             if (state_epoch == config.chain.GLOAS_FORK_EPOCH) {
                 const fulu_state = try state.tryCastToFork(.fulu);
-                const upgraded = try upgradeStateToGloas(allocator, config, epoch_cache, fulu_state);
+                const upgraded = try upgradeStateToGloas(allocator, io, config, epoch_cache, fulu_state);
                 state.* = .{ .gloas = upgraded.inner };
             }
 

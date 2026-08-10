@@ -53,7 +53,7 @@ pub fn processBlock(
     // Build slashings cache against the *current* latest_block_header slot (pre-header update).
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     if (comptime fork.gte(.gloas) and block_type == .full) {
-        try processParentExecutionPayload(allocator, config, epoch_cache, state, block);
+        try processParentExecutionPayload(allocator, io, config, epoch_cache, state, block);
     }
     try processBlockHeader(fork, allocator, epoch_cache, state, block_type, block);
     // Keep cache slot in sync with latest_block_header without forcing a rebuild.

@@ -8,6 +8,7 @@ const isValidIndexedPayloadAttestation = @import("./is_valid_indexed_payload_att
 
 pub fn processPayloadAttestation(
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(.gloas),
@@ -28,7 +29,7 @@ pub fn processPayloadAttestation(
     var indexed_payload_attestation = try epoch_cache.getIndexedPayloadAttestation(allocator, state, data.slot, payload_attestation);
     defer indexed_payload_attestation.attesting_indices.deinit(allocator);
 
-    if (!(try isValidIndexedPayloadAttestation(allocator, config, epoch_cache, &indexed_payload_attestation, true))) {
+    if (!(try isValidIndexedPayloadAttestation(allocator, io, config, epoch_cache, &indexed_payload_attestation, true))) {
         return error.InvalidPayloadAttestation;
     }
 }

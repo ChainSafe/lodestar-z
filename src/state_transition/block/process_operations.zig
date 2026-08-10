@@ -97,7 +97,7 @@ pub fn processOperations(
 
     if (comptime fork.gte(.gloas)) {
         for (body.inner.payload_attestations.items) |*payload_attestation| {
-            try processPayloadAttestation(allocator, config, epoch_cache, state, payload_attestation);
+            try processPayloadAttestation(allocator, io, config, epoch_cache, state, payload_attestation);
         }
     }
 }

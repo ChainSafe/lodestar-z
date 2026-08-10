@@ -23,6 +23,7 @@ pub fn getPayloadAttestationDataSigningRoot(config: *const BeaconConfig, data: *
 /// Consumer needs to free the returned pubkeys array.
 pub fn getIndexedPayloadAttestationSignatureSet(
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     indexed_payload_attestation: *const types.gloas.IndexedPayloadAttestation.Type,
@@ -31,9 +32,10 @@ pub fn getIndexedPayloadAttestationSignatureSet(
 
     const pubkeys = try allocator.alloc(PublicKey, attesting_indices.len);
     errdefer allocator.free(pubkeys);
-    for (attesting_indices, 0..) |index, i| {
-        pubkeys[i] = epoch_cache.index_to_pubkey.items[index];
-    }
+    epoch_cache.pubkey_cache.getPubkeys(io, attesting_indices, pubkeys) catch |err| switch (err) {
+        error.InvalidIndex => return error.PubkeyNotFound,
+        else => return err,
+    };
 
     var signing_root: Root = undefined;
     try getPayloadAttestationDataSigningRoot(config, &indexed_payload_attestation.data, &signing_root);

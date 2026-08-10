@@ -10,6 +10,7 @@ const verifyAggregatedSignatureSet = @import("../utils/signature_sets.zig").veri
 /// sorted, and (optionally) that the aggregate BLS signature is valid.
 pub fn isValidIndexedPayloadAttestation(
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     indexed_payload_attestation: *const types.gloas.IndexedPayloadAttestation.Type,
@@ -29,7 +30,7 @@ pub fn isValidIndexedPayloadAttestation(
 
     if (!verify_signature) return true;
 
-    const sig_set = try getIndexedPayloadAttestationSignatureSet(allocator, config, epoch_cache, indexed_payload_attestation);
+    const sig_set = try getIndexedPayloadAttestationSignatureSet(allocator, io, config, epoch_cache, indexed_payload_attestation);
     defer allocator.free(sig_set.pubkeys);
     return verifyAggregatedSignatureSet(&sig_set);
 }

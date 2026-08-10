@@ -18,6 +18,7 @@ const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 /// Spec: https://github.com/ethereum/consensus-specs/blob/v1.7.0-alpha.6/specs/gloas/beacon-chain.md#new-process_parent_execution_payload
 pub fn processParentExecutionPayload(
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(.gloas),
@@ -41,7 +42,7 @@ pub fn processParentExecutionPayload(
         return error.ParentExecutionRequestsRootMismatch;
     }
 
-    try applyParentExecutionPayload(allocator, config, epoch_cache, state, requests, &parent_bid);
+    try applyParentExecutionPayload(allocator, io, config, epoch_cache, state, requests, &parent_bid);
 }
 
 /// Process the parent's execution requests, queue the builder payment, update payload availability,
@@ -53,6 +54,7 @@ pub fn processParentExecutionPayload(
 /// Spec: https://github.com/ethereum/consensus-specs/blob/v1.7.0-alpha.6/specs/gloas/beacon-chain.md#new-apply_parent_execution_payload
 pub fn applyParentExecutionPayload(
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(.gloas),
@@ -68,11 +70,11 @@ pub fn applyParentExecutionPayload(
     }
 
     for (requests.withdrawals.items) |*withdrawal| {
-        try processWithdrawalRequest(.gloas, config, epoch_cache, state, withdrawal);
+        try processWithdrawalRequest(.gloas, io, config, epoch_cache, state, withdrawal);
     }
 
     for (requests.consolidations.items) |*consolidation| {
-        try processConsolidationRequest(.gloas, config, epoch_cache, state, consolidation);
+        try processConsolidationRequest(.gloas, io, config, epoch_cache, state, consolidation);
     }
 
     for (requests.builder_deposits.items) |*builder_deposit| {

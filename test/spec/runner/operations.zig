@@ -269,12 +269,12 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;
                     const fork_block = BeaconBlock(.full, fork){ .inner = self.op };
-                    try state_transition.processParentExecutionPayload(allocator, config, epoch_cache, state, &fork_block);
+                    try state_transition.processParentExecutionPayload(allocator, std.testing.io, config, epoch_cache, state, &fork_block);
                 },
                 .payload_attestation => {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;
-                    try state_transition.processPayloadAttestation(allocator, config, epoch_cache, state, &self.op);
+                    try state_transition.processPayloadAttestation(allocator, std.testing.io, config, epoch_cache, state, &self.op);
                 },
                 .proposer_slashing => {
                     const config = cached_state.config;
