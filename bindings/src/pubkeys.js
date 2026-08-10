@@ -25,6 +25,10 @@ export const pubkeyCache = {
     return pk;
   },
 
+  getPubkeyBytes(index) {
+    return native.getPubkeyBytes(index);
+  },
+
   aggregate(indices) {
     if (indices.length === 1) return pubkeyCache.getOrThrow(indices[0]);
     return native.aggregate(indices);

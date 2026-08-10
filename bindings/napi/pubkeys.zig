@@ -132,6 +132,16 @@ pub fn get(index: js.Number) !?blst_bindings.PublicKey {
     return .{ .raw = public_key };
 }
 
+/// JS: pubkeys.getPubkeyBytes(index) → Uint8Array | undefined
+pub fn getPubkeyBytes(index: js.Number) !?js.Uint8Array {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
+    const idx = try index.toU32();
+    const io = js.io();
+    const pubkey_bytes = state.cache.getPubkeyBytes(io, idx) orelse return null;
+    return try js.Uint8Array.fromExternal(pubkey_bytes[0..]);
+}
+
 /// Aggregate multiple `PublicKey`s by the given
 /// validator `indices` into one.
 ///

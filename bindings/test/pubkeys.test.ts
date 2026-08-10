@@ -105,6 +105,22 @@ describe("pubkeys", () => {
     expect(pubkeyCache.get(0xffffffff)).toBeUndefined();
   });
 
+  it("getPubkeyBytes returns the compressed pubkey bytes", () => {
+    for (const {index, pubkeyBytes} of keypairs) {
+      expect(pubkeyCache.getPubkeyBytes(index)).toEqual(pubkeyBytes);
+    }
+  });
+
+  it("getPubkeyBytes matches getOrThrow().toBytes() and returns copies", () => {
+    const bytes = pubkeyCache.getPubkeyBytes(0);
+    expect(bytes).toEqual(pubkeyCache.getOrThrow(0).toBytes());
+    expect(pubkeyCache.getPubkeyBytes(0)).not.toBe(bytes);
+  });
+
+  it("getPubkeyBytes returns undefined for out-of-range index", () => {
+    expect(pubkeyCache.getPubkeyBytes(0xffffffff)).toBeUndefined();
+  });
+
   it("getIndex returns null for unknown pubkey", () => {
     expect(pubkeyCache.getIndex(new Uint8Array(48))).toBeNull();
   });
