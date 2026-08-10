@@ -20,6 +20,7 @@ const Signature = blst.Signature;
 const AggregatePublicKey = blst.AggregatePublicKey;
 const AggregateSignature = blst.AggregateSignature;
 const BlstError = @import("error.zig").BlstError;
+const fast_verify = @import("fast_verify.zig");
 const SecretKey = @import("SecretKey.zig");
 const pippenger = @import("pippenger.zig");
 
@@ -248,6 +249,17 @@ const VerifyMultiWorkItem = struct {
     }
 };
 
+fn useDirectVerification(n_elems: usize, n_workers: usize) bool {
+    return n_elems <= 2 or n_workers <= 1;
+}
+
+test "small batch verification bypasses the worker queue" {
+    try std.testing.expect(useDirectVerification(1, 4));
+    try std.testing.expect(useDirectVerification(2, 4));
+    try std.testing.expect(!useDirectVerification(3, 4));
+    try std.testing.expect(useDirectVerification(3, 1));
+}
+
 /// Verifies multiple aggregate signatures in parallel using the thread pool.
 ///
 /// This is the multi-threaded version of the same function in `fast_verify.zig`.
@@ -271,6 +283,21 @@ pub fn verifyMultipleAggregateSignatures(
         msgs.len != n_elems or
         rands.len != n_elems)
         return BlstError.VerifyFail;
+
+    if (useDirectVerification(n_elems, pool.n_workers)) {
+        var pairing_buf: PairingBuf = .{};
+        return fast_verify.verifyMultipleAggregateSignatures(
+            &pairing_buf.data,
+            n_elems,
+            msgs,
+            dst,
+            pks,
+            pks_validate,
+            sigs,
+            sigs_groupcheck,
+            rands,
+        );
+    }
 
     const n_active = @min(pool.n_workers, n_elems);
 
