@@ -26,7 +26,7 @@ pub fn processRewardsAndPenalties(
 
     const rewards = cache.rewards;
     const penalties = cache.penalties;
-    try getRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache, rewards, penalties);
+    try getRewardsAndPenalties(fork, config, epoch_cache, state, cache, rewards, penalties);
 
     const balances = try state.balancesSlice(allocator);
     errdefer allocator.free(balances);
@@ -56,7 +56,6 @@ pub fn processRewardsAndPenalties(
 
 pub fn getRewardsAndPenalties(
     comptime fork: ForkSeq,
-    allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
@@ -65,9 +64,9 @@ pub fn getRewardsAndPenalties(
     penalties: []u64,
 ) !void {
     if (comptime fork == .phase0) {
-        return try getAttestationDeltas(allocator, epoch_cache, cache, try state.finalizedEpoch(), rewards, penalties);
+        return try getAttestationDeltas(epoch_cache, cache, try state.finalizedEpoch(), rewards, penalties);
     }
-    return try getRewardsAndPenaltiesAltair(fork, allocator, config, epoch_cache, state, cache, rewards, penalties);
+    return try getRewardsAndPenaltiesAltair(fork, config, epoch_cache, state, cache, rewards, penalties);
 }
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;

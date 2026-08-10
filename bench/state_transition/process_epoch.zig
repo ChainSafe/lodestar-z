@@ -127,11 +127,11 @@ fn ProcessSlashingsBench(comptime fork: ForkSeq) type {
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
+            _ = allocator;
             const cache = self.epoch_transition_cache;
 
             _ = state_transition.processSlashings(
                 fork,
-                allocator,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
@@ -468,7 +468,6 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             const slashings_start = time.start(io);
             const slashing_penalties = state_transition.processSlashings(
                 fork,
-                allocator,
                 epoch_cache,
                 fork_state,
                 cache,
