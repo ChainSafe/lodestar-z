@@ -19,6 +19,7 @@ const bls = @import("bls");
 const NativePublicKey = bls.PublicKey;
 const NativeSignature = bls.Signature;
 const NativeSecretKey = bls.SecretKey;
+const SigningRoot = bls.SigningRoot;
 const Pairing = bls.Pairing;
 const AggregatePublicKey = bls.AggregatePublicKey;
 const AggregateSignature = bls.AggregateSignature;
@@ -329,8 +330,9 @@ pub const SecretKey = struct {
 
     /// Signs a message with this `SecretKey`, returns a `Signature`.
     pub fn sign(self: *const SecretKey, msg: js.Uint8Array) !Signature {
-        const slice = try msg.toSlice();
-        return .{ .raw = self.raw.sign(slice, DST, null) };
+        const msg_bytes = try msg.toSlice();
+        if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
+        return .{ .raw = self.raw.sign(msg_bytes[0..@sizeOf(SigningRoot)], DST, null) };
     }
 
     /// Derives the PublicKey from this SecretKey.
@@ -360,11 +362,12 @@ pub const SecretKey = struct {
 /// 4) pk_validate: ?bool
 /// 5) sig_groupcheck: ?bool
 pub fn verify(msg: js.Uint8Array, pk: PublicKey, sig: Signature, pk_validate: ?js.Boolean, sig_groupcheck: ?js.Boolean) !js.Boolean {
-    const msg_slice = try msg.toSlice();
+    const msg_bytes = try msg.toSlice();
+    if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
 
     sig.raw.verify(
         try boolOrDefault(sig_groupcheck, false),
-        msg_slice,
+        msg_bytes[0..@sizeOf(SigningRoot)],
         DST,
         null,
         &pk.raw,
@@ -387,7 +390,7 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
         return error.InvalidAggregateVerifyInput;
     }
 
-    const msg_bufs = try allocator.alloc([32]u8, msgs_len);
+    const msg_bufs = try allocator.alloc(SigningRoot, msgs_len);
     defer allocator.free(msg_bufs);
 
     const pk_ptrs = try allocator.alloc(*NativePublicKey, pks_len);
@@ -396,8 +399,8 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
     for (0..msgs_len) |i| {
         const msg_value = try msgs.get(@intCast(i));
         const msg_bytes = try uint8SliceFromValue(msg_value);
-        if (msg_bytes.len != 32) return error.InvalidMessageLength;
-        @memcpy(&msg_bufs[i], msg_bytes[0..32]);
+        if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
+        msg_bufs[i] = msg_bytes[0..@sizeOf(SigningRoot)].*;
 
         const wrapped_pk = try unwrapClass(PublicKey, try pks.get(@intCast(i)));
         pk_ptrs[i] = &wrapped_pk.raw;
@@ -428,8 +431,8 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
 /// 3) sig: Signature
 /// 4) sigs_groupcheck: ?bool
 pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, sigs_groupcheck: ?js.Boolean) !js.Boolean {
-    const msg_slice = try msg.toSlice();
-    if (msg_slice.len != 32) return error.InvalidMessageLength;
+    const msg_bytes = try msg.toSlice();
+    if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
 
     const pks_len = try pks.length();
     if (pks_len == 0) return js.Boolean.from(false);
@@ -447,7 +450,7 @@ pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, si
     const result = sig.raw.fastAggregateVerify(
         try boolOrDefault(sigs_groupcheck, false),
         &pairing_buf,
-        msg_slice[0..32],
+        msg_bytes[0..@sizeOf(SigningRoot)],
         DST,
         native_pks,
         false,
@@ -483,14 +486,14 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
 
         const msg_napi = try set.getNamedProperty("msg");
         const msg_bytes = try uint8SliceFromValue(.{ .val = msg_napi });
-        if (msg_bytes.len != 32) return error.InvalidMessageLength;
+        if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
         const pk_napi = try set.getNamedProperty("pk");
         const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
 
         const sig_napi = try set.getNamedProperty("sig");
         const wrapped_sig = try unwrapClass(Signature, .{ .val = sig_napi });
         items[i] = .{
-            .message = msg_bytes,
+            .message = msg_bytes[0..@sizeOf(SigningRoot)].*,
             .public_key = &wrapped_pk.raw,
             .signature = &wrapped_sig.raw,
             .randomness = undefined,

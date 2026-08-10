@@ -78,7 +78,7 @@ pub fn aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
 
         const pubkeys = try allocator.alloc(bls.PublicKey, num_sigs);
         defer allocator.free(pubkeys);
-        const messages = try allocator.alloc([32]u8, num_sigs);
+        const messages = try allocator.alloc(bls.SigningRoot, num_sigs);
         defer allocator.free(messages);
 
         var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
@@ -94,10 +94,11 @@ pub fn aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
         }
 
         for (aggregate_verify_test_data.input.messages, 0..) |msg_hex_bytes, i| {
-            _ = try std.fmt.hexToBytes(
+            const message = try std.fmt.hexToBytes(
                 messages[i][0..],
                 msg_hex_bytes[2..], // skip "0x" prefix
             );
+            try std.testing.expectEqual(@sizeOf(bls.SigningRoot), message.len);
         }
 
         const sig_bytes = try std.fmt.hexToBytes(
@@ -149,7 +150,7 @@ pub fn fast_aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
         const pubkeys = try allocator.alloc(bls.PublicKey, num_sigs);
         defer allocator.free(pubkeys);
 
-        var msg_bytes: [32]u8 = undefined;
+        var msg_bytes: bls.SigningRoot = undefined;
         var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
         var sig_buf: [bls.Signature.COMPRESS_SIZE]u8 = undefined;
         var pairing_buf: [bls.Pairing.sizeOf()]u8 align(bls.Pairing.buf_align) = undefined;
@@ -162,10 +163,11 @@ pub fn fast_aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
             pubkeys[i] = try bls.PublicKey.deserialize(pk_bytes);
         }
 
-        _ = try std.fmt.hexToBytes(
+        const message = try std.fmt.hexToBytes(
             &msg_bytes,
             fast_aggregate_verify_test_data.input.message[2..], // skip "0x" prefix
         );
+        try std.testing.expectEqual(@sizeOf(bls.SigningRoot), message.len);
 
         const sig_bytes = try std.fmt.hexToBytes(
             &sig_buf,
@@ -213,8 +215,9 @@ pub fn sign(gpa: Allocator, path: std.Io.Dir) !void {
         var privkey: [32]u8 = undefined;
         _ = try std.fmt.hexToBytes(&privkey, sign_test_data.input.privkey[2..]); // skip "0x" prefix
 
-        var msg: [32]u8 = undefined;
-        _ = try std.fmt.hexToBytes(&msg, sign_test_data.input.message[2..]); // skip "0x" prefix
+        var msg: bls.SigningRoot = undefined;
+        const message = try std.fmt.hexToBytes(&msg, sign_test_data.input.message[2..]); // skip "0x" prefix
+        try std.testing.expectEqual(@sizeOf(bls.SigningRoot), message.len);
 
         const sk = bls.SecretKey.deserialize(&privkey) catch {
             // if secret key is invalid, expect signature to be "null"
@@ -256,7 +259,7 @@ pub fn verify(gpa: Allocator, path: std.Io.Dir) !void {
     {
         var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
         var sig_buf: [bls.Signature.COMPRESS_SIZE]u8 = undefined;
-        var msg_bytes: [32]u8 = undefined;
+        var msg_bytes: bls.SigningRoot = undefined;
 
         const pk_bytes = try std.fmt.hexToBytes(&pk_buf, verify_test_data.input.pubkey[2..]); // skip "0x" prefix
         const pk = bls.PublicKey.deserialize(pk_bytes) catch {
@@ -265,7 +268,8 @@ pub fn verify(gpa: Allocator, path: std.Io.Dir) !void {
             return;
         };
 
-        _ = try std.fmt.hexToBytes(&msg_bytes, verify_test_data.input.message[2..]); // skip "0x" prefix
+        const message = try std.fmt.hexToBytes(&msg_bytes, verify_test_data.input.message[2..]); // skip "0x" prefix
+        try std.testing.expectEqual(@sizeOf(bls.SigningRoot), message.len);
 
         const sig_bytes = try std.fmt.hexToBytes(&sig_buf, verify_test_data.input.signature[2..]); // skip "0x" prefix
         const signature = bls.Signature.deserialize(sig_bytes) catch {
@@ -371,7 +375,7 @@ pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
         const pubkeys = try allocator.alloc(bls.PublicKey, num_sigs);
         defer allocator.free(pubkeys);
 
-        var msg_bytes: [32]u8 = undefined;
+        var msg_bytes: bls.SigningRoot = undefined;
         var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
         var sig_buf: [bls.Signature.COMPRESS_SIZE]u8 = undefined;
         var pairing_buf: [bls.Pairing.sizeOf()]u8 align(bls.Pairing.buf_align) = undefined;
@@ -388,10 +392,11 @@ pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.Io.Dir) !void {
             };
         }
 
-        _ = try std.fmt.hexToBytes(
+        const message = try std.fmt.hexToBytes(
             &msg_bytes,
             eth_fast_aggregate_verify_test_data.input.message[2..], // skip "0x" prefix
         );
+        try std.testing.expectEqual(@sizeOf(bls.SigningRoot), message.len);
 
         const sig_bytes = try std.fmt.hexToBytes(
             &sig_buf,

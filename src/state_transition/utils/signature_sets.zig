@@ -3,7 +3,7 @@ const types = @import("consensus_types");
 pub const bls = @import("bls");
 const PublicKey = bls.PublicKey;
 const Signature = bls.Signature;
-const Root = types.primitive.Root.Type;
+const SigningRoot = bls.SigningRoot;
 const BLSSignature = types.primitive.BLSSignature.Type;
 const verify = @import("./bls.zig").verify;
 const fastAggregateVerify = @import("./bls.zig").fastAggregateVerify;
@@ -13,14 +13,14 @@ pub const SignatureSetType = enum { single, aggregate };
 pub const SingleSignatureSet = struct {
     // fromBytes api return PublicKey so it's more convenient to model this as value
     pubkey: PublicKey,
-    signing_root: Root,
+    signing_root: SigningRoot,
     signature: BLSSignature,
 };
 
 pub const AggregatedSignatureSet = struct {
     // fastAggregateVerify also requires []*const PublicKey
     pubkeys: []const PublicKey,
-    signing_root: Root,
+    signing_root: SigningRoot,
     signature: BLSSignature,
 };
 
@@ -42,7 +42,7 @@ pub fn verifyAggregatedSignatureSet(set: *const AggregatedSignatureSet) !bool {
     );
 }
 
-pub fn createSingleSignatureSetFromComponents(pubkey: *const PublicKey, signing_root: Root, signature: BLSSignature) SingleSignatureSet {
+pub fn createSingleSignatureSetFromComponents(pubkey: *const PublicKey, signing_root: SigningRoot, signature: BLSSignature) SingleSignatureSet {
     return .{
         .pubkey = pubkey,
         .signing_root = signing_root,
@@ -50,7 +50,7 @@ pub fn createSingleSignatureSetFromComponents(pubkey: *const PublicKey, signing_
     };
 }
 
-pub fn createAggregateSignatureSetFromComponents(pubkeys: []const PublicKey, signing_root: Root, signature: BLSSignature) AggregatedSignatureSet {
+pub fn createAggregateSignatureSetFromComponents(pubkeys: []const PublicKey, signing_root: SigningRoot, signature: BLSSignature) AggregatedSignatureSet {
     return .{
         .pubkeys = pubkeys,
         .signing_root = signing_root,

@@ -17,6 +17,7 @@ const Pairing = @import("Pairing.zig");
 const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
+const SigningRoot = blst.SigningRoot;
 const AggregatePublicKey = blst.AggregatePublicKey;
 const AggregateSignature = blst.AggregateSignature;
 const BlstError = @import("error.zig").BlstError;
@@ -236,7 +237,7 @@ const VerifyMultiWorkItem = struct {
                 job.sigs_groupcheck,
                 &item.randomness,
                 RAND_BITS,
-                item.message,
+                &item.message,
             ) catch {
                 job.err_flag.store(true, .release);
                 break;
@@ -298,7 +299,7 @@ pub fn verifyMultipleAggregateSignatures(
 
 const AggVerifyJob = struct {
     pks: []const *PublicKey,
-    msgs: []const [32]u8,
+    msgs: []const SigningRoot,
     dst: []const u8,
     pks_validate: bool,
     n_elems: usize,
@@ -353,7 +354,7 @@ pub fn aggregateVerify(
     io: std.Io,
     sig: *const Signature,
     sig_groupcheck: bool,
-    msgs: []const [32]u8,
+    msgs: []const SigningRoot,
     dst: []const u8,
     pks: []const *PublicKey,
     pks_validate: bool,
@@ -486,7 +487,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
 
     const num_sigs = 16;
 
-    var msgs: [num_sigs][32]u8 = undefined;
+    var msgs: [num_sigs]SigningRoot = undefined;
     var pks: [num_sigs]PublicKey = undefined;
     var sigs: [num_sigs]Signature = undefined;
     var items: [num_sigs]blst.BatchVerifyItem = undefined;
@@ -506,7 +507,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
         pks[i] = sk.toPublicKey();
         sigs[i] = sk.sign(&msgs[i], blst.DST, null);
         items[i] = .{
-            .message = &msgs[i],
+            .message = msgs[i],
             .public_key = &pks[i],
             .signature = &sigs[i],
             .randomness = undefined,

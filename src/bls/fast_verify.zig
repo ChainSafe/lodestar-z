@@ -6,7 +6,7 @@ const RAND_BITS = 8 * RAND_BYTES;
 
 /// One signature set and its random coefficient for batch verification.
 pub const BatchVerifyItem = struct {
-    message: []const u8,
+    message: SigningRoot,
     public_key: *const PublicKey,
     signature: *const Signature,
     randomness: [32]u8,
@@ -42,7 +42,7 @@ pub fn verifyMultipleAggregateSignatures(
             sigs_groupcheck,
             &item.randomness,
             RAND_BITS,
-            item.message,
+            &item.message,
         );
     }
 
@@ -56,3 +56,4 @@ const Pairing = @import("Pairing.zig");
 const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
+const SigningRoot = blst.SigningRoot;
