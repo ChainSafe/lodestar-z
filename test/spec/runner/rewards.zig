@@ -182,7 +182,6 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
             try getRewardsAndPenaltiesFn(
                 fork,
-                allocator,
                 cloned_state.config,
                 cloned_state.epoch_cache,
                 cloned_state.state.castToFork(fork),
