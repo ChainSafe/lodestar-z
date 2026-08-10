@@ -117,12 +117,6 @@ fn uint8SliceFromValue(value: js.Value) ![]u8 {
     return info.data;
 }
 
-/// Validates a dynamic N-API byte slice and narrows it to the fixed BLS message type.
-fn signingRootFromBytes(bytes: []const u8) !*const SigningRoot {
-    if (bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
-    return bytes[0..@sizeOf(SigningRoot)];
-}
-
 pub const PublicKey = struct {
     pub const js_meta = js.class(.{});
 
@@ -335,8 +329,9 @@ pub const SecretKey = struct {
 
     /// Signs a message with this `SecretKey`, returns a `Signature`.
     pub fn sign(self: *const SecretKey, msg: js.Uint8Array) !Signature {
-        const signing_root = try signingRootFromBytes(try msg.toSlice());
-        return .{ .raw = self.raw.sign(signing_root, DST, null) };
+        const msg_bytes = try msg.toSlice();
+        if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
+        return .{ .raw = self.raw.sign(msg_bytes[0..@sizeOf(SigningRoot)], DST, null) };
     }
 
     /// Derives the PublicKey from this SecretKey.
@@ -366,11 +361,12 @@ pub const SecretKey = struct {
 /// 4) pk_validate: ?bool
 /// 5) sig_groupcheck: ?bool
 pub fn verify(msg: js.Uint8Array, pk: PublicKey, sig: Signature, pk_validate: ?js.Boolean, sig_groupcheck: ?js.Boolean) !js.Boolean {
-    const signing_root = try signingRootFromBytes(try msg.toSlice());
+    const msg_bytes = try msg.toSlice();
+    if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
 
     sig.raw.verify(
         try boolOrDefault(sig_groupcheck, false),
-        signing_root,
+        msg_bytes[0..@sizeOf(SigningRoot)],
         DST,
         null,
         &pk.raw,
@@ -402,7 +398,8 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
     for (0..msgs_len) |i| {
         const msg_value = try msgs.get(@intCast(i));
         const msg_bytes = try uint8SliceFromValue(msg_value);
-        msg_bufs[i] = (try signingRootFromBytes(msg_bytes)).*;
+        if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
+        msg_bufs[i] = msg_bytes[0..@sizeOf(SigningRoot)].*;
 
         const wrapped_pk = try unwrapClass(PublicKey, try pks.get(@intCast(i)));
         pk_ptrs[i] = &wrapped_pk.raw;
@@ -433,7 +430,8 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
 /// 3) sig: Signature
 /// 4) sigs_groupcheck: ?bool
 pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, sigs_groupcheck: ?js.Boolean) !js.Boolean {
-    const signing_root = try signingRootFromBytes(try msg.toSlice());
+    const msg_bytes = try msg.toSlice();
+    if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
 
     const pks_len = try pks.length();
     if (pks_len == 0) return js.Boolean.from(false);
@@ -451,7 +449,7 @@ pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, si
     const result = sig.raw.fastAggregateVerify(
         try boolOrDefault(sigs_groupcheck, false),
         &pairing_buf,
-        signing_root,
+        msg_bytes[0..@sizeOf(SigningRoot)],
         DST,
         native_pks,
         false,
@@ -517,7 +515,8 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
 
         const msg_napi = try set.getNamedProperty("msg");
         const msg_bytes = try uint8SliceFromValue(.{ .val = msg_napi });
-        msgs[i] = (try signingRootFromBytes(msg_bytes)).*;
+        if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
+        msgs[i] = msg_bytes[0..@sizeOf(SigningRoot)].*;
 
         const pk_napi = try set.getNamedProperty("pk");
         const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
