@@ -1,13 +1,13 @@
 //! NAPI bindings for BLS (blst) cryptographic operations used by lodestar.
 //!
-//! This module uses a **Zig ThreadPool** (`thread_pool`) — a fixed-size pool of OS threads
-//! initialized once via `initThreadPool`. Used by synchronous NAPI functions (`aggregateVerify`,
+//! This module uses a **Zig ThreadPool** (`state.thread_pool`) — a fixed-size pool of OS threads
+//! initialized once via `state.init`. Used by synchronous NAPI functions (`aggregateVerify`,
 //! `verifyMultipleAggregateSignatures`) to fan out pairing checks across worker threads. The
 //! call still blocks the JS thread while it waits for the pool to finish, but the crypto work
 //! itself is parallelized.
 //!
 //! `aggregateWithRandomness` runs synchronously on the calling thread and does not
-//! rely on the native `thread_pool`. In lodestar, this is called from a Node.js
+//! rely on the native `state.thread_pool`. In lodestar, this is called from a Node.js
 //! worker thread (BLS thread pool), not the main thread.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,7 +15,6 @@ const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
 const bls = @import("bls");
-const napi_io = @import("./io.zig");
 
 const NativePublicKey = bls.PublicKey;
 const NativeSignature = bls.Signature;
@@ -35,35 +34,54 @@ const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 /// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
 const BATCH_VERIFY_SIZE = 32;
 
-/// Cached thread pool reference for parallel verification.
-/// Initialized lazily on first use, torn down via `deinitThreadPool`.
-var thread_pool: ?*ThreadPool = null;
+/// A broken random source must fail instead of retrying forever.
+const RANDOM_SCALAR_RETRIES_MAX = 8;
 
-pub fn initThreadPool(n_workers: u16) !void {
-    if (thread_pool != null) return error.PoolExists;
-    thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
-}
+/// Native-only thread pool state, reached from `root.zig` through the
+/// pub `state` var so it is not part of the JS module surface.
+const State = struct {
+    /// Cached thread pool reference for parallel verification.
+    thread_pool: ?*ThreadPool = null,
 
-/// Closes the `ThreadPool` used for blst operations.
-///
-/// Note: this can invalidate any inflight verification requests. Consumer is responsible
-/// for the lifecycle of their program and should only call this when all work is done.
-///
-/// This note is however application dependent. For the use case of lodestar,
-/// it's likely that this would not be called at all.
-/// Same goes for any other long-lived processes.
-pub fn deinitThreadPool() void {
-    if (thread_pool) |p| {
-        p.deinit(napi_io.get());
-        thread_pool = null;
+    pub fn init(self: *State, n_workers: u16) !void {
+        if (self.thread_pool != null) return error.PoolExists;
+        self.thread_pool = try ThreadPool.init(std.heap.page_allocator, js.io(), .{ .n_workers = n_workers });
     }
-}
+
+    /// Closes the `ThreadPool` used for blst operations.
+    ///
+    /// Note: this can invalidate any inflight verification requests. Consumer is responsible
+    /// for the lifecycle of their program and should only call this when all work is done.
+    ///
+    /// This note is however application dependent. For the use case of lodestar,
+    /// it's likely that this would not be called at all.
+    /// Same goes for any other long-lived processes.
+    pub fn deinit(self: *State) void {
+        if (self.thread_pool) |p| {
+            p.deinit(js.io());
+            self.thread_pool = null;
+        }
+    }
+};
+
+pub var state: State = .{};
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
     gpa.allocator()
 else
     std.heap.c_allocator;
+
+/// A zero coefficient would omit its input from the random linear combination.
+fn ensureNonzeroRandomScalar(io: std.Io, scalar: *[8]u8) !void {
+    if (!std.mem.allEqual(u8, scalar, 0)) return;
+
+    for (0..RANDOM_SCALAR_RETRIES_MAX) |_| {
+        io.random(scalar);
+        if (!std.mem.allEqual(u8, scalar, 0)) return;
+    }
+    return error.RandomScalarGenerationFailed;
+}
 
 fn boolOrDefault(value: ?js.Boolean, default: bool) !bool {
     return if (value) |v| try v.toBool() else default;
@@ -81,7 +99,8 @@ fn formatHex(bytes: []const u8) !js.String {
 }
 
 fn unwrapClass(comptime T: type, value: js.Value) !*T {
-    return js.env().unwrap(T, value.toValue());
+    const raw = value.toValue();
+    return js.convertArg(*T, raw.value, raw.env);
 }
 
 /// Reads a Uint8Array slice from a generic `js.Value`.
@@ -198,7 +217,7 @@ pub const Signature = struct {
 
         var sig = NativeSignature.deserialize(bytes) catch return error.DeserializationFailed;
         if (try boolOrDefault(sig_validate, false)) {
-            try sig.validate(try boolOrDefault(sig_infcheck, false));
+            try sig.validate(try boolOrDefault(sig_infcheck, true));
         }
         return .{ .raw = sig };
     }
@@ -272,8 +291,18 @@ pub const SecretKey = struct {
 
     /// Creates a `SecretKey` from a hex string.
     pub fn fromHex(hex_string: js.String) !SecretKey {
+        switch (try hex_string.len()) {
+            NativeSecretKey.serialize_size * 2,
+            NativeSecretKey.serialize_size * 2 + 2,
+            => {},
+            else => return error.InvalidSecretKeyLength,
+        }
+
         var hex_buf: [NativeSecretKey.serialize_size * 2 + 3]u8 = undefined;
         const hex = try hexFromString(hex_string, &hex_buf);
+        if (hex.len != NativeSecretKey.serialize_size * 2) {
+            return error.InvalidSecretKeyLength;
+        }
 
         var bytes_buf: [NativeSecretKey.serialize_size]u8 = undefined;
         const bytes = try std.fmt.hexToBytes(&bytes_buf, hex);
@@ -373,9 +402,9 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
         pk_ptrs[i] = &wrapped_pk.raw;
     }
 
-    const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
+    const pool = state.thread_pool orelse return error.ThreadPoolNotInitialized;
     const result = pool.aggregateVerify(
-        napi_io.get(),
+        js.io(),
         &sig.raw,
         try boolOrDefault(sig_groupcheck, false),
         msg_bufs,
@@ -472,13 +501,12 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         break :blk buf;
     };
 
-    var seed_bytes: [8]u8 = undefined;
-    const io = napi_io.get();
-    io.random(&seed_bytes);
-    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
-    const rand = prng.random();
+    const io = js.io();
+    io.random(std.mem.sliceAsBytes(rands));
+    for (rands) |*randomness| {
+        try ensureNonzeroRandomScalar(io, randomness[0..8]);
+    }
 
-    const e = js.env();
     for (0..n_elems) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
 
@@ -488,22 +516,17 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         msgs[i] = msg_bytes;
 
         const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try e.unwrap(PublicKey, pk_napi);
+        const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
         pks[i] = &wrapped_pk.raw;
 
         const sig_napi = try set.getNamedProperty("sig");
-        const wrapped_sig = try e.unwrap(Signature, sig_napi);
+        const wrapped_sig = try unwrapClass(Signature, .{ .val = sig_napi });
         sigs[i] = &wrapped_sig.raw;
-
-        var scalar = rand.int(u64);
-        while (scalar == 0) scalar = rand.int(u64);
-        std.mem.writeInt(u64, rands[i][0..8], scalar, .little);
-        @memset(rands[i][8..], 0);
     }
 
-    const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
+    const pool = state.thread_pool orelse return error.ThreadPoolNotInitialized;
     const result = pool.verifyMultipleAggregateSignatures(
-        napi_io.get(),
+        js.io(),
         n_elems,
         msgs,
         DST,
@@ -612,21 +635,17 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
     var sigs: [MAX_AGGREGATE_PER_JOB]NativeSignature = undefined;
     var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativeSignature = undefined;
 
-    var seed_bytes: [8]u8 = undefined;
-    const io = napi_io.get();
-    io.random(&seed_bytes);
-    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
-    const rand = prng.random();
+    const io = js.io();
     var scalars: [8 * MAX_AGGREGATE_PER_JOB]u8 = undefined;
     var sca_ptrs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
-    rand.bytes(scalars[0 .. n * nbytes]);
+    io.random(scalars[0 .. n * nbytes]);
 
     const env = js.env();
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
 
         const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try env.unwrap(PublicKey, pk_napi);
+        const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
         pk_ptrs[i] = &wrapped_pk.raw;
 
         const sig_napi = try set.getNamedProperty("sig");
@@ -635,17 +654,18 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
         sigs[i].validate(true) catch return error.InvalidSignature;
         sig_ptrs[i] = &sigs[i];
 
-        while (std.mem.allEqual(u8, scalars[i * nbytes ..][0..nbytes], 0)) {
-            rand.bytes(scalars[i * nbytes ..][0..nbytes]);
-        }
+        const scalar = scalars[i * nbytes ..][0..nbytes];
+        try ensureNonzeroRandomScalar(io, scalar);
         sca_ptrs[i] = &scalars[i * nbytes];
     }
 
-    const scratch_size = @max(
+    const scratch_size_bytes = @max(
         bls.c.blst_p1s_mult_pippenger_scratch_sizeof(n),
         bls.c.blst_p2s_mult_pippenger_scratch_sizeof(n),
     );
-    const scratch = try allocator.alloc(u64, scratch_size);
+    const scratch_len = @divExact(scratch_size_bytes, @sizeOf(u64));
+
+    const scratch = try allocator.alloc(u64, scratch_len);
     defer allocator.free(scratch);
 
     // Pippenger multi-scalar multiplication on G1 (pubkeys)
@@ -715,12 +735,12 @@ const AsyncAggRandData = struct {
 ///
 /// Note: MUST NOT call any napi APIs.
 fn asyncAggRand_execute(_: napi.Env, data: *AsyncAggRandData) void {
-    const pool = thread_pool orelse {
+    const pool = state.thread_pool orelse {
         data.err = error.PoolNotInitialized;
         return;
     };
     pool.aggregateWithRandomness(
-        napi_io.get(),
+        js.io(),
         data.pk_ptrs[0..data.n],
         data.sig_ptrs[0..data.n],
         data.randomness[0 .. data.n * 32],
@@ -803,7 +823,7 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
 
     if (n == 0) return error.EmptyArray;
     if (n > MAX_AGGREGATE_PER_JOB) return error.TooManySets;
-    if (thread_pool == null) return error.PoolNotInitialized;
+    if (state.thread_pool == null) return error.PoolNotInitialized;
 
     const env = js.env();
 
@@ -816,13 +836,19 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     data.err = null;
     data.deferred = undefined;
     data.work = undefined;
-    napi_io.get().random(data.randomness[0 .. n * 32]);
+
+    const io = js.io();
+    io.random(data.randomness[0 .. n * 32]);
+    for (0..n) |i| {
+        const scalar = data.randomness[i * 32 ..][0..8];
+        try ensureNonzeroRandomScalar(io, scalar);
+    }
 
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
 
         const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try env.unwrap(PublicKey, pk_napi);
+        const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
         data.pks[i] = wrapped_pk.raw;
         data.pk_ptrs[i] = &data.pks[i];
 
@@ -832,9 +858,12 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         data.sig_ptrs[i] = &data.sigs[i];
     }
 
-    data.deferred = try env.createPromise();
-
+    const deferred_cleanup_value = try env.getUndefined();
     const resource_name = try env.createStringUtf8("asyncAggregateWithRandomness");
+
+    // Until queue succeeds, this function owns the unqueued work handle. Deletion should
+    // not fail after successful creation. If that invariant breaks, later error cleanup may
+    // free `data` while the work handle still points to it.
     const work = try env.createAsyncWork(
         AsyncAggRandData,
         null,
@@ -843,7 +872,17 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         asyncAggRand_complete,
         data,
     );
+    errdefer work.delete() catch |err| {
+        std.log.err("failed to delete unqueued async BLS work: {s}", .{@errorName(err)});
+    };
+
     data.work = work.work;
+
+    // Settle the unreturned Promise so Node can release its deferred handle.
+    data.deferred = try env.createPromise();
+    errdefer data.deferred.resolve(deferred_cleanup_value) catch |err| {
+        std.log.err("failed to settle unreturned async BLS promise: {s}", .{@errorName(err)});
+    };
 
     try work.queue();
 

@@ -121,14 +121,20 @@ pub fn init(allocator_: Allocator, io: std.Io, opts: Opts) (Allocator.Error || s
     std.debug.assert(opts.n_workers <= MAX_WORKERS);
 
     const pool = try allocator_.create(ThreadPool);
+    errdefer pool.deinit(io);
+
     pool.* = .{
         .allocator = allocator_,
-        .n_workers = opts.n_workers,
+        .n_workers = 0,
         .queue = .{},
     };
-    for (0..pool.n_workers) |i| {
+
+    for (0..opts.n_workers) |i| {
         pool.threads[i] = try std.Thread.spawn(.{}, workerLoop, .{ pool, io });
+        pool.n_workers += 1;
     }
+    std.debug.assert(pool.n_workers == opts.n_workers);
+
     return pool;
 }
 
@@ -471,10 +477,11 @@ pub fn aggregateWithRandomness(
 
     var pk_proj: c.blst_p1 = undefined;
     try pippenger.parallelMSMG1(pool, io, pks, scalars_refs[0..pks.len], 64, &pk_proj);
-    c.blst_p1_to_affine(&pk_out.point, &pk_proj);
 
     var sig_proj: c.blst_p2 = undefined;
     try pippenger.parallelMSMG2(pool, io, sigs, scalars_refs[0..sigs.len], 64, &sig_proj);
+
+    c.blst_p1_to_affine(&pk_out.point, &pk_proj);
     c.blst_p2_to_affine(&sig_out.point, &sig_proj);
 }
 

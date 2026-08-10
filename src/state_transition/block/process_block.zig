@@ -36,6 +36,7 @@ pub const ProcessBlockOpts = struct {
 pub fn processBlock(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
@@ -101,11 +102,11 @@ pub fn processBlock(
         }
     }
 
-    try processRandao(fork, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);
+    try processRandao(fork, io, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);
     try processEth1Data(fork, state, body.eth1Data());
-    try processOperations(fork, allocator, config, epoch_cache, state, slashings_cache, block_type, body, opts);
+    try processOperations(fork, allocator, io, config, epoch_cache, state, slashings_cache, block_type, body, opts);
     if (comptime fork.gte(.altair)) {
-        try processSyncAggregate(fork, allocator, config, epoch_cache, state, body.syncAggregate(), opts.verify_signature);
+        try processSyncAggregate(fork, allocator, io, config, epoch_cache, state, body.syncAggregate(), opts.verify_signature);
     }
 
     if (comptime fork.gte(.deneb)) {

@@ -9,14 +9,14 @@ const allocator = std.heap.page_allocator;
 
 const default_pool_size: u32 = 0;
 
-pub const PoolRc = RefCount(Node.Pool);
+const PoolRc = RefCount(Node.Pool);
 
 /// Pool is wrapped in `RefCount` so binding objects holding pool refs at
 /// process exit keep the pool alive until their JS finalizer runs. NAPI
 /// env cleanup hook fires before module-level JS holders are finalized,
 /// so an unconditional `pool.deinit()` there would free memory that
 /// `pool.unref()` calls in those finalizers still need.
-pub const State = struct {
+const State = struct {
     pool_rc: ?*PoolRc = null,
 
     pub fn init(self: *State) !void {

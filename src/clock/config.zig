@@ -1,6 +1,6 @@
 //! Clock configuration: genesis, slot duration (with fork-aware transitions),
 //! epoch length, and gossip-disparity tolerance.  Shared by `slot_math`
-//! (pure arithmetic) and the stateful `SlotClock` / `EventClock` layers.
+//! (pure arithmetic) and the stateful `Clock` layer.
 
 const std = @import("std");
 const ct = @import("consensus_types");
@@ -42,7 +42,7 @@ pub const ClockConfig = struct {
     pub fn validate(self: ClockConfig) error{InvalidConfig}!void {
         if (self.slot_duration_ms == 0) return error.InvalidConfig;
         if (self.slots_per_epoch == 0) return error.InvalidConfig;
-        // genesis_time_sec → ms must not overflow.
+        // genesis_time_sec -> ms must not overflow.
         _ = std.math.mul(u64, self.genesis_time_sec, 1000) catch return error.InvalidConfig;
         var prev_slot: Slot = 0;
         for (self.duration_transitions.constSlice()) |t| {

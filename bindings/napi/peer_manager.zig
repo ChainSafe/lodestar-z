@@ -2,11 +2,10 @@ const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const js = @import("zapi:zapi").js;
 const peer_manager = @import("peer_manager");
-const napi_io = @import("./io.zig");
 
 /// Wall-clock time in Unix milliseconds, sourced from the shared `std.Io`.
 fn currentMillis() i64 {
-    return std.Io.Timestamp.now(napi_io.get(), .real).toMilliseconds();
+    return std.Io.Timestamp.now(js.io(), .real).toMilliseconds();
 }
 
 const PeerManager = peer_manager.PeerManager;
@@ -25,7 +24,9 @@ const parseExternalPeerActionName = peer_manager.parseExternalPeerActionName;
 /// Allocator for internal allocations.
 const allocator = std.heap.page_allocator;
 
-pub const State = struct {
+/// Native-only manager lifecycle, reached from `root.zig` through the
+/// pub `state` var so it is not part of the JS module surface.
+const State = struct {
     manager: ?PeerManager = null,
 
     pub fn init(self: *State, config: Config) !void {

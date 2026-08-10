@@ -12,7 +12,6 @@ const hasEth1WithdrawalCredential = @import("../utils/capella.zig").hasEth1Withd
 const electra_utils = @import("../utils/electra.zig");
 const hasCompoundingWithdrawalCredential = electra_utils.hasCompoundingWithdrawalCredential;
 const hasExecutionWithdrawalCredential = electra_utils.hasExecutionWithdrawalCredential;
-const isPubkeyKnown = electra_utils.isPubkeyKnown;
 const switchToCompoundingValidator = electra_utils.switchToCompoundingValidator;
 const computeConsolidationEpochAndUpdateChurn = @import("../utils/epoch.zig").computeConsolidationEpochAndUpdateChurn;
 const validator_utils = @import("../utils/validator.zig");
@@ -23,6 +22,7 @@ const isActiveValidatorView = validator_utils.isActiveValidatorView;
 // TODO Electra: Clean up necessary as there is a lot of overlap with isValidSwitchToCompoundRequest
 pub fn processConsolidationRequest(
     comptime fork: ForkSeq,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
@@ -32,13 +32,12 @@ pub fn processConsolidationRequest(
     const target_pubkey = consolidation.target_pubkey;
     const source_address = consolidation.source_address;
 
-    if (!(try isPubkeyKnown(fork, epoch_cache, state, source_pubkey))) return;
-    if (!(try isPubkeyKnown(fork, epoch_cache, state, target_pubkey))) return;
+    const source_index = epoch_cache.pubkey_cache.get(io, source_pubkey) orelse return;
+    const target_index = epoch_cache.pubkey_cache.get(io, target_pubkey) orelse return;
+    const validator_count = try state.validatorsCount();
+    if (source_index >= validator_count or target_index >= validator_count) return;
 
-    const source_index = epoch_cache.pubkey_to_index.get(source_pubkey) orelse return;
-    const target_index = epoch_cache.pubkey_to_index.get(target_pubkey) orelse return;
-
-    if (try isValidSwitchToCompoundRequest(fork, epoch_cache, state, consolidation)) {
+    if (try isValidSwitchToCompoundRequest(fork, epoch_cache, state, consolidation, source_index, target_index)) {
         try switchToCompoundingValidator(fork, state, source_index);
         // Early return since we have already switched validator to compounding
         return;
@@ -121,11 +120,9 @@ fn isValidSwitchToCompoundRequest(
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
     consolidation: *const ConsolidationRequest,
+    source_index: types.primitive.ValidatorIndex.Type,
+    target_index: types.primitive.ValidatorIndex.Type,
 ) !bool {
-    // this check is mainly to make the compiler happy, pubkey is checked by the consumer already
-    const source_index = epoch_cache.pubkey_to_index.get(consolidation.source_pubkey) orelse return false;
-    const target_index = epoch_cache.pubkey_to_index.get(consolidation.target_pubkey) orelse return false;
-
     // Switch to compounding requires source and target be equal
     if (source_index != target_index) {
         return false;
