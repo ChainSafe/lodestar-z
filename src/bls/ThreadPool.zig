@@ -20,6 +20,7 @@ const Signature = blst.Signature;
 const AggregatePublicKey = blst.AggregatePublicKey;
 const AggregateSignature = blst.AggregateSignature;
 const BlstError = @import("error.zig").BlstError;
+const BatchVerifyItem = @import("fast_verify.zig").BatchVerifyItem;
 const SecretKey = @import("SecretKey.zig");
 const pippenger = @import("pippenger.zig");
 
@@ -200,10 +201,7 @@ pub fn submitAndWait(pool: *ThreadPool, io: std.Io, items: []*WorkItem) (PoolErr
 }
 
 const VerifyMultiJob = struct {
-    pks: []const *PublicKey,
-    sigs: []const *Signature,
-    msgs: []const []const u8,
-    rands: []const [32]u8,
+    items: []const BatchVerifyItem,
     dst: []const u8,
     pks_validate: bool,
     sigs_groupcheck: bool,
@@ -223,21 +221,22 @@ const VerifyMultiWorkItem = struct {
         const job = self.job;
 
         var pairing = Pairing.init(&job.result_bufs[self.worker_id].data, true, job.dst);
-        const n_elems = job.pks.len;
+        const n_elems = job.items.len;
 
         while (true) {
             const i = job.counter.fetchAdd(1, .monotonic);
             if (i >= n_elems) break;
             if (job.err_flag.load(.monotonic)) break;
 
+            const item = &job.items[i];
             pairing.mulAndAggregate(
-                job.pks[i],
+                item.public_key,
                 job.pks_validate,
-                job.sigs[i],
+                item.signature,
                 job.sigs_groupcheck,
-                &job.rands[i],
+                &item.randomness,
                 RAND_BITS,
-                job.msgs[i],
+                item.message,
             ) catch {
                 job.err_flag.store(true, .release);
                 break;
@@ -256,31 +255,20 @@ const VerifyMultiWorkItem = struct {
 pub fn verifyMultipleAggregateSignatures(
     pool: *ThreadPool,
     io: std.Io,
-    n_elems: usize,
-    msgs: []const []const u8,
+    items: []const BatchVerifyItem,
     dst: []const u8,
-    pks: []const *PublicKey,
     pks_validate: bool,
-    sigs: []const *Signature,
     sigs_groupcheck: bool,
-    rands: []const [32]u8,
 ) (BlstError || PoolError || std.Io.Cancelable)!bool {
-    if (n_elems == 0 or
-        pks.len != n_elems or
-        sigs.len != n_elems or
-        msgs.len != n_elems or
-        rands.len != n_elems)
-        return BlstError.VerifyFail;
+    const n_elems = items.len;
+    if (n_elems == 0) return BlstError.VerifyFail;
 
     const n_active = @min(pool.n_workers, n_elems);
 
     var result_bufs: [MAX_WORKERS]PairingBuf = undefined;
 
     var job = VerifyMultiJob{
-        .pks = pks[0..n_elems],
-        .sigs = sigs[0..n_elems],
-        .msgs = msgs[0..n_elems],
-        .rands = rands[0..n_elems],
+        .items = items,
         .dst = dst,
         .pks_validate = pks_validate,
         .sigs_groupcheck = sigs_groupcheck,
@@ -499,11 +487,9 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
     const num_sigs = 16;
 
     var msgs: [num_sigs][32]u8 = undefined;
-    var msg_refs: [num_sigs][]const u8 = undefined;
     var pks: [num_sigs]PublicKey = undefined;
     var sigs: [num_sigs]Signature = undefined;
-    var pk_ptrs: [num_sigs]*PublicKey = undefined;
-    var sig_ptrs: [num_sigs]*Signature = undefined;
+    var items: [num_sigs]blst.BatchVerifyItem = undefined;
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
@@ -519,24 +505,21 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
         const sk = try SecretKey.keyGen(&ikm_i, null);
         pks[i] = sk.toPublicKey();
         sigs[i] = sk.sign(&msgs[i], blst.DST, null);
-        msg_refs[i] = &msgs[i];
-        pk_ptrs[i] = &pks[i];
-        sig_ptrs[i] = &sigs[i];
+        items[i] = .{
+            .message = &msgs[i],
+            .public_key = &pks[i],
+            .signature = &sigs[i],
+            .randomness = undefined,
+        };
+        std.Random.bytes(rand, &items[i].randomness);
     }
-
-    var rands: [num_sigs][32]u8 = undefined;
-    for (&rands) |*r| std.Random.bytes(rand, r);
 
     const result = try pool.verifyMultipleAggregateSignatures(
         std.testing.io,
-        num_sigs,
-        &msg_refs,
+        &items,
         blst.DST,
-        &pk_ptrs,
         true,
-        &sig_ptrs,
         true,
-        &rands,
     );
 
     try std.testing.expect(result);
