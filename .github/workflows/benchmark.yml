@@ -25,7 +25,8 @@ jobs:
   benchmark:
     name: benchmark
     runs-on: ubuntu-latest
-    # Forks and dependabot get a read-only token, so the result comment cannot be posted.
+    # Skip for dependabot PRs, secrets are not made available and will fail
+    # Don't run on forks. Forks get a read-only token and cannot post the result comment
     if: |
       github.actor != 'dependabot[bot]' &&
       ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository )
