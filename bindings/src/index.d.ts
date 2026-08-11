@@ -235,7 +235,7 @@ interface PeerManagerApi {
     localStatus: PeerManagerStatus,
     currentSlot: number
   ) => PeerManagerAction[];
-  onMetadataReceived: (peerId: string, metadata: PeerManagerMetadata) => void;
+  onMetadataReceived: (peerId: string, metadata: PeerManagerMetadata) => PeerManagerAction[];
   onMessageReceived: (peerId: string) => void;
   onGoodbye: (peerId: string, reason: number) => PeerManagerAction[];
   onPing: (peerId: string, seqNumber: number) => PeerManagerAction[];

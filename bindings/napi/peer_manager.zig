@@ -337,7 +337,7 @@ pub fn onStatusReceived(
 }
 
 /// JS: peerManager.onMetadataReceived(peerId, metadata)
-pub fn onMetadataReceived(peer_id_arg: js.String, metadata_arg: js.Value) !void {
+pub fn onMetadataReceived(peer_id_arg: js.String, metadata_arg: js.Value) !napi.Value {
     const m = try getManager();
     const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
@@ -360,7 +360,8 @@ pub fn onMetadataReceived(peer_id_arg: js.String, metadata_arg: js.Value) !void 
     metadata.sampling_groups = try parseOptionalU32Array(try md_obj.getNamedProperty("samplingGroups"));
     errdefer if (metadata.sampling_groups) |groups| allocator.free(groups);
 
-    m.onMetadataReceived(peer_id, metadata);
+    const actions = try m.onMetadataReceived(peer_id, metadata);
+    return actionsToNapiArray(js.env(), actions);
 }
 
 /// JS: peerManager.onMessageReceived(peerId)

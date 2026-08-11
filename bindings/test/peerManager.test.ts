@@ -117,6 +117,27 @@ describe("peerManager", () => {
     expect(discovery.custodyGroupQueries.length).toBeGreaterThan(0);
   });
 
+  it("onMetadataReceived returns a status re-request when custody group count changes", () => {
+    bindings.peerManager.onConnectionOpen("peer1", "outbound");
+    const meta = (seqNumber: number, custodyGroupCount: number) => ({
+      seqNumber,
+      attnets: new Uint8Array(8),
+      syncnets: new Uint8Array(1),
+      custodyGroupCount,
+      custodyGroups: [0, 1, 2, 3],
+      samplingGroups: [0, 1, 2, 3, 4, 5, 6, 7],
+    });
+
+    // First metadata → status re-request.
+    const first = bindings.peerManager.onMetadataReceived("peer1", meta(1, 4));
+    expect(first.map((a: {type: string}) => a.type)).toContain("send_status");
+    // Same custody group count → no re-request.
+    expect(bindings.peerManager.onMetadataReceived("peer1", meta(2, 4))).toHaveLength(0);
+    // Changed custody group count → status re-request.
+    const changed = bindings.peerManager.onMetadataReceived("peer1", meta(3, 8));
+    expect(changed.map((a: {type: string}) => a.type)).toContain("send_status");
+  });
+
   it("getPeerScore returns number", () => {
     bindings.peerManager.onConnectionOpen("peer1", "outbound");
     const score = bindings.peerManager.getPeerScore("peer1");

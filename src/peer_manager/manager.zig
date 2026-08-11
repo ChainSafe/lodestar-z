@@ -213,31 +213,36 @@ pub const PeerManager = struct {
             metrics.recordRelevanceCheck(.relevant);
         }
 
-        const peer = self.store.getPeerData(peer_id) orelse
-            return self.actions.items;
+        // The peer may be untracked if a status races ahead of connection-open.
+        const maybe_peer = self.store.getPeerData(peer_id);
 
         if (irrelevant != null) {
-            peer.relevant_status = .irrelevant;
-            // TS goodbyeAndDisconnect applies the goodbye-reason cooldown
-            // (240 min for irrelevant_network) so Discovery won't re-dial.
+            // TS goodbyeAndDisconnect is not gated on peerData: disconnect an
+            // irrelevant peer even if untracked, and apply the goodbye-reason
+            // cooldown (240 min for irrelevant_network) so Discovery won't re-dial.
+            if (maybe_peer) |peer| peer.relevant_status = .irrelevant;
             _ = self.scorer.applyReconnectionCoolDown(peer_id, .irrelevant_network);
             try self.actions.append(self.allocator, .{ .send_goodbye = .{
                 .peer_id = peer_id,
                 .reason = .irrelevant_network,
             } });
             try self.actions.append(self.allocator, .{ .disconnect_peer = peer_id });
-        } else {
-            if (peer.relevant_status != .relevant) {
-                peer.relevant_status = .relevant;
-                try self.actions.append(self.allocator, .{ .tag_peer_relevant = peer_id });
-            }
-            // TS emits peerConnected on EVERY status from a relevant peer —
-            // the sync layer consumes repeated events to refresh peer status.
-            try self.actions.append(self.allocator, .{ .emit_peer_connected = .{
-                .peer_id = peer_id,
-                .direction = peer.direction,
-            } });
+            return self.actions.items;
         }
+
+        // Relevant path needs a tracked peer: emitting peerConnected requires the
+        // peer's direction, and an untracked peer has no connection to report.
+        const peer = maybe_peer orelse return self.actions.items;
+        if (peer.relevant_status != .relevant) {
+            peer.relevant_status = .relevant;
+            try self.actions.append(self.allocator, .{ .tag_peer_relevant = peer_id });
+        }
+        // TS emits peerConnected on EVERY status from a relevant peer —
+        // the sync layer consumes repeated events to refresh peer status.
+        try self.actions.append(self.allocator, .{ .emit_peer_connected = .{
+            .peer_id = peer_id,
+            .direction = peer.direction,
+        } });
         return self.actions.items;
     }
 
@@ -245,8 +250,27 @@ pub const PeerManager = struct {
         self: *PeerManager,
         peer_id: []const u8,
         metadata: Metadata,
-    ) void {
+    ) ![]const Action {
+        self.resetActionState();
+
+        // Capture the prior custody group count before the metadata is overwritten.
+        const old_custody_group_count: ?u64 = if (self.store.getPeerData(peer_id)) |peer|
+            if (peer.metadata) |md| md.custody_group_count else null
+        else
+            null;
+
         self.store.updateMetadata(peer_id, metadata);
+
+        // TS re-requests STATUS when metadata is first seen or the custody group
+        // count changed, so the sync layer re-derives custody columns from a fresh
+        // status. Only meaningful for a tracked peer (updateMetadata no-ops otherwise).
+        if (self.store.contains(peer_id) and
+            (old_custody_group_count == null or
+                old_custody_group_count.? != metadata.custody_group_count))
+        {
+            try self.actions.append(self.allocator, .{ .send_status = peer_id });
+        }
+        return self.actions.items;
     }
 
     pub fn onMessageReceived(
@@ -276,11 +300,12 @@ pub const PeerManager = struct {
         seq_number: u64,
     ) ![]const Action {
         self.resetActionState();
-        const peer = self.store.getPeerData(peer_id) orelse
-            return self.actions.items;
 
-        const need_metadata = if (peer.metadata) |md|
-            seq_number > md.seq_number
+        // TS requests metadata whenever the sequence number is unknown or newer,
+        // even for an untracked peer (connectedPeers.get(...)?.metadata is
+        // undefined → request).
+        const need_metadata = if (self.store.getPeerData(peer_id)) |peer|
+            if (peer.metadata) |md| seq_number > md.seq_number else true
         else
             true;
 
@@ -834,7 +859,7 @@ test "onPing — higher seq triggers metadata request" {
     try std.testing.expect(actions[0] == .request_metadata);
 
     // Set metadata with seq_number=5
-    pm.onMetadataReceived("peer-a", .{
+    _ = try pm.onMetadataReceived("peer-a", .{
         .seq_number = 5,
         .attnets = [_]u8{0} ** 8,
         .syncnets = [_]u8{0},
@@ -851,6 +876,81 @@ test "onPing — higher seq triggers metadata request" {
     const actions3 = try pm.onPing("peer-a", 6);
     try std.testing.expectEqual(@as(usize, 1), actions3.len);
     try std.testing.expect(actions3[0] == .request_metadata);
+}
+
+test "onPing — untracked peer still requests metadata" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    // No connection was opened for this peer.
+    const actions = try pm.onPing("peer-unknown", 1);
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expect(actions[0] == .request_metadata);
+}
+
+fn metadataWithCustody(seq: u64, custody_group_count: u64) Metadata {
+    return .{
+        .seq_number = seq,
+        .attnets = [_]u8{0} ** 8,
+        .syncnets = [_]u8{0},
+        .custody_group_count = custody_group_count,
+        .custody_groups = null,
+        .sampling_groups = null,
+    };
+}
+
+test "onMetadataReceived — re-requests status on first metadata and custody change" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    _ = try pm.onConnectionOpen("peer-a", .outbound);
+
+    // First metadata → status re-request.
+    const a1 = try pm.onMetadataReceived("peer-a", metadataWithCustody(1, 4));
+    try std.testing.expectEqual(@as(usize, 1), a1.len);
+    try std.testing.expect(a1[0] == .send_status);
+
+    // Same custody group count → no re-request.
+    const a2 = try pm.onMetadataReceived("peer-a", metadataWithCustody(2, 4));
+    try std.testing.expectEqual(@as(usize, 0), a2.len);
+
+    // Changed custody group count → status re-request.
+    const a3 = try pm.onMetadataReceived("peer-a", metadataWithCustody(3, 8));
+    try std.testing.expectEqual(@as(usize, 1), a3.len);
+    try std.testing.expect(a3[0] == .send_status);
+}
+
+test "onMetadataReceived — untracked peer emits nothing" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    const actions = try pm.onMetadataReceived("peer-unknown", metadataWithCustody(1, 4));
+    try std.testing.expectEqual(@as(usize, 0), actions.len);
+}
+
+test "onStatusReceived — untracked irrelevant peer is still disconnected" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    // No connection opened; a status races ahead. Different fork digest → irrelevant.
+    const local = makeLocalStatus();
+    const remote = Status{
+        .fork_digest = .{ 0x11, 0x22, 0x33, 0x44 },
+        .finalized_root = local.finalized_root,
+        .finalized_epoch = local.finalized_epoch,
+        .head_root = [_]u8{3} ** 32,
+        .head_slot = local.head_slot,
+        .earliest_available_slot = null,
+    };
+    const actions = try pm.onStatusReceived("peer-unknown", remote, local, 320);
+    try std.testing.expectEqual(@as(usize, 2), actions.len);
+    try std.testing.expect(actions[0] == .send_goodbye);
+    try std.testing.expect(actions[1] == .disconnect_peer);
+    try std.testing.expect(pm.scorer.isCoolingDown("peer-unknown"));
 }
 
 test "onGoodbye — emits disconnect only" {
