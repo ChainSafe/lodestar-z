@@ -2,6 +2,7 @@ const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const js = @import("zapi:zapi").js;
 const peer_manager = @import("peer_manager");
+const env_state = @import("./env_state.zig");
 
 /// Wall-clock time in Unix milliseconds, sourced from the shared `std.Io`.
 fn currentMillis() i64 {
@@ -25,35 +26,15 @@ const parseExternalPeerActionName = peer_manager.parseExternalPeerActionName;
 /// Allocator for internal allocations.
 const allocator = std.heap.page_allocator;
 
-/// Native-only manager lifecycle, reached from `root.zig` through the
-/// pub `state` var so it is not part of the JS module surface.
-const State = struct {
-    manager: ?PeerManager = null,
-
-    pub fn init(self: *State, config: Config) !void {
-        if (self.manager != null) return error.AlreadyInitialized;
-        self.manager = try PeerManager.init(
-            allocator,
-            config,
-            currentMillis,
-        );
-    }
-
-    pub fn deinit(self: *State) void {
-        if (self.manager) |*m| {
-            m.deinit();
-            self.manager = null;
-        }
-    }
-};
-
-pub var state: State = .{};
-
 // ── Helpers ──────────────────────────────────────────────────────────
 
+fn getState() !*env_state.PeerManagerState {
+    const state = try env_state.get(js.env());
+    return &state.peer_manager;
+}
+
 fn getManager() !*PeerManager {
-    if (state.manager) |*m| return m;
-    return error.PeerManagerNotInitialized;
+    return (try getState()).get();
 }
 
 /// Rejects negatives rather than letting `@intCast` trap and abort the process
@@ -301,14 +282,15 @@ fn parseOptionalU32Array(value: napi.Value) !?[]u32 {
 
 /// JS: peerManager.init(config)
 pub fn init(config_arg: js.Value) !void {
+    const env = js.env();
     const config_obj = try config_arg.toValue().coerceToObject();
-    const config = try configFromObject(js.env(), config_obj);
-    try state.init(config);
+    const config = try configFromObject(env, config_obj);
+    try (try getState()).init(config, currentMillis);
 }
 
 /// JS: peerManager.close()
 pub fn close() !void {
-    state.deinit();
+    (try getState()).deinit();
 }
 
 // ── Tick Functions ───────────────────────────────────────────────────

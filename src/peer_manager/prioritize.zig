@@ -435,7 +435,7 @@ fn pruneExcessPeers(
     try pruneFindBetterPeers(
         allocator,
         peers,
-        sorted,
+        eligible.items,
         disconnect_target,
         disconnects,
         &already_disconnected,
@@ -1053,6 +1053,32 @@ test "outbound peers protected from pruning" {
     // At least 12 outbound peers should be protected (not disconnected)
     const outbound_remaining = 80 - outbound_disconnected;
     try testing.expect(outbound_remaining >= 12);
+}
+
+test "fallback pruning preserves peers on active subnets" {
+    var peers: [6]PrioritizePeersInput = undefined;
+    for (0..peers.len) |i| {
+        var peer = makePeerInput(PEER_NAMES[i], .inbound, 0);
+        var attnets = std.mem.zeroes([8]u8);
+        attnets[0] = 0x01;
+        peer.attnets = attnets;
+        peers[i] = peer;
+    }
+    const active = [_]RequestedSubnet{.{ .subnet = 0, .to_slot = 1000 }};
+
+    var result = try prioritizePeers(
+        testing.allocator,
+        &peers,
+        &active,
+        &.{},
+        null,
+        makeOpts(5, 10),
+    );
+    defer result.deinit();
+
+    // All six peers provide the target coverage for the active subnet, so the
+    // generic fallback must leave them for the subnet-aware pruning phases.
+    try testing.expectEqual(@as(usize, 0), result.peers_to_disconnect.items.len);
 }
 
 test "starvation prunes extra peers" {

@@ -182,7 +182,13 @@ pub const PeerScorer = struct {
                 data.lodestar_score *= decay;
                 self.updateState(data);
             }
-            if (@abs(data.lodestar_score) < constants.SCORE_THRESHOLD) {
+            // A negligible Lodestar component is not enough to discard an
+            // entry whose gossip component still requires eviction. Keep
+            // unhealthy scores until gossip recovers or bounded-map pruning
+            // removes them.
+            if (@abs(data.lodestar_score) < constants.SCORE_THRESHOLD and
+                scoreToState(data.score) == .healthy)
+            {
                 to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
@@ -643,6 +649,25 @@ test "decayScores prunes below threshold" {
     scorer.decayScores();
 
     try std.testing.expect(!scorer.scores.contains("peer1"));
+}
+
+test "decayScores preserves gossip-only ban for eviction" {
+    test_clock_value = 0;
+    var cfg = testConfig();
+    cfg.negative_gossip_score_ignore_threshold = -50.0;
+    var scorer = PeerScorer.init(std.testing.allocator, cfg, &testClock);
+    defer scorer.deinit();
+
+    const updates = [_]GossipScoreUpdate{
+        .{ .peer_id = "peer1", .new_score = -100.0 },
+    };
+    scorer.updateGossipScores(&updates);
+
+    test_clock_value = 1;
+    scorer.decayScores();
+
+    try std.testing.expect(scorer.scores.contains("peer1"));
+    try std.testing.expectEqual(ScoreState.banned, scorer.getScoreState("peer1"));
 }
 
 test "scoreToState transitions" {

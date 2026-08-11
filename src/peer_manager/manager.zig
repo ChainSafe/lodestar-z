@@ -927,6 +927,42 @@ test "detectStarvation — stalled head behind clock" {
     try std.testing.expect(!pm.detectStarvation(local.head_slot + threshold + 1, local));
 }
 
+test "heartbeat evicts a peer banned only by gossip score" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    _ = try pm.onConnectionOpen("peer-a", .inbound);
+    const updates = [_]GossipScoreUpdate{
+        .{ .peer_id = "peer-a", .new_score = -100.0 },
+    };
+    pm.updateGossipScores(&updates);
+
+    test_clock_value += 1;
+    const actions = try pm.heartbeat(320, makeLocalStatus());
+
+    var sent_banned_goodbye = false;
+    var disconnected = false;
+    for (actions) |action| {
+        switch (action) {
+            .send_goodbye => |goodbye| {
+                if (std.mem.eql(u8, goodbye.peer_id, "peer-a") and
+                    goodbye.reason == .banned)
+                {
+                    sent_banned_goodbye = true;
+                }
+            },
+            .disconnect_peer => |peer_id| {
+                if (std.mem.eql(u8, peer_id, "peer-a")) disconnected = true;
+            },
+            else => {},
+        }
+    }
+
+    try std.testing.expect(sent_banned_goodbye);
+    try std.testing.expect(disconnected);
+}
+
 test "onPing — higher seq triggers metadata request" {
     test_clock_value = 1000;
     var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);

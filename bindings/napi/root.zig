@@ -12,6 +12,7 @@ pub const pubkeys = @import("./pubkeys.zig");
 pub const peerManager = @import("./peer_manager.zig");
 
 const options = @import("bls_options");
+const env_state = @import("./env_state.zig");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
@@ -36,12 +37,14 @@ fn init(old_ref_count: u32) !void {
         errdefer pool.state.deinit();
 
         try pubkeys.state.init(js.env());
-
-        // All remaining initialization must stay infallible because the earlier errdefers no
-        // longer cover every initialized global.
-        errdefer comptime unreachable;
+        errdefer pubkeys.state.deinit();
 
         config.state.init();
+        errdefer config.state.deinit();
+
+        try env_state.install(js.env());
+    } else {
+        try env_state.install(js.env());
     }
 }
 
@@ -65,7 +68,6 @@ fn cleanup(new_ref_count: u32) void {
         config.state.deinit();
         pubkeys.state.deinit();
         pool.state.deinit();
-        peerManager.state.deinit();
         metrics.deinit();
     }
 }
