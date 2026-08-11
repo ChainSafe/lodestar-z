@@ -9,7 +9,9 @@ const state_transition = @import("../root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 const getBlockRootAtSlot = state_transition.getBlockRootAtSlot;
+const getRandaoMix = state_transition.getRandaoMix;
 const BeaconState = @import("fork_types").BeaconState;
+const c = @import("constants");
 
 /// Generate a valid electra block for the given pre-state.
 pub fn generateElectraBlock(allocator: Allocator, cached_state: *CachedBeaconState, out: *types.electra.SignedBeaconBlock.Type) !void {
@@ -96,4 +98,28 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *CachedBeaconSta
         },
         .signature = types.primitive.BLSSignature.default_value,
     };
+}
+
+/// Generate a valid empty Gloas block with a self-build execution payload bid.
+pub fn generateGloasBlock(cached_state: *CachedBeaconState, out: *types.gloas.BeaconBlock.Type) !void {
+    const state = try cached_state.state.tryCastToFork(.gloas);
+    const slot = try state.slot();
+
+    var latest_header = try state.latestBlockHeader();
+    const parent_root = try latest_header.hashTreeRoot();
+    const parent_block_root = try getBlockRootAtSlot(.gloas, state, slot - 1);
+    const parent_block_hash = try state.inner.getFieldRoot("latest_block_hash");
+    const prev_randao = try getRandaoMix(.gloas, state, cached_state.epoch_cache.epoch);
+
+    out.* = types.gloas.BeaconBlock.default_value;
+    out.slot = slot;
+    out.proposer_index = try cached_state.getBeaconProposer(slot);
+    out.parent_root = parent_root.*;
+    out.body.signed_execution_payload_bid.message.parent_block_hash = parent_block_hash.*;
+    out.body.signed_execution_payload_bid.message.parent_block_root = parent_block_root.*;
+    out.body.signed_execution_payload_bid.message.prev_randao = prev_randao.*;
+    out.body.signed_execution_payload_bid.message.builder_index = c.BUILDER_INDEX_SELF_BUILD;
+    out.body.signed_execution_payload_bid.message.slot = slot;
+    out.body.signed_execution_payload_bid.message.value = 0;
+    out.body.signed_execution_payload_bid.signature = c.G2_POINT_AT_INFINITY;
 }
