@@ -9,6 +9,7 @@ pub const stateTransition = @import("./stateTransition.zig");
 pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const pubkeys = @import("./pubkeys.zig");
+pub const pubkeysV2 = @import("./pubkeys_v2.zig");
 
 const options = @import("bls_options");
 
@@ -35,6 +36,9 @@ fn init(old_ref_count: u32) !void {
         errdefer pool.state.deinit();
 
         try pubkeys.state.init(js.env());
+        errdefer pubkeys.state.deinit();
+
+        try pubkeysV2.state.init(js.env());
 
         // All remaining initialization must stay infallible because the earlier errdefers no
         // longer cover every initialized global.
@@ -63,6 +67,7 @@ fn cleanup(new_ref_count: u32) void {
         blst.state.deinit();
         config.state.deinit();
         pubkeys.state.deinit();
+        pubkeysV2.state.deinit();
         pool.state.deinit();
         metrics.deinit();
     }

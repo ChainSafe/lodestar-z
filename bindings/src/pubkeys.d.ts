@@ -34,3 +34,9 @@ export interface PubkeyCache {
 }
 
 export declare const pubkeyCache: PubkeyCache;
+
+/**
+ * Draft lock-free cache (v2), exposed alongside v1 for benchmarking.
+ * PKIX save/load throws; the rest of the API matches v1.
+ */
+export declare const pubkeyCacheV2: PubkeyCache;
