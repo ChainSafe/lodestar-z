@@ -40,7 +40,9 @@ pub const PeerManager = struct {
 
     // Mutable state
     current_fork_name: ForkName,
-    last_heartbeat_slot: u64,
+    /// Our head slot at the previous heartbeat; null before the first one.
+    /// Used for starvation detection.
+    last_head_slot: ?u64,
     active_attnets: std.ArrayList(RequestedSubnet),
     active_syncnets: std.ArrayList(RequestedSubnet),
     our_sampling_groups: ?[]u32,
@@ -63,7 +65,7 @@ pub const PeerManager = struct {
             .config = config,
             .clock_fn = clock_fn,
             .current_fork_name = config.initial_fork_name,
-            .last_heartbeat_slot = 0,
+            .last_head_slot = null,
             .active_attnets = .empty,
             .active_syncnets = .empty,
             .our_sampling_groups = null,
@@ -96,10 +98,10 @@ pub const PeerManager = struct {
         self.resetActionState();
         self.scorer.decayScores();
         try self.evictBadPeers();
-        const starved = self.detectStarvation(current_slot);
+        const starved = self.detectStarvation(current_slot, local_status);
+        self.last_head_slot = local_status.head_slot;
         try self.runPrioritization(local_status, starved);
         metrics.setConnectedPeersMapSize(self.store.getConnectedPeerCount());
-        self.last_heartbeat_slot = current_slot;
         return self.actions.items;
     }
 
@@ -150,7 +152,10 @@ pub const PeerManager = struct {
             return self.actions.items;
 
         if (peer.direction == .inbound) {
-            _ = self.scorer.applyReconnectionCoolDown(
+            // Extend-only: a longer goodbye-reason cooldown (applied when the
+            // send_goodbye action was emitted) must survive the disconnect
+            // event that follows it.
+            _ = self.scorer.applyReconnectionCoolDownIfLonger(
                 peer_id,
                 .inbound_disconnect,
             );
@@ -188,14 +193,21 @@ pub const PeerManager = struct {
 
         if (irrelevant != null) {
             peer.relevant_status = .irrelevant;
+            // TS goodbyeAndDisconnect applies the goodbye-reason cooldown
+            // (240 min for irrelevant_network) so Discovery won't re-dial.
+            _ = self.scorer.applyReconnectionCoolDown(peer_id, .irrelevant_network);
             try self.actions.append(self.allocator, .{ .send_goodbye = .{
                 .peer_id = peer_id,
                 .reason = .irrelevant_network,
             } });
             try self.actions.append(self.allocator, .{ .disconnect_peer = peer_id });
-        } else if (peer.relevant_status != .relevant) {
-            peer.relevant_status = .relevant;
-            try self.actions.append(self.allocator, .{ .tag_peer_relevant = peer_id });
+        } else {
+            if (peer.relevant_status != .relevant) {
+                peer.relevant_status = .relevant;
+                try self.actions.append(self.allocator, .{ .tag_peer_relevant = peer_id });
+            }
+            // TS emits peerConnected on EVERY status from a relevant peer —
+            // the sync layer consumes repeated events to refresh peer status.
             try self.actions.append(self.allocator, .{ .emit_peer_connected = .{
                 .peer_id = peer_id,
                 .direction = peer.direction,
@@ -224,8 +236,11 @@ pub const PeerManager = struct {
         peer_id: []const u8,
         reason: GoodbyeReasonCode,
     ) ![]const Action {
+        // The remote-supplied reason must not drive our own reconnection
+        // cooldown (TS only disconnects here; the inbound-disconnect cooldown
+        // is applied by onConnectionClose when the connection actually drops).
+        _ = reason;
         self.resetActionState();
-        _ = self.scorer.applyReconnectionCoolDown(peer_id, reason);
         try self.actions.append(self.allocator, .{ .disconnect_peer = peer_id });
         return self.actions.items;
     }
@@ -371,16 +386,24 @@ pub const PeerManager = struct {
         }
     }
 
-    /// Detect if the heartbeat has stalled (same slot for >2 epochs).
-    fn detectStarvation(self: *const PeerManager, current_slot: u64) bool {
-        if (current_slot == 0) return false;
-        const EPOCHS_IN_SLOTS = 32; // Assuming 32 slots per epoch as per Ethereum spec
-        const STARVATION_EPOCHS = 2;
+    /// Detect if we are starved of data while syncing. Port of the TS
+    /// heartbeat check: starved when our head has not advanced since the
+    /// previous heartbeat AND the head has fallen more than the starvation
+    /// threshold behind the wall-clock slot.
+    fn detectStarvation(
+        self: *const PeerManager,
+        current_slot: u64,
+        local_status: Status,
+    ) bool {
+        // No previous heartbeat to compare against.
+        const last_head_slot = self.last_head_slot orelse return false;
 
-        if (self.last_heartbeat_slot == 0) return false; // Initial state, no starvation.
-
-        // Starvation logic: if current_slot is not advancing past 2 epochs from the last heartbeat.
-        return (current_slot - self.last_heartbeat_slot) <= (STARVATION_EPOCHS * EPOCHS_IN_SLOTS);
+        const threshold: u64 = self.config.slots_per_epoch * 2;
+        return
+        // While syncing progress is happening, we aren't starved.
+        local_status.head_slot == last_head_slot and
+            // If the head falls behind the threshold, we are starved.
+            current_slot -| local_status.head_slot > threshold;
     }
 
     /// Build inputs, run prioritizePeers, convert result to actions.
@@ -455,6 +478,9 @@ pub const PeerManager = struct {
     ) !void {
         for (result.peers_to_disconnect.items) |disc| {
             metrics.recordPeerPruned(metrics.pruneReasonFromExcess(disc.reason));
+            // TS goodbyeAndDisconnect applies the goodbye-reason cooldown
+            // (5 min for too_many_peers) so Discovery won't re-dial.
+            _ = self.scorer.applyReconnectionCoolDown(disc.peer_id, .too_many_peers);
             try self.actions.append(self.allocator, .{ .send_goodbye = .{
                 .peer_id = disc.peer_id,
                 .reason = .too_many_peers,
@@ -521,13 +547,9 @@ pub const PeerManager = struct {
         if (now - peer.last_received_msg_unix_ts_ms > ping_interval) {
             try self.actions.append(self.allocator, .{ .send_ping = peer.peer_id });
         }
-        if (peer.direction == .inbound and
-            peer.status == null and
-            now - peer.connected_unix_ts_ms > self.config.status_inbound_grace_period_ms)
-        {
-            try self.actions.append(self.allocator, .{ .disconnect_peer = peer.peer_id });
-            return;
-        }
+        // Inbound peers get their first status request after the grace period
+        // via the seeded last_status timestamp — never a disconnect (TS
+        // pingAndStatusTimeouts only ever requests, it does not prune).
         if (now - peer.last_status_unix_ts_ms > self.config.status_interval_ms) {
             try self.actions.append(self.allocator, .{ .send_status = peer.peer_id });
         }
@@ -632,6 +654,12 @@ test "onStatusReceived — relevant peer emits tag and connected" {
     try std.testing.expectEqual(@as(usize, 2), actions.len);
     try std.testing.expect(actions[0] == .tag_peer_relevant);
     try std.testing.expect(actions[1] == .emit_peer_connected);
+
+    // Subsequent statuses from a relevant peer re-emit peer-connected (the
+    // sync layer consumes repeated events), but tag only once.
+    const actions2 = try pm.onStatusReceived("peer-a", remote, local, 320);
+    try std.testing.expectEqual(@as(usize, 1), actions2.len);
+    try std.testing.expect(actions2[0] == .emit_peer_connected);
 }
 
 test "onStatusReceived — irrelevant peer emits goodbye" {
@@ -654,6 +682,56 @@ test "onStatusReceived — irrelevant peer emits goodbye" {
     try std.testing.expectEqual(@as(usize, 2), actions.len);
     try std.testing.expect(actions[0] == .send_goodbye);
     try std.testing.expect(actions[1] == .disconnect_peer);
+}
+
+test "onStatusReceived — irrelevant cooldown survives the disconnect event" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    _ = try pm.onConnectionOpen("peer-a", .inbound);
+    const local = makeLocalStatus();
+    const remote = Status{
+        .fork_digest = .{ 0x11, 0x22, 0x33, 0x44 },
+        .finalized_root = local.finalized_root,
+        .finalized_epoch = local.finalized_epoch,
+        .head_root = [_]u8{3} ** 32,
+        .head_slot = local.head_slot,
+        .earliest_available_slot = null,
+    };
+    _ = try pm.onStatusReceived("peer-a", remote, local, 320);
+
+    // The 240-minute irrelevant_network cooldown was applied on emission.
+    try std.testing.expect(pm.scorer.isCoolingDown("peer-a"));
+    const until_before = pm.scorer.scores.get("peer-a").?.last_update_ms;
+    try std.testing.expectEqual(@as(i64, 1000 + 240 * 60 * 1000), until_before);
+
+    // The inbound-disconnect cooldown (5 min) that follows the caller's
+    // disconnect must not shorten it.
+    _ = try pm.onConnectionClose("peer-a");
+    const until_after = pm.scorer.scores.get("peer-a").?.last_update_ms;
+    try std.testing.expectEqual(until_before, until_after);
+}
+
+test "detectStarvation — stalled head behind clock" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    const local = makeLocalStatus(); // head_slot = 320
+    const threshold = pm.config.slots_per_epoch * 2; // 64
+
+    // First heartbeat: no baseline yet.
+    try std.testing.expect(!pm.detectStarvation(10_000, local));
+    pm.last_head_slot = local.head_slot;
+
+    // Head stalled and further than the threshold behind the clock → starved.
+    try std.testing.expect(pm.detectStarvation(local.head_slot + threshold + 1, local));
+    // Head stalled but within the threshold → not starved.
+    try std.testing.expect(!pm.detectStarvation(local.head_slot + threshold, local));
+    // Head advanced since the last heartbeat → not starved.
+    pm.last_head_slot = local.head_slot - 1;
+    try std.testing.expect(!pm.detectStarvation(local.head_slot + threshold + 1, local));
 }
 
 test "onPing — higher seq triggers metadata request" {
@@ -749,14 +827,25 @@ test "checkPingAndStatus — past status interval emits status" {
     try std.testing.expect(has_status);
 }
 
-test "checkPingAndStatus — inbound peer without status disconnects after grace period" {
+test "checkPingAndStatus — inbound peer gets status request after grace period" {
     test_clock_value = 1000;
     var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
     defer pm.deinit();
 
     _ = try pm.onConnectionOpen("peer-a", .inbound);
+
+    // Within the grace period: no status request yet.
+    test_clock_value = 1000 + pm.config.status_inbound_grace_period_ms - 1;
+    var actions = try pm.checkPingAndStatus();
+    for (actions) |a| {
+        try std.testing.expect(a != .send_status);
+        try std.testing.expect(a != .disconnect_peer);
+    }
+
+    // Past the grace period: the seeded last_status timestamp fires a status
+    // request — never a disconnect (TS pingAndStatusTimeouts only requests).
     test_clock_value = 1000 + pm.config.status_inbound_grace_period_ms + 1;
-    const actions = try pm.checkPingAndStatus();
+    actions = try pm.checkPingAndStatus();
 
     var has_disconnect = false;
     var has_status = false;
@@ -765,8 +854,8 @@ test "checkPingAndStatus — inbound peer without status disconnects after grace
         if (a == .send_status) has_status = true;
     }
 
-    try std.testing.expect(has_disconnect);
-    try std.testing.expect(!has_status);
+    try std.testing.expect(!has_disconnect);
+    try std.testing.expect(has_status);
 }
 
 test "getConnectedPeers returns all peer ids" {

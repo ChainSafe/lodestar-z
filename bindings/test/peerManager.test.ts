@@ -131,6 +131,14 @@ describe("peerManager", () => {
     expect(() => bindings.peerManager.reportPeer("peer1", "NotARealAction")).toThrow();
   });
 
+  it("onGoodbye tolerates negative pseudo-codes (INBOUND_DISCONNECT = -1)", () => {
+    bindings.peerManager.onConnectionOpen("peer1", "outbound");
+    const actions = bindings.peerManager.onGoodbye("peer1", -1);
+    expect(Array.isArray(actions)).toBe(true);
+    const types = actions.map((a: {type: string}) => a.type);
+    expect(types).toContain("disconnect_peer");
+  });
+
   it("onStatusReceived rejects a negative headSlot instead of crashing", () => {
     bindings.peerManager.onConnectionOpen("peer1", "outbound");
     const badStatus = {...localStatus, headSlot: -1};

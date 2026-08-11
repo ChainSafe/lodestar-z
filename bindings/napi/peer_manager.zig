@@ -372,7 +372,9 @@ pub fn onGoodbye(peer_id_arg: js.String, reason_arg: js.Number) !napi.Value {
     const m = try getManager();
     const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
-    const reason_raw: u64 = @intCast(try reason_arg.toI64());
+    // TS uses negative pseudo-codes (INBOUND_DISCONNECT = -1); bit-cast so any
+    // negative value maps into the enum's unknown space instead of trapping.
+    const reason_raw: u64 = @bitCast(try reason_arg.toI64());
     const reason: GoodbyeReasonCode = @enumFromInt(reason_raw);
     const actions = try m.onGoodbye(peer_id, reason);
     return actionsToNapiArray(js.env(), actions);

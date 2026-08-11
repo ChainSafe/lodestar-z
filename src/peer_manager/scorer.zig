@@ -61,22 +61,9 @@ pub const PeerScorer = struct {
         if (self.config.disable_peer_scoring) return;
 
         const data = self.getOrCreateScore(peer_id);
-        const prev_state = scoreToState(data.score);
-
         data.lodestar_score += action.scoreDelta();
         data.lodestar_score = clampScore(data.lodestar_score);
-        recomputeScore(data, self.config);
-
-        const new_state = scoreToState(data.score);
-        if (prev_state != .banned and new_state == .banned) {
-            data.last_update_ms = self.clock_fn() + constants.COOL_DOWN_BEFORE_DECAY_MS;
-        }
-        if (prev_state != new_state) {
-            metrics.recordScoreStateTransition(
-                metrics.scoreStateLabel(prev_state),
-                metrics.scoreStateLabel(new_state),
-            );
-        }
+        self.updateState(data);
     }
 
     /// Port of updateGossipsubScores from score/utils.ts (lines 2487-2510).
@@ -109,6 +96,19 @@ pub const PeerScorer = struct {
         }
     }
 
+    /// Cooldown minutes per goodbye reason, or null when no cooldown applies.
+    /// Port of the switch in RealScore.applyReconnectionCoolDown (score.ts).
+    fn reconnectionCoolDownMinutes(reason: GoodbyeReasonCode) ?i64 {
+        return switch (reason) {
+            // Let the scoring system handle score decay by itself.
+            .banned, .score_too_low => null,
+            .inbound_disconnect, .too_many_peers => 5,
+            .@"error", .client_shutdown => 60,
+            .irrelevant_network => 240,
+            _ => null,
+        };
+    }
+
     /// Port of RealScore.applyReconnectionCoolDown (score.ts lines 2218-2239).
     pub fn applyReconnectionCoolDown(
         self: *PeerScorer,
@@ -117,16 +117,37 @@ pub const PeerScorer = struct {
     ) i64 {
         if (self.config.disable_peer_scoring) return constants.NO_COOL_DOWN_APPLIED;
 
-        const cooldown_min: i64 = switch (reason) {
-            .banned, .score_too_low => return constants.NO_COOL_DOWN_APPLIED,
-            .inbound_disconnect, .too_many_peers => 5,
-            .@"error", .client_shutdown => 60,
-            .irrelevant_network => 240,
-            _ => return constants.NO_COOL_DOWN_APPLIED,
-        };
+        const cooldown_min = reconnectionCoolDownMinutes(reason) orelse
+            return constants.NO_COOL_DOWN_APPLIED;
 
         const data = self.getOrCreateScore(peer_id);
         data.last_update_ms = self.clock_fn() + cooldown_min * 60 * 1000;
+        return cooldown_min;
+    }
+
+    /// Like `applyReconnectionCoolDown`, but never shortens an active cooldown.
+    ///
+    /// Used for inbound-disconnect events: in TS, `goodbyeAndDisconnect` applies
+    /// the goodbye-reason cooldown *after* the disconnect event's inbound
+    /// cooldown, so the goodbye reason wins. Here the goodbye-reason cooldown is
+    /// applied when the `send_goodbye` action is emitted (before the caller
+    /// disconnects), so the later inbound cooldown must not override a longer
+    /// one already in place.
+    pub fn applyReconnectionCoolDownIfLonger(
+        self: *PeerScorer,
+        peer_id: []const u8,
+        reason: GoodbyeReasonCode,
+    ) i64 {
+        if (self.config.disable_peer_scoring) return constants.NO_COOL_DOWN_APPLIED;
+
+        const cooldown_min = reconnectionCoolDownMinutes(reason) orelse
+            return constants.NO_COOL_DOWN_APPLIED;
+
+        const data = self.getOrCreateScore(peer_id);
+        const until = self.clock_fn() + cooldown_min * 60 * 1000;
+        if (until > data.last_update_ms) {
+            data.last_update_ms = until;
+        }
         return cooldown_min;
     }
 
@@ -153,19 +174,11 @@ pub const PeerScorer = struct {
             const data = entry.value_ptr;
             const elapsed = now_ms - data.last_update_ms;
             if (elapsed > 0) {
-                const prev_state = scoreToState(data.score);
                 data.last_update_ms = now_ms;
                 const decay = @exp(constants.HALFLIFE_DECAY_MS *
                     @as(f64, @floatFromInt(elapsed)));
                 data.lodestar_score *= decay;
-                recomputeScore(data, self.config);
-                const new_state = scoreToState(data.score);
-                if (prev_state != new_state) {
-                    metrics.recordScoreStateTransition(
-                        metrics.scoreStateLabel(prev_state),
-                        metrics.scoreStateLabel(new_state),
-                    );
-                }
+                self.updateState(data);
             }
             if (@abs(data.lodestar_score) < constants.SCORE_THRESHOLD) {
                 to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
@@ -218,6 +231,29 @@ pub const PeerScorer = struct {
         return result.value_ptr;
     }
 
+    /// Recompute the final score and handle state transitions: record the
+    /// transition metric and apply the ban cooldown whenever the peer newly
+    /// crosses into banned — regardless of what caused the score change
+    /// (action, decay, or a stale gossip component picked up on recompute).
+    /// Port of RealScore.updateState (score.ts).
+    fn updateState(self: *PeerScorer, data: *PeerScoreData) void {
+        const prev_state = scoreToState(data.score);
+        recomputeScore(data, self.config);
+        const new_state = scoreToState(data.score);
+
+        if (prev_state != new_state) {
+            metrics.recordScoreStateTransition(
+                metrics.scoreStateLabel(prev_state),
+                metrics.scoreStateLabel(new_state),
+            );
+        }
+
+        if (prev_state != .banned and new_state == .banned) {
+            // Ban this peer for at least COOL_DOWN_BEFORE_DECAY_MS.
+            data.last_update_ms = self.clock_fn() + constants.COOL_DOWN_BEFORE_DECAY_MS;
+        }
+    }
+
     /// Recompute the final score from lodestar + gossip components.
     /// Port of RealScore.recomputeScore (score.ts lines 2310-2322).
     fn recomputeScore(data: *PeerScoreData, config: Config) void {
@@ -235,8 +271,10 @@ pub const PeerScorer = struct {
         return @max(constants.MIN_SCORE, @min(constants.MAX_SCORE, score));
     }
 
+    /// Port of `Math.ceil(targetPeers * ALLOWED_NEGATIVE_GOSSIPSUB_FACTOR)`
+    /// from peerManager.updateGossipsubScores.
     fn computeIgnoreCount(config: Config) usize {
-        return @intFromFloat(@floor(
+        return @intFromFloat(@ceil(
             constants.ALLOWED_NEGATIVE_GOSSIPSUB_FACTOR *
                 @as(f64, @floatFromInt(config.target_peers)),
         ));
@@ -258,6 +296,9 @@ pub const PeerScorer = struct {
     }
 
     /// Port of RealScore.updateGossipsubScore (score.ts lines 2265-2272).
+    /// Note: like TS, this only stores the gossip component — the final score
+    /// is not recomputed here. It is picked up on the next `reportPeer` or
+    /// `decayScores` via `updateState`.
     fn updateSingleGossipScore(
         self: *PeerScorer,
         peer_id: []const u8,
@@ -267,17 +308,8 @@ pub const PeerScorer = struct {
         const data = self.getOrCreateScore(peer_id);
         // Only update gossip if not cooling down.
         if (data.last_update_ms <= self.clock_fn()) {
-            const prev_state = scoreToState(data.score);
             data.gossip_score = new_score;
             data.ignore_negative_gossip_score = ignore;
-            recomputeScore(data, self.config);
-            const new_state = scoreToState(data.score);
-            if (prev_state != new_state) {
-                metrics.recordScoreStateTransition(
-                    metrics.scoreStateLabel(prev_state),
-                    metrics.scoreStateLabel(new_state),
-                );
-            }
         }
     }
 
@@ -454,6 +486,26 @@ test "applyReconnectionCoolDown reasons" {
     );
 }
 
+test "applyReconnectionCoolDownIfLonger never shortens an active cooldown" {
+    test_clock_value = 0;
+    var scorer = PeerScorer.init(std.testing.allocator, testConfig(), &testClock);
+    defer scorer.deinit();
+
+    // A shorter cooldown must not override a longer active one.
+    _ = scorer.applyReconnectionCoolDown("p1", .irrelevant_network); // 240 min
+    const until = scorer.scores.get("p1").?.last_update_ms;
+    _ = scorer.applyReconnectionCoolDownIfLonger("p1", .inbound_disconnect); // 5 min
+    try std.testing.expectEqual(until, scorer.scores.get("p1").?.last_update_ms);
+
+    // But it does extend when longer.
+    _ = scorer.applyReconnectionCoolDown("p2", .inbound_disconnect); // 5 min
+    _ = scorer.applyReconnectionCoolDownIfLonger("p2", .@"error"); // 60 min
+    try std.testing.expectEqual(
+        @as(i64, 60 * 60 * 1000),
+        scorer.scores.get("p2").?.last_update_ms,
+    );
+}
+
 test "gossipsub positive score blending" {
     test_clock_value = 0;
     var cfg = testConfig();
@@ -470,19 +522,29 @@ test "gossipsub positive score blending" {
     };
     scorer.updateGossipScores(&updates);
 
-    // score = lodestar(-1) + gossip(10) * weight(0.5) = -1 + 5 = 4
-    try std.testing.expectApproxEqAbs(@as(f64, 4.0), scorer.getScore("peer1"), 0.01);
+    // Like TS, a gossip update only stores the component — the final score is
+    // stale until the next reportPeer/decayScores recompute.
+    try std.testing.expectApproxEqAbs(@as(f64, -1.0), scorer.getScore("peer1"), 0.01);
+
+    // Next action triggers the recompute:
+    // score = lodestar(-2) + gossip(10) * weight(0.5) = -2 + 5 = 3
+    scorer.reportPeer("peer1", .high_tolerance); // -1 more
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), scorer.getScore("peer1"), 0.01);
 }
 
 test "gossipsub negative score ignored for top peers" {
     test_clock_value = 0;
     var cfg = testConfig();
     cfg.target_peers = 10;
-    // ALLOWED_NEGATIVE_GOSSIPSUB_FACTOR = 0.1, so floor(0.1 * 10) = 1 peer ignored
+    // ALLOWED_NEGATIVE_GOSSIPSUB_FACTOR = 0.1, so ceil(0.1 * 10) = 1 peer ignored
     cfg.negative_gossip_score_ignore_threshold = -50.0;
     cfg.gossipsub_negative_score_weight = 1.0;
     var scorer = PeerScorer.init(std.testing.allocator, cfg, &testClock);
     defer scorer.deinit();
+
+    // Give both peers a lodestar base so the recompute below is observable.
+    scorer.reportPeer("peerA", .mid_tolerance); // -5
+    scorer.reportPeer("peerB", .mid_tolerance); // -5
 
     // Two peers with negative gossip. The one with the higher (less negative)
     // score should be ignored (sorted desc, so -5 comes before -30).
@@ -492,10 +554,39 @@ test "gossipsub negative score ignored for top peers" {
     };
     scorer.updateGossipScores(&updates);
 
-    // peerA: score=-5 but ignored → score = 0 (lodestar=0, gossip ignored)
-    try std.testing.expectApproxEqAbs(@as(f64, 0.0), scorer.getScore("peerA"), 0.01);
-    // peerB: score=-30, not ignored → score = 0 + (-30)*1.0 = -30
-    try std.testing.expectApproxEqAbs(@as(f64, -30.0), scorer.getScore("peerB"), 0.01);
+    // Trigger the recompute (gossip updates are stored lazily, like TS).
+    scorer.reportPeer("peerA", .high_tolerance); // -1
+    scorer.reportPeer("peerB", .high_tolerance); // -1
+
+    // peerA: gossip -5 ignored → score = lodestar(-6)
+    try std.testing.expectApproxEqAbs(@as(f64, -6.0), scorer.getScore("peerA"), 0.01);
+    // peerB: not ignored → score = -6 + (-30)*1.0 = -36
+    try std.testing.expectApproxEqAbs(@as(f64, -36.0), scorer.getScore("peerB"), 0.01);
+}
+
+test "gossip-driven ban applies cooldown at next decay" {
+    test_clock_value = 0;
+    var cfg = testConfig();
+    cfg.negative_gossip_score_ignore_threshold = -50.0;
+    cfg.gossipsub_negative_score_weight = 1.0;
+    var scorer = PeerScorer.init(std.testing.allocator, cfg, &testClock);
+    defer scorer.deinit();
+
+    // Small lodestar base, then a heavily negative gossip component
+    // (-100 < ignore threshold, so it is never ignored).
+    scorer.reportPeer("peer1", .mid_tolerance); // lodestar -5, healthy
+    const updates = [_]GossipScoreUpdate{
+        .{ .peer_id = "peer1", .new_score = -100.0 },
+    };
+    scorer.updateGossipScores(&updates);
+    try std.testing.expect(!scorer.isCoolingDown("peer1"));
+
+    // The next decay recomputes: score = -5 + (-100) → newly banned, which
+    // must apply the 30-minute ban cooldown (TS updateState semantics).
+    test_clock_value = 1;
+    scorer.decayScores();
+    try std.testing.expectEqual(ScoreState.banned, scorer.getScoreState("peer1"));
+    try std.testing.expect(scorer.isCoolingDown("peer1"));
 }
 
 test "MIN_LODESTAR_SCORE_BEFORE_BAN ignores gossip" {

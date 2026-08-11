@@ -388,7 +388,9 @@ fn pruneExcessPeers(
     else
         0.0;
     const target_f = @as(f64, @floatFromInt(count -| opts.target_peers)) + starvation_extra;
-    const disconnect_target = roundU32(target_f);
+    // TS compares the integer disconnect count against the float target with
+    // `<`, which effectively ceils fractional (starvation) targets.
+    const disconnect_target = ceilU32(target_f);
 
     // Track which peers are already marked for disconnect
     var already_disconnected = std.AutoHashMap(usize, ExcessPeerDisconnectReason).init(allocator);
@@ -837,6 +839,11 @@ fn peerHasSyncnetBit(peer: PeerInfo, subnet: u8) bool {
 fn roundU32(val: f64) u32 {
     if (val <= 0) return 0;
     return @intFromFloat(@round(val));
+}
+
+fn ceilU32(val: f64) u32 {
+    if (val <= 0) return 0;
+    return @intFromFloat(@ceil(val));
 }
 
 // =============================================================================
