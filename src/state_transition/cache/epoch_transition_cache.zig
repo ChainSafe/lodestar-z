@@ -15,7 +15,6 @@ const computeEpochShuffling = @import("../utils/epoch_shuffling.zig").computeEpo
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
-const deinitStateTransition = @import("../root.zig").deinitStateTransition;
 
 const attester_status = @import("../utils/attester_status.zig");
 const FLAG_CURR_HEAD_ATTESTER = attester_status.FLAG_CURR_HEAD_ATTESTER;
@@ -62,7 +61,6 @@ const ReusedEpochTransitionCache = struct {
 
     flags: U8Array,
 
-    // TODO: nextShufflingDecisionRoot, is it necessary without ShufflingCache?
     next_epoch_shuffling_active_validator_indices: std.ArrayList(ValidatorIndex),
 
     is_compounding_validator_arr: BoolArray,
@@ -208,16 +206,13 @@ pub const EpochTransitionCache = struct {
     balances: ?U64Array,
     next_shuffling_active_indices: []const ValidatorIndex,
     next_shuffling: ?*EpochShuffling,
-    // TODO: nextShufflingDecisionRoot may not needed as we don't use ShufflingCache
     next_epoch_total_active_balance_by_increment: u64,
     next_epoch_payload_timeliness_committees: ?PtcCommittees,
-    // TODO: asyncShufflingCalculation may not needed as we don't use ShufflingCache
     // these are borrowed from ReusedEpochTransitionCache
     is_active_prev_epoch: []const bool,
     is_active_curr_epoch: []const bool,
     is_active_next_epoch: []const bool,
 
-    // TODO: no need EpochTransitionCacheOpts for zig version
     // this is the same to beforeProcessEpoch in typesript version
     pub fn init(
         allocator: Allocator,
@@ -675,5 +670,5 @@ test "EpochTransitionCache.beforeProcessEpoch" {
         defer epoch_transition_cache.deinit(allocator);
     }
 
-    deinitStateTransition(std.testing.io);
+    deinitReusedEpochTransitionCache(std.testing.io);
 }

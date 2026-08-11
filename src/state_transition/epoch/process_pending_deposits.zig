@@ -25,6 +25,7 @@ const Node = @import("persistent_merkle_tree").Node;
 pub fn processPendingDeposits(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
@@ -79,7 +80,7 @@ pub fn processPendingDeposits(
         // Read validator state
         var is_validator_exited = false;
         var is_validator_withdrawn = false;
-        const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey);
+        const validator_index = epoch_cache.pubkey_cache.get(io, deposit.pubkey);
 
         if (try isValidatorKnown(fork, state, validator_index)) {
             var validators = try state.validators();
@@ -90,7 +91,7 @@ pub fn processPendingDeposits(
 
         if (is_validator_withdrawn) {
             // Deposited balance will never become active. Increase balance but do not consume churn
-            try applyPendingDeposit(fork, allocator, config, epoch_cache, state, deposit, cache);
+            try applyPendingDeposit(fork, allocator, io, config, epoch_cache, state, deposit, cache);
         } else if (is_validator_exited) {
             // Validator is exiting, postpone the deposit until after withdrawable epoch
             try deposits_to_postpone.append(allocator, deposit);
@@ -102,7 +103,7 @@ pub fn processPendingDeposits(
             }
             // Consume churn and apply deposit.
             processed_amount += deposit.amount;
-            try applyPendingDeposit(fork, allocator, config, epoch_cache, state, deposit, cache);
+            try applyPendingDeposit(fork, allocator, io, config, epoch_cache, state, deposit, cache);
         }
 
         // Regardless of how the deposit was handled, we move on in the queue.
@@ -130,13 +131,14 @@ pub fn processPendingDeposits(
 fn applyPendingDeposit(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
     deposit: PendingDeposit,
     cache: *EpochTransitionCache,
 ) !void {
-    const validator_index = epoch_cache.getValidatorIndex(&deposit.pubkey) orelse null;
+    const validator_index = epoch_cache.pubkey_cache.get(io, deposit.pubkey);
     const pubkey = &deposit.pubkey;
 
     const withdrawal_credentials = &deposit.withdrawal_credentials;
@@ -147,7 +149,7 @@ fn applyPendingDeposit(
     if (!is_validator_known) {
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
         if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
-            try addValidatorToRegistry(fork, allocator, epoch_cache, state, pubkey, withdrawal_credentials, amount);
+            try addValidatorToRegistry(fork, allocator, io, epoch_cache, state, pubkey, withdrawal_credentials, amount);
             try cache.is_compounding_validator_arr.append(allocator, hasCompoundingWithdrawalCredential(withdrawal_credentials));
             // set balance, so that the next deposit of same pubkey will increase the balance correctly
             // this is to fix the double deposit issue found in mekong
@@ -187,6 +189,7 @@ test "processPendingDeposits - sanity" {
     try processPendingDeposits(
         .electra,
         allocator,
+        std.testing.io,
         test_state.cached_state.config,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),

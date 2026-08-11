@@ -34,6 +34,7 @@ export class SecretKey {
   static fromBytes(bytes: Uint8Array): SecretKey;
   static fromHex(hex: string): SecretKey;
   static fromKeygen(ikm: Uint8Array, keyInfo?: Uint8Array): SecretKey;
+  /** Sign an exact 32-byte Ethereum consensus signing root. */
   sign(msg: Uint8Array): Signature;
   toPublicKey(): PublicKey;
   toBytes(): Uint8Array;
@@ -85,6 +86,7 @@ export class Signature {
 }
 
 export interface SignatureSet {
+  /** Exact 32-byte Ethereum consensus signing root. */
   msg: Uint8Array;
   pk: PublicKey;
   sig: Signature;
@@ -101,7 +103,7 @@ export interface PkAndSig {
 }
 
 /**
- * Verify a signature against a message and public key.
+ * Verify a signature against an exact 32-byte Ethereum consensus signing root and public key.
  *
  * If `pkValidate` is `true`, the public key will be infinity and group checked.
  *
@@ -116,7 +118,7 @@ export function verify(
 ): boolean;
 
 /**
- * Verify an aggregated signature against multiple messages and multiple public keys.
+ * Verify an aggregated signature against exact 32-byte Ethereum consensus signing roots and multiple public keys.
  *
  * If `pksValidate` is `true`, the public keys will be infinity and group checked.
  *
@@ -131,7 +133,7 @@ export function aggregateVerify(
 ): boolean;
 
 /**
- * Verify an aggregated signature against a single message and multiple public keys.
+ * Verify an aggregated signature against a single exact 32-byte Ethereum consensus signing root and multiple public keys.
  *
  * Proof-of-possession is required for public keys.
  *
@@ -145,7 +147,7 @@ export function fastAggregateVerify(
 ): boolean;
 
 /**
- * Verify multiple aggregated signatures against multiple messages and multiple public keys.
+ * Verify multiple aggregated signatures against exact 32-byte Ethereum consensus signing roots and multiple public keys.
  *
  * If `pksValidate` is `true`, the public keys will be infinity and group checked.
  *

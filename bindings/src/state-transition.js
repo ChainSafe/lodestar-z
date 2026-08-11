@@ -1,6 +1,4 @@
-import bindings from "./bindings.js";
-
-const native = bindings.stateTransition;
+import bindings from "./index.js";
 
 export const BeaconStateView = bindings.BeaconStateView;
-export const stateTransition = native.stateTransition;
+export const deinitReusedEpochTransitionCache = bindings.stateTransition.deinitReusedEpochTransitionCache;

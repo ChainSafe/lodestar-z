@@ -38,7 +38,7 @@ pub const WriterState = union(enum) {
     finished_group: struct {
         era_number: u64,
         current_offset: u64,
-        short_historical_root: [8]u8,
+        short_era_root: [8]u8,
     },
 };
 
@@ -72,7 +72,7 @@ pub fn finish(self: *Writer, allocator: std.mem.Allocator, io: std.Io) ![]const 
     const new_base = try std.fmt.allocPrint(
         allocator,
         "{s}-{d:0>5}-{s}.era",
-        .{ self.config.chain.CONFIG_NAME, self.era_number, self.state.finished_group.short_historical_root },
+        .{ self.config.chain.CONFIG_NAME, self.era_number, self.state.finished_group.short_era_root },
     );
     defer allocator.free(new_base);
 
@@ -120,7 +120,7 @@ pub fn writeVersion(self: *Writer, allocator: std.mem.Allocator) !void {
     };
 }
 
-pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u64, short_historical_root: [8]u8, data: []const u8) !void {
+pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u64, short_era_root: [8]u8, data: []const u8) !void {
     if (self.state == .init_group) {
         try self.writeVersion(allocator);
     }
@@ -184,24 +184,24 @@ pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u
         .finished_group = .{
             .era_number = wg_era_number,
             .current_offset = wg_current_offset,
-            .short_historical_root = short_historical_root,
+            .short_era_root = short_era_root,
         },
     };
 }
 
-pub fn writeSerializedState(self: *Writer, allocator: std.mem.Allocator, slot: u64, short_historical_root: [8]u8, data: []const u8) !void {
+pub fn writeSerializedState(self: *Writer, allocator: std.mem.Allocator, slot: u64, short_era_root: [8]u8, data: []const u8) !void {
     const compressed = try snappy.compress(allocator, data);
     defer allocator.free(compressed);
-    try self.writeCompressedState(allocator, slot, short_historical_root, compressed);
+    try self.writeCompressedState(allocator, slot, short_era_root, compressed);
 }
 
 pub fn writeState(self: *Writer, allocator: std.mem.Allocator, state: fork_types.AnyBeaconState) !void {
     var s = state;
     const slot = try s.slot();
-    const short_historical_root = try era.getShortHistoricalRoot(state);
+    const short_era_root = try era.getShortEraRoot(state);
     const serialized = try state.serialize(allocator);
     defer allocator.free(serialized);
-    try self.writeSerializedState(allocator, slot, short_historical_root, serialized);
+    try self.writeSerializedState(allocator, slot, short_era_root, serialized);
 }
 
 pub fn writeCompressedBlock(self: *Writer, allocator: std.mem.Allocator, slot: u64, data: []const u8) !void {

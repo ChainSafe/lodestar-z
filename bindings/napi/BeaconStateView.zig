@@ -16,7 +16,6 @@ const pubkey = @import("./pubkeys.zig");
 const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
-const napi_io = @import("./io.zig");
 
 /// Allocator used for all BeaconStateView instances.
 var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -72,7 +71,7 @@ pub const js_meta = js.class(.{ .properties = .{
 } });
 
 cached_state: ?*CachedBeaconState = null,
-pool_rc: ?*pool.PoolRc = null,
+pool_rc: @TypeOf(pool.state.pool_rc) = null,
 const BeaconStateView = @This();
 
 pub fn init() BeaconStateView {
@@ -91,6 +90,23 @@ pub fn deinit(self: *BeaconStateView) void {
     }
 }
 
+fn initCachedState(
+    cached_state: *CachedBeaconState,
+    io: std.Io,
+    state: *AnyBeaconState,
+) !void {
+    try cached_state.init(
+        allocator,
+        io,
+        state,
+        .{
+            .config = &config.state.config,
+            .pubkey_cache = &pubkey.state.cache,
+        },
+        null,
+    );
+}
+
 // -------------------------
 // Class Methods
 // -------------------------
@@ -107,16 +123,8 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     const cached_state = try allocator.create(CachedBeaconState);
     errdefer allocator.destroy(cached_state);
 
-    try cached_state.init(
-        allocator,
-        state,
-        .{
-            .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
-        },
-        null,
-    );
+    const io = js.io();
+    try initCachedState(cached_state, io, state);
 
     return .{
         .cached_state = cached_state,
@@ -723,6 +731,13 @@ pub fn getAllValidators(self: *const BeaconStateView) !js.Array {
     return js_types.wrap(js.Array, result);
 }
 
+/// Get the number of builders in the registry (Gloas+). Throws on pre-Gloas states.
+pub fn getBuildersLength(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    const count = try cached_state.state.buildersLength();
+    return js.Number.from(count);
+}
+
 /// Get all balances in the registry.
 pub fn getAllBalances(self: *const BeaconStateView) !js.Array {
     const env = js.env();
@@ -875,6 +890,7 @@ pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_value:
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.getVoluntaryExitValidity(
             f,
+            js.io(),
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state.castToFork(f),
@@ -901,6 +917,7 @@ pub fn isValidVoluntaryExit(self: *const BeaconStateView, signed_exit_value: js.
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.isValidVoluntaryExit(
             f,
+            js.io(),
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state.castToFork(f),
@@ -1037,7 +1054,7 @@ pub fn createMultiProof(self: *const BeaconStateView, descriptor: js.Uint8Array)
 pub fn computeUnrealizedCheckpoints(self: *const BeaconStateView) !js_types.UnrealizedCheckpoints {
     const env = js.env();
     const cached_state = try self.requireState();
-    const result = try st.computeUnrealizedCheckpoints(allocator, napi_io.get(), cached_state);
+    const result = try st.computeUnrealizedCheckpoints(allocator, js.io(), cached_state);
 
     const obj = try env.createObject();
     try obj.setNamedProperty(
@@ -1129,16 +1146,8 @@ pub fn loadOtherState(
         allocator.destroy(new_cached_state);
     }
 
-    try new_cached_state.init(
-        allocator,
-        new_state,
-        .{
-            .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
-        },
-        null,
-    );
+    const io = js.io();
+    try initCachedState(new_cached_state, io, new_state);
     new_cached_state_initialized = true;
 
     if (opts) |value| {
@@ -1150,16 +1159,18 @@ pub fn loadOtherState(
             // This doesn't matter for typescript lodestar because GC clears it anyway,
             // but we're losing some savings here. Consider implementating something like
             // a `prefetchAll` that only does `populateAllNodes` that returns void
-            var validators_view = try new_cached_state.state.validators();
-            _ = validators_view.getAllReadonlyValues(allocator) catch |err| {
+            const validators_view = try new_cached_state.state.validators();
+            const validators = validators_view.getAllReadonlyValues(allocator) catch |err| {
                 try js.env().throwError("STATE_ERROR", "Failed to preload validators");
                 return err;
             };
-            var balances_view = try new_cached_state.state.balances();
-            _ = balances_view.getAll(allocator) catch |err| {
+            allocator.free(validators);
+            const balances_view = try new_cached_state.state.balances();
+            const balances = balances_view.getAll(allocator) catch |err| {
                 try js.env().throwError("STATE_ERROR", "Failed to preload balances");
                 return err;
             };
+            allocator.free(balances);
         }
     }
 
@@ -1280,7 +1291,7 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
         allocator.destroy(post_state);
     }
 
-    try st.processSlots(allocator, napi_io.get(), post_state, slot_value, .{});
+    try st.processSlots(allocator, js.io(), post_state, slot_value, .{});
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
@@ -1309,7 +1320,7 @@ pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint
     const signed_block = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, bytes);
     defer signed_block.deinit(allocator);
 
-    const post_state = try st.stateTransition(allocator, napi_io.get(), cached_state, signed_block, opts);
+    const post_state = try st.stateTransition(allocator, js.io(), cached_state, signed_block, opts);
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),

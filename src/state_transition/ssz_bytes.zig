@@ -24,7 +24,62 @@ pub fn getStateSlotFromBytes(bytes: []const u8) !Slot {
     return std.mem.readInt(u64, bytes[SLOT_BYTES_POSITION_IN_STATE .. SLOT_BYTES_POSITION_IN_STATE + slot_size], .little);
 }
 
+///
+/// 8 + 32 + 8 + 16 = 64
+///
+/// ```
+/// class BeaconState(Container):
+///   genesis_time: uint64 [fixed - 8 bytes]
+///   genesis_validators_root: Root [fixed - 32 bytes]
+///   slot: Slot [fixed - 8 bytes]
+///   fork: Fork [fixed - 16 bytes]
+///   latest_block_header: BeaconBlockHeader
+///     slot: Slot [fixed - 8 bytes]  <-- this
+///   ...
+/// ```
+const BLOCK_HEADER_SLOT_BYTES_POSITION_IN_STATE: usize = 64;
+
+/// Leading bytes sufficient for both slot readers.
+pub const STATE_SLOTS_PREFIX_LEN: usize =
+    BLOCK_HEADER_SLOT_BYTES_POSITION_IN_STATE + types.primitive.Slot.fixed_size;
+
+/// Slot of the state's `latest_block_header` — the slot of the last block processed into the state,
+/// which lags `state.slot` when slots were skipped after that block.
+pub fn getLastProcessedSlotFromStateBytes(bytes: []const u8) !Slot {
+    const slot_size = types.primitive.Slot.fixed_size;
+    if (bytes.len < BLOCK_HEADER_SLOT_BYTES_POSITION_IN_STATE + slot_size) return error.InvalidSize;
+    return std.mem.readInt(u64, bytes[BLOCK_HEADER_SLOT_BYTES_POSITION_IN_STATE .. BLOCK_HEADER_SLOT_BYTES_POSITION_IN_STATE + slot_size], .little);
+}
+
 pub fn getForkFromStateBytes(config: *const BeaconConfig, bytes: []const u8) !ForkSeq {
     const slot = try getStateSlotFromBytes(bytes);
     return config.forkSeq(slot);
+}
+
+const testing = std.testing;
+
+test "state byte readers match a real serialized electra state" {
+    var state = types.electra.BeaconState.default_value;
+    state.slot = 12_345;
+    state.latest_block_header.slot = 12_344;
+
+    const bytes = try testing.allocator.alloc(u8, types.electra.BeaconState.serializedSize(&state));
+    defer testing.allocator.free(bytes);
+    _ = types.electra.BeaconState.serializeIntoBytes(&state, bytes);
+
+    try testing.expectEqual(@as(Slot, 12_345), try getStateSlotFromBytes(bytes));
+    try testing.expectEqual(@as(Slot, 12_344), try getLastProcessedSlotFromStateBytes(bytes));
+}
+
+test "state byte readers match a real serialized phase0 state" {
+    var state = types.phase0.BeaconState.default_value;
+    state.slot = 77;
+    state.latest_block_header.slot = 76;
+
+    const bytes = try testing.allocator.alloc(u8, types.phase0.BeaconState.serializedSize(&state));
+    defer testing.allocator.free(bytes);
+    _ = types.phase0.BeaconState.serializeIntoBytes(&state, bytes);
+
+    try testing.expectEqual(@as(Slot, 77), try getStateSlotFromBytes(bytes));
+    try testing.expectEqual(@as(Slot, 76), try getLastProcessedSlotFromStateBytes(bytes));
 }

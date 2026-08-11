@@ -18,6 +18,7 @@ const preset = @import("preset").preset;
 pub fn processProposerSlashing(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
@@ -26,7 +27,7 @@ pub fn processProposerSlashing(
     verify_signatures: bool,
 ) !void {
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
-    try assertValidProposerSlashing(fork, config, epoch_cache, state, proposer_slashing, verify_signatures);
+    try assertValidProposerSlashing(fork, io, config, epoch_cache, state, proposer_slashing, verify_signatures);
 
     if (fork.gte(.gloas)) {
         const slot = proposer_slashing.signed_header_1.message.slot;
@@ -58,6 +59,7 @@ pub fn processProposerSlashing(
 
 pub fn assertValidProposerSlashing(
     comptime fork: ForkSeq,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
@@ -99,6 +101,7 @@ pub fn assertValidProposerSlashing(
     // verify signatures
     if (verify_signature) {
         const signature_sets = try getProposerSlashingSignatureSets(
+            io,
             config,
             epoch_cache,
             proposer_slashing,

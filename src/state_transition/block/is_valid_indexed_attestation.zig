@@ -12,6 +12,7 @@ const getIndexedAttestationSignatureSet = @import("../signature_sets/indexed_att
 pub fn isValidIndexedAttestation(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     validators_count: usize,
@@ -26,6 +27,7 @@ pub fn isValidIndexedAttestation(
         const signature_set = try getIndexedAttestationSignatureSet(
             fork,
             allocator,
+            io,
             config,
             epoch_cache,
             indexed_attestation,

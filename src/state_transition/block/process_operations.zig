@@ -26,6 +26,7 @@ const processPayloadAttestation = @import("./process_payload_attestation.zig").p
 pub fn processOperations(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
@@ -44,13 +45,14 @@ pub fn processOperations(
     const current_epoch = epoch_cache.epoch;
 
     for (body.inner.proposer_slashings.items) |*proposer_slashing| {
-        try processProposerSlashing(fork, allocator, config, epoch_cache, state, slashings_cache, proposer_slashing, opts.verify_signature);
+        try processProposerSlashing(fork, allocator, io, config, epoch_cache, state, slashings_cache, proposer_slashing, opts.verify_signature);
     }
 
     for (body.inner.attester_slashings.items) |*attester_slashing| {
         try processAttesterSlashing(
             fork,
             allocator,
+            io,
             config,
             epoch_cache,
             state,
@@ -61,14 +63,14 @@ pub fn processOperations(
         );
     }
 
-    try processAttestations(fork, allocator, config, epoch_cache, state, slashings_cache, body.inner.attestations.items, opts.verify_signature);
+    try processAttestations(fork, allocator, io, config, epoch_cache, state, slashings_cache, body.inner.attestations.items, opts.verify_signature);
 
     for (body.inner.deposits.items) |*deposit| {
-        try processDeposit(fork, allocator, config, epoch_cache, state, deposit);
+        try processDeposit(fork, allocator, io, config, epoch_cache, state, deposit);
     }
 
     for (body.inner.voluntary_exits.items) |*voluntary_exit| {
-        try processVoluntaryExit(fork, config, epoch_cache, state, voluntary_exit, opts.verify_signature);
+        try processVoluntaryExit(fork, io, config, epoch_cache, state, voluntary_exit, opts.verify_signature);
     }
 
     if (comptime fork.gte(.capella)) {
@@ -85,11 +87,11 @@ pub fn processOperations(
         }
 
         for (execution_requests.withdrawals.items) |*withdrawal_request| {
-            try processWithdrawalRequest(fork, config, epoch_cache, state, withdrawal_request);
+            try processWithdrawalRequest(fork, io, config, epoch_cache, state, withdrawal_request);
         }
 
         for (execution_requests.consolidations.items) |*consolidation_request| {
-            try processConsolidationRequest(fork, config, epoch_cache, state, consolidation_request);
+            try processConsolidationRequest(fork, io, config, epoch_cache, state, consolidation_request);
         }
     }
 
@@ -118,6 +120,7 @@ test "process operations" {
     try processOperations(
         .electra,
         allocator,
+        std.testing.io,
         test_state.cached_state.config,
         test_state.cached_state.epoch_cache,
         try test_state.cached_state.state.tryCastToFork(.electra),
