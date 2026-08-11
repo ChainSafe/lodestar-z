@@ -54,7 +54,7 @@ pub fn aggregate(
     pk_validate: bool,
     sig: ?*const Signature,
     sig_groupcheck: bool,
-    msg: []const u8,
+    msg: *const SigningRoot,
     aug: ?[]const u8,
 ) BlstError!void {
     try errorFromInt(
@@ -64,8 +64,8 @@ pub fn aggregate(
             pk_validate,
             if (sig) |s| &s.point else null,
             sig_groupcheck,
-            msg.ptr,
-            msg.len,
+            msg,
+            @sizeOf(SigningRoot),
             if (aug) |a| a.ptr else null,
             if (aug) |a| a.len else 0,
         ),
@@ -83,7 +83,7 @@ pub fn mulAndAggregate(
     sig_groupcheck: bool,
     scalar: []const u8,
     nbits: usize,
-    msg: []const u8,
+    msg: *const SigningRoot,
 ) BlstError!void {
     try errorFromInt(
         c.blst_pairing_chk_n_mul_n_aggr_pk_in_g1(
@@ -94,8 +94,8 @@ pub fn mulAndAggregate(
             sig_groupcheck,
             scalar.ptr,
             nbits,
-            msg.ptr,
-            32,
+            msg,
+            @sizeOf(SigningRoot),
             null,
             0,
         ),
@@ -153,3 +153,4 @@ const errorFromInt = @import("error.zig").errorFromInt;
 const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
+const SigningRoot = blst.SigningRoot;
