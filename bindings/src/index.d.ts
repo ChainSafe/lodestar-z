@@ -239,6 +239,9 @@ interface PeerManagerApi {
   onMessageReceived: (peerId: string) => void;
   onGoodbye: (peerId: string, reason: number) => PeerManagerAction[];
   onPing: (peerId: string, seqNumber: number) => PeerManagerAction[];
+  reStatusPeers: (peerIds: string[]) => PeerManagerAction[];
+  goodbyeAndDisconnectAllPeers: () => PeerManagerAction[];
+  reconcileConnectedPeers: (connectedPeerIds: string[]) => number;
   reportPeer: (peerId: string, action: PeerManagerReportPeerAction) => void;
   updateGossipScores: (scores: PeerManagerGossipScoreUpdate[]) => void;
   setSubnetRequirements: (

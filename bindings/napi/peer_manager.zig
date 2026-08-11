@@ -395,6 +395,55 @@ pub fn onPing(peer_id_arg: js.String, seq_number_arg: js.Number) !napi.Value {
     return actionsToNapiArray(js.env(), actions);
 }
 
+/// JS: peerManager.reStatusPeers(peerIds) → PeerManagerAction[]
+pub fn reStatusPeers(peer_ids_arg: js.Value) !napi.Value {
+    const m = try getManager();
+    const arr = peer_ids_arg.toValue();
+    const len = try arr.getArrayLength();
+
+    const ids = try allocator.alloc([]const u8, len);
+    var filled: usize = 0;
+    defer {
+        for (ids[0..filled]) |id| allocator.free(id);
+        allocator.free(ids);
+    }
+    for (0..len) |i| {
+        ids[i] = try readOwnedPeerId(try arr.getElement(@intCast(i)));
+        filled = i + 1;
+    }
+
+    const actions = try m.reStatusPeers(ids);
+    return actionsToNapiArray(js.env(), actions);
+}
+
+/// JS: peerManager.goodbyeAndDisconnectAllPeers() → PeerManagerAction[]
+pub fn goodbyeAndDisconnectAllPeers() !napi.Value {
+    const m = try getManager();
+    const actions = try m.goodbyeAndDisconnectAllPeers();
+    return actionsToNapiArray(js.env(), actions);
+}
+
+/// JS: peerManager.reconcileConnectedPeers(connectedPeerIds) → number (pruned)
+pub fn reconcileConnectedPeers(peer_ids_arg: js.Value) !napi.Value {
+    const m = try getManager();
+    const arr = peer_ids_arg.toValue();
+    const len = try arr.getArrayLength();
+
+    const ids = try allocator.alloc([]const u8, len);
+    var filled: usize = 0;
+    defer {
+        for (ids[0..filled]) |id| allocator.free(id);
+        allocator.free(ids);
+    }
+    for (0..len) |i| {
+        ids[i] = try readOwnedPeerId(try arr.getElement(@intCast(i)));
+        filled = i + 1;
+    }
+
+    const pruned = try m.reconcileConnectedPeers(ids);
+    return js.env().createUint32(pruned);
+}
+
 // ── Score Mutations ──────────────────────────────────────────────────
 
 /// JS: peerManager.reportPeer(peerId, action)

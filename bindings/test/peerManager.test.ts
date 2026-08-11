@@ -108,6 +108,38 @@ describe("peerManager", () => {
     expect(Array.isArray(actions)).toBe(true);
   });
 
+  it("reStatusPeers forces a status request for a not-yet-due peer", () => {
+    // A freshly-connected inbound peer is not yet due for a status request.
+    bindings.peerManager.onConnectionOpen("peer1", "inbound");
+    const before = bindings.peerManager.checkPingAndStatus();
+    expect(before.map((a: {type: string}) => a.type)).not.toContain("send_status");
+
+    const actions = bindings.peerManager.reStatusPeers(["peer1"]);
+    expect(actions.map((a: {type: string}) => a.type)).toContain("send_status");
+  });
+
+  it("goodbyeAndDisconnectAllPeers emits goodbye + disconnect for every peer", () => {
+    bindings.peerManager.onConnectionOpen("peer1", "outbound");
+    bindings.peerManager.onConnectionOpen("peer2", "inbound");
+    const types = bindings.peerManager.goodbyeAndDisconnectAllPeers().map((a: {type: string}) => a.type);
+    expect(types.filter((t: string) => t === "send_goodbye")).toHaveLength(2);
+    expect(types.filter((t: string) => t === "disconnect_peer")).toHaveLength(2);
+  });
+
+  it("reconcileConnectedPeers prunes leaked store entries", () => {
+    bindings.peerManager.onConnectionOpen("peer1", "outbound");
+    bindings.peerManager.onConnectionOpen("peer2", "outbound");
+    bindings.peerManager.onConnectionOpen("peer3", "outbound");
+
+    // Within threshold → nothing pruned.
+    expect(bindings.peerManager.reconcileConnectedPeers(["peer1", "peer2", "peer3"])).toBe(0);
+    expect(bindings.peerManager.getConnectedPeerCount()).toBe(3);
+
+    // Only one really connected → the two leaked entries are pruned.
+    expect(bindings.peerManager.reconcileConnectedPeers(["peer2"])).toBe(2);
+    expect(bindings.peerManager.getConnectedPeers()).toEqual(["peer2"]);
+  });
+
   it("heartbeat discovery includes custody group queries when sampling groups are set", () => {
     bindings.peerManager.setSamplingGroups([0, 1, 2]);
     const actions = bindings.peerManager.heartbeat(100, localStatus);

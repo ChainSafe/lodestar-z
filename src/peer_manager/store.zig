@@ -93,6 +93,27 @@ pub const PeerStore = struct {
         self.allocator.free(kv.key);
     }
 
+    /// Remove every tracked peer not present in `keep_ids`. Returns the number
+    /// of peers pruned. Used to recover from missed disconnect events.
+    pub fn pruneNotIn(self: *PeerStore, keep_ids: []const []const u8) !u32 {
+        var keep = std.StringHashMap(void).init(self.allocator);
+        defer keep.deinit();
+        for (keep_ids) |id| try keep.put(id, {});
+
+        // Collect stale keys first — the map can't be mutated while iterating.
+        var stale: std.ArrayList([]const u8) = .empty;
+        defer stale.deinit(self.allocator);
+        var iter = self.peers.iterator();
+        while (iter.next()) |entry| {
+            if (!keep.contains(entry.key_ptr.*)) {
+                try stale.append(self.allocator, entry.key_ptr.*);
+            }
+        }
+
+        for (stale.items) |key| self.removePeer(key);
+        return @intCast(stale.items.len);
+    }
+
     pub fn contains(self: *const PeerStore, peer_id: []const u8) bool {
         return self.peers.contains(peer_id);
     }

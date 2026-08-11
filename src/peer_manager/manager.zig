@@ -116,6 +116,46 @@ pub const PeerManager = struct {
         return self.actions.items;
     }
 
+    /// Force an immediate status round for the given peers. Port of TS
+    /// reStatusPeers: reset each peer's status timer, then run the ping/status
+    /// timer check so a fresh status is requested (used by sync when a target
+    /// is reached). Untracked peer ids are ignored.
+    pub fn reStatusPeers(self: *PeerManager, peer_ids: []const []const u8) ![]const Action {
+        for (peer_ids) |peer_id| {
+            self.store.updateLastStatus(peer_id, 0);
+        }
+        return self.checkPingAndStatus();
+    }
+
+    /// Goodbye + disconnect every connected peer with CLIENT_SHUTDOWN. Port of
+    /// TS goodbyeAndDisconnectAllPeers, used on graceful shutdown.
+    pub fn goodbyeAndDisconnectAllPeers(self: *PeerManager) ![]const Action {
+        self.resetActionState();
+        var iter = self.store.iterPeers();
+        while (iter.next()) |entry| {
+            const peer_id = entry.value_ptr.peer_id;
+            _ = self.scorer.applyReconnectionCoolDown(peer_id, .client_shutdown);
+            try self.actions.append(self.allocator, .{ .send_goodbye = .{
+                .peer_id = peer_id,
+                .reason = .client_shutdown,
+            } });
+            try self.actions.append(self.allocator, .{ .disconnect_peer = peer_id });
+        }
+        return self.actions.items;
+    }
+
+    /// Reconcile the peer store against the authoritative set of connected peer
+    /// ids (from libp2p), dropping entries left behind by missed disconnect
+    /// events. Port of the TS heartbeat prune: only runs when the store has
+    /// grown more than 10% beyond the real set. Returns the number pruned so
+    /// the caller can record the leaked-connection metric.
+    pub fn reconcileConnectedPeers(self: *PeerManager, connected_peer_ids: []const []const u8) !u32 {
+        const store_count: f64 = @floatFromInt(self.store.getConnectedPeerCount());
+        const actual_count: f64 = @floatFromInt(connected_peer_ids.len);
+        if (store_count <= actual_count * 1.1) return 0;
+        return self.store.pruneNotIn(connected_peer_ids);
+    }
+
     // ── Event Handlers ──────────────────────────────────────────────
 
     pub fn onConnectionOpen(
@@ -962,6 +1002,78 @@ test "onGoodbye — emits disconnect only" {
     const actions = try pm.onGoodbye("peer-a", .client_shutdown);
     try std.testing.expectEqual(@as(usize, 1), actions.len);
     try std.testing.expect(actions[0] == .disconnect_peer);
+}
+
+test "reStatusPeers — forces a status request for the named peers" {
+    // Clock must exceed the status interval so a reset last_status (0) crosses it.
+    test_clock_value = 1_000_000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    _ = try pm.onConnectionOpen("peer-a", .outbound);
+    const local = makeLocalStatus();
+    // Satisfies the status timer (last_status = now).
+    _ = try pm.onStatusReceived("peer-a", local, local, 320);
+
+    // With the status timer satisfied, a plain timer check emits no status.
+    const before = try pm.checkPingAndStatus();
+    for (before) |a| try std.testing.expect(a != .send_status);
+
+    // reStatusPeers resets the timer and re-requests status.
+    const ids = [_][]const u8{"peer-a"};
+    const actions = try pm.reStatusPeers(&ids);
+    var has_status = false;
+    for (actions) |a| {
+        if (a == .send_status) has_status = true;
+    }
+    try std.testing.expect(has_status);
+}
+
+test "reconcileConnectedPeers — prunes leaked entries beyond the 10% threshold" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    _ = try pm.onConnectionOpen("peer-a", .outbound);
+    _ = try pm.onConnectionOpen("peer-b", .outbound);
+    _ = try pm.onConnectionOpen("peer-c", .outbound);
+
+    // Authoritative set still lists all three (within threshold) → no prune.
+    const all = [_][]const u8{ "peer-a", "peer-b", "peer-c" };
+    try std.testing.expectEqual(@as(u32, 0), try pm.reconcileConnectedPeers(&all));
+    try std.testing.expectEqual(@as(u32, 3), pm.getConnectedPeerCount());
+
+    // Only one peer really connected: store (3) > 1 * 1.1 → prune the two leaks.
+    const one = [_][]const u8{"peer-b"};
+    try std.testing.expectEqual(@as(u32, 2), try pm.reconcileConnectedPeers(&one));
+    try std.testing.expectEqual(@as(u32, 1), pm.getConnectedPeerCount());
+    try std.testing.expect(pm.store.contains("peer-b"));
+    try std.testing.expect(!pm.store.contains("peer-a"));
+}
+
+test "goodbyeAndDisconnectAllPeers — goodbye + disconnect for every peer" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    _ = try pm.onConnectionOpen("peer-a", .outbound);
+    _ = try pm.onConnectionOpen("peer-b", .inbound);
+
+    const actions = try pm.goodbyeAndDisconnectAllPeers();
+    // Two actions (goodbye + disconnect) per peer.
+    try std.testing.expectEqual(@as(usize, 4), actions.len);
+    var goodbyes: usize = 0;
+    var disconnects: usize = 0;
+    for (actions) |a| switch (a) {
+        .send_goodbye => |g| {
+            goodbyes += 1;
+            try std.testing.expectEqual(GoodbyeReasonCode.client_shutdown, g.reason);
+        },
+        .disconnect_peer => disconnects += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), goodbyes);
+    try std.testing.expectEqual(@as(usize, 2), disconnects);
 }
 
 test "checkPingAndStatus — inbound past interval emits ping" {
