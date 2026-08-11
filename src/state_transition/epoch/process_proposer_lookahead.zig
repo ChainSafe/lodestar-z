@@ -78,6 +78,7 @@ pub fn processProposerLookahead(
 }
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 
 test "processProposerLookahead sanity" {
     const allocator = std.testing.allocator;
@@ -103,4 +104,58 @@ test "processProposerLookahead sanity" {
         test_state.cached_state.state.castToFork(.fulu),
         test_state.epoch_transition_cache,
     );
+}
+
+fn tryGloasProposerLookahead(
+    allocator: Allocator,
+    epoch_cache: *EpochCache,
+    baseline_state: *BeaconState(.gloas),
+    baseline_cache: *const EpochTransitionCache,
+) !void {
+    var state = try baseline_state.clone(.{ .transfer_cache = false });
+    defer state.deinit();
+
+    var cache = baseline_cache.*;
+    cache.next_shuffling = null;
+    defer if (cache.next_shuffling) |shuffling| shuffling.deinit();
+
+    try processProposerLookahead(.gloas, allocator, epoch_cache, &state, &cache);
+}
+
+test "Gloas proposer lookahead - OOM does not leak or double-free shuffling allocations" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.initGloas(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var saw_oom = false;
+    var saw_success = false;
+    var fail_at: usize = 0;
+    while (fail_at < 2048) : (fail_at += 1) {
+        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
+        defer oom.deinit();
+
+        tryGloasProposerLookahead(
+            oom.allocator(),
+            test_state.cached_state.epoch_cache,
+            test_state.cached_state.state.castToFork(.gloas),
+            test_state.epoch_transition_cache,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_oom = true;
+                try std.testing.expect(!oom.double_free);
+                continue;
+            },
+            else => return err,
+        };
+
+        try std.testing.expect(!oom.double_free);
+        saw_success = true;
+        break;
+    }
+
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(saw_success);
 }

@@ -371,3 +371,47 @@ pub fn initializePtcWindow(
 
     return ptc_window;
 }
+
+const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
+
+test "Gloas PTC window fallback - OOM does not leak or double-free shuffling allocations" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.initGloas(allocator, &pool, 256);
+    defer test_state.deinit();
+    const state = test_state.cached_state.state.castToFork(.gloas);
+    try state.setSlot(try state.slot() + 2 * preset.SLOTS_PER_EPOCH);
+
+    var saw_oom = false;
+    var saw_success = false;
+    var fail_at: usize = 0;
+    while (fail_at < 512) : (fail_at += 1) {
+        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
+        defer oom.deinit();
+
+        _ = initializePtcWindow(
+            .gloas,
+            oom.allocator(),
+            test_state.cached_state.epoch_cache,
+            state,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_oom = true;
+                try std.testing.expect(!oom.double_free);
+                continue;
+            },
+            else => return err,
+        };
+
+        try std.testing.expect(!oom.double_free);
+        saw_success = true;
+        break;
+    }
+
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(saw_success);
+}

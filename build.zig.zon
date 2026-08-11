@@ -201,6 +201,7 @@
                 .metrics,
                 .hashing,
                 .time,
+                .testing_allocators,
             },
         },
         .era = .{

@@ -163,3 +163,78 @@ pub fn processBlock(
         }
     }
 }
+
+const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const generateGloasBlock = @import("../test_utils/root.zig").generateGloasBlock;
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
+
+fn tryGloasBlock(
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *EpochCache,
+    baseline: *BeaconState(.gloas),
+    block: *const types.gloas.BeaconBlock.Type,
+) !void {
+    var state = try baseline.clone(.{ .transfer_cache = false });
+    defer state.deinit();
+    var slashings_cache = try SlashingsCache.initEmpty(std.testing.allocator);
+    defer slashings_cache.deinit();
+    const fork_block = BeaconBlock(.full, .gloas){ .inner = block.* };
+
+    try processBlock(
+        .gloas,
+        allocator,
+        std.testing.io,
+        config,
+        epoch_cache,
+        &state,
+        &slashings_cache,
+        .full,
+        &fork_block,
+        .{},
+        .{ .verify_signature = false },
+    );
+}
+
+test "Gloas process block - OOM does not leak or double-free transient allocations" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.initGloas(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var block: types.gloas.BeaconBlock.Type = undefined;
+    try generateGloasBlock(test_state.cached_state, &block);
+
+    var saw_oom = false;
+    var saw_success = false;
+    var fail_at: usize = 0;
+    while (fail_at < 512) : (fail_at += 1) {
+        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
+        defer oom.deinit();
+
+        tryGloasBlock(
+            oom.allocator(),
+            test_state.cached_state.config,
+            test_state.cached_state.epoch_cache,
+            test_state.cached_state.state.castToFork(.gloas),
+            &block,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_oom = true;
+                try std.testing.expect(!oom.double_free);
+                continue;
+            },
+            else => return err,
+        };
+
+        try std.testing.expect(!oom.double_free);
+        saw_success = true;
+        break;
+    }
+
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(saw_success);
+}

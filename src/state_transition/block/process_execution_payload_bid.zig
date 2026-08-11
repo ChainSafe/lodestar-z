@@ -95,3 +95,119 @@ fn verifyExecutionPayloadBidSignature(
     verify(&signing_root, &public_key, &signature, .{}) catch return false;
     return true;
 }
+
+const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const interopSign = @import("../test_utils/root.zig").interopSign;
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
+
+fn addTestBuilder(state: *BeaconState(.gloas), amount: u64) !void {
+    var validators = try state.validators();
+    var validator: types.phase0.Validator.Type = undefined;
+    try validators.getValue(undefined, 0, &validator);
+
+    const builder = types.gloas.Builder.Type{
+        .pubkey = validator.pubkey,
+        .version = c.PAYLOAD_BUILDER_VERSION,
+        .execution_address = [_]u8{0x42} ** 20,
+        .balance = preset.MIN_DEPOSIT_AMOUNT + amount,
+        .deposit_epoch = 0,
+        .withdrawable_epoch = c.FAR_FUTURE_EPOCH,
+    };
+    var builders = try state.inner.get("builders");
+    try builders.pushValue(&builder);
+    try state.inner.set("builders", builders);
+    try state.commit();
+}
+
+fn makeSignedTestBid(
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    state: *BeaconState(.gloas),
+    amount: u64,
+) !types.gloas.SignedExecutionPayloadBid.Type {
+    const slot = try state.slot();
+    const parent_block_hash = try state.inner.getFieldRoot("latest_block_hash");
+    const parent_block_root = try getBlockRootAtSlot(.gloas, state, slot - 1);
+    const prev_randao = try getRandaoMix(.gloas, state, epoch_cache.epoch);
+
+    var signed_bid = types.gloas.SignedExecutionPayloadBid.default_value;
+    signed_bid.message.parent_block_hash = parent_block_hash.*;
+    signed_bid.message.parent_block_root = parent_block_root.*;
+    signed_bid.message.prev_randao = prev_randao.*;
+    signed_bid.message.builder_index = 0;
+    signed_bid.message.slot = slot;
+    signed_bid.message.value = amount;
+    try signed_bid.message.blob_kzg_commitments.append(
+        allocator,
+        types.primitive.KZGCommitment.default_value,
+    );
+
+    const signing_root = try getExecutionPayloadBidSigningRoot(allocator, config, slot, &signed_bid.message);
+    signed_bid.signature = (try interopSign(0, &signing_root)).compress();
+    return signed_bid;
+}
+
+fn tryExternalBuilderBid(
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    baseline: *BeaconState(.gloas),
+    signed_bid: *const types.gloas.SignedExecutionPayloadBid.Type,
+) !void {
+    var state = try baseline.clone(.{ .transfer_cache = false });
+    defer state.deinit();
+    try processExecutionPayloadBid(allocator, config, epoch_cache, &state, signed_bid);
+}
+
+test "Gloas external builder bid - OOM does not leak or double-free transient allocations" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.initGloas(allocator, &pool, 256);
+    defer test_state.deinit();
+    const state = test_state.cached_state.state.castToFork(.gloas);
+    const bid_amount = 1;
+    try addTestBuilder(state, bid_amount);
+
+    var signed_bid = try makeSignedTestBid(
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        state,
+        bid_amount,
+    );
+    defer types.gloas.SignedExecutionPayloadBid.deinit(allocator, &signed_bid);
+
+    var saw_oom = false;
+    var saw_success = false;
+    var fail_at: usize = 0;
+    while (fail_at < 128) : (fail_at += 1) {
+        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
+        defer oom.deinit();
+
+        tryExternalBuilderBid(
+            oom.allocator(),
+            test_state.cached_state.config,
+            test_state.cached_state.epoch_cache,
+            state,
+            &signed_bid,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_oom = true;
+                try std.testing.expect(!oom.double_free);
+                continue;
+            },
+            else => return err,
+        };
+
+        try std.testing.expect(!oom.double_free);
+        saw_success = true;
+        break;
+    }
+
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(saw_success);
+}

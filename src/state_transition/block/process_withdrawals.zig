@@ -515,6 +515,32 @@ fn getBuildersSweepWithdrawals(
     return .{ .withdrawals = builders_sweep_withdrawals, .processed_count = processed_count };
 }
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
+
+fn addGloasWithdrawalInputs(state: *BeaconState(.gloas)) !void {
+    var builders = try state.inner.get("builders");
+    const builder = types.gloas.Builder.Type{
+        .pubkey = [_]u8{0x11} ** 48,
+        .version = c.PAYLOAD_BUILDER_VERSION,
+        .execution_address = [_]u8{0x22} ** 20,
+        .balance = 64,
+        .deposit_epoch = 0,
+        .withdrawable_epoch = 0,
+    };
+    try builders.pushValue(&builder);
+    try state.inner.set("builders", builders);
+
+    var builder_pending_withdrawals = try state.inner.get("builder_pending_withdrawals");
+    const pending_withdrawal = types.gloas.BuilderPendingWithdrawal.Type{
+        .fee_recipient = [_]u8{0x33} ** 20,
+        .amount = 8,
+        .builder_index = 0,
+    };
+    try builder_pending_withdrawals.pushValue(&pending_withdrawal);
+    try state.inner.set("builder_pending_withdrawals", builder_pending_withdrawals);
+    try state.inner.set("next_withdrawal_builder_index", @as(u64, 0));
+    try state.commit();
+}
 
 test "process withdrawals - sanity" {
     const allocator = std.testing.allocator;
@@ -553,4 +579,130 @@ test "process withdrawals - sanity" {
         withdrawals_result,
         root,
     );
+}
+
+test "gloas expected withdrawals - OOM does not double-free transient allocations" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.initGloas(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const state = test_state.cached_state.state.castToFork(.gloas);
+    try addGloasWithdrawalInputs(state);
+
+    var saw_oom = false;
+    var saw_success = false;
+    var fail_at: usize = 0;
+    while (fail_at < 512) : (fail_at += 1) {
+        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
+        defer oom.deinit();
+        const fault_allocator = oom.allocator();
+
+        var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]Withdrawal = undefined;
+        var withdrawals_result = WithdrawalsResult{
+            .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
+        };
+        var call_error: ?anyerror = null;
+        {
+            var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(fault_allocator);
+            defer withdrawal_balances.deinit();
+
+            getExpectedWithdrawals(
+                .gloas,
+                fault_allocator,
+                test_state.cached_state.epoch_cache,
+                state,
+                &withdrawals_result,
+                &withdrawal_balances,
+            ) catch |err| {
+                call_error = err;
+            };
+        }
+
+        try std.testing.expect(!oom.double_free);
+        if (call_error) |err| switch (err) {
+            error.OutOfMemory => {
+                saw_oom = true;
+                continue;
+            },
+            else => return err,
+        };
+
+        saw_success = true;
+        try std.testing.expectEqual(@as(usize, 2), withdrawals_result.withdrawals.items.len);
+        try std.testing.expectEqual(@as(usize, 1), withdrawals_result.processed_builder_withdrawals_count);
+        try std.testing.expectEqual(@as(usize, 1), withdrawals_result.processed_builders_sweep_count);
+        for (withdrawals_result.withdrawals.items) |withdrawal| {
+            try std.testing.expect(isBuilderIndex(withdrawal.validator_index));
+        }
+        break;
+    }
+
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(saw_success);
+}
+
+test "gloas process withdrawals - mutation path applies builder withdrawals and truncates queues" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.initGloas(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    const state = test_state.cached_state.state.castToFork(.gloas);
+    try addGloasWithdrawalInputs(state);
+
+    // processWithdrawals is a no-op unless the parent block is full; the test is only
+    // meaningful when the precondition holds.
+    try std.testing.expect(try isParentBlockFull(state));
+
+    const initial_next_withdrawal_index = try state.nextWithdrawalIndex();
+
+    var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]Withdrawal = undefined;
+    var withdrawals_result = WithdrawalsResult{
+        .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
+    };
+    var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
+    defer withdrawal_balances.deinit();
+
+    try getExpectedWithdrawals(
+        .gloas,
+        allocator,
+        test_state.cached_state.epoch_cache,
+        state,
+        &withdrawals_result,
+        &withdrawal_balances,
+    );
+
+    // 8 from the builder payment queue + 56 sweeping the remaining builder balance.
+    try std.testing.expectEqual(@as(usize, 2), withdrawals_result.withdrawals.items.len);
+
+    // payload_withdrawals_root is unused for gloas (parent payload verifies later), pass zeroes.
+    try processWithdrawals(.gloas, allocator, state, withdrawals_result, [_]u8{0} ** 32);
+
+    // Commit so the assertions read back through the committed tree, not just cached child views.
+    try state.commit();
+
+    // applyWithdrawals drained the single builder: 64 - 8 (payment) - 56 (sweep) == 0.
+    var builders_view = try state.inner.getReadonly("builders");
+    var builder: types.gloas.Builder.Type = undefined;
+    try builders_view.getValue(allocator, 0, &builder);
+    try std.testing.expectEqual(@as(u64, 0), builder.balance);
+
+    // The processed builder payment was truncated off the queue.
+    var builder_pending_withdrawals = try state.inner.getReadonly("builder_pending_withdrawals");
+    try std.testing.expectEqual(@as(usize, 0), try builder_pending_withdrawals.length());
+
+    // Both expected withdrawals were recorded for parent-payload verification.
+    var payload_expected_withdrawals = try state.inner.getReadonly("payload_expected_withdrawals");
+    try std.testing.expectEqual(@as(usize, 2), try payload_expected_withdrawals.length());
+
+    // Sweep advanced the builder cursor by processed_builders_sweep_count (1) modulo builders_len (1).
+    try std.testing.expectEqual(@as(u64, 0), try state.inner.getReadonly("next_withdrawal_builder_index"));
+
+    // Withdrawal index advanced by the two withdrawals produced this block.
+    try std.testing.expectEqual(initial_next_withdrawal_index + 2, try state.nextWithdrawalIndex());
 }

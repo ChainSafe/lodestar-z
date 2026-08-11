@@ -138,3 +138,62 @@ fn onboardBuildersFromPendingDeposits(
     }
     try state.setPendingDeposits(new_pending);
 }
+
+const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
+
+fn tryGloasUpgrade(
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    baseline: *BeaconState(.fulu),
+) !void {
+    var fulu_state = try baseline.clone(.{ .transfer_cache = false });
+    var owns_fulu_state = true;
+    defer if (owns_fulu_state) fulu_state.deinit();
+
+    var gloas_state = try upgradeStateToGloas(allocator, std.testing.io, config, epoch_cache, &fulu_state);
+    owns_fulu_state = false;
+    defer gloas_state.deinit();
+}
+
+test "Gloas fork upgrade - OOM does not double-free transient allocations" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.initElectraForGloas(allocator, &pool, 64);
+    defer test_state.deinit();
+    try test_state.upgradeToFuluForGloas(allocator);
+    const baseline = test_state.cached_state.state.castToFork(.fulu);
+
+    var saw_oom = false;
+    var saw_success = false;
+    var fail_at: usize = 0;
+    while (fail_at < 256) : (fail_at += 1) {
+        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
+        defer oom.deinit();
+
+        tryGloasUpgrade(
+            oom.allocator(),
+            test_state.cached_state.config,
+            test_state.cached_state.epoch_cache,
+            baseline,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_oom = true;
+                try std.testing.expect(!oom.double_free);
+                continue;
+            },
+            else => return err,
+        };
+
+        try std.testing.expect(!oom.double_free);
+        saw_success = true;
+        break;
+    }
+
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(saw_success);
+}

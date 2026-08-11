@@ -42,3 +42,32 @@ pub fn getIndexedPayloadAttestationSignatureSet(
 
     return createAggregateSignatureSetFromComponents(pubkeys, signing_root, indexed_payload_attestation.signature);
 }
+
+const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
+// The pubkey lookup is fallible, so it can fail after `pubkeys` is allocated. The OOM suite only
+// injects allocator failures, so it never reaches this branch; std.testing.allocator fails the test
+// if the errdefer does not release `pubkeys`.
+test "Gloas indexed payload attestation - unknown validator index does not leak pubkeys" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.initGloas(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var indexed = types.gloas.IndexedPayloadAttestation.default_value;
+    defer indexed.attesting_indices.deinit(allocator);
+    // First index is valid, second is past the end of the pubkey cache.
+    try indexed.attesting_indices.append(allocator, 0);
+    try indexed.attesting_indices.append(allocator, 1_000_000);
+
+    try std.testing.expectError(error.PubkeyNotFound, getIndexedPayloadAttestationSignatureSet(
+        allocator,
+        std.testing.io,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        &indexed,
+    ));
+}
