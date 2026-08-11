@@ -29,6 +29,7 @@ const ComputeShuffledIndex = struct {
         }
 
         var arena = std.heap.ArenaAllocator.init(parent_allocator);
+        errdefer arena.deinit();
         const allocator = arena.allocator();
 
         const pivot_by_index = try allocator.alloc(?u64, @intCast(rounds));

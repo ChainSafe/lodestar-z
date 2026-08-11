@@ -591,9 +591,9 @@ pub const EpochTransitionCache = struct {
         if (self.next_shuffling) |next_shuffling| return next_shuffling;
 
         const active_indices = try allocator.alloc(ValidatorIndex, self.next_shuffling_active_indices.len);
-        errdefer allocator.free(active_indices);
         std.mem.copyForwards(ValidatorIndex, active_indices, self.next_shuffling_active_indices);
 
+        // computeEpochShuffling takes ownership of active_indices on both success and failure.
         self.next_shuffling = try computeEpochShuffling(
             allocator,
             state,
