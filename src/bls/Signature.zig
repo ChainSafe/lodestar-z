@@ -27,7 +27,7 @@ pub fn validate(self: *const Self, sig_infcheck: bool) BlstError!void {
 pub fn verify(
     self: *const Self,
     sig_groupcheck: bool,
-    msg: []const u8,
+    msg: *const SigningRoot,
     dst: []const u8,
     aug: ?[]const u8,
     pk: *const PublicKey,
@@ -36,7 +36,7 @@ pub fn verify(
     if (sig_groupcheck) try self.validate(false);
     if (pk_validate) try pk.validate();
 
-    if (msg.len == 0 or dst.len == 0) {
+    if (dst.len == 0) {
         return BlstError.BadEncoding;
     }
 
@@ -44,8 +44,8 @@ pub fn verify(
         @ptrCast(&pk.point),
         &self.point,
         true,
-        msg.ptr,
-        msg.len,
+        msg,
+        @sizeOf(SigningRoot),
         dst.ptr,
         dst.len,
         if (aug) |a| a.ptr else null,
@@ -62,7 +62,7 @@ pub fn aggregateVerify(
     self: *const Self,
     sig_groupcheck: bool,
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
-    msgs: []const [32]u8,
+    msgs: []const SigningRoot,
     dst: []const u8,
     pks: []const PublicKey,
     pks_validate: bool,
@@ -106,7 +106,7 @@ pub fn fastAggregateVerify(
     self: *const Self,
     sig_groupcheck: bool,
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
-    msg: *const [32]u8,
+    msg: *const SigningRoot,
     dst: []const u8,
     pks: []const PublicKey,
     pks_validate: bool,
@@ -131,7 +131,7 @@ pub fn fastAggregateVerifyPreAggregated(
     self: *const Self,
     sig_groupcheck: bool,
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
-    msg: *const [32]u8,
+    msg: *const SigningRoot,
     dst: []const u8,
     pk: *const PublicKey,
 ) BlstError!bool {
@@ -139,7 +139,7 @@ pub fn fastAggregateVerifyPreAggregated(
     return try self.aggregateVerify(
         sig_groupcheck,
         buffer,
-        @ptrCast(msg),
+        @as([*]const SigningRoot, @ptrCast(msg))[0..1],
         dst,
         pks[0..1],
         false,
@@ -216,6 +216,7 @@ const c = @import("root.zig").c;
 const BlstError = @import("error.zig").BlstError;
 const errorFromInt = @import("error.zig").errorFromInt;
 const PublicKey = @import("root.zig").PublicKey;
+const SigningRoot = @import("root.zig").SigningRoot;
 const AggregatePublicKey = @import("AggregatePublicKey.zig");
 const AggregateSignature = @import("AggregateSignature.zig");
 const Pairing = @import("Pairing.zig");
@@ -231,7 +232,8 @@ const ikm: [32]u8 = [_]u8{
 
 test uncompress {
     const sk = try SecretKey.keyGen(&ikm, null);
-    const sig = sk.sign("hello foo", DST, null);
+    const signing_root = [_]u8{0x42} ** 32;
+    const sig = sk.sign(&signing_root, DST, null);
     const sig_comp = sig.compress();
 
     // Valid compressed bytes round-trip.
@@ -257,13 +259,13 @@ test "test_sign_n_verify" {
     const pk = sk.toPublicKey();
 
     const dst = DST;
-    const msg = "hello foo";
-    const sig = sk.sign(msg, dst, null);
+    const signing_root = [_]u8{0x42} ** 32;
+    const sig = sk.sign(&signing_root, dst, null);
 
     // aug is null
     try sig.verify(
         true,
-        msg,
+        &signing_root,
         dst,
         null,
         &pk,

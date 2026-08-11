@@ -122,13 +122,13 @@ pub fn toPublicKey(self: *const Self) PublicKey {
 }
 
 /// Sign a message with this `SecretKey`. Returns the `Signature` for the message.
-pub fn sign(self: *const Self, msg: []const u8, dst: []const u8, aug: ?[]const u8) Signature {
+pub fn sign(self: *const Self, msg: *const SigningRoot, dst: []const u8, aug: ?[]const u8) Signature {
     var sig = Signature{};
     var q = @import("AggregateSignature.zig"){};
     c.blst_hash_to_g2(
         @ptrCast(&q.point),
-        msg.ptr,
-        msg.len,
+        msg,
+        @sizeOf(SigningRoot),
         dst.ptr,
         dst.len,
         if (aug) |a| a.ptr else null,
@@ -163,6 +163,7 @@ const check = @import("error.zig").check;
 const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
+const SigningRoot = blst.SigningRoot;
 
 const c = @import("root.zig").c;
 
