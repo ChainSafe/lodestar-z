@@ -86,6 +86,16 @@ fn configFromObject(env: napi.Env, obj: napi.Value) !Config {
     config.gossipsub_negative_score_weight = try (try obj.getNamedProperty("gossipsubNegativeScoreWeight")).getValueDouble();
     config.gossipsub_positive_score_weight = try (try obj.getNamedProperty("gossipsubPositiveScoreWeight")).getValueDouble();
     config.negative_gossip_score_ignore_threshold = try (try obj.getNamedProperty("negativeGossipScoreIgnoreThreshold")).getValueDouble();
+    // The weights are positive multipliers applied to the gossip score; a
+    // negative weight would invert the sign so a negative gossip score would
+    // *raise* the peer's score. The ignore threshold is a negative floor. Reject
+    // inverted configs at init rather than silently mis-scoring peers.
+    if (config.gossipsub_negative_score_weight < 0 or
+        config.gossipsub_positive_score_weight < 0 or
+        config.negative_gossip_score_ignore_threshold > 0)
+    {
+        return error.InvalidGossipScoreConfig;
+    }
     config.number_of_custody_groups = try (try obj.getNamedProperty("numberOfCustodyGroups")).getValueUint32();
     config.custody_requirement = try getU64Property(obj, "custodyRequirement");
     config.samples_per_slot = try getU64Property(obj, "samplesPerSlot");

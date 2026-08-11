@@ -13,9 +13,9 @@ const defaultConfig = {
   pingIntervalOutboundMs: 20000,
   statusIntervalMs: 300000,
   statusInboundGracePeriodMs: 15000,
-  gossipsubNegativeScoreWeight: -0.5,
-  gossipsubPositiveScoreWeight: 0.5,
-  negativeGossipScoreIgnoreThreshold: -100,
+  gossipsubNegativeScoreWeight: 0.001,
+  gossipsubPositiveScoreWeight: 0.001,
+  negativeGossipScoreIgnoreThreshold: -1000,
   disablePeerScoring: false,
   initialForkName: "deneb",
   numberOfCustodyGroups: 128,
@@ -209,6 +209,11 @@ describe("peerManager", () => {
 
   it("setForkName rejects an unknown fork name", () => {
     expect(() => bindings.peerManager.setForkName("notafork")).toThrow();
+  });
+
+  it("init rejects a negative gossip score weight", () => {
+    bindings.peerManager.close();
+    expect(() => bindings.peerManager.init({...defaultConfig, gossipsubNegativeScoreWeight: -0.5})).toThrow();
   });
 
   it("reportPeer rejects an unknown action", () => {
