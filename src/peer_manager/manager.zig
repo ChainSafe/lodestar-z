@@ -302,23 +302,24 @@ pub const PeerManager = struct {
     ) ![]const Action {
         self.resetActionState();
 
-        // Capture the prior custody group count before the metadata is overwritten.
-        const old_custody_group_count: ?u64 = if (self.store.getPeerData(peer_id)) |peer|
-            if (peer.metadata) |md| md.custody_group_count else null
-        else
-            null;
-
-        self.store.updateMetadata(peer_id, metadata);
-
         // TS re-requests STATUS when metadata is first seen or the custody group
         // count changed, so the sync layer re-derives custody columns from a fresh
-        // status. Only meaningful for a tracked peer (updateMetadata no-ops otherwise).
-        if (self.store.contains(peer_id) and
-            (old_custody_group_count == null or
-                old_custody_group_count.? != metadata.custody_group_count))
-        {
+        // status. Decide this against the *current* (pre-update) metadata; only a
+        // tracked peer matters (updateMetadata no-ops for an untracked one).
+        const changed = if (self.store.getPeerData(peer_id)) |peer|
+            if (peer.metadata) |md| md.custody_group_count != metadata.custody_group_count else true
+        else
+            false;
+
+        // Emit the fallible action BEFORE handing metadata ownership to the store.
+        // updateMetadata takes ownership of the custody/sampling arrays, so if the
+        // append OOM'd after it, the NAPI errdefer would free arrays the store now
+        // holds (double-free). Keeping the transfer last (it is infallible) avoids that.
+        if (changed) {
             try self.actions.append(self.allocator, .{ .send_status = peer_id });
         }
+
+        self.store.updateMetadata(peer_id, metadata);
         return self.actions.items;
     }
 
@@ -1008,6 +1009,42 @@ test "onMetadataReceived — untracked peer emits nothing" {
 
     const actions = try pm.onMetadataReceived("peer-unknown", metadataWithCustody(1, 4));
     try std.testing.expectEqual(@as(usize, 0), actions.len);
+}
+
+test "onMetadataReceived — transfers custody array ownership without leaking" {
+    // Uses real heap-allocated custody/sampling arrays so std.testing.allocator
+    // catches a leak or double-free in the ownership handoff. Guards against the
+    // send_status append running after the store takes ownership (which would let
+    // the caller's errdefer double-free the arrays).
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+    _ = try pm.onConnectionOpen("peer-a", .outbound);
+
+    const cg1 = try std.testing.allocator.alloc(u32, 4);
+    const sg1 = try std.testing.allocator.alloc(u32, 8);
+    _ = try pm.onMetadataReceived("peer-a", .{
+        .seq_number = 1,
+        .attnets = [_]u8{0} ** 8,
+        .syncnets = [_]u8{0},
+        .custody_group_count = 4,
+        .custody_groups = cg1,
+        .sampling_groups = sg1,
+    });
+
+    // Changed custody count → store frees the old arrays and takes the new ones.
+    const cg2 = try std.testing.allocator.alloc(u32, 8);
+    const sg2 = try std.testing.allocator.alloc(u32, 8);
+    const actions = try pm.onMetadataReceived("peer-a", .{
+        .seq_number = 2,
+        .attnets = [_]u8{0} ** 8,
+        .syncnets = [_]u8{0},
+        .custody_group_count = 8,
+        .custody_groups = cg2,
+        .sampling_groups = sg2,
+    });
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expect(actions[0] == .send_status);
 }
 
 test "onStatusReceived — untracked irrelevant peer is still disconnected" {

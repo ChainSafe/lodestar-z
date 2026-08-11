@@ -216,6 +216,11 @@ describe("peerManager", () => {
     expect(() => bindings.peerManager.init({...defaultConfig, gossipsubNegativeScoreWeight: -0.5})).toThrow();
   });
 
+  it("init rejects maxPeers below targetPeers", () => {
+    bindings.peerManager.close();
+    expect(() => bindings.peerManager.init({...defaultConfig, targetPeers: 20, maxPeers: 10})).toThrow();
+  });
+
   it("setSubnetRequirements rejects an out-of-range subnet index", () => {
     expect(() =>
       bindings.peerManager.setSubnetRequirements([{subnet: 64, toSlot: 1000}], [])

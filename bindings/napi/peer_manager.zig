@@ -112,6 +112,10 @@ fn configFromObject(env: napi.Env, obj: napi.Value) !Config {
     {
         return error.InvalidGossipScoreConfig;
     }
+    // prioritizePeers computes `max_peers - count` as an unsigned value while
+    // below the target; a maxPeers < targetPeers config would underflow and
+    // panic. Enforce the invariant at init.
+    if (config.max_peers < config.target_peers) return error.InvalidPeerLimits;
     config.number_of_custody_groups = try (try obj.getNamedProperty("numberOfCustodyGroups")).getValueUint32();
     config.custody_requirement = try getU64Property(obj, "custodyRequirement");
     config.samples_per_slot = try getU64Property(obj, "samplesPerSlot");
