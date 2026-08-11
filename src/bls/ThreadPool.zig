@@ -21,7 +21,8 @@ const SigningRoot = blst.SigningRoot;
 const AggregatePublicKey = blst.AggregatePublicKey;
 const AggregateSignature = blst.AggregateSignature;
 const BlstError = @import("error.zig").BlstError;
-const BatchVerifyItem = @import("fast_verify.zig").BatchVerifyItem;
+const fast_verify = @import("fast_verify.zig");
+const BatchVerifyItem = fast_verify.BatchVerifyItem;
 const SecretKey = @import("SecretKey.zig");
 const pippenger = @import("pippenger.zig");
 
@@ -263,6 +264,17 @@ pub fn verifyMultipleAggregateSignatures(
 ) (BlstError || PoolError || std.Io.Cancelable)!bool {
     const n_elems = items.len;
     if (n_elems == 0) return BlstError.VerifyFail;
+
+    if (n_elems <= 2 or pool.n_workers <= 1) {
+        var pairing_buf: PairingBuf = .{};
+        return fast_verify.verifyMultipleAggregateSignatures(
+            &pairing_buf.data,
+            items,
+            dst,
+            pks_validate,
+            sigs_groupcheck,
+        );
+    }
 
     const n_active = @min(pool.n_workers, n_elems);
 
