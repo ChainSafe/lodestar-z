@@ -320,6 +320,12 @@
                 .omit_frame_pointer = false,
             },
         },
+        .bench_pubkey_cache = .{
+            .root_module = .{
+                .root_source_file = "bench/state_transition/pubkey_cache.zig",
+                .imports = .{ .bls, .consensus_types, .state_transition, .zbench },
+            },
+        },
         .bench_process_epoch = .{
             .root_module = .{
                 .root_source_file = "bench/state_transition/process_epoch.zig",
