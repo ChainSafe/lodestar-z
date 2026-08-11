@@ -53,7 +53,7 @@ pub fn processEpoch(
     try observeEpochTransitionStep(.{ .step = .process_registry_updates }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
     timer = time.start(io);
-    const slashing_penalties = try processSlashings(fork, allocator, epoch_cache, state, cache, false);
+    const slashing_penalties = try processSlashings(fork, epoch_cache, state, cache, false);
     try observeEpochTransitionStep(.{ .step = .process_slashings }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
     timer = time.start(io);
