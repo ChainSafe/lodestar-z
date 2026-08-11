@@ -55,6 +55,17 @@ fn getManager() !*PeerManager {
     return error.PeerManagerNotInitialized;
 }
 
+/// Rejects negatives rather than letting `@intCast` trap and abort the process
+/// on a malicious peer's out-of-range `uint64` wire value.
+fn checkedU64(raw: i64) !u64 {
+    if (raw < 0) return error.NegativeValueForUnsignedField;
+    return @intCast(raw);
+}
+
+fn getU64Property(obj: napi.Value, name: [:0]const u8) !u64 {
+    return checkedU64(try (try obj.getNamedProperty(name)).getValueInt64());
+}
+
 fn configFromObject(env: napi.Env, obj: napi.Value) !Config {
     _ = env;
     var config: Config = .{
@@ -76,9 +87,9 @@ fn configFromObject(env: napi.Env, obj: napi.Value) !Config {
     config.gossipsub_positive_score_weight = try (try obj.getNamedProperty("gossipsubPositiveScoreWeight")).getValueDouble();
     config.negative_gossip_score_ignore_threshold = try (try obj.getNamedProperty("negativeGossipScoreIgnoreThreshold")).getValueDouble();
     config.number_of_custody_groups = try (try obj.getNamedProperty("numberOfCustodyGroups")).getValueUint32();
-    config.custody_requirement = @intCast(try (try obj.getNamedProperty("custodyRequirement")).getValueInt64());
-    config.samples_per_slot = @intCast(try (try obj.getNamedProperty("samplesPerSlot")).getValueInt64());
-    config.slots_per_epoch = @intCast(try (try obj.getNamedProperty("slotsPerEpoch")).getValueInt64());
+    config.custody_requirement = try getU64Property(obj, "custodyRequirement");
+    config.samples_per_slot = try getU64Property(obj, "samplesPerSlot");
+    config.slots_per_epoch = try getU64Property(obj, "slotsPerEpoch");
 
     // Boolean
     config.disable_peer_scoring = try (try obj.getNamedProperty("disablePeerScoring")).getValueBool();
@@ -103,20 +114,20 @@ fn statusFromObject(_: napi.Env, obj: napi.Value) !Status {
     if (finalized_root_info.data.len != 32) return error.InvalidFinalizedRootLength;
     @memcpy(&status.finalized_root, finalized_root_info.data[0..32]);
 
-    status.finalized_epoch = @intCast(try (try obj.getNamedProperty("finalizedEpoch")).getValueInt64());
+    status.finalized_epoch = try getU64Property(obj, "finalizedEpoch");
 
     const head_root_info = try (try obj.getNamedProperty("headRoot")).getTypedarrayInfo();
     if (head_root_info.data.len != 32) return error.InvalidHeadRootLength;
     @memcpy(&status.head_root, head_root_info.data[0..32]);
 
-    status.head_slot = @intCast(try (try obj.getNamedProperty("headSlot")).getValueInt64());
+    status.head_slot = try getU64Property(obj, "headSlot");
 
     const eas_value = try obj.getNamedProperty("earliestAvailableSlot");
     const eas_type = try eas_value.typeof();
     if (eas_type == .undefined or eas_type == .null) {
         status.earliest_available_slot = null;
     } else {
-        status.earliest_available_slot = @intCast(try eas_value.getValueInt64());
+        status.earliest_available_slot = try getU64Property(obj, "earliestAvailableSlot");
     }
 
     return status;
@@ -329,7 +340,7 @@ pub fn onMetadataReceived(peer_id_arg: js.String, metadata_arg: js.Value) !void 
     const md_obj = try metadata_arg.toValue().coerceToObject();
 
     var metadata: Metadata = undefined;
-    metadata.seq_number = @intCast(try (try md_obj.getNamedProperty("seqNumber")).getValueInt64());
+    metadata.seq_number = try getU64Property(md_obj, "seqNumber");
 
     const attnets_info = try (try md_obj.getNamedProperty("attnets")).getTypedarrayInfo();
     if (attnets_info.data.len != 8) return error.InvalidAttnetsLength;
@@ -339,7 +350,7 @@ pub fn onMetadataReceived(peer_id_arg: js.String, metadata_arg: js.Value) !void 
     if (syncnets_info.data.len != 1) return error.InvalidSyncnetsLength;
     @memcpy(&metadata.syncnets, syncnets_info.data[0..1]);
 
-    metadata.custody_group_count = @intCast(try (try md_obj.getNamedProperty("custodyGroupCount")).getValueInt64());
+    metadata.custody_group_count = try getU64Property(md_obj, "custodyGroupCount");
     metadata.custody_groups = try parseOptionalU32Array(try md_obj.getNamedProperty("custodyGroups"));
     errdefer if (metadata.custody_groups) |groups| allocator.free(groups);
     metadata.sampling_groups = try parseOptionalU32Array(try md_obj.getNamedProperty("samplingGroups"));
@@ -372,7 +383,7 @@ pub fn onPing(peer_id_arg: js.String, seq_number_arg: js.Number) !napi.Value {
     const m = try getManager();
     const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
-    const seq_number: u64 = @intCast(try seq_number_arg.toI64());
+    const seq_number: u64 = try checkedU64(try seq_number_arg.toI64());
     const actions = try m.onPing(peer_id, seq_number);
     return actionsToNapiArray(js.env(), actions);
 }

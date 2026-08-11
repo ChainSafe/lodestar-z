@@ -130,4 +130,21 @@ describe("peerManager", () => {
     bindings.peerManager.onConnectionOpen("peer1", "outbound");
     expect(() => bindings.peerManager.reportPeer("peer1", "NotARealAction")).toThrow();
   });
+
+  it("onStatusReceived rejects a negative headSlot instead of crashing", () => {
+    bindings.peerManager.onConnectionOpen("peer1", "outbound");
+    const badStatus = {...localStatus, headSlot: -1};
+    expect(() => bindings.peerManager.onStatusReceived("peer1", badStatus, localStatus, 100)).toThrow();
+  });
+
+  it("onMetadataReceived rejects a negative seqNumber instead of crashing", () => {
+    bindings.peerManager.onConnectionOpen("peer1", "outbound");
+    const badMetadata = {
+      seqNumber: -1,
+      attnets: new Uint8Array(8),
+      syncnets: new Uint8Array(1),
+      custodyGroupCount: 4,
+    };
+    expect(() => bindings.peerManager.onMetadataReceived("peer1", badMetadata)).toThrow();
+  });
 });
