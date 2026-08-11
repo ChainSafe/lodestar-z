@@ -96,9 +96,12 @@ pub const PeerManager = struct {
         local_status: Status,
     ) ![]const Action {
         self.resetActionState();
+        const timer = metrics.startTimer();
+        defer metrics.observeHeartbeatDuration(timer);
         self.scorer.decayScores();
         try self.evictBadPeers();
         const starved = self.detectStarvation(current_slot, local_status);
+        metrics.setStarved(starved);
         self.last_head_slot = local_status.head_slot;
         try self.runPrioritization(local_status, starved);
         metrics.setConnectedPeersMapSize(self.store.getConnectedPeerCount());

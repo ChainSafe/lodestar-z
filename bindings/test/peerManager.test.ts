@@ -108,6 +108,15 @@ describe("peerManager", () => {
     expect(Array.isArray(actions)).toBe(true);
   });
 
+  it("scrapes peer manager heartbeat_duration and starved metrics", () => {
+    bindings.metrics.init();
+    bindings.peerManager.onConnectionOpen("peer1", "outbound");
+    bindings.peerManager.heartbeat(100, localStatus);
+    const scraped = bindings.metrics.scrapeMetrics();
+    expect(scraped).toContain("lodestar_peer_manager_heartbeat_duration_seconds");
+    expect(scraped).toContain("lodestar_peer_manager_starved_bool");
+  });
+
   it("reStatusPeers forces a status request for a not-yet-due peer", () => {
     // A freshly-connected inbound peer is not yet due for a status request.
     bindings.peerManager.onConnectionOpen("peer1", "inbound");

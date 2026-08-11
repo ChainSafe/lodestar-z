@@ -46,6 +46,8 @@ const RelevanceResultLabel = struct { result: RelevanceResult };
 const SubnetTypeLabel = struct { type: SubnetType };
 
 const Metrics = struct {
+    heartbeat_duration_seconds: HeartbeatDuration,
+    starved_bool: SizeGauge,
     prioritize_peers_seconds: Duration,
     score_update_seconds: Duration,
     peers_evaluated_count: PeersEvaluated,
@@ -57,6 +59,7 @@ const Metrics = struct {
     connected_peers_map_size: SizeGauge,
     relevance_check_total: RelevanceVec,
 
+    const HeartbeatDuration = m.Histogram(f64, &.{ 0.001, 0.01, 0.1, 1.0 });
     const Duration = m.Histogram(f64, &.{ 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1 });
     const PeersEvaluated = m.Histogram(u32, &.{ 0, 25, 50, 75, 100, 150, 200 });
     const PrunedVec = m.CounterVec(u64, PruneReasonLabel);
@@ -112,6 +115,16 @@ pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !vo
     errdefer relevance_check_total.deinit();
 
     peer_manager = .{
+        .heartbeat_duration_seconds = Metrics.HeartbeatDuration.init(
+            "lodestar_peer_manager_heartbeat_duration_seconds",
+            .{ .help = "Peer manager heartbeat function duration in seconds" },
+            opts,
+        ),
+        .starved_bool = Metrics.SizeGauge.init(
+            "lodestar_peer_manager_starved_bool",
+            .{ .help = "Whether lodestar is starved of data while syncing" },
+            opts,
+        ),
         .prioritize_peers_seconds = Metrics.Duration.init(
             "lodestar_peer_manager_prioritize_peers_seconds",
             .{ .help = "prioritizePeers function duration in seconds, the core peer selection/pruning algorithm" },
@@ -187,6 +200,15 @@ pub fn startTimer() Timer {
 }
 
 // ── Recording helpers (safe no-ops while noop / disabled) ────────────
+
+pub fn observeHeartbeatDuration(timer: Timer) void {
+    const seconds = timer.elapsedSeconds() orelse return;
+    peer_manager.heartbeat_duration_seconds.observe(seconds);
+}
+
+pub fn setStarved(starved: bool) void {
+    peer_manager.starved_bool.set(@intFromBool(starved));
+}
 
 pub fn observePrioritizeDuration(timer: Timer) void {
     const seconds = timer.elapsedSeconds() orelse return;

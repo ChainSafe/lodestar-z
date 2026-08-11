@@ -154,13 +154,15 @@ pub const PeerScorer = struct {
     /// Port of PeerRpcScoreStore.update (store.ts lines 2447-2458).
     /// Decays scores and prunes stale entries.
     pub fn decayScores(self: *PeerScorer) void {
-        if (self.config.disable_peer_scoring) return;
-
+        // Record duration and map size on every heartbeat, even when scoring is
+        // disabled, to match TS (whose MaxScore no-op is per-score, not per-store).
         const timer = metrics.startTimer();
         defer {
             metrics.observeScoreUpdateDuration(timer);
             metrics.setScoreMapSize(self.scores.count());
         }
+
+        if (self.config.disable_peer_scoring) return;
 
         self.pruneToMax();
 
