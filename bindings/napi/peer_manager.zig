@@ -66,6 +66,21 @@ fn getU64Property(obj: napi.Value, name: [:0]const u8) !u64 {
     return checkedU64(try (try obj.getNamedProperty(name)).getValueInt64());
 }
 
+// Upper bounds for subnet indices, matching the per-subnet array sizes in
+// prioritizePeers (attnets `[64]`, syncnets `[8]`). An out-of-range index from
+// the caller would otherwise index out of bounds and panic.
+const ATTESTATION_SUBNET_COUNT: u32 = 64;
+const SYNCNET_SUBNET_SLOTS: u32 = 8;
+
+/// Reads a `{subnet, toSlot}` requirement, rejecting a subnet index that would
+/// index out of bounds of the caller's per-subnet arrays (`max_subnet` is the
+/// array length) and a negative `toSlot`.
+fn readRequestedSubnet(entry: napi.Value, max_subnet: u32) !RequestedSubnet {
+    const subnet = try (try entry.getNamedProperty("subnet")).getValueUint32();
+    if (subnet >= max_subnet) return error.SubnetOutOfRange;
+    return .{ .subnet = subnet, .to_slot = try getU64Property(entry, "toSlot") };
+}
+
 fn configFromObject(env: napi.Env, obj: napi.Value) !Config {
     _ = env;
     var config: Config = .{
@@ -292,7 +307,7 @@ pub fn close() !void {
 /// JS: peerManager.heartbeat(currentSlot, localStatus)
 pub fn heartbeat(current_slot: js.Number, local_status: js.Value) !napi.Value {
     const m = try getManager();
-    const slot: u64 = @intCast(try current_slot.toI64());
+    const slot: u64 = try checkedU64(try current_slot.toI64());
     const local = try statusFromObject(js.env(), try local_status.toValue().coerceToObject());
     const actions = try m.heartbeat(slot, local);
     return actionsToNapiArray(js.env(), actions);
@@ -341,7 +356,7 @@ pub fn onStatusReceived(
     defer allocator.free(peer_id);
     const remote = try statusFromObject(js.env(), try remote_status.toValue().coerceToObject());
     const local = try statusFromObject(js.env(), try local_status.toValue().coerceToObject());
-    const slot: u64 = @intCast(try current_slot.toI64());
+    const slot: u64 = try checkedU64(try current_slot.toI64());
     const actions = try m.onStatusReceived(peer_id, remote, local, slot);
     return actionsToNapiArray(js.env(), actions);
 }
@@ -507,10 +522,7 @@ pub fn setSubnetRequirements(attnets_arg: js.Value, syncnets_arg: js.Value) !voi
     defer allocator.free(attnets);
     for (0..attnets_len) |i| {
         const entry = try attnets_arr.getElement(@intCast(i));
-        attnets[i] = .{
-            .subnet = try (try entry.getNamedProperty("subnet")).getValueUint32(),
-            .to_slot = @intCast(try (try entry.getNamedProperty("toSlot")).getValueInt64()),
-        };
+        attnets[i] = try readRequestedSubnet(entry, ATTESTATION_SUBNET_COUNT);
     }
 
     const syncnets_arr = syncnets_arg.toValue();
@@ -519,10 +531,7 @@ pub fn setSubnetRequirements(attnets_arg: js.Value, syncnets_arg: js.Value) !voi
     defer allocator.free(syncnets);
     for (0..syncnets_len) |i| {
         const entry = try syncnets_arr.getElement(@intCast(i));
-        syncnets[i] = .{
-            .subnet = try (try entry.getNamedProperty("subnet")).getValueUint32(),
-            .to_slot = @intCast(try (try entry.getNamedProperty("toSlot")).getValueInt64()),
-        };
+        syncnets[i] = try readRequestedSubnet(entry, SYNCNET_SUBNET_SLOTS);
     }
 
     try m.setSubnetRequirements(attnets, syncnets);

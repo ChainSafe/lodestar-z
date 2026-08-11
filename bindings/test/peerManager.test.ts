@@ -216,6 +216,15 @@ describe("peerManager", () => {
     expect(() => bindings.peerManager.init({...defaultConfig, gossipsubNegativeScoreWeight: -0.5})).toThrow();
   });
 
+  it("setSubnetRequirements rejects an out-of-range subnet index", () => {
+    expect(() =>
+      bindings.peerManager.setSubnetRequirements([{subnet: 64, toSlot: 1000}], [])
+    ).toThrow();
+    expect(() =>
+      bindings.peerManager.setSubnetRequirements([], [{subnet: 8, toSlot: 1000}])
+    ).toThrow();
+  });
+
   it("reportPeer rejects an unknown action", () => {
     bindings.peerManager.onConnectionOpen("peer1", "outbound");
     expect(() => bindings.peerManager.reportPeer("peer1", "NotARealAction")).toThrow();
