@@ -166,7 +166,12 @@ pub const PeerStore = struct {
         peer_id: []const u8,
         metadata: Metadata,
     ) void {
-        const peer = self.peers.getPtr(peer_id) orelse return;
+        const peer = self.peers.getPtr(peer_id) orelse {
+            // We own the passed metadata; free it rather than leak when untracked.
+            var md: ?Metadata = metadata;
+            freeMetadataOwnedData(self.allocator, &md);
+            return;
+        };
         freeMetadataOwnedData(self.allocator, &peer.metadata);
         peer.metadata = metadata;
     }
@@ -277,6 +282,27 @@ test "getConnectedPeers returns all peer ids" {
     }
     try std.testing.expect(found_peer_a);
     try std.testing.expect(found_peer_b);
+}
+
+test "updateMetadata for absent peer frees transferred data" {
+    // std.testing.allocator fails the test if the metadata arrays leak.
+    var store = PeerStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const custody_groups = try std.testing.allocator.alloc(u32, 4);
+    const sampling_groups = try std.testing.allocator.alloc(u32, 8);
+    const metadata: Metadata = .{
+        .seq_number = 1,
+        .attnets = [_]u8{0} ** 8,
+        .syncnets = [_]u8{0},
+        .custody_group_count = 4,
+        .custody_groups = custody_groups,
+        .sampling_groups = sampling_groups,
+    };
+
+    store.updateMetadata("peer-missing", metadata);
+
+    try std.testing.expectEqual(@as(u32, 0), store.getConnectedPeerCount());
 }
 
 test "addPeer duplicate returns error" {

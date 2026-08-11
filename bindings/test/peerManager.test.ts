@@ -147,4 +147,17 @@ describe("peerManager", () => {
     };
     expect(() => bindings.peerManager.onMetadataReceived("peer1", badMetadata)).toThrow();
   });
+
+  it("onMetadataReceived for an untracked peer does not throw", () => {
+    const metadata = {
+      seqNumber: 1,
+      attnets: new Uint8Array(8),
+      syncnets: new Uint8Array(1),
+      custodyGroupCount: 4,
+      custodyGroups: [0, 1, 2, 3],
+      samplingGroups: [0, 1, 2, 3, 4, 5, 6, 7],
+    };
+    expect(() => bindings.peerManager.onMetadataReceived("unknown-peer", metadata)).not.toThrow();
+    expect(bindings.peerManager.getConnectedPeerCount()).toBe(0);
+  });
 });
