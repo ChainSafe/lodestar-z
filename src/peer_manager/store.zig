@@ -52,6 +52,10 @@ pub const PeerStore = struct {
         // Use getOrPut to avoid double lookup and unnecessary allocation.
         const entry = try self.peers.getOrPut(peer_id); // This will allocate if not exists
         if (entry.found_existing) return error.PeerAlreadyExists;
+        errdefer {
+            const removed = self.peers.remove(peer_id);
+            std.debug.assert(removed);
+        }
 
         // getOrPut keys the entry on the borrowed `peer_id`; replace it with an
         // owned copy so the store owns its keys (freed in deinit/removePeer).
@@ -204,9 +208,12 @@ pub const PeerStore = struct {
         version: []const u8,
     ) !void {
         const peer = self.peers.getPtr(peer_id) orelse return;
-        if (peer.agent_version) |old| self.allocator.free(old);
-        peer.agent_version = try self.allocator.dupe(u8, version);
+
+        const new_version = try self.allocator.dupe(u8, version);
+        const old_version = peer.agent_version;
+        peer.agent_version = new_version;
         peer.agent_client = getKnownClientFromAgentVersion(version);
+        if (old_version) |old| self.allocator.free(old);
     }
 
     pub fn setEncodingPreference(
@@ -338,6 +345,21 @@ test "addPeer duplicate returns error" {
     );
 }
 
+test "addPeer removes provisional entry when key duplication fails" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var store = PeerStore.init(failing.allocator());
+    defer store.deinit();
+
+    try store.peers.ensureUnusedCapacity(1);
+    failing.fail_index = failing.alloc_index;
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        store.addPeer("peer-a", .inbound, 1000, testConfig()),
+    );
+    try std.testing.expectEqual(@as(u32, 0), store.getConnectedPeerCount());
+}
+
 test "addPeer sets direction-dependent timestamps" {
     const config = testConfig();
     var store = PeerStore.init(std.testing.allocator);
@@ -389,6 +411,24 @@ test "setAgentVersion frees previous" {
 
     const peer = store.getPeerData("peer-a").?;
     try std.testing.expectEqualStrings("Teku/v2.0.0", peer.agent_version.?);
+}
+
+test "setAgentVersion preserves previous value on allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var store = PeerStore.init(failing.allocator());
+    defer store.deinit();
+
+    try store.addPeer("peer-a", .inbound, 1000, testConfig());
+    try store.setAgentVersion("peer-a", "Lighthouse/v1.0.0");
+    failing.fail_index = failing.alloc_index;
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        store.setAgentVersion("peer-a", "Teku/v2.0.0"),
+    );
+    const peer = store.getPeerData("peer-a").?;
+    try std.testing.expectEqualStrings("Lighthouse/v1.0.0", peer.agent_version.?);
+    try std.testing.expectEqual(ClientKind.lighthouse, peer.agent_client.?);
 }
 
 test "peer accessors expose stored interface fields" {

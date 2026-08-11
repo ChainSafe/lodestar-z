@@ -400,8 +400,10 @@ pub const PeerManager = struct {
     }
 
     pub fn setSamplingGroups(self: *PeerManager, groups: []const u32) !void {
-        if (self.our_sampling_groups) |old| self.allocator.free(old);
-        self.our_sampling_groups = try self.allocator.dupe(u32, groups);
+        const new_groups = try self.allocator.dupe(u32, groups);
+        const old_groups = self.our_sampling_groups;
+        self.our_sampling_groups = new_groups;
+        if (old_groups) |old| self.allocator.free(old);
     }
 
     // ── Queries ─────────────────────────────────────────────────────
@@ -1357,4 +1359,20 @@ test "heartbeat — discovery carries custody group queries" {
     }
 
     try std.testing.expect(found_discovery);
+}
+
+test "setSamplingGroups preserves previous value on allocation failure" {
+    test_clock_value = 0;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var pm = try PeerManager.init(failing.allocator(), testConfig(), &testClock);
+    defer pm.deinit();
+
+    try pm.setSamplingGroups(&.{ 0, 1, 2 });
+    failing.fail_index = failing.alloc_index;
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        pm.setSamplingGroups(&.{ 3, 4, 5 }),
+    );
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, pm.our_sampling_groups.?);
 }

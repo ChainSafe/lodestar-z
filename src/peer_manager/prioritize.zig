@@ -149,10 +149,10 @@ pub fn prioritizePeers(
     if (count < opts.target_peers) {
         // Overshoot connection attempts (success rate ~33%)
         const deficit = opts.target_peers - count;
-        const overshoot = constants.PEERS_TO_CONNECT_OVERSHOOT_FACTOR * deficit;
+        const overshoot = constants.PEERS_TO_CONNECT_OVERSHOOT_FACTOR *| deficit;
         const max_connect = opts.max_peers - count;
         result.peers_to_connect = @min(overshoot, max_connect);
-    } else if (count > opts.target_peers) {
+    } else if (count > opts.target_peers or opts.starved) {
         try pruneExcessPeers(
             allocator,
             peers,
@@ -937,6 +937,41 @@ test "at target peers — no connect no disconnect" {
 
     try testing.expectEqual(@as(u32, 0), result.peers_to_connect);
     try testing.expectEqual(@as(usize, 0), result.peers_to_disconnect.items.len);
+}
+
+test "at target peers — starvation prunes churn peers" {
+    const peers = generatePeerIds(100);
+    var opts = makeOpts(100, 110);
+    opts.starved = true;
+
+    var result = try prioritizePeers(
+        testing.allocator,
+        &peers,
+        &.{},
+        &.{},
+        null,
+        opts,
+    );
+    defer result.deinit();
+
+    try testing.expectEqual(@as(u32, 0), result.peers_to_connect);
+    try testing.expectEqual(@as(usize, 5), result.peers_to_disconnect.items.len);
+}
+
+test "peer connection overshoot saturates at u32 limit" {
+    const opts = makeOpts(std.math.maxInt(u32), std.math.maxInt(u32));
+
+    var result = try prioritizePeers(
+        testing.allocator,
+        &.{},
+        &.{},
+        &.{},
+        null,
+        opts,
+    );
+    defer result.deinit();
+
+    try testing.expectEqual(std.math.maxInt(u32), result.peers_to_connect);
 }
 
 test "above target peers — disconnects excess" {

@@ -48,6 +48,21 @@ fn getU64Property(obj: napi.Value, name: [:0]const u8) !u64 {
     return checkedU64(try (try obj.getNamedProperty(name)).getValueInt64());
 }
 
+/// N-API's uint32 conversion follows JavaScript ToUint32 semantics, which
+/// wraps negatives and large values. Peer limits are untrusted configuration,
+/// so validate the original Number before narrowing it.
+fn getU32PropertyChecked(obj: napi.Value, name: [:0]const u8) !u32 {
+    const raw = try (try obj.getNamedProperty(name)).getValueDouble();
+    if (!std.math.isFinite(raw) or
+        raw < 0 or
+        raw > @as(f64, @floatFromInt(std.math.maxInt(u32))) or
+        @trunc(raw) != raw)
+    {
+        return error.InvalidUnsignedInteger;
+    }
+    return @intFromFloat(raw);
+}
+
 // Upper bounds for subnet indices, matching the per-subnet array sizes in
 // prioritizePeers (attnets `[64]`, syncnets `[8]`). An out-of-range index from
 // the caller would otherwise index out of bounds and panic.
@@ -73,8 +88,8 @@ fn configFromObject(env: napi.Env, obj: napi.Value) !Config {
     };
 
     // Required numeric fields
-    config.target_peers = try (try obj.getNamedProperty("targetPeers")).getValueUint32();
-    config.max_peers = try (try obj.getNamedProperty("maxPeers")).getValueUint32();
+    config.target_peers = try getU32PropertyChecked(obj, "targetPeers");
+    config.max_peers = try getU32PropertyChecked(obj, "maxPeers");
     config.target_group_peers = try (try obj.getNamedProperty("targetGroupPeers")).getValueUint32();
     config.ping_interval_inbound_ms = try (try obj.getNamedProperty("pingIntervalInboundMs")).getValueInt64();
     config.ping_interval_outbound_ms = try (try obj.getNamedProperty("pingIntervalOutboundMs")).getValueInt64();
@@ -371,12 +386,19 @@ pub fn onMetadataReceived(peer_id_arg: js.String, metadata_arg: js.Value) !napi.
     @memcpy(&metadata.syncnets, syncnets_info.data[0..1]);
 
     metadata.custody_group_count = try getU64Property(md_obj, "custodyGroupCount");
-    metadata.custody_groups = try parseOptionalU32Array(try md_obj.getNamedProperty("custodyGroups"));
-    errdefer if (metadata.custody_groups) |groups| allocator.free(groups);
-    metadata.sampling_groups = try parseOptionalU32Array(try md_obj.getNamedProperty("samplingGroups"));
-    errdefer if (metadata.sampling_groups) |groups| allocator.free(groups);
+    var custody_groups = try parseOptionalU32Array(try md_obj.getNamedProperty("custodyGroups"));
+    errdefer if (custody_groups) |groups| allocator.free(groups);
+    metadata.custody_groups = custody_groups;
+
+    var sampling_groups = try parseOptionalU32Array(try md_obj.getNamedProperty("samplingGroups"));
+    errdefer if (sampling_groups) |groups| allocator.free(groups);
+    metadata.sampling_groups = sampling_groups;
 
     const actions = try m.onMetadataReceived(peer_id, metadata);
+    // A successful manager call transfers both arrays to the store, including
+    // the untracked-peer path where the store frees them immediately.
+    custody_groups = null;
+    sampling_groups = null;
     return actionsToNapiArray(js.env(), actions);
 }
 

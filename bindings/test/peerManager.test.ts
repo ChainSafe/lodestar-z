@@ -221,6 +221,12 @@ describe("peerManager", () => {
     expect(() => bindings.peerManager.init({...defaultConfig, targetPeers: 20, maxPeers: 10})).toThrow();
   });
 
+  it("init rejects wrapped or out-of-range peer limits", () => {
+    bindings.peerManager.close();
+    expect(() => bindings.peerManager.init({...defaultConfig, maxPeers: -1, targetPeers: -1})).toThrow();
+    expect(() => bindings.peerManager.init({...defaultConfig, maxPeers: 2 ** 32, targetPeers: 2 ** 32})).toThrow();
+  });
+
   it("setSubnetRequirements rejects an out-of-range subnet index", () => {
     expect(() =>
       bindings.peerManager.setSubnetRequirements([{subnet: 64, toSlot: 1000}], [])
