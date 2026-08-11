@@ -73,6 +73,7 @@ pub const PeerStore = struct {
         entry.value_ptr.* = .{
             .peer_id = owned_key,
             .direction = direction,
+            .connection_count = 1,
             .status = null,
             .metadata = null,
             .relevant_status = .unknown,

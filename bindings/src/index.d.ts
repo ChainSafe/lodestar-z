@@ -206,6 +206,7 @@ type PeerManagerAction =
       custodyGroupQueries: PeerManagerCustodyGroupQuery[];
     }
   | {type: "tag_peer_relevant"; peerId: string}
+  | {type: "untag_peer_relevant"; peerId: string}
   | {type: "emit_peer_connected"; peerId: string; direction: PeerManagerDirection}
   | {type: "emit_peer_disconnected"; peerId: string};
 

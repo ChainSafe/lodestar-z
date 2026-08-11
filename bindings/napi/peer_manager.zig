@@ -203,6 +203,10 @@ fn actionToNapiObject(env: napi.Env, action: Action) !napi.Value {
             try obj.setNamedProperty("type", try env.createStringUtf8("tag_peer_relevant"));
             try obj.setNamedProperty("peerId", try env.createStringUtf8(peer_id));
         },
+        .untag_peer_relevant => |peer_id| {
+            try obj.setNamedProperty("type", try env.createStringUtf8("untag_peer_relevant"));
+            try obj.setNamedProperty("peerId", try env.createStringUtf8(peer_id));
+        },
         .emit_peer_connected => |c| {
             try obj.setNamedProperty("type", try env.createStringUtf8("emit_peer_connected"));
             try obj.setNamedProperty("peerId", try env.createStringUtf8(c.peer_id));

@@ -64,11 +64,19 @@ describe("peerManager", () => {
     expect(types).toContain("send_status");
   });
 
-  it("onConnectionOpen duplicate is no-op", () => {
-    bindings.peerManager.onConnectionOpen("peer1", "outbound");
+  it("onConnectionOpen second connection updates direction without adding a peer", () => {
+    bindings.peerManager.onConnectionOpen("peer1", "inbound");
+    // Our outbound dial to an already-inbound peer: direction is overwritten and
+    // the outbound connection triggers an immediate handshake.
     const actions = bindings.peerManager.onConnectionOpen("peer1", "outbound");
-    expect(actions).toHaveLength(0);
+    const types = actions.map((a: {type: string}) => a.type);
+    expect(types).toContain("send_ping");
+    expect(types).toContain("send_status");
     expect(bindings.peerManager.getConnectedPeerCount()).toBe(1);
+
+    // A later inbound connection overwrites direction without a handshake.
+    const actions2 = bindings.peerManager.onConnectionOpen("peer1", "inbound");
+    expect(actions2).toHaveLength(0);
   });
 
   it("onConnectionClose emits disconnect event", () => {
@@ -76,6 +84,21 @@ describe("peerManager", () => {
     const actions = bindings.peerManager.onConnectionClose("peer1");
     const types = actions.map((a: {type: string}) => a.type);
     expect(types).toContain("emit_peer_disconnected");
+    expect(bindings.peerManager.getConnectedPeerCount()).toBe(0);
+  });
+
+  it("onConnectionClose only tears down on the last connection", () => {
+    bindings.peerManager.onConnectionOpen("peer1", "inbound");
+    bindings.peerManager.onConnectionOpen("peer1", "outbound");
+
+    // First close: another connection is still open → no disconnect event.
+    const first = bindings.peerManager.onConnectionClose("peer1");
+    expect(first.map((a: {type: string}) => a.type)).not.toContain("emit_peer_disconnected");
+    expect(bindings.peerManager.getConnectedPeerCount()).toBe(1);
+
+    // Second close: last connection → disconnect event, peer removed.
+    const second = bindings.peerManager.onConnectionClose("peer1");
+    expect(second.map((a: {type: string}) => a.type)).toContain("emit_peer_disconnected");
     expect(bindings.peerManager.getConnectedPeerCount()).toBe(0);
   });
 

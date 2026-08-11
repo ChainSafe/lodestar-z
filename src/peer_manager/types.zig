@@ -150,6 +150,9 @@ pub const PeerData = struct {
     /// Borrowed reference to the HashMap key. Do not free.
     peer_id: PeerIdStr,
     direction: Direction,
+    /// Open libp2p connections to this peer; teardown runs only when the last
+    /// one closes (libp2p may hold several connections per peer).
+    connection_count: u32,
     status: ?Status,
     metadata: ?Metadata,
     relevant_status: RelevantPeerStatus,
@@ -183,6 +186,7 @@ pub const Action = union(enum) {
     disconnect_peer: PeerIdStr,
     request_discovery: DiscoveryRequest,
     tag_peer_relevant: PeerIdStr,
+    untag_peer_relevant: PeerIdStr,
     emit_peer_connected: struct { peer_id: PeerIdStr, direction: Direction },
     emit_peer_disconnected: PeerIdStr,
 };

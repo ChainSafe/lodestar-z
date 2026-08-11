@@ -124,7 +124,20 @@ pub const PeerManager = struct {
         direction: Direction,
     ) ![]const Action {
         self.resetActionState();
-        if (self.store.contains(peer_id)) return self.actions.items;
+
+        // libp2p may open a second connection to a peer we already track (e.g.
+        // an inbound connection followed by our own outbound dial). Overwrite the
+        // direction but keep the existing timestamps/status; as on a first
+        // connection, only an outbound connection triggers an immediate handshake.
+        if (self.store.getPeerData(peer_id)) |peer| {
+            peer.connection_count += 1;
+            peer.direction = direction;
+            if (direction == .outbound) {
+                try self.actions.append(self.allocator, .{ .send_ping = peer_id });
+                try self.actions.append(self.allocator, .{ .send_status = peer_id });
+            }
+            return self.actions.items;
+        }
 
         self.store.addPeer(
             peer_id,
@@ -132,7 +145,7 @@ pub const PeerManager = struct {
             self.clock_fn(),
             self.config,
         ) catch |err| switch (err) {
-            error.PeerAlreadyExists => {}, // Already guarded by contains check before, so this should not be reached
+            error.PeerAlreadyExists => {}, // Already guarded by the getPeerData check above.
             error.OutOfMemory => return err, // Propagate fatal OOM error
         };
 
@@ -151,6 +164,13 @@ pub const PeerManager = struct {
         const peer = self.store.getPeerData(peer_id) orelse
             return self.actions.items;
 
+        // Tear down only when the last connection closes. TS ignores the
+        // disconnect event while another connection to the peer is still open.
+        if (peer.connection_count > 1) {
+            peer.connection_count -= 1;
+            return self.actions.items;
+        }
+
         if (peer.direction == .inbound) {
             // Extend-only: a longer goodbye-reason cooldown (applied when the
             // send_goodbye action was emitted) must survive the disconnect
@@ -159,6 +179,11 @@ pub const PeerManager = struct {
                 peer_id,
                 .inbound_disconnect,
             );
+        }
+        // Mirror TS: remove the relevant-peer tag on disconnect. Only needed if
+        // the peer was tagged (untagging is otherwise a no-op).
+        if (peer.relevant_status == .relevant) {
+            try self.actions.append(self.allocator, .{ .untag_peer_relevant = peer_id });
         }
         self.store.removePeer(peer_id);
         try self.actions.append(self.allocator, .{ .emit_peer_disconnected = peer_id });
@@ -600,15 +625,78 @@ test "onConnectionOpen — outbound emits ping and status" {
     try std.testing.expectEqual(@as(u32, 1), pm.getConnectedPeerCount());
 }
 
-test "onConnectionOpen — duplicate is no-op" {
+test "onConnectionOpen — second connection updates direction" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    // Inbound first, then our outbound dial: direction is overwritten and the
+    // outbound connection triggers an immediate ping + status. No new peer entry.
+    _ = try pm.onConnectionOpen("peer-a", .inbound);
+    const actions = try pm.onConnectionOpen("peer-a", .outbound);
+    try std.testing.expectEqual(@as(u32, 1), pm.getConnectedPeerCount());
+    try std.testing.expectEqual(Direction.outbound, pm.store.getPeerData("peer-a").?.direction);
+    try std.testing.expectEqual(@as(usize, 2), actions.len);
+    try std.testing.expect(actions[0] == .send_ping);
+    try std.testing.expect(actions[1] == .send_status);
+
+    // A subsequent inbound connection overwrites direction without a handshake.
+    const actions2 = try pm.onConnectionOpen("peer-a", .inbound);
+    try std.testing.expectEqual(Direction.inbound, pm.store.getPeerData("peer-a").?.direction);
+    try std.testing.expectEqual(@as(usize, 0), actions2.len);
+}
+
+test "onConnectionClose — only tears down on the last connection" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    // Two open connections to the same peer.
+    _ = try pm.onConnectionOpen("peer-a", .inbound);
+    _ = try pm.onConnectionOpen("peer-a", .outbound);
+    try std.testing.expectEqual(@as(u32, 1), pm.getConnectedPeerCount());
+
+    // First close: another connection remains → no teardown, peer stays.
+    const first = try pm.onConnectionClose("peer-a");
+    try std.testing.expectEqual(@as(usize, 0), first.len);
+    try std.testing.expectEqual(@as(u32, 1), pm.getConnectedPeerCount());
+
+    // Second close: last connection → teardown + disconnect event.
+    const second = try pm.onConnectionClose("peer-a");
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    try std.testing.expect(second[0] == .emit_peer_disconnected);
+    try std.testing.expectEqual(@as(u32, 0), pm.getConnectedPeerCount());
+}
+
+test "onConnectionClose — untags a previously relevant peer" {
     test_clock_value = 1000;
     var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
     defer pm.deinit();
 
     _ = try pm.onConnectionOpen("peer-a", .outbound);
-    const actions = try pm.onConnectionOpen("peer-a", .inbound);
-    try std.testing.expectEqual(@as(usize, 0), actions.len);
-    try std.testing.expectEqual(@as(u32, 1), pm.getConnectedPeerCount());
+    const local = makeLocalStatus();
+    // Relevant status tags the peer.
+    _ = try pm.onStatusReceived("peer-a", local, local, 320);
+
+    const actions = try pm.onConnectionClose("peer-a");
+    var has_untag = false;
+    var has_disconnect = false;
+    for (actions) |a| {
+        if (a == .untag_peer_relevant) has_untag = true;
+        if (a == .emit_peer_disconnected) has_disconnect = true;
+    }
+    try std.testing.expect(has_untag);
+    try std.testing.expect(has_disconnect);
+}
+
+test "onConnectionClose — no untag for a never-tagged peer" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    _ = try pm.onConnectionOpen("peer-a", .outbound);
+    const actions = try pm.onConnectionClose("peer-a");
+    for (actions) |a| try std.testing.expect(a != .untag_peer_relevant);
 }
 
 test "onConnectionClose — inbound applies cooldown" {
