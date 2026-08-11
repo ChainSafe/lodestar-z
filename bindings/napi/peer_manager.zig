@@ -15,6 +15,7 @@ const Metadata = peer_manager.Metadata;
 const Action = peer_manager.Action;
 const Direction = peer_manager.Direction;
 const ForkName = peer_manager.ForkName;
+const Encoding = peer_manager.Encoding;
 const PeerAction = peer_manager.PeerAction;
 const GoodbyeReasonCode = peer_manager.GoodbyeReasonCode;
 const GossipScoreUpdate = peer_manager.GossipScoreUpdate;
@@ -230,6 +231,10 @@ fn actionToNapiObject(env: napi.Env, action: Action) !napi.Value {
         },
         .untag_peer_relevant => |peer_id| {
             try obj.setNamedProperty("type", try env.createStringUtf8("untag_peer_relevant"));
+            try obj.setNamedProperty("peerId", try env.createStringUtf8(peer_id));
+        },
+        .identify_peer => |peer_id| {
+            try obj.setNamedProperty("type", try env.createStringUtf8("identify_peer"));
             try obj.setNamedProperty("peerId", try env.createStringUtf8(peer_id));
         },
         .emit_peer_connected => |c| {
@@ -618,6 +623,28 @@ pub fn getPeerData(peer_id_arg: js.String) !napi.Value {
     }
 
     return obj;
+}
+
+/// JS: peerManager.setAgentVersion(peerId, agentVersion)
+pub fn setAgentVersion(peer_id_arg: js.String, version_arg: js.String) !void {
+    const m = try getManager();
+    const peer_id = try dupePeerId(peer_id_arg);
+    defer allocator.free(peer_id);
+    var version_buf: [256]u8 = undefined;
+    const version = try version_arg.toSlice(&version_buf);
+    try m.setAgentVersion(peer_id, version);
+}
+
+/// JS: peerManager.setEncodingPreference(peerId, encoding)
+pub fn setEncodingPreference(peer_id_arg: js.String, encoding_arg: js.String) !void {
+    const m = try getManager();
+    const peer_id = try dupePeerId(peer_id_arg);
+    defer allocator.free(peer_id);
+    var enc_buf: [32]u8 = undefined;
+    const enc_str = try encoding_arg.toSlice(&enc_buf);
+    const encoding = std.meta.stringToEnum(Encoding, enc_str) orelse
+        return error.InvalidEncoding;
+    m.setEncodingPreference(peer_id, encoding);
 }
 
 /// JS: peerManager.getEncodingPreference(peerId) → string | null

@@ -225,6 +225,24 @@ describe("peerManager", () => {
     ).toThrow();
   });
 
+  it("identify + setAgentVersion populates client info and stops identify", () => {
+    bindings.peerManager.onConnectionOpen("peer1", "outbound");
+    const remote = {...localStatus, headRoot: new Uint8Array(32).fill(0x03)};
+    const first = bindings.peerManager.onStatusReceived("peer1", remote, localStatus, 3200);
+    expect(first.map((a: {type: string}) => a.type)).toContain("identify_peer");
+
+    bindings.peerManager.setAgentVersion("peer1", "Lighthouse/v5.0.0");
+    expect(bindings.peerManager.getAgentVersion("peer1")).toBe("Lighthouse/v5.0.0");
+    expect(bindings.peerManager.getPeerKind("peer1")).toBe("lighthouse");
+
+    bindings.peerManager.setEncodingPreference("peer1", "ssz_snappy");
+    expect(bindings.peerManager.getEncodingPreference("peer1")).toBe("ssz_snappy");
+
+    // Agent version now known → no more identify requests.
+    const second = bindings.peerManager.onStatusReceived("peer1", remote, localStatus, 3200);
+    expect(second.map((a: {type: string}) => a.type)).not.toContain("identify_peer");
+  });
+
   it("reportPeer rejects an unknown action", () => {
     bindings.peerManager.onConnectionOpen("peer1", "outbound");
     expect(() => bindings.peerManager.reportPeer("peer1", "NotARealAction")).toThrow();

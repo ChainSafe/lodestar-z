@@ -207,6 +207,7 @@ type PeerManagerAction =
     }
   | {type: "tag_peer_relevant"; peerId: string}
   | {type: "untag_peer_relevant"; peerId: string}
+  | {type: "identify_peer"; peerId: string}
   | {type: "emit_peer_connected"; peerId: string; direction: PeerManagerDirection}
   | {type: "emit_peer_disconnected"; peerId: string};
 
@@ -250,6 +251,8 @@ interface PeerManagerApi {
   ) => void;
   setForkName: (forkName: PeerManagerForkName) => void;
   setSamplingGroups: (groups: number[]) => void;
+  setAgentVersion: (peerId: string, agentVersion: string) => void;
+  setEncodingPreference: (peerId: string, encoding: string) => void;
   getConnectedPeerCount: () => number;
   getConnectedPeers: () => string[];
   getPeerData: (peerId: string) => PeerManagerPeerData | null;

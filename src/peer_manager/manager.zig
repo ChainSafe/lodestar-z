@@ -286,6 +286,12 @@ pub const PeerManager = struct {
             .peer_id = peer_id,
             .direction = peer.direction,
         } });
+        // TS runs identify once a relevant status proves the connection is
+        // usable, and only until the agent version is known. The host executes
+        // identify and reports the result via setAgentVersion.
+        if (peer.agent_version == null) {
+            try self.actions.append(self.allocator, .{ .identify_peer = peer_id });
+        }
         return self.actions.items;
     }
 
@@ -436,6 +442,17 @@ pub const PeerManager = struct {
         peer_id: []const u8,
     ) ?[]const u8 {
         return self.store.getAgentVersion(peer_id);
+    }
+
+    /// Records the agent version reported by the identify protocol (host-driven,
+    /// in response to an `identify_peer` action). Derives the client kind from it.
+    pub fn setAgentVersion(self: *PeerManager, peer_id: []const u8, version: []const u8) !void {
+        try self.store.setAgentVersion(peer_id, version);
+    }
+
+    /// Records the ReqResp encoding preference observed for a peer (host-driven).
+    pub fn setEncodingPreference(self: *PeerManager, peer_id: []const u8, encoding: Encoding) void {
+        self.store.setEncodingPreference(peer_id, encoding);
     }
 
     pub fn getPeerScore(
@@ -806,16 +823,35 @@ test "onStatusReceived — relevant peer emits tag and connected" {
         .head_slot = local.head_slot,
         .earliest_available_slot = null,
     };
+    // First relevant status: tag, peer-connected, and identify (agent unknown).
     const actions = try pm.onStatusReceived("peer-a", remote, local, 320);
-    try std.testing.expectEqual(@as(usize, 2), actions.len);
+    try std.testing.expectEqual(@as(usize, 3), actions.len);
     try std.testing.expect(actions[0] == .tag_peer_relevant);
     try std.testing.expect(actions[1] == .emit_peer_connected);
+    try std.testing.expect(actions[2] == .identify_peer);
 
-    // Subsequent statuses from a relevant peer re-emit peer-connected (the
-    // sync layer consumes repeated events), but tag only once.
+    // Once the agent version is known, identify is no longer requested; the
+    // sync layer still gets a peer-connected on every status, but tag runs once.
+    try pm.setAgentVersion("peer-a", "Lighthouse/v5.0.0");
     const actions2 = try pm.onStatusReceived("peer-a", remote, local, 320);
     try std.testing.expectEqual(@as(usize, 1), actions2.len);
     try std.testing.expect(actions2[0] == .emit_peer_connected);
+}
+
+test "setAgentVersion — populates agent version and derived client kind" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    _ = try pm.onConnectionOpen("peer-a", .outbound);
+    try std.testing.expect(pm.getAgentVersion("peer-a") == null);
+
+    try pm.setAgentVersion("peer-a", "Lighthouse/v5.0.0");
+    try std.testing.expectEqualStrings("Lighthouse/v5.0.0", pm.getAgentVersion("peer-a").?);
+    try std.testing.expectEqual(types.ClientKind.lighthouse, pm.getPeerKind("peer-a").?);
+
+    pm.setEncodingPreference("peer-a", .ssz_snappy);
+    try std.testing.expectEqual(types.Encoding.ssz_snappy, pm.getEncodingPreference("peer-a").?);
 }
 
 test "onStatusReceived — irrelevant peer emits goodbye" {

@@ -187,6 +187,7 @@ pub const Action = union(enum) {
     request_discovery: DiscoveryRequest,
     tag_peer_relevant: PeerIdStr,
     untag_peer_relevant: PeerIdStr,
+    identify_peer: PeerIdStr,
     emit_peer_connected: struct { peer_id: PeerIdStr, direction: Direction },
     emit_peer_disconnected: PeerIdStr,
 };
