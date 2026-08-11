@@ -462,28 +462,34 @@ pub const PeerManager = struct {
             try self.actions.append(self.allocator, .{ .disconnect_peer = disc.peer_id });
         }
 
-        if (result.peers_to_connect > 0) {
-            try self.discovery_attnet_queries.appendSlice(self.allocator, result.attnet_queries.items);
-            try self.discovery_syncnet_queries.appendSlice(self.allocator, result.syncnet_queries.items);
+        // Subnet/custody discovery must run even at or above targetPeers: duty
+        // subnet and custody-group peers are allowed above the peer limit.
+        try self.discovery_attnet_queries.appendSlice(self.allocator, result.attnet_queries.items);
+        try self.discovery_syncnet_queries.appendSlice(self.allocator, result.syncnet_queries.items);
 
-            var custody_iter = result.custody_group_queries.iterator();
-            while (custody_iter.next()) |entry| {
-                try self.discovery_custody_group_queries.append(self.allocator, .{
-                    .group = entry.key_ptr.*,
-                    .max_peers_to_discover = entry.value_ptr.*,
-                });
-            }
-            std.mem.sort(
-                CustodyGroupQuery,
-                self.discovery_custody_group_queries.items,
-                {},
-                struct {
-                    fn lessThan(_: void, a: CustodyGroupQuery, b: CustodyGroupQuery) bool {
-                        return a.group < b.group;
-                    }
-                }.lessThan,
-            );
+        var custody_iter = result.custody_group_queries.iterator();
+        while (custody_iter.next()) |entry| {
+            try self.discovery_custody_group_queries.append(self.allocator, .{
+                .group = entry.key_ptr.*,
+                .max_peers_to_discover = entry.value_ptr.*,
+            });
+        }
+        std.mem.sort(
+            CustodyGroupQuery,
+            self.discovery_custody_group_queries.items,
+            {},
+            struct {
+                fn lessThan(_: void, a: CustodyGroupQuery, b: CustodyGroupQuery) bool {
+                    return a.group < b.group;
+                }
+            }.lessThan,
+        );
 
+        const has_subnet_queries = self.discovery_attnet_queries.items.len > 0 or
+            self.discovery_syncnet_queries.items.len > 0 or
+            self.discovery_custody_group_queries.items.len > 0;
+
+        if (result.peers_to_connect > 0 or has_subnet_queries) {
             try self.actions.append(self.allocator, .{
                 .request_discovery = .{
                     .peers_to_connect = result.peers_to_connect,
