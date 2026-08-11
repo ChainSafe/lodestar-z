@@ -50,8 +50,7 @@ fn fuzzAggregateWithRandomness(input: []const u8) void {
     if (n == 0) return;
 
     var sigs: [MAX_AGGREGATE_PER_JOB]Signature = undefined;
-    var sig_refs: [MAX_AGGREGATE_PER_JOB]*const Signature = undefined;
-    var randomness: [MAX_AGGREGATE_PER_JOB * rand_size]u8 = undefined;
+    var items: [MAX_AGGREGATE_PER_JOB]AggregateSignature.RandomizedSignature = undefined;
     var count: usize = 0;
 
     for (0..n) |i| {
@@ -61,8 +60,10 @@ fn fuzzAggregateWithRandomness(input: []const u8) void {
 
         const sig = Signature.deserialize(sig_chunk) catch continue;
         sigs[count] = sig;
-        sig_refs[count] = &sigs[count];
-        @memcpy(randomness[count * rand_size .. (count + 1) * rand_size], rand_chunk);
+        items[count] = .{
+            .signature = &sigs[count],
+            .randomness = rand_chunk[0..rand_size].*,
+        };
         count += 1;
     }
 
@@ -71,13 +72,10 @@ fn fuzzAggregateWithRandomness(input: []const u8) void {
     var scratch: [1 << 16]u64 = undefined;
 
     _ = AggregateSignature.aggregateWithRandomness(
-        sig_refs[0..count],
-        randomness[0 .. count * rand_size],
+        items[0..count],
         false,
         &scratch,
-    ) catch |err| {
-        if (err != BlstError.AggrTypeMismatch) {
-            @panic("unexpected aggregateWithRandomness signature error");
-        }
+    ) catch {
+        @panic("unexpected aggregateWithRandomness signature error");
     };
 }
