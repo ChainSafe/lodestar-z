@@ -249,17 +249,6 @@ const VerifyMultiWorkItem = struct {
     }
 };
 
-fn useDirectVerification(n_elems: usize, n_workers: usize) bool {
-    return n_elems <= 2 or n_workers <= 1;
-}
-
-test "small batch verification bypasses the worker queue" {
-    try std.testing.expect(useDirectVerification(1, 4));
-    try std.testing.expect(useDirectVerification(2, 4));
-    try std.testing.expect(!useDirectVerification(3, 4));
-    try std.testing.expect(useDirectVerification(3, 1));
-}
-
 /// Verifies multiple aggregate signatures in parallel using the thread pool.
 ///
 /// This is the multi-threaded version of the same function in `fast_verify.zig`.
@@ -276,7 +265,7 @@ pub fn verifyMultipleAggregateSignatures(
     const n_elems = items.len;
     if (n_elems == 0) return BlstError.VerifyFail;
 
-    if (useDirectVerification(n_elems, pool.n_workers)) {
+    if (n_elems <= 2 or pool.n_workers <= 1) {
         var pairing_buf: PairingBuf = .{};
         return fast_verify.verifyMultipleAggregateSignatures(
             &pairing_buf.data,
