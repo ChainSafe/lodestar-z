@@ -245,10 +245,7 @@ interface PeerManagerApi {
   reconcileConnectedPeers: (connectedPeerIds: string[]) => number;
   reportPeer: (peerId: string, action: PeerManagerReportPeerAction) => void;
   updateGossipScores: (scores: PeerManagerGossipScoreUpdate[]) => void;
-  setSubnetRequirements: (
-    attnets: PeerManagerRequestedSubnet[],
-    syncnets: PeerManagerRequestedSubnet[]
-  ) => void;
+  setSubnetRequirements: (attnets: PeerManagerRequestedSubnet[], syncnets: PeerManagerRequestedSubnet[]) => void;
   setForkName: (forkName: PeerManagerForkName) => void;
   setSamplingGroups: (groups: number[]) => void;
   setAgentVersion: (peerId: string, agentVersion: string) => void;

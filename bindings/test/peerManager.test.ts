@@ -1,4 +1,4 @@
-import {describe, expect, it, beforeEach, afterEach} from "vitest";
+import {afterEach, beforeEach, describe, expect, it} from "vitest";
 
 // The peerManager binding is registered on the native addon's exports object.
 // Import the raw addon to access it.
@@ -6,28 +6,28 @@ import {describe, expect, it, beforeEach, afterEach} from "vitest";
 let bindings: any;
 
 const defaultConfig = {
-  targetPeers: 10,
-  maxPeers: 15,
-  targetGroupPeers: 6,
-  pingIntervalInboundMs: 15000,
-  pingIntervalOutboundMs: 20000,
-  statusIntervalMs: 300000,
-  statusInboundGracePeriodMs: 15000,
+  custodyRequirement: 4,
+  disablePeerScoring: false,
   gossipsubNegativeScoreWeight: 0.001,
   gossipsubPositiveScoreWeight: 0.001,
-  negativeGossipScoreIgnoreThreshold: -1000,
-  disablePeerScoring: false,
   initialForkName: "deneb",
+  maxPeers: 15,
+  negativeGossipScoreIgnoreThreshold: -1000,
   numberOfCustodyGroups: 128,
-  custodyRequirement: 4,
+  pingIntervalInboundMs: 15000,
+  pingIntervalOutboundMs: 20000,
   samplesPerSlot: 8,
   slotsPerEpoch: 32,
+  statusInboundGracePeriodMs: 15000,
+  statusIntervalMs: 300000,
+  targetGroupPeers: 6,
+  targetPeers: 10,
 };
 
 const localStatus = {
-  forkDigest: new Uint8Array([1, 2, 3, 4]),
-  finalizedRoot: new Uint8Array(32).fill(0xaa),
   finalizedEpoch: 100,
+  finalizedRoot: new Uint8Array(32).fill(0xaa),
+  forkDigest: new Uint8Array([1, 2, 3, 4]),
   headRoot: new Uint8Array(32).fill(0xbb),
   headSlot: 3200,
 };
@@ -161,12 +161,12 @@ describe("peerManager", () => {
   it("onMetadataReceived returns a status re-request when custody group count changes", () => {
     bindings.peerManager.onConnectionOpen("peer1", "outbound");
     const meta = (seqNumber: number, custodyGroupCount: number) => ({
-      seqNumber,
       attnets: new Uint8Array(8),
-      syncnets: new Uint8Array(1),
       custodyGroupCount,
       custodyGroups: [0, 1, 2, 3],
       samplingGroups: [0, 1, 2, 3, 4, 5, 6, 7],
+      seqNumber,
+      syncnets: new Uint8Array(1),
     });
 
     // First metadata → status re-request.
@@ -218,7 +218,7 @@ describe("peerManager", () => {
 
   it("init rejects maxPeers below targetPeers", () => {
     bindings.peerManager.close();
-    expect(() => bindings.peerManager.init({...defaultConfig, targetPeers: 20, maxPeers: 10})).toThrow();
+    expect(() => bindings.peerManager.init({...defaultConfig, maxPeers: 10, targetPeers: 20})).toThrow();
   });
 
   it("init rejects wrapped or out-of-range peer limits", () => {
@@ -228,12 +228,8 @@ describe("peerManager", () => {
   });
 
   it("setSubnetRequirements rejects an out-of-range subnet index", () => {
-    expect(() =>
-      bindings.peerManager.setSubnetRequirements([{subnet: 64, toSlot: 1000}], [])
-    ).toThrow();
-    expect(() =>
-      bindings.peerManager.setSubnetRequirements([], [{subnet: 8, toSlot: 1000}])
-    ).toThrow();
+    expect(() => bindings.peerManager.setSubnetRequirements([{subnet: 64, toSlot: 1000}], [])).toThrow();
+    expect(() => bindings.peerManager.setSubnetRequirements([], [{subnet: 8, toSlot: 1000}])).toThrow();
   });
 
   it("identify + setAgentVersion populates client info and stops identify", () => {
@@ -276,22 +272,22 @@ describe("peerManager", () => {
   it("onMetadataReceived rejects a negative seqNumber instead of crashing", () => {
     bindings.peerManager.onConnectionOpen("peer1", "outbound");
     const badMetadata = {
-      seqNumber: -1,
       attnets: new Uint8Array(8),
-      syncnets: new Uint8Array(1),
       custodyGroupCount: 4,
+      seqNumber: -1,
+      syncnets: new Uint8Array(1),
     };
     expect(() => bindings.peerManager.onMetadataReceived("peer1", badMetadata)).toThrow();
   });
 
   it("onMetadataReceived for an untracked peer does not throw", () => {
     const metadata = {
-      seqNumber: 1,
       attnets: new Uint8Array(8),
-      syncnets: new Uint8Array(1),
       custodyGroupCount: 4,
       custodyGroups: [0, 1, 2, 3],
       samplingGroups: [0, 1, 2, 3, 4, 5, 6, 7],
+      seqNumber: 1,
+      syncnets: new Uint8Array(1),
     };
     expect(() => bindings.peerManager.onMetadataReceived("unknown-peer", metadata)).not.toThrow();
     expect(bindings.peerManager.getConnectedPeerCount()).toBe(0);
