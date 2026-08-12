@@ -23,8 +23,10 @@ const GossipScoreUpdate = peer_manager.GossipScoreUpdate;
 const RequestedSubnet = peer_manager.RequestedSubnet;
 const parseExternalPeerActionName = peer_manager.parseExternalPeerActionName;
 
-/// Allocator for internal allocations.
-const allocator = std.heap.page_allocator;
+/// Allocator for internal (per-call) allocations, e.g. dup'd peer ids. libc
+/// allocator: page_allocator would mmap a full page per transient dup on the
+/// hot paths (onMessageReceived runs per gossip/reqresp message).
+const allocator = std.heap.c_allocator;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

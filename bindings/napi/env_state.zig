@@ -2,7 +2,9 @@ const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const peer_manager = @import("peer_manager");
 
-const allocator = std.heap.page_allocator;
+// libc allocator: page_allocator would round every peer-id key / score entry /
+// per-call dup up to a full OS page with an mmap syscall on the hot paths.
+const allocator = std.heap.c_allocator;
 
 pub const PeerManagerState = struct {
     manager: ?peer_manager.PeerManager = null,
