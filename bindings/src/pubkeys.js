@@ -29,6 +29,15 @@ export const pubkeyCache = {
     return native.getPubkeyBytes(index);
   },
 
+  getPubkeyBytesOrThrow(index) {
+     const pubkey = native.getPubkeyBytes(index);
+     if (pubkey === undefined) {
+       throw new Error(`pubkeyCache: index ${index} not found`);
+     }
+
+     return pubkey;
+   },
+
   aggregate(indices) {
     if (indices.length === 1) return pubkeyCache.getOrThrow(indices[0]);
     return native.aggregate(indices);
