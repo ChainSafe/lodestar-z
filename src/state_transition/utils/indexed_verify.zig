@@ -30,6 +30,14 @@ const BatchVerifyItem = bls.BatchVerifyItem;
 /// fast_verify's RAND_BITS = 64).
 const rand_bytes = 8;
 
+/// Upper bound on signature sets per call. Lodestar chunks jobs well below
+/// this; the bound protects against oversized batches from other consumers.
+pub const max_sets = 1024;
+
+/// Upper bound on participant indices in one aggregate set
+/// (MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT).
+pub const max_aggregate_indices = 131_072;
+
 /// A signer whose key is NOT in the validator registry, so the key rides in
 /// the message itself: deposit signatures (the validator does not exist
 /// yet), BLS-to-execution changes (`from_bls_pubkey` was never a validator
@@ -106,6 +114,7 @@ pub fn verifyIndexedSets(
     sets: []const VerifySet,
 ) !bool {
     if (sets.len == 0) return false;
+    if (sets.len > max_sets) return error.TooManySignatureSets;
 
     const pks = try allocator.alloc(bls.PublicKey, sets.len);
     defer allocator.free(pks);
@@ -151,6 +160,7 @@ pub fn verifyIndexedSets(
             },
             .aggregate => |s| {
                 if (s.indices.len == 0) return false;
+                if (s.indices.len > max_aggregate_indices) return error.TooManyAggregateIndices;
                 widen.clearRetainingCapacity();
                 try widen.ensureTotalCapacity(allocator, s.indices.len);
                 for (s.indices) |index| widen.appendAssumeCapacity(index);
@@ -206,6 +216,7 @@ pub fn verifySameMessageSets(
     sets: []const SameMessageSet,
 ) !bool {
     if (sets.len == 0) return false;
+    if (sets.len > max_sets) return error.TooManySignatureSets;
     if (message.len != 32) return error.InvalidMessageLength;
 
     const pks = try allocator.alloc(bls.PublicKey, sets.len);
@@ -227,52 +238,63 @@ pub fn verifySameMessageSets(
         error.InvalidLength => unreachable, // lengths match by construction
     };
 
-    // Randomized aggregation: Pippenger MSM over keys (G1) and sigs (G2)
-    // with the same per-set scalars, as in fast BLS batch verification.
-    const pk_ptrs = try allocator.alloc(*const bls.c.blst_p1_affine, sets.len);
-    defer allocator.free(pk_ptrs);
-    const sig_ptrs = try allocator.alloc(*const bls.c.blst_p2_affine, sets.len);
-    defer allocator.free(sig_ptrs);
-    const scalars = try allocator.alloc(u8, sets.len * rand_bytes);
-    defer allocator.free(scalars);
-    const scalar_ptrs = try allocator.alloc(*const u8, sets.len);
-    defer allocator.free(scalar_ptrs);
+    // Randomized aggregation of (pk_i, sig_i) pairs on the thread pool
+    // (parallel Pippenger MSM on G1 and G2 with shared per-set scalars),
+    // chunked to the pool's per-job bound. Each chunk contributes one
+    // aggregate pair; all pairs verify against `message` in one batch call.
+    const chunk_size = bls.MAX_AGGREGATE_PER_JOB;
+    const chunk_count = (sets.len - 1) / chunk_size + 1;
 
-    io.random(scalars);
+    const pk_ptrs = try allocator.alloc(*const bls.PublicKey, sets.len);
+    defer allocator.free(pk_ptrs);
+    const sig_ptrs = try allocator.alloc(*const bls.Signature, sets.len);
+    defer allocator.free(sig_ptrs);
     for (0..sets.len) |i| {
-        pk_ptrs[i] = &pks[i].point;
-        sig_ptrs[i] = &sigs[i].point;
-        const scalar = scalars[i * rand_bytes ..][0..rand_bytes];
-        ensureNonzero(io, scalar);
-        scalar_ptrs[i] = &scalars[i * rand_bytes];
+        pk_ptrs[i] = &pks[i];
+        sig_ptrs[i] = &sigs[i];
     }
 
-    const scratch_size = @max(
-        bls.c.blst_p1s_mult_pippenger_scratch_sizeof(sets.len),
-        bls.c.blst_p2s_mult_pippenger_scratch_sizeof(sets.len),
-    );
-    const scratch = try allocator.alloc(u64, @divExact(scratch_size, @sizeOf(u64)));
-    defer allocator.free(scratch);
+    // 32-byte stride per set (the pool reads the first 8 bytes of each slot).
+    const scalars = try allocator.alloc(u8, sets.len * 32);
+    defer allocator.free(scalars);
+    io.random(scalars);
+    for (0..sets.len) |i| {
+        ensureNonzero(io, scalars[i * 32 ..][0..rand_bytes]);
+    }
 
-    var p1: bls.c.blst_p1 = std.mem.zeroes(bls.c.blst_p1);
-    bls.c.blst_p1s_mult_pippenger(&p1, @ptrCast(pk_ptrs.ptr), sets.len, @ptrCast(scalar_ptrs.ptr), rand_bytes * 8, scratch.ptr);
-    var aggregate_pk: bls.PublicKey = .{};
-    bls.c.blst_p1_to_affine(&aggregate_pk.point, &p1);
+    const aggregate_pks = try allocator.alloc(bls.PublicKey, chunk_count);
+    defer allocator.free(aggregate_pks);
+    const aggregate_sigs = try allocator.alloc(bls.Signature, chunk_count);
+    defer allocator.free(aggregate_sigs);
+    const items = try allocator.alloc(BatchVerifyItem, chunk_count);
+    defer allocator.free(items);
 
-    var p2: bls.c.blst_p2 = std.mem.zeroes(bls.c.blst_p2);
-    bls.c.blst_p2s_mult_pippenger(&p2, @ptrCast(sig_ptrs.ptr), sets.len, @ptrCast(scalar_ptrs.ptr), rand_bytes * 8, scratch.ptr);
-    var aggregate_sig: bls.Signature = .{};
-    bls.c.blst_p2_to_affine(&aggregate_sig.point, &p2);
+    for (0..chunk_count) |chunk| {
+        const start = chunk * chunk_size;
+        const end = @min(start + chunk_size, sets.len);
+        pool.aggregateWithRandomness(
+            io,
+            pk_ptrs[start..end],
+            sig_ptrs[start..end],
+            scalars[start * 32 .. end * 32],
+            false, // registry keys were group-checked at deposit
+            false, // signatures validated at deserialization above
+            &aggregate_pks[chunk],
+            &aggregate_sigs[chunk],
+        ) catch |err| switch (err) {
+            error.VerifyFail, error.AggrTypeMismatch => return false,
+            else => |other| return other,
+        };
+        items[chunk] = .{
+            .message = message[0..32].*,
+            .public_key = &aggregate_pks[chunk],
+            .signature = &aggregate_sigs[chunk],
+            .randomness = undefined,
+        };
+    }
+    fillRandomness(io, items);
 
-    var items = [_]BatchVerifyItem{.{
-        .message = message[0..32].*,
-        .public_key = &aggregate_pk,
-        .signature = &aggregate_sig,
-        .randomness = undefined,
-    }};
-    fillRandomness(io, &items);
-
-    return pool.verifyMultipleAggregateSignatures(io, &items, bls.DST, false, false) catch |err| switch (err) {
+    return pool.verifyMultipleAggregateSignatures(io, items, bls.DST, false, false) catch |err| switch (err) {
         error.VerifyFail => false,
         else => |infra| infra,
     };

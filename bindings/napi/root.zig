@@ -9,6 +9,7 @@ pub const stateTransition = @import("./stateTransition.zig");
 pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const pubkeys = @import("./pubkeys.zig");
+pub const verify = @import("./verify.zig");
 
 const options = @import("bls_options");
 

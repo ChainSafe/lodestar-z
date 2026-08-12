@@ -194,3 +194,32 @@ export function aggregatePublicKeys(pks: PublicKey[], pksValidate?: boolean): Pu
  * If `pksValidate` is `true`, the public keys will be infinity and group checked.
  */
 export function aggregateSerializedPublicKeys(serializedPublicKeys: Uint8Array[], pksValidate?: boolean): PublicKey;
+
+/** Discriminated signature-set descriptor for verification by validator index. */
+export type NativeVerifySet =
+  | {type: "single"; publicKey: Uint8Array | PublicKey; message: Uint8Array; signature: Uint8Array}
+  | {type: "indexed"; index: number; message: Uint8Array; signature: Uint8Array}
+  | {type: "aggregate"; indices: Uint32Array; message: Uint8Array; signature: Uint8Array};
+
+/**
+ * Batch-verify signature sets that reference validators by index, resolving
+ * keys from the process-wide pubkey cache (populate via
+ * pubkeyCache.syncPubkeys before verification traffic starts; reset() is
+ * test-only). One boolean for the whole batch. Semantic failures (unknown
+ * index, malformed signature or key, failed verification, empty input)
+ * return false; caller bugs (wrong message length, unknown type) and
+ * infrastructure failures throw. Blocks the calling thread while the native
+ * pool verifies — intended for BLS worker threads.
+ */
+export declare function verifyIndexedSignatureSets(sets: NativeVerifySet[]): boolean;
+
+/**
+ * Same-message batch, fused: randomness-aggregate (pk_i, sig_i) pairs by
+ * validator index and verify the aggregate against one 32-byte message in a
+ * single native call. Same error contract as verifyIndexedSignatureSets.
+ * On false, retry per set (batches of one) for ordered attribution.
+ */
+export declare function verifySameMessageSetsByIndex(
+  message: Uint8Array,
+  sets: {index: number; signature: Uint8Array}[]
+): boolean;

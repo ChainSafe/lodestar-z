@@ -207,3 +207,49 @@ test "indexed_verify: same-message fused verification" {
     const short_msg = [_]u8{1} ** 31;
     try testing.expectError(error.InvalidMessageLength, h.verifySameMessage(&short_msg, &good));
 }
+
+test "indexed_verify: same-message batches chunk across the pool job bound" {
+    var h = try Harness.init();
+    defer h.deinit();
+
+    // More sets than MAX_AGGREGATE_PER_JOB (128) forces multi-chunk
+    // aggregation; reuse the harness signers cyclically.
+    const total = 130;
+    const msg: bls.SigningRoot = @splat(31);
+    var sig_bytes: [cached_count][96]u8 = undefined;
+    for (0..cached_count) |i| {
+        sig_bytes[i] = try interopSigBytes(i, &msg);
+    }
+
+    var sets: [total]SameMessageSet = undefined;
+    for (0..total) |i| {
+        sets[i] = .{ .index = i % cached_count, .signature = &sig_bytes[i % cached_count] };
+    }
+    try testing.expect(try h.verifySameMessage(&msg, &sets));
+
+    // One corrupted signature fails the multi-chunk batch.
+    sets[129] = .{ .index = 129 % cached_count, .signature = &sig_bytes[(129 + 1) % cached_count] };
+    try testing.expect(!try h.verifySameMessage(&msg, &sets));
+}
+
+test "indexed_verify: oversized inputs are caller bugs" {
+    var h = try Harness.init();
+    defer h.deinit();
+
+    const msg: bls.SigningRoot = @splat(1);
+    // Structurally valid signature: per-set caps are checked after wire
+    // parsing, so garbage bytes would return false before the cap error.
+    const valid_sig = try interopSigBytes(0, &msg);
+
+    const big_sets = try testing.allocator.alloc(SameMessageSet, indexed_verify.max_sets + 1);
+    defer testing.allocator.free(big_sets);
+    @memset(big_sets, .{ .index = 0, .signature = &valid_sig });
+    try testing.expectError(error.TooManySignatureSets, h.verifySameMessage(&msg, big_sets));
+
+    const big_indices = try testing.allocator.alloc(u32, indexed_verify.max_aggregate_indices + 1);
+    defer testing.allocator.free(big_indices);
+    @memset(big_indices, 0);
+    try testing.expectError(error.TooManyAggregateIndices, h.verify(&.{
+        .{ .aggregate = .{ .indices = big_indices, .message = &msg, .signature = &valid_sig } },
+    }));
+}

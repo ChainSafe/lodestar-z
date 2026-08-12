@@ -7,6 +7,10 @@ const pkCache = new Map();
 
 /** @type {import("./pubkeys.d.ts").PubkeyCache} */
 export const pubkeyCache = {
+  /**
+   * Legacy: prefer verification by index (blst.verifyIndexedSignatureSets)
+   * on hot paths; retained for consumers that need a JS PublicKey object.
+   */
   get(index) {
     let pk = pkCache.get(index);
     if (pk !== undefined) return pk;
@@ -17,6 +21,7 @@ export const pubkeyCache = {
     return pk;
   },
 
+  /** Legacy: see get(). */
   getOrThrow(index) {
     const pk = pubkeyCache.get(index);
     if (pk === undefined) {
@@ -39,7 +44,6 @@ export const pubkeyCache = {
    },
 
   aggregate(indices) {
-    if (indices.length === 1) return pubkeyCache.getOrThrow(indices[0]);
     return native.aggregate(indices);
   },
 
