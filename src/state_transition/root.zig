@@ -19,6 +19,7 @@ pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCach
 pub const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
 
 pub const shuffle = @import("./utils/shuffle.zig");
+pub const indexed_verify = @import("./utils/indexed_verify.zig");
 pub const committee_indices = @import("./utils/committee_indices.zig");
 pub const PubkeyCache = @import("./cache/pubkey_cache.zig").PubkeyCache;
 pub const pkix = @import("./cache/pkix.zig");
@@ -122,6 +123,7 @@ pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatest
 
 test {
     _ = @import("./cache/pubkey_cache_test.zig");
+    _ = @import("./utils/indexed_verify_test.zig");
     _ = @import("./cache/pkix_test.zig");
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
