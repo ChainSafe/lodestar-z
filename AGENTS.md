@@ -13,8 +13,9 @@
 - **No `any`:** avoid `any` and `as any`; use proper types or a justified Biome suppression.
 - **Follow existing patterns** before introducing new abstractions.
 - **Security reviews:** read `THREAT_MODEL.md` before reporting a security finding. Identify the
-  attacker, supported call path, trusted preconditions, violated security objective, and concrete
-  impact. Classify same-process hardening and operator misuse accurately.
+  attacker, current supported path or identified planned integration path, integration maturity,
+  trusted preconditions, violated security objective, and concrete impact. Classify same-process
+  hardening and operator misuse accurately.
 - **Incremental commits:** after review starts, do not force-push unless a maintainer requests it.
 - **Communication style:** do not use em dashes. Keep communication succinct and human-friendly.
 

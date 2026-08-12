@@ -73,10 +73,13 @@ Lodestar-z aims to preserve the following properties in supported builds and dep
 3. **Memory safety.** Malformed externally sourced bytes, points, indices, offsets, and collection
    lengths do not cause out-of-bounds access, use-after-free, double free, uninitialized-memory use,
    or allocator mismatch.
-4. **Process availability.** A single malformed or protocol-bounded remote input fails with an error
-   rather than a panic, deadlock, infinite loop, or unreasonable amplification of CPU or memory.
+4. **Process availability.** Attacker-controlled inputs and bounded sequences of inputs fail safely
+   and do not cause panics, deadlocks, infinite loops, cumulative leaks, or unbounded queue or cache
+   growth. CPU and memory amplification remain within explicit protocol, transport, and application
+   bounds.
 5. **State integrity.** Rejected candidate blocks do not partially modify the trusted pre-state,
-   publish derived epoch-cache entries, enter fork choice, or corrupt process-wide caches.
+   publish branch-specific epoch-cache entries, enter fork choice, or violate the documented
+   process-wide pubkey-cache invariant.
 6. **Lifecycle safety.** Supported Node.js worker creation, concurrent cache access, environment
    teardown, and finalization do not race or access freed global state.
 7. **Artifact integrity.** Published native artifacts are built from reviewed sources and pinned
@@ -94,7 +97,8 @@ The main assets are:
 - the correctness of beacon states, state roots, fork selection, validator accounting, and head
   selection;
 - Ethereum consensus safety and liveness for a Lodestar node using this implementation;
-- availability and memory integrity of the hosting Node.js process;
+- availability, integrity, and confidentiality of the hosting Node.js process memory, including
+  unrelated validator material, JWTs, API credentials, and other resident secrets;
 - correctness of BLS signature verification and aggregation;
 - integrity of process-wide node pools, pubkey caches, configuration, and worker-pool state;
 - confidentiality of BLS secret-key material intentionally passed to this package;
@@ -132,8 +136,13 @@ library can contain.
 
 Code loaded into the same process can invoke exported functions, allocate memory, read and write
 files using its own runtime privileges, terminate the process, and serialize a `SecretKey` by design.
-It is not a security boundary. N-API still validates types, lengths, indexes, and encodings to prevent
-accidental misuse from becoming native undefined behavior or a process crash.
+It is not an authorization or OS-isolation boundary. It remains a JavaScript-to-native memory-safety,
+host-process confidentiality, and cross-environment integrity boundary. Same-process callers,
+including compromised dependencies, may intentionally supply malformed arrays, coercing objects,
+stale handles, and adversarial buffers; those inputs must not yield arbitrary native memory access or
+cross-worker corruption. N-API entry points must validate runtime types, lengths, indexes, encodings,
+and buffer ranges before unsafe native access. Gaps are boundary-hardening or security findings
+according to current or planned reachability.
 
 ### Checkpoint state provider
 
@@ -166,9 +175,10 @@ publishing, and provenance are the relevant controls.
 | JavaScript to N-API | Runtime types, byte contents, lengths, indices, offsets, arrays, and object shapes | Same-process caller chooses which method to call and owns policy options |
 | P2P object to SSZ | Bytes, offsets, list lengths, bitfields, and encodings are hostile | Lodestar-ts applies transport bounds; native decoding still enforces canonical SSZ and consensus limits |
 | Beacon-state deserialization | Bytes come from a trusted anchor, trusted database, or trusted ERA source | Deserialization establishes structural SSZ validity only; provenance establishes state trust |
-| State transition | Serialized signed block contents are hostile | Pre-state is trusted; full STF or equivalent prior checks are required; execution and DA statuses are accurate |
+| State transition and import | Serialized signed block contents are hostile | Pre-state is trusted; full STF or equivalent prior checks are required; publication is gated on joined execution and DA results |
 | Fork choice | Valid blocks and validated attestations still represent competing branches | Only STF-valid blocks enter; attestations passed the applicable upstream validation; local time is trusted |
 | BLS API | Serialized points, messages, list contents, and cardinality | Boolean validation options are caller policy; proof-of-possession preconditions apply where documented |
+| Zig to C/native dependencies | JavaScript- or network-influenced values may reach dependency calls | Lodestar-z ensures valid representation, initialization, cardinality, pointer lifetime, requested validation, and ABI compatibility; pinned dependencies are trusted to honor their documented contracts |
 | Shared native state | Worker scheduling and teardown are asynchronous | Configuration and administrative cache operations follow their lifecycle contract |
 | Checkpoint provider | Response may be malformed; provider is semitrusted | User-provided checkpoint root is authoritative, or checkpoint selection is explicitly delegated |
 | Database, PKIX, and ERA/E2S | Fallible local I/O, format compatibility, and accidental corruption | Contents and provenance are trusted; malicious local replacement is out of scope |
@@ -212,15 +222,16 @@ or construction entry point requires trusted state bytes. Trust originates at on
 - a user-provided checkpoint root, after the downloaded state's hash-tree-root is matched to it; or
 - explicit delegation of checkpoint selection to a checkpoint state provider.
 
-Subsequent states inherit trust through successful state transitions. A state written to trusted
-storage retains the trust it had when written. SSZ deserialization checks structural validity; it
-does not establish provenance, consensus validity, canonicality, or finality.
+Subsequent states inherit authenticated provenance through successful state transitions. A state
+written to trusted storage retains the provenance and validity status it had when written. SSZ
+deserialization checks structural validity; it does not establish provenance, consensus validity,
+canonicality, or finality.
 
 ```text
 genesis or authenticated checkpoint
                  |
                  v
-       trusted beacon pre-state
+      eligible trusted pre-state
                  |
         hostile candidate block
                  |
@@ -228,52 +239,61 @@ genesis or authenticated checkpoint
           |                    |
        reject                accept
           |                    |
- discard candidate       trusted post-state
+ discard candidate      authenticated post-state
                                |
-                    fork choice or trusted storage
+                 eligible pre-state or trusted storage
 ```
 
-For this model, a trusted beacon state is:
+For this model, an authenticated CL-derived beacon state is:
 
 - structurally valid SSZ;
-- consensus-layer valid, conditional on the execution and DA assertions supplied by the application;
+- produced by a successful consensus-layer state transition;
 - descended from a trusted anchor; and
-- associated with a block branch that is eligible for fork choice at the time it is accepted.
+- accompanied by the execution and DA status used when it was accepted.
+
+An eligible trusted pre-state is an authenticated CL-derived state whose branch remains eligible for
+fork choice under its current execution and DA status. Eligibility is therefore a current-use
+property, not part of the state's historical provenance.
 
 These properties must not be conflated:
 
-| Property | Guarantee for a trusted beacon state |
+| Property | Guarantee for an authenticated CL-derived state |
 | --- | --- |
 | Structural SSZ validity | Always |
-| Consensus-layer validity | Always, conditional on correct external execution and DA assertions |
+| Consensus-layer transition | Successful |
 | Descent from trusted anchor | Always |
 | Canonical | Not necessarily |
 | Finalized | Not necessarily |
 | Persisted | Not necessarily |
-| Execution status | Valid or conditionally trusted while `syncing` |
+| Execution status | Valid or conditionally valid while `syncing` |
 | DA status | Valid within the DA window; treated as satisfied outside the window |
+| Fork-choice eligibility | Not inherent; required when the state is used as an eligible trusted pre-state |
 
-A noncanonical block and its implied post-state remain valid and trusted while their branch remains
-viable. Finalization makes conflicting branches ineligible and their states are evicted. This does
-not mean those states were invalid before finalization, but they are no longer eligible trusted
-pre-states afterward.
+A noncanonical block and its implied post-state may remain valid and eligible trusted pre-states while
+their branch remains viable. Finalization makes conflicting branches ineligible and their states are
+evicted. It does not erase their authenticated provenance or historical successful CL transition,
+but they can no longer serve as eligible trusted pre-states.
 
-An execution-optimistic state is conditionally trusted. Each block carries its own execution status.
-While the EL is syncing, optimistic blocks and their descendants remain `syncing`. When the EL later
-reports valid or invalid, fork choice propagates that result through the affected branch. Latest
-valid hash processing makes an invalid block and all descendants immediately ineligible, revokes
-their conditional trust, and prevents their use as trusted pre-states. Lodestar-ts is responsible for
-preventing validator duties while the node is execution optimistic.
+An execution-optimistic state is authenticated but conditionally valid. Each block carries its own
+execution status. While the EL is syncing, optimistic blocks and their descendants remain `syncing`
+and may remain eligible for fork choice. When the EL later reports valid or invalid, fork choice
+propagates that result through the affected branch. Latest valid hash processing makes an invalid
+block and all descendants immediately ineligible, revokes their conditional validity, and prevents
+their use as eligible trusted pre-states. Lodestar-ts is responsible for preventing validator duties
+while the node is execution optimistic.
 
-DA must be satisfied before STF. Inside the DA window this means DA validation has completed. A
-super-node that custodies all columns may start STF after observing half because it can reconstruct
-the remainder. Outside the window during sync, DA is treated as satisfied rather than retained as an
-optimistic branch status.
+DA must be satisfied before block acceptance and publication, but DA verification and STF may run
+concurrently when an all-or-none result gates publication. Inside the DA window, successful import
+requires completed DA validation. A super-node that custodies all columns may treat DA as satisfied
+after observing half because it can reconstruct the remainder. Outside the window during sync, DA is
+treated as satisfied rather than retained as an optimistic branch status.
 
-`BeaconStateView.stateTransition` clones the trusted cached pre-state. Work before a late failure
-mutates only the disposable candidate clone, which is destroyed on error. Only a successful full STF
-may publish the post-state or enter fork choice. A finding that claims accepted-state corruption must
-demonstrate an alias or cache mutation crossing this isolation boundary.
+`BeaconStateView.stateTransition` clones the trusted cached pre-state. Branch-specific work before a
+late failure mutates the disposable candidate clone, which is destroyed on error. The documented
+exception is the shared append-only pubkey cache, which may safely advance during a failed candidate
+transition under the invariant below. Only after a successful full STF and all joined import checks
+may the post-state be published or enter fork choice. A finding that claims accepted-state corruption
+must demonstrate an alias or cache mutation that violates these isolation and append-only rules.
 
 Malicious database or ERA state bytes are outside the adversarial model. Checkpoint-provider bytes
 are the one state-loading surface where malformed input is plausible because the provider is only
@@ -294,19 +314,17 @@ canonical SSZ decoding
         +-- gossip: consensus-spec gossip validation
         |
         +-- range, unknown-block, or backward sync: hash-chain validation
-                                                       |
-                                                       v
-                         proposer and operation signatures checked
-                         individually by STF or batch-verified beforehand
-                                                       |
-                                                       v
-                                      full STF and state-root verification
-                                                       |
-                                                       v
-                                  valid block and trusted post-state
-                                                       |
-                                                       v
-                                                 fork choice
+        |
+        +--> CL STF and state-root verification ------------------+
+        +--> proposer and operation signatures, in STF or batch --+
+        +--> execution verification or optimistic status --------+
+        +--> DA verification or satisfied sync policy ------------+
+                                                                  |
+                                                 all-or-none import gate
+                                                                  |
+                                      accepted block and eligible trusted post-state
+                                                                  |
+                                                            fork choice
 ```
 
 Backward sync starts when a block, attestation, or another P2P object references an unknown block. It
@@ -342,9 +360,11 @@ results. The EL is trusted to be nonmalicious but may be fallible or still synci
 response is a Lodestar-z consensus bug. The `syncing` execution status becomes branch metadata in
 the planned fork-choice integration rather than weakening CL state-transition checks.
 
-DA orchestration currently belongs to Lodestar-ts. Supplying the correct DA status before STF is an
-integration precondition. Incorrect handling of that status in Lodestar-z is in scope; a trusted
-caller falsely claiming availability is not an independent native validation bypass.
+DA orchestration currently belongs to Lodestar-ts. The real DA result or satisfied sync policy must
+participate in the all-or-none acceptance gate. STF may evaluate concurrently using a provisional
+available status as long as its candidate result cannot be published independently. Incorrect
+handling of a correct DA result in Lodestar-z is in scope; a trusted caller falsely claiming
+availability is not an independent native validation bypass.
 
 ### Fork choice
 
@@ -380,13 +400,20 @@ the pubkey cache across Node.js environments. Sharing is intentional.
   resize.
 - PKIX save, load, and reset are restricted to the control environment. Reads and supported append
   operations may be shared.
-- The pubkey cache contains finalized validator-registry history. Pending deposits are processed into
-  this global append-only history only at finalization, so an orphaned or execution-invalid branch
-  cannot poison it.
+- The pubkey cache represents unforkable append-only validator pubkey/index history. Because cloned
+  epoch caches share it, candidate processing may append a future entry before the block's remaining
+  operations and state-root check succeed. That append is not rolled back.
+- A cached index at or beyond a state's validator count must be treated as absent for that state.
+  Later valid processing at the same index must reproduce the same pubkey; conflicting, duplicate,
+  or sparse appends fail. This prevents a safe future cache entry from being mistaken for accepted
+  state.
+- Former Eth1 bridge deposits may register a validator during block processing and append immediately.
+  In Electra the validator initially has zero balance while its amount remains pending. Execution-layer
+  deposit requests stay pending and register a new validator only after their source slot is finalized.
 - Other state-transition caches are short-lived, generally epoch-scoped, and derived from a trusted
   state. Candidate-block processing must isolate their mutations until acceptance. A failed STF may
-  leave metrics or completed signature computations, but nothing that can influence later validity
-  decisions.
+  leave metrics, completed signature computations, and a permitted pubkey-cache append, but no other
+  candidate-derived mutation that can influence later validity decisions.
 - Chain configuration is application startup state. The application must not concurrently replace
   it while states or transitions are using borrowed configuration data.
 - Explicit capacity APIs are controlled by the local application. They must reject arithmetic
@@ -426,12 +453,12 @@ impact rather than a claimed beacon-node remote exploit.
 
 | ID | Scenario | Security condition |
 | --- | --- | --- |
-| TM-01 | Malformed P2P SSZ, proof descriptors, BLS encodings, or remotely influenced N-API values trigger native memory corruption or a panic | Reachable through a current or identified planned P2P integration without first violating a trusted-caller precondition |
+| TM-01 | Malformed P2P SSZ, proof descriptors, BLS encodings, or remotely influenced N-API values trigger native memory corruption, host-process memory disclosure, or a panic | Reachable through a current or identified planned P2P integration without first violating a trusted-caller precondition |
 | TM-02 | An adversarial block or attestation produces a state root, validator result, fork upgrade, or head different from the pinned specification | Correct preset/configuration, trusted pre-state, full required validation, and accurate external statuses are used |
 | TM-03 | An invalid BLS signature, public key, or aggregate is accepted when the requested checks and documented preconditions hold | Report identifies the exact API flags, point validation state, and proof-of-possession assumption |
 | TM-04 | Attacker-controlled work or memory grows beyond protocol or documented application bounds | Report traces attacker control and quantifies amplification, not merely a theoretical maximum local call |
 | TM-05 | Node.js workers race on a cache, pool, configuration, async job, finalizer, or cleanup hook | Sequence uses the supported worker/lifecycle model |
-| TM-06 | Failed STF leaks candidate-derived caches into trusted state, enters fork choice, leaks, double-frees, or deadlocks | Report accounts for cloning, epoch-cache ownership, `defer`, `errdefer`, reference counts, locks, and rollback |
+| TM-06 | Failed STF leaks branch-specific candidate caches into trusted state, enters fork choice, violates the unforkable pubkey-cache invariant, leaks, double-frees, or deadlocks | Report accounts for cloning, epoch-cache ownership, permitted pubkey appends, `defer`, `errdefer`, reference counts, locks, and rollback |
 | TM-07 | Checkpoint bootstrap accepts a downloaded state whose hash-tree-root does not equal the user-provided checkpoint root | Report identifies the integration layer responsible for the mandatory root comparison |
 | TM-08 | A build or release workflow executes untrusted code with secrets or publishes a substituted native artifact | Report demonstrates the relevant CI event, permissions, pinning, and artifact path |
 | TM-09 | Secret-key material escapes through an unrelated API or memory-safety flaw | Calling documented `SecretKey.toBytes` or `toHex` is not an escape |
@@ -478,7 +505,8 @@ The following are not security findings without additional evidence that crosses
 - bypassing validation by explicitly setting a verification option to `false` from trusted code;
 - inaccurate execution or data-availability results supplied by the trusted application;
 - fork choice not repeating state transition, signature, or indexed-attestation validation;
-- mutation of the disposable post-state clone before a transition is rejected;
+- mutation of the disposable post-state clone or a permitted future pubkey-cache append before a
+  transition is rejected, without a demonstrated violation of their isolation invariants;
 - a noncanonical but still viable branch retaining a valid trusted post-state;
 - states from a finalized-away branch being evicted as no longer useful;
 - the PKIX checksum not being a MAC or PKIX affine entries not being revalidated;
@@ -516,8 +544,8 @@ Before filing a security finding, answer all of the following:
 9. **Reproduction:** Can the issue be reproduced on the target branch with the supported Zig version
    and, for bindings, a ReleaseSafe native build?
 10. **Impact:** Does it cause consensus divergence, false cryptographic acceptance, memory
-    corruption, branch misclassification, persistent integrity loss, process unavailability, secret
-    exposure, or only a handled error?
+    corruption, host-process memory disclosure, branch misclassification, persistent integrity loss,
+    process unavailability, secret exposure, or only a handled error?
 11. **Rollback and ownership:** Does the effect survive candidate-clone destruction, epoch-cache
     cleanup, lock release, worker teardown, cache staging, or fork-choice invalidation?
 12. **Bound:** For denial of service, what are the maximum input, allocation, loop count, and
@@ -551,7 +579,8 @@ incomplete:
 - SSZ and BLS fuzz targets;
 - full STF before import, including proposer and operation signatures checked by STF or an
   all-or-none prior batch, plus post-state-root verification;
-- copy-on-write state cloning and cleanup on rejected transitions;
+- copy-on-write state cloning and cleanup on rejected transitions, with explicit state-length checks
+  for permitted append-only pubkey-cache advancement;
 - gossip validation or sync hash-chain validation before full forward STF;
 - trusted-anchor bootstrapping through genesis or checkpoint-root authentication;
 - explicit protocol bounds, bounded stack buffers, and checked arithmetic in parsers;
