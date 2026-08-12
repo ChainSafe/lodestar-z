@@ -139,7 +139,7 @@ pub fn getPubkeyBytes(index: js.Number) !?js.Uint8Array {
     const idx = try index.toU32();
     const io = js.io();
     const pubkey_bytes = state.cache.getPubkeyBytes(io, idx) orelse return null;
-    return try js.Uint8Array.fromExternal(pubkey_bytes[0..]);
+    return js.Uint8Array.from(pubkey_bytes[0..]);
 }
 
 /// Aggregate multiple `PublicKey`s by the given
