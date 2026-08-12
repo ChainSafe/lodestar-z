@@ -152,7 +152,7 @@ pub fn prioritizePeers(
         const overshoot = constants.PEERS_TO_CONNECT_OVERSHOOT_FACTOR *| deficit;
         const max_connect = opts.max_peers - count;
         result.peers_to_connect = @min(overshoot, max_connect);
-    } else if (count > opts.target_peers or opts.starved) {
+    } else if (count > opts.target_peers) {
         try pruneExcessPeers(
             allocator,
             peers,
@@ -431,11 +431,13 @@ fn pruneExcessPeers(
         &disconnected_count,
     );
 
-    // Phase 4: find better peers
+    // Phase 4: find better peers. Matches JS: iterate ALL peers in prune-sorted
+    // order (not just the eligible subset), so duty/far-ahead/outbound-protected
+    // peers can still be pruned to reach the target if nothing else remains.
     try pruneFindBetterPeers(
         allocator,
         peers,
-        eligible.items,
+        sorted,
         disconnect_target,
         disconnects,
         &already_disconnected,
@@ -939,7 +941,10 @@ test "at target peers — no connect no disconnect" {
     try testing.expectEqual(@as(usize, 0), result.peers_to_disconnect.items.len);
 }
 
-test "at target peers — starvation prunes churn peers" {
+test "at target peers — no pruning even when starved (JS parity)" {
+    // JS prioritizePeers only prunes when count > targetPeers; at exactly the
+    // target it does nothing, even while starved. Starvation only raises the
+    // disconnect target once already over the target.
     const peers = generatePeerIds(100);
     var opts = makeOpts(100, 110);
     opts.starved = true;
@@ -955,7 +960,7 @@ test "at target peers — starvation prunes churn peers" {
     defer result.deinit();
 
     try testing.expectEqual(@as(u32, 0), result.peers_to_connect);
-    try testing.expectEqual(@as(usize, 5), result.peers_to_disconnect.items.len);
+    try testing.expectEqual(@as(usize, 0), result.peers_to_disconnect.items.len);
 }
 
 test "peer connection overshoot saturates at u32 limit" {
@@ -1090,7 +1095,7 @@ test "outbound peers protected from pruning" {
     try testing.expect(outbound_remaining >= 12);
 }
 
-test "fallback pruning preserves peers on active subnets" {
+test "fallback pruning disconnects duty peers to reach target (JS parity)" {
     var peers: [6]PrioritizePeersInput = undefined;
     for (0..peers.len) |i| {
         var peer = makePeerInput(PEER_NAMES[i], .inbound, 0);
@@ -1111,9 +1116,15 @@ test "fallback pruning preserves peers on active subnets" {
     );
     defer result.deinit();
 
-    // All six peers provide the target coverage for the active subnet, so the
-    // generic fallback must leave them for the subnet-aware pruning phases.
-    try testing.expectEqual(@as(usize, 0), result.peers_to_disconnect.items.len);
+    // count (6) > target (5). Every peer is a subnet-duty peer, so phases 1-3
+    // prune none. JS phase 4 ("find better") iterates ALL peers and disconnects
+    // down to target regardless of duty status (issue #5198), so exactly one
+    // peer is pruned with reason find_better_peers.
+    try testing.expectEqual(@as(usize, 1), result.peers_to_disconnect.items.len);
+    try testing.expectEqual(
+        ExcessPeerDisconnectReason.find_better_peers,
+        result.peers_to_disconnect.items[0].reason,
+    );
 }
 
 test "starvation prunes extra peers" {
