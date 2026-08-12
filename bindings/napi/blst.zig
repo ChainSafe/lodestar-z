@@ -15,6 +15,7 @@ const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
 const bls = @import("bls");
+const blst_verifier = @import("./blst_verifier.zig");
 
 const NativePublicKey = bls.PublicKey;
 const NativeSignature = bls.Signature;
@@ -35,9 +36,6 @@ const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 ///
 /// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
 const BATCH_VERIFY_SIZE = 32;
-
-/// A broken random source must fail instead of retrying forever.
-const RANDOM_SCALAR_RETRIES_MAX = 8;
 
 /// Native-only thread pool state, reached from `root.zig` through the
 /// pub `state` var so it is not part of the JS module surface.
@@ -74,17 +72,6 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
-/// A zero coefficient would omit its input from the random linear combination.
-fn ensureNonzeroRandomScalar(io: std.Io, scalar: *[8]u8) !void {
-    if (!std.mem.allEqual(u8, scalar, 0)) return;
-
-    for (0..RANDOM_SCALAR_RETRIES_MAX) |_| {
-        io.random(scalar);
-        if (!std.mem.allEqual(u8, scalar, 0)) return;
-    }
-    return error.RandomScalarGenerationFailed;
-}
-
 fn boolOrDefault(value: ?js.Boolean, default: bool) !bool {
     return if (value) |v| try v.toBool() else default;
 }
@@ -111,11 +98,7 @@ fn unwrapClass(comptime T: type, value: js.Value) !*T {
 /// (it calls a non-existent `expectType` method). Instead we narrow via
 /// the underlying `napi.Value` directly.
 fn uint8SliceFromValue(value: js.Value) ![]u8 {
-    const raw = value.toValue();
-    if (!(try raw.isTypedarray())) return error.TypeMismatch;
-    const info = try raw.getTypedarrayInfo();
-    if (info.array_type != .uint8) return error.TypeMismatch;
-    return info.data;
+    return blst_verifier.uint8Slice(value.toValue());
 }
 
 pub const PublicKey = struct {
@@ -480,7 +463,6 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         break :blk buf;
     };
 
-    const io = js.io();
     for (0..n_elems) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
 
@@ -498,18 +480,17 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
             .signature = &wrapped_sig.raw,
             .randomness = undefined,
         };
-        io.random(&items[i].randomness);
-        try ensureNonzeroRandomScalar(io, items[i].randomness[0..8]);
     }
 
     const pool = state.thread_pool orelse return error.ThreadPoolNotInitialized;
-    const result = pool.verifyMultipleAggregateSignatures(
+    const result = try blst_verifier.verifySignatureSets(
         js.io(),
+        pool,
         items,
-        DST,
         try boolOrDefault(pks_validate, false),
         try boolOrDefault(sigs_groupcheck, false),
-    ) catch return js.Boolean.from(false);
+        false,
+    );
 
     return js.Boolean.from(result);
 }
@@ -629,7 +610,7 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
         sig_ptrs[i] = &sigs[i];
 
         const scalar = scalars[i * nbytes ..][0..nbytes];
-        try ensureNonzeroRandomScalar(io, scalar);
+        try blst_verifier.ensureNonzeroRandomScalar(io, scalar);
         sca_ptrs[i] = &scalars[i * nbytes];
     }
 
@@ -815,7 +796,7 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     io.random(data.randomness[0 .. n * 32]);
     for (0..n) |i| {
         const scalar = data.randomness[i * 32 ..][0..8];
-        try ensureNonzeroRandomScalar(io, scalar);
+        try blst_verifier.ensureNonzeroRandomScalar(io, scalar);
     }
 
     for (0..n) |i| {

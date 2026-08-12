@@ -190,16 +190,26 @@ test "explicit capacity is exact, non-shrinking, and guarded" {
     );
 }
 
-test "aggregate rejects empty and out-of-range indices" {
-    var pubkeys: [1]types.primitive.BLSPubkey.Type = undefined;
+test "aggregate supports u64 and u32 indices and rejects invalid input" {
+    var pubkeys: [2]types.primitive.BLSPubkey.Type = undefined;
     try interop.interopPubkeysCached(pubkeys.len, &pubkeys);
 
     var cache = PubkeyCache.init(testing.allocator, testing.io);
     defer cache.deinit();
-    try cache.append(testing.io, pubkeys[0], 0);
+    for (pubkeys, 0..) |pubkey, index| {
+        try cache.append(testing.io, pubkey, index);
+    }
+
+    const aggregate_u64 = try cache.aggregate(testing.io, &.{ 0, 1 });
+    const aggregate_u32 = try cache.aggregateU32(testing.io, &.{ 0, 1 });
+    const compressed_u64 = aggregate_u64.compress();
+    const compressed_u32 = aggregate_u32.compress();
+    try testing.expectEqualSlices(u8, &compressed_u64, &compressed_u32);
 
     try testing.expectError(error.InvalidLength, cache.aggregate(testing.io, &.{}));
-    try testing.expectError(error.InvalidIndex, cache.aggregate(testing.io, &.{1}));
+    try testing.expectError(error.InvalidLength, cache.aggregateU32(testing.io, &.{}));
+    try testing.expectError(error.InvalidIndex, cache.aggregate(testing.io, &.{2}));
+    try testing.expectError(error.InvalidIndex, cache.aggregateU32(testing.io, &.{2}));
 }
 
 test "batch lookups preserve order and validate inputs" {
