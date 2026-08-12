@@ -198,6 +198,7 @@ pub fn stateTransition(
     // Verify proposer signature only
     if (opts.verify_proposer and !try verifyProposerSignature(
         allocator,
+        io,
         config,
         post_epoch_cache,
         signed_block,
@@ -220,6 +221,7 @@ pub fn stateTransition(
                         try processBlock(
                             f,
                             allocator,
+                            io,
                             config,
                             post_epoch_cache,
                             post_state.castToFork(f),

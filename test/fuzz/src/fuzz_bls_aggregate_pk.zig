@@ -52,8 +52,7 @@ fn fuzzAggregateWithRandomness(input: []const u8) void {
     if (n == 0) return;
 
     var pks: [MAX_AGGREGATE_PER_JOB]PublicKey = undefined;
-    var pks_refs: [MAX_AGGREGATE_PER_JOB]*const PublicKey = undefined;
-    var randomness: [MAX_AGGREGATE_PER_JOB * rand_size]u8 = undefined;
+    var items: [MAX_AGGREGATE_PER_JOB]AggregatePublicKey.RandomizedPublicKey = undefined;
     var count: usize = 0;
 
     for (0..n) |i| {
@@ -63,8 +62,10 @@ fn fuzzAggregateWithRandomness(input: []const u8) void {
 
         const pk = PublicKey.deserialize(pk_chunk) catch continue;
         pks[count] = pk;
-        pks_refs[count] = &pks[count];
-        @memcpy(randomness[count * rand_size .. (count + 1) * rand_size], rand_chunk);
+        items[count] = .{
+            .public_key = &pks[count],
+            .randomness = rand_chunk[0..rand_size].*,
+        };
         count += 1;
     }
 
@@ -73,13 +74,10 @@ fn fuzzAggregateWithRandomness(input: []const u8) void {
     var scratch: [1 << 14]u64 = undefined;
 
     _ = AggregatePublicKey.aggregateWithRandomness(
-        pks_refs[0..count],
-        randomness[0 .. count * rand_size],
+        items[0..count],
         false,
         &scratch,
-    ) catch |err| {
-        if (err != blstError.AggrTypeMismatch) {
-            @panic("unexpected aggregateWithRandomness public key error");
-        }
+    ) catch {
+        @panic("unexpected aggregateWithRandomness public key error");
     };
 }

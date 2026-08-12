@@ -34,24 +34,30 @@ export const pubkeyCache = {
     return native.getIndex(pubkey);
   },
 
-  set(index, pubkey) {
-    native.set(index, pubkey);
-    // Invalidate cached JS object so next get() picks up the new native value
-    pkCache.delete(index);
+  append(index, pubkey) {
+    native.append(index, pubkey);
+  },
+
+  syncPubkeys(validators) {
+    native.syncPubkeys(validators);
   },
 
   get size() {
     return native.size();
   },
 
-  load(filepath) {
+  get capacity() {
+    return native.capacity();
+  },
+
+  load(filepath, maxCapacity) {
+    native.load(filepath, maxCapacity);
     pkCache.clear();
-    native.load(filepath);
   },
 
   reset() {
-    pkCache.clear();
     native.reset();
+    pkCache.clear();
   },
 
   save(filepath) {

@@ -27,7 +27,7 @@ pub fn validate(self: *const Self, sig_infcheck: bool) BlstError!void {
 pub fn verify(
     self: *const Self,
     sig_groupcheck: bool,
-    msg: []const u8,
+    msg: *const SigningRoot,
     dst: []const u8,
     aug: ?[]const u8,
     pk: *const PublicKey,
@@ -36,7 +36,7 @@ pub fn verify(
     if (sig_groupcheck) try self.validate(false);
     if (pk_validate) try pk.validate();
 
-    if (msg.len == 0 or dst.len == 0) {
+    if (dst.len == 0) {
         return BlstError.BadEncoding;
     }
 
@@ -44,8 +44,8 @@ pub fn verify(
         @ptrCast(&pk.point),
         &self.point,
         true,
-        msg.ptr,
-        msg.len,
+        msg,
+        @sizeOf(SigningRoot),
         dst.ptr,
         dst.len,
         if (aug) |a| a.ptr else null,
@@ -62,7 +62,7 @@ pub fn aggregateVerify(
     self: *const Self,
     sig_groupcheck: bool,
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
-    msgs: []const [32]u8,
+    msgs: []const SigningRoot,
     dst: []const u8,
     pks: []const PublicKey,
     pks_validate: bool,
@@ -106,7 +106,7 @@ pub fn fastAggregateVerify(
     self: *const Self,
     sig_groupcheck: bool,
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
-    msg: *const [32]u8,
+    msg: *const SigningRoot,
     dst: []const u8,
     pks: []const PublicKey,
     pks_validate: bool,
@@ -131,7 +131,7 @@ pub fn fastAggregateVerifyPreAggregated(
     self: *const Self,
     sig_groupcheck: bool,
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
-    msg: *const [32]u8,
+    msg: *const SigningRoot,
     dst: []const u8,
     pk: *const PublicKey,
 ) BlstError!bool {
@@ -139,7 +139,7 @@ pub fn fastAggregateVerifyPreAggregated(
     return try self.aggregateVerify(
         sig_groupcheck,
         buffer,
-        @ptrCast(msg),
+        @as([*]const SigningRoot, @ptrCast(msg))[0..1],
         dst,
         pks[0..1],
         false,
@@ -216,32 +216,56 @@ const c = @import("root.zig").c;
 const BlstError = @import("error.zig").BlstError;
 const errorFromInt = @import("error.zig").errorFromInt;
 const PublicKey = @import("root.zig").PublicKey;
+const SigningRoot = @import("root.zig").SigningRoot;
 const AggregatePublicKey = @import("AggregatePublicKey.zig");
 const AggregateSignature = @import("AggregateSignature.zig");
 const Pairing = @import("Pairing.zig");
 
 const SecretKey = @import("SecretKey.zig");
 const DST = @import("root.zig").DST;
+const ikm: [32]u8 = [_]u8{
+    0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
+    0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
+    0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
+    0x48, 0x99,
+};
+
+test uncompress {
+    const sk = try SecretKey.keyGen(&ikm, null);
+    const signing_root = [_]u8{0x42} ** 32;
+    const sig = sk.sign(&signing_root, DST, null);
+    const sig_comp = sig.compress();
+
+    // Valid compressed bytes round-trip.
+    const sig_uncomp = try uncompress(&sig_comp);
+    try std.testing.expect(sig.isEqual(&sig_uncomp));
+
+    // Invalid lengths must be rejected, even with the compression bit set.
+    try std.testing.expectError(BlstError.BadEncoding, uncompress(&[_]u8{}));
+    try std.testing.expectError(BlstError.BadEncoding, uncompress(sig_comp[0 .. COMPRESS_SIZE - 1]));
+    var too_long = [_]u8{0} ** (COMPRESS_SIZE + 1);
+    @memcpy(too_long[0..COMPRESS_SIZE], &sig_comp);
+    try std.testing.expectError(BlstError.BadEncoding, uncompress(&too_long));
+
+    // Correct length without the compression bit must be rejected.
+    var no_comp_bit = sig_comp;
+    no_comp_bit[0] &= 0x7f;
+    try std.testing.expectError(BlstError.BadEncoding, uncompress(&no_comp_bit));
+}
 
 test "test_sign_n_verify" {
     // sample code for consumer like on Readme
-    const ikm: [32]u8 = [_]u8{
-        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
-        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
-        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
-        0x48, 0x99,
-    };
     const sk = try SecretKey.keyGen(&ikm, null);
     const pk = sk.toPublicKey();
 
     const dst = DST;
-    const msg = "hello foo";
-    const sig = sk.sign(msg, dst, null);
+    const signing_root = [_]u8{0x42} ** 32;
+    const sig = sk.sign(&signing_root, dst, null);
 
     // aug is null
     try sig.verify(
         true,
-        msg,
+        &signing_root,
         dst,
         null,
         &pk,
@@ -250,13 +274,6 @@ test "test_sign_n_verify" {
 }
 
 test aggregateVerify {
-    const ikm: [32]u8 = [_]u8{
-        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
-        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
-        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
-        0x48, 0x99,
-    };
-
     const dst = DST;
     // aug is null
 

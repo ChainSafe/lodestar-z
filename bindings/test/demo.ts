@@ -4,6 +4,7 @@ import * as era from "@lodestar/era";
 import bindings from "../src/index.js";
 import {pubkeyCache} from "../src/pubkeys.js";
 import {getEraFilePaths, getFirstEraFilePath} from "./eraFiles.ts";
+import {getPubkeyCacheCapacityForState} from "./serializedState.ts";
 
 console.log("loaded bindings");
 
@@ -31,14 +32,7 @@ const hasPkix = printDuration("check for pkix file", () => {
   }
 });
 
-if (hasPkix) {
-  printDuration("load pkix from disk", () => pubkeyCache.load(PKIX_FILE));
-} else {
-  printDuration("update bindings capacity", () => {
-    bindings.pool.ensureCapacity(10_000_000);
-    pubkeyCache.ensureCapacity(2_000_000);
-  });
-}
+bindings.pool.ensureCapacity(10_000_000);
 
 const reader = await printDurationAsync("load era reader", () => era.era.EraReader.open(config, getFirstEraFilePath()));
 
@@ -47,6 +41,23 @@ const nextReader = await printDurationAsync("load era reader", () =>
 );
 
 const stateBytes = await printDurationAsync("read serialized state", () => reader.readSerializedState());
+const requiredPubkeyCapacity = getPubkeyCacheCapacityForState(stateBytes);
+
+let loadedPkix = false;
+if (hasPkix) {
+  try {
+    printDuration("load pkix from disk", () => pubkeyCache.load(PKIX_FILE, requiredPubkeyCapacity));
+    loadedPkix = true;
+  } catch (error) {
+    console.warn("PKIX cache is incompatible or corrupt; rebuilding it from state", error);
+  }
+}
+
+if (!loadedPkix || pubkeyCache.capacity < requiredPubkeyCapacity) {
+  printDuration("reserve pubkey cache", () => {
+    pubkeyCache.ensureCapacity(requiredPubkeyCapacity);
+  });
+}
 
 const state = printDuration("create state view", () => bindings.BeaconStateView.createFromBytes(stateBytes));
 
