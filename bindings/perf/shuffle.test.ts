@@ -5,7 +5,7 @@ import {bench, describe} from "@chainsafe/benchmark";
 import * as reference from "@chainsafe/swap-or-not-shuffle";
 
 const bindings = await import("../src/index.js");
-const swapOrNotShuffle = bindings.default.shuffle;
+const shuffle = bindings.default.shuffle;
 
 const seed = new Uint8Array(crypto.randomBytes(32));
 const rounds = reference.SHUFFLE_ROUNDS_MAINNET;
@@ -20,7 +20,7 @@ describe("shuffleList", () => {
 
     bench({
       fn: () => {
-        swapOrNotShuffle.unshuffleList(input, seed, rounds);
+        shuffle.unshuffleList(input, seed, rounds);
       },
       id: `zig unshuffleList - ${validatorCount} indices`,
     });
@@ -34,7 +34,7 @@ describe("shuffleList", () => {
 
     bench({
       fn: async () => {
-        await swapOrNotShuffle.asyncUnshuffleList(input, seed, rounds);
+        await shuffle.asyncUnshuffleList(input, seed, rounds);
       },
       id: `zig asyncUnshuffleList - ${validatorCount} indices`,
     });
@@ -61,7 +61,7 @@ describe("committee indices", () => {
 
   bench({
     fn: () => {
-      swapOrNotShuffle.computeSyncCommitteeIndicesElectra(
+      shuffle.computeSyncCommitteeIndicesElectra(
         seed,
         activeIndices,
         effectiveBalanceIncrements,
@@ -91,7 +91,7 @@ describe("committee indices", () => {
 
   bench({
     fn: () => {
-      swapOrNotShuffle.computeProposerIndexElectra(
+      shuffle.computeProposerIndexElectra(
         seed,
         activeIndices,
         effectiveBalanceIncrements,
