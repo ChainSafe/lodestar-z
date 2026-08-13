@@ -24,6 +24,9 @@ importers:
       '@chainsafe/blst':
         specifier: ^2.2.0
         version: 2.2.0
+      '@chainsafe/swap-or-not-shuffle':
+        specifier: ^1.2.1
+        version: 1.2.1
       '@lodestar/config':
         specifier: ^1.39.1
         version: 1.39.1

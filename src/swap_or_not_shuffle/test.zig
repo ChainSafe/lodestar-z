@@ -1,0 +1,199 @@
+//! Vectors are taken from the reference repo's test suite
+//! (https://github.com/ChainSafe/swap-or-not-shuffle) and were originally
+//! produced by/checked against the `@chainsafe/swap-or-not-shuffle` npm
+//! package, so any divergence from the Rust implementation fails here.
+
+const std = @import("std");
+const shuffle = @import("./root.zig");
+
+const SEED_SIZE = shuffle.SEED_SIZE;
+
+test "innerShuffleList roundtrip matches reference vector" {
+    var input = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+    const seed = [_]u8{0} ** SEED_SIZE;
+    const rounds = 32;
+
+    try shuffle.unshuffleList(u32, input[0..], seed[0..], rounds);
+    // checked against @chainsafe/swap-or-not-shuffle
+    const expected = [_]u32{ 6, 2, 3, 5, 1, 7, 8, 0, 4 };
+    try std.testing.expectEqualSlices(u32, expected[0..], input[0..]);
+
+    try shuffle.shuffleList(u32, input[0..], seed[0..], rounds);
+    const expected_input = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+    try std.testing.expectEqualSlices(u32, expected_input[0..], input[0..]);
+}
+
+test "innerShuffleList generic over u64" {
+    var input: [100]u64 = undefined;
+    for (0..input.len) |i| input[i] = i;
+    var seed: [SEED_SIZE]u8 = undefined;
+    for (0..SEED_SIZE) |i| seed[i] = @intCast(i * 7 % 256);
+
+    try shuffle.shuffleList(u64, input[0..], seed[0..], 90);
+    try shuffle.unshuffleList(u64, input[0..], seed[0..], 90);
+    for (0..input.len) |i| try std.testing.expectEqual(@as(u64, i), input[i]);
+}
+
+test "unshuffleList matches spec test vector" {
+    // seed 0x4fe91d85d6bc19b20413659c61f3c690a1c4d48be41cab8363a130cebabada97
+    const seed = [_]u8{
+        0x4f, 0xe9, 0x1d, 0x85, 0xd6, 0xbc, 0x19, 0xb2, 0x04, 0x13, 0x65, 0x9c, 0x61, 0xf3, 0xc6, 0x90,
+        0xa1, 0xc4, 0xd4, 0x8b, 0xe4, 0x1c, 0xab, 0x83, 0x63, 0xa1, 0x30, 0xce, 0xba, 0xba, 0xda, 0x97,
+    };
+    const rounds = 10;
+
+    var input: [100]u32 = undefined;
+    for (0..input.len) |i| input[i] = @intCast(i);
+
+    try shuffle.unshuffleList(u32, input[0..], seed[0..], rounds);
+
+    const expected = [_]u32{
+        99, 71, 51, 5,  78, 61, 12, 17, 30, 3,  59, 47, 6,  9,  1,  41, 18, 37, 55, 43, 20, 31, 38, 79, 29,
+        69, 70, 54, 53, 36, 34, 62, 77, 87, 39, 96, 56, 92, 16, 82, 40, 27, 58, 14, 68, 76, 80, 13, 28, 81,
+        64, 26, 19, 60, 90, 2,  98, 67, 66, 52, 46, 95, 49, 72, 8,  21, 75, 57, 97, 83, 84, 88, 86, 7,  74,
+        32, 63, 85, 23, 65, 24, 91, 0,  48, 35, 15, 44, 25, 22, 73, 93, 45, 4,  33, 89, 94, 10, 42, 11, 50,
+    };
+    try std.testing.expectEqualSlices(u32, expected[0..], input[0..]);
+}
+
+test "innerShuffleList no-op conditions match reference validation order" {
+    const good_seed = [_]u8{0} ** SEED_SIZE;
+    const bad_seed = [_]u8{0xac} ** 31;
+
+    // rounds == 0 returns before any validation
+    var list = [_]u32{ 0, 1, 2, 3, 4 };
+    try shuffle.innerShuffleList(u32, list[0..], bad_seed[0..], 0, false);
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 0, 1, 2, 3, 4 }, list[0..]);
+
+    // list length <= 1 returns before seed/rounds validation
+    var single = [_]u32{7};
+    try shuffle.innerShuffleList(u32, single[0..], bad_seed[0..], -1, false);
+    try std.testing.expectEqual(@as(u32, 7), single[0]);
+    var empty = [_]u32{};
+    try shuffle.innerShuffleList(u32, empty[0..], bad_seed[0..], 300, true);
+
+    // invalid seed is checked before invalid rounds
+    var multi = [_]u32{ 0, 1, 2 };
+    try std.testing.expectError(error.InvalidSeedLength, shuffle.innerShuffleList(u32, multi[0..], bad_seed[0..], -1, false));
+
+    const long_seed = [_]u8{0xac} ** 33;
+    try std.testing.expectError(error.InvalidSeedLength, shuffle.innerShuffleList(u32, multi[0..], long_seed[0..], 10, false));
+
+    try std.testing.expectError(error.InvalidNumberOfRounds, shuffle.innerShuffleList(u32, multi[0..], good_seed[0..], -1, false));
+    try std.testing.expectError(error.InvalidNumberOfRounds, shuffle.innerShuffleList(u32, multi[0..], good_seed[0..], 256, false));
+}
+
+test "ComputeShuffledIndex matches reference vector" {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{1} ** SEED_SIZE;
+    const index_count = 1000;
+    const rounds = 90;
+
+    var instance = try shuffle.ComputeShuffledIndex.init(allocator, seed[0..], index_count, rounds);
+    defer instance.deinit();
+
+    const expected = [_]u32{
+        789, 161, 541, 509, 498, 445, 270, 2,   505, 621, 947, 550, 338, 814, 285, 597,
+        169, 819, 644, 638, 751, 514, 750, 523, 303, 231, 391, 982, 409, 396, 641, 837,
+    };
+    for (expected, 0..) |want, i| {
+        try std.testing.expectEqual(want, try instance.get(@intCast(i)));
+    }
+}
+
+test "ComputeShuffledIndex rejects invalid seed" {
+    const bad_seed = [_]u8{1} ** 31;
+    try std.testing.expectError(
+        error.InvalidSeedLength,
+        shuffle.ComputeShuffledIndex.init(std.testing.allocator, bad_seed[0..], 1000, 90),
+    );
+}
+
+const MAX_EFFECTIVE_BALANCE: i64 = 32_000_000_000;
+const MAX_EFFECTIVE_BALANCE_ELECTRA: i64 = 2_048_000_000_000;
+const EFFECTIVE_BALANCE_INCREMENT: i64 = 1_000_000_000;
+
+fn testBalances(comptime vc: usize) struct { indices: [vc]u32, increments: [vc]u16 } {
+    var indices: [vc]u32 = undefined;
+    var increments: [vc]u16 = undefined;
+    for (0..vc) |i| {
+        indices[i] = @intCast(i);
+        increments[i] = @intCast(32 + 32 * (i % 64));
+    }
+    return .{ .indices = indices, .increments = increments };
+}
+
+test "computeProposerIndex matches reference vectors" {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{1} ** SEED_SIZE;
+    const data = testBalances(1000);
+    const rounds = 90;
+
+    const phase0_index = try shuffle.computeProposerIndex(
+        allocator,
+        seed[0..],
+        data.indices[0..],
+        data.increments[0..],
+        .one,
+        MAX_EFFECTIVE_BALANCE,
+        EFFECTIVE_BALANCE_INCREMENT,
+        rounds,
+    );
+    try std.testing.expectEqual(@as(u32, 789), phase0_index);
+
+    const electra_index = try shuffle.computeProposerIndexElectra(
+        allocator,
+        seed[0..],
+        data.indices[0..],
+        data.increments[0..],
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+        rounds,
+    );
+    try std.testing.expectEqual(@as(u32, 161), electra_index);
+}
+
+test "computeSyncCommitteeIndices matches reference vectors" {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{
+        74,  7,   102, 54,  84, 136, 68, 56,  19,  191, 186, 58,  72,  53, 151, 49,
+        220, 123, 42,  116, 59, 7,   73, 162, 110, 145, 93,  199, 163, 66, 85,  34,
+    };
+    const data = testBalances(1000);
+    const rounds = 90;
+
+    const phase0 = try shuffle.computeSyncCommitteeIndices(
+        allocator,
+        seed[0..],
+        data.indices[0..],
+        data.increments[0..],
+        .one,
+        32,
+        MAX_EFFECTIVE_BALANCE,
+        EFFECTIVE_BALANCE_INCREMENT,
+        rounds,
+    );
+    defer allocator.free(phase0);
+    const expected_phase0 = [_]u32{
+        293, 726, 771, 677, 530, 475, 322, 66,  521, 106, 774, 23,  508, 410, 526, 44,
+        213, 948, 248, 903, 85,  853, 171, 679, 309, 791, 851, 817, 609, 119, 128, 983,
+    };
+    try std.testing.expectEqualSlices(u32, expected_phase0[0..], phase0);
+
+    const electra = try shuffle.computeSyncCommitteeIndicesElectra(
+        allocator,
+        seed[0..],
+        data.indices[0..],
+        data.increments[0..],
+        32,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+        rounds,
+    );
+    defer allocator.free(electra);
+    const expected_electra = [_]u32{
+        726, 475, 521, 23,  508, 410, 213, 948, 248, 85,  171, 309, 791, 817, 119, 126,
+        651, 416, 273, 471, 739, 290, 588, 840, 665, 945, 496, 158, 757, 616, 226, 766,
+    };
+    try std.testing.expectEqualSlices(u32, expected_electra[0..], electra);
+}

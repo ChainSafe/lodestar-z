@@ -1,8 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const js = @import("zapi:zapi").js;
+const napi = @import("zapi:zapi").napi;
 pub const pool = @import("./pool.zig");
 pub const shuffle = @import("./shuffle.zig");
+pub const swapOrNotShuffle = @import("./swap_or_not_shuffle.zig");
 pub const config = @import("./config.zig");
 pub const metrics = @import("./metrics.zig");
 pub const stateTransition = @import("./stateTransition.zig");
@@ -58,6 +60,21 @@ fn detectCpuCount() !usize {
     };
 }
 
+/// Adds exports the DSL cannot register automatically: the reference
+/// package's numeric constants and the ByteCount enum object on the
+/// `swapOrNotShuffle` namespace.
+fn register(env: napi.Env, exports: napi.Value) !void {
+    const sons = @import("swap_or_not_shuffle");
+    const ns = try exports.getNamedProperty("swapOrNotShuffle");
+    try ns.setNamedProperty("SHUFFLE_ROUNDS_MAINNET", try env.createUint32(sons.SHUFFLE_ROUNDS_MAINNET));
+    try ns.setNamedProperty("SHUFFLE_ROUNDS_MINIMAL", try env.createUint32(sons.SHUFFLE_ROUNDS_MINIMAL));
+
+    const byte_count = try env.createObject();
+    try byte_count.setNamedProperty("One", try env.createUint32(@intFromEnum(sons.ByteCount.one)));
+    try byte_count.setNamedProperty("Two", try env.createUint32(@intFromEnum(sons.ByteCount.two)));
+    try ns.setNamedProperty("ByteCount", byte_count);
+}
+
 fn cleanup(new_ref_count: u32) void {
     if (new_ref_count == 0) {
         // Last environment — tear down shared state.
@@ -74,5 +91,6 @@ comptime {
         .identity = @import("zapi_addon_identity"),
         .init = init,
         .cleanup = cleanup,
+        .register = register,
     });
 }

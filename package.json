@@ -68,6 +68,7 @@
     "@chainsafe/benchmark": "^2.0.1",
     "@chainsafe/biomejs-config": "^1.0.0",
     "@chainsafe/blst": "^2.2.0",
+    "@chainsafe/swap-or-not-shuffle": "^1.2.1",
     "@lodestar/config": "^1.39.1",
     "@lodestar/era": "^1.39.1",
     "@lodestar/state-transition": "^1.39.1",

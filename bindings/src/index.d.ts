@@ -369,6 +369,21 @@ export declare class BeaconStateView {
   stateTransition(signedBlockBytes: Uint8Array, options?: TransitionOpts): BeaconStateView;
 }
 
+/**
+ * Computes `compute_shuffled_index` for single indices, caching per-round
+ * pivots and source hashes across calls.
+ */
+export declare class ComputeShuffledIndex {
+  constructor(seed: Uint8Array, indexCount: number, rounds: number);
+  get(index: number): number;
+}
+
+/** Pre-electra, byte count for random value is 1, post-electra, byte count for random value is 2 */
+export declare enum ByteCount {
+  One = 1,
+  Two = 2,
+}
+
 declare const bindings: {
   pool: {
     ensureCapacity: (capacity: number) => void;
@@ -378,6 +393,53 @@ declare const bindings: {
   };
   shuffle: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
+  };
+  /** API-compatible port of the `@chainsafe/swap-or-not-shuffle` package. */
+  swapOrNotShuffle: {
+    shuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Uint32Array;
+    unshuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Uint32Array;
+    asyncShuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Promise<Uint32Array>;
+    asyncUnshuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Promise<Uint32Array>;
+    ComputeShuffledIndex: typeof ComputeShuffledIndex;
+    computeProposerIndex: (
+      seed: Uint8Array,
+      activeIndices: Uint32Array,
+      effectiveBalanceIncrements: Uint16Array,
+      randByteCount: ByteCount,
+      maxEffectiveBalanceElectra: number,
+      effectiveBalanceIncrement: number,
+      rounds: number
+    ) => number;
+    computeProposerIndexElectra: (
+      seed: Uint8Array,
+      activeIndices: Uint32Array,
+      effectiveBalanceIncrements: Uint16Array,
+      maxEffectiveBalanceElectra: number,
+      effectiveBalanceIncrement: number,
+      rounds: number
+    ) => number;
+    computeSyncCommitteeIndices: (
+      seed: Uint8Array,
+      activeIndices: Uint32Array,
+      effectiveBalanceIncrements: Uint16Array,
+      randByteCount: ByteCount,
+      syncCommitteeSize: number,
+      maxEffectiveBalanceElectra: number,
+      effectiveBalanceIncrement: number,
+      rounds: number
+    ) => Uint32Array;
+    computeSyncCommitteeIndicesElectra: (
+      seed: Uint8Array,
+      activeIndices: Uint32Array,
+      effectiveBalanceIncrements: Uint16Array,
+      syncCommitteeSize: number,
+      maxEffectiveBalanceElectra: number,
+      effectiveBalanceIncrement: number,
+      rounds: number
+    ) => Uint32Array;
+    SHUFFLE_ROUNDS_MAINNET: number;
+    SHUFFLE_ROUNDS_MINIMAL: number;
+    ByteCount: {One: number; Two: number};
   };
   stateTransition: {
     deinitReusedEpochTransitionCache: () => void;
