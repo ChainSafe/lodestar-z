@@ -14,6 +14,7 @@ const builtin = @import("builtin");
 const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
+const pubkeys = @import("./pubkeys.zig");
 const bls = @import("bls");
 
 const NativePublicKey = bls.PublicKey;
@@ -718,7 +719,7 @@ fn asyncAggRand_execute(_: napi.Env, data: *AsyncAggRandData) void {
         data.pk_ptrs[0..data.n],
         data.sig_ptrs[0..data.n],
         data.randomness[0 .. data.n * 32],
-        false, // pks already validated implicitly by being deserialized PublicKey instances
+        false, // cache keys were group-checked at deposit processing
         true, // sigs were deserialized but not group-checked on the JS thread
         &data.pk_out,
         &data.sig_out,
@@ -788,8 +789,14 @@ fn rejectWithError(env: napi.Env, deferred: napi.Deferred, where: []const u8, co
 ///
 /// See: https://github.com/supranational/blst/blob/dece82ea537b422890888bacde4034ca5b5a44d8/bindings/rust/src/pippenger.rs
 ///
+/// Public keys are resolved from the process-wide pubkey cache by validator
+/// index on the JS thread during setup (copied by value into the async
+/// context), so callers skip the per-set getOrThrow and PublicKey object
+/// crossing. Unknown indices throw PubkeyIndexNotFound synchronously. For
+/// arbitrary non-registry keys, use the synchronous `aggregateWithRandomness`.
+///
 /// Arguments:
-/// 1) sets: Array of {pk: PublicKey, sig: Uint8Array}
+/// 1) sets: Array of {index: number, sig: Uint8Array}
 ///
 /// Returns: Promise<{pk: PublicKey, sig: Signature}>
 pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
@@ -798,6 +805,7 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     if (n == 0) return error.EmptyArray;
     if (n > MAX_AGGREGATE_PER_JOB) return error.TooManySets;
     if (state.thread_pool == null) return error.PoolNotInitialized;
+    if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
 
     const env = js.env();
 
@@ -821,9 +829,8 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
 
-        const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
-        data.pks[i] = wrapped_pk.raw;
+        const index = try (js.Number{ .val = try set.getNamedProperty("index") }).toU32();
+        data.pks[i] = pubkeys.state.cache.getPubkey(io, index) orelse return error.PubkeyIndexNotFound;
         data.pk_ptrs[i] = &data.pks[i];
 
         const sig_napi = try set.getNamedProperty("sig");

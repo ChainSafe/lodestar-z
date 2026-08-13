@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import {beforeEach, describe, expect, it} from "vitest";
+import {afterAll, beforeEach, describe, expect, it} from "vitest";
 import {
   PublicKey,
   SecretKey,
@@ -13,6 +13,7 @@ import {
   verify,
   verifyMultipleAggregateSignatures,
 } from "../src/blst.js";
+import {pubkeyCache} from "../src/pubkeys.js";
 
 describe("blst", () => {
   describe("PublicKey", () => {
@@ -463,13 +464,33 @@ describe("blst", () => {
   });
 
   describe("asyncAggregateWithRandomness", () => {
+    /**
+     * Resolve or append sets' pubkeys in the process-wide cache, returning
+     * their indices. Idempotent: the test helper returns the same
+     * deterministic keys across calls, and the cache rejects duplicates.
+     */
+    function seedIndices(sets: {pk: PublicKey}[]): number[] {
+      pubkeyCache.ensureCapacity(pubkeyCache.size + sets.length);
+      return sets.map((s) => {
+        const bytes = s.pk.toBytes();
+        const existing = pubkeyCache.getIndex(bytes);
+        if (existing !== null) return existing;
+        const index = pubkeyCache.size;
+        pubkeyCache.append(index, bytes);
+        return index;
+      });
+    }
+
+    afterAll(() => pubkeyCache.reset());
+
     it("should be exported as a function", () => {
       expect(typeof asyncAggregateWithRandomness).toBe("function");
     });
 
     it("should return a Promise", () => {
       const {sets} = getTestSetsSameMessage(2);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const indices = seedIndices(sets);
+      const input = sets.map((s, i) => ({index: indices[i], sig: s.sig.toBytes()}));
       const result = asyncAggregateWithRandomness(input);
       expect(result).toBeInstanceOf(Promise);
       return result;
@@ -477,7 +498,8 @@ describe("blst", () => {
 
     it("should resolve with aggregated pk and sig instances", async () => {
       const {sets} = getTestSetsSameMessage(8);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const indices = seedIndices(sets);
+      const input = sets.map((s, i) => ({index: indices[i], sig: s.sig.toBytes()}));
       const result = await asyncAggregateWithRandomness(input);
       expect(result).toHaveProperty("pk");
       expect(result).toHaveProperty("sig");
@@ -487,28 +509,32 @@ describe("blst", () => {
 
     it("should produce a valid aggregated signature - small MSM", async () => {
       const {msg, sets} = getTestSetsSameMessage(8);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const indices = seedIndices(sets);
+      const input = sets.map((s, i) => ({index: indices[i], sig: s.sig.toBytes()}));
       const {pk, sig} = await asyncAggregateWithRandomness(input);
       expect(verify(msg, pk, sig, false, false)).toBe(true);
     });
 
     it("should produce a valid aggregated signature - tiled MSM", async () => {
       const {msg, sets} = getTestSetsSameMessage(33);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const indices = seedIndices(sets);
+      const input = sets.map((s, i) => ({index: indices[i], sig: s.sig.toBytes()}));
       const {pk, sig} = await asyncAggregateWithRandomness(input);
       expect(verify(msg, pk, sig, false, false)).toBe(true);
     });
 
     it("should work with a single set", async () => {
       const {msg, sets} = getTestSetsSameMessage(1);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const indices = seedIndices(sets);
+      const input = sets.map((s, i) => ({index: indices[i], sig: s.sig.toBytes()}));
       const {pk, sig} = await asyncAggregateWithRandomness(input);
       expect(verify(msg, pk, sig, false, false)).toBe(true);
     });
 
     it("should fail verification against a different message", async () => {
       const {sets} = getTestSetsSameMessage(4);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const indices = seedIndices(sets);
+      const input = sets.map((s, i) => ({index: indices[i], sig: s.sig.toBytes()}));
       const {pk, sig} = await asyncAggregateWithRandomness(input);
       const wrongMessage = new Uint8Array(32).fill(0);
       expect(verify(wrongMessage, pk, sig, false, false)).toBe(false);
@@ -516,9 +542,11 @@ describe("blst", () => {
 
     it("should match the synchronous aggregateWithRandomness verification result", async () => {
       const {msg, sets} = getTestSetsSameMessage(6);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const syncResult = aggregateWithRandomness(input);
-      const asyncResult = await asyncAggregateWithRandomness(input);
+      const indices = seedIndices(sets);
+      const syncResult = aggregateWithRandomness(sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()})));
+      const asyncResult = await asyncAggregateWithRandomness(
+        sets.map((s, i) => ({index: indices[i], sig: s.sig.toBytes()}))
+      );
       // Randomness differs between calls so signatures aren't byte-equal,
       // but both must verify against the shared message.
       expect(verify(msg, syncResult.pk, syncResult.sig, false, false)).toBe(true);
@@ -536,15 +564,17 @@ describe("blst", () => {
       await expect(Promise.resolve().then(() => asyncAggregateWithRandomness(input))).rejects.toThrow();
     });
 
-    it("should reject objects of the wrong class", async () => {
+    it("should reject sets without a valid index", async () => {
       const {sets} = getTestSetsSameMessage(1);
-      const input = [{pk: sets[0].sk as unknown as PublicKey, sig: sets[0].sig.toBytes()}];
-      await expect(Promise.resolve().then(() => asyncAggregateWithRandomness(input))).rejects.toThrow("TypeMismatch");
+      // Old by-object shape: no `index` property.
+      const input = [{pk: sets[0].pk, sig: sets[0].sig.toBytes()} as unknown as {index: number; sig: Uint8Array}];
+      await expect(Promise.resolve().then(() => asyncAggregateWithRandomness(input))).rejects.toThrow();
     });
 
     it("should resolve concurrent invocations correctly", async () => {
       const {msg, sets} = getTestSetsSameMessage(8);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const indices = seedIndices(sets);
+      const input = sets.map((s, i) => ({index: indices[i], sig: s.sig.toBytes()}));
       const results = await Promise.all([
         asyncAggregateWithRandomness(input),
         asyncAggregateWithRandomness(input),

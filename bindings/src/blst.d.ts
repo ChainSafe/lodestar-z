@@ -172,7 +172,14 @@ export declare function aggregateWithRandomness(sets: PkAndSerializedSig[]): PkA
  * Same as `aggregateWithRandomness`, but the multi-scalar multiplications run on the
  * native thread pool and the call returns a Promise instead of blocking the JS thread.
  */
-export declare function asyncAggregateWithRandomness(sets: PkAndSerializedSig[]): Promise<PkAndSig>;
+/**
+ * Aggregate (pubkey, signature) pairs with randomness, resolving each signer
+ * from the process-wide pubkey cache by validator index (populate via
+ * pubkeyCache.syncPubkeys/append before use; reset() is test-only). Throws
+ * synchronously "PubkeyIndexNotFound" for an unknown index. For arbitrary
+ * non-registry keys, use the synchronous `aggregateWithRandomness`.
+ */
+export declare function asyncAggregateWithRandomness(sets: {index: number; sig: Uint8Array}[]): Promise<PkAndSig>;
 
 /**
  * Aggregate multiple signatures into a single signature.
