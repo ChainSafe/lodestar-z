@@ -1,6 +1,6 @@
 import {randomBytes} from "node:crypto";
-import * as reference from "@chainsafe/swap-or-not-shuffle";
 import {describe, expect, it} from "vitest";
+import * as referenceImplementation from "./referenceImplementation.js";
 
 const bindings = await import("../src/index.js");
 const shuffle = bindings.default.shuffle;
@@ -63,270 +63,279 @@ describe("innerShuffleList", () => {
   });
 });
 
+// Test suite ported from the reference repo
+// (https://github.com/ChainSafe/swap-or-not-shuffle test/unit/*), with the
+// pure-TS referenceImplementation as the oracle.
+
+interface ShuffleTestCase {
+  id: string;
+  rounds: number;
+  seed: Uint8Array;
+  input: Uint32Array;
+  shuffled: string;
+  unshuffled: string;
+}
+
+function fromHex(hex: string): Uint8Array {
+  const b = Buffer.from(hex.startsWith("0x") ? hex.slice(2) : hex, "hex");
+  return new Uint8Array(b.buffer, b.byteOffset, b.length);
+}
+
 function getInputArray(count: number): Uint32Array {
   return Uint32Array.from(Array.from({length: count}, (_, i) => i));
 }
 
-function randomSeed(): {seed: Uint8Array; id: string} {
-  const seed = new Uint8Array(randomBytes(32));
-  return {id: `seed 0x${Buffer.from(seed).toString("hex")}`, seed};
+function toHex(arr: Uint32Array): string {
+  return Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength).toString("hex");
 }
 
-describe("swap-or-not-shuffle reference parity", () => {
-  describe("constants", () => {
-    it("should match the reference package", () => {
-      expect(shuffle.SHUFFLE_ROUNDS_MAINNET).toEqual(reference.SHUFFLE_ROUNDS_MAINNET);
-      expect(shuffle.SHUFFLE_ROUNDS_MINIMAL).toEqual(reference.SHUFFLE_ROUNDS_MINIMAL);
-      expect(shuffle.ByteCount).toEqual({...reference.ByteCount});
-    });
+function buildReferenceTestCase(count: number, rounds: number): ShuffleTestCase {
+  const seed = new Uint8Array(randomBytes(32));
+  const input = getInputArray(count);
+  const shuffled = input.slice();
+  referenceImplementation.shuffleList(shuffled, seed, rounds);
+  const unshuffled = input.slice();
+  referenceImplementation.unshuffleList(unshuffled, seed, rounds);
+  return {
+    id: `TestCase for ${count} indices with seed of 0x${Buffer.from(seed).toString("hex")}`,
+    input,
+    rounds,
+    seed,
+    shuffled: toHex(shuffled),
+    unshuffled: toHex(unshuffled),
+  };
+}
+
+describe("shuffle", () => {
+  it("should expose the reference constants", () => {
+    expect(shuffle.SHUFFLE_ROUNDS_MAINNET).toEqual(90);
+    expect(shuffle.SHUFFLE_ROUNDS_MINIMAL).toEqual(10);
+    // biome-ignore lint/style/useNamingConvention: reference-canonical enum variant names
+    expect(shuffle.ByteCount).toEqual({One: 1, Two: 2});
   });
 
-  describe("shuffleList/unshuffleList", () => {
-    it("should throw for invalid seed", () => {
-      const input = getInputArray(10);
-      let invalidSeed = Buffer.alloc(31, 0xac);
-      expect(() => shuffle.unshuffleList(input, invalidSeed, 10)).to.throw("Shuffling seed must be 32 bytes long");
-      invalidSeed = Buffer.alloc(33, 0xac);
-      expect(() => shuffle.unshuffleList(input, invalidSeed, 10)).to.throw("Shuffling seed must be 32 bytes long");
-    });
+  it("should throw for invalid seed", () => {
+    const test = buildReferenceTestCase(10, 10);
+    let invalidSeed = Buffer.alloc(31, 0xac);
+    expect(() => shuffle.unshuffleList(test.input, invalidSeed, test.rounds)).to.throw(
+      "Shuffling seed must be 32 bytes long"
+    );
+    invalidSeed = Buffer.alloc(33, 0xac);
+    expect(() => shuffle.unshuffleList(test.input, invalidSeed, test.rounds)).to.throw(
+      "Shuffling seed must be 32 bytes long"
+    );
+  });
 
-    it("should throw for invalid number of rounds", () => {
-      const input = getInputArray(10);
-      const seed = new Uint8Array(32);
-      expect(() => shuffle.unshuffleList(input, seed, -1)).to.throw("Rounds must be between 0 and 255");
-      expect(() => shuffle.unshuffleList(input, seed, 256)).to.throw("Rounds must be between 0 and 255");
-    });
+  it("should throw for invalid number of rounds", () => {
+    const test = buildReferenceTestCase(10, 10);
+    expect(() => shuffle.unshuffleList(test.input, test.seed, -1)).to.throw("Rounds must be between 0 and 255");
+    expect(() => shuffle.unshuffleList(test.input, test.seed, 256)).to.throw("Rounds must be between 0 and 255");
+  });
 
-    it("should skip validation for empty and single-element lists (reference validation order)", () => {
-      const invalidSeed = Buffer.alloc(31, 0xac);
-      expect(Array.from(shuffle.unshuffleList(new Uint32Array([]), invalidSeed, 10))).toEqual([]);
-      expect(Array.from(shuffle.unshuffleList(new Uint32Array([7]), invalidSeed, -1))).toEqual([7]);
-      // rounds == 0 returns before any validation
-      expect(Array.from(shuffle.unshuffleList(new Uint32Array([0, 1, 2]), invalidSeed, 0))).toEqual([0, 1, 2]);
-    });
+  it("should skip validation for empty and single-element lists (reference validation order)", () => {
+    const invalidSeed = Buffer.alloc(31, 0xac);
+    expect(Array.from(shuffle.unshuffleList(new Uint32Array([]), invalidSeed, 10))).toEqual([]);
+    expect(Array.from(shuffle.unshuffleList(new Uint32Array([7]), invalidSeed, -1))).toEqual([7]);
+    // rounds == 0 returns before any validation
+    expect(Array.from(shuffle.unshuffleList(new Uint32Array([0, 1, 2]), invalidSeed, 0))).toEqual([0, 1, 2]);
+  });
 
-    it("should not mutate the input array", () => {
-      const {seed} = randomSeed();
-      const input = getInputArray(100);
-      shuffle.shuffleList(input, seed, 90);
-      expect(Array.from(input)).toEqual(Array.from(getInputArray(100)));
-    });
+  it("should not mutate the input array", () => {
+    const seed = new Uint8Array(randomBytes(32));
+    const input = getInputArray(100);
+    shuffle.shuffleList(input, seed, 90);
+    expect(Array.from(input)).toEqual(Array.from(getInputArray(100)));
+  });
 
-    it("should match spec test results", () => {
-      const seed = Buffer.from("4fe91d85d6bc19b20413659c61f3c690a1c4d48be41cab8363a130cebabada97", "hex");
-      const expected = [
-        99, 71, 51, 5, 78, 61, 12, 17, 30, 3, 59, 47, 6, 9, 1, 41, 18, 37, 55, 43, 20, 31, 38, 79, 29, 69, 70, 54, 53,
-        36, 34, 62, 77, 87, 39, 96, 56, 92, 16, 82, 40, 27, 58, 14, 68, 76, 80, 13, 28, 81, 64, 26, 19, 60, 90, 2, 98,
-        67, 66, 52, 46, 95, 49, 72, 8, 21, 75, 57, 97, 83, 84, 88, 86, 7, 74, 32, 63, 85, 23, 65, 24, 91, 0, 48, 35, 15,
-        44, 25, 22, 73, 93, 45, 4, 33, 89, 94, 10, 42, 11, 50,
-      ];
-
-      const result = shuffle.unshuffleList(getInputArray(100), seed, 10);
-      expect(Array.from(result)).toEqual(expected);
-    });
-
-    const testCases: {count: number; rounds: number}[] = [
-      {count: 2, rounds: 10},
-      {count: 8, rounds: 10},
-      {count: 16, rounds: 10},
-      {count: 16, rounds: 100},
-      {count: 100, rounds: 90},
-      {count: 256, rounds: 192},
-      {count: 1000, rounds: 90},
-      {count: 16384, rounds: 90},
+  it("should match spec test results", () => {
+    const seed = "0x4fe91d85d6bc19b20413659c61f3c690a1c4d48be41cab8363a130cebabada97";
+    const rounds = 10;
+    const expected = [
+      99, 71, 51, 5, 78, 61, 12, 17, 30, 3, 59, 47, 6, 9, 1, 41, 18, 37, 55, 43, 20, 31, 38, 79, 29, 69, 70, 54, 53, 36,
+      34, 62, 77, 87, 39, 96, 56, 92, 16, 82, 40, 27, 58, 14, 68, 76, 80, 13, 28, 81, 64, 26, 19, 60, 90, 2, 98, 67, 66,
+      52, 46, 95, 49, 72, 8, 21, 75, 57, 97, 83, 84, 88, 86, 7, 74, 32, 63, 85, 23, 65, 24, 91, 0, 48, 35, 15, 44, 25,
+      22, 73, 93, 45, 4, 33, 89, 94, 10, 42, 11, 50,
     ];
 
-    for (const {count, rounds} of testCases) {
-      const {seed, id} = randomSeed();
-      const input = getInputArray(count);
-
-      it(`sync - ${count} indices, ${rounds} rounds, ${id}`, () => {
-        expect(Array.from(shuffle.shuffleList(input, seed, rounds))).toEqual(
-          Array.from(reference.shuffleList(input, seed, rounds))
-        );
-        expect(Array.from(shuffle.unshuffleList(input, seed, rounds))).toEqual(
-          Array.from(reference.unshuffleList(input, seed, rounds))
-        );
-      });
-
-      it(`async - ${count} indices, ${rounds} rounds, ${id}`, async () => {
-        expect(Array.from(await shuffle.asyncShuffleList(input, seed, rounds))).toEqual(
-          Array.from(await reference.asyncShuffleList(input, seed, rounds))
-        );
-        expect(Array.from(await shuffle.asyncUnshuffleList(input, seed, rounds))).toEqual(
-          Array.from(await reference.asyncUnshuffleList(input, seed, rounds))
-        );
-      });
-    }
-
-    it("async - should reject with reference error message", async () => {
-      const input = getInputArray(10);
-      await expect(shuffle.asyncUnshuffleList(input, Buffer.alloc(31, 0xac), 10)).rejects.toThrow(
-        "Shuffling seed must be 32 bytes long"
-      );
-      await expect(shuffle.asyncUnshuffleList(input, new Uint8Array(32), 256)).rejects.toThrow(
-        "Rounds must be between 0 and 255"
-      );
-    });
+    const result = shuffle.unshuffleList(getInputArray(100), fromHex(seed), rounds);
+    expect(Array.from(result)).toEqual(expected);
   });
 
-  describe("ComputeShuffledIndex", () => {
-    it("should match the reference for every index", () => {
-      const {seed, id} = randomSeed();
-      const indexCount = 1000;
-      const rounds = reference.SHUFFLE_ROUNDS_MAINNET;
+  const testCases: ShuffleTestCase[] = [
+    buildReferenceTestCase(8, 10),
+    buildReferenceTestCase(16, 10),
+    buildReferenceTestCase(16, 100),
+    buildReferenceTestCase(256, 192),
+    buildReferenceTestCase(256, 192),
+    buildReferenceTestCase(1000, 90),
+  ];
 
-      const actual = new shuffle.ComputeShuffledIndex(seed, indexCount, rounds);
-      const expected = new reference.ComputeShuffledIndex(seed, indexCount, rounds);
-      for (let i = 0; i < indexCount; i++) {
-        expect(actual.get(i), `index ${i}, ${id}`).toEqual(expected.get(i));
-      }
+  for (const {id, seed, rounds, input, shuffled, unshuffled} of testCases) {
+    it(`sync - ${id}`, () => {
+      const unshuffledResult = shuffle.unshuffleList(input, seed, rounds);
+      const shuffledResult = shuffle.shuffleList(input, seed, rounds);
+      expect(toHex(shuffledResult)).to.equal(shuffled);
+      expect(toHex(unshuffledResult)).to.equal(unshuffled);
     });
-
-    it("should match the reference for out-of-range indices (wrapping arithmetic)", () => {
-      const {seed, id} = randomSeed();
-      const indexCount = 1000;
-      const rounds = reference.SHUFFLE_ROUNDS_MAINNET;
-
-      const actual = new shuffle.ComputeShuffledIndex(seed, indexCount, rounds);
-      const expected = new reference.ComputeShuffledIndex(seed, indexCount, rounds);
-      for (const index of [indexCount, indexCount + 1, 2 * indexCount + 7]) {
-        expect(actual.get(index), `index ${index}, ${id}`).toEqual(expected.get(index));
-      }
+    it(`async - ${id}`, async () => {
+      const unshuffledResult = await shuffle.asyncUnshuffleList(input, seed, rounds);
+      const shuffledResult = await shuffle.asyncShuffleList(input, seed, rounds);
+      expect(toHex(shuffledResult)).to.equal(shuffled);
+      expect(toHex(unshuffledResult)).to.equal(unshuffled);
     });
+  }
+
+  it("async - should reject with reference error message", async () => {
+    const input = getInputArray(10);
+    await expect(shuffle.asyncUnshuffleList(input, Buffer.alloc(31, 0xac), 10)).rejects.toThrow(
+      "Shuffling seed must be 32 bytes long"
+    );
+    await expect(shuffle.asyncUnshuffleList(input, new Uint8Array(32), 256)).rejects.toThrow(
+      "Rounds must be between 0 and 255"
+    );
+  });
+});
+
+describe("ComputeShuffledIndex", () => {
+  it("should match the naive spec implementation for every index", () => {
+    const seed = new Uint8Array(randomBytes(32));
+    const indexCount = 1000;
+    const rounds = referenceImplementation.SHUFFLE_ROUND_COUNT;
+
+    const actual = new shuffle.ComputeShuffledIndex(seed, indexCount, rounds);
+    for (let i = 0; i < indexCount; i++) {
+      expect(actual.get(i), `index ${i}, seed 0x${Buffer.from(seed).toString("hex")}`).toEqual(
+        referenceImplementation.computeShuffledIndex(i, indexCount, seed)
+      );
+    }
   });
 
-  describe("committee indices", () => {
-    const vc = 1000;
-    const activeIndices = getInputArray(vc);
-    const effectiveBalanceIncrements = new Uint16Array(vc);
-    for (let i = 0; i < vc; i++) {
-      effectiveBalanceIncrements[i] = 32 + 32 * (i % 64);
-    }
-    const MAX_EFFECTIVE_BALANCE = 32_000_000_000;
-    const MAX_EFFECTIVE_BALANCE_ELECTRA = 2_048_000_000_000;
-    const EFFECTIVE_BALANCE_INCREMENT = 1_000_000_000;
-    const SYNC_COMMITTEE_SIZE = 512;
-    const rounds = reference.SHUFFLE_ROUNDS_MAINNET;
+  it("should mirror the reference wrapping arithmetic for out-of-range indices", () => {
+    // Expected values were generated with @chainsafe/swap-or-not-shuffle
+    // v1.2.1 (release-mode u32 wrapping) for seed {1}x32, indexCount 10,
+    // rounds 90.
+    const seed = new Uint8Array(32).fill(1);
+    const csi = new shuffle.ComputeShuffledIndex(seed, 10, 90);
+    expect(csi.get(10)).toEqual(8);
+    expect(csi.get(11)).toEqual(1);
+    expect(csi.get(27)).toEqual(9);
+    expect(csi.get(100)).toEqual(1);
+  });
+});
 
-    it("computeProposerIndex should match the reference", () => {
-      for (const byteCount of [reference.ByteCount.One, reference.ByteCount.Two]) {
-        const {seed, id} = randomSeed();
-        const maxEffectiveBalance =
-          byteCount === reference.ByteCount.One ? MAX_EFFECTIVE_BALANCE : MAX_EFFECTIVE_BALANCE_ELECTRA;
-        expect(
-          shuffle.computeProposerIndex(
+describe("committee indices", () => {
+  const vc = 1000;
+  const activeIndices = getInputArray(vc);
+  const effectiveBalanceIncrements = new Uint16Array(vc);
+  for (let i = 0; i < vc; i++) {
+    effectiveBalanceIncrements[i] = 32 + 32 * (i % 64);
+  }
+  const {
+    EFFECTIVE_BALANCE_INCREMENT,
+    MAX_EFFECTIVE_BALANCE,
+    MAX_EFFECTIVE_BALANCE_ELECTRA,
+    SYNC_COMMITTEE_SIZE,
+    SHUFFLE_ROUND_COUNT,
+  } = referenceImplementation;
+  const byteCounts = [1, 2] as const;
+  const maxEffectiveBalanceFor = (byteCount: number) =>
+    byteCount === 1 ? MAX_EFFECTIVE_BALANCE : MAX_EFFECTIVE_BALANCE_ELECTRA;
+
+  it("computeProposerIndex should match the naive implementation", () => {
+    for (const byteCount of byteCounts) {
+      const seed = new Uint8Array(randomBytes(32));
+      expect(
+        shuffle.computeProposerIndex(
+          seed,
+          activeIndices,
+          effectiveBalanceIncrements,
+          byteCount,
+          maxEffectiveBalanceFor(byteCount),
+          EFFECTIVE_BALANCE_INCREMENT,
+          SHUFFLE_ROUND_COUNT
+        ),
+        `byteCount ${byteCount}, seed 0x${Buffer.from(seed).toString("hex")}`
+      ).toEqual(
+        referenceImplementation.naiveComputeProposerIndex(
+          seed,
+          activeIndices,
+          effectiveBalanceIncrements,
+          byteCount,
+          maxEffectiveBalanceFor(byteCount)
+        )
+      );
+    }
+  });
+
+  it("computeProposerIndexElectra should match the naive implementation", () => {
+    const seed = new Uint8Array(randomBytes(32));
+    expect(
+      shuffle.computeProposerIndexElectra(
+        seed,
+        activeIndices,
+        effectiveBalanceIncrements,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+        SHUFFLE_ROUND_COUNT
+      ),
+      `seed 0x${Buffer.from(seed).toString("hex")}`
+    ).toEqual(
+      referenceImplementation.naiveComputeProposerIndex(
+        seed,
+        activeIndices,
+        effectiveBalanceIncrements,
+        2,
+        MAX_EFFECTIVE_BALANCE_ELECTRA
+      )
+    );
+  });
+
+  it("computeSyncCommitteeIndices should match the naive implementation", {timeout: 20_000}, () => {
+    for (const byteCount of byteCounts) {
+      const seed = new Uint8Array(randomBytes(32));
+      expect(
+        Array.from(
+          shuffle.computeSyncCommitteeIndices(
             seed,
             activeIndices,
             effectiveBalanceIncrements,
             byteCount,
-            maxEffectiveBalance,
+            SYNC_COMMITTEE_SIZE,
+            maxEffectiveBalanceFor(byteCount),
             EFFECTIVE_BALANCE_INCREMENT,
-            rounds
-          ),
-          `byteCount ${byteCount}, ${id}`
-        ).toEqual(
-          reference.computeProposerIndex(
-            seed,
-            activeIndices,
-            effectiveBalanceIncrements,
-            byteCount,
-            maxEffectiveBalance,
-            EFFECTIVE_BALANCE_INCREMENT,
-            rounds
+            SHUFFLE_ROUND_COUNT
           )
-        );
-      }
-    });
-
-    it("computeProposerIndexElectra should match the reference", () => {
-      const {seed, id} = randomSeed();
-      expect(
-        shuffle.computeProposerIndexElectra(
+        ),
+        `byteCount ${byteCount}, seed 0x${Buffer.from(seed).toString("hex")}`
+      ).toEqual(
+        referenceImplementation.naiveComputeSyncCommitteeIndices(
           seed,
           activeIndices,
           effectiveBalanceIncrements,
-          MAX_EFFECTIVE_BALANCE_ELECTRA,
-          EFFECTIVE_BALANCE_INCREMENT,
-          rounds
-        ),
-        id
-      ).toEqual(
-        reference.computeProposerIndexElectra(
+          byteCount,
+          maxEffectiveBalanceFor(byteCount)
+        )
+      );
+    }
+  });
+
+  it("computeSyncCommitteeIndicesElectra should match the naive implementation", {timeout: 10_000}, () => {
+    const seed = new Uint8Array(randomBytes(32));
+    expect(
+      Array.from(
+        shuffle.computeSyncCommitteeIndicesElectra(
           seed,
           activeIndices,
           effectiveBalanceIncrements,
+          SYNC_COMMITTEE_SIZE,
           MAX_EFFECTIVE_BALANCE_ELECTRA,
           EFFECTIVE_BALANCE_INCREMENT,
-          rounds
+          SHUFFLE_ROUND_COUNT
         )
-      );
-    });
-
-    it("computeSyncCommitteeIndices should match the reference", () => {
-      for (const byteCount of [reference.ByteCount.One, reference.ByteCount.Two]) {
-        const {seed, id} = randomSeed();
-        const maxEffectiveBalance =
-          byteCount === reference.ByteCount.One ? MAX_EFFECTIVE_BALANCE : MAX_EFFECTIVE_BALANCE_ELECTRA;
-        expect(
-          Array.from(
-            shuffle.computeSyncCommitteeIndices(
-              seed,
-              activeIndices,
-              effectiveBalanceIncrements,
-              byteCount,
-              SYNC_COMMITTEE_SIZE,
-              maxEffectiveBalance,
-              EFFECTIVE_BALANCE_INCREMENT,
-              rounds
-            )
-          ),
-          `byteCount ${byteCount}, ${id}`
-        ).toEqual(
-          Array.from(
-            reference.computeSyncCommitteeIndices(
-              seed,
-              activeIndices,
-              effectiveBalanceIncrements,
-              byteCount,
-              SYNC_COMMITTEE_SIZE,
-              maxEffectiveBalance,
-              EFFECTIVE_BALANCE_INCREMENT,
-              rounds
-            )
-          )
-        );
-      }
-    });
-
-    it("computeSyncCommitteeIndicesElectra should match the reference", () => {
-      const {seed, id} = randomSeed();
-      expect(
-        Array.from(
-          shuffle.computeSyncCommitteeIndicesElectra(
-            seed,
-            activeIndices,
-            effectiveBalanceIncrements,
-            SYNC_COMMITTEE_SIZE,
-            MAX_EFFECTIVE_BALANCE_ELECTRA,
-            EFFECTIVE_BALANCE_INCREMENT,
-            rounds
-          )
-        ),
-        id
-      ).toEqual(
-        Array.from(
-          reference.computeSyncCommitteeIndicesElectra(
-            seed,
-            activeIndices,
-            effectiveBalanceIncrements,
-            SYNC_COMMITTEE_SIZE,
-            MAX_EFFECTIVE_BALANCE_ELECTRA,
-            EFFECTIVE_BALANCE_INCREMENT,
-            rounds
-          )
-        )
-      );
-    });
+      ),
+      `seed 0x${Buffer.from(seed).toString("hex")}`
+    ).toEqual(
+      referenceImplementation.naiveComputeSyncCommitteeIndicesElectra(seed, activeIndices, effectiveBalanceIncrements)
+    );
   });
 });
