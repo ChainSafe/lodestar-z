@@ -3,7 +3,7 @@
 // (https://github.com/ChainSafe/swap-or-not-shuffle test/perf/*).
 import crypto from "node:crypto";
 import {bench, describe} from "@chainsafe/benchmark";
-import * as referenceImplementation from "../test/referenceImplementation.ts";
+import * as shuffleReference from "../test/shuffleReference.ts";
 
 const bindings = await import("../src/index.js");
 const shuffle = bindings.default.shuffle;
@@ -20,7 +20,7 @@ for (const listSize of [16_384, 250_000, 1_000_000]) {
 
     bench({
       fn: () => {
-        referenceImplementation.unshuffleList(indices, seed, rounds);
+        shuffleReference.unshuffleList(indices, seed, rounds);
       },
       id: `JS  - unshuffleList - ${listSize} indices`,
     });
@@ -50,11 +50,11 @@ describe("committee indices", () => {
       effectiveBalanceIncrements[i] = 32 + 32 * (i % 64);
     }
     const {EFFECTIVE_BALANCE_INCREMENT, MAX_EFFECTIVE_BALANCE_ELECTRA, SYNC_COMMITTEE_SIZE, SHUFFLE_ROUND_COUNT} =
-      referenceImplementation;
+      shuffleReference;
 
     bench({
       fn: () => {
-        referenceImplementation.naiveComputeSyncCommitteeIndicesElectra(
+        shuffleReference.naiveComputeSyncCommitteeIndicesElectra(
           seed,
           activeIndices,
           effectiveBalanceIncrements

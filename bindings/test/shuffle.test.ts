@@ -1,6 +1,6 @@
 import {randomBytes} from "node:crypto";
 import {describe, expect, it} from "vitest";
-import * as referenceImplementation from "./referenceImplementation.js";
+import * as shuffleReference from "./shuffleReference.js";
 
 const bindings = await import("../src/index.js");
 const shuffle = bindings.default.shuffle;
@@ -65,7 +65,7 @@ describe("innerShuffleList", () => {
 
 // Test suite ported from the reference repo
 // (https://github.com/ChainSafe/swap-or-not-shuffle test/unit/*), with the
-// pure-TS referenceImplementation as the oracle.
+// pure-TS shuffleReference implementation as the oracle.
 
 interface ShuffleTestCase {
   id: string;
@@ -93,9 +93,9 @@ function buildReferenceTestCase(count: number, rounds: number): ShuffleTestCase 
   const seed = new Uint8Array(randomBytes(32));
   const input = getInputArray(count);
   const shuffled = input.slice();
-  referenceImplementation.shuffleList(shuffled, seed, rounds);
+  shuffleReference.shuffleList(shuffled, seed, rounds);
   const unshuffled = input.slice();
-  referenceImplementation.unshuffleList(unshuffled, seed, rounds);
+  shuffleReference.unshuffleList(unshuffled, seed, rounds);
   return {
     id: `TestCase for ${count} indices with seed of 0x${Buffer.from(seed).toString("hex")}`,
     input,
@@ -200,12 +200,12 @@ describe("ComputeShuffledIndex", () => {
   it("should match the naive spec implementation for every index", () => {
     const seed = new Uint8Array(randomBytes(32));
     const indexCount = 1000;
-    const rounds = referenceImplementation.SHUFFLE_ROUND_COUNT;
+    const rounds = shuffleReference.SHUFFLE_ROUND_COUNT;
 
     const actual = new shuffle.ComputeShuffledIndex(seed, indexCount, rounds);
     for (let i = 0; i < indexCount; i++) {
       expect(actual.get(i), `index ${i}, seed 0x${Buffer.from(seed).toString("hex")}`).toEqual(
-        referenceImplementation.computeShuffledIndex(i, indexCount, seed)
+        shuffleReference.computeShuffledIndex(i, indexCount, seed)
       );
     }
   });
@@ -236,7 +236,7 @@ describe("committee indices", () => {
     MAX_EFFECTIVE_BALANCE_ELECTRA,
     SYNC_COMMITTEE_SIZE,
     SHUFFLE_ROUND_COUNT,
-  } = referenceImplementation;
+  } = shuffleReference;
   const byteCounts = [1, 2] as const;
   const maxEffectiveBalanceFor = (byteCount: number) =>
     byteCount === 1 ? MAX_EFFECTIVE_BALANCE : MAX_EFFECTIVE_BALANCE_ELECTRA;
@@ -256,7 +256,7 @@ describe("committee indices", () => {
         ),
         `byteCount ${byteCount}, seed 0x${Buffer.from(seed).toString("hex")}`
       ).toEqual(
-        referenceImplementation.naiveComputeProposerIndex(
+        shuffleReference.naiveComputeProposerIndex(
           seed,
           activeIndices,
           effectiveBalanceIncrements,
@@ -280,7 +280,7 @@ describe("committee indices", () => {
       ),
       `seed 0x${Buffer.from(seed).toString("hex")}`
     ).toEqual(
-      referenceImplementation.naiveComputeProposerIndex(
+      shuffleReference.naiveComputeProposerIndex(
         seed,
         activeIndices,
         effectiveBalanceIncrements,
@@ -308,7 +308,7 @@ describe("committee indices", () => {
         ),
         `byteCount ${byteCount}, seed 0x${Buffer.from(seed).toString("hex")}`
       ).toEqual(
-        referenceImplementation.naiveComputeSyncCommitteeIndices(
+        shuffleReference.naiveComputeSyncCommitteeIndices(
           seed,
           activeIndices,
           effectiveBalanceIncrements,
@@ -335,7 +335,7 @@ describe("committee indices", () => {
       ),
       `seed 0x${Buffer.from(seed).toString("hex")}`
     ).toEqual(
-      referenceImplementation.naiveComputeSyncCommitteeIndicesElectra(seed, activeIndices, effectiveBalanceIncrements)
+      shuffleReference.naiveComputeSyncCommitteeIndicesElectra(seed, activeIndices, effectiveBalanceIncrements)
     );
   });
 });
