@@ -10,12 +10,13 @@ const builtin = @import("builtin");
 const js = @import("zapi:zapi").js;
 const napi = @import("zapi:zapi").napi;
 const sons = @import("swap_or_not_shuffle");
+const async_task = @import("./async_task.zig");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
 /// Error messages copied verbatim from the reference implementation.
-fn errorMessage(err: anyerror) [:0]const u8 {
+fn shuffleErrorMessage(err: anyerror) [:0]const u8 {
     return switch (err) {
         error.InvalidSeedLength => "Shuffling seed must be 32 bytes long",
         error.InvalidActiveIndicesLength => "ActiveIndices must fit in a u32",
@@ -27,7 +28,7 @@ fn errorMessage(err: anyerror) [:0]const u8 {
 /// Throw the reference error message; the DSL wrapper's own throw of the Zig
 /// error name is then swallowed as a pending exception.
 fn throwShufflingError(err: anyerror) anyerror {
-    js.throwError(errorMessage(err));
+    js.throwError(shuffleErrorMessage(err));
     return err;
 }
 
@@ -90,20 +91,34 @@ pub fn asyncUnshuffleList(active_indices: js.Uint32Array, seed: js.Uint8Array, r
     return shuffleListAsync(active_indices, seed, rounds, false, "asyncUnshuffleList");
 }
 
-/// Heap-allocated context shared between the JS thread (which kicks off the
-/// work), the libuv worker thread (which shuffles), and the JS thread again
-/// (which resolves/rejects the Promise). Inputs are copied so the worker never
-/// touches JS-managed memory.
-const AsyncShuffleData = struct {
+/// Shuffles a copy of the input off the JS thread. Inputs are copied with the
+/// async_task allocator so the worker never touches JS-managed memory and the
+/// result buffer can be transferred to JS zero-copy.
+const ShuffleTask = struct {
     input: []u32,
     /// Copied at its original length; the worker validates it, so invalid
     /// seeds reject the promise exactly like the reference.
     seed: []u8,
     rounds: i32,
     forwards: bool,
-    err: ?anyerror,
-    deferred: napi.Deferred,
-    work: napi.c.napi_async_work,
+
+    pub fn compute(self: *ShuffleTask) !void {
+        try sons.innerShuffleList(u32, self.input, self.seed, self.rounds, self.forwards);
+    }
+
+    pub fn resolve(self: *ShuffleTask, env: napi.Env) !napi.Value {
+        return async_task.transferOwnedSlice(u32, .uint32, env, &self.input);
+    }
+
+    pub fn errorMessage(err: anyerror) [:0]const u8 {
+        return shuffleErrorMessage(err);
+    }
+
+    pub fn deinit(self: *ShuffleTask) void {
+        // input is empty (freeing is a no-op) when resolve transferred it to JS
+        async_task.allocator.free(self.input);
+        async_task.allocator.free(self.seed);
+    }
 };
 
 fn shuffleListAsync(
@@ -111,117 +126,19 @@ fn shuffleListAsync(
     seed: js.Uint8Array,
     rounds: js.Number,
     forwards: bool,
-    comptime resource_name_str: []const u8,
+    comptime resource_name: []const u8,
 ) !js.Value {
-    const env = js.env();
+    const input = try async_task.allocator.dupe(u32, try active_indices.toSlice());
+    errdefer async_task.allocator.free(input);
+    const seed_copy = try async_task.allocator.dupe(u8, try seed.toSlice());
+    errdefer async_task.allocator.free(seed_copy);
 
-    const data = try allocator.create(AsyncShuffleData);
-    errdefer allocator.destroy(data);
-
-    data.input = try allocator.dupe(u32, try active_indices.toSlice());
-    errdefer allocator.free(data.input);
-    data.seed = try allocator.dupe(u8, try seed.toSlice());
-    errdefer allocator.free(data.seed);
-    data.rounds = rounds.assertI32();
-    data.forwards = forwards;
-    data.err = null;
-    data.deferred = undefined;
-    data.work = undefined;
-
-    const deferred_cleanup_value = try env.getUndefined();
-    const resource_name = try env.createStringUtf8(resource_name_str);
-
-    const work = try env.createAsyncWork(
-        AsyncShuffleData,
-        null,
-        resource_name,
-        asyncShuffleExecute,
-        asyncShuffleComplete,
-        data,
-    );
-    errdefer work.delete() catch |err| {
-        std.log.err("failed to delete unqueued async shuffle work: {s}", .{@errorName(err)});
-    };
-
-    data.work = work.work;
-
-    // Settle the unreturned Promise so Node can release its deferred handle.
-    data.deferred = try env.createPromise();
-    errdefer data.deferred.resolve(deferred_cleanup_value) catch |err| {
-        std.log.err("failed to settle unreturned async shuffle promise: {s}", .{@errorName(err)});
-    };
-
-    try work.queue();
-
-    return .{ .val = data.deferred.getPromise() };
-}
-
-/// Runs on a libuv worker thread. MUST NOT call any napi APIs.
-fn asyncShuffleExecute(_: napi.Env, data: *AsyncShuffleData) void {
-    sons.innerShuffleList(u32, data.input, data.seed, data.rounds, data.forwards) catch |err| {
-        data.err = err;
-    };
-}
-
-/// Runs on the JS thread once the worker has finished. Always settles the
-/// promise; if settling itself fails we fall back to a bare reject so callers
-/// never see a dangling Promise.
-fn asyncShuffleComplete(env: napi.Env, status: napi.status.Status, data: *AsyncShuffleData) void {
-    var input_owned = true;
-    defer {
-        napi.status.check(napi.c.napi_delete_async_work(env.env, data.work)) catch {};
-        allocator.free(data.seed);
-        if (input_owned) allocator.free(data.input);
-        allocator.destroy(data);
-    }
-
-    settleAsyncShuffle(env, status, data, &input_owned) catch {
-        rejectWithMessage(env, data.deferred, "InternalError") catch {};
-    };
-}
-
-fn settleAsyncShuffle(env: napi.Env, status: napi.status.Status, data: *AsyncShuffleData, input_owned: *bool) !void {
-    if (status != .ok) {
-        // libuv's async work itself failed (e.g. cancelled), not the shuffle.
-        return rejectWithMessage(env, data.deferred, @tagName(status));
-    }
-    if (data.err) |err| {
-        return rejectWithMessage(env, data.deferred, errorMessage(err));
-    }
-
-    if (data.input.len == 0) {
-        const arraybuffer = try env.createArrayBuffer(0, null);
-        const result = try env.createTypedarray(.uint32, 0, arraybuffer, 0);
-        return data.deferred.resolve(result);
-    }
-
-    // Zero-copy: transfer the worker's result buffer to JS as an external
-    // ArrayBuffer; V8 frees it via the finalizer when the array is collected.
-    const byte_len = data.input.len * @sizeOf(u32);
-    const finalize_cb = comptime napi.wrapSliceFinalizeCallback(u32, asyncResultFinalizer);
-    const len_hint: ?*anyopaque = @ptrFromInt(data.input.len);
-    const arraybuffer = try env.createExternalArrayBuffer(std.mem.sliceAsBytes(data.input), finalize_cb, len_hint);
-    input_owned.* = false;
-    _ = env.adjustExternalMemory(@intCast(byte_len)) catch {};
-
-    const result = try env.createTypedarray(.uint32, data.input.len, arraybuffer, 0);
-    try data.deferred.resolve(result);
-}
-
-/// Frees the result buffer handed to `createExternalArrayBuffer` and reverses
-/// the matching `adjustExternalMemory` accounting.
-fn asyncResultFinalizer(env: napi.Env, data: []u32) void {
-    const byte_len = data.len * @sizeOf(u32);
-    allocator.free(data);
-    _ = env.adjustExternalMemory(-@as(i64, @intCast(byte_len))) catch {};
-}
-
-/// Reject `deferred` with `new Error(message)` so JS callers can match on
-/// `err.message` exactly like with the reference package.
-fn rejectWithMessage(env: napi.Env, deferred: napi.Deferred, message: []const u8) !void {
-    const msg_val = try env.createStringUtf8(message);
-    const err_val = try env.createError(napi.Value{ .env = env.env, .value = null }, msg_val);
-    try deferred.reject(err_val);
+    return async_task.spawn(ShuffleTask, .{
+        .input = input,
+        .seed = seed_copy,
+        .rounds = rounds.assertI32(),
+        .forwards = forwards,
+    }, resource_name);
 }
 
 /// JS: new ComputeShuffledIndex(seed: Uint8Array, indexCount: number, rounds: number)
