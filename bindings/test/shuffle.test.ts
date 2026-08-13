@@ -182,6 +182,18 @@ describe("swap-or-not-shuffle reference parity", () => {
         expect(actual.get(i), `index ${i}, ${id}`).toEqual(expected.get(i));
       }
     });
+
+    it("should match the reference for out-of-range indices (wrapping arithmetic)", () => {
+      const {seed, id} = randomSeed();
+      const indexCount = 1000;
+      const rounds = reference.SHUFFLE_ROUNDS_MAINNET;
+
+      const actual = new shuffle.ComputeShuffledIndex(seed, indexCount, rounds);
+      const expected = new reference.ComputeShuffledIndex(seed, indexCount, rounds);
+      for (const index of [indexCount, indexCount + 1, 2 * indexCount + 7]) {
+        expect(actual.get(index), `index ${index}, ${id}`).toEqual(expected.get(index));
+      }
+    });
   });
 
   describe("committee indices", () => {

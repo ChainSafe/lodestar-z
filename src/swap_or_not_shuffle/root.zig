@@ -250,12 +250,16 @@ pub const ComputeShuffledIndex = struct {
     }
 
     pub fn get(self: *ComputeShuffledIndex, index: u32) !u32 {
-        // u64 arithmetic so `pivot + index_count` cannot overflow
-        const index_count: u64 = self.index_count;
-        var permuted: u64 = index;
+        // u32 wrapping arithmetic mirrors the reference's release-mode u32
+        // arithmetic: for valid inputs (index < index_count) this is
+        // arithmetically identical to non-wrapping math, so out-of-range
+        // indices produce the same (garbage but deterministic) values as the
+        // reference instead of panicking.
+        const index_count: u32 = self.index_count;
+        var permuted: u32 = index;
 
         for (0..self.rounds) |round| {
-            const pivot: u64 = self.pivot_by_round[round] orelse blk: {
+            const pivot: u32 = self.pivot_by_round[round] orelse blk: {
                 self.pivot_buffer[SEED_SIZE] = @intCast(round % 256);
                 var digest: [Sha256.digest_length]u8 = undefined;
                 Sha256.hash(&self.pivot_buffer, &digest, .{});
@@ -264,7 +268,7 @@ pub const ComputeShuffledIndex = struct {
                 break :blk pivot;
             };
 
-            const flip = (pivot + index_count - permuted) % index_count;
+            const flip = (pivot +% index_count -% permuted) % index_count;
             const position = @max(permuted, flip);
             const position_div: u32 = @intCast(position / 256);
 
@@ -280,7 +284,7 @@ pub const ComputeShuffledIndex = struct {
             permuted = if (bit == 1) flip else permuted;
         }
 
-        return @intCast(permuted);
+        return permuted;
     }
 };
 
@@ -365,7 +369,10 @@ pub fn getCommitteeIndices(
         }
         const candidate_effective_balance_increment: i64 = effective_balance_increments[candidate_index];
 
-        if (candidate_effective_balance_increment * max_random_value >= max_effective_balance_increment * random_value) {
+        // wrapping multiplies mirror the reference release-mode behavior for
+        // absurd (but JS-reachable) maxEffectiveBalanceElectra values; valid
+        // inputs never approach overflow so their results are unaffected
+        if (candidate_effective_balance_increment *% max_random_value >= max_effective_balance_increment *% random_value) {
             committee_indices.appendAssumeCapacity(candidate_index);
         }
 

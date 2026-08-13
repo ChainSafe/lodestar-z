@@ -440,7 +440,7 @@ declare const bindings: {
     ) => Uint32Array;
     SHUFFLE_ROUNDS_MAINNET: number;
     SHUFFLE_ROUNDS_MINIMAL: number;
-    ByteCount: {One: number; Two: number};
+    ByteCount: typeof ByteCount;
   };
   stateTransition: {
     deinitReusedEpochTransitionCache: () => void;

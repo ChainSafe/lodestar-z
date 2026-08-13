@@ -1,4 +1,4 @@
-// Benchmarks the zig swapOrNotShuffle binding against the Rust-based
+// Benchmarks the zig `shuffle` binding against the Rust-based
 // @chainsafe/swap-or-not-shuffle npm package on identical inputs.
 import crypto from "node:crypto";
 import {bench, describe} from "@chainsafe/benchmark";

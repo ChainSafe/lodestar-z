@@ -109,6 +109,23 @@ test "ComputeShuffledIndex rejects invalid seed" {
     );
 }
 
+test "ComputeShuffledIndex.get wraps like the reference for out-of-range indices" {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{1} ** SEED_SIZE;
+    const index_count = 10;
+    const rounds = 90;
+
+    var instance = try shuffle.ComputeShuffledIndex.init(allocator, seed[0..], index_count, rounds);
+    defer instance.deinit();
+
+    // checked against @chainsafe/swap-or-not-shuffle:
+    // node -e "const r = require('@chainsafe/swap-or-not-shuffle');
+    //   const c = new r.ComputeShuffledIndex(new Uint8Array(32).fill(1), 10, 90);
+    //   console.log(c.get(100))"
+    const result = try instance.get(100);
+    try std.testing.expectEqual(@as(u32, 1), result);
+}
+
 const MAX_EFFECTIVE_BALANCE: i64 = 32_000_000_000;
 const MAX_EFFECTIVE_BALANCE_ELECTRA: i64 = 2_048_000_000_000;
 const EFFECTIVE_BALANCE_INCREMENT: i64 = 1_000_000_000;
@@ -196,4 +213,63 @@ test "computeSyncCommitteeIndices matches reference vectors" {
         651, 416, 273, 471, 739, 290, 588, 840, 665, 945, 496, 158, 757, 616, 226, 766,
     };
     try std.testing.expectEqualSlices(u32, expected_electra[0..], electra);
+}
+
+test "getCommitteeIndices rejects empty active indices" {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{1} ** SEED_SIZE;
+    const active_indices = [_]u32{};
+    const increments = [_]u16{};
+
+    try std.testing.expectError(error.EmptyActiveIndices, shuffle.getCommitteeIndices(
+        allocator,
+        1,
+        seed[0..],
+        active_indices[0..],
+        increments[0..],
+        .one,
+        MAX_EFFECTIVE_BALANCE,
+        EFFECTIVE_BALANCE_INCREMENT,
+        90,
+    ));
+}
+
+test "getCommitteeIndices rejects zero effective balance increment" {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{1} ** SEED_SIZE;
+    const active_indices = [_]u32{0};
+    const increments = [_]u16{32};
+
+    try std.testing.expectError(error.InvalidEffectiveBalanceIncrement, shuffle.getCommitteeIndices(
+        allocator,
+        1,
+        seed[0..],
+        active_indices[0..],
+        increments[0..],
+        .one,
+        MAX_EFFECTIVE_BALANCE,
+        0,
+        90,
+    ));
+}
+
+test "getCommitteeIndices rejects out-of-bounds candidate index" {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{1} ** SEED_SIZE;
+    // a single active index >= effective_balance_increments.len (1) triggers
+    // the out-of-bounds lookup on the very first candidate.
+    const active_indices = [_]u32{5};
+    const increments = [_]u16{32};
+
+    try std.testing.expectError(error.EffectiveBalanceIncrementsOutOfBounds, shuffle.getCommitteeIndices(
+        allocator,
+        1,
+        seed[0..],
+        active_indices[0..],
+        increments[0..],
+        .one,
+        MAX_EFFECTIVE_BALANCE,
+        EFFECTIVE_BALANCE_INCREMENT,
+        90,
+    ));
 }
