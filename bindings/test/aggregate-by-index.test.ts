@@ -1,12 +1,5 @@
 import {afterAll, beforeAll, describe, expect, it} from "vitest";
-import {
-  SecretKey,
-  aggregateWithRandomness,
-  asyncAggregateWithRandomness,
-  aggregateWithRandomness,
-  asyncAggregateWithRandomness,
-  verify,
-} from "../src/blst.js";
+import {SecretKey, aggregateWithRandomness, asyncAggregateWithRandomness, verify} from "../src/blst.js";
 import {pubkeyCache} from "../src/pubkeys.js";
 
 const keypairs = Array.from({length: 8}, (_, i) => {
