@@ -391,11 +391,12 @@ declare const bindings: {
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
+  /**
+   * API-compatible port of the `@chainsafe/swap-or-not-shuffle` package,
+   * plus the in-place `innerShuffleList` variant.
+   */
   shuffle: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
-  };
-  /** API-compatible port of the `@chainsafe/swap-or-not-shuffle` package. */
-  swapOrNotShuffle: {
     shuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Uint32Array;
     unshuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Uint32Array;
     asyncShuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Promise<Uint32Array>;

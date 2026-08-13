@@ -5,7 +5,7 @@ import {bench, describe} from "@chainsafe/benchmark";
 import * as reference from "@chainsafe/swap-or-not-shuffle";
 
 const bindings = await import("../src/index.js");
-const swapOrNotShuffle = bindings.default.swapOrNotShuffle;
+const swapOrNotShuffle = bindings.default.shuffle;
 
 const seed = new Uint8Array(crypto.randomBytes(32));
 const rounds = reference.SHUFFLE_ROUNDS_MAINNET;

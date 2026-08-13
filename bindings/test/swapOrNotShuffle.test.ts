@@ -3,7 +3,7 @@ import * as reference from "@chainsafe/swap-or-not-shuffle";
 import {describe, expect, it} from "vitest";
 
 const bindings = await import("../src/index.js");
-const swapOrNotShuffle = bindings.default.swapOrNotShuffle;
+const swapOrNotShuffle = bindings.default.shuffle;
 
 function getInputArray(count: number): Uint32Array {
   return Uint32Array.from(Array.from({length: count}, (_, i) => i));
