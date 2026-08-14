@@ -17,12 +17,15 @@ changes.
 
 | Component | Current status | Review treatment |
 | --- | --- | --- |
-| BLS bindings | Integrated | Production-reachable |
-| Process-wide pubkey cache | Integrated | Production-reachable |
+| BLS bindings | Implemented and exported by the addon; not wired into Lodestar-ts production | Direct library surface and planned-integration security readiness |
+| Process-wide pubkey cache | Implemented and exported by the addon; not wired into Lodestar-ts production | Direct library surface and planned-integration security readiness |
 | State transition | Next integration stage | Consensus correctness and security readiness; planned input is a trusted pre-state plus a serialized hostile signed block |
 | Zig fork choice | Future integration stage | Parity and security readiness; planned inputs are STF-valid blocks and validated attestations |
 | Generic P2P deserialization | Planned as integrations expand | Hostile-input boundary only where a current or identified planned path exists |
 | Beacon-state and ERA loading | Library surface using trusted input | Reliability and hardening unless another attacker path is demonstrated |
+
+Lodestar-ts production currently uses `@chainsafe/blst` and its TypeScript pubkey cache rather than
+these addon surfaces.
 
 A planned-component bug can block integration without being described as a currently exploitable
 Lodestar vulnerability.
@@ -61,21 +64,25 @@ save API to choose its output path is not independently path traversal.
 `BeaconStateView.createFromBytes` and ERA state loading currently accept state bytes under the
 trusted-state contract. SSZ deserialization checks structure but does not authenticate provenance.
 
-Checkpoint-root authentication is not yet assigned to a stable Lodestar-ts or Lodestar-z integration
-point. If Lodestar-z becomes the first decoder of raw checkpoint responses, its slot extraction and
-state decoding must become checked hostile-input parsing before root comparison.
+Lodestar-ts currently owns raw checkpoint decoding and authentication. `initBeaconState` downloads
+or loads checkpoint bytes and `readWSState` decodes them. When the user supplies a weak-subjectivity
+checkpoint, `ensureWithinWeakSubjectivityPeriod` compares both the checkpoint root and epoch after
+decoding. Without a supplied checkpoint, trust in checkpoint selection is delegated to the source.
 
-### P2P block import
+If Lodestar-z becomes the first decoder of raw checkpoint responses, its slot extraction and state
+decoding must become checked hostile-input parsing before root comparison.
+
+### Live P2P block processing
 
 Lodestar-ts currently owns networking, framing, decompression limits, peer scoring, and import
 orchestration.
 
 - Gossip blocks receive the consensus-spec gossip validation applicable to that object.
-- Range, unknown-block, and backward sync establish ancestry through the parent-root hash chain.
-- Backward sync fetches parents until a block already known to fork choice, then processes the chain
-  forward.
-- Hash-chain membership does not establish consensus validity. Full STF is required before every
-  import.
+- Forward range sync and unknown-parent recovery establish ancestry through the parent-root hash
+  chain. Unknown-parent recovery fetches ancestors until reaching a block already known to fork
+  choice, then processes descendants forward.
+- Hash-chain membership does not establish consensus validity. Full STF is required before a block
+  enters the live chain or fork choice or establishes a trusted post-state.
 - Proposer and operation signatures are checked by STF or batch-verified beforehand. Prior batch
   results must join the same all-or-none import result.
 - Serialized P2P objects are expected to cross the binding as integrations expand.
@@ -83,6 +90,13 @@ orchestration.
 The Lodestar-ts import path may run STF, signature checks, execution verification, and DA
 verification concurrently. STF may receive a provisional available DA status, but the real DA
 result or satisfied sync policy joins before publication.
+
+### Historical archive backfill
+
+Archive backfill is distinct from unknown-parent recovery. It verifies reverse hash-chain continuity
+and proposer signatures, then writes blocks directly to `blockArchive` without full STF. These blocks
+do not enter the live chain or fork choice and do not establish trusted post-states. Any later use in
+a live consensus path must first satisfy the full acceptance contract.
 
 ### Execution, DA, and fork choice
 
@@ -114,7 +128,7 @@ should be reviewed before fork-choice integration rather than treated as a threa
 ### Shared configuration, pools, and caches
 
 The addon currently shares configuration, metrics, the BLS worker pool, persistent Merkle node pool,
-and pubkey cache across Node.js environments.
+pubkey cache, and reused epoch-transition cache across Node.js environments.
 
 - Worker and environment teardown must not destroy state still in use elsewhere.
 - Movable pubkey-cache storage is locked, and borrowed references must not survive a resize.
@@ -136,9 +150,17 @@ the new validator initially has zero balance while its amount remains pending. E
 deposit requests remain pending and register a new validator only after their source slot is
 finalized.
 
-Other state-transition caches are generally epoch-scoped and candidate-specific. A failed STF may
-leave metrics, completed signature computations, and a permitted pubkey-cache append, but no other
-candidate-derived mutation that influences later validity.
+Apart from the process-wide pubkey and reused epoch-transition caches, state-transition caches are
+generally epoch-scoped and candidate-specific. A failed STF may leave metrics, completed signature
+computations, and a permitted pubkey-cache append, but no other candidate-derived mutation that
+influences later validity.
+
+The reused epoch-transition cache in `epoch_transition_cache.zig` is process-global and survives
+until explicit deinitialization. Its lock covers lookup and resize, but `EpochTransitionCache.init`
+mutates the shared arrays after that lock is released, and returned candidate caches borrow those
+arrays. Correctness therefore currently requires non-overlapping epoch-transition cache use and no
+concurrent teardown across environments. Concurrent integrations must serialize the full borrowed
+lifetime or replace this sharing model.
 
 ## Persistence paths
 
@@ -170,7 +192,7 @@ Reviewers should test these controls rather than assume they are complete:
 
 - consensus, SSZ, and BLS vectors pinned through `build.zig.zon`;
 - minimal and mainnet preset tests plus SSZ and BLS fuzz targets;
-- full STF, signatures, and state-root verification before import;
+- full STF, signatures, and state-root verification before live-chain or fork-choice admission;
 - copy-on-write candidate state and cleanup on rejection;
 - gossip validation or sync hash-chain validation before forward STF;
 - genesis or checkpoint-root trust bootstrapping;
@@ -190,5 +212,6 @@ Reviewers should test these controls rather than assume they are complete:
 - Which production limits apply to proof descriptors, aggregate lists, pool preheating, and pubkey
   cache growth?
 - Is configuration guaranteed to be set once before workers and state views exist?
+- How will reused epoch-transition cache use and teardown be serialized across environments?
 - How are PKIX files provisioned and invalidated across network or binary upgrades?
 - Is the exported `SecretKey` intended for production validator keys or compatibility and testing?

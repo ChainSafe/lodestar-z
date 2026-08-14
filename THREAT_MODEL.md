@@ -66,7 +66,8 @@ protection from arbitrary code that already has the Node.js process's privileges
 | Remote consensus participant | Controls protocol-shaped and malformed P2P objects. It does not directly control native options, configuration, local files, or capacity APIs without a demonstrated Lodestar path. |
 | Remote API user | Controls only values forwarded by Lodestar's API layer after its validation and limits. Reports must trace that path. |
 | Operator and host application | Trusted to choose the preset, configuration, initial state, local files, verification policy, external statuses, capacities, and wall-clock time. Accidental misuse should fail clearly, but a malicious operator is out of scope. |
-| Same-process JavaScript or Zig code | Has ambient application privileges and may intentionally provide malformed or coercing values. It is not an authorization or OS-isolation boundary, but it does not thereby possess arbitrary native-memory or cross-worker access. |
+| Same-process JavaScript | Has ambient application privileges and may intentionally provide malformed or coercing values. It is not an authorization or OS-isolation boundary, but it does not thereby possess arbitrary native-memory or cross-worker access. |
+| Same-process Zig code | Executes native code with process privileges and can construct or dereference arbitrary pointers. It is trusted to honor Zig API preconditions and is not a native-memory isolation boundary. |
 | Checkpoint state provider | Semitrusted. A user-provided checkpoint root is authoritative; without one, checkpoint selection is explicitly delegated to the provider. |
 | Trusted local storage | Database state, ERA/E2S data, and PKIX files are application-owned. This model assumes bytes written are the bytes later read. Malicious local replacement and host compromise are out of scope. |
 | Contributor or supply-chain attacker | May attempt to introduce malicious source, workflow, dependency, or release changes. |
@@ -109,32 +110,33 @@ A state read from trusted storage retains the provenance and validity status it 
 Subsequent states inherit authenticated provenance through successful consensus-layer state
 transitions.
 
-An **authenticated CL-derived state** is structurally valid SSZ, descended from a trusted anchor,
-produced by a successful consensus-layer transition, and accompanied by the execution and DA status
-used at acceptance.
+An **authenticated beacon state** is structurally valid SSZ and is either a trusted anchor or the
+result of a successful consensus-layer transition from an eligible trusted pre-state. It carries the
+execution and DA status applicable when it was accepted.
 
-An **eligible trusted pre-state** is an authenticated CL-derived state whose branch remains eligible
+An **eligible trusted pre-state** is an authenticated beacon state whose branch remains eligible
 for fork choice under its current execution and DA status. Eligibility is a current-use property,
 not part of historical provenance.
 
-| Property | Authenticated CL-derived state |
+| Property | Authenticated beacon state |
 | --- | --- |
 | Structural SSZ validity | Always |
-| Successful CL transition and anchor descent | Always |
+| Trusted origin | Authenticated anchor or successful CL transition from an eligible trusted pre-state |
 | Canonical, finalized, or persisted | Not necessarily |
-| Execution status | Valid or conditionally valid while execution validity is unresolved |
-| DA status | Valid within the DA window; treated as satisfied by the defined sync policy outside it |
+| Execution status | Where applicable, valid or conditionally valid while execution validity is unresolved |
+| DA status | Where applicable, valid within the DA window; treated as satisfied by the defined sync policy outside it |
 | Fork-choice eligibility | Required only when used as an eligible trusted pre-state |
 
 A noncanonical branch may retain valid eligible pre-states while it remains viable. Finalization
-makes conflicting branches ineligible but does not erase their provenance or historical successful
-CL transitions. Execution invalidation instead revokes conditional validity and eligibility for the
+makes conflicting branches ineligible but does not erase their provenance or historical CL
+validity. Execution invalidation instead revokes conditional validity and eligibility for the
 affected branch.
 
 ### Candidate-block acceptance
 
-- A full consensus-layer state transition is required before every block import. Gossip checks,
-  hash-chain checks during sync, and ancestry checks establish prerequisites but do not replace it.
+- A full consensus-layer state transition is required before a block enters the live chain or fork
+  choice, or establishes a trusted post-state. Gossip, sync, hash-chain, and ancestry checks may
+  establish prerequisites but do not replace it.
 - All proposer and operation signatures are checked by the state transition or by an equivalent
   prior batch whose all-or-none result gates the same import.
 - A candidate may publish its post-state and enter fork choice only after state transition,
@@ -147,6 +149,10 @@ affected branch.
   the defined sync policy treats DA as satisfied rather than retaining a DA-optimistic branch.
 - Verification flags are trusted application policy. A required check may be disabled only when the
   same accepted operation is gated on equivalent prior verification.
+
+Blocks stored only as historical archive data need not run STF when they cannot affect consensus
+decisions or establish trusted state. Any later promotion into the live chain must satisfy the full
+acceptance contract.
 
 Lodestar-z consumes execution and DA results rather than establishing them. A false result supplied
 by a trusted external system is not an independent Lodestar-z bypass. Mishandling an accurate result
