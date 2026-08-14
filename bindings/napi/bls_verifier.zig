@@ -3,12 +3,10 @@ const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const bls = @import("bls");
 const preset = @import("preset").preset;
-const state_transition = @import("state_transition");
+const signature_set_verifier = @import("state_transition").signature_set_verifier;
+
 const blst_bindings = @import("./blst.zig");
 const pubkeys = @import("./pubkeys.zig");
-
-const NativePublicKey = bls.PublicKey;
-const signature_set_verifier = state_transition.signature_set_verifier;
 
 // Bound synchronous NAPI work and the fixed stack buffers below. Lodestar's
 // worker jobs normally contain at most 128 sets, so 256 provides headroom while
@@ -16,6 +14,7 @@ const signature_set_verifier = state_transition.signature_set_verifier;
 const max_verify_sets = 256;
 const max_same_message_sets = bls.MAX_AGGREGATE_PER_JOB;
 const max_indices_per_set = preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT;
+
 const SignatureSetBatch = signature_set_verifier.SignatureSetBatch(max_verify_sets);
 const SameMessageSignatureSetBatch = signature_set_verifier.SameMessageSignatureSetBatch(max_same_message_sets);
 
@@ -40,6 +39,7 @@ const SameMessageSet = struct {
     signature: js.Uint8Array,
 };
 
+// TODO(zapi): Replace with value.toU32Exact() after next zapi release: see https://github.com/ChainSafe/zapi/pull/71
 fn uint32(value: js.Number) !u32 {
     const number = try value.toF64();
     const max_u32: f64 = @floatFromInt(std.math.maxInt(u32));
@@ -74,7 +74,7 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
         const message = try set.message.toSlice();
         if (message.len != 32) return error.InvalidMessageLength;
 
-        const public_key: NativePublicKey = switch (set_type) {
+        const public_key: bls.PublicKey = switch (set_type) {
             .indexed => blk: {
                 if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
                 const indexed = try (try value.asObject(IndexedSet)).get();
@@ -95,7 +95,7 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
             .single => blk: {
                 const single = try (try value.asObject(SingleSet)).get();
                 const bytes = try single.pubkey.toSlice();
-                break :blk NativePublicKey.keyValidate(bytes) catch return js.Boolean.from(false);
+                break :blk bls.PublicKey.keyValidate(bytes) catch return js.Boolean.from(false);
             },
         };
 
