@@ -15,7 +15,7 @@ const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
 const bls = @import("bls");
-const blst_verifier = @import("./blst_verifier.zig");
+const bls_verifier = bls.verifier;
 
 const NativePublicKey = bls.PublicKey;
 const NativeSignature = bls.Signature;
@@ -474,14 +474,13 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     }
 
     const pool = state.thread_pool orelse return error.ThreadPoolNotInitialized;
-    const result = try blst_verifier.verifySignatureSets(
+    const result = try bls_verifier.verifySignatureSets(
         js.io(),
         pool,
         items,
         .{
             .pks_validate = try boolOrDefault(pks_validate, false),
             .sigs_groupcheck = try boolOrDefault(sigs_groupcheck, false),
-            .propagate_pool_shutdown = false,
         },
     );
 
@@ -604,7 +603,7 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
         sig_ptrs[i] = &sigs[i];
 
         const scalar = scalars[i * nbytes ..][0..nbytes];
-        try blst_verifier.ensureNonzeroRandomScalar(io, scalar);
+        try bls_verifier.ensureNonzeroRandomScalar(io, scalar);
         sca_ptrs[i] = &scalars[i * nbytes];
     }
 
@@ -790,7 +789,7 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     io.random(data.randomness[0 .. n * 32]);
     for (0..n) |i| {
         const scalar = data.randomness[i * 32 ..][0..8];
-        try blst_verifier.ensureNonzeroRandomScalar(io, scalar);
+        try bls_verifier.ensureNonzeroRandomScalar(io, scalar);
     }
 
     for (0..n) |i| {

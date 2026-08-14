@@ -4,14 +4,12 @@ const js = zapi.js;
 const napi = zapi.napi;
 const bls = @import("bls");
 const preset = @import("preset").preset;
+const state_transition = @import("state_transition");
 const blst_bindings = @import("./blst.zig");
-const blst_verifier = @import("./blst_verifier.zig");
 const pubkeys = @import("./pubkeys.zig");
 
 const NativePublicKey = bls.PublicKey;
-const NativeSignature = bls.Signature;
-const BatchVerifyItem = bls.BatchVerifyItem;
-const DST = bls.DST;
+const signature_set_verifier = state_transition.signature_set_verifier;
 
 // Bound synchronous NAPI work and the fixed stack buffers below. Lodestar's
 // worker jobs normally contain at most 128 sets, so 256 provides headroom while
@@ -19,6 +17,8 @@ const DST = bls.DST;
 const max_verify_sets = 256;
 const max_same_message_sets = bls.MAX_AGGREGATE_PER_JOB;
 const max_indices_per_set = preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT;
+const SignatureSetBatch = signature_set_verifier.SignatureSetBatch(max_verify_sets);
+const SameMessageSignatureSetBatch = signature_set_verifier.SameMessageSignatureSetBatch(max_same_message_sets);
 
 const SetType = enum(u32) {
     indexed = 0,
@@ -40,44 +40,6 @@ fn uint32(value: napi.Value) !u32 {
     return @intFromFloat(number);
 }
 
-fn parseSignature(set: napi.Value) !?NativeSignature {
-    const value = js.Value{ .val = try set.getNamedProperty("signature") };
-    const bytes = try (try value.asUint8Array()).toSlice();
-    var signature = NativeSignature.deserialize(bytes) catch return null;
-    signature.validate(true) catch return null;
-    return signature;
-}
-
-fn resolvePublicKey(set: napi.Value, set_type: SetType) !?NativePublicKey {
-    const io = js.io();
-    return switch (set_type) {
-        .indexed => blk: {
-            if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
-            const index = try uint32(try set.getNamedProperty("index"));
-            break :blk pubkeys.state.cache.getPubkey(io, index) orelse
-                return error.PubkeyIndexNotFound;
-        },
-        .aggregate => blk: {
-            if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
-            const indices = try uint32Slice(try set.getNamedProperty("indices"));
-            if (indices.len == 0) return error.EmptyIndices;
-            if (indices.len > max_indices_per_set) return error.TooManyIndices;
-
-            break :blk pubkeys.state.cache.aggregateU32(io, indices) catch |err| switch (err) {
-                error.InvalidIndex => return error.PubkeyIndexNotFound,
-                error.InvalidLength => return error.EmptyIndices,
-            };
-        },
-        .single => blk: {
-            const value = js.Value{ .val = try set.getNamedProperty("pubkey") };
-            const bytes = try (try value.asUint8Array()).toSlice();
-            var public_key = NativePublicKey.deserialize(bytes) catch break :blk null;
-            public_key.validate() catch break :blk null;
-            break :blk public_key;
-        },
-    };
-}
-
 /// Verify indexed, aggregate, and raw-pubkey signature sets synchronously.
 ///
 /// Returns false as soon as a cryptographically invalid set is encountered.
@@ -88,10 +50,8 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
     if (count == 0) return js.Boolean.from(false);
     if (count > max_verify_sets) return error.TooManySets;
 
-    var messages: [max_verify_sets][32]u8 = undefined;
-    var public_keys: [max_verify_sets]NativePublicKey = undefined;
-    var signatures: [max_verify_sets]NativeSignature = undefined;
-    var items: [max_verify_sets]BatchVerifyItem = undefined;
+    var batch: SignatureSetBatch = .{};
+    const io = js.io();
 
     for (0..count) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
@@ -105,48 +65,38 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
         const message_value = js.Value{ .val = try set.getNamedProperty("message") };
         const message = try (try message_value.asUint8Array()).toSlice();
         if (message.len != 32) return error.InvalidMessageLength;
-        messages[i] = message[0..32].*;
+        const exact_message = message[0..32].*;
 
-        public_keys[i] = (try resolvePublicKey(set, set_type)) orelse
-            return js.Boolean.from(false);
-
-        signatures[i] = (try parseSignature(set)) orelse
-            return js.Boolean.from(false);
-
-        items[i] = .{
-            .message = messages[i],
-            .public_key = &public_keys[i],
-            .signature = &signatures[i],
-            .randomness = undefined,
+        const public_key: NativePublicKey = switch (set_type) {
+            .indexed => blk: {
+                if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
+                const index = try uint32(try set.getNamedProperty("index"));
+                break :blk pubkeys.state.cache.getPubkey(io, index) orelse
+                    return error.PubkeyIndexNotFound;
+            },
+            .aggregate => blk: {
+                if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
+                const indices = try uint32Slice(try set.getNamedProperty("indices"));
+                if (indices.len > max_indices_per_set) return error.TooManyIndices;
+                break :blk pubkeys.state.cache.aggregateU32(io, indices) catch |err| switch (err) {
+                    error.InvalidIndex => return error.PubkeyIndexNotFound,
+                    error.InvalidLength => return error.EmptyIndices,
+                };
+            },
+            .single => blk: {
+                const value = js.Value{ .val = try set.getNamedProperty("pubkey") };
+                const bytes = try (try value.asUint8Array()).toSlice();
+                break :blk NativePublicKey.keyValidate(bytes) catch return js.Boolean.from(false);
+            },
         };
+
+        const signature_value = js.Value{ .val = try set.getNamedProperty("signature") };
+        const signature = try (try signature_value.asUint8Array()).toSlice();
+        if (!batch.append(&public_key, &exact_message, signature)) return js.Boolean.from(false);
     }
 
-    if (count == 1) {
-        signatures[0].verify(
-            false,
-            &messages[0],
-            DST,
-            null,
-            &public_keys[0],
-            false,
-        ) catch return js.Boolean.from(false);
-        return js.Boolean.from(true);
-    }
-
-    const pool = blst_bindings.state.thread_pool orelse
-        return error.ThreadPoolNotInitialized;
-    const result = try blst_verifier.verifySignatureSets(
-        js.io(),
-        pool,
-        items[0..count],
-        .{
-            .pks_validate = false,
-            .sigs_groupcheck = false,
-            .propagate_pool_shutdown = true,
-        },
-    );
-
-    return js.Boolean.from(result);
+    const pool = blst_bindings.state.thread_pool orelse return error.ThreadPoolNotInitialized;
+    return js.Boolean.from(try batch.verify(io, pool));
 }
 
 /// Randomly aggregate and verify indexed signatures over the same message.
@@ -165,59 +115,31 @@ pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !j
 
     if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
 
-    var public_keys: [max_same_message_sets]NativePublicKey = undefined;
-    var public_key_refs: [max_same_message_sets]*const NativePublicKey = undefined;
-    var signatures: [max_same_message_sets]NativeSignature = undefined;
-    var signature_refs: [max_same_message_sets]*const NativeSignature = undefined;
-    var signature_valid: [max_same_message_sets]bool = undefined;
-    var can_aggregate = true;
+    var batch: SameMessageSignatureSetBatch = .{};
 
     const io = js.io();
     for (0..count) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
         const index = try uint32(try set.getNamedProperty("index"));
-        public_keys[i] = pubkeys.state.cache.getPubkey(io, index) orelse
+        const public_key = pubkeys.state.cache.getPubkey(io, index) orelse
             return error.PubkeyIndexNotFound;
-        public_key_refs[i] = &public_keys[i];
 
-        if (try parseSignature(set)) |signature| {
-            signatures[i] = signature;
-            signature_refs[i] = &signatures[i];
-            signature_valid[i] = true;
-        } else {
-            signature_valid[i] = false;
-            can_aggregate = false;
-        }
+        const signature_value = js.Value{ .val = try set.getNamedProperty("signature") };
+        const signature = try (try signature_value.asUint8Array()).toSlice();
+        batch.append(&public_key, signature);
     }
 
-    if (can_aggregate) {
-        const pool = blst_bindings.state.thread_pool orelse
-            return error.ThreadPoolNotInitialized;
-        if (try blst_verifier.verifySameMessage(
-            io,
-            pool,
-            public_key_refs[0..count],
-            signature_refs[0..count],
-            &exact_message,
-        )) {
-            for (0..count) |i| try results.set(@intCast(i), js.Boolean.from(true));
-            return results;
-        }
-    }
+    var verification_results: [max_same_message_sets]bool = undefined;
+    const pool = blst_bindings.state.thread_pool orelse return error.ThreadPoolNotInitialized;
+    try batch.verify(
+        io,
+        pool,
+        &exact_message,
+        verification_results[0..count],
+    );
 
     for (0..count) |i| {
-        const is_valid = signature_valid[i] and blk: {
-            signatures[i].verify(
-                false,
-                &exact_message,
-                DST,
-                null,
-                &public_keys[i],
-                false,
-            ) catch break :blk false;
-            break :blk true;
-        };
-        try results.set(@intCast(i), js.Boolean.from(is_valid));
+        try results.set(@intCast(i), js.Boolean.from(verification_results[i]));
     }
 
     return results;
