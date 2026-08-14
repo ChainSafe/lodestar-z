@@ -12,10 +12,11 @@
 - **Relative imports:** use the `.js` extension in TypeScript ESM imports.
 - **No `any`:** avoid `any` and `as any`; use proper types or a justified Biome suppression.
 - **Follow existing patterns** before introducing new abstractions.
-- **Security reviews:** read `THREAT_MODEL.md` and `docs/security/IMPLEMENTATION_MAP.md` before
-  reporting a security finding. Identify the attacker, current supported path or identified planned
-  integration path, integration maturity, trusted preconditions, violated security objective, and
-  concrete impact. Classify same-process hardening and operator misuse accurately.
+- **Security reviews:** first surface candidate security-objective violations, then use
+  `THREAT_MODEL.md` and `docs/security/IMPLEMENTATION_MAP.md` to classify them. The model is not an
+  allowlist. Downgrade a candidate only after verifying the applicable trust assumption against the
+  current or planned call path. If code and documentation conflict, report the code behavior and the
+  documentation gap.
 - **Security-model maintenance:** review both security documents when a change adds or alters a
   trust boundary, native dependency, persistence path or format, shared mutable cache or pool,
   externally influenced native input, or supported integration. Update the normative threat model
