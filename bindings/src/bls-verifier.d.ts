@@ -39,7 +39,9 @@ export type SameMessageSignatureSet = {
 
 /**
  * Verify signature sets using cached pubkeys for indexed and aggregate sets.
- * Invalid cryptographic inputs return false; invalid interface state throws.
+ * Returns false as soon as a cryptographically invalid set is encountered.
+ * Evaluation short-circuits, so later sets are not inspected. Cache and
+ * interface errors throw only when encountered before the result is known.
  */
 export declare function verifySignatureSets(sets: BlsSignatureSet[]): boolean;
 

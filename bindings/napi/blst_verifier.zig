@@ -1,6 +1,4 @@
 const std = @import("std");
-const zapi = @import("zapi:zapi");
-const napi = zapi.napi;
 const bls = @import("bls");
 
 const NativePublicKey = bls.PublicKey;
@@ -12,26 +10,15 @@ const BatchVerifyItem = bls.BatchVerifyItem;
 const DST = bls.DST;
 const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 
+// A correct RNG produces an all-zero 64-bit scalar with probability 2^-64.
+// Keep retries bounded so a broken RNG fails instead of looping forever.
 const random_scalar_retries_max = 8;
 
-pub fn uint8Slice(value: napi.Value) ![]u8 {
-    if (!(try value.isTypedarray())) return error.TypeMismatch;
-    const info = try value.getTypedarrayInfo();
-    if (info.array_type != .uint8) return error.TypeMismatch;
-    return info.data;
-}
-
-pub fn parseSignature(bytes: []const u8) ?NativeSignature {
-    if (bytes.len != NativeSignature.COMPRESS_SIZE and
-        bytes.len != NativeSignature.SERIALIZE_SIZE)
-    {
-        return null;
-    }
-
-    var signature = NativeSignature.deserialize(bytes) catch return null;
-    signature.validate(true) catch return null;
-    return signature;
-}
+pub const VerifySignatureSetsOptions = struct {
+    pks_validate: bool = true,
+    sigs_groupcheck: bool = true,
+    propagate_pool_shutdown: bool = true,
+};
 
 pub fn ensureNonzeroRandomScalar(io: std.Io, scalar: *[8]u8) !void {
     if (!std.mem.allEqual(u8, scalar, 0)) return;
@@ -47,9 +34,7 @@ pub fn verifySignatureSets(
     io: std.Io,
     pool: *ThreadPool,
     items: []BatchVerifyItem,
-    pks_validate: bool,
-    sigs_groupcheck: bool,
-    propagate_pool_shutdown: bool,
+    options: VerifySignatureSetsOptions,
 ) !bool {
     for (items) |*item| {
         io.random(&item.randomness);
@@ -60,10 +45,10 @@ pub fn verifySignatureSets(
         io,
         items,
         DST,
-        pks_validate,
-        sigs_groupcheck,
+        options.pks_validate,
+        options.sigs_groupcheck,
     ) catch |err| switch (err) {
-        error.ShuttingDown, error.Canceled => if (propagate_pool_shutdown) return err else false,
+        error.ShuttingDown, error.Canceled => if (options.propagate_pool_shutdown) return err else false,
         else => false,
     };
 }

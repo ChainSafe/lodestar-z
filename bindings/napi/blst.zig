@@ -92,15 +92,6 @@ fn unwrapClass(comptime T: type, value: js.Value) !*T {
     return js.convertArg(*T, raw.value, raw.env);
 }
 
-/// Reads a Uint8Array slice from a generic `js.Value`.
-///
-/// Workaround: `js.Value.asUint8Array` is currently broken in zapi 2.0.0
-/// (it calls a non-existent `expectType` method). Instead we narrow via
-/// the underlying `napi.Value` directly.
-fn uint8SliceFromValue(value: js.Value) ![]u8 {
-    return blst_verifier.uint8Slice(value.toValue());
-}
-
 pub const PublicKey = struct {
     pub const js_meta = js.class(.{});
 
@@ -304,7 +295,7 @@ pub const SecretKey = struct {
 
         const key_info_slice: ?[]const u8 = if (key_info) |value| blk: {
             if (value.isUndefined() or value.isNull()) break :blk null;
-            break :blk try uint8SliceFromValue(value);
+            break :blk try (try value.asUint8Array()).toSlice();
         } else null;
 
         const sk = NativeSecretKey.keyGen(seed_slice, key_info_slice) catch return error.KeyGenFailed;
@@ -381,7 +372,7 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
 
     for (0..msgs_len) |i| {
         const msg_value = try msgs.get(@intCast(i));
-        const msg_bytes = try uint8SliceFromValue(msg_value);
+        const msg_bytes = try (try msg_value.asUint8Array()).toSlice();
         if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
         msg_bufs[i] = msg_bytes[0..@sizeOf(SigningRoot)].*;
 
@@ -467,7 +458,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         const set = (try sets.get(@intCast(i))).toValue();
 
         const msg_napi = try set.getNamedProperty("msg");
-        const msg_bytes = try uint8SliceFromValue(.{ .val = msg_napi });
+        const msg_bytes = try (try (js.Value{ .val = msg_napi }).asUint8Array()).toSlice();
         if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
         const pk_napi = try set.getNamedProperty("pk");
         const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
@@ -487,9 +478,11 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         js.io(),
         pool,
         items,
-        try boolOrDefault(pks_validate, false),
-        try boolOrDefault(sigs_groupcheck, false),
-        false,
+        .{
+            .pks_validate = try boolOrDefault(pks_validate, false),
+            .sigs_groupcheck = try boolOrDefault(sigs_groupcheck, false),
+            .propagate_pool_shutdown = false,
+        },
     );
 
     return js.Boolean.from(result);
@@ -555,7 +548,8 @@ pub fn aggregateSerializedPublicKeys(serialized_public_keys: js.Array, pks_valid
     defer allocator.free(native_pks);
 
     for (0..pks_len) |i| {
-        const bytes = try uint8SliceFromValue(try serialized_public_keys.get(@intCast(i)));
+        const value = try serialized_public_keys.get(@intCast(i));
+        const bytes = try (try value.asUint8Array()).toSlice();
         native_pks[i] = NativePublicKey.deserialize(bytes) catch return error.DeserializationFailed;
     }
 
@@ -604,7 +598,7 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
         pk_ptrs[i] = &wrapped_pk.raw;
 
         const sig_napi = try set.getNamedProperty("sig");
-        const sig_bytes = try uint8SliceFromValue(.{ .val = sig_napi });
+        const sig_bytes = try (try (js.Value{ .val = sig_napi }).asUint8Array()).toSlice();
         sigs[i] = NativeSignature.deserialize(sig_bytes[0..]) catch return error.DeserializationFailed;
         sigs[i].validate(true) catch return error.InvalidSignature;
         sig_ptrs[i] = &sigs[i];
@@ -808,7 +802,7 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
         data.pk_ptrs[i] = &data.pks[i];
 
         const sig_napi = try set.getNamedProperty("sig");
-        const sig_bytes = try uint8SliceFromValue(.{ .val = sig_napi });
+        const sig_bytes = try (try (js.Value{ .val = sig_napi }).asUint8Array()).toSlice();
         data.sigs[i] = NativeSignature.deserialize(sig_bytes[0..]) catch return error.DeserializationFailed;
         data.sig_ptrs[i] = &data.sigs[i];
     }

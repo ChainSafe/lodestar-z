@@ -13,6 +13,9 @@ const NativeSignature = bls.Signature;
 const BatchVerifyItem = bls.BatchVerifyItem;
 const DST = bls.DST;
 
+// Bound synchronous NAPI work and the fixed stack buffers below. Lodestar's
+// worker jobs normally contain at most 128 sets, so 256 provides headroom while
+// requiring unusually large direct callers to chunk explicitly.
 const max_verify_sets = 256;
 const max_same_message_sets = bls.MAX_AGGREGATE_PER_JOB;
 const max_indices_per_set = preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT;
@@ -23,18 +26,9 @@ const SetType = enum(u32) {
     single = 2,
 };
 
-fn uint8Slice(value: napi.Value) ![]u8 {
-    return blst_verifier.uint8Slice(value);
-}
-
 fn uint32Slice(value: napi.Value) ![]u32 {
-    if (!(try value.isTypedarray())) return error.TypeMismatch;
-    const info = try value.getTypedarrayInfo();
-    if (info.array_type != .uint32) return error.TypeMismatch;
-
-    const byte_ptr: [*]u8 = info.data.ptr;
-    const typed_ptr: [*]u32 = @ptrCast(@alignCast(byte_ptr));
-    return typed_ptr[0..info.length];
+    try js.Uint32Array.validateArg(value);
+    return (js.Uint32Array{ .val = value }).toSlice();
 }
 
 fn uint32(value: napi.Value) !u32 {
@@ -46,27 +40,12 @@ fn uint32(value: napi.Value) !u32 {
     return @intFromFloat(number);
 }
 
-fn parseMessage(set: napi.Value) ![32]u8 {
-    const message = try uint8Slice(try set.getNamedProperty("message"));
-    if (message.len != 32) return error.InvalidMessageLength;
-    return message[0..32].*;
-}
-
 fn parseSignature(set: napi.Value) !?NativeSignature {
-    const bytes = try uint8Slice(try set.getNamedProperty("signature"));
-    return blst_verifier.parseSignature(bytes);
-}
-
-fn parsePublicKey(set: napi.Value) !?NativePublicKey {
-    const bytes = try uint8Slice(try set.getNamedProperty("pubkey"));
-    if (bytes.len != NativePublicKey.COMPRESS_SIZE and
-        bytes.len != NativePublicKey.SERIALIZE_SIZE)
-    {
-        return null;
-    }
-    var public_key = NativePublicKey.deserialize(bytes) catch return null;
-    public_key.validate() catch return null;
-    return public_key;
+    const value = js.Value{ .val = try set.getNamedProperty("signature") };
+    const bytes = try (try value.asUint8Array()).toSlice();
+    var signature = NativeSignature.deserialize(bytes) catch return null;
+    signature.validate(true) catch return null;
+    return signature;
 }
 
 fn resolvePublicKey(set: napi.Value, set_type: SetType) !?NativePublicKey {
@@ -89,15 +68,21 @@ fn resolvePublicKey(set: napi.Value, set_type: SetType) !?NativePublicKey {
                 error.InvalidLength => return error.EmptyIndices,
             };
         },
-        .single => try parsePublicKey(set),
+        .single => blk: {
+            const value = js.Value{ .val = try set.getNamedProperty("pubkey") };
+            const bytes = try (try value.asUint8Array()).toSlice();
+            var public_key = NativePublicKey.deserialize(bytes) catch break :blk null;
+            public_key.validate() catch break :blk null;
+            break :blk public_key;
+        },
     };
 }
 
 /// Verify indexed, aggregate, and raw-pubkey signature sets synchronously.
 ///
-/// Invalid cryptographic inputs return false. Cache misses and malformed
-/// interface inputs throw so callers do not classify operational failures as
-/// invalid signatures.
+/// Returns false as soon as a cryptographically invalid set is encountered.
+/// Evaluation short-circuits, so later sets are not inspected. Cache and
+/// interface errors throw only when encountered before the result is known.
 pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
     const count = try sets.length();
     if (count == 0) return js.Boolean.from(false);
@@ -117,7 +102,10 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
             else => return error.InvalidSetType,
         };
 
-        messages[i] = try parseMessage(set);
+        const message_value = js.Value{ .val = try set.getNamedProperty("message") };
+        const message = try (try message_value.asUint8Array()).toSlice();
+        if (message.len != 32) return error.InvalidMessageLength;
+        messages[i] = message[0..32].*;
 
         public_keys[i] = (try resolvePublicKey(set, set_type)) orelse
             return js.Boolean.from(false);
@@ -151,9 +139,11 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
         js.io(),
         pool,
         items[0..count],
-        false,
-        false,
-        true,
+        .{
+            .pks_validate = false,
+            .sigs_groupcheck = false,
+            .propagate_pool_shutdown = true,
+        },
     );
 
     return js.Boolean.from(result);

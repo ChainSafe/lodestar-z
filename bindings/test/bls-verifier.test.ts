@@ -92,6 +92,25 @@ describe("bls verifier", () => {
     ).toThrow("PubkeyIndexNotFound");
   });
 
+  it("short-circuits after an invalid cryptographic input", () => {
+    const signingRoot = message(1);
+    const invalidSet: BlsSignatureSet = {
+      index: 0,
+      message: signingRoot,
+      signature: new Uint8Array(96),
+      type: BLS_VERIFIER_SET_TYPE.indexed,
+    };
+    const missingCacheSet: BlsSignatureSet = {
+      index: keys.length,
+      message: signingRoot,
+      signature: keys[0].sign(signingRoot).toBytes(),
+      type: BLS_VERIFIER_SET_TYPE.indexed,
+    };
+
+    expect(verifySignatureSets([invalidSet, missingCacheSet])).toBe(false);
+    expect(() => verifySignatureSets([missingCacheSet, invalidSet])).toThrow("PubkeyIndexNotFound");
+  });
+
   it("randomly aggregates indexed signatures over the same message", () => {
     const signingRoot = message(4);
     const sets = keys.map((key, index) => ({
