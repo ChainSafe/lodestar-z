@@ -226,23 +226,14 @@ pub const PubkeyCache = struct {
         io: std.Io,
         indices: []const u64,
     ) !bls.PublicKey {
-        return self.aggregateIndices(u64, io, indices);
+        return self.aggregateIndices(io, u64, indices);
     }
 
-    /// Aggregate 32-bit validator indices without widening or allocating a
-    /// temporary buffer.
-    pub fn aggregateU32(
+    /// Aggregate the pubkeys at indices of the requested integer type.
+    pub fn aggregateIndices(
         self: *const PubkeyCache,
         io: std.Io,
-        indices: []const u32,
-    ) !bls.PublicKey {
-        return self.aggregateIndices(u32, io, indices);
-    }
-
-    fn aggregateIndices(
-        self: *const PubkeyCache,
         comptime Index: type,
-        io: std.Io,
         indices: []const Index,
     ) !bls.PublicKey {
         if (indices.len == 0) return error.InvalidLength;

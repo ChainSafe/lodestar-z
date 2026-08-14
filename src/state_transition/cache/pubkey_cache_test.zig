@@ -201,15 +201,15 @@ test "aggregate supports u64 and u32 indices and rejects invalid input" {
     }
 
     const aggregate_u64 = try cache.aggregate(testing.io, &.{ 0, 1 });
-    const aggregate_u32 = try cache.aggregateU32(testing.io, &.{ 0, 1 });
+    const aggregate_u32 = try cache.aggregateIndices(testing.io, u32, &.{ 0, 1 });
     const compressed_u64 = aggregate_u64.compress();
     const compressed_u32 = aggregate_u32.compress();
     try testing.expectEqualSlices(u8, &compressed_u64, &compressed_u32);
 
     try testing.expectError(error.InvalidLength, cache.aggregate(testing.io, &.{}));
-    try testing.expectError(error.InvalidLength, cache.aggregateU32(testing.io, &.{}));
+    try testing.expectError(error.InvalidLength, cache.aggregateIndices(testing.io, u32, &.{}));
     try testing.expectError(error.InvalidIndex, cache.aggregate(testing.io, &.{2}));
-    try testing.expectError(error.InvalidIndex, cache.aggregateU32(testing.io, &.{2}));
+    try testing.expectError(error.InvalidIndex, cache.aggregateIndices(testing.io, u32, &.{2}));
 }
 
 test "batch lookups preserve order and validate inputs" {

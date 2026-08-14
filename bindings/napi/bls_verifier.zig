@@ -42,9 +42,8 @@ fn uint32(value: napi.Value) !u32 {
 
 /// Verify indexed, aggregate, and raw-pubkey signature sets synchronously.
 ///
-/// Returns false as soon as a cryptographically invalid set is encountered.
-/// Evaluation short-circuits, so later sets are not inspected. Cache and
-/// interface errors throw only when encountered before the result is known.
+/// Returns false on cryptographic failure. Throws for malformed inputs and
+/// cache misses encountered before a result is known.
 pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
     const count = try sets.length();
     if (count == 0) return js.Boolean.from(false);
@@ -77,7 +76,7 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
                 if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
                 const indices = try uint32Slice(try set.getNamedProperty("indices"));
                 if (indices.len > max_indices_per_set) return error.TooManyIndices;
-                break :blk pubkeys.state.cache.aggregateU32(io, indices) catch |err| switch (err) {
+                break :blk pubkeys.state.cache.aggregateIndices(io, u32, indices) catch |err| switch (err) {
                     error.InvalidIndex => return error.PubkeyIndexNotFound,
                     error.InvalidLength => return error.EmptyIndices,
                 };
@@ -99,8 +98,10 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
 }
 
 /// Randomly aggregate and verify indexed signatures over the same message.
-/// Returns one result per input, falling back to individual checks only when
-/// the aggregate check fails.
+///
+/// Returns one validity result per input, preserving order. Uses aggregate
+/// verification with individual fallback. Throws on invalid input, cache
+/// errors, or pool unavailability.
 pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !js.Array {
     const count = try sets.length();
     if (count > max_same_message_sets) return error.TooManySets;
