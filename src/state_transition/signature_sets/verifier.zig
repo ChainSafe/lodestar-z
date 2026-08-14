@@ -47,7 +47,7 @@ pub fn SignatureSetBatch(comptime capacity: usize) type {
             var items: [capacity]BatchVerifyItem = undefined;
             for (0..self.count) |i| {
                 items[i] = .{
-                    .message = self.messages[i],
+                    .message = &self.messages[i],
                     .public_key = &self.public_keys[i],
                     .signature = &self.signatures[i],
                     .randomness = undefined,

@@ -65,7 +65,6 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
         const message_value = js.Value{ .val = try set.getNamedProperty("message") };
         const message = try (try message_value.asUint8Array()).toSlice();
         if (message.len != 32) return error.InvalidMessageLength;
-        const exact_message = message[0..32].*;
 
         const public_key: NativePublicKey = switch (set_type) {
             .indexed => blk: {
@@ -92,7 +91,7 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
 
         const signature_value = js.Value{ .val = try set.getNamedProperty("signature") };
         const signature = try (try signature_value.asUint8Array()).toSlice();
-        if (!batch.append(&public_key, &exact_message, signature)) return js.Boolean.from(false);
+        if (!batch.append(&public_key, message[0..32], signature)) return js.Boolean.from(false);
     }
 
     const pool = blst_bindings.state.thread_pool orelse return error.ThreadPoolNotInitialized;

@@ -238,7 +238,7 @@ const VerifyMultiWorkItem = struct {
                 job.sigs_groupcheck,
                 &item.randomness,
                 RAND_BITS,
-                &item.message,
+                item.message,
             ) catch {
                 job.err_flag.store(true, .release);
                 break;
@@ -520,7 +520,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
         pks[i] = sk.toPublicKey();
         sigs[i] = sk.sign(&msgs[i], blst.DST, null);
         items[i] = .{
-            .message = msgs[i],
+            .message = &msgs[i],
             .public_key = &pks[i],
             .signature = &sigs[i],
             .randomness = undefined,

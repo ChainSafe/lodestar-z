@@ -40,7 +40,7 @@ pub fn verifySignatureSets(
         const item = &items[0];
         item.signature.verify(
             options.sigs_groupcheck,
-            &item.message,
+            item.message,
             DST,
             null,
             item.public_key,
@@ -65,12 +65,12 @@ pub fn verifySignatureSets(
 
 test "single signature set verification" {
     const ikm = [_]u8{1} ** 32;
-    const message = [_]u8{2} ** 32;
+    var message = [_]u8{2} ** 32;
     const secret_key = try bls.SecretKey.keyGen(&ikm, null);
     const public_key = secret_key.toPublicKey();
     const signature = secret_key.sign(&message, DST, null);
     var items = [_]BatchVerifyItem{.{
-        .message = message,
+        .message = &message,
         .public_key = &public_key,
         .signature = &signature,
         .randomness = undefined,
@@ -86,7 +86,7 @@ test "single signature set verification" {
         .{ .pks_validate = true, .sigs_groupcheck = true },
     ));
 
-    items[0].message = [_]u8{3} ** 32;
+    message = [_]u8{3} ** 32;
     try std.testing.expect(!try verifySignatureSets(
         std.testing.io,
         pool,

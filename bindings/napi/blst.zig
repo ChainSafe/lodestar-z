@@ -466,7 +466,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         const sig_napi = try set.getNamedProperty("sig");
         const wrapped_sig = try unwrapClass(Signature, .{ .val = sig_napi });
         items[i] = .{
-            .message = msg_bytes[0..@sizeOf(SigningRoot)].*,
+            .message = msg_bytes[0..@sizeOf(SigningRoot)],
             .public_key = &wrapped_pk.raw,
             .signature = &wrapped_sig.raw,
             .randomness = undefined,
