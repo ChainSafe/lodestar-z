@@ -37,6 +37,17 @@ const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 /// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
 const BATCH_VERIFY_SIZE = 32;
 
+const SignatureSetInput = struct {
+    msg: js.Uint8Array,
+    pk: js.Value,
+    sig: js.Value,
+};
+
+const RandomizedAggregationInput = struct {
+    pk: js.Value,
+    sig: js.Uint8Array,
+};
+
 /// Native-only thread pool state, reached from `root.zig` through the
 /// pub `state` var so it is not part of the JS module surface.
 const State = struct {
@@ -455,20 +466,16 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     };
 
     for (0..n_elems) |i| {
-        const set = (try sets.get(@intCast(i))).toValue();
-
-        const msg_napi = try set.getNamedProperty("msg");
-        const msg_bytes = try (try (js.Value{ .val = msg_napi }).asUint8Array()).toSlice();
-        if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
-        const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
-
-        const sig_napi = try set.getNamedProperty("sig");
-        const wrapped_sig = try unwrapClass(Signature, .{ .val = sig_napi });
+        const set_value = try sets.get(@intCast(i));
+        const set = try (try set_value.asObject(SignatureSetInput)).get();
+        const message_bytes = try set.msg.toSlice();
+        if (message_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
+        const public_key = try unwrapClass(PublicKey, set.pk);
+        const signature = try unwrapClass(Signature, set.sig);
         items[i] = .{
-            .message = msg_bytes[0..@sizeOf(SigningRoot)],
-            .public_key = &wrapped_pk.raw,
-            .signature = &wrapped_sig.raw,
+            .message = message_bytes[0..@sizeOf(SigningRoot)],
+            .public_key = &public_key.raw,
+            .signature = &signature.raw,
             .randomness = undefined,
         };
     }
@@ -590,15 +597,13 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
 
     const env = js.env();
     for (0..n) |i| {
-        const set = (try sets.get(@intCast(i))).toValue();
+        const set_value = try sets.get(@intCast(i));
+        const set = try (try set_value.asObject(RandomizedAggregationInput)).get();
+        const public_key = try unwrapClass(PublicKey, set.pk);
+        pk_ptrs[i] = &public_key.raw;
 
-        const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
-        pk_ptrs[i] = &wrapped_pk.raw;
-
-        const sig_napi = try set.getNamedProperty("sig");
-        const sig_bytes = try (try (js.Value{ .val = sig_napi }).asUint8Array()).toSlice();
-        sigs[i] = NativeSignature.deserialize(sig_bytes[0..]) catch return error.DeserializationFailed;
+        const signature_bytes = try set.sig.toSlice();
+        sigs[i] = NativeSignature.deserialize(signature_bytes[0..]) catch return error.DeserializationFailed;
         sigs[i].validate(true) catch return error.InvalidSignature;
         sig_ptrs[i] = &sigs[i];
 
@@ -793,16 +798,14 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     }
 
     for (0..n) |i| {
-        const set = (try sets.get(@intCast(i))).toValue();
-
-        const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try unwrapClass(PublicKey, .{ .val = pk_napi });
-        data.pks[i] = wrapped_pk.raw;
+        const set_value = try sets.get(@intCast(i));
+        const set = try (try set_value.asObject(RandomizedAggregationInput)).get();
+        const public_key = try unwrapClass(PublicKey, set.pk);
+        data.pks[i] = public_key.raw;
         data.pk_ptrs[i] = &data.pks[i];
 
-        const sig_napi = try set.getNamedProperty("sig");
-        const sig_bytes = try (try (js.Value{ .val = sig_napi }).asUint8Array()).toSlice();
-        data.sigs[i] = NativeSignature.deserialize(sig_bytes[0..]) catch return error.DeserializationFailed;
+        const signature_bytes = try set.sig.toSlice();
+        data.sigs[i] = NativeSignature.deserialize(signature_bytes[0..]) catch return error.DeserializationFailed;
         data.sig_ptrs[i] = &data.sigs[i];
     }
 
