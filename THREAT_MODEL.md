@@ -1,615 +1,246 @@
 # Lodestar-z threat model
 
-This document defines the security boundaries and review assumptions for Lodestar-z. It is written
-for maintainers and automated reviewers. Read it before reporting a security issue.
+This document is the stable security contract for Lodestar-z. It defines the assets, actors, trust
+boundaries, invariants, and classification rules that determine whether a finding is a security
+issue, security-readiness issue, correctness bug, or hardening opportunity.
 
-It applies to the `main` branch and was last reviewed on 2026-08-12.
+Current integration status, call paths, cache mechanics, file references, and implemented controls
+belong in the [security implementation map](docs/security/IMPLEMENTATION_MAP.md). Those details may
+change without changing this contract.
 
-This is a living model. A code path that violates an assumption may still contain a bug, but the
-report must explain why the violation is reachable in a supported Lodestar deployment.
+This model applies to the `main` branch. Review consensus claims against the specification version
+pinned in `build.zig.zon`, the active fork, and the active preset.
 
-## System and deployment context
+## Scope
 
-Lodestar-z is a Zig library and a Node.js native addon. It is not a network service, an HTTP server,
-an Ethereum peer-to-peer stack, an execution client, a key manager, or a slashing-protection
-database.
+Lodestar-z is a Zig library and Node.js native addon used by Lodestar. It is not itself a network
+service, P2P stack, execution client, key manager, or slashing-protection database.
 
-The production data flow is generally:
-
-```text
-remote consensus peer or external subsystem
-                    |
-                    v
-       Lodestar networking and orchestration       outside this repository
-                    |
-                    v
-       JavaScript wrappers and N-API boundary      bindings/src, bindings/napi
-                    |
-                    v
-   SSZ, state transition, BLS, caches, fork choice src
-                    |
-                    v
-        post-state, roots, proofs, or errors
-```
-
-P2P objects are the principal hostile data source. Lodestar-ts currently owns networking, message
-size and decompression limits, peer scoring, and orchestration. P2P objects that will cross into
-Lodestar-z may still contain adversarial SSZ bytes. Beacon states, ERA data, database contents,
-configuration, wall-clock time, and application policy have different trust contracts described
-below. Reviews must not treat every serialized object or JavaScript argument as remotely controlled.
-
-The package also supports direct use by JavaScript and Zig callers. Those callers are in the same
-process and privilege domain as Lodestar-z. The addon is not a sandbox around hostile JavaScript.
-
-### Integration maturity
-
-Threat reports must distinguish current production reachability from the required security posture
-of components planned to replace Lodestar-ts implementations:
-
-| Component | Integration status | Review classification |
-| --- | --- | --- |
-| BLS bindings | Integrated | Production-reachable |
-| Process-wide pubkey cache | Integrated | Production-reachable |
-| State transition | Next integration stage | Consensus correctness and security readiness; planned input is a trusted pre-state plus serialized hostile signed block |
-| Zig fork choice | Future integration stage | Parity and security readiness; planned inputs include STF-valid blocks and validated attestations |
-| Generic P2P-object deserialization | Planned as integrations expand | Hostile-input boundary where actually wired |
-| Beacon-state and ERA loading | Library surface using trusted input | Reliability and defense in depth unless another attacker path is demonstrated |
-
-A bug in a planned component can be important and release-blocking without being described as a
+Security classification depends on the least-privileged attacker, the supported or identified
+planned path to the affected code, the trusted preconditions on that path, and the resulting impact.
+A bug in a planned integration may be release-blocking security-readiness work without being a
 currently exploitable Lodestar vulnerability. Direct downstream users must establish their own
-reachable boundary.
+reachable boundaries.
+
+## Assets
+
+The protected assets are:
+
+- Ethereum consensus safety and liveness;
+- beacon-state, state-root, validator-accounting, fork-choice, and head correctness;
+- BLS verification and aggregation correctness;
+- availability, integrity, and confidentiality of the hosting Node.js process, including unrelated
+  validator material, JWTs, API credentials, and other resident secrets;
+- integrity of shared native pools, caches, configuration, and worker state;
+- confidentiality of BLS secret-key material intentionally passed to the library; and
+- integrity of source dependencies, npm packages, and native release artifacts.
+
+The library does not claim to provide an HSM, hardened secret memory, a JavaScript sandbox, or
+protection from arbitrary code that already has the Node.js process's privileges.
 
 ## Security objectives
 
-Lodestar-z aims to preserve the following properties in supported builds and deployments:
+1. **Consensus correctness.** Given the correct preset and configuration, an eligible trusted
+   pre-state, all required validation, and accurate execution and data-availability results, state
+   transition and fork choice agree with the pinned consensus specification.
+2. **Cryptographic correctness.** BLS operations do not accept invalid signatures or points when
+   the API contract requests the relevant checks. Batch operations preserve cardinality and use
+   unpredictable nonzero coefficients where required.
+3. **Memory safety.** Malformed externally influenced values do not cause out-of-bounds access,
+   use-after-free, double free, uninitialized-memory use, allocator mismatch, or native-memory
+   disclosure.
+4. **Process availability.** Attacker-controlled inputs and bounded sequences fail safely. They do
+   not cause panics, deadlocks, infinite loops, cumulative leaks, or unbounded queue or cache growth.
+   CPU and memory amplification remain within explicit protocol, transport, and application bounds.
+5. **State integrity.** Rejected candidates do not modify their trusted pre-state, publish
+   branch-specific derived state, enter fork choice, or corrupt shared state.
+6. **Lifecycle safety.** Supported workers, concurrent operations, environment teardown, and
+   finalization do not race or access freed shared state.
+7. **Artifact integrity.** Published native artifacts are built from reviewed source and pinned
+   dependencies through the repository release process.
 
-1. **Consensus correctness.** With the correct preset and chain configuration, a trusted pre-state,
-   all required checks completed locally or equivalently beforehand, and accurate external execution
-   and data-availability results, state transition and fork choice agree with the consensus
-   specification version pinned in `build.zig.zon`.
-2. **Cryptographic correctness.** BLS operations do not accept invalid signatures or points when the
-   relevant validation is requested by their API contract. Randomized batch operations use
-   unpredictable, nonzero coefficients and preserve the required cardinality.
-3. **Memory safety.** Malformed externally sourced bytes, points, indices, offsets, and collection
-   lengths do not cause out-of-bounds access, use-after-free, double free, uninitialized-memory use,
-   or allocator mismatch.
-4. **Process availability.** Attacker-controlled inputs and bounded sequences of inputs fail safely
-   and do not cause panics, deadlocks, infinite loops, cumulative leaks, or unbounded queue or cache
-   growth. CPU and memory amplification remain within explicit protocol, transport, and application
-   bounds.
-5. **State integrity.** Rejected candidate blocks do not partially modify the trusted pre-state,
-   publish branch-specific epoch-cache entries, enter fork choice, or violate the documented
-   process-wide pubkey-cache invariant.
-6. **Lifecycle safety.** Supported Node.js worker creation, concurrent cache access, environment
-   teardown, and finalization do not race or access freed global state.
-7. **Artifact integrity.** Published native artifacts are built from reviewed sources and pinned
-   dependencies through the repository release workflow.
+## Actors and trusted inputs
 
-Secret keys are sensitive when callers use the exported BLS `SecretKey` API. The library must not
-leak them through unrelated output, logs, memory-safety errors, or other objects. It does not claim
-to provide process isolation, an HSM, hardened memory, or protection from arbitrary code already
-executing in the Node.js process.
+| Actor or source | Capability and trust |
+| --- | --- |
+| Remote consensus participant | Controls protocol-shaped and malformed P2P objects. It does not directly control native options, configuration, local files, or capacity APIs without a demonstrated Lodestar path. |
+| Remote API user | Controls only values forwarded by Lodestar's API layer after its validation and limits. Reports must trace that path. |
+| Operator and host application | Trusted to choose the preset, configuration, initial state, local files, verification policy, external statuses, capacities, and wall-clock time. Accidental misuse should fail clearly, but a malicious operator is out of scope. |
+| Same-process JavaScript or Zig code | Has ambient application privileges and may intentionally provide malformed or coercing values. It is not an authorization or OS-isolation boundary, but it does not thereby possess arbitrary native-memory or cross-worker access. |
+| Checkpoint state provider | Semitrusted. A user-provided checkpoint root is authoritative; without one, checkpoint selection is explicitly delegated to the provider. |
+| Trusted local storage | Database state, ERA/E2S data, and PKIX files are application-owned. This model assumes bytes written are the bytes later read. Malicious local replacement and host compromise are out of scope. |
+| Contributor or supply-chain attacker | May attempt to introduce malicious source, workflow, dependency, or release changes. |
 
-## Assets and impact
+Raw checkpoint bytes are hostile to whichever component first decodes them before authentication.
+Lodestar-z state-loading entry points are defined to accept trusted state bytes. If a supported
+integration assigns initial checkpoint decoding to Lodestar-z, that entry point becomes a
+hostile-input boundary.
 
-The main assets are:
+## Trust boundaries
 
-- the correctness of beacon states, state roots, fork selection, validator accounting, and head
-  selection;
-- Ethereum consensus safety and liveness for a Lodestar node using this implementation;
-- availability, integrity, and confidentiality of the hosting Node.js process memory, including
-  unrelated validator material, JWTs, API credentials, and other resident secrets;
-- correctness of BLS signature verification and aggregation;
-- integrity of process-wide node pools, pubkey caches, configuration, and worker-pool state;
-- confidentiality of BLS secret-key material intentionally passed to this package;
-- integrity of npm packages and native release artifacts.
+| Boundary | Lodestar-z contract |
+| --- | --- |
+| Remote source to Lodestar-z | Remotely derived bytes remain hostile unless the exact required validation has already completed and is bound to the operation's result. |
+| JavaScript to N-API | Runtime types, lengths, indexes, encodings, arrays, object shapes, and buffer ranges must be validated before unsafe native access. Caller-selected policy remains trusted. |
+| Serialized input to SSZ | Decoding enforces canonical encoding, offsets, list limits, bitfields, arithmetic bounds, and safe ownership. |
+| Beacon-state construction | Input state bytes already have trusted provenance. SSZ decoding establishes structure only, not ancestry, canonicality, finality, or consensus validity. |
+| State transition | The pre-state is an eligible trusted pre-state; the signed candidate block is hostile. Required consensus checks and state-root verification must complete before publication. |
+| Fork choice | Blocks have passed full state transition, attestations have passed the applicable upstream validation, external statuses are accurate, and local time is trusted. Fork choice still owns its specified ancestry, timing, vote, status-propagation, and bound checks. |
+| BLS API | Serialized points, messages, collections, and cardinality may be hostile. Caller-controlled validation flags and proof-of-possession preconditions are explicit policy. |
+| Zig to native dependencies | Lodestar-z owns representation, initialization, cardinality, pointer lifetime, requested validation, and ABI compatibility. Pinned dependencies are trusted to honor documented contracts. |
+| Shared native state | Synchronization, ownership, worker visibility, and teardown order must be defined. |
+| Local persistence | Provenance is trusted. Parsers still enforce documented framing, size, format, checksum, ownership, and cleanup contracts for reliability and memory safety. |
+| Build and release | Maintainer review, pinned inputs, protected repository settings, and release credentials establish artifact trust. |
 
-A consensus mismatch, invalid signature acceptance, remotely reachable native memory corruption, or
-deterministic process crash can be security-significant. A wrong exception message, an unsupported
-API call, or bad output caused only by an operator supplying inconsistent trusted configuration is
-normally a correctness or usability issue instead.
+A `std.debug.assert` is not a parser guard for externally influenced data in ReleaseSafe. TypeScript
+declarations are not runtime validation.
 
-## Actors and capabilities
+## Consensus trust invariants
 
-### Remote consensus participant
+### Beacon-state provenance and eligibility
 
-A peer can send adversarial but protocol-shaped blocks, attestations, signatures, public keys, and
-SSZ payloads to Lodestar. It may also send malformed network payloads. It cannot directly choose
-native method options, mutate the local chain configuration, select local files, reserve arbitrary
-cache capacity, or call addon methods unless a concrete Lodestar path exposes that control.
+A beacon state is not an arbitrary network object. Trusted provenance originates from:
 
-### Remote API user
-
-An API user has only the capabilities granted by Lodestar's HTTP or RPC layer, which is outside this
-repository. A report relying on this actor must trace the value through that layer to a Lodestar-z
-entry point and account for upstream validation and limits.
-
-### Operator and host application
-
-The operator and the Lodestar application choose the network preset, chain configuration, trusted
-checkpoint or initial state, file paths, cache sizing, execution status, data-availability status,
-verification policy, and wall-clock time. These are trusted control-plane inputs. Accidental
-mistakes should fail clearly where practical, but a malicious operator is not an attacker this
-library can contain.
-
-### Same-process JavaScript or Zig code
-
-Code loaded into the same process can invoke exported functions, allocate memory, read and write
-files using its own runtime privileges, terminate the process, and serialize a `SecretKey` by design.
-It is not an authorization or OS-isolation boundary. It remains a JavaScript-to-native memory-safety,
-host-process confidentiality, and cross-environment integrity boundary. Same-process callers,
-including compromised dependencies, may intentionally supply malformed arrays, coercing objects,
-stale handles, and adversarial buffers; those inputs must not yield arbitrary native memory access or
-cross-worker corruption. N-API entry points must validate runtime types, lengths, indexes, encodings,
-and buffer ranges before unsafe native access. Gaps are boundary-hardening or security findings
-according to current or planned reachability.
-
-### Checkpoint state provider
-
-A checkpoint state provider is usually semitrusted. If the user supplies a checkpoint root, matching
-the downloaded state's hash-tree-root to that root is a mandatory part of establishing the trust
-chain. The exact Lodestar-ts or Lodestar-z integration point that performs this check is not yet
-fixed. If the user supplies no root, trust in checkpoint selection is explicitly delegated to the
-provider. A malicious provider under delegated trust is outside this threat model, while safely
-handling malformed responses remains worthwhile boundary hardening.
-
-### Trusted local storage
-
-Beacon states read from the database, ERA/E2S data, and PKIX snapshots are application-owned trusted
-inputs. The current model assumes bytes written are the bytes later read. Host or database compromise,
-silent storage corruption, and an operator selecting a file from the wrong network are outside the
-adversarial model. Framing checks and graceful failures remain reliability and defense-in-depth
-requirements, not evidence that these inputs are ordinarily hostile.
-
-### Contributor or supply-chain attacker
-
-A contributor may propose malicious source or workflow changes. A dependency or build service may
-be compromised. Code review, pinned Zig dependencies and GitHub Actions, tests, npm trusted
-publishing, and provenance are the relevant controls.
-
-## Trust boundaries and contracts
-
-| Boundary | Untrusted or fallible data | Trusted decision or precondition |
-| --- | --- | --- |
-| Network to Lodestar | P2P gossip and req/resp objects | Message framing, size/decompression limits, peer scoring, and orchestration are currently owned by Lodestar-ts |
-| JavaScript to N-API | Runtime types, byte contents, lengths, indices, offsets, arrays, and object shapes | Same-process caller chooses which method to call and owns policy options |
-| P2P object to SSZ | Bytes, offsets, list lengths, bitfields, and encodings are hostile | Lodestar-ts applies transport bounds; native decoding still enforces canonical SSZ and consensus limits |
-| Beacon-state deserialization | Bytes come from a trusted anchor, trusted database, or trusted ERA source | Deserialization establishes structural SSZ validity only; provenance establishes state trust |
-| State transition and import | Serialized signed block contents are hostile | Pre-state is trusted; full STF or equivalent prior checks are required; publication is gated on joined execution and DA results |
-| Fork choice | Valid blocks and validated attestations still represent competing branches | Only STF-valid blocks enter; attestations passed the applicable upstream validation; local time is trusted |
-| BLS API | Serialized points, messages, list contents, and cardinality | Boolean validation options are caller policy; proof-of-possession preconditions apply where documented |
-| Zig to C/native dependencies | JavaScript- or network-influenced values may reach dependency calls | Lodestar-z ensures valid representation, initialization, cardinality, pointer lifetime, requested validation, and ABI compatibility; pinned dependencies are trusted to honor their documented contracts |
-| Shared native state | Worker scheduling and teardown are asynchronous | Configuration and administrative cache operations follow their lifecycle contract |
-| Checkpoint provider | Response may be malformed; provider is semitrusted | User-provided checkpoint root is authoritative, or checkpoint selection is explicitly delegated |
-| Database, PKIX, and ERA/E2S | Fallible local I/O, format compatibility, and accidental corruption | Contents and provenance are trusted; malicious local replacement is out of scope |
-| Build and release | Source contributions and downloaded dependencies | Maintainer review, pinned versions/hashes, protected repository settings, and release credentials |
-
-### Component review map
-
-| Area | Primary security concern | Important inherited contract |
-| --- | --- | --- |
-| `src/ssz`, `src/persistent_merkle_tree`, `src/hashing` | Canonical decoding, offset and generalized-index bounds, ownership, proof correctness, and bounded merkleization | Generic typed callers obey allocator and lifetime contracts; serialized bytes can be hostile |
-| `src/consensus_types`, `src/fork_types`, `src/config`, `src/preset` | Correct fork schema, preset values, fork dispatch, and type-safe cross-fork access | Active preset and runtime chain configuration identify the intended network |
-| `src/state_transition` | Consensus equivalence, signature checks, rejected-state isolation, cache consistency, and bounded per-block work | Trusted anchored pre-state and accurate external execution/DA results |
-| `src/bls` | Point decoding, subgroup and infinity checks, aggregation cardinality, randomness, thread-pool cleanup, and false acceptance | Per-call validation flags and proof-of-possession requirements are explicit API policy |
-| `src/fork_choice` | Head correctness, optimistic invalidation, vote accounting, finalized ancestry, equivocation handling, queue bounds, and arithmetic | Blocks passed full state transition; indexed attestations passed upstream validation; time is advanced by the trusted caller |
-| `src/beacon_node`, `src/clock` | Cache ownership, event ordering, time/slot calculations, and integration invariants | A report must establish whether the component is wired into a production Lodestar path |
-| `src/era` | Format correctness, offsets, decompression, allocation bounds, SSZ parsing, and optional semantic validation | ERA data and its provenance are trusted; failures are ordinarily reliability issues |
-| `bindings/napi`, `bindings/src` | Runtime type and range checks, native lifetime, worker isolation, error stability, and JS/native API agreement | Same-process caller owns control-plane policy and has ambient process privileges |
-| `scripts`, `test`, `bench`, `examples` | Developer, CI, generation, or supply-chain impact | These are not runtime peer-facing surfaces without a demonstrated invocation path |
-
-### N-API boundary
-
-The native exports are registered from `bindings/napi/root.zig`: configuration, node-pool sizing,
-shuffle, metrics, state transition helpers, `BeaconStateView`, BLS, and the pubkey cache. Public
-JavaScript declarations and wrappers live in `bindings/src`.
-
-Every JavaScript-controlled length, index, byte encoding, buffer range, class instance, and numeric
-conversion that reaches native memory must be checked or passed to an API that returns a bounded
-error. JavaScript type declarations are not runtime validation. A `std.debug.assert` is not an
-acceptable parser guard in ReleaseSafe when malformed external data can reach it.
-
-This robustness requirement does not turn the addon into an authorization boundary. For example,
-`pubkeyCache.save(path)` is explicitly a local file-writing API. Letting its caller choose `path` is
-not path traversal by itself.
-
-### Beacon-state trust and provenance
-
-A beacon state is not an arbitrary network object in the Lodestar architecture. Every state-loading
-or construction entry point requires trusted state bytes. Trust originates at one of these anchors:
-
-- genesis, which can be viewed as the trusted checkpoint at epoch zero;
-- a user-provided checkpoint root, after the downloaded state's hash-tree-root is matched to it; or
+- genesis, treated as the checkpoint at epoch zero;
+- a state whose hash-tree-root matches a user-provided checkpoint root; or
 - explicit delegation of checkpoint selection to a checkpoint state provider.
 
-Subsequent states inherit authenticated provenance through successful state transitions. A state
-written to trusted storage retains the provenance and validity status it had when written. SSZ
-deserialization checks structural validity; it does not establish provenance, consensus validity,
-canonicality, or finality.
+A state read from trusted storage retains the provenance and validity status it had when written.
+Subsequent states inherit authenticated provenance through successful consensus-layer state
+transitions.
 
-```text
-genesis or authenticated checkpoint
-                 |
-                 v
-      eligible trusted pre-state
-                 |
-        hostile candidate block
-                 |
-       isolated full state transition
-          |                    |
-       reject                accept
-          |                    |
- discard candidate      authenticated post-state
-                               |
-                 eligible pre-state or trusted storage
-```
+An **authenticated CL-derived state** is structurally valid SSZ, descended from a trusted anchor,
+produced by a successful consensus-layer transition, and accompanied by the execution and DA status
+used at acceptance.
 
-For this model, an authenticated CL-derived beacon state is:
+An **eligible trusted pre-state** is an authenticated CL-derived state whose branch remains eligible
+for fork choice under its current execution and DA status. Eligibility is a current-use property,
+not part of historical provenance.
 
-- structurally valid SSZ;
-- produced by a successful consensus-layer state transition;
-- descended from a trusted anchor; and
-- accompanied by the execution and DA status used when it was accepted.
-
-An eligible trusted pre-state is an authenticated CL-derived state whose branch remains eligible for
-fork choice under its current execution and DA status. Eligibility is therefore a current-use
-property, not part of the state's historical provenance.
-
-These properties must not be conflated:
-
-| Property | Guarantee for an authenticated CL-derived state |
+| Property | Authenticated CL-derived state |
 | --- | --- |
 | Structural SSZ validity | Always |
-| Consensus-layer transition | Successful |
-| Descent from trusted anchor | Always |
-| Canonical | Not necessarily |
-| Finalized | Not necessarily |
-| Persisted | Not necessarily |
-| Execution status | Valid or conditionally valid while `syncing` |
-| DA status | Valid within the DA window; treated as satisfied outside the window |
-| Fork-choice eligibility | Not inherent; required when the state is used as an eligible trusted pre-state |
+| Successful CL transition and anchor descent | Always |
+| Canonical, finalized, or persisted | Not necessarily |
+| Execution status | Valid or conditionally valid while execution validity is unresolved |
+| DA status | Valid within the DA window; treated as satisfied by the defined sync policy outside it |
+| Fork-choice eligibility | Required only when used as an eligible trusted pre-state |
 
-A noncanonical block and its implied post-state may remain valid and eligible trusted pre-states while
-their branch remains viable. Finalization makes conflicting branches ineligible and their states are
-evicted. It does not erase their authenticated provenance or historical successful CL transition,
-but they can no longer serve as eligible trusted pre-states.
+A noncanonical branch may retain valid eligible pre-states while it remains viable. Finalization
+makes conflicting branches ineligible but does not erase their provenance or historical successful
+CL transitions. Execution invalidation instead revokes conditional validity and eligibility for the
+affected branch.
 
-An execution-optimistic state is authenticated but conditionally valid. Each block carries its own
-execution status. While the EL is syncing, optimistic blocks and their descendants remain `syncing`
-and may remain eligible for fork choice. When the EL later reports valid or invalid, fork choice
-propagates that result through the affected branch. Latest valid hash processing makes an invalid
-block and all descendants immediately ineligible, revokes their conditional validity, and prevents
-their use as eligible trusted pre-states. Lodestar-ts is responsible for preventing validator duties
-while the node is execution optimistic.
+### Candidate-block acceptance
 
-DA must be satisfied before block acceptance and publication, but DA verification and STF may run
-concurrently when an all-or-none result gates publication. Inside the DA window, successful import
-requires completed DA validation. A super-node that custodies all columns may treat DA as satisfied
-after observing half because it can reconstruct the remainder. Outside the window during sync, DA is
-treated as satisfied rather than retained as an optimistic branch status.
+- A full consensus-layer state transition is required before every block import. Gossip checks,
+  hash-chain checks during sync, and ancestry checks establish prerequisites but do not replace it.
+- All proposer and operation signatures are checked by the state transition or by an equivalent
+  prior batch whose all-or-none result gates the same import.
+- A candidate may publish its post-state and enter fork choice only after state transition,
+  state-root verification, signatures, execution handling, and DA handling have jointly succeeded.
+  Independent checks may run concurrently.
+- A state with unresolved execution validity is authenticated but conditionally valid. It may remain
+  fork-choice eligible, but validators must not perform duties while the node is execution
+  optimistic. A later invalid result invalidates the affected branch.
+- Within the DA window, DA must be satisfied before acceptance and publication. Outside the window,
+  the defined sync policy treats DA as satisfied rather than retaining a DA-optimistic branch.
+- Verification flags are trusted application policy. A required check may be disabled only when the
+  same accepted operation is gated on equivalent prior verification.
 
-`BeaconStateView.stateTransition` clones the trusted cached pre-state. Branch-specific work before a
-late failure mutates the disposable candidate clone, which is destroyed on error. The documented
-exception is the shared append-only pubkey cache, which may safely advance during a failed candidate
-transition under the invariant below. Only after a successful full STF and all joined import checks
-may the post-state be published or enter fork choice. A finding that claims accepted-state corruption
-must demonstrate an alias or cache mutation that violates these isolation and append-only rules.
+Lodestar-z consumes execution and DA results rather than establishing them. A false result supplied
+by a trusted external system is not an independent Lodestar-z bypass. Mishandling an accurate result
+is in scope.
 
-Malicious database or ERA state bytes are outside the adversarial model. Checkpoint-provider bytes
-are the one state-loading surface where malformed input is plausible because the provider is only
-semitrusted. Robust decoding there is defense in depth, and matching a user-provided checkpoint root
-is the critical authentication step.
+### Candidate isolation and shared facts
 
-### P2P block validation paths
+Candidate processing must isolate branch-specific mutations until acceptance. A rejected candidate
+may leave only work products or cache facts that cannot affect later validity based on the rejected
+branch.
 
-Gossip and sync establish different preliminary facts, but full STF is required before every block
-import:
+Shared caches may retain only branch-independent facts. In particular, an append-only
+validator-pubkey cache may advance during a failed candidate only if:
 
-```text
-hostile P2P bytes
-        |
-        v
-canonical SSZ decoding
-        |
-        +-- gossip: consensus-spec gossip validation
-        |
-        +-- range, unknown-block, or backward sync: hash-chain validation
-        |
-        +--> CL STF and state-root verification ------------------+
-        +--> proposer and operation signatures, in STF or batch --+
-        +--> execution verification or optimistic status --------+
-        +--> DA verification or satisfied sync policy ------------+
-                                                                  |
-                                                 all-or-none import gate
-                                                                  |
-                                      accepted block and eligible trusted post-state
-                                                                  |
-                                                            fork choice
-```
+- cached indexes beyond a state's validator count are treated as absent for that state;
+- later valid processing at an index must reproduce the same pubkey; and
+- conflicting, duplicate, or sparse appends fail.
 
-Backward sync starts when a block, attestation, or another P2P object references an unknown block. It
-fetches parents until reaching a block already known to fork choice, checks `parentRoot` against the
-parent block's hash-tree-root, and then processes the chain forward through full STF before import.
-Hash-chain membership proves ancestry, not consensus validity.
+Any new mutable global state must define its synchronization, ownership, worker visibility, bounds,
+and teardown order.
 
-Lodestar-ts may batch-verify signatures in parallel before STF. In practice, all required
-verification pathways are joined with all-or-none `Promise.all` behavior. Disabling a corresponding
-STF check is valid only when that exact import operation is gated on all prior verification promises.
-Successful signature computations may remain after a later STF failure, but they are useless and
-must not imply block validity.
+## Finding classification
 
-### Verification flags and external statuses
+### Required evidence
 
-The following values are trusted application policy, not remote authorization controls:
+A security report must identify:
 
-- `verifyStateRoot`, `verifyProposer`, and `verifySignatures`;
-- execution-payload status;
-- data-availability status;
-- BLS public-key, signature, group, and infinity-check options.
+1. the least-privileged attacker and controlled value;
+2. the current supported path or identified planned integration path to the operation;
+3. the integration maturity and every trusted precondition on that path;
+4. the validation, ownership, lifecycle, fork, preset, and external-status contracts involved;
+5. the violated security objective and concrete effect;
+6. whether the effect survives candidate cleanup, cache isolation, fork-choice invalidation, or
+   worker teardown; and
+7. a reproducible input or sequence with relevant size, work, and allocation bounds.
 
-Disabling a check is supported for call paths that already performed equivalent validation, tests,
-and controlled workloads. Production import still requires proposer verification, all operation
-signature checks, consensus processing, and post-state-root verification. A report is
-security-relevant only if an untrusted actor can cause a supported production path to omit a
-required check, prior verification is not bound into the all-or-none import result, a check marked
-enabled is ineffective, or the API contract falsely claims validation that does not occur.
+Severity follows demonstrated reachability, defaults, reproducibility, and impact. A
+dangerous-looking line is not sufficient evidence.
 
-Lodestar-z does not contact the execution layer or a data-availability subsystem. It consumes their
-results. The EL is trusted to be nonmalicious but may be fallible or still syncing. An incorrect
-`valid` response from a faulty EL is an external-system failure. Incorrect handling of a correct EL
-response is a Lodestar-z consensus bug. The `syncing` execution status becomes branch metadata in
-the planned fork-choice integration rather than weakening CL state-transition checks.
+### Categories
 
-DA orchestration currently belongs to Lodestar-ts. The real DA result or satisfied sync policy must
-participate in the all-or-none acceptance gate. STF may evaluate concurrently using a provisional
-available status as long as its candidate result cannot be published independently. Incorrect
-handling of a correct DA result in Lodestar-z is in scope; a trusted caller falsely claiming
-availability is not an independent native validation bypass.
+| Classification | Meaning |
+| --- | --- |
+| Security vulnerability | An in-scope attacker crosses a current supported boundary and violates a security objective. |
+| Security-readiness issue | A planned integration would expose the violation at a hostile boundary, but that path is not yet production-reachable. |
+| Consensus correctness bug | Behavior differs from the pinned specification under valid inputs without established attacker reachability. |
+| Boundary hardening | Validation or robustness is weak where the caller already has equivalent impact and no less-privileged hostile path is established. |
+| Trusted-input reliability bug | Trusted state, storage, or local-file use causes a leak, panic, race, cleanup failure, or bad error. |
+| Operator misuse or unsupported use | The trigger violates an explicit trusted precondition or supported lifecycle. |
+| Test or documentation gap | No current behavior violates this model. |
 
-### Fork choice
+### Resource exhaustion
 
-Fork choice intentionally does not repeat every expensive consensus check:
+Every denial-of-service report must quantify the input bound, work or allocation amplification,
+repeatability, and attacker-controlled path.
 
-- `ForkChoice.onBlock` requires the supplied block to have passed state transition upstream.
-- `ForkChoice.onAttestation` requires the indexed attestation to have passed
-  `is_valid_indexed_attestation` upstream.
-- `onAttesterSlashing` relies on state-transition validation, including sorted attesting indices.
+- One malformed remote input must fail safely before peer scoring can help.
+- Sustained attacks must account for supported transport limits, scoring, and disconnection, but
+  those controls do not excuse cumulative leaks or unbounded queues.
+- Protocol-bounded transition and cryptographic costs are expected unless amplification materially
+  exceeds the protocol work.
+- A large allocation requested only by a trusted same-process caller is hardening unless remote
+  influence is demonstrated.
+- Host-wide out-of-memory is not itself a vulnerability; attacker-controlled amplification before
+  it can be.
 
-On the gossip path, attestation prerequisites are the applicable consensus-spec gossip and indexed
-attestation validations. They include structural constraints, timing, shuffling and committee
-membership, sorted and unique indices, and BLS verification as applicable. Sync paths may establish
-their prerequisites differently, but may not put an invalid block into fork choice.
+### Common non-findings
 
-Fork choice remains responsible for its documented checks, including known parents, time, finalized
-ancestry, target consistency, execution and payload status propagation, latest-valid-hash branch
-invalidation, vote application, and internal bounds. Missing an upstream-owned signature check
-inside fork choice is not a vulnerability unless a production caller can bypass the prerequisite.
+Without evidence crossing a boundary above, these are not security vulnerabilities:
 
-The current production Lodestar fork-choice implementation remains in Lodestar-ts. The Zig module is
-intended to replace it, so parity of optimistic handling, invalidation, and validation prerequisites
-is a required integration invariant even before current remote reachability exists.
+- missing authentication on an in-process API, deliberate use of caller-owned policy flags, or
+  effects already available through the caller's ambient privileges without additional
+  native-memory or cross-worker impact;
+- an operator selecting malicious configuration, an untrusted initial state, a wrong-network file,
+  or an attacker-controlled output path;
+- treating trusted database, ERA/E2S, or PKIX bytes as remotely controlled;
+- expecting state SSZ decoding to establish trusted ancestry, canonicality, or finality;
+- fork choice relying on documented state-transition or attestation-validation prerequisites;
+- mutation of a disposable candidate or a permitted branch-independent cache append;
+- retention of a viable noncanonical state or eviction of a finalized-away state;
+- a checksum that detects corruption but is not an authentication mechanism;
+- intended secret-key serialization to the owning caller;
+- failures confined to tests, generators, fuzzers, examples, benchmarks, or explicit stubs; and
+- timing or memory-forensic attacks absent a separately adopted side-channel guarantee.
 
-### Process-wide configuration, pools, and caches
+These may still be correctness, reliability, API-design, or defense-in-depth issues.
 
-The addon shares BLS worker-pool state, the persistent Merkle node pool, configuration, metrics, and
-the pubkey cache across Node.js environments. Sharing is intentional.
+## Maintenance rule
 
-- Loading and unloading supported workers must not tear down state still used by another
-  environment.
-- Pubkey-cache movable storage is protected by its lock, and references into it must not escape a
-  resize.
-- PKIX save, load, and reset are restricted to the control environment. Reads and supported append
-  operations may be shared.
-- The pubkey cache represents unforkable append-only validator pubkey/index history. Because cloned
-  epoch caches share it, candidate processing may append a future entry before the block's remaining
-  operations and state-root check succeed. That append is not rolled back.
-- A cached index at or beyond a state's validator count must be treated as absent for that state.
-  Later valid processing at the same index must reproduce the same pubkey; conflicting, duplicate,
-  or sparse appends fail. This prevents a safe future cache entry from being mistaken for accepted
-  state.
-- Former Eth1 bridge deposits may register a validator during block processing and append immediately.
-  In Electra the validator initially has zero balance while its amount remains pending. Execution-layer
-  deposit requests stay pending and register a new validator only after their source slot is finalized.
-- Other state-transition caches are short-lived, generally epoch-scoped, and derived from a trusted
-  state. Candidate-block processing must isolate their mutations until acceptance. A failed STF may
-  leave metrics, completed signature computations, and a permitted pubkey-cache append, but no other
-  candidate-derived mutation that can influence later validity decisions.
-- Chain configuration is application startup state. The application must not concurrently replace
-  it while states or transitions are using borrowed configuration data.
-- Explicit capacity APIs are controlled by the local application. They must reject arithmetic
-  overflow and impossible capacities, but a same-process caller deliberately requesting a large
-  valid reservation is not a remote memory-exhaustion attack.
+Keep this file normative and short. A statement belongs here only if changing it can change a
+finding's trust analysis, classification, reachability, severity, or required security property.
+Descriptions of where or how the current implementation enforces a rule belong in the
+[implementation map](docs/security/IMPLEMENTATION_MAP.md).
 
-Any code change that adds mutable global state must define its synchronization, ownership, worker
-visibility, and teardown order.
-
-### PKIX cache files
-
-PKIX is a fast native cache snapshot, not a trust anchor. Its loader checks framing, exact file size,
-format version, ABI compatibility, caller-supplied capacity, and corruption checksums. The checksum
-is not intended to authenticate a maliciously modified file, and affine entries are not
-semantically revalidated on load. Callers must load only an application-owned file from the intended
-network while cache administration is safe.
-
-Reports about forged PKIX checksums or semantically invalid but well-framed local files are out of
-scope unless they show one of the following:
-
-- a normal Lodestar workflow allows a remote actor to replace or select the file;
-- the loader accepts a file contrary to its documented ABI, size, or checksum contract;
-- a failed or concurrent load corrupts the previously live cache.
-
-### ERA and E2S files
-
-ERA/E2S data is trusted local input, not a hostile runtime surface. Entry sizes, index counts,
-arithmetic, file offsets, decompression, and SSZ decoding should still be bounded and checked for
-reliability. `Reader.validate` additionally checks network and block/state consistency. Lower-level
-`read*` methods do not establish trust because trust already comes from provenance.
-
-Download scripts, test-vector generation, benchmarks, and fuzz harnesses are development tooling,
-not runtime network endpoints. Findings in them need a build, CI, developer-workstation, or release
-impact rather than a claimed beacon-node remote exploit.
-
-## Threat scenarios in scope
-
-| ID | Scenario | Security condition |
-| --- | --- | --- |
-| TM-01 | Malformed P2P SSZ, proof descriptors, BLS encodings, or remotely influenced N-API values trigger native memory corruption, host-process memory disclosure, or a panic | Reachable through a current or identified planned P2P integration without first violating a trusted-caller precondition |
-| TM-02 | An adversarial block or attestation produces a state root, validator result, fork upgrade, or head different from the pinned specification | Correct preset/configuration, trusted pre-state, full required validation, and accurate external statuses are used |
-| TM-03 | An invalid BLS signature, public key, or aggregate is accepted when the requested checks and documented preconditions hold | Report identifies the exact API flags, point validation state, and proof-of-possession assumption |
-| TM-04 | Attacker-controlled work or memory grows beyond protocol or documented application bounds | Report traces attacker control and quantifies amplification, not merely a theoretical maximum local call |
-| TM-05 | Node.js workers race on a cache, pool, configuration, async job, finalizer, or cleanup hook | Sequence uses the supported worker/lifecycle model |
-| TM-06 | Failed STF leaks branch-specific candidate caches into trusted state, enters fork choice, violates the unforkable pubkey-cache invariant, leaks, double-frees, or deadlocks | Report accounts for cloning, epoch-cache ownership, permitted pubkey appends, `defer`, `errdefer`, reference counts, locks, and rollback |
-| TM-07 | Checkpoint bootstrap accepts a downloaded state whose hash-tree-root does not equal the user-provided checkpoint root | Report identifies the integration layer responsible for the mandatory root comparison |
-| TM-08 | A build or release workflow executes untrusted code with secrets or publishes a substituted native artifact | Report demonstrates the relevant CI event, permissions, pinning, and artifact path |
-| TM-09 | Secret-key material escapes through an unrelated API or memory-safety flaw | Calling documented `SecretKey.toBytes` or `toHex` is not an escape |
-| TM-10 | Correct EL or DA status causes wrong optimistic eligibility, validator-safety signal, or branch invalidation | A false status supplied by an external system is distinguished from mishandling a correct status |
-
-## Resource-exhaustion standard
-
-This project requires bounded loops and allocations even when an immediate exploit is not proven.
-Security severity still depends on reachability:
-
-- A protocol-valid peer input that causes superlinear or grossly amplified work in the normal node
-  path is a security concern.
-- A malformed remote input that allocates before checking its encoded bound is a security concern.
-- A single malformed P2P object must fail safely before peer scoring can help. Scoring does not
-  mitigate a panic, memory corruption, deadlock, or large one-shot amplification.
-- A remote API input is relevant only when the Lodestar API actually forwards it and does not
-  impose an effective bound.
-- An arbitrary JavaScript array or explicit `ensureCapacity` value supplied by trusted same-process
-  code is boundary hardening unless a remote path is demonstrated.
-- Normal state-transition cost, cryptographic verification cost, and allocations bounded by
-  consensus constants are expected. A report should compare the cost with the protocol maximum and
-  the surrounding Lodestar rate controls.
-- Sustained invalid-input attacks must account for Lodestar-ts peer scoring and disconnection. A
-  report should show meaningful damage before scoring takes effect or an integration path that is
-  not scored appropriately. Scoring policy itself is currently a Lodestar-ts concern.
-- Unavoidable process behavior after genuine host-wide out-of-memory is not by itself a
-  vulnerability. Attacker-controlled allocation amplification before OOM can be one.
-
-Every denial-of-service report should provide an input-size bound, work or allocation estimate,
-repeatability, and the attacker-controlled call path.
-
-## Out of scope and common false positives
-
-The following are not security findings without additional evidence that crosses a boundary above:
-
-- lack of authentication or authorization on an in-process Zig or N-API function;
-- arbitrary code already executing inside the Lodestar Node.js process;
-- an operator choosing a malicious configuration, wrong preset, untrusted initial state, wrong
-  network file, or attacker-controlled output path;
-- treating trusted database beacon states or ERA/E2S data as attacker-controlled inputs without a
-  demonstrated boundary that can replace them;
-- expecting beacon-state SSZ deserialization to establish trusted ancestry, canonicality, finality,
-  or long-range-attack resistance;
-- bypassing validation by explicitly setting a verification option to `false` from trusted code;
-- inaccurate execution or data-availability results supplied by the trusted application;
-- fork choice not repeating state transition, signature, or indexed-attestation validation;
-- mutation of the disposable post-state clone or a permitted future pubkey-cache append before a
-  transition is rejected, without a demonstrated violation of their isolation invariants;
-- a noncanonical but still viable branch retaining a valid trusted post-state;
-- states from a finalized-away branch being evicted as no longer useful;
-- the PKIX checksum not being a MAC or PKIX affine entries not being revalidated;
-- path traversal based solely on the caller-controlled path of an explicit local load/save API;
-- disclosure of a secret through the documented `SecretKey.toBytes` or `toHex` method to its owning
-  caller;
-- crashes or hangs only in tests, generated spec-test runners, fuzz harnesses, examples, or
-  benchmarks, absent a production or supply-chain path;
-- missing implementation of an API that is explicitly stubbed and throws `NOT_IMPLEMENTED`;
-- a large allocation requested only by a malicious same-process caller, with no remote influence;
-- timing or memory-forensic attacks against secret keys, unless maintainers separately adopt a
-  hardened-memory or side-channel-resistance guarantee.
-
-These cases can still justify a correctness, reliability, API-design, or defense-in-depth issue.
-Label them accurately rather than presenting them as remote vulnerabilities.
-
-## Security-review procedure
-
-Before filing a security finding, answer all of the following:
-
-1. **Attacker:** Who is the least-privileged actor that controls the trigger?
-2. **Maturity:** Is the component production-integrated, planned for integration, or only a direct
-   library surface?
-3. **Provenance:** Is the input hostile P2P data, a semitrusted checkpoint response, trusted state or
-   ERA data, trusted application policy, or same-process caller data?
-4. **Entry point:** Which exported Zig function, N-API method, parser, file workflow, or CI event is
-   reached?
-5. **Call path:** How does attacker-controlled data reach the exact operation through gossip, sync,
-   req/resp, a binding, or another supported or identified planned deployment path?
-6. **Validation route:** Did gossip validation, hash-chain validation, individual STF checks, or
-   all-or-none prior batch verification establish a prerequisite?
-7. **Contract:** Which trust-anchor, execution/DA, lifecycle, ownership, fork, preset, and upstream
-   preconditions apply?
-8. **Violated objective:** Which numbered security objective or threat scenario is broken?
-9. **Reproduction:** Can the issue be reproduced on the target branch with the supported Zig version
-   and, for bindings, a ReleaseSafe native build?
-10. **Impact:** Does it cause consensus divergence, false cryptographic acceptance, memory
-    corruption, host-process memory disclosure, branch misclassification, persistent integrity loss,
-    process unavailability, secret exposure, or only a handled error?
-11. **Rollback and ownership:** Does the effect survive candidate-clone destruction, epoch-cache
-    cleanup, lock release, worker teardown, cache staging, or fork-choice invalidation?
-12. **Bound:** For denial of service, what are the maximum input, allocation, loop count, and
-   amplification?
-13. **Reference:** For consensus behavior, does the claim match the exact spec version pinned in
-    `build.zig.zon`, the active fork, and the active preset rather than upstream `master`?
-
-A useful report includes a minimal test or input and states whether the classification is:
-
-- **security vulnerability:** crosses an in-scope boundary and violates a security objective;
-- **consensus correctness bug:** wrong behavior under valid inputs, with deployment reachability not
-  yet established;
-- **security-readiness or integration invariant:** required before a planned component becomes a
-  hostile-input production boundary, but not currently remotely reachable;
-- **boundary hardening:** unsafe or weak validation at an in-process boundary without a remote path;
-- **trusted-input reliability bug:** leak, panic, format failure, race, or bad cleanup under
-  non-adversarial state, database, ERA, or local-file use;
-- **operator misuse or unsupported use:** violates an explicit trusted precondition;
-- **test or documentation gap:** no current behavior violating the model.
-
-Do not assign a high severity from a dangerous-looking line alone. Severity follows the demonstrated
-attacker, defaults, call path, reproducibility, and effect.
-
-## Existing controls to verify, not assume
-
-The repository has controls that reduce risk, but a review may show that an implementation is
-incomplete:
-
-- consensus, SSZ, and BLS vectors pinned through `build.zig.zon`;
-- minimal and mainnet preset testing;
-- SSZ and BLS fuzz targets;
-- full STF before import, including proposer and operation signatures checked by STF or an
-  all-or-none prior batch, plus post-state-root verification;
-- copy-on-write state cloning and cleanup on rejected transitions, with explicit state-length checks
-  for permitted append-only pubkey-cache advancement;
-- gossip validation or sync hash-chain validation before full forward STF;
-- trusted-anchor bootstrapping through genesis or checkpoint-root authentication;
-- explicit protocol bounds, bounded stack buffers, and checked arithmetic in parsers;
-- keyed pubkey-cache hashing, locking around movable storage, staged PKIX installation, capacity
-  limits, and control-environment administration;
-- reference-counted native pools and last-environment cleanup;
-- fork-choice execution-status propagation and latest-valid-hash invalidation as required parity
-  behavior for the future integration;
-- ReleaseSafe native artifacts;
-- pinned GitHub Actions, hashed Zig dependencies, lockfile installation, npm trusted publishing, and
-  provenance.
-
-Security reports should test whether the relevant control actually covers the claimed path.
-
-## Open deployment questions
-
-Maintainers should update this model as the integration matures. Until then, reviewers should state
-their assumption for these questions rather than silently choosing the most alarming one:
-
-- Which N-API methods are stable end-user APIs versus Lodestar-internal compatibility surfaces?
-- Which additional serialized P2P object types are connected to Lodestar-z as STF and fork-choice
-  integration proceeds?
-- Which layer will own the mandatory comparison between a downloaded checkpoint state root and a
-  user-provided checkpoint root?
-- What stable error taxonomy will let Lodestar-ts distinguish invalid peer data, consensus failure,
-  execution invalidity, and internal failure for scoring and operations?
-- What production limits should apply to proof descriptors, aggregate lists, pool preheating, and
-  pubkey-cache growth?
-- Is chain configuration guaranteed to be set once before workers and state views are created?
-- How are PKIX files provisioned, permissioned, and invalidated across network or binary upgrades?
-- Is the exported `SecretKey` API intended for production validator key material, or only API
-  compatibility and testing?
+Review both documents when a change adds or alters a trust boundary, native dependency, persistence
+path or format, shared mutable cache or pool, externally influenced native input, or supported
+integration.
