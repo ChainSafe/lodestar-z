@@ -1,7 +1,6 @@
 const std = @import("std");
 const zapi = @import("zapi:zapi");
 const js = zapi.js;
-const napi = zapi.napi;
 const bls = @import("bls");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
@@ -26,13 +25,23 @@ const SetType = enum(u32) {
     single = 2,
 };
 
-fn uint32Slice(value: napi.Value) ![]u32 {
-    try js.Uint32Array.validateArg(value);
-    return (js.Uint32Array{ .val = value }).toSlice();
-}
+const CommonSet = struct {
+    type: js.Number,
+    message: js.Uint8Array,
+    signature: js.Uint8Array,
+};
 
-fn uint32(value: napi.Value) !u32 {
-    const number = try value.getValueDouble();
+const IndexedSet = struct { index: js.Number };
+const AggregateSet = struct { indices: js.Uint32Array };
+const SingleSet = struct { pubkey: js.Uint8Array };
+
+const SameMessageSet = struct {
+    index: js.Number,
+    signature: js.Uint8Array,
+};
+
+fn uint32(value: js.Number) !u32 {
+    const number = try value.toF64();
     const max_u32: f64 = @floatFromInt(std.math.maxInt(u32));
     if (!std.math.isFinite(number) or number < 0 or number > max_u32 or @floor(number) != number) {
         return error.InvalidUint32;
@@ -53,28 +62,30 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
     const io = js.io();
 
     for (0..count) |i| {
-        const set = (try sets.get(@intCast(i))).toValue();
-        const set_type: SetType = switch (try uint32(try set.getNamedProperty("type"))) {
+        const value = try sets.get(@intCast(i));
+        const set = try (try value.asObject(CommonSet)).get();
+        const set_type: SetType = switch (try uint32(set.type)) {
             @intFromEnum(SetType.indexed) => .indexed,
             @intFromEnum(SetType.aggregate) => .aggregate,
             @intFromEnum(SetType.single) => .single,
             else => return error.InvalidSetType,
         };
 
-        const message_value = js.Value{ .val = try set.getNamedProperty("message") };
-        const message = try (try message_value.asUint8Array()).toSlice();
+        const message = try set.message.toSlice();
         if (message.len != 32) return error.InvalidMessageLength;
 
         const public_key: NativePublicKey = switch (set_type) {
             .indexed => blk: {
                 if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
-                const index = try uint32(try set.getNamedProperty("index"));
+                const indexed = try (try value.asObject(IndexedSet)).get();
+                const index = try uint32(indexed.index);
                 break :blk pubkeys.state.cache.getPubkey(io, index) orelse
                     return error.PubkeyIndexNotFound;
             },
             .aggregate => blk: {
                 if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
-                const indices = try uint32Slice(try set.getNamedProperty("indices"));
+                const aggregate = try (try value.asObject(AggregateSet)).get();
+                const indices = try aggregate.indices.toSlice();
                 if (indices.len > max_indices_per_set) return error.TooManyIndices;
                 break :blk pubkeys.state.cache.aggregateIndices(io, u32, indices) catch |err| switch (err) {
                     error.InvalidIndex => return error.PubkeyIndexNotFound,
@@ -82,14 +93,13 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
                 };
             },
             .single => blk: {
-                const value = js.Value{ .val = try set.getNamedProperty("pubkey") };
-                const bytes = try (try value.asUint8Array()).toSlice();
+                const single = try (try value.asObject(SingleSet)).get();
+                const bytes = try single.pubkey.toSlice();
                 break :blk NativePublicKey.keyValidate(bytes) catch return js.Boolean.from(false);
             },
         };
 
-        const signature_value = js.Value{ .val = try set.getNamedProperty("signature") };
-        const signature = try (try signature_value.asUint8Array()).toSlice();
+        const signature = try set.signature.toSlice();
         if (!batch.append(&public_key, message[0..32], signature)) return js.Boolean.from(false);
     }
 
@@ -111,7 +121,6 @@ pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !j
 
     const message_slice = try message.toSlice();
     if (message_slice.len != 32) return error.InvalidMessageLength;
-    const exact_message = message_slice[0..32].*;
 
     if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
 
@@ -119,14 +128,13 @@ pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !j
 
     const io = js.io();
     for (0..count) |i| {
-        const set = (try sets.get(@intCast(i))).toValue();
-        const index = try uint32(try set.getNamedProperty("index"));
+        const value = try sets.get(@intCast(i));
+        const set = try (try value.asObject(SameMessageSet)).get();
+        const index = try uint32(set.index);
         const public_key = pubkeys.state.cache.getPubkey(io, index) orelse
             return error.PubkeyIndexNotFound;
 
-        const signature_value = js.Value{ .val = try set.getNamedProperty("signature") };
-        const signature = try (try signature_value.asUint8Array()).toSlice();
-        batch.append(&public_key, signature);
+        batch.append(&public_key, try set.signature.toSlice());
     }
 
     var verification_results: [max_same_message_sets]bool = undefined;
@@ -134,7 +142,7 @@ pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !j
     try batch.verify(
         io,
         pool,
-        &exact_message,
+        message_slice[0..32],
         verification_results[0..count],
     );
 
