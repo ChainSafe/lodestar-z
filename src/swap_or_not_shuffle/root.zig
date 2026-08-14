@@ -1,4 +1,4 @@
-//! Port of https://github.com/ChainSafe/swap-or-not-shuffle `src/lib.rs`.
+//! Port of https://github.com/ChainSafe/swap-or-not-shuffle/blob/main/src/lib.rs
 //!
 //! Behavior (output values, validation order, and error conditions) is kept
 //! identical to the Rust reference so results have zero divergence with the

@@ -1,8 +1,9 @@
 // Pure-TS reference implementation for the swap-or-not-shuffle tests, ported
-// from https://github.com/ChainSafe/swap-or-not-shuffle
-// test/referenceImplementation.ts with its external dependencies
-// (@chainsafe/as-sha256, @lodestar/params, @lodestar/state-transition,
-// @lodestar/utils, bigint-buffer) inlined so the suite is self-contained.
+// from the upstream repo's oracle:
+// https://github.com/ChainSafe/swap-or-not-shuffle/blob/main/test/referenceImplementation.ts
+// Its external dependencies (@chainsafe/as-sha256, @lodestar/params,
+// @lodestar/state-transition, @lodestar/utils, bigint-buffer) are inlined so
+// the suite is self-contained.
 import {createHash} from "node:crypto";
 
 export const SHUFFLE_ROUND_COUNT = 90;

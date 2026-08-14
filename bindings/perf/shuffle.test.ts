@@ -1,6 +1,6 @@
 // Benchmarks the zig `shuffle` binding against the pure-TS reference
-// implementation, mirroring the reference repo's perf suite
-// (https://github.com/ChainSafe/swap-or-not-shuffle test/perf/*).
+// implementation, mirroring the upstream repo's perf suite
+// (https://github.com/ChainSafe/swap-or-not-shuffle/tree/main/test/perf).
 import crypto from "node:crypto";
 import {bench, describe} from "@chainsafe/benchmark";
 import * as shuffleReference from "../test/shuffleReference.ts";

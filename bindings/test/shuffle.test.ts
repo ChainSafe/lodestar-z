@@ -63,9 +63,9 @@ describe("innerShuffleList", () => {
   });
 });
 
-// Test suite ported from the reference repo
-// (https://github.com/ChainSafe/swap-or-not-shuffle test/unit/*), with the
-// pure-TS shuffleReference implementation as the oracle.
+// Test suite ported from the upstream repo's unit tests
+// (https://github.com/ChainSafe/swap-or-not-shuffle/tree/main/test/unit),
+// with the pure-TS shuffleReference implementation as the oracle.
 
 interface ShuffleTestCase {
   id: string;
