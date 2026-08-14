@@ -243,3 +243,187 @@ describe("committee indices", () => {
     }
   });
 });
+
+describe("ptc indices", () => {
+  const vc = 1000;
+  const activeIndices = getInputArray(vc);
+  const effectiveBalanceIncrements = new Uint16Array(vc);
+  for (let i = 0; i < vc; i++) {
+    effectiveBalanceIncrements[i] = 32 + 32 * (i % 64);
+  }
+  const {EFFECTIVE_BALANCE_INCREMENT, MAX_EFFECTIVE_BALANCE_ELECTRA, PTC_SIZE, SLOTS_PER_EPOCH} = shuffleReference;
+
+  it("computePtcIndices should match the naive implementation", () => {
+    const seed = new Uint8Array(randomBytes(32));
+    expect(
+      Array.from(
+        shuffle.computePtcIndices(
+          seed,
+          activeIndices,
+          effectiveBalanceIncrements,
+          PTC_SIZE,
+          MAX_EFFECTIVE_BALANCE_ELECTRA,
+          EFFECTIVE_BALANCE_INCREMENT
+        )
+      ),
+      `seed 0x${Buffer.from(seed).toString("hex")}`
+    ).toEqual(
+      shuffleReference.naiveComputePayloadTimelinessCommitteeIndices(effectiveBalanceIncrements, activeIndices, seed)
+    );
+  });
+
+  it("computePtcIndicesForEpoch should match the naive implementation", {timeout: 10_000}, () => {
+    const epochSeed = new Uint8Array(randomBytes(32));
+    const startSlot = 12345;
+    const indicesPerSlot = Math.floor(vc / SLOTS_PER_EPOCH);
+    const slotOffsets = new Uint32Array(SLOTS_PER_EPOCH + 1);
+    for (let i = 0; i <= SLOTS_PER_EPOCH; i++) slotOffsets[i] = i * indicesPerSlot;
+
+    const committees: Uint32Array[][] = new Array(SLOTS_PER_EPOCH);
+    for (let i = 0; i < SLOTS_PER_EPOCH; i++) {
+      committees[i] = [activeIndices.subarray(slotOffsets[i], slotOffsets[i + 1])];
+    }
+
+    expect(
+      Array.from(
+        shuffle.computePtcIndicesForEpoch(
+          epochSeed,
+          startSlot,
+          SLOTS_PER_EPOCH,
+          activeIndices,
+          slotOffsets,
+          effectiveBalanceIncrements,
+          PTC_SIZE,
+          MAX_EFFECTIVE_BALANCE_ELECTRA,
+          EFFECTIVE_BALANCE_INCREMENT
+        )
+      ),
+      `epochSeed 0x${Buffer.from(epochSeed).toString("hex")}`
+    ).toEqual(
+      shuffleReference
+        .naiveComputePayloadTimelinessCommitteesForEpoch(epochSeed, startSlot, committees, effectiveBalanceIncrements)
+        .flat()
+    );
+  });
+
+  it("should reject non-u32 sizes and slots instead of coercing", () => {
+    const seed = new Uint8Array(32);
+    for (const ptcSize of [-1, 1.5, 2 ** 32]) {
+      expect(() =>
+        shuffle.computePtcIndices(
+          seed,
+          activeIndices,
+          effectiveBalanceIncrements,
+          ptcSize,
+          MAX_EFFECTIVE_BALANCE_ELECTRA,
+          EFFECTIVE_BALANCE_INCREMENT
+        )
+      ).to.throw("InvalidUnsignedInteger");
+    }
+    expect(() =>
+      shuffle.computePtcIndicesForEpoch(
+        seed,
+        2 ** 32,
+        1,
+        activeIndices,
+        Uint32Array.from([0, activeIndices.length]),
+        effectiveBalanceIncrements,
+        4,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT
+      )
+    ).to.throw("InvalidUnsignedInteger");
+  });
+
+  it("the Into variants should fill a caller-provided array", () => {
+    const seed = new Uint8Array(randomBytes(32));
+    const expected = shuffle.computePtcIndices(
+      seed,
+      activeIndices,
+      effectiveBalanceIncrements,
+      PTC_SIZE,
+      MAX_EFFECTIVE_BALANCE_ELECTRA,
+      EFFECTIVE_BALANCE_INCREMENT
+    );
+    const out = new Uint32Array(PTC_SIZE);
+    shuffle.computePtcIndicesInto(
+      out,
+      seed,
+      activeIndices,
+      effectiveBalanceIncrements,
+      MAX_EFFECTIVE_BALANCE_ELECTRA,
+      EFFECTIVE_BALANCE_INCREMENT
+    );
+    expect(Array.from(out)).toEqual(Array.from(expected));
+
+    const indicesPerSlot = Math.floor(vc / SLOTS_PER_EPOCH);
+    const slotOffsets = new Uint32Array(SLOTS_PER_EPOCH + 1);
+    for (let i = 0; i <= SLOTS_PER_EPOCH; i++) slotOffsets[i] = i * indicesPerSlot;
+    const ptcSize = 8;
+    const expectedEpoch = shuffle.computePtcIndicesForEpoch(
+      seed,
+      0,
+      SLOTS_PER_EPOCH,
+      activeIndices,
+      slotOffsets,
+      effectiveBalanceIncrements,
+      ptcSize,
+      MAX_EFFECTIVE_BALANCE_ELECTRA,
+      EFFECTIVE_BALANCE_INCREMENT
+    );
+    const epochOut = new Uint32Array(SLOTS_PER_EPOCH * ptcSize);
+    shuffle.computePtcIndicesForEpochInto(
+      epochOut,
+      seed,
+      0,
+      SLOTS_PER_EPOCH,
+      activeIndices,
+      slotOffsets,
+      effectiveBalanceIncrements,
+      ptcSize,
+      MAX_EFFECTIVE_BALANCE_ELECTRA,
+      EFFECTIVE_BALANCE_INCREMENT
+    );
+    expect(Array.from(epochOut)).toEqual(Array.from(expectedEpoch));
+
+    // a wrongly sized out array is rejected rather than partially filled
+    expect(() =>
+      shuffle.computePtcIndicesForEpochInto(
+        new Uint32Array(SLOTS_PER_EPOCH * ptcSize - 1),
+        seed,
+        0,
+        SLOTS_PER_EPOCH,
+        activeIndices,
+        slotOffsets,
+        effectiveBalanceIncrements,
+        ptcSize,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT
+      )
+    ).to.throw("InvalidOutputLength");
+  });
+
+  it("computePtcIndices should throw for invalid inputs", () => {
+    const seed = new Uint8Array(32);
+    expect(() =>
+      shuffle.computePtcIndices(
+        new Uint8Array(31),
+        activeIndices,
+        effectiveBalanceIncrements,
+        PTC_SIZE,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT
+      )
+    ).to.throw("InvalidSeedLength");
+    expect(() =>
+      shuffle.computePtcIndices(
+        seed,
+        new Uint32Array([]),
+        effectiveBalanceIncrements,
+        PTC_SIZE,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT
+      )
+    ).to.throw("EmptyActiveIndices");
+  });
+});

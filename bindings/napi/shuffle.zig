@@ -98,3 +98,100 @@ pub fn computeSyncCommitteeIndices(
     defer allocator.free(result);
     return js.Uint32Array.from(result);
 }
+
+pub fn computePtcIndices(
+    seed: js.Uint8Array,
+    indices: js.Uint32Array,
+    effective_balance_increments: js.Uint16Array,
+    ptc_size: js.Number,
+    max_effective_balance_electra: js.Number,
+    effective_balance_increment: js.Number,
+) !js.Uint32Array {
+    const out_array = try js.Uint32Array.alloc(try ptc_size.toU32Exact());
+    try sons.computePtcIndicesInto(
+        try seed.toSlice(),
+        try indices.toSlice(),
+        try effective_balance_increments.toSlice(),
+        max_effective_balance_electra.assertI64(),
+        effective_balance_increment.assertI64(),
+        try out_array.toSlice(),
+    );
+    return out_array;
+}
+
+pub fn computePtcIndicesForEpoch(
+    epoch_seed: js.Uint8Array,
+    start_slot: js.Number,
+    slots_per_epoch: js.Number,
+    shuffling: js.Uint32Array,
+    slot_offsets: js.Uint32Array,
+    effective_balance_increments: js.Uint16Array,
+    ptc_size: js.Number,
+    max_effective_balance_electra: js.Number,
+    effective_balance_increment: js.Number,
+) !js.Uint32Array {
+    const slots = try slots_per_epoch.toU32Exact();
+    const size = try ptc_size.toU32Exact();
+    const out_array = try js.Uint32Array.alloc(@as(usize, slots) * size);
+    try sons.computePtcIndicesForEpochInto(
+        try epoch_seed.toSlice(),
+        try start_slot.toU32Exact(),
+        slots,
+        try shuffling.toSlice(),
+        try slot_offsets.toSlice(),
+        try effective_balance_increments.toSlice(),
+        size,
+        max_effective_balance_electra.assertI64(),
+        effective_balance_increment.assertI64(),
+        try out_array.toSlice(),
+    );
+    return out_array;
+}
+
+/// Fills the caller's `out` array instead of allocating a new one; its length
+/// is the committee size.
+pub fn computePtcIndicesInto(
+    out: js.Uint32Array,
+    seed: js.Uint8Array,
+    indices: js.Uint32Array,
+    effective_balance_increments: js.Uint16Array,
+    max_effective_balance_electra: js.Number,
+    effective_balance_increment: js.Number,
+) !void {
+    try sons.computePtcIndicesInto(
+        try seed.toSlice(),
+        try indices.toSlice(),
+        try effective_balance_increments.toSlice(),
+        max_effective_balance_electra.assertI64(),
+        effective_balance_increment.assertI64(),
+        try out.toSlice(),
+    );
+}
+
+/// Fills the caller's `out` array instead of allocating a new one; it must hold
+/// `slotsPerEpoch * ptcSize` entries.
+pub fn computePtcIndicesForEpochInto(
+    out: js.Uint32Array,
+    epoch_seed: js.Uint8Array,
+    start_slot: js.Number,
+    slots_per_epoch: js.Number,
+    shuffling: js.Uint32Array,
+    slot_offsets: js.Uint32Array,
+    effective_balance_increments: js.Uint16Array,
+    ptc_size: js.Number,
+    max_effective_balance_electra: js.Number,
+    effective_balance_increment: js.Number,
+) !void {
+    try sons.computePtcIndicesForEpochInto(
+        try epoch_seed.toSlice(),
+        try start_slot.toU32Exact(),
+        try slots_per_epoch.toU32Exact(),
+        try shuffling.toSlice(),
+        try slot_offsets.toSlice(),
+        try effective_balance_increments.toSlice(),
+        try ptc_size.toU32Exact(),
+        max_effective_balance_electra.assertI64(),
+        effective_balance_increment.assertI64(),
+        try out.toSlice(),
+    );
+}
