@@ -1,14 +1,16 @@
 import bindings from "./bindings.js";
 
+const blsVerifier = bindings.blsVerifier;
+
 /** @type {typeof import("./bls-verifier.d.ts").BLS_VERIFIER_SET_TYPE} */
 export const BLS_VERIFIER_SET_TYPE = {
-  indexed: bindings.blsVerifier.indexedSetType(),
-  aggregate: bindings.blsVerifier.aggregateSetType(),
-  single: bindings.blsVerifier.singleSetType(),
+  indexed: blsVerifier.indexedSetType(),
+  aggregate: blsVerifier.aggregateSetType(),
+  single: blsVerifier.singleSetType(),
 };
 
-export const BLS_VERIFIER_MAX_BATCH_SIZE = bindings.blsVerifier.maxBatchSize();
-export const BLS_VERIFIER_MAX_SAME_MESSAGE_BATCH_SIZE = bindings.blsVerifier.maxSameMessageBatchSize();
+export const BLS_VERIFIER_MAX_BATCH_SIZE = blsVerifier.maxBatchSize();
+export const BLS_VERIFIER_MAX_SAME_MESSAGE_BATCH_SIZE = blsVerifier.maxSameMessageBatchSize();
 
-export const verifySignatureSets = bindings.blsVerifier.verifySignatureSets;
-export const verifySignatureSetsSameMessage = bindings.blsVerifier.verifySignatureSetsSameMessage;
+export const verifySignatureSets = blsVerifier.verifySignatureSets;
+export const verifySignatureSetsSameMessage = blsVerifier.verifySignatureSetsSameMessage;
