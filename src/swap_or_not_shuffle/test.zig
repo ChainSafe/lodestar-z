@@ -278,3 +278,213 @@ test "getCommitteeIndices rejects out-of-bounds candidate index" {
         90,
     ));
 }
+
+test "computePtcIndices matches naive reference vector" {
+    const allocator = std.testing.allocator;
+    const seed = [_]u8{1} ** SEED_SIZE;
+    const data = testBalances(100);
+
+    const result = try allocator.alloc(u32, 32);
+    defer allocator.free(result);
+    try shuffle.computePtcIndicesInto(
+        result,
+        seed[0..],
+        data.indices[0..],
+        data.increments[0..],
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+    );
+
+    // generated with the naive lodestar PTC sampler ported in
+    // https://github.com/ChainSafe/swap-or-not-shuffle/pull/24
+    const expected = [_]u32{
+        4,  8,  9,  15, 20, 22, 30, 31, 32, 35, 38, 41, 42, 44, 45, 46,
+        49, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 78, 81, 83, 84,
+    };
+    try std.testing.expectEqualSlices(u32, expected[0..], result);
+}
+
+test "computePtcIndicesForEpoch matches naive reference vector" {
+    const allocator = std.testing.allocator;
+    const epoch_seed = [_]u8{2} ** SEED_SIZE;
+    const data = testBalances(80);
+    const slot_offsets = [_]u32{ 0, 20, 40, 60, 80 };
+
+    const result = try allocator.alloc(u32, 4 * 8);
+    defer allocator.free(result);
+    try shuffle.computePtcIndicesForEpochInto(
+        result,
+        epoch_seed[0..],
+        5,
+        4,
+        data.indices[0..],
+        slot_offsets[0..],
+        data.increments[0..],
+        8,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+    );
+
+    const expected = [_]u32{
+        8,  9,  10, 15, 16, 14, 16, 4,  21, 26, 27, 28, 29, 30, 31, 35,
+        40, 42, 44, 45, 46, 47, 48, 49, 60, 62, 63, 68, 76, 60, 62, 63,
+    };
+    try std.testing.expectEqualSlices(u32, expected[0..], result);
+}
+
+test "computePtcIndicesForEpoch slots agree with computePtcIndices" {
+    const allocator = std.testing.allocator;
+    const epoch_seed = [_]u8{2} ** SEED_SIZE;
+    const data = testBalances(80);
+    const slot_offsets = [_]u32{ 0, 20, 40, 60, 80 };
+    const start_slot = 5;
+    const ptc_size = 8;
+
+    const epoch_result = try allocator.alloc(u32, 4 * ptc_size);
+    defer allocator.free(epoch_result);
+    try shuffle.computePtcIndicesForEpochInto(
+        epoch_result,
+        epoch_seed[0..],
+        start_slot,
+        4,
+        data.indices[0..],
+        slot_offsets[0..],
+        data.increments[0..],
+        ptc_size,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+    );
+
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    for (0..4) |slot| {
+        var input = [_]u8{0} ** (SEED_SIZE + 8);
+        @memcpy(input[0..SEED_SIZE], epoch_seed[0..]);
+        std.mem.writeInt(u64, input[SEED_SIZE..][0..8], start_slot + slot, .little);
+        var slot_seed: [SEED_SIZE]u8 = undefined;
+        Sha256.hash(&input, &slot_seed, .{});
+
+        const slot_result = try allocator.alloc(u32, ptc_size);
+        defer allocator.free(slot_result);
+        try shuffle.computePtcIndicesInto(
+            slot_result,
+            slot_seed[0..],
+            data.indices[slot_offsets[slot]..slot_offsets[slot + 1]],
+            data.increments[0..],
+            MAX_EFFECTIVE_BALANCE_ELECTRA,
+            EFFECTIVE_BALANCE_INCREMENT,
+        );
+        try std.testing.expectEqualSlices(u32, slot_result, epoch_result[slot * ptc_size ..][0..ptc_size]);
+    }
+}
+
+test "computePtcIndicesInto rejects invalid inputs gracefully" {
+    const good_seed = [_]u8{1} ** SEED_SIZE;
+    const bad_seed = [_]u8{1} ** 31;
+    const data = testBalances(10);
+    var out: [8]u32 = undefined;
+
+    try std.testing.expectError(error.InvalidSeedLength, shuffle.computePtcIndicesInto(
+        out[0..],
+        bad_seed[0..],
+        data.indices[0..],
+        data.increments[0..],
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+    ));
+
+    try std.testing.expectError(error.EmptyActiveIndices, shuffle.computePtcIndicesInto(
+        out[0..],
+        good_seed[0..],
+        &[_]u32{},
+        data.increments[0..],
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+    ));
+
+    try std.testing.expectError(error.InvalidEffectiveBalanceIncrement, shuffle.computePtcIndicesInto(
+        out[0..],
+        good_seed[0..],
+        data.indices[0..],
+        data.increments[0..],
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        0,
+    ));
+
+    // candidate index beyond the increments slice
+    const oob_indices = [_]u32{99};
+    const short_increments = [_]u16{32};
+    try std.testing.expectError(error.EffectiveBalanceIncrementsOutOfBounds, shuffle.computePtcIndicesInto(
+        out[0..],
+        good_seed[0..],
+        oob_indices[0..],
+        short_increments[0..],
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+    ));
+
+    // an empty `out` is a no-op where the reference would loop forever
+    try shuffle.computePtcIndicesInto(
+        out[0..0],
+        good_seed[0..],
+        data.indices[0..],
+        data.increments[0..],
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+    );
+}
+
+test "computePtcIndicesForEpochInto rejects invalid slot offsets" {
+    const epoch_seed = [_]u8{2} ** SEED_SIZE;
+    const data = testBalances(80);
+    var out: [4 * 8]u32 = undefined;
+
+    // too few offsets for the slot count
+    const short_offsets = [_]u32{ 0, 20 };
+    try std.testing.expectError(error.InvalidSlotOffsets, shuffle.computePtcIndicesForEpochInto(
+        out[0..],
+        epoch_seed[0..],
+        0,
+        4,
+        data.indices[0..],
+        short_offsets[0..],
+        data.increments[0..],
+        8,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+    ));
+
+    // offsets beyond the shuffling length
+    const oob_offsets = [_]u32{ 0, 20, 40, 60, 999 };
+    try std.testing.expectError(error.InvalidSlotOffsets, shuffle.computePtcIndicesForEpochInto(
+        out[0..],
+        epoch_seed[0..],
+        0,
+        4,
+        data.indices[0..],
+        oob_offsets[0..],
+        data.increments[0..],
+        8,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+    ));
+}
+
+test "computePtcIndicesForEpochInto rejects a mismatched out length" {
+    const epoch_seed = [_]u8{2} ** SEED_SIZE;
+    const data = testBalances(80);
+    const slot_offsets = [_]u32{ 0, 20, 40, 60, 80 };
+    var out: [4 * 8 - 1]u32 = undefined;
+
+    try std.testing.expectError(error.InvalidOutputLength, shuffle.computePtcIndicesForEpochInto(
+        out[0..],
+        epoch_seed[0..],
+        0,
+        4,
+        data.indices[0..],
+        slot_offsets[0..],
+        data.increments[0..],
+        8,
+        MAX_EFFECTIVE_BALANCE_ELECTRA,
+        EFFECTIVE_BALANCE_INCREMENT,
+    ));
+}
