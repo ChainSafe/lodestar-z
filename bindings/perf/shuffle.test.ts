@@ -54,11 +54,7 @@ describe("committee indices", () => {
 
     bench({
       fn: () => {
-        shuffleReference.naiveComputeSyncCommitteeIndicesElectra(
-          seed,
-          activeIndices,
-          effectiveBalanceIncrements
-        );
+        shuffleReference.naiveComputeSyncCommitteeIndicesElectra(seed, activeIndices, effectiveBalanceIncrements);
       },
       id: `JS  - computeSyncCommitteeIndicesElectra - ${listSize} indices`,
     });
