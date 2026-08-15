@@ -311,6 +311,21 @@ describe("blst", () => {
       expect(result).toBe(true);
     });
 
+    it("snapshots the message before reading public keys", () => {
+      const message = Uint8Array.from(TEST_VECTORS.message);
+      const pk = PublicKey.fromHex(TEST_VECTORS.publicKey.compressed);
+      const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
+      const pks = [pk];
+      Object.defineProperty(pks, 0, {
+        get() {
+          message.fill(0);
+          return pk;
+        },
+      });
+
+      expect(fastAggregateVerify(message, pks, sig, false)).toBe(true);
+    });
+
     it("should return false for empty pubkeys", () => {
       const sig = Signature.fromHex(TEST_VECTORS.signature.compressed);
       const result = fastAggregateVerify(TEST_VECTORS.message, [], sig, false);
@@ -337,6 +352,19 @@ describe("blst", () => {
   describe("verifyMultipleAggregateSignatures", () => {
     it("should return true for valid sets", () => {
       expect(verifyMultipleAggregateSignatures(getTestSets(6), false, false)).to.be.true;
+    });
+
+    it("snapshots messages before reading later sets", () => {
+      const sets = getTestSets(2);
+      const second = sets[1];
+      Object.defineProperty(sets, 1, {
+        get() {
+          sets[0].msg.fill(0);
+          return second;
+        },
+      });
+
+      expect(verifyMultipleAggregateSignatures(sets, false, false)).toBe(true);
     });
 
     it("should return false for invalid sets", () => {

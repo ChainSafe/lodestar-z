@@ -71,8 +71,10 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
             else => return error.InvalidSetType,
         };
 
-        const message = try set.message.toSlice();
-        if (message.len != 32) return error.InvalidMessageLength;
+        const message_slice = try set.message.toSlice();
+        if (message_slice.len != 32) return error.InvalidMessageLength;
+        // Variant property reads below may execute JavaScript.
+        const message = message_slice[0..32].*;
 
         const public_key: bls.PublicKey = switch (set_type) {
             .indexed => blk: {

@@ -71,6 +71,24 @@ describe("bls verifier", () => {
     ).toBe(false);
   });
 
+  it("snapshots a message before reading variant properties", () => {
+    const signingRoot = message(1);
+    const signature = keys[0].sign(signingRoot).toBytes();
+    const set = {
+      message: signingRoot,
+      signature,
+      type: BLS_VERIFIER_SET_TYPE.indexed,
+    } as BlsSignatureSet;
+    Object.defineProperty(set, "index", {
+      get() {
+        signingRoot.fill(2);
+        return 0;
+      },
+    });
+
+    expect(verifySignatureSets([set])).toBe(true);
+  });
+
   it("throws for a missing cached validator index", () => {
     const signingRoot = message(1);
     expect(() =>

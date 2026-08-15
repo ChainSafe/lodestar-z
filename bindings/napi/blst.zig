@@ -418,6 +418,8 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
 pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, sigs_groupcheck: ?js.Boolean) !js.Boolean {
     const msg_bytes = try msg.toSlice();
     if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
+    // Array element reads below may execute JavaScript.
+    const message = msg_bytes[0..@sizeOf(SigningRoot)].*;
 
     const pks_len = try pks.length();
     if (pks_len == 0) return js.Boolean.from(false);
@@ -435,7 +437,7 @@ pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, si
     const result = sig.raw.fastAggregateVerify(
         try boolOrDefault(sigs_groupcheck, false),
         &pairing_buf,
-        msg_bytes[0..@sizeOf(SigningRoot)],
+        &message,
         DST,
         native_pks,
         false,
@@ -465,15 +467,27 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         break :blk buf;
     };
 
+    var messages_stack: [BATCH_VERIFY_SIZE]SigningRoot = undefined;
+    var messages_heap: ?[]SigningRoot = null;
+    defer if (messages_heap) |buf| allocator.free(buf);
+
+    const messages = if (n_elems <= BATCH_VERIFY_SIZE) messages_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc(SigningRoot, n_elems);
+        messages_heap = buf;
+        break :blk buf;
+    };
+
     for (0..n_elems) |i| {
         const set_value = try sets.get(@intCast(i));
         const set = try (try set_value.asObject(SignatureSetInput)).get();
         const message_bytes = try set.msg.toSlice();
         if (message_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
+        // Keep native-owned storage across later array and property reads.
+        messages[i] = message_bytes[0..@sizeOf(SigningRoot)].*;
         const public_key = try unwrapClass(PublicKey, set.pk);
         const signature = try unwrapClass(Signature, set.sig);
         items[i] = .{
-            .message = message_bytes[0..@sizeOf(SigningRoot)],
+            .message = &messages[i],
             .public_key = &public_key.raw,
             .signature = &signature.raw,
             .randomness = undefined,
