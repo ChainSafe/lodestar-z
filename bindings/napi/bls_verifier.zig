@@ -155,3 +155,8 @@ pub fn maxBatchSize() js.Number {
 pub fn maxSameMessageBatchSize() js.Number {
     return js.Number.from(max_same_message_sets);
 }
+
+pub fn executorConcurrency() !js.Number {
+    const pool = blst_bindings.state.thread_pool orelse return error.ThreadPoolNotInitialized;
+    return js.Number.from(pool.workerCount());
+}

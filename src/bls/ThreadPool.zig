@@ -272,6 +272,10 @@ pub fn submitRoot(pool: *ThreadPool, io: std.Io, item: *WorkItem, priority: Prio
     try pool.queue.pushRoot(io, pool, item);
 }
 
+pub fn workerCount(pool: *const ThreadPool) usize {
+    return pool.n_workers;
+}
+
 /// Submit work items to the pool and wait for all to complete.
 pub fn submitAndWait(pool: *ThreadPool, io: std.Io, items: []*WorkItem) (PoolError || std.Io.Cancelable)!void {
     if (current_pool == pool) {

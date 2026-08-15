@@ -1,5 +1,6 @@
 import {beforeEach, describe, expect, it} from "vitest";
 import {
+  BLS_VERIFIER_EXECUTOR_CONCURRENCY,
   BLS_VERIFIER_MAX_BATCH_SIZE,
   BLS_VERIFIER_MAX_SAME_MESSAGE_BATCH_SIZE,
   BLS_VERIFIER_SET_TYPE,
@@ -23,6 +24,10 @@ function message(value: number): Uint8Array {
 }
 
 describe("bls verifier", () => {
+  it("reports the native executor concurrency", () => {
+    expect(BLS_VERIFIER_EXECUTOR_CONCURRENCY).toBeGreaterThan(0);
+  });
+
   beforeEach(() => {
     pubkeyCache.reset();
     for (const [index, key] of keys.entries()) {

@@ -6,6 +6,7 @@ export declare const BLS_VERIFIER_SET_TYPE: {
 
 export declare const BLS_VERIFIER_MAX_BATCH_SIZE: 256;
 export declare const BLS_VERIFIER_MAX_SAME_MESSAGE_BATCH_SIZE: 128;
+export declare const BLS_VERIFIER_EXECUTOR_CONCURRENCY: number;
 
 export type BlsVerifierSetTypeValue = (typeof BLS_VERIFIER_SET_TYPE)[keyof typeof BLS_VERIFIER_SET_TYPE];
 
