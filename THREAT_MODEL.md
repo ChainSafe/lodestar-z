@@ -19,14 +19,16 @@ The assets protected here are:
 - Ethereum consensus safety and liveness;
 - state-transition, fork-choice, and BLS correctness;
 - native memory safety and availability of the hosting process; and
-- integrity of shared native state across calls and Node.js environments.
+- integrity of shared native state across calls and Node.js environments; and
+- integrity of source dependencies and published native artifacts.
 
 The relevant attackers are remote peers or API users whose values reach Lodestar-z, and
-same-process JavaScript callers that can supply malformed values. The operator and host application
-are trusted to select configuration, verification policy, initial state, local files, wall-clock
-time, and execution or data-availability status. Same-process Zig code is trusted to honor native
-API preconditions. Host compromise and malicious replacement of trusted local storage are out of
-scope.
+same-process JavaScript callers that can supply malformed values. Attackers may also target
+dependencies, build workflows, release credentials, or the package registry. The operator and host
+application are trusted to select configuration, verification policy, initial state, local files,
+wall-clock time, and execution or data-availability status. Same-process Zig code is trusted to
+honor native API preconditions. Host compromise and malicious replacement of trusted local storage
+are out of scope.
 
 ## Security objectives
 
@@ -39,6 +41,8 @@ scope.
    allocation.
 5. Rejected candidates cannot publish branch-specific state or corrupt shared state.
 6. Supported concurrent operations and environment teardown cannot race with borrowed native state.
+7. Build and release preserve the integrity and provenance of reviewed source, dependency inputs,
+   and published native artifacts.
 
 ## Trust boundaries
 
@@ -51,6 +55,7 @@ scope.
 | Fork choice | Blocks have passed full state transition, attestations have passed their applicable validation, external statuses are accurate, and local time is trusted. Fork choice still owns its specified ancestry, timing, vote, invalidation, and bound checks. |
 | Zig to native dependencies | Lodestar-z owns representation, cardinality, validation flags, pointer lifetime, and ABI compatibility. Pinned dependencies are trusted only within their documented contracts. |
 | Shared native state | Ownership, synchronization, bounds, worker visibility, and teardown must be defined for every shared pool or cache. |
+| Build and release | Dependency resolution, automation credentials, and artifact publication must preserve provenance from reviewed source to the published native addon. |
 
 ## BeaconState trust
 

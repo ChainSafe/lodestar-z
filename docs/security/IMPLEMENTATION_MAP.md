@@ -4,7 +4,7 @@ This is the volatile companion to the stable [threat model](../../THREAT_MODEL.m
 implementation facts needed to establish a trust boundary or precondition.
 
 - **Owner:** `@ChainSafe/lodestar`
-- **Last reviewed:** 2026-08-14
+- **Last reviewed:** 2026-08-15
 
 ## Integration status
 
@@ -31,6 +31,7 @@ supported caller supplies a current hostile path.
 | Pubkey cache | [`pubkey_cache.zig`](../../src/state_transition/cache/pubkey_cache.zig) defines an application-wide, append-only cache with locked access and no escaping pointers into movable storage. [`bindings/napi/pubkeys.zig`](../../bindings/napi/pubkeys.zig) owns its process-wide instance. |
 | Reused epoch cache | [`epoch_transition_cache.zig`](../../src/state_transition/cache/epoch_transition_cache.zig) stores process-global arrays borrowed by an `EpochTransitionCache`. The lock covers acquisition and resize, not the full borrowed lifetime. Current safe use requires non-overlapping transitions and no concurrent teardown. |
 | PKIX persistence | [`pkix.zig`](../../src/state_transition/cache/pkix.zig) checks framing, bounds, ABI compatibility, and corruption checksums. It does not authenticate the file or semantically revalidate affine entries, so file provenance remains trusted. |
+| Build and release provenance | [`build.zig.zon`](../../build.zig.zon) and [`pnpm-lock.yaml`](../../pnpm-lock.yaml) pin dependency inputs. [`publish-bindings.yml`](../../.github/workflows/publish-bindings.yml) pins actions, builds ReleaseSafe artifacts, and publishes them with npm provenance. |
 
 ## Host integration contracts
 
