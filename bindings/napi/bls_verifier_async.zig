@@ -126,7 +126,10 @@ const CompletionPort = struct {
             null,
             null,
             name.value,
-            bls.ThreadPool.MAX_ASYNC_ROOTS,
+            // Root admission already bounds pending completions. An unbounded
+            // TSFN queue prevents a theoretically full completion queue from
+            // dropping a result and leaving its Promise unsettled.
+            0,
             1,
             self,
             completionPortFinalize,
