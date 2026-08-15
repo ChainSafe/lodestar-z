@@ -29,10 +29,23 @@ const pippenger = @import("pippenger.zig");
 pub const PoolError = error{
     /// Pool is currently shutting down.
     ShuttingDown,
+    /// The bounded asynchronous root-job admission limit has been reached.
+    QueueFull,
 };
 
 /// This is pretty arbitrary
 pub const MAX_WORKERS: usize = 16;
+pub const MAX_ASYNC_ROOTS: usize = 512;
+
+pub const Priority = enum(u8) {
+    normal,
+    critical,
+};
+
+const WorkKind = enum(u8) {
+    child,
+    root,
+};
 
 /// Number of random bits used for verification.
 const RAND_BITS = 64;
@@ -51,18 +64,44 @@ threads: [MAX_WORKERS]std.Thread = undefined,
 /// Signals workers to exit after draining the queue. Checked by `workerLoop`
 /// only when the queue is empty, so all pending items are processed first.
 shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-/// Signals `pushBatch` to reject new work. Set before `shutdown` so no new
-/// items enter the queue while workers are draining it.
-shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 queue: JobQueue,
 
-/// Thread-safe FIFO work queue. Workers wait on `cond` for new items
-/// and pop them in submission order.
+threadlocal var current_pool: ?*ThreadPool = null;
+threadlocal var current_root_priority: ?Priority = null;
+
+const QueueList = struct {
+    head: ?*WorkItem = null,
+    tail: ?*WorkItem = null,
+
+    fn push(self: *QueueList, item: *WorkItem) void {
+        item.next = null;
+        if (self.tail) |tail| {
+            tail.next = item;
+        } else {
+            self.head = item;
+        }
+        self.tail = item;
+    }
+
+    fn pop(self: *QueueList) ?*WorkItem {
+        const item = self.head orelse return null;
+        self.head = item.next;
+        if (self.head == null) self.tail = null;
+        item.next = null;
+        return item;
+    }
+};
+
+/// Thread-safe priority work queue. Root jobs and their forked child work are
+/// kept separate so a worker helping a root never recursively starts an
+/// equal-priority root.
 const JobQueue = struct {
     mutex: std.Io.Mutex = std.Io.Mutex.init,
     cond: std.Io.Condition = std.Io.Condition.init,
-    head: ?*WorkItem = null,
-    tail: ?*WorkItem = null,
+    roots: [2]QueueList = .{ .{}, .{} },
+    children: [2]QueueList = .{ .{}, .{} },
+    accepting_roots: bool = true,
+    active_roots: usize = 0,
     /// Count of workers currently blocked in `cond.wait`. Guarded by `mutex`
     /// (read in `pushBatch`, maintained in `workerLoop`), so it is exact at
     /// signal time. Lets `pushBatch` wake only as many workers as there is new
@@ -71,22 +110,17 @@ const JobQueue = struct {
 
     /// Pushes a batch of `WorkItem`s to the `JobQueue`.
     ///
-    /// Returns false if the pool has signalled that it is shutting down and does
-    /// not push any work.
+    /// Returns false only after workers have been told to stop. During graceful
+    /// shutdown accepted roots may continue to submit child work.
     fn pushBatch(self: *JobQueue, io: std.Io, pool: *ThreadPool, items: []*WorkItem) std.Io.Cancelable!bool {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
-        if (pool.shutting_down.load(.acquire)) return false;
+        if (pool.shutdown.load(.acquire)) return false;
 
         for (items) |item| {
-            item.next = null;
-            if (self.tail) |tail| {
-                tail.next = item;
-            } else {
-                self.head = item;
-            }
-            self.tail = item;
+            std.debug.assert(item.kind == .child);
+            self.children[@intFromEnum(item.priority)].push(item);
         }
         // Wake at most one sleeping worker per submitted item, and never more than
         // are actually asleep. Running workers loop back to `pop()` after each item,
@@ -98,14 +132,32 @@ const JobQueue = struct {
         return true;
     }
 
-    fn pop(self: *JobQueue) ?*WorkItem {
-        const item = self.head orelse return null;
-        self.head = item.next;
-        if (self.head == null) {
-            self.tail = null;
+    fn pushRoot(self: *JobQueue, io: std.Io, pool: *ThreadPool, item: *WorkItem) PoolError!void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        if (!self.accepting_roots or pool.shutdown.load(.acquire)) return PoolError.ShuttingDown;
+        if (self.active_roots >= MAX_ASYNC_ROOTS) return PoolError.QueueFull;
+
+        std.debug.assert(item.kind == .root);
+        self.active_roots += 1;
+        self.roots[@intFromEnum(item.priority)].push(item);
+        self.cond.signal(io);
+    }
+
+    fn popWorker(self: *JobQueue) ?*WorkItem {
+        return self.roots[@intFromEnum(Priority.critical)].pop() orelse
+            self.children[@intFromEnum(Priority.critical)].pop() orelse
+            self.roots[@intFromEnum(Priority.normal)].pop() orelse
+            self.children[@intFromEnum(Priority.normal)].pop();
+    }
+
+    fn popHelper(self: *JobQueue, priority: Priority) ?*WorkItem {
+        if (priority == .normal) {
+            if (self.roots[@intFromEnum(Priority.critical)].pop()) |item| return item;
         }
-        item.next = null;
-        return item;
+        return self.children[@intFromEnum(Priority.critical)].pop() orelse
+            if (priority == .normal) self.children[@intFromEnum(Priority.normal)].pop() else null;
     }
 };
 
@@ -113,8 +165,11 @@ const JobQueue = struct {
 /// executes the work function, then signals `done`.
 pub const WorkItem = struct {
     exec_fn: *const fn (*WorkItem) void,
+    finish_fn: ?*const fn (*WorkItem) void = null,
     done: std.Io.Event = .unset,
     next: ?*WorkItem = null,
+    priority: Priority = .normal,
+    kind: WorkKind = .child,
 };
 
 /// Creates a thread pool with the specified number of workers.
@@ -143,23 +198,21 @@ pub fn init(allocator_: Allocator, io: std.Io, opts: Opts) (Allocator.Error || s
 
 /// Shuts down the thread pool and frees resources.
 ///
-/// Cleanup happens in 3 phases:
-///   1) stop accepting new work,
-///   2) tell workers to drain queue then exist,
-///   3) wait for workers to finish draining then cleanup
+/// Cleanup first closes root admission, then lets accepted roots finish all
+/// forked work before stopping worker threads.
 ///
 /// The pool pointer is invalid after this call.
 pub fn deinit(pool: *ThreadPool, io: std.Io) void {
-    // Phase 1: stop accepting new work
     pool.queue.mutex.lockUncancelable(io);
-    pool.shutting_down.store(true, .release);
+    pool.queue.accepting_roots = false;
+    while (pool.queue.active_roots > 0) {
+        pool.queue.cond.waitUncancelable(io, &pool.queue.mutex);
+    }
 
-    // Phase 2: tell workers to drain queue then exit
     pool.shutdown.store(true, .release);
     pool.queue.cond.broadcast(io);
     pool.queue.mutex.unlock(io);
 
-    // Phase 3: wait for workers to finish draining and cleanup
     for (pool.threads[0..pool.n_workers]) |t| t.join();
     pool.allocator.destroy(pool);
 }
@@ -169,9 +222,6 @@ pub fn deinit(pool: *ThreadPool, io: std.Io) void {
 /// Pops work first before checking for `shutdown` signal, allowing
 /// workers to finish their work before closing.
 ///
-/// Safety: it is safe to pop work first since we stop accepting work
-/// in `pushBatch` by checking for the `shutting_down` signal; no new
-/// work can be accepted at the point of entry into this loop.
 fn workerLoop(pool: *ThreadPool, io: std.Io) void {
     while (true) {
         const item: *WorkItem = blk: {
@@ -179,7 +229,7 @@ fn workerLoop(pool: *ThreadPool, io: std.Io) void {
             defer pool.queue.mutex.unlock(io);
 
             while (true) {
-                if (pool.queue.pop()) |wi| break :blk wi;
+                if (pool.queue.popWorker()) |wi| break :blk wi;
                 if (pool.shutdown.load(.acquire)) return;
                 pool.queue.sleeping_workers += 1;
                 pool.queue.cond.waitUncancelable(io, &pool.queue.mutex);
@@ -187,16 +237,81 @@ fn workerLoop(pool: *ThreadPool, io: std.Io) void {
             }
         };
 
-        item.exec_fn(item);
-        item.done.set(io);
+        executeWorkItem(pool, io, item);
     }
+}
+
+fn executeWorkItem(pool: *ThreadPool, io: std.Io, item: *WorkItem) void {
+    const previous_pool = current_pool;
+    const previous_root_priority = current_root_priority;
+    current_pool = pool;
+    if (item.kind == .root) current_root_priority = item.priority;
+
+    item.exec_fn(item);
+
+    current_pool = previous_pool;
+    current_root_priority = previous_root_priority;
+    item.done.set(io);
+
+    if (item.kind == .root) {
+        pool.queue.mutex.lockUncancelable(io);
+        std.debug.assert(pool.queue.active_roots > 0);
+        pool.queue.active_roots -= 1;
+        if (pool.queue.active_roots == 0) pool.queue.cond.broadcast(io);
+        pool.queue.mutex.unlock(io);
+    }
+
+    if (item.finish_fn) |finish| finish(item);
+}
+
+/// Submit a native-owned asynchronous root job. Its memory must remain valid
+/// through `finish_fn`, which runs after the root and all child work complete.
+pub fn submitRoot(pool: *ThreadPool, io: std.Io, item: *WorkItem, priority: Priority) PoolError!void {
+    item.kind = .root;
+    item.priority = priority;
+    try pool.queue.pushRoot(io, pool, item);
 }
 
 /// Submit work items to the pool and wait for all to complete.
 pub fn submitAndWait(pool: *ThreadPool, io: std.Io, items: []*WorkItem) (PoolError || std.Io.Cancelable)!void {
+    if (current_pool == pool) {
+        const inherited_priority = current_root_priority orelse .normal;
+        for (items) |item| {
+            std.debug.assert(item.kind == .child);
+            if (@intFromEnum(item.priority) < @intFromEnum(inherited_priority)) {
+                item.priority = inherited_priority;
+            }
+        }
+    }
+
     if (!try pool.queue.pushBatch(io, pool, items)) return PoolError.ShuttingDown;
-    // NOTE: must be uncancelable — work items live on the caller's stack, so a
-    // cancel here would let workers write into freed frames.
+
+    if (current_pool == pool) {
+        const priority = current_root_priority orelse .normal;
+        while (true) {
+            var incomplete: ?*WorkItem = null;
+            for (items) |item| {
+                if (!item.done.isSet()) {
+                    incomplete = item;
+                    break;
+                }
+            }
+            const wait_item = incomplete orelse return;
+
+            pool.queue.mutex.lockUncancelable(io);
+            const help_item = pool.queue.popHelper(priority);
+            pool.queue.mutex.unlock(io);
+
+            if (help_item) |item| {
+                executeWorkItem(pool, io, item);
+            } else {
+                wait_item.done.waitUncancelable(io);
+            }
+        }
+    }
+
+    // Work items live on the caller's stack, so cancellation must not let the
+    // caller return while workers still reference them.
     for (items) |item| {
         item.done.waitUncancelable(io);
     }
@@ -643,4 +758,103 @@ test "aggregateWithRandomness multi-threaded" {
     );
 
     try agg_sig.verify(true, &msg, blst.DST, null, &agg_pk, true);
+}
+
+test "asynchronous roots cooperatively execute child work" {
+    const Child = struct {
+        base: WorkItem,
+        completed: *std.atomic.Value(u32),
+
+        fn exec(base: *WorkItem) void {
+            const self: *@This() = @fieldParentPtr("base", base);
+            _ = self.completed.fetchAdd(1, .monotonic);
+        }
+    };
+
+    const Root = struct {
+        base: WorkItem,
+        pool: *ThreadPool,
+        completed: *std.atomic.Value(u32),
+
+        fn exec(base: *WorkItem) void {
+            const self: *@This() = @fieldParentPtr("base", base);
+            var child = Child{
+                .base = .{ .exec_fn = Child.exec },
+                .completed = self.completed,
+            };
+            var children = [_]*WorkItem{&child.base};
+            self.pool.submitAndWait(std.testing.io, &children) catch unreachable;
+        }
+    };
+
+    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 2 });
+    defer pool.deinit(std.testing.io);
+
+    var completed = std.atomic.Value(u32).init(0);
+    var roots: [4]Root = undefined;
+    for (&roots) |*root| {
+        root.* = .{
+            .base = .{ .exec_fn = Root.exec },
+            .pool = pool,
+            .completed = &completed,
+        };
+        try pool.submitRoot(std.testing.io, &root.base, .normal);
+    }
+
+    for (&roots) |*root| root.base.done.waitUncancelable(std.testing.io);
+    try std.testing.expectEqual(roots.len, completed.load(.acquire));
+}
+
+test "critical asynchronous roots run before queued normal roots" {
+    const Root = struct {
+        base: WorkItem,
+        started: ?*std.Io.Event = null,
+        release: ?*std.Io.Event = null,
+        sequence: ?*std.atomic.Value(u32) = null,
+        order: ?*u32 = null,
+
+        fn exec(base: *WorkItem) void {
+            const self: *@This() = @fieldParentPtr("base", base);
+            if (self.started) |started| started.set(std.testing.io);
+            if (self.release) |release| release.waitUncancelable(std.testing.io);
+            if (self.sequence) |sequence| {
+                self.order.?.* = sequence.fetchAdd(1, .monotonic);
+            }
+        }
+    };
+
+    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 1 });
+    defer pool.deinit(std.testing.io);
+
+    var blocker_started: std.Io.Event = .unset;
+    var blocker_release: std.Io.Event = .unset;
+    var blocker = Root{
+        .base = .{ .exec_fn = Root.exec },
+        .started = &blocker_started,
+        .release = &blocker_release,
+    };
+    try pool.submitRoot(std.testing.io, &blocker.base, .normal);
+    blocker_started.waitUncancelable(std.testing.io);
+
+    var sequence = std.atomic.Value(u32).init(0);
+    var normal_order: u32 = undefined;
+    var critical_order: u32 = undefined;
+    var normal = Root{
+        .base = .{ .exec_fn = Root.exec },
+        .sequence = &sequence,
+        .order = &normal_order,
+    };
+    var critical = Root{
+        .base = .{ .exec_fn = Root.exec },
+        .sequence = &sequence,
+        .order = &critical_order,
+    };
+    try pool.submitRoot(std.testing.io, &normal.base, .normal);
+    try pool.submitRoot(std.testing.io, &critical.base, .critical);
+    blocker_release.set(std.testing.io);
+
+    critical.base.done.waitUncancelable(std.testing.io);
+    normal.base.done.waitUncancelable(std.testing.io);
+    try std.testing.expectEqual(0, critical_order);
+    try std.testing.expectEqual(1, normal_order);
 }
