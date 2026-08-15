@@ -242,18 +242,20 @@ fn workerLoop(pool: *ThreadPool, io: std.Io) void {
 }
 
 fn executeWorkItem(pool: *ThreadPool, io: std.Io, item: *WorkItem) void {
+    const is_root = item.kind == .root;
+    const finish_fn = item.finish_fn;
+    std.debug.assert(finish_fn == null or is_root);
     const previous_pool = current_pool;
     const previous_root_priority = current_root_priority;
     current_pool = pool;
-    if (item.kind == .root) current_root_priority = item.priority;
+    if (is_root) current_root_priority = item.priority;
 
     item.exec_fn(item);
 
     current_pool = previous_pool;
     current_root_priority = previous_root_priority;
-    item.done.set(io);
 
-    if (item.kind == .root) {
+    if (is_root) {
         pool.queue.mutex.lockUncancelable(io);
         std.debug.assert(pool.queue.active_roots > 0);
         pool.queue.active_roots -= 1;
@@ -261,7 +263,11 @@ fn executeWorkItem(pool: *ThreadPool, io: std.Io, item: *WorkItem) void {
         pool.queue.mutex.unlock(io);
     }
 
-    if (item.finish_fn) |finish| finish(item);
+    // Ordinary callers may release stack-owned child work as soon as `done`
+    // is set, so do not read the work item after this point. Async roots remain
+    // owned through their explicit finish callback.
+    item.done.set(io);
+    if (finish_fn) |finish| finish(item);
 }
 
 /// Submit a native-owned asynchronous root job. Its memory must remain valid
@@ -861,4 +867,93 @@ test "critical asynchronous roots run before queued normal roots" {
     normal.base.done.waitUncancelable(std.testing.io);
     try std.testing.expectEqual(0, critical_order);
     try std.testing.expectEqual(1, normal_order);
+}
+
+test "normal roots cooperatively yield to critical roots between child items" {
+    const Child = struct {
+        base: WorkItem,
+        started: ?*std.Io.Event = null,
+        release: ?*std.Io.Event = null,
+        sequence: *std.atomic.Value(u32),
+        order: *u32,
+
+        fn exec(base: *WorkItem) void {
+            const self: *@This() = @fieldParentPtr("base", base);
+            if (self.started) |started| started.set(std.testing.io);
+            if (self.release) |release| release.waitUncancelable(std.testing.io);
+            self.order.* = self.sequence.fetchAdd(1, .monotonic);
+        }
+    };
+
+    const NormalRoot = struct {
+        base: WorkItem,
+        pool: *ThreadPool,
+        child_started: *std.Io.Event,
+        child_release: *std.Io.Event,
+        sequence: *std.atomic.Value(u32),
+        child_orders: *[2]u32,
+
+        fn exec(base: *WorkItem) void {
+            const self: *@This() = @fieldParentPtr("base", base);
+            var children = [_]Child{
+                .{
+                    .base = .{ .exec_fn = Child.exec },
+                    .started = self.child_started,
+                    .release = self.child_release,
+                    .sequence = self.sequence,
+                    .order = &self.child_orders[0],
+                },
+                .{
+                    .base = .{ .exec_fn = Child.exec },
+                    .sequence = self.sequence,
+                    .order = &self.child_orders[1],
+                },
+            };
+            var child_ptrs = [_]*WorkItem{ &children[0].base, &children[1].base };
+            self.pool.submitAndWait(std.testing.io, &child_ptrs) catch unreachable;
+        }
+    };
+
+    const CriticalRoot = struct {
+        base: WorkItem,
+        sequence: *std.atomic.Value(u32),
+        order: *u32,
+
+        fn exec(base: *WorkItem) void {
+            const self: *@This() = @fieldParentPtr("base", base);
+            self.order.* = self.sequence.fetchAdd(1, .monotonic);
+        }
+    };
+
+    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 1 });
+    defer pool.deinit(std.testing.io);
+
+    var child_started: std.Io.Event = .unset;
+    var child_release: std.Io.Event = .unset;
+    var sequence = std.atomic.Value(u32).init(0);
+    var child_orders: [2]u32 = undefined;
+    var critical_order: u32 = undefined;
+    var normal = NormalRoot{
+        .base = .{ .exec_fn = NormalRoot.exec },
+        .pool = pool,
+        .child_started = &child_started,
+        .child_release = &child_release,
+        .sequence = &sequence,
+        .child_orders = &child_orders,
+    };
+    var critical = CriticalRoot{
+        .base = .{ .exec_fn = CriticalRoot.exec },
+        .sequence = &sequence,
+        .order = &critical_order,
+    };
+
+    try pool.submitRoot(std.testing.io, &normal.base, .normal);
+    child_started.waitUncancelable(std.testing.io);
+    try pool.submitRoot(std.testing.io, &critical.base, .critical);
+    child_release.set(std.testing.io);
+
+    normal.base.done.waitUncancelable(std.testing.io);
+    critical.base.done.waitUncancelable(std.testing.io);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2 }, &child_orders);
+    try std.testing.expectEqual(1, critical_order);
 }
