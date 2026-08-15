@@ -127,6 +127,20 @@ describe("bls verifier", () => {
     expect(verifySignatureSetsSameMessage(sets, signingRoot)).toEqual([true, false, true, true]);
   });
 
+  it("snapshots the shared message before reading set properties", () => {
+    const signingRoot = message(4);
+    const signature = keys[0].sign(signingRoot).toBytes();
+    const set = {index: 0, signature};
+    Object.defineProperty(set, "signature", {
+      get() {
+        signingRoot.fill(5);
+        return signature;
+      },
+    });
+
+    expect(verifySignatureSetsSameMessage([set], signingRoot)).toEqual([true]);
+  });
+
   it("rejects empty and oversized batches", () => {
     expect(verifySignatureSets([])).toBe(false);
     expect(verifySignatureSetsSameMessage([], message(1))).toEqual([]);

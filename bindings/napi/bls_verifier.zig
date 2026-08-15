@@ -121,6 +121,7 @@ pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !j
 
     const message_slice = try message.toSlice();
     if (message_slice.len != 32) return error.InvalidMessageLength;
+    const exact_message = message_slice[0..32].*;
 
     if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
 
@@ -142,7 +143,7 @@ pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !j
     try batch.verify(
         io,
         pool,
-        message_slice[0..32],
+        &exact_message,
         verification_results[0..count],
     );
 
