@@ -5,7 +5,9 @@ import {
   BLS_VERIFIER_SET_TYPE,
   type BlsSignatureSet,
   verifySignatureSets,
+  verifySignatureSetsAsync,
   verifySignatureSetsSameMessage,
+  verifySignatureSetsSameMessageAsync,
 } from "../src/bls-verifier.js";
 import {SecretKey, aggregateSignatures} from "../src/blst.js";
 import {pubkeyCache} from "../src/pubkeys.js";
@@ -58,6 +60,39 @@ describe("bls verifier", () => {
     expect(verifySignatureSets(sets)).toBe(true);
   });
 
+  it("verifies mixed sets asynchronously", async () => {
+    const indexedMessage = message(1);
+    const aggregateMessage = message(2);
+    const singleMessage = message(3);
+    const aggregateSignature = aggregateSignatures([keys[1].sign(aggregateMessage), keys[2].sign(aggregateMessage)]);
+
+    await expect(
+      verifySignatureSetsAsync(
+        [
+          {
+            index: 0,
+            message: indexedMessage,
+            signature: keys[0].sign(indexedMessage).toBytes(),
+            type: BLS_VERIFIER_SET_TYPE.indexed,
+          },
+          {
+            indices: Uint32Array.from([1, 2]),
+            message: aggregateMessage,
+            signature: aggregateSignature.toBytes(),
+            type: BLS_VERIFIER_SET_TYPE.aggregate,
+          },
+          {
+            message: singleMessage,
+            pubkey: keys[3].toPublicKey().toBytes(),
+            signature: keys[3].sign(singleMessage).toBytes(),
+            type: BLS_VERIFIER_SET_TYPE.single,
+          },
+        ],
+        true
+      )
+    ).resolves.toBe(true);
+  });
+
   it("returns false for invalid cryptographic input", () => {
     expect(
       verifySignatureSets([
@@ -69,6 +104,31 @@ describe("bls verifier", () => {
         },
       ])
     ).toBe(false);
+  });
+
+  it("returns asynchronous cryptographic failures and cache errors distinctly", async () => {
+    const signingRoot = message(1);
+    await expect(
+      verifySignatureSetsAsync([
+        {
+          index: 0,
+          message: signingRoot,
+          signature: new Uint8Array(96),
+          type: BLS_VERIFIER_SET_TYPE.indexed,
+        },
+      ])
+    ).resolves.toBe(false);
+
+    await expect(
+      verifySignatureSetsAsync([
+        {
+          index: keys.length,
+          message: signingRoot,
+          signature: keys[0].sign(signingRoot).toBytes(),
+          type: BLS_VERIFIER_SET_TYPE.indexed,
+        },
+      ])
+    ).rejects.toThrow("PubkeyIndexNotFound");
   });
 
   it("throws for a missing cached validator index", () => {
@@ -125,6 +185,58 @@ describe("bls verifier", () => {
 
     sets[1] = {...sets[1], signature: new Uint8Array(96)};
     expect(verifySignatureSetsSameMessage(sets, signingRoot)).toEqual([true, false, true, true]);
+  });
+
+  it("randomly aggregates indexed signatures asynchronously", async () => {
+    const signingRoot = message(4);
+    const sets = keys.map((key, index) => ({
+      index,
+      signature: key.sign(signingRoot).toBytes(),
+    }));
+
+    await expect(verifySignatureSetsSameMessageAsync(sets, signingRoot, true)).resolves.toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
+
+    sets[1] = {...sets[1], signature: keys[1].sign(message(5)).toBytes()};
+    await expect(verifySignatureSetsSameMessageAsync(sets, signingRoot)).resolves.toEqual([true, false, true, true]);
+  });
+
+  it("snapshots asynchronous input before returning", async () => {
+    const signingRoot = message(7);
+    const signature = keys[0].sign(signingRoot).toBytes();
+    const promise = verifySignatureSetsAsync([
+      {
+        index: 0,
+        message: signingRoot,
+        signature,
+        type: BLS_VERIFIER_SET_TYPE.indexed,
+      },
+    ]);
+
+    signingRoot.fill(0);
+    signature.fill(0);
+    await expect(promise).resolves.toBe(true);
+  });
+
+  it("runs concurrent asynchronous roots on the shared BLS executor", async () => {
+    const signingRoot = message(8);
+    const signature = keys[0].sign(signingRoot).toBytes();
+    const jobs = Array.from({length: 32}, () =>
+      verifySignatureSetsAsync([
+        {
+          index: 0,
+          message: signingRoot,
+          signature,
+          type: BLS_VERIFIER_SET_TYPE.indexed,
+        },
+      ])
+    );
+
+    await expect(Promise.all(jobs)).resolves.toEqual(Array.from({length: jobs.length}, () => true));
   });
 
   it("rejects empty and oversized batches", () => {

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import {Worker} from "node:worker_threads";
 import {describe, expect, it} from "vitest";
+import {BLS_VERIFIER_SET_TYPE, verifySignatureSetsAsync} from "../src/bls-verifier.js";
 import {PublicKey, SecretKey, Signature, verify} from "../src/blst.js";
 import {pubkeyCache} from "../src/pubkeys.js";
 
@@ -96,10 +97,63 @@ describe("worker isolation", () => {
     expect(pubkeyCache.size).toBe(1);
     expect(pubkeyCache.getOrThrow(0).toBytes()).toEqual(expected);
   });
+
+  it("safely tears down a worker with pending asynchronous BLS jobs", async () => {
+    const worker = new Worker(
+      `
+        import {parentPort} from "node:worker_threads";
+        import {
+          BLS_VERIFIER_MAX_BATCH_SIZE,
+          BLS_VERIFIER_SET_TYPE,
+          verifySignatureSetsAsync,
+        } from ${JSON.stringify(blsVerifierModulePath)};
+        import {SecretKey} from ${JSON.stringify(blstModulePath)};
+
+        const ikm = new Uint8Array(32);
+        ikm[0] = 1;
+        const key = SecretKey.fromKeygen(ikm);
+        const message = new Uint8Array(32).fill(1);
+        const set = {
+          message,
+          pubkey: key.toPublicKey().toBytes(),
+          signature: key.sign(message).toBytes(),
+          type: BLS_VERIFIER_SET_TYPE.single,
+        };
+
+        for (let i = 0; i < 64; i++) {
+          void verifySignatureSetsAsync(Array.from({length: BLS_VERIFIER_MAX_BATCH_SIZE}, () => set));
+        }
+        parentPort.postMessage("queued");
+      `,
+      {eval: true}
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      worker.once("message", () => resolve());
+      worker.once("error", reject);
+    });
+    await worker.terminate();
+
+    const ikm = new Uint8Array(32);
+    ikm[0] = 2;
+    const key = SecretKey.fromKeygen(ikm);
+    const message = new Uint8Array(32).fill(2);
+    await expect(
+      verifySignatureSetsAsync([
+        {
+          message,
+          pubkey: key.toPublicKey().toBytes(),
+          signature: key.sign(message).toBytes(),
+          type: BLS_VERIFIER_SET_TYPE.single,
+        },
+      ])
+    ).resolves.toBe(true);
+  }, 30_000);
 });
 
 const pubkeysModulePath = new URL("../src/pubkeys.js", import.meta.url).href;
 const blstModulePath = new URL("../src/blst.js", import.meta.url).href;
+const blsVerifierModulePath = new URL("../src/bls-verifier.js", import.meta.url).href;
 
 function runBlstWorker(): Promise<string> {
   return runWorker(`

@@ -1,53 +1,24 @@
-const std = @import("std");
 const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const bls = @import("bls");
-const preset = @import("preset").preset;
-const signature_set_verifier = @import("state_transition").signature_set_verifier;
 
+const async_verifier = @import("./bls_verifier_async.zig");
+const common = @import("./bls_verifier_common.zig");
 const blst_bindings = @import("./blst.zig");
 const pubkeys = @import("./pubkeys.zig");
 
-// Bound synchronous NAPI work and the fixed stack buffers below. Lodestar's
-// worker jobs normally contain at most 128 sets, so 256 provides headroom while
-// requiring unusually large direct callers to chunk explicitly.
-const max_verify_sets = 256;
-const max_same_message_sets = bls.MAX_AGGREGATE_PER_JOB;
-const max_indices_per_set = preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT;
-
-const SignatureSetBatch = signature_set_verifier.SignatureSetBatch(max_verify_sets);
-const SameMessageSignatureSetBatch = signature_set_verifier.SameMessageSignatureSetBatch(max_same_message_sets);
-
-const SetType = enum(u32) {
-    indexed = 0,
-    aggregate = 1,
-    single = 2,
-};
-
-const CommonSet = struct {
-    type: js.Number,
-    message: js.Uint8Array,
-    signature: js.Uint8Array,
-};
-
-const IndexedSet = struct { index: js.Number };
-const AggregateSet = struct { indices: js.Uint32Array };
-const SingleSet = struct { pubkey: js.Uint8Array };
-
-const SameMessageSet = struct {
-    index: js.Number,
-    signature: js.Uint8Array,
-};
-
-// TODO(zapi): Replace with value.toU32Exact() after next zapi release: see https://github.com/ChainSafe/zapi/pull/71
-fn uint32(value: js.Number) !u32 {
-    const number = try value.toF64();
-    const max_u32: f64 = @floatFromInt(std.math.maxInt(u32));
-    if (!std.math.isFinite(number) or number < 0 or number > max_u32 or @floor(number) != number) {
-        return error.InvalidUint32;
-    }
-    return @intFromFloat(number);
-}
+const max_verify_sets = common.max_verify_sets;
+const max_same_message_sets = common.max_same_message_sets;
+const max_indices_per_set = common.max_indices_per_set;
+const SignatureSetBatch = common.SignatureSetBatch;
+const SameMessageSignatureSetBatch = common.SameMessageSignatureSetBatch;
+const SetType = common.SetType;
+const CommonSet = common.CommonSet;
+const IndexedSet = common.IndexedSet;
+const AggregateSet = common.AggregateSet;
+const SingleSet = common.SingleSet;
+const SameMessageSet = common.SameMessageSet;
+const uint32 = common.uint32;
 
 /// Verify indexed, aggregate, and raw-pubkey signature sets synchronously.
 ///
@@ -151,6 +122,18 @@ pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !j
     }
 
     return results;
+}
+
+pub fn verifySignatureSetsAsync(sets: js.Array, critical: ?js.Boolean) !js.Value {
+    return async_verifier.verifySignatureSets(sets, critical);
+}
+
+pub fn verifySignatureSetsSameMessageAsync(
+    sets: js.Array,
+    message: js.Uint8Array,
+    critical: ?js.Boolean,
+) !js.Value {
+    return async_verifier.verifySignatureSetsSameMessage(sets, message, critical);
 }
 
 pub fn indexedSetType() js.Number {

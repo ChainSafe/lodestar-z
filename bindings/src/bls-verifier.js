@@ -13,4 +13,6 @@ export const BLS_VERIFIER_MAX_BATCH_SIZE = blsVerifier.maxBatchSize();
 export const BLS_VERIFIER_MAX_SAME_MESSAGE_BATCH_SIZE = blsVerifier.maxSameMessageBatchSize();
 
 export const verifySignatureSets = blsVerifier.verifySignatureSets;
+export const verifySignatureSetsAsync = blsVerifier.verifySignatureSetsAsync;
 export const verifySignatureSetsSameMessage = blsVerifier.verifySignatureSetsSameMessage;
+export const verifySignatureSetsSameMessageAsync = blsVerifier.verifySignatureSetsSameMessageAsync;

@@ -46,7 +46,25 @@ export type SameMessageSignatureSet = {
 export declare function verifySignatureSets(sets: BlsSignatureSet[]): boolean;
 
 /**
+ * Asynchronously verify signature sets using the native BLS executor.
+ * Input bytes are copied before this function returns.
+ * Set `critical` for latency-sensitive consensus work.
+ */
+export declare function verifySignatureSetsAsync(sets: BlsSignatureSet[], critical?: boolean): Promise<boolean>;
+
+/**
  * Randomly aggregate and verify cached pubkeys and signatures over one message.
  * Returns one result per input; invalid interface state throws.
  */
 export declare function verifySignatureSetsSameMessage(sets: SameMessageSignatureSet[], message: Uint8Array): boolean[];
+
+/**
+ * Asynchronously verify cached signatures over one message using the native
+ * BLS executor. Input bytes are copied before this function returns.
+ * Set `critical` for latency-sensitive consensus work.
+ */
+export declare function verifySignatureSetsSameMessageAsync(
+  sets: SameMessageSignatureSet[],
+  message: Uint8Array,
+  critical?: boolean
+): Promise<boolean[]>;
