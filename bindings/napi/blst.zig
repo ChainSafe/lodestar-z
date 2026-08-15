@@ -1,14 +1,13 @@
 //! NAPI bindings for BLS (blst) cryptographic operations used by lodestar.
 //!
-//! This module uses a **Zig ThreadPool** (`state.thread_pool`) — a fixed-size pool of OS threads
-//! initialized once via `state.init`. Used by synchronous NAPI functions (`aggregateVerify`,
-//! `verifyMultipleAggregateSignatures`) to fan out pairing checks across worker threads. The
-//! call still blocks the JS thread while it waits for the pool to finish, but the crypto work
-//! itself is parallelized.
+//! This module uses a **Zig ThreadPool** (`state.thread_pool`), a process-wide fixed-size pool
+//! initialized once via `state.init`. Synchronous NAPI functions block their caller while child
+//! work runs in the pool. The asynchronous BLS verifier submits native-owned root jobs that
+//! prepare and verify inputs without blocking JavaScript.
 //!
-//! `aggregateWithRandomness` runs synchronously on the calling thread and does not
-//! rely on the native `state.thread_pool`. In lodestar, this is called from a Node.js
-//! worker thread (BLS thread pool), not the main thread.
+//! `aggregateWithRandomness` remains synchronous and does not use `state.thread_pool`.
+//! `asyncAggregateWithRandomness` snapshots its inputs and fans work into the shared pool from
+//! a libuv worker.
 const std = @import("std");
 const builtin = @import("builtin");
 const zapi = @import("zapi:zapi");
@@ -29,12 +28,8 @@ const BatchVerifyItem = bls.BatchVerifyItem;
 const DST = bls.DST;
 const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 
-/// In upstream lodestar we split batchable sets into chunks of minimum size 16.
-/// Cost savings after ~16 are not significant.
-/// In metrics, we can observe that sas fleet receives on average ~30 signature sets,
-/// so a safe bound is about 32.
-///
-/// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
+/// Pairing savings above roughly 16 sets are small. Lodestar commonly groups around
+/// 30 batchable signature sets, so 32 is a useful stack allocation boundary.
 const BATCH_VERIFY_SIZE = 32;
 
 const SignatureSetInput = struct {
