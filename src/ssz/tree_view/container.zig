@@ -775,31 +775,6 @@ const Checkpoint = FixedContainerType(struct {
     root: ByteVectorType(32),
 });
 
-fn forceThirdNodeAllocationToOOM(
-    allocator: std.mem.Allocator,
-    failing: *std.testing.FailingAllocator,
-    pool: *Node.Pool,
-    filler: *std.ArrayList(Node.Id),
-) !usize {
-    failing.fail_index = failing.alloc_index;
-    fill: for (0..pool.nodes.len) |_| {
-        const node = pool.createLeafFromUint(0) catch |err| switch (err) {
-            error.OutOfMemory => break :fill,
-        };
-        errdefer pool.unref(node);
-
-        try filler.append(allocator, node);
-    }
-    try std.testing.expectEqual(
-        pool.nodes.len,
-        @as(usize, @intFromEnum(pool.next_free_node)),
-    );
-    try std.testing.expect(filler.items.len >= 2);
-    pool.unref(filler.pop().?);
-    pool.unref(filler.pop().?);
-    return pool.getNodesInUse();
-}
-
 test "ContainerTreeView commit reclaims basic nodes after parent rebuild OOM" {
     const allocator = std.testing.allocator;
     var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
@@ -829,7 +804,24 @@ test "ContainerTreeView commit reclaims basic nodes after parent rebuild OOM" {
         for (filler.items) |node| pool.unref(node);
         filler.deinit(allocator);
     }
-    const baseline = try forceThirdNodeAllocationToOOM(allocator, &failing, &pool, &filler);
+    failing.fail_index = failing.alloc_index;
+    fill: for (0..pool.nodes.len) |_| {
+        const node = pool.createLeafFromUint(0) catch |err| switch (err) {
+            error.OutOfMemory => break :fill,
+        };
+        errdefer pool.unref(node);
+
+        try filler.append(allocator, node);
+    }
+    try std.testing.expectEqual(
+        pool.nodes.len,
+        @as(usize, @intFromEnum(pool.next_free_node)),
+    );
+    try std.testing.expect(filler.items.len >= 2);
+    // Reserve two slots for the basic leaves; their parent allocation hits OOM.
+    pool.unref(filler.pop().?);
+    pool.unref(filler.pop().?);
+    const baseline = pool.getNodesInUse();
 
     try std.testing.expectError(error.OutOfMemory, view.commit());
     try std.testing.expectEqual(old_root, view.getRoot());
@@ -862,14 +854,8 @@ test "ContainerTreeView retry adopts a child committed before outer rebuild OOM"
     });
     defer pool.deinit();
 
-    const Inner = FixedContainerType(struct {
-        a: UintType(64),
-        b: UintType(64),
-    });
-    const Outer = FixedContainerType(struct {
-        inner: Inner,
-        c: UintType(64),
-    });
+    const Inner = FixedContainerType(struct { a: UintType(64), b: UintType(64) });
+    const Outer = FixedContainerType(struct { inner: Inner, c: UintType(64) });
     const value: Outer.Type = .{ .inner = .{ .a = 1, .b = 2 }, .c = 3 };
     const root = try Outer.tree.fromValue(&pool, &value);
     var outer = try Outer.TreeView.init(allocator, &pool, root);
@@ -885,7 +871,24 @@ test "ContainerTreeView retry adopts a child committed before outer rebuild OOM"
         for (filler.items) |node| pool.unref(node);
         filler.deinit(allocator);
     }
-    const baseline = try forceThirdNodeAllocationToOOM(allocator, &failing, &pool, &filler);
+    failing.fail_index = failing.alloc_index;
+    fill: for (0..pool.nodes.len) |_| {
+        const node = pool.createLeafFromUint(0) catch |err| switch (err) {
+            error.OutOfMemory => break :fill,
+        };
+        errdefer pool.unref(node);
+
+        try filler.append(allocator, node);
+    }
+    try std.testing.expectEqual(
+        pool.nodes.len,
+        @as(usize, @intFromEnum(pool.next_free_node)),
+    );
+    try std.testing.expect(filler.items.len >= 2);
+    // Reserve two slots for the child leaf and inner branch; the outer-parent allocation hits OOM.
+    pool.unref(filler.pop().?);
+    pool.unref(filler.pop().?);
+    const baseline = pool.getNodesInUse();
 
     try std.testing.expectError(error.OutOfMemory, outer.commit());
     try std.testing.expectEqual(old_outer_root, outer.getRoot());
