@@ -8,9 +8,9 @@ const signature_set_verifier = @import("state_transition").signature_set_verifie
 const blst_bindings = @import("./blst.zig");
 const pubkeys = @import("./pubkeys.zig");
 
-// Bound synchronous NAPI work and the fixed stack buffers below. Lodestar's
-// worker jobs normally contain at most 128 sets, so 256 provides headroom while
-// requiring unusually large direct callers to chunk explicitly.
+/// Bound synchronous NAPI work and the fixed stack buffers below. Lodestar's
+/// worker jobs normally contain at most 128 sets, so 256 provides headroom while
+/// requiring unusually large direct callers to chunk explicitly.
 const max_verify_sets = 256;
 const max_same_message_sets = bls.MAX_AGGREGATE_PER_JOB;
 const max_indices_per_set = preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT;
