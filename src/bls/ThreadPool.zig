@@ -254,7 +254,7 @@ const VerifyMultiWorkItem = struct {
 /// This is the multi-threaded version of the same function in `fast_verify.zig`.
 /// Multiple callers may invoke this concurrently — each call owns its own
 /// pairing buffers and job state, workers pull from a shared queue.
-/// Invalid cryptographic inputs return false; pool lifecycle errors propagate.
+/// Returns false for invalid cryptographic inputs. Propagates pool lifecycle errors.
 pub fn verifyMultipleAggregateSignatures(
     pool: *ThreadPool,
     io: std.Io,
