@@ -123,6 +123,12 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
             var nodes: [ST.chunk_count]Node.Id = undefined;
             var indices: [ST.chunk_count]usize = undefined;
+            var fresh_basic_nodes: [ST.chunk_count]Node.Id = undefined;
+            var fresh_basic_count: usize = 0;
+            errdefer self.pool.free(fresh_basic_nodes[0..fresh_basic_count]);
+
+            var new_root_to_free: ?Node.Id = null;
+            errdefer if (new_root_to_free) |new_root| self.pool.unref(new_root);
 
             var changed_idx: usize = 0;
             inline for (ST.fields, 0..) |field, i| {
@@ -134,9 +140,10 @@ pub fn ContainerTreeView(comptime ST: type) type {
                             self.pool,
                             &child_value,
                         );
+                        fresh_basic_nodes[fresh_basic_count] = child_node;
+                        fresh_basic_count += 1;
                         nodes[changed_idx] = child_node;
                         indices[changed_idx] = i;
-                        self.original_nodes[i] = child_node;
                         changed_idx += 1;
                     } else {
                         var child_view = self.child_data[i] orelse return error.MissingChildView;
@@ -146,7 +153,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
                         } else true;
                         if (child_changed) {
                             nodes[changed_idx] = child_view.getRoot();
-                            self.original_nodes[i] = child_view.getRoot();
                             indices[changed_idx] = i;
                             changed_idx += 1;
                         }
@@ -155,14 +161,30 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 }
             }
 
-            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
             if (changed_idx == 0) {
+                self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
                 return;
             }
-            const new_root = try self.root.setNodesAtDepth(self.pool, ST.chunk_depth, indices[0..changed_idx], nodes[0..changed_idx]);
+            const new_root = try self.root.setNodesAtDepth(
+                self.pool,
+                ST.chunk_depth,
+                indices[0..changed_idx],
+                nodes[0..changed_idx],
+            );
+            if (ST.chunk_depth > 0) {
+                fresh_basic_count = 0;
+                new_root_to_free = new_root;
+            }
             try self.pool.ref(new_root);
+            new_root_to_free = null;
+            fresh_basic_count = 0;
+
             self.pool.unref(self.root);
             self.root = new_root;
+            for (indices[0..changed_idx], nodes[0..changed_idx]) |index, node| {
+                self.original_nodes[index] = node;
+            }
+            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
         }
 
         pub fn getRoot(self: *const Self) Node.Id {
@@ -753,6 +775,146 @@ const Checkpoint = FixedContainerType(struct {
     epoch: UintType(64),
     root: ByteVectorType(32),
 });
+
+test "ContainerTreeView commit reclaims basic nodes after parent rebuild OOM" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+    var pool = try Node.Pool.init(.{
+        .page_allocator = failing.allocator(),
+        .allocator = allocator,
+        .pool_size = 32,
+    });
+    defer pool.deinit();
+
+    const TwoBasic = FixedContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+    const value: TwoBasic.Type = .{ .a = 1, .b = 2 };
+    const root = try TwoBasic.tree.fromValue(&pool, &value);
+    var view = try TwoBasic.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    const old_root = view.getRoot();
+    const old_a = try view.getRootNode("a");
+    try view.set("a", 10);
+    try view.set("b", 20);
+
+    var filler: std.ArrayList(Node.Id) = .empty;
+    defer {
+        for (filler.items) |node| pool.unref(node);
+        filler.deinit(allocator);
+    }
+    failing.fail_index = failing.alloc_index;
+    fill: for (0..pool.nodes.len) |_| {
+        const node = pool.createLeafFromUint(0) catch |err| switch (err) {
+            error.OutOfMemory => break :fill,
+        };
+        try filler.append(allocator, node);
+    }
+    try std.testing.expectEqual(
+        pool.nodes.len,
+        @as(usize, @intFromEnum(pool.next_free_node)),
+    );
+    try std.testing.expect(filler.items.len >= 2);
+    pool.unref(filler.pop().?);
+    pool.unref(filler.pop().?);
+    const baseline = pool.getNodesInUse();
+
+    try std.testing.expectError(error.OutOfMemory, view.commit());
+    try std.testing.expectEqual(old_root, view.getRoot());
+    try std.testing.expectEqual(@as(usize, 2), view.changed.count());
+    try std.testing.expectEqual(old_a, try view.getRootNode("a"));
+    try std.testing.expect(!old_a.getState(&pool).isFree());
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+
+    failing.fail_index = std.math.maxInt(usize);
+    try view.commit();
+    try std.testing.expect(view.getRoot() != old_root);
+    try std.testing.expectEqual(@as(usize, 0), view.changed.count());
+
+    var committed: TwoBasic.Type = undefined;
+    try TwoBasic.tree.toValue(view.getRoot(), &pool, &committed);
+    try std.testing.expectEqual(@as(u64, 10), committed.a);
+    try std.testing.expectEqual(@as(u64, 20), committed.b);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "ContainerTreeView retry adopts a child committed before outer rebuild OOM" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+    var pool = try Node.Pool.init(.{
+        .page_allocator = failing.allocator(),
+        .allocator = allocator,
+        .pool_size = 32,
+    });
+    defer pool.deinit();
+
+    const Inner = FixedContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+    const Outer = FixedContainerType(struct {
+        inner: Inner,
+        c: UintType(64),
+    });
+    const value: Outer.Type = .{ .inner = .{ .a = 1, .b = 2 }, .c = 3 };
+    const root = try Outer.tree.fromValue(&pool, &value);
+    var outer = try Outer.TreeView.init(allocator, &pool, root);
+    defer outer.deinit();
+
+    const old_outer_root = outer.getRoot();
+    const old_inner_root = try outer.getRootNode("inner");
+    var inner = try outer.get("inner");
+    try inner.set("a", 10);
+
+    var filler: std.ArrayList(Node.Id) = .empty;
+    defer {
+        for (filler.items) |node| pool.unref(node);
+        filler.deinit(allocator);
+    }
+    failing.fail_index = failing.alloc_index;
+    fill: for (0..pool.nodes.len) |_| {
+        const node = pool.createLeafFromUint(0) catch |err| switch (err) {
+            error.OutOfMemory => break :fill,
+        };
+        try filler.append(allocator, node);
+    }
+    try std.testing.expectEqual(
+        pool.nodes.len,
+        @as(usize, @intFromEnum(pool.next_free_node)),
+    );
+    try std.testing.expect(filler.items.len >= 2);
+    pool.unref(filler.pop().?);
+    pool.unref(filler.pop().?);
+    const baseline = pool.getNodesInUse();
+
+    try std.testing.expectError(error.OutOfMemory, outer.commit());
+    try std.testing.expectEqual(old_outer_root, outer.getRoot());
+    try std.testing.expectEqual(old_inner_root, outer.original_nodes[0].?);
+    try std.testing.expect(outer.changed.isSet(0));
+    try std.testing.expectEqual(@as(usize, 0), inner.changed.count());
+    try std.testing.expect(inner.getRoot() != old_inner_root);
+
+    var committed_inner: Inner.Type = undefined;
+    try Inner.tree.toValue(inner.getRoot(), &pool, &committed_inner);
+    try std.testing.expectEqual(@as(u64, 10), committed_inner.a);
+    try std.testing.expectEqual(@as(u64, 2), committed_inner.b);
+    try std.testing.expectEqual(baseline + 2, pool.getNodesInUse());
+
+    failing.fail_index = std.math.maxInt(usize);
+    try outer.commit();
+    try std.testing.expect(outer.getRoot() != old_outer_root);
+    try std.testing.expectEqual(inner.getRoot(), outer.original_nodes[0].?);
+    try std.testing.expectEqual(@as(usize, 0), outer.changed.count());
+
+    var committed_outer: Outer.Type = undefined;
+    try Outer.tree.toValue(outer.getRoot(), &pool, &committed_outer);
+    try std.testing.expectEqual(@as(u64, 10), committed_outer.inner.a);
+    try std.testing.expectEqual(@as(u64, 2), committed_outer.inner.b);
+    try std.testing.expectEqual(@as(u64, 3), committed_outer.c);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
 
 test "TreeView container field roundtrip" {
     var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1000 });
