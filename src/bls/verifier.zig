@@ -10,8 +10,8 @@ const BatchVerifyItem = bls.BatchVerifyItem;
 const DST = bls.DST;
 const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 
-// A correct RNG produces an all-zero 64-bit scalar with probability 2^-64.
-// Keep retries bounded so a broken RNG fails instead of looping forever.
+/// A correct RNG produces an all-zero 64-bit scalar with probability 2^-64.
+/// Keep retries bounded so a broken RNG fails instead of looping forever.
 const random_scalar_retries_max = 8;
 
 pub const VerifySignatureSetsOptions = struct {
