@@ -1,5 +1,5 @@
 const js = @import("zapi:zapi").js;
-const stInnerShuffleList = @import("state_transition").shuffle.innerShuffleList;
+const stInnerShuffleList = @import("swap_or_not_shuffle").innerShuffleList;
 
 pub fn innerShuffleList(list: js.Uint32Array, seed: js.Uint8Array, rounds: js.Number, forwards: js.Boolean) !void {
     const list_u32 = try list.toSlice();
