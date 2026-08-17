@@ -54,6 +54,7 @@ pub const TreeViewState = struct {
         if (gop.found_existing) {
             return gop.value_ptr.*;
         }
+        errdefer _ = self.children_nodes.remove(gindex);
         const child_node = try self.root.getNode(self.pool, gindex);
         gop.value_ptr.* = child_node;
         return child_node;
@@ -141,3 +142,23 @@ pub const TreeViewState = struct {
         self.changed.clearRetainingCapacity();
     }
 };
+
+test "getChildNode removes a new cache entry when lookup fails" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 1,
+    });
+    defer pool.deinit();
+
+    const root = try pool.createLeaf(&([_]u8{0} ** 32));
+    var state: TreeViewState = undefined;
+    try state.init(allocator, &pool, root);
+    defer state.deinit();
+
+    // A leaf cannot satisfy child navigation, so the newly inserted cache slot must roll back.
+    const child_gindex = Gindex.fromDepth(1, 0);
+    try std.testing.expectError(error.InvalidNode, state.getChildNode(child_gindex));
+    try std.testing.expectEqual(@as(usize, 0), state.children_nodes.count());
+}
