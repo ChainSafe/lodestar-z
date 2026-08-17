@@ -50,13 +50,13 @@ pub const TreeViewState = struct {
     }
 
     pub fn getChildNode(self: *TreeViewState, gindex: Gindex) !Node.Id {
-        const gop = try self.children_nodes.getOrPut(self.allocator, gindex);
-        if (gop.found_existing) {
-            return gop.value_ptr.*;
+        if (self.children_nodes.get(gindex)) |child_node| {
+            return child_node;
         }
-        errdefer _ = self.children_nodes.remove(gindex);
+
+        try self.children_nodes.ensureUnusedCapacity(self.allocator, 1);
         const child_node = try self.root.getNode(self.pool, gindex);
-        gop.value_ptr.* = child_node;
+        self.children_nodes.putAssumeCapacityNoClobber(gindex, child_node);
         return child_node;
     }
 
@@ -143,7 +143,7 @@ pub const TreeViewState = struct {
     }
 };
 
-test "getChildNode removes a new cache entry when lookup fails" {
+test "getChildNode does not publish a cache entry when lookup fails" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{
         .page_allocator = allocator,
@@ -157,7 +157,7 @@ test "getChildNode removes a new cache entry when lookup fails" {
     try state.init(allocator, &pool, root);
     defer state.deinit();
 
-    // A leaf cannot satisfy child navigation, so the newly inserted cache slot must roll back.
+    // Failed leaf child navigation must not publish a cache entry.
     const child_gindex = Gindex.fromDepth(1, 0);
     try std.testing.expectError(error.InvalidNode, state.getChildNode(child_gindex));
     try std.testing.expectEqual(@as(usize, 0), state.children_nodes.count());
