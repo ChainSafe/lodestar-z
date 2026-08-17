@@ -231,6 +231,12 @@
                 .imports = .{.download_era_options},
             },
         },
+        .discv5_discover = .{
+            .root_module = .{
+                .root_source_file = "examples/discv5_discover.zig",
+                .imports = .{.discv5},
+            },
+        },
         // TODO: Re-enable metrics_stf once karlseguin/http.zig supports Zig 0.16.0.
         // See: https://github.com/karlseguin/http.zig/issues/175
         // .metrics_stf = .{
