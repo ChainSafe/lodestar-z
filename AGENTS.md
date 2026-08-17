@@ -185,6 +185,19 @@ Important requirements include:
 - Keep allocation and matching cleanup together, separated from surrounding logic by blank lines.
 - Explain why a non-obvious design or safety decision is correct.
 - Run `zig fmt` on every Zig change.
+- When writing doc comments, always state the expected outcome, then justification.
+
+For example, instead of:
+
+```
+Invalid cryptographic inputs return false; Malformed inputs throw an error.
+```
+
+Prefer:
+
+```
+/// Returns false on cryptographic failure. Throws for malformed inputs.
+```
 
 ### JavaScript and TypeScript
 
