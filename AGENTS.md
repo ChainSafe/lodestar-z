@@ -185,20 +185,6 @@ Important requirements include:
 - Keep allocation and matching cleanup together, separated from surrounding logic by blank lines.
 - Explain why a non-obvious design or safety decision is correct.
 - Run `zig fmt` on every Zig change.
-- When writing doc comments, always state the expected outcome, then justification.
-
-For example, instead of:
-
-```
-Invalid cryptographic inputs return false; Malformed inputs throw an error.
-```
-
-Prefer:
-
-```
-/// Returns false on cryptographic failure. Throws for malformed inputs.
-```
-
 ### JavaScript and TypeScript
 
 Bindings use ES modules and Biome:
@@ -210,6 +196,40 @@ Bindings use ES modules and Biome:
 - Avoid `any` and `as any`. If unavoidable, add a suppression with the full rule and rationale.
 - Keep declarations in `bindings/src/*.d.ts` synchronized with JavaScript wrappers and NAPI exports.
 - Do not edit native binaries under `zig-out/`; they are build outputs.
+
+
+### Comments
+
+**The default number of comments in new code is zero.**
+
+Add a comment only when the code cannot carry important information, such as:
+
+- A precondition not visible in the signature
+- A non-obvious consensus or protocol rule
+- Design, invariants, or non-obvious algorithms of a public or self-contained module
+- An ordering or workaround that looks unnecessary but is correctness-critical
+- Rationale needed to prevent a future regression
+
+Do not comment to restate what the code does. If the reason is clear from the surrounding names and
+structure, omit the comment. Do not narrate a change or record what the code used to do. That belongs
+in the commit message. Keep enduring correctness constraints and non-obvious rationale next to the
+code they govern.
+
+Prefer a clearer name, a smaller function, or a named constant over a comment explaining unclear
+code. Use `//` for implementation comments and `/** */` JSDoc for public API documentation.
+
+Prefer the active voice over passive voice. For example, instead of:
+
+```
+Invalid cryptographic inputs return false; Malformed inputs throw an error.
+```
+
+Prefer:
+
+```
+/// Returns false on cryptographic failure. Throws for malformed inputs.
+```
+
 
 ## Architecture patterns
 
