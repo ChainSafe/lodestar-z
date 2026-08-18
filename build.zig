@@ -1,5 +1,5 @@
 const std = @import("std");
-const zapi_build = @import("zapi");
+const zapi = @import("zapi");
 const zbuild = @import("zbuild");
 
 pub fn build(b: *std.Build) !void {
@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) !void {
     const manifest = @import("build.zig.zon");
     const result = try zbuild.configureBuild(b, manifest, .{});
 
-    zapi_build.addAddonIdentity(
+    zapi.addAddonIdentity(
         b,
         result.library("bindings").?,
         manifest,

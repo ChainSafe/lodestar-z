@@ -39,10 +39,6 @@ const SameMessageSet = struct {
     signature: js.Uint8Array,
 };
 
-fn uint32(value: js.Number) !u32 {
-    return value.toU32Exact() catch return error.InvalidUint32;
-}
-
 /// Verify indexed, aggregate, and raw-pubkey signature sets synchronously.
 ///
 /// Returns false on cryptographic failure. Throws for malformed inputs and
@@ -58,7 +54,7 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
     for (0..count) |i| {
         const value = try sets.get(@intCast(i));
         const set = try (try value.asObject(CommonSet)).get();
-        const set_type: SetType = switch (try uint32(set.type)) {
+        const set_type: SetType = switch (try set.type.toU32Exact()) {
             @intFromEnum(SetType.indexed) => .indexed,
             @intFromEnum(SetType.aggregate) => .aggregate,
             @intFromEnum(SetType.single) => .single,
@@ -72,7 +68,7 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
             .indexed => blk: {
                 if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
                 const indexed = try (try value.asObject(IndexedSet)).get();
-                const index = try uint32(indexed.index);
+                const index = try indexed.index.toU32Exact();
                 break :blk pubkeys.state.cache.getPubkey(io, index) orelse
                     return error.PubkeyIndexNotFound;
             },
@@ -124,7 +120,7 @@ pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !j
     for (0..count) |i| {
         const value = try sets.get(@intCast(i));
         const set = try (try value.asObject(SameMessageSet)).get();
-        const index = try uint32(set.index);
+        const index = try set.index.toU32Exact();
         const public_key = pubkeys.state.cache.getPubkey(io, index) orelse
             return error.PubkeyIndexNotFound;
 

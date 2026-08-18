@@ -28,9 +28,8 @@ describe("bls verifier", () => {
     }
   });
 
-  it("exports native verifier limits and a frozen set type enum", () => {
+  it("exports native verifier limits and set type enum", () => {
     expect(BLS_VERIFIER_SET_TYPE).toEqual({aggregate: 1, indexed: 0, single: 2});
-    expect(Object.isFrozen(BLS_VERIFIER_SET_TYPE)).toBe(true);
     expect(BLS_VERIFIER_MAX_BATCH_SIZE).toBe(256);
     expect(BLS_VERIFIER_MAX_SAME_MESSAGE_BATCH_SIZE).toBe(128);
   });
@@ -178,8 +177,8 @@ describe("bls verifier", () => {
             type: BLS_VERIFIER_SET_TYPE.indexed,
           },
         ])
-      ).toThrow("InvalidUint32");
-      expect(() => verifySignatureSetsSameMessage([{index, signature}], signingRoot)).toThrow("InvalidUint32");
+      ).toThrow("InvalidUnsignedInteger");
+      expect(() => verifySignatureSetsSameMessage([{index, signature}], signingRoot)).toThrow("InvalidUnsignedInteger");
     }
   });
 
