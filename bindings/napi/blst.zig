@@ -14,6 +14,7 @@ const builtin = @import("builtin");
 const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
+const AddonIdentity = @import("zapi_addon_identity");
 const bls = @import("bls");
 const bls_verifier = bls.verifier;
 
@@ -100,7 +101,7 @@ fn formatHex(bytes: []const u8) !js.String {
 
 fn unwrapClass(comptime T: type, value: js.Value) !*T {
     const raw = value.toValue();
-    return js.convertArg(*T, raw.value, raw.env);
+    return js.convertArg(*T, AddonIdentity, raw.value, raw.env);
 }
 
 pub const PublicKey = struct {
@@ -647,8 +648,8 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
     var result_sig: NativeSignature = .{};
     bls.c.blst_p2_to_affine(&result_sig.point, &p2_ret);
 
-    const pk_value = napi.Value{ .env = env.env, .value = js.convertReturn(PublicKey, .{ .raw = result_pk }, env.env) };
-    const sig_value = napi.Value{ .env = env.env, .value = js.convertReturn(Signature, .{ .raw = result_sig }, env.env) };
+    const pk_value = napi.Value{ .env = env.env, .value = js.convertReturn(PublicKey, AddonIdentity, .{ .raw = result_pk }, env.env) };
+    const sig_value = napi.Value{ .env = env.env, .value = js.convertReturn(Signature, AddonIdentity, .{ .raw = result_sig }, env.env) };
 
     const result = try env.createObject();
     try result.setNamedProperty("pk", pk_value);
@@ -734,8 +735,8 @@ fn settle(env: napi.Env, status: napi.status.Status, data: *AsyncAggRandData) !v
         return rejectWithError(env, data.deferred, "asyncAggregateWithRandomness", @errorName(err));
     }
 
-    const pk_value = napi.Value{ .env = env.env, .value = js.convertReturn(PublicKey, .{ .raw = data.pk_out }, env.env) };
-    const sig_value = napi.Value{ .env = env.env, .value = js.convertReturn(Signature, .{ .raw = data.sig_out }, env.env) };
+    const pk_value = napi.Value{ .env = env.env, .value = js.convertReturn(PublicKey, AddonIdentity, .{ .raw = data.pk_out }, env.env) };
+    const sig_value = napi.Value{ .env = env.env, .value = js.convertReturn(Signature, AddonIdentity, .{ .raw = data.sig_out }, env.env) };
 
     const result = try env.createObject();
     try result.setNamedProperty("pk", pk_value);

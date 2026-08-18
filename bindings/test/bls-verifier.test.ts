@@ -28,6 +28,13 @@ describe("bls verifier", () => {
     }
   });
 
+  it("exports native verifier limits and a frozen set type enum", () => {
+    expect(BLS_VERIFIER_SET_TYPE).toEqual({aggregate: 1, indexed: 0, single: 2});
+    expect(Object.isFrozen(BLS_VERIFIER_SET_TYPE)).toBe(true);
+    expect(BLS_VERIFIER_MAX_BATCH_SIZE).toBe(256);
+    expect(BLS_VERIFIER_MAX_SAME_MESSAGE_BATCH_SIZE).toBe(128);
+  });
+
   it("verifies mixed indexed, aggregate, and raw-pubkey sets", () => {
     const indexedMessage = message(1);
     const aggregateMessage = message(2);
@@ -161,7 +168,7 @@ describe("bls verifier", () => {
   it("rejects invalid numeric indices", () => {
     const signingRoot = message(1);
     const signature = keys[0].sign(signingRoot).toBytes();
-    for (const index of [-1, 0.5, 2 ** 32]) {
+    for (const index of [-1, 0.5, 2 ** 32, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() =>
         verifySignatureSets([
           {

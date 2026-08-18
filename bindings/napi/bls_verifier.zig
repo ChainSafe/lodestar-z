@@ -11,14 +11,14 @@ const pubkeys = @import("./pubkeys.zig");
 /// Bound synchronous NAPI work and the fixed stack buffers below. Lodestar's
 /// worker jobs normally contain at most 128 sets, so 256 provides headroom while
 /// requiring unusually large direct callers to chunk explicitly.
-const max_verify_sets = 256;
-const max_same_message_sets = bls.MAX_AGGREGATE_PER_JOB;
+pub const MAX_BATCH_SIZE = 256;
+pub const MAX_SAME_MESSAGE_BATCH_SIZE = bls.MAX_AGGREGATE_PER_JOB;
 const max_indices_per_set = preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT;
 
-const SignatureSetBatch = signature_set_verifier.SignatureSetBatch(max_verify_sets);
-const SameMessageSignatureSetBatch = signature_set_verifier.SameMessageSignatureSetBatch(max_same_message_sets);
+const SignatureSetBatch = signature_set_verifier.SignatureSetBatch(MAX_BATCH_SIZE);
+const SameMessageSignatureSetBatch = signature_set_verifier.SameMessageSignatureSetBatch(MAX_SAME_MESSAGE_BATCH_SIZE);
 
-const SetType = enum(u32) {
+pub const SetType = enum(u32) {
     indexed = 0,
     aggregate = 1,
     single = 2,
@@ -39,14 +39,8 @@ const SameMessageSet = struct {
     signature: js.Uint8Array,
 };
 
-// TODO(zapi): Replace with value.toU32Exact() after next zapi release: see https://github.com/ChainSafe/zapi/pull/71
 fn uint32(value: js.Number) !u32 {
-    const number = try value.toF64();
-    const max_u32: f64 = @floatFromInt(std.math.maxInt(u32));
-    if (!std.math.isFinite(number) or number < 0 or number > max_u32 or @floor(number) != number) {
-        return error.InvalidUint32;
-    }
-    return @intFromFloat(number);
+    return value.toU32Exact() catch return error.InvalidUint32;
 }
 
 /// Verify indexed, aggregate, and raw-pubkey signature sets synchronously.
@@ -56,7 +50,7 @@ fn uint32(value: js.Number) !u32 {
 pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
     const count = try sets.length();
     if (count == 0) return js.Boolean.from(false);
-    if (count > max_verify_sets) return error.TooManySets;
+    if (count > MAX_BATCH_SIZE) return error.TooManySets;
 
     var batch: SignatureSetBatch = .{};
     const io = js.io();
@@ -114,7 +108,7 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
 /// errors, or pool unavailability.
 pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !js.Array {
     const count = try sets.length();
-    if (count > max_same_message_sets) return error.TooManySets;
+    if (count > MAX_SAME_MESSAGE_BATCH_SIZE) return error.TooManySets;
 
     const results = js.Array.createWithLength(count);
     if (count == 0) return results;
@@ -137,7 +131,7 @@ pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !j
         batch.append(&public_key, try set.signature.toSlice());
     }
 
-    var verification_results: [max_same_message_sets]bool = undefined;
+    var verification_results: [MAX_SAME_MESSAGE_BATCH_SIZE]bool = undefined;
     const pool = blst_bindings.state.thread_pool orelse return error.ThreadPoolNotInitialized;
     try batch.verify(
         io,
@@ -151,24 +145,4 @@ pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !j
     }
 
     return results;
-}
-
-pub fn indexedSetType() js.Number {
-    return js.Number.from(@intFromEnum(SetType.indexed));
-}
-
-pub fn aggregateSetType() js.Number {
-    return js.Number.from(@intFromEnum(SetType.aggregate));
-}
-
-pub fn singleSetType() js.Number {
-    return js.Number.from(@intFromEnum(SetType.single));
-}
-
-pub fn maxBatchSize() js.Number {
-    return js.Number.from(max_verify_sets);
-}
-
-pub fn maxSameMessageBatchSize() js.Number {
-    return js.Number.from(max_same_message_sets);
 }
