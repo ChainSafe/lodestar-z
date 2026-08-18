@@ -7,13 +7,20 @@
 //! by zapi#68 `OwnedTypedArray` once zapi 4.0 ships.
 //!
 //! A Task is any struct providing:
+//!
+//! Required:
 //!  - `compute(self: *Task) !void` — libuv worker thread; MUST NOT call napi APIs
 //!  - `resolve(self: *Task, env: napi.Env) !napi.Value` — JS thread; builds the
 //!    fulfillment value
-//!  - `errorMessage(err: anyerror) [:0]const u8` — maps errors to rejection
-//!    messages
 //!  - `deinit(self: *Task) void` — frees task-owned memory; must be safe after
 //!    a successful transfer in `resolve`
+//!
+//! Optional:
+//!  - `reject(self: *Task, env: napi.Env, err: anyerror) !napi.Value` — JS
+//!    thread; builds the rejection value for a failed `compute`. Takes
+//!    precedence over `errorMessage`.
+//!  - `errorMessage(err: anyerror) [:0]const u8` — maps a failed `compute`'s
+//!    error to the rejection Error's message. Defaults to `@errorName(err)`.
 //!
 //! Ownership: on `spawn` error the task is NOT consumed — the caller's
 //! errdefers must free its resources. After `spawn` returns successfully the
@@ -34,6 +41,14 @@ pub const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.
 /// settles on the JS thread: rejected with `Task.errorMessage(err)` if
 /// `compute` failed, otherwise resolved with `task.resolve(env)`.
 pub fn spawn(comptime Task: type, task: Task, comptime resource_name: []const u8) !js.Value {
+    comptime {
+        for ([_][]const u8{ "compute", "resolve", "deinit" }) |decl| {
+            if (!@hasDecl(Task, decl)) {
+                @compileError("async_task.spawn: " ++ @typeName(Task) ++ " is missing the required `" ++ decl ++ "` declaration");
+            }
+        }
+    }
+
     const Context = struct {
         task: Task,
         err: ?anyerror,
@@ -70,7 +85,11 @@ pub fn spawn(comptime Task: type, task: Task, comptime resource_name: []const u8
                 return rejectWithMessage(env, ctx.deferred, @tagName(status));
             }
             if (ctx.err) |err| {
-                return rejectWithMessage(env, ctx.deferred, Task.errorMessage(err));
+                if (comptime @hasDecl(Task, "reject")) {
+                    return ctx.deferred.reject(try ctx.task.reject(env, err));
+                }
+                const message = if (comptime @hasDecl(Task, "errorMessage")) Task.errorMessage(err) else @errorName(err);
+                return rejectWithMessage(env, ctx.deferred, message);
             }
             try ctx.deferred.resolve(try ctx.task.resolve(env));
         }
