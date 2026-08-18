@@ -2,9 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 /// Expose c types for lodestar-bun bindings
-pub const c = @cImport({
-    @cInclude("blst.h");
-});
+pub const c = @import("blst");
 
 // blst Zig native types
 pub const Pairing = @import("Pairing.zig");
@@ -22,6 +20,7 @@ pub const BatchVerifyItem = @import("fast_verify.zig").BatchVerifyItem;
 pub const verifyMultipleAggregateSignatures = @import("fast_verify.zig").verifyMultipleAggregateSignatures;
 pub const ThreadPool = @import("ThreadPool.zig");
 pub const pippenger = @import("pippenger.zig");
+pub const verifier = @import("verifier.zig");
 
 /// Maximum number of signatures that can be aggregated in a single job.
 pub const MAX_AGGREGATE_PER_JOB: usize = 128;
@@ -41,4 +40,5 @@ test {
     testing.refAllDecls(AggregateSignature);
     testing.refAllDecls(ThreadPool);
     testing.refAllDecls(pippenger);
+    testing.refAllDecls(verifier);
 }

@@ -5,6 +5,12 @@ const Self = @This();
 /// against an aggregate public key.
 point: c.blst_p2 = c.blst_p2{},
 
+/// A signature paired with its fixed-width random aggregation coefficient.
+pub const RandomizedSignature = struct {
+    signature: *const Signature,
+    randomness: [32]u8,
+};
+
 /// Validates that the aggregate signature is in the correct subgroup (G2).
 pub fn validate(self: *const Self) BlstError!void {
     if (!c.blst_p2_in_g2(&self.point)) return BlstError.PointNotInGroup;
@@ -37,41 +43,80 @@ pub fn aggregate(sigs: []const Signature, sigs_groupcheck: bool) BlstError!Self 
 
 /// Aggregates multiple signatures using multi-scalar multiplication with randomness.
 ///
-/// Errors if scratch space is insufficient, or if any signature validation fails.
+/// Errors if `items` is empty, contains more than `MAX_AGGREGATE_PER_JOB`
+/// entries, scratch space is insufficient, or any signature validation fails.
 ///
 /// Returns the `AggregateSignature` on success.
 pub fn aggregateWithRandomness(
-    sigs: []*const Signature,
-    randomness: []const u8,
+    items: []const RandomizedSignature,
     sigs_groupcheck: bool,
     scratch: []u64,
 ) BlstError!Self {
-    if (sigs_groupcheck) for (sigs) |sig| try sig.validate(false);
+    if (items.len == 0) return BlstError.EmptyAggregate;
+    if (items.len > MAX_AGGREGATE_PER_JOB) return BlstError.TooManyItems;
     const scratch_len = @divExact(
-        c.blst_p2s_mult_pippenger_scratch_sizeof(sigs.len),
+        c.blst_p2s_mult_pippenger_scratch_sizeof(items.len),
         @sizeOf(u64),
     );
     if (scratch.len < scratch_len) {
-        return BlstError.AggrTypeMismatch;
+        return BlstError.InsufficientScratchSpace;
     }
+    if (sigs_groupcheck) for (items) |item| try item.signature.validate(false);
 
     var scalars_refs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
-    for (0..sigs.len) |i| scalars_refs[i] = &randomness[i * 32];
+    var sigs_refs: [MAX_AGGREGATE_PER_JOB]*const c.blst_p2_affine = undefined;
+    for (items, 0..) |*item, i| {
+        scalars_refs[i] = &item.randomness[0];
+        sigs_refs[i] = &item.signature.point;
+    }
 
     var agg_sig = Self{};
 
     c.blst_p2s_mult_pippenger(
         &agg_sig.point,
-        @ptrCast(sigs[0..sigs.len].ptr),
-        sigs.len,
-        scalars_refs[0..sigs.len].ptr,
+        sigs_refs[0..items.len].ptr,
+        items.len,
+        scalars_refs[0..items.len].ptr,
         64,
         scratch.ptr,
     );
     return agg_sig;
 }
 
-test aggregateWithRandomness {
+test "aggregateWithRandomness rejects empty signature items" {
+    const items: []const RandomizedSignature = &.{};
+    var scratch: [1]u64 = undefined;
+
+    try std.testing.expectError(
+        BlstError.EmptyAggregate,
+        aggregateWithRandomness(items, false, &scratch),
+    );
+}
+
+test "aggregateWithRandomness rejects too many signature items" {
+    const items: [MAX_AGGREGATE_PER_JOB + 1]RandomizedSignature = undefined;
+    var scratch: [1]u64 = undefined;
+
+    try std.testing.expectError(
+        BlstError.TooManyItems,
+        aggregateWithRandomness(&items, false, &scratch),
+    );
+}
+
+test "aggregateWithRandomness rejects insufficient signature scratch space" {
+    const signature: Signature = undefined;
+    const items = [_]RandomizedSignature{.{
+        .signature = &signature,
+        .randomness = [_]u8{1} ** 32,
+    }};
+
+    try std.testing.expectError(
+        BlstError.InsufficientScratchSpace,
+        aggregateWithRandomness(&items, false, &.{}),
+    );
+}
+
+test "aggregateWithRandomness aggregates 128 signatures" {
     const ikm: [32]u8 = [_]u8{
         0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
         0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
@@ -125,25 +170,29 @@ test aggregateWithRandomness {
         try sig.verify(true, &msgs[i], dst, null, &pks[i], true);
     }
     var rands: [32 * MAX_AGGREGATE_PER_JOB]u8 = [_]u8{0} ** (32 * MAX_AGGREGATE_PER_JOB);
-    var sigs_refs: [MAX_AGGREGATE_PER_JOB]*const Signature = undefined;
-    var pks_refs: [MAX_AGGREGATE_PER_JOB]*const PublicKey = undefined;
+    var randomized_sigs: [MAX_AGGREGATE_PER_JOB]RandomizedSignature = undefined;
+    var randomized_pks: [MAX_AGGREGATE_PER_JOB]AggregatePublicKey.RandomizedPublicKey = undefined;
     std.Random.bytes(rand, &rands);
 
     for (0..num_sigs) |i| {
-        sigs_refs[i] = &sigs[i];
-        pks_refs[i] = &pks[i];
+        randomized_sigs[i] = .{
+            .signature = &sigs[i],
+            .randomness = rands[i * 32 ..][0..32].*,
+        };
+        randomized_pks[i] = .{
+            .public_key = &pks[i],
+            .randomness = rands[i * 32 ..][0..32].*,
+        };
     }
 
     const agg_pk = try AggregatePublicKey.aggregateWithRandomness(
-        pks_refs[0..],
-        &rands,
+        &randomized_pks,
         true,
         pk_scratch,
     );
     const pk = agg_pk.toPublicKey();
     const agg_sig = try aggregateWithRandomness(
-        &sigs_refs,
-        &rands,
+        &randomized_sigs,
         true,
         sig_scratch,
     );

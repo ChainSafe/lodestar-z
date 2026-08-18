@@ -9,6 +9,9 @@ pub const BlstError = error{
     PkIsInfinity,
     BadScalar,
     MergeError,
+    EmptyAggregate,
+    TooManyItems,
+    InsufficientScratchSpace,
     UnknownError,
 };
 

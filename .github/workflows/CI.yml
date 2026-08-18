@@ -84,6 +84,9 @@ jobs:
       - name: Run bls tests
         run: |
           zig build test:bls
+      - name: Run swap-or-not-shuffle tests
+        run: |
+          zig build test:swap_or_not_shuffle
       - name: Run state-transition tests
         run: |
           zig build test:state_transition

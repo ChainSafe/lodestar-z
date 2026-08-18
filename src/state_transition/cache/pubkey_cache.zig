@@ -164,6 +164,20 @@ pub const PubkeyCache = struct {
         return self.entries.values()[@intCast(index)];
     }
 
+    /// Get the compressed pubkey bytes for a validator index. A value is
+    /// returned so no pointer into movable map storage escapes the shared
+    /// lock.
+    pub fn getPubkeyBytes(
+        self: *const PubkeyCache,
+        io: std.Io,
+        index: u64,
+    ) ?[48]u8 {
+        self.lockShared(io);
+        defer self.unlockShared(io);
+        if (index >= self.entries.count()) return null;
+        return self.entries.keys()[@intCast(index)];
+    }
+
     /// Copy affine pubkeys for a batch of validator indices while holding one
     /// shared lock. The output is left unchanged when an index is invalid.
     pub fn getPubkeys(
@@ -211,6 +225,16 @@ pub const PubkeyCache = struct {
         self: *const PubkeyCache,
         io: std.Io,
         indices: []const u64,
+    ) !bls.PublicKey {
+        return self.aggregateIndices(io, u64, indices);
+    }
+
+    /// Aggregate the pubkeys at indices of the requested integer type.
+    pub fn aggregateIndices(
+        self: *const PubkeyCache,
+        io: std.Io,
+        comptime Index: type,
+        indices: []const Index,
     ) !bls.PublicKey {
         if (indices.len == 0) return error.InvalidLength;
 

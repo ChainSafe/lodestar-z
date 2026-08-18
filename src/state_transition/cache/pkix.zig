@@ -179,6 +179,11 @@ pub fn save(cache: *PubkeyCache, io: std.Io, writer: *std.Io.Writer) !void {
 /// PKIX checks framing, ABI compatibility, bounds, and checksum, but does not
 /// authenticate or semantically validate entries. Callers must provide an
 /// application-owned file from the intended network.
+///
+/// The supported trust assumption is that `load` receives only PKIX files
+/// produced by this module's `save`. Entry-level cache invariants are inherited
+/// from caches built through `append` and `save` and are not revalidated by
+/// `load`.
 pub fn load(
     allocator: std.mem.Allocator,
     io: std.Io,

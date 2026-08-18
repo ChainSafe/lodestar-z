@@ -5,6 +5,10 @@ export interface PubkeyCache {
   get(index: number): PublicKey | undefined;
   /** Same as get(), but throws if the index is not in the cache */
   getOrThrow(index: number): PublicKey;
+  /** Get the cached 48-byte compressed pubkey bytes without materializing a PublicKey wrapper. */
+  getPubkeyBytes(index: number): Uint8Array | undefined;
+  /** Same as getPubkeyBytes(), but throws if the index is not in the cache. */
+  getPubkeyBytesOrThrow(index: number): Uint8Array;
   /** Aggregate cached public keys by validator index */
   aggregate(indices: number[]): PublicKey;
   /** Get validator index by pubkey bytes */

@@ -4,6 +4,12 @@ const Self = @This();
 /// An aggregate public key that can be used to verify aggregate signatures.
 point: c.blst_p1 = c.blst_p1{},
 
+/// A public key paired with its fixed-width random aggregation coefficient.
+pub const RandomizedPublicKey = struct {
+    public_key: *const PublicKey,
+    randomness: [32]u8,
+};
+
 /// Converts an aggregate public key back to a regular public key.
 /// This converts from projective coordinates back to affine coordinates.
 pub fn toPublicKey(self: *const Self) PublicKey {
@@ -38,43 +44,80 @@ pub fn aggregate(pks: []const PublicKey, pks_validate: bool) BlstError!Self {
 /// enhanced security through the use of randomness.
 ///
 /// Errors if:
-/// - `pk` slice is empty,
+/// - `items` is empty or contains more than `MAX_AGGREGATE_PER_JOB` entries,
 /// - `scratch` space is insufficient, or
 /// - if any public key validation fails.
 ///
 /// Returns the `AggregatePublicKey` on success.
 pub fn aggregateWithRandomness(
-    pks: []*const PublicKey,
-    randomness: []const u8,
+    items: []const RandomizedPublicKey,
     pks_validate: bool,
     scratch: []u64,
 ) BlstError!Self {
-    if (pks.len == 0) return BlstError.AggrTypeMismatch;
+    if (items.len == 0) return BlstError.EmptyAggregate;
+    if (items.len > MAX_AGGREGATE_PER_JOB) return BlstError.TooManyItems;
     const scratch_len = @divExact(
-        c.blst_p1s_mult_pippenger_scratch_sizeof(pks.len),
+        c.blst_p1s_mult_pippenger_scratch_sizeof(items.len),
         @sizeOf(u64),
     );
     if (scratch.len < scratch_len) {
-        return BlstError.AggrTypeMismatch;
+        return BlstError.InsufficientScratchSpace;
     }
-    if (pks_validate) for (pks) |pk| try pk.validate();
+    if (pks_validate) for (items) |item| try item.public_key.validate();
 
     var scalars_refs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
-    for (0..pks.len) |i| scalars_refs[i] = &randomness[i * 32];
+    var pks_refs: [MAX_AGGREGATE_PER_JOB]*const c.blst_p1_affine = undefined;
+    for (items, 0..) |*item, i| {
+        scalars_refs[i] = &item.randomness[0];
+        pks_refs[i] = &item.public_key.point;
+    }
 
     var agg_pk = Self{};
     c.blst_p1s_mult_pippenger(
         &agg_pk.point,
-        @ptrCast(pks[0..pks.len].ptr),
-        pks.len,
-        @ptrCast(scalars_refs[0..pks.len].ptr),
+        pks_refs[0..items.len].ptr,
+        items.len,
+        scalars_refs[0..items.len].ptr,
         64,
         scratch.ptr,
     );
     return agg_pk;
 }
 
-test aggregateWithRandomness {
+test "aggregateWithRandomness rejects empty items" {
+    const items: []const RandomizedPublicKey = &.{};
+    var scratch: [1]u64 = undefined;
+
+    try std.testing.expectError(
+        BlstError.EmptyAggregate,
+        aggregateWithRandomness(items, false, &scratch),
+    );
+}
+
+test "aggregateWithRandomness rejects too many public key items" {
+    const items: [MAX_AGGREGATE_PER_JOB + 1]RandomizedPublicKey = undefined;
+    var scratch: [1]u64 = undefined;
+
+    try std.testing.expectError(
+        BlstError.TooManyItems,
+        aggregateWithRandomness(&items, false, &scratch),
+    );
+}
+
+test "aggregateWithRandomness rejects insufficient public key scratch space" {
+    const public_key: PublicKey = undefined;
+    const items = [_]RandomizedPublicKey{.{
+        .public_key = &public_key,
+        .randomness = [_]u8{1} ** 32,
+    }};
+
+    try std.testing.expectError(
+        BlstError.InsufficientScratchSpace,
+        aggregateWithRandomness(&items, false, &.{}),
+    );
+}
+
+test "aggregateWithRandomness aggregates 128 public keys" {
     const ikm: [32]u8 = [_]u8{
         0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
         0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
@@ -115,18 +158,18 @@ test aggregateWithRandomness {
         sigs[i] = sig;
     }
     var rands: [32 * MAX_AGGREGATE_PER_JOB]u8 = [_]u8{0} ** (32 * MAX_AGGREGATE_PER_JOB);
-    var scalars_refs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
-    var pks_refs: [MAX_AGGREGATE_PER_JOB]*const PublicKey = undefined;
+    var items: [MAX_AGGREGATE_PER_JOB]RandomizedPublicKey = undefined;
     std.Random.bytes(rand, &rands);
 
     for (0..num_sigs) |i| {
-        scalars_refs[i] = &rands[i * 32];
-        pks_refs[i] = &pks[i];
+        items[i] = .{
+            .public_key = &pks[i],
+            .randomness = rands[i * 32 ..][0..32].*,
+        };
     }
 
     _ = try aggregateWithRandomness(
-        &pks_refs,
-        &rands,
+        &items,
         true,
         scratch[0..],
     );
