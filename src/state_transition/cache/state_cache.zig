@@ -183,22 +183,6 @@ pub const CachedBeaconState = struct {
     }
 };
 
-test "CachedBeaconState.clone()" {
-    const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    defer test_state.deinit();
-    // test clone() api works fine with no memory leak
-    const cloned_cached_state = try test_state.cached_state.clone(allocator, .{});
-    defer {
-        cloned_cached_state.deinit();
-        allocator.destroy(cloned_cached_state);
-    }
-}
-
 test "CachedBeaconState.clone() epoch cache isolation" {
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;

@@ -6,8 +6,6 @@ import {
   aggregatePublicKeys,
   aggregateSignatures,
   aggregateVerify,
-  aggregateWithRandomness,
-  asyncAggregateWithRandomness,
   verifyMultipleAggregateSignatures,
 } from "../src/blst.js";
 
@@ -80,36 +78,6 @@ describe("verifyMultipleAggregateSignatures", () => {
         if (!isValid) throw Error("Invalid");
       },
       id: `verifyMultipleAggregateSignatures ${count} sets`,
-    });
-  }
-});
-
-describe("aggregateWithRandomness", () => {
-  for (const count of [1, 8, 32, 64, 128]) {
-    bench({
-      beforeEach: () => {
-        const sets = generateSets(count);
-        return sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      },
-      fn: (sets) => {
-        aggregateWithRandomness(sets);
-      },
-      id: `aggregateWithRandomness ${count} sets`,
-    });
-  }
-});
-
-describe("asyncAggregateWithRandomness", () => {
-  for (const count of [1, 8, 32, 64, 128]) {
-    bench({
-      beforeEach: () => {
-        const sets = generateSets(count);
-        return sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      },
-      fn: async (sets) => {
-        await asyncAggregateWithRandomness(sets);
-      },
-      id: `asyncAggregateWithRandomness ${count} sets`,
     });
   }
 });

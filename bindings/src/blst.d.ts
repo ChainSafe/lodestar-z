@@ -162,19 +162,6 @@ export function verifyMultipleAggregateSignatures(
 ): boolean;
 
 /**
- * Aggregate multiple public keys and multiple serialized signatures into a single blinded public key and blinded signature.
- *
- * Signatures are deserialized and validated with infinity and group checks before aggregation.
- */
-export declare function aggregateWithRandomness(sets: PkAndSerializedSig[]): PkAndSig;
-
-/**
- * Same as `aggregateWithRandomness`, but the multi-scalar multiplications run on the
- * native thread pool and the call returns a Promise instead of blocking the JS thread.
- */
-export declare function asyncAggregateWithRandomness(sets: PkAndSerializedSig[]): Promise<PkAndSig>;
-
-/**
  * Aggregate multiple signatures into a single signature.
  *
  * If `sigsGroupcheck` is `true`, the signatures will be group checked.
