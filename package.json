@@ -16,6 +16,10 @@
       "import": "./bindings/src/blst.js",
       "types": "./bindings/src/blst.d.ts"
     },
+    "./bls-verifier": {
+      "import": "./bindings/src/bls-verifier.js",
+      "types": "./bindings/src/bls-verifier.d.ts"
+    },
     "./pubkeys": {
       "import": "./bindings/src/pubkeys.js",
       "types": "./bindings/src/pubkeys.d.ts"

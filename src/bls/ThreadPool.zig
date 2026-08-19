@@ -238,7 +238,7 @@ const VerifyMultiWorkItem = struct {
                 job.sigs_groupcheck,
                 &item.randomness,
                 RAND_BITS,
-                &item.message,
+                item.message,
             ) catch {
                 job.err_flag.store(true, .release);
                 break;
@@ -254,6 +254,7 @@ const VerifyMultiWorkItem = struct {
 /// This is the multi-threaded version of the same function in `fast_verify.zig`.
 /// Multiple callers may invoke this concurrently — each call owns its own
 /// pairing buffers and job state, workers pull from a shared queue.
+/// Returns false for invalid cryptographic inputs. Propagates pool lifecycle errors.
 pub fn verifyMultipleAggregateSignatures(
     pool: *ThreadPool,
     io: std.Io,
@@ -261,9 +262,9 @@ pub fn verifyMultipleAggregateSignatures(
     dst: []const u8,
     pks_validate: bool,
     sigs_groupcheck: bool,
-) (BlstError || PoolError || std.Io.Cancelable)!bool {
+) (PoolError || std.Io.Cancelable)!bool {
     const n_elems = items.len;
-    if (n_elems == 0) return BlstError.VerifyFail;
+    if (n_elems == 0) return false;
 
     if (n_elems <= 2 or pool.n_workers <= 1) {
         var pairing_buf: PairingBuf = .{};
@@ -273,7 +274,7 @@ pub fn verifyMultipleAggregateSignatures(
             dst,
             pks_validate,
             sigs_groupcheck,
-        );
+        ) catch false;
     }
 
     const n_active = @min(pool.n_workers, n_elems);
@@ -304,9 +305,9 @@ pub fn verifyMultipleAggregateSignatures(
 
     try pool.submitAndWait(io, item_ptrs[0..n_active]);
 
-    if (job.err_flag.load(.acquire)) return BlstError.VerifyFail;
+    if (job.err_flag.load(.acquire)) return false;
 
-    return mergeAndVerify(&result_bufs, n_active, null);
+    return mergeAndVerify(&result_bufs, n_active, null) catch false;
 }
 
 const AggVerifyJob = struct {
@@ -519,7 +520,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
         pks[i] = sk.toPublicKey();
         sigs[i] = sk.sign(&msgs[i], blst.DST, null);
         items[i] = .{
-            .message = msgs[i],
+            .message = &msgs[i],
             .public_key = &pks[i],
             .signature = &sigs[i],
             .randomness = undefined,

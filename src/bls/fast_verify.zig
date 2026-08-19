@@ -4,9 +4,10 @@ const RAND_BYTES = 8;
 /// Number of random bits used for verification.
 const RAND_BITS = 8 * RAND_BYTES;
 
-/// One signature set and its random coefficient for batch verification.
+/// Borrowed signature-set inputs and an owned random coefficient for batch verification.
+/// Input pointers must remain valid until verification completes.
 pub const BatchVerifyItem = struct {
-    message: SigningRoot,
+    message: *const SigningRoot,
     public_key: *const PublicKey,
     signature: *const Signature,
     randomness: [32]u8,
@@ -42,7 +43,7 @@ pub fn verifyMultipleAggregateSignatures(
             sigs_groupcheck,
             &item.randomness,
             RAND_BITS,
-            &item.message,
+            item.message,
         );
     }
 
