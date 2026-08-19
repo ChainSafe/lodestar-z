@@ -4,7 +4,7 @@ This is the volatile companion to the stable [threat model](../../THREAT_MODEL.m
 implementation facts needed to establish a trust boundary or precondition.
 
 - **Owner:** `@ChainSafe/lodestar`
-- **Last reviewed:** 2026-08-15
+- **Last reviewed:** 2026-08-18
 
 ## Integration status
 
@@ -24,7 +24,7 @@ supported caller supplies a current hostile path.
 
 | Boundary or invariant | Current implementation evidence |
 | --- | --- |
-| N-API exports and shared addon lifecycle | [`bindings/napi/root.zig`](../../bindings/napi/root.zig) registers exports and initializes or tears down process-wide configuration, pools, metrics, and the pubkey cache on first or last environment. |
+| N-API exports and shared addon lifecycle | [`build.zig`](../../build.zig) and [`bindings/napi/root.zig`](../../bindings/napi/root.zig) give zapi class exports a Zig package and addon-specific identity. The identity's version component comes from `build.zig.zon`, which intentionally remains `0.0.0` independently of the npm bindings version. The root module registers exports and initializes or tears down process-wide configuration, pools, metrics, and the pubkey cache on first or last environment. |
 | Beacon-state construction | [`BeaconStateView.createFromBytes`](../../bindings/napi/BeaconStateView.zig) reads the slot and SSZ-deserializes bytes without authenticating a root. Its contract therefore requires trusted state bytes. |
 | State-transition candidate isolation | [`stateTransition`](../../src/state_transition/state_transition.zig) clones the cached state and destroys the clone on error before returning a post-state. Verification options are caller policy. |
 | Serialized block boundary | [`BeaconStateView.stateTransition`](../../bindings/napi/BeaconStateView.zig) accepts serialized signed-block bytes and passes the decoded block to the transition. This is a hostile-input boundary for integrated callers. |
@@ -40,6 +40,8 @@ change reachability and classification, but they are not enforced by this reposi
 
 - Lodestar-ts owns initial checkpoint decoding and root authentication. Without a user-provided
   checkpoint root, trust is delegated to the checkpoint provider.
+- Lodestar loads one version of `@chainsafe/lodestar-z` per Node.js process. Passing zapi class
+  instances between different addon versions is unsupported.
 - Gossip objects receive their specification-defined validation. Range sync and unknown-parent
   recovery instead establish a parent-root hash chain before processing blocks forward.
 - A full state transition is required before a block enters the live chain or fork choice. Archive

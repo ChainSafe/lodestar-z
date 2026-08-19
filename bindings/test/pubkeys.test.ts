@@ -105,6 +105,17 @@ describe("pubkeys", () => {
     expect(pubkeyCache.get(0xffffffff)).toBeUndefined();
   });
 
+  it("rejects indices that are not exact uint32 values", () => {
+    for (const index of [-1, 0.5, 2 ** 32, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => pubkeyCache.get(index)).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.getPubkeyBytes(index)).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.aggregate([0, index])).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.append(index, keypairs[0].pubkeyBytes)).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.ensureCapacity(index)).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.load(tempPkixPath, index)).toThrow("InvalidUnsignedInteger");
+    }
+  });
+
   it("getPubkeyBytes returns the compressed pubkey bytes", () => {
     for (const {index, pubkeyBytes} of keypairs) {
       expect(pubkeyCache.getPubkeyBytes(index)).toEqual(pubkeyBytes);
