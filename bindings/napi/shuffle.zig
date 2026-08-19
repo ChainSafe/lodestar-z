@@ -32,6 +32,19 @@ fn throwShufflingError(err: anyerror) anyerror {
     return err;
 }
 
+/// Exported to JS by the zapi DSL (namespace consts, zapi#73) so the numbers
+/// live next to the functions that use them, matching the reference package's
+/// module-level exports.
+pub const SHUFFLE_ROUNDS_MAINNET: u32 = sons.SHUFFLE_ROUNDS_MAINNET;
+pub const SHUFFLE_ROUNDS_MINIMAL: u32 = sons.SHUFFLE_ROUNDS_MINIMAL;
+
+/// JS-facing mirror of `sons.ByteCount`: the DSL exports enum tag names
+/// verbatim, and the reference package spells them `One`/`Two`.
+pub const ByteCount = enum(u8) {
+    One = @intFromEnum(sons.ByteCount.one),
+    Two = @intFromEnum(sons.ByteCount.two),
+};
+
 fn byteCountFromJs(rand_byte_count: js.Number) !sons.ByteCount {
     return switch (rand_byte_count.assertI32()) {
         1 => .one,
