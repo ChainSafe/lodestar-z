@@ -541,4 +541,3 @@ function expectEqualHex(value: Uint8Array, expected: Uint8Array): void {
 function expectNotEqualHex(value: Uint8Array, expected: Uint8Array): void {
   expect(Buffer.from(value).toString("hex")).to.not.equal(Buffer.from(expected).toString("hex"));
 }
-
