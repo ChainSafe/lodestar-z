@@ -8,8 +8,6 @@ import {
   aggregatePublicKeys as aggregatePublicKeysTS,
   aggregateSignatures as aggregateSignaturesTS,
   aggregateVerify as aggregateVerifyTS,
-  aggregateWithRandomness as aggregateWithRandomnessTS,
-  asyncAggregateWithRandomness as asyncAggregateWithRandomnessTS,
   verifyMultipleAggregateSignatures as verifyTS,
 } from "@chainsafe/blst";
 import {
@@ -18,8 +16,6 @@ import {
   aggregatePublicKeys as aggregatePublicKeysZig,
   aggregateSignatures as aggregateSignaturesZig,
   aggregateVerify as aggregateVerifyZig,
-  aggregateWithRandomness as aggregateWithRandomnessZig,
-  asyncAggregateWithRandomness as asyncAggregateWithRandomnessZig,
   verifyMultipleAggregateSignatures as verifyZig,
 } from "../src/blst.js";
 
@@ -149,58 +145,6 @@ describe("verifyMultipleAggregateSignatures", () => {
         if (!isValid) throw Error("Invalid");
       },
       id: `@chainsafe/blst  ${count} sets`,
-    });
-  }
-});
-
-describe("aggregateWithRandomness", () => {
-  for (const count of [1, 8, 32, 64, 128]) {
-    bench({
-      beforeEach: () => {
-        const sets = generateZigSets(count);
-        return sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      },
-      fn: (sets) => {
-        aggregateWithRandomnessZig(sets);
-      },
-      id: `aggregateWithRandomness lodestar-z (sync)  ${count} sets`,
-    });
-
-    bench({
-      beforeEach: () => {
-        const sets = generateTSSets(count);
-        return sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      },
-      fn: (sets) => {
-        aggregateWithRandomnessTS(sets);
-      },
-      id: `aggregateWithRandomness @chainsafe/blst  ${count} sets`,
-    });
-  }
-});
-
-describe("asyncAggregateWithRandomness", () => {
-  for (const count of [1, 8, 32, 64, 128]) {
-    bench({
-      beforeEach: () => {
-        const sets = generateZigSets(count);
-        return sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      },
-      fn: async (sets) => {
-        await asyncAggregateWithRandomnessZig(sets);
-      },
-      id: `asyncAggregateWithRandomness lodestar-z  ${count} sets`,
-    });
-
-    bench({
-      beforeEach: () => {
-        const sets = generateTSSets(count);
-        return sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      },
-      fn: async (sets) => {
-        await asyncAggregateWithRandomnessTS(sets);
-      },
-      id: `asyncAggregateWithRandomness @chainsafe/blst  ${count} sets`,
     });
   }
 });
