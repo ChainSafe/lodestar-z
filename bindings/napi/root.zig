@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const js = @import("zapi:zapi").js;
+const addon_identity = @import("zapi_addon_identity");
 pub const pool = @import("./pool.zig");
 pub const shuffle = @import("./shuffle.zig");
 pub const config = @import("./config.zig");
@@ -70,5 +71,9 @@ fn cleanup(new_ref_count: u32) void {
 }
 
 comptime {
-    js.exportModule(@This(), .{ .init = init, .cleanup = cleanup });
+    js.exportModule(@This(), .{
+        .identity = addon_identity,
+        .init = init,
+        .cleanup = cleanup,
+    });
 }

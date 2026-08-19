@@ -14,6 +14,7 @@ const builtin = @import("builtin");
 const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
+const addon_identity = @import("zapi_addon_identity");
 const bls = @import("bls");
 const bls_verifier = bls.verifier;
 
@@ -100,7 +101,16 @@ fn formatHex(bytes: []const u8) !js.String {
 
 fn unwrapClass(comptime T: type, value: js.Value) !*T {
     const raw = value.toValue();
-    return js.convertArg(*T, raw.value, raw.env);
+    return js.convertArg(*T, addon_identity, raw.value, raw.env);
+}
+
+/// Materializes a DSL class instance as a low-level `napi.Value`.
+///
+/// The DSL cannot convert these for us: both callers assemble a plain
+/// `{pk, sig}` object, and one runs in an async completion callback outside
+/// the DSL's callback context.
+fn classToValue(comptime T: type, env: napi.Env, instance: T) napi.Value {
+    return .{ .env = env.env, .value = js.convertReturn(T, addon_identity, instance, env.env) };
 }
 
 pub const PublicKey = struct {
@@ -647,8 +657,8 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
     var result_sig: NativeSignature = .{};
     bls.c.blst_p2_to_affine(&result_sig.point, &p2_ret);
 
-    const pk_value = napi.Value{ .env = env.env, .value = js.convertReturn(PublicKey, .{ .raw = result_pk }, env.env) };
-    const sig_value = napi.Value{ .env = env.env, .value = js.convertReturn(Signature, .{ .raw = result_sig }, env.env) };
+    const pk_value = classToValue(PublicKey, env, .{ .raw = result_pk });
+    const sig_value = classToValue(Signature, env, .{ .raw = result_sig });
 
     const result = try env.createObject();
     try result.setNamedProperty("pk", pk_value);
@@ -734,8 +744,8 @@ fn settle(env: napi.Env, status: napi.status.Status, data: *AsyncAggRandData) !v
         return rejectWithError(env, data.deferred, "asyncAggregateWithRandomness", @errorName(err));
     }
 
-    const pk_value = napi.Value{ .env = env.env, .value = js.convertReturn(PublicKey, .{ .raw = data.pk_out }, env.env) };
-    const sig_value = napi.Value{ .env = env.env, .value = js.convertReturn(Signature, .{ .raw = data.sig_out }, env.env) };
+    const pk_value = classToValue(PublicKey, env, .{ .raw = data.pk_out });
+    const sig_value = classToValue(Signature, env, .{ .raw = data.sig_out });
 
     const result = try env.createObject();
     try result.setNamedProperty("pk", pk_value);
