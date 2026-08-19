@@ -251,4 +251,24 @@ describe("pubkeys", () => {
     expect(() => pubkeyCache.append(pubkeyCache.capacity, keypairs[0].pubkeyBytes)).toThrow();
     expect(pubkeyCache.size).toBe(sizeBefore);
   });
+
+  // Validator indices and capacities must not be coerced: ToUint32 would wrap
+  // -1 to 2**32-1 and truncate fractions, silently addressing the wrong entry
+  // or reserving an absurd allocation.
+  it("rejects non-integer indices and capacities instead of coercing them", () => {
+    const sizeBefore = pubkeyCache.size;
+    const capacityBefore = pubkeyCache.capacity;
+
+    for (const index of [-1, 0.5, 2 ** 32, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => pubkeyCache.get(index)).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.getPubkeyBytes(index)).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.aggregate([index])).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.append(index, keypairs[0].pubkeyBytes)).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.ensureCapacity(index)).toThrow("InvalidUnsignedInteger");
+    }
+
+    expect(pubkeyCache.size).toBe(sizeBefore);
+    expect(pubkeyCache.capacity).toBe(capacityBefore);
+    expectCacheContents();
+  });
 });

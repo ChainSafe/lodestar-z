@@ -171,8 +171,8 @@ describe("bls verifier", () => {
             type: BLS_VERIFIER_SET_TYPE.indexed,
           },
         ])
-      ).toThrow("InvalidUint32");
-      expect(() => verifySignatureSetsSameMessage([{index, signature}], signingRoot)).toThrow("InvalidUint32");
+      ).toThrow("InvalidUnsignedInteger");
+      expect(() => verifySignatureSetsSameMessage([{index, signature}], signingRoot)).toThrow("InvalidUnsignedInteger");
     }
   });
 
