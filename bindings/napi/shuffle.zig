@@ -1,5 +1,6 @@
-//! JS binding for the `swap_or_not_shuffle` module. Function names, argument
-//! order and error messages match `@chainsafe/swap-or-not-shuffle`.
+//! JS binding for the `swap_or_not_shuffle` module. Function names and
+//! argument order match `@chainsafe/swap-or-not-shuffle`; errors surface as
+//! Zig error names, like the other bindings here.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -9,28 +10,11 @@ const sons = @import("swap_or_not_shuffle");
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
-/// Verbatim reference error messages.
-fn shuffleErrorMessage(err: anyerror) [:0]const u8 {
-    return switch (err) {
-        error.InvalidSeedLength => "Shuffling seed must be 32 bytes long",
-        error.InvalidActiveIndicesLength => "ActiveIndices must fit in a u32",
-        error.InvalidNumberOfRounds => "Rounds must be between 0 and 255",
-        else => @errorName(err),
-    };
-}
-
-/// The DSL wrapper's own throw of the Zig error name is swallowed as a
-/// pending exception, so throw the reference message first.
-fn throwShufflingError(err: anyerror) anyerror {
-    js.throwError(shuffleErrorMessage(err));
-    return err;
-}
-
 fn byteCountFromJs(rand_byte_count: js.Number) !sons.ByteCount {
     return switch (rand_byte_count.assertI32()) {
         1 => .one,
         2 => .two,
-        else => throwShufflingError(error.InvalidByteCount),
+        else => error.InvalidByteCount,
     };
 }
 
@@ -62,9 +46,7 @@ pub fn unshuffleList(active_indices: js.Uint32Array, seed: js.Uint8Array, rounds
     @memcpy(out, input);
 
     const forwards = false;
-    sons.innerShuffleList(u32, out, try seed.toSlice(), rounds.assertI32(), forwards) catch |err| {
-        return throwShufflingError(err);
-    };
+    try sons.innerShuffleList(u32, out, try seed.toSlice(), rounds.assertI32(), forwards);
     return out_array;
 }
 
@@ -78,7 +60,7 @@ pub fn computeProposerIndex(
     effective_balance_increment: js.Number,
     rounds: js.Number,
 ) !js.Number {
-    const result = sons.computeProposerIndex(
+    const result = try sons.computeProposerIndex(
         allocator,
         try seed.toSlice(),
         try active_indices.toSlice(),
@@ -87,7 +69,7 @@ pub fn computeProposerIndex(
         max_effective_balance_electra.assertI64(),
         effective_balance_increment.assertI64(),
         rounds.assertU32(),
-    ) catch |err| return throwShufflingError(err);
+    );
     return js.Number.from(result);
 }
 
@@ -102,7 +84,7 @@ pub fn computeSyncCommitteeIndices(
     effective_balance_increment: js.Number,
     rounds: js.Number,
 ) !js.Uint32Array {
-    const result = sons.computeSyncCommitteeIndices(
+    const result = try sons.computeSyncCommitteeIndices(
         allocator,
         try seed.toSlice(),
         try active_indices.toSlice(),
@@ -112,7 +94,7 @@ pub fn computeSyncCommitteeIndices(
         max_effective_balance_electra.assertI64(),
         effective_balance_increment.assertI64(),
         rounds.assertU32(),
-    ) catch |err| return throwShufflingError(err);
+    );
     defer allocator.free(result);
     return js.Uint32Array.from(result);
 }

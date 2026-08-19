@@ -104,19 +104,15 @@ describe("shuffle", () => {
   it("should throw for invalid seed", () => {
     const test = buildReferenceTestCase(10, 10);
     let invalidSeed = Buffer.alloc(31, 0xac);
-    expect(() => shuffle.unshuffleList(test.input, invalidSeed, test.rounds)).to.throw(
-      "Shuffling seed must be 32 bytes long"
-    );
+    expect(() => shuffle.unshuffleList(test.input, invalidSeed, test.rounds)).to.throw("InvalidSeedLength");
     invalidSeed = Buffer.alloc(33, 0xac);
-    expect(() => shuffle.unshuffleList(test.input, invalidSeed, test.rounds)).to.throw(
-      "Shuffling seed must be 32 bytes long"
-    );
+    expect(() => shuffle.unshuffleList(test.input, invalidSeed, test.rounds)).to.throw("InvalidSeedLength");
   });
 
   it("should throw for invalid number of rounds", () => {
     const test = buildReferenceTestCase(10, 10);
-    expect(() => shuffle.unshuffleList(test.input, test.seed, -1)).to.throw("Rounds must be between 0 and 255");
-    expect(() => shuffle.unshuffleList(test.input, test.seed, 256)).to.throw("Rounds must be between 0 and 255");
+    expect(() => shuffle.unshuffleList(test.input, test.seed, -1)).to.throw("InvalidNumberOfRounds");
+    expect(() => shuffle.unshuffleList(test.input, test.seed, 256)).to.throw("InvalidNumberOfRounds");
   });
 
   it("should skip validation for empty and single-element lists (reference validation order)", () => {
