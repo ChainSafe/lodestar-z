@@ -97,7 +97,10 @@ pub fn BasicPackedChunks(
             }
             const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
             const child_node = try self.state.getChildNode(gindex);
+
             const new_node = try ST.Element.tree.fromValuePacked(child_node, self.state.pool, index, &value);
+            errdefer self.state.pool.unref(new_node);
+
             try self.state.setChildNode(gindex, new_node);
         }
 
@@ -426,19 +429,21 @@ pub fn CompositeChunks(
         /// clone(transfer_cache) invalidates it — re-get() after either, and don't deinit it.
         pub fn get(self: *Self, index: usize) !ElementPtr {
             const gindex = Gindex.fromDepth(chunk_depth, index);
-            // Always mark as changed - the child may have been previously cached
-            // via getReadonly() without being tracked in changed.
-            try self.state.changed.put(self.state.allocator, gindex, {});
-            const gop = try self.children_data.getOrPut(self.state.allocator, gindex);
-            if (gop.found_existing) {
-                return gop.value_ptr.*;
+            if (!self.state.changed.contains(gindex)) {
+                try self.state.changed.ensureUnusedCapacity(self.state.allocator, 1);
             }
-            // getOrPut's new slot holds an undefined value until we fill it below; drop it on
-            // failure, or a later deinit would free a garbage pointer.
-            errdefer _ = self.children_data.remove(gindex);
+            if (self.children_data.get(gindex)) |child_ptr| {
+                self.state.changed.putAssumeCapacity(gindex, {});
+                return child_ptr;
+            }
+
+            try self.children_data.ensureUnusedCapacity(self.state.allocator, 1);
+
             const child_node = try self.state.getChildNode(gindex);
             const child_ptr = try Element.init(self.state.allocator, self.state.pool, child_node);
-            gop.value_ptr.* = child_ptr;
+
+            self.state.changed.putAssumeCapacity(gindex, {});
+            self.children_data.putAssumeCapacityNoClobber(gindex, child_ptr);
             return child_ptr;
         }
 
@@ -470,9 +475,11 @@ pub fn CompositeChunks(
                 return child_ptr;
             }
             const child_node = try self.state.getChildNode(gindex);
+
             const child_ptr = try Element.init(self.state.allocator, self.state.pool, child_node);
-            try self.children_data.put(self.state.allocator, gindex, child_ptr);
-            // Do NOT add to self.state.changed (read-only)
+            errdefer child_ptr.deinit();
+
+            try self.children_data.putNoClobber(self.state.allocator, gindex, child_ptr);
             return child_ptr;
         }
 
