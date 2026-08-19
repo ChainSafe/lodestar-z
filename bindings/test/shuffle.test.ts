@@ -72,7 +72,6 @@ interface ShuffleTestCase {
   rounds: number;
   seed: Uint8Array;
   input: Uint32Array;
-  shuffled: string;
   unshuffled: string;
 }
 
@@ -92,8 +91,6 @@ function toHex(arr: Uint32Array): string {
 function buildReferenceTestCase(count: number, rounds: number): ShuffleTestCase {
   const seed = new Uint8Array(randomBytes(32));
   const input = getInputArray(count);
-  const shuffled = input.slice();
-  shuffleReference.shuffleList(shuffled, seed, rounds);
   const unshuffled = input.slice();
   shuffleReference.unshuffleList(unshuffled, seed, rounds);
   return {
@@ -101,19 +98,11 @@ function buildReferenceTestCase(count: number, rounds: number): ShuffleTestCase 
     input,
     rounds,
     seed,
-    shuffled: toHex(shuffled),
     unshuffled: toHex(unshuffled),
   };
 }
 
 describe("shuffle", () => {
-  it("should expose the reference constants", () => {
-    expect(shuffle.SHUFFLE_ROUNDS_MAINNET).toEqual(90);
-    expect(shuffle.SHUFFLE_ROUNDS_MINIMAL).toEqual(10);
-    // biome-ignore lint/style/useNamingConvention: reference-canonical enum variant names
-    expect(shuffle.ByteCount).toEqual({One: 1, Two: 2});
-  });
-
   it("should throw for invalid seed", () => {
     const test = buildReferenceTestCase(10, 10);
     let invalidSeed = Buffer.alloc(31, 0xac);
@@ -143,8 +132,18 @@ describe("shuffle", () => {
   it("should not mutate the input array", () => {
     const seed = new Uint8Array(randomBytes(32));
     const input = getInputArray(100);
-    shuffle.shuffleList(input, seed, 90);
+    shuffle.unshuffleList(input, seed, 90);
     expect(Array.from(input)).toEqual(Array.from(getInputArray(100)));
+  });
+
+  it("should round-trip via innerShuffleList", () => {
+    const {seed} = buildReferenceTestCase(1, 1);
+    const original = getInputArray(100);
+    const roundTripped = original.slice();
+    innerShuffleList(roundTripped, seed, 90, false);
+    expect(Array.from(roundTripped)).not.toEqual(Array.from(original));
+    innerShuffleList(roundTripped, seed, 90, true);
+    expect(Array.from(roundTripped)).toEqual(Array.from(original));
   });
 
   it("should match spec test results", () => {
@@ -170,57 +169,11 @@ describe("shuffle", () => {
     buildReferenceTestCase(1000, 90),
   ];
 
-  for (const {id, seed, rounds, input, shuffled, unshuffled} of testCases) {
-    it(`sync - ${id}`, () => {
-      const unshuffledResult = shuffle.unshuffleList(input, seed, rounds);
-      const shuffledResult = shuffle.shuffleList(input, seed, rounds);
-      expect(toHex(shuffledResult)).to.equal(shuffled);
-      expect(toHex(unshuffledResult)).to.equal(unshuffled);
-    });
-    it(`async - ${id}`, async () => {
-      const unshuffledResult = await shuffle.asyncUnshuffleList(input, seed, rounds);
-      const shuffledResult = await shuffle.asyncShuffleList(input, seed, rounds);
-      expect(toHex(shuffledResult)).to.equal(shuffled);
-      expect(toHex(unshuffledResult)).to.equal(unshuffled);
+  for (const {id, seed, rounds, input, unshuffled} of testCases) {
+    it(`${id}`, () => {
+      expect(toHex(shuffle.unshuffleList(input, seed, rounds))).to.equal(unshuffled);
     });
   }
-
-  it("async - should reject with reference error message", async () => {
-    const input = getInputArray(10);
-    await expect(shuffle.asyncUnshuffleList(input, Buffer.alloc(31, 0xac), 10)).rejects.toThrow(
-      "Shuffling seed must be 32 bytes long"
-    );
-    await expect(shuffle.asyncUnshuffleList(input, new Uint8Array(32), 256)).rejects.toThrow(
-      "Rounds must be between 0 and 255"
-    );
-  });
-});
-
-describe("ComputeShuffledIndex", () => {
-  it("should match the naive spec implementation for every index", () => {
-    const seed = new Uint8Array(randomBytes(32));
-    const indexCount = 1000;
-    const rounds = shuffleReference.SHUFFLE_ROUND_COUNT;
-
-    const actual = new shuffle.ComputeShuffledIndex(seed, indexCount, rounds);
-    for (let i = 0; i < indexCount; i++) {
-      expect(actual.get(i), `index ${i}, seed 0x${Buffer.from(seed).toString("hex")}`).toEqual(
-        shuffleReference.computeShuffledIndex(i, indexCount, seed)
-      );
-    }
-  });
-
-  it("should mirror the reference wrapping arithmetic for out-of-range indices", () => {
-    // Expected values were generated with @chainsafe/swap-or-not-shuffle
-    // v1.2.1 (release-mode u32 wrapping) for seed {1}x32, indexCount 10,
-    // rounds 90.
-    const seed = new Uint8Array(32).fill(1);
-    const csi = new shuffle.ComputeShuffledIndex(seed, 10, 90);
-    expect(csi.get(10)).toEqual(8);
-    expect(csi.get(11)).toEqual(1);
-    expect(csi.get(27)).toEqual(9);
-    expect(csi.get(100)).toEqual(1);
-  });
 });
 
 describe("committee indices", () => {
@@ -267,29 +220,6 @@ describe("committee indices", () => {
     }
   });
 
-  it("computeProposerIndexElectra should match the naive implementation", () => {
-    const seed = new Uint8Array(randomBytes(32));
-    expect(
-      shuffle.computeProposerIndexElectra(
-        seed,
-        activeIndices,
-        effectiveBalanceIncrements,
-        MAX_EFFECTIVE_BALANCE_ELECTRA,
-        EFFECTIVE_BALANCE_INCREMENT,
-        SHUFFLE_ROUND_COUNT
-      ),
-      `seed 0x${Buffer.from(seed).toString("hex")}`
-    ).toEqual(
-      shuffleReference.naiveComputeProposerIndex(
-        seed,
-        activeIndices,
-        effectiveBalanceIncrements,
-        2,
-        MAX_EFFECTIVE_BALANCE_ELECTRA
-      )
-    );
-  });
-
   it("computeSyncCommitteeIndices should match the naive implementation", {timeout: 20_000}, () => {
     for (const byteCount of byteCounts) {
       const seed = new Uint8Array(randomBytes(32));
@@ -317,25 +247,5 @@ describe("committee indices", () => {
         )
       );
     }
-  });
-
-  it("computeSyncCommitteeIndicesElectra should match the naive implementation", {timeout: 10_000}, () => {
-    const seed = new Uint8Array(randomBytes(32));
-    expect(
-      Array.from(
-        shuffle.computeSyncCommitteeIndicesElectra(
-          seed,
-          activeIndices,
-          effectiveBalanceIncrements,
-          SYNC_COMMITTEE_SIZE,
-          MAX_EFFECTIVE_BALANCE_ELECTRA,
-          EFFECTIVE_BALANCE_INCREMENT,
-          SHUFFLE_ROUND_COUNT
-        )
-      ),
-      `seed 0x${Buffer.from(seed).toString("hex")}`
-    ).toEqual(
-      shuffleReference.naiveComputeSyncCommitteeIndicesElectra(seed, activeIndices, effectiveBalanceIncrements)
-    );
   });
 });

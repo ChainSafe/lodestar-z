@@ -369,21 +369,6 @@ export declare class BeaconStateView {
   stateTransition(signedBlockBytes: Uint8Array, options?: TransitionOpts): BeaconStateView;
 }
 
-/**
- * Computes `compute_shuffled_index` for single indices, caching per-round
- * pivots and source hashes across calls.
- */
-export declare class ComputeShuffledIndex {
-  constructor(seed: Uint8Array, indexCount: number, rounds: number);
-  get(index: number): number;
-}
-
-/** Pre-electra, byte count for random value is 1, post-electra, byte count for random value is 2 */
-export declare enum ByteCount {
-  One = 1,
-  Two = 2,
-}
-
 declare const bindings: {
   pool: {
     ensureCapacity: (capacity: number) => void;
@@ -392,30 +377,20 @@ declare const bindings: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
   /**
-   * API-compatible port of the `@chainsafe/swap-or-not-shuffle` package,
-   * plus the in-place `innerShuffleList` variant.
+   * Shuffling helpers ported from `@chainsafe/swap-or-not-shuffle`. Only the
+   * functions Lodestar calls are bound; argument order matches the package so
+   * call sites are a drop-in swap.
    */
   shuffle: {
+    /** In-place, zero-allocation variant: mutates `out` instead of returning a copy. */
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
-    shuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Uint32Array;
     unshuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Uint32Array;
-    asyncShuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Promise<Uint32Array>;
-    asyncUnshuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Promise<Uint32Array>;
-    ComputeShuffledIndex: typeof ComputeShuffledIndex;
     computeProposerIndex: (
       seed: Uint8Array,
       activeIndices: Uint32Array,
       effectiveBalanceIncrements: Uint16Array,
-      randByteCount: ByteCount,
-      maxEffectiveBalanceElectra: number,
-      effectiveBalanceIncrement: number,
-      rounds: number
-    ) => number;
-    computeProposerIndexElectra: (
-      seed: Uint8Array,
-      activeIndices: Uint32Array,
-      effectiveBalanceIncrements: Uint16Array,
-      maxEffectiveBalanceElectra: number,
+      randByteCount: 1 | 2,
+      maxEffectiveBalance: number,
       effectiveBalanceIncrement: number,
       rounds: number
     ) => number;
@@ -423,24 +398,12 @@ declare const bindings: {
       seed: Uint8Array,
       activeIndices: Uint32Array,
       effectiveBalanceIncrements: Uint16Array,
-      randByteCount: ByteCount,
+      randByteCount: 1 | 2,
       syncCommitteeSize: number,
-      maxEffectiveBalanceElectra: number,
+      maxEffectiveBalance: number,
       effectiveBalanceIncrement: number,
       rounds: number
     ) => Uint32Array;
-    computeSyncCommitteeIndicesElectra: (
-      seed: Uint8Array,
-      activeIndices: Uint32Array,
-      effectiveBalanceIncrements: Uint16Array,
-      syncCommitteeSize: number,
-      maxEffectiveBalanceElectra: number,
-      effectiveBalanceIncrement: number,
-      rounds: number
-    ) => Uint32Array;
-    SHUFFLE_ROUNDS_MAINNET: number;
-    SHUFFLE_ROUNDS_MINIMAL: number;
-    ByteCount: typeof ByteCount;
   };
   stateTransition: {
     deinitReusedEpochTransitionCache: () => void;

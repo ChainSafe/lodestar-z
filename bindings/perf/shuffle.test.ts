@@ -16,7 +16,7 @@ for (const listSize of [16_384, 250_000, 1_000_000]) {
   describe(`shuffle list - ${listSize} indices`, () => {
     const seed = new Uint8Array(32).fill(0xac);
     const indices = getInputArray(listSize);
-    const rounds = shuffle.SHUFFLE_ROUNDS_MINIMAL;
+    const rounds = 10; // SHUFFLE_ROUNDS_MINIMAL
 
     bench({
       fn: () => {
@@ -30,13 +30,6 @@ for (const listSize of [16_384, 250_000, 1_000_000]) {
         shuffle.unshuffleList(indices, seed, rounds);
       },
       id: `zig - unshuffleList - ${listSize} indices`,
-    });
-
-    bench({
-      fn: async () => {
-        await shuffle.asyncUnshuffleList(indices, seed, rounds);
-      },
-      id: `zig - asyncUnshuffleList - ${listSize} indices`,
     });
   });
 }
@@ -61,31 +54,33 @@ describe("committee indices", () => {
 
     bench({
       fn: () => {
-        shuffle.computeSyncCommitteeIndicesElectra(
+        shuffle.computeSyncCommitteeIndices(
           seed,
           activeIndices,
           effectiveBalanceIncrements,
+          2,
           SYNC_COMMITTEE_SIZE,
           MAX_EFFECTIVE_BALANCE_ELECTRA,
           EFFECTIVE_BALANCE_INCREMENT,
           SHUFFLE_ROUND_COUNT
         );
       },
-      id: `zig - computeSyncCommitteeIndicesElectra - ${listSize} indices`,
+      id: `zig - computeSyncCommitteeIndices - ${listSize} indices`,
     });
 
     bench({
       fn: () => {
-        shuffle.computeProposerIndexElectra(
+        shuffle.computeProposerIndex(
           seed,
           activeIndices,
           effectiveBalanceIncrements,
+          2,
           MAX_EFFECTIVE_BALANCE_ELECTRA,
           EFFECTIVE_BALANCE_INCREMENT,
           SHUFFLE_ROUND_COUNT
         );
       },
-      id: `zig - computeProposerIndexElectra - ${listSize} indices`,
+      id: `zig - computeProposerIndex - ${listSize} indices`,
     });
   }
 });
