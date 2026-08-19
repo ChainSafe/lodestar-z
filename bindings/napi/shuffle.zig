@@ -1,14 +1,5 @@
-//! JS binding for the `swap_or_not_shuffle` module.
-//!
-//! The exposed surface is limited to what Lodestar actually calls
-//! (ChainSafe/lodestar#9829): `unshuffleList`, `computeProposerIndex`,
-//! `computeSyncCommitteeIndices`, plus the pre-existing in-place
-//! `innerShuffleList`. Names, argument order, return values and error
-//! messages match the `@chainsafe/swap-or-not-shuffle` npm package so the
-//! call sites are a drop-in swap. The package's remaining exports (forward
-//! `shuffleList`, the async variants, `ComputeShuffledIndex`, the Electra
-//! wrappers, `SHUFFLE_ROUNDS_*`, `ByteCount`) stay unbound until a consumer
-//! needs them — the Zig module still implements them.
+//! JS binding for the `swap_or_not_shuffle` module. Function names, argument
+//! order and error messages match `@chainsafe/swap-or-not-shuffle`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -18,7 +9,7 @@ const sons = @import("swap_or_not_shuffle");
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
-/// Error messages copied verbatim from the reference implementation.
+/// Verbatim reference error messages.
 fn shuffleErrorMessage(err: anyerror) [:0]const u8 {
     return switch (err) {
         error.InvalidSeedLength => "Shuffling seed must be 32 bytes long",
@@ -28,8 +19,8 @@ fn shuffleErrorMessage(err: anyerror) [:0]const u8 {
     };
 }
 
-/// Throw the reference error message; the DSL wrapper's own throw of the Zig
-/// error name is then swallowed as a pending exception.
+/// The DSL wrapper's own throw of the Zig error name is swallowed as a
+/// pending exception, so throw the reference message first.
 fn throwShufflingError(err: anyerror) anyerror {
     js.throwError(shuffleErrorMessage(err));
     return err;
@@ -45,8 +36,7 @@ fn byteCountFromJs(rand_byte_count: js.Number) !sons.ByteCount {
 
 /// JS: innerShuffleList(out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean): void
 ///
-/// In-place, zero-allocation variant: mutates `out` directly instead of
-/// returning a copy. Not part of the reference package API.
+/// Shuffles `out` in place, no allocation.
 pub fn innerShuffleList(list: js.Uint32Array, seed: js.Uint8Array, rounds: js.Number, forwards: js.Boolean) !void {
     const list_u32 = try list.toSlice();
     const seed_slice = try seed.toSlice();
@@ -62,8 +52,9 @@ pub fn innerShuffleList(list: js.Uint32Array, seed: js.Uint8Array, rounds: js.Nu
 
 /// JS: unshuffleList(activeIndices: Uint32Array, seed: Uint8Array, rounds: number): Uint32Array
 ///
-/// The input array is copied, un-shuffled in place inside the copy, and
-/// returned; the caller's array is never mutated (same as the reference).
+/// Copies the input array and un-shuffles the copy.
+///
+/// Returns the copy.
 pub fn unshuffleList(active_indices: js.Uint32Array, seed: js.Uint8Array, rounds: js.Number) !js.Uint32Array {
     const input = try active_indices.toSlice();
     const out_array = try js.Uint32Array.alloc(input.len);

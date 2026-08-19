@@ -1,7 +1,5 @@
-//! Vectors are taken from the reference repo's test suite
-//! (https://github.com/ChainSafe/swap-or-not-shuffle) and were originally
-//! produced by/checked against the `@chainsafe/swap-or-not-shuffle` npm
-//! package, so any divergence from the Rust implementation fails here.
+//! Vectors come from https://github.com/ChainSafe/swap-or-not-shuffle and its
+//! npm package, so any divergence from the reference fails here.
 
 const std = @import("std");
 const shuffle = @import("./root.zig");

@@ -376,13 +376,8 @@ declare const bindings: {
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
-  /**
-   * Shuffling helpers ported from `@chainsafe/swap-or-not-shuffle`. Only the
-   * functions Lodestar calls are bound; argument order matches the package so
-   * call sites are a drop-in swap.
-   */
   shuffle: {
-    /** In-place, zero-allocation variant: mutates `out` instead of returning a copy. */
+    /** Shuffles `out` in place, no allocation. */
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
     unshuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Uint32Array;
     computeProposerIndex: (

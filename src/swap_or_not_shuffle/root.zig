@@ -1,8 +1,6 @@
 //! Port of https://github.com/ChainSafe/swap-or-not-shuffle/blob/main/src/lib.rs
 //!
-//! Behavior (output values, validation order, and error conditions) is kept
-//! identical to the Rust reference so results have zero divergence with the
-//! `@chainsafe/swap-or-not-shuffle` npm package.
+//! Output values, validation order and error conditions match the reference.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -62,23 +60,11 @@ const ShufflingManager = struct {
     }
 };
 
-/// Shuffles an entire list in-place.
+/// Shuffles an entire list in-place, equivalent to running
+/// `compute_shuffled_index` over every index but ~250x faster on large lists.
+/// Algorithm by [@protolambda](https://github.com/protolambda).
 ///
-/// Note: this is equivalent to the `compute_shuffled_index` function, except
-/// it shuffles an entire list not just a single index. With large lists this
-/// function has been observed to be 250x faster than running
-/// `compute_shuffled_index` across an entire list.
-///
-/// Credits to [@protolambda](https://github.com/protolambda) for defining this
-/// algorithm.
-///
-/// Shuffles if `forwards == true`, otherwise un-shuffles.
-/// It holds that: shuffle_list(shuffle_list(l, r, s, true), r, s, false) == l
-///           and: shuffle_list(shuffle_list(l, r, s, false), r, s, true) == l
-///
-/// The Eth2.0 spec mostly uses shuffling with `forwards == false`, because
-/// backwards shuffled lists are slightly easier to specify, and slightly
-/// easier to compute.
+/// Shuffles if `forwards`, otherwise un-shuffles; each is the other's inverse.
 ///
 /// `T` is `u32` for the JS binding and `ValidatorIndex`/`u64` for Zig callers.
 pub fn innerShuffleList(comptime T: type, out: []T, seed: []const u8, rounds: i32, forwards: bool) ShufflingError!void {
@@ -195,16 +181,13 @@ pub fn unshuffleList(comptime T: type, out: []T, seed: []const u8, rounds: i32) 
     return innerShuffleList(T, out, seed, rounds, false);
 }
 
-/// Computes `compute_shuffled_index` for single indices, caching per-round
-/// pivots and source hashes across calls.
+/// `compute_shuffled_index` for single indices, caching per-round pivots and
+/// source hashes across calls.
 pub const ComputeShuffledIndex = struct {
     arena: std.heap.ArenaAllocator,
     /// Lazily computed pivot per round; there are at most `rounds` values.
     pivot_by_round: []?u32,
-    /// Given 2M active validators there are 2M / 256 = 8k possible
-    /// position_div values, so at most 8k distinct sources per round.
-    /// Unmanaged so the allocator is taken from `self.arena` at call time;
-    /// a managed map would capture a dangling pointer to init's stack frame.
+    /// Unmanaged: a managed map would capture a pointer to init's stack frame.
     source_by_position_by_round: []std.AutoHashMapUnmanaged(u32, [32]u8),
     /// 32 bytes seed + 1 byte round
     pivot_buffer: [PIVOT_VIEW_SIZE]u8,
@@ -295,8 +278,7 @@ pub const ByteCount = enum(u8) {
 };
 
 /// Draws `committee_size` indices from `active_indices` weighted by effective
-/// balance, exactly mirroring the reference `get_committee_indices`.
-/// Caller owns the returned slice.
+/// balance. Caller owns the returned slice.
 pub fn getCommitteeIndices(
     allocator: Allocator,
     committee_size: u32,
