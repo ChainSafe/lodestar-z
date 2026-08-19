@@ -56,7 +56,7 @@ pub fn ensureCapacity(new_size: js.Number) !void {
         return error.PoolNotInitialized;
     }
 
-    const requested = new_size.assertU32();
+    const requested = try new_size.toU32Exact();
     const old_size = state.pool().nodes.capacity;
     if (requested <= old_size) {
         return;

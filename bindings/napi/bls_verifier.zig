@@ -1,4 +1,3 @@
-const std = @import("std");
 const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const bls = @import("bls");
@@ -39,16 +38,6 @@ const SameMessageSet = struct {
     signature: js.Uint8Array,
 };
 
-// TODO(zapi): Replace with value.toU32Exact() after next zapi release: see https://github.com/ChainSafe/zapi/pull/71
-fn uint32(value: js.Number) !u32 {
-    const number = try value.toF64();
-    const max_u32: f64 = @floatFromInt(std.math.maxInt(u32));
-    if (!std.math.isFinite(number) or number < 0 or number > max_u32 or @floor(number) != number) {
-        return error.InvalidUint32;
-    }
-    return @intFromFloat(number);
-}
-
 /// Verify indexed, aggregate, and raw-pubkey signature sets synchronously.
 ///
 /// Returns false on cryptographic failure. Throws for malformed inputs and
@@ -64,7 +53,7 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
     for (0..count) |i| {
         const value = try sets.get(@intCast(i));
         const set = try (try value.asObject(CommonSet)).get();
-        const set_type: SetType = switch (try uint32(set.type)) {
+        const set_type: SetType = switch (try set.type.toU32Exact()) {
             @intFromEnum(SetType.indexed) => .indexed,
             @intFromEnum(SetType.aggregate) => .aggregate,
             @intFromEnum(SetType.single) => .single,
@@ -78,7 +67,7 @@ pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
             .indexed => blk: {
                 if (!pubkeys.state.initialized) return error.PubkeyIndexNotInitialized;
                 const indexed = try (try value.asObject(IndexedSet)).get();
-                const index = try uint32(indexed.index);
+                const index = try indexed.index.toU32Exact();
                 break :blk pubkeys.state.cache.getPubkey(io, index) orelse
                     return error.PubkeyIndexNotFound;
             },
@@ -130,7 +119,7 @@ pub fn verifySignatureSetsSameMessage(sets: js.Array, message: js.Uint8Array) !j
     for (0..count) |i| {
         const value = try sets.get(@intCast(i));
         const set = try (try value.asObject(SameMessageSet)).get();
-        const index = try uint32(set.index);
+        const index = try set.index.toU32Exact();
         const public_key = pubkeys.state.cache.getPubkey(io, index) orelse
             return error.PubkeyIndexNotFound;
 
