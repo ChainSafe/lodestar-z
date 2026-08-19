@@ -1,5 +1,12 @@
-//! Vectors come from https://github.com/ChainSafe/swap-or-not-shuffle and its
-//! npm package, so any divergence from the reference fails here.
+//! Vector provenance:
+//!  - shuffle round-trip and the 100-index spec vector: the upstream repo's
+//!    unit tests (test/unit/shuffle.test.ts)
+//!  - ComputeShuffledIndex, proposer and sync-committee vectors: carried over
+//!    from this repo's src/state_transition/utils/committee_indices.zig tests
+//!  - out-of-range wrapping vector: captured from @chainsafe/swap-or-not-shuffle
+//!    v1.2.1 (see the test)
+//!  - validation-order and error-path cases: written for this port; the
+//!    reference crashes on those inputs, so it has no equivalent
 
 const std = @import("std");
 const shuffle = @import("./root.zig");

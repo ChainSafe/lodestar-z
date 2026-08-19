@@ -184,6 +184,8 @@ pub fn unshuffleList(comptime T: type, out: []T, seed: []const u8, rounds: i32) 
 /// `compute_shuffled_index` for single indices, caching per-round pivots and
 /// source hashes across calls.
 pub const ComputeShuffledIndex = struct {
+    /// The caches below are written until `deinit` and never freed piecemeal,
+    /// so an arena keeps their many small allocations to one teardown.
     arena: std.heap.ArenaAllocator,
     /// Lazily computed pivot per round; there are at most `rounds` values.
     pivot_by_round: []?u32,
