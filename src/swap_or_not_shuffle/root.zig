@@ -1,6 +1,4 @@
 //! Port of https://github.com/ChainSafe/swap-or-not-shuffle/blob/main/src/lib.rs
-//!
-//! Output values, validation order and error conditions match the reference.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -44,7 +42,7 @@ const ShufflingManager = struct {
     fn rawPivot(self: *const ShufflingManager) u64 {
         var digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(self.buf[0..PIVOT_VIEW_SIZE], &digest, .{});
-        return std.mem.readInt(u64, digest[0..8], .little);
+        return std.mem.readInt(u64, digest[0..@sizeOf(u64)], .little);
     }
 
     /// Add the current position into the buffer.
@@ -68,8 +66,6 @@ const ShufflingManager = struct {
 ///
 /// `T` is `u32` for the JS binding and `ValidatorIndex`/`u64` for Zig callers.
 pub fn innerShuffleList(comptime T: type, out: []T, seed: []const u8, rounds: i32, forwards: bool) ShufflingError!void {
-    // Validation order mirrors the reference: rounds == 0 and short lists
-    // return successfully even when the seed or rounds are invalid.
     if (rounds == 0) {
         // no shuffling rounds
         return;
@@ -290,8 +286,7 @@ pub fn getCommitteeIndices(
     effective_balance_increment: i64,
     rounds: u32,
 ) ![]u32 {
-    // The reference panics on these inputs (`% 0` / division by zero); return
-    // errors instead of invoking unchecked arithmetic.
+    // reference divergence: error instead of risking invoking unchecked arithmetic
     if (active_indices.len == 0) {
         return error.EmptyActiveIndices;
     }
