@@ -38,7 +38,8 @@
     "prepare-mainnet": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=mainnet",
     "prepare-minimal": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=minimal",
     "lint": "biome check",
-    "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts"
+    "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts",
+    "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --config .benchrc.yaml --defaultBranch main"
   },
   "keywords": [],
   "author": "ChainSafe Systems",
@@ -67,12 +68,12 @@
     "@biomejs/biome": "^2.3.11",
     "@chainsafe/benchmark": "^2.0.1",
     "@chainsafe/biomejs-config": "^1.0.0",
-    "@chainsafe/blst": "^2.2.0",
     "@lodestar/config": "^1.39.1",
     "@lodestar/era": "^1.39.1",
     "@lodestar/state-transition": "^1.39.1",
     "@lodestar/types": "^1.39.1",
     "@types/node": "^25.0.9",
+    "tsx": "^4.20.6",
     "vitest": "^4.0.17"
   }
 }
