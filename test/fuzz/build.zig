@@ -109,13 +109,13 @@ pub fn build(b: *std.Build) void {
         .{
             .group = "bls",
             .name = "bls_aggregate_pk",
-            .max_input_len = 10240,
+            .max_input_len = 6144,
             .extra_libs = &.{dep_blst.artifact("blst")},
         },
         .{
             .group = "bls",
             .name = "bls_aggregate_sig",
-            .max_input_len = 16384,
+            .max_input_len = 12288,
             .extra_libs = &.{dep_blst.artifact("blst")},
         },
     };

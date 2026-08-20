@@ -23,12 +23,12 @@ validates the manifest and requires exactly these 13 targets:
 | SSZ | `ssz_opaque_roundtrip` | 1,048,576 | Byte, value, root, and ownership round trips for opaque chunked-leaf lists, vectors, and struct containers |
 | BLS | `bls_public_key` | 96 | Public-key decode, validation, serialization, and stable round trips |
 | BLS | `bls_signature` | 192 | Signature decode, validation, serialization, and stable round trips |
-| BLS | `bls_aggregate_pk` | 10,240 | Bounded public-key aggregation with and without randomness |
-| BLS | `bls_aggregate_sig` | 16,384 | Bounded signature aggregation with and without randomness |
+| BLS | `bls_aggregate_pk` | 6,144 | Bounded public-key aggregation |
+| BLS | `bls_aggregate_sig` | 12,288 | Bounded signature aggregation |
 
 SSZ inputs generally start with a target-specific selector byte. BLS inputs are interpreted as raw
-compressed encodings or bounded sequences of encodings and randomness. See `src/fuzz_*.zig` for the
-exact input formats.
+compressed encodings or bounded sequences of encodings. See `src/fuzz_*.zig` for the exact input
+formats.
 
 Operation-stream targets use maximum lengths derived from their bounded step counts. Exact and
 protocol targets use limits derived from their serialized sizes or bounded element cardinalities.

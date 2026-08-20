@@ -14,31 +14,18 @@ pub export fn zig_fuzz_test(
     if (len == 0 or len > Signature.SERIALIZE_SIZE) return;
     const input = buf[0..len];
 
-    const sig = Signature.deserialize(input) catch |err| {
+    const sig = Signature.sigValidate(input, true) catch |err| {
         switch (err) {
             BlstError.BadEncoding, BlstError.PointNotOnCurve, BlstError.PointNotInGroup, BlstError.PkIsInfinity => return,
             else => @panic("unexpected signature decode error"),
         }
     };
 
-    sig.validate(true) catch |err| {
-        switch (err) {
-            BlstError.PointNotInGroup, BlstError.PkIsInfinity => return,
-            else => @panic("unexpected signature validation error"),
-        }
-    };
-
     const encoded = sig.serialize();
-    const sig2 = Signature.deserialize(&encoded) catch |err| {
+    const sig2 = Signature.sigValidate(&encoded, true) catch |err| {
         switch (err) {
             BlstError.BadEncoding, BlstError.PointNotOnCurve, BlstError.PointNotInGroup, BlstError.PkIsInfinity => return,
             else => @panic("unexpected signature roundtrip error"),
-        }
-    };
-    sig2.validate(true) catch |err| {
-        switch (err) {
-            BlstError.PointNotInGroup, BlstError.PkIsInfinity => return,
-            else => @panic("unexpected signature validation error"),
         }
     };
     const encoded2 = sig2.serialize();
