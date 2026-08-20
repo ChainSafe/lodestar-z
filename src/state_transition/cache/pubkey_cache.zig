@@ -226,6 +226,16 @@ pub const PubkeyCache = struct {
         io: std.Io,
         indices: []const u64,
     ) !bls.PublicKey {
+        return self.aggregateIndices(io, u64, indices);
+    }
+
+    /// Aggregate the pubkeys at indices of the requested integer type.
+    pub fn aggregateIndices(
+        self: *const PubkeyCache,
+        io: std.Io,
+        comptime Index: type,
+        indices: []const Index,
+    ) !bls.PublicKey {
         if (indices.len == 0) return error.InvalidLength;
 
         self.lockShared(io);
