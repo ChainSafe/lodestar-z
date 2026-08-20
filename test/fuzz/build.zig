@@ -51,8 +51,11 @@ pub fn build(b: *std.Build) void {
         extract_step.dependOn(&run_extract.step);
     }
 
+    const transport_input_len_max = 1024 * 1024;
     const Fuzzer = struct {
+        group: []const u8,
         name: []const u8,
+        max_input_len: u32,
         extra_libs: []const *std.Build.Step.Compile = &.{},
 
         /// Returns the corpus directory path for this fuzzer.
@@ -67,20 +70,84 @@ pub fn build(b: *std.Build) void {
     };
 
     const fuzzers = &[_]Fuzzer{
-        .{ .name = "ssz_basic" },
-        .{ .name = "ssz_bitlist" },
-        .{ .name = "ssz_bitvector" },
-        .{ .name = "ssz_bytelist" },
-        .{ .name = "ssz_containers" },
-        .{ .name = "ssz_lists" },
-        .{ .name = "ssz_chunked_leaf_set", .extra_libs = &.{dep_hashtree.artifact("hashtree")} },
-        .{ .name = "ssz_nested_opaque_proof", .extra_libs = &.{dep_hashtree.artifact("hashtree")} },
-        .{ .name = "ssz_opaque_roundtrip", .extra_libs = &.{dep_hashtree.artifact("hashtree")} },
-        .{ .name = "bls_public_key", .extra_libs = &.{dep_blst.artifact("blst")} },
-        .{ .name = "bls_signature", .extra_libs = &.{dep_blst.artifact("blst")} },
-        .{ .name = "bls_aggregate_pk", .extra_libs = &.{dep_blst.artifact("blst")} },
-        .{ .name = "bls_aggregate_sig", .extra_libs = &.{dep_blst.artifact("blst")} },
+        .{ .group = "ssz", .name = "ssz_basic", .max_input_len = 33 },
+        .{ .group = "ssz", .name = "ssz_bitlist", .max_input_len = 258 },
+        .{ .group = "ssz", .name = "ssz_bitvector", .max_input_len = 65 },
+        .{ .group = "ssz", .name = "ssz_bytelist", .max_input_len = 1025 },
+        .{ .group = "ssz", .name = "ssz_containers", .max_input_len = 16613 },
+        .{ .group = "ssz", .name = "ssz_lists", .max_input_len = 4161 },
+        .{
+            .group = "ssz",
+            .name = "ssz_chunked_leaf_set",
+            .max_input_len = 4097,
+            .extra_libs = &.{dep_hashtree.artifact("hashtree")},
+        },
+        .{
+            .group = "ssz",
+            .name = "ssz_nested_opaque_proof",
+            .max_input_len = 8191,
+            .extra_libs = &.{dep_hashtree.artifact("hashtree")},
+        },
+        .{
+            .group = "ssz",
+            .name = "ssz_opaque_roundtrip",
+            .max_input_len = 1048576,
+            .extra_libs = &.{dep_hashtree.artifact("hashtree")},
+        },
+        .{
+            .group = "bls",
+            .name = "bls_public_key",
+            .max_input_len = 96,
+            .extra_libs = &.{dep_blst.artifact("blst")},
+        },
+        .{
+            .group = "bls",
+            .name = "bls_signature",
+            .max_input_len = 192,
+            .extra_libs = &.{dep_blst.artifact("blst")},
+        },
+        .{
+            .group = "bls",
+            .name = "bls_aggregate_pk",
+            .max_input_len = 10240,
+            .extra_libs = &.{dep_blst.artifact("blst")},
+        },
+        .{
+            .group = "bls",
+            .name = "bls_aggregate_sig",
+            .max_input_len = 16384,
+            .extra_libs = &.{dep_blst.artifact("blst")},
+        },
     };
+
+    var targets_tsv: std.Io.Writer.Allocating = .init(b.allocator);
+    defer targets_tsv.deinit();
+
+    targets_tsv.writer.writeAll(
+        "schema\tgroup\ttarget\texecutable\tcmin\tmax_input_len\n",
+    ) catch @panic("OOM");
+    inline for (fuzzers) |fuzzer| {
+        if (fuzzer.max_input_len > transport_input_len_max) {
+            @panic("fuzzer max input length exceeds transport ceiling");
+        }
+        targets_tsv.writer.print(
+            "2\t{s}\t{s}\tzig-out/bin/fuzz-{s}\tcorpus/{s}-cmin\t{}\n",
+            .{
+                fuzzer.group,
+                fuzzer.name,
+                fuzzer.name,
+                fuzzer.name,
+                fuzzer.max_input_len,
+            },
+        ) catch @panic("OOM");
+    }
+    const write_files = b.addWriteFiles();
+    const targets_tsv_file = write_files.add("targets.tsv", targets_tsv.written());
+    const install_targets_tsv = b.addInstallFile(
+        targets_tsv_file,
+        "share/lodestar-z-fuzz/targets.tsv",
+    );
+    b.getInstallStep().dependOn(&install_targets_tsv.step);
 
     inline for (fuzzers) |fuzzer| {
         const run_step = b.step(

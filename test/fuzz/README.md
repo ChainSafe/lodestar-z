@@ -1,218 +1,197 @@
-# AFL++ Fuzzer for lodestar-z
+# AFL++ correctness and reliability fuzzing
 
-This directory contains [AFL++](https://aflplus.plus/) fuzzing harnesses
-for SSZ deserialization in lodestar-z.
+This directory contains AFL++ harnesses for correctness and reliability testing of lodestar-z SSZ,
+persistent Merkle tree, and BLS code. This v1 covers the native Zig harnesses only.
 
-## Fuzz Targets
+## Targets
 
-### SSZ
+`build.zig` is the single target registry. A build generates and installs
+`zig-out/share/lodestar-z-fuzz/targets.tsv`, with one row per target containing its schema, group,
+target name, executable, committed minimized corpus, and maximum input length. The controller
+validates the manifest and requires exactly these 13 targets:
 
-| Target | Binary | Description |
-|--------|--------|-------------|
-| `ssz_basic` | `fuzz-ssz_basic` | Bool, Uint8/16/32/64/128/256 |
-| `ssz_bitlist` | `fuzz-ssz_bitlist` | BitList(8/64/2048) |
-| `ssz_bitvector` | `fuzz-ssz_bitvector` | BitVector(4/32/64/512) |
-| `ssz_bytelist` | `fuzz-ssz_bytelist` | ByteList(32/256/1024) |
-| `ssz_containers` | `fuzz-ssz_containers` | Fork, Checkpoint, Eth1Data, Attestation, etc. |
-| `ssz_lists` | `fuzz-ssz_lists` | FixedList(Uint64/32/Bool), VariableList(ByteList) |
-| `ssz_chunked_leaf_set` | `fuzz-ssz_chunked_leaf_set` | FixedList(Uint64, chunked_leaf=true): replay set/commit/get op stream, assert root equivalence against fromValue(reference) |
+| Group | Target | Maximum bytes | Coverage |
+| --- | --- | ---: | --- |
+| SSZ | `ssz_basic` | 33 | Canonical deserialize/serialize round trips for `Bool` and unsigned integers from 8 to 256 bits |
+| SSZ | `ssz_bitlist` | 258 | Sentinel, padding, limit, and round-trip behavior for bitlists of 8, 64, and 2048 bits |
+| SSZ | `ssz_bitvector` | 65 | Fixed size, trailing-bit, and round-trip behavior for bitvectors of 4, 32, 64, and 512 bits |
+| SSZ | `ssz_bytelist` | 1,025 | Length limits and round trips for byte lists with limits 32, 256, and 1024 |
+| SSZ | `ssz_containers` | 16,613 | Fixed and variable phase0 containers, including attestations and indexed attestations |
+| SSZ | `ssz_lists` | 4,161 | Fixed lists of integers and booleans, plus variable lists of byte lists |
+| SSZ | `ssz_chunked_leaf_set` | 4,097 | Bounded `TreeView` operation streams over chunked-leaf lists, checked against a value reference and pool ownership invariants |
+| SSZ | `ssz_nested_opaque_proof` | 8,191 | Single-proof creation and reconstruction through nested `container_struct` and `chunked_leaf` nodes |
+| SSZ | `ssz_opaque_roundtrip` | 1,048,576 | Byte, value, root, and ownership round trips for opaque chunked-leaf lists, vectors, and struct containers |
+| BLS | `bls_public_key` | 96 | Public-key decode, validation, serialization, and stable round trips |
+| BLS | `bls_signature` | 192 | Signature decode, validation, serialization, and stable round trips |
+| BLS | `bls_aggregate_pk` | 10,240 | Bounded public-key aggregation with and without randomness |
+| BLS | `bls_aggregate_sig` | 16,384 | Bounded signature aggregation with and without randomness |
 
-Each SSZ input is `[selector_byte][ssz_data...]`. The first byte selects
-which SSZ type to test within the target. See source files for the mapping.
+SSZ inputs generally start with a target-specific selector byte. BLS inputs are interpreted as raw
+compressed encodings or bounded sequences of encodings and randomness. See `src/fuzz_*.zig` for the
+exact input formats.
 
-### BLS
+Operation-stream targets use maximum lengths derived from their bounded step counts. Exact and
+protocol targets use limits derived from their serialized sizes or bounded element cardinalities.
 
-| Target | Binary | Description |
-|--------|--------|-------------|
-| `bls_public_key` | `fuzz-bls_public_key` | Deserialize → validate → serialize roundtrip for `PublicKey` |
-| `bls_signature` | `fuzz-bls_signature` | Deserialize → validate → serialize roundtrip for `Signature` |
-| `bls_aggregate_pk` | `fuzz-bls_aggregate_pk` | Aggregate multiple `PublicKey`s, with and without randomness |
-| `bls_aggregate_sig` | `fuzz-bls_aggregate_sig` | Aggregate multiple `Signature`s, with and without randomness |
+## Prerequisites and deterministic fixtures
 
-BLS inputs are raw bytes interpreted directly as compressed point encodings.
+The foreground controller requires Linux, Bash 5 or newer, Git, Zig, and AFL++ with `afl-cc` and
+`afl-fuzz` on `PATH`. It also uses standard Linux utilities including `realpath`, `sha256sum`,
+`setsid`, and `stat`.
 
-## Prerequisites
+The verified continuous-runner toolchain is AFL++ 5.02c at commit
+`011cd189801830253c66ecd3cd6919ec01b46c34` with LLVM 18. After changing the AFL++ version, rebuild
+the persistent harnesses and use a new state directory instead of resuming existing state.
 
-Install AFL++ so that `afl-cc` and `afl-fuzz` are on your `PATH`.
+Generate fixtures from the consensus-spec version pinned by the repository:
 
-- **macOS (Homebrew):** `brew install afl++`
-- **Linux:** build from source or use your distro's package (e.g.
-  `apt install afl++` on Debian/Ubuntu).
+```sh
+# From the repository root.
+zig build run:download_spec_tests
+
+# From test/fuzz.
+zig build extract-corpus
+```
+
+The extractor reads `test/spec/version.txt`, not an independently chosen upstream version. It
+extracts matching generic and minimal phase0 vectors for `ssz_basic`, `ssz_bitlist`,
+`ssz_bitvector`, and `ssz_containers`, and writes fixed fixtures for the two opaque-node targets.
+Targets without matching vectors retain their committed hand-written fixtures. Review any resulting
+corpus diff before committing it.
 
 ## Building
 
-From this directory (`test/fuzz`):
+From `test/fuzz`:
 
 ```sh
-zig build
+zig build -Doptimize=ReleaseSafe
 ```
 
-This compiles Zig static libraries for each fuzz target, emits LLVM bitcode,
-then links each with `afl.c` using `afl-cc` to produce instrumented binaries
-at `zig-out/bin/fuzz-*`.
+This produces the instrumented `zig-out/bin/fuzz-*` executables and the installed manifest.
+`ReleaseSafe` keeps runtime safety checks and harness assertions enabled while applying
+optimizations needed for sustained fuzzing throughput. The controller always performs this build
+itself and refuses to run unless the complete Git checkout is clean both before and after it.
 
-## Running the Fuzzer
+## Foreground controller
 
-Each target has its own run step:
+`fuzz-loop.sh` starts one AFL++ worker for each selected target and remains in the foreground. All
+named options must precede selectors:
 
 ```sh
-zig build run-ssz_basic
-zig build run-ssz_containers
+./fuzz-loop.sh \
+  --state-dir "$STATE_DIR" \
+  --timeout-ms "$TIMEOUT_MS" \
+  --memory-mb "$MEMORY_MB" \
+  --min-input-len "$MIN_INPUT_LEN" \
+  [all|ssz|bls|TARGET ...]
 ```
 
-Or invoke `afl-fuzz` directly:
+Selectors default to `all`. Groups and individual target names may be combined; duplicates keep
+their first occurrence in selector-expansion order, while each group expands in manifest order. All
+numeric values must be positive decimals. The minimum input length must not exceed any selected
+target's manifest maximum. Manifest maximums must be positive canonical decimals no greater than
+1 MiB.
+
+`STATE_DIR` is required and must resolve outside the Git checkout. The controller does not write
+campaign output, logs, or mutable state into the repository. Before workers start, it verifies the
+selected binaries and requires each selected `corpus/<target>-cmin` directory to be non-empty,
+committed, and free of untracked files.
+
+### First start and resume
+
+On first start, `STATE_DIR` must not already exist. The controller creates it atomically, starts each
+worker from the selected committed `-cmin` corpus, and stores:
+
+```text
+STATE_DIR/
+├── .initialized
+├── metadata
+├── targets.tsv
+└── output/
+```
+
+The state is published atomically after creating the output directory, marker, metadata, and
+manifest. The marker, metadata, and manifest are mode `0444`. Metadata records the Git commit,
+repository and state paths, manifest hash, `ReleaseSafe` build command, tool paths and versions,
+global resource policy, selected targets, and exact per-target first-start and resume worker
+arguments. AFL++ populates `output/<target>/default/` after each worker starts.
+
+Passing an existing state directory requests a resume. Resume succeeds only when those immutable
+files are present and byte-for-byte metadata matches the current invocation, and every selected
+target has a non-empty `fuzzer_stats`. The same commit, checkout path, manifest, tools, policy,
+selectors, and state path are therefore required. A successful resume uses AFL++ `-i -` to continue
+the existing campaign. Use a new state directory when any recorded value changes.
+
+### Worker lifecycle and status
+
+Each worker runs in its own process group with stdout and stderr discarded to `/dev/null`. Raw AFL++
+output is not a campaign result: in non-TTY mode it emits per-test status indefinitely and would
+cause unbounded disk writes. The controller's own stdout and stderr remain available to its caller,
+including the systemd journal. If any worker exits, the controller treats it as unexpected, reports
+the status, terminates all remaining worker groups, and exits nonzero. It does not restart workers.
+
+On `SIGINT` or `SIGTERM`, the controller sends `SIGTERM` to every worker group, waits for bounded
+shutdown, sends `SIGKILL` to survivors, and reaps them. The controller exits with status 130 for
+`SIGINT` and 143 for `SIGTERM`.
+
+Inspect AFL++ statistics and obtain a quiet aggregate status while the campaign runs:
 
 ```sh
-afl-fuzz -i corpus/ssz_basic-cmin -o afl-out/ssz_basic \
-  -- zig-out/bin/fuzz-ssz_basic @@
+sed -n '1,120p' "$STATE_DIR/output/ssz_basic/default/fuzzer_stats"
+sed -n '$p' "$STATE_DIR/output/ssz_basic/default/plot_data"
+afl-whatsup -s "$STATE_DIR/output/ssz_basic"
 ```
 
-The fuzzer runs indefinitely. Let it run for as long as you like; meaningful
-coverage is usually reached within a few hours, but longer runs can find
-deeper bugs. Press `ctrl+c` to stop the fuzzer when you're done.
+Campaign results are the `fuzzer_stats` and `plot_data` files, aggregate `afl-whatsup` output, saved
+`queue`, `crashes`, and `hangs` entries under `STATE_DIR/output/<target>/default/`, and the
+controller's exit status.
 
-On Linux containers, AFL++ may abort if `/proc/sys/kernel/core_pattern` is
-configured to pipe core dumps. If you cannot change sysctl as root, run with:
+## Bounded saved-input replay
+
+Replay saved crash and hang inputs from external state with a positive per-input timeout:
 
 ```sh
-AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 zig build run-ssz_basic
+./replay-crashes.sh \
+  --state-dir "$STATE_DIR" \
+  --timeout-ms "$REPLAY_TIMEOUT_MS" \
+  [all|ssz|bls|TARGET ...]
 ```
 
-BLS targets work the same way:
+Selectors default to all targets recorded in that state. Replay processes every enumerable saved
+input for the selected targets and preserves harness diagnostics. It exits zero only when state and
+infrastructure validation succeeds and every replayed input exits zero. It still processes the full
+enumerable set before returning an aggregate nonzero status for any timeout, signal, nonzero harness
+exit, oversized target input, or validation failure.
+
+## Offline corpus minimization
+
+Minimization is a deliberate offline maintenance operation. Stop the controller first. Never use a
+live queue as `afl-cmin` input, and never point `afl-cmin` output at a committed corpus directory.
+Copy one saved queue into a temporary input directory and use a distinct temporary output path:
 
 ```sh
-zig build run-bls_public_key
-zig build run-bls_signature
-zig build run-bls_aggregate_pk
-zig build run-bls_aggregate_sig
+TARGET=ssz_basic
+MIN_WORK="$(mktemp -d)"
+MIN_INPUT="$MIN_WORK/input"
+MIN_OUTPUT="$MIN_WORK/output"
+
+mkdir "$MIN_INPUT"
+cp -a "$STATE_DIR/output/$TARGET/default/queue/." "$MIN_INPUT/"
+
+afl-cmin \
+  -i "$MIN_INPUT" \
+  -o "$MIN_OUTPUT" \
+  -- "zig-out/bin/fuzz-$TARGET"
 ```
 
-### Running targets in a loop
+Use AFL++ 5.02c's `afl-cmin` exactly as shown. The harness reads test cases from standard input, so
+do not add `@@`, do not substitute `afl-cmin.bash`, and do not set `AFL_NO_FORKSRV`. Review the
+minimized files, their coverage, and the relevant harness behavior in `MIN_OUTPUT`. Only after that
+review should a separate, intentional repository change update `corpus/<target>-cmin`; sanitize
+filenames when needed and review the final Git diff. The controller never minimizes or updates
+committed corpora.
 
-`fuzz-loop.sh` runs fuzzers in parallel, [minimizes the corpus]()
-with `afl-cmin` after each round, and repeats indefinitely:
+## Scope
 
-```sh
-./fuzz-loop.sh --help
-Usage: ./fuzz-loop.sh [targets...]
-
-Groups:  all, ssz, bls
-Targets: ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig
-
-Examples:
-  ./fuzz-loop.sh                    # fuzz all targets
-  ./fuzz-loop.sh ssz                # fuzz all SSZ targets
-  ./fuzz-loop.sh bls                # fuzz all BLS targets
-  ./fuzz-loop.sh ssz bls_signature  # mix groups and individual targets
-
-Environment:
-  ROUND_DURATION=3600               # seconds per round (default: 3600)
-```
-
-Logs are written to `logs/<target>.log`. Crashes are reported at the end of
-each round; run `./replay-crashes.sh` to inspect them.
-
-## Finding Crashes and Hangs
-
-After (or during) a run, results are written to `afl-out/<target>/default/`:
-
-```
-afl-out/ssz_basic/default/
-├── crashes/ # Inputs that triggered crashes
-├── hangs/   # Inputs that triggered hangs/timeouts
-└── queue/   # All interesting inputs (the evolved corpus)
-```
-
-Each file in `crashes/` or `hangs/` is a raw byte file that triggered the
-issue. The filename encodes metadata about how it was found (e.g.
-`id:000000,sig:06,...`).
-
-## Reproducing a Crash
-
-Replay any crashing input by piping it into the harness:
-
-```sh
-cat afl-out/ssz_basic/default/crashes/<filename> | zig-out/bin/fuzz-ssz_basic
-```
-
-## Corpus Management
-
-After a fuzzing run, the queue in `afl-out/<target>/default/queue/` typically
-contains many redundant inputs. Use `afl-cmin` to find the smallest
-subset that preserves full edge coverage, and `afl-tmin` to shrink
-individual test cases.
-
-> **Important:** The instrumented binary reads input from **stdin**, not
-> from file arguments. Do **not** use `@@` with `afl-cmin`, `afl-tmin`,
-> or `afl-showmap` — it will cause them to see only the C harness
-> coverage (~4 tuples) instead of the Zig SSZ coverage.
-
-### Populating seeds from spec tests
-
-```sh
-# Download spec tests first (from project root)
-cd ../.. && zig build run:download_spec_tests
-
-# Extract to corpus/-initial directories
-cd test/fuzz && zig build extract-corpus
-```
-
-### Corpus minimization (`afl-cmin`)
-
-Reduce the evolved queue to a minimal set covering all discovered edges:
-
-```sh
-AFL_NO_FORKSRV=1 afl-cmin.bash \
-  -i afl-out/ssz_basic/default/queue \
-  -o corpus/ssz_basic-cmin \
-  -- zig-out/bin/fuzz-ssz_basic
-```
-
-`AFL_NO_FORKSRV=1` is required because the Python `afl-cmin` wrapper has
-a bug in some AFL++ versions. Use the `afl-cmin.bash` script instead.
-
-### Windows/macOS compatibility
-
-AFL++ output filenames contain colons (e.g., `id:000024,time:0,...`), which
-are invalid on Windows (NTFS). After running `afl-cmin`,
-rename the output files to replace colons with underscores before committing:
-
-```sh
-./corpus/sanitize-filenames.sh
-```
-
-### Corpus directories
-
-| Directory | Contents |
-|-----------|----------|
-| `corpus/<target>-initial/` | Hand-crafted seeds + spec test vectors |
-| `corpus/<target>-cmin/` | Output of `afl-cmin` (edge-deduplicated corpus) |
-
-## Adding a New Target
-
-1. Create `src/fuzz_<name>.zig` exporting `zig_fuzz_init` and
-   `zig_fuzz_test` with `callconv(.c)`.
-2. Add the name to the `fuzzers` array in `build.zig`. If the target links
-   against blst (i.e. it uses BLS operations), set extra_libs if you're facing similar situation that bls has: e.g., `.extra_libs = &.{dep_blst.artifact("blst")}`.
-3. Create `corpus/<name>-initial/` with hand-crafted seed files.
-4. Add the target to `replay-crashes.sh` target list.
-
-## On MacOs
-
-If you are on macOS, you could temporarily comment these two lines in `pkg/afl++/afl.c`:
-
-```c
-__sanitizer_cov_trace_pc_guard_init(&__start___sancov_guards,
-                                      &__stop___sancov_guards);
-```
-
-On Linux (ELF), the linker automatically synthesizes `__start___sancov_guards`
-and `__stop___sancov_guards` symbols for any custom section. On macOS (Mach-O),
-these symbols are not automatic — they only exist if the section is present and
-non-empty in the final binary. If the Zig-compiled bitcode does not produce the
-`__sancov_guards` section in the expected Mach-O layout, the symbols are absent
-and calling `__sanitizer_cov_trace_pc_guard_init` crashes at startup.
-
-AFL++ has its own coverage tracking that does not depend on this call, so
-commenting it out is safe.
-
+Host service files, concrete numeric resource choices, host/tool/repository updates, and zapi or
+Lodestar runners are outside this v1.
