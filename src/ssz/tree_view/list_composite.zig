@@ -280,6 +280,10 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                     ST.Element.default_value
                 else
                     std.mem.zeroes(ST.Element.Type);
+                errdefer if (comptime @hasDecl(ST.Element, "deinit")) {
+                    ST.Element.deinit(allocator, &value);
+                };
+
                 try ST.Element.tree.toValue(allocator, node, self.tree_view.chunks.state.pool, &value);
                 self.elem_index += 1;
                 return value;

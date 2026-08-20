@@ -532,13 +532,11 @@ pub fn CompositeChunks(
             try self.state.root.getNodesAtDepth(self.state.pool, chunk_depth, 0, nodes);
 
             for (nodes, 0..) |node, i| {
-                if (comptime @hasDecl(ST.Element, "deinit")) {
-                    errdefer {
-                        for (values[0..i]) |*v| {
-                            ST.Element.deinit(allocator, v);
-                        }
+                errdefer if (comptime @hasDecl(ST.Element, "deinit")) {
+                    for (values[0..i]) |*v| {
+                        ST.Element.deinit(allocator, v);
                     }
-                }
+                };
                 if (comptime isFixedType(ST.Element)) {
                     try ST.Element.tree.toValue(node, self.state.pool, &values[i]);
                 } else {
@@ -549,6 +547,10 @@ pub fn CompositeChunks(
                     } else {
                         values[i] = std.mem.zeroes(Value);
                     }
+                    errdefer if (comptime @hasDecl(ST.Element, "deinit")) {
+                        ST.Element.deinit(allocator, &values[i]);
+                    };
+
                     try ST.Element.tree.toValue(allocator, node, self.state.pool, &values[i]);
                 }
             }
