@@ -115,6 +115,26 @@ describe("shuffle", () => {
     expect(() => shuffle.unshuffleList(test.input, test.seed, 256)).to.throw("InvalidNumberOfRounds");
   });
 
+  it("should reject out-of-range numbers instead of coercing them", () => {
+    const seed = new Uint8Array(32);
+    const indices = getInputArray(64);
+    const increments = new Uint16Array(64).fill(32);
+    const maxEb = 2_048_000_000_000;
+    const increment = 1_000_000_000;
+
+    // ToUint32 would wrap these into huge sizes / round counts
+    for (const size of [-1, 2 ** 32]) {
+      expect(() =>
+        shuffle.computeSyncCommitteeIndices(seed, indices, increments, 2, size, maxEb, increment, 90)
+      ).to.throw("InvalidUnsignedInteger");
+    }
+    expect(() => shuffle.computeProposerIndex(seed, indices, increments, 2, maxEb, increment, -1)).to.throw(
+      "InvalidUnsignedInteger"
+    );
+    // ToInt32 would wrap this to 10 rounds
+    expect(() => innerShuffleList(indices.slice(), seed, 2 ** 32 + 10, false)).to.throw("InvalidRoundsSize");
+  });
+
   it("should skip validation for empty and single-element lists (reference validation order)", () => {
     const invalidSeed = Buffer.alloc(31, 0xac);
     expect(Array.from(shuffle.unshuffleList(new Uint32Array([]), invalidSeed, 10))).toEqual([]);
