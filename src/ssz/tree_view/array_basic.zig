@@ -516,3 +516,34 @@ test "ArrayBasicTreeView - get and set" {
     _ = VecU64Type.serializeIntoBytes(&expected, &expected_serialized);
     try std.testing.expectEqualSlices(u8, &expected_serialized, &serialized);
 }
+
+test "ArrayBasicTreeView set OOM reclaims unpublished node" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const VectorType = FixedVectorType(UintType(64), 4, .{});
+    const value: VectorType.Type = .{ 11, 22, 33, 44 };
+    const root = try VectorType.tree.fromValue(&pool, &value);
+    var view = try VectorType.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try std.testing.expectEqual(@as(u64, 11), try view.get(0));
+    const nodes_in_use = pool.getNodesInUse();
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.set(0, 99));
+    failing.fail_index = std.math.maxInt(usize);
+
+    try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+    try std.testing.expectEqual(@as(u64, 11), try view.get(0));
+
+    try view.set(0, 99);
+    try std.testing.expectEqual(@as(u64, 99), try view.get(0));
+}

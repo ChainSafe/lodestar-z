@@ -660,3 +660,33 @@ test "BitVectorType - default_root" {
     const node_513 = try Bits513.tree.default(&pool);
     try std.testing.expectEqualSlices(u8, &Bits513.default_root, node_513.getRoot(&pool));
 }
+
+test "BitVectorTreeView set OOM reclaims unpublished node" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const Bits = BitVectorType(44);
+    const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
+    var view = try Bits.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try std.testing.expect(!try view.get(0));
+    const nodes_in_use = pool.getNodesInUse();
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.set(0, true));
+    failing.fail_index = std.math.maxInt(usize);
+
+    try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+    try std.testing.expect(!try view.get(0));
+
+    try view.set(0, true);
+    try std.testing.expect(try view.get(0));
+}
