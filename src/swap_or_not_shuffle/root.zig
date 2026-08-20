@@ -368,7 +368,7 @@ pub fn computeProposerIndex(
     active_indices: []const u32,
     effective_balance_increments: []const u16,
     rand_byte_count: ByteCount,
-    max_effective_balance_electra: i64,
+    max_effective_balance: i64,
     effective_balance_increment: i64,
     rounds: u32,
 ) !u32 {
@@ -379,7 +379,7 @@ pub fn computeProposerIndex(
         active_indices,
         effective_balance_increments,
         rand_byte_count,
-        max_effective_balance_electra,
+        max_effective_balance,
         effective_balance_increment,
         rounds,
     );
@@ -415,7 +415,7 @@ pub fn computeSyncCommitteeIndices(
     effective_balance_increments: []const u16,
     rand_byte_count: ByteCount,
     sync_committee_size: u32,
-    max_effective_balance_electra: i64,
+    max_effective_balance: i64,
     effective_balance_increment: i64,
     rounds: u32,
 ) ![]u32 {
@@ -426,7 +426,7 @@ pub fn computeSyncCommitteeIndices(
         active_indices,
         effective_balance_increments,
         rand_byte_count,
-        max_effective_balance_electra,
+        max_effective_balance,
         effective_balance_increment,
         rounds,
     );
