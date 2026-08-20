@@ -5,14 +5,140 @@ const ChunkedLeafType = pmt.ChunkedLeaf;
 const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 const ArmOnSizeAllocator = @import("testing_allocators").ArmOnSizeAllocator;
 const FixedContainerType = @import("type/container.zig").FixedContainerType;
+const VariableContainerType = @import("type/container.zig").VariableContainerType;
 const FixedListType = @import("type/list.zig").FixedListType;
+const VariableListType = @import("type/list.zig").VariableListType;
+const VariableVectorType = @import("type/vector.zig").VariableVectorType;
 const UintType = @import("type/uint.zig").UintType;
+const ByteListType = @import("type/byte_list.zig").ByteListType;
 const ByteVectorType = @import("type/byte_vector.zig").ByteVectorType;
 
 const Checkpoint = FixedContainerType(struct {
     epoch: UintType(64),
     root: ByteVectorType(32),
 });
+
+test "VariableContainerType tree.toValue OOM resets output" {
+    const allocator = std.testing.allocator;
+    const Bytes = ByteListType(32);
+    const Container = VariableContainerType(struct {
+        first: Bytes,
+        second: Bytes,
+    });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool.deinit();
+
+    var source = Container.default_value;
+    defer Container.deinit(allocator, &source);
+
+    try source.first.appendSlice(allocator, &.{1});
+    try source.second.appendSlice(allocator, &.{2});
+
+    const root = try Container.tree.fromValue(&pool, &source);
+    defer pool.unref(root);
+
+    // Fail the second field after the first field owns its decoded bytes.
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 2,
+        .resize_fail_index = 0,
+    });
+    const failing_allocator = failing.allocator();
+
+    var out = Container.default_value;
+    defer Container.deinit(failing_allocator, &out);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Container.tree.toValue(failing_allocator, root, &pool, &out),
+    );
+    try std.testing.expect(Container.equals(&out, &Container.default_value));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "VariableVectorType tree.toValue OOM resets output" {
+    const allocator = std.testing.allocator;
+    const Bytes = ByteListType(32);
+    const Vector = VariableVectorType(Bytes, 2);
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool.deinit();
+
+    var source = Vector.default_value;
+    defer Vector.deinit(allocator, &source);
+
+    try source[0].appendSlice(allocator, &.{1});
+    try source[1].appendSlice(allocator, &.{2});
+
+    const root = try Vector.tree.fromValue(&pool, &source);
+    defer pool.unref(root);
+
+    // Fail the second element after the first element owns its decoded bytes.
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 2,
+        .resize_fail_index = 0,
+    });
+    const failing_allocator = failing.allocator();
+
+    var out = Vector.default_value;
+    defer Vector.deinit(failing_allocator, &out);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Vector.tree.toValue(failing_allocator, root, &pool, &out),
+    );
+    try std.testing.expect(Vector.equals(&out, &Vector.default_value));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "VariableListType tree.toValue OOM resets output" {
+    const allocator = std.testing.allocator;
+    const Bytes = ByteListType(32);
+    const List = VariableListType(Bytes, 2);
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool.deinit();
+
+    var source: List.Type = .empty;
+    defer List.deinit(allocator, &source);
+
+    try source.append(allocator, Bytes.default_value);
+    try source.append(allocator, Bytes.default_value);
+    try source.items[0].appendSlice(allocator, &.{1});
+    try source.items[1].appendSlice(allocator, &.{2});
+
+    const root = try List.tree.fromValue(&pool, &source);
+    defer pool.unref(root);
+
+    // Fail the second element after the output list and first element own allocations.
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 4,
+        .resize_fail_index = 0,
+    });
+    const failing_allocator = failing.allocator();
+
+    var out = List.default_value;
+    defer List.deinit(failing_allocator, &out);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        List.tree.toValue(failing_allocator, root, &pool, &out),
+    );
+    try std.testing.expect(List.equals(&out, &List.default_value));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
 
 // std.testing.allocator can't see pool-slot leaks, so check getNodesInUse() against a baseline.
 test "TreeView composite list sliceTo does not leak pool nodes" {
