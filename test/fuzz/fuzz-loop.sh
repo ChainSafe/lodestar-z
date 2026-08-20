@@ -484,7 +484,8 @@ start_workers() {
 
 main() {
     [[ "$(uname -s)" == "Linux" ]] || die "this controller requires Linux"
-    (( BASH_VERSINFO[0] >= 5 )) || die "this controller requires Bash 5 or newer"
+    (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )) ||
+        die "this controller requires Bash 5.1 or newer"
     parse_arguments "$@"
 
     REPO_ROOT="$(realpath -e -- "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)")"

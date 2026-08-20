@@ -35,7 +35,7 @@ protocol targets use limits derived from their serialized sizes or bounded eleme
 
 ## Prerequisites and deterministic fixtures
 
-The foreground controller requires Linux, Bash 5 or newer, Git, Zig, and AFL++ with `afl-cc` and
+The foreground controller requires Linux, Bash 5.1 or newer, Git, Zig, and AFL++ with `afl-cc` and
 `afl-fuzz` on `PATH`. It also uses standard Linux utilities including `realpath`, `sha256sum`,
 `setsid`, and `stat`.
 
