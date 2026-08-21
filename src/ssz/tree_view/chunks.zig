@@ -478,12 +478,43 @@ pub fn CompositeChunks(
 
         /// Get all child views without tracking changes (read-only).
         pub fn getAllReadonly(self: *Self, allocator: Allocator, len: usize) ![]ElementPtr {
-            const views = try allocator.alloc(ElementPtr, len);
+            return self.getReadonlyByRange(allocator, 0, len);
+        }
+
+        /// Get child views for indices [start_index, start_index + count) without tracking
+        /// changes (read-only). The committed nodes for the range are fetched in a single
+        /// traversal instead of one root-to-leaf walk per index.
+        /// Caller owns the returned slice and must free it with `allocator`; the views are
+        /// borrowed — same borrow/invalidation rules as getReadonly().
+        pub fn getReadonlyByRange(self: *Self, allocator: Allocator, start_index: usize, count: usize) ![]ElementPtr {
+            const views = try allocator.alloc(ElementPtr, count);
             errdefer allocator.free(views);
-            for (0..len) |i| {
-                views[i] = try self.getReadonly(i);
+
+            try self.populateNodesByRange(start_index, count);
+
+            for (views, start_index..) |*view, i| {
+                view.* = try self.getReadonly(i);
             }
             return views;
+        }
+
+        /// Bulk-fetch committed nodes for [start_index, start_index + count) into the
+        /// children_nodes cache. Staged entries (uncommitted set/setValue) are left untouched.
+        fn populateNodesByRange(self: *Self, start_index: usize, count: usize) !void {
+            if (count == 0) return;
+
+            const nodes = try self.state.allocator.alloc(Node.Id, count);
+            defer self.state.allocator.free(nodes);
+
+            try self.state.root.getNodesAtDepth(self.state.pool, chunk_depth, start_index, nodes);
+
+            for (nodes, start_index..) |node, index| {
+                const gindex = Gindex.fromDepth(chunk_depth, index);
+                const gop = try self.state.children_nodes.getOrPut(self.state.allocator, gindex);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = node;
+                }
+            }
         }
 
         pub const Value = ST.Element.Type;

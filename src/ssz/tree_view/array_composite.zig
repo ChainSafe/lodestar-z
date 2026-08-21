@@ -144,6 +144,17 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
             return self.chunks.getAllReadonly(allocator, length);
         }
 
+        /// Read-only views for elements [start_index, start_index + count), fetched in a
+        /// single tree traversal. Caller owns the returned slice and must free it with
+        /// `allocator`; the views are borrowed — same borrow/invalidation rules as
+        /// getReadonly().
+        pub fn getReadonlyByRange(self: *Self, allocator: Allocator, start_index: usize, count: usize) ![]Element {
+            if (start_index > length or count > length - start_index) {
+                return error.IndexOutOfBounds;
+            }
+            return self.chunks.getReadonlyByRange(allocator, start_index, count);
+        }
+
         pub fn getAllReadonlyValues(self: *Self, allocator: Allocator) ![]ST.Element.Type {
             return self.chunks.getAllValues(allocator, length);
         }
@@ -583,4 +594,46 @@ test "ArrayCompositeTreeView - get and set" {
     const bytes1_written = try elem1.serializeIntoBytes(&bytes1);
     try std.testing.expectEqual(bytes1.len, bytes1_written);
     try std.testing.expectEqualSlices(u8, &new_val, &bytes1);
+}
+
+test "TreeView vector composite getReadonlyByRange returns range views" {
+    const allocator = std.testing.allocator;
+
+    const Root32 = ByteVectorType(32);
+    const VecRootsType = FixedVectorType(Root32, 4, .{});
+
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
+    defer pool.deinit();
+
+    const value = [4][32]u8{
+        [_]u8{0xaa} ** 32,
+        [_]u8{0xbb} ** 32,
+        [_]u8{0xcc} ** 32,
+        [_]u8{0xdd} ** 32,
+    };
+
+    const tree_node = try VecRootsType.tree.fromValue(&pool, &value);
+    var view = try VecRootsType.TreeView.init(allocator, &pool, tree_node);
+    defer view.deinit();
+
+    const views = try view.getReadonlyByRange(allocator, 1, 2);
+    defer allocator.free(views);
+
+    try std.testing.expectEqual(@as(usize, 2), views.len);
+    for (views, 1..) |elem, i| {
+        var bytes: [Root32.fixed_size]u8 = undefined;
+        const written = try elem.serializeIntoBytes(&bytes);
+        try std.testing.expectEqual(bytes.len, written);
+        try std.testing.expectEqualSlices(u8, &value[i], &bytes);
+    }
+
+    // Range views are borrowed from the same cache as getReadonly().
+    try std.testing.expectEqual(try view.getReadonly(1), views[0]);
+
+    try std.testing.expectError(error.IndexOutOfBounds, view.getReadonlyByRange(allocator, 3, 2));
+    try std.testing.expectError(error.IndexOutOfBounds, view.getReadonlyByRange(allocator, 5, 0));
+
+    const empty = try view.getReadonlyByRange(allocator, 4, 0);
+    defer allocator.free(empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
 }
