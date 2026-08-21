@@ -422,6 +422,7 @@
                     .bls,
                     .persistent_merkle_tree,
                     .hex,
+                    .fork_choice,
                 },
             },
         },
