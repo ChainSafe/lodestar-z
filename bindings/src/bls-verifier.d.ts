@@ -39,14 +39,24 @@ export type SameMessageSignatureSet = {
 
 /**
  * Verify signature sets using cached pubkeys for indexed and aggregate sets.
- * Returns false as soon as a cryptographically invalid set is encountered.
- * Evaluation short-circuits, so later sets are not inspected. Cache and
- * interface errors throw only when encountered before the result is known.
+ * The verifier validates every signature before pairing.
+ *
+ * Returns false as soon as one of these conditions are encountered:
+ *
+ * - A signature is malformed or cryptographically invalid.
+ * - A single set public key is malformed or cryptographically invalid.
+ *
+ * Throws cache and interface errors when encountered before the result is
+ * known.
  */
 export declare function verifySignatureSets(sets: BlsSignatureSet[]): boolean;
 
 /**
  * Randomly aggregate and verify cached pubkeys and signatures over one message.
- * Returns one result per input; invalid interface state throws.
+ * The verifier validates every signature.
+ *
+ * Returns false for an input set when its signature is malformed or cryptographically invalid.
+ *
+ * Returns one result per input. Invalid interface state throws.
  */
 export declare function verifySignatureSetsSameMessage(sets: SameMessageSignatureSet[], message: Uint8Array): boolean[];
