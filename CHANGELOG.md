@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.1](https://github.com/ChainSafe/lodestar-z/compare/v1.0.0...v1.0.1) (2026-08-21)
+
+
+### Code Refactoring
+
+* **pubkeys:** drop deserialized lookup wrappers ([#584](https://github.com/ChainSafe/lodestar-z/issues/584)) ([8ec2897](https://github.com/ChainSafe/lodestar-z/commit/8ec28977146f02a1b075740d4d99a7e1a5993c37))
+* **shuffle:** drop JS signature comments and fix balance param name ([#577](https://github.com/ChainSafe/lodestar-z/issues/577)) ([be598b1](https://github.com/ChainSafe/lodestar-z/commit/be598b1165a9e35892d9aa0eb024ef27d12ef07b))
+
+
+### Miscellaneous Chores
+
+* **docs:** document bls/pk cache trust assumptions ([#585](https://github.com/ChainSafe/lodestar-z/issues/585)) ([66ecb23](https://github.com/ChainSafe/lodestar-z/commit/66ecb2315943f7a0ea2d1a718575be415a4328ae))
+
 ## [1.0.0](https://github.com/ChainSafe/lodestar-z/compare/v0.1.2...v1.0.0) (2026-08-19)
 
 
