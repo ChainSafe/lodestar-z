@@ -18,8 +18,6 @@ fn byteCountFromJs(rand_byte_count: js.Number) !sons.ByteCount {
     };
 }
 
-/// JS: innerShuffleList(out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean): void
-///
 /// Shuffles `out` in place, no allocation.
 pub fn innerShuffleList(list: js.Uint32Array, seed: js.Uint8Array, rounds: js.Number, forwards: js.Boolean) !void {
     const list_u32 = try list.toSlice();
@@ -34,8 +32,6 @@ pub fn innerShuffleList(list: js.Uint32Array, seed: js.Uint8Array, rounds: js.Nu
     try sons.innerShuffleList(u32, list_u32, seed_slice, rounds_i32, is_forwards);
 }
 
-/// JS: unshuffleList(activeIndices: Uint32Array, seed: Uint8Array, rounds: number): Uint32Array
-///
 /// Copies the input array and un-shuffles the copy.
 ///
 /// Returns the copy.
@@ -50,13 +46,12 @@ pub fn unshuffleList(active_indices: js.Uint32Array, seed: js.Uint8Array, rounds
     return out_array;
 }
 
-/// JS: computeProposerIndex(seed, activeIndices, effectiveBalanceIncrements, randByteCount, maxEffectiveBalanceElectra, effectiveBalanceIncrement, rounds): number
 pub fn computeProposerIndex(
     seed: js.Uint8Array,
     active_indices: js.Uint32Array,
     effective_balance_increments: js.Uint16Array,
     rand_byte_count: js.Number,
-    max_effective_balance_electra: js.Number,
+    max_effective_balance: js.Number,
     effective_balance_increment: js.Number,
     rounds: js.Number,
 ) !js.Number {
@@ -66,21 +61,20 @@ pub fn computeProposerIndex(
         try active_indices.toSlice(),
         try effective_balance_increments.toSlice(),
         try byteCountFromJs(rand_byte_count),
-        max_effective_balance_electra.assertI64(),
+        max_effective_balance.assertI64(),
         effective_balance_increment.assertI64(),
         rounds.assertU32(),
     );
     return js.Number.from(result);
 }
 
-/// JS: computeSyncCommitteeIndices(seed, activeIndices, effectiveBalanceIncrements, randByteCount, syncCommitteeSize, maxEffectiveBalanceElectra, effectiveBalanceIncrement, rounds): Uint32Array
 pub fn computeSyncCommitteeIndices(
     seed: js.Uint8Array,
     active_indices: js.Uint32Array,
     effective_balance_increments: js.Uint16Array,
     rand_byte_count: js.Number,
     sync_committee_size: js.Number,
-    max_effective_balance_electra: js.Number,
+    max_effective_balance: js.Number,
     effective_balance_increment: js.Number,
     rounds: js.Number,
 ) !js.Uint32Array {
@@ -91,7 +85,7 @@ pub fn computeSyncCommitteeIndices(
         try effective_balance_increments.toSlice(),
         try byteCountFromJs(rand_byte_count),
         sync_committee_size.assertU32(),
-        max_effective_balance_electra.assertI64(),
+        max_effective_balance.assertI64(),
         effective_balance_increment.assertI64(),
         rounds.assertU32(),
     );
