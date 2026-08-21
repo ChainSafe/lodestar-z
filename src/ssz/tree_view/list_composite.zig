@@ -174,6 +174,18 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             return self.chunks.getAllReadonly(allocator, list_length);
         }
 
+        /// Read-only views for elements [start_index, start_index + count), fetched in a
+        /// single tree traversal. Caller owns the returned slice and must free it with
+        /// `allocator`; the views are borrowed — same borrow/invalidation rules as
+        /// getReadonly().
+        pub fn getReadonlyByRange(self: *Self, allocator: Allocator, start_index: usize, count: usize) ![]Element {
+            const list_length = try self.length();
+            if (start_index > list_length or count > list_length - start_index) {
+                return error.IndexOutOfBounds;
+            }
+            return self.chunks.getReadonlyByRange(allocator, start_index, count);
+        }
+
         pub fn getAllReadonlyValues(self: *Self, allocator: Allocator) ![]ST.Element.Type {
             const list_length = try self.length();
             return self.chunks.getAllValues(allocator, list_length);
@@ -1227,4 +1239,86 @@ test "ListCompositeTreeView - push and serialize" {
     try view.hashTreeRootInto(&hash_root);
     const expected_root = [_]u8{ 0x0c, 0xb9, 0x47, 0x37, 0x7e, 0x17, 0x7f, 0x77, 0x47, 0x19, 0xea, 0xd8, 0xd2, 0x10, 0xaf, 0x9c, 0x64, 0x61, 0xf4, 0x1b, 0xaf, 0x5b, 0x40, 0x82, 0xf8, 0x6a, 0x39, 0x11, 0x45, 0x48, 0x31, 0xb8 };
     try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
+}
+
+test "TreeView composite list getReadonlyByRange returns range views" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
+    defer pool.deinit();
+
+    const ListType = FixedListType(Checkpoint, 16, .{});
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    for (0..6) |i| try list.append(allocator, .{ .epoch = @intCast(i + 1), .root = [_]u8{@intCast(i)} ** 32 });
+
+    const root_node = try ListType.tree.fromValue(&pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const views = try view.getReadonlyByRange(allocator, 2, 3);
+    defer allocator.free(views);
+
+    try std.testing.expectEqual(@as(usize, 3), views.len);
+    for (views, 2..) |elem, i| {
+        var value: Checkpoint.Type = undefined;
+        try elem.toValue(undefined, &value);
+        try std.testing.expectEqual(@as(u64, @intCast(i + 1)), value.epoch);
+        try std.testing.expectEqual(@as(u8, @intCast(i)), value.root[0]);
+    }
+
+    // Range views are borrowed from the same cache as getReadonly().
+    try std.testing.expectEqual(try view.getReadonly(2), views[0]);
+}
+
+test "TreeView composite list getReadonlyByRange bounds" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
+    defer pool.deinit();
+
+    const ListType = FixedListType(Checkpoint, 16, .{});
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    for (0..4) |i| try list.append(allocator, .{ .epoch = @intCast(i), .root = [_]u8{0} ** 32 });
+
+    const root_node = try ListType.tree.fromValue(&pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try std.testing.expectError(error.IndexOutOfBounds, view.getReadonlyByRange(allocator, 0, 5));
+    try std.testing.expectError(error.IndexOutOfBounds, view.getReadonlyByRange(allocator, 5, 0));
+    try std.testing.expectError(error.IndexOutOfBounds, view.getReadonlyByRange(allocator, 3, 2));
+
+    const empty = try view.getReadonlyByRange(allocator, 4, 0);
+    defer allocator.free(empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+test "TreeView composite list getReadonlyByRange sees uncommitted setValue" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
+    defer pool.deinit();
+
+    const ListType = FixedListType(Checkpoint, 16, .{});
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    for (0..4) |i| try list.append(allocator, .{ .epoch = @intCast(i), .root = [_]u8{0} ** 32 });
+
+    const root_node = try ListType.tree.fromValue(&pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    const staged: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{9} ** 32 };
+    try view.setValue(1, &staged);
+
+    const views = try view.getReadonlyByRange(allocator, 0, 4);
+    defer allocator.free(views);
+
+    var value: Checkpoint.Type = undefined;
+    try views[1].toValue(undefined, &value);
+    try std.testing.expectEqual(@as(u64, 99), value.epoch);
+    try views[2].toValue(undefined, &value);
+    try std.testing.expectEqual(@as(u64, 2), value.epoch);
 }
