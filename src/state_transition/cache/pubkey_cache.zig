@@ -11,7 +11,7 @@
 //! Decoding rejects malformed compressed encodings and off-curve points. It
 //! does not reject cryptographically invalid keys.
 //!
-//! Before cache insertion, each population path must establish these missing properties:
+//! Before cache insertion, each population path must establish these properties:
 //!
 //! 1. An append caller must reject cryptographically invalid keys.
 //! 2. Bulk synchronization must use state whose validator additions passed
