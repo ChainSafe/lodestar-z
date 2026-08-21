@@ -120,6 +120,11 @@ pub fn build(b: *std.Build) void {
         },
     };
 
+    const replay_corpus_step = b.step(
+        "replay-corpus",
+        "Replay every committed minimized corpus",
+    );
+
     var targets_tsv: std.Io.Writer.Allocating = .init(b.allocator);
     defer targets_tsv.deinit();
 
@@ -172,6 +177,10 @@ pub fn build(b: *std.Build) void {
             "persistent_merkle_tree",
             lodestar_z.module("persistent_merkle_tree"),
         );
+        const fuzz_options = b.addOptions();
+        fuzz_options.addOption(u32, "max_input_len", fuzzer.max_input_len);
+        const fuzz_options_mod = fuzz_options.createModule();
+        lib_mod.addImport("fuzz_options", fuzz_options_mod);
 
         const lib = b.addLibrary(.{
             .name = fuzzer.name,
@@ -201,5 +210,26 @@ pub fn build(b: *std.Build) void {
             b.fmt("fuzz-{s}", .{fuzzer.name}),
         );
         b.getInstallStep().dependOn(&install.step);
+
+        const repro_mod = b.createModule(.{
+            .root_source_file = b.path("src/repro.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        repro_mod.addImport("fuzz_target", lib_mod);
+        repro_mod.addImport("fuzz_options", fuzz_options_mod);
+
+        const repro_exe = b.addExecutable(.{
+            .name = b.fmt("repro-{s}", .{fuzzer.name}),
+            .root_module = repro_mod,
+        });
+        for (fuzzer.extra_libs) |extra_lib| {
+            repro_exe.root_module.linkLibrary(extra_lib);
+        }
+        b.installArtifact(repro_exe);
+
+        const replay_corpus = b.addRunArtifact(repro_exe);
+        replay_corpus.addDirectoryArg(b.path(fuzzer.corpus(b)));
+        replay_corpus_step.dependOn(&replay_corpus.step);
     }
 }

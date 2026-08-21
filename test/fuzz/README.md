@@ -32,6 +32,8 @@ formats.
 
 Operation-stream targets use maximum lengths derived from their bounded step counts. Exact and
 protocol targets use limits derived from their serialized sizes or bounded element cardinalities.
+The registry injects each limit into both the AFL++ target and its repro executable. Targets reject
+oversized inputs themselves, while the controller also supplies the same limit to AFL++ with `-G`.
 
 ## Prerequisites and deterministic fixtures
 
@@ -67,10 +69,34 @@ From `test/fuzz`:
 zig build -Doptimize=ReleaseSafe
 ```
 
-This produces the instrumented `zig-out/bin/fuzz-*` executables and the installed manifest.
+This produces the instrumented `zig-out/bin/fuzz-*` executables, matching
+`zig-out/bin/repro-*` executables, and the installed manifest.
 `ReleaseSafe` keeps runtime safety checks and harness assertions enabled while applying
 optimizations needed for sustained fuzzing throughput. The controller always performs this build
 itself and refuses to run unless the complete Git checkout is clean both before and after it.
+
+Run one target under AFL++ with its committed minimized corpus:
+
+```sh
+zig build run-ssz_basic -Doptimize=ReleaseSafe
+```
+
+Replay one saved input or every regular file in one directory without AFL++:
+
+```sh
+zig-out/bin/repro-ssz_basic path/to/input
+zig-out/bin/repro-ssz_basic corpus/ssz_basic-cmin
+```
+
+Replay every target's committed minimized corpus with the matching repro executable:
+
+```sh
+zig build replay-corpus -Doptimize=ReleaseSafe
+```
+
+The repro executable calls `zig_fuzz_init` once, enforces the registry input limit before invoking
+the target, and bounds both directory entries and per-file allocation. CI builds the ReleaseSafe
+harnesses and runs this complete committed-corpus replay under one job timeout.
 
 ## Foreground controller
 

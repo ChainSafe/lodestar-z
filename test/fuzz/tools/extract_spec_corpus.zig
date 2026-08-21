@@ -45,12 +45,8 @@ const bitvec_selectors = [_]struct {
     .{ .size = "2", .sel = 0x00 },
     .{ .size = "3", .sel = 0x00 },
     .{ .size = "4", .sel = 0x00 },
-    .{ .size = "5", .sel = 0x01 },
-    .{ .size = "8", .sel = 0x01 },
-    .{ .size = "16", .sel = 0x01 },
     .{ .size = "31", .sel = 0x01 },
     .{ .size = "512", .sel = 0x03 },
-    .{ .size = "513", .sel = 0x03 },
 };
 
 // ssz_containers: consensus types

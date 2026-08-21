@@ -374,6 +374,7 @@ jobs:
   build-fuzz:
     name: build fuzz harnesses
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: build-test
     steps:
       - name: Checkout Repository
@@ -412,12 +413,10 @@ jobs:
           afl-cc --version
           llvm-config-18 --version
       - name: Build fuzz harnesses
-        # Build in ReleaseFast so Zig 0.16's Debug `sanitize_c = .full`
-        # doesn't emit `__ubsan_handle_*` calls into blst's C objects that
-        # `afl-cc` can't resolve without `libubsan`. Fuzzers want throughput
-        # anyway; devs can still use `zig build` in Debug locally.
         run: |
-          cd test/fuzz && zig build -Doptimize=ReleaseFast
+          cd test/fuzz
+          zig build -Doptimize=ReleaseSafe
+          zig build replay-corpus -Doptimize=ReleaseSafe
 
   bindings-test:
     name: bindings - test
