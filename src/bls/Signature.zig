@@ -21,6 +21,15 @@ pub fn validate(self: *const Self, sig_infcheck: bool) BlstError!void {
     if (!c.blst_p2_affine_in_g2(&self.point)) return BlstError.PointNotInGroup;
 }
 
+/// Validate a serialized signature.
+///
+/// Returns the `Signature` on success, `BlstError` on failure.
+pub fn sigValidate(signature: []const u8, sig_infcheck: bool) BlstError!Self {
+    const sig = try Self.deserialize(signature);
+    try sig.validate(sig_infcheck);
+    return sig;
+}
+
 /// Verify the `Signature` against a `PublicKey` and message.
 ///
 /// Returns `BlstError` if verification fails.
@@ -229,6 +238,21 @@ const ikm: [32]u8 = [_]u8{
     0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
     0x48, 0x99,
 };
+
+test sigValidate {
+    const sk = try SecretKey.keyGen(&ikm, null);
+    const signing_root = [_]u8{0x42} ** 32;
+    const sig = sk.sign(&signing_root, DST, null);
+    const sig_comp = sig.compress();
+
+    const validated = try sigValidate(&sig_comp, true);
+    try std.testing.expect(sig.isEqual(&validated));
+
+    var infinity = [_]u8{0} ** COMPRESS_SIZE;
+    infinity[0] = 0xc0;
+    try std.testing.expectError(BlstError.PkIsInfinity, sigValidate(&infinity, true));
+    try std.testing.expect((try sigValidate(&infinity, false)).isInfinity());
+}
 
 test uncompress {
     const sk = try SecretKey.keyGen(&ikm, null);

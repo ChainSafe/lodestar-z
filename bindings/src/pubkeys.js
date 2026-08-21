@@ -2,19 +2,10 @@ import bindings from "./bindings.js";
 
 const native = bindings.pubkeys;
 
-/** @type {Map<number, import("./blst.js").PublicKey>} */
-const pkCache = new Map();
-
 /** @type {import("./pubkeys.d.ts").PubkeyCache} */
 export const pubkeyCache = {
   get(index) {
-    let pk = pkCache.get(index);
-    if (pk !== undefined) return pk;
-    pk = native.get(index);
-    if (pk !== undefined) {
-      pkCache.set(index, pk);
-    }
-    return pk;
+    return native.get(index);
   },
 
   getOrThrow(index) {
@@ -24,6 +15,19 @@ export const pubkeyCache = {
     }
     return pk;
   },
+
+  getPubkeyBytes(index) {
+    return native.getPubkeyBytes(index);
+  },
+
+  getPubkeyBytesOrThrow(index) {
+     const pubkey = native.getPubkeyBytes(index);
+     if (pubkey === undefined) {
+       throw new Error(`pubkeyCache: index ${index} not found`);
+     }
+
+     return pubkey;
+   },
 
   aggregate(indices) {
     if (indices.length === 1) return pubkeyCache.getOrThrow(indices[0]);
@@ -52,12 +56,10 @@ export const pubkeyCache = {
 
   load(filepath, maxCapacity) {
     native.load(filepath, maxCapacity);
-    pkCache.clear();
   },
 
   reset() {
     native.reset();
-    pkCache.clear();
   },
 
   save(filepath) {

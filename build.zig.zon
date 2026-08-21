@@ -20,8 +20,8 @@
             .hash = "zbuild-0.4.0-XJFav-1nAgDmfVY1nVSIIzbkcbuHZj7yMb7Fv8yvznPO",
         },
         .blst = .{
-            .url = "git+https://github.com/ChainSafe/blst.zig.git#5d9543be8a7a1a9942c62a097644286751f95dc7",
-            .hash = "blst_zig-0.0.0-cnAxzisLAADc_A14MqXu_f_rLBRS6m6ki8zHrUjLXYoo",
+            .url = "git+https://github.com/ChainSafe/blst.zig.git#4b13f897d72fe7c9168f0f0eccf055e3941f56c7",
+            .hash = "blst_zig-0.0.0-cnAxzmIPAADDM1ada7PDap4MdWbHWq-zpVsnJYTWWt3q",
             .args = .{
                 .optimize = .ReleaseFast,
                 .portable = true,
@@ -40,8 +40,8 @@
             .hash = "zig_yaml-0.1.0-C1161kFWAwDxjKAFmklKwWVDvz2mmq0Q__bDhGGjeyd3",
         },
         .zapi = .{
-            .url = "https://github.com/ChainSafe/zapi/archive/ab42ab08de92e1ea1f9f8a3f124e5c4bf55d564d.tar.gz",
-            .hash = "zapi-3.1.0-rIqzUXatBABpDFl_itCopyVIJdcEHttbhye7WfTNoHCR",
+            .url = "https://github.com/ChainSafe/zapi/archive/ca55a240a07cbeaba7ac543125a108bca4076a5a.tar.gz",
+            .hash = "zapi-4.0.0-rIqzUasFBQBedS0-MCZXl1BnemstdjIhb5OUdGD305rI",
         },
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench#b2b89c475e3ef1bb2bd71255c80478a82d3e0ca8",
@@ -183,12 +183,16 @@
         },
         .bls = .{
             .root_source_file = "src/bls/root.zig",
-            .link_libraries = .{"blst"},
+            .imports = .{.blst},
+        },
+        .swap_or_not_shuffle = .{
+            .root_source_file = "src/swap_or_not_shuffle/root.zig",
         },
         .state_transition = .{
             .root_source_file = "src/state_transition/root.zig",
             .imports = .{
                 .build_options,
+                .swap_or_not_shuffle,
                 .ssz,
                 .config,
                 .consensus_types,
@@ -354,6 +358,7 @@
                     .bls,
                     .bls_options,
                     .cpu_count,
+                    .swap_or_not_shuffle,
                     .hex,
                     .persistent_merkle_tree,
                     .ssz,
@@ -386,6 +391,7 @@
         .config = .{ .root_module = .config },
         .fork_types = .{ .root_module = .fork_types },
         .bls = .{ .root_module = .bls },
+        .swap_or_not_shuffle = .{ .root_module = .swap_or_not_shuffle },
         .state_transition = .{ .root_module = .state_transition },
         .era = .{ .root_module = .era },
         .fork_choice = .{ .root_module = .fork_choice },

@@ -1,3 +1,24 @@
+//! Lock-protected, append-only cache for validator BLS public keys.
+//!
+//! The cache maps each validator index to a compressed public key and its
+//! uncompressed affine form. It provides:
+//! 1. Lookup by validator index or compressed public key.
+//! 2. Aggregation by validator index.
+//! 3. Bulk synchronization from a validator list.
+//!
+//! # Safety
+//!
+//! Decoding rejects malformed compressed encodings and off-curve points. It
+//! does not reject cryptographically invalid keys.
+//!
+//! Before cache insertion, each population path must establish these properties:
+//!
+//! 1. An append caller must reject cryptographically invalid keys.
+//! 2. Bulk synchronization must use state whose validator additions passed
+//!    deposit proof-of-possession validation.
+//! 3. Snapshot installation must use a file produced from such a cache and
+//!    protected from untrusted modification.
+
 const std = @import("std");
 const bls = @import("bls");
 const types = @import("consensus_types");
@@ -164,6 +185,20 @@ pub const PubkeyCache = struct {
         return self.entries.values()[@intCast(index)];
     }
 
+    /// Get the compressed pubkey bytes for a validator index. A value is
+    /// returned so no pointer into movable map storage escapes the shared
+    /// lock.
+    pub fn getPubkeyBytes(
+        self: *const PubkeyCache,
+        io: std.Io,
+        index: u64,
+    ) ?[48]u8 {
+        self.lockShared(io);
+        defer self.unlockShared(io);
+        if (index >= self.entries.count()) return null;
+        return self.entries.keys()[@intCast(index)];
+    }
+
     /// Copy affine pubkeys for a batch of validator indices while holding one
     /// shared lock. The output is left unchanged when an index is invalid.
     pub fn getPubkeys(
@@ -211,6 +246,16 @@ pub const PubkeyCache = struct {
         self: *const PubkeyCache,
         io: std.Io,
         indices: []const u64,
+    ) !bls.PublicKey {
+        return self.aggregateIndices(io, u64, indices);
+    }
+
+    /// Aggregate the pubkeys at indices of the requested integer type.
+    pub fn aggregateIndices(
+        self: *const PubkeyCache,
+        io: std.Io,
+        comptime Index: type,
+        indices: []const Index,
     ) !bls.PublicKey {
         if (indices.len == 0) return error.InvalidLength;
 

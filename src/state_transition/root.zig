@@ -18,10 +18,10 @@ pub const buildSlashingsCacheFromStateIfNeeded = @import("./cache/slashings_cach
 pub const EpochCacheImmutableData = @import("./cache/epoch_cache.zig").EpochCacheImmutableData;
 pub const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
 
-pub const shuffle = @import("./utils/shuffle.zig");
 pub const committee_indices = @import("./utils/committee_indices.zig");
 pub const PubkeyCache = @import("./cache/pubkey_cache.zig").PubkeyCache;
 pub const pkix = @import("./cache/pkix.zig");
+pub const signature_set_verifier = @import("./signature_sets/verifier.zig");
 
 pub const EpochTransitionCache = @import("./cache/epoch_transition_cache.zig").EpochTransitionCache;
 pub const processEpoch = @import("./epoch/process_epoch.zig").processEpoch;
@@ -131,6 +131,7 @@ const weak_subjectivity = @import("weak_subjectivity.zig");
 pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatestWeakSubjectivityCheckpointEpoch;
 
 test {
+    _ = @import("memory_safety_test.zig");
     _ = @import("./cache/pubkey_cache_test.zig");
     _ = @import("./cache/pkix_test.zig");
     testing.refAllDecls(@This());

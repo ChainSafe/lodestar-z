@@ -5,6 +5,12 @@ const Self = @This();
 /// against an aggregate public key.
 point: c.blst_p2 = c.blst_p2{},
 
+/// A signature paired with its fixed-width random aggregation coefficient.
+pub const RandomizedSignature = struct {
+    signature: *const Signature,
+    randomness: [32]u8,
+};
+
 /// Validates that the aggregate signature is in the correct subgroup (G2).
 pub fn validate(self: *const Self) BlstError!void {
     if (!c.blst_p2_in_g2(&self.point)) return BlstError.PointNotInGroup;
@@ -35,121 +41,6 @@ pub fn aggregate(sigs: []const Signature, sigs_groupcheck: bool) BlstError!Self 
     return agg_sig;
 }
 
-/// Aggregates multiple signatures using multi-scalar multiplication with randomness.
-///
-/// Errors if scratch space is insufficient, or if any signature validation fails.
-///
-/// Returns the `AggregateSignature` on success.
-pub fn aggregateWithRandomness(
-    sigs: []*const Signature,
-    randomness: []const u8,
-    sigs_groupcheck: bool,
-    scratch: []u64,
-) BlstError!Self {
-    if (sigs_groupcheck) for (sigs) |sig| try sig.validate(false);
-    const scratch_len = @divExact(
-        c.blst_p2s_mult_pippenger_scratch_sizeof(sigs.len),
-        @sizeOf(u64),
-    );
-    if (scratch.len < scratch_len) {
-        return BlstError.AggrTypeMismatch;
-    }
-
-    var scalars_refs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
-    for (0..sigs.len) |i| scalars_refs[i] = &randomness[i * 32];
-
-    var agg_sig = Self{};
-
-    c.blst_p2s_mult_pippenger(
-        &agg_sig.point,
-        @ptrCast(sigs[0..sigs.len].ptr),
-        sigs.len,
-        scalars_refs[0..sigs.len].ptr,
-        64,
-        scratch.ptr,
-    );
-    return agg_sig;
-}
-
-test aggregateWithRandomness {
-    const ikm: [32]u8 = [_]u8{
-        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
-        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
-        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
-        0x48, 0x99,
-    };
-
-    const dst = DST;
-    // aug is null
-
-    const num_sigs = MAX_AGGREGATE_PER_JOB;
-
-    var msgs: [num_sigs][32]u8 = undefined;
-    var sks: [num_sigs]SecretKey = undefined;
-    var pks: [num_sigs]PublicKey = undefined;
-    var sigs: [num_sigs]Signature = undefined;
-
-    const pk_scratch_len = @divExact(
-        c.blst_p1s_mult_pippenger_scratch_sizeof(num_sigs),
-        @sizeOf(u64),
-    );
-    const sig_scratch_len = @divExact(
-        c.blst_p2s_mult_pippenger_scratch_sizeof(num_sigs),
-        @sizeOf(u64),
-    );
-    const allocator = std.testing.allocator;
-
-    const pk_scratch = try allocator.alloc(u64, pk_scratch_len);
-    defer allocator.free(pk_scratch);
-
-    const sig_scratch = try allocator.alloc(u64, sig_scratch_len);
-    defer allocator.free(sig_scratch);
-
-    var prng = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        std.testing.io.random(std.mem.asBytes(&seed));
-        break :blk seed;
-    });
-    const rand = prng.random();
-    std.Random.bytes(rand, &msgs[0]);
-    for (0..num_sigs) |i| {
-        const msg = msgs[0];
-        const sk = try SecretKey.keyGen(&ikm, null);
-        const pk = sk.toPublicKey();
-        const sig = sk.sign(&msg, dst, null);
-
-        sks[i] = sk;
-        pks[i] = pk;
-        sigs[i] = sig;
-        msgs[i] = msg;
-        try sig.verify(true, &msgs[i], dst, null, &pks[i], true);
-    }
-    var rands: [32 * MAX_AGGREGATE_PER_JOB]u8 = [_]u8{0} ** (32 * MAX_AGGREGATE_PER_JOB);
-    var sigs_refs: [MAX_AGGREGATE_PER_JOB]*const Signature = undefined;
-    var pks_refs: [MAX_AGGREGATE_PER_JOB]*const PublicKey = undefined;
-    std.Random.bytes(rand, &rands);
-
-    for (0..num_sigs) |i| {
-        sigs_refs[i] = &sigs[i];
-        pks_refs[i] = &pks[i];
-    }
-
-    const agg_pk = try AggregatePublicKey.aggregateWithRandomness(
-        pks_refs[0..],
-        &rands,
-        true,
-        pk_scratch,
-    );
-    const pk = agg_pk.toPublicKey();
-    const agg_sig = try aggregateWithRandomness(
-        &sigs_refs,
-        &rands,
-        true,
-        sig_scratch,
-    );
-    const sig = agg_sig.toSignature();
-    try sig.verify(true, &msgs[0], dst, null, &pk, true);
-}
 const std = @import("std");
 const c = @import("root.zig").c;
 
