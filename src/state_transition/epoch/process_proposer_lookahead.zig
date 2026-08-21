@@ -8,6 +8,7 @@ const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+const FLAG_UNSLASHED = @import("../utils/attester_status.zig").FLAG_UNSLASHED;
 const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const seed_utils = @import("../utils/seed.zig");
@@ -23,7 +24,7 @@ pub fn processProposerLookahead(
     allocator: Allocator,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
-    epoch_transition_cache: *const EpochTransitionCache,
+    epoch_transition_cache: *EpochTransitionCache,
 ) !void {
     const proposer_lookahead: *[ssz.fulu.ProposerLookahead.length]u64 = try state.proposerLookaheadSlice(allocator);
     defer allocator.free(@as([]u64, proposer_lookahead));
@@ -43,9 +44,21 @@ pub fn processProposerLookahead(
     const current_epoch = computeEpochAtSlot(try state.slot());
     const new_epoch = current_epoch + preset.MIN_SEED_LOOKAHEAD + 1;
 
-    // Active indices for the new epoch come from the epoch transition cache
-    // (computed during beforeProcessEpoch for current_epoch + 2)
-    const active_indices = epoch_transition_cache.next_shuffling_active_indices;
+    // Share the N+2 shuffling with processPtcWindow and afterProcessEpoch.
+    const next_shuffling = try epoch_transition_cache.getNextShuffling(allocator, fork, state);
+    const shuffling_active_indices = next_shuffling.active_indices;
+    var unslashed_active_indices: std.ArrayList(ValidatorIndex) = .empty;
+    defer unslashed_active_indices.deinit(allocator);
+
+    const active_indices = if (comptime fork.gte(.gloas)) blk: {
+        try unslashed_active_indices.ensureTotalCapacity(allocator, shuffling_active_indices.len);
+        for (shuffling_active_indices) |index| {
+            if ((epoch_transition_cache.flags[@intCast(index)] & FLAG_UNSLASHED) != 0) {
+                unslashed_active_indices.appendAssumeCapacity(index);
+            }
+        }
+        break :blk unslashed_active_indices.items;
+    } else shuffling_active_indices;
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
 
     var seed: [32]u8 = undefined;
@@ -65,6 +78,7 @@ pub fn processProposerLookahead(
 }
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 
 test "processProposerLookahead sanity" {
     const allocator = std.testing.allocator;
@@ -90,4 +104,58 @@ test "processProposerLookahead sanity" {
         test_state.cached_state.state.castToFork(.fulu),
         test_state.epoch_transition_cache,
     );
+}
+
+fn tryGloasProposerLookahead(
+    allocator: Allocator,
+    epoch_cache: *EpochCache,
+    baseline_state: *BeaconState(.gloas),
+    baseline_cache: *const EpochTransitionCache,
+) !void {
+    var state = try baseline_state.clone(.{ .transfer_cache = false });
+    defer state.deinit();
+
+    var cache = baseline_cache.*;
+    cache.next_shuffling = null;
+    defer if (cache.next_shuffling) |shuffling| shuffling.deinit();
+
+    try processProposerLookahead(.gloas, allocator, epoch_cache, &state, &cache);
+}
+
+test "Gloas proposer lookahead - OOM does not leak or double-free shuffling allocations" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.initGloas(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var saw_oom = false;
+    var saw_success = false;
+    var fail_at: usize = 0;
+    while (fail_at < 2048) : (fail_at += 1) {
+        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
+        defer oom.deinit();
+
+        tryGloasProposerLookahead(
+            oom.allocator(),
+            test_state.cached_state.epoch_cache,
+            test_state.cached_state.state.castToFork(.gloas),
+            test_state.epoch_transition_cache,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_oom = true;
+                try std.testing.expect(!oom.double_free);
+                continue;
+            },
+            else => return err,
+        };
+
+        try std.testing.expect(!oom.double_free);
+        saw_success = true;
+        break;
+    }
+
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(saw_success);
 }

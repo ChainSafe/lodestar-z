@@ -1,5 +1,6 @@
 const std = @import("std");
 const bls = @import("bls");
+const c = @import("constants");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const mainnet_chain_config = @import("config").mainnet.chain_config;
@@ -180,6 +181,60 @@ pub const TestCachedBeaconState = struct {
         var fork_view = try state.fork();
         const fork_epoch = try fork_view.get("epoch");
         return initFromState(allocator, pool, state, ForkSeq.electra, fork_epoch);
+    }
+
+    pub fn initElectraForGloas(allocator: Allocator, pool: *Node.Pool, validator_count: usize) !TestCachedBeaconState {
+        const fork_epoch = if (active_chain_config.ELECTRA_FORK_EPOCH == c.FAR_FUTURE_EPOCH)
+            0
+        else
+            active_chain_config.ELECTRA_FORK_EPOCH;
+        const test_chain_config = active_chain_config.merge(.{ .ELECTRA_FORK_EPOCH = fork_epoch });
+        var state = try generateElectraState(allocator, pool, test_chain_config, validator_count);
+        errdefer {
+            state.deinit();
+            allocator.destroy(state);
+        }
+
+        return initFromState(allocator, pool, state, ForkSeq.electra, fork_epoch);
+    }
+
+    pub fn initGloas(allocator: Allocator, pool: *Node.Pool, validator_count: usize) !TestCachedBeaconState {
+        var test_state = try initElectraForGloas(allocator, pool, validator_count);
+        errdefer test_state.deinit();
+        try test_state.upgradeToGloas(allocator);
+        return test_state;
+    }
+
+    pub fn upgradeToFuluForGloas(self: *TestCachedBeaconState, allocator: Allocator) !void {
+        const fork_epoch = self.cached_state.epoch_cache.epoch;
+        self.config.* = BeaconConfig.init(
+            getConfig(active_chain_config, .gloas, fork_epoch),
+            (try self.cached_state.state.genesisValidatorsRoot()).*,
+        );
+
+        const fulu_state = try state_transition.upgradeStateToFulu(
+            allocator,
+            self.cached_state.config,
+            self.cached_state.epoch_cache,
+            try self.cached_state.state.tryCastToFork(.electra),
+        );
+        self.cached_state.state.* = .{ .fulu = fulu_state.inner };
+    }
+
+    pub fn upgradeToGloas(self: *TestCachedBeaconState, allocator: Allocator) !void {
+        if (self.cached_state.state.forkSeq() == .electra) {
+            try self.upgradeToFuluForGloas(allocator);
+        }
+
+        const gloas_state = try state_transition.upgradeStateToGloas(
+            allocator,
+            std.testing.io,
+            self.cached_state.config,
+            self.cached_state.epoch_cache,
+            try self.cached_state.state.tryCastToFork(.fulu),
+        );
+        self.cached_state.state.* = .{ .gloas = gloas_state.inner };
+        try self.cached_state.state.commit();
     }
 
     pub fn initFromState(allocator: Allocator, pool: *Node.Pool, state: *AnyBeaconState, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconState {

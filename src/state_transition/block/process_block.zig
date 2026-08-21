@@ -24,7 +24,10 @@ const processRandao = @import("./process_randao.zig").processRandao;
 const processSyncAggregate = @import("./process_sync_committee.zig").processSyncAggregate;
 const processWithdrawals = @import("./process_withdrawals.zig").processWithdrawals;
 const getExpectedWithdrawals = @import("./process_withdrawals.zig").getExpectedWithdrawals;
+const processExecutionPayloadBid = @import("./process_execution_payload_bid.zig").processExecutionPayloadBid;
+const processParentExecutionPayload = @import("./process_parent_execution_payload.zig").processParentExecutionPayload;
 const isExecutionEnabled = @import("../utils/execution.zig").isExecutionEnabled;
+const isParentBlockFull = @import("../utils/gloas.zig").isParentBlockFull;
 // TODO: proposer reward api
 // const ProposerRewardType = @import("../types/proposer_reward.zig").ProposerRewardType;
 
@@ -49,11 +52,38 @@ pub fn processBlock(
 ) !void {
     // Build slashings cache against the *current* latest_block_header slot (pre-header update).
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
+    if (comptime fork.gte(.gloas) and block_type == .full) {
+        try processParentExecutionPayload(allocator, io, config, epoch_cache, state, block);
+    }
     try processBlockHeader(fork, allocator, epoch_cache, state, block_type, block);
     // Keep cache slot in sync with latest_block_header without forcing a rebuild.
     slashings_cache.updateLatestBlockSlot(block.slot());
     const body = block.body();
     const current_epoch = epoch_cache.epoch;
+
+    if (comptime fork.gte(.gloas)) {
+        if (try isParentBlockFull(state)) {
+            var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
+                allocator,
+                preset.MAX_WITHDRAWALS_PER_PAYLOAD,
+            ) };
+            defer withdrawals_result.withdrawals.deinit(allocator);
+            var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
+            defer withdrawal_balances.deinit();
+
+            try getExpectedWithdrawals(
+                fork,
+                allocator,
+                epoch_cache,
+                state,
+                &withdrawals_result,
+                &withdrawal_balances,
+            );
+
+            const empty_root: Root = .{0} ** 32;
+            try processWithdrawals(fork, allocator, state, withdrawals_result, empty_root);
+        }
+    }
 
     // The call to the process_execution_payload must happen before the call to the process_randao as the former depends
     // on the randao_mix computed with the reveal of the previous block.
@@ -63,13 +93,17 @@ pub fn processBlock(
             // TODO Deneb: Allow to disable withdrawals for interop testing
             // https://github.com/ethereum/consensus-specs/blob/b62c9e877990242d63aa17a2a59a49bc649a2f2e/specs/eip4844/beacon-chain.md#disabling-withdrawals
             if (comptime fork.gte(.capella)) {
-                var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
-                var withdrawals_result = WithdrawalsResult{ .withdrawals = Withdrawals.initBuffer(&withdrawals_buf) };
+                var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
+                    allocator,
+                    preset.MAX_WITHDRAWALS_PER_PAYLOAD,
+                ) };
+                defer withdrawals_result.withdrawals.deinit(allocator);
                 var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
                 defer withdrawal_balances.deinit();
 
                 try getExpectedWithdrawals(
                     fork,
+                    allocator,
                     epoch_cache,
                     state,
                     &withdrawals_result,
@@ -102,6 +136,17 @@ pub fn processBlock(
         }
     }
 
+    if (comptime fork.gte(.gloas)) {
+        if (comptime block_type != .full) return error.InvalidBlockTypeForFork;
+        try processExecutionPayloadBid(
+            allocator,
+            config,
+            epoch_cache,
+            state,
+            &body.inner.signed_execution_payload_bid,
+        );
+    }
+
     try processRandao(fork, io, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);
     try processEth1Data(fork, state, body.eth1Data());
     try processOperations(fork, allocator, io, config, epoch_cache, state, slashings_cache, block_type, body, opts);
@@ -117,4 +162,79 @@ pub fn processBlock(
             return error.DataAvailabilityPreData;
         }
     }
+}
+
+const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const generateGloasBlock = @import("../test_utils/root.zig").generateGloasBlock;
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
+
+fn tryGloasBlock(
+    allocator: Allocator,
+    config: *const BeaconConfig,
+    epoch_cache: *EpochCache,
+    baseline: *BeaconState(.gloas),
+    block: *const types.gloas.BeaconBlock.Type,
+) !void {
+    var state = try baseline.clone(.{ .transfer_cache = false });
+    defer state.deinit();
+    var slashings_cache = try SlashingsCache.initEmpty(std.testing.allocator);
+    defer slashings_cache.deinit();
+    const fork_block = BeaconBlock(.full, .gloas){ .inner = block.* };
+
+    try processBlock(
+        .gloas,
+        allocator,
+        std.testing.io,
+        config,
+        epoch_cache,
+        &state,
+        &slashings_cache,
+        .full,
+        &fork_block,
+        .{},
+        .{ .verify_signature = false },
+    );
+}
+
+test "Gloas process block - OOM does not leak or double-free transient allocations" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.initGloas(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var block: types.gloas.BeaconBlock.Type = undefined;
+    try generateGloasBlock(test_state.cached_state, &block);
+
+    var saw_oom = false;
+    var saw_success = false;
+    var fail_at: usize = 0;
+    while (fail_at < 512) : (fail_at += 1) {
+        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
+        defer oom.deinit();
+
+        tryGloasBlock(
+            oom.allocator(),
+            test_state.cached_state.config,
+            test_state.cached_state.epoch_cache,
+            test_state.cached_state.state.castToFork(.gloas),
+            &block,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_oom = true;
+                try std.testing.expect(!oom.double_free);
+                continue;
+            },
+            else => return err,
+        };
+
+        try std.testing.expect(!oom.double_free);
+        saw_success = true;
+        break;
+    }
+
+    try std.testing.expect(saw_oom);
+    try std.testing.expect(saw_success);
 }

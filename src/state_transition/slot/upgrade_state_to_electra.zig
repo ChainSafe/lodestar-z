@@ -54,7 +54,7 @@ pub fn upgradeStateToElectra(
     try state.setEarliestExitEpoch(earliest_exit_epoch + 1);
     try state.setEarliestConsolidationEpoch(computeActivationExitEpoch(current_epoch_pre));
     try state.setExitBalanceToConsume(getActivationExitChurnLimit(epoch_cache));
-    try state.setConsolidationBalanceToConsume(getConsolidationChurnLimit(epoch_cache));
+    try state.setConsolidationBalanceToConsume(getConsolidationChurnLimit(.electra, epoch_cache));
 
     const sort_fn = struct {
         pub fn sort(validator_arr: []const ct.phase0.Validator.Type, a: ValidatorIndex, b: ValidatorIndex) bool {

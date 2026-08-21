@@ -1,0 +1,73 @@
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const bls = @import("bls");
+const PublicKey = bls.PublicKey;
+const types = @import("consensus_types");
+const Root = types.primitive.Root.Type;
+const BLSSignature = types.primitive.BLSSignature.Type;
+const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+const BeaconConfig = @import("config").BeaconConfig;
+const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const c = @import("constants");
+const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
+const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
+const AggregatedSignatureSet = @import("../utils/signature_sets.zig").AggregatedSignatureSet;
+const createAggregateSignatureSetFromComponents = @import("../utils/signature_sets.zig").createAggregateSignatureSetFromComponents;
+
+pub fn getPayloadAttestationDataSigningRoot(config: *const BeaconConfig, data: *const types.gloas.PayloadAttestationData.Type, out: *[32]u8) !void {
+    const domain = try config.getDomain(computeEpochAtSlot(data.slot), c.DOMAIN_PTC_ATTESTER, null);
+
+    try computeSigningRoot(types.gloas.PayloadAttestationData, data, domain, out);
+}
+
+/// Consumer needs to free the returned pubkeys array.
+pub fn getIndexedPayloadAttestationSignatureSet(
+    allocator: Allocator,
+    io: std.Io,
+    config: *const BeaconConfig,
+    epoch_cache: *const EpochCache,
+    indexed_payload_attestation: *const types.gloas.IndexedPayloadAttestation.Type,
+) !AggregatedSignatureSet {
+    const attesting_indices = indexed_payload_attestation.attesting_indices.items;
+
+    const pubkeys = try allocator.alloc(PublicKey, attesting_indices.len);
+    errdefer allocator.free(pubkeys);
+    epoch_cache.pubkey_cache.getPubkeys(io, attesting_indices, pubkeys) catch |err| switch (err) {
+        error.InvalidIndex => return error.PubkeyNotFound,
+        else => return err,
+    };
+
+    var signing_root: Root = undefined;
+    try getPayloadAttestationDataSigningRoot(config, &indexed_payload_attestation.data, &signing_root);
+
+    return createAggregateSignatureSetFromComponents(pubkeys, signing_root, indexed_payload_attestation.signature);
+}
+
+const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+
+// The pubkey lookup is fallible, so it can fail after `pubkeys` is allocated. The OOM suite only
+// injects allocator failures, so it never reaches this branch; std.testing.allocator fails the test
+// if the errdefer does not release `pubkeys`.
+test "Gloas indexed payload attestation - unknown validator index does not leak pubkeys" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.initGloas(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var indexed = types.gloas.IndexedPayloadAttestation.default_value;
+    defer indexed.attesting_indices.deinit(allocator);
+    // First index is valid, second is past the end of the pubkey cache.
+    try indexed.attesting_indices.append(allocator, 0);
+    try indexed.attesting_indices.append(allocator, 1_000_000);
+
+    try std.testing.expectError(error.PubkeyNotFound, getIndexedPayloadAttestationSignatureSet(
+        allocator,
+        std.testing.io,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        &indexed,
+    ));
+}
