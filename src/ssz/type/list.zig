@@ -921,7 +921,13 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 return std.mem.readInt(usize, hash[0..8], .little);
             }
 
+            /// Requires initialized, logically empty `out`; on error, resets it to `default_value`.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
+                errdefer {
+                    deinit(allocator, out);
+                    out.* = default_value;
+                }
+
                 const len = try length(node, pool);
                 const chunk_count = len;
                 if (chunk_count == 0) {

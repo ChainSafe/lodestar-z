@@ -786,7 +786,13 @@ pub fn VariableContainerType(comptime ST: type) type {
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }
 
+            /// Requires initialized, logically empty `out`; on error, resets it to `default_value`.
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
+                errdefer {
+                    deinit(allocator, out);
+                    out.* = default_value;
+                }
+
                 var nodes: [chunk_count]Node.Id = undefined;
                 try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
                 inline for (fields, 0..) |field, i| {
