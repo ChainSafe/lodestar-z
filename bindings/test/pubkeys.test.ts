@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {afterAll, beforeEach, describe, expect, it} from "vitest";
-import {PublicKey, SecretKey, aggregatePublicKeys} from "../src/blst.js";
+import {SecretKey, aggregatePublicKeys} from "../src/blst.js";
 import {pubkeyCache} from "../src/pubkeys.js";
 
 // Generate deterministic valid BLS keypairs for testing
@@ -28,19 +28,14 @@ function expectCacheContents(count = keypairs.length): void {
   expect(pubkeyCache.size).toBe(count);
   for (const {index, pubkeyBytes} of keypairs.slice(0, count)) {
     expect(pubkeyCache.getIndex(pubkeyBytes)).toBe(index);
-    expect(pubkeyCache.getPubkeyBytesOrThrow(index)).toEqual(pubkeyBytes);
+    expect(pubkeyCache.getOrThrow(index).toBytes()).toEqual(pubkeyBytes);
   }
-  expect(pubkeyCache.getPubkeyBytes(count)).toBeUndefined();
+  expect(pubkeyCache.get(count)).toBeUndefined();
 }
 
 describe("pubkeys", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "lodestar-z-pubkeys-"));
   const tempPkixPath = path.join(tempDir, "cache.pkix");
-
-  it("does not expose deserialized pubkey lookup helpers", () => {
-    expect("get" in pubkeyCache).toBe(false);
-    expect("getOrThrow" in pubkeyCache).toBe(false);
-  });
 
   beforeEach(() => {
     seedCache();
@@ -58,7 +53,7 @@ describe("pubkeys", () => {
     expect(pubkeyCache.size).toBe(keypairs.length);
 
     for (const {index, pubkeyBytes} of keypairs) {
-      expect(pubkeyCache.getPubkeyBytes(index)).toBeDefined();
+      expect(pubkeyCache.get(index)).toBeDefined();
       expect(pubkeyCache.getIndex(pubkeyBytes)).toBe(index);
     }
   });
@@ -90,18 +85,31 @@ describe("pubkeys", () => {
     expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBeNull();
   });
 
+  it("get returns fresh deserialized values without memoizing wrappers", () => {
+    const pk1 = pubkeyCache.getOrThrow(0);
+    const pk2 = pubkeyCache.getOrThrow(0);
+    expect(pk1).not.toBe(pk2);
+    expect(pk1.toBytes()).toEqual(keypairs[0].pubkeyBytes);
+    expect(pk2.toBytes()).toEqual(keypairs[0].pubkeyBytes);
+  });
+
   it("aggregates cached pubkeys by index", () => {
     const indices = [0, 1, 2];
-    const expected = aggregatePublicKeys(indices.map((index) => PublicKey.fromBytes(keypairs[index].pubkeyBytes)));
+    const expected = aggregatePublicKeys(indices.map((index) => pubkeyCache.getOrThrow(index)));
     expect(pubkeyCache.aggregate(indices).toBytes()).toEqual(expected.toBytes());
   });
 
   it("returns the cached pubkey for a single-key aggregate", () => {
-    expect(pubkeyCache.aggregate([1]).toBytes()).toEqual(keypairs[1].pubkeyBytes);
+    expect(pubkeyCache.aggregate([1]).toBytes()).toEqual(pubkeyCache.getOrThrow(1).toBytes());
+  });
+
+  it("get returns undefined for out-of-range index", () => {
+    expect(pubkeyCache.get(0xffffffff)).toBeUndefined();
   });
 
   it("rejects indices that are not exact uint32 values", () => {
     for (const index of [-1, 0.5, 2 ** 32, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => pubkeyCache.get(index)).toThrow("InvalidUnsignedInteger");
       expect(() => pubkeyCache.getPubkeyBytes(index)).toThrow("InvalidUnsignedInteger");
       expect(() => pubkeyCache.aggregate([0, index])).toThrow("InvalidUnsignedInteger");
       expect(() => pubkeyCache.append(index, keypairs[0].pubkeyBytes)).toThrow("InvalidUnsignedInteger");
@@ -116,9 +124,9 @@ describe("pubkeys", () => {
     }
   });
 
-  it("getPubkeyBytes returns copies", () => {
+  it("getPubkeyBytes matches getOrThrow().toBytes() and returns copies", () => {
     const bytes = pubkeyCache.getPubkeyBytes(0);
-    expect(bytes).toEqual(keypairs[0].pubkeyBytes);
+    expect(bytes).toEqual(pubkeyCache.getOrThrow(0).toBytes());
     expect(pubkeyCache.getPubkeyBytes(0)).not.toBe(bytes);
   });
 
@@ -135,29 +143,29 @@ describe("pubkeys", () => {
   });
 
   it("accepts identical replays and rejects conflicting replays", () => {
-    const before = pubkeyCache.getPubkeyBytesOrThrow(0);
+    const before = pubkeyCache.getOrThrow(0);
     pubkeyCache.append(0, keypairs[0].pubkeyBytes);
     expect(() => pubkeyCache.append(0, keypairs[1].pubkeyBytes)).toThrow("ConflictingPubkey");
     expect(() => pubkeyCache.append(0, new Uint8Array(1))).toThrow("InvalidPubkeyLength");
 
-    const after = pubkeyCache.getPubkeyBytesOrThrow(0);
-    expect(after).toEqual(before);
-    expect(after).toEqual(keypairs[0].pubkeyBytes);
+    const after = pubkeyCache.getOrThrow(0);
+    expect(after.toBytes()).toEqual(before.toBytes());
+    expect(after.toBytes()).toEqual(keypairs[0].pubkeyBytes);
   });
 
   it("reset clears both lookup directions and invalidates cached values", () => {
-    const before = pubkeyCache.getPubkeyBytesOrThrow(0);
+    const before = pubkeyCache.getOrThrow(0);
 
     pubkeyCache.reset();
     expect(pubkeyCache.size).toBe(0);
-    expect(pubkeyCache.getPubkeyBytes(0)).toBeUndefined();
+    expect(pubkeyCache.get(0)).toBeUndefined();
     expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBeNull();
 
     pubkeyCache.append(0, keypairs[1].pubkeyBytes);
 
-    const after = pubkeyCache.getPubkeyBytesOrThrow(0);
-    expect(after).not.toEqual(before);
-    expect(after).toEqual(keypairs[1].pubkeyBytes);
+    const after = pubkeyCache.getOrThrow(0);
+    expect(after).not.toBe(before);
+    expect(after.toBytes()).toEqual(keypairs[1].pubkeyBytes);
   });
 
   it("save replaces an existing file and load restores cache contents", () => {
@@ -166,9 +174,12 @@ describe("pubkeys", () => {
 
     pubkeyCache.reset();
     pubkeyCache.append(0, keypairs[1].pubkeyBytes);
+    const beforeLoad = pubkeyCache.getOrThrow(0);
+
     pubkeyCache.load(tempPkixPath, pubkeyCache.capacity);
 
     expectCacheContents();
+    expect(pubkeyCache.getOrThrow(0)).not.toBe(beforeLoad);
   });
 
   it.runIf(process.platform === "linux")("save/load preserves a path longer than the former stack buffer", () => {

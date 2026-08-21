@@ -80,7 +80,7 @@ describe("worker isolation", () => {
       }
 
       parentPort.postMessage({
-        pubkey: pubkeyCache.getPubkeyBytesOrThrow(0),
+        pubkey: pubkeyCache.getOrThrow(0).toBytes(),
         save: capture(() => pubkeyCache.save("")),
         load: capture(() => pubkeyCache.load("", 1)),
         reset: capture(() => pubkeyCache.reset()),
@@ -94,7 +94,7 @@ describe("worker isolation", () => {
       save: "PubkeyCacheControlEnvironmentOnly",
     });
     expect(pubkeyCache.size).toBe(1);
-    expect(pubkeyCache.getPubkeyBytesOrThrow(0)).toEqual(expected);
+    expect(pubkeyCache.getOrThrow(0).toBytes()).toEqual(expected);
   });
 });
 

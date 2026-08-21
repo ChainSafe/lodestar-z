@@ -4,6 +4,18 @@ const native = bindings.pubkeys;
 
 /** @type {import("./pubkeys.d.ts").PubkeyCache} */
 export const pubkeyCache = {
+  get(index) {
+    return native.get(index);
+  },
+
+  getOrThrow(index) {
+    const pk = pubkeyCache.get(index);
+    if (pk === undefined) {
+      throw Error(`pubkeyCache: index ${index} not found`);
+    }
+    return pk;
+  },
+
   getPubkeyBytes(index) {
     return native.getPubkeyBytes(index);
   },
@@ -18,6 +30,7 @@ export const pubkeyCache = {
    },
 
   aggregate(indices) {
+    if (indices.length === 1) return pubkeyCache.getOrThrow(indices[0]);
     return native.aggregate(indices);
   },
 
