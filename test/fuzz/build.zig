@@ -56,9 +56,15 @@ pub fn build(b: *std.Build) void {
         extra_libs: []const *std.Build.Step.Compile = &.{},
 
         /// Returns the corpus directory path for this fuzzer.
-        /// Change the suffix to switch between -cmin and -initial.
+        /// Prefers the edge-deduplicated -cmin corpus and falls back to the
+        /// hand-crafted -initial seeds for targets that have not been
+        /// minimized yet.
         fn corpus(self: @This(), bb: *std.Build) []const u8 {
-            return bb.fmt("corpus/{s}-cmin", .{self.name});
+            const cmin = bb.fmt("corpus/{s}-cmin", .{self.name});
+            bb.build_root.handle.access(bb.graph.io, cmin, .{}) catch {
+                return bb.fmt("corpus/{s}-initial", .{self.name});
+            };
+            return cmin;
         }
 
         fn source(self: @This(), bb: *std.Build) []const u8 {
@@ -82,57 +88,123 @@ pub fn build(b: *std.Build) void {
         .{ .name = "bls_aggregate_sig", .extra_libs = &.{dep_blst.artifact("blst")} },
     };
 
+    const addHarnessImports = struct {
+        fn add(mod: *std.Build.Module, lz: *std.Build.Dependency) void {
+            mod.addImport("ssz", lz.module("ssz"));
+            mod.addImport("bls", lz.module("bls"));
+            mod.addImport(
+                "consensus_types",
+                lz.module("consensus_types"),
+            );
+            mod.addImport("preset", lz.module("preset"));
+            mod.addImport("constants", lz.module("constants"));
+            mod.addImport(
+                "persistent_merkle_tree",
+                lz.module("persistent_merkle_tree"),
+            );
+        }
+    }.add;
+
+    const replay_step = b.step(
+        "replay",
+        "Replay the committed corpus through every harness natively (no AFL++)",
+    );
+
+    // Instrumented builds need afl-cc; the native replay path does not.
+    // Degrade the AFL++ steps to a clear failure instead of panicking at
+    // configure time, so `zig build replay` works on hosts without AFL++.
+    const have_afl = if (b.findProgram(&.{"afl-cc"}, &.{})) |_| true else |_| false;
+    const afl_missing_msg =
+        "afl-cc not found; install AFL++ to build instrumented fuzzers " ++
+        "(see test/fuzz/README.md). `zig build replay` works without it.";
+
     inline for (fuzzers) |fuzzer| {
         const run_step = b.step(
             b.fmt("run-{s}", .{fuzzer.name}),
             b.fmt("Run {s} with afl-fuzz", .{fuzzer.name}),
         );
 
-        const lib_mod = b.createModule(.{
+        if (have_afl) {
+            const lib_mod = b.createModule(.{
+                .root_source_file = b.path(fuzzer.source(b)),
+                .target = target,
+                .optimize = optimize,
+            });
+            addHarnessImports(lib_mod, lodestar_z);
+
+            const lib = b.addLibrary(.{
+                .name = fuzzer.name,
+                .root_module = lib_mod,
+            });
+            lib.root_module.stack_check = false;
+            lib.root_module.fuzz = true;
+
+            const exe = afl.addInstrumentedExe(b, lib, fuzzer.extra_libs);
+            const mkdir = b.addSystemCommand(&.{
+                "mkdir", "-p",
+            });
+            mkdir.addDirectoryArg(
+                b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
+            );
+            const run = afl.addFuzzerRun(
+                b,
+                exe,
+                b.path(fuzzer.corpus(b)),
+                b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
+            );
+            run.step.dependOn(&mkdir.step);
+            run_step.dependOn(&run.step);
+
+            const install = b.addInstallBinFile(
+                exe,
+                b.fmt("fuzz-{s}", .{fuzzer.name}),
+            );
+            b.getInstallStep().dependOn(&install.step);
+        } else {
+            const fail = b.addFail(afl_missing_msg);
+            run_step.dependOn(&fail.step);
+            b.getInstallStep().dependOn(&fail.step);
+        }
+
+        // Native corpus replay: the same harness (uninstrumented) linked into
+        // the replay driver, so the committed corpus runs as a deterministic
+        // regression check on any host without afl-cc.
+        const replay_lib_mod = b.createModule(.{
             .root_source_file = b.path(fuzzer.source(b)),
             .target = target,
             .optimize = optimize,
         });
-        lib_mod.addImport("ssz", lodestar_z.module("ssz"));
-        lib_mod.addImport("bls", lodestar_z.module("bls"));
-        lib_mod.addImport(
-            "consensus_types",
-            lodestar_z.module("consensus_types"),
-        );
-        lib_mod.addImport("preset", lodestar_z.module("preset"));
-        lib_mod.addImport("constants", lodestar_z.module("constants"));
-        lib_mod.addImport(
-            "persistent_merkle_tree",
-            lodestar_z.module("persistent_merkle_tree"),
-        );
+        addHarnessImports(replay_lib_mod, lodestar_z);
 
-        const lib = b.addLibrary(.{
-            .name = fuzzer.name,
-            .root_module = lib_mod,
+        const replay_lib = b.addLibrary(.{
+            .name = b.fmt("{s}_replay", .{fuzzer.name}),
+            .root_module = replay_lib_mod,
         });
-        lib.root_module.stack_check = false;
-        lib.root_module.fuzz = true;
 
-        const exe = afl.addInstrumentedExe(b, lib, fuzzer.extra_libs);
-        const mkdir = b.addSystemCommand(&.{
-            "mkdir", "-p",
+        const replay_exe_mod = b.createModule(.{
+            .root_source_file = b.path("tools/replay_corpus.zig"),
+            .target = target,
+            .optimize = optimize,
         });
-        mkdir.addDirectoryArg(
-            b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
-        );
-        const run = afl.addFuzzerRun(
-            b,
-            exe,
-            b.path(fuzzer.corpus(b)),
-            b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
-        );
-        run.step.dependOn(&mkdir.step);
-        run_step.dependOn(&run.step);
+        const replay_exe = b.addExecutable(.{
+            .name = b.fmt("replay-{s}", .{fuzzer.name}),
+            .root_module = replay_exe_mod,
+        });
+        replay_exe.root_module.linkLibrary(replay_lib);
+        for (fuzzer.extra_libs) |extra_lib| {
+            replay_exe.root_module.linkLibrary(extra_lib);
+        }
 
-        const install = b.addInstallBinFile(
-            exe,
-            b.fmt("fuzz-{s}", .{fuzzer.name}),
+        const run_replay = b.addRunArtifact(replay_exe);
+        run_replay.setCwd(b.path("."));
+        run_replay.addArg(b.fmt("corpus/{s}-cmin", .{fuzzer.name}));
+        run_replay.addArg(b.fmt("corpus/{s}-initial", .{fuzzer.name}));
+        replay_step.dependOn(&run_replay.step);
+
+        const replay_target_step = b.step(
+            b.fmt("replay-{s}", .{fuzzer.name}),
+            b.fmt("Replay the committed corpus through {s} natively", .{fuzzer.name}),
         );
-        b.getInstallStep().dependOn(&install.step);
+        replay_target_step.dependOn(&run_replay.step);
     }
 }
