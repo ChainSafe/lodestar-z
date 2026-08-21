@@ -16,6 +16,8 @@ for SSZ deserialization in lodestar-z.
 | `ssz_containers` | `fuzz-ssz_containers` | Fork, Checkpoint, Eth1Data, Attestation, etc. |
 | `ssz_lists` | `fuzz-ssz_lists` | FixedList(Uint64/32/Bool), VariableList(ByteList) |
 | `ssz_chunked_leaf_set` | `fuzz-ssz_chunked_leaf_set` | FixedList(Uint64, chunked_leaf=true): replay set/commit/get op stream, assert root equivalence against fromValue(reference) |
+| `ssz_nested_opaque_proof` | `fuzz-ssz_nested_opaque_proof` | Single proofs through nested opaque nodes (container_struct root over a chunked_leaf vector) |
+| `ssz_opaque_roundtrip` | `fuzz-ssz_opaque_roundtrip` | Opaque-node tree byte/value round-trips: chunked_leaf list/vector and container_struct |
 
 Each SSZ input is `[selector_byte][ssz_data...]`. The first byte selects
 which SSZ type to test within the target. See source files for the mapping.
@@ -50,6 +52,23 @@ zig build
 This compiles Zig static libraries for each fuzz target, emits LLVM bitcode,
 then links each with `afl.c` using `afl-cc` to produce instrumented binaries
 at `zig-out/bin/fuzz-*`.
+
+## Replaying the Corpus (no AFL++ required)
+
+Every committed corpus input can be replayed natively through its harness,
+without AFL++ installed:
+
+```sh
+zig build replay                 # all targets
+zig build replay-ssz_containers  # one target
+```
+
+Replay builds uninstrumented binaries, so it works on any host and (in the
+default Debug mode) runs each input with full safety checks. CI runs
+`zig build replay` on every pull request, which makes the committed corpus a
+regression suite: an input that once triggered a bug keeps guarding against
+it. A scheduled workflow (`.github/workflows/fuzz.yml`) additionally runs
+bounded `afl-fuzz` rounds weekly and uploads any findings as artifacts.
 
 ## Running the Fuzzer
 

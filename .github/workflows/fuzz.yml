@@ -1,0 +1,88 @@
+name: Fuzz
+
+on:
+  schedule:
+    # Weekly bounded fuzzing round. Crashes fail the job and are uploaded
+    # as artifacts; see test/fuzz/README.md for reproducing them locally.
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Seconds of afl-fuzz time per target"
+        required: false
+        default: "900"
+
+env:
+  ZIG_VERSION: "0.16.0"
+  # 15 minutes per target unless overridden via workflow_dispatch.
+  FUZZ_DURATION: ${{ github.event.inputs.duration || '900' }}
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - ssz_basic
+          - ssz_bitlist
+          - ssz_bitvector
+          - ssz_bytelist
+          - ssz_containers
+          - ssz_lists
+          - ssz_chunked_leaf_set
+          - ssz_nested_opaque_proof
+          - ssz_opaque_roundtrip
+          - bls_public_key
+          - bls_signature
+          - bls_aggregate_pk
+          - bls_aggregate_sig
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Install AFL++ and LLVM
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y afl++ llvm
+      - name: Configure kernel for AFL++
+        run: |
+          sudo sysctl -w kernel.core_pattern=core
+      - name: Build fuzz harness
+        # ReleaseFast for the same reason as the build-fuzz CI job: Debug's
+        # sanitize_c emits __ubsan_handle_* calls afl-cc cannot resolve.
+        run: |
+          cd test/fuzz && zig build -Doptimize=ReleaseFast
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          cd test/fuzz
+          corpus="corpus/${{ matrix.target }}-cmin"
+          [ -d "$corpus" ] || corpus="corpus/${{ matrix.target }}-initial"
+          mkdir -p "afl-out/${{ matrix.target }}"
+          AFL_SKIP_CPUFREQ=1 AFL_NO_UI=1 afl-fuzz \
+            -V "$FUZZ_DURATION" \
+            -i "$corpus" \
+            -o "afl-out/${{ matrix.target }}" \
+            -- "zig-out/bin/fuzz-${{ matrix.target }}"
+      - name: Check for crashes and hangs
+        run: |
+          cd test/fuzz
+          crashes=$(find "afl-out/${{ matrix.target }}" -path '*/crashes/*' -type f ! -name 'README.txt' | wc -l)
+          hangs=$(find "afl-out/${{ matrix.target }}" -path '*/hangs/*' -type f ! -name 'README.txt' | wc -l)
+          echo "crashes: $crashes, hangs: $hangs"
+          if [ "$crashes" -gt 0 ] || [ "$hangs" -gt 0 ]; then
+            echo "::error::afl-fuzz found $crashes crash(es) and $hangs hang(s) in ${{ matrix.target }}"
+            exit 1
+          fi
+      - name: Upload findings
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: afl-out-${{ matrix.target }}
+          path: test/fuzz/afl-out/${{ matrix.target }}
+          retention-days: 30

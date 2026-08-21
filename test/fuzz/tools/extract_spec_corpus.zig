@@ -471,12 +471,14 @@ pub fn main(init: std.process.Init) !void {
     // Build system places the exe; we use CWD (test/fuzz/).
     const cwd = std.Io.Dir.cwd();
 
-    // Spec test base paths
+    // Spec test base paths. Keep the version in sync with
+    // `spec_test_options.spec_test_version` in the root build.zig.zon.
+    const spec_test_version = "v1.7.0-alpha.11";
     const generic_path =
-        "../../test/spec/spec_tests/v1.5.0" ++
+        "../../test/spec/spec_tests/" ++ spec_test_version ++
         "/general/tests/general/phase0/ssz_generic";
     const static_path =
-        "../../test/spec/spec_tests/v1.5.0" ++
+        "../../test/spec/spec_tests/" ++ spec_test_version ++
         "/minimal/tests/minimal/phase0/ssz_static";
 
     var generic_dir = cwd.openDir(

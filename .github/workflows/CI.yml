@@ -400,6 +400,12 @@ jobs:
         # anyway; devs can still use `zig build` in Debug locally.
         run: |
           cd test/fuzz && zig build -Doptimize=ReleaseFast
+      - name: Replay committed corpus
+        # Native replay (no afl-cc): every committed corpus input runs through
+        # its harness in Debug with full safety checks, acting as a regression
+        # gate for previously-found inputs.
+        run: |
+          cd test/fuzz && zig build replay
 
   bindings-test:
     name: bindings - test
