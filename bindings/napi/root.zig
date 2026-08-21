@@ -10,8 +10,17 @@ pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const blsVerifier = @import("./bls_verifier.zig");
 pub const pubkeys = @import("./pubkeys.zig");
+pub const logger = @import("./logger.zig");
 
 const options = @import("bls_options");
+const logger_mod = @import("logger");
+
+/// Compile all log levels in; `logger_mod.logFn` gates at runtime
+/// (adjustable from JS via `logger.setLogLevel`).
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = logger_mod.logFn,
+};
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
