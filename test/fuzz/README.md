@@ -95,8 +95,9 @@ zig build replay-corpus -Doptimize=ReleaseSafe
 ```
 
 The repro executable calls `zig_fuzz_init` once, enforces the registry input limit before invoking
-the target, and bounds both directory entries and per-file allocation. CI builds the ReleaseSafe
-harnesses and runs this complete committed-corpus replay under one job timeout.
+the target, and bounds both directory entries and per-file allocation. Ordinary CI only builds the
+ReleaseSafe harnesses. The separate periodic fuzzing workflow runs the complete committed-corpus
+replay.
 
 ## Foreground controller
 

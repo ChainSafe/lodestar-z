@@ -416,7 +416,6 @@ jobs:
         run: |
           cd test/fuzz
           zig build -Doptimize=ReleaseSafe
-          zig build replay-corpus -Doptimize=ReleaseSafe
 
   bindings-test:
     name: bindings - test
