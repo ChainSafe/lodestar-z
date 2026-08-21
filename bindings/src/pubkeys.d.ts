@@ -1,10 +1,6 @@
 import type {PublicKey} from "./blst.js";
 
 export interface PubkeyCache {
-  /** Get a cached, deserialized PublicKey. */
-  get(index: number): PublicKey | undefined;
-  /** Same as get(), but throws if the index is not in the cache */
-  getOrThrow(index: number): PublicKey;
   /** Get the cached 48-byte compressed pubkey bytes without materializing a PublicKey wrapper. */
   getPubkeyBytes(index: number): Uint8Array | undefined;
   /** Same as getPubkeyBytes(), but throws if the index is not in the cache. */

@@ -122,16 +122,6 @@ pub fn getIndex(pubkey: js.Uint8Array) !js.Value {
     return .{ .val = try e.getNull() };
 }
 
-/// JS: pubkeys.get(index) → PublicKey | undefined
-pub fn get(index: js.Number) !?blst_bindings.PublicKey {
-    if (!state.initialized) return error.PubkeyIndexNotInitialized;
-
-    const idx = try index.toU32Exact();
-    const io = js.io();
-    const public_key = state.cache.getPubkey(io, idx) orelse return null;
-    return .{ .raw = public_key };
-}
-
 /// JS: pubkeys.getPubkeyBytes(index) → Uint8Array | undefined
 pub fn getPubkeyBytes(index: js.Number) !?js.Uint8Array {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
@@ -169,13 +159,10 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
     }
 
     const io = js.io();
-    const aggregate_pubkey = if (exact_indices.len == 1)
-        state.cache.getPubkey(io, exact_indices[0]) orelse return error.PubkeyIndexNotFound
-    else
-        state.cache.aggregate(io, exact_indices) catch |err| switch (err) {
-            error.InvalidIndex => return error.PubkeyIndexNotFound,
-            else => return error.AggregationFailed,
-        };
+    const aggregate_pubkey = state.cache.aggregate(io, exact_indices) catch |err| switch (err) {
+        error.InvalidIndex => return error.PubkeyIndexNotFound,
+        else => return error.AggregationFailed,
+    };
 
     return .{ .raw = aggregate_pubkey };
 }
