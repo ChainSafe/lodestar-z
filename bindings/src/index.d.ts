@@ -399,6 +399,32 @@ declare const bindings: {
       effectiveBalanceIncrement: number,
       rounds: number
     ) => Uint32Array;
+    /** Samples the payload timeliness committee for one slot from its (pre-shuffled) indices. */
+    computePtcIndices: (
+      seed: Uint8Array,
+      indices: Uint32Array,
+      effectiveBalanceIncrements: Uint16Array,
+      ptcSize: number,
+      maxEffectiveBalanceElectra: number,
+      effectiveBalanceIncrement: number
+    ) => Uint32Array;
+    /**
+     * Samples the payload timeliness committees for all slots of an epoch from
+     * the flat epoch shuffling; `slotOffsets` (length slotsPerEpoch + 1) marks
+     * each slot's window. Returns the concatenated per-slot committees
+     * (slotsPerEpoch * ptcSize entries).
+     */
+    computePtcIndicesForEpoch: (
+      epochSeed: Uint8Array,
+      startSlot: number,
+      slotsPerEpoch: number,
+      shuffling: Uint32Array,
+      slotOffsets: Uint32Array,
+      effectiveBalanceIncrements: Uint16Array,
+      ptcSize: number,
+      maxEffectiveBalanceElectra: number,
+      effectiveBalanceIncrement: number
+    ) => Uint32Array;
   };
   stateTransition: {
     deinitReusedEpochTransitionCache: () => void;

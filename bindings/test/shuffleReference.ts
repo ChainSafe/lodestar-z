@@ -7,6 +7,8 @@ export const EFFECTIVE_BALANCE_INCREMENT = 1_000_000_000;
 export const MAX_EFFECTIVE_BALANCE = 32_000_000_000;
 export const MAX_EFFECTIVE_BALANCE_ELECTRA = 2_048_000_000_000;
 export const SYNC_COMMITTEE_SIZE = 512;
+export const PTC_SIZE = 512;
+export const SLOTS_PER_EPOCH = 32;
 
 function digest(data: Uint8Array): Uint8Array {
   return createHash("sha256").update(data).digest();
@@ -282,4 +284,62 @@ export function naiveComputeSyncCommitteeIndicesElectra(
     2,
     MAX_EFFECTIVE_BALANCE_ELECTRA
   );
+}
+
+/// PTC sampler from lodestar (naiveComputePayloadTimelinessCommitteeIndices),
+/// ported from https://github.com/ChainSafe/swap-or-not-shuffle/pull/24
+export function naiveComputePayloadTimelinessCommitteeIndices(
+  effectiveBalanceIncrements: Uint16Array,
+  indices: ArrayLike<number>,
+  seed: Uint8Array
+): number[] {
+  if (indices.length === 0) {
+    throw Error("Validator indices must not be empty");
+  }
+
+  const result: number[] = [];
+  const maxRandomValue = 2 ** 16 - 1;
+  const maxEffectiveBalanceIncrement = MAX_EFFECTIVE_BALANCE_ELECTRA / EFFECTIVE_BALANCE_INCREMENT;
+
+  let i = 0;
+  while (result.length < PTC_SIZE) {
+    const candidateIndex = indices[i % indices.length];
+    const randomBytes = digest(concatBytes(seed, intToBytesLE(Math.floor(i / 16), 8)));
+    const offset = (i % 16) * 2;
+    const randomValue = randomBytes[offset] + 256 * randomBytes[offset + 1];
+
+    const effectiveBalanceIncrement = effectiveBalanceIncrements[candidateIndex];
+    if (effectiveBalanceIncrement * maxRandomValue >= maxEffectiveBalanceIncrement * randomValue) {
+      result.push(candidateIndex);
+    }
+    i += 1;
+  }
+
+  return result;
+}
+
+/// epoch PTC from lodestar (computePayloadTimelinessCommitteesForEpoch),
+/// tweaked to avoid beacon state param; ported from
+/// https://github.com/ChainSafe/swap-or-not-shuffle/pull/24
+export function naiveComputePayloadTimelinessCommitteesForEpoch(
+  epochSeed: Uint8Array,
+  startSlot: number,
+  committees: Uint32Array[][],
+  effectiveBalanceIncrements: Uint16Array
+): number[][] {
+  const result: number[][] = new Array(SLOTS_PER_EPOCH);
+  for (let i = 0; i < SLOTS_PER_EPOCH; i++) {
+    const slotSeed = digest(concatBytes(epochSeed, intToBytesLE(startSlot + i, 8)));
+    const slotCommittees = committees[i];
+    let totalLen = 0;
+    for (const c of slotCommittees) totalLen += c.length;
+    const allIndices = new Uint32Array(totalLen);
+    let offset = 0;
+    for (const c of slotCommittees) {
+      allIndices.set(c, offset);
+      offset += c.length;
+    }
+    result[i] = naiveComputePayloadTimelinessCommitteeIndices(effectiveBalanceIncrements, allIndices, slotSeed);
+  }
+  return result;
 }
