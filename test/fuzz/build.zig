@@ -53,7 +53,6 @@ pub fn build(b: *std.Build) void {
 
     const transport_input_len_max = 1024 * 1024;
     const Fuzzer = struct {
-        group: []const u8,
         name: []const u8,
         max_input_len: u32,
         extra_libs: []const *std.Build.Step.Compile = &.{},
@@ -70,91 +69,107 @@ pub fn build(b: *std.Build) void {
     };
 
     const fuzzers = &[_]Fuzzer{
-        .{ .group = "ssz", .name = "ssz_basic", .max_input_len = 33 },
-        .{ .group = "ssz", .name = "ssz_bitlist", .max_input_len = 258 },
-        .{ .group = "ssz", .name = "ssz_bitvector", .max_input_len = 65 },
-        .{ .group = "ssz", .name = "ssz_bytelist", .max_input_len = 1025 },
-        .{ .group = "ssz", .name = "ssz_containers", .max_input_len = 16613 },
-        .{ .group = "ssz", .name = "ssz_lists", .max_input_len = 4161 },
+        .{ .name = "ssz_basic", .max_input_len = 33 },
+        .{ .name = "ssz_bitlist", .max_input_len = 258 },
+        .{ .name = "ssz_bitvector", .max_input_len = 65 },
+        .{ .name = "ssz_bytelist", .max_input_len = 1025 },
+        .{ .name = "ssz_containers", .max_input_len = 16613 },
+        .{ .name = "ssz_lists", .max_input_len = 4161 },
         .{
-            .group = "ssz",
             .name = "ssz_chunked_leaf_set",
             .max_input_len = 4097,
             .extra_libs = &.{dep_hashtree.artifact("hashtree")},
         },
         .{
-            .group = "ssz",
             .name = "ssz_nested_opaque_proof",
             .max_input_len = 8191,
             .extra_libs = &.{dep_hashtree.artifact("hashtree")},
         },
         .{
-            .group = "ssz",
             .name = "ssz_opaque_roundtrip",
             .max_input_len = 1048576,
             .extra_libs = &.{dep_hashtree.artifact("hashtree")},
         },
         .{
-            .group = "bls",
             .name = "bls_public_key",
             .max_input_len = 96,
             .extra_libs = &.{dep_blst.artifact("blst")},
         },
         .{
-            .group = "bls",
             .name = "bls_signature",
             .max_input_len = 192,
             .extra_libs = &.{dep_blst.artifact("blst")},
         },
         .{
-            .group = "bls",
             .name = "bls_aggregate_pk",
             .max_input_len = 6144,
             .extra_libs = &.{dep_blst.artifact("blst")},
         },
         .{
-            .group = "bls",
             .name = "bls_aggregate_sig",
             .max_input_len = 12288,
             .extra_libs = &.{dep_blst.artifact("blst")},
         },
     };
 
-    const replay_corpus_step = b.step(
-        "replay-corpus",
-        "Replay every committed minimized corpus",
+    const fuzz_target = b.option(
+        []const u8,
+        "fuzz-target",
+        "Build and replay only the named fuzz target",
     );
+    if (fuzz_target) |selected_target| {
+        var found = false;
+        for (fuzzers) |fuzzer| {
+            if (std.mem.eql(u8, selected_target, fuzzer.name)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            std.process.fatal("unknown fuzz target: {s}", .{selected_target});
+        }
+    }
 
-    var targets_tsv: std.Io.Writer.Allocating = .init(b.allocator);
-    defer targets_tsv.deinit();
+    var targets_json: std.Io.Writer.Allocating = .init(b.allocator);
+    defer targets_json.deinit();
 
-    targets_tsv.writer.writeAll(
-        "schema\tgroup\ttarget\texecutable\tcmin\tmax_input_len\n",
-    ) catch @panic("OOM");
-    inline for (fuzzers) |fuzzer| {
+    targets_json.writer.writeAll("{\"include\":[") catch @panic("OOM");
+    for (fuzzers, 0..) |fuzzer, index| {
         if (fuzzer.max_input_len > transport_input_len_max) {
             @panic("fuzzer max input length exceeds transport ceiling");
         }
-        targets_tsv.writer.print(
-            "2\t{s}\t{s}\tzig-out/bin/fuzz-{s}\tcorpus/{s}-cmin\t{}\n",
-            .{
-                fuzzer.group,
-                fuzzer.name,
-                fuzzer.name,
-                fuzzer.name,
-                fuzzer.max_input_len,
-            },
+        if (index > 0) {
+            targets_json.writer.writeByte(',') catch @panic("OOM");
+        }
+        targets_json.writer.print(
+            "{{\"target\":\"{s}\",\"max_input_len\":{d}}}",
+            .{ fuzzer.name, fuzzer.max_input_len },
         ) catch @panic("OOM");
     }
-    const write_files = b.addWriteFiles();
-    const targets_tsv_file = write_files.add("targets.tsv", targets_tsv.written());
-    const install_targets_tsv = b.addInstallFile(
-        targets_tsv_file,
-        "share/lodestar-z-fuzz/targets.tsv",
-    );
-    b.getInstallStep().dependOn(&install_targets_tsv.step);
+    targets_json.writer.writeAll("]}") catch @panic("OOM");
 
-    inline for (fuzzers) |fuzzer| {
+    const write_files = b.addWriteFiles();
+    const targets_json_file = write_files.add("targets.json", targets_json.written());
+    const install_targets_json = b.addInstallFile(
+        targets_json_file,
+        "share/lodestar-z-fuzz/targets.json",
+    );
+    const metadata_step = b.step(
+        "fuzz-metadata",
+        "Write the fuzz target matrix without compiling fuzzers",
+    );
+    metadata_step.dependOn(&install_targets_json.step);
+
+    const replay_corpus_step = b.step(
+        "replay-corpus",
+        "Replay committed minimized fuzz corpora",
+    );
+
+    for (fuzzers) |fuzzer| {
+        if (fuzz_target) |selected_target| {
+            if (!std.mem.eql(u8, selected_target, fuzzer.name)) continue;
+        }
+
         const run_step = b.step(
             b.fmt("run-{s}", .{fuzzer.name}),
             b.fmt("Run {s} with afl-fuzz", .{fuzzer.name}),
