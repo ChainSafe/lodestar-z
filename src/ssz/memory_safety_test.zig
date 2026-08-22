@@ -5,14 +5,98 @@ const ChunkedLeafType = pmt.ChunkedLeaf;
 const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 const ArmOnSizeAllocator = @import("testing_allocators").ArmOnSizeAllocator;
 const FixedContainerType = @import("type/container.zig").FixedContainerType;
+const VariableContainerType = @import("type/container.zig").VariableContainerType;
 const FixedListType = @import("type/list.zig").FixedListType;
+const VariableListType = @import("type/list.zig").VariableListType;
 const UintType = @import("type/uint.zig").UintType;
+const ByteListType = @import("type/byte_list.zig").ByteListType;
 const ByteVectorType = @import("type/byte_vector.zig").ByteVectorType;
 
 const Checkpoint = FixedContainerType(struct {
     epoch: UintType(64),
     root: ByteVectorType(32),
 });
+
+test "TreeView composite list getAllReadonlyValues OOM cleans initialized values" {
+    const allocator = std.testing.allocator;
+    const Bytes = ByteListType(32);
+    const Element = VariableContainerType(struct {
+        first: Bytes,
+        second: Bytes,
+    });
+    const ListType = VariableListType(Element, 2);
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool.deinit();
+
+    var source: ListType.Type = .empty;
+    defer ListType.deinit(allocator, &source);
+
+    try source.append(allocator, Element.default_value);
+    try source.append(allocator, Element.default_value);
+    try source.items[0].first.appendSlice(allocator, &.{1});
+    try source.items[0].second.appendSlice(allocator, &.{2});
+    try source.items[1].first.appendSlice(allocator, &.{3});
+    try source.items[1].second.appendSlice(allocator, &.{4});
+
+    const root = try ListType.tree.fromValue(&pool, &source);
+    var view = try ListType.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    // Fail the second element's second field after its first field and the prefix own memory.
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 8,
+        .resize_fail_index = 0,
+    });
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        view.getAllReadonlyValues(failing.allocator()),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "TreeView composite list iterator nextValue OOM cleans initialized value" {
+    const allocator = std.testing.allocator;
+    const Bytes = ByteListType(32);
+    const Element = VariableContainerType(struct {
+        first: Bytes,
+        second: Bytes,
+    });
+    const ListType = VariableListType(Element, 1);
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool.deinit();
+
+    var source: ListType.Type = .empty;
+    defer ListType.deinit(allocator, &source);
+
+    try source.append(allocator, Element.default_value);
+    try source.items[0].first.appendSlice(allocator, &.{1});
+    try source.items[0].second.appendSlice(allocator, &.{2});
+
+    const root = try ListType.tree.fromValue(&pool, &source);
+    var view = try ListType.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    var iterator = view.iteratorReadonly(0);
+    // Fail the second field after the first field owns an allocation.
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 2,
+        .resize_fail_index = 0,
+    });
+
+    try std.testing.expectError(error.OutOfMemory, iterator.nextValue(failing.allocator()));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
 
 // std.testing.allocator can't see pool-slot leaks, so check getNodesInUse() against a baseline.
 test "TreeView composite list sliceTo does not leak pool nodes" {
