@@ -45,12 +45,8 @@ const bitvec_selectors = [_]struct {
     .{ .size = "2", .sel = 0x00 },
     .{ .size = "3", .sel = 0x00 },
     .{ .size = "4", .sel = 0x00 },
-    .{ .size = "5", .sel = 0x01 },
-    .{ .size = "8", .sel = 0x01 },
-    .{ .size = "16", .sel = 0x01 },
     .{ .size = "31", .sel = 0x01 },
     .{ .size = "512", .sel = 0x03 },
-    .{ .size = "513", .sel = 0x03 },
 };
 
 // ssz_containers: consensus types
@@ -70,6 +66,44 @@ const container_selectors = [_]struct {
 
 /// 4 MiB buffer size — enough for any spec test vector.
 const buf_len = 4 * 1024 * 1024;
+
+const spec_version_file_path = "../../test/spec/version.txt";
+const spec_version_file_size_max = 1024;
+const spec_version_size_max = 64;
+const spec_tests_root = "../../test/spec/spec_tests/";
+const generic_spec_suffix = "/general/tests/general/phase0/ssz_generic";
+const static_spec_suffix = "/minimal/tests/minimal/phase0/ssz_static";
+const spec_path_size_max = spec_tests_root.len + spec_version_size_max + @max(
+    generic_spec_suffix.len,
+    static_spec_suffix.len,
+);
+
+fn readSpecVersion(cwd: Dir, io: std.Io, file_buf: []u8) ![]const u8 {
+    std.debug.assert(file_buf.len == spec_version_file_size_max + 1);
+
+    const contents = try cwd.readFile(io, spec_version_file_path, file_buf);
+    if (contents.len > spec_version_file_size_max) {
+        return error.SpecVersionFileTooLong;
+    }
+
+    var version: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    for (0..contents.len + 1) |_| {
+        const untrimmed_line = lines.next() orelse break;
+        const line = std.mem.trim(u8, untrimmed_line, " \t\r");
+        if (line.len == 0) continue;
+        if (std.mem.startsWith(u8, line, "//")) continue;
+
+        var tokens = std.mem.tokenizeAny(u8, line, " \t\r");
+        const token = tokens.next() orelse unreachable;
+        if (tokens.next() != null) return error.InvalidSpecVersionLine;
+        if (token.len > spec_version_size_max) return error.SpecVersionTooLong;
+        if (version != null) return error.MultipleSpecVersions;
+        version = token;
+    }
+
+    return version orelse error.MissingSpecVersion;
+}
 
 /// Read a .ssz_snappy file, decompress it, and return
 /// the raw SSZ bytes (slice into decompress_buf).
@@ -129,6 +163,46 @@ fn writeCorpus(
     try writer.writeByte(selector);
     try writer.writeAll(ssz_data);
     try file_writer.end();
+}
+
+fn writeNestedOpaqueProofSeed(corpus_dir: Dir, io: std.Io) !u32 {
+    try writeCorpus(
+        corpus_dir,
+        io,
+        "seed-01-gindex-2047",
+        0x01,
+        &.{ 0xff, 0x07 },
+    );
+    return 1;
+}
+
+fn writeOpaqueRoundtripSeeds(corpus_dir: Dir, io: std.Io) !u32 {
+    try writeCorpus(corpus_dir, io, "selector-00-list-u64-zero", 0x00, &([_]u8{0} ** 8));
+    try writeCorpus(corpus_dir, io, "selector-01-list-u32-zero", 0x01, &([_]u8{0} ** 4));
+    try writeCorpus(corpus_dir, io, "selector-02-container-zero", 0x02, &([_]u8{0} ** 52));
+    try writeCorpus(corpus_dir, io, "selector-03-vector-zero", 0x03, &([_]u8{0} ** 4152));
+    return 4;
+}
+
+fn writeCorpusSeedPair(cwd: Dir, io: std.Io, options: struct {
+    name: []const u8,
+    initial_path: []const u8,
+    cmin_path: []const u8,
+    write_seeds: *const fn (Dir, std.Io) anyerror!u32,
+}) !u32 {
+    var initial_dir = try cwd.createDirPathOpen(io, options.initial_path, .{});
+    defer initial_dir.close(io);
+
+    var cmin_dir = try cwd.createDirPathOpen(io, options.cmin_path, .{});
+    defer cmin_dir.close(io);
+
+    const initial_count = try options.write_seeds(initial_dir, io);
+    const cmin_count = try options.write_seeds(cmin_dir, io);
+    std.debug.assert(initial_count == cmin_count);
+
+    const count = initial_count + cmin_count;
+    std.debug.print("  {s}: {} seeds\n", .{ options.name, count });
+    return count;
 }
 
 fn extractBasic(
@@ -471,13 +545,30 @@ pub fn main(init: std.process.Init) !void {
     // Build system places the exe; we use CWD (test/fuzz/).
     const cwd = std.Io.Dir.cwd();
 
-    // Spec test base paths
-    const generic_path =
-        "../../test/spec/spec_tests/v1.5.0" ++
-        "/general/tests/general/phase0/ssz_generic";
-    const static_path =
-        "../../test/spec/spec_tests/v1.5.0" ++
-        "/minimal/tests/minimal/phase0/ssz_static";
+    // Spec test base paths.
+    var version_file_buf: [spec_version_file_size_max + 1]u8 = undefined;
+    const spec_version = readSpecVersion(cwd, io, &version_file_buf) catch |err| {
+        std.debug.print(
+            "Cannot read spec test version at {s}: {}\n" ++
+                "Run: zig build run:download_spec_tests\n",
+            .{ spec_version_file_path, err },
+        );
+        return err;
+    };
+
+    var generic_path_buf: [spec_path_size_max]u8 = undefined;
+    const generic_path = std.fmt.bufPrint(
+        &generic_path_buf,
+        "{s}{s}{s}",
+        .{ spec_tests_root, spec_version, generic_spec_suffix },
+    ) catch return error.SpecTestPathTooLong;
+
+    var static_path_buf: [spec_path_size_max]u8 = undefined;
+    const static_path = std.fmt.bufPrint(
+        &static_path_buf,
+        "{s}{s}{s}",
+        .{ spec_tests_root, spec_version, static_spec_suffix },
+    ) catch return error.SpecTestPathTooLong;
 
     var generic_dir = cwd.openDir(
         io,
@@ -513,6 +604,20 @@ pub fn main(init: std.process.Init) !void {
     );
 
     var total: u32 = 0;
+
+    total += try writeCorpusSeedPair(cwd, io, .{
+        .name = "ssz_nested_opaque_proof",
+        .initial_path = "corpus/ssz_nested_opaque_proof-initial",
+        .cmin_path = "corpus/ssz_nested_opaque_proof-cmin",
+        .write_seeds = writeNestedOpaqueProofSeed,
+    });
+
+    total += try writeCorpusSeedPair(cwd, io, .{
+        .name = "ssz_opaque_roundtrip",
+        .initial_path = "corpus/ssz_opaque_roundtrip-initial",
+        .cmin_path = "corpus/ssz_opaque_roundtrip-cmin",
+        .write_seeds = writeOpaqueRoundtripSeeds,
+    });
 
     // ssz_basic
     {

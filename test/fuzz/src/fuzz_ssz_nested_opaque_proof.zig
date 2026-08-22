@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const fuzz_options = @import("fuzz_options");
 const ssz = @import("ssz");
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
@@ -35,6 +36,7 @@ const gindex_span: u64 = gindex_max - gindex_min + 1;
 pub export fn zig_fuzz_init() callconv(.c) void {}
 
 pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
+    if (len > fuzz_options.max_input_len) return;
     if (len < 1 + op_size) return;
 
     var fba = std.heap.FixedBufferAllocator.init(&fuzz_buf);
@@ -69,7 +71,10 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
         }
     }
 
-    const root = Outer.tree.fromValue(&pool, &value) catch return;
+    const root = Outer.tree.fromValue(&pool, &value) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("constructing nested opaque tree", err),
+    };
     defer pool.unref(root);
 
     const original_root = root.getRoot(&pool).*;
@@ -82,7 +87,15 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
         const g = gindex_min + (raw % gindex_span);
         const gindex = Gindex.fromUint(g);
 
-        var single_proof = proof.createSingleProof(allocator, &pool, root, gindex) catch continue;
+        var single_proof = proof.createSingleProof(
+            allocator,
+            &pool,
+            root,
+            gindex,
+        ) catch |err| switch (err) {
+            error.InvalidNode, error.OutOfMemory => continue,
+            else => panicUnexpected("creating nested opaque proof", err),
+        };
         defer single_proof.deinit(allocator);
 
         var pool2 = Node.Pool.init(.{
@@ -92,16 +105,27 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
         }) catch continue;
         defer pool2.deinit();
 
+        const pool2_baseline_in_use = pool2.getNodesInUse();
+
         const rebuilt = proof.createNodeFromSingleProof(
             &pool2,
             gindex,
             single_proof.leaf,
             single_proof.witnesses,
-        ) catch continue;
-        defer pool2.unref(rebuilt);
+        ) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => panicUnexpected("reconstructing nested opaque proof", err),
+        };
 
         // A correct single proof rebuilds to the original root hash.
         const rebuilt_root = rebuilt.getRoot(&pool2).*;
         assert(std.mem.eql(u8, &original_root, &rebuilt_root));
+
+        pool2.unref(rebuilt);
+        assert(pool2.getNodesInUse() == pool2_baseline_in_use);
     }
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }
