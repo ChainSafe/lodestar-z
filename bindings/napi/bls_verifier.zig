@@ -41,8 +41,11 @@ const SameMessageSet = struct {
 
 /// Verify indexed, aggregate, and raw-pubkey signature sets synchronously.
 ///
-/// Returns false on cryptographic failure. Throws for malformed inputs and
-/// cache misses encountered before a result is known.
+/// Returns false when:
+/// 1. A signature is malformed or invalid cryptographically.
+/// 2. A raw public key is malformed or invalid cryptographically.
+///
+/// Throws for malformed inputs and cache misses encountered before a result is known.
 pub fn verifySignatureSets(sets: js.Array) !js.Boolean {
     const count = try sets.length();
     if (count == 0) return js.Boolean.from(false);
