@@ -13,7 +13,6 @@ pub export fn zig_fuzz_test(
 ) callconv(.c) void {
     const input = buf[0..len];
     fuzzAggregate(input);
-    fuzzAggregateWithRandomness(input);
 }
 
 fn fuzzAggregate(input: []const u8) void {
@@ -39,45 +38,5 @@ fn fuzzAggregate(input: []const u8) void {
         if (err != blstError.AggrTypeMismatch) {
             @panic("unexpected aggregate public key error");
         }
-    };
-}
-
-fn fuzzAggregateWithRandomness(input: []const u8) void {
-    const pk_size = PublicKey.COMPRESS_SIZE;
-    const rand_size = 32;
-    const item_size = pk_size + rand_size;
-    if (input.len < item_size) return;
-
-    const n = @min(input.len / item_size, MAX_AGGREGATE_PER_JOB);
-    if (n == 0) return;
-
-    var pks: [MAX_AGGREGATE_PER_JOB]PublicKey = undefined;
-    var items: [MAX_AGGREGATE_PER_JOB]AggregatePublicKey.RandomizedPublicKey = undefined;
-    var count: usize = 0;
-
-    for (0..n) |i| {
-        const off = i * item_size;
-        const pk_chunk = input[off .. off + pk_size];
-        const rand_chunk = input[off + pk_size .. off + item_size];
-
-        const pk = PublicKey.deserialize(pk_chunk) catch continue;
-        pks[count] = pk;
-        items[count] = .{
-            .public_key = &pks[count],
-            .randomness = rand_chunk[0..rand_size].*,
-        };
-        count += 1;
-    }
-
-    if (count == 0) return;
-
-    var scratch: [1 << 14]u64 = undefined;
-
-    _ = AggregatePublicKey.aggregateWithRandomness(
-        items[0..count],
-        false,
-        &scratch,
-    ) catch {
-        @panic("unexpected aggregateWithRandomness public key error");
     };
 }

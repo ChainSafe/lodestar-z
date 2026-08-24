@@ -454,8 +454,7 @@ fn mergeAndVerify(
 /// - `pks` and `sigs` are paired by index.
 /// - `randomness` must contain at least `pks.len * 32` bytes;
 /// - only the first 8 bytes per 32-byte slot are read by
-///   the underlying 64-bit Pippenger, but the 32-byte stride matches the existing
-///   `AggregatePublicKey.aggregateWithRandomness` layout.
+///   the underlying 64-bit Pippenger.
 pub fn aggregateWithRandomness(
     pool: *ThreadPool,
     io: std.Io,
