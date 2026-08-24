@@ -577,7 +577,7 @@ test "ArrayBasicTreeView set should reclaim unpublished node on OOM" {
     try std.testing.expectError(error.OutOfMemory, view.set(0, 99));
     failing.fail_index = std.math.maxInt(usize);
 
-    // Publication failure must reclaim the fresh node instead of consuming a pool slot.
+    // The failed update must not leave an extra in-use pool node.
     try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
     try std.testing.expectEqual(@as(u64, 11), try view.get(0));
 
@@ -673,7 +673,7 @@ test "BitVectorTreeView set should reclaim unpublished node on OOM" {
     try std.testing.expectError(error.OutOfMemory, view.set(0, true));
     failing.fail_index = std.math.maxInt(usize);
 
-    // Publication failure must reclaim the fresh leaf instead of consuming a pool slot.
+    // The failed update must not leave an extra in-use pool node.
     try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
     try std.testing.expect(!try view.get(0));
 
