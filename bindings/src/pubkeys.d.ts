@@ -1,5 +1,14 @@
 import type {PublicKey} from "./blst.js";
 
+/**
+ * Append-only validator public-key cache.
+ *
+ * Throws when encountering:
+ * - An existing index with a different public key.
+ * - An existing public key at a different index.
+ *
+ * No-op for an exact index and public-key replay.
+ */
 export interface PubkeyCache {
   /** Get a cached, deserialized PublicKey. */
   get(index: number): PublicKey | undefined;
@@ -13,18 +22,30 @@ export interface PubkeyCache {
   aggregate(indices: number[]): PublicKey;
   /** Get validator index by pubkey bytes */
   getIndex(pubkey: Uint8Array): number | null;
-  /** Append at the next index. Exact replays are no-ops; invalid, conflicting, duplicate, or sparse entries throw. */
+  /**
+   * Append a trusted public key at the next index. Before calling this method,
+   * the caller must cryptographically validate the public key.
+   *
+   * The method throws if:
+   *
+   * - Encodings are malformed.
+   * - Entries are sparse.
+   */
   append(index: number, pubkey: Uint8Array): void;
-  /** Populate the cache from the missing suffix of a validator list. */
+  /**
+   * Populate the cache from the missing suffix of a trusted validator list.
+   * This method decodes public keys but does not validate.
+   */
   syncPubkeys(validators: {pubkey: Uint8Array}[]): void;
   /** Current number of cached entries. */
   readonly size: number;
   /** Number of entries the current native allocation can hold without growing. */
   readonly capacity: number;
   /**
-   * Load a compatible PKIX file from the control environment while no workers are using the cache.
-   * The explicit capacity limit bounds both the entry count and native allocation;
-   * spare capacity recorded in the file is discarded above this limit.
+   * Load a compatible, trusted PKIX file from the control environment while no workers are using the cache.
+   * Does not revalidate public keys. The explicit capacity
+   * limit bounds both the entry count and native allocation; spare capacity
+   * recorded in the file is discarded above this limit.
    */
   load(filepath: string, maxCapacity: number): void;
   /** Testing-only reset from the control environment while no workers are using the cache. */

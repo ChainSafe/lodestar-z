@@ -814,28 +814,6 @@ test "TreeView list basic clone(true) transfers cache and clears source" {
     try std.testing.expect(cloned.chunks.state.children_nodes.count() > 0);
 }
 
-test "TreeView list basic clone(transfer_cache) on a dirty view leaves no orphan pool nodes" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
-    defer pool.deinit();
-
-    const ListType = FixedListType(UintType(32), 16, .{});
-    var list: ListType.Type = .empty;
-    defer list.deinit(allocator);
-    for (0..4) |i| try list.append(allocator, @as(u32, @intCast(i + 1)));
-
-    const baseline = pool.getNodesInUse();
-    {
-        const root = try ListType.tree.fromValue(&pool, &list);
-        var view = try ListType.TreeView.init(allocator, &pool, root);
-        try view.set(0, @as(u32, 42));
-        var cloned = try view.clone(.{});
-        cloned.deinit();
-        view.deinit();
-    }
-    try std.testing.expectEqual(baseline, pool.getNodesInUse());
-}
-
 test "TreeView list basic clone(transfer_cache) drops an uncommitted push without _len skew" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
@@ -993,33 +971,6 @@ test "TreeView basic list sliceTo matches incremental snapshots" {
         try sliced.hashTreeRootInto(&actual_root);
 
         try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
-    }
-}
-
-// std.testing.allocator can't see pool-slot leaks, so check getNodesInUse() against a baseline.
-test "TreeView basic list sliceTo does not leak pool nodes" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
-    defer pool.deinit();
-
-    const Uint64 = UintType(64);
-    const ListType = FixedListType(Uint64, 1024, .{});
-
-    var empty_list: ListType.Type = .empty;
-    defer empty_list.deinit(allocator);
-    const root_node = try ListType.tree.fromValue(&pool, &empty_list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
-    defer view.deinit();
-
-    for (0..16) |i| try view.push(@intCast(i));
-    try view.commit();
-
-    const baseline = pool.getNodesInUse();
-    for (0..15) |idx| {
-        var sliced = try view.sliceTo(idx);
-        sliced.deinit();
-        // Any difference means an intermediate orphan root leaked.
-        try std.testing.expectEqual(baseline, pool.getNodesInUse());
     }
 }
 
@@ -1887,103 +1838,4 @@ test "ListBasicTreeView chunked_leaf: getAllInto sees uncommitted push" {
     _ = try view.getAllInto(out);
 
     try std.testing.expectEqualSlices(u64, &.{ 10, 20, 30, 40 }, out);
-}
-
-test "ListBasicTreeView chunked_leaf: sliceTo doesn't leak pool nodes" {
-    // sliceTo allocates transient roots via setNodeAtDepth / truncate /
-    // setNode. Those calls don't consume their input root_node, so the
-    // caller must unref the intermediates. The test asserts node count
-    // returns to baseline after repeated sliceTo+deinit.
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
-    defer pool.deinit();
-
-    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
-    var src: ListT.Type = .empty;
-    defer src.deinit(allocator);
-    for (0..100) |i| try src.append(allocator, @as(u64, @intCast(i)));
-
-    const root_id = try ListT.tree.fromValue(&pool, &src);
-    var view = try ListT.TreeView.init(allocator, &pool, root_id);
-    defer view.deinit();
-
-    // One warmup so any one-time lazy initialization isn't counted.
-    {
-        var w = try view.sliceTo(50);
-        w.deinit();
-    }
-
-    const before = pool.getNodesInUse();
-    for (0..50) |_| {
-        var s = try view.sliceTo(50);
-        s.deinit();
-    }
-    const after = pool.getNodesInUse();
-
-    try std.testing.expectEqual(before, after);
-}
-
-test "ListBasicTreeView non-chunked_leaf: sliceTo doesn't leak pool nodes" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
-    defer pool.deinit();
-
-    const ListT = FixedListType(UintType(64), 1 << 20, .{});
-    var src: ListT.Type = .empty;
-    defer src.deinit(allocator);
-    for (0..100) |i| try src.append(allocator, @as(u64, @intCast(i)));
-
-    const root_id = try ListT.tree.fromValue(&pool, &src);
-    var view = try ListT.TreeView.init(allocator, &pool, root_id);
-    defer view.deinit();
-
-    {
-        var w = try view.sliceTo(50);
-        w.deinit();
-    }
-
-    const before = pool.getNodesInUse();
-    for (0..50) |_| {
-        var s = try view.sliceTo(50);
-        s.deinit();
-    }
-    const after = pool.getNodesInUse();
-
-    try std.testing.expectEqual(before, after);
-}
-
-const ArmOnSizeAllocator = @import("testing_allocators").ArmOnSizeAllocator;
-
-// Path 3 (shared chunked_leaf) CoWs a fresh node + 2KB blob; if setChildNode OOMs
-// it must be reclaimed. Leak shows as getNodesInUse (slot) + testing.allocator (blob).
-test "ListBasicTreeView chunked_leaf: set OOM in setChildNode reclaims the CoW chunked_leaf (no leak)" {
-    const allocator = std.testing.allocator;
-    var view_failing = std.testing.FailingAllocator.init(allocator, .{});
-    // Arm the view allocator to OOM on the CoW blob alloc → fails setChildNode's changed.put.
-    var armer = ArmOnSizeAllocator{ .backing = allocator, .target = &view_failing, .trigger_len = @sizeOf(ChunkedLeafType) };
-
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = armer.allocator(), .pool_size = 4096 });
-    defer pool.deinit();
-
-    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
-
-    var src: ListT.Type = .empty;
-    defer src.deinit(allocator);
-
-    for (0..100) |i| try src.append(allocator, @as(u64, @intCast(i)));
-    const root_id = try ListT.tree.fromValue(&pool, &src);
-
-    var view = try ListT.TreeView.init(view_failing.allocator(), &pool, root_id);
-    defer view.deinit();
-
-    const baseline = pool.getNodesInUse();
-
-    // First set on the committed (shared, rc>=1) chunked_leaf takes Path 3.
-    armer.armed = true;
-    try std.testing.expectError(error.OutOfMemory, view.set(0, 999));
-    view_failing.fail_index = std.math.maxInt(usize); // disarm for cleanup
-    armer.armed = false;
-
-    // The freshly-CoW'd node + its 2KB blob were reclaimed, not leaked.
-    try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }

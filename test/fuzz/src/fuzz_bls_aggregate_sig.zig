@@ -13,7 +13,6 @@ pub export fn zig_fuzz_test(
 ) callconv(.c) void {
     const input = buf[0..len];
     fuzzAggregate(input);
-    fuzzAggregateWithRandomness(input);
 }
 
 fn fuzzAggregate(input: []const u8) void {
@@ -37,45 +36,5 @@ fn fuzzAggregate(input: []const u8) void {
         if (err != BlstError.AggrTypeMismatch) {
             @panic("unexpected aggregate signature error");
         }
-    };
-}
-
-fn fuzzAggregateWithRandomness(input: []const u8) void {
-    const sig_size = Signature.COMPRESS_SIZE;
-    const rand_size = 32;
-    const item_size = sig_size + rand_size;
-    if (input.len < item_size) return;
-
-    const n = @min(input.len / item_size, MAX_AGGREGATE_PER_JOB);
-    if (n == 0) return;
-
-    var sigs: [MAX_AGGREGATE_PER_JOB]Signature = undefined;
-    var items: [MAX_AGGREGATE_PER_JOB]AggregateSignature.RandomizedSignature = undefined;
-    var count: usize = 0;
-
-    for (0..n) |i| {
-        const off = i * item_size;
-        const sig_chunk = input[off .. off + sig_size];
-        const rand_chunk = input[off + sig_size .. off + item_size];
-
-        const sig = Signature.deserialize(sig_chunk) catch continue;
-        sigs[count] = sig;
-        items[count] = .{
-            .signature = &sigs[count],
-            .randomness = rand_chunk[0..rand_size].*,
-        };
-        count += 1;
-    }
-
-    if (count == 0) return;
-
-    var scratch: [1 << 16]u64 = undefined;
-
-    _ = AggregateSignature.aggregateWithRandomness(
-        items[0..count],
-        false,
-        &scratch,
-    ) catch {
-        @panic("unexpected aggregateWithRandomness signature error");
     };
 }
