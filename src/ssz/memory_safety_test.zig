@@ -1,12 +1,15 @@
 const std = @import("std");
 const pmt = @import("persistent_merkle_tree");
+const Gindex = pmt.Gindex;
 const Node = pmt.Node;
 const ChunkedLeafType = pmt.ChunkedLeaf;
 const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 const ArmOnSizeAllocator = @import("testing_allocators").ArmOnSizeAllocator;
 const FixedContainerType = @import("type/container.zig").FixedContainerType;
 const FixedListType = @import("type/list.zig").FixedListType;
+const FixedVectorType = @import("type/vector.zig").FixedVectorType;
 const UintType = @import("type/uint.zig").UintType;
+const BitVectorType = @import("type/bit_vector.zig").BitVectorType;
 const ByteVectorType = @import("type/byte_vector.zig").ByteVectorType;
 
 const Checkpoint = FixedContainerType(struct {
@@ -548,4 +551,128 @@ test "ListBasicTreeView chunked_leaf: set OOM in setChildNode reclaims the CoW c
 
     // The freshly-CoW'd node + its 2KB blob were reclaimed, not leaked.
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "ArrayBasicTreeView set OOM reclaims unpublished node" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const VectorType = FixedVectorType(UintType(64), 4, .{});
+    const value: VectorType.Type = .{ 11, 22, 33, 44 };
+    const root = try VectorType.tree.fromValue(&pool, &value);
+    var view = try VectorType.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try std.testing.expectEqual(@as(u64, 11), try view.get(0));
+    const nodes_in_use = pool.getNodesInUse();
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.set(0, 99));
+    failing.fail_index = std.math.maxInt(usize);
+
+    try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+    try std.testing.expectEqual(@as(u64, 11), try view.get(0));
+
+    try view.set(0, 99);
+    try std.testing.expectEqual(@as(u64, 99), try view.get(0));
+}
+
+test "ArrayCompositeTreeView get OOM leaves caches unchanged" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const Inner = FixedContainerType(struct { x: UintType(64) });
+    const VectorType = FixedVectorType(Inner, 2, .{});
+    const value: VectorType.Type = .{ .{ .x = 1 }, .{ .x = 2 } };
+    const root = try VectorType.tree.fromValue(&pool, &value);
+    var view = try VectorType.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try view.chunks.state.changed.ensureUnusedCapacity(failing.allocator(), 1);
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.get(0));
+    failing.fail_index = std.math.maxInt(usize);
+
+    try std.testing.expectEqual(@as(usize, 0), view.chunks.state.changed.count());
+
+    _ = try view.get(0);
+}
+
+test "ArrayCompositeTreeView getReadonly OOM reclaims unpublished child view" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const Inner = FixedContainerType(struct { x: UintType(64) });
+    const VectorType = FixedVectorType(Inner, 2, .{});
+    const value: VectorType.Type = .{ .{ .x = 1 }, .{ .x = 2 } };
+    const root = try VectorType.tree.fromValue(&pool, &value);
+    var view = try VectorType.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try view.chunks.state.children_nodes.ensureUnusedCapacity(failing.allocator(), 1);
+    const gindex = Gindex.fromDepth(VectorType.chunk_depth, 0);
+    const child_node = try view.chunks.state.getChildNode(gindex);
+    const child_ref_count = child_node.getState(&pool).refCount();
+    const outstanding_bytes = failing.allocated_bytes - failing.freed_bytes;
+
+    failing.fail_index = failing.alloc_index + 1;
+    try std.testing.expectError(error.OutOfMemory, view.getReadonly(0));
+    failing.fail_index = std.math.maxInt(usize);
+
+    try std.testing.expectEqual(child_ref_count, child_node.getState(&pool).refCount());
+    try std.testing.expectEqual(outstanding_bytes, failing.allocated_bytes - failing.freed_bytes);
+
+    _ = try view.getReadonly(0);
+}
+
+test "BitVectorTreeView set OOM reclaims unpublished node" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const Bits = BitVectorType(44);
+    const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
+    var view = try Bits.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try std.testing.expect(!try view.get(0));
+    const nodes_in_use = pool.getNodesInUse();
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.set(0, true));
+    failing.fail_index = std.math.maxInt(usize);
+
+    try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+    try std.testing.expect(!try view.get(0));
+
+    try view.set(0, true);
+    try std.testing.expect(try view.get(0));
 }
