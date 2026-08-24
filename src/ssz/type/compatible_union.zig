@@ -259,13 +259,15 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
                     const value_data_ptr = &@field(value.*, field_name);
-                    out.* = @unionInit(Type, field_name, option_type.default_value);
-                    const out_data_ptr = &@field(out.*, field_name);
+                    var replacement = @unionInit(Type, field_name, option_type.default_value);
+                    errdefer deinit(allocator, &replacement);
+                    const replacement_data_ptr = &@field(replacement, field_name);
                     if (comptime isFixedType(option_type)) {
-                        try option_type.clone(value_data_ptr, out_data_ptr);
+                        try option_type.clone(value_data_ptr, replacement_data_ptr);
                     } else {
-                        try option_type.clone(allocator, value_data_ptr, out_data_ptr);
+                        try option_type.clone(allocator, value_data_ptr, replacement_data_ptr);
                     }
+                    out.* = replacement;
                     return;
                 }
             }
@@ -353,15 +355,17 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                    out.* = @unionInit(Type, field_name, option_type.default_value);
-                    const out_data_ptr = &@field(out.*, field_name);
+                    var replacement = @unionInit(Type, field_name, option_type.default_value);
+                    errdefer deinit(allocator, &replacement);
+                    const replacement_data_ptr = &@field(replacement, field_name);
 
                     if (comptime isFixedType(option_type)) {
-                        try option_type.deserializeFromBytes(data[1..], out_data_ptr);
+                        try option_type.deserializeFromBytes(data[1..], replacement_data_ptr);
                     } else {
-                        try option_type.deserializeFromBytes(allocator, data[1..], out_data_ptr);
+                        try option_type.deserializeFromBytes(allocator, data[1..], replacement_data_ptr);
                     }
 
+                    out.* = replacement;
                     return;
                 }
             }
@@ -457,14 +461,16 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                         const option_type = option.@"1";
                         const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                        out.* = @unionInit(Type, field_name, option_type.default_value);
-                        const out_data_ptr = &@field(out.*, field_name);
+                        var replacement = @unionInit(Type, field_name, option_type.default_value);
+                        errdefer deinit(allocator, &replacement);
+                        const replacement_data_ptr = &@field(replacement, field_name);
 
                         if (comptime isFixedType(option_type)) {
-                            try option_type.tree.toValue(data_node, pool, out_data_ptr);
+                            try option_type.tree.toValue(data_node, pool, replacement_data_ptr);
                         } else {
-                            try option_type.tree.toValue(allocator, data_node, pool, out_data_ptr);
+                            try option_type.tree.toValue(allocator, data_node, pool, replacement_data_ptr);
                         }
+                        out.* = replacement;
                         return;
                     }
                 }
@@ -489,10 +495,12 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                         } else {
                             data_tree = try option_type.tree.fromValue(allocator, pool, data_ptr);
                         }
+                        errdefer pool.unref(data_tree);
 
                         // Mix in selector: create branch with data on left, selector on right
                         const selector_bytes = selectorPadded(selector);
                         const selector_node = try pool.createLeaf(&selector_bytes);
+                        errdefer pool.unref(selector_node);
 
                         return try pool.createBranch(data_tree, selector_node);
                     }
@@ -543,13 +551,14 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                     const option_type = option.@"1";
                     const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
 
-                    out.* = @unionInit(Type, field_name, option_type.default_value);
-                    const out_data_ptr = &@field(out.*, field_name);
+                    var replacement = @unionInit(Type, field_name, option_type.default_value);
+                    errdefer deinit(allocator, &replacement);
+                    const replacement_data_ptr = &@field(replacement, field_name);
 
                     if (comptime isFixedType(option_type)) {
-                        try option_type.deserializeFromJson(source, out_data_ptr);
+                        try option_type.deserializeFromJson(source, replacement_data_ptr);
                     } else {
-                        try option_type.deserializeFromJson(allocator, source, out_data_ptr);
+                        try option_type.deserializeFromJson(allocator, source, replacement_data_ptr);
                     }
 
                     // End object "}"
@@ -557,6 +566,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                         .object_end => {},
                         else => return error.InvalidJson,
                     }
+                    out.* = replacement;
                     return;
                 }
             }

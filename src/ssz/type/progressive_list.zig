@@ -81,14 +81,19 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
 
             const len = data.len / Element.fixed_size;
 
-            try out.resize(allocator, len);
-            @memset(out.items[0..len], Element.default_value);
+            var replacement: Type = .empty;
+            errdefer replacement.deinit(allocator);
+            try replacement.resize(allocator, len);
+            @memset(replacement.items, Element.default_value);
             for (0..len) |i| {
                 try Element.deserializeFromBytes(
                     data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
-                    &out.items[i],
+                    &replacement.items[i],
                 );
             }
+
+            deinit(allocator, out);
+            out.* = replacement;
         }
 
         pub fn serializeIntoJson(_: std.mem.Allocator, writer: anytype, in: *const Type) !void {
@@ -105,12 +110,16 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 else => return error.InvalidJson,
             }
 
-            var i: usize = 0;
-            while ((try source.peekNextTokenType()) != .array_end) : (i += 1) {
-                try out.append(allocator, Element.default_value);
-                try Element.deserializeFromJson(source, &out.items[i]);
+            var replacement: Type = .empty;
+            errdefer replacement.deinit(allocator);
+            while ((try source.peekNextTokenType()) != .array_end) {
+                try replacement.append(allocator, Element.default_value);
+                try Element.deserializeFromJson(source, &replacement.items[replacement.items.len - 1]);
             }
             _ = try source.next();
+
+            deinit(allocator, out);
+            out.* = replacement;
         }
 
         pub const serialized = struct {
@@ -177,12 +186,13 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 else
                     len;
 
+                var replacement: Type = .empty;
+                errdefer replacement.deinit(allocator);
                 if (chunk_count == 0) {
-                    try out.resize(allocator, 0);
+                    deinit(allocator, out);
+                    out.* = replacement;
                     return;
                 }
-                try out.resize(allocator, len);
-                @memset(out.items, Element.default_value);
 
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
@@ -190,6 +200,8 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 const contents_node = try node.getLeft(pool);
                 try progressive.getNodes(pool, contents_node, nodes);
 
+                try replacement.resize(allocator, len);
+                @memset(replacement.items, Element.default_value);
                 if (comptime isBasicType(Element)) {
                     for (0..len) |i| {
                         const chunk_index = (i * Element.fixed_size) / 32;
@@ -198,7 +210,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                             nodes[chunk_index],
                             pool,
                             element_index,
-                            &out.items[i],
+                            &replacement.items[i],
                         );
                     }
                 } else {
@@ -206,10 +218,13 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                         try Element.tree.toValue(
                             nodes[i],
                             pool,
-                            &out.items[i],
+                            &replacement.items[i],
                         );
                     }
                 }
+
+                deinit(allocator, out);
+                out.* = replacement;
             }
 
             pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
@@ -217,14 +232,17 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 const chunk_count = chunkCount(value);
 
                 if (chunk_count == 0) {
-                    return try pool.createBranch(
-                        @enumFromInt(0),
-                        try pool.createLeafFromUint(0),
-                    );
+                    const length_leaf = try pool.createLeafFromUint(0);
+                    errdefer pool.unref(length_leaf);
+
+                    return try pool.createBranch(@enumFromInt(0), length_leaf);
                 }
 
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
+                @memset(nodes, @as(Node.Id, @enumFromInt(0)));
+                var content_owns_nodes = false;
+                errdefer if (!content_owns_nodes) pool.free(nodes);
                 if (comptime isBasicType(Element)) {
                     const items_per_chunk = 32 / Element.fixed_size;
                     var next: usize = 0;
@@ -251,7 +269,12 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 }
 
                 const contents_tree = try progressive.fillWithContents(allocator, pool, nodes);
+                content_owns_nodes = true;
+                errdefer pool.unref(contents_tree);
+
                 const length_leaf = try pool.createLeafFromUint(len);
+                errdefer pool.unref(length_leaf);
+
                 const result = try pool.createBranch(
                     contents_tree,
                     length_leaf,
@@ -333,15 +356,20 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
 
             const len = offsets.len - 1;
 
-            try out.resize(allocator, len);
-            @memset(out.items[0..len], Element.default_value);
+            var replacement: Type = .empty;
+            errdefer deinit(allocator, &replacement);
+            try replacement.resize(allocator, len);
+            @memset(replacement.items, Element.default_value);
             for (0..len) |i| {
                 try Element.deserializeFromBytes(
                     allocator,
                     data[offsets[i]..offsets[i + 1]],
-                    &out.items[i],
+                    &replacement.items[i],
                 );
             }
+
+            deinit(allocator, out);
+            out.* = replacement;
         }
 
         pub fn readVariableOffsets(allocator: std.mem.Allocator, data: []const u8) ![]u32 {
@@ -350,6 +378,7 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
             const len = first_offset / 4;
 
             const offsets = try allocator.alloc(u32, len + 1);
+            errdefer allocator.free(offsets);
 
             offsets[0] = first_offset;
             while (iterator.pos < len) {
@@ -423,8 +452,11 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const len = try length(node, pool);
                 const chunk_count = len;
+                var replacement: Type = .empty;
+                errdefer deinit(allocator, &replacement);
                 if (chunk_count == 0) {
-                    try out.resize(allocator, 0);
+                    deinit(allocator, out);
+                    out.* = replacement;
                     return;
                 }
 
@@ -433,38 +465,48 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
 
                 try progressive.getNodes(pool, try node.getLeft(pool), nodes);
 
-                try out.resize(allocator, len);
-                @memset(out.items, Element.default_value);
+                try replacement.resize(allocator, len);
+                @memset(replacement.items, Element.default_value);
                 for (0..len) |i| {
                     try Element.tree.toValue(
                         allocator,
                         nodes[i],
                         pool,
-                        &out.items[i],
+                        &replacement.items[i],
                     );
                 }
+
+                deinit(allocator, out);
+                out.* = replacement;
             }
 
             pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
                 const len = value.items.len;
                 const chunk_count = len;
                 if (chunk_count == 0) {
-                    return try pool.createBranch(
-                        @enumFromInt(0),
-                        try pool.createLeafFromUint(0),
-                    );
+                    const length_leaf = try pool.createLeafFromUint(0);
+                    errdefer pool.unref(length_leaf);
+
+                    return try pool.createBranch(@enumFromInt(0), length_leaf);
                 }
 
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
+                @memset(nodes, @as(Node.Id, @enumFromInt(0)));
+                var content_owns_nodes = false;
+                errdefer if (!content_owns_nodes) pool.free(nodes);
                 for (0..chunk_count) |i| {
                     nodes[i] = try tree_api.fromValue(Element, allocator, pool, &value.items[i]);
                 }
 
-                return try pool.createBranch(
-                    try progressive.fillWithContents(allocator, pool, nodes),
-                    try pool.createLeafFromUint(len),
-                );
+                const contents_tree = try progressive.fillWithContents(allocator, pool, nodes);
+                content_owns_nodes = true;
+                errdefer pool.unref(contents_tree);
+
+                const length_leaf = try pool.createLeafFromUint(len);
+                errdefer pool.unref(length_leaf);
+
+                return try pool.createBranch(contents_tree, length_leaf);
             }
         };
 
@@ -482,12 +524,20 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 else => return error.InvalidJson,
             }
 
-            var i: usize = 0;
-            while ((try source.peekNextTokenType()) != .array_end) : (i += 1) {
-                try out.append(allocator, Element.default_value);
-                try Element.deserializeFromJson(allocator, source, &out.items[i]);
+            var replacement: Type = .empty;
+            errdefer deinit(allocator, &replacement);
+            while ((try source.peekNextTokenType()) != .array_end) {
+                try replacement.append(allocator, Element.default_value);
+                try Element.deserializeFromJson(
+                    allocator,
+                    source,
+                    &replacement.items[replacement.items.len - 1],
+                );
             }
             _ = try source.next();
+
+            deinit(allocator, out);
+            out.* = replacement;
         }
     };
 }

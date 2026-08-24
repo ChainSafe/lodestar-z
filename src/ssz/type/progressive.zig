@@ -179,6 +179,7 @@ pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
 pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, nodes: *const [node_count]Node.Id) !Node.Id {
     const subtree_count = comptime subtreeIndex(node_count);
     var n: Node.Id = @enumFromInt(0);
+    errdefer pool.unref(n);
 
     // Compute subtree starts at comptime
     comptime var subtree_starts: [subtree_count]usize = undefined;
@@ -208,6 +209,7 @@ pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, no
 pub fn fillWithContents(allocator: std.mem.Allocator, pool: *Node.Pool, nodes: []Node.Id) !Node.Id {
     const subtree_count = subtreeIndex(nodes.len);
     var n: Node.Id = @enumFromInt(0);
+    errdefer pool.unref(n);
 
     var subtree_starts = std.ArrayList(usize).empty;
     defer subtree_starts.deinit(allocator);
