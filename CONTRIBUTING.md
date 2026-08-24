@@ -18,7 +18,7 @@ Unsure where to begin contributing to Lodestar? Here are some ideas!
 
 ## Reporting A Bug?
 
-- :spiral_notepad: [Create a new issue!](https://github.com/ChainSafe/lodestar/issues/new/choose) Select the type of issue that best fits, and please fill out as much of the information as you can.
+- :spiral_notepad: [Create a new issue!](https://github.com/ChainSafe/lodestar-z/issues/new/choose)
 
 ## Contribution Process
 
@@ -138,7 +138,7 @@ For example:
   Open pull requests signal to the maintainers that it's ready for review.
 - If your pull request is no longer applicable or validated to fix an issue, close your pull request.
 - If your pull request is fixable and needs additional changes or commits within a short period of time, switch your pull request into a draft until it's ready.
-- Otherwise, close your pull request and [create a new issue instead.](https://github.com/ChainSafe/lodestar/issues/new/choose)
+- Otherwise, close your pull request and [create a new issue instead.](https://github.com/ChainSafe/lodestar-z/issues/new/choose)
 
 ## Managing and Opening Feature/Large PRs
 
