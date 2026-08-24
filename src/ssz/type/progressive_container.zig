@@ -187,11 +187,16 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
             if (data.len != fixed_size) {
                 return error.InvalidSize;
             }
+            var replacement = default_value;
             var i: usize = 0;
             inline for (fields) |field| {
-                try field.type.deserializeFromBytes(data[i .. i + field.type.fixed_size], &@field(out, field.name));
+                try field.type.deserializeFromBytes(
+                    data[i .. i + field.type.fixed_size],
+                    &@field(replacement, field.name),
+                );
                 i += field.type.fixed_size;
             }
+            out.* = replacement;
         }
 
         pub const serialized = struct {
@@ -234,20 +239,23 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
 
                 try progressive.getNodes(pool, content_node, &nodes);
 
+                var replacement = default_value;
                 inline for (fields, 0..) |field, i| {
                     const field_idx = comptime getActiveFieldIndex(active_fields, i);
                     const child_node = nodes[field_idx];
-                    try field.type.tree.toValue(child_node, pool, &@field(out, field.name));
+                    try field.type.tree.toValue(
+                        child_node,
+                        pool,
+                        &@field(replacement, field.name),
+                    );
                 }
+                out.* = replacement;
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
-
-                // Initialize all nodes to zero
-                for (&nodes) |*node| {
-                    node.* = @enumFromInt(0);
-                }
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
+                var content_owns_nodes = false;
+                errdefer if (!content_owns_nodes) pool.free(&nodes);
 
                 inline for (fields, 0..) |field, i| {
                     const field_idx = comptime getActiveFieldIndex(active_fields, i);
@@ -256,10 +264,13 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                 }
 
                 const content_tree = try progressive.fillWithContentsComptime(chunk_count, pool, &nodes);
+                content_owns_nodes = true;
+                errdefer pool.unref(content_tree);
 
                 // Mix in active_fields
                 const active_fields_packed = comptime packActiveFields(active_fields);
                 const active_fields_node = try pool.createLeaf(&active_fields_packed);
+                errdefer pool.unref(active_fields_node);
 
                 return try pool.createBranch(content_tree, active_fields_node);
             }
@@ -282,6 +293,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                 else => return error.InvalidJson,
             }
 
+            var replacement = default_value;
             inline for (fields) |field| {
                 const field_name = switch (try source.next()) {
                     .string => |str| str,
@@ -292,7 +304,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                 }
                 try field.type.deserializeFromJson(
                     source,
-                    &@field(out, field.name),
+                    &@field(replacement, field.name),
                 );
             }
 
@@ -301,6 +313,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                 .object_end => {},
                 else => return error.InvalidJson,
             }
+            out.* = replacement;
         }
 
         pub fn getFieldIndex(comptime name: []const u8) usize {
@@ -463,14 +476,23 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
             value: *const Type,
             out: *Type,
         ) !void {
+            var replacement = default_value;
+            errdefer deinit(allocator, &replacement);
             inline for (fields) |field| {
                 if (comptime isFixedType(field.type)) {
-                    try field.type.clone(&@field(value, field.name), &@field(out, field.name));
+                    try field.type.clone(
+                        &@field(value, field.name),
+                        &@field(replacement, field.name),
+                    );
                 } else {
-                    @field(out, field.name) = field.type.default_value;
-                    try field.type.clone(allocator, &@field(value, field.name), &@field(out, field.name));
+                    try field.type.clone(
+                        allocator,
+                        &@field(value, field.name),
+                        &@field(replacement, field.name),
+                    );
                 }
             }
+            out.* = replacement;
         }
 
         pub fn serializedSize(value: *const Type) usize {
@@ -510,20 +532,25 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
 
             const ranges = try readFieldRanges(data);
 
+            var replacement = default_value;
+            errdefer deinit(allocator, &replacement);
             inline for (fields, 0..) |field, i| {
                 if (comptime isFixedType(field.type)) {
                     try field.type.deserializeFromBytes(
                         data[ranges[i][0]..ranges[i][1]],
-                        &@field(out, field.name),
+                        &@field(replacement, field.name),
                     );
                 } else {
                     try field.type.deserializeFromBytes(
                         allocator,
                         data[ranges[i][0]..ranges[i][1]],
-                        &@field(out, field.name),
+                        &@field(replacement, field.name),
                     );
                 }
             }
+
+            deinit(allocator, out);
+            out.* = replacement;
         }
 
         pub fn getFieldIndex(comptime name: []const u8) usize {
@@ -660,25 +687,37 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
 
                 try progressive.getNodes(pool, content_node, nodes);
 
+                var replacement = default_value;
+                errdefer deinit(allocator, &replacement);
                 inline for (fields, 0..) |field, i| {
                     const field_idx = comptime getActiveFieldIndex(active_fields, i);
                     const child_node = nodes[field_idx];
                     if (comptime isFixedType(field.type)) {
-                        try field.type.tree.toValue(child_node, pool, &@field(out, field.name));
+                        try field.type.tree.toValue(
+                            child_node,
+                            pool,
+                            &@field(replacement, field.name),
+                        );
                     } else {
-                        try field.type.tree.toValue(allocator, child_node, pool, &@field(out, field.name));
+                        try field.type.tree.toValue(
+                            allocator,
+                            child_node,
+                            pool,
+                            &@field(replacement, field.name),
+                        );
                     }
                 }
+
+                deinit(allocator, out);
+                out.* = replacement;
             }
 
             pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
-
-                // Initialize all nodes to zero
-                for (nodes) |*node| {
-                    node.* = @enumFromInt(0);
-                }
+                @memset(nodes, @as(Node.Id, @enumFromInt(0)));
+                var content_owns_nodes = false;
+                errdefer if (!content_owns_nodes) pool.free(nodes);
 
                 inline for (fields, 0..) |field, i| {
                     const field_idx = comptime getActiveFieldIndex(active_fields, i);
@@ -687,10 +726,13 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 }
 
                 const content_tree = try progressive.fillWithContents(allocator, pool, nodes);
+                content_owns_nodes = true;
+                errdefer pool.unref(content_tree);
 
                 // Mix in active_fields
                 const active_fields_packed = comptime packActiveFields(active_fields);
                 const active_fields_node = try pool.createLeaf(&active_fields_packed);
+                errdefer pool.unref(active_fields_node);
 
                 return try pool.createBranch(content_tree, active_fields_node);
             }
@@ -717,6 +759,8 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 else => return error.InvalidJson,
             }
 
+            var replacement = default_value;
+            errdefer deinit(allocator, &replacement);
             inline for (fields) |field| {
                 const field_name = switch (try source.next()) {
                     .string => |str| str,
@@ -729,13 +773,13 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 if (comptime isFixedType(field.type)) {
                     try field.type.deserializeFromJson(
                         source,
-                        &@field(out, field.name),
+                        &@field(replacement, field.name),
                     );
                 } else {
                     try field.type.deserializeFromJson(
                         allocator,
                         source,
-                        &@field(out, field.name),
+                        &@field(replacement, field.name),
                     );
                 }
             }
@@ -745,6 +789,9 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 .object_end => {},
                 else => return error.InvalidJson,
             }
+
+            deinit(allocator, out);
+            out.* = replacement;
         }
     };
 }

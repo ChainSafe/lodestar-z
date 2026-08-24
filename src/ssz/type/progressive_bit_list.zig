@@ -312,15 +312,18 @@ pub fn ProgressiveBitListType() type {
             pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
                 const chunk_count = chunkCount(value);
                 if (chunk_count == 0) {
-                    return try pool.createBranch(
-                        @enumFromInt(0),
-                        try pool.createLeafFromUint(0),
-                    );
+                    const length_leaf = try pool.createLeafFromUint(0);
+                    errdefer pool.unref(length_leaf);
+
+                    return try pool.createBranch(@enumFromInt(0), length_leaf);
                 }
                 const byte_length = (value.bit_len + 7) / 8;
 
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
+                @memset(nodes, @as(Node.Id, @enumFromInt(0)));
+                var content_owns_nodes = false;
+                errdefer if (!content_owns_nodes) pool.free(nodes);
                 for (0..chunk_count) |i| {
                     var leaf_buf = [_]u8{0} ** 32;
                     const start_idx = i * 32;
@@ -338,7 +341,12 @@ pub fn ProgressiveBitListType() type {
                 }
 
                 const contents_tree = try progressive.fillWithContents(allocator, pool, nodes);
+                content_owns_nodes = true;
+                errdefer pool.unref(contents_tree);
+
                 const length_leaf = try pool.createLeafFromUint(value.bit_len);
+                errdefer pool.unref(length_leaf);
+
                 return try pool.createBranch(
                     contents_tree,
                     length_leaf,
