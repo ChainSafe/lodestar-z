@@ -17,7 +17,7 @@ const Checkpoint = FixedContainerType(struct {
     root: ByteVectorType(32),
 });
 
-test "TreeView composite list getAllReadonlyValues OOM cleans initialized values" {
+test "getAllReadonlyValues should deinit completed prefix and current value on conversion OOM" {
     const allocator = std.testing.allocator;
     const Bytes = ByteListType(32);
     const Element = VariableContainerType(struct {
@@ -57,10 +57,11 @@ test "TreeView composite list getAllReadonlyValues OOM cleans initialized values
         error.OutOfMemory,
         view.getAllReadonlyValues(failing.allocator()),
     );
+    // The completed prefix and current partially converted value must not leak.
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
-test "TreeView composite list iterator nextValue should deinit the current value on conversion OOM" {
+test "iterator nextValue should deinit current value on conversion OOM" {
     const allocator = std.testing.allocator;
     const Bytes = ByteListType(32);
     const Element = VariableContainerType(struct {
@@ -95,6 +96,7 @@ test "TreeView composite list iterator nextValue should deinit the current value
     });
 
     try std.testing.expectError(error.OutOfMemory, iterator.nextValue(failing.allocator()));
+    // The current partially converted value must not leak.
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
