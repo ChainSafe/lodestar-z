@@ -47,7 +47,7 @@ We say this as heavy users of AI to help maintain this project (with careful sup
 ## AI is Welcome Here
 
 Lodestar-z is written with plenty of AI assistance, and as a team we embrace
-AI tools as a productive tool in their workflow. As a project, we welcome
+AI tools as a productive tool in our workflow. As a project, we welcome
 AI as a tool!
 
 **Our reason for the strict AI policy is not due to an anti-AI stance**, but
