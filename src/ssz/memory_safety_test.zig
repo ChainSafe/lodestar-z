@@ -577,6 +577,7 @@ test "ArrayBasicTreeView set should reclaim unpublished node on OOM" {
     try std.testing.expectError(error.OutOfMemory, view.set(0, 99));
     failing.fail_index = std.math.maxInt(usize);
 
+    // Publication failure must reclaim the fresh node instead of consuming a pool slot.
     try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
     try std.testing.expectEqual(@as(u64, 11), try view.get(0));
 
@@ -608,6 +609,7 @@ test "ArrayCompositeTreeView get should leave caches unchanged on OOM" {
     try std.testing.expectError(error.OutOfMemory, view.get(0));
     failing.fail_index = std.math.maxInt(usize);
 
+    // A failed mutable get must not publish the index as changed.
     try std.testing.expectEqual(@as(usize, 0), view.chunks.state.changed.count());
 
     _ = try view.get(0);
@@ -641,6 +643,7 @@ test "ArrayCompositeTreeView getReadonly should reclaim unpublished child view o
     try std.testing.expectError(error.OutOfMemory, view.getReadonly(0));
     failing.fail_index = std.math.maxInt(usize);
 
+    // A failed readonly cache insertion must release the child view's node ref and allocation.
     try std.testing.expectEqual(child_ref_count, child_node.getState(&pool).refCount());
     try std.testing.expectEqual(outstanding_bytes, failing.allocated_bytes - failing.freed_bytes);
 
@@ -670,6 +673,7 @@ test "BitVectorTreeView set should reclaim unpublished node on OOM" {
     try std.testing.expectError(error.OutOfMemory, view.set(0, true));
     failing.fail_index = std.math.maxInt(usize);
 
+    // Publication failure must reclaim the fresh leaf instead of consuming a pool slot.
     try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
     try std.testing.expect(!try view.get(0));
 

@@ -481,6 +481,7 @@ pub fn CompositeChunks(
             const child_ptr = try Element.init(self.state.allocator, self.state.pool, child_node);
             errdefer child_ptr.deinit();
 
+            // Readonly access publishes the child cache without marking the index as changed.
             try self.children_data.putNoClobber(self.state.allocator, gindex, child_ptr);
             return child_ptr;
         }
