@@ -20,8 +20,9 @@ The Lodestar team has strict rules for AI usage:
   greater system without the aid of AI tools, do not contribute
   to this project.
 
-- **Bad AI-generated PRs/issues will be de-prioritized**.
-  Bad contributions that are clearly AI (slop) will be de-prioritized.
+- **Bad AI-generated PRs/issues will be de-prioritized or closed**.
+  Bad contributions that are clearly AI (slop) will be de-prioritized
+  or closed without warning.
   We love to help developers learn about Lodestar/Ethereum and grow.
   If you're interested in that then use AI responsibly.
 
