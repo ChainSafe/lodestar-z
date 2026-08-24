@@ -5,17 +5,23 @@ import {loadState as loadStateTS} from "@lodestar/state-transition";
 import {ssz} from "@lodestar/types";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "../test/eraFiles.ts";
+import {getPubkeyCacheCapacityForState} from "../test/serializedState.ts";
 
 const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
 const stateBytes = await reader.readSerializedState();
 await reader.close();
+const requiredPubkeyCapacity = getPubkeyCacheCapacityForState(stateBytes);
 
 bindings.pool.ensureCapacity(10_000_000);
-bindings.pubkeys.ensureCapacity(2_000_000);
+let loadedPkix = false;
 try {
-  bindings.pubkeys.load("./mainnet.pkix");
+  bindings.pubkeys.load("./mainnet.pkix", requiredPubkeyCapacity);
+  loadedPkix = true;
 } catch (_e) {
-  // ignore
+  // Rebuild incompatible or corrupt snapshots from the serialized state.
+}
+if (!loadedPkix || bindings.pubkeys.capacity() < requiredPubkeyCapacity) {
+  bindings.pubkeys.ensureCapacity(requiredPubkeyCapacity);
 }
 
 const seedState = bindings.BeaconStateView.createFromBytes(stateBytes);

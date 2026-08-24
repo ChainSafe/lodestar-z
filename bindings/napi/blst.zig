@@ -1,29 +1,28 @@
 //! NAPI bindings for BLS (blst) cryptographic operations used by lodestar.
 //!
-//! This module uses a **Zig ThreadPool** (`thread_pool`) — a fixed-size pool of OS threads
-//! initialized once via `initThreadPool`. Used by synchronous NAPI functions (`aggregateVerify`,
+//! This module uses a **Zig ThreadPool** (`state.thread_pool`) — a fixed-size pool of OS threads
+//! initialized once via `state.init`. Used by synchronous NAPI functions (`aggregateVerify`,
 //! `verifyMultipleAggregateSignatures`) to fan out pairing checks across worker threads. The
 //! call still blocks the JS thread while it waits for the pool to finish, but the crypto work
 //! itself is parallelized.
-//!
-//! `aggregateWithRandomness` runs synchronously on the calling thread and does not
-//! rely on the native `thread_pool`. In lodestar, this is called from a Node.js
-//! worker thread (BLS thread pool), not the main thread.
 const std = @import("std");
 const builtin = @import("builtin");
 const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
+const AddonIdentity = @import("zapi_addon_identity");
 const bls = @import("bls");
-const napi_io = @import("./io.zig");
+const bls_verifier = bls.verifier;
 
 const NativePublicKey = bls.PublicKey;
 const NativeSignature = bls.Signature;
 const NativeSecretKey = bls.SecretKey;
+const SigningRoot = bls.SigningRoot;
 const Pairing = bls.Pairing;
 const AggregatePublicKey = bls.AggregatePublicKey;
 const AggregateSignature = bls.AggregateSignature;
 const ThreadPool = bls.ThreadPool;
+const BatchVerifyItem = bls.BatchVerifyItem;
 const DST = bls.DST;
 const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 
@@ -35,29 +34,45 @@ const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 /// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
 const BATCH_VERIFY_SIZE = 32;
 
-/// Cached thread pool reference for parallel verification.
-/// Initialized lazily on first use, torn down via `deinitThreadPool`.
-var thread_pool: ?*ThreadPool = null;
+const SignatureSetInput = struct {
+    msg: js.Uint8Array,
+    pk: js.Value,
+    sig: js.Value,
+};
 
-pub fn initThreadPool(n_workers: u16) !void {
-    if (thread_pool != null) return error.PoolExists;
-    thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
-}
+const RandomizedAggregationInput = struct {
+    pk: js.Value,
+    sig: js.Uint8Array,
+};
 
-/// Closes the `ThreadPool` used for blst operations.
-///
-/// Note: this can invalidate any inflight verification requests. Consumer is responsible
-/// for the lifecycle of their program and should only call this when all work is done.
-///
-/// This note is however application dependent. For the use case of lodestar,
-/// it's likely that this would not be called at all.
-/// Same goes for any other long-lived processes.
-pub fn deinitThreadPool() void {
-    if (thread_pool) |p| {
-        p.deinit(napi_io.get());
-        thread_pool = null;
+/// Native-only thread pool state, reached from `root.zig` through the
+/// pub `state` var so it is not part of the JS module surface.
+const State = struct {
+    /// Cached thread pool reference for parallel verification.
+    thread_pool: ?*ThreadPool = null,
+
+    pub fn init(self: *State, n_workers: u16) !void {
+        if (self.thread_pool != null) return error.PoolExists;
+        self.thread_pool = try ThreadPool.init(std.heap.page_allocator, js.io(), .{ .n_workers = n_workers });
     }
-}
+
+    /// Closes the `ThreadPool` used for blst operations.
+    ///
+    /// Note: this can invalidate any inflight verification requests. Consumer is responsible
+    /// for the lifecycle of their program and should only call this when all work is done.
+    ///
+    /// This note is however application dependent. For the use case of lodestar,
+    /// it's likely that this would not be called at all.
+    /// Same goes for any other long-lived processes.
+    pub fn deinit(self: *State) void {
+        if (self.thread_pool) |p| {
+            p.deinit(js.io());
+            self.thread_pool = null;
+        }
+    }
+};
+
+pub var state: State = .{};
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -81,20 +96,8 @@ fn formatHex(bytes: []const u8) !js.String {
 }
 
 fn unwrapClass(comptime T: type, value: js.Value) !*T {
-    return js.env().unwrap(T, value.toValue());
-}
-
-/// Reads a Uint8Array slice from a generic `js.Value`.
-///
-/// Workaround: `js.Value.asUint8Array` is currently broken in zapi 2.0.0
-/// (it calls a non-existent `expectType` method). Instead we narrow via
-/// the underlying `napi.Value` directly.
-fn uint8SliceFromValue(value: js.Value) ![]u8 {
     const raw = value.toValue();
-    if (!(try raw.isTypedarray())) return error.TypeMismatch;
-    const info = try raw.getTypedarrayInfo();
-    if (info.array_type != .uint8) return error.TypeMismatch;
-    return info.data;
+    return js.convertArg(*T, AddonIdentity, raw.value, raw.env);
 }
 
 pub const PublicKey = struct {
@@ -198,7 +201,7 @@ pub const Signature = struct {
 
         var sig = NativeSignature.deserialize(bytes) catch return error.DeserializationFailed;
         if (try boolOrDefault(sig_validate, false)) {
-            try sig.validate(try boolOrDefault(sig_infcheck, false));
+            try sig.validate(try boolOrDefault(sig_infcheck, true));
         }
         return .{ .raw = sig };
     }
@@ -272,8 +275,18 @@ pub const SecretKey = struct {
 
     /// Creates a `SecretKey` from a hex string.
     pub fn fromHex(hex_string: js.String) !SecretKey {
+        switch (try hex_string.len()) {
+            NativeSecretKey.serialize_size * 2,
+            NativeSecretKey.serialize_size * 2 + 2,
+            => {},
+            else => return error.InvalidSecretKeyLength,
+        }
+
         var hex_buf: [NativeSecretKey.serialize_size * 2 + 3]u8 = undefined;
         const hex = try hexFromString(hex_string, &hex_buf);
+        if (hex.len != NativeSecretKey.serialize_size * 2) {
+            return error.InvalidSecretKeyLength;
+        }
 
         var bytes_buf: [NativeSecretKey.serialize_size]u8 = undefined;
         const bytes = try std.fmt.hexToBytes(&bytes_buf, hex);
@@ -290,7 +303,7 @@ pub const SecretKey = struct {
 
         const key_info_slice: ?[]const u8 = if (key_info) |value| blk: {
             if (value.isUndefined() or value.isNull()) break :blk null;
-            break :blk try uint8SliceFromValue(value);
+            break :blk try (try value.asUint8Array()).toSlice();
         } else null;
 
         const sk = NativeSecretKey.keyGen(seed_slice, key_info_slice) catch return error.KeyGenFailed;
@@ -299,8 +312,9 @@ pub const SecretKey = struct {
 
     /// Signs a message with this `SecretKey`, returns a `Signature`.
     pub fn sign(self: *const SecretKey, msg: js.Uint8Array) !Signature {
-        const slice = try msg.toSlice();
-        return .{ .raw = self.raw.sign(slice, DST, null) };
+        const msg_bytes = try msg.toSlice();
+        if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
+        return .{ .raw = self.raw.sign(msg_bytes[0..@sizeOf(SigningRoot)], DST, null) };
     }
 
     /// Derives the PublicKey from this SecretKey.
@@ -330,11 +344,12 @@ pub const SecretKey = struct {
 /// 4) pk_validate: ?bool
 /// 5) sig_groupcheck: ?bool
 pub fn verify(msg: js.Uint8Array, pk: PublicKey, sig: Signature, pk_validate: ?js.Boolean, sig_groupcheck: ?js.Boolean) !js.Boolean {
-    const msg_slice = try msg.toSlice();
+    const msg_bytes = try msg.toSlice();
+    if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
 
     sig.raw.verify(
         try boolOrDefault(sig_groupcheck, false),
-        msg_slice,
+        msg_bytes[0..@sizeOf(SigningRoot)],
         DST,
         null,
         &pk.raw,
@@ -357,7 +372,7 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
         return error.InvalidAggregateVerifyInput;
     }
 
-    const msg_bufs = try allocator.alloc([32]u8, msgs_len);
+    const msg_bufs = try allocator.alloc(SigningRoot, msgs_len);
     defer allocator.free(msg_bufs);
 
     const pk_ptrs = try allocator.alloc(*NativePublicKey, pks_len);
@@ -365,17 +380,17 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
 
     for (0..msgs_len) |i| {
         const msg_value = try msgs.get(@intCast(i));
-        const msg_bytes = try uint8SliceFromValue(msg_value);
-        if (msg_bytes.len != 32) return error.InvalidMessageLength;
-        @memcpy(&msg_bufs[i], msg_bytes[0..32]);
+        const msg_bytes = try (try msg_value.asUint8Array()).toSlice();
+        if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
+        msg_bufs[i] = msg_bytes[0..@sizeOf(SigningRoot)].*;
 
         const wrapped_pk = try unwrapClass(PublicKey, try pks.get(@intCast(i)));
         pk_ptrs[i] = &wrapped_pk.raw;
     }
 
-    const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
+    const pool = state.thread_pool orelse return error.ThreadPoolNotInitialized;
     const result = pool.aggregateVerify(
-        napi_io.get(),
+        js.io(),
         &sig.raw,
         try boolOrDefault(sig_groupcheck, false),
         msg_bufs,
@@ -398,8 +413,8 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
 /// 3) sig: Signature
 /// 4) sigs_groupcheck: ?bool
 pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, sigs_groupcheck: ?js.Boolean) !js.Boolean {
-    const msg_slice = try msg.toSlice();
-    if (msg_slice.len != 32) return error.InvalidMessageLength;
+    const msg_bytes = try msg.toSlice();
+    if (msg_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
 
     const pks_len = try pks.length();
     if (pks_len == 0) return js.Boolean.from(false);
@@ -417,7 +432,7 @@ pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, si
     const result = sig.raw.fastAggregateVerify(
         try boolOrDefault(sigs_groupcheck, false),
         &pairing_buf,
-        msg_slice[0..32],
+        msg_bytes[0..@sizeOf(SigningRoot)],
         DST,
         native_pks,
         false,
@@ -437,82 +452,41 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     const n_elems = try sets.length();
     if (n_elems == 0) return js.Boolean.from(false);
 
-    var msgs_stack: [BATCH_VERIFY_SIZE][]const u8 = undefined;
-    var pks_stack: [BATCH_VERIFY_SIZE]*NativePublicKey = undefined;
-    var sigs_stack: [BATCH_VERIFY_SIZE]*NativeSignature = undefined;
-    var rands_stack: [BATCH_VERIFY_SIZE][32]u8 = undefined;
+    var items_stack: [BATCH_VERIFY_SIZE]BatchVerifyItem = undefined;
+    var items_heap: ?[]BatchVerifyItem = null;
+    defer if (items_heap) |buf| allocator.free(buf);
 
-    var msgs_heap: ?[][]const u8 = null;
-    defer if (msgs_heap) |buf| allocator.free(buf);
-    var pks_heap: ?[]*NativePublicKey = null;
-    defer if (pks_heap) |buf| allocator.free(buf);
-    var sigs_heap: ?[]*NativeSignature = null;
-    defer if (sigs_heap) |buf| allocator.free(buf);
-    var rands_heap: ?[][32]u8 = null;
-    defer if (rands_heap) |buf| allocator.free(buf);
-
-    const msgs = if (n_elems <= BATCH_VERIFY_SIZE) msgs_stack[0..n_elems] else blk: {
-        const buf = try allocator.alloc([]const u8, n_elems);
-        msgs_heap = buf;
-        break :blk buf;
-    };
-    const pks = if (n_elems <= BATCH_VERIFY_SIZE) pks_stack[0..n_elems] else blk: {
-        const buf = try allocator.alloc(*NativePublicKey, n_elems);
-        pks_heap = buf;
-        break :blk buf;
-    };
-    const sigs = if (n_elems <= BATCH_VERIFY_SIZE) sigs_stack[0..n_elems] else blk: {
-        const buf = try allocator.alloc(*NativeSignature, n_elems);
-        sigs_heap = buf;
-        break :blk buf;
-    };
-    const rands = if (n_elems <= BATCH_VERIFY_SIZE) rands_stack[0..n_elems] else blk: {
-        const buf = try allocator.alloc([32]u8, n_elems);
-        rands_heap = buf;
+    const items = if (n_elems <= BATCH_VERIFY_SIZE) items_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc(BatchVerifyItem, n_elems);
+        items_heap = buf;
         break :blk buf;
     };
 
-    var seed_bytes: [8]u8 = undefined;
-    const io = napi_io.get();
-    io.random(&seed_bytes);
-    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
-    const rand = prng.random();
-
-    const e = js.env();
     for (0..n_elems) |i| {
-        const set = (try sets.get(@intCast(i))).toValue();
-
-        const msg_napi = try set.getNamedProperty("msg");
-        const msg_bytes = try uint8SliceFromValue(.{ .val = msg_napi });
-        if (msg_bytes.len != 32) return error.InvalidMessageLength;
-        msgs[i] = msg_bytes;
-
-        const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try e.unwrap(PublicKey, pk_napi);
-        pks[i] = &wrapped_pk.raw;
-
-        const sig_napi = try set.getNamedProperty("sig");
-        const wrapped_sig = try e.unwrap(Signature, sig_napi);
-        sigs[i] = &wrapped_sig.raw;
-
-        var scalar = rand.int(u64);
-        while (scalar == 0) scalar = rand.int(u64);
-        std.mem.writeInt(u64, rands[i][0..8], scalar, .little);
-        @memset(rands[i][8..], 0);
+        const set_value = try sets.get(@intCast(i));
+        const set = try (try set_value.asObject(SignatureSetInput)).get();
+        const message_bytes = try set.msg.toSlice();
+        if (message_bytes.len != @sizeOf(SigningRoot)) return error.InvalidMessageLength;
+        const public_key = try unwrapClass(PublicKey, set.pk);
+        const signature = try unwrapClass(Signature, set.sig);
+        items[i] = .{
+            .message = message_bytes[0..@sizeOf(SigningRoot)],
+            .public_key = &public_key.raw,
+            .signature = &signature.raw,
+            .randomness = undefined,
+        };
     }
 
-    const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
-    const result = pool.verifyMultipleAggregateSignatures(
-        napi_io.get(),
-        n_elems,
-        msgs,
-        DST,
-        pks,
-        try boolOrDefault(pks_validate, false),
-        sigs,
-        try boolOrDefault(sigs_groupcheck, false),
-        rands,
-    ) catch return js.Boolean.from(false);
+    const pool = state.thread_pool orelse return error.ThreadPoolNotInitialized;
+    const result = try bls_verifier.verifySignatureSets(
+        js.io(),
+        pool,
+        items,
+        .{
+            .pks_validate = try boolOrDefault(pks_validate, false),
+            .sigs_groupcheck = try boolOrDefault(sigs_groupcheck, false),
+        },
+    );
 
     return js.Boolean.from(result);
 }
@@ -577,7 +551,8 @@ pub fn aggregateSerializedPublicKeys(serialized_public_keys: js.Array, pks_valid
     defer allocator.free(native_pks);
 
     for (0..pks_len) |i| {
-        const bytes = try uint8SliceFromValue(try serialized_public_keys.get(@intCast(i)));
+        const value = try serialized_public_keys.get(@intCast(i));
+        const bytes = try (try value.asUint8Array()).toSlice();
         native_pks[i] = NativePublicKey.deserialize(bytes) catch return error.DeserializationFailed;
     }
 
@@ -585,190 +560,6 @@ pub fn aggregateSerializedPublicKeys(serialized_public_keys: js.Array, pks_valid
         return error.AggregationFailed;
 
     return .{ .raw = agg_pk.toPublicKey() };
-}
-
-/// Synchronously aggregates public keys and signatures with randomness using
-/// Pippenger multi-scalar multiplication. Runs on the calling thread.
-///
-/// Arguments:
-/// 1) sets: Array of {pk: PublicKey, sig: Uint8Array}
-///
-/// Returns: {pk: PublicKey, sig: Signature}
-///
-/// TODO(zapi#23): once the DSL supports returning a struct of class instances,
-/// change the return type to `!struct { pk: PublicKey, sig: Signature }` and
-/// drop the manual `createObject` + `convertReturn` + `setNamedProperty` plumbing
-/// at the bottom of this function.
-/// See https://github.com/ChainSafe/zapi/issues/23
-pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
-    const n = try sets.length();
-    if (n == 0) return error.EmptyArray;
-    if (n > MAX_AGGREGATE_PER_JOB) return error.TooManySets;
-
-    const nbits: usize = 64;
-    const nbytes: usize = 8;
-
-    var pk_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativePublicKey = undefined;
-    var sigs: [MAX_AGGREGATE_PER_JOB]NativeSignature = undefined;
-    var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativeSignature = undefined;
-
-    var seed_bytes: [8]u8 = undefined;
-    const io = napi_io.get();
-    io.random(&seed_bytes);
-    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
-    const rand = prng.random();
-    var scalars: [8 * MAX_AGGREGATE_PER_JOB]u8 = undefined;
-    var sca_ptrs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
-    rand.bytes(scalars[0 .. n * nbytes]);
-
-    const env = js.env();
-    for (0..n) |i| {
-        const set = (try sets.get(@intCast(i))).toValue();
-
-        const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try env.unwrap(PublicKey, pk_napi);
-        pk_ptrs[i] = &wrapped_pk.raw;
-
-        const sig_napi = try set.getNamedProperty("sig");
-        const sig_bytes = try uint8SliceFromValue(.{ .val = sig_napi });
-        sigs[i] = NativeSignature.deserialize(sig_bytes[0..]) catch return error.DeserializationFailed;
-        sigs[i].validate(true) catch return error.InvalidSignature;
-        sig_ptrs[i] = &sigs[i];
-
-        while (std.mem.allEqual(u8, scalars[i * nbytes ..][0..nbytes], 0)) {
-            rand.bytes(scalars[i * nbytes ..][0..nbytes]);
-        }
-        sca_ptrs[i] = &scalars[i * nbytes];
-    }
-
-    const scratch_size = @max(
-        bls.c.blst_p1s_mult_pippenger_scratch_sizeof(n),
-        bls.c.blst_p2s_mult_pippenger_scratch_sizeof(n),
-    );
-    const scratch = try allocator.alloc(u64, scratch_size);
-    defer allocator.free(scratch);
-
-    // Pippenger multi-scalar multiplication on G1 (pubkeys)
-    var p1_ret: bls.c.blst_p1 = std.mem.zeroes(bls.c.blst_p1);
-    bls.c.blst_p1s_mult_pippenger(
-        &p1_ret,
-        @ptrCast(&pk_ptrs),
-        n,
-        @ptrCast(&sca_ptrs),
-        nbits,
-        scratch.ptr,
-    );
-    var result_pk: NativePublicKey = .{};
-    bls.c.blst_p1_to_affine(&result_pk.point, &p1_ret);
-
-    // Pippenger multi-scalar multiplication on G2 (signatures)
-    var p2_ret: bls.c.blst_p2 = std.mem.zeroes(bls.c.blst_p2);
-    bls.c.blst_p2s_mult_pippenger(
-        &p2_ret,
-        @ptrCast(&sig_ptrs),
-        n,
-        @ptrCast(&sca_ptrs),
-        nbits,
-        scratch.ptr,
-    );
-    var result_sig: NativeSignature = .{};
-    bls.c.blst_p2_to_affine(&result_sig.point, &p2_ret);
-
-    const pk_value = napi.Value{ .env = env.env, .value = js.convertReturn(PublicKey, .{ .raw = result_pk }, env.env) };
-    const sig_value = napi.Value{ .env = env.env, .value = js.convertReturn(Signature, .{ .raw = result_sig }, env.env) };
-
-    const result = try env.createObject();
-    try result.setNamedProperty("pk", pk_value);
-    try result.setNamedProperty("sig", sig_value);
-    return .{ .val = result };
-}
-
-/// Heap-allocated context shared between the JS thread (which kicks off the work),
-/// the libuv worker thread (which calls `ThreadPool.aggregateWithRandomness`), and
-/// the JS thread again (which resolves/rejects the Promise).
-///
-/// All input data should be copied into this struct so the worker thread doesn't depend on
-/// any JS-managed memory staying alive.
-const AsyncAggRandData = struct {
-    n: usize,
-    pks: [MAX_AGGREGATE_PER_JOB]NativePublicKey,
-    sigs: [MAX_AGGREGATE_PER_JOB]NativeSignature,
-    pk_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativePublicKey,
-    sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativeSignature,
-    randomness: [MAX_AGGREGATE_PER_JOB * 32]u8,
-    pk_out: NativePublicKey,
-    sig_out: NativeSignature,
-    err: ?anyerror,
-    deferred: napi.Deferred,
-    work: napi.c.napi_async_work,
-
-    fn destroy(self: *AsyncAggRandData) void {
-        allocator.destroy(self);
-    }
-};
-
-/// Execute `aggregateWithRandomness` on a libuv worker thread.
-///
-/// Assumes that:
-/// 1) pubkeys are already validated,
-/// 2) signatures are not group-checked on JS thread
-///
-/// Note: MUST NOT call any napi APIs.
-fn asyncAggRand_execute(_: napi.Env, data: *AsyncAggRandData) void {
-    const pool = thread_pool orelse {
-        data.err = error.PoolNotInitialized;
-        return;
-    };
-    pool.aggregateWithRandomness(
-        napi_io.get(),
-        data.pk_ptrs[0..data.n],
-        data.sig_ptrs[0..data.n],
-        data.randomness[0 .. data.n * 32],
-        false, // pks already validated implicitly by being deserialized PublicKey instances
-        true, // sigs were deserialized but not group-checked on the JS thread
-        &data.pk_out,
-        &data.sig_out,
-    ) catch |err| {
-        data.err = err;
-    };
-}
-
-/// Ran on the JS thread once the worker has finished. Always settles the
-/// promise — `settle` does the resolve/reject; if it errors we fall back to a
-/// bare reject so callers never see a dangling Promise.
-fn asyncAggRand_complete(env: napi.Env, status: napi.status.Status, data: *AsyncAggRandData) void {
-    defer {
-        napi.status.check(napi.c.napi_delete_async_work(env.env, data.work)) catch {};
-        data.destroy();
-    }
-
-    settle(env, status, data) catch {
-        // Catch all rejection: if we reach this point we might want
-        // better errors upstream
-        rejectWithError(env, data.deferred, "asyncAggregateWithRandomness", "InternalError") catch {};
-    };
-}
-
-fn settle(env: napi.Env, status: napi.status.Status, data: *AsyncAggRandData) !void {
-    if (status != .ok) {
-        // libuv's async work itself failed (e.g. cancelled), not crypto.
-        return rejectWithError(env, data.deferred, "asyncAggregateWithRandomness/asyncWork", @tagName(status));
-    }
-    if (data.err) |err| {
-        // Worker captured a Zig error — surface its name as the JS Error.code
-        // (e.g. "PointNotInGroup", "PoolNotInitialized", "OutOfMemory") so JS
-        // callers can branch on it.
-        return rejectWithError(env, data.deferred, "asyncAggregateWithRandomness", @errorName(err));
-    }
-
-    const pk_value = napi.Value{ .env = env.env, .value = js.convertReturn(PublicKey, .{ .raw = data.pk_out }, env.env) };
-    const sig_value = napi.Value{ .env = env.env, .value = js.convertReturn(Signature, .{ .raw = data.sig_out }, env.env) };
-
-    const result = try env.createObject();
-    try result.setNamedProperty("pk", pk_value);
-    try result.setNamedProperty("sig", sig_value);
-
-    try data.deferred.resolve(result);
 }
 
 /// Build a JS `Error` with `.code = code` and `.message = "<where>: <code>"`
@@ -782,70 +573,4 @@ fn rejectWithError(env: napi.Env, deferred: napi.Deferred, where: []const u8, co
     const msg_val = try env.createStringUtf8(msg);
     const err_val = try env.createError(code_val, msg_val);
     try deferred.reject(err_val);
-}
-
-/// Asynchronously aggregates public keys and signatures with randomness using
-/// Pippenger multi-scalar multiplication. The PK and Sig multi-scalar mults
-/// run in parallel on the bls `ThreadPool`.
-///
-/// This call is non-blocking.
-///
-/// This is modeled after blst's rust pippenger implementation.
-///
-/// See: https://github.com/supranational/blst/blob/dece82ea537b422890888bacde4034ca5b5a44d8/bindings/rust/src/pippenger.rs
-///
-/// Arguments:
-/// 1) sets: Array of {pk: PublicKey, sig: Uint8Array}
-///
-/// Returns: Promise<{pk: PublicKey, sig: Signature}>
-pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
-    const n = try sets.length();
-
-    if (n == 0) return error.EmptyArray;
-    if (n > MAX_AGGREGATE_PER_JOB) return error.TooManySets;
-    if (thread_pool == null) return error.PoolNotInitialized;
-
-    const env = js.env();
-
-    const data = try allocator.create(AsyncAggRandData);
-    errdefer allocator.destroy(data);
-
-    data.n = n;
-    data.pk_out = .{};
-    data.sig_out = .{};
-    data.err = null;
-    data.deferred = undefined;
-    data.work = undefined;
-    napi_io.get().random(data.randomness[0 .. n * 32]);
-
-    for (0..n) |i| {
-        const set = (try sets.get(@intCast(i))).toValue();
-
-        const pk_napi = try set.getNamedProperty("pk");
-        const wrapped_pk = try env.unwrap(PublicKey, pk_napi);
-        data.pks[i] = wrapped_pk.raw;
-        data.pk_ptrs[i] = &data.pks[i];
-
-        const sig_napi = try set.getNamedProperty("sig");
-        const sig_bytes = try uint8SliceFromValue(.{ .val = sig_napi });
-        data.sigs[i] = NativeSignature.deserialize(sig_bytes[0..]) catch return error.DeserializationFailed;
-        data.sig_ptrs[i] = &data.sigs[i];
-    }
-
-    data.deferred = try env.createPromise();
-
-    const resource_name = try env.createStringUtf8("asyncAggregateWithRandomness");
-    const work = try env.createAsyncWork(
-        AsyncAggRandData,
-        null,
-        resource_name,
-        asyncAggRand_execute,
-        asyncAggRand_complete,
-        data,
-    );
-    data.work = work.work;
-
-    try work.queue();
-
-    return .{ .val = data.deferred.getPromise() };
 }

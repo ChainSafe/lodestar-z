@@ -21,7 +21,7 @@ pub fn processPendingConsolidations(
     var pending_consolidations_it = pending_consolidations.iteratorReadonly(0);
     const pending_consolidations_length = try pending_consolidations.length();
     for (0..pending_consolidations_length) |_| {
-        const pending_consolidation = try pending_consolidations_it.nextValue(undefined);
+        const pending_consolidation = try pending_consolidations_it.nextValue();
         const source_index = pending_consolidation.source_index;
         const target_index = pending_consolidation.target_index;
         var source_validator = try validators.get(source_index);

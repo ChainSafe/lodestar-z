@@ -13,12 +13,14 @@ const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 
 pub fn verifyProposerSignature(
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     signed_block: AnySignedBeaconBlock,
 ) !bool {
     const signature_set = try getBlockProposerSignatureSet(
         allocator,
+        io,
         config,
         epoch_cache,
         signed_block,
@@ -28,6 +30,7 @@ pub fn verifyProposerSignature(
 
 pub fn getBlockProposerSignatureSet(
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     signed_block: AnySignedBeaconBlock,
@@ -43,28 +46,29 @@ pub fn getBlockProposerSignatureSet(
     // The proposer index isn't validated until processBlockHeader, so a malicious block could
     // put an out-of-range value here.
     const proposer_index = block.proposerIndex();
-    if (proposer_index >= epoch_cache.index_to_pubkey.items.len) {
+    const pubkey = epoch_cache.pubkey_cache.getPubkey(io, proposer_index) orelse
         return error.InvalidProposerIndex;
-    }
 
     return .{
-        .pubkey = epoch_cache.index_to_pubkey.items[proposer_index],
+        .pubkey = pubkey,
         .signing_root = signing_root_buf,
         .signature = signed_block.signature().*,
     };
 }
 
 pub fn getBlockHeaderProposerSignatureSet(
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     signed_block_header: *const types.phase0.SignedBeaconBlockHeader.Type,
-) SingleSignatureSet {
-    const domain = config.getDomain(epoch_cache.epoch, c.DOMAIN_BEACON_PROPOSER, signed_block_header.message.slot);
+) !SingleSignatureSet {
+    const domain = try config.getDomain(epoch_cache.epoch, c.DOMAIN_BEACON_PROPOSER, signed_block_header.message.slot);
     var signing_root: Root = undefined;
     try computeSigningRoot(types.phase0.SignedBeaconBlockHeader, signed_block_header, domain, &signing_root);
 
     return .{
-        .pubkey = epoch_cache.index_to_pubkey(signed_block_header.message.proposerIndex),
+        .pubkey = epoch_cache.pubkey_cache.getPubkey(io, signed_block_header.message.proposer_index) orelse
+            return error.PubkeyNotFound,
         .signing_root = signing_root,
         .signature = signed_block_header.signature,
     };

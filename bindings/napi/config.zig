@@ -9,7 +9,7 @@ const Preset = @import("preset").Preset;
 
 const max_blob_schedule_entries = 16;
 
-pub const State = struct {
+const State = struct {
     config: BeaconConfig = undefined,
     initialized: bool = false,
     config_name: [64]u8 = undefined,
@@ -71,7 +71,7 @@ pub fn set(object: js.Value, genesis_root: js.Uint8Array) !void {
     state.initialized = true;
 }
 
-pub fn chainConfigFromObject(env: napi.Env, obj: napi.Value) !ChainConfig {
+fn chainConfigFromObject(env: napi.Env, obj: napi.Value) !ChainConfig {
     var chain_config: ChainConfig = undefined;
 
     inline for (std.meta.fields(ChainConfig)) |field| {

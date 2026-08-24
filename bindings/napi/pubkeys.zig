@@ -1,167 +1,107 @@
 const std = @import("std");
-const js = @import("zapi:zapi").js;
-const bls = @import("bls");
+const zapi = @import("zapi:zapi");
+const js = zapi.js;
+const napi = zapi.napi;
 const blst_bindings = @import("./blst.zig");
-const PubkeyIndexMap = @import("state_transition").PubkeyIndexMap;
-const Index2PubkeyCache = @import("state_transition").Index2PubkeyCache;
-const napi_io = @import("./io.zig");
+const state_transition = @import("state_transition");
+const PubkeyCache = state_transition.PubkeyCache;
+const pkix = state_transition.pkix;
+const Validator = @import("consensus_types").phase0.Validator.Type;
 
-/// Uses page allocator for internal allocations.
-/// It's recommended to never reallocate the pubkey2index after initialization.
+/// Uses the page allocator for the process-wide cache's internal allocations.
 const allocator = std.heap.page_allocator;
 
 const default_initial_capacity: u32 = 0;
 const max_stack_aggregate_pubkeys = 512;
 
-pub const State = struct {
-    pubkey2index: PubkeyIndexMap = undefined,
-    index2pubkey: Index2PubkeyCache = undefined,
+const State = struct {
+    cache: PubkeyCache = undefined,
     initialized: bool = false,
+    control_env: napi.c.napi_env = null,
 
-    pub fn init(self: *State) !void {
+    pub fn init(self: *State, env: napi.Env) !void {
         if (self.initialized) return;
-        self.pubkey2index = PubkeyIndexMap.init(allocator);
-        try self.pubkey2index.ensureTotalCapacity(default_initial_capacity);
-        self.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, default_initial_capacity);
+
+        self.cache = try PubkeyCache.initCapacity(allocator, js.io(), default_initial_capacity);
         self.initialized = true;
+        self.control_env = env.env;
     }
 
+    /// Last-environment cleanup runs after JS calls stop. Remaining view
+    /// finalizers do not dereference their retained pubkey-cache pointer.
     pub fn deinit(self: *State) void {
         if (!self.initialized) return;
-        self.pubkey2index.deinit();
-        self.index2pubkey.deinit(allocator);
+        self.cache.deinit();
         self.initialized = false;
+        self.control_env = null;
     }
 
-    pub fn reset(self: *State) !void {
-        if (!self.initialized) return;
-
-        self.pubkey2index.clearRetainingCapacity();
-        self.index2pubkey.shrinkRetainingCapacity(0);
+    fn requireControlEnvironment(self: *const State, env: napi.Env) !void {
+        if (self.control_env == null or self.control_env != env.env) {
+            return error.PubkeyCacheControlEnvironmentOnly;
+        }
     }
 };
 
 pub var state: State = .{};
 
-/// Must only be called after pubkey2index has been initialized with a capacity.
-/// Must be kept in sync with std/hashmap.zig
-fn pubkey2indexWrittenSize() usize {
-    const K = [48]u8;
-    const V = u64;
-    const Header = struct {
-        values: [*]V,
-        keys: [*]K,
-        capacity: u32,
-    };
-    const Metadata = packed struct {
-        const FingerPrint = u7;
-        fingerprint: FingerPrint,
-        used: u1,
-    };
-    const header_align = @alignOf(Header);
-    const key_align = @alignOf(K);
-    const val_align = @alignOf(V);
-    const max_align = comptime @max(header_align, key_align, val_align);
-
-    const new_cap: usize = state.pubkey2index.capacity();
-    const meta_size = @sizeOf(Header) + new_cap * @sizeOf(Metadata);
-
-    const keys_start = std.mem.alignForward(usize, meta_size, key_align);
-    const keys_end = keys_start + new_cap * @sizeOf(K);
-
-    const vals_start = std.mem.alignForward(usize, keys_end, val_align);
-    const vals_end = vals_start + new_cap * @sizeOf(V);
-
-    const total_size = std.mem.alignForward(usize, vals_end, max_align);
-
-    return total_size - @sizeOf(Header);
-}
-
 /// JS: pubkeys.save(filePath)
 pub fn save(file_path: js.String) !void {
-    var file_path_buf: [1024]u8 = undefined;
-    const path = try file_path.toSlice(&file_path_buf);
-    const io = napi_io.get();
-    const file = try std.Io.Dir.createFile(.cwd(), io, path, .{});
-    defer file.close(io);
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+    try state.requireControlEnvironment(js.env());
 
-    // Write header: Magic "PKIX" + len + capacity
-    var header: [12]u8 = [_]u8{ 'P', 'K', 'I', 'X', 0, 0, 0, 0, 0, 0, 0, 0 };
-    std.mem.writeInt(u32, header[4..8], @intCast(state.index2pubkey.items.len), .little);
-    std.mem.writeInt(u32, header[8..12], @intCast(state.index2pubkey.capacity), .little);
+    const path = try file_path.toOwnedSlice(allocator);
+    defer allocator.free(path);
+    const io = js.io();
+
+    // `createFileAtomic` creates a sibling temporary file so replacement cannot
+    // cross filesystems. `deinit` removes the temporary file on every failure.
+    var atomic_file = try std.Io.Dir.createFileAtomic(.cwd(), io, path, .{ .replace = true });
+    defer atomic_file.deinit(io);
 
     var write_buf: [4096]u8 = undefined;
-    var file_writer = file.writer(io, &write_buf);
-    var writer = &file_writer.interface;
-    try writer.writeAll(header[0..12]);
-
-    // Write pubkey2index entries
-    const p2i_size = pubkey2indexWrittenSize();
-    const ptr: [*]u8 = @ptrCast(state.pubkey2index.unmanaged.metadata.?);
-    try writer.writeAll(ptr[0..p2i_size]);
-
-    // Write index2pubkey entries
-    try writer.writeAll(std.mem.sliceAsBytes(state.index2pubkey.items));
+    var file_writer = atomic_file.file.writer(io, &write_buf);
+    try pkix.save(&state.cache, io, &file_writer.interface);
 
     try file_writer.end();
+    try atomic_file.file.sync(io);
+    try atomic_file.replace(io);
 }
 
-/// JS: pubkeys.load(filePath)
-pub fn load(file_path: js.String) !void {
-    var file_path_buf: [1024]u8 = undefined;
-    const path = try file_path.toSlice(&file_path_buf);
-    const io = napi_io.get();
+/// JS: pubkeys.load(filePath, maxCapacity)
+pub fn load(file_path: js.String, max_capacity: js.Number) !void {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+    try state.requireControlEnvironment(js.env());
+
+    const path = try file_path.toOwnedSlice(allocator);
+    defer allocator.free(path);
+    const capacity_limit = try max_capacity.toU32Exact();
+    const io = js.io();
+
     const file = try std.Io.Dir.openFile(.cwd(), io, path, .{});
     defer file.close(io);
 
-    if (state.initialized) {
-        state.deinit();
-    }
-
+    const file_size = try file.length(io);
     var read_buf: [4096]u8 = undefined;
     var file_reader = file.reader(io, &read_buf);
 
-    const header = try file_reader.interface.takeArray(12);
+    var loaded_cache = try pkix.load(
+        allocator,
+        io,
+        &file_reader.interface,
+        file_size,
+        capacity_limit,
+    );
+    defer loaded_cache.deinit();
 
-    if (!std.mem.eql(u8, header[0..4], &[_]u8{ 'P', 'K', 'I', 'X' })) {
-        return error.InvalidPubkeyIndexFile;
-    }
-
-    const len = std.mem.readInt(u32, header[4..8], .little);
-    const capacity = std.mem.readInt(u32, header[8..12], .little);
-
-    const file_size = try file.length(io);
-
-    state.pubkey2index = PubkeyIndexMap.init(allocator);
-    try state.pubkey2index.ensureTotalCapacity(capacity);
-    errdefer state.pubkey2index.deinit();
-    state.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, capacity);
-    errdefer state.index2pubkey.deinit(allocator);
-    try state.index2pubkey.resize(allocator, len);
-
-    const p2i_size = pubkey2indexWrittenSize();
-    const i2p_size = @sizeOf(bls.PublicKey) * len;
-
-    if (file_size != 12 + p2i_size + i2p_size) {
-        return error.InvalidPubkeyIndexFile;
-    }
-
-    // Read pubkey2index entries
-    const ptr: [*]u8 = @ptrCast(state.pubkey2index.unmanaged.metadata.?);
-    try file_reader.interface.readSliceAll(ptr[0..p2i_size]);
-
-    state.pubkey2index.unmanaged.size = len;
-    state.pubkey2index.unmanaged.available = capacity - len;
-
-    // Read index2pubkey entries
-    try file_reader.interface.readSliceAll(std.mem.sliceAsBytes(state.index2pubkey.items));
-
-    state.initialized = true;
+    try pkix.install(&state.cache, io, &loaded_cache);
 }
 
 /// JS: pubkeys.reset()
 pub fn reset() !void {
-    try state.reset();
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+    try state.requireControlEnvironment(js.env());
+    try state.cache.clear(js.io());
 }
 
 /// JS: pubkeys.getIndex(pubkeyBytes) → number | null
@@ -170,10 +110,14 @@ pub fn getIndex(pubkey: js.Uint8Array) !js.Value {
 
     const pubkey_slice = try pubkey.toSlice();
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
+    const pubkey_bytes = pubkey_slice[0..48].*;
+
+    const io = js.io();
+    const index = state.cache.get(io, pubkey_bytes);
 
     const e = js.env();
-    if (state.pubkey2index.get(pubkey_slice[0..48].*)) |index| {
-        return .{ .val = try e.createUint32(@intCast(index)) };
+    if (index) |validator_index| {
+        return .{ .val = try e.createUint32(@intCast(validator_index)) };
     }
     return .{ .val = try e.getNull() };
 }
@@ -182,10 +126,20 @@ pub fn getIndex(pubkey: js.Uint8Array) !js.Value {
 pub fn get(index: js.Number) !?blst_bindings.PublicKey {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
-    const idx = try index.toU32();
-    if (idx >= state.index2pubkey.items.len) return null;
+    const idx = try index.toU32Exact();
+    const io = js.io();
+    const public_key = state.cache.getPubkey(io, idx) orelse return null;
+    return .{ .raw = public_key };
+}
 
-    return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
+/// JS: pubkeys.getPubkeyBytes(index) → Uint8Array | undefined
+pub fn getPubkeyBytes(index: js.Number) !?js.Uint8Array {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
+    const idx = try index.toU32Exact();
+    const io = js.io();
+    const pubkey_bytes = state.cache.getPubkeyBytes(io, idx) orelse return null;
+    return js.Uint8Array.from(pubkey_bytes[0..]);
 }
 
 /// Aggregate multiple `PublicKey`s by the given
@@ -201,77 +155,100 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
     const len = try indices.length();
     if (len == 0) return error.EmptyPublicKeyArray;
 
-    if (len == 1) {
-        const idx = try (try indices.getNumber(0)).toU32();
-        if (idx >= state.index2pubkey.items.len) return error.PubkeyIndexNotFound;
-        return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
-    }
-
-    var pks_stack: [max_stack_aggregate_pubkeys]bls.PublicKey = undefined;
-    const pks = if (len <= pks_stack.len)
-        pks_stack[0..len]
+    var indices_stack: [max_stack_aggregate_pubkeys]u64 = undefined;
+    const exact_indices = if (len <= indices_stack.len)
+        indices_stack[0..len]
     else blk: {
-        const buf = try allocator.alloc(bls.PublicKey, len);
+        const buf = try allocator.alloc(u64, len);
         break :blk buf;
     };
-    defer if (len > pks_stack.len) allocator.free(pks);
+    defer if (len > indices_stack.len) allocator.free(exact_indices);
 
     for (0..len) |i| {
-        const idx = try (try indices.getNumber(@intCast(i))).toU32();
-        if (idx >= state.index2pubkey.items.len) return error.PubkeyIndexNotFound;
-        pks[i] = state.index2pubkey.items[@intCast(idx)];
+        exact_indices[i] = try (try indices.getNumber(@intCast(i))).toU32Exact();
     }
 
-    const agg_pk = bls.AggregatePublicKey.aggregate(pks, false) catch
-        return error.AggregationFailed;
+    const io = js.io();
+    const aggregate_pubkey = if (exact_indices.len == 1)
+        state.cache.getPubkey(io, exact_indices[0]) orelse return error.PubkeyIndexNotFound
+    else
+        state.cache.aggregate(io, exact_indices) catch |err| switch (err) {
+            error.InvalidIndex => return error.PubkeyIndexNotFound,
+            else => return error.AggregationFailed,
+        };
 
-    return .{ .raw = agg_pk.toPublicKey() };
+    return .{ .raw = aggregate_pubkey };
 }
 
-/// JS: pubkeys.set(index, pubkeyBytes)
-pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
+/// JS: pubkeys.append(index, pubkeyBytes)
+pub fn append(index: js.Number, pubkey: js.Uint8Array) !void {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
-    const idx = try index.toU32();
+    const idx = try index.toU32Exact();
+    const io = js.io();
+
     const pubkey_slice = try pubkey.toSlice();
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
+    const pubkey_bytes = pubkey_slice[0..48].*;
 
-    const pubkey_bytes = pubkey_slice[0..48];
+    try state.cache.append(io, pubkey_bytes, idx);
+}
 
-    // Ensure capacity if needed
-    if (idx >= state.index2pubkey.capacity) {
-        const new_cap: u32 = @intCast(@max(idx + 1, state.index2pubkey.capacity * 2));
-        try state.pubkey2index.ensureTotalCapacity(new_cap);
-        try state.index2pubkey.ensureTotalCapacity(allocator, new_cap);
+/// JS: pubkeys.syncPubkeys(validators)
+pub fn syncPubkeys(validators: js.Array) !void {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
+    const validator_count = try validators.length();
+    const io = js.io();
+    const num_cached = state.cache.count(io);
+    if (validator_count <= num_cached) return;
+
+    const num_new_validators = validator_count - num_cached;
+
+    // SAFETY: the first `num_cached` validator ptrs are intentionally left undefined,
+    // because syncPubkeys only has to append the last `num_new_validators` pubkeys.
+    const validator_ptrs = try allocator.alloc(*const Validator, validator_count);
+    defer allocator.free(validator_ptrs);
+
+    const new_validators = try allocator.alloc(Validator, num_new_validators);
+    defer allocator.free(new_validators);
+
+    // `new_index` is the index of the soon-to-be added pubkey of a new validator.
+    // `i` is the local-only index of the temporary backing memory `new_validators`.
+    for (num_cached..validator_count, 0..) |new_index, i| {
+        const value = try validators.get(@intCast(new_index));
+        const partial_validator = try (try value.asObject(struct { pubkey: js.Uint8Array })).get();
+
+        new_validators[i] = undefined;
+        new_validators[i].pubkey = try partial_validator.pubkey.toArray(blst_bindings.PublicKey.COMPRESS_SIZE);
+        validator_ptrs[new_index] = &new_validators[i];
     }
 
-    // Extend length if needed
-    if (idx >= state.index2pubkey.items.len) {
-        try state.index2pubkey.resize(allocator, idx + 1);
-    }
-
-    // Set pubkey2index
-    state.pubkey2index.put(pubkey_bytes.*, @intCast(idx)) catch return error.PubkeyIndexInsertFailed;
-
-    // Deserialize and set index2pubkey
-    state.index2pubkey.items[@intCast(idx)] = try bls.PublicKey.uncompress(pubkey_bytes);
+    try state.cache.syncPubkeys(io, validator_ptrs);
 }
 
 /// JS: pubkeys.size() → number
 /// Note: zapi DSL does not yet support namespace-level getters, so this is a function.
 pub fn size() !js.Number {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
-    return js.Number.from(@as(u32, @intCast(state.index2pubkey.items.len)));
+    const io = js.io();
+    return js.Number.from(state.cache.count(io));
 }
 
 /// JS: pubkeys.ensureCapacity(newSize)
 pub fn ensureCapacity(new_size: js.Number) !void {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
-    const requested = try new_size.toU32();
-    const old_size = state.index2pubkey.capacity;
-    if (requested <= old_size) return;
+    const requested = try new_size.toU32Exact();
+    const io = js.io();
+    try state.cache.ensureTotalCapacity(io, requested);
+}
 
-    try state.pubkey2index.ensureTotalCapacity(requested);
-    try state.index2pubkey.ensureTotalCapacity(allocator, requested);
+/// JS: pubkeys.capacity() → number
+/// Note: zapi DSL does not yet support namespace-level getters, so this is a function.
+pub fn capacity() !js.Number {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+    const io = js.io();
+    const current_capacity: u32 = @intCast(state.cache.capacity(io));
+    return js.Number.from(current_capacity);
 }

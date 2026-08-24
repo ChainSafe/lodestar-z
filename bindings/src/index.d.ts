@@ -1,4 +1,5 @@
 // biome-ignore-all lint/style/useNamingConvention: spec-canonical fork names in `ForkName`
+
 interface BeaconBlockHeader {
   slot: number;
   proposerIndex: number;
@@ -269,6 +270,7 @@ export declare class BeaconStateView {
   getBalance(index: number): number;
   getValidator(index: number): Validator;
   getAllValidators(): Validator[];
+  getBuildersLength(): number;
   getAllBalances(): number[];
   getValidatorsByStatus(statuses: Set<string>, currentEpoch: number): Validator[];
   // TODO wrong function
@@ -364,6 +366,7 @@ export declare class BeaconStateView {
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
+  stateTransition(signedBlockBytes: Uint8Array, options?: TransitionOpts): BeaconStateView;
 }
 
 declare const bindings: {
@@ -374,14 +377,31 @@ declare const bindings: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
   shuffle: {
+    /** Shuffles `out` in place, no allocation. */
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
+    unshuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Uint32Array;
+    computeProposerIndex: (
+      seed: Uint8Array,
+      activeIndices: Uint32Array,
+      effectiveBalanceIncrements: Uint16Array,
+      randByteCount: 1 | 2,
+      maxEffectiveBalance: number,
+      effectiveBalanceIncrement: number,
+      rounds: number
+    ) => number;
+    computeSyncCommitteeIndices: (
+      seed: Uint8Array,
+      activeIndices: Uint32Array,
+      effectiveBalanceIncrements: Uint16Array,
+      randByteCount: 1 | 2,
+      syncCommitteeSize: number,
+      maxEffectiveBalance: number,
+      effectiveBalanceIncrement: number,
+      rounds: number
+    ) => Uint32Array;
   };
   stateTransition: {
-    stateTransition: (
-      preState: BeaconStateView,
-      signedBlockBytes: Uint8Array,
-      options?: TransitionOpts
-    ) => BeaconStateView;
+    deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
     init: () => void;
