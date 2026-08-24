@@ -118,6 +118,13 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
         pub const kind = TypeKind.progressive_container;
         pub const Fields: type = ST;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
+        pub const field_indices: [fields.len]usize = blk: {
+            var indices: [fields.len]usize = undefined;
+            for (0..fields.len) |i| {
+                indices[i] = getActiveFieldIndex(active_fields, i);
+            }
+            break :blk indices;
+        };
         pub const Type: type = T;
         pub const fixed_size: usize = _fixed_size;
         pub const field_offsets: [fields.len]usize = _offsets;
@@ -386,6 +393,13 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
     return struct {
         pub const kind = TypeKind.progressive_container;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
+        pub const field_indices: [fields.len]usize = blk: {
+            var indices: [fields.len]usize = undefined;
+            for (0..fields.len) |i| {
+                indices[i] = getActiveFieldIndex(active_fields, i);
+            }
+            break :blk indices;
+        };
         pub const Fields: type = ST;
         pub const Type: type = T;
         pub const min_size: usize = _min_size;
