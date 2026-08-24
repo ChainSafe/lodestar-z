@@ -2,12 +2,18 @@
 
 Thanks for your interest in contributing to Lodestar. It's people like you that push the Ethereum ecosystem forward.
 
-## New Contributor?
+## Contribution Process
 
-Unsure where to begin contributing to Lodestar? Here are some ideas!
-
-- :speech_balloon: Join our [Discord chat](https://discord.gg/aMxzVcr)!
-  [![Discord](https://img.shields.io/discord/593655374469660673.svg?label=Discord&logo=discord)](https://discord.gg/aMxzVcr)
+1. Make sure you're familiar with our contribution guidelines _(this document)_!
+2. Before starting on any code, make sure to **leave a comment stating your intention**
+   in the issue you are interested in or on our [Discord](https://discord.gg/aMxzVcr).
+   We would prefer to have some form of human-to-human interaction before you
+   contribute any code, especially since AI usage is commonplace today.
+3. Create your [own fork](https://github.com/ChainSafe/lodestar-z/fork) and
+   make the necessary changes. Test your changes locally first.
+   See [Developer Usage](#developer-usage) below.
+4. Make an open pull request when you're ready for it to be reviewed.
+   See Pull request etiquette for more information.
 
 ### AI Assistance Notice
 
@@ -19,14 +25,6 @@ Unsure where to begin contributing to Lodestar? Here are some ideas!
 ## Reporting A Bug?
 
 - :spiral_notepad: [Create a new issue!](https://github.com/ChainSafe/lodestar-z/issues/new/choose)
-
-## Contribution Process
-
-1. Make sure you're familiar with our contribution guidelines _(this document)_!
-2. Create your [own fork](https://github.com/ChainSafe/lodestar-z/fork) of this repository.
-3. Make your changes in your local fork.
-4. If you've made a code change, make sure to test your changes first locally. See [Developer Usage](#developer-usage) below.
-5. Make an open pull request when you're ready for it to be reviewed. We review PRs on a regular basis. See Pull request etiquette for more information.
 
 > [!IMPORTANT]
 > Please note that trivial, non-code contributions such as spelling, grammar, typos, corrections, comments and link fixes are not acceptable pull requests.
