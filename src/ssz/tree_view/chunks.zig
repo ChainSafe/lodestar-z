@@ -429,6 +429,8 @@ pub fn CompositeChunks(
         /// clone(transfer_cache) invalidates it — re-get() after either, and don't deinit it.
         pub fn get(self: *Self, index: usize) !ElementPtr {
             const gindex = Gindex.fromDepth(chunk_depth, index);
+            // A successful mutable get always marks the child as changed, including a child cached
+            // by getReadonly(). Reserve first, then publish only after all fallible work succeeds.
             if (!self.state.changed.contains(gindex)) {
                 try self.state.changed.ensureUnusedCapacity(self.state.allocator, 1);
             }
