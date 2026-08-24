@@ -16,19 +16,31 @@ pub fn Hasher(comptime ST: type) type {
                         return try HasherData.initCapacity(allocator, hasher_size, null);
                     } else {
                         var children = try allocator.alloc(HasherData, 1);
+                        errdefer allocator.free(children);
+
                         children[0] = try Hasher(ST.Element).init(allocator);
+                        errdefer children[0].deinit(allocator);
+
                         return try HasherData.initCapacity(allocator, hasher_size, children);
                     }
                 },
                 .container => {
                     const hasher_size = if (ST.chunk_count % 2 == 1) ST.chunk_count + 1 else ST.chunk_count;
                     var children = try allocator.alloc(HasherData, ST.fields.len);
+                    errdefer allocator.free(children);
+
+                    var initialized_count: usize = 0;
+                    errdefer for (children[0..initialized_count]) |child| {
+                        child.deinit(allocator);
+                    };
+
                     inline for (ST.fields, 0..) |field, i| {
                         if (comptime isBasicType(field.type)) {
                             children[i] = try HasherData.initCapacity(allocator, 0, null);
                         } else {
                             children[i] = try Hasher(field.type).init(allocator);
                         }
+                        initialized_count += 1;
                     }
                     return try HasherData.initCapacity(allocator, hasher_size, children);
                 },
@@ -39,7 +51,11 @@ pub fn Hasher(comptime ST: type) type {
                         return try HasherData.initCapacity(allocator, hasher_size, null);
                     } else {
                         var children = try allocator.alloc(HasherData, 1);
+                        errdefer allocator.free(children);
+
                         children[0] = try Hasher(ST.Element).init(allocator);
+                        errdefer children[0].deinit(allocator);
+
                         return try HasherData.initCapacity(allocator, hasher_size, children);
                     }
                 },
