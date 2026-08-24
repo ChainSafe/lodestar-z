@@ -25,7 +25,7 @@ Unsure where to begin contributing to Lodestar? Here are some ideas!
 1. Make sure you're familiar with our contribution guidelines _(this document)_!
 2. Create your [own fork](https://github.com/ChainSafe/lodestar-z/fork) of this repository.
 3. Make your changes in your local fork.
-4. If you've made a code change, make sure to test your changes first locally. See [Developer Usage](#Developer%20Usage) below.
+4. If you've made a code change, make sure to test your changes first locally. See [Developer Usage](#developer-usage) below.
 5. Make an open pull request when you're ready for it to be reviewed. We review PRs on a regular basis. See Pull request etiquette for more information.
 
 > [!IMPORTANT]
@@ -37,7 +37,7 @@ Unsure where to begin contributing to Lodestar? Here are some ideas!
 
 We currently host all zig packages and napi bindings in [this repository](https://github.com/ChainSafe/lodestar-z)
 as a [monorepo](https://en.wikipedia.org/wiki/Monorepo).
-See [packages/](https://github.com/ChainSafe/lodestar-z/tree/main/src) for a list of packages
+See [src/](https://github.com/ChainSafe/lodestar-z/tree/main/src) for a list of packages
 and [bindings/](https://github.com/ChainSafe/lodestar-z/tree/main/bindings) for
 a list of napi bindings hosted in this repository.
 
@@ -112,11 +112,11 @@ pnpm lint
 pnpm exec biome check --write .
 ```
 
-## Github Style Guide
+## GitHub Style Guide
 
 **Branch Naming**
 
-If you are contributing from this repository prefix the branch name with your Github username (i.e. `myusername/short-description`).
+If you are contributing from this repository prefix the branch name with your GitHub username (i.e. `myusername/short-description`).
 
 **Pull Request Naming**
 
@@ -163,34 +163,34 @@ If the PR involves significant code refactoring, structural changes, or fundamen
 - Create a GitHub issue or Discord Thread before writing code.
 - Outline the problem, your proposed approach, and any alternative solutions.
 - Request feedback and build consensus with the team.
-- Summarize the outcome and link the discussion in the PR description once consensus is reached.
+- Summarize the outcome and link the issue in the PR description once consensus is reached.
 - If changes affect multiple packages or require coordination with ongoing development,
-  summarize any key decisions from the discussion in the PR description.
+  summarize any key decisions from the issue in the PR description.
 
 ### 3. Large Feature or Multi-PR Implementation
 
 If the PR introduces large-scale changes, affecting multiple areas of the codebase or requiring step-by-step integration:
 
 - Document the feature first before opening any PR.
-- Open a GitHub Discussion with a detailed technical proposal explaining the feature. This ideally will include some details like:
+- Open a GitHub Discussion with a detailed technical proposal explaining the feature. This should include details like:
   - Big picture explanation of how and why the feature will help or will change the codebase
   - Rough outline of the code that will be implemented
   - If a functional implementation is used, a brief description of what each function will do,
     possibly with a basic function signature if it is clear what will be needed
   - Broad overview of how data will flow and integrate with the surrounding sub-systems
-  - Rough discussion of potential performance (cpu and memory) implications
+  - Rough discussion of potential performance (CPU and memory) implications
 - Share the document with the team and gather feedback before implementation.
 - Create a feature branch to showcase the entire implementation. The idea will be to get this branch deployed on a feature group to test.
   Throughout the process, metrics will be analyzed to ensure there are no regressions.
 - First merge any refactor work necessary to get `main` prepared for the feature.
-- Create a second empty feature branch off of `main` that fork after the refactor work is merged.
+- Create a second empty feature branch from `main` after the refactor work is merged.
 - Break down the implementation into smaller, manageable PRs that merge into the empty feature branch.
 - Each PR should focus on a specific part of the feature.
-  This middle part of the review is focused on API, implementation overview and other high level pieces but will be relatively limited as the API discussion,
+  This middle part of the review is focused on API, implementation overview and other high-level pieces but will be relatively limited as the API discussion,
   analysis of the feature branch and full review on merge to `main` are the important steps.
 - Link the design document in each PR description so reviewers can always refer to the full scope.
 - Merge the smaller PRs into the feature branch until the complete feature is ready for a final merge into the `main` branch.
   This is the "formal review process" where several team members will likely get involved. 
-  Up to this point its mostly peer review. The merge to `main` is where details like naming, function signature,
+  Up to this point it's mostly peer review. The merge to `main` is where details like naming, function signature,
   type definitions, etc will be scrutinized. This is also where metrics from the initial implementation branch
   will get a detailed, final analysis.

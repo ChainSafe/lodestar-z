@@ -20,9 +20,8 @@ We welcome all contributions, but are strict about quality.
 Before contributing, please read [CONTRIBUTING](./CONTRIBUTING.md) and the
 relevant links inside (most importantly, our [AI_POLICY](./AI_POLICY.md)).
 
-PRs/issues that are clearly low effort will be de-prioritized
-or closed according to our discretion.
+We may deprioritize or close low-effort issues and pull requests at our discretion.
 
-# License
+## License
 
 Apache-2.0
