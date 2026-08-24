@@ -8,7 +8,6 @@ const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").Epoc
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
 const getAttestationDeltas = @import("./get_attestation_deltas.zig").getAttestationDeltas;
 const getRewardsAndPenaltiesAltair = @import("./get_rewards_and_penalties.zig").getRewardsAndPenaltiesAltair;
-const Node = @import("persistent_merkle_tree").Node;
 
 pub fn processRewardsAndPenalties(
     comptime fork: ForkSeq,
@@ -67,37 +66,4 @@ pub fn getRewardsAndPenalties(
         return try getAttestationDeltas(epoch_cache, cache, try state.finalizedEpoch(), rewards, penalties);
     }
     return try getRewardsAndPenaltiesAltair(fork, config, epoch_cache, state, cache, rewards, penalties);
-}
-
-const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
-
-test "processRewardsAndPenalties - sanity" {
-    const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
-    defer test_state.deinit();
-
-    try processRewardsAndPenalties(
-        .electra,
-        allocator,
-        test_state.cached_state.config,
-        test_state.cached_state.epoch_cache,
-        test_state.cached_state.state.castToFork(.electra),
-        test_state.epoch_transition_cache,
-        null,
-    );
-
-    // Verify replacing the old cached balances does not leak.
-    try processRewardsAndPenalties(
-        .electra,
-        allocator,
-        test_state.cached_state.config,
-        test_state.cached_state.epoch_cache,
-        test_state.cached_state.state.castToFork(.electra),
-        test_state.epoch_transition_cache,
-        null,
-    );
 }

@@ -7,8 +7,6 @@ import {
   aggregatePublicKeys,
   aggregateSerializedPublicKeys,
   aggregateVerify,
-  aggregateWithRandomness,
-  asyncAggregateWithRandomness,
   fastAggregateVerify,
   verify,
   verifyMultipleAggregateSignatures,
@@ -417,144 +415,6 @@ describe("blst", () => {
       expect(() => aggregateSerializedPublicKeys([new Uint8Array(32)])).toThrow();
     });
   });
-
-  describe("aggregateWithRandomness", () => {
-    it("should return aggregated pk and sig", () => {
-      const {_, sets} = getTestSetsSameMessage(8);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const result = aggregateWithRandomness(input);
-      expect(result).toHaveProperty("pk");
-      expect(result).toHaveProperty("sig");
-      expect(result.pk).toBeInstanceOf(PublicKey);
-    });
-
-    it("should produce a valid aggregated signature", () => {
-      const {msg, sets} = getTestSetsSameMessage(8);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const {pk, sig} = aggregateWithRandomness(input);
-      const isValid = verify(msg, pk, sig, false, false);
-      expect(isValid).toBe(true);
-    });
-
-    it("should work with a single set", () => {
-      const {msg, sets} = getTestSetsSameMessage(1);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const {pk, sig} = aggregateWithRandomness(input);
-      const isValid = verify(msg, pk, sig, false, false);
-      expect(isValid).toBe(true);
-    });
-
-    it("should throw on empty input", () => {
-      expect(() => aggregateWithRandomness([])).toThrow();
-    });
-
-    it("should reject invalid signature bytes", () => {
-      const {sets} = getTestSetsSameMessage(4);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      input[2].sig = new Uint8Array(96).fill(0xff);
-      expect(() => aggregateWithRandomness(input)).toThrow();
-    });
-
-    it("should reject objects of the wrong class", () => {
-      const {sets} = getTestSetsSameMessage(1);
-      const input = [{pk: sets[0].sk as unknown as PublicKey, sig: sets[0].sig.toBytes()}];
-      expect(() => aggregateWithRandomness(input)).toThrow("TypeMismatch");
-    });
-  });
-
-  describe("asyncAggregateWithRandomness", () => {
-    it("should be exported as a function", () => {
-      expect(typeof asyncAggregateWithRandomness).toBe("function");
-    });
-
-    it("should return a Promise", () => {
-      const {sets} = getTestSetsSameMessage(2);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const result = asyncAggregateWithRandomness(input);
-      expect(result).toBeInstanceOf(Promise);
-      return result;
-    });
-
-    it("should resolve with aggregated pk and sig instances", async () => {
-      const {sets} = getTestSetsSameMessage(8);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const result = await asyncAggregateWithRandomness(input);
-      expect(result).toHaveProperty("pk");
-      expect(result).toHaveProperty("sig");
-      expect(result.pk).toBeInstanceOf(PublicKey);
-      expect(result.sig).toBeInstanceOf(Signature);
-    });
-
-    it("should produce a valid aggregated signature - small MSM", async () => {
-      const {msg, sets} = getTestSetsSameMessage(8);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const {pk, sig} = await asyncAggregateWithRandomness(input);
-      expect(verify(msg, pk, sig, false, false)).toBe(true);
-    });
-
-    it("should produce a valid aggregated signature - tiled MSM", async () => {
-      const {msg, sets} = getTestSetsSameMessage(33);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const {pk, sig} = await asyncAggregateWithRandomness(input);
-      expect(verify(msg, pk, sig, false, false)).toBe(true);
-    });
-
-    it("should work with a single set", async () => {
-      const {msg, sets} = getTestSetsSameMessage(1);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const {pk, sig} = await asyncAggregateWithRandomness(input);
-      expect(verify(msg, pk, sig, false, false)).toBe(true);
-    });
-
-    it("should fail verification against a different message", async () => {
-      const {sets} = getTestSetsSameMessage(4);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const {pk, sig} = await asyncAggregateWithRandomness(input);
-      const wrongMessage = new Uint8Array(32).fill(0);
-      expect(verify(wrongMessage, pk, sig, false, false)).toBe(false);
-    });
-
-    it("should match the synchronous aggregateWithRandomness verification result", async () => {
-      const {msg, sets} = getTestSetsSameMessage(6);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const syncResult = aggregateWithRandomness(input);
-      const asyncResult = await asyncAggregateWithRandomness(input);
-      // Randomness differs between calls so signatures aren't byte-equal,
-      // but both must verify against the shared message.
-      expect(verify(msg, syncResult.pk, syncResult.sig, false, false)).toBe(true);
-      expect(verify(msg, asyncResult.pk, asyncResult.sig, false, false)).toBe(true);
-    });
-
-    it("should reject on empty input", async () => {
-      await expect(Promise.resolve().then(() => asyncAggregateWithRandomness([]))).rejects.toThrow();
-    });
-
-    it("should reject on invalid signature bytes", async () => {
-      const {sets} = getTestSetsSameMessage(4);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      input[2].sig = new Uint8Array(96).fill(0xff);
-      await expect(Promise.resolve().then(() => asyncAggregateWithRandomness(input))).rejects.toThrow();
-    });
-
-    it("should reject objects of the wrong class", async () => {
-      const {sets} = getTestSetsSameMessage(1);
-      const input = [{pk: sets[0].sk as unknown as PublicKey, sig: sets[0].sig.toBytes()}];
-      await expect(Promise.resolve().then(() => asyncAggregateWithRandomness(input))).rejects.toThrow("TypeMismatch");
-    });
-
-    it("should resolve concurrent invocations correctly", async () => {
-      const {msg, sets} = getTestSetsSameMessage(8);
-      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      const results = await Promise.all([
-        asyncAggregateWithRandomness(input),
-        asyncAggregateWithRandomness(input),
-        asyncAggregateWithRandomness(input),
-      ]);
-      for (const {pk, sig} of results) {
-        expect(verify(msg, pk, sig, false, false)).toBe(true);
-      }
-    });
-  });
 });
 
 const DEFAULT_TEST_MESSAGE = Uint8Array.from(Buffer.from("lodestarlodestarlodestarlodestar"));
@@ -680,33 +540,4 @@ function expectEqualHex(value: Uint8Array, expected: Uint8Array): void {
 
 function expectNotEqualHex(value: Uint8Array, expected: Uint8Array): void {
   expect(Buffer.from(value).toString("hex")).to.not.equal(Buffer.from(expected).toString("hex"));
-}
-
-const commonMessage = crypto.randomBytes(32);
-const commonMessageSignatures = new Map<number, Signature>();
-
-function getTestSetSameMessage(i: number): TestSet {
-  const set = getTestSet(i);
-  let sig = commonMessageSignatures.get(i);
-  if (!sig) {
-    sig = set.sk.sign(commonMessage);
-    commonMessageSignatures.set(i, sig);
-  }
-  return {
-    msg: commonMessage,
-    pk: set.pk,
-    sig,
-    sk: set.sk,
-  };
-}
-
-function getTestSetsSameMessage(count: number): {
-  msg: Uint8Array;
-  sets: {sk: SecretKey; pk: PublicKey; sig: Signature}[];
-} {
-  const sets = arrayOfIndexes(0, count - 1).map(getTestSetSameMessage);
-  return {
-    msg: sets[0].msg,
-    sets: sets.map(({sk, pk, sig}) => ({pk, sig, sk})),
-  };
 }

@@ -8,6 +8,7 @@ pub const metrics = @import("./metrics.zig");
 pub const stateTransition = @import("./stateTransition.zig");
 pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
+pub const blsVerifier = @import("./bls_verifier.zig");
 pub const pubkeys = @import("./pubkeys.zig");
 
 const options = @import("bls_options");
@@ -69,5 +70,9 @@ fn cleanup(new_ref_count: u32) void {
 }
 
 comptime {
-    js.exportModule(@This(), .{ .init = init, .cleanup = cleanup });
+    js.exportModule(@This(), .{
+        .identity = @import("zapi_addon_identity"),
+        .init = init,
+        .cleanup = cleanup,
+    });
 }

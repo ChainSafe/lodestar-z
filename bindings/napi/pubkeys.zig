@@ -75,7 +75,7 @@ pub fn load(file_path: js.String, max_capacity: js.Number) !void {
 
     const path = try file_path.toOwnedSlice(allocator);
     defer allocator.free(path);
-    const capacity_limit = try max_capacity.toU32();
+    const capacity_limit = try max_capacity.toU32Exact();
     const io = js.io();
 
     const file = try std.Io.Dir.openFile(.cwd(), io, path, .{});
@@ -126,7 +126,7 @@ pub fn getIndex(pubkey: js.Uint8Array) !js.Value {
 pub fn get(index: js.Number) !?blst_bindings.PublicKey {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
-    const idx = try index.toU32();
+    const idx = try index.toU32Exact();
     const io = js.io();
     const public_key = state.cache.getPubkey(io, idx) orelse return null;
     return .{ .raw = public_key };
@@ -136,7 +136,7 @@ pub fn get(index: js.Number) !?blst_bindings.PublicKey {
 pub fn getPubkeyBytes(index: js.Number) !?js.Uint8Array {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
-    const idx = try index.toU32();
+    const idx = try index.toU32Exact();
     const io = js.io();
     const pubkey_bytes = state.cache.getPubkeyBytes(io, idx) orelse return null;
     return js.Uint8Array.from(pubkey_bytes[0..]);
@@ -165,7 +165,7 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
     defer if (len > indices_stack.len) allocator.free(exact_indices);
 
     for (0..len) |i| {
-        exact_indices[i] = try (try indices.getNumber(@intCast(i))).toU32();
+        exact_indices[i] = try (try indices.getNumber(@intCast(i))).toU32Exact();
     }
 
     const io = js.io();
@@ -184,7 +184,7 @@ pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
 pub fn append(index: js.Number, pubkey: js.Uint8Array) !void {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
-    const idx = try index.toU32();
+    const idx = try index.toU32Exact();
     const io = js.io();
 
     const pubkey_slice = try pubkey.toSlice();
@@ -239,7 +239,7 @@ pub fn size() !js.Number {
 pub fn ensureCapacity(new_size: js.Number) !void {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
-    const requested = try new_size.toU32();
+    const requested = try new_size.toU32Exact();
     const io = js.io();
     try state.cache.ensureTotalCapacity(io, requested);
 }

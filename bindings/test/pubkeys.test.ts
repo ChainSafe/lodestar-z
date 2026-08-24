@@ -85,10 +85,12 @@ describe("pubkeys", () => {
     expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBeNull();
   });
 
-  it("get caches deserialized values", () => {
+  it("get returns fresh deserialized values without memoizing wrappers", () => {
     const pk1 = pubkeyCache.getOrThrow(0);
     const pk2 = pubkeyCache.getOrThrow(0);
-    expect(pk1).toBe(pk2);
+    expect(pk1).not.toBe(pk2);
+    expect(pk1.toBytes()).toEqual(keypairs[0].pubkeyBytes);
+    expect(pk2.toBytes()).toEqual(keypairs[0].pubkeyBytes);
   });
 
   it("aggregates cached pubkeys by index", () => {
@@ -103,6 +105,17 @@ describe("pubkeys", () => {
 
   it("get returns undefined for out-of-range index", () => {
     expect(pubkeyCache.get(0xffffffff)).toBeUndefined();
+  });
+
+  it("rejects indices that are not exact uint32 values", () => {
+    for (const index of [-1, 0.5, 2 ** 32, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => pubkeyCache.get(index)).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.getPubkeyBytes(index)).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.aggregate([0, index])).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.append(index, keypairs[0].pubkeyBytes)).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.ensureCapacity(index)).toThrow("InvalidUnsignedInteger");
+      expect(() => pubkeyCache.load(tempPkixPath, index)).toThrow("InvalidUnsignedInteger");
+    }
   });
 
   it("getPubkeyBytes returns the compressed pubkey bytes", () => {
@@ -136,7 +149,7 @@ describe("pubkeys", () => {
     expect(() => pubkeyCache.append(0, new Uint8Array(1))).toThrow("InvalidPubkeyLength");
 
     const after = pubkeyCache.getOrThrow(0);
-    expect(after).toBe(before);
+    expect(after.toBytes()).toEqual(before.toBytes());
     expect(after.toBytes()).toEqual(keypairs[0].pubkeyBytes);
   });
 
