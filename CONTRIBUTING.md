@@ -43,9 +43,9 @@ a list of napi bindings hosted in this repository.
 
 ### Prerequisites
 
-- :lightning: [Zig](http://ziglang.org/) (0.16.0)
-- :gear: [NodeJS](https://nodejs.org/) (LTS)
-- :toolbox: [pnpm](https://pnpm.io/) (10.x)
+- [Zig](http://ziglang.org/) (0.16.0)
+- [NodeJS](https://nodejs.org/) (LTS)
+- [pnpm](https://pnpm.io/) (10.x)
 
 We follow a modified version of [TIGERSTYLE](./.gemini/styleguide.md) loosely.
 
