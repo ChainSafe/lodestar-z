@@ -60,13 +60,18 @@ pub fn ProgressiveBitList() type {
         }
 
         pub fn resize(self: *@This(), allocator: std.mem.Allocator, bit_len: usize) !void {
-            const old_byte_len = std.math.divCeil(usize, self.bit_len, 8) catch unreachable;
+            const old_bit_len = self.bit_len;
+            const old_byte_len = std.math.divCeil(usize, old_bit_len, 8) catch unreachable;
             const byte_len = std.math.divCeil(usize, bit_len, 8) catch unreachable;
             try self.data.resize(allocator, byte_len);
             self.bit_len = bit_len;
             // zero out additionally allocated bytes
             if (old_byte_len < byte_len) {
                 @memset(self.data.items[old_byte_len..], 0);
+            } else if (bit_len < old_bit_len and bit_len % 8 != 0) {
+                const retained_bits: u3 = @intCast(bit_len % 8);
+                const retained_mask = (@as(u8, 1) << retained_bits) - 1;
+                self.data.items[byte_len - 1] &= retained_mask;
             }
         }
 
@@ -382,4 +387,23 @@ test "ProgressiveBitListType - sanity" {
 
     try std.testing.expect(try b.get(0) == false);
     try std.testing.expect(try b.get(2) == true);
+}
+
+test "ProgressiveBitListType - shrinking clears truncated bits" {
+    const allocator = std.testing.allocator;
+    const Bits = ProgressiveBitListType();
+    var bits = try Bits.Type.fromBitLen(allocator, 8);
+    defer bits.deinit(allocator);
+
+    try bits.setAssumeCapacity(7, true);
+    try bits.resize(allocator, 1);
+
+    var serialized: [1]u8 = undefined;
+    _ = Bits.serializeIntoBytes(&bits, &serialized);
+
+    var round_trip = Bits.default_value;
+    defer round_trip.deinit(allocator);
+    try Bits.deserializeFromBytes(allocator, &serialized, &round_trip);
+
+    try std.testing.expectEqual(@as(usize, 1), round_trip.bit_len);
 }

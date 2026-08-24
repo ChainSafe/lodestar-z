@@ -68,6 +68,65 @@ fn UnionDataType(comptime options: anytype) type {
     return @Union(.auto, UnionTagType(options), &union_names, &union_types, &union_attrs);
 }
 
+pub fn areTypesCompatible(comptime A: type, comptime B: type) bool {
+    if (A == B) return true;
+
+    if (A.kind == .compatible_union and B.kind == .compatible_union) {
+        inline for (A._union_options) |option_a| {
+            inline for (B._union_options) |option_b| {
+                if (!areTypesCompatible(option_a.@"1", option_b.@"1")) return false;
+            }
+        }
+        return true;
+    }
+
+    if (A.kind != B.kind) return false;
+
+    return switch (A.kind) {
+        .bool => true,
+        .uint => A.fixed_size == B.fixed_size,
+        .progressive_bit_list => true,
+        .list => A.limit == B.limit and areTypesCompatible(A.Element, B.Element),
+        .vector => A.length == B.length and areTypesCompatible(A.Element, B.Element),
+        .progressive_list => areTypesCompatible(A.Element, B.Element),
+        .container => containersAreCompatible(A, B),
+        .progressive_container => progressiveContainersAreCompatible(A, B),
+        .compatible_union => unreachable,
+    };
+}
+
+fn containersAreCompatible(comptime A: type, comptime B: type) bool {
+    if (A.fields.len != B.fields.len) return false;
+
+    inline for (A.fields, B.fields) |field_a, field_b| {
+        if (!std.mem.eql(u8, field_a.name, field_b.name)) return false;
+        if (!areTypesCompatible(field_a.type, field_b.type)) return false;
+    }
+    return true;
+}
+
+fn progressiveContainersAreCompatible(comptime A: type, comptime B: type) bool {
+    inline for (A.fields, A.field_indices) |field_a, index_a| {
+        inline for (B.fields, B.field_indices) |field_b, index_b| {
+            if (index_a == index_b) {
+                if (!std.mem.eql(u8, field_a.name, field_b.name)) return false;
+                if (!areTypesCompatible(field_a.type, field_b.type)) return false;
+            }
+            if (std.mem.eql(u8, field_a.name, field_b.name) and index_a != index_b) return false;
+        }
+    }
+    return true;
+}
+
+fn compatibleUnionOptionsAreCompatible(comptime options: anytype) bool {
+    inline for (options, 0..) |option_a, i| {
+        inline for (options, 0..) |option_b, j| {
+            if (i < j and !areTypesCompatible(option_a.@"1", option_b.@"1")) return false;
+        }
+    }
+    return true;
+}
+
 pub fn CompatibleUnionType(comptime options: anytype) type {
     comptime {
         // Validate that we have at least one option
@@ -83,13 +142,17 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
             }
         }
 
-        // Check for duplicate selectors
+        // Check for duplicate selectors.
         for (options, 0..) |option1, i| {
             for (options, 0..) |option2, j| {
                 if (i < j and option1.@"0" == option2.@"0") {
                     @compileError("CompatibleUnion has duplicate selector");
                 }
             }
+        }
+
+        if (!compatibleUnionOptionsAreCompatible(options)) {
+            @compileError("CompatibleUnion option types are not compatible");
         }
     }
 
@@ -503,20 +566,15 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
 const UintType = @import("uint.zig").UintType;
 
-test "CompatibleUnion - basic square and circle" {
+test "CompatibleUnion - basic square" {
     const Square = @import("container.zig").FixedContainerType(struct {
         side: UintType(16),
         color: UintType(8),
     });
 
-    const Circle = @import("container.zig").FixedContainerType(struct {
-        radius: UintType(16),
-        color: UintType(8),
-    });
-
     const Shape = CompatibleUnionType(.{
         .{ 1, Square },
-        .{ 2, Circle },
+        .{ 2, Square },
     });
 
     // Initialize the union properly with @unionInit
@@ -596,4 +654,20 @@ test "CompatibleUnion - invalid selector rejected" {
     buf[0] = 2;
     const result3 = Shape.deserializeFromBytes(std.testing.allocator, &buf, &value);
     try std.testing.expectError(error.InvalidSelector, result3);
+}
+
+test "CompatibleUnion - rejects options with incompatible Merkleization" {
+    const Square = @import("container.zig").FixedContainerType(struct {
+        side: UintType(16),
+        color: UintType(8),
+    });
+    const Circle = @import("container.zig").FixedContainerType(struct {
+        radius: UintType(16),
+        color: UintType(8),
+    });
+
+    try std.testing.expect(!compatibleUnionOptionsAreCompatible(.{
+        .{ 1, Square },
+        .{ 2, Circle },
+    }));
 }
