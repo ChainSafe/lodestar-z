@@ -54,6 +54,8 @@ pub fn Hasher(comptime ST: type) type {
                         errdefer allocator.free(children);
 
                         children[0] = try Hasher(ST.Element).init(allocator);
+                        // Parent capacity is zero today; keep cleanup paired if that changes.
+                        errdefer children[0].deinit(allocator);
 
                         return try HasherData.initCapacity(allocator, hasher_size, children);
                     }
