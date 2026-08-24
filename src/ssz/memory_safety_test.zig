@@ -60,7 +60,7 @@ test "TreeView composite list getAllReadonlyValues OOM cleans initialized values
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
-test "TreeView composite list iterator nextValue OOM cleans initialized value" {
+test "TreeView composite list iterator nextValue should deinit the current value on conversion OOM" {
     const allocator = std.testing.allocator;
     const Bytes = ByteListType(32);
     const Element = VariableContainerType(struct {
