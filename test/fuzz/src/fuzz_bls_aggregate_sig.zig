@@ -21,7 +21,6 @@ pub export fn zig_fuzz_test(
 fn fuzzAggregate(input: []const u8) void {
     const signature_size = Signature.COMPRESS_SIZE;
     if (input.len < signature_size) return;
-    if (input.len % signature_size != 0) return;
 
     const record_count = input.len / signature_size;
     if (record_count > MAX_AGGREGATE_PER_JOB) return;

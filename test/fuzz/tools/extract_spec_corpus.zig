@@ -36,7 +36,7 @@ const bitlist_selectors = [_]struct {
 };
 
 // ssz_bitvector: BitVector(4)=0, BitVector(32)=1,
-//               BitVector(64)=2
+//               BitVector(64)=2, BitVector(512)=3
 const bitvec_selectors = [_]struct {
     size: []const u8,
     sel: u8,
@@ -45,6 +45,9 @@ const bitvec_selectors = [_]struct {
     .{ .size = "2", .sel = 0x00 },
     .{ .size = "3", .sel = 0x00 },
     .{ .size = "4", .sel = 0x00 },
+    .{ .size = "5", .sel = 0x01 },
+    .{ .size = "8", .sel = 0x01 },
+    .{ .size = "16", .sel = 0x01 },
     .{ .size = "31", .sel = 0x01 },
     .{ .size = "512", .sel = 0x03 },
 };
@@ -163,46 +166,6 @@ fn writeCorpus(
     try writer.writeByte(selector);
     try writer.writeAll(ssz_data);
     try file_writer.end();
-}
-
-fn writeNestedOpaqueProofSeed(corpus_dir: Dir, io: std.Io) !u32 {
-    try writeCorpus(
-        corpus_dir,
-        io,
-        "seed-01-gindex-2047",
-        0x01,
-        &.{ 0xff, 0x07 },
-    );
-    return 1;
-}
-
-fn writeOpaqueRoundtripSeeds(corpus_dir: Dir, io: std.Io) !u32 {
-    try writeCorpus(corpus_dir, io, "selector-00-list-u64-zero", 0x00, &([_]u8{0} ** 8));
-    try writeCorpus(corpus_dir, io, "selector-01-list-u32-zero", 0x01, &([_]u8{0} ** 4));
-    try writeCorpus(corpus_dir, io, "selector-02-container-zero", 0x02, &([_]u8{0} ** 52));
-    try writeCorpus(corpus_dir, io, "selector-03-vector-zero", 0x03, &([_]u8{0} ** 4152));
-    return 4;
-}
-
-fn writeCorpusSeedPair(cwd: Dir, io: std.Io, options: struct {
-    name: []const u8,
-    initial_path: []const u8,
-    cmin_path: []const u8,
-    write_seeds: *const fn (Dir, std.Io) anyerror!u32,
-}) !u32 {
-    var initial_dir = try cwd.createDirPathOpen(io, options.initial_path, .{});
-    defer initial_dir.close(io);
-
-    var cmin_dir = try cwd.createDirPathOpen(io, options.cmin_path, .{});
-    defer cmin_dir.close(io);
-
-    const initial_count = try options.write_seeds(initial_dir, io);
-    const cmin_count = try options.write_seeds(cmin_dir, io);
-    std.debug.assert(initial_count == cmin_count);
-
-    const count = initial_count + cmin_count;
-    std.debug.print("  {s}: {} seeds\n", .{ options.name, count });
-    return count;
 }
 
 fn extractBasic(
@@ -545,7 +508,6 @@ pub fn main(init: std.process.Init) !void {
     // Build system places the exe; we use CWD (test/fuzz/).
     const cwd = std.Io.Dir.cwd();
 
-    // Spec test base paths.
     var version_file_buf: [spec_version_file_size_max + 1]u8 = undefined;
     const spec_version = readSpecVersion(cwd, io, &version_file_buf) catch |err| {
         std.debug.print(
@@ -604,20 +566,6 @@ pub fn main(init: std.process.Init) !void {
     );
 
     var total: u32 = 0;
-
-    total += try writeCorpusSeedPair(cwd, io, .{
-        .name = "ssz_nested_opaque_proof",
-        .initial_path = "corpus/ssz_nested_opaque_proof-initial",
-        .cmin_path = "corpus/ssz_nested_opaque_proof-cmin",
-        .write_seeds = writeNestedOpaqueProofSeed,
-    });
-
-    total += try writeCorpusSeedPair(cwd, io, .{
-        .name = "ssz_opaque_roundtrip",
-        .initial_path = "corpus/ssz_opaque_roundtrip-initial",
-        .cmin_path = "corpus/ssz_opaque_roundtrip-cmin",
-        .write_seeds = writeOpaqueRoundtripSeeds,
-    });
 
     // ssz_basic
     {

@@ -51,20 +51,13 @@ pub fn build(b: *std.Build) void {
         extract_step.dependOn(&run_extract.step);
     }
 
-    const transport_input_len_max = 1024 * 1024;
     const Fuzzer = struct {
         name: []const u8,
         max_input_len: u32,
         extra_libs: []const *std.Build.Step.Compile = &.{},
 
-        /// Returns the corpus directory path for this fuzzer.
-        /// Change the suffix to switch between -cmin and -initial.
         fn corpus(self: @This(), bb: *std.Build) []const u8 {
             return bb.fmt("corpus/{s}-cmin", .{self.name});
-        }
-
-        fn source(self: @This(), bb: *std.Build) []const u8 {
-            return bb.fmt("src/fuzz_{s}.zig", .{self.name});
         }
     };
 
@@ -135,9 +128,6 @@ pub fn build(b: *std.Build) void {
 
     targets_json.writer.writeAll("{\"include\":[") catch @panic("OOM");
     for (fuzzers, 0..) |fuzzer, index| {
-        if (fuzzer.max_input_len > transport_input_len_max) {
-            @panic("fuzzer max input length exceeds transport ceiling");
-        }
         if (index > 0) {
             targets_json.writer.writeByte(',') catch @panic("OOM");
         }
@@ -162,7 +152,7 @@ pub fn build(b: *std.Build) void {
 
     const replay_corpus_step = b.step(
         "replay-corpus",
-        "Replay committed minimized fuzz corpora",
+        "Replay committed bootstrap fuzz corpora",
     );
 
     for (fuzzers) |fuzzer| {
@@ -176,7 +166,7 @@ pub fn build(b: *std.Build) void {
         );
 
         const lib_mod = b.createModule(.{
-            .root_source_file = b.path(fuzzer.source(b)),
+            .root_source_file = b.path(b.fmt("src/fuzz_{s}.zig", .{fuzzer.name})),
             .target = target,
             .optimize = optimize,
         });

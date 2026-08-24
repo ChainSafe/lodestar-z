@@ -18,8 +18,8 @@ executables, and bounded corpus replay for lodestar-z SSZ, persistent Merkle tre
 | `ssz_chunked_leaf_set` | 4,097 | Bounded selector-prefixed `TreeView` operation streams over chunked-leaf lists, checked against a value reference and pool ownership invariants |
 | `ssz_nested_opaque_proof` | 8,191 | Selector-prefixed single-proof creation and reconstruction through nested `container_struct` and `chunked_leaf` nodes |
 | `ssz_opaque_roundtrip` | 1,048,576 | Selector-prefixed byte, value, root, and ownership round trips for opaque chunked-leaf lists, vectors, and struct containers |
-| `bls_public_key` | 96 | Raw compressed public-key decode, validation, serialization, and stable round trips |
-| `bls_signature` | 192 | Raw compressed signature decode, validation, serialization, and stable round trips |
+| `bls_public_key` | 96 | Compressed (48-byte) or serialized (96-byte) public-key decode, validation, serialization, and stable round trips |
+| `bls_signature` | 192 | Compressed (96-byte) or serialized (192-byte) signature decode, validation, serialization, and stable round trips |
 | `bls_aggregate_pk` | 6,144 | Bounded sequences of compressed public keys with aggregation oracles |
 | `bls_aggregate_sig` | 12,288 | Bounded sequences of compressed signatures with aggregation oracles |
 
@@ -60,7 +60,7 @@ This writes `zig-out/share/lodestar-z-fuzz/targets.json` in registry order with 
 
 The real file contains all 13 entries.
 
-Run one target under AFL++ with its committed minimized corpus:
+Run one target under AFL++ with its committed bootstrap corpus:
 
 ```sh
 zig build run-ssz_basic -Doptimize=ReleaseSafe
@@ -78,12 +78,13 @@ zig build run:download_spec_tests
 zig build extract-corpus
 ```
 
-The extractor reads `test/spec/version.txt`. It extracts matching generic and minimal phase0
-vectors for `ssz_basic`, `ssz_bitlist`, `ssz_bitvector`, and `ssz_containers`, and writes fixed
-fixtures for the two opaque-node targets. Targets without matching vectors retain their committed
+The extractor reads `test/spec/version.txt` and writes spec-derived `-initial` fixtures for
+`ssz_basic`, `ssz_bitlist`, `ssz_bitvector`, and `ssz_containers`. It does not run minimization or
+write the committed bootstrap corpus. Targets without matching vectors retain their committed
 hand-written fixtures. Review every resulting corpus diff before committing it.
 
-Committed minimized corpora use `corpus/<target>-cmin`.
+`corpus/<target>-cmin` is the current compatibility path for committed bootstrap inputs. Evolving
+campaign corpora and `afl-cmin` or `afl-tmin` output remain external to this repository.
 
 ## Reproduction and bounded replay
 
@@ -97,7 +98,7 @@ zig-out/bin/repro-ssz_basic corpus/ssz_basic-cmin
 The repro executable calls `zig_fuzz_init` once, rejects inputs beyond the registry limit, and
 bounds directory enumeration and per-file allocation.
 
-Replay every committed minimized corpus with its matching repro executable:
+Replay every committed bootstrap corpus with its matching repro executable:
 
 ```sh
 zig build replay-corpus -Doptimize=ReleaseSafe

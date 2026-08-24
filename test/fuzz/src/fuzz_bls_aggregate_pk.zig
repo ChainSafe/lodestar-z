@@ -21,7 +21,6 @@ pub export fn zig_fuzz_test(
 fn fuzzAggregate(input: []const u8) void {
     const public_key_size = PublicKey.COMPRESS_SIZE;
     if (input.len < public_key_size) return;
-    if (input.len % public_key_size != 0) return;
 
     const record_count = input.len / public_key_size;
     if (record_count > MAX_AGGREGATE_PER_JOB) return;
