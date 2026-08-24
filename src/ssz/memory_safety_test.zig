@@ -1,13 +1,17 @@
 const std = @import("std");
 const pmt = @import("persistent_merkle_tree");
+const Gindex = pmt.Gindex;
 const Node = pmt.Node;
 const ChunkedLeafType = pmt.ChunkedLeaf;
 const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 const ArmOnSizeAllocator = @import("testing_allocators").ArmOnSizeAllocator;
+const Hasher = @import("hasher.zig").Hasher;
 const FixedContainerType = @import("type/container.zig").FixedContainerType;
 const FixedListType = @import("type/list.zig").FixedListType;
+const FixedVectorType = @import("type/vector.zig").FixedVectorType;
 const UintType = @import("type/uint.zig").UintType;
 const BoolType = @import("type/bool.zig").BoolType;
+const BitVectorType = @import("type/bit_vector.zig").BitVectorType;
 const ByteVectorType = @import("type/byte_vector.zig").ByteVectorType;
 const FixedProgressiveListType = @import("type/progressive_list.zig").FixedProgressiveListType;
 const VariableProgressiveListType = @import("type/progressive_list.zig").VariableProgressiveListType;
@@ -77,6 +81,54 @@ fn expectProgressiveFromValueOomReclaimsNodes(
 
     try std.testing.expect(saw_failure);
     try std.testing.expect(saw_success);
+}
+
+test "Hasher init container should not leak initialized prefix on later child OOM" {
+    const ChildType = FixedVectorType(UintType(64), 8, .{});
+    const ContainerType = FixedContainerType(struct {
+        first: ChildType,
+        second: ChildType,
+    });
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 2 },
+    );
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Hasher(ContainerType).init(failing.allocator()),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "Hasher init composite vector should not leak initialized child on parent OOM" {
+    const ChildType = FixedVectorType(UintType(64), 8, .{});
+    const VectorType = FixedVectorType(ChildType, 2, .{});
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 2 },
+    );
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Hasher(VectorType).init(failing.allocator()),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "Hasher init composite list should not leak children slice on recursive child OOM" {
+    const ChildType = FixedVectorType(UintType(64), 8, .{});
+    const ListType = FixedListType(ChildType, 4, .{});
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 1 },
+    );
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Hasher(ListType).init(failing.allocator()),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
 // std.testing.allocator can't see pool-slot leaks, so check getNodesInUse() against a baseline.
@@ -406,6 +458,149 @@ test "TreeView container setValue/commit - OOM does not double-free" {
         view.commit() catch {};
         try std.testing.expect(!oom.double_free);
     }
+}
+
+test "ContainerTreeView commit should reclaim basic nodes after parent rebuild OOM" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+    var pool = try Node.Pool.init(.{
+        .page_allocator = failing.allocator(),
+        .allocator = allocator,
+        .pool_size = 32,
+    });
+    defer pool.deinit();
+
+    const TwoBasic = FixedContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+    const value: TwoBasic.Type = .{ .a = 1, .b = 2 };
+    const root = try TwoBasic.tree.fromValue(&pool, &value);
+    var view = try TwoBasic.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    const old_root = view.getRoot();
+    const old_a = try view.getRootNode("a");
+    try view.set("a", 10);
+    try view.set("b", 20);
+
+    var filler: std.ArrayList(Node.Id) = .empty;
+    defer {
+        for (filler.items) |node| pool.unref(node);
+        filler.deinit(allocator);
+    }
+    failing.fail_index = failing.alloc_index;
+    fill: for (0..pool.nodes.len) |_| {
+        const node = pool.createLeafFromUint(0) catch |err| switch (err) {
+            error.OutOfMemory => break :fill,
+        };
+        errdefer pool.unref(node);
+
+        try filler.append(allocator, node);
+    }
+    try std.testing.expectEqual(
+        pool.nodes.len,
+        @as(usize, @intFromEnum(pool.next_free_node)),
+    );
+    try std.testing.expect(filler.items.len >= 2);
+    // Reserve two slots for the basic leaves; their parent allocation hits OOM.
+    pool.unref(filler.pop().?);
+    pool.unref(filler.pop().?);
+    const baseline = pool.getNodesInUse();
+
+    try std.testing.expectError(error.OutOfMemory, view.commit());
+    try std.testing.expectEqual(old_root, view.getRoot());
+    // The field cache must remain aligned with the unchanged root after rebuild failure.
+    try std.testing.expectEqual(old_a, try view.getRootNode("a"));
+    try std.testing.expect(!old_a.getState(&pool).isFree());
+    // Fresh leaves must be reclaimed when no rebuilt parent adopts them.
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+
+    failing.fail_index = std.math.maxInt(usize);
+    try view.commit();
+    const committed_root = view.getRoot();
+    // A retry must publish the values that remained staged after the failed rebuild.
+    try std.testing.expect(committed_root != old_root);
+    try std.testing.expect((try view.getRootNode("a")) != old_a);
+    try view.commit();
+    try std.testing.expectEqual(committed_root, view.getRoot());
+
+    var committed: TwoBasic.Type = undefined;
+    try TwoBasic.tree.toValue(view.getRoot(), &pool, &committed);
+    try std.testing.expectEqual(@as(u64, 10), committed.a);
+    try std.testing.expectEqual(@as(u64, 20), committed.b);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "ContainerTreeView retry should adopt a child committed before outer rebuild OOM" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+    var pool = try Node.Pool.init(.{
+        .page_allocator = failing.allocator(),
+        .allocator = allocator,
+        .pool_size = 32,
+    });
+    defer pool.deinit();
+
+    const Inner = FixedContainerType(struct { a: UintType(64), b: UintType(64) });
+    const Outer = FixedContainerType(struct { inner: Inner, c: UintType(64) });
+    const value: Outer.Type = .{ .inner = .{ .a = 1, .b = 2 }, .c = 3 };
+    const root = try Outer.tree.fromValue(&pool, &value);
+    var outer = try Outer.TreeView.init(allocator, &pool, root);
+    defer outer.deinit();
+
+    const old_outer_root = outer.getRoot();
+    const old_inner_root = try outer.getRootNode("inner");
+    var inner = try outer.get("inner");
+    try inner.set("a", 10);
+
+    var filler: std.ArrayList(Node.Id) = .empty;
+    defer {
+        for (filler.items) |node| pool.unref(node);
+        filler.deinit(allocator);
+    }
+    failing.fail_index = failing.alloc_index;
+    fill: for (0..pool.nodes.len) |_| {
+        const node = pool.createLeafFromUint(0) catch |err| switch (err) {
+            error.OutOfMemory => break :fill,
+        };
+        errdefer pool.unref(node);
+
+        try filler.append(allocator, node);
+    }
+    try std.testing.expectEqual(
+        pool.nodes.len,
+        @as(usize, @intFromEnum(pool.next_free_node)),
+    );
+    try std.testing.expect(filler.items.len >= 2);
+    // Reserve two slots for the child leaf and inner branch; the outer-parent allocation hits OOM.
+    pool.unref(filler.pop().?);
+    pool.unref(filler.pop().?);
+    const baseline = pool.getNodesInUse();
+
+    try std.testing.expectError(error.OutOfMemory, outer.commit());
+    try std.testing.expectEqual(old_outer_root, outer.getRoot());
+    // A failed outer rebuild must not publish the committed child through its field cache.
+    try std.testing.expectEqual(old_inner_root, try outer.getRootNode("inner"));
+    try std.testing.expect(inner.getRoot() != old_inner_root);
+
+    var committed_inner: Inner.Type = undefined;
+    try Inner.tree.toValue(inner.getRoot(), &pool, &committed_inner);
+    try std.testing.expectEqual(@as(u64, 10), committed_inner.a);
+    try std.testing.expectEqual(@as(u64, 2), committed_inner.b);
+
+    failing.fail_index = std.math.maxInt(usize);
+    try outer.commit();
+    // A retry must adopt the child root that committed before the outer rebuild failed.
+    try std.testing.expect(outer.getRoot() != old_outer_root);
+    try std.testing.expectEqual(inner.getRoot(), try outer.getRootNode("inner"));
+
+    var committed_outer: Outer.Type = undefined;
+    try Outer.tree.toValue(outer.getRoot(), &pool, &committed_outer);
+    try std.testing.expectEqual(@as(u64, 10), committed_outer.inner.a);
+    try std.testing.expectEqual(@as(u64, 2), committed_outer.inner.b);
+    try std.testing.expectEqual(@as(u64, 3), committed_outer.c);
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
 test "TreeView container fromValue - OOM leaves no orphan pool nodes" {
@@ -937,4 +1132,132 @@ test "compatible union byte deserialization preserves out on malformed input" {
     );
     try std.testing.expectEqual(@as(u8, 1), Union.getSelector(&out));
     try std.testing.expectEqual(@as(usize, 0), out.option_1.items.len);
+}
+
+test "ArrayBasicTreeView set should reclaim unpublished node on OOM" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const VectorType = FixedVectorType(UintType(64), 4, .{});
+    const value: VectorType.Type = .{ 11, 22, 33, 44 };
+    const root = try VectorType.tree.fromValue(&pool, &value);
+    var view = try VectorType.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try std.testing.expectEqual(@as(u64, 11), try view.get(0));
+    const nodes_in_use = pool.getNodesInUse();
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.set(0, 99));
+    failing.fail_index = std.math.maxInt(usize);
+
+    // The failed update must not leave an extra in-use pool node.
+    try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+    try std.testing.expectEqual(@as(u64, 11), try view.get(0));
+
+    try view.set(0, 99);
+    try std.testing.expectEqual(@as(u64, 99), try view.get(0));
+}
+
+test "ArrayCompositeTreeView get should leave caches unchanged on OOM" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const Inner = FixedContainerType(struct { x: UintType(64) });
+    const VectorType = FixedVectorType(Inner, 2, .{});
+    const value: VectorType.Type = .{ .{ .x = 1 }, .{ .x = 2 } };
+    const root = try VectorType.tree.fromValue(&pool, &value);
+    var view = try VectorType.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try view.chunks.state.changed.ensureUnusedCapacity(failing.allocator(), 1);
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.get(0));
+    failing.fail_index = std.math.maxInt(usize);
+
+    // A failed mutable get must not publish the index as changed.
+    try std.testing.expectEqual(@as(usize, 0), view.chunks.state.changed.count());
+
+    _ = try view.get(0);
+}
+
+test "ArrayCompositeTreeView getReadonly should reclaim unpublished child view on OOM" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const Inner = FixedContainerType(struct { x: UintType(64) });
+    const VectorType = FixedVectorType(Inner, 2, .{});
+    const value: VectorType.Type = .{ .{ .x = 1 }, .{ .x = 2 } };
+    const root = try VectorType.tree.fromValue(&pool, &value);
+    var view = try VectorType.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try view.chunks.state.children_nodes.ensureUnusedCapacity(failing.allocator(), 1);
+    const gindex = Gindex.fromDepth(VectorType.chunk_depth, 0);
+    const child_node = try view.chunks.state.getChildNode(gindex);
+    const child_ref_count = child_node.getState(&pool).refCount();
+    const outstanding_bytes = failing.allocated_bytes - failing.freed_bytes;
+
+    failing.fail_index = failing.alloc_index + 1;
+    try std.testing.expectError(error.OutOfMemory, view.getReadonly(0));
+    failing.fail_index = std.math.maxInt(usize);
+
+    // A failed readonly cache insertion must release the child view's node ref and allocation.
+    try std.testing.expectEqual(child_ref_count, child_node.getState(&pool).refCount());
+    try std.testing.expectEqual(outstanding_bytes, failing.allocated_bytes - failing.freed_bytes);
+
+    _ = try view.getReadonly(0);
+}
+
+test "BitVectorTreeView set should reclaim unpublished node on OOM" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const Bits = BitVectorType(44);
+    const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
+    var view = try Bits.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try std.testing.expect(!try view.get(0));
+    const nodes_in_use = pool.getNodesInUse();
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.set(0, true));
+    failing.fail_index = std.math.maxInt(usize);
+
+    // The failed update must not leave an extra in-use pool node.
+    try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+    try std.testing.expect(!try view.get(0));
+
+    try view.set(0, true);
+    try std.testing.expect(try view.get(0));
 }
