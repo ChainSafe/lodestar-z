@@ -553,7 +553,7 @@ test "ListBasicTreeView chunked_leaf: set OOM in setChildNode reclaims the CoW c
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
-test "ArrayBasicTreeView set OOM reclaims unpublished node" {
+test "ArrayBasicTreeView set should reclaim unpublished node on OOM" {
     const allocator = std.testing.allocator;
     var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
 
@@ -584,7 +584,7 @@ test "ArrayBasicTreeView set OOM reclaims unpublished node" {
     try std.testing.expectEqual(@as(u64, 99), try view.get(0));
 }
 
-test "ArrayCompositeTreeView get OOM leaves caches unchanged" {
+test "ArrayCompositeTreeView get should leave caches unchanged on OOM" {
     const allocator = std.testing.allocator;
     var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
 
@@ -613,7 +613,7 @@ test "ArrayCompositeTreeView get OOM leaves caches unchanged" {
     _ = try view.get(0);
 }
 
-test "ArrayCompositeTreeView getReadonly OOM reclaims unpublished child view" {
+test "ArrayCompositeTreeView getReadonly should reclaim unpublished child view on OOM" {
     const allocator = std.testing.allocator;
     var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
 
@@ -647,7 +647,7 @@ test "ArrayCompositeTreeView getReadonly OOM reclaims unpublished child view" {
     _ = try view.getReadonly(0);
 }
 
-test "BitVectorTreeView set OOM reclaims unpublished node" {
+test "BitVectorTreeView set should reclaim unpublished node on OOM" {
     const allocator = std.testing.allocator;
     var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
 
