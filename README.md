@@ -6,23 +6,19 @@ Modules are implemented in Zig and exposed to Node.js through NAPI bindings.
 ## Installation
 
 ```sh
-zig fetch git+https://github.com/ChainSafe/lodestar-z
+zig fetch --save git+https://github.com/ChainSafe/lodestar-z
 ```
 
-### Spec Tests
+### Spec Test Compliance
 
 `lodestar-z` is compliant against the spec tests version specified in `build.zig.zon`
 under `options_modules.spec_test_options`.
-
-```sh
-zig build test:spec_tests -Dpreset=mainnet
-```
 
 ## Contributing to Lodestar-z
 
 We welcome all contributions, but are strict about quality.
 Before contributing, please read [CONTRIBUTING](./CONTRIBUTING.md) and the
-relevant links inside (most importantly, our [AI_POLCY](./AI_POLICY.md)).
+relevant links inside (most importantly, our [AI_POLICY](./AI_POLICY.md)).
 
 PRs/issues that are clearly low effort will be de-prioritized
 or closed according to our discretion.
