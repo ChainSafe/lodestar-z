@@ -5,6 +5,7 @@ const Node = pmt.Node;
 const ChunkedLeafType = pmt.ChunkedLeaf;
 const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 const ArmOnSizeAllocator = @import("testing_allocators").ArmOnSizeAllocator;
+const Hasher = @import("hasher.zig").Hasher;
 const FixedContainerType = @import("type/container.zig").FixedContainerType;
 const FixedListType = @import("type/list.zig").FixedListType;
 const FixedVectorType = @import("type/vector.zig").FixedVectorType;
@@ -16,6 +17,54 @@ const Checkpoint = FixedContainerType(struct {
     epoch: UintType(64),
     root: ByteVectorType(32),
 });
+
+test "Hasher init container should not leak initialized prefix on later child OOM" {
+    const ChildType = FixedVectorType(UintType(64), 8, .{});
+    const ContainerType = FixedContainerType(struct {
+        first: ChildType,
+        second: ChildType,
+    });
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 2 },
+    );
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Hasher(ContainerType).init(failing.allocator()),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "Hasher init composite vector should not leak initialized child on parent OOM" {
+    const ChildType = FixedVectorType(UintType(64), 8, .{});
+    const VectorType = FixedVectorType(ChildType, 2, .{});
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 2 },
+    );
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Hasher(VectorType).init(failing.allocator()),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "Hasher init composite list should not leak children slice on recursive child OOM" {
+    const ChildType = FixedVectorType(UintType(64), 8, .{});
+    const ListType = FixedListType(ChildType, 4, .{});
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 1 },
+    );
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Hasher(ListType).init(failing.allocator()),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
 
 // std.testing.allocator can't see pool-slot leaks, so check getNodesInUse() against a baseline.
 test "TreeView composite list sliceTo does not leak pool nodes" {
