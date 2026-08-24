@@ -1,0 +1,196 @@
+# Contribution Guidelines
+
+Thanks for your interest in contributing to Lodestar. It's people like you that push the Ethereum ecosystem forward.
+
+## New Contributor?
+
+Unsure where to begin contributing to Lodestar? Here are some ideas!
+
+- :speech_balloon: Join our [Discord chat](https://discord.gg/aMxzVcr)!
+  [![Discord](https://img.shields.io/discord/593655374469660673.svg?label=Discord&logo=discord)](https://discord.gg/aMxzVcr)
+
+### AI Assistance Notice
+
+> [!IMPORTANT]
+>
+> The Lodestar team uses AI heavily in our work, but we have strict rules for AI contributions to our project.
+> See our [AI_POLICY](./AI_POLICY.md) before contributing.
+
+## Reporting A Bug?
+
+- :spiral_notepad: [Create a new issue!](https://github.com/ChainSafe/lodestar/issues/new/choose) Select the type of issue that best fits, and please fill out as much of the information as you can.
+
+## Contribution Process
+
+1. Make sure you're familiar with our contribution guidelines _(this document)_!
+2. Create your [own fork](https://github.com/ChainSafe/lodestar-z/fork) of this repository.
+3. Make your changes in your local fork.
+4. If you've made a code change, make sure to test your changes first locally. See [Developer Usage](#Developer%20Usage) below.
+5. Make an open pull request when you're ready for it to be reviewed. We review PRs on a regular basis. See Pull request etiquette for more information.
+
+> [!IMPORTANT]
+> Please note that trivial, non-code contributions such as spelling, grammar, typos, corrections, comments and link fixes are not acceptable pull requests.
+> Although we appreciate the effort to fix these valid concerns, it is not practical for us to run our CI systems to accommodate minor external contributions which generate minimal value for the purpose of contribution/airdrop farming.
+> It would be appreciated for you to open up an issue instead for our team to aggregate these types of contributions into a batch commit.
+
+## Developer Usage
+
+We currently host all zig packages and napi bindings in [this repository](https://github.com/ChainSafe/lodestar-z)
+as a [monorepo](https://en.wikipedia.org/wiki/Monorepo).
+See [packages/](https://github.com/ChainSafe/lodestar-z/tree/main/src) for a list of packages
+and [bindings/](https://github.com/ChainSafe/lodestar-z/tree/main/bindings) for
+a list of napi bindings hosted in this repository.
+
+### Prerequisites
+
+- :lightning: [Zig](http://ziglang.org/) (0.16.0)
+- :gear: [NodeJS](https://nodejs.org/) (LTS)
+- :toolbox: [pnpm](https://pnpm.io/) (10.x)
+
+We follow a modified version of [TIGERSTYLE](./.gemini/styleguide.md) loosely.
+
+Before opening a PR, please make sure all tests pass.
+
+To do that, download the spec tests and era files used in testing:
+
+```sh
+# Download vectors pinned by build.zig.zon
+zig build run:download_spec_tests
+
+# Download era files
+zig build run:download_era_files
+
+# Generate test sources
+zig build run:write_spec_tests
+zig build run:write_ssz_generic_spec_tests
+zig build run:write_ssz_static_spec_tests
+zig build run:write_bls_spec_tests
+```
+
+If you created new unit tests, you can run them individually.
+For example, if you made a new unit test in the `ssz` package:
+
+```sh
+zig build test:ssz -Dtest:ssz.filters="my full test name"
+```
+
+If you made changes that affect spec relevant behavior, run:
+
+```sh
+zig build test:spec_tests -Dpreset={mainnet,minimal}
+```
+
+And run all other tests:
+
+```sh
+zig build test
+```
+
+And format all files:
+
+```sh
+zig fmt .
+```
+
+If you made a change to the bindings, make sure the bindings tests pass:
+
+```sh
+pnpm install
+
+# Build bindings
+zig build build-lib:bindings
+
+# Build for a specific preset through package scripts
+pnpm prepare-mainnet
+pnpm prepare-minimal
+
+# Run binding tests
+pnpm test
+
+# Run Biome
+pnpm lint
+pnpm exec biome check --write .
+```
+
+## Github Style Guide
+
+**Branch Naming**
+
+If you are contributing from this repository prefix the branch name with your Github username (i.e. `myusername/short-description`).
+
+**Pull Request Naming**
+
+Pull request titles must be:
+
+- Adhering to the [conventional commits](https://www.conventionalcommits.org/en/v1.0.0/#summary) spec
+- Short and descriptive summary
+- Written in imperative present tense
+- Not end with a period
+
+For example:
+
+- refactor(bindings): use owned typed arrays for BLS outputs
+- chore: remove merge transition code
+
+**Pull Request Etiquette**
+
+- Pull requests should remain as drafts when they are not ready for review by maintainers.
+  Open pull requests signal to the maintainers that it's ready for review.
+- If your pull request is no longer applicable or validated to fix an issue, close your pull request.
+- If your pull request is fixable and needs additional changes or commits within a short period of time, switch your pull request into a draft until it's ready.
+- Otherwise, close your pull request and [create a new issue instead.](https://github.com/ChainSafe/lodestar/issues/new/choose)
+
+## Managing and Opening Feature/Large PRs
+
+To maintain code quality, improve collaboration, and ensure clarity in large or complex changes, we follow these guidelines when opening pull requests (PRs). Depending on the nature of the change, PRs fall into three categories:
+
+### 1. Single, Complete PR
+
+If the PR contains a self-contained and complete feature or bug fix that does not require major refactoring or cross-team discussions, then:
+
+- Clearly explain the rationale and motivation behind the change in the PR description.
+- Provide relevant context, including:
+  - Problem the PR is solving.
+  - Why the approach was chosen.
+  - Any alternatives considered (if relevant).
+- If the PR modifies critical code paths, add references to relevant issues, benchmarks, or related discussions.
+- Ensure the PR adheres to our standard PR etiquette and commit message guidelines.
+
+### 2. PR with Major Refactoring
+
+If the PR involves significant code refactoring, structural changes, or fundamental modifications where team input is needed:
+
+- Create a GitHub issue or Discord Thread before writing code.
+- Outline the problem, your proposed approach, and any alternative solutions.
+- Request feedback and build consensus with the team.
+- Summarize the outcome and link the discussion in the PR description once consensus is reached.
+- If changes affect multiple packages or require coordination with ongoing development,
+  summarize any key decisions from the discussion in the PR description.
+
+### 3. Large Feature or Multi-PR Implementation
+
+If the PR introduces large-scale changes, affecting multiple areas of the codebase or requiring step-by-step integration:
+
+- Document the feature first before opening any PR.
+- Open a GitHub Discussion with a detailed technical proposal explaining the feature. This ideally will include some details like:
+  - Big picture explanation of how and why the feature will help or will change the codebase
+  - Rough outline of the code that will be implemented
+  - If a functional implementation is used, a brief description of what each function will do,
+    possibly with a basic function signature if it is clear what will be needed
+  - Broad overview of how data will flow and integrate with the surrounding sub-systems
+  - Rough discussion of potential performance (cpu and memory) implications
+- Share the document with the team and gather feedback before implementation.
+- Create a feature branch to showcase the entire implementation. The idea will be to get this branch deployed on a feature group to test.
+  Throughout the process, metrics will be analyzed to ensure there are no regressions.
+- First merge any refactor work necessary to get `main` prepared for the feature.
+- Create a second empty feature branch off of `main` that fork after the refactor work is merged.
+- Break down the implementation into smaller, manageable PRs that merge into the empty feature branch.
+- Each PR should focus on a specific part of the feature.
+  This middle part of the review is focused on API, implementation overview and other high level pieces but will be relatively limited as the API discussion,
+  analysis of the feature branch and full review on merge to `main` are the important steps.
+- Link the design document in each PR description so reviewers can always refer to the full scope.
+- Merge the smaller PRs into the feature branch until the complete feature is ready for a final merge into the `main` branch.
+  This is the "formal review process" where several team members will likely get involved. 
+  Up to this point its mostly peer review. The merge to `main` is where details like naming, function signature,
+  type definitions, etc will be scrutinized. This is also where metrics from the initial implementation branch
+  will get a detailed, final analysis.
