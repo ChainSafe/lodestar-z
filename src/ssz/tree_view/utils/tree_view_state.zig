@@ -61,12 +61,15 @@ pub const TreeViewState = struct {
     }
 
     pub fn setChildNode(self: *TreeViewState, gindex: Gindex, node: Node.Id) !void {
-        try self.changed.put(self.allocator, gindex, {});
-        const opt_old_node = try self.children_nodes.fetchPut(
-            self.allocator,
-            gindex,
-            node,
-        );
+        if (!self.changed.contains(gindex)) {
+            try self.changed.ensureUnusedCapacity(self.allocator, 1);
+        }
+        if (!self.children_nodes.contains(gindex)) {
+            try self.children_nodes.ensureUnusedCapacity(self.allocator, 1);
+        }
+
+        self.changed.putAssumeCapacity(gindex, {});
+        const opt_old_node = self.children_nodes.fetchPutAssumeCapacity(gindex, node);
         if (opt_old_node) |old_node| {
             if (old_node.value.getState(self.pool).refCount() == 0) {
                 self.pool.unref(old_node.value);
