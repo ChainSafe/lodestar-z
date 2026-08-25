@@ -762,7 +762,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
 
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
             var elements = try VariableElementIterator(Self).init(data);
-            const len = elements.len();
+            const len = elements.len;
 
             try out.resize(allocator, len);
             @memset(out.items[0..len], Element.default_value);
@@ -783,12 +783,12 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
             }
 
             pub fn length(data: []const u8) !usize {
-                return (try VariableElementIterator(Self).init(data)).len();
+                return (try VariableElementIterator(Self).init(data)).len;
             }
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 var elements = try VariableElementIterator(Self).init(data);
-                const len = elements.len();
+                const len = elements.len;
                 const chunk_count = len;
 
                 const chunks = try allocator.alloc([32]u8, (chunk_count + 1) / 2 * 2);
@@ -840,7 +840,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
                 var elements = try VariableElementIterator(Self).init(data);
-                const len = elements.len();
+                const len = elements.len;
 
                 if (len == 0) {
                     return try pool.createBranch(

@@ -68,7 +68,7 @@ pub fn VariableElementIterator(comptime ST: type) type {
     return struct {
         data: []const u8,
         /// Total number of elements.
-        element_count: usize,
+        len: usize,
         /// Number of elements already returned by `next()`.
         index: usize,
         start: usize,
@@ -84,7 +84,7 @@ pub fn VariableElementIterator(comptime ST: type) type {
                 if (ST.kind == .vector) return error.offsetOutOfRange;
                 return .{
                     .data = data,
-                    .element_count = 0,
+                    .len = 0,
                     .index = 0,
                     .start = 0,
                 };
@@ -95,17 +95,17 @@ pub fn VariableElementIterator(comptime ST: type) type {
             if (first_offset == 0) return error.zeroOffset;
             if (first_offset % 4 != 0) return error.offsetNotDivisibleBy4;
 
-            const element_count = first_offset / 4;
-            if (ST.kind == .vector and element_count != ST.length) {
+            const len = first_offset / 4;
+            if (ST.kind == .vector and len != ST.length) {
                 return error.invalidOffsetCount;
             }
-            if (ST.kind == .list and element_count > ST.limit) {
+            if (ST.kind == .list and len > ST.limit) {
                 return error.invalidOffsetCount;
             }
             if (first_offset > data.len) return error.offsetOutOfRange;
 
             var previous_offset = first_offset;
-            for (1..element_count) |i| {
+            for (1..len) |i| {
                 const offset = readOffset(data, i);
                 if (offset > data.len) return error.offsetOutOfRange;
                 if (offset < previous_offset) return error.offsetNotIncreasing;
@@ -114,23 +114,18 @@ pub fn VariableElementIterator(comptime ST: type) type {
 
             return .{
                 .data = data,
-                .element_count = element_count,
+                .len = len,
                 .index = 0,
                 .start = first_offset,
             };
         }
 
-        /// Returns the total element count.
-        pub fn len(self: Self) usize {
-            return self.element_count;
-        }
-
         /// Returns the next serialized element, or `null` after the last element.
         pub fn next(self: *Self) ?[]const u8 {
-            if (self.index == self.element_count) return null;
+            if (self.index == self.len) return null;
 
             const next_index = self.index + 1;
-            const end = if (next_index == self.element_count)
+            const end = if (next_index == self.len)
                 self.data.len
             else
                 readOffset(self.data, next_index);
@@ -178,7 +173,7 @@ test "iterates validated variable elements" {
     };
 
     var elements = try VariableElementIterator(VariableList).init(&data);
-    try std.testing.expectEqual(@as(usize, 2), elements.len());
+    try std.testing.expectEqual(@as(usize, 2), elements.len);
     try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, elements.next().?);
     try std.testing.expectEqualSlices(u8, &.{ 3, 4, 5 }, elements.next().?);
     try std.testing.expectEqual(null, elements.next());
@@ -186,7 +181,7 @@ test "iterates validated variable elements" {
 
 test "accepts empty list and empty elements" {
     var empty_list = try VariableElementIterator(VariableList).init(&.{});
-    try std.testing.expectEqual(@as(usize, 0), empty_list.len());
+    try std.testing.expectEqual(@as(usize, 0), empty_list.len);
     try std.testing.expectEqual(null, empty_list.next());
 
     const data = [_]u8{
