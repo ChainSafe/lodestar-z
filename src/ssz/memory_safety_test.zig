@@ -7,6 +7,7 @@ const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetect
 const ArmOnSizeAllocator = @import("testing_allocators").ArmOnSizeAllocator;
 const Hasher = @import("hasher.zig").Hasher;
 const FixedContainerType = @import("type/container.zig").FixedContainerType;
+const VariableContainerType = @import("type/container.zig").VariableContainerType;
 const FixedListType = @import("type/list.zig").FixedListType;
 const VariableListType = @import("type/list.zig").VariableListType;
 const FixedVectorType = @import("type/vector.zig").FixedVectorType;
@@ -19,6 +20,89 @@ const Checkpoint = FixedContainerType(struct {
     epoch: UintType(64),
     root: ByteVectorType(32),
 });
+
+test "getAllReadonlyValues should deinit completed prefix and current value on conversion OOM" {
+    const allocator = std.testing.allocator;
+    const Bytes = ByteListType(32);
+    const Element = VariableContainerType(struct {
+        first: Bytes,
+        second: Bytes,
+    });
+    const ListType = VariableListType(Element, 2);
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool.deinit();
+
+    var source: ListType.Type = .empty;
+    defer ListType.deinit(allocator, &source);
+
+    try source.append(allocator, Element.default_value);
+    try source.append(allocator, Element.default_value);
+    try source.items[0].first.appendSlice(allocator, &.{1});
+    try source.items[0].second.appendSlice(allocator, &.{2});
+    try source.items[1].first.appendSlice(allocator, &.{3});
+    try source.items[1].second.appendSlice(allocator, &.{4});
+
+    const root = try ListType.tree.fromValue(&pool, &source);
+    var view = try ListType.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    // Fail the second element's second field after its first field and the prefix own memory.
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 8,
+        .resize_fail_index = 0,
+    });
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        view.getAllReadonlyValues(failing.allocator()),
+    );
+    // The completed prefix and current partially converted value must not leak.
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "iterator nextValue should deinit current value on conversion OOM" {
+    const allocator = std.testing.allocator;
+    const Bytes = ByteListType(32);
+    const Element = VariableContainerType(struct {
+        first: Bytes,
+        second: Bytes,
+    });
+    const ListType = VariableListType(Element, 1);
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool.deinit();
+
+    var source: ListType.Type = .empty;
+    defer ListType.deinit(allocator, &source);
+
+    try source.append(allocator, Element.default_value);
+    try source.items[0].first.appendSlice(allocator, &.{1});
+    try source.items[0].second.appendSlice(allocator, &.{2});
+
+    const root = try ListType.tree.fromValue(&pool, &source);
+    var view = try ListType.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    var iterator = view.iteratorReadonly(0);
+    // Fail the second field after the first field owns an allocation.
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 2,
+        .resize_fail_index = 0,
+    });
+
+    try std.testing.expectError(error.OutOfMemory, iterator.nextValue(failing.allocator()));
+    // The current partially converted value must not leak.
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
 
 test "VariableList deserializeFromBytes should free offsets on malformed later offset" {
     const ListType = VariableListType(ByteListType(8), 4);
