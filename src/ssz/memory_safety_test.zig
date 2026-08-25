@@ -8,15 +8,36 @@ const ArmOnSizeAllocator = @import("testing_allocators").ArmOnSizeAllocator;
 const Hasher = @import("hasher.zig").Hasher;
 const FixedContainerType = @import("type/container.zig").FixedContainerType;
 const FixedListType = @import("type/list.zig").FixedListType;
+const VariableListType = @import("type/list.zig").VariableListType;
 const FixedVectorType = @import("type/vector.zig").FixedVectorType;
 const UintType = @import("type/uint.zig").UintType;
 const BitVectorType = @import("type/bit_vector.zig").BitVectorType;
+const ByteListType = @import("type/byte_list.zig").ByteListType;
 const ByteVectorType = @import("type/byte_vector.zig").ByteVectorType;
 
 const Checkpoint = FixedContainerType(struct {
     epoch: UintType(64),
     root: ByteVectorType(32),
 });
+
+test "VariableList deserializeFromBytes should free offsets on malformed later offset" {
+    const ListType = VariableListType(ByteListType(8), 4);
+    // Offset 8 declares two elements, so decoding allocates the offsets array.
+    // Offset 4 then moves backward, triggering offsetNotIncreasing after allocation.
+    const serialized = [_]u8{ 8, 0, 0, 0, 4, 0, 0, 0 };
+    var tracking = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = tracking.allocator();
+
+    var out = ListType.default_value;
+    defer out.deinit(allocator);
+
+    try std.testing.expectError(
+        error.offsetNotIncreasing,
+        ListType.deserializeFromBytes(allocator, &serialized, &out),
+    );
+    // The temporary offsets must not leak after malformed input is rejected.
+    try std.testing.expectEqual(tracking.allocated_bytes, tracking.freed_bytes);
+}
 
 test "Hasher init container should not leak initialized prefix on later child OOM" {
     const ChildType = FixedVectorType(UintType(64), 8, .{});
