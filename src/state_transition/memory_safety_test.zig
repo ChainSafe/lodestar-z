@@ -17,7 +17,6 @@ const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgra
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 
 test "upgradeStateToCapella and upgradeStateToDeneb should release temporary payload headers" {
-    // std.testing.allocator makes the test fail on leaks even without an explicit expect.
     const allocator = std.testing.allocator;
     const chain_config = if (active_preset == .mainnet)
         config.mainnet.chain_config
@@ -65,6 +64,8 @@ test "upgradeStateToCapella and upgradeStateToDeneb should release temporary pay
     );
     defer epoch_cache.deinit();
 
+    // std.testing.allocator makes the test fail without an explicit expect if either upgrade
+    // leaks its temporary payload header.
     const capella_state = try upgradeStateToCapella(
         allocator,
         &beacon_config,
