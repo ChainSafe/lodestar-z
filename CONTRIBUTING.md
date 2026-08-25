@@ -4,6 +4,16 @@ Thanks for your interest in contributing to Lodestar. It's people like you that 
 
 ## Contribution Process
 
+If you're reporting a bug or have a feature request,
+create a new [issue](https://github.com/ChainSafe/lodestar-z/issues/new/choose).
+
+> [!IMPORTANT]
+> Please note that trivial, non-code contributions such as spelling, grammar, typos, corrections, comments and link fixes are not acceptable pull requests.
+> Although we appreciate the effort to fix these valid concerns, it is not practical for us to run our CI systems to accommodate minor external contributions which generate minimal value for the purpose of contribution/airdrop farming.
+> It would be appreciated for you to open up an issue instead for our team to aggregate these types of contributions into a batch commit.
+
+If you wish to contribute code:
+
 1. Make sure you're familiar with our contribution guidelines _(this document)_!
 2. Before starting on any code, make sure to **leave a comment stating your intention**
    in the issue you are interested in or on our [Discord](https://discord.gg/aMxzVcr).
@@ -47,15 +57,6 @@ Please remember that Lodestar is maintained by a small team of humans. Every
 discussion, issue and pull request is read and reviewed by the team. It is
 rude and disrespectful to attempt contributions with low-effort work,
 since it puts the burden of validation on the maintainer.
-
-## Reporting A Bug?
-
-- :spiral_notepad: [Create a new issue!](https://github.com/ChainSafe/lodestar-z/issues/new/choose)
-
-> [!IMPORTANT]
-> Please note that trivial, non-code contributions such as spelling, grammar, typos, corrections, comments and link fixes are not acceptable pull requests.
-> Although we appreciate the effort to fix these valid concerns, it is not practical for us to run our CI systems to accommodate minor external contributions which generate minimal value for the purpose of contribution/airdrop farming.
-> It would be appreciated for you to open up an issue instead for our team to aggregate these types of contributions into a batch commit.
 
 ## Developer Usage
 
