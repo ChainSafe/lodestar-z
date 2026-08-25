@@ -766,9 +766,13 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
 
             try out.resize(allocator, len);
             @memset(out.items[0..len], Element.default_value);
+            errdefer {
+                Self.deinit(allocator, out);
+                out.* = default_value;
+            }
 
             var i: usize = 0;
-            while (elements.next()) |element_bytes| : (i += 1) {
+            while (try elements.next()) |element_bytes| : (i += 1) {
                 try Element.deserializeFromBytes(allocator, element_bytes, &out.items[i]);
             }
             std.debug.assert(i == len);
@@ -777,13 +781,16 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         pub const serialized = struct {
             pub fn validate(data: []const u8) !void {
                 var elements = try VariableElementIterator(Self).init(data);
-                while (elements.next()) |element_bytes| {
+                while (try elements.next()) |element_bytes| {
                     try Element.serialized.validate(element_bytes);
                 }
             }
 
             pub fn length(data: []const u8) !usize {
-                return (try VariableElementIterator(Self).init(data)).len;
+                var elements = try VariableElementIterator(Self).init(data);
+                const len = elements.len;
+                while (try elements.next()) |_| {}
+                return len;
             }
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
@@ -796,7 +803,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 @memset(chunks, [_]u8{0} ** 32);
 
                 var i: usize = 0;
-                while (elements.next()) |element_bytes| : (i += 1) {
+                while (try elements.next()) |element_bytes| : (i += 1) {
                     try Element.serialized.hashTreeRoot(allocator, element_bytes, &chunks[i]);
                 }
                 std.debug.assert(i == len);
@@ -852,7 +859,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
                 errdefer it.deinit();
 
-                while (elements.next()) |elem_bytes| {
+                while (try elements.next()) |elem_bytes| {
                     try it.append(try Element.tree.deserializeFromBytes(pool, elem_bytes));
                 }
 

@@ -1,5 +1,5 @@
-//! A zero-allocation, eagerly validated iterator for serialized elements in
-//! SSZ lists and vectors with variable-size elements.
+//! A zero-allocation, one-pass iterator for serialized elements in SSZ lists and vectors with
+//! variable-size elements.
 //!
 //! SSZ encodes these collections as a table of 4-byte little-endian offsets followed by the
 //! element data. For example:
@@ -15,7 +15,8 @@
 //!
 //! # Safety
 //!
-//! Initialization eagerly validates the complete offset table:
+//! Initialization validates the first offset and collection bounds. Iteration validates each
+//! subsequent offset before returning the preceding element:
 //!
 //! - Returns `error.offsetOutOfRange` if a vector input is empty, the input does not contain a
 //!   complete first offset, or an offset points past the end of the input.
@@ -36,8 +37,7 @@
 //! Both elements start at byte 8, so the first element is the empty slice `data[8..8]`. The second
 //! element contains the remaining bytes.
 //!
-//! After successful validation, the iterator yields borrowed element slices without allocation or
-//! per-element errors, making iteration infallible.
+//! The iterator reads each offset once and yields borrowed element slices without allocation.
 
 const std = @import("std");
 const TypeKind = @import("type_kind.zig").TypeKind;
@@ -48,8 +48,8 @@ const isFixedType = @import("type_kind.zig").isFixedType;
 /// Pre-condition:
 /// `ST` must describe an SSZ list or vector with a variable-size element type.
 ///
-/// `init` validates the complete offset table and collection bounds,
-/// which makes element iteration infallible.
+/// `init` validates the first offset and collection bounds. `next` validates each subsequent
+/// offset before yielding an element.
 ///
 /// Returned element slices reference the input data, so the caller must
 /// keep the data alive and unchanged while the iterator is in use.
@@ -75,10 +75,9 @@ pub fn VariableElementIterator(comptime ST: type) type {
 
         const Self = @This();
 
-        /// Initializes an iterator and validates the complete SSZ offset table.
+        /// Initializes an iterator and validates the first SSZ offset and collection bounds.
         ///
-        /// Returns an error if the encoding has invalid offsets or violates the list or vector
-        /// bounds of `ST`.
+        /// Later offsets are validated by `next`.
         pub fn init(data: []const u8) !Self {
             if (data.len == 0) {
                 if (ST.kind == .vector) return error.offsetOutOfRange;
@@ -104,14 +103,6 @@ pub fn VariableElementIterator(comptime ST: type) type {
             }
             if (first_offset > data.len) return error.offsetOutOfRange;
 
-            var previous_offset = first_offset;
-            for (1..len) |i| {
-                const offset = readOffset(data, i);
-                if (offset > data.len) return error.offsetOutOfRange;
-                if (offset < previous_offset) return error.offsetNotIncreasing;
-                previous_offset = offset;
-            }
-
             return .{
                 .data = data,
                 .len = len,
@@ -121,7 +112,9 @@ pub fn VariableElementIterator(comptime ST: type) type {
         }
 
         /// Returns the next serialized element, or `null` after the last element.
-        pub fn next(self: *Self) ?[]const u8 {
+        ///
+        /// Returns an error if the next offset is out of range or less than the previous offset.
+        pub fn next(self: *Self) !?[]const u8 {
             if (self.index == self.len) return null;
 
             const next_index = self.index + 1;
@@ -130,8 +123,8 @@ pub fn VariableElementIterator(comptime ST: type) type {
             else
                 readOffset(self.data, next_index);
 
-            std.debug.assert(end >= self.start);
-            std.debug.assert(end <= self.data.len);
+            if (end > self.data.len) return error.offsetOutOfRange;
+            if (end < self.start) return error.offsetNotIncreasing;
 
             const element = self.data[self.start..end];
             self.start = end;
@@ -174,41 +167,38 @@ test "iterates validated variable elements" {
 
     var elements = try VariableElementIterator(VariableList).init(&data);
     try std.testing.expectEqual(@as(usize, 2), elements.len);
-    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, elements.next().?);
-    try std.testing.expectEqualSlices(u8, &.{ 3, 4, 5 }, elements.next().?);
-    try std.testing.expectEqual(null, elements.next());
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, (try elements.next()).?);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 4, 5 }, (try elements.next()).?);
+    try std.testing.expectEqual(null, try elements.next());
 }
 
 test "accepts empty list and empty elements" {
     var empty_list = try VariableElementIterator(VariableList).init(&.{});
     try std.testing.expectEqual(@as(usize, 0), empty_list.len);
-    try std.testing.expectEqual(null, empty_list.next());
+    try std.testing.expectEqual(null, try empty_list.next());
 
     const data = [_]u8{
         8, 0, 0, 0,
         8, 0, 0, 0,
     };
     var empty_elements = try VariableElementIterator(VariableList).init(&data);
-    try std.testing.expectEqualSlices(u8, &.{}, empty_elements.next().?);
-    try std.testing.expectEqualSlices(u8, &.{}, empty_elements.next().?);
-    try std.testing.expectEqual(null, empty_elements.next());
+    try std.testing.expectEqualSlices(u8, &.{}, (try empty_elements.next()).?);
+    try std.testing.expectEqualSlices(u8, &.{}, (try empty_elements.next()).?);
+    try std.testing.expectEqual(null, try empty_elements.next());
 }
 
-test "rejects malformed offsets during initialization" {
-    try std.testing.expectError(
-        error.offsetNotIncreasing,
-        VariableElementIterator(VariableList).init(&.{
-            8, 0, 0, 0,
-            7, 0, 0, 0,
-        }),
-    );
-    try std.testing.expectError(
-        error.offsetOutOfRange,
-        VariableElementIterator(VariableList).init(&.{
-            8, 0, 0, 0,
-            9, 0, 0, 0,
-        }),
-    );
+test "rejects malformed offsets during iteration or initialization" {
+    var decreasing = try VariableElementIterator(VariableList).init(&.{
+        8, 0, 0, 0,
+        7, 0, 0, 0,
+    });
+    try std.testing.expectError(error.offsetNotIncreasing, decreasing.next());
+
+    var out_of_range = try VariableElementIterator(VariableList).init(&.{
+        8, 0, 0, 0,
+        9, 0, 0, 0,
+    });
+    try std.testing.expectError(error.offsetOutOfRange, out_of_range.next());
     try std.testing.expectError(
         error.offsetNotDivisibleBy4,
         VariableElementIterator(VariableList).init(&.{ 5, 0, 0, 0, 0 }),
