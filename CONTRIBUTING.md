@@ -31,7 +31,7 @@ Thanks for your interest in contributing to Lodestar. It's people like you that 
   before submission. AI is very good at being overly verbose that
   distracts from the main point. Humans must do their research and
   trim this down. Our team appreciates and takes all contributions seriously,
-  so unedited AI slop, if left unedited, is disrespectful of our time and effort.
+  so AI output, if left unedited, is disrespectful of our time and effort.
 
 - **The human-in-the-loop must fully understand all code.** If you
   can't explain what your changes do and how they interact with the
