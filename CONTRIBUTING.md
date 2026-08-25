@@ -19,8 +19,34 @@ Thanks for your interest in contributing to Lodestar. It's people like you that 
 
 > [!IMPORTANT]
 >
-> The Lodestar team uses AI heavily in our work, but we have strict rules for AI contributions to our project.
-> See our [AI_POLICY](./AI_POLICY.md) before contributing.
+> The Lodestar team uses AI heavily in our work, but we have strict rules for AI contributions.
+
+- **All AI usage in any form must be disclosed.** You must state
+  the tool you used (e.g. Claude Code, Cursor, Amp) along with
+  the extent that the work was AI-assisted.
+
+- **PR descriptions, code changes, issues and discussions can use AI assistance
+  but must have a full human-in-the-loop.** This means that any content
+  generated with AI must have been reviewed _and edited_ by a human
+  before submission. AI is very good at being overly verbose that
+  distracts from the main point. Humans must do their research and
+  trim this down. Our team appreciates and takes all contributions seriously,
+  so unedited AI slop, if left unedited, is disrespectful of our time and effort.
+
+- **The human-in-the-loop must fully understand all code.** If you
+  can't explain what your changes do and how they interact with the
+  greater system, do not contribute to this project.
+
+- **Bad AI-generated PRs/issues will be de-prioritized or closed**.
+  Bad contributions that are clearly AI (slop) will be de-prioritized
+  or closed without warning.
+  We love to help developers learn about Lodestar/Ethereum and grow.
+  If you're interested in that then use AI responsibly.
+
+Please remember that Lodestar is maintained by a small team of humans. Every
+discussion, issue and pull request is read and reviewed by the team. It is
+rude and disrespectful to attempt contributions with low-effort work,
+since it puts the burden of validation on the maintainer.
 
 ## Reporting A Bug?
 

@@ -26,7 +26,7 @@ under `options_modules.spec_test_options`.
 
 We welcome all contributions, but are strict about quality.
 Before contributing, please read [CONTRIBUTING](./CONTRIBUTING.md) and the
-relevant links inside (most importantly, our [AI_POLICY](./AI_POLICY.md)).
+relevant links inside.
 
 We may deprioritize or close low-effort issues and pull requests at our discretion.
 
