@@ -52,6 +52,7 @@ test "ByteVector tree.deserializeFromBytes should reclaim partial leaves on OOM"
         error.OutOfMemory,
         VectorType.tree.deserializeFromBytes(&pool, &bytes),
     );
+    // The first leaf must not remain in the pool after the second leaf allocation fails.
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
@@ -76,6 +77,7 @@ test "ByteVector tree.fromValue should reclaim leaves when fill fails with OOM" 
         error.OutOfMemory,
         VectorType.tree.fromValue(&pool, &VectorType.default_value),
     );
+    // The two leaves must not remain in the pool after parent construction fails.
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
@@ -101,6 +103,7 @@ test "BitVector tree.deserializeFromBytes should reclaim partial leaves on OOM" 
         error.OutOfMemory,
         VectorType.tree.deserializeFromBytes(&pool, &bytes),
     );
+    // The first leaf must not remain in the pool after the second leaf allocation fails.
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
@@ -125,6 +128,7 @@ test "BitVector tree.fromValue should reclaim leaves when fill fails with OOM" {
         error.OutOfMemory,
         VectorType.tree.fromValue(&pool, &VectorType.default_value),
     );
+    // The two leaves must not remain in the pool after parent construction fails.
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
