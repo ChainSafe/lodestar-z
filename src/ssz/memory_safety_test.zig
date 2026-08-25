@@ -18,6 +18,116 @@ const Checkpoint = FixedContainerType(struct {
     root: ByteVectorType(32),
 });
 
+fn fillPoolLeavingFreeSlots(pool: *Node.Pool, free_slot_count: usize) !void {
+    try pool.preheat(@intCast(pool.nodes.capacity - pool.nodes.len));
+
+    const available_free_count = pool.nodes.len - @intFromEnum(pool.next_free_node);
+    std.debug.assert(free_slot_count <= available_free_count);
+
+    const filler_count = available_free_count - free_slot_count;
+    for (0..filler_count) |_| {
+        _ = try pool.createLeaf(&[_]u8{0} ** 32);
+    }
+}
+
+test "ByteVector tree.deserializeFromBytes should reclaim partial leaves on OOM" {
+    const VectorType = ByteVectorType(64);
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 1 },
+    );
+    var pool = try Node.Pool.init(.{
+        .page_allocator = failing.allocator(),
+        .allocator = failing.allocator(),
+        .pool_size = 0,
+    });
+    defer pool.deinit();
+
+    try fillPoolLeavingFreeSlots(&pool, 1);
+
+    const baseline = pool.getNodesInUse();
+    const bytes = [_]u8{0} ** VectorType.fixed_size;
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        VectorType.tree.deserializeFromBytes(&pool, &bytes),
+    );
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "ByteVector tree.fromValue should reclaim leaves when fill fails with OOM" {
+    const VectorType = ByteVectorType(64);
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 1 },
+    );
+    var pool = try Node.Pool.init(.{
+        .page_allocator = failing.allocator(),
+        .allocator = failing.allocator(),
+        .pool_size = 0,
+    });
+    defer pool.deinit();
+
+    try fillPoolLeavingFreeSlots(&pool, 2);
+
+    const baseline = pool.getNodesInUse();
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        VectorType.tree.fromValue(&pool, &VectorType.default_value),
+    );
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "BitVector tree.deserializeFromBytes should reclaim partial leaves on OOM" {
+    const VectorType = BitVectorType(512);
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 1 },
+    );
+    var pool = try Node.Pool.init(.{
+        .page_allocator = failing.allocator(),
+        .allocator = failing.allocator(),
+        .pool_size = 0,
+    });
+    defer pool.deinit();
+
+    try fillPoolLeavingFreeSlots(&pool, 1);
+
+    const baseline = pool.getNodesInUse();
+    const bytes = [_]u8{0} ** VectorType.fixed_size;
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        VectorType.tree.deserializeFromBytes(&pool, &bytes),
+    );
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "BitVector tree.fromValue should reclaim leaves when fill fails with OOM" {
+    const VectorType = BitVectorType(512);
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 1 },
+    );
+    var pool = try Node.Pool.init(.{
+        .page_allocator = failing.allocator(),
+        .allocator = failing.allocator(),
+        .pool_size = 0,
+    });
+    defer pool.deinit();
+
+    try fillPoolLeavingFreeSlots(&pool, 2);
+
+    const baseline = pool.getNodesInUse();
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        VectorType.tree.fromValue(&pool, &VectorType.default_value),
+    );
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
 test "Hasher init container should not leak initialized prefix on later child OOM" {
     const ChildType = FixedVectorType(UintType(64), 8, .{});
     const ContainerType = FixedContainerType(struct {
