@@ -13,7 +13,7 @@
 //! long. Each offset occupies 4 bytes, so the table contains `8 / 4 = 2` offsets. The second offset
 //! is 14, so the first element occupies bytes 8 through 13 and the second element starts at byte 14.
 //!
-//! # Safety 
+//! # Safety
 //!
 //! Initialization eagerly validates the complete offset table:
 //!
@@ -47,16 +47,17 @@ const isFixedType = @import("type_kind.zig").isFixedType;
 ///
 /// Pre-condition:
 /// `ST` must describe an SSZ list or vector with a variable-size element type.
-/// 
+///
 /// `init` validates the complete offset table and collection bounds,
 /// which makes element iteration infallible.
 ///
-/// Returned element slices reference the input data, so the caller must 
+/// Returned element slices reference the input data, so the caller must
 /// keep the data alive and unchanged while the iterator is in use.
 pub fn VariableElementIterator(comptime ST: type) type {
     comptime {
-        if (ST.kind != .vector and 
-            ST.kind != .list) {
+        if (ST.kind != .vector and
+            ST.kind != .list)
+        {
             @compileError("ST must be a vector or list");
         }
         if (isFixedType(ST.Element)) {
