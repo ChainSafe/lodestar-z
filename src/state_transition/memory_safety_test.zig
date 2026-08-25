@@ -16,7 +16,8 @@ const processRewardsAndPenalties =
 const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 
-fn runPayloadHeaderUpgradeCleanupTest(allocator: std.mem.Allocator) !void {
+test "upgradeStateToCapella and upgradeStateToDeneb should release temporary payload headers" {
+    const allocator = std.testing.allocator;
     const chain_config = if (active_preset == .mainnet)
         config.mainnet.chain_config
     else
@@ -78,15 +79,6 @@ fn runPayloadHeaderUpgradeCleanupTest(allocator: std.mem.Allocator) !void {
         state.castToFork(.capella),
     );
     state = .{ .deneb = deneb_state.inner };
-}
-
-test "upgradeStateToCapella and upgradeStateToDeneb should release temporary payload headers" {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    const run_result = runPayloadHeaderUpgradeCleanupTest(debug_allocator.allocator());
-    const deinit_status = debug_allocator.deinit();
-
-    try std.testing.expectEqual(.ok, deinit_status);
-    try run_result;
 }
 
 test "deserializeContainerOverrideFields... cleans up pool nodes on error" {
