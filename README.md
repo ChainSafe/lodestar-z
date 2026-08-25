@@ -5,8 +5,16 @@ Modules are implemented in Zig and exposed to Node.js through NAPI bindings.
 
 ## Installation
 
+You can use **lodestar-z** natively in Zig:
+
 ```sh
 zig fetch --save git+https://github.com/ChainSafe/lodestar-z
+```
+
+Or in TypeScript, via napi bindings:
+
+```sh
+pnpm install @chainsafe/lodestar-z
 ```
 
 ### Spec Test Compliance
