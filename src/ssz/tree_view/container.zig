@@ -123,6 +123,11 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
             var nodes: [ST.chunk_count]Node.Id = undefined;
             var indices: [ST.chunk_count]usize = undefined;
+            // Only basic nodes created by this commit need direct cleanup. Composite roots are
+            // borrowed from their child views and must not be released here.
+            var fresh_basic_nodes: [ST.chunk_count]Node.Id = undefined;
+            var fresh_basic_count: usize = 0;
+            errdefer self.pool.free(fresh_basic_nodes[0..fresh_basic_count]);
 
             var changed_idx: usize = 0;
             inline for (ST.fields, 0..) |field, i| {
@@ -134,9 +139,10 @@ pub fn ContainerTreeView(comptime ST: type) type {
                             self.pool,
                             &child_value,
                         );
+                        fresh_basic_nodes[fresh_basic_count] = child_node;
+                        fresh_basic_count += 1;
                         nodes[changed_idx] = child_node;
                         indices[changed_idx] = i;
-                        self.original_nodes[i] = child_node;
                         changed_idx += 1;
                     } else {
                         var child_view = self.child_data[i] orelse return error.MissingChildView;
@@ -146,7 +152,6 @@ pub fn ContainerTreeView(comptime ST: type) type {
                         } else true;
                         if (child_changed) {
                             nodes[changed_idx] = child_view.getRoot();
-                            self.original_nodes[i] = child_view.getRoot();
                             indices[changed_idx] = i;
                             changed_idx += 1;
                         }
@@ -155,14 +160,36 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 }
             }
 
-            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
             if (changed_idx == 0) {
+                self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
                 return;
             }
-            const new_root = try self.root.setNodesAtDepth(self.pool, ST.chunk_depth, indices[0..changed_idx], nodes[0..changed_idx]);
-            try self.pool.ref(new_root);
+            const new_root = try self.root.setNodesAtDepth(
+                self.pool,
+                ST.chunk_depth,
+                indices[0..changed_idx],
+                nodes[0..changed_idx],
+            );
+            // The rebuilt parent now owns the fresh basic nodes, so disarm their errdefer
+            // cleanup. At depth zero there is no parent, so keep cleanup armed until the
+            // view takes its own reference.
+            if (comptime ST.chunk_depth > 0) {
+                fresh_basic_count = 0;
+            }
+            // This scope disarms the rollback once the view acquires its reference. The
+            // remaining publication steps cannot fail.
+            {
+                errdefer if (comptime ST.chunk_depth > 0) self.pool.unref(new_root);
+                try self.pool.ref(new_root);
+            }
+            fresh_basic_count = 0;
+
             self.pool.unref(self.root);
             self.root = new_root;
+            for (indices[0..changed_idx], nodes[0..changed_idx]) |index, node| {
+                self.original_nodes[index] = node;
+            }
+            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
         }
 
         pub fn getRoot(self: *const Self) Node.Id {
