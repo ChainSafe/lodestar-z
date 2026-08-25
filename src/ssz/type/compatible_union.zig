@@ -188,15 +188,6 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
         pub const max_size: usize = _max_size;
         pub const _union_options = options;
 
-        // Default value uses first option with selector
-        pub const default_value: Type = blk: {
-            const first_selector = options[0].@"0";
-            const first_type = options[0].@"1";
-            const field_name = std.fmt.comptimePrint("option_{d}", .{first_selector});
-
-            break :blk @unionInit(Type, field_name, first_type.default_value);
-        };
-
         /// Get the selector value from a union value
         pub fn getSelector(value: *const Type) u8 {
             return @intFromEnum(std.meta.activeTag(value.*));
@@ -575,6 +566,20 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 }
 
 const UintType = @import("uint.zig").UintType;
+
+test "CompatibleUnion - has no default value" {
+    const Square = @import("container.zig").FixedContainerType(struct {
+        side: UintType(16),
+        color: UintType(8),
+    });
+
+    const Shape = CompatibleUnionType(.{
+        .{ 1, Square },
+        .{ 2, Square },
+    });
+
+    try std.testing.expect(!@hasDecl(Shape, "default_value"));
+}
 
 test "CompatibleUnion - basic square" {
     const Square = @import("container.zig").FixedContainerType(struct {
