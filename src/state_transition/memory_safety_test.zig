@@ -17,6 +17,8 @@ const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgra
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 
 test "upgradeStateToCapella and upgradeStateToDeneb should release temporary payload headers" {
+    // The test runner checks this allocator for leaks after all test-scope defers run,
+    // so this test needs no explicit leak assertion.
     const allocator = std.testing.allocator;
     const chain_config = if (active_preset == .mainnet)
         config.mainnet.chain_config
