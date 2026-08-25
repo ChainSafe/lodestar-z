@@ -22,6 +22,8 @@ const Checkpoint = FixedContainerType(struct {
 
 test "VariableList deserializeFromBytes should free offsets on malformed later offset" {
     const ListType = VariableListType(ByteListType(8), 4);
+    // Offset 8 declares two elements, so decoding allocates the offsets array.
+    // Offset 4 then moves backward, triggering offsetNotIncreasing after allocation.
     const serialized = [_]u8{ 8, 0, 0, 0, 4, 0, 0, 0 };
     var tracking = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     const allocator = tracking.allocator();
