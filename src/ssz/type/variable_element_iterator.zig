@@ -1,11 +1,62 @@
+//! A zero-allocation, eagerly validated iterator for serialized elements in
+//! SSZ lists and vectors with variable-size elements.
+//!
+//! SSZ encodes these collections as a table of 4-byte little-endian offsets followed by the
+//! element data. For example:
+//!
+//! ```text
+//!     [offset 1] [offset 2] [data 1 ..........] [data 2 ..]
+//! 0x  08000000   0e000000   010002000300        01000200
+//! ```
+//!
+//! The first offset is 8, so the element data starts at byte 8 and the offset table is 8 bytes
+//! long. Each offset occupies 4 bytes, so the table contains `8 / 4 = 2` offsets. The second offset
+//! is 14, so the first element occupies bytes 8 through 13 and the second element starts at byte 14.
+//!
+//! # Safety 
+//!
+//! Initialization eagerly validates the complete offset table:
+//!
+//! - Returns `error.offsetOutOfRange` if a vector input is empty, the input does not contain a
+//!   complete first offset, or an offset points past the end of the input.
+//! - Returns `error.zeroOffset` if the first offset is zero.
+//! - Returns `error.offsetNotDivisibleBy4` if the first offset is not divisible by the 4-byte offset
+//!   size.
+//! - Returns `error.invalidOffsetCount` if the offset count does not equal the vector length or
+//!   exceeds the list limit.
+//! - Returns `error.offsetNotIncreasing` if an offset is less than the previous offset.
+//!
+//! Equal offsets encode empty elements. For example:
+//!
+//! ```text
+//!     [offset 1] [offset 2] [data 2 ..]
+//! 0x  08000000   08000000   01000200
+//! ```
+//!
+//! Both elements start at byte 8, so the first element is the empty slice `data[8..8]`. The second
+//! element contains the remaining bytes.
+//!
+//! After successful validation, the iterator yields borrowed element slices without allocation or
+//! per-element errors, making iteration infallible.
+
 const std = @import("std");
 const TypeKind = @import("type_kind.zig").TypeKind;
 const isFixedType = @import("type_kind.zig").isFixedType;
 
-/// Iterates serialized variable-size list or vector elements after validating all offsets.
+/// Returns an iterator over serialized elements of a variable-element SSZ list or vector.
+///
+/// Pre-condition:
+/// `ST` must describe an SSZ list or vector with a variable-size element type.
+/// 
+/// `init` validates the complete offset table and collection bounds,
+/// which makes element iteration infallible.
+///
+/// Returned element slices reference the input data, so the caller must 
+/// keep the data alive and unchanged while the iterator is in use.
 pub fn VariableElementIterator(comptime ST: type) type {
     comptime {
-        if (ST.kind != .vector and ST.kind != .list) {
+        if (ST.kind != .vector and 
+            ST.kind != .list) {
             @compileError("ST must be a vector or list");
         }
         if (isFixedType(ST.Element)) {
@@ -15,13 +66,18 @@ pub fn VariableElementIterator(comptime ST: type) type {
 
     return struct {
         data: []const u8,
+        /// Total number of elements.
         element_count: usize,
+        /// Number of elements already returned by `next()`.
         index: usize,
         start: usize,
 
         const Self = @This();
 
-        /// `data` must remain unchanged while the iterator is in use.
+        /// Initializes an iterator and validates the complete SSZ offset table.
+        ///
+        /// Returns an error if the encoding has invalid offsets or violates the list or vector
+        /// bounds of `ST`.
         pub fn init(data: []const u8) !Self {
             if (data.len == 0) {
                 if (ST.kind == .vector) return error.offsetOutOfRange;
@@ -63,10 +119,12 @@ pub fn VariableElementIterator(comptime ST: type) type {
             };
         }
 
+        /// Returns the total element count.
         pub fn len(self: Self) usize {
             return self.element_count;
         }
 
+        /// Returns the next serialized element, or `null` after the last element.
         pub fn next(self: *Self) ?[]const u8 {
             if (self.index == self.element_count) return null;
 
