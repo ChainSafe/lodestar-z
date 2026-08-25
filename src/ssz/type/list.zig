@@ -783,6 +783,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
             const len = first_offset / 4;
 
             const offsets = try allocator.alloc(u32, len + 1);
+            errdefer allocator.free(offsets);
 
             offsets[0] = first_offset;
             while (iterator.pos < len) {
