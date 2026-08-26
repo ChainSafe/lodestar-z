@@ -22,11 +22,13 @@ test "setNodesGrouped should release an intermediate root when a later group run
     const root = try pool.createBranch(content_root, original_length_node);
     defer pool.unref(root);
 
+    // The first group consumes this node; teardown owns it only if rollback does not free it.
     const replacement_length_node = try pool.createLeafFromUint(100);
     defer if (!replacement_length_node.getState(&pool).isFree()) {
         pool.unref(replacement_length_node);
     };
 
+    // The second group fails before consuming this node, so the test retains ownership.
     const replacement_data_node = try pool.createLeafFromUint(101);
     defer pool.unref(replacement_data_node);
 
@@ -60,10 +62,17 @@ test "setNodesGrouped should release an intermediate root when a later group run
         root.setNodesGrouped(&pool, &replacement_gindices, &replacement_nodes),
     );
 
-    // Creating and freeing the intermediate root cancel out. Rollback also frees the consumed
-    // replacement length node that was already included in nodes_in_use_before_update.
+    // The first group consumed the replacement length, so grouped rollback must free it.
+    try std.testing.expect(replacement_length_node.getState(&pool).isFree());
+
+    // Creating and freeing the intermediate root cancel out. Freeing the replacement length,
+    // which was already included in the baseline, leaves one fewer node in use.
     try std.testing.expectEqual(nodes_in_use_before_update - 1, pool.getNodesInUse());
+
+    // The failed grouped update returns no new root, leaving the original root caller-owned.
     try std.testing.expect(!root.getState(&pool).isFree());
+
+    // The second group failed before consuming the replacement data, which remains caller-owned.
     try std.testing.expect(!replacement_data_node.getState(&pool).isFree());
 
     for (capacity_fill_nodes.items) |id| pool.unref(id);
