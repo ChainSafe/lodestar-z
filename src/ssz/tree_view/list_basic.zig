@@ -94,6 +94,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         /// a bare length cut would leave stale chunk data in the merkleized root.
         pub fn growTo(self: *Self, new_length: usize) !void {
             std.debug.assert(new_length >= self._len);
+            if (new_length > ST.limit) return error.LengthOverLimit;
             self._len = new_length;
         }
 
@@ -683,6 +684,33 @@ test "TreeView list push enforces limit" {
 
     try std.testing.expectError(error.LengthOverLimit, view.push(@as(u32, 3)));
     try std.testing.expectEqual(@as(usize, 2), try view.length());
+}
+
+test "ListBasicTreeView growTo should reject lengths over the limit" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 64,
+    });
+    defer pool.deinit();
+
+    const ListType = FixedListType(UintType(32), 2, .{});
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    try list.append(allocator, 1);
+
+    const root = try ListType.tree.fromValue(&pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    try std.testing.expectError(error.LengthOverLimit, view.growTo(ListType.limit + 1));
+    try std.testing.expectEqual(@as(usize, 1), try view.length());
+
+    try view.growTo(ListType.limit);
+    try view.commit();
+    try std.testing.expectEqual(ListType.limit, try ListType.tree.length(view.getRoot(), &pool));
 }
 
 test "TreeView list basic clone isolates updates" {
