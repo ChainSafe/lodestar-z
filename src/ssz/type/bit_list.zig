@@ -130,6 +130,9 @@ pub fn BitList(comptime limit: comptime_int) type {
         }
 
         pub fn set(self: *@This(), allocator: std.mem.Allocator, bit_index: usize, bit: bool) !void {
+            if (bit_index >= limit) {
+                return error.tooLarge;
+            }
             if (bit_index + 1 > self.bit_len) {
                 try self.resize(allocator, bit_index + 1);
             }
@@ -640,6 +643,19 @@ test "BitListType - sanity" {
     try Bits.deserializeFromBytes(allocator, b_buf, &b);
 
     try std.testing.expect(try b.get(0) == false);
+}
+
+test "BitList set should reject max usize index" {
+    const allocator = std.testing.allocator;
+    const Bits = BitListType(8);
+
+    var value = Bits.default_value;
+    defer Bits.deinit(allocator, &value);
+
+    try std.testing.expectError(
+        error.tooLarge,
+        value.set(allocator, std.math.maxInt(usize), true),
+    );
 }
 
 test "BitListType - sanity with bools" {
