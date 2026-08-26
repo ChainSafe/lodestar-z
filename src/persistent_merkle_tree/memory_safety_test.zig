@@ -13,53 +13,57 @@ test "setNodesGrouped should release an intermediate root when a later group run
     });
     defer pool.deinit();
 
-    const p = &pool;
-
-    const left = try pool.createBranch(
+    // This matches a list root: content subtree on the left and length leaf on the right.
+    const content_root = try pool.createBranch(
         try pool.createLeafFromUint(1),
         try pool.createLeafFromUint(2),
     );
-    const right = try pool.createBranch(
-        try pool.createLeafFromUint(3),
-        try pool.createLeafFromUint(4),
-    );
-    const root = try pool.createBranch(left, right);
+    const original_length_node = try pool.createLeafFromUint(2);
+    const root = try pool.createBranch(content_root, original_length_node);
     defer pool.unref(root);
 
-    const new_length = try pool.createLeafFromUint(100);
-    defer if (!new_length.getState(p).isFree()) pool.unref(new_length);
+    const replacement_length_node = try pool.createLeafFromUint(100);
+    defer if (!replacement_length_node.getState(&pool).isFree()) {
+        pool.unref(replacement_length_node);
+    };
 
-    const new_data = try pool.createLeafFromUint(101);
-    defer pool.unref(new_data);
+    const replacement_data_node = try pool.createLeafFromUint(101);
+    defer pool.unref(replacement_data_node);
 
-    // Arm OOM after setup: within-capacity node creation still succeeds, but pool growth fails.
+    // Fail only later pool growth after the fixture is fully allocated.
     failing.fail_index = failing.alloc_index;
 
-    var filler: std.ArrayList(Node.Id) = .empty;
-    defer filler.deinit(std.testing.allocator);
+    var capacity_fill_nodes: std.ArrayList(Node.Id) = .empty;
+    defer capacity_fill_nodes.deinit(std.testing.allocator);
 
-    // Leave one free slot for the depth-1 group, forcing the depth-2 group to grow the pool.
+    // Leave one slot so the depth-1 length group succeeds and the depth-2 data group must grow.
     while (pool.createLeafFromUint(0)) |id| {
-        try filler.append(std.testing.allocator, id);
+        try capacity_fill_nodes.append(std.testing.allocator, id);
     } else |err| switch (err) {
         error.OutOfMemory => {},
     }
-    pool.unref(filler.pop().?);
+    pool.unref(capacity_fill_nodes.pop().?);
 
-    const in_use_before = pool.getNodesInUse();
-    // Model a list commit: gindex 3 stores the length mix-in and gindex 4 stores data.
-    const gindices = [_]Gindex{ Gindex.fromUint(3), Gindex.fromUint(4) };
-    var nodes = [_]Node.Id{ new_length, new_data };
+    const nodes_in_use_before_update = pool.getNodesInUse();
+    const replacement_length_gindex = Gindex.fromDepth(1, 1);
+    const replacement_data_gindex = Gindex.fromDepth(2, 0);
+    const replacement_gindices = [_]Gindex{
+        replacement_length_gindex,
+        replacement_data_gindex,
+    };
+    var replacement_nodes = [_]Node.Id{ replacement_length_node, replacement_data_node };
 
-    try std.testing.expectError(error.OutOfMemory, root.setNodesGrouped(p, &gindices, &nodes));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        root.setNodesGrouped(&pool, &replacement_gindices, &replacement_nodes),
+    );
 
     failing.fail_index = std.math.maxInt(usize);
 
-    // The first group consumes new_length, so its rollback must release that node together with
-    // the intermediate root. The original root and the unprocessed new_data remain caller-owned.
-    try std.testing.expectEqual(in_use_before - 1, pool.getNodesInUse());
-    try std.testing.expect(!root.getState(p).isFree());
-    try std.testing.expect(!new_data.getState(p).isFree());
+    // Rollback frees the consumed length and intermediate root; the other inputs remain owned.
+    try std.testing.expectEqual(nodes_in_use_before_update - 1, pool.getNodesInUse());
+    try std.testing.expect(!root.getState(&pool).isFree());
+    try std.testing.expect(!replacement_data_node.getState(&pool).isFree());
 
-    for (filler.items) |id| pool.unref(id);
+    for (capacity_fill_nodes.items) |id| pool.unref(id);
 }
