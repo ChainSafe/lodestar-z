@@ -32,11 +32,13 @@ test "setNodesGrouped should release an intermediate root when a later group run
     const new_data = try pool.createLeafFromUint(101);
     defer pool.unref(new_data);
 
+    // Arm OOM after setup: within-capacity node creation still succeeds, but pool growth fails.
     failing.fail_index = failing.alloc_index;
 
     var filler: std.ArrayList(Node.Id) = .empty;
     defer filler.deinit(std.testing.allocator);
 
+    // Leave one free slot for the depth-1 group, forcing the depth-2 group to grow the pool.
     while (pool.createLeafFromUint(0)) |id| {
         try filler.append(std.testing.allocator, id);
     } else |err| switch (err) {
@@ -45,6 +47,7 @@ test "setNodesGrouped should release an intermediate root when a later group run
     pool.unref(filler.pop().?);
 
     const in_use_before = pool.getNodesInUse();
+    // Model a list commit: gindex 3 stores the length mix-in and gindex 4 stores data.
     const gindices = [_]Gindex{ Gindex.fromUint(3), Gindex.fromUint(4) };
     var nodes = [_]Node.Id{ new_length, new_data };
 
