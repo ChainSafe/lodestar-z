@@ -817,7 +817,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     return 0;
                 }
                 var iterator = OffsetIterator(Self).init(data);
-                return try iterator.firstOffset() / 4;
+                return try iterator.next() / 4;
             }
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
@@ -1066,6 +1066,14 @@ test "ListType - sanity" {
 
     _ = BytesBytes.serializeIntoBytes(&bb, bb_buf);
     try BytesBytes.deserializeFromBytes(allocator, bb_buf, &bb);
+}
+
+test "VariableListType serialized.length should reject a first offset beyond the input" {
+    const Element = FixedListType(UintType(16), 2, .{});
+    const List = VariableListType(Element, 4);
+    const data = [_]u8{ 8, 0, 0, 0 };
+
+    try std.testing.expectError(error.offsetOutOfRange, List.serialized.length(&data));
 }
 
 test "clone FixedListType" {
