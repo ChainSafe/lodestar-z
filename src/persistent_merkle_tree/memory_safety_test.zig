@@ -59,8 +59,6 @@ test "setNodesGrouped should release an intermediate root when a later group run
         root.setNodesGrouped(&pool, &replacement_gindices, &replacement_nodes),
     );
 
-    failing.fail_index = std.math.maxInt(usize);
-
     // Rollback frees the consumed length and intermediate root; the other inputs remain owned.
     try std.testing.expectEqual(nodes_in_use_before_update - 1, pool.getNodesInUse());
     try std.testing.expect(!root.getState(&pool).isFree());
