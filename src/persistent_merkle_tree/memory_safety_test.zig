@@ -45,6 +45,7 @@ test "setNodesGrouped should release an intermediate root when a later group run
     // Free exactly one slot for the depth-1 group, leaving none for the depth-2 group.
     pool.unref(capacity_fill_nodes.pop().?);
 
+    // Both replacement nodes are rc=0 caller-owned slots, but they still count as in use.
     const nodes_in_use_before_update = pool.getNodesInUse();
     const replacement_length_gindex = Gindex.fromDepth(1, 1);
     const replacement_data_gindex = Gindex.fromDepth(2, 0);
