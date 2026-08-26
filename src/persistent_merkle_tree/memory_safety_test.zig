@@ -36,12 +36,13 @@ test "setNodesGrouped should release an intermediate root when a later group run
     var capacity_fill_nodes: std.ArrayList(Node.Id) = .empty;
     defer capacity_fill_nodes.deinit(std.testing.allocator);
 
-    // Leave one slot so the depth-1 length group succeeds and the depth-2 data group must grow.
+    // Fill every current pool slot; the next allocation reaches the armed growth OOM.
     while (pool.createLeafFromUint(0)) |id| {
         try capacity_fill_nodes.append(std.testing.allocator, id);
     } else |err| switch (err) {
         error.OutOfMemory => {},
     }
+    // Free exactly one slot for the depth-1 group, leaving none for the depth-2 group.
     pool.unref(capacity_fill_nodes.pop().?);
 
     const nodes_in_use_before_update = pool.getNodesInUse();
