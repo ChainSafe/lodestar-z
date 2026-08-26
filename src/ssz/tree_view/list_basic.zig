@@ -93,7 +93,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         /// Grows the list; new positions read as zero. Shrinking must go through sliceTo —
         /// a bare length cut would leave stale chunk data in the merkleized root.
         pub fn growTo(self: *Self, new_length: usize) !void {
-            std.debug.assert(new_length >= self._len);
+            if (new_length < self._len) return error.InvalidLength;
             if (new_length > ST.limit) return error.LengthOverLimit;
             self._len = new_length;
         }
@@ -686,7 +686,7 @@ test "TreeView list push enforces limit" {
     try std.testing.expectEqual(@as(usize, 2), try view.length());
 }
 
-test "ListBasicTreeView growTo should reject lengths over the limit" {
+test "ListBasicTreeView growTo should reject invalid lengths" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{
         .page_allocator = allocator,
@@ -705,6 +705,7 @@ test "ListBasicTreeView growTo should reject lengths over the limit" {
     var view = try ListType.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
+    try std.testing.expectError(error.InvalidLength, view.growTo(0));
     try std.testing.expectError(error.LengthOverLimit, view.growTo(ListType.limit + 1));
     try std.testing.expectEqual(@as(usize, 1), try view.length());
 
