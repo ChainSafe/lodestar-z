@@ -58,6 +58,9 @@ pub fn OffsetIterator(comptime ST: type) type {
                     return error.invalidOffsetCount;
                 }
             }
+            if (first_offset > self.data.len) {
+                return error.offsetOutOfRange;
+            }
 
             return first_offset;
         }

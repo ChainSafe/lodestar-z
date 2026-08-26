@@ -817,7 +817,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     return 0;
                 }
                 var iterator = OffsetIterator(Self).init(data);
-                return try iterator.next() / 4;
+                return try iterator.firstOffset() / 4;
             }
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
