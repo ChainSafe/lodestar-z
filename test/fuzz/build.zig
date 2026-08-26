@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
     const Fuzzer = struct {
         name: []const u8,
         max_input_len: u32,
+        corpus_version: u32 = 1,
         extra_libs: []const *std.Build.Step.Compile = &.{},
 
         fn corpus(self: @This(), bb: *std.Build) []const u8 {
@@ -132,8 +133,8 @@ pub fn build(b: *std.Build) void {
             targets_json.writer.writeByte(',') catch @panic("OOM");
         }
         targets_json.writer.print(
-            "{{\"target\":\"{s}\",\"max_input_len\":{d}}}",
-            .{ fuzzer.name, fuzzer.max_input_len },
+            "{{\"target\":\"{s}\",\"max_input_len\":{d},\"corpus_version\":{d}}}",
+            .{ fuzzer.name, fuzzer.max_input_len, fuzzer.corpus_version },
         ) catch @panic("OOM");
     }
     targets_json.writer.writeAll("]}") catch @panic("OOM");

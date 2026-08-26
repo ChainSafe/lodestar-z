@@ -55,10 +55,11 @@ zig build fuzz-metadata
 This writes `zig-out/share/lodestar-z-fuzz/targets.json` in registry order with this shape:
 
 ```json
-{"include":[{"target":"ssz_basic","max_input_len":33}]}
+{"include":[{"target":"ssz_basic","max_input_len":33,"corpus_version":1}]}
 ```
 
-The real file contains all 13 entries.
+The real file contains all 13 entries. Increment a target's `corpus_version` only when its input
+protocol or target semantics become incompatible with the existing persistent corpus.
 
 Run one target under AFL++ with its committed bootstrap corpus:
 
