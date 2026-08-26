@@ -22,22 +22,24 @@ test "setNodesGrouped should release an intermediate root when a later group run
     const root = try pool.createBranch(content_root, original_length_node);
     defer pool.unref(root);
 
+    // The length update runs first. Once it succeeds, its temporary root owns this node.
     const replacement_length_node = try pool.createLeafFromUint(100);
     defer if (!replacement_length_node.getState(&pool).isFree()) {
         pool.unref(replacement_length_node);
     };
 
+    // The data update runs second, and the test fails before this node is attached.
     const replacement_data_node = try pool.createLeafFromUint(101);
     defer pool.unref(replacement_data_node);
 
-    // From here on, the pool can reuse free slots but cannot grow.
+    // Setup is complete. Existing slots still work, but growing the pool now fails.
     failing.fail_index = failing.alloc_index;
 
     var capacity_fill_nodes: std.ArrayList(Node.Id) = .empty;
     defer capacity_fill_nodes.deinit(std.testing.allocator);
 
-    // Fill the pool, then free one slot. The length update uses it, forcing the data update to
-    // grow the pool and fail.
+    // Fill the pool, then give one slot back. The length update needs that one slot; the data
+    // update needs more space and is where OOM occurs.
     while (pool.createLeafFromUint(0)) |id| {
         try capacity_fill_nodes.append(std.testing.allocator, id);
     } else |err| switch (err) {
@@ -46,6 +48,7 @@ test "setNodesGrouped should release an intermediate root when a later group run
     pool.unref(capacity_fill_nodes.pop().?);
 
     const nodes_in_use_before_update = pool.getNodesInUse();
+    // A list commit updates the length at depth 1 and the first data leaf at depth 2.
     const replacement_length_gindex = Gindex.fromDepth(1, 1);
     const replacement_data_gindex = Gindex.fromDepth(2, 0);
     const replacement_gindices = [_]Gindex{
@@ -59,9 +62,12 @@ test "setNodesGrouped should release an intermediate root when a later group run
         root.setNodesGrouped(&pool, &replacement_gindices, &replacement_nodes),
     );
 
-    // Rolling back the temporary root also frees the replacement length it owned. The temporary
-    // root itself cancels out of the count, while the original root and replacement data stay ours.
+    // The first update attached the replacement length to the temporary root, so rolling that
+    // root back frees both. The data update failed before attaching its node, leaving it and the
+    // original root for this test to clean up.
     try std.testing.expect(replacement_length_node.getState(&pool).isFree());
+
+    // The temporary root was both created and freed; the net -1 is the released length node.
     try std.testing.expectEqual(nodes_in_use_before_update - 1, pool.getNodesInUse());
     try std.testing.expect(!root.getState(&pool).isFree());
     try std.testing.expect(!replacement_data_node.getState(&pool).isFree());
