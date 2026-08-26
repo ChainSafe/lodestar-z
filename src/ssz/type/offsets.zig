@@ -75,8 +75,10 @@ pub fn OffsetIterator(comptime ST: type) type {
             else
                 self.readOffset(self.pos);
 
-            if (offset > self.data.len) {
-                return error.offsetOutOfRange;
+            if (self.pos > 0) {
+                if (offset > self.data.len) {
+                    return error.offsetOutOfRange;
+                }
             }
             if (offset < self.prev_offset) {
                 return error.offsetNotIncreasing;
