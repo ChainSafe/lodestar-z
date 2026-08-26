@@ -62,15 +62,17 @@ test "setNodesGrouped should release an intermediate root when a later group run
         root.setNodesGrouped(&pool, &replacement_gindices, &replacement_nodes),
     );
 
-    // The first update attached the replacement length to the temporary root, so rolling that
-    // root back frees both. The data update failed before attaching its node, leaving it and the
-    // original root for this test to clean up.
+    // The first update put the replacement length under the intermediate root. When the second
+    // update fails, rolling back that root frees the length with it.
     try std.testing.expect(replacement_length_node.getState(&pool).isFree());
 
-    // The temporary root was both created and freed; the net -1 is the released length node.
-    try std.testing.expectEqual(nodes_in_use_before_update - 1, pool.getNodesInUse());
+    // The original root was never consumed, and the failed second update never attached the data.
     try std.testing.expect(!root.getState(&pool).isFree());
     try std.testing.expect(!replacement_data_node.getState(&pool).isFree());
+
+    // The intermediate root adds one node and rollback removes it again. The baseline already
+    // counted the replacement length, so freeing that node is the only net change.
+    try std.testing.expectEqual(nodes_in_use_before_update - 1, pool.getNodesInUse());
 
     for (capacity_fill_nodes.items) |id| pool.unref(id);
 }
