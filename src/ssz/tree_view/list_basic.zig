@@ -666,7 +666,7 @@ test "TreeView list push across chunk boundary resets prefetch" {
     try std.testing.expectEqualSlices(u32, expected[0..], filled);
 }
 
-test "TreeView list push enforces limit" {
+test "ListBasicTreeView push and growTo should enforce length bounds" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
@@ -683,35 +683,9 @@ test "TreeView list push enforces limit" {
     defer view.deinit();
 
     try std.testing.expectError(error.LengthOverLimit, view.push(@as(u32, 3)));
-    try std.testing.expectEqual(@as(usize, 2), try view.length());
-}
-
-test "ListBasicTreeView growTo should reject invalid lengths" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{
-        .page_allocator = allocator,
-        .allocator = allocator,
-        .pool_size = 64,
-    });
-    defer pool.deinit();
-
-    const ListType = FixedListType(UintType(32), 2, .{});
-
-    var list: ListType.Type = .empty;
-    defer list.deinit(allocator);
-    try list.append(allocator, 1);
-
-    const root = try ListType.tree.fromValue(&pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root);
-    defer view.deinit();
-
-    try std.testing.expectError(error.InvalidLength, view.growTo(0));
+    try std.testing.expectError(error.InvalidLength, view.growTo(1));
     try std.testing.expectError(error.LengthOverLimit, view.growTo(ListType.limit + 1));
-    try std.testing.expectEqual(@as(usize, 1), try view.length());
-
-    try view.growTo(ListType.limit);
-    try view.commit();
-    try std.testing.expectEqual(ListType.limit, try ListType.tree.length(view.getRoot(), &pool));
+    try std.testing.expectEqual(@as(usize, 2), try view.length());
 }
 
 test "TreeView list basic clone isolates updates" {

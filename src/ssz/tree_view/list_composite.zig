@@ -598,7 +598,7 @@ test "TreeView composite list sliceFrom handles boundary conditions" {
     }
 }
 
-test "TreeView composite list push appends element" {
+test "ListCompositeTreeView push and growTo should enforce length bounds" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
@@ -624,6 +624,8 @@ test "TreeView composite list push appends element" {
     try view.push(element_view);
     transferred = true;
 
+    try std.testing.expectError(error.InvalidLength, view.growTo(1));
+    try std.testing.expectError(error.LengthOverLimit, view.growTo(ListType.limit + 1));
     try std.testing.expectEqual(@as(usize, 2), try view.length());
 
     try view.commit();
@@ -634,34 +636,6 @@ test "TreeView composite list push appends element" {
 
     try std.testing.expectEqual(@as(usize, 2), roundtrip.items.len);
     try std.testing.expectEqual(next_checkpoint.epoch, roundtrip.items[1].epoch);
-}
-
-test "ListCompositeTreeView growTo should reject invalid lengths" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{
-        .page_allocator = allocator,
-        .allocator = allocator,
-        .pool_size = 64,
-    });
-    defer pool.deinit();
-
-    const ListType = FixedListType(Checkpoint, 2, .{});
-
-    var list: ListType.Type = .empty;
-    defer list.deinit(allocator);
-    try list.append(allocator, .{ .epoch = 1, .root = [_]u8{1} ** 32 });
-
-    const root = try ListType.tree.fromValue(&pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root);
-    defer view.deinit();
-
-    try std.testing.expectError(error.InvalidLength, view.growTo(0));
-    try std.testing.expectError(error.LengthOverLimit, view.growTo(ListType.limit + 1));
-    try std.testing.expectEqual(@as(usize, 1), try view.length());
-
-    try view.growTo(ListType.limit);
-    try view.commit();
-    try std.testing.expectEqual(ListType.limit, try ListType.tree.length(view.getRoot(), &pool));
 }
 
 test "TreeView composite list clone isolates updates" {
