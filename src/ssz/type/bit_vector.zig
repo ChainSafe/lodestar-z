@@ -232,7 +232,9 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
                 const chunk_bytes: []u8 = @ptrCast(&chunks);
                 @memcpy(chunk_bytes[0..byte_length], data[0..byte_length]);
 
-                var nodes: [chunk_count]Node.Id = undefined;
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
+                errdefer pool.free(&nodes);
+
                 for (&chunks, 0..) |*chunk, i| {
                     nodes[i] = try pool.createLeaf(chunk);
                 }
@@ -260,7 +262,9 @@ pub fn BitVectorType(comptime _length: comptime_int) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
+                errdefer pool.free(&nodes);
+
                 for (0..chunk_count) |i| {
                     var leaf_buf = [_]u8{0} ** 32;
                     const start_idx = i * 32;

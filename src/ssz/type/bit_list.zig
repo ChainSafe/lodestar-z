@@ -130,6 +130,9 @@ pub fn BitList(comptime limit: comptime_int) type {
         }
 
         pub fn set(self: *@This(), allocator: std.mem.Allocator, bit_index: usize, bit: bool) !void {
+            if (bit_index >= limit) {
+                return error.tooLarge;
+            }
             if (bit_index + 1 > self.bit_len) {
                 try self.resize(allocator, bit_index + 1);
             }
@@ -715,7 +718,7 @@ test "clone" {
     try expectEqualSerializedAlloc(Bits, allocator, b, cloned);
 }
 
-test "resize" {
+test "BitList resize and set should enforce length bounds" {
     const allocator = std.testing.allocator;
 
     const Bits = BitListType(16);
@@ -736,6 +739,11 @@ test "resize" {
 
     try std.testing.expect(b.data.items.len == 1);
     try std.testing.expect(b.data.items[0] == 13);
+
+    try std.testing.expectError(
+        error.tooLarge,
+        b.set(allocator, std.math.maxInt(usize), true),
+    );
 }
 
 // Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/bitList/valid.test.ts#L44-L69

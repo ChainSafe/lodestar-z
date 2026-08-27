@@ -381,8 +381,8 @@ pub fn historicalSummaries(self: *const BeaconStateView) !js.Array {
     const cached_state = try self.requireState();
     var historical_summaries_view = try cached_state.state.historicalSummaries();
     var historical_summaries = ct.capella.HistoricalSummaries.default_value;
-    try historical_summaries_view.toValue(allocator, &historical_summaries);
     defer historical_summaries.deinit(allocator);
+    try historical_summaries_view.toValue(allocator, &historical_summaries);
     return js_types.wrap(js.Array, try sszValueToNapiValue(env, ct.capella.HistoricalSummaries, &historical_summaries));
 }
 
