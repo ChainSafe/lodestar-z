@@ -233,18 +233,28 @@ pub fn FixedContainerType(comptime ST: type) type {
                 else => return error.InvalidJson,
             }
 
-            inline for (fields) |field| {
+            var seen: [fields.len]bool = @splat(false);
+            for (0..fields.len) |_| {
                 const field_name = switch (try source.next()) {
                     .string => |str| str,
                     else => return error.InvalidJson,
                 };
-                if (!std.mem.eql(u8, field_name, field.name)) {
+
+                var found = false;
+                inline for (fields, 0..) |field, i| {
+                    if (std.mem.eql(u8, field_name, field.name)) {
+                        if (seen[i]) return error.InvalidJson;
+                        seen[i] = true;
+                        found = true;
+                        try field.type.deserializeFromJson(
+                            source,
+                            &@field(out, field.name),
+                        );
+                    }
+                }
+                if (!found) {
                     return error.InvalidJson;
                 }
-                try field.type.deserializeFromJson(
-                    source,
-                    &@field(out, field.name),
-                );
             }
 
             // end object token "}"
@@ -867,26 +877,35 @@ pub fn VariableContainerType(comptime ST: type) type {
                 else => return error.InvalidJson,
             }
 
-            inline for (fields) |field| {
+            var seen: [fields.len]bool = @splat(false);
+            for (0..fields.len) |_| {
                 const field_name = switch (try source.next()) {
                     .string => |str| str,
                     else => return error.InvalidJson,
                 };
-                if (!std.mem.eql(u8, field_name, field.name)) {
-                    return error.InvalidJson;
-                }
 
-                if (comptime isFixedType(field.type)) {
-                    try field.type.deserializeFromJson(
-                        source,
-                        &@field(out, field.name),
-                    );
-                } else {
-                    try field.type.deserializeFromJson(
-                        allocator,
-                        source,
-                        &@field(out, field.name),
-                    );
+                var found = false;
+                inline for (fields, 0..) |field, i| {
+                    if (std.mem.eql(u8, field_name, field.name)) {
+                        if (seen[i]) return error.InvalidJson;
+                        seen[i] = true;
+                        found = true;
+                        if (comptime isFixedType(field.type)) {
+                            try field.type.deserializeFromJson(
+                                source,
+                                &@field(out, field.name),
+                            );
+                        } else {
+                            try field.type.deserializeFromJson(
+                                allocator,
+                                source,
+                                &@field(out, field.name),
+                            );
+                        }
+                    }
+                }
+                if (!found) {
+                    return error.InvalidJson;
                 }
             }
 
@@ -943,6 +962,62 @@ test "ContainerType - sanity" {
     defer allocator.free(f_buf);
     _ = Foo.serializeIntoBytes(&f, f_buf);
     try Foo.deserializeFromBytes(allocator, f_buf, &f);
+}
+
+test "FixedContainerType deserializeFromJson should accept fields in any order" {
+    const allocator = std.testing.allocator;
+    const Container = FixedContainerType(struct {
+        count: UintType(8),
+        enabled: BoolType(),
+    });
+
+    var value = Container.default_value;
+    var scanner = std.json.Scanner.initCompleteInput(allocator,
+        \\{"enabled":true,"count":"7"}
+    );
+    defer scanner.deinit();
+
+    try Container.deserializeFromJson(&scanner, &value);
+    try std.testing.expectEqual(@as(u8, 7), value.count);
+    try std.testing.expect(value.enabled);
+}
+
+test "VariableContainerType deserializeFromJson should validate field sets" {
+    const allocator = std.testing.allocator;
+    const Container = VariableContainerType(struct {
+        values: FixedListType(UintType(8), 4, .{}),
+        enabled: BoolType(),
+    });
+
+    var value = Container.default_value;
+    defer Container.deinit(allocator, &value);
+
+    var scanner = std.json.Scanner.initCompleteInput(allocator,
+        \\{"enabled":true,"values":["1","2"]}
+    );
+    defer scanner.deinit();
+
+    try Container.deserializeFromJson(allocator, &scanner, &value);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, value.values.items);
+    try std.testing.expect(value.enabled);
+
+    const invalid_json = [_][]const u8{
+        "{\"values\":[\"1\"]}",
+        "{\"values\":[\"1\"],\"unknown\":true,\"enabled\":true}",
+        "{\"values\":[\"1\"],\"values\":[\"2\"]}",
+    };
+    for (invalid_json) |json| {
+        var invalid_value = Container.default_value;
+        defer Container.deinit(allocator, &invalid_value);
+
+        var invalid_scanner = std.json.Scanner.initCompleteInput(allocator, json);
+        defer invalid_scanner.deinit();
+
+        try std.testing.expectError(
+            error.InvalidJson,
+            Container.deserializeFromJson(allocator, &invalid_scanner, &invalid_value),
+        );
+    }
 }
 
 test "clone FixedContainerType" {
