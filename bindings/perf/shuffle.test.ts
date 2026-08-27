@@ -1,10 +1,8 @@
 // Mirrors https://github.com/ChainSafe/swap-or-not-shuffle/tree/main/test/perf
 import {bench, describe} from "@chainsafe/benchmark";
+import * as shuffle from "../src/shuffle.js";
 import * as shuffleReference from "../test/shuffleReference.ts";
 import {deterministicBenchmarkSeed} from "./benchmarkSeed.js";
-
-const bindings = await import("../src/index.js");
-const shuffle = bindings.default.shuffle;
 
 function getInputArray(count: number): Uint32Array {
   return Uint32Array.from(Array.from({length: count}, (_, i) => i));
