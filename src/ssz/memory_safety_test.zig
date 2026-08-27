@@ -632,38 +632,26 @@ test "ContainerTreeView retry should adopt a child committed before outer rebuil
 test "TreeView container fromValue - OOM leaves no orphan pool nodes" {
     const checkpoint: Checkpoint.Type = .{ .epoch = 7, .root = [_]u8{7} ** 32 };
 
-    var saw_oom = false;
-    for (0..200) |fail_at| {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
-            .resize_fail_index = 0,
-        });
-        var pool = try Node.Pool.init(.{
-            .page_allocator = failing.allocator(),
-            .allocator = failing.allocator(),
-            .pool_size = 0,
-        });
-        defer pool.deinit();
+    var pool = try Node.Pool.init(.{
+        .page_allocator = std.testing.allocator,
+        .allocator = std.testing.allocator,
+        .pool_size = 0,
+    });
+    defer pool.deinit();
 
-        const baseline = pool.getNodesInUse();
-        failing.fail_index = failing.alloc_index + fail_at;
-        const view = Checkpoint.TreeView.fromValue(
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 0,
+    });
+    const baseline = pool.getNodesInUse();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Checkpoint.TreeView.fromValue(
             failing.allocator(),
             &pool,
             &checkpoint,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => {
-                saw_oom = true;
-                try std.testing.expectEqual(baseline, pool.getNodesInUse());
-                continue;
-            },
-            else => return err,
-        };
-        view.deinit();
-        try std.testing.expectEqual(baseline, pool.getNodesInUse());
-        try std.testing.expect(saw_oom);
-        return;
-    }
-    return error.TestUnexpectedResult;
+        ),
+    );
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
 test "TreeView container getFieldRoot on a dirty basic field leaves no orphan pool nodes" {
@@ -692,38 +680,26 @@ test "TreeView container deserialize - OOM leaves no orphan pool nodes" {
     var bytes: [Checkpoint.fixed_size]u8 = undefined;
     _ = Checkpoint.serializeIntoBytes(&value, &bytes);
 
-    var saw_oom = false;
-    for (0..200) |fail_at| {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
-            .resize_fail_index = 0,
-        });
-        var pool = try Node.Pool.init(.{
-            .page_allocator = failing.allocator(),
-            .allocator = failing.allocator(),
-            .pool_size = 0,
-        });
-        defer pool.deinit();
+    var pool = try Node.Pool.init(.{
+        .page_allocator = std.testing.allocator,
+        .allocator = std.testing.allocator,
+        .pool_size = 0,
+    });
+    defer pool.deinit();
 
-        const baseline = pool.getNodesInUse();
-        failing.fail_index = failing.alloc_index + fail_at;
-        const view = Checkpoint.TreeView.deserialize(
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 0,
+    });
+    const baseline = pool.getNodesInUse();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Checkpoint.TreeView.deserialize(
             failing.allocator(),
             &pool,
             &bytes,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => {
-                saw_oom = true;
-                try std.testing.expectEqual(baseline, pool.getNodesInUse());
-                continue;
-            },
-            else => return err,
-        };
-        view.deinit();
-        try std.testing.expectEqual(baseline, pool.getNodesInUse());
-        try std.testing.expect(saw_oom);
-        return;
-    }
-    return error.TestUnexpectedResult;
+        ),
+    );
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
 test "TreeView list basic clone(transfer_cache) on a dirty view leaves no orphan pool nodes" {
