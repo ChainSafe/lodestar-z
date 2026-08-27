@@ -356,6 +356,8 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
         /// Get the hash tree root of a specific field by name.
         /// For composite fields, commits the child view first if it has changes.
+        /// Returned pointers may borrow `Node.Pool` storage. Pool growth can invalidate them, so
+        /// copy the root before another operation that may commit or allocate PMT nodes.
         pub fn getFieldRoot(self: *Self, comptime field_name: []const u8) !*const [32]u8 {
             comptime {
                 @setEvalBranchQuota(20000);
