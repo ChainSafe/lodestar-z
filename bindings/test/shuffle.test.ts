@@ -1,9 +1,8 @@
 import {randomBytes} from "node:crypto";
 import {describe, expect, it} from "vitest";
+import * as shuffle from "../src/shuffle.js";
 import * as shuffleReference from "./shuffleReference.js";
 
-const bindings = await import("../src/index.js");
-const shuffle = bindings.default.shuffle;
 const innerShuffleList = shuffle.innerShuffleList;
 const SEED_SIZE = 32;
 

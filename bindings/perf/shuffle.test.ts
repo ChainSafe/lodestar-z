@@ -1,10 +1,8 @@
 // Mirrors https://github.com/ChainSafe/swap-or-not-shuffle/tree/main/test/perf
-import crypto from "node:crypto";
 import {bench, describe} from "@chainsafe/benchmark";
+import * as shuffle from "../src/shuffle.js";
 import * as shuffleReference from "../test/shuffleReference.ts";
-
-const bindings = await import("../src/index.js");
-const shuffle = bindings.default.shuffle;
+import {deterministicBenchmarkSeed} from "./benchmarkSeed.js";
 
 function getInputArray(count: number): Uint32Array {
   return Uint32Array.from(Array.from({length: count}, (_, i) => i));
@@ -34,7 +32,7 @@ for (const listSize of [16_384, 250_000, 1_000_000]) {
 
 describe("committee indices", () => {
   for (const listSize of [16_384, 250_000, 1_000_000]) {
-    const seed = new Uint8Array(crypto.randomBytes(32));
+    const seed = deterministicBenchmarkSeed(`committee-indices:${listSize}`);
     const activeIndices = getInputArray(listSize);
     const effectiveBalanceIncrements = new Uint16Array(listSize);
     for (let i = 0; i < listSize; i++) {
