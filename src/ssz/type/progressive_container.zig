@@ -114,6 +114,7 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
     const T = @Struct(.auto, null, &native_names, &native_types, &native_attrs);
 
     return struct {
+        const Self = @This();
         pub const kind = TypeKind.progressive_container;
         pub const Fields: type = ST;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
@@ -249,6 +250,22 @@ pub fn FixedProgressiveContainerType(comptime ST: type, comptime active_fields: 
                     );
                 }
                 out.* = replacement;
+            }
+
+            pub fn serializedSize(_: Node.Id, _: *Node.Pool) !usize {
+                return Self.fixed_size;
+            }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                var value = Self.default_value;
+                try toValue(node, pool, &value);
+                return Self.serializeIntoBytes(&value, out);
+            }
+
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                var value = Self.default_value;
+                try Self.deserializeFromBytes(data, &value);
+                return fromValue(pool, &value);
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
@@ -403,6 +420,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
     const T = @Struct(.auto, null, &native_names, &native_types, &native_attrs);
 
     return struct {
+        const Self = @This();
         pub const kind = TypeKind.progressive_container;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
         pub const field_indices: [fields.len]usize = blk: {
@@ -711,7 +729,35 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 out.* = replacement;
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try toValue(allocator, node, pool, &value);
+                return Self.serializedSize(&value);
+            }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try toValue(allocator, node, pool, &value);
+                return Self.serializeIntoBytes(&value, out);
+            }
+
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try Self.deserializeFromBytes(allocator, data, &value);
+                return fromValue(pool, &value);
+            }
+
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
+                const allocator = pool.allocator;
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
                 @memset(nodes, @as(Node.Id, @enumFromInt(0)));
@@ -721,14 +767,7 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 inline for (fields, 0..) |field, i| {
                     const field_idx = comptime getActiveFieldIndex(active_fields, i);
                     const field_value = &@field(value, field.name);
-                    nodes[field_idx] = switch (field.type.kind) {
-                        .progressive_list, .progressive_bit_list, .compatible_union => try field.type.tree.fromValue(allocator, pool, field_value),
-                        .progressive_container => if (comptime isFixedType(field.type))
-                            try field.type.tree.fromValue(pool, field_value)
-                        else
-                            try field.type.tree.fromValue(allocator, pool, field_value),
-                        else => try field.type.tree.fromValue(pool, field_value),
-                    };
+                    nodes[field_idx] = try field.type.tree.fromValue(pool, field_value);
                 }
 
                 const content_tree = try progressive.fillWithContents(allocator, pool, nodes);
