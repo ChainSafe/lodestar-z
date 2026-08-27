@@ -20,6 +20,9 @@ pub const DoubleFreeDetectAllocator = struct {
     pub fn deinit(self: *DoubleFreeDetectAllocator) void {
         self.live.deinit();
     }
+    pub fn assertNoDoubleFree(self: *const DoubleFreeDetectAllocator) void {
+        std.debug.assert(!self.double_free);
+    }
     pub fn allocator(self: *DoubleFreeDetectAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = allocFn, .resize = resizeFn, .remap = remapFn, .free = freeFn } };
     }

@@ -204,26 +204,49 @@ test "TreeView composite list setValue - OOM does not double-free the element vi
     for (0..3) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
+    var saw_target_oom = false;
+    var saw_success = false;
     var fail_at: usize = 0;
     while (fail_at < 200) : (fail_at += 1) {
         var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
         defer oom.deinit();
+        defer oom.assertNoDoubleFree();
         const alloc = oom.allocator();
 
-        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
+        var pool = Node.Pool.init(.{
+            .page_allocator = alloc,
+            .allocator = alloc,
+            .pool_size = 0,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
         defer pool.deinit();
 
-        const root = ListType.tree.fromValue(&pool, &list) catch continue;
-        var view = ListType.TreeView.init(alloc, &pool, root) catch {
+        const root = ListType.tree.fromValue(&pool, &list) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
+        var view = ListType.TreeView.init(alloc, &pool, root) catch |err| {
             pool.unref(root);
-            continue;
+            switch (err) {
+                error.OutOfMemory => continue,
+                else => return err,
+            }
         };
         defer view.deinit();
 
-        // We only care that no path double-frees; the OOM itself is expected.
-        view.setValue(0, &newval) catch {};
-        try std.testing.expect(!oom.double_free);
+        view.setValue(0, &newval) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_target_oom = true;
+                continue;
+            },
+            else => return err,
+        };
+        saw_success = true;
     }
+    try std.testing.expect(saw_target_oom);
+    try std.testing.expect(saw_success);
 }
 
 test "TreeView composite list push - OOM does not double-free" {
@@ -234,25 +257,49 @@ test "TreeView composite list push - OOM does not double-free" {
     for (0..3) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
+    var saw_target_oom = false;
+    var saw_success = false;
     var fail_at: usize = 0;
     while (fail_at < 200) : (fail_at += 1) {
         var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
         defer oom.deinit();
+        defer oom.assertNoDoubleFree();
         const alloc = oom.allocator();
 
-        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
+        var pool = Node.Pool.init(.{
+            .page_allocator = alloc,
+            .allocator = alloc,
+            .pool_size = 0,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
         defer pool.deinit();
 
-        const root = ListType.tree.fromValue(&pool, &list) catch continue;
-        var view = ListType.TreeView.init(alloc, &pool, root) catch {
+        const root = ListType.tree.fromValue(&pool, &list) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
+        var view = ListType.TreeView.init(alloc, &pool, root) catch |err| {
             pool.unref(root);
-            continue;
+            switch (err) {
+                error.OutOfMemory => continue,
+                else => return err,
+            }
         };
         defer view.deinit();
 
-        view.pushValue(&newval) catch {};
-        try std.testing.expect(!oom.double_free);
+        view.pushValue(&newval) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_target_oom = true;
+                continue;
+            },
+            else => return err,
+        };
+        saw_success = true;
     }
+    try std.testing.expect(saw_target_oom);
+    try std.testing.expect(saw_success);
 }
 
 test "TreeView composite list set(index, ownedView) - failed set leaves the element view to the caller" {
@@ -263,35 +310,67 @@ test "TreeView composite list set(index, ownedView) - failed set leaves the elem
     for (0..3) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
+    var saw_target_oom = false;
+    var saw_success = false;
     var fail_at: usize = 0;
     while (fail_at < 200) : (fail_at += 1) {
         var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
         defer oom.deinit();
+        defer oom.assertNoDoubleFree();
         const alloc = oom.allocator();
 
-        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
+        var pool = Node.Pool.init(.{
+            .page_allocator = alloc,
+            .allocator = alloc,
+            .pool_size = 0,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
         defer pool.deinit();
 
-        const root = ListType.tree.fromValue(&pool, &list) catch continue;
-        var view = ListType.TreeView.init(alloc, &pool, root) catch {
+        const root = ListType.tree.fromValue(&pool, &list) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
+        var view = ListType.TreeView.init(alloc, &pool, root) catch |err| {
             pool.unref(root);
-            continue;
+            switch (err) {
+                error.OutOfMemory => continue,
+                else => return err,
+            }
         };
         defer view.deinit();
 
-        const elem_node = Checkpoint.tree.fromValue(&pool, &newval) catch continue;
-        var elem_view = Checkpoint.TreeView.init(alloc, &pool, elem_node) catch {
+        const elem_node = Checkpoint.tree.fromValue(&pool, &newval) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
+        var elem_view = Checkpoint.TreeView.init(alloc, &pool, elem_node) catch |err| {
             pool.unref(elem_node);
-            continue;
+            switch (err) {
+                error.OutOfMemory => continue,
+                else => return err,
+            }
         };
         const elem_addr = @intFromPtr(elem_view);
 
-        if (view.set(0, elem_view)) |_| {} else |_| {
-            try std.testing.expect(oom.live.contains(elem_addr));
-            elem_view.deinit();
+        if (view.set(0, elem_view)) |_| {
+            saw_success = true;
+        } else |err| switch (err) {
+            error.OutOfMemory => {
+                try std.testing.expect(oom.live.contains(elem_addr));
+                elem_view.deinit();
+                saw_target_oom = true;
+            },
+            else => {
+                elem_view.deinit();
+                return err;
+            },
         }
-        try std.testing.expect(!oom.double_free);
     }
+    try std.testing.expect(saw_target_oom);
+    try std.testing.expect(saw_success);
 }
 
 test "TreeView composite list clone(transfer_cache) - OOM does not double-free cached children" {
@@ -301,31 +380,55 @@ test "TreeView composite list clone(transfer_cache) - OOM does not double-free c
     defer list.deinit(std.testing.allocator);
     for (0..3) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
 
+    var saw_target_oom = false;
+    var saw_success = false;
     var fail_at: usize = 0;
     while (fail_at < 200) : (fail_at += 1) {
         var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
         defer oom.deinit();
+        defer oom.assertNoDoubleFree();
         const alloc = oom.allocator();
 
-        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
+        var pool = Node.Pool.init(.{
+            .page_allocator = alloc,
+            .allocator = alloc,
+            .pool_size = 0,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
         defer pool.deinit();
 
-        const root = ListType.tree.fromValue(&pool, &list) catch continue;
-        var view = ListType.TreeView.init(alloc, &pool, root) catch {
+        const root = ListType.tree.fromValue(&pool, &list) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
+        var view = ListType.TreeView.init(alloc, &pool, root) catch |err| {
             pool.unref(root);
-            continue;
+            switch (err) {
+                error.OutOfMemory => continue,
+                else => return err,
+            }
         };
         defer view.deinit();
 
         // Cache a child so the transfer_cache path has something to move.
-        _ = view.get(0) catch {};
-        const cloned = view.clone(.{ .transfer_cache = true }) catch {
-            try std.testing.expect(!oom.double_free);
-            continue;
+        _ = view.get(0) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
         };
-        cloned.deinit();
-        try std.testing.expect(!oom.double_free);
+        const cloned = view.clone(.{ .transfer_cache = true }) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_target_oom = true;
+                continue;
+            },
+            else => return err,
+        };
+        defer cloned.deinit();
+        saw_success = true;
     }
+    try std.testing.expect(saw_target_oom);
+    try std.testing.expect(saw_success);
 }
 
 test "TreeView composite list commit - OOM does not double-free" {
@@ -336,30 +439,54 @@ test "TreeView composite list commit - OOM does not double-free" {
     for (0..3) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
+    var saw_target_oom = false;
+    var saw_success = false;
     var fail_at: usize = 0;
     while (fail_at < 200) : (fail_at += 1) {
         var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
         defer oom.deinit();
+        defer oom.assertNoDoubleFree();
         const alloc = oom.allocator();
 
-        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
+        var pool = Node.Pool.init(.{
+            .page_allocator = alloc,
+            .allocator = alloc,
+            .pool_size = 0,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
         defer pool.deinit();
 
-        const root = ListType.tree.fromValue(&pool, &list) catch continue;
-        var view = ListType.TreeView.init(alloc, &pool, root) catch {
+        const root = ListType.tree.fromValue(&pool, &list) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
+        var view = ListType.TreeView.init(alloc, &pool, root) catch |err| {
             pool.unref(root);
-            continue;
+            switch (err) {
+                error.OutOfMemory => continue,
+                else => return err,
+            }
         };
         defer view.deinit();
 
         // Stage a change so commit has work; the sweep injects OOM inside commit too.
-        view.setValue(0, &newval) catch {
-            try std.testing.expect(!oom.double_free);
-            continue;
+        view.setValue(0, &newval) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
         };
-        view.commit() catch {};
-        try std.testing.expect(!oom.double_free);
+        view.commit() catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_target_oom = true;
+                continue;
+            },
+            else => return err,
+        };
+        saw_success = true;
     }
+    try std.testing.expect(saw_target_oom);
+    try std.testing.expect(saw_success);
 }
 
 test "TreeView composite list fromValue - OOM leaves no orphan pool nodes" {
@@ -367,23 +494,46 @@ test "TreeView composite list fromValue - OOM leaves no orphan pool nodes" {
 
     var list: ListType.Type = .empty;
     defer list.deinit(std.testing.allocator);
-    for (0..6) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
+    for (0..16) |i| {
+        try list.append(std.testing.allocator, .{
+            .epoch = @intCast(i),
+            .root = [_]u8{@intCast(i)} ** 32,
+        });
+    }
 
+    var saw_target_oom = false;
+    var saw_success = false;
     var fail_at: usize = 0;
     while (fail_at < 400) : (fail_at += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
-        var pool = Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = failing.allocator(), .pool_size = 0 }) catch continue;
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_at,
+            .resize_fail_index = 0,
+        });
+        var pool = Node.Pool.init(.{
+            .page_allocator = failing.allocator(),
+            .allocator = failing.allocator(),
+            .pool_size = 0,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
         defer pool.deinit();
 
         const baseline = pool.getNodesInUse();
-        const root = ListType.tree.fromValue(&pool, &list) catch {
-            // OOM mid-build: the error path must release every partial node.
-            try std.testing.expectEqual(baseline, pool.getNodesInUse());
-            continue;
+        const root = ListType.tree.fromValue(&pool, &list) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_target_oom = true;
+                try std.testing.expectEqual(baseline, pool.getNodesInUse());
+                continue;
+            },
+            else => return err,
         };
         pool.unref(root);
         try std.testing.expectEqual(baseline, pool.getNodesInUse());
+        saw_success = true;
     }
+    try std.testing.expect(saw_target_oom);
+    try std.testing.expect(saw_success);
 }
 
 test "TreeView composite list deserializeFromBytes - OOM leaves no orphan pool nodes" {
@@ -391,27 +541,50 @@ test "TreeView composite list deserializeFromBytes - OOM leaves no orphan pool n
 
     var list: ListType.Type = .empty;
     defer list.deinit(std.testing.allocator);
-    for (0..6) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
+    for (0..16) |i| {
+        try list.append(std.testing.allocator, .{
+            .epoch = @intCast(i),
+            .root = [_]u8{@intCast(i)} ** 32,
+        });
+    }
 
     const bytes = try std.testing.allocator.alloc(u8, ListType.serializedSize(&list));
     defer std.testing.allocator.free(bytes);
     _ = ListType.serializeIntoBytes(&list, bytes);
 
+    var saw_target_oom = false;
+    var saw_success = false;
     var fail_at: usize = 0;
     while (fail_at < 400) : (fail_at += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
-        var pool = Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = failing.allocator(), .pool_size = 0 }) catch continue;
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_at,
+            .resize_fail_index = 0,
+        });
+        var pool = Node.Pool.init(.{
+            .page_allocator = failing.allocator(),
+            .allocator = failing.allocator(),
+            .pool_size = 0,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
         defer pool.deinit();
 
         const baseline = pool.getNodesInUse();
-        const root = ListType.tree.deserializeFromBytes(&pool, bytes) catch {
-            // OOM mid-build: the error path must release every partial node.
-            try std.testing.expectEqual(baseline, pool.getNodesInUse());
-            continue;
+        const root = ListType.tree.deserializeFromBytes(&pool, bytes) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_target_oom = true;
+                try std.testing.expectEqual(baseline, pool.getNodesInUse());
+                continue;
+            },
+            else => return err,
         };
         pool.unref(root);
         try std.testing.expectEqual(baseline, pool.getNodesInUse());
+        saw_success = true;
     }
+    try std.testing.expect(saw_target_oom);
+    try std.testing.expect(saw_success);
 }
 
 test "TreeView composite list deserializeFromBytes - malformed input errors without leaking" {
@@ -471,33 +644,53 @@ test "TreeView composite list sliceTo doesn't leak pool nodes" {
     try std.testing.expectEqual(before, after);
 }
 
-test "TreeView container setValue/commit - OOM does not double-free" {
+test "TreeView container setValue - OOM does not double-free during teardown" {
     const new_root_bytes: [32]u8 = [_]u8{0xee} ** 32;
 
+    var saw_target_oom = false;
+    var saw_success = false;
     var fail_at: usize = 0;
     while (fail_at < 200) : (fail_at += 1) {
         var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
         defer oom.deinit();
+        defer oom.assertNoDoubleFree();
         const alloc = oom.allocator();
 
-        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
+        var pool = Node.Pool.init(.{
+            .page_allocator = alloc,
+            .allocator = alloc,
+            .pool_size = 0,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
         defer pool.deinit();
 
         const checkpoint: Checkpoint.Type = .{ .epoch = 1, .root = [_]u8{1} ** 32 };
-        const root_node = Checkpoint.tree.fromValue(&pool, &checkpoint) catch continue;
-        var view = Checkpoint.TreeView.init(alloc, &pool, root_node) catch {
+        const root_node = Checkpoint.tree.fromValue(&pool, &checkpoint) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
+        var view = Checkpoint.TreeView.init(alloc, &pool, root_node) catch |err| {
             pool.unref(root_node);
-            continue;
+            switch (err) {
+                error.OutOfMemory => continue,
+                else => return err,
+            }
         };
         defer view.deinit();
 
-        view.setValue("root", &new_root_bytes) catch {
-            try std.testing.expect(!oom.double_free);
-            continue;
+        view.setValue("root", &new_root_bytes) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_target_oom = true;
+                continue;
+            },
+            else => return err,
         };
-        view.commit() catch {};
-        try std.testing.expect(!oom.double_free);
+        saw_success = true;
     }
+    try std.testing.expect(saw_target_oom);
+    try std.testing.expect(saw_success);
 }
 
 test "ContainerTreeView commit should reclaim basic nodes after parent rebuild OOM" {
@@ -646,20 +839,43 @@ test "ContainerTreeView retry should adopt a child committed before outer rebuil
 test "TreeView container fromValue - OOM leaves no orphan pool nodes" {
     const checkpoint: Checkpoint.Type = .{ .epoch = 7, .root = [_]u8{7} ** 32 };
 
+    var saw_target_oom = false;
+    var saw_success = false;
     var fail_at: usize = 0;
     while (fail_at < 200) : (fail_at += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
-        var pool = Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = failing.allocator(), .pool_size = 0 }) catch continue;
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_at,
+            .resize_fail_index = 0,
+        });
+        var pool = Node.Pool.init(.{
+            .page_allocator = failing.allocator(),
+            .allocator = failing.allocator(),
+            .pool_size = 0,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
         defer pool.deinit();
 
         const baseline = pool.getNodesInUse();
-        const view = Checkpoint.TreeView.fromValue(failing.allocator(), &pool, &checkpoint) catch {
-            try std.testing.expectEqual(baseline, pool.getNodesInUse());
-            continue;
+        const view = Checkpoint.TreeView.fromValue(
+            failing.allocator(),
+            &pool,
+            &checkpoint,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_target_oom = true;
+                try std.testing.expectEqual(baseline, pool.getNodesInUse());
+                continue;
+            },
+            else => return err,
         };
         view.deinit();
         try std.testing.expectEqual(baseline, pool.getNodesInUse());
+        saw_success = true;
     }
+    try std.testing.expect(saw_target_oom);
+    try std.testing.expect(saw_success);
 }
 
 test "TreeView container getFieldRoot on a dirty basic field leaves no orphan pool nodes" {
@@ -688,20 +904,43 @@ test "TreeView container deserialize - OOM leaves no orphan pool nodes" {
     var bytes: [Checkpoint.fixed_size]u8 = undefined;
     _ = Checkpoint.serializeIntoBytes(&value, &bytes);
 
+    var saw_target_oom = false;
+    var saw_success = false;
     var fail_at: usize = 0;
     while (fail_at < 200) : (fail_at += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
-        var pool = Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = failing.allocator(), .pool_size = 0 }) catch continue;
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_at,
+            .resize_fail_index = 0,
+        });
+        var pool = Node.Pool.init(.{
+            .page_allocator = failing.allocator(),
+            .allocator = failing.allocator(),
+            .pool_size = 0,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => return err,
+        };
         defer pool.deinit();
 
         const baseline = pool.getNodesInUse();
-        const view = Checkpoint.TreeView.deserialize(failing.allocator(), &pool, &bytes) catch {
-            try std.testing.expectEqual(baseline, pool.getNodesInUse());
-            continue;
+        const view = Checkpoint.TreeView.deserialize(
+            failing.allocator(),
+            &pool,
+            &bytes,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => {
+                saw_target_oom = true;
+                try std.testing.expectEqual(baseline, pool.getNodesInUse());
+                continue;
+            },
+            else => return err,
         };
         view.deinit();
         try std.testing.expectEqual(baseline, pool.getNodesInUse());
+        saw_success = true;
     }
+    try std.testing.expect(saw_target_oom);
+    try std.testing.expect(saw_success);
 }
 
 test "TreeView list basic clone(transfer_cache) on a dirty view leaves no orphan pool nodes" {
