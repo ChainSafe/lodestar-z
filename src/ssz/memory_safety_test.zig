@@ -302,15 +302,16 @@ test "TreeView composite list set(index, ownedView) - failed set leaves the elem
             pool.unref(elem_node);
             return err;
         };
-        const elem_addr = @intFromPtr(elem_view);
+        const element_view_address = @intFromPtr(elem_view);
 
-        // The failed set must leave the element view with the caller.
+        // The caller still owns elem_view. Fail the list's cache reservation before set stores it.
+        // On OOM the address must remain live, then the caller deinits it exactly once.
         oom.failing.fail_index = oom.failing.alloc_index;
         if (view.set(0, elem_view)) |_| {
             return error.TestUnexpectedResult;
         } else |err| switch (err) {
             error.OutOfMemory => {
-                try std.testing.expect(oom.live.contains(elem_addr));
+                try std.testing.expect(oom.live.contains(element_view_address));
                 elem_view.deinit();
             },
             else => {
