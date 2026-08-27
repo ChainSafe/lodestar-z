@@ -206,7 +206,7 @@ test "TreeView composite list setValue - OOM does not double-free the element vi
 
     var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
     defer oom.deinit();
-    defer oom.assertNoDoubleFree();
+    defer std.debug.assert(!oom.double_free);
     const alloc = oom.allocator();
 
     var pool = try Node.Pool.init(.{
@@ -238,7 +238,7 @@ test "TreeView composite list push - OOM does not double-free" {
 
     var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
     defer oom.deinit();
-    defer oom.assertNoDoubleFree();
+    defer std.debug.assert(!oom.double_free);
     const alloc = oom.allocator();
 
     var pool = try Node.Pool.init(.{
@@ -270,7 +270,7 @@ test "TreeView composite list set(index, ownedView) - failed set leaves the elem
 
     var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
     defer oom.deinit();
-    defer oom.assertNoDoubleFree();
+    defer std.debug.assert(!oom.double_free);
     const alloc = oom.allocator();
 
     var pool = try Node.Pool.init(.{
@@ -319,7 +319,7 @@ test "TreeView composite list commit - OOM does not double-free" {
 
     var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
     defer oom.deinit();
-    defer oom.assertNoDoubleFree();
+    defer std.debug.assert(!oom.double_free);
     const alloc = oom.allocator();
 
     var pool = try Node.Pool.init(.{
