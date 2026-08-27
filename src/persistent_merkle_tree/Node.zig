@@ -1516,6 +1516,8 @@ pub const Id = enum(u32) {
         }
 
         var node_id = root_node;
+        errdefer if (node_id != root_node) pool.unref(node_id);
+
         var start: usize = 0;
         while (start < gindices.len) {
             const depth = gindices[start].pathLen();

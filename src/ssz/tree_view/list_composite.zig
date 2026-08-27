@@ -113,7 +113,8 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         /// Grows the list; new positions read as zero. Shrinking must go through sliceTo —
         /// a bare length cut would leave stale chunk data in the merkleized root.
         pub fn growTo(self: *Self, new_length: usize) !void {
-            std.debug.assert(new_length >= self._len);
+            if (new_length < self._len) return error.InvalidLength;
+            if (new_length > ST.limit) return error.LengthOverLimit;
             self._len = new_length;
         }
 
@@ -597,7 +598,7 @@ test "TreeView composite list sliceFrom handles boundary conditions" {
     }
 }
 
-test "TreeView composite list push appends element" {
+test "ListCompositeTreeView push and growTo should enforce length bounds" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
@@ -623,6 +624,8 @@ test "TreeView composite list push appends element" {
     try view.push(element_view);
     transferred = true;
 
+    try std.testing.expectError(error.InvalidLength, view.growTo(1));
+    try std.testing.expectError(error.LengthOverLimit, view.growTo(ListType.limit + 1));
     try std.testing.expectEqual(@as(usize, 2), try view.length());
 
     try view.commit();
