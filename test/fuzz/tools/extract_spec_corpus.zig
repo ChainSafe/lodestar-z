@@ -41,14 +41,9 @@ const bitvec_selectors = [_]struct {
     size: []const u8,
     sel: u8,
 }{
-    .{ .size = "1", .sel = 0x00 },
-    .{ .size = "2", .sel = 0x00 },
-    .{ .size = "3", .sel = 0x00 },
     .{ .size = "4", .sel = 0x00 },
-    .{ .size = "5", .sel = 0x01 },
-    .{ .size = "8", .sel = 0x01 },
-    .{ .size = "16", .sel = 0x01 },
-    .{ .size = "31", .sel = 0x01 },
+    .{ .size = "32", .sel = 0x01 },
+    .{ .size = "64", .sel = 0x02 },
     .{ .size = "512", .sel = 0x03 },
 };
 
