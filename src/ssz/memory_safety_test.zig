@@ -225,8 +225,9 @@ test "TreeView composite list setValue - OOM does not double-free the element vi
         };
         defer view.deinit();
 
-        // Tree construction uses the normal allocator. Let the child view allocate, then fail when
-        // the list reserves its cache entry.
+        // The setValue path creates a child view before storing it in the list cache. Let it
+        // allocate, then fail the cache reservation. setValue must free the child once. Teardown
+        // must not free it again.
         oom.failing.fail_index = oom.failing.alloc_index + 1;
         try std.testing.expectError(error.OutOfMemory, view.setValue(0, &newval));
     }
@@ -261,8 +262,9 @@ test "TreeView composite list push - OOM does not double-free" {
         };
         defer view.deinit();
 
-        // Tree construction uses the normal allocator. Let the child view allocate, then fail when
-        // the list reserves its cache entry.
+        // The pushValue path creates a child view before storing it in the list cache. Let it
+        // allocate, then fail the cache reservation. pushValue must free the child once. Teardown
+        // must not free it again.
         oom.failing.fail_index = oom.failing.alloc_index + 1;
         try std.testing.expectError(error.OutOfMemory, view.pushValue(&newval));
     }
@@ -351,7 +353,8 @@ test "TreeView composite list commit - OOM does not double-free" {
         };
         defer view.deinit();
 
-        // Stage a child change first, then fail while commit rebuilds the list root.
+        // Stage a child change, then fail while commit rebuilds the list root. The parent view
+        // still owns the cached child after the error, so teardown must free it exactly once.
         try view.setValue(0, &newval);
         oom.failing.fail_index = oom.failing.alloc_index;
         try std.testing.expectError(error.OutOfMemory, view.commit());
@@ -375,6 +378,7 @@ test "TreeView composite list fromValue - OOM leaves no orphan pool nodes" {
     // Each attempt starts from a fresh pool and stops after the first complete build.
     var saw_oom = false;
     for (0..400) |fail_at| {
+        // Force growth to allocate new storage so fail_at selects each allocation in order.
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
             .resize_fail_index = 0,
         });
@@ -390,7 +394,7 @@ test "TreeView composite list fromValue - OOM leaves no orphan pool nodes" {
         const root = ListType.tree.fromValue(&pool, &list) catch |err| switch (err) {
             error.OutOfMemory => {
                 saw_oom = true;
-                // Earlier steps in this attempt must not leave partial nodes behind.
+                // Returning to baseline proves every earlier child and branch was reclaimed.
                 try std.testing.expectEqual(baseline, pool.getNodesInUse());
                 continue;
             },
@@ -425,6 +429,7 @@ test "TreeView composite list deserializeFromBytes - OOM leaves no orphan pool n
     // Each attempt starts from a fresh pool and stops after the first complete decode.
     var saw_oom = false;
     for (0..400) |fail_at| {
+        // Force growth to allocate new storage so fail_at selects each allocation in order.
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
             .resize_fail_index = 0,
         });
@@ -440,7 +445,7 @@ test "TreeView composite list deserializeFromBytes - OOM leaves no orphan pool n
         const root = ListType.tree.deserializeFromBytes(&pool, bytes) catch |err| switch (err) {
             error.OutOfMemory => {
                 saw_oom = true;
-                // Earlier steps in this attempt must not leave partial nodes behind.
+                // Returning to baseline proves all earlier decoded nodes were reclaimed.
                 try std.testing.expectEqual(baseline, pool.getNodesInUse());
                 continue;
             },
@@ -665,7 +670,9 @@ test "TreeView container fromValue - OOM leaves no orphan pool nodes" {
     });
     defer pool.deinit();
 
-    // Build the root with the normal pool allocator, then fail the view's first allocation.
+    // The fromValue path builds the root before allocating the TreeView wrapper. Keep root
+    // construction infallible, then fail the wrapper allocation. The error path must unref
+    // the completed root.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
         .fail_index = 0,
     });
@@ -714,7 +721,8 @@ test "TreeView container deserialize - OOM leaves no orphan pool nodes" {
     });
     defer pool.deinit();
 
-    // Decode the root with the normal pool allocator, then fail the view's first allocation.
+    // The deserialize path builds the root before allocating the TreeView wrapper. Keep decoding
+    // infallible, then fail the wrapper allocation; the error path must unref the finished root.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
         .fail_index = 0,
     });
