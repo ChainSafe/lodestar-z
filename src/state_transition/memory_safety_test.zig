@@ -24,6 +24,9 @@ const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeSt
 const preset = @import("preset").preset;
 const Root = ct.primitive.Root.Type;
 
+// Extends the pool length only to its allocated capacity, so storage does not move yet.
+// Occupies every free slot, then reopens exactly `free_slot_count` slots.
+// The caller owns the returned filler nodes and must unref them and deinit the list.
 fn occupyPoolLeavingFreeSlots(
     allocator: std.mem.Allocator,
     pool: *Node.Pool,
@@ -42,8 +45,8 @@ fn occupyPoolLeavingFreeSlots(
     try std.testing.expectEqual(pool.nodes.len, @intFromEnum(pool.next_free_node));
     try std.testing.expect(filler_nodes.items.len >= free_slot_count);
 
-    // One vector commit consumes one node per tree level. Leave exactly that many slots so the
-    // state-roots commit must grow the pool after the block-roots commit.
+    // The block-roots commit consumes the reopened slots, forcing the state-roots commit to grow
+    // the pool.
     for (0..free_slot_count) |_| pool.unref(filler_nodes.pop().?);
 
     return filler_nodes;
@@ -200,6 +203,7 @@ test "historical summaries should preserve block root across pool growth" {
         allocator.destroy(state);
     };
 
+    // This slot makes next_epoch enter the historical accumulator branch.
     const historical_slot = preset.SLOTS_PER_HISTORICAL_ROOT - 1;
     try state.setSlot(historical_slot);
     try state.commit();
@@ -216,19 +220,22 @@ test "historical summaries should preserve block root across pool growth" {
     state_owned = false;
     defer test_state.deinit();
 
+    // processSlot leaves block_roots and state_roots cached and dirty.
     try processSlot(test_state.cached_state.state);
 
-    var capacity_fill_nodes = try occupyPoolLeavingFreeSlots(
+    // Leave enough slots for block_roots to commit, forcing state_roots to grow the pool.
+    var pool_filler_nodes = try occupyPoolLeavingFreeSlots(
         allocator,
         &pool,
         ct.phase0.HistoricalBlockRoots.chunk_depth,
     );
     defer {
-        for (capacity_fill_nodes.items) |node| pool.unref(node);
-        capacity_fill_nodes.deinit(allocator);
+        for (pool_filler_nodes.items) |node| pool.unref(node);
+        pool_filler_nodes.deinit(allocator);
     }
 
-    const root_column_storage_before = @intFromPtr(pool.nodes.items(.root).ptr);
+    // Integer address and capacity checks prove movement without dereferencing the old pointer.
+    const root_column_address_before = @intFromPtr(pool.nodes.items(.root).ptr);
     const pool_capacity_before = pool.nodes.capacity;
     try processHistoricalSummariesUpdate(
         .electra,
@@ -236,8 +243,9 @@ test "historical summaries should preserve block root across pool growth" {
         test_state.epoch_transition_cache,
     );
     try std.testing.expect(pool.nodes.capacity > pool_capacity_before);
-    try std.testing.expect(root_column_storage_before != @intFromPtr(pool.nodes.items(.root).ptr));
+    try std.testing.expect(root_column_address_before != @intFromPtr(pool.nodes.items(.root).ptr));
 
+    // Reread both roots from current storage before checking the appended summary.
     const expected_block_summary_root = (try test_state.cached_state.state.blockRootsRoot()).*;
     const expected_state_summary_root = (try test_state.cached_state.state.stateRootsRoot()).*;
     var historical_summaries = try test_state.cached_state.state.historicalSummaries();
@@ -270,6 +278,7 @@ test "historical roots should preserve block root across pool growth" {
         allocator.destroy(state);
     };
 
+    // This slot makes next_epoch enter the historical accumulator branch.
     const historical_slot = preset.SLOTS_PER_HISTORICAL_ROOT - 1;
     try state.setSlot(historical_slot);
     try state.commit();
@@ -283,19 +292,23 @@ test "historical roots should preserve block root across pool growth" {
     );
     state_owned = false;
     defer test_state.deinit();
+
+    // processSlot leaves block_roots and state_roots cached and dirty.
     try processSlot(test_state.cached_state.state);
 
-    var capacity_fill_nodes = try occupyPoolLeavingFreeSlots(
+    // Leave enough slots for block_roots to commit, forcing state_roots to grow the pool.
+    var pool_filler_nodes = try occupyPoolLeavingFreeSlots(
         allocator,
         &pool,
         ct.phase0.HistoricalBlockRoots.chunk_depth,
     );
     defer {
-        for (capacity_fill_nodes.items) |node| pool.unref(node);
-        capacity_fill_nodes.deinit(allocator);
+        for (pool_filler_nodes.items) |node| pool.unref(node);
+        pool_filler_nodes.deinit(allocator);
     }
 
-    const root_column_storage_before = @intFromPtr(pool.nodes.items(.root).ptr);
+    // Integer address and capacity checks prove movement without dereferencing the old pointer.
+    const root_column_address_before = @intFromPtr(pool.nodes.items(.root).ptr);
     const pool_capacity_before = pool.nodes.capacity;
     try processHistoricalRootsUpdate(
         .phase0,
@@ -303,8 +316,9 @@ test "historical roots should preserve block root across pool growth" {
         test_state.epoch_transition_cache,
     );
     try std.testing.expect(pool.nodes.capacity > pool_capacity_before);
-    try std.testing.expect(root_column_storage_before != @intFromPtr(pool.nodes.items(.root).ptr));
+    try std.testing.expect(root_column_address_before != @intFromPtr(pool.nodes.items(.root).ptr));
 
+    // Reread both roots from current storage before checking the appended historical root.
     const expected_block_roots = (try test_state.cached_state.state.blockRootsRoot()).*;
     const expected_state_roots = (try test_state.cached_state.state.stateRootsRoot()).*;
     var expected_historical_root: Root = undefined;
