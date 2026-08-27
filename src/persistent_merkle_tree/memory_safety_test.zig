@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
+const proof = @import("proof.zig");
 
 test "setNodesGrouped should release an intermediate root when a later group runs out of memory" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
@@ -75,4 +76,52 @@ test "setNodesGrouped should release an intermediate root when a later group run
     try std.testing.expectEqual(nodes_in_use_before_update - 1, pool.getNodesInUse());
 
     for (capacity_fill_nodes.items) |id| pool.unref(id);
+}
+
+test "compact multiproof reconstruction should reclaim partial nodes on OOM" {
+    var leaves = [_][32]u8{
+        [_]u8{1} ** 32,
+        [_]u8{2} ** 32,
+    };
+    // The descriptor is a branch with two leaf children.
+    const descriptor = [_]u8{0b0110_0000};
+
+    // One free slot fails on the right leaf; two fail on the parent branch.
+    for ([_]usize{ 1, 2 }) |available_slots| {
+        var failing = std.testing.FailingAllocator.init(
+            std.testing.allocator,
+            .{ .resize_fail_index = 0 },
+        );
+
+        var pool = try Node.Pool.init(.{
+            .page_allocator = failing.allocator(),
+            .allocator = std.testing.allocator,
+            .pool_size = 8,
+        });
+        defer pool.deinit();
+
+        failing.fail_index = failing.alloc_index;
+
+        var capacity_fill_nodes: std.ArrayList(Node.Id) = .empty;
+        defer capacity_fill_nodes.deinit(std.testing.allocator);
+
+        while (pool.createLeafFromUint(0)) |id| {
+            try capacity_fill_nodes.append(std.testing.allocator, id);
+        } else |err| switch (err) {
+            error.OutOfMemory => {},
+        }
+        for (0..available_slots) |_| {
+            pool.unref(capacity_fill_nodes.pop().?);
+        }
+
+        const baseline = pool.getNodesInUse();
+        try std.testing.expectError(
+            error.OutOfMemory,
+            proof.createNodeFromCompactMultiProof(&pool, &leaves, &descriptor),
+        );
+
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+
+        for (capacity_fill_nodes.items) |id| pool.unref(id);
+    }
 }
