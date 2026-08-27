@@ -458,7 +458,6 @@ pub fn computeSyncCommitteeIndicesElectra(
 /// Fills `out` by sampling from the pre-shuffled `indices`, weighted by
 /// effective balance; one SHA-256 per 16 candidates.
 /// Port of https://github.com/ChainSafe/swap-or-not-shuffle/pull/24 (453b639b).
-/// Callers guarantee `out.len > 0`, otherwise this never returns.
 fn computePtcIndicesInner(
     seed: *const [SEED_SIZE]u8,
     indices: []const u32,
