@@ -570,6 +570,9 @@ pub fn createNodeFromCompactMultiProof(
 
     const bitlist = try descriptorToBitlist(temp_allocator, descriptor);
 
+    if (leaves.len == 0) {
+        return error.InvalidWitnessLength;
+    }
     if (bitlist.len != leaves.len * 2 - 1) {
         return error.InvalidWitnessLength;
     }
