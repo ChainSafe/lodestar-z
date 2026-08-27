@@ -31,6 +31,10 @@
     "./metrics": {
       "import": "./bindings/src/metrics.js",
       "types": "./bindings/src/metrics.d.ts"
+    },
+    "./shuffle": {
+      "import": "./bindings/src/shuffle.js",
+      "types": "./bindings/src/shuffle.d.ts"
     }
   },
   "scripts": {
