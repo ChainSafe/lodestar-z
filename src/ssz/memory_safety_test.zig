@@ -6,6 +6,7 @@ const ChunkedLeafType = pmt.ChunkedLeaf;
 const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 const ArmOnSizeAllocator = @import("testing_allocators").ArmOnSizeAllocator;
 const Hasher = @import("hasher.zig").Hasher;
+const isFixedType = @import("type/type_kind.zig").isFixedType;
 const FixedContainerType = @import("type/container.zig").FixedContainerType;
 const VariableContainerType = @import("type/container.zig").VariableContainerType;
 const FixedListType = @import("type/list.zig").FixedListType;
@@ -22,7 +23,22 @@ const ProgressiveBitListType = @import("type/progressive_bit_list.zig").Progress
 const FixedProgressiveContainerType = @import("type/progressive_container.zig").FixedProgressiveContainerType;
 const VariableProgressiveContainerType = @import("type/progressive_container.zig").VariableProgressiveContainerType;
 const CompatibleUnionType = @import("type/compatible_union.zig").CompatibleUnionType;
-const tree_api = @import("type/tree_api.zig");
+
+fn treeFromValue(
+    comptime ST: type,
+    allocator: std.mem.Allocator,
+    pool: *Node.Pool,
+    value: *const ST.Type,
+) !Node.Id {
+    return switch (ST.kind) {
+        .progressive_list, .progressive_bit_list, .compatible_union => ST.tree.fromValue(allocator, pool, value),
+        .progressive_container => if (comptime isFixedType(ST))
+            ST.tree.fromValue(pool, value)
+        else
+            ST.tree.fromValue(allocator, pool, value),
+        else => ST.tree.fromValue(pool, value),
+    };
+}
 
 const Checkpoint = FixedContainerType(struct {
     epoch: UintType(64),
@@ -71,7 +87,7 @@ fn expectProgressiveFromValueOomReclaimsNodes(
         for (0..available_nodes) |_| pool.unref(filler.pop().?);
 
         const baseline = pool.getNodesInUse();
-        const root = tree_api.fromValue(ST, allocator, &pool, value) catch |err| {
+        const root = treeFromValue(ST, allocator, &pool, value) catch |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
             try std.testing.expectEqual(baseline, pool.getNodesInUse());
             saw_failure = true;

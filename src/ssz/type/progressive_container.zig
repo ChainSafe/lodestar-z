@@ -3,7 +3,6 @@ const TypeKind = @import("type_kind.zig").TypeKind;
 const isFixedType = @import("type_kind.zig").isFixedType;
 const isBasicType = @import("type_kind.zig").isBasicType;
 const progressive = @import("progressive.zig");
-const tree_api = @import("tree_api.zig");
 const hashOne = @import("hashing").hashOne;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
@@ -722,7 +721,14 @@ pub fn VariableProgressiveContainerType(comptime ST: type, comptime active_field
                 inline for (fields, 0..) |field, i| {
                     const field_idx = comptime getActiveFieldIndex(active_fields, i);
                     const field_value = &@field(value, field.name);
-                    nodes[field_idx] = try tree_api.fromValue(field.type, allocator, pool, field_value);
+                    nodes[field_idx] = switch (field.type.kind) {
+                        .progressive_list, .progressive_bit_list, .compatible_union => try field.type.tree.fromValue(allocator, pool, field_value),
+                        .progressive_container => if (comptime isFixedType(field.type))
+                            try field.type.tree.fromValue(pool, field_value)
+                        else
+                            try field.type.tree.fromValue(allocator, pool, field_value),
+                        else => try field.type.tree.fromValue(pool, field_value),
+                    };
                 }
 
                 const content_tree = try progressive.fillWithContents(allocator, pool, nodes);

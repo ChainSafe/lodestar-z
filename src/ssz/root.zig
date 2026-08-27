@@ -53,7 +53,6 @@ pub const isProgressiveBitListType = types.isProgressiveBitListType;
 // Compatible union
 pub const CompatibleUnionType = types.CompatibleUnionType;
 pub const getPathGindex = types.getPathGindex;
-pub const treeApi = types.treeApi;
 
 const hasher = @import("hasher.zig");
 pub const Hasher = hasher.Hasher;

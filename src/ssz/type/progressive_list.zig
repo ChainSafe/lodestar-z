@@ -3,7 +3,6 @@ const TypeKind = @import("type_kind.zig").TypeKind;
 const isBasicType = @import("type_kind.zig").isBasicType;
 const isFixedType = @import("type_kind.zig").isFixedType;
 const OffsetIterator = @import("offsets.zig").OffsetIterator;
-const tree_api = @import("tree_api.zig");
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const Depth = @import("hashing").Depth;
@@ -496,7 +495,14 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 var content_owns_nodes = false;
                 errdefer if (!content_owns_nodes) pool.free(nodes);
                 for (0..chunk_count) |i| {
-                    nodes[i] = try tree_api.fromValue(Element, allocator, pool, &value.items[i]);
+                    nodes[i] = switch (Element.kind) {
+                        .progressive_list, .progressive_bit_list, .compatible_union => try Element.tree.fromValue(allocator, pool, &value.items[i]),
+                        .progressive_container => if (comptime isFixedType(Element))
+                            try Element.tree.fromValue(pool, &value.items[i])
+                        else
+                            try Element.tree.fromValue(allocator, pool, &value.items[i]),
+                        else => try Element.tree.fromValue(pool, &value.items[i]),
+                    };
                 }
 
                 const contents_tree = try progressive.fillWithContents(allocator, pool, nodes);
