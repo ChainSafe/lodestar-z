@@ -645,19 +645,6 @@ test "BitListType - sanity" {
     try std.testing.expect(try b.get(0) == false);
 }
 
-test "BitList set should reject max usize index" {
-    const allocator = std.testing.allocator;
-    const Bits = BitListType(8);
-
-    var value = Bits.default_value;
-    defer Bits.deinit(allocator, &value);
-
-    try std.testing.expectError(
-        error.tooLarge,
-        value.set(allocator, std.math.maxInt(usize), true),
-    );
-}
-
 test "BitListType - sanity with bools" {
     const allocator = std.testing.allocator;
     const Bits = BitListType(16);
@@ -731,7 +718,7 @@ test "clone" {
     try expectEqualSerializedAlloc(Bits, allocator, b, cloned);
 }
 
-test "resize" {
+test "BitList resize and set should enforce length bounds" {
     const allocator = std.testing.allocator;
 
     const Bits = BitListType(16);
@@ -752,6 +739,11 @@ test "resize" {
 
     try std.testing.expect(b.data.items.len == 1);
     try std.testing.expect(b.data.items[0] == 13);
+
+    try std.testing.expectError(
+        error.tooLarge,
+        b.set(allocator, std.math.maxInt(usize), true),
+    );
 }
 
 // Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/bitList/valid.test.ts#L44-L69
