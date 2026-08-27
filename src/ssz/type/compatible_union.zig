@@ -182,6 +182,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
     }
 
     return struct {
+        const Self = @This();
         pub const kind = TypeKind.compatible_union;
         pub const Type: type = ValueType;
         pub const min_size: usize = _min_size;
@@ -469,7 +470,34 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
                 return error.InvalidSelector;
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
+                const allocator = pool.allocator;
+                var value: Type = undefined;
+                try toValue(allocator, node, pool, &value);
+                defer Self.deinit(allocator, &value);
+
+                return Self.serializedSize(&value);
+            }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                const allocator = pool.allocator;
+                var value: Type = undefined;
+                try toValue(allocator, node, pool, &value);
+                defer Self.deinit(allocator, &value);
+
+                return Self.serializeIntoBytes(&value, out);
+            }
+
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                const allocator = pool.allocator;
+                var value: Type = undefined;
+                try Self.deserializeFromBytes(allocator, data, &value);
+                defer Self.deinit(allocator, &value);
+
+                return fromValue(pool, &value);
+            }
+
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 var data_tree: Node.Id = undefined;
                 const selector = getSelector(value);
 
@@ -481,11 +509,7 @@ pub fn CompatibleUnionType(comptime options: anytype) type {
 
                         const data_ptr = &@field(value.*, field_name);
 
-                        if (comptime isFixedType(option_type)) {
-                            data_tree = try option_type.tree.fromValue(pool, data_ptr);
-                        } else {
-                            data_tree = try option_type.tree.fromValue(allocator, pool, data_ptr);
-                        }
+                        data_tree = try option_type.tree.fromValue(pool, data_ptr);
                         errdefer pool.unref(data_tree);
 
                         // Mix in selector: create branch with data on left, selector on right

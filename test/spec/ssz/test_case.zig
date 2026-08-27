@@ -7,57 +7,6 @@ const Node = @import("persistent_merkle_tree").Node;
 
 const Allocator = std.mem.Allocator;
 
-fn treeFromValue(
-    comptime ST: type,
-    allocator: Allocator,
-    pool: *Node.Pool,
-    value: *const ST.Type,
-) !Node.Id {
-    return switch (ST.kind) {
-        .progressive_list, .progressive_bit_list, .compatible_union => ST.tree.fromValue(allocator, pool, value),
-        .progressive_container => if (comptime ssz.isFixedType(ST))
-            ST.tree.fromValue(pool, value)
-        else
-            ST.tree.fromValue(allocator, pool, value),
-        else => ST.tree.fromValue(pool, value),
-    };
-}
-
-fn supportsTreeDeserializeFromBytes(comptime ST: type) bool {
-    if (!@hasDecl(ST.tree, "deserializeFromBytes")) return false;
-
-    return switch (ST.kind) {
-        .progressive_list, .progressive_bit_list, .compatible_union, .progressive_container => false,
-        .container => blk: {
-            inline for (ST.fields) |field| {
-                if (!supportsTreeDeserializeFromBytes(field.type)) break :blk false;
-            }
-            break :blk true;
-        },
-        .list, .vector => if (comptime ssz.isBasicType(ST.Element))
-            true
-        else
-            supportsTreeDeserializeFromBytes(ST.Element),
-        else => true,
-    };
-}
-
-fn treeDeserializeFromBytes(
-    comptime ST: type,
-    allocator: Allocator,
-    pool: *Node.Pool,
-    data: []const u8,
-) !Node.Id {
-    return switch (ST.kind) {
-        .progressive_list, .progressive_bit_list, .compatible_union => ST.tree.deserializeFromBytes(allocator, pool, data),
-        .progressive_container => if (comptime ssz.isFixedType(ST))
-            ST.tree.deserializeFromBytes(pool, data)
-        else
-            ST.tree.deserializeFromBytes(allocator, pool, data),
-        else => ST.tree.deserializeFromBytes(pool, data),
-    };
-}
-
 pub fn parseYaml(comptime ST: type, allocator: Allocator, y: yaml.Yaml, out: *ST.Type) !void {
     if (comptime ssz.isBitVectorType(ST)) {
         const bytes_buf = try allocator.alloc(u8, ST.byte_length + 2);
@@ -244,7 +193,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
     // read expected value
 
     const value_expected = try allocator.create(ST.Type);
-    value_expected.* = ST.default_value;
+    value_expected.* = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
     try parseYaml(ST, allocator, value_yaml, value_expected);
 
     // read expected serialized
@@ -273,7 +222,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
         try ST.serialized.validate(serialized_expected);
 
         const value_actual = try allocator.create(ST.Type);
-        value_actual.* = ST.default_value;
+        value_actual.* = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
 
         if (comptime ssz.isFixedType(ST)) {
             try ST.deserializeFromBytes(serialized_expected, value_actual);
@@ -305,7 +254,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
     // test deserialization - json to value
     {
         const value_actual = try allocator.create(ST.Type);
-        value_actual.* = ST.default_value;
+        value_actual.* = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
 
         var scanner = std.json.Scanner.initCompleteInput(allocator, expected_json);
         defer scanner.deinit();
@@ -348,13 +297,13 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
 
     // test conversion between tree and value
     {
-        const node = try treeFromValue(ST, allocator, &pool, value_expected);
+        const node = try ST.tree.fromValue(&pool, value_expected);
         defer pool.unref(node);
 
         try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));
 
         const value_from_tree = try allocator.create(ST.Type);
-        value_from_tree.* = ST.default_value;
+        value_from_tree.* = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
 
         if (comptime ssz.isFixedType(ST)) {
             try ST.tree.toValue(node, &pool, value_from_tree);
@@ -365,8 +314,8 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
     }
 
     // test conversion between tree and serialized
-    if (comptime supportsTreeDeserializeFromBytes(ST)) {
-        const node = try treeDeserializeFromBytes(ST, allocator, &pool, serialized_expected);
+    {
+        const node = try ST.tree.deserializeFromBytes(&pool, serialized_expected);
         defer pool.unref(node);
 
         try std.testing.expectEqualSlices(u8, &root_expected, node.getRoot(&pool));
@@ -397,7 +346,7 @@ pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !voi
 
     try std.testing.expectError(error.InvalidSSZ, validate(ST, serialized_expected));
 
-    var value_actual = ST.default_value;
+    var value_actual: ST.Type = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
 
     try std.testing.expectError(error.InvalidSSZ, deserialize(ST, allocator, serialized_expected, &value_actual));
 }

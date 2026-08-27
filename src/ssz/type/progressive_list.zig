@@ -17,6 +17,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
     }
 
     return struct {
+        const Self = @This();
         pub const kind = TypeKind.progressive_list;
         pub const Element: type = ST;
         pub const Type: type = std.ArrayListUnmanaged(Element.Type);
@@ -226,7 +227,35 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 out.* = replacement;
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try toValue(allocator, node, pool, &value);
+                return Self.serializedSize(&value);
+            }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try toValue(allocator, node, pool, &value);
+                return Self.serializeIntoBytes(&value, out);
+            }
+
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try Self.deserializeFromBytes(allocator, data, &value);
+                return fromValue(pool, &value);
+            }
+
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
+                const allocator = pool.allocator;
                 const len = value.items.len;
                 const chunk_count = chunkCount(value);
 
@@ -479,7 +508,35 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 out.* = replacement;
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try toValue(allocator, node, pool, &value);
+                return Self.serializedSize(&value);
+            }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try toValue(allocator, node, pool, &value);
+                return Self.serializeIntoBytes(&value, out);
+            }
+
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try Self.deserializeFromBytes(allocator, data, &value);
+                return fromValue(pool, &value);
+            }
+
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
+                const allocator = pool.allocator;
                 const len = value.items.len;
                 const chunk_count = len;
                 if (chunk_count == 0) {
@@ -495,14 +552,7 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
                 var content_owns_nodes = false;
                 errdefer if (!content_owns_nodes) pool.free(nodes);
                 for (0..chunk_count) |i| {
-                    nodes[i] = switch (Element.kind) {
-                        .progressive_list, .progressive_bit_list, .compatible_union => try Element.tree.fromValue(allocator, pool, &value.items[i]),
-                        .progressive_container => if (comptime isFixedType(Element))
-                            try Element.tree.fromValue(pool, &value.items[i])
-                        else
-                            try Element.tree.fromValue(allocator, pool, &value.items[i]),
-                        else => try Element.tree.fromValue(pool, &value.items[i]),
-                    };
+                    nodes[i] = try Element.tree.fromValue(pool, &value.items[i]);
                 }
 
                 const contents_tree = try progressive.fillWithContents(allocator, pool, nodes);

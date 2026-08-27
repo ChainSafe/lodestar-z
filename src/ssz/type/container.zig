@@ -813,14 +813,7 @@ pub fn VariableContainerType(comptime ST: type) type {
 
                 inline for (fields, 0..) |field, i| {
                     const field_value = &@field(value, field.name);
-                    nodes[i] = switch (field.type.kind) {
-                        .progressive_list, .progressive_bit_list, .compatible_union => try field.type.tree.fromValue(pool.allocator, pool, field_value),
-                        .progressive_container => if (comptime isFixedType(field.type))
-                            try field.type.tree.fromValue(pool, field_value)
-                        else
-                            try field.type.tree.fromValue(pool.allocator, pool, field_value),
-                        else => try field.type.tree.fromValue(pool, field_value),
-                    };
+                    nodes[i] = try field.type.tree.fromValue(pool, field_value);
                 }
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }

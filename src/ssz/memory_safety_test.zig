@@ -24,22 +24,6 @@ const FixedProgressiveContainerType = @import("type/progressive_container.zig").
 const VariableProgressiveContainerType = @import("type/progressive_container.zig").VariableProgressiveContainerType;
 const CompatibleUnionType = @import("type/compatible_union.zig").CompatibleUnionType;
 
-fn treeFromValue(
-    comptime ST: type,
-    allocator: std.mem.Allocator,
-    pool: *Node.Pool,
-    value: *const ST.Type,
-) !Node.Id {
-    return switch (ST.kind) {
-        .progressive_list, .progressive_bit_list, .compatible_union => ST.tree.fromValue(allocator, pool, value),
-        .progressive_container => if (comptime isFixedType(ST))
-            ST.tree.fromValue(pool, value)
-        else
-            ST.tree.fromValue(allocator, pool, value),
-        else => ST.tree.fromValue(pool, value),
-    };
-}
-
 const Checkpoint = FixedContainerType(struct {
     epoch: UintType(64),
     root: ByteVectorType(32),
@@ -87,7 +71,7 @@ fn expectProgressiveFromValueOomReclaimsNodes(
         for (0..available_nodes) |_| pool.unref(filler.pop().?);
 
         const baseline = pool.getNodesInUse();
-        const root = treeFromValue(ST, allocator, &pool, value) catch |err| {
+        const root = ST.tree.fromValue(&pool, value) catch |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
             try std.testing.expectEqual(baseline, pool.getNodesInUse());
             saw_failure = true;
@@ -1096,6 +1080,25 @@ test "compatible union tree.fromValue reclaims unpublished nodes on OOM" {
     try expectProgressiveFromValueOomReclaimsNodes(Union, &value, 32);
 }
 
+test "progressive tree deserialization uses the standard pool API" {
+    const List = FixedProgressiveListType(UintType(64));
+    const Bits = ProgressiveBitListType();
+    const Container = FixedProgressiveContainerType(struct {
+        a: UintType(64),
+    }, &.{1});
+    const Union = CompatibleUnionType(.{
+        .{ 1, UintType(64) },
+        .{ 2, UintType(64) },
+    });
+
+    inline for (.{ List, Bits, Container, Union }) |ST| {
+        try std.testing.expect(@hasDecl(ST.tree, "deserializeFromBytes"));
+        if (comptime @hasDecl(ST.tree, "deserializeFromBytes")) {
+            try std.testing.expectEqual(2, @typeInfo(@TypeOf(ST.tree.deserializeFromBytes)).@"fn".params.len);
+        }
+    }
+}
+
 test "progressive fixed list byte deserialization preserves out on malformed input" {
     const List = FixedProgressiveListType(BoolType());
     var out: List.Type = .empty;
@@ -1257,7 +1260,7 @@ test "variable progressive list tree.toValue preserves out on OOM" {
         .pool_size = 64,
     });
     defer pool.deinit();
-    const root = try List.tree.fromValue(std.testing.allocator, &pool, &source);
+    const root = try List.tree.fromValue(&pool, &source);
     defer pool.unref(root);
 
     var saw_failure = false;

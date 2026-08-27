@@ -114,6 +114,7 @@ pub fn isProgressiveBitListType(ST: type) bool {
 
 pub fn ProgressiveBitListType() type {
     return struct {
+        const Self = @This();
         pub const kind = TypeKind.progressive_bit_list;
         pub const Element: type = BoolType();
         pub const Type: type = ProgressiveBitList();
@@ -309,7 +310,35 @@ pub fn ProgressiveBitListType() type {
                 }
             }
 
-            pub fn fromValue(allocator: std.mem.Allocator, pool: *Node.Pool, value: *const Type) !Node.Id {
+            pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try toValue(allocator, node, pool, &value);
+                return Self.serializedSize(&value);
+            }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try toValue(allocator, node, pool, &value);
+                return Self.serializeIntoBytes(&value, out);
+            }
+
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                const allocator = pool.allocator;
+                var value = Self.default_value;
+                defer Self.deinit(allocator, &value);
+
+                try Self.deserializeFromBytes(allocator, data, &value);
+                return fromValue(pool, &value);
+            }
+
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
+                const allocator = pool.allocator;
                 const chunk_count = chunkCount(value);
                 if (chunk_count == 0) {
                     const length_leaf = try pool.createLeafFromUint(0);
