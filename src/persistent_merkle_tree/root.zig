@@ -13,6 +13,7 @@ pub const ChunkedLeaf = @import("ChunkedLeaf.zig");
 
 test {
     testing.refAllDecls(@This());
+    _ = @import("memory_safety_test.zig");
     testing.refAllDecls(@import("node_test.zig"));
     testing.refAllDecls(@import("proof_test.zig"));
     testing.refAllDecls(@import("view_test.zig"));
