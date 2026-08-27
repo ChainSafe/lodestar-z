@@ -195,8 +195,6 @@ test "TreeView composite list sliceTo does not leak pool nodes" {
     }
 }
 
-// These tests enable allocation failure only after setup. The inner scope completes view and pool
-// cleanup before the allocator is checked for a double-free.
 test "TreeView composite list setValue - OOM does not double-free the element view" {
     const ListType = FixedListType(Checkpoint, 16, .{});
 
