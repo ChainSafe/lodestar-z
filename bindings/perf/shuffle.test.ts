@@ -1,10 +1,8 @@
 // Mirrors https://github.com/ChainSafe/swap-or-not-shuffle/tree/main/test/perf
-import crypto from "node:crypto";
 import {bench, describe} from "@chainsafe/benchmark";
+import * as shuffle from "../src/shuffle.js";
 import * as shuffleReference from "../test/shuffleReference.ts";
-
-const bindings = await import("../src/index.js");
-const shuffle = bindings.default.shuffle;
+import {deterministicBenchmarkSeed} from "./benchmarkSeed.js";
 
 function getInputArray(count: number): Uint32Array {
   return Uint32Array.from(Array.from({length: count}, (_, i) => i));
@@ -34,7 +32,7 @@ for (const listSize of [16_384, 250_000, 1_000_000]) {
 
 describe("committee indices", () => {
   for (const listSize of [16_384, 250_000, 1_000_000]) {
-    const seed = new Uint8Array(crypto.randomBytes(32));
+    const seed = deterministicBenchmarkSeed(`committee-indices:${listSize}`);
     const activeIndices = getInputArray(listSize);
     const effectiveBalanceIncrements = new Uint16Array(listSize);
     for (let i = 0; i < listSize; i++) {
@@ -79,6 +77,83 @@ describe("committee indices", () => {
         );
       },
       id: `zig - computeProposerIndex - ${listSize} indices`,
+    });
+  }
+});
+
+describe("computePtcIndices - per slot", () => {
+  const {EFFECTIVE_BALANCE_INCREMENT, MAX_EFFECTIVE_BALANCE_ELECTRA, PTC_SIZE} = shuffleReference;
+  for (const vc of [16_384, 250_000, 1_000_000]) {
+    const seed = new Uint8Array(crypto.randomBytes(32));
+    const indices = getInputArray(vc);
+    const effectiveBalanceIncrements = new Uint16Array(vc).fill(32);
+
+    bench({
+      fn: () => {
+        shuffleReference.naiveComputePayloadTimelinessCommitteeIndices(effectiveBalanceIncrements, indices, seed);
+      },
+      id: `JS  - computePtcIndices - ${vc} indices`,
+    });
+
+    bench({
+      fn: () => {
+        shuffle.computePtcIndices(
+          seed,
+          indices,
+          effectiveBalanceIncrements,
+          PTC_SIZE,
+          MAX_EFFECTIVE_BALANCE_ELECTRA,
+          EFFECTIVE_BALANCE_INCREMENT
+        );
+      },
+      id: `zig - computePtcIndices - ${vc} indices`,
+    });
+  }
+});
+
+describe("computePtcIndicesForEpoch - full epoch (32 slots)", () => {
+  const {EFFECTIVE_BALANCE_INCREMENT, MAX_EFFECTIVE_BALANCE_ELECTRA, PTC_SIZE, SLOTS_PER_EPOCH} = shuffleReference;
+  for (const vc of [250_000, 1_000_000]) {
+    const shuffling = getInputArray(vc);
+    const indicesPerSlot = Math.floor(vc / SLOTS_PER_EPOCH);
+    const slotOffsets = new Uint32Array(SLOTS_PER_EPOCH + 1);
+    for (let i = 0; i <= SLOTS_PER_EPOCH; i++) slotOffsets[i] = i * indicesPerSlot;
+    const effectiveBalanceIncrements = new Uint16Array(vc).fill(32);
+    const epochSeed = new Uint8Array(crypto.randomBytes(32));
+    const startSlot = 0;
+
+    const committees: Uint32Array[][] = new Array(SLOTS_PER_EPOCH);
+    for (let i = 0; i < SLOTS_PER_EPOCH; i++) {
+      committees[i] = [shuffling.subarray(slotOffsets[i], slotOffsets[i + 1])];
+    }
+
+    bench({
+      fn: () => {
+        shuffleReference.naiveComputePayloadTimelinessCommitteesForEpoch(
+          epochSeed,
+          startSlot,
+          committees,
+          effectiveBalanceIncrements
+        );
+      },
+      id: `JS  - computePtcIndicesForEpoch - ${vc} validators`,
+    });
+
+    bench({
+      fn: () => {
+        shuffle.computePtcIndicesForEpoch(
+          epochSeed,
+          startSlot,
+          SLOTS_PER_EPOCH,
+          shuffling,
+          slotOffsets,
+          effectiveBalanceIncrements,
+          PTC_SIZE,
+          MAX_EFFECTIVE_BALANCE_ELECTRA,
+          EFFECTIVE_BALANCE_INCREMENT
+        );
+      },
+      id: `zig - computePtcIndicesForEpoch - ${vc} validators`,
     });
   }
 });

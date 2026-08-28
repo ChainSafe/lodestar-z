@@ -455,6 +455,150 @@ pub fn computeSyncCommitteeIndicesElectra(
     );
 }
 
+/// Fills `out` by sampling from the pre-shuffled `indices`, weighted by
+/// effective balance; one SHA-256 per 16 candidates.
+/// Port of https://github.com/ChainSafe/swap-or-not-shuffle/pull/24 (453b639b).
+fn computePtcIndicesInner(
+    seed: *const [SEED_SIZE]u8,
+    indices: []const u32,
+    effective_balance_increments: []const u16,
+    max_ebi: i64,
+    out: []u32,
+) !void {
+    const max_random_value: i64 = 0xffff;
+    const indices_len = indices.len;
+
+    var hash_input = [_]u8{0} ** (SEED_SIZE + 8);
+    @memcpy(hash_input[0..SEED_SIZE], seed);
+
+    var digest: [Sha256.digest_length]u8 = undefined;
+    var count: usize = 0;
+
+    var i: usize = 0;
+    // bounded by `count` so an empty `out` cannot spin; the inner break still
+    // stops mid-block, which also keeps `out[count]` in range
+    outer: while (count < out.len) : (i += 16) {
+        // one SHA-256 per 16 candidates; encode block index in bytes 32..40
+        std.mem.writeInt(u64, hash_input[SEED_SIZE..][0..8], i / 16, .little);
+        Sha256.hash(&hash_input, &digest, .{});
+
+        // consume all 16 u16 random values from this hash block
+        for (0..16) |j| {
+            const candidate_index = indices[(i + j) % indices_len];
+            const random_value: i64 = std.mem.readInt(u16, digest[j * 2 ..][0..2], .little);
+            if (candidate_index >= effective_balance_increments.len) {
+                // the reference panics on the out-of-bounds read
+                return error.EffectiveBalanceIncrementsOutOfBounds;
+            }
+            const ebi: i64 = effective_balance_increments[candidate_index];
+            // accept if ebi / max_ebi >= random_value / max_random_value;
+            // wrapping multiplies mirror the reference release-mode behavior
+            if (ebi *% max_random_value >= max_ebi *% random_value) {
+                out[count] = candidate_index;
+                count += 1;
+                if (count == out.len) {
+                    break :outer;
+                }
+            }
+        }
+    }
+}
+
+/// Samples one slot's payload timeliness committee into `out`, whose length is
+/// the committee size. Caller owns `out`.
+pub fn computePtcIndicesInto(
+    seed: []const u8,
+    indices: []const u32,
+    effective_balance_increments: []const u16,
+    max_effective_balance_electra: i64,
+    effective_balance_increment: i64,
+    out: []u32,
+) !void {
+    // The reference panics on a non-32-byte seed and on `% 0`, and divides by
+    // zero on a zero increment; return errors instead. An empty `out` is a
+    // no-op, where the reference would loop forever.
+    if (seed.len != SEED_SIZE) {
+        return error.InvalidSeedLength;
+    }
+    if (indices.len == 0) {
+        return error.EmptyActiveIndices;
+    }
+    if (effective_balance_increment == 0) {
+        return error.InvalidEffectiveBalanceIncrement;
+    }
+    if (out.len == 0) {
+        return;
+    }
+
+    const max_ebi = @divTrunc(max_effective_balance_electra, effective_balance_increment);
+    try computePtcIndicesInner(seed[0..SEED_SIZE], indices, effective_balance_increments, max_ebi, out);
+}
+
+/// Samples every slot's payload timeliness committee for an epoch into `out`,
+/// which must hold `slots_per_epoch * ptc_size` entries, slot-major.
+/// `slot_offsets` (length `slots_per_epoch + 1`) marks each slot's window into
+/// the flat `shuffling`; per-slot seed is
+/// `sha256(epoch_seed ++ u64le(start_slot + slot))`. Caller owns `out`.
+pub fn computePtcIndicesForEpochInto(
+    epoch_seed: []const u8,
+    start_slot: u32,
+    slots_per_epoch: u32,
+    shuffling: []const u32,
+    slot_offsets: []const u32,
+    effective_balance_increments: []const u16,
+    ptc_size: u32,
+    max_effective_balance_electra: i64,
+    effective_balance_increment: i64,
+    out: []u32,
+) !void {
+    // graceful errors where the reference panics (see computePtcIndicesInto)
+    if (epoch_seed.len != SEED_SIZE) {
+        return error.InvalidSeedLength;
+    }
+    if (effective_balance_increment == 0) {
+        return error.InvalidEffectiveBalanceIncrement;
+    }
+    const slots: usize = slots_per_epoch;
+    if (slot_offsets.len < slots + 1) {
+        return error.InvalidSlotOffsets;
+    }
+    if (out.len != slots * ptc_size) {
+        return error.InvalidOutputLength;
+    }
+
+    const max_ebi = @divTrunc(max_effective_balance_electra, effective_balance_increment);
+
+    var slot_seed_input = [_]u8{0} ** (SEED_SIZE + 8);
+    @memcpy(slot_seed_input[0..SEED_SIZE], epoch_seed);
+
+    for (0..slots) |i| {
+        // per-slot seed: sha256(epoch_seed ++ u64le(start_slot + i))
+        std.mem.writeInt(u64, slot_seed_input[SEED_SIZE..][0..8], @as(u64, start_slot) + i, .little);
+        var slot_seed: [SEED_SIZE]u8 = undefined;
+        Sha256.hash(&slot_seed_input, &slot_seed, .{});
+
+        const start = slot_offsets[i];
+        const end = slot_offsets[i + 1];
+        if (start > end or end > shuffling.len) {
+            return error.InvalidSlotOffsets;
+        }
+        const slot_indices = shuffling[start..end];
+        if (slot_indices.len == 0) {
+            return error.EmptyActiveIndices;
+        }
+
+        if (ptc_size != 0) {
+            try computePtcIndicesInner(
+                &slot_seed,
+                slot_indices,
+                effective_balance_increments,
+                max_ebi,
+                out[i * ptc_size ..][0..ptc_size],
+            );
+        }
+    }
+}
+
 test {
     _ = @import("./test.zig");
 }
