@@ -83,7 +83,7 @@ pub fn Hasher(comptime ST: type) type {
             } else {
                 switch (ST.kind) {
                     .progressive_list, .progressive_bit_list => {
-                        try ST.hashTreeRoot(scratch.getAllocator(), value, out);
+                        try ST.hashTreeRoot(scratch.allocator, value, out);
                     },
                     .list => {
                         const chunk_count = ST.chunkCount(value);
@@ -130,11 +130,11 @@ pub fn Hasher(comptime ST: type) type {
                         if (comptime isFixedType(ST)) {
                             try ST.hashTreeRoot(value, out);
                         } else {
-                            try ST.hashTreeRoot(scratch.getAllocator(), value, out);
+                            try ST.hashTreeRoot(scratch.allocator, value, out);
                         }
                     },
                     .compatible_union => {
-                        try ST.hashTreeRoot(scratch.getAllocator(), value, out);
+                        try ST.hashTreeRoot(scratch.allocator, value, out);
                     },
                     else => unreachable,
                 }
@@ -167,10 +167,6 @@ pub const HasherData = struct {
         }
         var chunks = self.chunks;
         chunks.deinit(allocator);
-    }
-
-    pub fn getAllocator(self: *HasherData) std.mem.Allocator {
-        return self.allocator;
     }
 };
 
