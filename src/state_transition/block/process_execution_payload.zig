@@ -82,11 +82,15 @@ pub fn processExecutionPayload(
     var payload_header = ForkTypes(fork).ExecutionPayloadHeader.default_value;
     switch (block_type) {
         .full => try body.executionPayload().createExecutionPayloadHeader(allocator, &payload_header),
-        .blinded => try ForkTypes(fork).ExecutionPayloadHeader.clone(
-            allocator,
-            &body.executionPayloadHeader().inner,
-            &payload_header,
-        ),
+        .blinded => {
+            errdefer ForkTypes(fork).ExecutionPayloadHeader.deinit(allocator, &payload_header);
+
+            try ForkTypes(fork).ExecutionPayloadHeader.clone(
+                allocator,
+                &body.executionPayloadHeader().inner,
+                &payload_header,
+            );
+        },
     }
     defer ForkTypes(fork).ExecutionPayloadHeader.deinit(allocator, &payload_header);
 

@@ -473,15 +473,23 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
             try merkleize(@ptrCast(&chunks), chunk_depth, out);
         }
 
-        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
-            comptime {
-                const OutInfo = @typeInfo(@TypeOf(out.*));
-                std.debug.assert(OutInfo == .array);
-                std.debug.assert(OutInfo.array.len == length);
-            }
+        /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
+        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+            return cloneInto(@This(), allocator, value, out);
+        }
+
+        /// The caller initializes `out` with `DestinationST.default_value` and deinitializes it
+        /// after success or error. Errors leave `out` safe to deinitialize.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
+            comptime std.debug.assert(DestinationST.length == length);
 
             for (value, 0..) |*element, i| {
-                try Element.clone(allocator, element, &out[i]);
+                try Element.cloneInto(DestinationST.Element, allocator, element, &out[i]);
             }
         }
 
@@ -714,7 +722,7 @@ test "clone VariableVectorType" {
     defer FooVector.deinit(allocator, &foo_vector);
     try foo_vector[0].a.append(allocator, 100);
 
-    var cloned: FooVector.Type = undefined;
+    var cloned = FooVector.default_value;
     defer FooVector.deinit(allocator, &cloned);
     try FooVector.clone(allocator, &foo_vector, &cloned);
     try std.testing.expect(&foo_vector != &cloned);
@@ -728,9 +736,9 @@ test "clone VariableVectorType" {
         b: UintType(8),
     });
     const BarVector = VariableVectorType(Bar, 4);
-    var cloned2: BarVector.Type = undefined;
+    var cloned2 = BarVector.default_value;
     defer BarVector.deinit(allocator, &cloned2);
-    try FooVector.clone(allocator, &foo_vector, &cloned2);
+    try FooVector.cloneInto(BarVector, allocator, &foo_vector, &cloned2);
     try std.testing.expect(cloned2[0].a.items.len == 1);
     try std.testing.expect(cloned2[0].a.items[0] == 100);
 }

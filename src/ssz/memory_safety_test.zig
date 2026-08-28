@@ -179,6 +179,36 @@ test "getAllReadonlyValues should deinit completed prefix and current value on c
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
+test "VariableList clone should keep destination deinit-safe when the second child OOMs" {
+    const Bytes = ByteListType(8);
+    const ListType = VariableListType(Bytes, 2);
+
+    var source = ListType.default_value;
+    defer ListType.deinit(std.testing.allocator, &source);
+    try source.append(std.testing.allocator, Bytes.default_value);
+    try source.items[0].append(std.testing.allocator, 1);
+    try source.append(std.testing.allocator, Bytes.default_value);
+    try source.items[1].append(std.testing.allocator, 2);
+
+    var failing = DoubleFreeDetectAllocator.init(std.testing.allocator, 2);
+    defer failing.deinit();
+    const allocator = failing.allocator();
+
+    {
+        var cloned = ListType.default_value;
+        defer ListType.deinit(allocator, &cloned);
+
+        try std.testing.expectError(
+            error.OutOfMemory,
+            ListType.clone(allocator, &source, &cloned),
+        );
+    }
+
+    // The unvisited destination element must not be deinitialized as garbage.
+    try std.testing.expect(!failing.double_free);
+    try std.testing.expectEqual(@as(usize, 0), failing.live.count());
+}
+
 test "iterator nextValue should deinit current value on conversion OOM" {
     const allocator = std.testing.allocator;
     const Bytes = ByteListType(32);
