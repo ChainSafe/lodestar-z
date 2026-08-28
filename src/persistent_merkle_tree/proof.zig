@@ -554,7 +554,11 @@ fn compactMultiProofToNode(
 
     pointer.bit_index += 1;
     const left = try compactMultiProofToNode(pool, bitlist, leaves, pointer);
+    errdefer pool.unref(left);
+
     const right = try compactMultiProofToNode(pool, bitlist, leaves, pointer);
+    errdefer pool.unref(right);
+
     return pool.createBranch(left, right);
 }
 
@@ -570,12 +574,16 @@ pub fn createNodeFromCompactMultiProof(
 
     const bitlist = try descriptorToBitlist(temp_allocator, descriptor);
 
+    if (leaves.len == 0) {
+        return error.InvalidWitnessLength;
+    }
     if (bitlist.len != leaves.len * 2 - 1) {
         return error.InvalidWitnessLength;
     }
 
     var pointer = MultiProofPointer{ .bit_index = 0, .leaf_index = 0 };
     const node = try compactMultiProofToNode(pool, bitlist, leaves, &pointer);
+    errdefer pool.unref(node);
 
     try pool.ref(node);
     return node;
