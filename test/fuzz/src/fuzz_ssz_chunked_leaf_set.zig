@@ -18,6 +18,7 @@ var fuzz_buf: [fuzz_buffer_size]u8 = undefined;
 const Capacity: usize = 1 << 20;
 const op_size: usize = 4;
 const selector_count: u8 = 4;
+const grow_to_opcode: u8 = 'G';
 
 pub export fn zig_fuzz_init() callconv(.c) void {}
 
@@ -96,6 +97,11 @@ fn fuzzListOps(
         const arg_lo = data[i + 1];
         const arg_hi = data[i + 2];
         const val_seed = data[i + 3];
+
+        if (data[i] == grow_to_opcode) {
+            assertInvalidGrowTo(ListT, view, reference.items.len, arg_lo);
+            continue;
+        }
 
         switch (op) {
             0 => {
@@ -224,6 +230,27 @@ fn fuzzListOps(
             else => unreachable,
         }
     }
+}
+
+fn assertInvalidGrowTo(
+    comptime ListT: type,
+    view: *ListT.TreeView,
+    length: usize,
+    argument: u8,
+) void {
+    const shrink = length > 0 and argument & 1 == 0;
+    const new_length = if (shrink) length - 1 else ListT.limit + 1;
+    const expected_error = if (shrink) error.InvalidLength else error.LengthOverLimit;
+
+    view.growTo(new_length) catch |err| {
+        assert(err == expected_error);
+        const length_after = view.length() catch |length_err| {
+            panicUnexpected("reading list length after rejected growth", length_err);
+        };
+        assert(length_after == length);
+        return;
+    };
+    @panic("invalid growTo length accepted");
 }
 
 fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
