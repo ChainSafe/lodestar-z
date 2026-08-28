@@ -68,7 +68,11 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ssz_bitvector", .max_input_len = 65 },
         .{ .name = "ssz_bytelist", .max_input_len = 1025 },
         .{ .name = "ssz_containers", .max_input_len = 16613 },
-        .{ .name = "ssz_lists", .max_input_len = 4161 },
+        .{
+            .name = "ssz_lists",
+            .max_input_len = 4161,
+            .extra_libs = &.{dep_hashtree.artifact("hashtree")},
+        },
         .{
             .name = "ssz_chunked_leaf_set",
             .max_input_len = 4097,
