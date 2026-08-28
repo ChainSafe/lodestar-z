@@ -36,8 +36,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
         /// whether the corresponding child node/data has changed since the last update of the root
         changed: std.StaticBitSet(ST.chunk_count),
         original_nodes: [ST.chunk_count]?Node.Id,
-        /// Stable backing store for `getFieldRoot` return pointers on dirty basic fields, so the
-        /// temporary PMT node can be unref'd instead of leaking a Pool slot per call.
+        /// Stable view-owned backing for `getFieldRoot` return pointers for all fields.
         field_root_cache: [ST.chunk_count][32]u8,
         pub const SszType = ST;
 
@@ -356,9 +355,9 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
         /// Gets a field's hash tree root. A cached composite child may contain pending changes, so
         /// this method commits it first. Basic fields and uncached composite fields do not commit.
-        /// The pointer avoids copying a 32-byte root on hot reads. When it borrows `Node.Pool`
-        /// storage, pool growth invalidates it; copy the root before another operation that may
-        /// commit or allocate PMT nodes.
+        /// Every call copies 32 bytes into view-owned storage, so the returned pointer survives
+        /// `Node.Pool` growth. A later call for the same field overwrites the cached contents, and
+        /// deinitializing the view invalidates the pointer.
         pub fn getFieldRoot(self: *Self, comptime field_name: []const u8) !*const [32]u8 {
             comptime {
                 @setEvalBranchQuota(20000);
@@ -373,15 +372,19 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     return &self.field_root_cache[field_index];
                 }
                 const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
-                return node.getRoot(self.pool);
+                self.field_root_cache[field_index] = node.getRoot(self.pool).*;
+                return &self.field_root_cache[field_index];
             } else {
                 // For composite types, if we have a cached view, commit it and return its root
                 if (self.child_data[field_index]) |child_view_ptr| {
                     try child_view_ptr.commit();
-                    return child_view_ptr.getRoot().getRoot(self.pool);
+                    self.field_root_cache[field_index] =
+                        child_view_ptr.getRoot().getRoot(self.pool).*;
+                    return &self.field_root_cache[field_index];
                 } else {
                     const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
-                    return node.getRoot(self.pool);
+                    self.field_root_cache[field_index] = node.getRoot(self.pool).*;
+                    return &self.field_root_cache[field_index];
                 }
             }
         }
