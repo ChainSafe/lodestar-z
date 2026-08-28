@@ -16,19 +16,31 @@ pub fn Hasher(comptime ST: type) type {
                         return try HasherData.initCapacity(allocator, hasher_size, null);
                     } else {
                         var children = try allocator.alloc(HasherData, 1);
+                        errdefer allocator.free(children);
+
                         children[0] = try Hasher(ST.Element).init(allocator);
+                        errdefer children[0].deinit(allocator);
+
                         return try HasherData.initCapacity(allocator, hasher_size, children);
                     }
                 },
                 .container => {
                     const hasher_size = if (ST.chunk_count % 2 == 1) ST.chunk_count + 1 else ST.chunk_count;
                     var children = try allocator.alloc(HasherData, ST.fields.len);
+                    errdefer allocator.free(children);
+
+                    var initialized_count: usize = 0;
+                    errdefer for (children[0..initialized_count]) |child| {
+                        child.deinit(allocator);
+                    };
+
                     inline for (ST.fields, 0..) |field, i| {
                         if (comptime isBasicType(field.type)) {
                             children[i] = try HasherData.initCapacity(allocator, 0, null);
                         } else {
                             children[i] = try Hasher(field.type).init(allocator);
                         }
+                        initialized_count += 1;
                     }
                     return try HasherData.initCapacity(allocator, hasher_size, children);
                 },
@@ -39,7 +51,12 @@ pub fn Hasher(comptime ST: type) type {
                         return try HasherData.initCapacity(allocator, hasher_size, null);
                     } else {
                         var children = try allocator.alloc(HasherData, 1);
+                        errdefer allocator.free(children);
+
                         children[0] = try Hasher(ST.Element).init(allocator);
+                        // Parent capacity is zero today; keep cleanup paired if that changes.
+                        errdefer children[0].deinit(allocator);
+
                         return try HasherData.initCapacity(allocator, hasher_size, children);
                     }
                 },
@@ -77,7 +94,7 @@ pub fn Hasher(comptime ST: type) type {
                             }
                         }
                         try h.merkleize(@ptrCast(scratch.chunks.items), ST.chunk_depth, out);
-                        if (ST.Element.kind == .bool) {
+                        if (comptime isBitListType(ST)) {
                             h.mixInLength(value.bit_len, out);
                         } else {
                             h.mixInLength(value.items.len, out);
@@ -135,3 +152,27 @@ pub const HasherData = struct {
         chunks.deinit(allocator);
     }
 };
+
+test "Hasher should hash ordinary boolean lists as basic lists" {
+    const BooleanList = @import("type/list.zig").FixedListType(
+        @import("type/bool.zig").BoolType(),
+        64,
+        .{},
+    );
+    const allocator = std.testing.allocator;
+
+    var value = BooleanList.default_value;
+    defer BooleanList.deinit(allocator, &value);
+    try value.appendSlice(allocator, &.{ true, false, true });
+
+    var scratch = try Hasher(BooleanList).init(allocator);
+    defer scratch.deinit(allocator);
+
+    var expected: [32]u8 = undefined;
+    try BooleanList.hashTreeRoot(allocator, &value, &expected);
+
+    var actual: [32]u8 = undefined;
+    try Hasher(BooleanList).hash(&scratch, &value, &actual);
+
+    try std.testing.expectEqual(expected, actual);
+}

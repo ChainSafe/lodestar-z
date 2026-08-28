@@ -85,10 +85,7 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
         }
 
         pub fn fromValue(allocator: Allocator, pool: *Node.Pool, value: *const ST.Type) !*Self {
-            const root = if (comptime isFixedType(ST))
-                try ST.tree.fromValue(pool, value)
-            else
-                try ST.tree.fromValue(allocator, pool, value);
+            const root = try ST.tree.fromValue(pool, value);
             errdefer pool.unref(root);
             return try Self.init(allocator, pool, root);
         }
@@ -172,8 +169,33 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
 
 const UintType = @import("../type/uint.zig").UintType;
 const FixedVectorType = @import("../type/vector.zig").FixedVectorType;
+const VariableVectorType = @import("../type/vector.zig").VariableVectorType;
 const FixedContainerType = @import("../type/container.zig").FixedContainerType;
+const ByteListType = @import("../type/byte_list.zig").ByteListType;
 const ByteVectorType = @import("../type/byte_vector.zig").ByteVectorType;
+
+test "ArrayCompositeTreeView fromValue should support variable vectors" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
+    defer pool.deinit();
+
+    const Bytes = ByteListType(8);
+    const VectorType = VariableVectorType(Bytes, 2);
+
+    var value = VectorType.default_value;
+    defer VectorType.deinit(allocator, &value);
+    try value[0].appendSlice(allocator, &[_]u8{ 1, 2 });
+    try value[1].appendSlice(allocator, &[_]u8{ 3, 4, 5 });
+
+    var view = try VectorType.TreeView.fromValue(allocator, &pool, &value);
+    defer view.deinit();
+
+    var roundtrip = VectorType.default_value;
+    defer VectorType.deinit(allocator, &roundtrip);
+    try view.toValue(allocator, &roundtrip);
+
+    try std.testing.expect(VectorType.equals(&value, &roundtrip));
+}
 
 test "TreeView vector composite element set/get/commit" {
     const allocator = std.testing.allocator;
