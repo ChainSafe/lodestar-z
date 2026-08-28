@@ -7,8 +7,6 @@ pub const BYTES_PER_CHUNK = types.BYTES_PER_CHUNK;
 pub const TypeKind = types.TypeKind;
 pub const isBasicType = types.isBasicType;
 pub const isFixedType = types.isFixedType;
-pub const isProgressiveListType = types.isProgressiveListType;
-pub const isCompatibleUnionType = types.isCompatibleUnionType;
 
 pub const BoolType = types.BoolType;
 pub const UintType = types.UintType;
@@ -66,6 +64,12 @@ pub const ArrayCompositeTreeView = tree_view.ArrayCompositeTreeView;
 pub const ListBasicTreeView = tree_view.ListBasicTreeView;
 pub const ListCompositeTreeView = tree_view.ListCompositeTreeView;
 pub const CloneOpts = @import("tree_view/utils/clone_opts.zig").CloneOpts;
+
+test "redundant SSZ helper APIs are not exposed" {
+    try testing.expect(!@hasDecl(types, "isProgressiveListType"));
+    try testing.expect(!@hasDecl(types, "isCompatibleUnionType"));
+    try testing.expect(!@hasDecl(HasherData, "getAllocator"));
+}
 
 test {
     _ = @import("memory_safety_test.zig");

@@ -43,13 +43,3 @@ pub fn isFixedType(T: type) bool {
         },
     };
 }
-
-// Progressive list types
-pub fn isProgressiveListType(T: type) bool {
-    return T.kind == .progressive_list;
-}
-
-// Compatible union types
-pub fn isCompatibleUnionType(T: type) bool {
-    return T.kind == .compatible_union;
-}

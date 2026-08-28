@@ -1,8 +1,6 @@
 pub const TypeKind = @import("type_kind.zig").TypeKind;
 pub const isBasicType = @import("type_kind.zig").isBasicType;
 pub const isFixedType = @import("type_kind.zig").isFixedType;
-pub const isProgressiveListType = @import("type_kind.zig").isProgressiveListType;
-pub const isCompatibleUnionType = @import("type_kind.zig").isCompatibleUnionType;
 
 pub const BoolType = @import("bool.zig").BoolType;
 pub const UintType = @import("uint.zig").UintType;
