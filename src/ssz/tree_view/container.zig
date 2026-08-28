@@ -353,11 +353,10 @@ pub fn ContainerTreeView(comptime ST: type) type {
             return self.root.getRoot(self.pool);
         }
 
-        /// Gets a field's hash tree root. A cached composite child may contain pending changes, so
-        /// this method commits it first. Basic fields and uncached composite fields do not commit.
-        /// Every call copies 32 bytes into view-owned storage, so the returned pointer survives
-        /// `Node.Pool` growth. A later call for the same field overwrites the cached contents, and
-        /// deinitializing the view invalidates the pointer.
+        /// Returns a view-owned snapshot of the field root. A cached composite child is committed
+        /// before taking the snapshot; other paths do not commit. The pointer survives `Node.Pool`
+        /// growth, but the snapshot does not reflect later field changes. A successful call for
+        /// the same field refreshes the snapshot. Deinitializing the view invalidates the pointer.
         pub fn getFieldRoot(self: *Self, comptime field_name: []const u8) !*const [32]u8 {
             comptime {
                 @setEvalBranchQuota(20000);
@@ -476,9 +475,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
         value: T,
         /// Bit per field; tracks whether `value` diverges from `root`.
         changed: std.StaticBitSet(ST.chunk_count),
-        /// Stable backing store for `getFieldRoot` return pointers. The hash
-        /// is computed in place here so we can return `*const [32]u8` without
-        /// allocating a temporary PMT slot per call (which previously leaked).
+        /// View-owned backing for field root snapshots returned by `getFieldRoot`.
         field_root_cache: [ST.chunk_count][32]u8,
 
         pub const SszType = ST;
@@ -560,14 +557,14 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             return self.root.getRoot(self.pool);
         }
 
+        /// Returns a view-owned snapshot of the field root. The pointer survives `Node.Pool`
+        /// growth, but the snapshot does not reflect later field changes. A successful call for
+        /// the same field refreshes the snapshot. Deinitializing the view invalidates the pointer.
         pub fn getFieldRoot(self: *Self, comptime field_name: []const u8) !*const [32]u8 {
             const ChildST = ST.getFieldType(field_name);
             const field_index = comptime ST.getFieldIndex(field_name);
             const field_value = try self.get(field_name);
-            // Materialize a temporary PMT subtree just to compute the cached
-            // root, then unref it immediately. The hash bytes are copied into
-            // `field_root_cache` so the returned pointer remains valid for the
-            // view's lifetime — without leaking a Pool slot per call.
+            // Copy the root before releasing the temporary PMT subtree that computed it.
             const node = try ChildST.tree.fromValue(self.pool, &field_value);
             defer self.pool.unref(node);
             self.field_root_cache[field_index] = node.getRoot(self.pool).*;
