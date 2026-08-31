@@ -24,6 +24,8 @@ pub const pkix = @import("./cache/pkix.zig");
 pub const signature_set_verifier = @import("./signature_sets/verifier.zig");
 
 pub const EpochTransitionCache = @import("./cache/epoch_transition_cache.zig").EpochTransitionCache;
+pub const ReusedEpochTransitionCache =
+    @import("./cache/epoch_transition_cache.zig").ReusedEpochTransitionCache;
 pub const processEpoch = @import("./epoch/process_epoch.zig").processEpoch;
 pub const processJustificationAndFinalization = @import("./epoch/process_justification_and_finalization.zig").processJustificationAndFinalization;
 pub const computeUnrealizedCheckpoints = @import("./utils/unrealized_checkpoints.zig").computeUnrealizedCheckpoints;
@@ -85,7 +87,6 @@ pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtS
 pub const computeSlotsSinceEpochStart = @import("./utils/epoch.zig").computeSlotsSinceEpochStart;
 pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
 pub const AnchorCheckpoint = @import("./AnchorCheckpoint.zig");
-pub const deinitReusedEpochTransitionCache = @import("./state_transition.zig").deinitReusedEpochTransitionCache;
 pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
 pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;
 pub const getRandaoMix = @import("./utils/seed.zig").getRandaoMix;

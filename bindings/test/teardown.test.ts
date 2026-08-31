@@ -27,7 +27,9 @@ bindings.pool.ensureCapacity(10_000_000);
 bindings.pubkeys.ensureCapacity(getSerializedFuluValidatorCount(stateBytes));
 
 const seedState = bindings.BeaconStateView.createFromBytes(stateBytes);
-console.log("slot=" + seedState.slot);
+const nextEpochSlot = seedState.slot + 32 - (seedState.slot % 32);
+const postState = seedState.processSlots(nextEpochSlot);
+console.log("slot=" + postState.slot);
 `
     );
 

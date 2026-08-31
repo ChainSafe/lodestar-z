@@ -17,6 +17,7 @@ const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const ForkSeq = config.ForkSeq;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const EpochTransitionCache = state_transition.EpochTransitionCache;
+const ReusedEpochTransitionCache = state_transition.ReusedEpochTransitionCache;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const slotFromStateBytes = @import("utils.zig").slotFromStateBytes;
 const loadState = @import("utils.zig").loadState;
@@ -44,14 +45,14 @@ fn ProcessJustificationAndFinalizationBench(comptime fork: ForkSeq) type {
 fn ProcessBeforeProcessEpochBench(comptime fork: ForkSeq) type {
     comptime _ = fork;
     return struct {
-        io: std.Io,
+        reused_cache: *ReusedEpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             BenchState.cloned_cached_state.state.commit() catch unreachable;
 
             var epoch_transition_cache = EpochTransitionCache.init(
                 allocator,
-                self.io,
+                self.reused_cache,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
@@ -83,12 +84,12 @@ fn ProcessInactivityUpdatesBench(comptime fork: ForkSeq) type {
 fn ProcessRewardsAndPenaltiesBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
-        io: std.Io,
+        reused_cache: *ReusedEpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
             const validator_count = BenchState.cloned_cached_state.state.validatorsCount() catch unreachable;
-            cache.syncRewardPenaltyLengths(self.io, validator_count) catch unreachable;
+            cache.syncRewardPenaltyLengths(self.reused_cache, validator_count) catch unreachable;
 
             state_transition.processRewardsAndPenalties(
                 fork,
@@ -384,11 +385,12 @@ fn printSegmentStats(stdout: *std.Io.Writer) !void {
 fn ProcessEpochBench(comptime fork: ForkSeq) type {
     return struct {
         io: std.Io,
+        reused_cache: *ReusedEpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             var cache = EpochTransitionCache.init(
                 allocator,
-                self.io,
+                self.reused_cache,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
@@ -396,7 +398,7 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
             defer cache.deinit(allocator);
 
             const validator_count = BenchState.cloned_cached_state.state.validatorsCount() catch unreachable;
-            cache.syncRewardPenaltyLengths(self.io, validator_count) catch unreachable;
+            cache.syncRewardPenaltyLengths(self.reused_cache, validator_count) catch unreachable;
 
             state_transition.processEpoch(
                 fork,
@@ -417,6 +419,7 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
 fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
     return struct {
         io: std.Io,
+        reused_cache: *ReusedEpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const io = self.io;
@@ -426,7 +429,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             BenchState.cloned_cached_state.state.commit() catch unreachable;
             var cache_val = EpochTransitionCache.init(
                 allocator,
-                io,
+                self.reused_cache,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state,
@@ -665,13 +668,19 @@ fn runBenchmark(
     state_bytes: []const u8,
     chain_config: config.ChainConfig,
 ) !void {
-    defer state_transition.deinitReusedEpochTransitionCache(io);
-
     var beacon_state: ?*AnyBeaconState = try loadState(fork, allocator, pool, state_bytes);
     defer if (beacon_state) |state| {
         state.deinit();
         allocator.destroy(state);
     };
+
+    const validator_count = try beacon_state.?.validatorsCount();
+    var baseline_reused_cache: ReusedEpochTransitionCache = undefined;
+    try baseline_reused_cache.init(allocator, validator_count);
+    defer baseline_reused_cache.deinit();
+    var iteration_reused_cache: ReusedEpochTransitionCache = undefined;
+    try iteration_reused_cache.init(allocator, validator_count);
+    defer iteration_reused_cache.deinit();
 
     try stdout.print("State deserialized: slot={}, validators={}\n", .{
         try beacon_state.?.slot(),
@@ -709,7 +718,7 @@ fn runBenchmark(
 
     var epoch_transition_cache = try EpochTransitionCache.init(
         allocator,
-        io,
+        &baseline_reused_cache,
         cached_state.config,
         cached_state.epoch_cache,
         cached_state.state,
@@ -728,7 +737,9 @@ fn runBenchmark(
     var bench = zbench.Benchmark.init(allocator, .{ .iterations = 50 });
     defer bench.deinit();
 
-    try bench.addParam("before_process_epoch", &ProcessBeforeProcessEpochBench(fork){ .io = io }, .{ .hooks = hooks });
+    try bench.addParam("before_process_epoch", &ProcessBeforeProcessEpochBench(fork){
+        .reused_cache = &iteration_reused_cache,
+    }, .{ .hooks = hooks });
 
     try bench.addParam("justification_finalization", &ProcessJustificationAndFinalizationBench(fork){
         .epoch_transition_cache = &epoch_transition_cache,
@@ -742,7 +753,7 @@ fn runBenchmark(
 
     try bench.addParam("rewards_and_penalties", &ProcessRewardsAndPenaltiesBench(fork){
         .epoch_transition_cache = &epoch_transition_cache,
-        .io = io,
+        .reused_cache = &baseline_reused_cache,
     }, .{ .hooks = hooks });
 
     try bench.addParam("registry_updates", &ProcessRegistryUpdatesBench(fork){
@@ -799,11 +810,17 @@ fn runBenchmark(
     }
 
     // Non-segmented
-    try bench.addParam("epoch(non-segmented)", &ProcessEpochBench(fork){ .io = io }, .{ .hooks = hooks });
+    try bench.addParam("epoch(non-segmented)", &ProcessEpochBench(fork){
+        .io = io,
+        .reused_cache = &iteration_reused_cache,
+    }, .{ .hooks = hooks });
 
     // Segmented (step-by-step timing)
     resetSegmentStats();
-    try bench.addParam("epoch(segmented)", &ProcessEpochSegmentedBench(fork){ .io = io }, .{ .hooks = hooks });
+    try bench.addParam("epoch(segmented)", &ProcessEpochSegmentedBench(fork){
+        .io = io,
+        .reused_cache = &iteration_reused_cache,
+    }, .{ .hooks = hooks });
 
     try bench.run(io, std.Io.File.stdout());
     try printSegmentStats(stdout);

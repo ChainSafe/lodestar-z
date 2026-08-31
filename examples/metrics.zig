@@ -141,6 +141,10 @@ pub fn main(init: std.process.Init) !void {
         cached_state.deinit();
         allocator.destroy(cached_state);
     }
+    var reused_cache: state_transition.ReusedEpochTransitionCache = undefined;
+    try reused_cache.init(allocator, try cached_state.state.validatorsCount());
+    defer reused_cache.deinit();
+
     std.debug.print("Running state transition.\nYou may open up a local prometheus instance to check out metrics in action.\n", .{});
     for (blocks_index.start_slot + 1..blocks_index.start_slot + blocks_index.offsets.len) |slot| {
         const block = try reader_blocks.readBlock(allocator, slot) orelse continue;
@@ -155,6 +159,7 @@ pub fn main(init: std.process.Init) !void {
         const next = try state_transition.stateTransition(
             allocator,
             io,
+            &reused_cache,
             cached_state,
             block,
             .{

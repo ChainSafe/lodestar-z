@@ -19,6 +19,8 @@ const verifyProposerSignature = @import("./signature_sets/proposer.zig").verifyP
 pub const processBlock = @import("./block/process_block.zig").processBlock;
 const EpochTransitionCacheOpts = @import("cache/epoch_transition_cache.zig").EpochTransitionCacheOpts;
 const EpochTransitionCache = @import("cache/epoch_transition_cache.zig").EpochTransitionCache;
+const ReusedEpochTransitionCache =
+    @import("cache/epoch_transition_cache.zig").ReusedEpochTransitionCache;
 const processEpoch = @import("epoch/process_epoch.zig").processEpoch;
 const computeEpochAtSlot = @import("utils/epoch.zig").computeEpochAtSlot;
 const processSlot = @import("slot/process_slot.zig").processSlot;
@@ -28,8 +30,6 @@ const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgra
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 const upgradeStateToElectra = @import("slot/upgrade_state_to_electra.zig").upgradeStateToElectra;
 const upgradeStateToFulu = @import("slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
-
-pub const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 
 pub const ExecutionPayloadStatus = enum(u8) {
     invalid,
@@ -50,6 +50,7 @@ pub const BlockExternalData = struct {
 pub fn processSlots(
     allocator: std.mem.Allocator,
     io: std.Io,
+    reused_cache: *ReusedEpochTransitionCache,
     cached_state: *CachedBeaconState,
     slot: Slot,
     _: EpochTransitionCacheOpts,
@@ -70,7 +71,7 @@ pub fn processSlots(
             var timer = time.start(io);
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
-                io,
+                reused_cache,
                 config,
                 epoch_cache,
                 state,
@@ -165,6 +166,7 @@ pub const StateTransitionResult = struct {
 pub fn stateTransition(
     allocator: std.mem.Allocator,
     io: std.Io,
+    reused_cache: *ReusedEpochTransitionCache,
     cached_state: *CachedBeaconState,
     signed_block: AnySignedBeaconBlock,
     opts: TransitionOpts,
@@ -186,6 +188,7 @@ pub fn stateTransition(
     try processSlots(
         allocator,
         io,
+        reused_cache,
         post_cached_state,
         block_slot,
         .{},
@@ -299,6 +302,7 @@ test "state transition - electra block" {
         const res = stateTransition(
             allocator,
             std.testing.io,
+            &test_state.transition_reused_cache,
             test_state.cached_state,
             signed_beacon_block,
             tc.transition_opt,
@@ -318,15 +322,12 @@ test "state transition - electra block" {
             }
         }
     }
-
-    deinitReusedEpochTransitionCache(std.testing.io);
 }
 
 test "state transition - a rejected block leaves the pre-state unchanged" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 * 5 });
     defer pool.deinit();
-    defer deinitReusedEpochTransitionCache(std.testing.io);
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
@@ -345,7 +346,14 @@ test "state transition - a rejected block leaves the pre-state unchanged" {
     // and mutates a clone, then discards it on error — so the original state must come out
     // untouched: same root, same slot. (This is the invariant behind the "mutate then reject"
     // findings; the mutations only ever land on the thrown-away clone.)
-    const res = stateTransition(allocator, std.testing.io, test_state.cached_state, signed_beacon_block, .{});
+    const res = stateTransition(
+        allocator,
+        std.testing.io,
+        &test_state.transition_reused_cache,
+        test_state.cached_state,
+        signed_beacon_block,
+        .{},
+    );
     if (res) |post| {
         post.deinit();
         allocator.destroy(post);

@@ -506,6 +506,10 @@ fn runBenchmark(
         allocator.destroy(state);
     };
 
+    var reused_cache: state_transition.ReusedEpochTransitionCache = undefined;
+    try reused_cache.init(allocator, try beacon_state.?.validatorsCount());
+    defer reused_cache.deinit();
+
     const beacon_config = config.BeaconConfig.init(chain_config, (try beacon_state.?.genesisValidatorsRoot()).*);
 
     var pubkey_cache = try state_transition.PubkeyCache.initCapacity(
@@ -533,6 +537,7 @@ fn runBenchmark(
     try state_transition.state_transition.processSlots(
         allocator,
         io,
+        &reused_cache,
         cached_state,
         block_slot,
         .{},

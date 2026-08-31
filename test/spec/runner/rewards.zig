@@ -44,10 +44,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             defer pool.deinit();
 
             var tc = try Self.init(allocator, &pool, dir);
-            defer {
-                tc.deinit();
-                state_transition.deinitReusedEpochTransitionCache(std.testing.io);
-            }
+            defer tc.deinit();
 
             try tc.runTest();
         }
@@ -173,7 +170,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
-                std.testing.io,
+                &self.pre.transition_reused_cache,
                 cloned_state.config,
                 cloned_state.epoch_cache,
                 cloned_state.state,

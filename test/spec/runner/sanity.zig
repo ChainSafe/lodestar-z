@@ -37,10 +37,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
 
         pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !void {
             var tc = try Self.init(allocator, pool, dir);
-            defer {
-                tc.deinit();
-                state_transition.deinitReusedEpochTransitionCache(std.testing.io);
-            }
+            defer tc.deinit();
 
             try tc.runTest();
         }
@@ -79,6 +76,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
             try state_transition.state_transition.processSlots(
                 self.pre.allocator,
                 std.testing.io,
+                &self.pre.transition_reused_cache,
                 self.pre.cached_state,
                 try self.pre.cached_state.state.slot() + self.slots,
                 .{},
@@ -108,10 +106,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
 
         pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !void {
             var tc = try Self.init(allocator, pool, dir);
-            defer {
-                tc.deinit();
-                state_transition.deinitReusedEpochTransitionCache(std.testing.io);
-            }
+            defer tc.deinit();
 
             try tc.runTest();
         }
@@ -201,6 +196,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                     const new_result = try state_transition.state_transition.stateTransition(
                         self.pre.allocator,
                         std.testing.io,
+                        &self.pre.transition_reused_cache,
                         input_cached_state,
                         signed_block,
                         .{

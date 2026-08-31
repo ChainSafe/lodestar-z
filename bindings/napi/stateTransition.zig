@@ -1,6 +1,6 @@
 const js = @import("zapi:zapi").js;
-const st = @import("state_transition");
+const environment_state = @import("environment_state.zig");
 
-pub fn deinitReusedEpochTransitionCache() void {
-    st.deinitReusedEpochTransitionCache(js.io());
+pub fn deinitReusedEpochTransitionCache() !void {
+    try environment_state.deinitReusedEpochTransitionCache(js.env());
 }

@@ -64,6 +64,7 @@ const BeaconState = fork_types.BeaconState;
 const BlockType = fork_types.BlockType;
 const ForkSeq = @import("config").ForkSeq;
 const CachedBeaconState = state_transition.CachedBeaconState;
+const ReusedEpochTransitionCache = state_transition.ReusedEpochTransitionCache;
 const UnrealizedCheckpoints = state_transition.UnrealizedCheckpoints;
 
 const ZERO_HASH = constants.ZERO_HASH;
@@ -278,6 +279,7 @@ pub const ForkChoice = struct {
     votes: Votes,
     fc_store: *ForkChoiceStore,
     deltas_cache: DeltasCache,
+    reused_epoch_transition_cache: ?ReusedEpochTransitionCache,
 
     // ── Head tracking ──
     /// Cached head — updated by `updateHead()`.
@@ -337,6 +339,7 @@ pub const ForkChoice = struct {
             .votes = .{},
             .fc_store = fc_store,
             .deltas_cache = .empty,
+            .reused_epoch_transition_cache = null,
             .head = undefined,
             .proposer_boost_root = null,
             .justified_proposer_boost_score = null,
@@ -371,6 +374,9 @@ pub const ForkChoice = struct {
         self.queued_attestations.deinit(allocator);
         self.validated_attestation_datas.deinit(allocator);
         self.deltas_cache.deinit(allocator);
+        if (self.reused_epoch_transition_cache) |*reused_cache| {
+            reused_cache.deinit();
+        }
 
         // Release init-allocated resources in reverse order.
         self.votes.deinit(allocator);
@@ -535,7 +541,16 @@ pub const ForkChoice = struct {
                 };
             } else {
                 // Compute new, happens ~2/3 first blocks of epoch as monitored in mainnet.
-                const unrealized = try state_transition.computeUnrealizedCheckpoints(state, allocator);
+                if (self.reused_epoch_transition_cache == null) {
+                    var reused_cache: ReusedEpochTransitionCache = undefined;
+                    try reused_cache.init(allocator, try state.state.validatorsCount());
+                    self.reused_epoch_transition_cache = reused_cache;
+                }
+                const unrealized = try state_transition.computeUnrealizedCheckpoints(
+                    allocator,
+                    &self.reused_epoch_transition_cache.?,
+                    state,
+                );
                 unrealized_justified_checkpoint = .{
                     .epoch = unrealized.justified_checkpoint.epoch,
                     .root = unrealized.justified_checkpoint.root,
