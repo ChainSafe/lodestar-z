@@ -92,15 +92,17 @@ campaign corpora and `afl-cmin` or `afl-tmin` output remain external to this rep
 
 ## Reproduction and bounded replay
 
-Replay one input file or every regular file in one directory without AFL++:
+Replay one input file, one base64-encoded input, or every regular file in one directory without
+AFL++:
 
 ```sh
 zig-out/bin/repro-ssz_basic path/to/input
 zig-out/bin/repro-ssz_basic corpus/ssz_basic-cmin
+zig build run-repro-ssz_basic -Doptimize=ReleaseSafe -- --base64 'AAA='
 ```
 
 The repro executable calls `zig_fuzz_init` once, rejects inputs beyond the registry limit, and
-bounds directory enumeration and per-file allocation.
+bounds directory enumeration, decoding, and per-input allocation.
 
 Replay every committed bootstrap corpus with its matching repro executable:
 

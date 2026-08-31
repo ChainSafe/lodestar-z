@@ -238,6 +238,14 @@ pub fn build(b: *std.Build) void {
         }
         b.installArtifact(repro_exe);
 
+        const run_repro = b.addRunArtifact(repro_exe);
+        if (b.args) |args| run_repro.addArgs(args);
+        const run_repro_step = b.step(
+            b.fmt("run-repro-{s}", .{fuzzer.name}),
+            b.fmt("Replay one input with {s}", .{fuzzer.name}),
+        );
+        run_repro_step.dependOn(&run_repro.step);
+
         const replay_corpus = b.addRunArtifact(repro_exe);
         replay_corpus.addDirectoryArg(b.path(fuzzer.corpus(b)));
         replay_corpus_step.dependOn(&replay_corpus.step);

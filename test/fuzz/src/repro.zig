@@ -8,6 +8,14 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+    if (args.len == 3) {
+        if (!std.mem.eql(u8, args[1], "--base64")) return error.ExpectedOneFileOrDirectory;
+
+        fuzz_target.zig_fuzz_init();
+        try replayBase64(allocator, args[2]);
+        return;
+    }
     if (args.len != 2) return error.ExpectedOneFileOrDirectory;
 
     fuzz_target.zig_fuzz_init();
@@ -19,6 +27,20 @@ pub fn main(init: std.process.Init) !void {
         .directory => try replayDirectory(cwd, io, allocator, args[1]),
         else => return error.ExpectedOneFileOrDirectory,
     }
+}
+
+fn replayBase64(allocator: std.mem.Allocator, encoded: []const u8) !void {
+    const encoded_len_max = std.base64.standard.Encoder.calcSize(fuzz_options.max_input_len);
+    if (encoded.len > encoded_len_max) return error.InputTooLong;
+
+    const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(encoded);
+    if (decoded_len > fuzz_options.max_input_len) return error.InputTooLong;
+
+    const input = try allocator.alloc(u8, decoded_len);
+    defer allocator.free(input);
+
+    try std.base64.standard.Decoder.decode(input, encoded);
+    fuzz_target.zig_fuzz_test(input.ptr, input.len);
 }
 
 fn replayDirectory(
