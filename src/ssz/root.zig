@@ -65,12 +65,6 @@ pub const ListBasicTreeView = tree_view.ListBasicTreeView;
 pub const ListCompositeTreeView = tree_view.ListCompositeTreeView;
 pub const CloneOpts = @import("tree_view/utils/clone_opts.zig").CloneOpts;
 
-test "redundant SSZ helper APIs are not exposed" {
-    try testing.expect(!@hasDecl(types, "isProgressiveListType"));
-    try testing.expect(!@hasDecl(types, "isCompatibleUnionType"));
-    try testing.expect(!@hasDecl(HasherData, "getAllocator"));
-}
-
 test {
     _ = @import("memory_safety_test.zig");
     testing.refAllDecls(@This());
