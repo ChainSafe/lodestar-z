@@ -36,8 +36,7 @@ pub export fn zig_fuzz_test(
     len: usize,
 ) callconv(.c) void {
     if (len > fuzz_options.max_input_len) return;
-    // Precondition: need at least selector + 1 byte of data.
-    if (len < 2) return;
+    if (len < 1) return;
 
     var fixed_buffer_allocator =
         std.heap.FixedBufferAllocator.init(&fuzz_buf);
@@ -79,14 +78,14 @@ fn fuzzFixedContainer(
     comptime ContainerT: type,
     data: []const u8,
 ) void {
-    // Precondition: fixed containers require exact serialized size.
-    if (data.len != ContainerT.fixed_size) return;
-
     var value: ContainerT.Type = undefined;
     ContainerT.deserializeFromBytes(
         data,
         &value,
-    ) catch return;
+    ) catch |err| switch (@as(anyerror, err)) {
+        error.InvalidSize, error.invalidBoolean => return,
+        else => panicUnexpected("deserializing fixed container", err),
+    };
 
     // Round-trip invariant.
     var serialized: [ContainerT.fixed_size]u8 = undefined;
@@ -103,16 +102,23 @@ fn fuzzVariableContainer(
     allocator: std.mem.Allocator,
     data: []const u8,
 ) void {
-    // Precondition: input length must be within declared bounds.
-    if (data.len < ContainerT.min_size) return;
-    if (data.len > ContainerT.max_size) return;
-
     var value: ContainerT.Type = ContainerT.default_value;
     ContainerT.deserializeFromBytes(
         allocator,
         data,
         &value,
-    ) catch return;
+    ) catch |err| switch (@as(anyerror, err)) {
+        error.InvalidSize,
+        error.offsetOutOfRange,
+        error.offsetNotIncreasing,
+        error.UnexpectedRemainder,
+        error.gtLimit,
+        error.noPaddingBit,
+        error.tooLarge,
+        error.OutOfMemory,
+        => return,
+        else => panicUnexpected("deserializing variable container", err),
+    };
 
     // Round-trip invariant.
     const serialized_size = ContainerT.serializedSize(&value);
@@ -127,4 +133,8 @@ fn fuzzVariableContainer(
     );
     assert(written == serialized_size);
     assert(std.mem.eql(u8, output, data));
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }

@@ -63,11 +63,11 @@ pub fn build(b: *std.Build) void {
     };
 
     const fuzzers = &[_]Fuzzer{
-        .{ .name = "ssz_basic", .max_input_len = 33 },
-        .{ .name = "ssz_bitlist", .max_input_len = 258 },
-        .{ .name = "ssz_bitvector", .max_input_len = 65 },
-        .{ .name = "ssz_bytelist", .max_input_len = 1025 },
-        .{ .name = "ssz_containers", .max_input_len = 16613 },
+        .{ .name = "ssz_basic", .max_input_len = 34 },
+        .{ .name = "ssz_bitlist", .max_input_len = 259 },
+        .{ .name = "ssz_bitvector", .max_input_len = 66 },
+        .{ .name = "ssz_bytelist", .max_input_len = 1026 },
+        .{ .name = "ssz_containers", .max_input_len = 16614 },
         .{
             .name = "ssz_lists",
             .max_input_len = 4161,
@@ -90,12 +90,12 @@ pub fn build(b: *std.Build) void {
         },
         .{
             .name = "bls_public_key",
-            .max_input_len = 96,
+            .max_input_len = 97,
             .extra_libs = &.{dep_blst.artifact("blst")},
         },
         .{
             .name = "bls_signature",
-            .max_input_len = 192,
+            .max_input_len = 193,
             .extra_libs = &.{dep_blst.artifact("blst")},
         },
         .{

@@ -9,19 +9,22 @@ executables, and bounded corpus replay for lodestar-z SSZ, persistent Merkle tre
 
 | Target | Maximum bytes | Input and oracle semantics |
 | --- | ---: | --- |
-| `ssz_basic` | 33 | Selector-prefixed canonical deserialize/serialize round trips for `Bool` and unsigned integers from 8 to 256 bits |
-| `ssz_bitlist` | 258 | Selector-prefixed sentinel, padding, limit, and round-trip behavior for bitlists of 8, 64, and 2048 bits |
-| `ssz_bitvector` | 65 | Selector-prefixed fixed size, trailing-bit, and round-trip behavior for bitvectors of 4, 32, 64, and 512 bits |
-| `ssz_bytelist` | 1,025 | Selector-prefixed length limits and round trips for byte lists with limits 32, 256, and 1024 |
-| `ssz_containers` | 16,613 | Selector-prefixed fixed and variable phase0 containers, including attestations and indexed attestations |
+| `ssz_basic` | 34 | Selector-prefixed canonical deserialize/serialize round trips for `Bool` and unsigned integers from 8 to 256 bits |
+| `ssz_bitlist` | 259 | Selector-prefixed sentinel, padding, limit, and round-trip behavior for bitlists of 8, 64, and 2048 bits |
+| `ssz_bitvector` | 66 | Selector-prefixed fixed size, trailing-bit, and round-trip behavior for bitvectors of 4, 32, 64, and 512 bits |
+| `ssz_bytelist` | 1,026 | Selector-prefixed length limits and round trips for byte lists with limits 32, 256, and 1024 |
+| `ssz_containers` | 16,614 | Selector-prefixed fixed and variable phase0 containers, including attestations and indexed attestations |
 | `ssz_lists` | 4,161 | Selector-prefixed fixed lists of integers and booleans, plus variable lists of byte lists |
 | `ssz_chunked_leaf_set` | 4,097 | Bounded selector-prefixed `TreeView` operation streams over chunked-leaf lists, checked against a value reference and pool ownership invariants |
 | `ssz_nested_opaque_proof` | 8,191 | Selector-prefixed single-proof creation and reconstruction through nested `container_struct` and `chunked_leaf` nodes |
 | `ssz_opaque_roundtrip` | 1,048,576 | Selector-prefixed byte, value, root, and ownership round trips for opaque chunked-leaf lists, vectors, and struct containers |
-| `bls_public_key` | 96 | Compressed (48-byte) or serialized (96-byte) public-key decode, validation, serialization, and stable round trips |
-| `bls_signature` | 192 | Compressed (96-byte) or serialized (192-byte) signature decode, validation, serialization, and stable round trips |
+| `bls_public_key` | 97 | Compressed (48-byte) or serialized (96-byte) public-key decode, validation, serialization, and stable round trips |
+| `bls_signature` | 193 | Compressed (96-byte) or serialized (192-byte) signature decode, validation, serialization, and stable round trips |
 | `bls_aggregate_pk` | 6,144 | Bounded sequences of compressed public keys with aggregation oracles |
 | `bls_aggregate_sig` | 12,288 | Bounded sequences of compressed signatures with aggregation oracles |
+
+Decoder targets allow one byte beyond their largest valid input when that boundary is needed to
+exercise production length rejection. Selector-prefixed targets include the selector in the limit.
 
 See `src/fuzz_*.zig` for the exact input formats and target-specific oracles. The registry injects
 each maximum input length into both the AFL++ target and its matching repro executable.
@@ -55,7 +58,7 @@ zig build fuzz-metadata
 This writes `zig-out/share/lodestar-z-fuzz/targets.json` in registry order with this shape:
 
 ```json
-{"include":[{"target":"ssz_basic","max_input_len":33,"corpus_version":1}]}
+{"include":[{"target":"ssz_basic","max_input_len":34,"corpus_version":1}]}
 ```
 
 The real file contains all 13 entries. Increment a target's `corpus_version` only when its input

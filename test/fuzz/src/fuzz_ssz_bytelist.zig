@@ -66,7 +66,10 @@ fn fuzzByteList(
         allocator,
         data,
         &value,
-    ) catch return;
+    ) catch |err| switch (@as(anyerror, err)) {
+        error.invalidLength, error.OutOfMemory => return,
+        else => panicUnexpected("deserializing bytelist", err),
+    };
 
     // Postcondition: deserialized length within limit.
     assert(value.items.len <= ByteListT.limit);
@@ -85,4 +88,8 @@ fn fuzzByteList(
     );
     assert(written == serialized_size);
     assert(std.mem.eql(u8, output, data));
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }

@@ -44,7 +44,10 @@ fn fuzzBitVector(
     data: []const u8,
 ) void {
     var value: BitVectorT.Type = undefined;
-    BitVectorT.deserializeFromBytes(data, &value) catch return;
+    BitVectorT.deserializeFromBytes(data, &value) catch |err| switch (@as(anyerror, err)) {
+        error.invalidLength, error.trailingData => return,
+        else => panicUnexpected("deserializing bitvector", err),
+    };
 
     // Round-trip invariant.
     var serialized: [BitVectorT.fixed_size]u8 = undefined;
@@ -54,4 +57,8 @@ fn fuzzBitVector(
     );
     assert(written == BitVectorT.fixed_size);
     assert(std.mem.eql(u8, &serialized, data));
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }

@@ -13,8 +13,6 @@ pub export fn zig_fuzz_test(
     len: usize,
 ) callconv(.c) void {
     if (len > fuzz_options.max_input_len) return;
-    if (len == 0) return;
-    if (len > PublicKey.SERIALIZE_SIZE) return;
     const input = buf[0..len];
 
     const pk = PublicKey.keyValidate(input) catch |err| {

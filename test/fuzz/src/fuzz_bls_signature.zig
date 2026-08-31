@@ -13,7 +13,6 @@ pub export fn zig_fuzz_test(
     len: usize,
 ) callconv(.c) void {
     if (len > fuzz_options.max_input_len) return;
-    if (len == 0 or len > Signature.SERIALIZE_SIZE) return;
     const input = buf[0..len];
 
     const sig = Signature.sigValidate(input, true) catch |err| {

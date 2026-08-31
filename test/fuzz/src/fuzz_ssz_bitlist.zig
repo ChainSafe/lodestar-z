@@ -27,8 +27,7 @@ pub export fn zig_fuzz_test(
     len: usize,
 ) callconv(.c) void {
     if (len > fuzz_options.max_input_len) return;
-    // Precondition: need at least selector + 1 byte of data.
-    if (len < 2) return;
+    if (len < 1) return;
 
     var fixed_buffer_allocator =
         std.heap.FixedBufferAllocator.init(&fuzz_buf);
@@ -59,7 +58,14 @@ fn fuzzBitList(
         allocator,
         data,
         &value,
-    ) catch return;
+    ) catch |err| switch (@as(anyerror, err)) {
+        error.InvalidSize,
+        error.noPaddingBit,
+        error.tooLarge,
+        error.OutOfMemory,
+        => return,
+        else => panicUnexpected("deserializing bitlist", err),
+    };
 
     // Postcondition: bit length within declared limit.
     assert(value.bit_len <= BitListT.limit);
@@ -79,4 +85,8 @@ fn fuzzBitList(
     );
     assert(written == serialized_size);
     assert(std.mem.eql(u8, output, data));
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }
