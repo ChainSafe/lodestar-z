@@ -18,6 +18,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 const state_transition = @import("state_transition");
 const types = @import("consensus_types");
+const Node = @import("persistent_merkle_tree").Node;
 
 const CachedBeaconState = state_transition.CachedBeaconState;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
@@ -74,6 +75,13 @@ pub fn main(init: std.process.Init) !void {
     const allocator = gpa.allocator();
     const io = init.io;
 
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 10_000_000,
+    });
+    defer pool.deinit();
+
     _ = try std.Thread.spawn(.{}, serveMetrics, .{ allocator, 8008 });
 
     try state_transition.metrics.init(allocator, io, .{});
@@ -98,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Reading state\n", .{});
     var state_ptr = try allocator.create(@import("fork_types").AnyBeaconState);
     errdefer allocator.destroy(state_ptr);
-    state_ptr.* = try reader_state.readState(allocator, null);
+    state_ptr.* = try reader_state.readState(allocator, &pool, null);
     const blocks_index = reader_blocks.group_indices[0].blocks_index orelse return error.NoBlockIndex;
     const max_new_validators = try std.math.mul(
         usize,

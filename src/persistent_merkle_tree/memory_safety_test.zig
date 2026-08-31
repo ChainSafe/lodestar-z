@@ -4,11 +4,9 @@ const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
 const proof = @import("proof.zig");
 
-test "setNodesGrouped should release an intermediate root when a later group runs out of memory" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
-
+test "setNodesGrouped should release an intermediate root when a later group exhausts the pool" {
     var pool = try Node.Pool.init(.{
-        .page_allocator = failing.allocator(),
+        .page_allocator = std.testing.allocator,
         .allocator = std.testing.allocator,
         .pool_size = 16,
     });
@@ -33,18 +31,15 @@ test "setNodesGrouped should release an intermediate root when a later group run
     const replacement_data_node = try pool.createLeafFromUint(101);
     defer pool.unref(replacement_data_node);
 
-    // Setup is complete. Existing slots still work, but growing the pool now fails.
-    failing.fail_index = failing.alloc_index;
-
     var capacity_fill_nodes: std.ArrayList(Node.Id) = .empty;
     defer capacity_fill_nodes.deinit(std.testing.allocator);
 
     // Fill the pool, then give one slot back. The length update needs that one slot; the data
-    // update needs more space and is where OOM occurs.
+    // update needs more space and exhausts the fixed pool.
     while (pool.createLeafFromUint(0)) |id| {
         try capacity_fill_nodes.append(std.testing.allocator, id);
     } else |err| switch (err) {
-        error.OutOfMemory => {},
+        error.PoolExhausted => {},
     }
     pool.unref(capacity_fill_nodes.pop().?);
 
@@ -59,7 +54,7 @@ test "setNodesGrouped should release an intermediate root when a later group run
     var replacement_nodes = [_]Node.Id{ replacement_length_node, replacement_data_node };
 
     try std.testing.expectError(
-        error.OutOfMemory,
+        error.PoolExhausted,
         root.setNodesGrouped(&pool, &replacement_gindices, &replacement_nodes),
     );
 
@@ -78,7 +73,7 @@ test "setNodesGrouped should release an intermediate root when a later group run
     for (capacity_fill_nodes.items) |id| pool.unref(id);
 }
 
-test "compact multiproof reconstruction should reclaim partial nodes on OOM" {
+test "compact multiproof reconstruction should reclaim partial nodes on pool exhaustion" {
     var leaves = [_][32]u8{
         [_]u8{1} ** 32,
         [_]u8{2} ** 32,
@@ -88,19 +83,12 @@ test "compact multiproof reconstruction should reclaim partial nodes on OOM" {
 
     // One free slot fails on the right leaf; two fail on the parent branch.
     for ([_]usize{ 1, 2 }) |available_slots| {
-        var failing = std.testing.FailingAllocator.init(
-            std.testing.allocator,
-            .{ .resize_fail_index = 0 },
-        );
-
         var pool = try Node.Pool.init(.{
-            .page_allocator = failing.allocator(),
+            .page_allocator = std.testing.allocator,
             .allocator = std.testing.allocator,
             .pool_size = 8,
         });
         defer pool.deinit();
-
-        failing.fail_index = failing.alloc_index;
 
         var capacity_fill_nodes: std.ArrayList(Node.Id) = .empty;
         defer capacity_fill_nodes.deinit(std.testing.allocator);
@@ -108,7 +96,7 @@ test "compact multiproof reconstruction should reclaim partial nodes on OOM" {
         while (pool.createLeafFromUint(0)) |id| {
             try capacity_fill_nodes.append(std.testing.allocator, id);
         } else |err| switch (err) {
-            error.OutOfMemory => {},
+            error.PoolExhausted => {},
         }
         for (0..available_slots) |_| {
             pool.unref(capacity_fill_nodes.pop().?);
@@ -116,7 +104,7 @@ test "compact multiproof reconstruction should reclaim partial nodes on OOM" {
 
         const baseline = pool.getNodesInUse();
         try std.testing.expectError(
-            error.OutOfMemory,
+            error.PoolExhausted,
             proof.createNodeFromCompactMultiProof(&pool, &leaves, &descriptor),
         );
 
@@ -124,4 +112,30 @@ test "compact multiproof reconstruction should reclaim partial nodes on OOM" {
 
         for (capacity_fill_nodes.items) |id| pool.unref(id);
     }
+}
+
+test "fillWithContents exhaustion should preserve inputs and restore pool slots" {
+    var pool = try Node.Pool.init(.{
+        .page_allocator = std.testing.allocator,
+        .allocator = std.testing.allocator,
+        .pool_size = 6,
+    });
+    defer pool.deinit();
+
+    const leaf = try pool.createLeafFromUint(1);
+    defer pool.unref(leaf);
+
+    var contents = [_]Node.Id{leaf} ** 8;
+    const contents_before = contents;
+    const leaf_state_before = leaf.getState(&pool);
+    const nodes_in_use_before = pool.getNodesInUse();
+
+    try std.testing.expectError(
+        error.PoolExhausted,
+        Node.fillWithContents(&pool, &contents, 3),
+    );
+
+    try std.testing.expectEqual(contents_before, contents);
+    try std.testing.expectEqual(nodes_in_use_before, pool.getNodesInUse());
+    try std.testing.expectEqual(leaf_state_before, leaf.getState(&pool));
 }
