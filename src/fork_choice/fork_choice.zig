@@ -279,7 +279,6 @@ pub const ForkChoice = struct {
     votes: Votes,
     fc_store: *ForkChoiceStore,
     deltas_cache: DeltasCache,
-    reused_epoch_transition_cache: ?ReusedEpochTransitionCache,
 
     // ── Head tracking ──
     /// Cached head — updated by `updateHead()`.
@@ -339,7 +338,6 @@ pub const ForkChoice = struct {
             .votes = .{},
             .fc_store = fc_store,
             .deltas_cache = .empty,
-            .reused_epoch_transition_cache = null,
             .head = undefined,
             .proposer_boost_root = null,
             .justified_proposer_boost_score = null,
@@ -374,9 +372,6 @@ pub const ForkChoice = struct {
         self.queued_attestations.deinit(allocator);
         self.validated_attestation_datas.deinit(allocator);
         self.deltas_cache.deinit(allocator);
-        if (self.reused_epoch_transition_cache) |*reused_cache| {
-            reused_cache.deinit();
-        }
 
         // Release init-allocated resources in reverse order.
         self.votes.deinit(allocator);
@@ -401,6 +396,7 @@ pub const ForkChoice = struct {
     pub fn onBlock(
         self: *ForkChoice,
         allocator: Allocator,
+        reused_cache: *ReusedEpochTransitionCache,
         block: *const AnyBeaconBlock,
         state: *CachedBeaconState,
         block_delay_sec: u32,
@@ -414,6 +410,7 @@ pub const ForkChoice = struct {
             inline else => |fork| try self.onBlockInner(
                 fork,
                 allocator,
+                reused_cache,
                 block.castToFork(.full, fork),
                 state,
                 block_delay_sec,
@@ -435,6 +432,7 @@ pub const ForkChoice = struct {
         self: *ForkChoice,
         comptime fork: ForkSeq,
         allocator: Allocator,
+        reused_cache: *ReusedEpochTransitionCache,
         block: *const BeaconBlock(.full, fork),
         state: *CachedBeaconState,
         block_delay_sec: u32,
@@ -541,14 +539,9 @@ pub const ForkChoice = struct {
                 };
             } else {
                 // Compute new, happens ~2/3 first blocks of epoch as monitored in mainnet.
-                if (self.reused_epoch_transition_cache == null) {
-                    var reused_cache: ReusedEpochTransitionCache = undefined;
-                    try reused_cache.init(allocator, try state.state.validatorsCount());
-                    self.reused_epoch_transition_cache = reused_cache;
-                }
                 const unrealized = try state_transition.computeUnrealizedCheckpoints(
                     allocator,
-                    &self.reused_epoch_transition_cache.?,
+                    reused_cache,
                     state,
                 );
                 unrealized_justified_checkpoint = .{
