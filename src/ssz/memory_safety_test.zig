@@ -35,7 +35,6 @@ fn expectProgressiveFromValuePoolExhaustionReclaimsNodes(
     max_available_nodes: usize,
 ) !void {
     var saw_failure = false;
-    var saw_success = false;
 
     for (0..max_available_nodes + 1) |available_nodes| {
         var pool = try Node.Pool.init(.{
@@ -54,11 +53,10 @@ fn expectProgressiveFromValuePoolExhaustionReclaimsNodes(
         };
         pool.unref(root);
         try std.testing.expectEqual(baseline, pool.getNodesInUse());
-        saw_success = true;
+        try std.testing.expect(saw_failure);
+        return;
     }
-
-    try std.testing.expect(saw_failure);
-    try std.testing.expect(saw_success);
+    return error.TestUnexpectedResult;
 }
 
 test "ByteVector tree.deserializeFromBytes should reclaim partial leaves on pool exhaustion" {

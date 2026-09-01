@@ -223,21 +223,6 @@ test "Pool - invalid capacity fails before allocation" {
     }
 }
 
-test "Pool - payload allocation OOM is distinct from pool exhaustion" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = failing.allocator(), .pool_size = 1 });
-    defer pool.deinit();
-
-    const baseline = pool.getNodesInUse();
-    try std.testing.expectError(error.OutOfMemory, pool.createChunkedLeafEmpty(1));
-    try std.testing.expectEqual(baseline, pool.getNodesInUse());
-
-    failing.fail_index = std.math.maxInt(usize);
-    const leaf = try pool.createLeafFromUint(1);
-    defer pool.unref(leaf);
-    try std.testing.expectError(error.PoolExhausted, pool.createChunkedLeafEmpty(1));
-}
-
 test "All zero hashes (depth>0) point both children to the previous depth" {
     var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1 });
     defer pool.deinit();
@@ -271,7 +256,7 @@ test "Navigation - invalid node access is rejected" {
     try std.testing.expectError(Node.Error.InvalidNode, zero0.getRight(p));
 }
 
-test "alloc returns a set of unique nodes" {
+test "Pool.alloc returns unique nodes and restores partial allocations on exhaustion" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = max_depth });
     defer pool.deinit();

@@ -114,17 +114,42 @@ test "compact multiproof reconstruction should reclaim partial nodes on pool exh
     }
 }
 
+test "createChunkedLeafEmpty should not consume slots or leak payloads on allocation failure" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var pool = try Node.Pool.init(.{
+        .page_allocator = std.testing.allocator,
+        .allocator = failing.allocator(),
+        .pool_size = 1,
+    });
+    defer pool.deinit();
+
+    const baseline = pool.getNodesInUse();
+    try std.testing.expectError(error.OutOfMemory, pool.createChunkedLeafEmpty(1));
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+
+    failing.fail_index = std.math.maxInt(usize);
+    const leaf = try pool.createLeafFromUint(1);
+    defer pool.unref(leaf);
+
+    try std.testing.expectError(error.PoolExhausted, pool.createChunkedLeafEmpty(1));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
 test "fillWithContents exhaustion should preserve inputs and restore pool slots" {
     const test_cases = [_]struct {
         contents_len: usize,
         pool_size: u32,
+        aliased: bool,
     }{
-        // A partially built level above one completed level.
-        .{ .contents_len = 8, .pool_size = 6 },
-        // No parent in the failing level above two completed levels.
-        .{ .contents_len = 8, .pool_size = 7 },
-        // An odd completed level whose last parent includes a zero child.
-        .{ .contents_len = 5, .pool_size = 5 },
+        // Aliased inputs with a partially built level above one completed level.
+        .{ .contents_len = 8, .pool_size = 6, .aliased = true },
+        // Distinct inputs with no parent in the failing level above two completed levels.
+        .{ .contents_len = 8, .pool_size = 14, .aliased = false },
+        // Distinct inputs with an odd completed level whose last parent includes a zero child.
+        .{ .contents_len = 5, .pool_size = 9, .aliased = false },
     };
 
     for (test_cases) |test_case| {
@@ -135,12 +160,34 @@ test "fillWithContents exhaustion should preserve inputs and restore pool slots"
         });
         defer pool.deinit();
 
-        const leaf = try pool.createLeafFromUint(1);
-        defer pool.unref(leaf);
+        var contents: [8]Node.Id = undefined;
+        var initialized_count: usize = 0;
+        defer if (test_case.aliased) {
+            if (initialized_count == 1) pool.unref(contents[0]);
+        } else {
+            pool.free(contents[0..initialized_count]);
+        };
 
-        var contents = [_]Node.Id{leaf} ** 8;
-        const contents_before = contents;
-        const leaf_state_before = leaf.getState(&pool);
+        if (test_case.aliased) {
+            contents[0] = try pool.createLeafFromUint(1);
+            initialized_count = 1;
+            @memset(contents[0..test_case.contents_len], contents[0]);
+        } else {
+            for (0..test_case.contents_len) |i| {
+                contents[i] = try pool.createLeafFromUint(i + 1);
+                initialized_count += 1;
+            }
+        }
+
+        var contents_before: [8]Node.Id = undefined;
+        @memcpy(
+            contents_before[0..test_case.contents_len],
+            contents[0..test_case.contents_len],
+        );
+        var states_before: [8]Node.State = undefined;
+        for (contents[0..test_case.contents_len], 0..) |node, i| {
+            states_before[i] = node.getState(&pool);
+        }
         const nodes_in_use_before = pool.getNodesInUse();
 
         try std.testing.expectError(
@@ -154,6 +201,8 @@ test "fillWithContents exhaustion should preserve inputs and restore pool slots"
             contents[0..test_case.contents_len],
         );
         try std.testing.expectEqual(nodes_in_use_before, pool.getNodesInUse());
-        try std.testing.expectEqual(leaf_state_before, leaf.getState(&pool));
+        for (contents[0..test_case.contents_len], 0..) |node, i| {
+            try std.testing.expectEqual(states_before[i], node.getState(&pool));
+        }
     }
 }
