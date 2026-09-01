@@ -126,10 +126,13 @@ test "createChunkedLeafEmpty should not consume slots or leak payloads on alloca
     });
     defer pool.deinit();
 
+    // The first call fails before it can take a Pool slot.
     const baseline = pool.getNodesInUse();
     try std.testing.expectError(error.OutOfMemory, pool.createChunkedLeafEmpty(1));
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 
+    // With the only slot occupied, the next call allocates its payload and then fails to attach
+    // it. The payload must be freed on the way out.
     failing.fail_index = std.math.maxInt(usize);
     const leaf = try pool.createLeafFromUint(1);
     defer pool.unref(leaf);
@@ -168,6 +171,7 @@ test "fillWithContents exhaustion should preserve inputs and restore pool slots"
             pool.free(contents[0..initialized_count]);
         };
 
+        // Aliased IDs stress refcount rollback; distinct IDs make a bad restoration order visible.
         if (test_case.aliased) {
             contents[0] = try pool.createLeafFromUint(1);
             initialized_count = 1;
@@ -190,11 +194,13 @@ test "fillWithContents exhaustion should preserve inputs and restore pool slots"
         }
         const nodes_in_use_before = pool.getNodesInUse();
 
+        // Each pool size runs out at the parent-building stage described by the case above.
         try std.testing.expectError(
             error.PoolExhausted,
             Node.fillWithContents(&pool, contents[0..test_case.contents_len], 3),
         );
 
+        // A failed build must leave every caller-owned ID, refcount, and Pool slot unchanged.
         try std.testing.expectEqualSlices(
             Node.Id,
             contents_before[0..test_case.contents_len],

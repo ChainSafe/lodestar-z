@@ -36,6 +36,8 @@ fn expectProgressiveFromValuePoolExhaustionReclaimsNodes(
 ) !void {
     var saw_failure = false;
 
+    // Start with no room and add one slot per attempt. This walks each partial build until the
+    // first capacity that can finish the value.
     for (0..max_available_nodes + 1) |available_nodes| {
         var pool = try Node.Pool.init(.{
             .page_allocator = std.testing.allocator,
@@ -305,6 +307,7 @@ test "TreeView composite list setValue - OOM does not double-free the element vi
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
     var saw_oom = false;
+    // Build a fresh view with failures disabled, then fail one allocation made by setValue().
     for (0..200) |fail_after| {
         var oom = DoubleFreeDetectAllocator.init(
             std.testing.allocator,
@@ -340,6 +343,7 @@ test "TreeView composite list setValue - OOM does not double-free the element vi
                 operation_succeeded = true;
             }
         }
+        // Both the view and Pool have now run their cleanup, so any overlapping free is visible.
         try std.testing.expect(!oom.double_free);
 
         if (operation_succeeded) {
@@ -359,6 +363,7 @@ test "TreeView composite list push - OOM does not double-free" {
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
     var saw_oom = false;
+    // Build a fresh view with failures disabled, then fail one allocation made by pushValue().
     for (0..200) |fail_after| {
         var oom = DoubleFreeDetectAllocator.init(
             std.testing.allocator,
@@ -394,6 +399,7 @@ test "TreeView composite list push - OOM does not double-free" {
                 operation_succeeded = true;
             }
         }
+        // Both the view and Pool have now run their cleanup, so any overlapping free is visible.
         try std.testing.expect(!oom.double_free);
 
         if (operation_succeeded) {
@@ -413,6 +419,7 @@ test "TreeView composite list set(index, ownedView) - failed set leaves the elem
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
     var saw_oom = false;
+    // Create both views before enabling failures so every failed attempt belongs to set().
     for (0..200) |fail_after| {
         var oom = DoubleFreeDetectAllocator.init(
             std.testing.allocator,
@@ -440,6 +447,7 @@ test "TreeView composite list set(index, ownedView) - failed set leaves the elem
             defer if (caller_owns_element) elem_view.deinit();
 
             const elem_addr = @intFromPtr(elem_view);
+            // The caller still owns elem_view until set succeeds, so it must remain live on error.
             oom.failing.fail_index = oom.failing.alloc_index + fail_after;
             var operation_error: ?anyerror = null;
             view.set(0, elem_view) catch |err| {
@@ -458,6 +466,7 @@ test "TreeView composite list set(index, ownedView) - failed set leaves the elem
                 operation_succeeded = true;
             }
         }
+        // Both possible owners have now run their cleanup, so a double-free cannot be hidden.
         try std.testing.expect(!oom.double_free);
 
         if (operation_succeeded) {
@@ -477,6 +486,7 @@ test "TreeView composite list commit - OOM does not double-free" {
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
     var saw_oom = false;
+    // Stage the update before enabling failures so this sweep covers commit() only.
     for (0..200) |fail_after| {
         var oom = DoubleFreeDetectAllocator.init(
             std.testing.allocator,
@@ -514,6 +524,7 @@ test "TreeView composite list commit - OOM does not double-free" {
                 operation_succeeded = true;
             }
         }
+        // The view and Pool have both been released before checking their cleanup paths.
         try std.testing.expect(!oom.double_free);
 
         if (operation_succeeded) {
@@ -532,6 +543,8 @@ test "TreeView composite list fromValue - pool exhaustion leaves no orphan nodes
     for (0..6) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
 
     var saw_exhaustion = false;
+    // Adding one slot per attempt moves the failure through element construction and then the
+    // list parents.
     for (0..64) |pool_size| {
         var pool = try Node.Pool.init(.{
             .page_allocator = std.testing.allocator,
@@ -569,6 +582,8 @@ test "TreeView composite list deserializeFromBytes - pool exhaustion leaves no o
     _ = ListType.serializeIntoBytes(&list, bytes);
 
     var saw_exhaustion = false;
+    // Adding one slot per attempt moves the failure through element parsing and then the list
+    // parents.
     for (0..64) |pool_size| {
         var pool = try Node.Pool.init(.{
             .page_allocator = std.testing.allocator,
@@ -655,6 +670,8 @@ test "TreeView container setValue/commit - OOM does not double-free" {
     const new_root_bytes: [32]u8 = [_]u8{0xee} ** 32;
 
     var saw_oom = false;
+    // Create the original view before enabling failures. The sweep then walks allocations made by
+    // setValue() and commit().
     for (0..200) |fail_after| {
         var oom = DoubleFreeDetectAllocator.init(
             std.testing.allocator,
@@ -696,6 +713,7 @@ test "TreeView container setValue/commit - OOM does not double-free" {
                 operation_succeeded = true;
             }
         }
+        // The child view, container view, and Pool have all completed cleanup at this point.
         try std.testing.expect(!oom.double_free);
 
         if (operation_succeeded) {

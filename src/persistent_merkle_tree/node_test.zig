@@ -181,6 +181,7 @@ test "Pool - fixed capacity exhausts, reuses slots, and keeps columns stable" {
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 3 });
     defer pool.deinit();
 
+    // Keep the column addresses so the test can prove that using the fixed slots never moves them.
     const payloads_ptr = pool.nodes.items(.payload).ptr;
     const roots_ptr = pool.nodes.items(.root).ptr;
     const states_ptr = pool.nodes.items(.state).ptr;
@@ -197,6 +198,7 @@ test "Pool - fixed capacity exhausts, reuses slots, and keeps columns stable" {
     try std.testing.expectEqual(states_ptr, pool.nodes.items(.state).ptr);
     try std.testing.expectEqual(max_depth + 3, pool.getNodesInUse());
 
+    // Once the Pool is full, releasing one slot should make that exact ID available again.
     pool.unref(second);
     const replacement = try pool.createLeafFromUint(4);
     try std.testing.expectEqual(second, replacement);
@@ -275,12 +277,14 @@ test "Pool.alloc returns unique nodes and restores partial allocations on exhaus
 
     try std.testing.expectEqual(nodes.len, node_set.count());
 
+    // Leave one slot free and request two. The failed batch must put its temporary slot back.
     pool.unref(nodes[0]);
     const nodes_in_use = pool.getNodesInUse();
     var rejected: [2]Node.Id = undefined;
     try std.testing.expectError(error.PoolExhausted, pool.alloc(&rejected));
     try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
 
+    // Reusing the same ID proves that the failed batch left the free list intact.
     const reused = try pool.createLeafFromUint(1);
     try std.testing.expectEqual(nodes[0], reused);
     pool.unref(reused);
