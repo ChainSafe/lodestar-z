@@ -33,6 +33,7 @@ pub const Address = union(enum) {
     ip6: struct {
         octets: [16]u8,
         port: u16,
+        interface: u32 = 0,
     },
 
     pub fn eql(left: Address, right: Address) bool {
@@ -45,6 +46,7 @@ pub const Address = union(enum) {
             .ip6 => |value| switch (right) {
                 .ip4 => false,
                 .ip6 => |other| value.port == other.port and
+                    value.interface == other.interface and
                     std.mem.eql(u8, &value.octets, &other.octets),
             },
         };

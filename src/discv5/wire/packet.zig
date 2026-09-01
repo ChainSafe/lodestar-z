@@ -171,6 +171,12 @@ pub fn encodeOrdinary(out: []u8, args: OrdinaryArgs) Error![]u8 {
     return encodeMessage(out, .message, args.source_id, args.packet);
 }
 
+pub fn ordinaryPacketLength(plaintext_length: usize) Error!usize {
+    if (plaintext_length > constants.ordinary_plaintext_size_max)
+        return Error.InvalidPacket;
+    return constants.ordinary_packet_overhead + plaintext_length;
+}
+
 pub fn encodeHandshake(out: []u8, args: HandshakeArgs) Error![]u8 {
     try validateHandshakeAuthdata(args.authdata);
     return encodeMessage(out, .handshake, args.authdata, args.packet);

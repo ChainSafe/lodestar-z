@@ -43,6 +43,17 @@ test "relay policy does not cross special address scopes" {
     try std.testing.expect(!types.relayAllowed(public6, multicast6));
 }
 
+test "IPv6 interface scope is part of endpoint identity" {
+    const first = types.Address{ .ip6 = .{
+        .octets = [_]u8{0x22} ** 16,
+        .port = 9_001,
+        .interface = 1,
+    } };
+    var second = first;
+    second.ip6.interface = 2;
+    try std.testing.expect(!types.Address.eql(first, second));
+}
+
 fn address4(a: u8, b: u8, c: u8, d: u8) types.Address {
     return .{ .ip4 = .{ .octets = .{ a, b, c, d }, .port = 9_000 } };
 }

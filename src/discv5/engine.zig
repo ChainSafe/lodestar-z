@@ -6,13 +6,15 @@ const handshake = @import("identity/handshake.zig");
 const protocol = @import("protocol.zig");
 const routing_mod = @import("routing.zig");
 const session_mod = @import("session.zig");
+const standard_response = @import("standard_response.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 const packet = @import("wire/packet.zig");
 
-pub const Error = calls_mod.Error || crypto.Error || enr.Error || message.Error ||
-    packet.Error || routing_mod.Error || routing_mod.InitError || session_mod.Error || error{
+pub const Error = calls_mod.Error || crypto.Error || enr.Error || packet.Error ||
+    routing_mod.Error || routing_mod.InitError || session_mod.Error || standard_response.Error || error{
+    ApplicationResponseRequired,
     ClockOverflow,
     InvalidLocalRecord,
     InvalidRemoteRecord,
@@ -24,7 +26,10 @@ pub const Error = calls_mod.Error || crypto.Error || enr.Error || message.Error 
     SessionRequired,
     UnexpectedChallenge,
     UnexpectedHandshake,
+    UnexpectedRequest,
 };
+
+pub const StandardResponse = standard_response.Plan;
 
 pub const StartEntropy = struct {
     masking_iv: [constants.masking_iv_size]u8,
@@ -230,6 +235,8 @@ pub const Engine = struct {
             std.debug.assert(cancelled);
         }
         const plaintext = self.calls.requestBytes(handle) orelse return Error.MissingCall;
+        if (out.len < try packet.ordinaryPacketLength(plaintext.len))
+            return Error.BufferTooSmall;
         var outbound = try self.sessions.outbound(peer, &entropy.nonce_tail, now_ms);
         defer if (outbound) |*active| {
             std.crypto.secureZero(u8, std.mem.asBytes(active));
@@ -259,8 +266,70 @@ pub const Engine = struct {
         entropy: StartEntropy,
     ) Error!u16 {
         try validateResponse(response);
+        return self.sendPreparedResponse(out, peer, response, now_ms, entropy);
+    }
+
+    pub fn prepareStandardResponse(
+        self: *const Self,
+        request: *const AuthenticatedRequest,
+        response: *StandardResponse,
+    ) Error!void {
+        return switch (request.message) {
+            .ping => |ping| standard_response.preparePong(
+                response,
+                request.peer,
+                ping.request_id,
+                self.local_record.sequence,
+            ),
+            .find_node => |find_node| blk: {
+                const records = try self.findNodes(
+                    request.peer.address,
+                    find_node.distances,
+                    &response.records,
+                );
+                break :blk try standard_response.prepareNodes(
+                    response,
+                    request.peer,
+                    find_node.request_id,
+                    records.len,
+                );
+            },
+            .talk_request => Error.ApplicationResponseRequired,
+            else => Error.UnexpectedRequest,
+        };
+    }
+
+    pub fn sendNextStandardResponse(
+        self: *Self,
+        out: []u8,
+        response: *StandardResponse,
+        now_ms: u64,
+        entropy: StartEntropy,
+    ) Error!?u16 {
+        const message_response = response.next() orelse return null;
+        const packet_length = try self.sendPreparedResponse(
+            out,
+            response.peer,
+            &message_response,
+            now_ms,
+            entropy,
+        );
+        response.markSent();
+        return packet_length;
+    }
+
+    fn sendPreparedResponse(
+        self: *Self,
+        out: []u8,
+        peer: types.Endpoint,
+        response: *const message.Message,
+        now_ms: u64,
+        entropy: StartEntropy,
+    ) Error!u16 {
         var plaintext_buffer: [constants.ordinary_plaintext_size_max]u8 = undefined;
         const plaintext = try response.encode(&plaintext_buffer);
+        if (out.len < try packet.ordinaryPacketLength(plaintext.len))
+            return Error.BufferTooSmall;
         var outbound = (try self.sessions.outbound(
             peer,
             &entropy.nonce_tail,
