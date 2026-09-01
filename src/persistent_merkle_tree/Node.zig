@@ -39,6 +39,8 @@ pub const Error = error{
     InvalidNode,
     /// Attempt to use a length beyond the tree's length at a given depth.
     InvalidLength,
+    /// The configured pool size cannot be represented by the free list.
+    InvalidPoolCapacity,
     /// Attempt to increment the reference count beyond `max_ref_count`.
     RefCountOverflow,
     /// The fixed-capacity pool has no free user slots.
@@ -275,7 +277,7 @@ pub const Pool = struct {
         pool_size: u32,
     };
 
-    pub fn init(opts: InitOptions) (Allocator.Error || error{InvalidPoolCapacity})!Pool {
+    pub fn init(opts: InitOptions) Error!Pool {
         const total_capacity = std.math.add(u32, opts.pool_size, max_depth) catch {
             return error.InvalidPoolCapacity;
         };
