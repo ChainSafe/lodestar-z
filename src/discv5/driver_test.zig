@@ -7,7 +7,6 @@ const enr = @import("identity/enr.zig");
 const lookup = @import("lookup.zig");
 const lookup_driver = @import("lookup_driver.zig");
 const message = @import("wire/message.zig");
-const packet = @import("wire/packet.zig");
 const routing = @import("routing.zig");
 const runtime = @import("runtime.zig");
 const session = @import("session.zig");
@@ -151,10 +150,9 @@ test "driver releases a malformed datagram before the next step" {
         &.{0xff},
     );
     var expired: [4]calls.Expired = undefined;
-    try std.testing.expectError(
-        packet.Error.InvalidPacket,
-        pair.driver_a.step(std.testing.io, &expired),
-    );
+    const rejected = try pair.driver_a.step(std.testing.io, &expired);
+    try std.testing.expect(rejected.datagram == .rejected);
+    try std.testing.expectEqual(error.InvalidPacket, rejected.datagram.rejected);
 
     const request = message.Message{ .ping = .{
         .request_id = try message.RequestId.init(&.{0x44}),
@@ -170,6 +168,35 @@ test "driver releases a malformed datagram before the next step" {
     const completed = try pair.driver_b.step(std.testing.io, &expired);
     try std.testing.expect(completed.event == .response);
     try std.testing.expectEqual(handle, completed.event.response.matched.handle);
+}
+
+test "driver returns call expiries when rejecting a malformed datagram" {
+    var pair: Pair = undefined;
+    try pair.init(1, true);
+    defer pair.deinit();
+
+    const request = message.Message{ .ping = .{
+        .request_id = try message.RequestId.init(&.{0x45}),
+        .enr_sequence = pair.record_a.sequence,
+    } };
+    const handle = try pair.driver_a.startCall(
+        std.testing.io,
+        endpoint(&pair.record_b),
+        &request,
+    );
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake);
+    try pair.udp_b.send(
+        std.testing.io,
+        pair.udp_a.localAddress(),
+        &.{0xff},
+    );
+
+    var expired: [4]calls.Expired = undefined;
+    const result = try pair.driver_a.step(std.testing.io, &expired);
+    try std.testing.expect(result.datagram == .rejected);
+    try std.testing.expectEqual(error.InvalidPacket, result.datagram.rejected);
+    try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
+    try std.testing.expectEqual(handle, expired[0].handle);
 }
 
 test "driver completes a caller-owned lookup across multiple peers" {
@@ -316,6 +343,86 @@ test "lookup step preserves an unrelated response event" {
         caller_handle,
         result.driver.event.response.matched.handle,
     );
+}
+
+test "two caller-owned lookups share one driver" {
+    var network: LookupNetwork = undefined;
+    try network.init(1_000);
+    defer network.deinit();
+
+    const peer_c = endpoint(&network.record_c);
+    _ = try network.node_a.confirmPeer(&peer_c, &network.record_c, 0);
+    var seeds_b_buffer: [lookup.result_max]routing.Entry = undefined;
+    const seeds_b = network.node_a.closestNodes(
+        &network.record_b.node_id,
+        &seeds_b_buffer,
+    );
+    var operation_b: lookup.Lookup = undefined;
+    try operation_b.init(
+        std.testing.allocator,
+        network.record_a.node_id,
+        network.record_b.node_id,
+        seeds_b,
+    );
+    defer {
+        operation_b.cancel(&network.node_a);
+        operation_b.deinit();
+    }
+    var seeds_c_buffer: [lookup.result_max]routing.Entry = undefined;
+    const seeds_c = network.node_a.closestNodes(
+        &network.record_c.node_id,
+        &seeds_c_buffer,
+    );
+    var operation_c: lookup.Lookup = undefined;
+    try operation_c.init(
+        std.testing.allocator,
+        network.record_a.node_id,
+        network.record_c.node_id,
+        seeds_c,
+    );
+    defer {
+        operation_c.cancel(&network.node_a);
+        operation_c.deinit();
+    }
+
+    try std.testing.expect(try network.driver_a.startLookupCall(
+        std.testing.io,
+        &operation_b,
+    ));
+    try std.testing.expect(try network.driver_a.startLookupCall(
+        std.testing.io,
+        &operation_c,
+    ));
+    try std.testing.expectEqual(@as(usize, 2), network.node_a.calls.count());
+
+    var expired: [4]calls.Expired = undefined;
+    try std.testing.expectEqual(
+        @as(u8, 1),
+        (try network.driver_b.step(std.testing.io, &expired)).standard_responses,
+    );
+    try std.testing.expectEqual(
+        @as(u8, 1),
+        (try network.driver_c.step(std.testing.io, &expired)).standard_responses,
+    );
+
+    var responses_b: u8 = 0;
+    var responses_c: u8 = 0;
+    for (0..2) |_| {
+        const result = try network.driver_a.step(std.testing.io, &expired);
+        const response = result.event.response;
+        if (operation_b.ownsCall(response.matched.handle)) {
+            try operation_b.onResponse(&network.node_a, &response, result.now_ms);
+            responses_b += 1;
+        } else if (operation_c.ownsCall(response.matched.handle)) {
+            try operation_c.onResponse(&network.node_a, &response, result.now_ms);
+            responses_c += 1;
+        } else {
+            return error.TestUnexpectedResult;
+        }
+    }
+    try std.testing.expectEqual(@as(u8, 1), responses_b);
+    try std.testing.expectEqual(@as(u8, 1), responses_c);
+    try std.testing.expectEqual(@as(usize, 0), network.node_a.calls.count());
 }
 
 const Pair = struct {

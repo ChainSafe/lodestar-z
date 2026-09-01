@@ -22,9 +22,16 @@ pub const Config = struct {
     poll_interval_ms: u32 = 100,
 };
 
+pub const DatagramResult = union(enum) {
+    timeout,
+    accepted,
+    rejected: engine.Error,
+};
+
 pub const StepResult = struct {
     now_ms: u64 = 0,
     event: engine.Event = .none,
+    datagram: DatagramResult = .timeout,
     calls_expired: usize = 0,
     maintenance_expired: usize = 0,
     challenges_expired: usize = 0,
@@ -158,13 +165,17 @@ pub const Driver = struct {
         self.tick(now_ms, expired_calls, &result);
         var entropy = try receiveEntropy(io);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
-        const outcome = try self.core.receive(
+        const outcome = self.core.receive(
             &self.output,
             datagram.bytes,
             datagram.from,
             .{ .now_ms = now_ms, .known_record = null, .entropy = entropy },
             &self.scratch,
-        );
+        ) catch |err| {
+            result.datagram = .{ .rejected = err };
+            return result;
+        };
+        result.datagram = .accepted;
         if (outcome.packet_length > 0) {
             try self.udp.send(io, datagram.from, self.output[0..outcome.packet_length]);
         }

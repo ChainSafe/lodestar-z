@@ -224,6 +224,12 @@
         },
     },
     .executables = .{
+        .discv5_crawl = .{
+            .root_module = .{
+                .root_source_file = "examples/discv5_crawl.zig",
+                .imports = .{.discv5},
+            },
+        },
         .download_era_files = .{
             .root_module = .{
                 .root_source_file = "scripts/download_era_files.zig",
