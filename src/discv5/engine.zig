@@ -4,6 +4,7 @@ const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
 const handshake = @import("identity/handshake.zig");
 const protocol = @import("protocol.zig");
+const routing_mod = @import("routing.zig");
 const session_mod = @import("session.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
@@ -11,7 +12,7 @@ const message = @import("wire/message.zig");
 const packet = @import("wire/packet.zig");
 
 pub const Error = calls_mod.Error || crypto.Error || enr.Error || message.Error ||
-    packet.Error || session_mod.Error || error{
+    packet.Error || routing_mod.Error || routing_mod.InitError || session_mod.Error || error{
     ClockOverflow,
     InvalidLocalRecord,
     InvalidRemoteRecord,
@@ -52,6 +53,7 @@ pub const AuthenticatedRequest = struct {
 };
 
 pub const AuthenticatedResponse = struct {
+    peer: types.Endpoint,
     matched: calls_mod.Matched,
     record: ?enr.Record,
     node_records: []const enr.Record,
@@ -66,6 +68,7 @@ pub const Event = union(enum) {
 pub const Outcome = struct {
     packet_length: u16 = 0,
     event: Event = .none,
+    revalidate: ?types.NodeId = null,
 };
 
 pub const Scratch = struct {
@@ -110,6 +113,7 @@ pub const Engine = struct {
     config: Config,
     sessions: session_mod.Store,
     calls: calls_mod.Table,
+    routing: routing_mod.Table,
 
     pub fn init(
         self: *Self,
@@ -139,12 +143,15 @@ pub const Engine = struct {
         );
         errdefer self.sessions.deinit();
         try self.calls.init(allocator, config.call_capacity);
+        errdefer self.calls.deinit();
+        try self.routing.init(allocator, local_record.node_id);
         self.config = config;
         self.local_key = local_key;
         self.local_record = local_record;
     }
 
     pub fn deinit(self: *Self) void {
+        self.routing.deinit();
         self.calls.deinit();
         self.sessions.deinit();
         std.crypto.secureZero(u8, std.mem.asBytes(&self.local_key));
@@ -158,18 +165,60 @@ pub const Engine = struct {
         now_ms: u64,
         entropy: StartEntropy,
     ) Error!StartResult {
+        return self.startCallWithIdentity(out, peer, null, request, now_ms, entropy);
+    }
+
+    pub fn startCallKnown(
+        self: *Self,
+        out: []u8,
+        peer: types.Endpoint,
+        remote_record: *const enr.Record,
+        request: *const message.Message,
+        now_ms: u64,
+        entropy: StartEntropy,
+    ) Error!StartResult {
+        if (!std.mem.eql(u8, &peer.node_id, &remote_record.node_id))
+            return Error.InvalidRemoteRecord;
+        return self.startCallWithIdentity(
+            out,
+            peer,
+            &remote_record.public_key,
+            request,
+            now_ms,
+            entropy,
+        );
+    }
+
+    fn startCallWithIdentity(
+        self: *Self,
+        out: []u8,
+        peer: types.Endpoint,
+        remote_public_key: ?*const [33]u8,
+        request: *const message.Message,
+        now_ms: u64,
+        entropy: StartEntropy,
+    ) Error!StartResult {
         const deadline_ms = try deadline(now_ms, self.config.request_timeout_ms);
         const has_session = self.sessions.hasSession(peer);
         const request_capacity = if (has_session)
             constants.ordinary_plaintext_size_max
         else
             try packet.handshakePlaintextCapacity(self.local_record.length);
-        const handle = self.calls.begin(
-            peer,
-            request,
-            deadline_ms,
-            request_capacity,
-        ) catch |err| switch (err) {
+        const handle = (if (remote_public_key) |public_key|
+            self.calls.beginKnown(
+                peer,
+                public_key,
+                request,
+                deadline_ms,
+                request_capacity,
+            )
+        else
+            self.calls.begin(
+                peer,
+                request,
+                deadline_ms,
+                request_capacity,
+            )) catch |err| switch (err) {
             calls_mod.Error.RequestTooLarge => if (has_session)
                 return err
             else
@@ -276,6 +325,36 @@ pub const Engine = struct {
         };
     }
 
+    pub fn cancelCall(self: *Self, handle: calls_mod.Handle) bool {
+        return self.calls.cancel(handle);
+    }
+
+    pub fn confirmPeer(
+        self: *Self,
+        peer: *const types.Endpoint,
+        record: *const enr.Record,
+        now_ms: u64,
+    ) routing_mod.Error!routing_mod.PutResult {
+        return self.routing.upsertVerified(peer, record, now_ms);
+    }
+
+    pub fn findNodes(
+        self: *const Self,
+        requester: types.Address,
+        distances: []const u16,
+        out: []enr.Record,
+    ) routing_mod.Error![]enr.Record {
+        return self.routing.findNodes(&self.local_record, requester, distances, out);
+    }
+
+    pub fn closestNodes(
+        self: *const Self,
+        target: *const types.NodeId,
+        out: []routing_mod.Entry,
+    ) []routing_mod.Entry {
+        return self.routing.closest(target, out);
+    }
+
     fn receiveOrdinary(
         self: *Self,
         out: []u8,
@@ -303,13 +382,17 @@ pub const Engine = struct {
             plaintext,
             &scratch.message_decode,
         );
-        return .{ .event = try self.dispatch(
+        const event = try self.dispatch(
             peer,
             decoded_message,
             null,
             args.now_ms,
             scratch,
-        ) };
+        );
+        return .{
+            .event = event,
+            .revalidate = self.routeAuthenticated(peer, null, args.now_ms),
+        };
     }
 
     fn issueChallenge(
@@ -324,7 +407,10 @@ pub const Engine = struct {
             if (!std.mem.eql(u8, &record.node_id, &peer.node_id))
                 return Error.InvalidRemoteRecord;
             break :blk record.sequence;
-        } else 0;
+        } else if (self.routing.get(&peer.node_id)) |entry|
+            entry.record.sequence
+        else
+            0;
         const encoded = try packet.encodeWhoareyou(out, .{
             .masking_iv = &args.entropy.challenge_masking_iv,
             .recipient_id = &peer.node_id,
@@ -354,9 +440,15 @@ pub const Engine = struct {
             std.debug.assert(cancelled);
         }
         const peer = self.calls.endpoint(handle) orelse return Error.MissingCall;
-        const remote_record = args.known_record orelse return Error.MissingIdentity;
-        if (!std.mem.eql(u8, &remote_record.node_id, &peer.node_id))
-            return Error.InvalidRemoteRecord;
+        const remote_public_key = self.calls.remotePublicKey(handle) orelse
+            if (args.known_record) |record| blk: {
+                if (!std.mem.eql(u8, &record.node_id, &peer.node_id))
+                    return Error.InvalidRemoteRecord;
+                break :blk record.public_key;
+            } else if (self.routing.get(&peer.node_id)) |entry|
+                entry.record.public_key
+            else
+                return Error.MissingIdentity;
         const local_enr = if (decoded.form.whoareyou.enr_sequence < self.local_record.sequence)
             self.local_record.slice()
         else
@@ -376,7 +468,7 @@ pub const Engine = struct {
         const ephemeral_public_key = crypto.compressedPublicKey(&ephemeral_key);
         var keys = try handshake.deriveKeys(
             &ephemeral_key,
-            &remote_record.public_key,
+            &remote_public_key,
             &self.local_record.node_id,
             &peer.node_id,
             &challenge_data,
@@ -454,7 +546,12 @@ pub const Engine = struct {
         const peer = types.Endpoint{ .node_id = authdata.source_id, .address = from };
         const challenge = self.sessions.getChallenge(peer) orelse
             return Error.UnexpectedHandshake;
-        const records = try selectRecord(authdata.enr, args.known_record, &peer.node_id);
+        var stored_record: ?enr.Record = if (self.routing.get(&peer.node_id)) |entry|
+            entry.record
+        else
+            null;
+        const known_record = args.known_record orelse if (stored_record) |*record| record else null;
+        const records = try selectRecord(authdata.enr, known_record, &peer.node_id);
         try handshake.verifyProof(
             authdata.id_signature,
             &records.selected.public_key,
@@ -492,7 +589,10 @@ pub const Engine = struct {
         };
         defer std.crypto.secureZero(u8, std.mem.asBytes(&active));
         self.sessions.install(peer, &active, args.now_ms);
-        return .{ .event = event };
+        return .{
+            .event = event,
+            .revalidate = self.routeAuthenticated(peer, &records.selected, args.now_ms),
+        };
     }
 
     fn dispatch(
@@ -552,10 +652,30 @@ pub const Engine = struct {
             break :blk filtered.records;
         };
         return .{ .response = .{
+            .peer = peer,
             .matched = matched,
             .record = record,
             .node_records = node_records,
         } };
+    }
+
+    fn routeAuthenticated(
+        self: *Self,
+        peer: types.Endpoint,
+        supplied_record: ?*const enr.Record,
+        now_ms: u64,
+    ) ?types.NodeId {
+        var stored_record: ?enr.Record = null;
+        const record = supplied_record orelse blk: {
+            const entry = self.routing.get(&peer.node_id) orelse return null;
+            stored_record = entry.record;
+            break :blk &stored_record.?;
+        };
+        const result = self.routing.upsertVerified(&peer, record, now_ms) catch return null;
+        return switch (result) {
+            .pending => |node_id| node_id,
+            else => null,
+        };
     }
 };
 

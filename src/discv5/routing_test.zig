@@ -260,25 +260,25 @@ test "routing FINDNODE selection filters exact distances and caps the aggregate"
     _ = try table.upsertVerified(&distance_241_peer, &distance_241_record, 1);
 
     var out: [protocol.findnode_result_max + 4]enr.Record = undefined;
-    const selected = try table.findNodes(&local_record, &.{ 0, 241, 241, 256 }, &out);
+    const selected = try table.findNodes(&local_record, null, &.{ 0, 241, 241, 256 }, &out);
     try std.testing.expectEqual(protocol.findnode_result_max, selected.len);
     try std.testing.expectEqualSlices(u8, &local_id, &selected[0].node_id);
     try std.testing.expectEqualSlices(u8, &distance_241_id, &selected[1].node_id);
     for (selected[2..]) |record| {
         try std.testing.expectEqual(@as(u16, 256), types.logDistance(&local_id, &record.node_id));
     }
-    const sparse = try table.findNodes(&local_record, &.{241}, &out);
+    const sparse = try table.findNodes(&local_record, null, &.{241}, &out);
     try std.testing.expectEqual(@as(usize, 1), sparse.len);
     try std.testing.expectEqualSlices(u8, &distance_241_id, &sparse[0].node_id);
 
     try std.testing.expectError(
         routing.Error.InvalidDistance,
-        table.findNodes(&local_record, &.{ 0, 257 }, &out),
+        table.findNodes(&local_record, null, &.{ 0, 257 }, &out),
     );
     var too_many = [_]u16{0} ** (protocol.distance_count + 1);
     try std.testing.expectError(
         routing.Error.TooManyDistances,
-        table.findNodes(&local_record, &too_many, &out),
+        table.findNodes(&local_record, null, &too_many, &out),
     );
 }
 
@@ -315,6 +315,35 @@ test "routing closest selection is sorted and bounded" {
         &local_id,
         &selected[selected.len - 1].peer.node_id,
     ));
+}
+
+test "routing FINDNODE does not relay special-scope addresses" {
+    const local_id = [_]u8{0} ** 32;
+    var table: routing.Table = undefined;
+    try table.init(std.testing.allocator, local_id);
+    defer table.deinit();
+
+    var local_record = makeRecord(local_id, address4(127, 0, 0, 1, 9_000), 1);
+    const private_id = nodeAtDistance(256, 1);
+    const private_address = address4(10, 0, 0, 1, 9_001);
+    var private_record = makeRecord(private_id, private_address, 1);
+    const private_peer = types.Endpoint{ .node_id = private_id, .address = private_address };
+    _ = try table.upsertVerified(&private_peer, &private_record, 1);
+    const public_id = nodeAtDistance(255, 2);
+    const public_address = address4(198, 51, 100, 1, 9_002);
+    var public_record = makeRecord(public_id, public_address, 1);
+    const public_peer = types.Endpoint{ .node_id = public_id, .address = public_address };
+    _ = try table.upsertVerified(&public_peer, &public_record, 1);
+
+    var out: [3]enr.Record = undefined;
+    const selected = try table.findNodes(
+        &local_record,
+        address4(203, 0, 113, 1, 9_003),
+        &.{ 0, 255, 256 },
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+    try std.testing.expectEqual(public_id, selected[0].node_id);
 }
 
 test "routing table rejects inconsistent records and unusable endpoints" {

@@ -70,6 +70,7 @@ const Entry = struct {
     sent: bool = false,
     deadline_ms: u64,
     handshake_attempted: bool = false,
+    remote_public_key: ?[33]u8 = null,
 };
 
 pub const Table = struct {
@@ -110,6 +111,42 @@ pub const Table = struct {
         deadline_ms: u64,
         request_capacity: usize,
     ) Error!Handle {
+        return self.beginWithIdentity(peer, request, deadline_ms, request_capacity, null);
+    }
+
+    pub fn beginKnown(
+        self: *Table,
+        peer: types.Endpoint,
+        remote_public_key: *const [33]u8,
+        request: *const message.Message,
+        deadline_ms: u64,
+        request_capacity: usize,
+    ) Error!Handle {
+        return self.beginWithIdentity(
+            peer,
+            request,
+            deadline_ms,
+            request_capacity,
+            remote_public_key,
+        );
+    }
+
+    pub fn remotePublicKey(
+        self: *const Table,
+        handle: Handle,
+    ) ?[33]u8 {
+        const entry = self.get(handle) orelse return null;
+        return entry.remote_public_key;
+    }
+
+    fn beginWithIdentity(
+        self: *Table,
+        peer: types.Endpoint,
+        request: *const message.Message,
+        deadline_ms: u64,
+        request_capacity: usize,
+        remote_public_key: ?*const [33]u8,
+    ) Error!Handle {
         if (self.findNode(&peer.node_id) != null) return Error.PeerBusy;
         const expected = try expectedResponse(request);
         var encoded: [constants.ordinary_plaintext_size_max]u8 = undefined;
@@ -128,6 +165,7 @@ pub const Table = struct {
             .request = undefined,
             .request_length = @intCast(request_bytes.len),
             .deadline_ms = deadline_ms,
+            .remote_public_key = if (remote_public_key) |value| value.* else null,
         };
         @memcpy(entry.request[0..request_bytes.len], request_bytes);
         self.entries[index] = entry;
