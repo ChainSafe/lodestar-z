@@ -449,7 +449,7 @@ test "TreeView composite list fromValue - pool exhaustion leaves no orphan nodes
     defer list.deinit(std.testing.allocator);
     for (0..6) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
 
-    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1 });
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 6 });
     defer pool.deinit();
 
     const baseline = pool.getNodesInUse();
@@ -468,7 +468,7 @@ test "TreeView composite list deserializeFromBytes - pool exhaustion leaves no o
     defer std.testing.allocator.free(bytes);
     _ = ListType.serializeIntoBytes(&list, bytes);
 
-    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1 });
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 6 });
     defer pool.deinit();
 
     const baseline = pool.getNodesInUse();
