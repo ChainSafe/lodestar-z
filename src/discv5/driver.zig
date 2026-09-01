@@ -9,18 +9,21 @@ const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 
-pub const Error = lookup_mod.Error || runtime.ReceiveTimeoutError || runtime.ReleaseError ||
+pub const Error = engine.Error || runtime.ReceiveTimeoutError || runtime.ReleaseError ||
     runtime.SendError || std.Io.RandomSecureError || error{
     ClockOutOfRange,
     InvalidPollInterval,
     MissingExpiryStorage,
 };
 
+pub const LookupError = Error || lookup_mod.Error;
+
 pub const Config = struct {
     poll_interval_ms: u32 = 100,
 };
 
 pub const StepResult = struct {
+    now_ms: u64 = 0,
     event: engine.Event = .none,
     calls_expired: usize = 0,
     maintenance_expired: usize = 0,
@@ -28,9 +31,6 @@ pub const StepResult = struct {
     sessions_expired: usize = 0,
     standard_responses: u8 = 0,
     maintenance_started: bool = false,
-    lookup_started: u8 = 0,
-    lookup_responses: u8 = 0,
-    lookup_failures: u8 = 0,
 };
 
 pub const Driver = struct {
@@ -94,41 +94,45 @@ pub const Driver = struct {
         try self.udp.send(io, peer.address, self.output[0..packet_length]);
     }
 
+    pub fn startLookupCall(
+        self: *Self,
+        io: std.Io,
+        operation: *lookup_mod.Lookup,
+    ) LookupError!bool {
+        const now_ms = try monotonicMilliseconds(io);
+        const request_id = try randomRequestId(io);
+        var entropy = try startEntropy(io);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
+        const started = try operation.startNext(
+            self.core,
+            &self.output,
+            request_id,
+            now_ms,
+            entropy,
+        ) orelse return false;
+        self.udp.send(
+            io,
+            started.peer.address,
+            self.output[0..started.call.packet_length],
+        ) catch |err| {
+            operation.onFailure(self.core, started.call.handle) catch unreachable;
+            return err;
+        };
+        return true;
+    }
+
     /// The returned event borrows driver scratch and remains valid until the next step.
     pub fn step(
         self: *Self,
         io: std.Io,
         expired_calls: []calls.Expired,
     ) Error!StepResult {
-        return self.stepWithLookup(io, expired_calls, null);
-    }
-
-    /// Consumes only events and expiries owned by this lookup; all others remain returned.
-    /// Pass the same operation to every step while it has waiting calls.
-    pub fn stepLookup(
-        self: *Self,
-        io: std.Io,
-        operation: *lookup_mod.Lookup,
-        expired_calls: []calls.Expired,
-    ) Error!StepResult {
-        return self.stepWithLookup(io, expired_calls, operation);
-    }
-
-    fn stepWithLookup(
-        self: *Self,
-        io: std.Io,
-        expired_calls: []calls.Expired,
-        operation: ?*lookup_mod.Lookup,
-    ) Error!StepResult {
         if (expired_calls.len == 0) return error.MissingExpiryStorage;
         var result = StepResult{};
 
         var now_ms = try monotonicMilliseconds(io);
-        try self.tick(now_ms, expired_calls, operation, &result);
-        if (operation) |active| {
-            try self.startLookupCalls(io, active, now_ms, &result);
-            if (active.isFinished()) return result;
-        }
+        result.now_ms = now_ms;
+        self.tick(now_ms, expired_calls, &result);
         result.maintenance_started = try self.startMaintenance(io, now_ms);
 
         const timeout = std.Io.Timeout{ .duration = .{
@@ -138,10 +142,8 @@ pub const Driver = struct {
         const datagram = self.udp.receiveTimeout(io, timeout) catch |err| switch (err) {
             error.Timeout => {
                 now_ms = try monotonicMilliseconds(io);
-                try self.tick(now_ms, expired_calls, operation, &result);
-                if (operation) |active| {
-                    try self.startLookupCalls(io, active, now_ms, &result);
-                }
+                result.now_ms = now_ms;
+                self.tick(now_ms, expired_calls, &result);
                 if (!result.maintenance_started) {
                     result.maintenance_started = try self.startMaintenance(io, now_ms);
                 }
@@ -152,7 +154,8 @@ pub const Driver = struct {
         defer self.udp.release(datagram.handle) catch unreachable;
 
         now_ms = try monotonicMilliseconds(io);
-        try self.tick(now_ms, expired_calls, operation, &result);
+        result.now_ms = now_ms;
+        self.tick(now_ms, expired_calls, &result);
         var entropy = try receiveEntropy(io);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
         const outcome = try self.core.receive(
@@ -165,14 +168,7 @@ pub const Driver = struct {
         if (outcome.packet_length > 0) {
             try self.udp.send(io, datagram.from, self.output[0..outcome.packet_length]);
         }
-        const event = try self.handleEvent(io, outcome.event, now_ms, &result);
-        result.event = if (operation) |active|
-            try self.handleLookupEvent(active, event, now_ms, &result)
-        else
-            event;
-        if (operation) |active| {
-            try self.startLookupCalls(io, active, now_ms, &result);
-        }
+        result.event = try self.handleEvent(io, outcome.event, now_ms, &result);
         if (!result.maintenance_started) {
             result.maintenance_started = try self.startMaintenance(io, now_ms);
         }
@@ -183,24 +179,11 @@ pub const Driver = struct {
         self: *Self,
         now_ms: u64,
         expired_calls: []calls.Expired,
-        operation: ?*lookup_mod.Lookup,
         result: *StepResult,
-    ) Error!void {
+    ) void {
         const available = expired_calls[result.calls_expired..];
         const expired = self.core.tick(now_ms, available);
-        var retained: usize = 0;
-        for (available[0..expired.calls]) |item| {
-            if (operation) |active| {
-                if (active.ownsCall(item.handle)) {
-                    try active.onFailure(self.core, item.handle);
-                    result.lookup_failures += 1;
-                    continue;
-                }
-            }
-            available[retained] = item;
-            retained += 1;
-        }
-        result.calls_expired += retained;
+        result.calls_expired += expired.calls;
         result.maintenance_expired += expired.maintenance_calls;
         result.challenges_expired += expired.challenges;
         result.sessions_expired += expired.sessions;
@@ -237,58 +220,6 @@ pub const Driver = struct {
         }
         std.debug.assert(self.response.complete());
         return .none;
-    }
-
-    fn handleLookupEvent(
-        self: *Self,
-        operation: *lookup_mod.Lookup,
-        event: engine.Event,
-        now_ms: u64,
-        result: *StepResult,
-    ) Error!engine.Event {
-        const response = switch (event) {
-            .response => |response| response,
-            else => return event,
-        };
-        if (!operation.ownsCall(response.matched.handle)) return event;
-        try operation.onResponse(self.core, &response, now_ms);
-        result.lookup_responses += 1;
-        return .none;
-    }
-
-    fn startLookupCalls(
-        self: *Self,
-        io: std.Io,
-        operation: *lookup_mod.Lookup,
-        now_ms: u64,
-        result: *StepResult,
-    ) Error!void {
-        for (0..lookup_mod.parallelism) |_| {
-            if (operation.isFinished() or
-                operation.waitingCount() == lookup_mod.parallelism) return;
-            const request_id = try randomRequestId(io);
-            var entropy = try startEntropy(io);
-            defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
-            const started = operation.startNext(
-                self.core,
-                &self.output,
-                request_id,
-                now_ms,
-                entropy,
-            ) catch |err| switch (err) {
-                calls.Error.PeerBusy, calls.Error.TableFull => return,
-                else => return err,
-            } orelse return;
-            self.udp.send(
-                io,
-                started.peer.address,
-                self.output[0..started.call.packet_length],
-            ) catch |err| {
-                operation.onFailure(self.core, started.call.handle) catch unreachable;
-                return err;
-            };
-            result.lookup_started += 1;
-        }
     }
 
     fn startMaintenance(self: *Self, io: std.Io, now_ms: u64) Error!bool {
