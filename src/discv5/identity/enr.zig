@@ -24,6 +24,32 @@ pub const Record = struct {
     udp: ?u16,
     udp6: ?u16,
 
+    pub fn create(
+        key_pair: *const crypto.KeyPair,
+        sequence: u64,
+        endpoint_value: types.Address,
+    ) Error!Record {
+        if (!validEndpoint(endpoint_value)) return Error.InvalidRecord;
+        const public_key = crypto.compressedPublicKey(key_pair);
+
+        var content_buffer: [constants.enr_size_max]u8 = undefined;
+        var content_writer = rlp.Writer.init(&content_buffer);
+        const content = try content_writer.beginList();
+        try writeFields(&content_writer, sequence, endpoint_value, &public_key);
+        content_writer.finishList(content);
+        var digest: [32]u8 = undefined;
+        Keccak256.hash(content_writer.bytes(), &digest, .{});
+        const signature = try crypto.sign(&digest, key_pair);
+
+        var record_buffer: [constants.enr_size_max]u8 = undefined;
+        var record_writer = rlp.Writer.init(&record_buffer);
+        const record = try record_writer.beginList();
+        try record_writer.writeBytes(&signature);
+        try writeFields(&record_writer, sequence, endpoint_value, &public_key);
+        record_writer.finishList(record);
+        return Record.init(record_writer.bytes());
+    }
+
     pub fn init(data: []const u8) Error!Record {
         if (data.len > constants.enr_size_max) return Error.InvalidRecord;
         const parsed = try parse(data);
@@ -42,6 +68,18 @@ pub const Record = struct {
         return record;
     }
 
+    pub fn initText(text: []const u8) Error!Record {
+        if (!std.mem.startsWith(u8, text, "enr:")) return Error.InvalidRecord;
+        const encoded = text[4..];
+        const decoded_size = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(encoded) catch
+            return Error.InvalidRecord;
+        if (decoded_size > constants.enr_size_max) return Error.InvalidRecord;
+        var decoded: [constants.enr_size_max]u8 = undefined;
+        std.base64.url_safe_no_pad.Decoder.decode(decoded[0..decoded_size], encoded) catch
+            return Error.InvalidRecord;
+        return Record.init(decoded[0..decoded_size]);
+    }
+
     pub fn slice(self: *const Record) []const u8 {
         std.debug.assert(self.length <= self.bytes.len);
         return self.bytes[0..self.length];
@@ -57,6 +95,53 @@ pub const Record = struct {
         return null;
     }
 };
+
+fn writeFields(
+    writer: *rlp.Writer,
+    sequence: u64,
+    endpoint_value: types.Address,
+    public_key: *const [33]u8,
+) rlp.Error!void {
+    try writer.writeUint(sequence);
+    try writer.writeBytes("id");
+    try writer.writeBytes("v4");
+    switch (endpoint_value) {
+        .ip4 => |address| {
+            try writer.writeBytes("ip");
+            try writer.writeBytes(&address.octets);
+        },
+        .ip6 => |address| {
+            try writer.writeBytes("ip6");
+            try writer.writeBytes(&address.octets);
+        },
+    }
+    try writer.writeBytes("secp256k1");
+    try writer.writeBytes(public_key);
+    switch (endpoint_value) {
+        .ip4 => |address| {
+            try writer.writeBytes("udp");
+            try writer.writeUint(address.port);
+        },
+        .ip6 => |address| {
+            try writer.writeBytes("udp6");
+            try writer.writeUint(address.port);
+        },
+    }
+}
+
+fn validEndpoint(endpoint_value: types.Address) bool {
+    return switch (endpoint_value) {
+        .ip4 => |address| address.port != 0 and !allZero(&address.octets),
+        .ip6 => |address| address.port != 0 and !allZero(&address.octets),
+    };
+}
+
+fn allZero(bytes: []const u8) bool {
+    for (bytes) |byte| {
+        if (byte != 0) return false;
+    }
+    return true;
+}
 
 const Parsed = struct {
     sequence: u64,

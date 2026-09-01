@@ -132,7 +132,7 @@ test "EIP-778 record validates signature identity and endpoint" {
         "enr:-IS4QHCYrYZbAKWCBRlAy5zzaDZXJBGkcnh4MHcBFZntXNFrdvJjX04jRzjzCBOo" ++
         "nrkTfj499SZuOh8R33Ls8RRcy5wBgmlkgnY0gmlwhH8AAAGJc2VjcDI1NmsxoQPK" ++
         "Y0yuDUmstAHYpMa2_oxVtw0RW_QAdpzBQA8yWM0xOIN1ZHCCdl8";
-    const record = try recordFromText(text);
+    const record = try enr.Record.initText(text);
     const expected_id = hexBytes(
         32,
         "a448f24c6d18e575453db13171562b71999873db5b286df957af199ec94617f7",
@@ -158,15 +158,33 @@ test "EIP-778 record validates signature identity and endpoint" {
     );
 }
 
-fn recordFromText(text: []const u8) !enr.Record {
-    if (!std.mem.startsWith(u8, text, "enr:")) return error.InvalidText;
-    const encoded = text[4..];
-    const size = try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(encoded);
-    if (size > @import("../wire/constants.zig").enr_size_max)
-        return error.InvalidText;
-    var raw: [@import("../wire/constants.zig").enr_size_max]u8 = undefined;
-    try std.base64.url_safe_no_pad.Decoder.decode(raw[0..size], encoded);
-    return enr.Record.init(raw[0..size]);
+test "EIP-778 record creation round-trips IPv4 and IPv6 endpoints" {
+    const key_pair = try crypto.keyPairFromSecret(&([_]u8{0x42} ** 32));
+    const endpoints = [_]@import("../types.zig").Address{
+        .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_000 } },
+        .{ .ip6 = .{
+            .octets = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+            .port = 9_001,
+        } },
+    };
+    for (endpoints) |endpoint| {
+        const record = try enr.Record.create(&key_pair, 7, endpoint);
+        try std.testing.expectEqual(@as(u64, 7), record.sequence);
+        try std.testing.expectEqual(endpoint, record.endpoint().?);
+        try std.testing.expectEqual(
+            crypto.compressedPublicKey(&key_pair),
+            record.public_key,
+        );
+    }
+
+    try std.testing.expectError(
+        enr.Error.InvalidRecord,
+        enr.Record.create(
+            &key_pair,
+            1,
+            .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 0 } },
+        ),
+    );
 }
 
 fn hexBytes(comptime length: usize, comptime encoded: []const u8) [length]u8 {
