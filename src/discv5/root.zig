@@ -1,4 +1,5 @@
 pub const calls = @import("calls.zig");
+pub const driver = @import("driver.zig");
 pub const engine = @import("engine.zig");
 pub const identity = @import("identity/root.zig");
 pub const lookup = @import("lookup.zig");
@@ -11,6 +12,7 @@ pub const wire = @import("wire/root.zig");
 
 test {
     _ = calls;
+    _ = driver;
     _ = engine;
     _ = identity;
     _ = lookup;
@@ -21,6 +23,7 @@ test {
     _ = types;
     _ = wire;
     _ = @import("calls_test.zig");
+    _ = @import("driver_test.zig");
     _ = @import("engine_test.zig");
     _ = @import("lookup_test.zig");
     _ = @import("routing_test.zig");

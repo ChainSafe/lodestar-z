@@ -20,6 +20,12 @@ pub const ReceiveError = net.Socket.ReceiveError || error{
     GenerationExhausted,
 };
 
+pub const ReceiveTimeoutError = net.Socket.ReceiveTimeoutError || error{
+    AdmissionUnavailable,
+    DatagramTooLarge,
+    GenerationExhausted,
+};
+
 pub const ReleaseError = error{
     StaleDatagram,
 };
@@ -56,9 +62,23 @@ pub const Udp = struct {
 
     pub fn receive(self: *Self, io: std.Io) ReceiveError!Datagram {
         if (self.admitted != null) return error.AdmissionUnavailable;
+        const incoming = try self.socket.receive(io, &self.buffer);
+        return self.admit(incoming);
+    }
+
+    pub fn receiveTimeout(
+        self: *Self,
+        io: std.Io,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!Datagram {
+        if (self.admitted != null) return error.AdmissionUnavailable;
+        const incoming = try self.socket.receiveTimeout(io, &self.buffer, timeout);
+        return self.admit(incoming);
+    }
+
+    fn admit(self: *Self, incoming: net.IncomingMessage) ReceiveError!Datagram {
         const successor = std.math.add(u64, self.next_generation, 1) catch
             return error.GenerationExhausted;
-        const incoming = try self.socket.receive(io, &self.buffer);
         if (incoming.flags.trunc) return error.DatagramTooLarge;
         std.debug.assert(incoming.data.len <= self.buffer.len);
         const generation = self.next_generation;

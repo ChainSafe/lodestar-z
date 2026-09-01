@@ -33,6 +33,8 @@ test "routing table revalidates the least recent entry before replacement" {
     const first_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 20);
     try expectPending(first_pending, &ids[0]);
     try std.testing.expectEqual(@as(usize, 1), table.pendingCount());
+    const first_target = table.revalidationTarget().?;
+    try std.testing.expectEqualSlices(u8, &ids[0], &first_target.peer.node_id);
 
     var first_record = makeRecord(ids[0], address4(10, 1, 0, 1, 9_000), 1);
     const first_peer = types.Endpoint{ .node_id = ids[0], .address = first_record.endpoint().? };
@@ -41,6 +43,7 @@ test "routing table revalidates the least recent entry before replacement" {
         try table.upsertVerified(&first_peer, &first_record, 21),
     );
     try std.testing.expectEqual(@as(usize, 0), table.pendingCount());
+    try std.testing.expect(table.revalidationTarget() == null);
 
     const second_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 22);
     try expectPending(second_pending, &ids[1]);

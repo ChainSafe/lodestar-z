@@ -51,6 +51,18 @@ pub const StartResult = struct {
     packet_length: u16,
 };
 
+pub const RevalidationStart = struct {
+    peer: types.Endpoint,
+    call: StartResult,
+};
+
+pub const TickResult = struct {
+    calls: usize,
+    maintenance_calls: usize,
+    challenges: usize,
+    sessions: usize,
+};
+
 pub const AuthenticatedRequest = struct {
     peer: types.Endpoint,
     message: message.Message,
@@ -73,7 +85,6 @@ pub const Event = union(enum) {
 pub const Outcome = struct {
     packet_length: u16 = 0,
     event: Event = .none,
-    revalidate: ?types.NodeId = null,
 };
 
 pub const Scratch = struct {
@@ -170,7 +181,15 @@ pub const Engine = struct {
         now_ms: u64,
         entropy: StartEntropy,
     ) Error!StartResult {
-        return self.startCallWithIdentity(out, peer, null, request, now_ms, entropy);
+        return self.startCallWithIdentity(
+            out,
+            peer,
+            null,
+            request,
+            now_ms,
+            entropy,
+            .caller,
+        );
     }
 
     pub fn startCallKnown(
@@ -191,7 +210,32 @@ pub const Engine = struct {
             request,
             now_ms,
             entropy,
+            .caller,
         );
+    }
+
+    pub fn startRevalidation(
+        self: *Self,
+        out: []u8,
+        request_id: message.RequestId,
+        now_ms: u64,
+        entropy: StartEntropy,
+    ) Error!?RevalidationStart {
+        const target = self.routing.revalidationTarget() orelse return null;
+        const request = message.Message{ .ping = .{
+            .request_id = request_id,
+            .enr_sequence = self.local_record.sequence,
+        } };
+        const call = try self.startCallWithIdentity(
+            out,
+            target.peer,
+            &target.record.public_key,
+            &request,
+            now_ms,
+            entropy,
+            .routing_revalidation,
+        );
+        return .{ .peer = target.peer, .call = call };
     }
 
     fn startCallWithIdentity(
@@ -202,6 +246,7 @@ pub const Engine = struct {
         request: *const message.Message,
         now_ms: u64,
         entropy: StartEntropy,
+        owner: calls_mod.Owner,
     ) Error!StartResult {
         const deadline_ms = try deadline(now_ms, self.config.request_timeout_ms);
         const has_session = self.sessions.hasSession(peer);
@@ -209,21 +254,30 @@ pub const Engine = struct {
             constants.ordinary_plaintext_size_max
         else
             try packet.handshakePlaintextCapacity(self.local_record.length);
-        const handle = (if (remote_public_key) |public_key|
-            self.calls.beginKnown(
+        const handle = (switch (owner) {
+            .caller => if (remote_public_key) |public_key|
+                self.calls.beginKnown(
+                    peer,
+                    public_key,
+                    request,
+                    deadline_ms,
+                    request_capacity,
+                )
+            else
+                self.calls.begin(
+                    peer,
+                    request,
+                    deadline_ms,
+                    request_capacity,
+                ),
+            .routing_revalidation => self.calls.beginRevalidation(
                 peer,
-                public_key,
+                remote_public_key orelse unreachable,
                 request,
                 deadline_ms,
                 request_capacity,
-            )
-        else
-            self.calls.begin(
-                peer,
-                request,
-                deadline_ms,
-                request_capacity,
-            )) catch |err| switch (err) {
+            ),
+        }) catch |err| switch (err) {
             calls_mod.Error.RequestTooLarge => if (has_session)
                 return err
             else
@@ -379,10 +433,31 @@ pub const Engine = struct {
     pub fn tick(
         self: *Self,
         now_ms: u64,
-        expired_calls: []calls_mod.Handle,
-    ) struct { calls: usize, challenges: usize, sessions: usize } {
+        expired_calls: []calls_mod.Expired,
+    ) TickResult {
+        const expired_count = self.calls.expire(now_ms, expired_calls);
+        var caller_count: usize = 0;
+        var maintenance_count: usize = 0;
+        for (expired_calls[0..expired_count]) |expired| switch (expired.owner) {
+            .caller => {
+                expired_calls[caller_count] = expired;
+                caller_count += 1;
+            },
+            .routing_revalidation => {
+                _ = self.routing.resolveRevalidation(
+                    &expired.peer.node_id,
+                    false,
+                    now_ms,
+                ) catch |err| switch (err) {
+                    routing_mod.Error.NoPendingRevalidation => {},
+                    else => unreachable,
+                };
+                maintenance_count += 1;
+            },
+        };
         return .{
-            .calls = self.calls.expire(now_ms, expired_calls),
+            .calls = caller_count,
+            .maintenance_calls = maintenance_count,
             .challenges = self.sessions.expireChallenges(
                 now_ms,
                 self.config.challenge_timeout_ms,
@@ -424,6 +499,10 @@ pub const Engine = struct {
         return self.routing.closest(target, out);
     }
 
+    pub fn hasPendingRevalidation(self: *const Self) bool {
+        return self.routing.revalidationTarget() != null;
+    }
+
     fn receiveOrdinary(
         self: *Self,
         out: []u8,
@@ -458,10 +537,8 @@ pub const Engine = struct {
             args.now_ms,
             scratch,
         );
-        return .{
-            .event = event,
-            .revalidate = self.routeAuthenticated(peer, null, args.now_ms),
-        };
+        self.routeAuthenticated(peer, null, args.now_ms);
+        return .{ .event = event };
     }
 
     fn issueChallenge(
@@ -658,10 +735,8 @@ pub const Engine = struct {
         };
         defer std.crypto.secureZero(u8, std.mem.asBytes(&active));
         self.sessions.install(peer, &active, args.now_ms);
-        return .{
-            .event = event,
-            .revalidate = self.routeAuthenticated(peer, &records.selected, args.now_ms),
-        };
+        self.routeAuthenticated(peer, &records.selected, args.now_ms);
+        return .{ .event = event };
     }
 
     fn dispatch(
@@ -707,6 +782,11 @@ pub const Engine = struct {
             now_ms,
             scratch.node_ids[0..parsed_records.len],
         );
+        if (match_result.owner == .routing_revalidation) {
+            std.debug.assert(match_result.matched.terminal);
+            std.debug.assert(match_result.matched.response == .pong);
+            return .none;
+        }
         var matched = match_result.matched;
         const node_records = if (parsed_records.len == 0)
             parsed_records
@@ -733,18 +813,14 @@ pub const Engine = struct {
         peer: types.Endpoint,
         supplied_record: ?*const enr.Record,
         now_ms: u64,
-    ) ?types.NodeId {
+    ) void {
         var stored_record: ?enr.Record = null;
         const record = supplied_record orelse blk: {
-            const entry = self.routing.get(&peer.node_id) orelse return null;
+            const entry = self.routing.get(&peer.node_id) orelse return;
             stored_record = entry.record;
             break :blk &stored_record.?;
         };
-        const result = self.routing.upsertVerified(&peer, record, now_ms) catch return null;
-        return switch (result) {
-            .pending => |node_id| node_id,
-            else => null,
-        };
+        _ = self.routing.upsertVerified(&peer, record, now_ms) catch return;
     }
 };
 

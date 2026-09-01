@@ -94,6 +94,16 @@ pub const Table = struct {
         return count_value;
     }
 
+    pub fn revalidationTarget(self: *const Self) ?Entry {
+        for (self.pending, 0..) |candidate, index| {
+            const pending = candidate orelse continue;
+            const position = self.findInBucket(index, &pending.replace_id) orelse
+                unreachable;
+            return self.bucketEntries(index)[position];
+        }
+        return null;
+    }
+
     pub fn contains(self: *const Self, node_id: *const types.NodeId) bool {
         const index = bucketIndex(types.logDistance(&self.local_id, node_id));
         return self.findInBucket(index, node_id) != null;

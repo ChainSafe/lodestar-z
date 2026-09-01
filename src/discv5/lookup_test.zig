@@ -5,8 +5,8 @@ const enr = @import("identity/enr.zig");
 const lookup = @import("lookup.zig");
 const message = @import("wire/message.zig");
 const routing = @import("routing.zig");
-const rlp = @import("wire/rlp.zig");
 const session = @import("session.zig");
+const test_support = @import("test_support.zig");
 const types = @import("types.zig");
 
 test "lookup requests the target distance and adjacent buckets" {
@@ -245,7 +245,11 @@ test "empty lookup finishes without creating a call" {
 
 fn initEngine() !engine.Engine {
     const key = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-    const local_record = try buildRecord(&key, address4(203, 0, 113, 1, 9_000));
+    const local_record = try test_support.buildRecord(
+        &key,
+        1,
+        address4(203, 0, 113, 1, 9_000),
+    );
     var core: engine.Engine = undefined;
     try core.initWithConfig(std.testing.allocator, key, local_record, .{
         .session_capacity = 8,
@@ -329,43 +333,6 @@ fn installSession(core: *engine.Engine, peer: types.Endpoint) void {
     const key = [_]u8{0x55} ** 16;
     const active = session.Session{ .read_key = key, .write_key = key };
     core.sessions.install(peer, &active, 0);
-}
-
-fn buildRecord(
-    key_pair: *const crypto.KeyPair,
-    endpoint: types.Address,
-) !enr.Record {
-    const ip4 = endpoint.ip4;
-    const public_key = crypto.compressedPublicKey(key_pair);
-    var content_buffer: [300]u8 = undefined;
-    var content_writer = rlp.Writer.init(&content_buffer);
-    const content = try content_writer.beginList();
-    try content_writer.writeUint(1);
-    try content_writer.writeBytes("id");
-    try content_writer.writeBytes("v4");
-    try content_writer.writeBytes("ip");
-    try content_writer.writeBytes(&ip4.octets);
-    try content_writer.writeBytes("secp256k1");
-    try content_writer.writeBytes(&public_key);
-    try content_writer.writeBytes("udp");
-    try content_writer.writeUint(ip4.port);
-    content_writer.finishList(content);
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash(content_writer.bytes(), &digest, .{});
-    const signature = try crypto.sign(&digest, key_pair);
-
-    var full_buffer: [300]u8 = undefined;
-    var full_writer = rlp.Writer.init(&full_buffer);
-    const full = try full_writer.beginList();
-    try full_writer.writeBytes(&signature);
-    var content_reader = rlp.Reader.init(content_writer.bytes());
-    var fields = try content_reader.readList();
-    for (0..16) |_| {
-        if (fields.atEnd()) break;
-        try full_writer.writeRawItem(try fields.readRawItem());
-    }
-    full_writer.finishList(full);
-    return enr.Record.init(full_writer.bytes());
 }
 
 fn startEntropy(seed: u8) engine.StartEntropy {

@@ -146,9 +146,10 @@ test "expiry is bounded by caller output and removes exact generations" {
     const ping = pingRequest(1);
     const first = try begin(&table, endpoint(1, 9_001), &ping, 10);
     _ = try begin(&table, endpoint(2, 9_002), &ping, 10);
-    var expired: [1]calls.Handle = undefined;
+    var expired: [1]calls.Expired = undefined;
     try std.testing.expectEqual(@as(usize, 1), table.expire(10, &expired));
-    try std.testing.expectEqual(first, expired[0]);
+    try std.testing.expectEqual(first, expired[0].handle);
+    try std.testing.expectEqual(calls.Owner.caller, expired[0].owner);
     try std.testing.expectEqual(@as(usize, 1), table.count());
     try std.testing.expectEqual(@as(usize, 1), table.expire(10, &expired));
     try std.testing.expectEqual(@as(usize, 0), table.count());

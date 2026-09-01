@@ -34,6 +34,11 @@ pub const Response = union(enum) {
     talk_response: message.TalkResponse,
 };
 
+pub const Owner = enum {
+    caller,
+    routing_revalidation,
+};
+
 pub const Matched = struct {
     handle: Handle,
     response: Response,
@@ -43,6 +48,13 @@ pub const Matched = struct {
 pub const MatchResult = struct {
     matched: Matched,
     accepted_node_mask: u16 = 0,
+    owner: Owner,
+};
+
+pub const Expired = struct {
+    handle: Handle,
+    peer: types.Endpoint,
+    owner: Owner,
 };
 
 const NodesState = struct {
@@ -64,6 +76,7 @@ const Entry = struct {
     peer: types.Endpoint,
     request_id: message.RequestId,
     expected: Expected,
+    owner: Owner,
     request: [constants.ordinary_plaintext_size_max]u8,
     request_length: u16,
     sent_nonce: [constants.nonce_size]u8 = undefined,
@@ -111,7 +124,14 @@ pub const Table = struct {
         deadline_ms: u64,
         request_capacity: usize,
     ) Error!Handle {
-        return self.beginWithIdentity(peer, request, deadline_ms, request_capacity, null);
+        return self.beginWithIdentity(
+            peer,
+            request,
+            deadline_ms,
+            request_capacity,
+            null,
+            .caller,
+        );
     }
 
     pub fn beginKnown(
@@ -128,6 +148,26 @@ pub const Table = struct {
             deadline_ms,
             request_capacity,
             remote_public_key,
+            .caller,
+        );
+    }
+
+    pub fn beginRevalidation(
+        self: *Table,
+        peer: types.Endpoint,
+        remote_public_key: *const [33]u8,
+        request: *const message.Message,
+        deadline_ms: u64,
+        request_capacity: usize,
+    ) Error!Handle {
+        if (request.* != .ping) return Error.UnexpectedResponse;
+        return self.beginWithIdentity(
+            peer,
+            request,
+            deadline_ms,
+            request_capacity,
+            remote_public_key,
+            .routing_revalidation,
         );
     }
 
@@ -146,6 +186,7 @@ pub const Table = struct {
         deadline_ms: u64,
         request_capacity: usize,
         remote_public_key: ?*const [33]u8,
+        owner: Owner,
     ) Error!Handle {
         if (self.findNode(&peer.node_id) != null) return Error.PeerBusy;
         const expected = try expectedResponse(request);
@@ -162,6 +203,7 @@ pub const Table = struct {
             .peer = peer,
             .request_id = request.requestId(),
             .expected = expected,
+            .owner = owner,
             .request = undefined,
             .request_length = @intCast(request_bytes.len),
             .deadline_ms = deadline_ms,
@@ -258,15 +300,19 @@ pub const Table = struct {
         return true;
     }
 
-    pub fn expire(self: *Table, now_ms: u64, out: []Handle) usize {
+    pub fn expire(self: *Table, now_ms: u64, out: []Expired) usize {
         var expired_count: usize = 0;
         for (self.entries, 0..) |*slot, index| {
             if (expired_count == out.len) break;
             const entry = slot.* orelse continue;
             if (now_ms < entry.deadline_ms) continue;
             out[expired_count] = .{
-                .index = @intCast(index),
-                .generation = entry.generation,
+                .handle = .{
+                    .index = @intCast(index),
+                    .generation = entry.generation,
+                },
+                .peer = entry.peer,
+                .owner = entry.owner,
             };
             expired_count += 1;
             clearEntry(slot);
@@ -320,6 +366,7 @@ pub const Table = struct {
                 .terminal = terminal,
             },
             .accepted_node_mask = accepted_nodes,
+            .owner = self.entries[index].?.owner,
         };
         if (terminal) clearEntry(&self.entries[index]);
         return result;
@@ -331,12 +378,13 @@ pub const Table = struct {
         handle: Handle,
         response: Response,
     ) MatchResult {
+        const owner = self.entries[index].?.owner;
         clearEntry(&self.entries[index]);
         return .{ .matched = .{
             .handle = handle,
             .response = response,
             .terminal = true,
-        } };
+        }, .owner = owner };
     }
 
     fn availableIndex(self: *const Table) Error!usize {
