@@ -290,7 +290,7 @@ fn completeNodes(
         .record = null,
         .node_records = records,
     };
-    _ = try operation.onResponse(core, &response, now_ms);
+    try operation.onResponse(core, &response, now_ms);
 }
 
 fn fakeEntry(id: u8) routing.Entry {
