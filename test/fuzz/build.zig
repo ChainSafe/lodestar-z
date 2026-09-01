@@ -80,6 +80,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "bls_signature", .extra_libs = &.{dep_blst.artifact("blst")} },
         .{ .name = "bls_aggregate_pk", .extra_libs = &.{dep_blst.artifact("blst")} },
         .{ .name = "bls_aggregate_sig", .extra_libs = &.{dep_blst.artifact("blst")} },
+        .{ .name = "discv5_wire" },
     };
 
     inline for (fuzzers) |fuzzer| {
@@ -101,6 +102,7 @@ pub fn build(b: *std.Build) void {
         );
         lib_mod.addImport("preset", lodestar_z.module("preset"));
         lib_mod.addImport("constants", lodestar_z.module("constants"));
+        lib_mod.addImport("discv5", lodestar_z.module("discv5"));
         lib_mod.addImport(
             "persistent_merkle_tree",
             lodestar_z.module("persistent_merkle_tree"),

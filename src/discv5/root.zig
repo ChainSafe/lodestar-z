@@ -3,6 +3,7 @@ pub const driver = @import("driver.zig");
 pub const engine = @import("engine.zig");
 pub const identity = @import("identity/root.zig");
 pub const lookup = @import("lookup.zig");
+pub const lookup_driver = @import("lookup_driver.zig");
 pub const protocol = @import("protocol.zig");
 pub const routing = @import("routing.zig");
 pub const runtime = @import("runtime.zig");
@@ -16,6 +17,7 @@ test {
     _ = engine;
     _ = identity;
     _ = lookup;
+    _ = lookup_driver;
     _ = protocol;
     _ = routing;
     _ = runtime;
