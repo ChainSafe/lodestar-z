@@ -20,6 +20,9 @@ era_number: u64,
 short_era_root: [8]u8,
 /// An array of state and block indices, one per group
 group_indices: []era.GroupIndex,
+/// Persistent merkle tree pool used by TreeViews (must outlive returned views)
+pool: *Node.Pool,
+
 const Reader = @This();
 
 pub fn open(allocator: std.mem.Allocator, io: std.Io, config: c.BeaconConfig, path: []const u8) !Reader {
@@ -37,6 +40,15 @@ pub fn open(allocator: std.mem.Allocator, io: std.Io, config: c.BeaconConfig, pa
         allocator.free(group_indices);
     }
 
+    const pool = try allocator.create(Node.Pool);
+    errdefer allocator.destroy(pool);
+    pool.* = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 10_000_000,
+    });
+    errdefer pool.deinit();
+
     return .{
         .config = config,
         .file = file,
@@ -44,6 +56,7 @@ pub fn open(allocator: std.mem.Allocator, io: std.Io, config: c.BeaconConfig, pa
         .era_number = era_file_name.era_number,
         .short_era_root = era_file_name.short_era_root,
         .group_indices = group_indices,
+        .pool = pool,
     };
 }
 
@@ -56,6 +69,9 @@ pub fn close(self: *Reader, allocator: std.mem.Allocator) void {
         }
     }
     allocator.free(self.group_indices);
+
+    self.pool.deinit();
+    allocator.destroy(self.pool);
 
     self.* = undefined;
 }
@@ -83,19 +99,14 @@ pub fn readSerializedState(self: Reader, allocator: std.mem.Allocator, era_numbe
     return try snappy.uncompress(allocator, compressed) orelse error.InvalidE2SHeader;
 }
 
-pub fn readState(
-    self: Reader,
-    allocator: std.mem.Allocator,
-    pool: *Node.Pool,
-    era_number: ?u64,
-) !fork_types.AnyBeaconState {
+pub fn readState(self: Reader, allocator: std.mem.Allocator, era_number: ?u64) !fork_types.AnyBeaconState {
     const serialized = try self.readSerializedState(allocator, era_number);
     defer allocator.free(serialized);
 
     const state_slot = fork_types.readSlotFromAnyBeaconStateBytes(serialized);
     const state_fork = self.config.forkSeq(state_slot);
 
-    return try fork_types.AnyBeaconState.deserialize(allocator, pool, state_fork, serialized);
+    return try fork_types.AnyBeaconState.deserialize(allocator, self.pool, state_fork, serialized);
 }
 
 pub fn readCompressedBlock(self: Reader, allocator: std.mem.Allocator, slot: u64) !?[]const u8 {
@@ -142,7 +153,7 @@ pub fn readBlock(self: Reader, allocator: std.mem.Allocator, slot: u64) !?fork_t
 /// - era range correctness
 /// - network correctness for state and blocks
 /// - TODO block root and signature matches
-pub fn validate(self: Reader, allocator: std.mem.Allocator, pool: *Node.Pool) !void {
+pub fn validate(self: Reader, allocator: std.mem.Allocator) !void {
     for (self.group_indices, 0..) |index, group_index| {
         const era_number = self.era_number + group_index;
 
@@ -163,7 +174,7 @@ pub fn validate(self: Reader, allocator: std.mem.Allocator, pool: *Node.Pool) !v
 
         // validate state
         // the state is loadable and consistent with the given config
-        var state = try self.readState(allocator, pool, era_number);
+        var state = try self.readState(allocator, era_number);
         defer state.deinit();
 
         if (!std.mem.eql(u8, &self.config.genesis_validator_root, try state.genesisValidatorsRoot())) {

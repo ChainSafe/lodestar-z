@@ -404,7 +404,6 @@
                     .config,
                     .download_era_options,
                     .era,
-                    .persistent_merkle_tree,
                 },
             },
         },

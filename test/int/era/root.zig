@@ -2,18 +2,10 @@ const std = @import("std");
 const era = @import("era");
 const download_era_options = @import("download_era_options");
 const c = @import("config");
-const Node = @import("persistent_merkle_tree").Node;
 
 const allocator = std.testing.allocator;
 
 test "validate an existing era file" {
-    var pool = try Node.Pool.init(.{
-        .page_allocator = allocator,
-        .allocator = allocator,
-        .pool_size = 10_000_000,
-    });
-    defer pool.deinit();
-
     const era_path = try std.fs.path.join(
         allocator,
         &[_][]const u8{ download_era_options.era_out_dir, download_era_options.era_files[0] },
@@ -31,17 +23,10 @@ test "validate an existing era file" {
     defer reader.close(allocator);
 
     // Main validation
-    try reader.validate(allocator, &pool);
+    try reader.validate(allocator);
 }
 
 test "write an era file from an existing era file" {
-    var pool = try Node.Pool.init(.{
-        .page_allocator = allocator,
-        .allocator = allocator,
-        .pool_size = 10_000_000,
-    });
-    defer pool.deinit();
-
     const era_path = try std.fs.path.join(
         allocator,
         &[_][]const u8{ download_era_options.era_out_dir, download_era_options.era_files[0] },
@@ -77,7 +62,7 @@ test "write an era file from an existing era file" {
 
         try writer.writeBlock(allocator, block);
     }
-    var state = try reader.readState(allocator, &pool, null);
+    var state = try reader.readState(allocator, null);
     defer state.deinit();
 
     try writer.writeState(allocator, state);
@@ -114,7 +99,7 @@ test "write an era file from an existing era file" {
         }
     }
     // Compare state
-    var out_state = try out_reader.readState(allocator, &pool, null);
+    var out_state = try out_reader.readState(allocator, null);
     defer out_state.deinit();
 
     const serialized = try state.serialize(allocator);
