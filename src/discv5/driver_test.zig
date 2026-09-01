@@ -4,6 +4,8 @@ const crypto = @import("identity/crypto.zig");
 const driver = @import("driver.zig");
 const engine = @import("engine.zig");
 const enr = @import("identity/enr.zig");
+const lookup = @import("lookup.zig");
+const message = @import("wire/message.zig");
 const routing = @import("routing.zig");
 const runtime = @import("runtime.zig");
 const session = @import("session.zig");
@@ -28,7 +30,7 @@ test "driver rejects invalid polling and missing expiry storage" {
 
 test "driver retains a routing incumbent that answers revalidation" {
     var pair: Pair = undefined;
-    try pair.init(1_000);
+    try pair.init(1_000, true);
     defer pair.deinit();
     try pair.fillBucket();
 
@@ -54,7 +56,7 @@ test "driver retains a routing incumbent that answers revalidation" {
 
 test "driver replaces a routing incumbent when revalidation expires" {
     var pair: Pair = undefined;
-    try pair.init(1);
+    try pair.init(1, true);
     defer pair.deinit();
     try pair.fillBucket();
 
@@ -69,6 +71,151 @@ test "driver replaces a routing incumbent when revalidation expires" {
     try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
 }
 
+test "driver completes a cold call through challenge and handshake" {
+    var pair: Pair = undefined;
+    try pair.init(1_000, false);
+    defer pair.deinit();
+
+    const request = message.Message{ .ping = .{
+        .request_id = try message.RequestId.init(&.{0x42}),
+        .enr_sequence = pair.record_a.sequence,
+    } };
+    const handle = try pair.driver_a.startCallKnown(
+        std.testing.io,
+        endpoint(&pair.record_b),
+        &pair.record_b,
+        &request,
+    );
+    var expired: [4]calls.Expired = undefined;
+    try std.testing.expect((try pair.driver_b.step(std.testing.io, &expired)).event == .none);
+    try std.testing.expect((try pair.driver_a.step(std.testing.io, &expired)).event == .none);
+    const request_step = try pair.driver_b.step(std.testing.io, &expired);
+    try std.testing.expectEqual(@as(u8, 1), request_step.standard_responses);
+    const response_step = try pair.driver_a.step(std.testing.io, &expired);
+    try std.testing.expect(response_step.event == .response);
+    try std.testing.expectEqual(handle, response_step.event.response.matched.handle);
+    try std.testing.expect(response_step.event.response.matched.response == .pong);
+    try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
+}
+
+test "driver leaves TALK response policy with the application" {
+    var pair: Pair = undefined;
+    try pair.init(1_000, true);
+    defer pair.deinit();
+
+    const request_id = try message.RequestId.init(&.{0x43});
+    const request = message.Message{ .talk_request = .{
+        .request_id = request_id,
+        .protocol = "test",
+        .request = "request",
+    } };
+    const handle = try pair.driver_a.startCall(
+        std.testing.io,
+        endpoint(&pair.record_b),
+        &request,
+    );
+    var expired: [4]calls.Expired = undefined;
+    const received = try pair.driver_b.step(std.testing.io, &expired);
+    try std.testing.expect(received.event == .request);
+    try std.testing.expect(received.event.request.message == .talk_request);
+    try std.testing.expectEqual(@as(u8, 0), received.standard_responses);
+
+    const response = message.Message{ .talk_response = .{
+        .request_id = request_id,
+        .response = "response",
+    } };
+    try pair.driver_b.sendResponse(
+        std.testing.io,
+        endpoint(&pair.record_a),
+        &response,
+    );
+    const completed = try pair.driver_a.step(std.testing.io, &expired);
+    try std.testing.expect(completed.event == .response);
+    try std.testing.expectEqual(handle, completed.event.response.matched.handle);
+    try std.testing.expectEqualStrings(
+        "response",
+        completed.event.response.matched.response.talk_response.response,
+    );
+}
+
+test "driver completes a caller-owned lookup across multiple peers" {
+    var network: LookupNetwork = undefined;
+    try network.init(1_000);
+    defer network.deinit();
+
+    var seed_buffer: [lookup.result_max]routing.Entry = undefined;
+    const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
+    var operation: lookup.Lookup = undefined;
+    try operation.init(
+        std.testing.allocator,
+        network.record_a.node_id,
+        network.record_c.node_id,
+        seeds,
+    );
+    defer operation.deinit();
+
+    var expired: [4]calls.Expired = undefined;
+    const first = try network.driver_a.stepLookup(std.testing.io, &operation, &expired);
+    try std.testing.expectEqual(@as(u8, 1), first.lookup_started);
+    try std.testing.expectEqual(@as(usize, 0), first.calls_expired);
+
+    const from_b = try network.driver_b.step(std.testing.io, &expired);
+    try std.testing.expectEqual(@as(u8, 1), from_b.standard_responses);
+    const second = try network.driver_a.stepLookup(std.testing.io, &operation, &expired);
+    try std.testing.expectEqual(@as(u8, 1), second.lookup_responses);
+    try std.testing.expectEqual(@as(u8, 1), second.lookup_started);
+
+    const from_c = try network.driver_c.step(std.testing.io, &expired);
+    try std.testing.expectEqual(@as(u8, 1), from_c.standard_responses);
+    const completed = try network.driver_a.stepLookup(std.testing.io, &operation, &expired);
+    try std.testing.expectEqual(@as(u8, 1), completed.lookup_responses);
+    try std.testing.expect(operation.isFinished());
+    try std.testing.expectEqual(@as(usize, 0), network.node_a.calls.count());
+    try std.testing.expect(network.node_a.routing.contains(&network.record_c.node_id));
+
+    var records: [lookup.result_max]enr.Record = undefined;
+    const results = operation.results(&records);
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqual(network.record_c.node_id, results[0].node_id);
+    try std.testing.expectEqual(network.record_b.node_id, results[1].node_id);
+}
+
+test "lookup expiry is consumed without hiding an unrelated call expiry" {
+    var network: LookupNetwork = undefined;
+    try network.init(1);
+    defer network.deinit();
+
+    const request = message.Message{ .ping = .{
+        .request_id = try message.RequestId.init(&.{0x24}),
+        .enr_sequence = network.record_a.sequence,
+    } };
+    const caller_handle = try network.driver_a.startCallKnown(
+        std.testing.io,
+        endpoint(&network.record_c),
+        &network.record_c,
+        &request,
+    );
+    var seed_buffer: [lookup.result_max]routing.Entry = undefined;
+    const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
+    var operation: lookup.Lookup = undefined;
+    try operation.init(
+        std.testing.allocator,
+        network.record_a.node_id,
+        network.record_c.node_id,
+        seeds,
+    );
+    defer operation.deinit();
+
+    var expired: [4]calls.Expired = undefined;
+    const result = try network.driver_a.stepLookup(std.testing.io, &operation, &expired);
+    try std.testing.expectEqual(@as(u8, 1), result.lookup_started);
+    try std.testing.expectEqual(@as(u8, 1), result.lookup_failures);
+    try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
+    try std.testing.expectEqual(caller_handle, expired[0].handle);
+    try std.testing.expect(operation.isFinished());
+    try std.testing.expectEqual(@as(usize, 0), network.node_a.calls.count());
+}
+
 const Pair = struct {
     udp_a: runtime.Udp,
     udp_b: runtime.Udp,
@@ -80,7 +227,7 @@ const Pair = struct {
     driver_b: driver.Driver,
     candidate_id: types.NodeId,
 
-    fn init(self: *Pair, request_timeout_ms: u64) !void {
+    fn init(self: *Pair, request_timeout_ms: u64, install_session: bool) !void {
         const loopback = net.IpAddress{ .ip4 = .loopback(0) };
         self.udp_a = try runtime.Udp.bind(std.testing.io, loopback);
         errdefer self.udp_a.close(std.testing.io);
@@ -104,12 +251,14 @@ const Pair = struct {
         try self.node_b.initWithConfig(std.testing.allocator, key_b, self.record_b, config);
         errdefer self.node_b.deinit();
 
-        const peer_a = endpoint(&self.record_a);
-        const peer_b = endpoint(&self.record_b);
-        const session_key = [_]u8{0x55} ** 16;
-        const active = session.Session{ .read_key = session_key, .write_key = session_key };
-        self.node_a.sessions.install(peer_b, &active, 0);
-        self.node_b.sessions.install(peer_a, &active, 0);
+        if (install_session) {
+            const peer_a = endpoint(&self.record_a);
+            const peer_b = endpoint(&self.record_b);
+            const session_key = [_]u8{0x55} ** 16;
+            const active = session.Session{ .read_key = session_key, .write_key = session_key };
+            self.node_a.sessions.install(peer_b, &active, 0);
+            self.node_b.sessions.install(peer_a, &active, 0);
+        }
         self.driver_a = try driver.Driver.initWithConfig(
             &self.node_a,
             &self.udp_a,
@@ -167,6 +316,84 @@ const Pair = struct {
         }
     }
 };
+
+const LookupNetwork = struct {
+    udp_a: runtime.Udp,
+    udp_b: runtime.Udp,
+    udp_c: runtime.Udp,
+    record_a: enr.Record,
+    record_b: enr.Record,
+    record_c: enr.Record,
+    node_a: engine.Engine,
+    node_b: engine.Engine,
+    node_c: engine.Engine,
+    driver_a: driver.Driver,
+    driver_b: driver.Driver,
+    driver_c: driver.Driver,
+
+    fn init(self: *LookupNetwork, request_timeout_ms: u64) !void {
+        const loopback = net.IpAddress{ .ip4 = .loopback(0) };
+        self.udp_a = try runtime.Udp.bind(std.testing.io, loopback);
+        errdefer self.udp_a.close(std.testing.io);
+        self.udp_b = try runtime.Udp.bind(std.testing.io, loopback);
+        errdefer self.udp_b.close(std.testing.io);
+        self.udp_c = try runtime.Udp.bind(std.testing.io, loopback);
+        errdefer self.udp_c.close(std.testing.io);
+
+        const key_a = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
+        const key_b = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
+        const key_c = try crypto.keyPairFromSecret(&([_]u8{0x33} ** 32));
+        self.record_a = try test_support.buildRecord(&key_a, 1, self.udp_a.localAddress());
+        self.record_b = try test_support.buildRecord(&key_b, 1, self.udp_b.localAddress());
+        self.record_c = try test_support.buildRecord(&key_c, 1, self.udp_c.localAddress());
+        const config = engine.Config{
+            .session_capacity = 4,
+            .challenge_capacity = 4,
+            .call_capacity = 4,
+            .request_timeout_ms = request_timeout_ms,
+            .challenge_timeout_ms = 1_000,
+            .session_idle_timeout_ms = std.math.maxInt(u64),
+        };
+        try self.node_a.initWithConfig(std.testing.allocator, key_a, self.record_a, config);
+        errdefer self.node_a.deinit();
+        try self.node_b.initWithConfig(std.testing.allocator, key_b, self.record_b, config);
+        errdefer self.node_b.deinit();
+        try self.node_c.initWithConfig(std.testing.allocator, key_c, self.record_c, config);
+        errdefer self.node_c.deinit();
+
+        installSession(&self.node_a, &self.record_b, 0x51);
+        installSession(&self.node_b, &self.record_a, 0x51);
+        installSession(&self.node_a, &self.record_c, 0x52);
+        installSession(&self.node_c, &self.record_a, 0x52);
+        self.driver_a = try makeDriver(&self.node_a, &self.udp_a);
+        self.driver_b = try makeDriver(&self.node_b, &self.udp_b);
+        self.driver_c = try makeDriver(&self.node_c, &self.udp_c);
+
+        const peer_b = endpoint(&self.record_b);
+        const peer_c = endpoint(&self.record_c);
+        _ = try self.node_a.confirmPeer(&peer_b, &self.record_b, 0);
+        _ = try self.node_b.confirmPeer(&peer_c, &self.record_c, 0);
+    }
+
+    fn deinit(self: *LookupNetwork) void {
+        self.node_c.deinit();
+        self.node_b.deinit();
+        self.node_a.deinit();
+        self.udp_c.close(std.testing.io);
+        self.udp_b.close(std.testing.io);
+        self.udp_a.close(std.testing.io);
+    }
+};
+
+fn makeDriver(core: *engine.Engine, udp: *runtime.Udp) !driver.Driver {
+    return driver.Driver.initWithConfig(core, udp, .{ .poll_interval_ms = 10 });
+}
+
+fn installSession(core: *engine.Engine, record: *const enr.Record, key_byte: u8) void {
+    const key = [_]u8{key_byte} ** 16;
+    const active = session.Session{ .read_key = key, .write_key = key };
+    core.sessions.install(endpoint(record), &active, 0);
+}
 
 fn endpoint(record: *const enr.Record) types.Endpoint {
     return .{ .node_id = record.node_id, .address = record.endpoint().? };

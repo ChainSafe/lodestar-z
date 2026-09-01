@@ -90,6 +90,10 @@ pub const Lookup = struct {
         return self.finished;
     }
 
+    pub fn ownsCall(self: *const Self, handle: calls.Handle) bool {
+        return self.waitingIndex(handle) != null;
+    }
+
     pub fn startNext(
         self: *Self,
         core: *engine_mod.Engine,
@@ -137,7 +141,7 @@ pub const Lookup = struct {
         core: *engine_mod.Engine,
         response: *const engine_mod.AuthenticatedResponse,
         now_ms: u64,
-    ) Error!?types.NodeId {
+    ) Error!void {
         if (response.matched.response != .nodes) return Error.UnexpectedResponse;
         const index = self.waitingIndex(response.matched.handle) orelse
             return Error.UnknownQuery;
@@ -145,20 +149,16 @@ pub const Lookup = struct {
             return Error.UnknownQuery;
         const source = response.peer.address;
         for (response.node_records) |*record| self.addDiscovered(record, source);
-        if (!response.matched.terminal) return null;
+        if (!response.matched.terminal) return;
 
         self.candidates[index].state = .succeeded;
         self.waiting_count -= 1;
         const candidate = &self.candidates[index];
-        const update = core.confirmPeer(
+        _ = core.confirmPeer(
             &candidate.peer,
             &candidate.record,
             now_ms,
-        ) catch return null;
-        return switch (update) {
-            .pending => |node_id| node_id,
-            else => null,
-        };
+        ) catch return;
     }
 
     pub fn onFailure(
