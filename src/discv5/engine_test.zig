@@ -69,9 +69,10 @@ const Pair = struct {
             startEntropy(0x08),
         ));
         try std.testing.expectEqual(@as(usize, 0), self.node_a.calls.count());
-        const started = try self.node_a.startCall(
+        const started = try self.node_a.startCallKnown(
             &self.a_to_b,
             self.peerB(),
+            &self.record_b,
             &ping_message,
             1,
             startEntropy(0x10),
@@ -95,7 +96,7 @@ const Pair = struct {
             &self.a_to_b,
             self.b_to_a[0..challenge.packet_length],
             self.address_b,
-            receiveArgs(3, &self.record_b, 0x40),
+            receiveArgs(3, null, 0x40),
             &self.scratch_a,
         );
         try std.testing.expect(response.packet_length > 63);
@@ -137,6 +138,7 @@ const Pair = struct {
             self.record_a.node_id,
             authenticated.event.request.record.?.node_id,
         );
+        try std.testing.expect(self.node_b.routing.contains(&self.record_a.node_id));
         try std.testing.expectEqual(@as(usize, 1), self.node_b.sessions.sessionCount());
         try std.testing.expectEqual(@as(usize, 0), self.node_b.sessions.challengeCount());
         return authenticated.event.request.message.ping.request_id;
@@ -164,12 +166,22 @@ const Pair = struct {
             &self.a_to_b,
             self.b_to_a[0..length],
             self.address_b,
-            receiveArgs(7, null, 0x80),
+            receiveArgs(7, &self.record_b, 0x80),
             &self.scratch_a,
         );
         try std.testing.expect(completed.event == .response);
         try std.testing.expect(completed.event.response.matched.terminal);
         try std.testing.expectEqual(started.handle, completed.event.response.matched.handle);
+        const peer_b = self.peerB();
+        _ = try self.node_a.confirmPeer(&peer_b, &self.record_b, 7);
+        try std.testing.expect(self.node_a.routing.contains(&self.record_b.node_id));
+
+        var records: [2]enr.Record = undefined;
+        const distance = types.logDistance(&self.record_a.node_id, &self.record_b.node_id);
+        const selected = try self.node_a.findNodes(self.address_b, &.{ 0, distance }, &records);
+        try std.testing.expectEqual(@as(usize, 2), selected.len);
+        try std.testing.expectEqual(self.record_a.node_id, selected[0].node_id);
+        try std.testing.expectEqual(self.record_b.node_id, selected[1].node_id);
     }
 
     fn directSessionTimeout(self: *Pair) !void {

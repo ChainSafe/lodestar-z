@@ -9,7 +9,9 @@ pub const table_capacity: usize = bucket_size * bucket_count;
 pub const bucket_subnet_limit: usize = 2;
 pub const table_subnet_limit: usize = 10;
 
-pub const Error = std.mem.Allocator.Error || error{
+pub const InitError = std.mem.Allocator.Error;
+
+pub const Error = error{
     AddressLimit,
     InvalidDistance,
     InvalidLocalRecord,
@@ -58,7 +60,7 @@ pub const Table = struct {
         self: *Self,
         allocator: std.mem.Allocator,
         local_id: types.NodeId,
-    ) Error!void {
+    ) InitError!void {
         const entries = try allocator.alloc(Entry, table_capacity);
         errdefer allocator.free(entries);
         const pending = try allocator.alloc(?Pending, bucket_count);
@@ -182,6 +184,7 @@ pub const Table = struct {
     pub fn findNodes(
         self: *const Self,
         local_record: *const enr.Record,
+        requester: ?types.Address,
         distances: []const u16,
         out: []enr.Record,
     ) Error![]enr.Record {
@@ -196,7 +199,9 @@ pub const Table = struct {
 
         const limit = @min(out.len, protocol.findnode_result_max);
         var result_length: usize = 0;
-        if (requested[0] and result_length < limit) {
+        if (requested[0] and result_length < limit and
+            recordRelayAllowed(local_record, requester))
+        {
             out[result_length] = local_record.*;
             result_length += 1;
         }
@@ -211,6 +216,9 @@ pub const Table = struct {
                 const entry = &entries[position];
                 if (types.logDistance(&self.local_id, &entry.peer.node_id) != distance)
                     continue;
+                if (requester) |source| {
+                    if (!types.relayAllowed(source, entry.peer.address)) continue;
+                }
                 out[result_length] = entry.record;
                 result_length += 1;
             }
@@ -229,7 +237,7 @@ pub const Table = struct {
             for (self.bucketEntries(index)) |entry| {
                 var position: usize = 0;
                 while (position < result_length and
-                    !isCloser(&entry.peer.node_id, &out[position].peer.node_id, target))
+                    !types.xorCloser(&entry.peer.node_id, &out[position].peer.node_id, target))
                 {
                     position += 1;
                 }
@@ -405,17 +413,10 @@ fn allZero(bytes: []const u8) bool {
     return true;
 }
 
-fn isCloser(
-    left: *const types.NodeId,
-    right: *const types.NodeId,
-    target: *const types.NodeId,
-) bool {
-    for (left, right, target) |left_byte, right_byte, target_byte| {
-        const left_distance = left_byte ^ target_byte;
-        const right_distance = right_byte ^ target_byte;
-        if (left_distance != right_distance) return left_distance < right_distance;
-    }
-    return false;
+fn recordRelayAllowed(record: *const enr.Record, requester: ?types.Address) bool {
+    const source = requester orelse return true;
+    const address = record.endpoint() orelse return false;
+    return types.relayAllowed(source, address);
 }
 
 fn bucketIndex(distance: u16) usize {

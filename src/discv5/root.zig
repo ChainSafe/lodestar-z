@@ -1,6 +1,7 @@
 pub const calls = @import("calls.zig");
 pub const engine = @import("engine.zig");
 pub const identity = @import("identity/root.zig");
+pub const lookup = @import("lookup.zig");
 pub const protocol = @import("protocol.zig");
 pub const routing = @import("routing.zig");
 pub const session = @import("session.zig");
@@ -11,6 +12,7 @@ test {
     _ = calls;
     _ = engine;
     _ = identity;
+    _ = lookup;
     _ = protocol;
     _ = routing;
     _ = session;
@@ -18,6 +20,7 @@ test {
     _ = wire;
     _ = @import("calls_test.zig");
     _ = @import("engine_test.zig");
+    _ = @import("lookup_test.zig");
     _ = @import("routing_test.zig");
     _ = @import("session_test.zig");
     _ = @import("types_test.zig");
