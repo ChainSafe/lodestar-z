@@ -1537,11 +1537,7 @@ fn rollbackFillLevel(
         const parent_state = &pool.nodes.items(.state)[@intFromEnum(parent)];
         std.debug.assert(parent_state.isBranch());
         std.debug.assert(parent_state.refCount() == 0);
-        const children = childrenOf(
-            parent,
-            .branch,
-            pool.nodes.items(.payload),
-        );
+        const children = childrenOf(parent, .branch, pool.nodes.items(.payload));
 
         const child_index = parent_index * 2;
         contents[child_index] = children.left;
@@ -1551,9 +1547,9 @@ fn rollbackFillLevel(
 
         pool.unrefUnsafe(children.left);
         pool.unrefUnsafe(children.right);
-        // The child refs are already restored, so return only the parent slot.
-        parent_state.setKind(.leaf);
-        pool.unref(parent);
+        // Child refs are restored, so return only the parent slot.
+        parent_state.* = State.initFree(pool.next_free_node);
+        pool.next_free_node = parent;
     }
 }
 
@@ -1569,39 +1565,33 @@ pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
         return Error.InvalidLength;
     }
 
-    const contents_count = contents.len;
     var d = depth;
     var count = contents.len;
-    var levels_completed: Depth = 0;
-    var parents_created: usize = 0;
+    var i: usize = 0;
     errdefer {
-        rollbackFillLevel(pool, contents, count, parents_created);
+        rollbackFillLevel(pool, contents, count, i / 2);
 
-        var level = levels_completed;
+        var level = depth - d;
         while (level > 0) {
-            const previous_count = fillCountAtLevel(contents_count, level - 1);
-            const parent_count = fillCountAtLevel(contents_count, level);
+            const previous_count = fillCountAtLevel(contents.len, level - 1);
+            const parent_count = fillCountAtLevel(contents.len, level);
             rollbackFillLevel(pool, contents, previous_count, parent_count);
             level -= 1;
         }
     }
 
     while (d > 0) : (d -= 1) {
-        parents_created = 0;
-        var i: usize = 0;
+        i = 0;
         while (i < count - 1) : (i += 2) {
             contents[i / 2] = try pool.createBranch(contents[i], contents[i + 1]);
-            parents_created += 1;
         }
 
         // if the count is odd, we need to add a zero node
         if (i != count) {
             contents[i / 2] = try pool.createBranch(contents[i], @enumFromInt(depth - d));
-            parents_created += 1;
         }
 
         count = (count + 1) / 2;
-        levels_completed += 1;
     }
 
     return contents[0];
