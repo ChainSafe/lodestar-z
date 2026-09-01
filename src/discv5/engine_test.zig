@@ -16,8 +16,9 @@ test "paired engines recover a session and complete one call without queues" {
     try pair.init();
     defer pair.deinit();
     const recovery = try pair.beginRecovery();
-    const request_id = try pair.authenticate(recovery.handshake_length);
-    try pair.completePong(recovery.started, request_id);
+    const request = try pair.authenticate(recovery.handshake_length);
+    try pair.completePong(recovery.started, &request);
+    try pair.standardFindNodeResponse();
     try pair.filterFindNodeRecords();
     try pair.directSessionTimeout();
 }
@@ -113,7 +114,7 @@ const Pair = struct {
         return .{ .started = started, .handshake_length = response.packet_length };
     }
 
-    fn authenticate(self: *Pair, handshake_length: u16) !message.RequestId {
+    fn authenticate(self: *Pair, handshake_length: u16) !engine.AuthenticatedRequest {
         var corrupted = self.a_to_b;
         corrupted[handshake_length - 1] ^= 1;
         try std.testing.expectError(packet.Error.DecryptionFailed, self.node_b.receive(
@@ -141,27 +142,47 @@ const Pair = struct {
         try std.testing.expect(self.node_b.routing.contains(&self.record_a.node_id));
         try std.testing.expectEqual(@as(usize, 1), self.node_b.sessions.sessionCount());
         try std.testing.expectEqual(@as(usize, 0), self.node_b.sessions.challengeCount());
-        return authenticated.event.request.message.ping.request_id;
+        return authenticated.event.request;
     }
 
     fn completePong(
         self: *Pair,
         started: engine.StartResult,
-        request_id: message.RequestId,
+        request: *const engine.AuthenticatedRequest,
     ) !void {
-        const pong = message.Message{ .pong = .{
-            .request_id = request_id,
-            .enr_sequence = self.record_b.sequence,
-            .recipient_ip = .{ .ip4 = .{ 127, 0, 0, 1 } },
-            .recipient_port = 9_001,
-        } };
-        const length = try self.node_b.sendResponse(
-            &self.b_to_a,
-            self.peerA(),
-            &pong,
+        var response: engine.StandardResponse = undefined;
+        try self.node_b.prepareStandardResponse(request, &response);
+        var too_small: [1]u8 = undefined;
+        try std.testing.expectError(packet.Error.BufferTooSmall, self.node_b.sendNextStandardResponse(
+            &too_small,
+            &response,
             6,
             startEntropy(0x70),
+        ));
+        try std.testing.expect(!response.complete());
+        const length = (try self.node_b.sendNextStandardResponse(
+            &self.b_to_a,
+            &response,
+            6,
+            startEntropy(0x70),
+        )).?;
+        const response_packet = try packet.decode(
+            self.b_to_a[0..length],
+            &self.record_a.node_id,
+            &self.scratch_a.packet_decode,
         );
+        try std.testing.expectEqualSlices(
+            u8,
+            &.{ 0, 0, 0, 1 },
+            response_packet.static_header.nonce[0..4],
+        );
+        try std.testing.expect(response.complete());
+        try std.testing.expect((try self.node_b.sendNextStandardResponse(
+            &self.b_to_a,
+            &response,
+            6,
+            startEntropy(0x70),
+        )) == null);
         const completed = try self.node_a.receive(
             &self.a_to_b,
             self.b_to_a[0..length],
@@ -172,6 +193,10 @@ const Pair = struct {
         try std.testing.expect(completed.event == .response);
         try std.testing.expect(completed.event.response.matched.terminal);
         try std.testing.expectEqual(started.handle, completed.event.response.matched.handle);
+        const pong = completed.event.response.matched.response.pong;
+        try std.testing.expectEqual(self.record_b.sequence, pong.enr_sequence);
+        try std.testing.expectEqual(self.address_a.ip4.octets, pong.recipient_ip.ip4);
+        try std.testing.expectEqual(self.address_a.ip4.port, pong.recipient_port);
         const peer_b = self.peerB();
         _ = try self.node_a.confirmPeer(&peer_b, &self.record_b, 7);
         try std.testing.expect(self.node_a.routing.contains(&self.record_b.node_id));
@@ -190,7 +215,7 @@ const Pair = struct {
             &self.a_to_b,
             self.peerB(),
             &ping_message,
-            12,
+            16,
             startEntropy(0x90),
         );
         const direct_packet = try packet.decode(
@@ -200,21 +225,21 @@ const Pair = struct {
         );
         try std.testing.expectEqualSlices(
             u8,
-            &.{ 0, 0, 0, 3 },
+            &.{ 0, 0, 0, 4 },
             direct_packet.static_header.nonce[0..4],
         );
         const received = try self.node_b.receive(
             &self.b_to_a,
             self.a_to_b[0..started.packet_length],
             self.address_a,
-            receiveArgs(13, null, 0xa0),
+            receiveArgs(17, null, 0xa0),
             &self.scratch_b,
         );
         try std.testing.expectEqual(@as(u16, 0), received.packet_length);
         try std.testing.expect(received.event == .request);
         try std.testing.expect(received.event.request.record == null);
         var expired: [1]calls.Handle = undefined;
-        const tick = self.node_a.tick(112, &expired);
+        const tick = self.node_a.tick(116, &expired);
         try std.testing.expectEqual(@as(usize, 1), tick.calls);
         try std.testing.expectEqual(started.handle, expired[0]);
     }
@@ -229,14 +254,14 @@ const Pair = struct {
             &self.a_to_b,
             self.peerB(),
             &request,
-            8,
+            12,
             startEntropy(0x81),
         );
         const received = try self.node_b.receive(
             &self.b_to_a,
             self.a_to_b[0..started.packet_length],
             self.address_a,
-            receiveArgs(9, null, 0x82),
+            receiveArgs(13, null, 0x82),
             &self.scratch_b,
         );
         try std.testing.expect(received.event == .request);
@@ -251,14 +276,14 @@ const Pair = struct {
             &self.b_to_a,
             self.peerA(),
             &response,
-            10,
+            14,
             startEntropy(0x83),
         );
         const completed = try self.node_a.receive(
             &self.a_to_b,
             self.b_to_a[0..response_length],
             self.address_b,
-            receiveArgs(11, null, 0x84),
+            receiveArgs(15, null, 0x84),
             &self.scratch_a,
         );
         try std.testing.expect(completed.event == .response);
@@ -270,6 +295,54 @@ const Pair = struct {
         try std.testing.expectEqual(
             @as(usize, 1),
             completed.event.response.matched.response.nodes.enrs.len,
+        );
+    }
+
+    fn standardFindNodeResponse(self: *Pair) !void {
+        const request = message.Message{ .find_node = .{
+            .request_id = try message.RequestId.init(&.{0x04}),
+            .distances = &.{0},
+        } };
+        const started = try self.node_b.startCall(
+            &self.b_to_a,
+            self.peerA(),
+            &request,
+            8,
+            startEntropy(0xb0),
+        );
+        const received = try self.node_a.receive(
+            &self.a_to_b,
+            self.b_to_a[0..started.packet_length],
+            self.address_b,
+            receiveArgs(9, null, 0xb1),
+            &self.scratch_a,
+        );
+        try std.testing.expect(received.event == .request);
+        var response: engine.StandardResponse = undefined;
+        try self.node_a.prepareStandardResponse(
+            &received.event.request,
+            &response,
+        );
+        const response_length = (try self.node_a.sendNextStandardResponse(
+            &self.a_to_b,
+            &response,
+            10,
+            startEntropy(0xb2),
+        )).?;
+        try std.testing.expect(response.complete());
+        const completed = try self.node_b.receive(
+            &self.b_to_a,
+            self.a_to_b[0..response_length],
+            self.address_a,
+            receiveArgs(11, null, 0xb3),
+            &self.scratch_b,
+        );
+        try std.testing.expect(completed.event == .response);
+        try std.testing.expectEqual(started.handle, completed.event.response.matched.handle);
+        try std.testing.expectEqual(@as(usize, 1), completed.event.response.node_records.len);
+        try std.testing.expectEqual(
+            self.record_a.node_id,
+            completed.event.response.node_records[0].node_id,
         );
     }
 
