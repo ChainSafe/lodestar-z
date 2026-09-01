@@ -36,19 +36,15 @@ pub const Address = union(enum) {
         interface: u32 = 0,
     },
 
-    pub fn eql(left: Address, right: Address) bool {
-        return switch (left) {
-            .ip4 => |value| switch (right) {
-                .ip4 => |other| value.port == other.port and
-                    std.mem.eql(u8, &value.octets, &other.octets),
-                .ip6 => false,
-            },
-            .ip6 => |value| switch (right) {
-                .ip4 => false,
-                .ip6 => |other| value.port == other.port and
-                    value.interface == other.interface and
-                    std.mem.eql(u8, &value.octets, &other.octets),
-            },
+    pub fn port(self: Address) u16 {
+        return switch (self) {
+            inline else => |value| value.port,
+        };
+    }
+
+    pub fn isUsable(self: Address) bool {
+        return switch (self) {
+            inline else => |value| value.port != 0 and !std.mem.allEqual(u8, &value.octets, 0),
         };
     }
 };
@@ -68,12 +64,28 @@ pub fn relayAllowed(source: Address, candidate: Address) bool {
 pub const Endpoint = struct {
     node_id: NodeId,
     address: Address,
-
-    pub fn eql(left: Endpoint, right: Endpoint) bool {
-        return std.mem.eql(u8, &left.node_id, &right.node_id) and
-            Address.eql(left.address, right.address);
-    }
 };
+
+/// Keeps `out[0..length]` ordered by XOR distance to `target`, dropping the farthest when full.
+pub fn insertClosest(
+    comptime T: type,
+    comptime nodeIdOf: fn (*const T) *const NodeId,
+    out: []T,
+    length: usize,
+    item: T,
+    target: *const NodeId,
+) usize {
+    std.debug.assert(length <= out.len);
+    var position: usize = 0;
+    while (position < length and !xorCloser(nodeIdOf(&item), nodeIdOf(&out[position]), target)) {
+        position += 1;
+    }
+    if (position == out.len) return length;
+    const new_length = @min(length + 1, out.len);
+    std.mem.copyBackwards(T, out[position + 1 .. new_length], out[position .. new_length - 1]);
+    out[position] = item;
+    return new_length;
+}
 
 const AddressClass = enum {
     invalid,

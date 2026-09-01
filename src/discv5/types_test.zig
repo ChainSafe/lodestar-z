@@ -51,7 +51,7 @@ test "IPv6 interface scope is part of endpoint identity" {
     } };
     var second = first;
     second.ip6.interface = 2;
-    try std.testing.expect(!types.Address.eql(first, second));
+    try std.testing.expect(!std.meta.eql(first, second));
 }
 
 fn address4(a: u8, b: u8, c: u8, d: u8) types.Address {

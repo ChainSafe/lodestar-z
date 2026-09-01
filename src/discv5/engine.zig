@@ -26,7 +26,6 @@ pub const Error = calls_mod.Error || crypto.Error || enr.Error || packet.Error |
     SessionRequired,
     UnexpectedChallenge,
     UnexpectedHandshake,
-    UnexpectedRequest,
 };
 
 pub const StandardResponse = standard_response.Plan;
@@ -63,9 +62,15 @@ pub const TickResult = struct {
     sessions: usize,
 };
 
+pub const Request = union(enum) {
+    ping: message.Ping,
+    find_node: message.FindNode,
+    talk_request: message.TalkRequest,
+};
+
 pub const AuthenticatedRequest = struct {
     peer: types.Endpoint,
-    message: message.Message,
+    message: Request,
     record: ?enr.Record,
 };
 
@@ -97,7 +102,6 @@ pub const Scratch = struct {
 
 pub const ReceiveArgs = struct {
     now_ms: u64,
-    known_record: ?*const enr.Record,
     entropy: ReceiveEntropy,
 };
 
@@ -177,25 +181,6 @@ pub const Engine = struct {
         self: *Self,
         out: []u8,
         peer: types.Endpoint,
-        request: *const message.Message,
-        now_ms: u64,
-        entropy: StartEntropy,
-    ) Error!StartResult {
-        return self.startCallWithIdentity(
-            out,
-            peer,
-            null,
-            request,
-            now_ms,
-            entropy,
-            .caller,
-        );
-    }
-
-    pub fn startCallKnown(
-        self: *Self,
-        out: []u8,
-        peer: types.Endpoint,
         remote_record: *const enr.Record,
         request: *const message.Message,
         now_ms: u64,
@@ -203,7 +188,7 @@ pub const Engine = struct {
     ) Error!StartResult {
         if (!std.mem.eql(u8, &peer.node_id, &remote_record.node_id))
             return Error.InvalidRemoteRecord;
-        return self.startCallWithIdentity(
+        return self.beginCall(
             out,
             peer,
             &remote_record.public_key,
@@ -226,7 +211,7 @@ pub const Engine = struct {
             .request_id = request_id,
             .enr_sequence = self.local_record.sequence,
         } };
-        const call = try self.startCallWithIdentity(
+        const call = try self.beginCall(
             out,
             target.peer,
             &target.record.public_key,
@@ -238,11 +223,11 @@ pub const Engine = struct {
         return .{ .peer = target.peer, .call = call };
     }
 
-    fn startCallWithIdentity(
+    fn beginCall(
         self: *Self,
         out: []u8,
         peer: types.Endpoint,
-        remote_public_key: ?*const [33]u8,
+        remote_public_key: *const [33]u8,
         request: *const message.Message,
         now_ms: u64,
         entropy: StartEntropy,
@@ -254,34 +239,18 @@ pub const Engine = struct {
             constants.ordinary_plaintext_size_max
         else
             try packet.handshakePlaintextCapacity(self.local_record.length);
-        const handle = (switch (owner) {
-            .caller => if (remote_public_key) |public_key|
-                self.calls.beginKnown(
-                    peer,
-                    public_key,
-                    request,
-                    deadline_ms,
-                    request_capacity,
-                )
+        const handle = self.calls.begin(
+            peer,
+            remote_public_key,
+            request,
+            deadline_ms,
+            request_capacity,
+            owner,
+        ) catch |err| switch (err) {
+            calls_mod.Error.RequestTooLarge => return if (has_session)
+                err
             else
-                self.calls.begin(
-                    peer,
-                    request,
-                    deadline_ms,
-                    request_capacity,
-                ),
-            .routing_revalidation => self.calls.beginRevalidation(
-                peer,
-                remote_public_key orelse unreachable,
-                request,
-                deadline_ms,
-                request_capacity,
-            ),
-        }) catch |err| switch (err) {
-            calls_mod.Error.RequestTooLarge => if (has_session)
-                return err
-            else
-                return Error.SessionRequired,
+                Error.SessionRequired,
             else => return err,
         };
         errdefer {
@@ -349,7 +318,6 @@ pub const Engine = struct {
                 );
             },
             .talk_request => Error.ApplicationResponseRequired,
-            else => Error.UnexpectedRequest,
         };
     }
 
@@ -360,7 +328,8 @@ pub const Engine = struct {
         now_ms: u64,
         entropy: StartEntropy,
     ) Error!?u16 {
-        const message_response = response.next() orelse return null;
+        var raw_records: standard_response.RawRecords = undefined;
+        const message_response = response.next(&raw_records) orelse return null;
         const packet_length = try self.sendPreparedResponse(
             out,
             response.peer,
@@ -549,11 +518,7 @@ pub const Engine = struct {
         args: ReceiveArgs,
     ) Error!Outcome {
         var challenge_data: [constants.whoareyou_packet_size]u8 = undefined;
-        const known_sequence = if (args.known_record) |record| blk: {
-            if (!std.mem.eql(u8, &record.node_id, &peer.node_id))
-                return Error.InvalidRemoteRecord;
-            break :blk record.sequence;
-        } else if (self.routing.get(&peer.node_id)) |entry|
+        const known_sequence = if (self.routing.get(&peer.node_id)) |entry|
             entry.record.sequence
         else
             0;
@@ -587,14 +552,7 @@ pub const Engine = struct {
         }
         const peer = self.calls.endpoint(handle) orelse return Error.MissingCall;
         const remote_public_key = self.calls.remotePublicKey(handle) orelse
-            if (args.known_record) |record| blk: {
-                if (!std.mem.eql(u8, &record.node_id, &peer.node_id))
-                    return Error.InvalidRemoteRecord;
-                break :blk record.public_key;
-            } else if (self.routing.get(&peer.node_id)) |entry|
-                entry.record.public_key
-            else
-                return Error.MissingIdentity;
+            return Error.MissingCall;
         const local_enr = if (decoded.form.whoareyou.enr_sequence < self.local_record.sequence)
             self.local_record.slice()
         else
@@ -692,11 +650,10 @@ pub const Engine = struct {
         const peer = types.Endpoint{ .node_id = authdata.source_id, .address = from };
         const challenge = self.sessions.getChallenge(peer) orelse
             return Error.UnexpectedHandshake;
-        var stored_record: ?enr.Record = if (self.routing.get(&peer.node_id)) |entry|
+        const known_record: ?enr.Record = if (self.routing.get(&peer.node_id)) |entry|
             entry.record
         else
             null;
-        const known_record = args.known_record orelse if (stored_record) |*record| record else null;
         const records = try selectRecord(authdata.enr, known_record, &peer.node_id);
         try handshake.verifyProof(
             authdata.id_signature,
@@ -748,11 +705,9 @@ pub const Engine = struct {
         scratch: *Scratch,
     ) Error!Event {
         return switch (decoded) {
-            .ping, .find_node, .talk_request => .{ .request = .{
-                .peer = peer,
-                .message = decoded,
-                .record = record,
-            } },
+            .ping => |ping| requestEvent(peer, .{ .ping = ping }, record),
+            .find_node => |find_node| requestEvent(peer, .{ .find_node = find_node }, record),
+            .talk_request => |talk| requestEvent(peer, .{ .talk_request = talk }, record),
             .pong, .nodes, .talk_response => self.dispatchResponse(
                 peer,
                 decoded,
@@ -771,15 +726,14 @@ pub const Engine = struct {
         now_ms: u64,
         scratch: *Scratch,
     ) Error!Event {
-        try self.calls.preflight(peer, &decoded, now_ms);
+        const handle = try self.calls.match(peer, &decoded, now_ms);
         const parsed_records = switch (decoded) {
             .nodes => |nodes| try validateNodeRecords(nodes.enrs, scratch),
             else => &.{},
         };
         const match_result = try self.calls.accept(
-            peer,
+            handle,
             &decoded,
-            now_ms,
             scratch.node_ids[0..parsed_records.len],
         );
         if (match_result.owner == .routing_revalidation) {
@@ -794,7 +748,7 @@ pub const Engine = struct {
             const filtered = retainAcceptedNodeRecords(
                 decoded.nodes.enrs,
                 parsed_records,
-                match_result.accepted_node_mask,
+                match_result.accepted_nodes,
                 scratch,
             );
             matched.response.nodes.enrs = filtered.raw;
@@ -824,6 +778,10 @@ pub const Engine = struct {
     }
 };
 
+fn requestEvent(peer: types.Endpoint, request: Request, record: ?enr.Record) Event {
+    return .{ .request = .{ .peer = peer, .message = request, .record = record } };
+}
+
 fn validateNodeRecords(raw_records: []const []const u8, scratch: *Scratch) Error![]const enr.Record {
     if (raw_records.len > scratch.node_records.len) return Error.InvalidMessage;
     for (raw_records, scratch.node_records[0..raw_records.len]) |raw, *record| {
@@ -844,13 +802,13 @@ const FilteredNodeRecords = struct {
 fn retainAcceptedNodeRecords(
     raw_records: []const []const u8,
     parsed_records: []const enr.Record,
-    accepted: u16,
+    accepted: calls_mod.AcceptedNodes,
     scratch: *Scratch,
 ) FilteredNodeRecords {
     std.debug.assert(raw_records.len == parsed_records.len);
     var retained: usize = 0;
     for (raw_records, parsed_records, 0..) |raw, record, index| {
-        if (accepted & (@as(u16, 1) << @intCast(index)) == 0) continue;
+        if (!accepted.isSet(index)) continue;
         scratch.message_decode.enrs[retained] = raw;
         scratch.node_records[retained] = record;
         retained += 1;
@@ -868,13 +826,11 @@ const SelectedRecord = struct {
 
 fn selectRecord(
     encoded: ?[]const u8,
-    known: ?*const enr.Record,
+    known: ?enr.Record,
     expected_id: *const types.NodeId,
 ) Error!SelectedRecord {
     const provided = if (encoded) |raw| try enr.Record.init(raw) else null;
     if (provided) |record| if (!std.mem.eql(u8, &record.node_id, expected_id))
-        return Error.InvalidRemoteRecord;
-    if (known) |record| if (!std.mem.eql(u8, &record.node_id, expected_id))
         return Error.InvalidRemoteRecord;
     const update = if (provided) |record|
         if (known) |known_record|
@@ -883,10 +839,7 @@ fn selectRecord(
             record
     else
         null;
-    const selected = update orelse if (known) |record|
-        record.*
-    else
-        return Error.MissingIdentity;
+    const selected = update orelse known orelse return Error.MissingIdentity;
     return .{ .selected = selected, .update = update };
 }
 

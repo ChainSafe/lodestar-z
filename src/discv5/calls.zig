@@ -45,9 +45,11 @@ pub const Matched = struct {
     terminal: bool,
 };
 
+pub const AcceptedNodes = std.StaticBitSet(protocol.findnode_result_max);
+
 pub const MatchResult = struct {
     matched: Matched,
-    accepted_node_mask: u16 = 0,
+    accepted_nodes: AcceptedNodes = AcceptedNodes.initEmpty(),
     owner: Owner,
 };
 
@@ -83,7 +85,7 @@ const Entry = struct {
     sent: bool = false,
     deadline_ms: u64,
     handshake_attempted: bool = false,
-    remote_public_key: ?[33]u8 = null,
+    remote_public_key: [33]u8,
 };
 
 pub const Table = struct {
@@ -120,72 +122,10 @@ pub const Table = struct {
     pub fn begin(
         self: *Table,
         peer: types.Endpoint,
-        request: *const message.Message,
-        deadline_ms: u64,
-        request_capacity: usize,
-    ) Error!Handle {
-        return self.beginWithIdentity(
-            peer,
-            request,
-            deadline_ms,
-            request_capacity,
-            null,
-            .caller,
-        );
-    }
-
-    pub fn beginKnown(
-        self: *Table,
-        peer: types.Endpoint,
         remote_public_key: *const [33]u8,
         request: *const message.Message,
         deadline_ms: u64,
         request_capacity: usize,
-    ) Error!Handle {
-        return self.beginWithIdentity(
-            peer,
-            request,
-            deadline_ms,
-            request_capacity,
-            remote_public_key,
-            .caller,
-        );
-    }
-
-    pub fn beginRevalidation(
-        self: *Table,
-        peer: types.Endpoint,
-        remote_public_key: *const [33]u8,
-        request: *const message.Message,
-        deadline_ms: u64,
-        request_capacity: usize,
-    ) Error!Handle {
-        if (request.* != .ping) return Error.UnexpectedResponse;
-        return self.beginWithIdentity(
-            peer,
-            request,
-            deadline_ms,
-            request_capacity,
-            remote_public_key,
-            .routing_revalidation,
-        );
-    }
-
-    pub fn remotePublicKey(
-        self: *const Table,
-        handle: Handle,
-    ) ?[33]u8 {
-        const entry = self.get(handle) orelse return null;
-        return entry.remote_public_key;
-    }
-
-    fn beginWithIdentity(
-        self: *Table,
-        peer: types.Endpoint,
-        request: *const message.Message,
-        deadline_ms: u64,
-        request_capacity: usize,
-        remote_public_key: ?*const [33]u8,
         owner: Owner,
     ) Error!Handle {
         if (self.findNode(&peer.node_id) != null) return Error.PeerBusy;
@@ -207,12 +147,17 @@ pub const Table = struct {
             .request = undefined,
             .request_length = @intCast(request_bytes.len),
             .deadline_ms = deadline_ms,
-            .remote_public_key = if (remote_public_key) |value| value.* else null,
+            .remote_public_key = remote_public_key.*,
         };
         @memcpy(entry.request[0..request_bytes.len], request_bytes);
         self.entries[index] = entry;
         self.next_generations[index] = successor;
         return .{ .index = @intCast(index), .generation = generation };
+    }
+
+    pub fn remotePublicKey(self: *const Table, handle: Handle) ?[33]u8 {
+        const entry = self.get(handle) orelse return null;
+        return entry.remote_public_key;
     }
 
     pub fn requestBytes(self: *const Table, handle: Handle) ?[]const u8 {
@@ -232,7 +177,7 @@ pub const Table = struct {
         deadline_ms: u64,
     ) Error!void {
         const entry = self.getMut(handle) orelse return Error.StaleHandle;
-        if (self.findNonceExcept(entry.peer.address, sent_nonce, handle) != null)
+        if (self.findNonce(entry.peer.address, sent_nonce, handle) != null)
             return Error.NonceInUse;
         entry.sent_nonce = sent_nonce.*;
         entry.sent = true;
@@ -245,7 +190,7 @@ pub const Table = struct {
         nonce: *const [constants.nonce_size]u8,
         now_ms: u64,
     ) Error!?Handle {
-        const index = self.findNonce(address, nonce) orelse return null;
+        const index = self.findNonce(address, nonce, null) orelse return null;
         const entry = &self.entries[index].?;
         if (now_ms >= entry.deadline_ms) return null;
         if (entry.handshake_attempted) return Error.HandshakeAttempted;
@@ -253,16 +198,34 @@ pub const Table = struct {
         return .{ .index = @intCast(index), .generation = entry.generation };
     }
 
-    pub fn accept(
-        self: *Table,
+    pub fn match(
+        self: *const Table,
         peer: types.Endpoint,
         response: *const message.Message,
         now_ms: u64,
+    ) Error!Handle {
+        const index = self.findPeer(peer) orelse return Error.UnknownCall;
+        const entry = &self.entries[index].?;
+        if (now_ms >= entry.deadline_ms) return Error.CallExpired;
+        const response_id = response.requestId();
+        if (!std.mem.eql(u8, entry.request_id.slice(), response_id.slice()))
+            return Error.RequestIdMismatch;
+        if (!expectsResponse(entry.expected, response)) return Error.UnexpectedResponse;
+        if (response.* == .nodes) {
+            try validateNodesHeader(&entry.expected.nodes, response.nodes.total);
+        }
+        return .{ .index = @intCast(index), .generation = entry.generation };
+    }
+
+    pub fn accept(
+        self: *Table,
+        handle: Handle,
+        response: *const message.Message,
         node_ids: []const types.NodeId,
     ) Error!MatchResult {
-        const index = try self.responseIndex(peer, response, now_ms);
-        const entry = &self.entries[index].?;
-        const handle = Handle{ .index = @intCast(index), .generation = entry.generation };
+        const entry = self.getMut(handle) orelse return Error.StaleHandle;
+        if (!expectsResponse(entry.expected, response)) return Error.UnexpectedResponse;
+        const index: usize = handle.index;
         return switch (response.*) {
             .pong => |pong| self.complete(index, handle, .{ .pong = pong }),
             .talk_response => |talk| self.complete(
@@ -271,24 +234,8 @@ pub const Table = struct {
                 .{ .talk_response = talk },
             ),
             .nodes => |nodes| try self.acceptNodes(index, handle, nodes, node_ids),
-            else => Error.UnexpectedResponse,
+            else => unreachable,
         };
-    }
-
-    pub fn preflight(
-        self: *const Table,
-        peer: types.Endpoint,
-        response: *const message.Message,
-        now_ms: u64,
-    ) Error!void {
-        const index = try self.responseIndex(peer, response, now_ms);
-        if (response.* == .nodes) {
-            const state = switch (self.entries[index].?.expected) {
-                .nodes => |*value| value,
-                else => unreachable,
-            };
-            try validateNodesHeader(state, response.nodes.total);
-        }
     }
 
     pub fn cancel(self: *Table, handle: Handle) bool {
@@ -337,14 +284,11 @@ pub const Table = struct {
     ) Error!MatchResult {
         if (node_ids.len != nodes.enrs.len or node_ids.len > protocol.findnode_result_max)
             return Error.InvalidNodeCount;
-        const state = switch (self.entries[index].?.expected) {
-            .nodes => |*value| value,
-            else => unreachable,
-        };
+        const state = &self.entries[index].?.expected.nodes;
         try validateNodesHeader(state, nodes.total);
         const total: u8 = @intCast(nodes.total);
 
-        var accepted_nodes: u16 = 0;
+        var accepted_nodes = AcceptedNodes.initEmpty();
         for (node_ids, 0..) |*node_id, node_index| {
             if (state.accepted == protocol.findnode_result_max) break;
             const distance = types.logDistance(&self.entries[index].?.peer.node_id, node_id);
@@ -352,7 +296,7 @@ pub const Table = struct {
             if (containsNode(state.seen[0..state.accepted], node_id)) continue;
             state.seen[state.accepted] = node_id.*;
             state.accepted += 1;
-            accepted_nodes |= @as(u16, 1) << @intCast(node_index);
+            accepted_nodes.set(node_index);
         }
 
         state.total = total;
@@ -365,7 +309,7 @@ pub const Table = struct {
                 .response = .{ .nodes = nodes },
                 .terminal = terminal,
             },
-            .accepted_node_mask = accepted_nodes,
+            .accepted_nodes = accepted_nodes,
             .owner = self.entries[index].?.owner,
         };
         if (terminal) clearEntry(&self.entries[index]);
@@ -400,28 +344,6 @@ pub const Table = struct {
         return if (saw_exhausted) Error.GenerationExhausted else Error.TableFull;
     }
 
-    fn responseIndex(
-        self: *const Table,
-        peer: types.Endpoint,
-        response: *const message.Message,
-        now_ms: u64,
-    ) Error!usize {
-        const index = self.findPeer(peer) orelse return Error.UnknownCall;
-        const entry = &self.entries[index].?;
-        if (now_ms >= entry.deadline_ms) return Error.CallExpired;
-        const response_id = response.requestId();
-        if (!std.mem.eql(u8, entry.request_id.slice(), response_id.slice()))
-            return Error.RequestIdMismatch;
-        const compatible = switch (response.*) {
-            .pong => entry.expected == .pong,
-            .nodes => entry.expected == .nodes,
-            .talk_response => entry.expected == .talk_response,
-            else => return Error.UnexpectedResponse,
-        };
-        if (!compatible) return Error.UnexpectedResponse;
-        return index;
-    }
-
     fn get(self: *const Table, handle: Handle) ?*const Entry {
         const index: usize = handle.index;
         if (index >= self.entries.len) return null;
@@ -440,10 +362,9 @@ pub const Table = struct {
 
     fn findPeer(self: *const Table, peer: types.Endpoint) ?usize {
         for (self.entries, 0..) |entry, index| {
-            if (entry) |stored| {
-                if (!stored.sent) continue;
-                if (types.Endpoint.eql(stored.peer, peer)) return index;
-            }
+            const stored = entry orelse continue;
+            if (!stored.sent) continue;
+            if (std.meta.eql(stored.peer, peer)) return index;
         }
         return null;
     }
@@ -460,28 +381,15 @@ pub const Table = struct {
         self: *const Table,
         address: types.Address,
         nonce: *const [constants.nonce_size]u8,
+        excluded: ?Handle,
     ) ?usize {
         for (self.entries, 0..) |entry, index| {
             const stored = entry orelse continue;
             if (!stored.sent) continue;
-            if (!types.Address.eql(stored.peer.address, address)) continue;
-            if (std.mem.eql(u8, &stored.sent_nonce, nonce)) return index;
-        }
-        return null;
-    }
-
-    fn findNonceExcept(
-        self: *const Table,
-        address: types.Address,
-        nonce: *const [constants.nonce_size]u8,
-        excluded: Handle,
-    ) ?usize {
-        for (self.entries, 0..) |entry, index| {
-            const stored = entry orelse continue;
-            if (!stored.sent) continue;
-            if (index == excluded.index and stored.generation == excluded.generation)
-                continue;
-            if (!types.Address.eql(stored.peer.address, address)) continue;
+            if (excluded) |handle| {
+                if (index == handle.index and stored.generation == handle.generation) continue;
+            }
+            if (!std.meta.eql(stored.peer.address, address)) continue;
             if (std.mem.eql(u8, &stored.sent_nonce, nonce)) return index;
         }
         return null;
@@ -503,6 +411,15 @@ fn expectedResponse(request: *const message.Message) Error!Expected {
         },
         .talk_request => .talk_response,
         else => Error.UnexpectedResponse,
+    };
+}
+
+fn expectsResponse(expected: Expected, response: *const message.Message) bool {
+    return switch (response.*) {
+        .pong => expected == .pong,
+        .nodes => expected == .nodes,
+        .talk_response => expected == .talk_response,
+        else => false,
     };
 }
 

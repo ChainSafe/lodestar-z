@@ -65,12 +65,13 @@ const Pair = struct {
         try std.testing.expectError(packet.Error.BufferTooSmall, self.node_a.startCall(
             &too_small,
             self.peerB(),
+            &self.record_b,
             &ping_message,
             1,
             startEntropy(0x08),
         ));
         try std.testing.expectEqual(@as(usize, 0), self.node_a.calls.count());
-        const started = try self.node_a.startCallKnown(
+        const started = try self.node_a.startCall(
             &self.a_to_b,
             self.peerB(),
             &self.record_b,
@@ -81,6 +82,7 @@ const Pair = struct {
         try std.testing.expectError(calls.Error.PeerBusy, self.node_a.startCall(
             &self.a_to_b,
             self.peerB(),
+            &self.record_b,
             &ping_message,
             1,
             startEntropy(0x20),
@@ -89,7 +91,7 @@ const Pair = struct {
             &self.b_to_a,
             self.a_to_b[0..started.packet_length],
             self.address_a,
-            receiveArgs(2, null, 0x30),
+            receiveArgs(2, 0x30),
             &self.scratch_b,
         );
         try std.testing.expectEqual(@as(u16, 63), challenge.packet_length);
@@ -97,7 +99,7 @@ const Pair = struct {
             &self.a_to_b,
             self.b_to_a[0..challenge.packet_length],
             self.address_b,
-            receiveArgs(3, null, 0x40),
+            receiveArgs(3, 0x40),
             &self.scratch_a,
         );
         try std.testing.expect(response.packet_length > 63);
@@ -121,7 +123,7 @@ const Pair = struct {
             &self.b_to_a,
             corrupted[0..handshake_length],
             self.address_a,
-            receiveArgs(4, null, 0x50),
+            receiveArgs(4, 0x50),
             &self.scratch_b,
         ));
         try std.testing.expectEqual(@as(usize, 0), self.node_b.sessions.sessionCount());
@@ -130,7 +132,7 @@ const Pair = struct {
             &self.b_to_a,
             self.a_to_b[0..handshake_length],
             self.address_a,
-            receiveArgs(5, null, 0x60),
+            receiveArgs(5, 0x60),
             &self.scratch_b,
         );
         try std.testing.expect(authenticated.event == .request);
@@ -187,7 +189,7 @@ const Pair = struct {
             &self.a_to_b,
             self.b_to_a[0..length],
             self.address_b,
-            receiveArgs(7, &self.record_b, 0x80),
+            receiveArgs(7, 0x80),
             &self.scratch_a,
         );
         try std.testing.expect(completed.event == .response);
@@ -214,6 +216,7 @@ const Pair = struct {
         const started = try self.node_a.startCall(
             &self.a_to_b,
             self.peerB(),
+            &self.record_b,
             &ping_message,
             16,
             startEntropy(0x90),
@@ -232,7 +235,7 @@ const Pair = struct {
             &self.b_to_a,
             self.a_to_b[0..started.packet_length],
             self.address_a,
-            receiveArgs(17, null, 0xa0),
+            receiveArgs(17, 0xa0),
             &self.scratch_b,
         );
         try std.testing.expectEqual(@as(u16, 0), received.packet_length);
@@ -253,6 +256,7 @@ const Pair = struct {
         const started = try self.node_a.startCall(
             &self.a_to_b,
             self.peerB(),
+            &self.record_b,
             &request,
             12,
             startEntropy(0x81),
@@ -261,7 +265,7 @@ const Pair = struct {
             &self.b_to_a,
             self.a_to_b[0..started.packet_length],
             self.address_a,
-            receiveArgs(13, null, 0x82),
+            receiveArgs(13, 0x82),
             &self.scratch_b,
         );
         try std.testing.expect(received.event == .request);
@@ -283,7 +287,7 @@ const Pair = struct {
             &self.a_to_b,
             self.b_to_a[0..response_length],
             self.address_b,
-            receiveArgs(15, null, 0x84),
+            receiveArgs(15, 0x84),
             &self.scratch_a,
         );
         try std.testing.expect(completed.event == .response);
@@ -306,6 +310,7 @@ const Pair = struct {
         const started = try self.node_b.startCall(
             &self.b_to_a,
             self.peerA(),
+            &self.record_a,
             &request,
             8,
             startEntropy(0xb0),
@@ -314,7 +319,7 @@ const Pair = struct {
             &self.a_to_b,
             self.b_to_a[0..started.packet_length],
             self.address_b,
-            receiveArgs(9, null, 0xb1),
+            receiveArgs(9, 0xb1),
             &self.scratch_a,
         );
         try std.testing.expect(received.event == .request);
@@ -334,7 +339,7 @@ const Pair = struct {
             &self.b_to_a,
             self.a_to_b[0..response_length],
             self.address_a,
-            receiveArgs(11, null, 0xb3),
+            receiveArgs(11, 0xb3),
             &self.scratch_b,
         );
         try std.testing.expect(completed.event == .response);
@@ -379,8 +384,10 @@ test "cold oversized requests fail before transmission" {
     var node: TestEngine = undefined;
     try node.initWithConfig(std.testing.allocator, key, local_record, testConfig());
     defer node.deinit();
+    const remote_key = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
+    const remote_record = try test_support.buildRecord(&remote_key, 1, address(2, 9_002));
     const peer = types.Endpoint{
-        .node_id = [_]u8{0x22} ** 32,
+        .node_id = remote_record.node_id,
         .address = address(2, 9_002),
     };
     const payload = [_]u8{0x55} ** 1_100;
@@ -394,6 +401,7 @@ test "cold oversized requests fail before transmission" {
     try std.testing.expectError(engine.Error.SessionRequired, node.startCall(
         &output,
         peer,
+        &remote_record,
         &request,
         1,
         startEntropy(0x10),
@@ -410,6 +418,7 @@ test "cold oversized requests fail before transmission" {
     const started = try node.startCall(
         &output,
         peer,
+        &remote_record,
         &request,
         3,
         startEntropy(0x20),
@@ -438,14 +447,9 @@ fn startEntropy(seed: u8) engine.StartEntropy {
     };
 }
 
-fn receiveArgs(
-    now_ms: u64,
-    known_record: ?*const enr.Record,
-    seed: u8,
-) engine.ReceiveArgs {
+fn receiveArgs(now_ms: u64, seed: u8) engine.ReceiveArgs {
     return .{
         .now_ms = now_ms,
-        .known_record = known_record,
         .entropy = .{
             .challenge_masking_iv = [_]u8{seed} ** 16,
             .id_nonce = [_]u8{seed +% 1} ** 16,

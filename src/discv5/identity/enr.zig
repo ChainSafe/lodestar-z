@@ -29,7 +29,7 @@ pub const Record = struct {
         sequence: u64,
         endpoint_value: types.Address,
     ) Error!Record {
-        if (!validEndpoint(endpoint_value)) return Error.InvalidRecord;
+        if (!endpoint_value.isUsable()) return Error.InvalidRecord;
         const public_key = crypto.compressedPublicKey(key_pair);
 
         var content_buffer: [constants.enr_size_max]u8 = undefined;
@@ -127,20 +127,6 @@ fn writeFields(
             try writer.writeUint(address.port);
         },
     }
-}
-
-fn validEndpoint(endpoint_value: types.Address) bool {
-    return switch (endpoint_value) {
-        .ip4 => |address| address.port != 0 and !allZero(&address.octets),
-        .ip6 => |address| address.port != 0 and !allZero(&address.octets),
-    };
-}
-
-fn allZero(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte != 0) return false;
-    }
-    return true;
 }
 
 const Parsed = struct {
@@ -241,28 +227,12 @@ pub fn nodeIdFromPublicKey(public_key: *const [33]u8) Error!types.NodeId {
 
 fn hashSignedPayload(payload: []const u8, digest: *[32]u8) void {
     std.debug.assert(payload.len <= constants.enr_size_max);
-    var prefix: [3]u8 = undefined;
-    const prefix_length = listPrefix(&prefix, payload.len);
+    var prefix: [9]u8 = undefined;
+    const prefix_length = rlp.listPrefix(&prefix, payload.len);
     var hasher = Keccak256.init(.{});
     hasher.update(prefix[0..prefix_length]);
     hasher.update(payload);
     hasher.final(digest);
-}
-
-fn listPrefix(out: *[3]u8, payload_length: usize) usize {
-    if (payload_length <= 55) {
-        out[0] = 0xc0 + @as(u8, @intCast(payload_length));
-        return 1;
-    }
-    if (payload_length <= std.math.maxInt(u8)) {
-        out[0] = 0xf8;
-        out[1] = @intCast(payload_length);
-        return 2;
-    }
-    std.debug.assert(payload_length <= constants.enr_size_max);
-    out[0] = 0xf9;
-    std.mem.writeInt(u16, out[1..3], @intCast(payload_length), .big);
-    return 3;
 }
 
 comptime {
