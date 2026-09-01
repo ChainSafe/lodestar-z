@@ -6,7 +6,7 @@ const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const Scalar = Secp256k1.scalar.Scalar;
 const scalar_order = Secp256k1.scalar.field_order;
 const half_scalar_order = scalar_order / 2;
-const rfc6979_candidates_max: usize = 1_024;
+const rfc6979_candidates_max: usize = 16;
 
 pub const Error = error{
     EcdhFailed,

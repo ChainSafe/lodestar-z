@@ -20,14 +20,14 @@ pub const whoareyou_packet_size: usize = masking_iv_size + static_header_size +
     whoareyou_authdata_size;
 pub const header_size_max: usize = static_header_size + handshake_authdata_size_max;
 pub const associated_data_size_max: usize = masking_iv_size + header_size_max;
-pub const message_size_max: usize = packet_size_max - masking_iv_size - static_header_size -
+pub const ordinary_plaintext_size_max: usize = packet_size_max - masking_iv_size - static_header_size -
     node_id_size - gcm_tag_size;
-pub const findnode_distances_max: usize = message_size_max - 8;
-pub const nodes_enrs_max: usize = 16;
+pub const handshake_plaintext_size_max: usize = packet_size_max - masking_iv_size -
+    static_header_size - handshake_authdata_size_min - gcm_tag_size;
 
 comptime {
     std.debug.assert(whoareyou_packet_size == packet_size_min);
-    std.debug.assert(message_size_max == 1_193);
-    std.debug.assert(findnode_distances_max == 1_185);
+    std.debug.assert(ordinary_plaintext_size_max == 1_193);
+    std.debug.assert(handshake_plaintext_size_max == 1_094);
     std.debug.assert(header_size_max < packet_size_max);
 }

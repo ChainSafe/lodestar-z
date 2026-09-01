@@ -156,7 +156,7 @@ test "packet size and handshake bounds fail before output mutation" {
     const masking_iv = [_]u8{0x33} ** constants.masking_iv_size;
     const nonce = [_]u8{0x44} ** constants.nonce_size;
     const key = [_]u8{0x55} ** 16;
-    const oversized = [_]u8{0} ** (constants.message_size_max + 1);
+    const oversized = [_]u8{0} ** (constants.ordinary_plaintext_size_max + 1);
     var raw = [_]u8{0xa5} ** constants.packet_size_max;
     const before = raw;
 
@@ -171,4 +171,19 @@ test "packet size and handshake bounds fail before output mutation" {
         .source_id = &source_id,
     }));
     try std.testing.expectEqualSlices(u8, &before, &raw);
+}
+
+test "handshake plaintext capacity accounts for the transmitted ENR" {
+    try std.testing.expectEqual(
+        constants.handshake_plaintext_size_max,
+        try packet.handshakePlaintextCapacity(0),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 794),
+        try packet.handshakePlaintextCapacity(constants.enr_size_max),
+    );
+    try std.testing.expectError(
+        packet.Error.InvalidAuthdata,
+        packet.handshakePlaintextCapacity(constants.enr_size_max + 1),
+    );
 }
