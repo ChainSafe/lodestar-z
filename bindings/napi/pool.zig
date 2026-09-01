@@ -1,5 +1,4 @@
 const std = @import("std");
-const js = @import("zapi:zapi").js;
 const Node = @import("persistent_merkle_tree").Node;
 const RefCount = @import("state_transition").RefCount;
 
@@ -15,7 +14,6 @@ const PoolRc = RefCount(Node.Pool);
 fn poolSizeFromEnvironment() !u32 {
     const raw = std.c.getenv(pool_size_environment_variable) orelse return default_pool_size;
     const value = std.mem.span(raw);
-    if (value.len == 0) return error.InvalidPoolCapacity;
     return std.fmt.parseInt(u32, value, 10) catch error.InvalidPoolCapacity;
 }
 
@@ -57,17 +55,3 @@ const State = struct {
 };
 
 pub var state: State = .{};
-
-/// JS: pool.ensureCapacity(newSize)
-pub fn ensureCapacity(new_size: js.Number) !void {
-    if (state.pool_rc == null) {
-        return error.PoolNotInitialized;
-    }
-
-    const requested = new_size.assertU32();
-    const old_size = state.pool().nodes.capacity;
-    if (requested <= old_size) {
-        return;
-    }
-    return error.PoolExhausted;
-}
