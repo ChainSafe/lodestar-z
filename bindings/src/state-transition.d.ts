@@ -6,5 +6,3 @@ export type {
   VoluntaryExit,
   VoluntaryExitValidity,
 } from "./index.js";
-
-export declare function deinitReusedEpochTransitionCache(): void;

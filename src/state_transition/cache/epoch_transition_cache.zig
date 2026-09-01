@@ -46,8 +46,7 @@ const ValidatorActivation = struct {
 
 const ValidatorActivationList = std.ArrayList(ValidatorActivation);
 
-/// this is a cache that's never gc'd, it is used to store data that is reused across multiple epochs
-const ReusedEpochTransitionCache = struct {
+pub const ReusedEpochTransitionCache = struct {
     allocator: Allocator,
     is_active_prev_epoch: BoolArray,
     is_active_current_epoch: BoolArray,
@@ -136,39 +135,6 @@ const ReusedEpochTransitionCache = struct {
     }
 };
 
-var _reused_cache: ?*ReusedEpochTransitionCache = null;
-var _reused_lock: std.Io.Mutex = std.Io.Mutex.init;
-
-fn getReusedEpochTransitionCache(allocator: Allocator, io: std.Io, validator_count: usize) !*ReusedEpochTransitionCache {
-    try _reused_lock.lock(io);
-    defer _reused_lock.unlock(io);
-
-    if (_reused_cache) |cache| {
-        try cache.resize(validator_count);
-        return cache;
-    }
-    _reused_cache = try allocator.create(ReusedEpochTransitionCache);
-    errdefer {
-        allocator.destroy(_reused_cache.?);
-        _reused_cache = null;
-    }
-    try _reused_cache.?.init(allocator, validator_count);
-    try _reused_cache.?.resize(validator_count);
-    return _reused_cache.?;
-}
-
-pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
-    _reused_lock.lockUncancelable(io);
-    defer _reused_lock.unlock(io);
-
-    if (_reused_cache) |cache| {
-        const allocator = cache.allocator;
-        cache.deinit();
-        allocator.destroy(cache);
-        _reused_cache = null;
-    }
-}
-
 pub const EpochTransitionCacheOpts = struct {
     /// Assert progressive balances the same in the cache.
     assert_correct_progressive_balances: bool = false,
@@ -211,7 +177,7 @@ pub const EpochTransitionCache = struct {
     // this is the same to beforeProcessEpoch in typesript version
     pub fn init(
         allocator: Allocator,
-        io: std.Io,
+        reused_cache: *ReusedEpochTransitionCache,
         config: *const BeaconConfig,
         epoch_cache: *EpochCache,
         state: *AnyBeaconState,
@@ -251,7 +217,7 @@ pub const EpochTransitionCache = struct {
 
         var next_epoch_shuffling_active_indices_length: usize = 0;
 
-        var reused_cache = try getReusedEpochTransitionCache(allocator, io, validator_count);
+        try reused_cache.resize(validator_count);
         for (0..validator_count) |i| {
             const validator = try validators_it.nextValuePtr();
             var flag: u8 = 0;
@@ -565,11 +531,11 @@ pub const EpochTransitionCache = struct {
 
     /// Ensure rewards/penalties arrays match the current validator count.
     /// This is only used in benchmark tests where we want to reuse the cache across steps.
-    pub fn syncRewardPenaltyLengths(self: *EpochTransitionCache, io: std.Io, validator_count: usize) !void {
-        try _reused_lock.lock(io);
-        defer _reused_lock.unlock(io);
-
-        const reused_cache = _reused_cache orelse return error.ReusedEpochTransitionCacheUnavailable;
+    pub fn syncRewardPenaltyLengths(
+        self: *EpochTransitionCache,
+        reused_cache: *ReusedEpochTransitionCache,
+        validator_count: usize,
+    ) !void {
         try reused_cache.rewards.resize(reused_cache.allocator, validator_count);
         try reused_cache.penalties.resize(reused_cache.allocator, validator_count);
         self.rewards = reused_cache.rewards.items;
@@ -612,13 +578,11 @@ test "EpochTransitionCache.beforeProcessEpoch" {
 
         var epoch_transition_cache = try EpochTransitionCache.init(
             allocator,
-            std.testing.io,
+            &test_state.transition_reused_cache,
             test_state.cached_state.config,
             test_state.cached_state.epoch_cache,
             test_state.cached_state.state,
         );
         defer epoch_transition_cache.deinit(allocator);
     }
-
-    deinitReusedEpochTransitionCache(std.testing.io);
 }

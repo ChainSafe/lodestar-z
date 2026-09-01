@@ -2,6 +2,8 @@ const std = @import("std");
 const Checkpoint = @import("consensus_types").phase0.Checkpoint.Type;
 const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
+const ReusedEpochTransitionCache =
+    @import("../cache/epoch_transition_cache.zig").ReusedEpochTransitionCache;
 const processJustificationAndFinalization = @import("../epoch/process_justification_and_finalization.zig").processJustificationAndFinalization;
 const weighJustificationAndFinalization = @import("../epoch/process_justification_and_finalization.zig").weighJustificationAndFinalization;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
@@ -15,7 +17,11 @@ const Node = @import("persistent_merkle_tree").Node;
 /// Compute on-the-fly justified / finalized checkpoints.
 ///   - For phase0, we need to create the cache through beforeProcessEpoch
 ///   - For other forks, use the progressive balances inside EpochCache
-pub fn computeUnrealizedCheckpoints(allocator: std.mem.Allocator, io: std.Io, cached_state: *CachedBeaconState) !UnrealizedCheckpoints {
+pub fn computeUnrealizedCheckpoints(
+    allocator: std.mem.Allocator,
+    reused_cache: *ReusedEpochTransitionCache,
+    cached_state: *CachedBeaconState,
+) !UnrealizedCheckpoints {
     // For phase0, we need to create the cache through beforeProcessEpoch
     if (cached_state.state.forkSeq() == .phase0) {
         // Clone state to mutate below         true = do not transfer cache
@@ -25,7 +31,7 @@ pub fn computeUnrealizedCheckpoints(allocator: std.mem.Allocator, io: std.Io, ca
 
         var epoch_transition_cache = try EpochTransitionCache.init(
             allocator,
-            io,
+            reused_cache,
             cloned_state.config,
             cloned_state.epoch_cache,
             cloned_state.state,

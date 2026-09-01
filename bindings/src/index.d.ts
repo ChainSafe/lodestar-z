@@ -376,9 +376,6 @@ declare const bindings: {
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
-  stateTransition: {
-    deinitReusedEpochTransitionCache: () => void;
-  };
   metrics: {
     init: () => void;
     scrapeMetrics: () => string;

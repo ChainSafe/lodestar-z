@@ -64,6 +64,7 @@ const BeaconState = fork_types.BeaconState;
 const BlockType = fork_types.BlockType;
 const ForkSeq = @import("config").ForkSeq;
 const CachedBeaconState = state_transition.CachedBeaconState;
+const ReusedEpochTransitionCache = state_transition.ReusedEpochTransitionCache;
 const UnrealizedCheckpoints = state_transition.UnrealizedCheckpoints;
 
 const ZERO_HASH = constants.ZERO_HASH;
@@ -395,6 +396,7 @@ pub const ForkChoice = struct {
     pub fn onBlock(
         self: *ForkChoice,
         allocator: Allocator,
+        reused_cache: *ReusedEpochTransitionCache,
         block: *const AnyBeaconBlock,
         state: *CachedBeaconState,
         block_delay_sec: u32,
@@ -408,6 +410,7 @@ pub const ForkChoice = struct {
             inline else => |fork| try self.onBlockInner(
                 fork,
                 allocator,
+                reused_cache,
                 block.castToFork(.full, fork),
                 state,
                 block_delay_sec,
@@ -429,6 +432,7 @@ pub const ForkChoice = struct {
         self: *ForkChoice,
         comptime fork: ForkSeq,
         allocator: Allocator,
+        reused_cache: *ReusedEpochTransitionCache,
         block: *const BeaconBlock(.full, fork),
         state: *CachedBeaconState,
         block_delay_sec: u32,
@@ -535,7 +539,11 @@ pub const ForkChoice = struct {
                 };
             } else {
                 // Compute new, happens ~2/3 first blocks of epoch as monitored in mainnet.
-                const unrealized = try state_transition.computeUnrealizedCheckpoints(state, allocator);
+                const unrealized = try state_transition.computeUnrealizedCheckpoints(
+                    allocator,
+                    reused_cache,
+                    state,
+                );
                 unrealized_justified_checkpoint = .{
                     .epoch = unrealized.justified_checkpoint.epoch,
                     .root = unrealized.justified_checkpoint.root,

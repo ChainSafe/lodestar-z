@@ -49,10 +49,7 @@ pub fn TestCase(comptime target_fork: ForkSeq) type {
             defer pool.deinit();
 
             var tc = try Self.init(allocator, &pool, dir);
-            defer {
-                tc.deinit();
-                state_transition.deinitReusedEpochTransitionCache(std.testing.io);
-            }
+            defer tc.deinit();
 
             try tc.runTest();
         }

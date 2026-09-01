@@ -168,7 +168,9 @@ pub const TestCachedBeaconState = struct {
     config: *BeaconConfig,
     pubkey_cache: *PubkeyCache,
     cached_state: *CachedBeaconState,
+    reused_cache: *state_transition.ReusedEpochTransitionCache,
     epoch_transition_cache: *state_transition.EpochTransitionCache,
+    transition_reused_cache: state_transition.ReusedEpochTransitionCache,
 
     pub fn init(allocator: Allocator, pool: *Node.Pool, validator_count: usize) !TestCachedBeaconState {
         var state = try generateElectraState(allocator, pool, active_chain_config, validator_count);
@@ -200,6 +202,17 @@ pub const TestCachedBeaconState = struct {
         errdefer allocator.destroy(config);
         config.* = BeaconConfig.init(chain_config, (try state.genesisValidatorsRoot()).*);
 
+        const validator_count = try state.validatorsCount();
+        const reused_cache = try allocator.create(state_transition.ReusedEpochTransitionCache);
+        errdefer allocator.destroy(reused_cache);
+        reused_cache.* = undefined;
+        try reused_cache.init(allocator, validator_count);
+        errdefer reused_cache.deinit();
+
+        var transition_reused_cache: state_transition.ReusedEpochTransitionCache = undefined;
+        try transition_reused_cache.init(allocator, validator_count);
+        errdefer transition_reused_cache.deinit();
+
         const immutable_data = state_transition.EpochCacheImmutableData{
             .config = config,
             .pubkey_cache = pubkey_cache,
@@ -214,7 +227,7 @@ pub const TestCachedBeaconState = struct {
         errdefer allocator.destroy(epoch_transition_cache);
         epoch_transition_cache.* = try state_transition.EpochTransitionCache.init(
             allocator,
-            std.testing.io,
+            reused_cache,
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state,
@@ -226,19 +239,23 @@ pub const TestCachedBeaconState = struct {
             .config = config,
             .pubkey_cache = pubkey_cache,
             .cached_state = cached_state,
+            .reused_cache = reused_cache,
             .epoch_transition_cache = epoch_transition_cache,
+            .transition_reused_cache = transition_reused_cache,
         };
     }
 
     pub fn deinit(self: *TestCachedBeaconState) void {
+        self.transition_reused_cache.deinit();
+        self.epoch_transition_cache.deinit(self.allocator);
+        self.allocator.destroy(self.epoch_transition_cache);
+        self.reused_cache.deinit();
+        self.allocator.destroy(self.reused_cache);
         self.cached_state.deinit();
         self.allocator.destroy(self.cached_state);
+        self.allocator.destroy(self.config);
         self.pubkey_cache.deinit();
         self.allocator.destroy(self.pubkey_cache);
-        self.epoch_transition_cache.deinit(self.allocator);
-        @import("../state_transition.zig").deinitReusedEpochTransitionCache(std.testing.io);
-        self.allocator.destroy(self.epoch_transition_cache);
-        self.allocator.destroy(self.config);
     }
 };
 

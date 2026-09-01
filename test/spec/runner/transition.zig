@@ -27,10 +27,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
             defer pool.deinit();
 
             var tc = try Self.init(allocator, &pool, dir);
-            defer {
-                tc.deinit();
-                state_transition.deinitReusedEpochTransitionCache(std.testing.io);
-            }
+            defer tc.deinit();
             try tc.runTest();
         }
 
@@ -126,6 +123,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
                 const new_result = try state_transition.state_transition.stateTransition(
                     self.pre.allocator,
                     std.testing.io,
+                    &self.pre.transition_reused_cache,
                     input_cached_state,
                     beacon_block,
                     .{
