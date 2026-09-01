@@ -15,8 +15,8 @@ const isFixedType = @import("type_kind.zig").isFixedType;
 /// Then, read the rest of offsets to get offsets = [8, 14]
 pub fn OffsetIterator(comptime ST: type) type {
     comptime {
-        if (ST.kind != .vector and ST.kind != .list) {
-            @compileError("ST must be a vector or list");
+        if (ST.kind != .vector and ST.kind != .list and ST.kind != .progressive_list) {
+            @compileError("ST must be a vector, list, or progressive_list");
         }
         if (isFixedType(ST.Element)) {
             @compileError("ST.Element must not be a fixed type");
