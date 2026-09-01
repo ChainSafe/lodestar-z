@@ -1,6 +1,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const message = @import("message.zig");
+const protocol = @import("../protocol.zig");
 const rlp = @import("rlp.zig");
 
 test "request IDs preserve length and reject more than eight bytes" {
@@ -34,7 +35,7 @@ test "all RPC messages round-trip without allocation" {
         .{ .talk_response = .{ .request_id = request_id, .response = "response" } },
     };
 
-    var encoded: [constants.message_size_max]u8 = undefined;
+    var encoded: [constants.ordinary_plaintext_size_max]u8 = undefined;
     var scratch: message.DecodeScratch = .{};
     for (&cases) |*expected| {
         const bytes = try expected.encode(&encoded);
@@ -91,14 +92,49 @@ test "FINDNODE validates every distance before publishing scratch" {
 
 test "NODES enforces the bounded ENR count" {
     const request_id = try message.RequestId.init(&.{});
-    const enrs = [_][]const u8{&.{0x80}} ** (constants.nodes_enrs_max + 1);
+    const enrs = [_][]const u8{&.{0x80}} ** (protocol.findnode_result_max + 1);
     const nodes = message.Message{ .nodes = .{
         .request_id = request_id,
         .total = 1,
         .enrs = &enrs,
     } };
-    var encoded: [constants.message_size_max]u8 = undefined;
+    var encoded: [constants.ordinary_plaintext_size_max]u8 = undefined;
     try std.testing.expectError(message.Error.InvalidMessage, nodes.encode(&encoded));
+}
+
+test "FINDNODE decoding publishes each distance once" {
+    const request_id = try message.RequestId.init(&.{0x01});
+    const find_node = message.Message{ .find_node = .{
+        .request_id = request_id,
+        .distances = &.{ 256, 0, 256, 1, 0 },
+    } };
+    var encoded: [64]u8 = undefined;
+    const bytes = try find_node.encode(&encoded);
+    var scratch: message.DecodeScratch = .{};
+    const decoded = try message.Message.decode(bytes, &scratch);
+    try std.testing.expectEqualSlices(u16, &.{ 256, 0, 1 }, decoded.find_node.distances);
+}
+
+test "FINDNODE decoder bounds large duplicate lists by distinct values" {
+    var encoded: [1_200]u8 = undefined;
+    encoded[0] = 0x03;
+    var writer = rlp.Writer.init(encoded[1..]);
+    const outer = try writer.beginList();
+    try writer.writeBytes(&.{0x01});
+    const distances = try writer.beginList();
+    for (0..300) |_| try writer.writeUint(256);
+    writer.finishList(distances);
+    writer.finishList(outer);
+    const encoded_length = writer.bytes().len + 1;
+    var scratch: message.DecodeScratch = .{};
+    const decoded = try message.Message.decode(encoded[0..encoded_length], &scratch);
+    try std.testing.expectEqualSlices(u16, &.{256}, decoded.find_node.distances);
+
+    const outbound = message.Message{ .find_node = .{
+        .request_id = try message.RequestId.init(&.{0x01}),
+        .distances = &([_]u16{0} ** (protocol.distance_count + 1)),
+    } };
+    try std.testing.expectError(message.Error.InvalidMessage, outbound.encode(&encoded));
 }
 
 fn expectMessageEqual(expected: *const message.Message, actual: *const message.Message) !void {

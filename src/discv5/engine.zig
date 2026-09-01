@@ -3,6 +3,7 @@ const calls_mod = @import("calls.zig");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
 const handshake = @import("identity/handshake.zig");
+const protocol = @import("protocol.zig");
 const session_mod = @import("session.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
@@ -18,6 +19,8 @@ pub const Error = calls_mod.Error || crypto.Error || enr.Error || message.Error 
     MissingCall,
     MissingIdentity,
     MissingSession,
+    RequestTooLargeForHandshake,
+    SessionRequired,
     UnexpectedChallenge,
     UnexpectedHandshake,
 };
@@ -69,12 +72,12 @@ pub const Scratch = struct {
     packet_decode: packet.DecodeScratch = .{},
     packet_decrypt: packet.DecryptScratch = .{},
     message_decode: message.DecodeScratch = .{},
-    node_records: [constants.nodes_enrs_max]enr.Record = undefined,
+    node_records: [protocol.findnode_result_max]enr.Record = undefined,
+    node_ids: [protocol.findnode_result_max]types.NodeId = undefined,
 };
 
 pub const ReceiveArgs = struct {
     now_ms: u64,
-    response_timeout_ms: u64,
     known_record: ?*const enr.Record,
     entropy: ReceiveEntropy,
 };
@@ -86,13 +89,17 @@ const OutboundHandshake = struct {
     signature: [64]u8,
     ephemeral_public_key: [33]u8,
     nonce: [constants.nonce_size]u8,
-    remote_sequence: u64,
+    local_enr: []const u8,
     deadline_ms: u64,
 };
 
-pub const Limits = struct {
-    sessions: u16 = session_mod.capacity_max,
-    calls: u16 = calls_mod.capacity_max,
+pub const Config = struct {
+    session_capacity: usize = 1_024,
+    challenge_capacity: usize = 64,
+    call_capacity: usize = 64,
+    request_timeout_ms: u64 = 1_000,
+    challenge_timeout_ms: u64 = 1_000,
+    session_idle_timeout_ms: u64 = 86_400_000,
 };
 
 pub const Engine = struct {
@@ -100,34 +107,45 @@ pub const Engine = struct {
 
     local_key: crypto.KeyPair,
     local_record: enr.Record,
-    sessions: session_mod.Table,
+    config: Config,
+    sessions: session_mod.Store,
     calls: calls_mod.Table,
 
     pub fn init(
         self: *Self,
+        allocator: std.mem.Allocator,
         local_key: crypto.KeyPair,
         local_record: enr.Record,
     ) Error!void {
-        return self.initWithLimits(local_key, local_record, .{});
+        return self.initWithConfig(allocator, local_key, local_record, .{});
     }
 
-    pub fn initWithLimits(
+    pub fn initWithConfig(
         self: *Self,
+        allocator: std.mem.Allocator,
         local_key: crypto.KeyPair,
         local_record: enr.Record,
-        limits: Limits,
+        config: Config,
     ) Error!void {
         const public_key = crypto.compressedPublicKey(&local_key);
         if (!std.mem.eql(u8, &public_key, &local_record.public_key))
             return Error.InvalidLocalRecord;
-        try self.sessions.init(limits.sessions);
+        if (config.request_timeout_ms == 0 or config.challenge_timeout_ms == 0 or
+            config.session_idle_timeout_ms == 0) return Error.InvalidTimeout;
+        try self.sessions.init(
+            allocator,
+            config.session_capacity,
+            config.challenge_capacity,
+        );
         errdefer self.sessions.deinit();
-        try self.calls.init(limits.calls);
+        try self.calls.init(allocator, config.call_capacity);
+        self.config = config;
         self.local_key = local_key;
         self.local_record = local_record;
     }
 
     pub fn deinit(self: *Self) void {
+        self.calls.deinit();
         self.sessions.deinit();
         std.crypto.secureZero(u8, std.mem.asBytes(&self.local_key));
     }
@@ -138,11 +156,26 @@ pub const Engine = struct {
         peer: types.Endpoint,
         request: *const message.Message,
         now_ms: u64,
-        timeout_ms: u64,
         entropy: StartEntropy,
     ) Error!StartResult {
-        const deadline_ms = try deadline(now_ms, timeout_ms);
-        const handle = try self.calls.begin(peer, request, deadline_ms);
+        const deadline_ms = try deadline(now_ms, self.config.request_timeout_ms);
+        const has_session = self.sessions.hasSession(peer);
+        const request_capacity = if (has_session)
+            constants.ordinary_plaintext_size_max
+        else
+            try packet.handshakePlaintextCapacity(self.local_record.length);
+        const handle = self.calls.begin(
+            peer,
+            request,
+            deadline_ms,
+            request_capacity,
+        ) catch |err| switch (err) {
+            calls_mod.Error.RequestTooLarge => if (has_session)
+                return err
+            else
+                return Error.SessionRequired,
+            else => return err,
+        };
         errdefer {
             const cancelled = self.calls.cancel(handle);
             std.debug.assert(cancelled);
@@ -177,7 +210,7 @@ pub const Engine = struct {
         entropy: StartEntropy,
     ) Error!u16 {
         try validateResponse(response);
-        var plaintext_buffer: [constants.message_size_max]u8 = undefined;
+        var plaintext_buffer: [constants.ordinary_plaintext_size_max]u8 = undefined;
         const plaintext = try response.encode(&plaintext_buffer);
         var outbound = (try self.sessions.outbound(
             peer,
@@ -228,14 +261,17 @@ pub const Engine = struct {
     pub fn tick(
         self: *Self,
         now_ms: u64,
-        challenge_timeout_ms: u64,
         expired_calls: []calls_mod.Handle,
-    ) struct { calls: usize, challenges: usize } {
+    ) struct { calls: usize, challenges: usize, sessions: usize } {
         return .{
             .calls = self.calls.expire(now_ms, expired_calls),
             .challenges = self.sessions.expireChallenges(
                 now_ms,
-                challenge_timeout_ms,
+                self.config.challenge_timeout_ms,
+            ),
+            .sessions = self.sessions.expireSessions(
+                now_ms,
+                self.config.session_idle_timeout_ms,
             ),
         };
     }
@@ -250,7 +286,7 @@ pub const Engine = struct {
         scratch: *Scratch,
     ) Error!Outcome {
         const peer = types.Endpoint{ .node_id = source_id, .address = from };
-        var read_key = self.sessions.readKey(peer, args.now_ms) orelse
+        var read_key = self.sessions.readKey(peer) orelse
             return self.issueChallenge(out, decoded, peer, args);
         defer std.crypto.secureZero(u8, &read_key);
         const plaintext = packet.decrypt(
@@ -261,11 +297,19 @@ pub const Engine = struct {
             packet.Error.DecryptionFailed => return self.issueChallenge(out, decoded, peer, args),
             else => return err,
         };
+        const touched = self.sessions.touch(peer, args.now_ms);
+        std.debug.assert(touched);
         const decoded_message = try message.Message.decode(
             plaintext,
             &scratch.message_decode,
         );
-        return .{ .event = try self.dispatch(peer, decoded_message, null, scratch) };
+        return .{ .event = try self.dispatch(
+            peer,
+            decoded_message,
+            null,
+            args.now_ms,
+            scratch,
+        ) };
     }
 
     fn issueChallenge(
@@ -313,9 +357,16 @@ pub const Engine = struct {
         const remote_record = args.known_record orelse return Error.MissingIdentity;
         if (!std.mem.eql(u8, &remote_record.node_id, &peer.node_id))
             return Error.InvalidRemoteRecord;
+        const local_enr = if (decoded.form.whoareyou.enr_sequence < self.local_record.sequence)
+            self.local_record.slice()
+        else
+            &.{};
+        const plaintext = self.calls.requestBytes(handle) orelse return Error.MissingCall;
+        if (plaintext.len > try packet.handshakePlaintextCapacity(local_enr.len))
+            return Error.RequestTooLargeForHandshake;
         const response_deadline = try deadline(
             args.now_ms,
-            args.response_timeout_ms,
+            self.config.request_timeout_ms,
         );
         const challenge_data = try challengeData(decoded);
         var ephemeral_key = try crypto.keyPairFromSecret(
@@ -347,7 +398,7 @@ pub const Engine = struct {
                 session_mod.first_nonce_counter,
                 &args.entropy.handshake_nonce_tail,
             ),
-            .remote_sequence = decoded.form.whoareyou.enr_sequence,
+            .local_enr = local_enr,
             .deadline_ms = response_deadline,
         });
     }
@@ -358,16 +409,12 @@ pub const Engine = struct {
         args: ReceiveArgs,
         prepared: OutboundHandshake,
     ) Error!Outcome {
-        const local_enr = if (prepared.remote_sequence < self.local_record.sequence)
-            self.local_record.slice()
-        else
-            &.{};
         var authdata_buffer: [constants.handshake_authdata_size_max]u8 = undefined;
         const authdata = try packet.buildHandshakeAuthdata(&authdata_buffer, .{
             .source_id = &self.local_record.node_id,
             .id_signature = &prepared.signature,
             .ephemeral_key = &prepared.ephemeral_public_key,
-            .enr = local_enr,
+            .enr = prepared.local_enr,
         });
         const plaintext = self.calls.requestBytes(prepared.handle) orelse
             return Error.MissingCall;
@@ -405,7 +452,7 @@ pub const Engine = struct {
     ) Error!Outcome {
         const authdata = decoded.form.handshake;
         const peer = types.Endpoint{ .node_id = authdata.source_id, .address = from };
-        const challenge = self.sessions.getChallenge(peer, args.now_ms) orelse
+        const challenge = self.sessions.getChallenge(peer) orelse
             return Error.UnexpectedHandshake;
         const records = try selectRecord(authdata.enr, args.known_record, &peer.node_id);
         try handshake.verifyProof(
@@ -432,7 +479,13 @@ pub const Engine = struct {
             plaintext,
             &scratch.message_decode,
         );
-        const event = try self.dispatch(peer, decoded_message, records.update, scratch);
+        const event = try self.dispatch(
+            peer,
+            decoded_message,
+            records.update,
+            args.now_ms,
+            scratch,
+        );
         var active = session_mod.Session{
             .read_key = keys.initiator,
             .write_key = keys.recipient,
@@ -447,6 +500,7 @@ pub const Engine = struct {
         peer: types.Endpoint,
         decoded: message.Message,
         record: ?enr.Record,
+        now_ms: u64,
         scratch: *Scratch,
     ) Error!Event {
         return switch (decoded) {
@@ -459,6 +513,7 @@ pub const Engine = struct {
                 peer,
                 decoded,
                 record,
+                now_ms,
                 scratch,
             ),
         };
@@ -469,14 +524,35 @@ pub const Engine = struct {
         peer: types.Endpoint,
         decoded: message.Message,
         record: ?enr.Record,
+        now_ms: u64,
         scratch: *Scratch,
     ) Error!Event {
-        const node_records = switch (decoded) {
+        try self.calls.preflight(peer, &decoded, now_ms);
+        const parsed_records = switch (decoded) {
             .nodes => |nodes| try validateNodeRecords(nodes.enrs, scratch),
             else => &.{},
         };
+        const match_result = try self.calls.accept(
+            peer,
+            &decoded,
+            now_ms,
+            scratch.node_ids[0..parsed_records.len],
+        );
+        var matched = match_result.matched;
+        const node_records = if (parsed_records.len == 0)
+            parsed_records
+        else blk: {
+            const filtered = retainAcceptedNodeRecords(
+                decoded.nodes.enrs,
+                parsed_records,
+                match_result.accepted_node_mask,
+                scratch,
+            );
+            matched.response.nodes.enrs = filtered.raw;
+            break :blk filtered.records;
+        };
         return .{ .response = .{
-            .matched = try self.calls.accept(peer, &decoded),
+            .matched = matched,
             .record = record,
             .node_records = node_records,
         } };
@@ -488,7 +564,36 @@ fn validateNodeRecords(raw_records: []const []const u8, scratch: *Scratch) Error
     for (raw_records, scratch.node_records[0..raw_records.len]) |raw, *record| {
         record.* = try enr.Record.init(raw);
     }
+    for (scratch.node_records[0..raw_records.len], scratch.node_ids[0..raw_records.len]) |
+        *record,
+        *node_id,
+    | node_id.* = record.node_id;
     return scratch.node_records[0..raw_records.len];
+}
+
+const FilteredNodeRecords = struct {
+    raw: []const []const u8,
+    records: []const enr.Record,
+};
+
+fn retainAcceptedNodeRecords(
+    raw_records: []const []const u8,
+    parsed_records: []const enr.Record,
+    accepted: u16,
+    scratch: *Scratch,
+) FilteredNodeRecords {
+    std.debug.assert(raw_records.len == parsed_records.len);
+    var retained: usize = 0;
+    for (raw_records, parsed_records, 0..) |raw, record, index| {
+        if (accepted & (@as(u16, 1) << @intCast(index)) == 0) continue;
+        scratch.message_decode.enrs[retained] = raw;
+        scratch.node_records[retained] = record;
+        retained += 1;
+    }
+    return .{
+        .raw = scratch.message_decode.enrs[0..retained],
+        .records = scratch.node_records[0..retained],
+    };
 }
 
 const SelectedRecord = struct {
@@ -540,9 +645,9 @@ fn validateResponse(value: *const message.Message) Error!void {
     switch (value.*) {
         .pong, .talk_response => {},
         .nodes => |nodes| {
-            if (nodes.total == 0 or nodes.total > calls_mod.nodes_response_packets_max)
+            if (nodes.total == 0 or nodes.total > protocol.findnode_response_packets_max)
                 return Error.InvalidResponseCount;
-            if (nodes.enrs.len > constants.nodes_enrs_max)
+            if (nodes.enrs.len > protocol.findnode_result_max)
                 return Error.InvalidMessage;
             for (nodes.enrs) |raw| _ = try enr.Record.init(raw);
         },
@@ -551,7 +656,7 @@ fn validateResponse(value: *const message.Message) Error!void {
 }
 
 comptime {
-    std.debug.assert(@sizeOf(Engine) <= 160 * 1_024);
+    std.debug.assert(@sizeOf(Engine) <= 1_024);
 }
 
 test "NODES record validation rejects malformed ENRs before publication" {
@@ -560,5 +665,26 @@ test "NODES record validation rejects malformed ENRs before publication" {
     try std.testing.expectError(
         enr.Error.InvalidRecord,
         validateNodeRecords(&raw, &scratch),
+    );
+}
+
+test "unsolicited NODES fails before record validation" {
+    var core: Engine = undefined;
+    try core.calls.init(std.testing.allocator, 1);
+    defer core.calls.deinit();
+    const peer = types.Endpoint{
+        .node_id = [_]u8{0x11} ** 32,
+        .address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_001 } },
+    };
+    const raw = [_][]const u8{&.{0xc0}};
+    const response = message.Message{ .nodes = .{
+        .request_id = try message.RequestId.init(&.{0x01}),
+        .total = 1,
+        .enrs = &raw,
+    } };
+    var scratch: Scratch = .{};
+    try std.testing.expectError(
+        calls_mod.Error.UnknownCall,
+        core.dispatchResponse(peer, response, null, 0, &scratch),
     );
 }

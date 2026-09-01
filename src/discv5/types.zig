@@ -2,6 +2,16 @@ const std = @import("std");
 
 pub const NodeId = [32]u8;
 
+pub fn logDistance(left: *const NodeId, right: *const NodeId) u16 {
+    for (left, right, 0..) |left_byte, right_byte, index| {
+        const difference = left_byte ^ right_byte;
+        if (difference == 0) continue;
+        const leading: u16 = @intCast(@clz(difference));
+        return @intCast(256 - index * 8 - leading);
+    }
+    return 0;
+}
+
 pub const Address = union(enum) {
     ip4: struct {
         octets: [4]u8,

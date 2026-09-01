@@ -6,6 +6,7 @@ const enr = @import("identity/enr.zig");
 const message = @import("wire/message.zig");
 const packet = @import("wire/packet.zig");
 const rlp = @import("wire/rlp.zig");
+const engine_session = @import("session.zig");
 const types = @import("types.zig");
 
 const TestEngine = engine.Engine;
@@ -17,6 +18,7 @@ test "paired engines recover a session and complete one call without queues" {
     const recovery = try pair.beginRecovery();
     const request_id = try pair.authenticate(recovery.handshake_length);
     try pair.completePong(recovery.started, request_id);
+    try pair.filterFindNodeRecords();
     try pair.directSessionTimeout();
 }
 
@@ -44,9 +46,9 @@ const Pair = struct {
         const key_b = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
         self.record_a = try buildRecord(&key_a, 1, self.address_a);
         self.record_b = try buildRecord(&key_b, 1, self.address_b);
-        try self.node_a.initWithLimits(key_a, self.record_a, .{ .sessions = 4, .calls = 4 });
+        try self.node_a.initWithConfig(std.testing.allocator, key_a, self.record_a, testConfig());
         errdefer self.node_a.deinit();
-        try self.node_b.initWithLimits(key_b, self.record_b, .{ .sessions = 4, .calls = 4 });
+        try self.node_b.initWithConfig(std.testing.allocator, key_b, self.record_b, testConfig());
         self.scratch_a = .{};
         self.scratch_b = .{};
     }
@@ -64,7 +66,6 @@ const Pair = struct {
             self.peerB(),
             &ping_message,
             1,
-            100,
             startEntropy(0x08),
         ));
         try std.testing.expectEqual(@as(usize, 0), self.node_a.calls.count());
@@ -73,7 +74,6 @@ const Pair = struct {
             self.peerB(),
             &ping_message,
             1,
-            100,
             startEntropy(0x10),
         );
         try std.testing.expectError(calls.Error.PeerBusy, self.node_a.startCall(
@@ -81,7 +81,6 @@ const Pair = struct {
             self.peerB(),
             &ping_message,
             1,
-            100,
             startEntropy(0x20),
         ));
         const challenge = try self.node_b.receive(
@@ -179,8 +178,7 @@ const Pair = struct {
             &self.a_to_b,
             self.peerB(),
             &ping_message,
-            8,
-            10,
+            12,
             startEntropy(0x90),
         );
         const direct_packet = try packet.decode(
@@ -190,23 +188,77 @@ const Pair = struct {
         );
         try std.testing.expectEqualSlices(
             u8,
-            &.{ 0, 0, 0, 2 },
+            &.{ 0, 0, 0, 3 },
             direct_packet.static_header.nonce[0..4],
         );
         const received = try self.node_b.receive(
             &self.b_to_a,
             self.a_to_b[0..started.packet_length],
             self.address_a,
-            receiveArgs(9, null, 0xa0),
+            receiveArgs(13, null, 0xa0),
             &self.scratch_b,
         );
         try std.testing.expectEqual(@as(u16, 0), received.packet_length);
         try std.testing.expect(received.event == .request);
         try std.testing.expect(received.event.request.record == null);
         var expired: [1]calls.Handle = undefined;
-        const tick = self.node_a.tick(18, 100, &expired);
+        const tick = self.node_a.tick(112, &expired);
         try std.testing.expectEqual(@as(usize, 1), tick.calls);
         try std.testing.expectEqual(started.handle, expired[0]);
+    }
+
+    fn filterFindNodeRecords(self: *Pair) !void {
+        const requested_distance = types.logDistance(&self.record_b.node_id, &self.record_a.node_id);
+        const request = message.Message{ .find_node = .{
+            .request_id = try message.RequestId.init(&.{0x03}),
+            .distances = &.{requested_distance},
+        } };
+        const started = try self.node_a.startCall(
+            &self.a_to_b,
+            self.peerB(),
+            &request,
+            8,
+            startEntropy(0x81),
+        );
+        const received = try self.node_b.receive(
+            &self.b_to_a,
+            self.a_to_b[0..started.packet_length],
+            self.address_a,
+            receiveArgs(9, null, 0x82),
+            &self.scratch_b,
+        );
+        try std.testing.expect(received.event == .request);
+
+        const raw_records = [_][]const u8{ self.record_a.slice(), self.record_b.slice() };
+        const response = message.Message{ .nodes = .{
+            .request_id = request.find_node.request_id,
+            .total = 1,
+            .enrs = &raw_records,
+        } };
+        const response_length = try self.node_b.sendResponse(
+            &self.b_to_a,
+            self.peerA(),
+            &response,
+            10,
+            startEntropy(0x83),
+        );
+        const completed = try self.node_a.receive(
+            &self.a_to_b,
+            self.b_to_a[0..response_length],
+            self.address_b,
+            receiveArgs(11, null, 0x84),
+            &self.scratch_a,
+        );
+        try std.testing.expect(completed.event == .response);
+        try std.testing.expectEqual(@as(usize, 1), completed.event.response.node_records.len);
+        try std.testing.expectEqual(
+            self.record_a.node_id,
+            completed.event.response.node_records[0].node_id,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            completed.event.response.matched.response.nodes.enrs.len,
+        );
     }
 
     fn ping(self: *const Pair, id: u8) message.Message {
@@ -232,7 +284,63 @@ test "engine rejects a local record owned by another key" {
     var invalid: TestEngine = undefined;
     try std.testing.expectError(
         engine.Error.InvalidLocalRecord,
-        invalid.init(key_a, record_b),
+        invalid.init(std.testing.allocator, key_a, record_b),
+    );
+}
+
+test "cold oversized requests fail before transmission" {
+    const key = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
+    const local_record = try buildRecord(&key, 1, address(1, 9_001));
+    var node: TestEngine = undefined;
+    try node.initWithConfig(std.testing.allocator, key, local_record, testConfig());
+    defer node.deinit();
+    const peer = types.Endpoint{
+        .node_id = [_]u8{0x22} ** 32,
+        .address = address(2, 9_002),
+    };
+    const payload = [_]u8{0x55} ** 1_100;
+    const request = message.Message{ .talk_request = .{
+        .request_id = try message.RequestId.init(&.{0x01}),
+        .protocol = &.{},
+        .request = &payload,
+    } };
+    var output = [_]u8{0xa5} ** 1_280;
+    const before = output;
+    try std.testing.expectError(engine.Error.SessionRequired, node.startCall(
+        &output,
+        peer,
+        &request,
+        1,
+        startEntropy(0x10),
+    ));
+    try std.testing.expectEqualSlices(u8, &before, &output);
+    try std.testing.expectEqual(@as(usize, 0), node.calls.count());
+
+    const session_key = [_]u8{0x33} ** 16;
+    const active = engine_session.Session{
+        .read_key = session_key,
+        .write_key = session_key,
+    };
+    node.sessions.install(peer, &active, 2);
+    const started = try node.startCall(
+        &output,
+        peer,
+        &request,
+        3,
+        startEntropy(0x20),
+    );
+    try std.testing.expect(started.packet_length > 1_100);
+}
+
+test "engine configuration rejects zero retention windows" {
+    const key = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
+    const local_record = try buildRecord(&key, 1, address(1, 9_001));
+    var node: TestEngine = undefined;
+    var config = testConfig();
+    config.challenge_timeout_ms = 0;
+    try std.testing.expectError(
+        engine.Error.InvalidTimeout,
+        node.initWithConfig(std.testing.allocator, key, local_record, config),
     );
 }
 
@@ -294,7 +402,6 @@ fn receiveArgs(
 ) engine.ReceiveArgs {
     return .{
         .now_ms = now_ms,
-        .response_timeout_ms = 100,
         .known_record = known_record,
         .entropy = .{
             .challenge_masking_iv = [_]u8{seed} ** 16,
@@ -303,6 +410,17 @@ fn receiveArgs(
             .handshake_nonce_tail = [_]u8{seed +% 3} ** 8,
             .ephemeral_secret = [_]u8{seed +% 4} ** 32,
         },
+    };
+}
+
+fn testConfig() engine.Config {
+    return .{
+        .session_capacity = 4,
+        .challenge_capacity = 4,
+        .call_capacity = 4,
+        .request_timeout_ms = 100,
+        .challenge_timeout_ms = 100,
+        .session_idle_timeout_ms = 1_000,
     };
 }
 

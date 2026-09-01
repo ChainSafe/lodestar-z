@@ -59,7 +59,7 @@ pub const DecodeScratch = struct {
 
 pub const DecryptScratch = struct {
     associated_data: [constants.associated_data_size_max]u8 = undefined,
-    plaintext: [constants.message_size_max]u8 = undefined,
+    plaintext: [constants.ordinary_plaintext_size_max]u8 = undefined,
 };
 
 pub const MessageArgs = struct {
@@ -144,7 +144,7 @@ pub fn decrypt(
     if (packet.static_header.flag == .whoareyou) return Error.InvalidPacket;
     if (packet.ciphertext.len < constants.gcm_tag_size) return Error.DecryptionFailed;
     const plaintext_length = packet.ciphertext.len - constants.gcm_tag_size;
-    if (plaintext_length > constants.message_size_max) return Error.InvalidPacket;
+    if (plaintext_length > constants.ordinary_plaintext_size_max) return Error.InvalidPacket;
     const associated_data_length = constants.masking_iv_size + packet.header.len;
     if (associated_data_length > scratch.associated_data.len) return Error.InvalidPacket;
 
@@ -153,7 +153,7 @@ pub fn decrypt(
     @memcpy(associated_data[constants.masking_iv_size..], packet.header);
     const ciphertext = packet.ciphertext[0..plaintext_length];
     const tag = packet.ciphertext[plaintext_length..][0..constants.gcm_tag_size].*;
-    var plaintext: [constants.message_size_max]u8 = undefined;
+    var plaintext: [constants.ordinary_plaintext_size_max]u8 = undefined;
     defer std.crypto.secureZero(u8, &plaintext);
     Aes128Gcm.decrypt(
         plaintext[0..plaintext_length],
@@ -174,6 +174,11 @@ pub fn encodeOrdinary(out: []u8, args: OrdinaryArgs) Error![]u8 {
 pub fn encodeHandshake(out: []u8, args: HandshakeArgs) Error![]u8 {
     try validateHandshakeAuthdata(args.authdata);
     return encodeMessage(out, .handshake, args.authdata, args.packet);
+}
+
+pub fn handshakePlaintextCapacity(enr_length: usize) Error!usize {
+    if (enr_length > constants.enr_size_max) return Error.InvalidAuthdata;
+    return constants.handshake_plaintext_size_max - enr_length;
 }
 
 pub fn encodeWhoareyou(
