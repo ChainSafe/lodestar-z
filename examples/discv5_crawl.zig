@@ -15,10 +15,10 @@ const crawl_duration_seconds_default: u16 = 60;
 const crawl_duration_seconds_max: u16 = 300;
 const driver_steps_max: usize = 12_000;
 const key_generation_attempts_max: usize = 16;
-const lookup_concurrency: usize = 4;
+const lookup_concurrency: usize = 16;
 const lookup_total_max: usize = 64;
 const poll_interval_ms: u32 = 25;
-const record_capacity: usize = discv5.routing.table_capacity;
+const record_capacity: usize = 8_192;
 const rejection_reason_capacity: usize = 16;
 
 const Bootstrap = struct {
@@ -40,17 +40,37 @@ const LookupSlot = struct {
 };
 
 const RecordSet = struct {
-    records: [record_capacity]discv5.identity.enr.Record = undefined,
+    allocator: std.mem.Allocator,
+    records: []discv5.identity.enr.Record,
+    indices: std.AutoHashMapUnmanaged(discv5.types.NodeId, u16),
     count: u16 = 0,
 
+    fn init(allocator: std.mem.Allocator) !RecordSet {
+        const records = try allocator.alloc(discv5.identity.enr.Record, record_capacity);
+        errdefer allocator.free(records);
+
+        var indices: std.AutoHashMapUnmanaged(discv5.types.NodeId, u16) = .empty;
+        errdefer indices.deinit(allocator);
+        try indices.ensureTotalCapacity(allocator, @intCast(record_capacity));
+
+        return .{ .allocator = allocator, .records = records, .indices = indices };
+    }
+
+    fn deinit(self: *RecordSet) void {
+        self.indices.deinit(self.allocator);
+        self.allocator.free(self.records);
+        self.* = undefined;
+    }
+
     fn add(self: *RecordSet, record: *const discv5.identity.enr.Record) bool {
-        for (self.records[0..self.count]) |*stored| {
-            if (!std.mem.eql(u8, &stored.node_id, &record.node_id)) continue;
+        if (self.indices.get(record.node_id)) |index| {
+            const stored = &self.records[index];
             if (record.sequence > stored.sequence) stored.* = record.*;
             return false;
         }
         if (self.count == self.records.len) return false;
         self.records[self.count] = record.*;
+        self.indices.putAssumeCapacityNoClobber(record.node_id, self.count);
         self.count += 1;
         return true;
     }
@@ -160,7 +180,8 @@ pub fn main(init: std.process.Init) !void {
         std.meta.activeTag(advertised_address),
         &bootstraps,
     );
-    var records = RecordSet{};
+    var records = try RecordSet.init(allocator);
+    defer records.deinit();
     const authenticated = try authenticateBootstraps(
         io,
         &transport,
@@ -177,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
     try crawl(io, allocator, &transport, &records, deadline_ms);
     const elapsed_ms = (try monotonicMilliseconds(io)) - started_ms;
     std.debug.print(
-        "collected {d} authenticated peer records from {d} routing entries in {d} ms\n",
+        "collected {d} validated peer records from {d} routing entries in {d} ms\n",
         .{ records.count, core.routing.count(), elapsed_ms },
     );
     for (records.records[0..records.count]) |*record| printRecord(record);
@@ -288,7 +309,7 @@ fn crawl(
         try startLookups(io, allocator, transport.core, &slots, &launched);
         try refillLookups(io, transport, &slots, refill_cursor);
         refill_cursor = (refill_cursor + 1) % slots.len;
-        completed += finishLookups(transport.core, &slots, records);
+        completed += finishLookups(transport.core, &slots);
         if (completed == lookup_total_max and activeLookupCount(&slots) == 0) break;
         if (records.count == record_capacity) break;
 
@@ -298,12 +319,11 @@ fn crawl(
             .timeout, .accepted => {},
         }
         try routeExpiries(transport.core, &slots, expired[0..result.calls_expired]);
-        try routeEvent(transport.core, &slots, &result);
+        try routeEvent(transport.core, &slots, records, &result);
     }
 
     for (&slots) |*slot| {
         if (!slot.active) continue;
-        collectLookupResults(&slot.operation, records);
         slot.cancel(transport.core);
     }
     std.debug.print("lookups launched={d} completed={d}\n", .{ launched, completed });
@@ -348,6 +368,13 @@ fn refillLookups(
                 slot.operation.waitingCount() == discv5.lookup.parallelism) continue;
             const started = transport.startLookupCall(io, &slot.operation) catch |err| switch (err) {
                 error.PeerBusy, error.TableFull => continue,
+                error.AccessDenied,
+                error.AddressFamilyUnsupported,
+                error.ConnectionRefused,
+                error.ConnectionResetByPeer,
+                error.HostUnreachable,
+                error.NetworkUnreachable,
+                => continue,
                 else => return err,
             };
             if (!started) continue;
@@ -358,21 +385,14 @@ fn refillLookups(
 fn finishLookups(
     core: *discv5.engine.Engine,
     slots: *[lookup_concurrency]LookupSlot,
-    records: *RecordSet,
 ) usize {
     var completed: usize = 0;
     for (slots) |*slot| {
         if (!slot.active or !slot.operation.isFinished()) continue;
-        collectLookupResults(&slot.operation, records);
         slot.cancel(core);
         completed += 1;
     }
     return completed;
-}
-
-fn collectLookupResults(operation: *const discv5.lookup.Lookup, records: *RecordSet) void {
-    var result_buffer: [discv5.lookup.result_max]discv5.identity.enr.Record = undefined;
-    for (operation.results(&result_buffer)) |*record| _ = records.add(record);
 }
 
 fn routeExpiries(
@@ -392,6 +412,7 @@ fn routeExpiries(
 fn routeEvent(
     core: *discv5.engine.Engine,
     slots: *[lookup_concurrency]LookupSlot,
+    records: *RecordSet,
     result: *const discv5.driver.StepResult,
 ) !void {
     const response = switch (result.event) {
@@ -400,6 +421,7 @@ fn routeEvent(
     };
     for (slots) |*slot| {
         if (!slot.active or !slot.operation.ownsCall(response.matched.handle)) continue;
+        for (response.node_records) |*record| _ = records.add(record);
         try slot.operation.onResponse(core, &response, result.now_ms);
         return;
     }
@@ -486,5 +508,6 @@ comptime {
     std.debug.assert(driver_steps_max <= std.math.maxInt(u32));
     std.debug.assert(lookup_concurrency * discv5.lookup.parallelism <= call_capacity);
     std.debug.assert(record_capacity <= std.math.maxInt(u16));
+    std.debug.assert(record_capacity >= discv5.routing.table_capacity);
     std.debug.assert(rejection_reason_capacity <= std.math.maxInt(u8));
 }
