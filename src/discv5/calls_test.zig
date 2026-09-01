@@ -98,7 +98,7 @@ test "only sent calls participate in nonce and response matching" {
         .recipient_ip = .{ .ip4 = .{ 127, 0, 0, 1 } },
         .recipient_port = 9_001,
     } };
-    try std.testing.expectError(calls.Error.UnknownCall, table.accept(peer_b, &pong, 99, &.{}));
+    try std.testing.expectError(calls.Error.UnknownCall, accept(&table, peer_b, &pong, 99, &.{}));
 }
 
 test "response matching validates type ID and NODES packet count before mutation" {
@@ -116,25 +116,25 @@ test "response matching validates type ID and NODES packet count before mutation
     const wrong_id = nodesResponse(2, 2);
     try std.testing.expectError(
         calls.Error.RequestIdMismatch,
-        table.accept(peer, &wrong_id, 99, &.{}),
+        accept(&table, peer, &wrong_id, 99, &.{}),
     );
     const invalid_total = nodesResponse(1, 0);
     try std.testing.expectError(
         calls.Error.InvalidResponseCount,
-        table.accept(peer, &invalid_total, 99, &.{}),
+        accept(&table, peer, &invalid_total, 99, &.{}),
     );
 
     const first = nodesResponse(1, 2);
-    const first_result = try table.accept(peer, &first, 99, &.{});
+    const first_result = try accept(&table, peer, &first, 99, &.{});
     try std.testing.expectEqual(handle, first_result.matched.handle);
     try std.testing.expect(!first_result.matched.terminal);
     const inconsistent = nodesResponse(1, 3);
     try std.testing.expectError(
         calls.Error.InvalidResponseCount,
-        table.accept(peer, &inconsistent, 99, &.{}),
+        accept(&table, peer, &inconsistent, 99, &.{}),
     );
     const second = nodesResponse(1, 2);
-    const second_result = try table.accept(peer, &second, 99, &.{});
+    const second_result = try accept(&table, peer, &second, 99, &.{});
     try std.testing.expect(second_result.matched.terminal);
     try std.testing.expectEqual(@as(usize, 0), table.count());
 }
@@ -180,9 +180,9 @@ test "FINDNODE accepts only requested unique records and caps the exchange" {
         .total = 2,
         .enrs = &raw,
     } };
-    const result = try table.accept(peer, &response, 99, &node_ids);
+    const result = try accept(&table, peer, &response, 99, &node_ids);
     try std.testing.expect(result.matched.terminal);
-    try std.testing.expectEqual(std.math.maxInt(u16), result.accepted_node_mask);
+    try std.testing.expectEqual(protocol.findnode_result_max, result.accepted_nodes.count());
     try std.testing.expectEqual(@as(usize, 0), table.count());
 }
 
@@ -206,8 +206,32 @@ test "FINDNODE filters unsolicited and duplicate node IDs" {
         .total = 1,
         .enrs = &raw,
     } };
-    const result = try table.accept(peer, &response, 99, &ids);
-    try std.testing.expectEqual(@as(u16, 1), result.accepted_node_mask);
+    const result = try accept(&table, peer, &response, 99, &ids);
+    try std.testing.expect(result.accepted_nodes.isSet(0));
+    try std.testing.expectEqual(@as(usize, 1), result.accepted_nodes.count());
+}
+
+test "accept refuses a handle whose call ended after matching" {
+    var table: calls.Table = undefined;
+    try table.init(std.testing.allocator, 1);
+    defer table.deinit();
+    const peer = endpoint(1, 9_001);
+    const request = pingRequest(1);
+    const handle = try begin(&table, peer, &request, 100);
+    try table.markSent(handle, &([_]u8{0x11} ** 12), 100);
+    const response = message.Message{ .pong = .{
+        .request_id = request.ping.request_id,
+        .enr_sequence = 1,
+        .recipient_ip = .{ .ip4 = .{ 127, 0, 0, 1 } },
+        .recipient_port = 9_001,
+    } };
+    const matched = try table.match(peer, &response, 99);
+    try std.testing.expectEqual(handle, matched);
+    try std.testing.expect(table.cancel(handle));
+    try std.testing.expectError(
+        calls.Error.StaleHandle,
+        table.accept(matched, &response, &.{}),
+    );
 }
 
 test "responses at the deadline are not published" {
@@ -226,7 +250,7 @@ test "responses at the deadline are not published" {
     } };
     try std.testing.expectError(
         calls.Error.CallExpired,
-        table.accept(peer, &response, 100, &.{}),
+        accept(&table, peer, &response, 100, &.{}),
     );
     try std.testing.expectEqual(@as(usize, 1), table.count());
 }
@@ -237,12 +261,26 @@ fn begin(
     request: *const message.Message,
     deadline_ms: u64,
 ) !calls.Handle {
+    const remote_public_key = [_]u8{0x02} ** 33;
     return table.begin(
         peer,
+        &remote_public_key,
         request,
         deadline_ms,
         constants.ordinary_plaintext_size_max,
+        .caller,
     );
+}
+
+fn accept(
+    table: *calls.Table,
+    peer: types.Endpoint,
+    response: *const message.Message,
+    now_ms: u64,
+    node_ids: []const types.NodeId,
+) !calls.MatchResult {
+    const handle = try table.match(peer, response, now_ms);
+    return table.accept(handle, response, node_ids);
 }
 
 fn pingRequest(id: u8) message.Message {

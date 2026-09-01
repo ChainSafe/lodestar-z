@@ -187,7 +187,7 @@ pub const Store = struct {
 
     fn findChallenge(self: *const Store, peer: types.Endpoint) ?usize {
         for (self.challenges, 0..) |entry, index| {
-            if (entry) |stored| if (types.Endpoint.eql(stored.peer, peer)) return index;
+            if (entry) |stored| if (std.meta.eql(stored.peer, peer)) return index;
         }
         return null;
     }

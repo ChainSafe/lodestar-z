@@ -39,7 +39,7 @@ pub const Writer = struct {
         const content_start = mark.offset + list_prefix_reserve;
         const content_length = self.length - content_start;
         var prefix: [9]u8 = undefined;
-        const prefix_length = encodeLengthPrefix(&prefix, 0xc0, 0xf7, content_length);
+        const prefix_length = listPrefix(&prefix, content_length);
         std.debug.assert(prefix_length <= list_prefix_reserve);
 
         const shift = list_prefix_reserve - prefix_length;
@@ -192,6 +192,10 @@ pub const Reader = struct {
         return .{ .kind = kind, .payload_start = payload_start, .payload_end = payload_end };
     }
 };
+
+pub fn listPrefix(out: *[9]u8, payload_length: usize) usize {
+    return encodeLengthPrefix(out, 0xc0, 0xf7, payload_length);
+}
 
 fn encodeLengthPrefix(
     out: *[9]u8,

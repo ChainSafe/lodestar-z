@@ -113,7 +113,7 @@ pub const Lookup = struct {
             .request_id = request_id,
             .distances = &distances,
         } };
-        const started = try core.startCallKnown(
+        const started = try core.startCall(
             out,
             candidate.peer,
             &candidate.record,
@@ -145,7 +145,7 @@ pub const Lookup = struct {
         if (response.matched.response != .nodes) return Error.UnexpectedResponse;
         const index = self.waitingIndex(response.matched.handle) orelse
             return Error.UnknownQuery;
-        if (!types.Endpoint.eql(response.peer, self.candidates[index].peer))
+        if (!std.meta.eql(response.peer, self.candidates[index].peer))
             return Error.UnknownQuery;
         const source = response.peer.address;
         for (response.node_records) |*record| self.addDiscovered(record, source);
@@ -185,26 +185,20 @@ pub const Lookup = struct {
     }
 
     pub fn results(self: *const Self, out: []enr.Record) []enr.Record {
-        const limit = @min(out.len, result_max);
-        var result_length: usize = 0;
+        const bounded = out[0..@min(out.len, result_max)];
+        var length: usize = 0;
         for (self.activeCandidates()) |*candidate| {
             if (candidate.state != .succeeded) continue;
-            var position: usize = 0;
-            while (position < result_length and !types.xorCloser(
-                &candidate.peer.node_id,
-                &out[position].node_id,
-                &self.target,
-            )) : (position += 1) {}
-            if (position == limit) continue;
-            if (result_length < limit) result_length += 1;
-            std.mem.copyBackwards(
+            length = types.insertClosest(
                 enr.Record,
-                out[position + 1 .. result_length],
-                out[position .. result_length - 1],
+                recordNodeId,
+                bounded,
+                length,
+                candidate.record,
+                &self.target,
             );
-            out[position] = candidate.record;
         }
-        return out[0..result_length];
+        return bounded[0..length];
     }
 
     fn addSeed(self: *Self, seed: *const routing.Entry) Error!void {
@@ -222,7 +216,7 @@ pub const Lookup = struct {
     ) void {
         if (std.mem.eql(u8, &record.node_id, &self.local_id)) return;
         const address = record.endpoint() orelse return;
-        if (addressPort(address) < discovered_port_min or
+        if (address.port() < discovered_port_min or
             !types.relayAllowed(source, address)) return;
         if (self.findCandidate(&record.node_id)) |index| {
             const candidate = &self.candidates[index];
@@ -274,27 +268,21 @@ pub const Lookup = struct {
     }
 
     fn successBoundary(self: *const Self) ?types.NodeId {
-        var closest: [result_max]usize = undefined;
+        var closest: [result_max]*const Candidate = undefined;
         var length: usize = 0;
-        for (self.activeCandidates(), 0..) |*candidate, index| {
+        for (self.activeCandidates()) |*candidate| {
             if (candidate.state != .succeeded) continue;
-            var position: usize = 0;
-            while (position < length and !types.xorCloser(
-                &candidate.peer.node_id,
-                &self.candidates[closest[position]].peer.node_id,
+            length = types.insertClosest(
+                *const Candidate,
+                candidateNodeId,
+                &closest,
+                length,
+                candidate,
                 &self.target,
-            )) : (position += 1) {}
-            if (position == result_max) continue;
-            if (length < result_max) length += 1;
-            std.mem.copyBackwards(
-                usize,
-                closest[position + 1 .. length],
-                closest[position .. length - 1],
             );
-            closest[position] = index;
         }
         if (length < result_max) return null;
-        return self.candidates[closest[result_max - 1]].peer.node_id;
+        return closest[result_max - 1].peer.node_id;
     }
 
     fn findCandidate(
@@ -309,7 +297,7 @@ pub const Lookup = struct {
 
     fn waitingIndex(self: *const Self, handle: calls.Handle) ?usize {
         for (self.activeCandidates(), 0..) |*candidate, index| switch (candidate.state) {
-            .waiting => |stored| if (handleEqual(stored, handle)) return index,
+            .waiting => |stored| if (std.meta.eql(stored, handle)) return index,
             else => {},
         };
         return null;
@@ -348,14 +336,12 @@ pub fn requestDistances(
     return result;
 }
 
-fn addressPort(address: types.Address) u16 {
-    return switch (address) {
-        inline else => |value| value.port,
-    };
+fn recordNodeId(record: *const enr.Record) *const types.NodeId {
+    return &record.node_id;
 }
 
-fn handleEqual(left: calls.Handle, right: calls.Handle) bool {
-    return left.index == right.index and left.generation == right.generation;
+fn candidateNodeId(candidate: *const *const Candidate) *const types.NodeId {
+    return &candidate.*.peer.node_id;
 }
 
 comptime {

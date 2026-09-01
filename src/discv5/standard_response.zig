@@ -12,10 +12,11 @@ const Nodes = struct {
     packet_count: u8,
 };
 
+pub const RawRecords = [protocol.findnode_result_max][]const u8;
+
 pub const Plan = struct {
     peer: types.Endpoint = undefined,
     records: [protocol.findnode_result_max]enr.Record = undefined,
-    raw_records: [protocol.findnode_result_max][]const u8 = undefined,
     boundaries: [protocol.findnode_response_packets_max + 1]u8 = undefined,
     sent: u8 = 0,
     body: union(enum) {
@@ -23,7 +24,8 @@ pub const Plan = struct {
         nodes: Nodes,
     } = undefined,
 
-    pub fn next(self: *const Plan) ?message.Message {
+    /// The returned NODES message borrows `raw` for its record slices.
+    pub fn next(self: *const Plan, raw: *RawRecords) ?message.Message {
         return switch (self.body) {
             .pong => |value| if (self.sent == 0) .{ .pong = value } else null,
             .nodes => |value| blk: {
@@ -36,7 +38,7 @@ pub const Plan = struct {
                 break :blk .{ .nodes = .{
                     .request_id = value.request_id,
                     .total = value.packet_count,
-                    .enrs = self.raw_records[start..end],
+                    .enrs = sliceRecords(self.records[start..end], raw),
                 } };
             },
         };
@@ -94,10 +96,8 @@ pub fn prepareNodes(
         setNodes(plan, request_id, 1);
         return;
     }
-    for (plan.records[0..record_count], plan.raw_records[0..record_count]) |
-        *record,
-        *raw,
-    | raw.* = record.slice();
+    var raw_records: RawRecords = undefined;
+    const raw = sliceRecords(plan.records[0..record_count], &raw_records);
 
     var packet_count: u8 = 0;
     var record_start: usize = 0;
@@ -112,7 +112,7 @@ pub fn prepareNodes(
                     .request_id = request_id,
                     // Counts 1 through 16 have the same one-byte RLP width.
                     .total = protocol.findnode_response_packets_max,
-                    .enrs = plan.raw_records[record_start .. record_end + 1],
+                    .enrs = raw[record_start .. record_end + 1],
                 },
             };
             _ = candidate.encode(&encoded) catch |err| switch (err) {
@@ -127,6 +127,11 @@ pub fn prepareNodes(
     }
     plan.boundaries[packet_count] = @intCast(record_count);
     setNodes(plan, request_id, packet_count);
+}
+
+fn sliceRecords(records: []const enr.Record, raw: *RawRecords) []const []const u8 {
+    for (records, raw[0..records.len]) |*record, *slice| slice.* = record.slice();
+    return raw[0..records.len];
 }
 
 fn setNodes(plan: *Plan, request_id: message.RequestId, packet_count: u8) void {

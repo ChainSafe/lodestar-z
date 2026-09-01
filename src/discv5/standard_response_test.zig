@@ -1,5 +1,6 @@
 const std = @import("std");
 const enr = @import("identity/enr.zig");
+const protocol = @import("protocol.zig");
 const response_mod = @import("standard_response.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
@@ -13,12 +14,13 @@ test "empty NODES response is one packet" {
         try message.RequestId.init(&.{0x01}),
         0,
     );
-    const next = response.next().?;
+    var raw: response_mod.RawRecords = undefined;
+    const next = response.next(&raw).?;
     try std.testing.expectEqual(@as(u64, 1), next.nodes.total);
     try std.testing.expectEqual(@as(usize, 0), next.nodes.enrs.len);
     response.markSent();
     try std.testing.expect(response.complete());
-    try std.testing.expect(response.next() == null);
+    try std.testing.expect(response.next(&raw) == null);
 }
 
 test "maximum ENRs are fragmented by encoded size" {
@@ -33,8 +35,10 @@ test "maximum ENRs are fragmented by encoded size" {
 
     var packet_count: usize = 0;
     var record_count: usize = 0;
-    while (response.next()) |next| {
-        const retry = response.next().?;
+    var raw: response_mod.RawRecords = undefined;
+    var retry_raw: response_mod.RawRecords = undefined;
+    while (response.next(&raw)) |next| {
+        const retry = response.next(&retry_raw).?;
         try std.testing.expectEqual(next.nodes.enrs.len, retry.nodes.enrs.len);
         var encoded: [constants.ordinary_plaintext_size_max]u8 = undefined;
         _ = try next.encode(&encoded);
@@ -64,7 +68,8 @@ test "PONG reports the authenticated source address" {
         try message.RequestId.init(&.{0x01}),
         7,
     );
-    const next = response.next().?;
+    var raw: response_mod.RawRecords = undefined;
+    const next = response.next(&raw).?;
     try std.testing.expectEqual(@as(u64, 7), next.pong.enr_sequence);
     try std.testing.expectEqual(@as(u16, 9_001), next.pong.recipient_port);
     try std.testing.expectEqual([_]u8{0x22} ** 16, next.pong.recipient_ip.ip6);

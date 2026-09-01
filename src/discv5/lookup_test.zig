@@ -278,12 +278,8 @@ fn completeNodes(
         .total = 1,
         .enrs = &raw_records,
     } };
-    const matched = try core.calls.accept(
-        started.peer,
-        &response_message,
-        now_ms,
-        node_ids[0..0],
-    );
+    const handle = try core.calls.match(started.peer, &response_message, now_ms);
+    const matched = try core.calls.accept(handle, &response_message, node_ids[0..0]);
     var response = engine.AuthenticatedResponse{
         .peer = started.peer,
         .matched = matched.matched,

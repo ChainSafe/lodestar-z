@@ -186,7 +186,7 @@ test "routing table applies ENR updates atomically and ignores stale endpoints" 
         routing.PutResult.refreshed,
         try table.upsertVerified(&stale_peer, &stale_record, 2),
     );
-    try std.testing.expect(types.Address.eql(
+    try std.testing.expect(std.meta.eql(
         original_address,
         table.get(&node_id).?.peer.address,
     ));
@@ -197,7 +197,7 @@ test "routing table applies ENR updates atomically and ignores stale endpoints" 
         try table.upsertVerified(&stale_peer, &updated_record, 3),
     );
     const updated = table.get(&node_id).?;
-    try std.testing.expect(types.Address.eql(stale_address, updated.peer.address));
+    try std.testing.expect(std.meta.eql(stale_address, updated.peer.address));
     try std.testing.expectEqual(@as(u64, 3), updated.record.sequence);
 }
 

@@ -12,6 +12,7 @@ const message = @import("wire/message.zig");
 pub const Error = engine.Error || runtime.ReceiveTimeoutError || runtime.ReleaseError ||
     runtime.SendError || std.Io.RandomSecureError || error{
     ClockOutOfRange,
+    DestinationUnreachable,
     InvalidPollInterval,
     MissingExpiryStorage,
 };
@@ -67,19 +68,26 @@ pub const Driver = struct {
         self: *Self,
         io: std.Io,
         peer: types.Endpoint,
-        request: *const message.Message,
-    ) Error!calls.Handle {
-        return self.startCallWithRecord(io, peer, null, request);
-    }
-
-    pub fn startCallKnown(
-        self: *Self,
-        io: std.Io,
-        peer: types.Endpoint,
         record: *const enr.Record,
         request: *const message.Message,
     ) Error!calls.Handle {
-        return self.startCallWithRecord(io, peer, record, request);
+        const now_ms = try monotonicMilliseconds(io);
+        var entropy = try startEntropy(io);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
+        const started = try self.core.startCall(
+            &self.output,
+            peer,
+            record,
+            request,
+            now_ms,
+            entropy,
+        );
+        self.send(io, peer.address, self.output[0..started.packet_length]) catch |err| {
+            const cancelled = self.core.cancelCall(started.handle);
+            std.debug.assert(cancelled);
+            return err;
+        };
+        return started.handle;
     }
 
     pub fn sendResponse(
@@ -98,7 +106,7 @@ pub const Driver = struct {
             now_ms,
             entropy,
         );
-        try self.udp.send(io, peer.address, self.output[0..packet_length]);
+        try self.send(io, peer.address, self.output[0..packet_length]);
     }
 
     pub fn startLookupCall(
@@ -117,7 +125,7 @@ pub const Driver = struct {
             now_ms,
             entropy,
         ) orelse return false;
-        self.udp.send(
+        self.send(
             io,
             started.peer.address,
             self.output[0..started.call.packet_length],
@@ -136,75 +144,77 @@ pub const Driver = struct {
     ) Error!StepResult {
         if (expired_calls.len == 0) return error.MissingExpiryStorage;
         var result = StepResult{};
+        try self.advance(io, expired_calls, &result);
+        try self.maintain(io, &result);
 
-        var now_ms = try monotonicMilliseconds(io);
-        result.now_ms = now_ms;
-        self.tick(now_ms, expired_calls, &result);
-        result.maintenance_started = try self.startMaintenance(io, now_ms);
-
-        const timeout = std.Io.Timeout{ .duration = .{
-            .raw = .fromMilliseconds(self.config.poll_interval_ms),
-            .clock = .awake,
-        } };
-        const datagram = self.udp.receiveTimeout(io, timeout) catch |err| switch (err) {
-            error.Timeout => {
-                now_ms = try monotonicMilliseconds(io);
-                result.now_ms = now_ms;
-                self.tick(now_ms, expired_calls, &result);
-                if (!result.maintenance_started) {
-                    result.maintenance_started = try self.startMaintenance(io, now_ms);
-                }
-                return result;
-            },
-            else => return err,
-        };
-        defer self.udp.release(datagram.handle) catch unreachable;
-
-        now_ms = try monotonicMilliseconds(io);
-        result.now_ms = now_ms;
-        self.tick(now_ms, expired_calls, &result);
-        var entropy = try receiveEntropy(io);
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
-        const outcome = self.core.receive(
-            &self.output,
-            datagram.bytes,
-            datagram.from,
-            .{ .now_ms = now_ms, .known_record = null, .entropy = entropy },
-            &self.scratch,
-        ) catch |err| {
-            result.datagram = .{ .rejected = err };
-            return result;
-        };
-        result.datagram = .accepted;
-        if (outcome.packet_length > 0) {
-            try self.udp.send(io, datagram.from, self.output[0..outcome.packet_length]);
-        }
-        result.event = try self.handleEvent(io, outcome.event, now_ms, &result);
-        if (!result.maintenance_started) {
-            result.maintenance_started = try self.startMaintenance(io, now_ms);
-        }
+        const datagram = try self.receiveDatagram(io);
+        defer if (datagram) |admitted| self.udp.release(admitted.handle) catch unreachable;
+        try self.advance(io, expired_calls, &result);
+        if (datagram) |admitted| try self.processDatagram(io, admitted, &result);
+        try self.maintain(io, &result);
         return result;
     }
 
-    fn tick(
+    fn advance(
         self: *Self,
-        now_ms: u64,
+        io: std.Io,
         expired_calls: []calls.Expired,
         result: *StepResult,
-    ) void {
+    ) Error!void {
+        result.now_ms = try monotonicMilliseconds(io);
         const available = expired_calls[result.calls_expired..];
-        const expired = self.core.tick(now_ms, available);
+        const expired = self.core.tick(result.now_ms, available);
         result.calls_expired += expired.calls;
         result.maintenance_expired += expired.maintenance_calls;
         result.challenges_expired += expired.challenges;
         result.sessions_expired += expired.sessions;
     }
 
+    fn maintain(self: *Self, io: std.Io, result: *StepResult) Error!void {
+        if (result.maintenance_started) return;
+        result.maintenance_started = try self.startMaintenance(io, result.now_ms);
+    }
+
+    fn receiveDatagram(self: *Self, io: std.Io) Error!?runtime.Datagram {
+        const timeout = std.Io.Timeout{ .duration = .{
+            .raw = .fromMilliseconds(self.config.poll_interval_ms),
+            .clock = .awake,
+        } };
+        return self.udp.receiveTimeout(io, timeout) catch |err| switch (err) {
+            error.Timeout => null,
+            else => err,
+        };
+    }
+
+    fn processDatagram(
+        self: *Self,
+        io: std.Io,
+        datagram: runtime.Datagram,
+        result: *StepResult,
+    ) Error!void {
+        var entropy = try receiveEntropy(io);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
+        const outcome = self.core.receive(
+            &self.output,
+            datagram.bytes,
+            datagram.from,
+            .{ .now_ms = result.now_ms, .entropy = entropy },
+            &self.scratch,
+        ) catch |err| {
+            result.datagram = .{ .rejected = err };
+            return;
+        };
+        result.datagram = .accepted;
+        if (outcome.packet_length > 0) {
+            try self.send(io, datagram.from, self.output[0..outcome.packet_length]);
+        }
+        result.event = try self.handleEvent(io, outcome.event, result);
+    }
+
     fn handleEvent(
         self: *Self,
         io: std.Io,
         event: engine.Event,
-        now_ms: u64,
         result: *StepResult,
     ) Error!engine.Event {
         const request = switch (event) {
@@ -214,7 +224,6 @@ pub const Driver = struct {
         switch (request.message) {
             .talk_request => return event,
             .ping, .find_node => {},
-            else => unreachable,
         }
         try self.core.prepareStandardResponse(&request, &self.response);
         while (result.standard_responses < protocol.findnode_response_packets_max) {
@@ -223,10 +232,10 @@ pub const Driver = struct {
             const packet_length = try self.core.sendNextStandardResponse(
                 &self.output,
                 &self.response,
-                now_ms,
+                result.now_ms,
                 entropy,
             ) orelse break;
-            try self.udp.send(io, request.peer.address, self.output[0..packet_length]);
+            try self.send(io, request.peer.address, self.output[0..packet_length]);
             result.standard_responses += 1;
         }
         std.debug.assert(self.response.complete());
@@ -247,7 +256,7 @@ pub const Driver = struct {
             calls.Error.PeerBusy, calls.Error.TableFull => return false,
             else => return err,
         } orelse return false;
-        self.udp.send(
+        self.send(
             io,
             started.peer.address,
             self.output[0..started.call.packet_length],
@@ -259,47 +268,26 @@ pub const Driver = struct {
         return true;
     }
 
-    fn startCallWithRecord(
-        self: *Self,
+    fn send(
+        self: *const Self,
         io: std.Io,
-        peer: types.Endpoint,
-        record: ?*const enr.Record,
-        request: *const message.Message,
-    ) Error!calls.Handle {
-        const now_ms = try monotonicMilliseconds(io);
-        var entropy = try startEntropy(io);
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
-        const started = if (record) |known|
-            try self.core.startCallKnown(
-                &self.output,
-                peer,
-                known,
-                request,
-                now_ms,
-                entropy,
-            )
-        else
-            try self.core.startCall(
-                &self.output,
-                peer,
-                request,
-                now_ms,
-                entropy,
-            );
-        self.udp.send(
-            io,
-            peer.address,
-            self.output[0..started.packet_length],
-        ) catch |err| {
-            const cancelled = self.core.cancelCall(started.handle);
-            std.debug.assert(cancelled);
-            return err;
+        destination: types.Address,
+        bytes: []const u8,
+    ) Error!void {
+        return self.udp.send(io, destination, bytes) catch |err| switch (err) {
+            error.AccessDenied,
+            error.AddressFamilyUnsupported,
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            => error.DestinationUnreachable,
+            else => err,
         };
-        return started.handle;
     }
 };
 
-fn monotonicMilliseconds(io: std.Io) Error!u64 {
+pub fn monotonicMilliseconds(io: std.Io) Error!u64 {
     const value = std.Io.Clock.awake.now(io).toMilliseconds();
     if (value < 0) return error.ClockOutOfRange;
     return @intCast(value);

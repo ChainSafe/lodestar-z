@@ -109,7 +109,7 @@ pub const Udp = struct {
     }
 };
 
-fn fromNetwork(address: net.IpAddress) types.Address {
+pub fn fromNetwork(address: net.IpAddress) types.Address {
     return switch (address) {
         .ip4 => |value| .{ .ip4 = .{
             .octets = value.bytes,

@@ -241,27 +241,14 @@ pub const Table = struct {
         target: *const types.NodeId,
         out: []Entry,
     ) []Entry {
-        const limit = @min(out.len, bucket_size);
-        var result_length: usize = 0;
+        const bounded = out[0..@min(out.len, bucket_size)];
+        var length: usize = 0;
         for (0..bucket_count) |index| {
             for (self.bucketEntries(index)) |entry| {
-                var position: usize = 0;
-                while (position < result_length and
-                    !types.xorCloser(&entry.peer.node_id, &out[position].peer.node_id, target))
-                {
-                    position += 1;
-                }
-                if (position == limit) continue;
-                if (result_length < limit) result_length += 1;
-                std.mem.copyBackwards(
-                    Entry,
-                    out[position + 1 .. result_length],
-                    out[position .. result_length - 1],
-                );
-                out[position] = entry;
+                length = types.insertClosest(Entry, entryNodeId, bounded, length, entry, target);
             }
         }
-        return out[0..result_length];
+        return bounded[0..length];
     }
 
     fn updateExisting(
@@ -377,16 +364,11 @@ fn validateEntry(
         return Error.InvalidRemoteRecord;
     if (record.length > record.bytes.len) return Error.InvalidRecord;
     if (!recordHasAddress(record, peer.address)) return Error.InvalidRemoteRecord;
-    switch (peer.address) {
-        .ip4 => |address| {
-            if (address.port == 0 or allZero(&address.octets))
-                return Error.InvalidRemoteRecord;
-        },
-        .ip6 => |address| {
-            if (address.port == 0 or allZero(&address.octets))
-                return Error.InvalidRemoteRecord;
-        },
-    }
+    if (!peer.address.isUsable()) return Error.InvalidRemoteRecord;
+}
+
+fn entryNodeId(entry: *const Entry) *const types.NodeId {
+    return &entry.peer.node_id;
 }
 
 fn recordHasAddress(record: *const enr.Record, address: types.Address) bool {
@@ -414,13 +396,6 @@ fn sameSubnet(left: types.Address, right: types.Address) bool {
             .ip6 => |other| std.mem.eql(u8, value.octets[0..8], other.octets[0..8]),
         },
     };
-}
-
-fn allZero(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte != 0) return false;
-    }
-    return true;
 }
 
 fn recordRelayAllowed(record: *const enr.Record, requester: ?types.Address) bool {

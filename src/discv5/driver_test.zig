@@ -81,7 +81,7 @@ test "driver completes a cold call through challenge and handshake" {
         .request_id = try message.RequestId.init(&.{0x42}),
         .enr_sequence = pair.record_a.sequence,
     } };
-    const handle = try pair.driver_a.startCallKnown(
+    const handle = try pair.driver_a.startCall(
         std.testing.io,
         endpoint(&pair.record_b),
         &pair.record_b,
@@ -113,6 +113,7 @@ test "driver leaves TALK response policy with the application" {
     const handle = try pair.driver_a.startCall(
         std.testing.io,
         endpoint(&pair.record_b),
+        &pair.record_b,
         &request,
     );
     var expired: [4]calls.Expired = undefined;
@@ -161,6 +162,7 @@ test "driver releases a malformed datagram before the next step" {
     const handle = try pair.driver_b.startCall(
         std.testing.io,
         endpoint(&pair.record_a),
+        &pair.record_a,
         &request,
     );
     const answered = try pair.driver_a.step(std.testing.io, &expired);
@@ -182,6 +184,7 @@ test "driver returns call expiries when rejecting a malformed datagram" {
     const handle = try pair.driver_a.startCall(
         std.testing.io,
         endpoint(&pair.record_b),
+        &pair.record_b,
         &request,
     );
     try std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake);
@@ -219,10 +222,10 @@ test "driver completes a caller-owned lookup across multiple peers" {
     const first = try lookup_driver.step(
         &network.driver_a,
         std.testing.io,
-        &operation,
+        &.{&operation},
         &expired,
     );
-    try std.testing.expectEqual(@as(u8, 1), first.started);
+    try std.testing.expectEqual(@as(u16, 1), first.started);
     try std.testing.expectEqual(@as(usize, 0), first.driver.calls_expired);
 
     const from_b = try network.driver_b.step(std.testing.io, &expired);
@@ -230,21 +233,22 @@ test "driver completes a caller-owned lookup across multiple peers" {
     const second = try lookup_driver.step(
         &network.driver_a,
         std.testing.io,
-        &operation,
+        &.{&operation},
         &expired,
     );
-    try std.testing.expectEqual(@as(u8, 1), second.responses);
-    try std.testing.expectEqual(@as(u8, 1), second.started);
+    try std.testing.expectEqual(@as(u16, 1), second.responses);
+    try std.testing.expectEqual(@as(u16, 1), second.started);
+    try std.testing.expectEqual(@as(?u16, 0), second.consumed);
 
     const from_c = try network.driver_c.step(std.testing.io, &expired);
     try std.testing.expectEqual(@as(u8, 1), from_c.standard_responses);
     const completed = try lookup_driver.step(
         &network.driver_a,
         std.testing.io,
-        &operation,
+        &.{&operation},
         &expired,
     );
-    try std.testing.expectEqual(@as(u8, 1), completed.responses);
+    try std.testing.expectEqual(@as(u16, 1), completed.responses);
     try std.testing.expect(operation.isFinished());
     try std.testing.expectEqual(@as(usize, 0), network.node_a.calls.count());
     try std.testing.expect(network.node_a.routing.contains(&network.record_c.node_id));
@@ -265,7 +269,7 @@ test "lookup expiry is consumed without hiding an unrelated call expiry" {
         .request_id = try message.RequestId.init(&.{0x24}),
         .enr_sequence = network.record_a.sequence,
     } };
-    const caller_handle = try network.driver_a.startCallKnown(
+    const caller_handle = try network.driver_a.startCall(
         std.testing.io,
         endpoint(&network.record_c),
         &network.record_c,
@@ -286,11 +290,11 @@ test "lookup expiry is consumed without hiding an unrelated call expiry" {
     const result = try lookup_driver.step(
         &network.driver_a,
         std.testing.io,
-        &operation,
+        &.{&operation},
         &expired,
     );
-    try std.testing.expectEqual(@as(u8, 1), result.started);
-    try std.testing.expectEqual(@as(u8, 1), result.failures);
+    try std.testing.expectEqual(@as(u16, 1), result.started);
+    try std.testing.expectEqual(@as(u16, 1), result.failures);
     try std.testing.expectEqual(@as(usize, 1), result.driver.calls_expired);
     try std.testing.expectEqual(caller_handle, expired[0].handle);
     try std.testing.expect(operation.isFinished());
@@ -306,7 +310,7 @@ test "lookup step preserves an unrelated response event" {
         .request_id = try message.RequestId.init(&.{0x25}),
         .enr_sequence = network.record_a.sequence,
     } };
-    const caller_handle = try network.driver_a.startCallKnown(
+    const caller_handle = try network.driver_a.startCall(
         std.testing.io,
         endpoint(&network.record_c),
         &network.record_c,
@@ -333,11 +337,12 @@ test "lookup step preserves an unrelated response event" {
     const result = try lookup_driver.step(
         &network.driver_a,
         std.testing.io,
-        &operation,
+        &.{&operation},
         &expired,
     );
-    try std.testing.expectEqual(@as(u8, 1), result.started);
-    try std.testing.expectEqual(@as(u8, 0), result.responses);
+    try std.testing.expectEqual(@as(u16, 1), result.started);
+    try std.testing.expectEqual(@as(u16, 0), result.responses);
+    try std.testing.expect(result.consumed == null);
     try std.testing.expect(result.driver.event == .response);
     try std.testing.expectEqual(
         caller_handle,
@@ -385,44 +390,39 @@ test "two caller-owned lookups share one driver" {
         operation_c.deinit();
     }
 
-    try std.testing.expect(try network.driver_a.startLookupCall(
-        std.testing.io,
-        &operation_b,
-    ));
-    try std.testing.expect(try network.driver_a.startLookupCall(
-        std.testing.io,
-        &operation_c,
-    ));
-    try std.testing.expectEqual(@as(usize, 2), network.node_a.calls.count());
-
     var expired: [4]calls.Expired = undefined;
-    try std.testing.expectEqual(
-        @as(u8, 1),
-        (try network.driver_b.step(std.testing.io, &expired)).standard_responses,
-    );
-    try std.testing.expectEqual(
-        @as(u8, 1),
-        (try network.driver_c.step(std.testing.io, &expired)).standard_responses,
-    );
-
-    var responses_b: u8 = 0;
-    var responses_c: u8 = 0;
-    for (0..2) |_| {
-        const result = try network.driver_a.step(std.testing.io, &expired);
-        const response = result.event.response;
-        if (operation_b.ownsCall(response.matched.handle)) {
-            try operation_b.onResponse(&network.node_a, &response, result.now_ms);
-            responses_b += 1;
-        } else if (operation_c.ownsCall(response.matched.handle)) {
-            try operation_c.onResponse(&network.node_a, &response, result.now_ms);
-            responses_c += 1;
-        } else {
-            return error.TestUnexpectedResult;
-        }
+    var responses_b: usize = 0;
+    var responses_c: usize = 0;
+    for (0..32) |_| {
+        if (operation_b.isFinished() and operation_c.isFinished()) break;
+        const result = try lookup_driver.step(
+            &network.driver_a,
+            std.testing.io,
+            &.{ &operation_b, &operation_c },
+            &expired,
+        );
+        try std.testing.expect(result.driver.event != .response or result.consumed != null);
+        if (result.consumed) |index| switch (index) {
+            0 => responses_b += 1,
+            1 => responses_c += 1,
+            else => return error.TestUnexpectedResult,
+        };
+        _ = try network.driver_b.step(std.testing.io, &expired);
+        _ = try network.driver_c.step(std.testing.io, &expired);
     }
-    try std.testing.expectEqual(@as(u8, 1), responses_b);
-    try std.testing.expectEqual(@as(u8, 1), responses_c);
+    try std.testing.expect(operation_b.isFinished());
+    try std.testing.expect(operation_c.isFinished());
+    try std.testing.expectEqual(@as(usize, 2), responses_b);
+    try std.testing.expectEqual(@as(usize, 2), responses_c);
     try std.testing.expectEqual(@as(usize, 0), network.node_a.calls.count());
+
+    var records: [lookup.result_max]enr.Record = undefined;
+    const results_b = operation_b.results(&records);
+    try std.testing.expectEqual(@as(usize, 2), results_b.len);
+    try std.testing.expectEqual(network.record_b.node_id, results_b[0].node_id);
+    const results_c = operation_c.results(&records);
+    try std.testing.expectEqual(@as(usize, 2), results_c.len);
+    try std.testing.expectEqual(network.record_c.node_id, results_c[0].node_id);
 }
 
 const Pair = struct {
