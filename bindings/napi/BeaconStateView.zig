@@ -16,11 +16,41 @@ const pubkey = @import("./pubkeys.zig");
 const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
-const environment_state = @import("./environment_state.zig");
 
 /// Allocator used for all BeaconStateView instances.
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = gpa.allocator();
+
+fn finalizeReusedEpochTransitionCache(
+    _: napi.Env,
+    reused_cache: *st.ReusedEpochTransitionCache,
+    _: ?*anyopaque,
+) void {
+    const cache_allocator = reused_cache.allocator;
+    reused_cache.deinit();
+    cache_allocator.destroy(reused_cache);
+}
+
+fn getReusedEpochTransitionCache(
+    env: napi.Env,
+    cached_state: *CachedBeaconState,
+) !*st.ReusedEpochTransitionCache {
+    if (try env.getInstanceData(st.ReusedEpochTransitionCache)) |reused_cache| return reused_cache;
+
+    const reused_cache = try allocator.create(st.ReusedEpochTransitionCache);
+    errdefer allocator.destroy(reused_cache);
+
+    try reused_cache.init(allocator, try cached_state.state.validatorsCount());
+    errdefer reused_cache.deinit();
+
+    try env.setInstanceData(
+        st.ReusedEpochTransitionCache,
+        reused_cache,
+        finalizeReusedEpochTransitionCache,
+        null,
+    );
+    return reused_cache;
+}
 
 pub const js_meta = js.class(.{ .properties = .{
     .slot = js.prop(.{ .get = true, .set = false }),
@@ -1055,7 +1085,7 @@ pub fn createMultiProof(self: *const BeaconStateView, descriptor: js.Uint8Array)
 pub fn computeUnrealizedCheckpoints(self: *const BeaconStateView) !js_types.UnrealizedCheckpoints {
     const env = js.env();
     const cached_state = try self.requireState();
-    const reused_cache = try environment_state.getReusedEpochTransitionCache(env, allocator, cached_state);
+    const reused_cache = try getReusedEpochTransitionCache(env, cached_state);
     const result = try st.computeUnrealizedCheckpoints(allocator, reused_cache, cached_state);
 
     const obj = try env.createObject();
@@ -1293,7 +1323,7 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
         allocator.destroy(post_state);
     }
 
-    const reused_cache = try environment_state.getReusedEpochTransitionCache(js.env(), allocator, post_state);
+    const reused_cache = try getReusedEpochTransitionCache(js.env(), post_state);
     try st.processSlots(allocator, js.io(), reused_cache, post_state, slot_value, .{});
     return .{
         .cached_state = post_state,
@@ -1323,7 +1353,7 @@ pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint
     const signed_block = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, bytes);
     defer signed_block.deinit(allocator);
 
-    const reused_cache = try environment_state.getReusedEpochTransitionCache(js.env(), allocator, cached_state);
+    const reused_cache = try getReusedEpochTransitionCache(js.env(), cached_state);
     const post_state = try st.stateTransition(
         allocator,
         js.io(),
