@@ -168,7 +168,7 @@ fn parse(data: []const u8) Error!Parsed {
     var fields: usize = 0;
     while (!list.atEnd() and fields < field_pairs_max) : (fields += 1) {
         const key = list.readBytes() catch return Error.InvalidRecord;
-        const value = list.readBytes() catch return Error.InvalidRecord;
+        const value = list.readRawItem() catch return Error.InvalidRecord;
         if (previous_key) |previous| {
             if (std.mem.order(u8, previous, key) != .lt) return Error.InvalidRecord;
         }
@@ -194,23 +194,34 @@ fn parseField(
     saw_v4: *bool,
 ) Error!void {
     if (std.mem.eql(u8, key, "id")) {
-        if (!std.mem.eql(u8, value, "v4")) return Error.UnsupportedScheme;
+        const decoded = try decodeFieldBytes(value);
+        if (!std.mem.eql(u8, decoded, "v4")) return Error.UnsupportedScheme;
         saw_v4.* = true;
     } else if (std.mem.eql(u8, key, "secp256k1")) {
-        if (value.len != 33) return Error.InvalidRecord;
-        parsed.public_key = value[0..33].*;
+        const decoded = try decodeFieldBytes(value);
+        if (decoded.len != 33) return Error.InvalidRecord;
+        parsed.public_key = decoded[0..33].*;
         saw_public_key.* = true;
     } else if (std.mem.eql(u8, key, "ip")) {
-        if (value.len != 4) return Error.InvalidRecord;
-        parsed.ip4 = value[0..4].*;
+        const decoded = try decodeFieldBytes(value);
+        if (decoded.len != 4) return Error.InvalidRecord;
+        parsed.ip4 = decoded[0..4].*;
     } else if (std.mem.eql(u8, key, "ip6")) {
-        if (value.len != 16) return Error.InvalidRecord;
-        parsed.ip6 = value[0..16].*;
+        const decoded = try decodeFieldBytes(value);
+        if (decoded.len != 16) return Error.InvalidRecord;
+        parsed.ip6 = decoded[0..16].*;
     } else if (std.mem.eql(u8, key, "udp")) {
-        parsed.udp = try parsePort(value);
+        parsed.udp = try parsePort(try decodeFieldBytes(value));
     } else if (std.mem.eql(u8, key, "udp6")) {
-        parsed.udp6 = try parsePort(value);
+        parsed.udp6 = try parsePort(try decodeFieldBytes(value));
     }
+}
+
+fn decodeFieldBytes(encoded: []const u8) Error![]const u8 {
+    var reader = rlp.Reader.init(encoded);
+    const decoded = reader.readBytes() catch return Error.InvalidRecord;
+    if (!reader.atEnd()) return Error.InvalidRecord;
+    return decoded;
 }
 
 fn parsePort(bytes: []const u8) Error!u16 {

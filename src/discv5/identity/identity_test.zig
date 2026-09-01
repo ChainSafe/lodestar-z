@@ -2,6 +2,7 @@ const std = @import("std");
 const crypto = @import("crypto.zig");
 const enr = @import("enr.zig");
 const handshake = @import("handshake.zig");
+const types = @import("../types.zig");
 
 test "official ECDH and handshake key derivation vectors" {
     const secret = hexBytes(
@@ -143,7 +144,7 @@ test "EIP-778 record validates signature identity and endpoint" {
         try std.testing.expectEqual(@as(u8, 0), byte);
     }
     try std.testing.expectEqual(
-        @import("../types.zig").Address{ .ip4 = .{
+        types.Address{ .ip4 = .{
             .octets = .{ 127, 0, 0, 1 },
             .port = 30_303,
         } },
@@ -158,9 +159,22 @@ test "EIP-778 record validates signature identity and endpoint" {
     );
 }
 
+test "EIP-778 record accepts unknown list values" {
+    const text =
+        "enr:-Ku4QB83BHEIa8uU6Q932c7EddcaxbDY-LlL_71dkEaHP3rPL4old52mYB8Oy-" ++
+        "CuCrFKPiCcKpHFRFZ6jps6UmK7s82GAZ7PBP-ug2V0aMfGhAfJRi6AgmlkgnY0" ++
+        "gmlwhKRGnbyJc2VjcDI1NmsxoQPNpMD5QcpDsSXoH4DyuU0vZoPAcrqYb8kD" ++
+        "hpsh_hgmD4RzbmFwwIN0Y3CCdl2DdWRwgqBjhHVkcDaCdl0";
+    const record = try enr.Record.initText(text);
+    try std.testing.expectEqual(
+        types.Address{ .ip4 = .{ .octets = .{ 164, 70, 157, 188 }, .port = 41_059 } },
+        record.endpoint().?,
+    );
+}
+
 test "EIP-778 record creation round-trips IPv4 and IPv6 endpoints" {
     const key_pair = try crypto.keyPairFromSecret(&([_]u8{0x42} ** 32));
-    const endpoints = [_]@import("../types.zig").Address{
+    const endpoints = [_]types.Address{
         .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_000 } },
         .{ .ip6 = .{
             .octets = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
