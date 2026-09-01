@@ -1,7 +1,8 @@
 //! Starts one DiscV5 node, authenticates configured bootnodes, and runs a bounded set of
 //! concurrent random lookups.
 //!
-//! zig build run:discv5_crawl -- 0.0.0.0:9000 203.0.113.10:9000 enr:... [enr:...]
+//! zig build run:discv5_crawl -- 0.0.0.0:9000 203.0.113.10:9000
+//!     [--duration-seconds 60] enr:... [enr:...]
 
 const std = @import("std");
 const discv5 = @import("discv5");
@@ -10,12 +11,15 @@ const net = std.Io.net;
 const bootstrap_capacity: usize = 32;
 const bootstrap_steps_max: usize = 4_096;
 const call_capacity: usize = 64;
+const crawl_duration_seconds_default: u16 = 60;
+const crawl_duration_seconds_max: u16 = 300;
 const driver_steps_max: usize = 12_000;
 const key_generation_attempts_max: usize = 16;
 const lookup_concurrency: usize = 4;
 const lookup_total_max: usize = 64;
 const poll_interval_ms: u32 = 25;
 const record_capacity: usize = discv5.routing.table_capacity;
+const rejection_reason_capacity: usize = 16;
 
 const Bootstrap = struct {
     record: discv5.identity.enr.Record,
@@ -52,6 +56,42 @@ const RecordSet = struct {
     }
 };
 
+const RejectionStats = struct {
+    const Entry = struct {
+        reason: discv5.engine.Error,
+        count: u32,
+    };
+
+    entries: [rejection_reason_capacity]Entry = undefined,
+    count: u8 = 0,
+    total: u32 = 0,
+    unclassified: u32 = 0,
+
+    fn add(self: *RejectionStats, reason: discv5.engine.Error) void {
+        self.total += 1;
+        for (self.entries[0..self.count]) |*entry| {
+            if (entry.reason != reason) continue;
+            entry.count += 1;
+            return;
+        }
+        if (self.count == self.entries.len) {
+            self.unclassified += 1;
+            return;
+        }
+        self.entries[self.count] = .{ .reason = reason, .count = 1 };
+        self.count += 1;
+    }
+
+    fn print(self: *const RejectionStats) void {
+        std.debug.print("rejected_datagrams={d}\n", .{self.total});
+        for (self.entries[0..self.count]) |entry| {
+            std.debug.print("  {s}={d}\n", .{ @errorName(entry.reason), entry.count });
+        }
+        if (self.unclassified > 0)
+            std.debug.print("  unclassified={d}\n", .{self.unclassified});
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .{};
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -60,12 +100,26 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 4) {
         std.debug.print(
-            "usage: {s} <bind-ip:port> <advertised-ip:port> <boot-enr> [boot-enr...]\n",
+            "usage: {s} <bind-ip:port> <advertised-ip:port> " ++
+                "[--duration-seconds <1..300>] <boot-enr> [boot-enr...]\n",
             .{args[0]},
         );
         return;
     }
-    if (args.len - 3 > bootstrap_capacity) return error.TooManyBootnodes;
+    var duration_seconds = crawl_duration_seconds_default;
+    var bootnode_start: usize = 3;
+    if (std.mem.eql(u8, args[3], "--duration-seconds")) {
+        if (args.len < 6) return error.MissingDurationOrBootnode;
+        duration_seconds = try std.fmt.parseInt(u16, args[4], 10);
+        if (duration_seconds == 0 or duration_seconds > crawl_duration_seconds_max)
+            return error.InvalidDuration;
+        bootnode_start = 5;
+    }
+    if (args.len - bootnode_start > bootstrap_capacity) return error.TooManyBootnodes;
+    const started_ms = try monotonicMilliseconds(io);
+    const duration_ms = @as(u64, duration_seconds) * std.time.ms_per_s;
+    const deadline_ms = std.math.add(u64, started_ms, duration_ms) catch
+        return error.ClockOutOfRange;
 
     const bind_address = try net.IpAddress.parseLiteral(args[1]);
     const advertised_address = toDiscv5Address(try net.IpAddress.parseLiteral(args[2]));
@@ -102,7 +156,7 @@ pub fn main(init: std.process.Init) !void {
 
     var bootstraps: [bootstrap_capacity]Bootstrap = undefined;
     const bootstraps_slice = try parseBootstraps(
-        args[3..],
+        args[bootnode_start..],
         std.meta.activeTag(advertised_address),
         &bootstraps,
     );
@@ -112,6 +166,7 @@ pub fn main(init: std.process.Init) !void {
         &transport,
         bootstraps_slice,
         &records,
+        deadline_ms,
     );
     if (core.routing.count() == 0) return error.NoReachableBootnodes;
 
@@ -119,10 +174,11 @@ pub fn main(init: std.process.Init) !void {
         "node bound on {any}, authenticated {d}/{d} bootnodes\n",
         .{ udp.localAddress(), authenticated, bootstraps_slice.len },
     );
-    try crawl(io, allocator, &transport, &records);
+    try crawl(io, allocator, &transport, &records, deadline_ms);
+    const elapsed_ms = (try monotonicMilliseconds(io)) - started_ms;
     std.debug.print(
-        "collected {d} authenticated peer records from {d} routing entries\n",
-        .{ records.count, core.routing.count() },
+        "collected {d} authenticated peer records from {d} routing entries in {d} ms\n",
+        .{ records.count, core.routing.count(), elapsed_ms },
     );
     for (records.records[0..records.count]) |*record| printRecord(record);
 }
@@ -157,6 +213,7 @@ fn authenticateBootstraps(
     transport: *discv5.driver.Driver,
     bootstraps: []Bootstrap,
     records: *RecordSet,
+    deadline_ms: u64,
 ) !usize {
     var pending: usize = 0;
     for (bootstraps, 0..) |*bootstrap, index| {
@@ -176,6 +233,7 @@ fn authenticateBootstraps(
     var expired: [call_capacity]discv5.calls.Expired = undefined;
     for (0..bootstrap_steps_max) |_| {
         if (pending == 0) break;
+        if (try monotonicMilliseconds(io) >= deadline_ms) break;
         const result = try transport.step(io, &expired);
         for (expired[0..result.calls_expired]) |item| {
             if (findBootstrap(bootstraps, item.handle)) |bootstrap| {
@@ -215,16 +273,18 @@ fn crawl(
     allocator: std.mem.Allocator,
     transport: *discv5.driver.Driver,
     records: *RecordSet,
+    deadline_ms: u64,
 ) !void {
     var slots = [_]LookupSlot{.{}} ** lookup_concurrency;
     defer for (&slots) |*slot| slot.cancel(transport.core);
     var expired: [call_capacity]discv5.calls.Expired = undefined;
     var launched: usize = 0;
     var completed: usize = 0;
-    var rejected: usize = 0;
+    var rejections = RejectionStats{};
     var refill_cursor: usize = 0;
 
     for (0..driver_steps_max) |_| {
+        if (try monotonicMilliseconds(io) >= deadline_ms) break;
         try startLookups(io, allocator, transport.core, &slots, &launched);
         try refillLookups(io, transport, &slots, refill_cursor);
         refill_cursor = (refill_cursor + 1) % slots.len;
@@ -233,7 +293,10 @@ fn crawl(
         if (records.count == record_capacity) break;
 
         const result = try transport.step(io, &expired);
-        if (result.datagram == .rejected) rejected += 1;
+        switch (result.datagram) {
+            .rejected => |reason| rejections.add(reason),
+            .timeout, .accepted => {},
+        }
         try routeExpiries(transport.core, &slots, expired[0..result.calls_expired]);
         try routeEvent(transport.core, &slots, &result);
     }
@@ -243,10 +306,8 @@ fn crawl(
         collectLookupResults(&slot.operation, records);
         slot.cancel(transport.core);
     }
-    std.debug.print(
-        "lookups launched={d} completed={d} rejected_datagrams={d}\n",
-        .{ launched, completed, rejected },
-    );
+    std.debug.print("lookups launched={d} completed={d}\n", .{ launched, completed });
+    rejections.print();
 }
 
 fn startLookups(
@@ -405,6 +466,12 @@ fn addressPort(address: discv5.types.Address) u16 {
     };
 }
 
+fn monotonicMilliseconds(io: std.Io) !u64 {
+    const value = std.Io.Clock.awake.now(io).toMilliseconds();
+    if (value < 0) return error.ClockOutOfRange;
+    return @intCast(value);
+}
+
 fn printRecord(record: *const discv5.identity.enr.Record) void {
     var encoded_buffer: [512]u8 = undefined;
     const encoded = std.base64.url_safe_no_pad.Encoder.encode(
@@ -416,6 +483,8 @@ fn printRecord(record: *const discv5.identity.enr.Record) void {
 
 comptime {
     std.debug.assert(bootstrap_capacity <= call_capacity);
+    std.debug.assert(driver_steps_max <= std.math.maxInt(u32));
     std.debug.assert(lookup_concurrency * discv5.lookup.parallelism <= call_capacity);
     std.debug.assert(record_capacity <= std.math.maxInt(u16));
+    std.debug.assert(rejection_reason_capacity <= std.math.maxInt(u8));
 }
