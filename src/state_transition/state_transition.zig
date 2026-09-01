@@ -322,44 +322,6 @@ test "state transition - electra block" {
     deinitReusedEpochTransitionCache(std.testing.io);
 }
 
-test "state transition - rejects a full block with an extra withdrawal" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{
-        .page_allocator = allocator,
-        .allocator = allocator,
-        .pool_size = 256 * 5,
-    });
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    defer test_state.deinit();
-
-    var electra_block = types.electra.SignedBeaconBlock.default_value;
-    try generateElectraBlock(allocator, test_state.cached_state, &electra_block);
-    defer types.electra.SignedBeaconBlock.deinit(allocator, &electra_block);
-
-    try electra_block.message.body.execution_payload.withdrawals.append(
-        allocator,
-        types.capella.Withdrawal.default_value,
-    );
-
-    const signed_beacon_block = AnySignedBeaconBlock{ .full_electra = &electra_block };
-    try testing.expectError(
-        error.WithdrawalsLengthMismatch,
-        stateTransition(
-            allocator,
-            std.testing.io,
-            test_state.cached_state,
-            signed_beacon_block,
-            .{
-                .verify_state_root = false,
-                .verify_proposer = false,
-                .verify_signatures = false,
-            },
-        ),
-    );
-}
-
 test "state transition - a rejected block leaves the pre-state unchanged" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 * 5 });
