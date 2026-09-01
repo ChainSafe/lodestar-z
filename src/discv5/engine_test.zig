@@ -5,8 +5,8 @@ const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
 const message = @import("wire/message.zig");
 const packet = @import("wire/packet.zig");
-const rlp = @import("wire/rlp.zig");
 const engine_session = @import("session.zig");
+const test_support = @import("test_support.zig");
 const types = @import("types.zig");
 
 const TestEngine = engine.Engine;
@@ -45,8 +45,8 @@ const Pair = struct {
         self.address_b = address(2, 9_002);
         const key_a = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
         const key_b = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
-        self.record_a = try buildRecord(&key_a, 1, self.address_a);
-        self.record_b = try buildRecord(&key_b, 1, self.address_b);
+        self.record_a = try test_support.buildRecord(&key_a, 1, self.address_a);
+        self.record_b = try test_support.buildRecord(&key_b, 1, self.address_b);
         try self.node_a.initWithConfig(std.testing.allocator, key_a, self.record_a, testConfig());
         errdefer self.node_a.deinit();
         try self.node_b.initWithConfig(std.testing.allocator, key_b, self.record_b, testConfig());
@@ -238,10 +238,10 @@ const Pair = struct {
         try std.testing.expectEqual(@as(u16, 0), received.packet_length);
         try std.testing.expect(received.event == .request);
         try std.testing.expect(received.event.request.record == null);
-        var expired: [1]calls.Handle = undefined;
+        var expired: [1]calls.Expired = undefined;
         const tick = self.node_a.tick(116, &expired);
         try std.testing.expectEqual(@as(usize, 1), tick.calls);
-        try std.testing.expectEqual(started.handle, expired[0]);
+        try std.testing.expectEqual(started.handle, expired[0].handle);
     }
 
     fn filterFindNodeRecords(self: *Pair) !void {
@@ -365,7 +365,7 @@ const Pair = struct {
 test "engine rejects a local record owned by another key" {
     const key_a = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
     const key_b = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
-    const record_b = try buildRecord(&key_b, 1, address(2, 9_002));
+    const record_b = try test_support.buildRecord(&key_b, 1, address(2, 9_002));
     var invalid: TestEngine = undefined;
     try std.testing.expectError(
         engine.Error.InvalidLocalRecord,
@@ -375,7 +375,7 @@ test "engine rejects a local record owned by another key" {
 
 test "cold oversized requests fail before transmission" {
     const key = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-    const local_record = try buildRecord(&key, 1, address(1, 9_001));
+    const local_record = try test_support.buildRecord(&key, 1, address(1, 9_001));
     var node: TestEngine = undefined;
     try node.initWithConfig(std.testing.allocator, key, local_record, testConfig());
     defer node.deinit();
@@ -419,7 +419,7 @@ test "cold oversized requests fail before transmission" {
 
 test "engine configuration rejects zero retention windows" {
     const key = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-    const local_record = try buildRecord(&key, 1, address(1, 9_001));
+    const local_record = try test_support.buildRecord(&key, 1, address(1, 9_001));
     var node: TestEngine = undefined;
     var config = testConfig();
     config.challenge_timeout_ms = 0;
@@ -427,48 +427,6 @@ test "engine configuration rejects zero retention windows" {
         engine.Error.InvalidTimeout,
         node.initWithConfig(std.testing.allocator, key, local_record, config),
     );
-}
-
-fn buildRecord(
-    key_pair: *const crypto.KeyPair,
-    sequence: u64,
-    endpoint: types.Address,
-) !enr.Record {
-    const ip4 = switch (endpoint) {
-        .ip4 => |value| value,
-        .ip6 => return error.UnsupportedTestAddress,
-    };
-    const public_key = crypto.compressedPublicKey(key_pair);
-    var content_buffer: [300]u8 = undefined;
-    var content_writer = rlp.Writer.init(&content_buffer);
-    const content = try content_writer.beginList();
-    try content_writer.writeUint(sequence);
-    try content_writer.writeBytes("id");
-    try content_writer.writeBytes("v4");
-    try content_writer.writeBytes("ip");
-    try content_writer.writeBytes(&ip4.octets);
-    try content_writer.writeBytes("secp256k1");
-    try content_writer.writeBytes(&public_key);
-    try content_writer.writeBytes("udp");
-    try content_writer.writeUint(ip4.port);
-    content_writer.finishList(content);
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash(content_writer.bytes(), &digest, .{});
-    const signature = try crypto.sign(&digest, key_pair);
-
-    var full_buffer: [300]u8 = undefined;
-    var full_writer = rlp.Writer.init(&full_buffer);
-    const full = try full_writer.beginList();
-    try full_writer.writeBytes(&signature);
-    var content_reader = rlp.Reader.init(content_writer.bytes());
-    var fields = try content_reader.readList();
-    for (0..16) |_| {
-        if (fields.atEnd()) break;
-        try full_writer.writeRawItem(try fields.readRawItem());
-    }
-    try std.testing.expect(fields.atEnd());
-    full_writer.finishList(full);
-    return enr.Record.init(full_writer.bytes());
 }
 
 fn startEntropy(seed: u8) engine.StartEntropy {
