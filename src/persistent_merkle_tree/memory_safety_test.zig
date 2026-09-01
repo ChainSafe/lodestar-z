@@ -115,27 +115,45 @@ test "compact multiproof reconstruction should reclaim partial nodes on pool exh
 }
 
 test "fillWithContents exhaustion should preserve inputs and restore pool slots" {
-    var pool = try Node.Pool.init(.{
-        .page_allocator = std.testing.allocator,
-        .allocator = std.testing.allocator,
-        .pool_size = 6,
-    });
-    defer pool.deinit();
+    const test_cases = [_]struct {
+        contents_len: usize,
+        pool_size: u32,
+    }{
+        // A partially built level above one completed level.
+        .{ .contents_len = 8, .pool_size = 6 },
+        // No parent in the failing level above two completed levels.
+        .{ .contents_len = 8, .pool_size = 7 },
+        // An odd completed level whose last parent includes a zero child.
+        .{ .contents_len = 5, .pool_size = 5 },
+    };
 
-    const leaf = try pool.createLeafFromUint(1);
-    defer pool.unref(leaf);
+    for (test_cases) |test_case| {
+        var pool = try Node.Pool.init(.{
+            .page_allocator = std.testing.allocator,
+            .allocator = std.testing.allocator,
+            .pool_size = test_case.pool_size,
+        });
+        defer pool.deinit();
 
-    var contents = [_]Node.Id{leaf} ** 8;
-    const contents_before = contents;
-    const leaf_state_before = leaf.getState(&pool);
-    const nodes_in_use_before = pool.getNodesInUse();
+        const leaf = try pool.createLeafFromUint(1);
+        defer pool.unref(leaf);
 
-    try std.testing.expectError(
-        error.PoolExhausted,
-        Node.fillWithContents(&pool, &contents, 3),
-    );
+        var contents = [_]Node.Id{leaf} ** 8;
+        const contents_before = contents;
+        const leaf_state_before = leaf.getState(&pool);
+        const nodes_in_use_before = pool.getNodesInUse();
 
-    try std.testing.expectEqual(contents_before, contents);
-    try std.testing.expectEqual(nodes_in_use_before, pool.getNodesInUse());
-    try std.testing.expectEqual(leaf_state_before, leaf.getState(&pool));
+        try std.testing.expectError(
+            error.PoolExhausted,
+            Node.fillWithContents(&pool, contents[0..test_case.contents_len], 3),
+        );
+
+        try std.testing.expectEqualSlices(
+            Node.Id,
+            contents_before[0..test_case.contents_len],
+            contents[0..test_case.contents_len],
+        );
+        try std.testing.expectEqual(nodes_in_use_before, pool.getNodesInUse());
+        try std.testing.expectEqual(leaf_state_before, leaf.getState(&pool));
+    }
 }

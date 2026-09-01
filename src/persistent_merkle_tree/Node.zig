@@ -1523,7 +1523,7 @@ fn fillCountAtLevel(contents_count: usize, level: Depth) usize {
     return count;
 }
 
-fn rollbackFillLevel(
+fn restoreChildrenAndFreeParents(
     pool: *Pool,
     contents: []Id,
     previous_count: usize,
@@ -1569,13 +1569,15 @@ pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
     var count = contents.len;
     var i: usize = 0;
     errdefer {
-        rollbackFillLevel(pool, contents, count, i / 2);
+        // The failing level may contain only a prefix of its parents. Restore those children
+        // first, then unwind each completed level until contents holds the original node IDs.
+        restoreChildrenAndFreeParents(pool, contents, count, i / 2);
 
         var level = depth - d;
         while (level > 0) {
             const previous_count = fillCountAtLevel(contents.len, level - 1);
             const parent_count = fillCountAtLevel(contents.len, level);
-            rollbackFillLevel(pool, contents, previous_count, parent_count);
+            restoreChildrenAndFreeParents(pool, contents, previous_count, parent_count);
             level -= 1;
         }
     }
