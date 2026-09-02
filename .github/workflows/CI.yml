@@ -45,6 +45,13 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: zig fmt --check .
 
+      # Repo-wide lint rules that `zig fmt` cannot express. Platform independent,
+      # so it runs once rather than across the matrix.
+      - name: Run tidy lint
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          zig build test:tidy
+
       - name: Run hashing tests
         run: |
           zig build test:hashing
@@ -60,6 +67,9 @@ jobs:
       - name: Run hex tests
         run: |
           zig build test:hex
+      - name: Run bounded_array tests
+        run: |
+          zig build test:bounded_array
       - name: Run cpu_count tests
         run: |
           zig build test:cpu_count

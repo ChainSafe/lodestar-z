@@ -131,6 +131,21 @@ A few things to keep in mind:
   imports compiles fine, runs nothing, and still reports success, so check that
   `zig build test:<module> --summary all` reports more tests after you add one.
 
+These rules are enforced, not just documented. Run:
+
+```sh
+zig build test:tidy
+```
+
+It checks that every `_test.zig` is imported, pairs with a module and is wired from that module,
+that a `root.zig` whose siblings have tests declares a `test` block, that every module has a CI
+step, and that no file exceeds the inline test limits. CI runs it alongside `zig fmt --check`.
+
+If your file genuinely needs to keep bulky tests inline because they touch private declarations,
+add it to `inline_test_allowlist` in `test/tidy.zig` with a comment naming the declarations
+involved. Tidy fails if an allowlisted file later drops below the limits, so exemptions cannot
+outlive their reason.
+
 If you created new unit tests, you can run them individually.
 For example, if you made a new unit test in the `ssz` package:
 

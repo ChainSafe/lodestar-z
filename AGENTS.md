@@ -24,7 +24,7 @@
 - **Test file layout:** once a file's `test` blocks reach roughly 100 lines or 8 tests, move them
   to a sibling `<module>_test.zig` and wire it from the module itself with
   `test { _ = @import("<module>_test.zig"); }`. Never mark a declaration `pub` only to relocate a
-  test.
+  test. `zig build test:tidy` enforces this.
 - **Incremental commits:** after review starts, do not force-push unless a maintainer requests it.
 - **Communication style:** do not use em dashes. Keep communication succinct and human-friendly.
 
@@ -93,6 +93,9 @@ zig fmt --check .
 
 # Format Zig files
 zig fmt .
+
+# Run repo-wide lint rules that `zig fmt` cannot express
+zig build test:tidy
 
 # Run all unit tests
 zig build test
@@ -351,6 +354,13 @@ Every package `root.zig` should name its files in a `test` block rather than rel
 `refAllDecls` reaching them through the re-export list. When adding a test file, confirm the count
 reported by `zig build test:<module> --summary all` actually goes up.
 
+`zig build test:tidy` checks all of this and runs in CI. It verifies that every `_test.zig` is
+imported, pairs with a module, and is wired from that module; that a `root.zig` whose siblings have
+tests declares a `test` block; that every module in `build.zig.zon` has a CI step; and that no file
+exceeds the inline test limits without an entry in `inline_test_allowlist` in `test/tidy.zig`.
+Exemptions live in that allowlist rather than in prose, so adding one is a reviewable diff, and
+tidy fails when an entry no longer needs the exemption.
+
 ## Pull request guidelines
 
 ### Branches and commits
@@ -376,12 +386,13 @@ implementation was primarily AI-authored or whether AI was used only for codebas
 ### Pre-push checklist
 
 1. `zig fmt --check .`
-2. Run relevant tests, never run slow `zig build test` unless changes touch spec logic
-3. Relevant spec tests for consensus, SSZ, or BLS changes
-4. `pnpm lint` for binding source changes
-5. Rebuild bindings and run `pnpm test` for binding or NAPI changes
-6. Confirm no generated test source or build output was edited manually
-7. Confirm both ownership cleanup and error paths are covered
+2. `zig build test:tidy`
+3. Run relevant tests, never run slow `zig build test` unless changes touch spec logic
+4. Relevant spec tests for consensus, SSZ, or BLS changes
+5. `pnpm lint` for binding source changes
+6. Rebuild bindings and run `pnpm test` for binding or NAPI changes
+7. Confirm no generated test source or build output was edited manually
+8. Confirm both ownership cleanup and error paths are covered
 
 ## Common tasks
 
