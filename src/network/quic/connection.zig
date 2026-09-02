@@ -28,6 +28,8 @@ pub const CloseReason = union(enum) {
     transport_error: u64,
 };
 
+pub const PendingClose = struct { reason: CloseReason, code: u64 };
+
 pub const app_error_normal: u64 = 0;
 pub const app_error_peer_id_mismatch: u64 = 1;
 pub const app_error_handshake_timeout: u64 = 2;
@@ -79,6 +81,8 @@ pub const Slot = struct {
     created_ms: u64 = 0,
     last_send_ms: u64 = 0,
     close_reason: ?CloseReason = null,
+    pending_close: ?PendingClose = null,
+    pending_close_armed: bool = false,
     connected_pending: bool = false,
     closed_pending: bool = false,
     streams_pending: u16 = 0,
@@ -104,6 +108,8 @@ pub const Slot = struct {
         self.created_ms = params.now.mono_ms;
         self.last_send_ms = params.now.mono_ms;
         self.close_reason = null;
+        self.pending_close = null;
+        self.pending_close_armed = false;
         self.connected_pending = false;
         self.closed_pending = false;
         self.streams_pending = 0;
@@ -171,6 +177,10 @@ pub const Slot = struct {
     pub fn close(self: *Slot, reason: CloseReason, code: u64) void {
         if (self.close_reason == null) self.close_reason = reason;
         _ = c.quiche_conn_close(self.conn.?, true, code, "", 0);
+    }
+
+    pub fn deferClose(self: *Slot, reason: CloseReason, code: u64) void {
+        self.pending_close = .{ .reason = reason, .code = code };
     }
 
     pub fn isEstablished(self: *const Slot) bool {

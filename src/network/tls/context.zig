@@ -24,12 +24,22 @@ pub const Context = struct {
     local_peer_id: peer_id.PeerId,
 
     pub fn init(host: *const keys.KeyPair, now_unix: i64, serial: [8]u8) Error!Context {
+        const host_key = host.publicKey();
+        return initWith(&host_key, host, now_unix, serial);
+    }
+
+    pub fn initWith(
+        host_key: *const keys.PublicKey,
+        signer: *const keys.KeyPair,
+        now_unix: i64,
+        serial: [8]u8,
+    ) Error!Context {
         if (ex_data_index < 0) {
             ex_data_index = c.SSL_get_ex_new_index(0, null, null, null, null);
             if (ex_data_index < 0) return error.OpenSslFailed;
         }
 
-        var certificate = try cert.Certificate.create(host, now_unix, serial);
+        var certificate = try cert.Certificate.createWith(host_key, signer, now_unix, serial);
         errdefer certificate.deinit();
 
         const ssl_ctx = c.SSL_CTX_new(c.TLS_method()) orelse return error.OpenSslFailed;
@@ -47,11 +57,10 @@ pub const Context = struct {
             verifyCallback,
         );
 
-        const host_key = host.publicKey();
         return .{
             .ssl_ctx = ssl_ctx,
             .certificate = certificate,
-            .local_peer_id = peer_id.PeerId.fromPublicKey(&host_key),
+            .local_peer_id = peer_id.PeerId.fromPublicKey(host_key),
         };
     }
 
