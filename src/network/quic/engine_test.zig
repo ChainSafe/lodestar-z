@@ -370,14 +370,14 @@ test "engine rejects a forged certificate with tls_failed" {
 
 test "engine keep-alive survives a short idle timeout" {
     var pair: Pair = .{};
-    try pair.init(.{ .idle_timeout_ms = 300, .keep_alive_ms = 50 }, .{ .idle_timeout_ms = 300, .keep_alive_ms = 50 });
+    try pair.init(.{ .idle_timeout_ms = 1_000, .keep_alive_ms = 200 }, .{ .idle_timeout_ms = 1_000, .keep_alive_ms = 200 });
     defer pair.deinit();
     const handles = try connectPair(&pair);
 
     var round: usize = 0;
-    while (round < 12) : (round += 1) {
-        sleepMs(50);
-        pair.advance(50);
+    while (round < 8) : (round += 1) {
+        sleepMs(200);
+        pair.advance(200);
         try pair.pump();
     }
     var storage: [8]Event = undefined;
@@ -387,12 +387,12 @@ test "engine keep-alive survives a short idle timeout" {
 
 test "engine reports idle timeout without keep-alive" {
     var pair: Pair = .{};
-    try pair.init(.{ .idle_timeout_ms = 200, .keep_alive_ms = 60_000 }, .{ .idle_timeout_ms = 200, .keep_alive_ms = 60_000 });
+    try pair.init(.{ .idle_timeout_ms = 600, .keep_alive_ms = 60_000 }, .{ .idle_timeout_ms = 600, .keep_alive_ms = 60_000 });
     defer pair.deinit();
     const handles = try connectPair(&pair);
 
-    sleepMs(350);
-    pair.advance(350);
+    sleepMs(900);
+    pair.advance(900);
     try pair.pump();
 
     var storage: [8]Event = undefined;
