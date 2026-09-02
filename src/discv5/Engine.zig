@@ -1,3 +1,6 @@
+//! The Engine applies protocol policy over the channel, call table, and routing table. It is
+//! single-threaded, so callers serialize entry and supply time and entropy.
+
 const std = @import("std");
 const CallTable = @import("CallTable.zig");
 const Channel = @import("Channel.zig");
@@ -51,6 +54,7 @@ pub const Request = union(enum) {
 pub const AuthenticatedRequest = struct {
     peer: types.Endpoint,
     message: Request,
+    /// The ENR update the handshake carried, if it carried one.
     record: ?enr.Record,
 };
 
@@ -58,6 +62,7 @@ pub const AuthenticatedResponse = struct {
     peer: types.Endpoint,
     matched: CallTable.Matched,
     record: ?enr.Record,
+    /// The validated records at requested distances, in NODES order. They borrow scratch.
     node_records: []const enr.Record,
 };
 
@@ -72,7 +77,7 @@ pub const Accepted = struct {
     event: Event = .none,
 };
 
-/// Peer-caused conditions arrive as `rejected`; an error from `receive` is a local failure.
+/// Peer-caused conditions arrive as `rejected`. An error from `receive` is a local failure.
 pub const Outcome = union(enum) {
     accepted: Accepted,
     rejected: types.RejectReason,
@@ -151,6 +156,8 @@ pub fn peerCount(self: *const Engine) usize {
     return self.routing.count();
 }
 
+/// Encodes, seals, and registers one request. The packet in `out` is the caller's to send, and
+/// on failure nothing is registered.
 pub fn startCall(
     self: *Engine,
     out: []u8,
@@ -173,6 +180,8 @@ pub fn startCall(
     );
 }
 
+/// Sends a PING to the incumbent that the routing table wants checked, if there is one. The
+/// result never reaches the host.
 pub fn startRevalidation(
     self: *Engine,
     out: []u8,
@@ -216,6 +225,7 @@ fn beginCall(
         try self.channel.requestCapacity(peer),
         owner,
     ) catch |err| switch (err) {
+        // The request would fit an established session but not a handshake packet.
         CallTable.Error.RequestTooLarge => return if (self.channel.hasSession(peer))
             err
         else
@@ -244,6 +254,8 @@ pub fn sendResponse(
     return self.sendPreparedResponse(out, peer, response, now_ms, entropy);
 }
 
+/// Stages the PONG or NODES reply to a request. TALKREQ is the host's to answer through
+/// `sendResponse`.
 pub fn prepareStandardResponse(
     self: *const Engine,
     request: *const AuthenticatedRequest,
@@ -305,6 +317,8 @@ fn sendPreparedResponse(
     return sealed.packet_length;
 }
 
+/// Processes one datagram. `out` receives at most one immediate reply, either a WHOAREYOU or
+/// the local handshake. Standard responses are staged separately.
 pub fn receive(
     self: *Engine,
     out: []u8,
@@ -339,6 +353,8 @@ fn process(
     };
 }
 
+/// Expires calls, challenges, and sessions. Caller-owned expiries are compacted to the front
+/// of `expired_calls`, and maintenance expiries are resolved here.
 pub fn tick(
     self: *Engine,
     now_ms: u64,
@@ -470,6 +486,8 @@ fn recoverCall(
         return Error.MissingCall;
     const plaintext = self.calls.requestBytes(handle) orelse return Error.MissingCall;
     const deadline_ms = try deadline(args.now_ms, self.config.request_timeout_ms);
+    // Reserve the nonce before encoding so a collision cannot leave a session behind for a
+    // cancelled call.
     try self.calls.markSent(
         handle,
         &Channel.handshakeNonce(&args.entropy.handshake),
@@ -553,6 +571,7 @@ fn dispatchResponse(
     } };
 }
 
+// Any authenticated packet counts as liveness for a peer already in routing.
 fn routeAuthenticated(
     self: *Engine,
     peer: types.Endpoint,
@@ -564,6 +583,8 @@ fn routeAuthenticated(
     _ = self.routing.upsertVerified(&peer, &record, now_ms) catch return;
 }
 
+// This is the one place where peer-caused errors become values. Anything unmapped is a local
+// failure.
 fn rejectReason(err: Error) ?types.RejectReason {
     return switch (err) {
         Error.InvalidMessage,

@@ -1,3 +1,6 @@
+//! A SessionStore holds session keys and pending WHOAREYOU challenges. Both are keyed by node ID
+//! and observed address, so a peer that moves has to handshake again.
+
 const std = @import("std");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
@@ -32,6 +35,8 @@ pub const KnownIdentity = struct {
 pub const Challenge = struct {
     data: [constants.whoareyou_packet_size]u8,
     sent_at_ms: u64,
+    /// What the engine knew about the peer when it issued the challenge. Verification uses this
+    /// instead of consulting routing later.
     known: ?KnownIdentity,
 };
 
@@ -98,6 +103,8 @@ pub fn touch(self: *SessionStore, peer: types.Endpoint, now_ms: u64) bool {
     return true;
 }
 
+/// Consumes the next nonce for `peer`. When the counter is exhausted the session is removed
+/// rather than wrapped, because AES-GCM must never see a nonce twice under one key.
 pub fn outbound(
     self: *SessionStore,
     peer: types.Endpoint,
@@ -117,6 +124,7 @@ pub fn outbound(
     return .{ .write_key = stored.value.write_key, .nonce = nonce };
 }
 
+/// Replaces any existing session for `peer` and consumes its pending challenge.
 pub fn install(
     self: *SessionStore,
     peer: types.Endpoint,
@@ -136,6 +144,8 @@ pub fn install(
     self.removeChallenge(peer);
 }
 
+/// Stores a challenge for `peer` unless one is already pending. When the cache is full, the
+/// oldest challenge is evicted.
 pub fn putChallenge(
     self: *SessionStore,
     peer: types.Endpoint,

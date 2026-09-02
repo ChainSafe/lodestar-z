@@ -1,3 +1,6 @@
+//! An EIP-778 node record is bounded to 300 bytes. Only the identity scheme, key, IP, and UDP
+//! pairs are interpreted. Every other pair is checked for order and kept as signed bytes.
+
 const std = @import("std");
 const crypto = @import("crypto.zig");
 const types = @import("../types.zig");
@@ -50,6 +53,8 @@ pub const Record = struct {
         return Record.init(record_writer.bytes());
     }
 
+    /// Parses and verifies a signed record. Keys must be unique and sorted, and the signature
+    /// covers the RLP list of everything after it.
     pub fn init(data: []const u8) Error!Record {
         if (data.len > constants.enr_size_max) return Error.InvalidRecord;
         const parsed = try parse(data);
@@ -85,6 +90,8 @@ pub const Record = struct {
         return self.bytes[0..self.length];
     }
 
+    /// Prefers the IPv4 endpoint. An IPv6 record uses `udp6` and falls back to `udp`, as the
+    /// spec allows.
     pub fn endpoint(self: *const Record) ?types.Address {
         if (self.ip4) |ip| if (self.udp) |port| {
             return .{ .ip4 = .{ .octets = ip, .port = port } };
@@ -218,6 +225,7 @@ fn parsePort(bytes: []const u8) Error!u16 {
     return value;
 }
 
+/// Hashes the uncompressed point without its 0x04 prefix with keccak256, per the v4 scheme.
 pub fn nodeIdFromPublicKey(public_key: *const [33]u8) Error!types.NodeId {
     const uncompressed = try crypto.uncompressedPublicKey(public_key);
     var node_id: types.NodeId = undefined;
@@ -225,6 +233,8 @@ pub fn nodeIdFromPublicKey(public_key: *const [33]u8) Error!types.NodeId {
     return node_id;
 }
 
+// The signed content is the record list without its signature, so the list prefix has to be
+// rebuilt for the shorter payload.
 fn hashSignedPayload(payload: []const u8, digest: *[32]u8) void {
     std.debug.assert(payload.len <= constants.enr_size_max);
     var prefix: [9]u8 = undefined;

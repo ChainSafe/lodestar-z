@@ -1,3 +1,7 @@
+//! A Channel is the authentication boundary. It turns a datagram into plaintext from a known
+//! peer, or into a handshake step. It owns the local key, sessions, and challenges, and it never
+//! sees calls or routing.
+
 const std = @import("std");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
@@ -48,6 +52,7 @@ pub const HandshakeEntropy = struct {
 
 pub const Sealed = struct {
     packet_length: u16,
+    /// The nonce the packet carries. The call table uses it to match a WHOAREYOU to the call.
     nonce: [constants.nonce_size]u8,
 };
 
@@ -65,10 +70,13 @@ pub const Unauthenticated = struct {
 pub const Whoareyou = struct {
     from: types.Address,
     request_nonce: [constants.nonce_size]u8,
+    /// The unmasked 63-byte WHOAREYOU packet, which both sides use as the key agreement salt.
     challenge_data: [constants.whoareyou_packet_size]u8,
     enr_sequence: u64,
 };
 
+/// The classification of one datagram. Only `authenticated` carries plaintext, and that
+/// plaintext borrows scratch until the next receive.
 pub const Inbound = union(enum) {
     authenticated: Authenticated,
     unauthenticated: Unauthenticated,
@@ -136,11 +144,15 @@ pub fn hasSession(self: *const Channel, peer: types.Endpoint) bool {
     return self.sessions.hasSession(peer);
 }
 
+/// Returns the largest request `seal` can send to `peer` right now. With a session that is the
+/// full plaintext size, and without one it is what fits beside the local ENR in a handshake.
 pub fn requestCapacity(self: *const Channel, peer: types.Endpoint) Error!usize {
     if (self.sessions.hasSession(peer)) return constants.ordinary_plaintext_size_max;
     return packet.handshakePlaintextCapacity(self.local_record.length);
 }
 
+/// Encrypts with the session for `peer`. Without a session it uses `entropy.sessionless_key`,
+/// which the recipient cannot decrypt and so must challenge.
 pub fn seal(
     self: *Channel,
     out: []u8,
@@ -160,6 +172,8 @@ pub fn seal(
     return self.encodeOrdinary(out, peer, &entropy.masking_iv, nonce, write_key, plaintext);
 }
 
+/// Encrypts like `seal` but fails without a session, because responses never go out
+/// unauthenticated.
 pub fn sealEstablished(
     self: *Channel,
     out: []u8,
@@ -183,6 +197,8 @@ pub fn sealEstablished(
     );
 }
 
+/// Classifies one datagram. This never fails, since every peer-caused problem is reported as
+/// `rejected`.
 pub fn receive(
     self: *Channel,
     raw: []const u8,
@@ -215,6 +231,9 @@ pub fn receive(
     };
 }
 
+/// Sends a WHOAREYOU for the packet that carried `request_nonce`. Returns null when a challenge
+/// for `peer` is already pending. `known` sets the ENR sequence to ask for and the key to verify
+/// the handshake against.
 pub fn challenge(
     self: *Channel,
     out: []u8,
@@ -236,6 +255,8 @@ pub fn challenge(
     return @intCast(encoded.len);
 }
 
+/// Completes the local side of the handshake and installs the session. The local ENR is
+/// included only when the challenger's `enr_sequence` is stale.
 pub fn answerChallenge(self: *Channel, out: []u8, args: HandshakeArgs) Error!Sealed {
     const local_enr: []const u8 = if (args.enr_sequence < self.local_record.sequence)
         self.local_record.slice()
@@ -384,6 +405,7 @@ fn encodeOrdinary(
     return .{ .packet_length = @intCast(encoded.len), .nonce = nonce.* };
 }
 
+/// Returns the nonce `answerChallenge` will use for `entropy`, so a caller can reserve it first.
 pub fn handshakeNonce(entropy: *const HandshakeEntropy) [constants.nonce_size]u8 {
     return SessionStore.makeNonce(SessionStore.first_nonce_counter, &entropy.nonce_tail);
 }

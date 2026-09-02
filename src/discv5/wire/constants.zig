@@ -1,3 +1,6 @@
+//! These sizes come from the discv5 wire spec. Each one is a protocol fact rather than a tuning
+//! knob.
+
 const std = @import("std");
 
 pub const packet_size_min: usize = 63;

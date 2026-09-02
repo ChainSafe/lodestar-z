@@ -1,3 +1,6 @@
+//! secp256k1 primitives for the v4 identity scheme. Signing is deterministic per RFC 6979 and
+//! produces low-S signatures, so every message has exactly one valid encoding.
+
 const std = @import("std");
 
 const Secp256k1 = std.crypto.ecc.Secp256k1;
@@ -77,6 +80,7 @@ pub fn sign(digest: *const [32]u8, key_pair: *const KeyPair) Error![64]u8 {
     return Error.SigningFailed;
 }
 
+/// Rejects high-S signatures, since a third party could otherwise re-encode a valid one.
 pub fn verify(
     digest: *const [32]u8,
     signature: *const [64]u8,

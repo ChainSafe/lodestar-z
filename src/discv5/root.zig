@@ -1,8 +1,10 @@
 //! DiscV5 node discovery.
 //!
-//! Layers, lowest first: `types`, `wire`, `identity`; `SessionStore`, `CallTable`, `RoutingTable`,
-//! `ResponsePlan`, `Udp`; `Channel`; `Engine`; `Lookup`; `Driver` and `lookup_driver`. Each file
-//! imports only layers below it. See docs/architecture/discv5.md.
+//! The lowest layer is `types`, followed by `wire` and `identity`. Above them sit `SessionStore`,
+//! `CallTable`, `RoutingTable`, `ResponsePlan`, and `Udp`, which depend on nothing but those
+//! three. `Channel` builds on the session store, `Engine` on the channel and the tables, `Lookup`
+//! on the engine, and `Driver` and `lookup_driver` on everything beneath them. Each file imports
+//! only layers below it. The design is described in docs/architecture/discv5.md.
 
 pub const CallTable = @import("CallTable.zig");
 pub const Channel = @import("Channel.zig");

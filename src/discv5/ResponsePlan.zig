@@ -1,3 +1,6 @@
+//! A ResponsePlan is a PONG or NODES reply staged for sending. NODES fragments are cut by
+//! encoded size, so up to sixteen records go out in as few packets as fit.
+
 const std = @import("std");
 const enr = @import("identity/enr.zig");
 const types = @import("types.zig");
@@ -83,6 +86,7 @@ pub fn preparePong(
     } };
 }
 
+/// Cuts `records[0..record_count]` into packets. The caller fills `records` in place first.
 pub fn prepareNodes(
     plan: *ResponsePlan,
     peer: types.Endpoint,

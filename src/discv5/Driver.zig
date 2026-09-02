@@ -1,3 +1,7 @@
+//! The Driver is the synchronous host loop. Each step handles at most one datagram, sends
+//! without a queue, and does expiry work on every poll, so progress never depends on inbound
+//! traffic.
+
 const std = @import("std");
 const CallTable = @import("CallTable.zig");
 const Engine = @import("Engine.zig");
@@ -26,6 +30,7 @@ pub const DatagramResult = union(enum) {
     rejected: types.RejectReason,
 };
 
+/// These counters exist for observability. Nothing in `step` depends on them.
 pub const Progress = struct {
     maintenance_expired: usize = 0,
     challenges_expired: usize = 0,
@@ -42,7 +47,7 @@ pub const StepResult = struct {
     progress: Progress = .{},
 };
 
-/// Clock reading and fresh entropy for one outbound packet.
+/// A clock reading and fresh entropy for one outbound packet.
 pub const SendContext = struct {
     now_ms: u64,
     entropy: Engine.StartEntropy,
@@ -70,6 +75,8 @@ pub fn initWithConfig(
     return .{ .core = core, .udp = adapter, .config = config };
 }
 
+/// Encodes and sends one request immediately. A failed send cancels the call, so no unsent
+/// request lingers.
 pub fn startCall(
     self: *Driver,
     io: std.Io,
@@ -132,7 +139,9 @@ pub fn transmit(
     };
 }
 
-/// The returned event borrows driver scratch and remains valid until the next step.
+/// Runs one poll. It expires state, may start a revalidation, waits up to the poll interval
+/// for one datagram, processes it, and drains any standard response. The returned event
+/// borrows driver scratch and stays valid until the next step.
 pub fn step(
     self: *Driver,
     io: std.Io,

@@ -1,3 +1,6 @@
+//! The packet codec handles header masking, the three packet forms, and AES-GCM sealing.
+//! Decoding checks structure only and never proves who sent a packet.
+
 const std = @import("std");
 const constants = @import("constants.zig");
 const types = @import("../types.zig");
@@ -95,6 +98,8 @@ pub const HandshakeAuthdataArgs = struct {
     enr: []const u8,
 };
 
+/// Unmasks and validates the framing. The result borrows `raw` for the ciphertext and `scratch`
+/// for the header, and both stay valid until the next decode into that scratch.
 pub fn decode(
     raw: []const u8,
     recipient_id: *const types.NodeId,
@@ -136,6 +141,7 @@ pub fn decode(
     };
 }
 
+/// Returns plaintext that borrows `scratch` and is overwritten by the next call.
 pub fn decrypt(
     packet: *const Packet,
     read_key: *const [16]u8,
@@ -187,6 +193,8 @@ pub fn handshakePlaintextCapacity(enr_length: usize) Error!usize {
     return constants.handshake_plaintext_size_max - enr_length;
 }
 
+/// Writes the packet before masking into `challenge_data_out`, because both sides feed those
+/// bytes into key agreement and the identity proof.
 pub fn encodeWhoareyou(
     out: []u8,
     args: WhoareyouArgs,
@@ -375,6 +383,8 @@ fn writeHeader(
     @memcpy(out[constants.static_header_size..header_size], authdata);
 }
 
+// Header masking is AES-128-CTR keyed by the first 16 bytes of the recipient's node ID. It hides
+// the packet structure from anyone who does not know the destination node.
 fn aesCtr(key: *const [16]u8, iv: *const [16]u8, bytes: []u8) void {
     std.debug.assert(bytes.len <= constants.header_size_max);
     const aes = Aes128.initEnc(key.*);

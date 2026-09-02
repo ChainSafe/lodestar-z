@@ -1,3 +1,6 @@
+//! A Udp adapter wraps one socket and one borrowed receive slot. The caller serializes every
+//! method and releases each datagram before receiving the next.
+
 const std = @import("std");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
@@ -34,7 +37,6 @@ pub const SendError = net.Socket.SendError || error{
     DatagramTooLarge,
 };
 
-/// Caller serializes all methods and releases each datagram before receiving another.
 const Udp = @This();
 
 socket: net.Socket,
@@ -78,6 +80,7 @@ pub fn receiveTimeout(
 fn admit(self: *Udp, incoming: net.IncomingMessage) ReceiveError!Datagram {
     const successor = std.math.add(u64, self.next_generation, 1) catch
         return error.GenerationExhausted;
+    // Every valid packet fits the 1,280-byte buffer, so a truncated datagram was never valid.
     if (incoming.flags.trunc) return error.DatagramTooLarge;
     std.debug.assert(incoming.data.len <= self.buffer.len);
     const generation = self.next_generation;
@@ -107,6 +110,7 @@ pub fn send(
     return self.socket.send(io, &address, bytes);
 }
 
+/// Normalizes IPv4-mapped IPv6 sources to IPv4 so both forms share one session key.
 pub fn fromNetwork(address: net.IpAddress) types.Address {
     return switch (address) {
         .ip4 => |value| .{ .ip4 = .{
