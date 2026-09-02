@@ -18,6 +18,12 @@ pub const CloseReason = union(enum) {
     tls_failed,
     peer_closed: struct { app: bool, code: u64 },
     transport_error: u64,
+    send_failed,
+};
+
+pub const Sent = struct {
+    bytes: []u8,
+    to: Address,
 };
 
 pub const PendingClose = struct { reason: CloseReason, code: u64 };

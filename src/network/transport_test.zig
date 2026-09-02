@@ -1,0 +1,101 @@
+const std = @import("std");
+const driver_mod = @import("driver.zig");
+const engine_mod = @import("quic/engine.zig");
+const keys = @import("wire/keys.zig");
+const multiaddr = @import("wire/multiaddr.zig");
+const transport_mod = @import("transport.zig");
+
+const Transport = transport_mod.Transport;
+const step_options = driver_mod.StepOptions{ .wait_max_ms = 10 };
+const payload_len = 64 * 1024;
+
+fn initTransport(target: *Transport, seed: u8) !void {
+    const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
+    try target.init(std.testing.allocator, std.testing.io, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+    });
+}
+
+fn writeSome(
+    engine: *engine_mod.Engine,
+    stream: engine_mod.StreamHandle,
+    bytes: []const u8,
+) !usize {
+    return engine.write(stream, bytes, false) catch |err| switch (err) {
+        error.WouldBlock => 0,
+        else => err,
+    };
+}
+
+test "transport moves a bulk payload over loopback sockets with batched sends" {
+    var dialer: Transport = .{};
+    try initTransport(&dialer, 21);
+    defer dialer.deinit(std.testing.io);
+    var listener: Transport = .{};
+    try initTransport(&listener, 22);
+    defer listener.deinit(std.testing.io);
+
+    const target = listener.localMultiaddr();
+    try std.testing.expect(target.peer.?.eql(&listener.peerId()));
+    const handle = try dialer.dial(std.testing.io, &target);
+
+    var dialer_events: [8]engine_mod.Event = undefined;
+    var listener_events: [8]engine_mod.Event = undefined;
+    var activity: [4]engine_mod.Handle = undefined;
+    var connected = false;
+    var rounds: usize = 0;
+    while (rounds < 200 and !connected) : (rounds += 1) {
+        const dialed = try dialer.step(std.testing.io, &dialer_events, &activity, step_options);
+        _ = try listener.step(std.testing.io, &listener_events, &activity, step_options);
+        for (dialer_events[0..dialed.events]) |event| {
+            if (event == .connected) connected = true;
+        }
+    }
+    try std.testing.expect(connected);
+
+    var payload: [payload_len]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% 7);
+    const stream = try dialer.engine.openStream(handle);
+    var sink: [payload_len]u8 = undefined;
+    var written: usize = 0;
+    var received: usize = 0;
+    var inbound: ?engine_mod.StreamHandle = null;
+    var datagrams_sent: u32 = 0;
+    var send_calls: u32 = 0;
+    rounds = 0;
+    while (rounds < 2_000 and received < payload_len) : (rounds += 1) {
+        if (written < payload_len) {
+            written += try writeSome(&dialer.engine, stream, payload[written..]);
+        }
+        const sent = try dialer.step(std.testing.io, &dialer_events, &activity, step_options);
+        try std.testing.expectEqual(@as(u32, 0), sent.send_failures);
+        datagrams_sent += sent.datagrams_sent;
+        send_calls += sent.send_calls;
+        const got = try listener.step(std.testing.io, &listener_events, &activity, step_options);
+        for (listener_events[0..got.events]) |event| {
+            if (event == .stream_opened) inbound = event.stream_opened;
+        }
+        const open = inbound orelse continue;
+        var reads: usize = 0;
+        while (reads < 8 and received < payload_len) : (reads += 1) {
+            const read = try listener.engine.read(open, sink[received..]);
+            if (read.len == 0) break;
+            received += read.len;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, payload_len), received);
+    try std.testing.expectEqualSlices(u8, &payload, &sink);
+    try std.testing.expect(send_calls > 0);
+    try std.testing.expect(send_calls < datagrams_sent);
+}
+
+test "transport refuses to dial a multiaddr without a peer id" {
+    var dialer: Transport = .{};
+    try initTransport(&dialer, 23);
+    defer dialer.deinit(std.testing.io);
+
+    const target = multiaddr.Multiaddr{ .address = dialer.localAddress() };
+    try std.testing.expectError(error.MissingPeerId, dialer.dial(std.testing.io, &target));
+    try std.testing.expectEqual(@as(usize, 0), dialer.engine.driverView().activeIndices().len);
+}

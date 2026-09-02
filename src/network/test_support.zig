@@ -1,12 +1,11 @@
 const std = @import("std");
 const constants = @import("constants.zig");
-const driver_mod = @import("driver.zig");
 const engine_mod = @import("quic/engine.zig");
 const keys = @import("wire/keys.zig");
 const limits = @import("quic/limits.zig");
 const tls = @import("tls/context.zig");
+const transport_mod = @import("transport.zig");
 const types = @import("types.zig");
-const udp_mod = @import("udp.zig");
 
 const Engine = engine_mod.Engine;
 const Event = engine_mod.Event;
@@ -146,27 +145,18 @@ pub const Pair = struct {
 };
 
 pub const Node = struct {
-    ctx: tls.Context = undefined,
-    engine: engine_mod.Engine = undefined,
-    udp: udp_mod.Udp = undefined,
-    driver: driver_mod.Driver = undefined,
+    transport: transport_mod.Transport = .{},
 
     pub fn init(self: *Node, seed: u8) !void {
         const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
-        self.ctx = try tls.Context.init(&key, (try driver_mod.currentTime(std.testing.io)).unix_s, [_]u8{seed} ** 8);
-        errdefer self.ctx.deinit();
-        self.udp = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
-        errdefer self.udp.close(std.testing.io);
-        const local = self.udp.localAddress();
-        self.engine = try engine_mod.Engine.init(std.testing.allocator, &self.ctx, .{}, &local);
-        errdefer self.engine.deinit();
-        self.driver = driver_mod.Driver.init(&self.engine, &self.udp);
+        try self.transport.init(std.testing.allocator, std.testing.io, .{
+            .host = &key,
+            .bind = .{ .ip4 = .loopback(0) },
+        });
     }
 
     pub fn deinit(self: *Node) void {
-        self.udp.close(std.testing.io);
-        self.engine.deinit();
-        self.ctx.deinit();
+        self.transport.deinit(std.testing.io);
     }
 };
 
