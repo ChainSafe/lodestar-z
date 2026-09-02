@@ -1,6 +1,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const runtime = @import("runtime.zig");
+const types = @import("types.zig");
 
 const net = std.Io.net;
 
@@ -30,7 +31,7 @@ test "UDP admits one mutable datagram at a time" {
     var raw_sender = try loopback.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer raw_sender.close(std.testing.io);
     const oversized = [_]u8{0x55} ** (constants.datagram_size_max + 1);
-    const destination = runtime.toNetwork(receiver.localAddress());
+    const destination = runtime.toNetwork(receiver.localAddress(), receiver.family);
     try raw_sender.send(std.testing.io, &destination, &oversized);
     try std.testing.expectError(error.DatagramTooLarge, receiver.receiveTimeout(std.testing.io, oneSecond()));
 
@@ -49,7 +50,10 @@ test "UDP receive times out without traffic" {
 }
 
 test "UDP rejects oversized sends before I/O" {
-    var transport = runtime.Udp.init(undefined);
+    const loopback = net.IpAddress{ .ip4 = .loopback(0) };
+    const socket = try loopback.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    var transport = runtime.Udp.init(socket);
+    defer transport.close(std.testing.io);
     const oversized = [_]u8{0x44} ** (constants.datagram_size_max + 1);
     try std.testing.expectError(
         error.DatagramTooLarge,
@@ -67,6 +71,23 @@ test "UDP address conversion normalizes mapped IPv4" {
     const address = runtime.fromNetwork(mapped);
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 7 }, &address.ip4.octets);
     try std.testing.expectEqual(@as(u16, 4_001), address.port());
-    const back = runtime.toNetwork(address);
+    const back = runtime.toNetwork(address, .ip4);
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 7 }, &back.ip4.bytes);
+    try std.testing.expectEqual(@as(u16, 4_001), back.ip4.port);
+}
+
+test "UDP address conversion maps IPv4 destinations onto IPv6 sockets" {
+    const ip4 = types.Address{ .ip4 = .{ .octets = .{ 10, 0, 0, 7 }, .port = 4_001 } };
+    const mapped = runtime.toNetwork(ip4, .ip6);
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0} ** 10 ++ [_]u8{ 0xff, 0xff, 10, 0, 0, 7 }),
+        &mapped.ip6.bytes,
+    );
+    try std.testing.expectEqual(@as(u16, 4_001), mapped.ip6.port);
+    try std.testing.expectEqual(@as(u32, 0), mapped.ip6.interface.index);
+
+    const plain = runtime.toNetwork(ip4, .ip4);
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 7 }, &plain.ip4.bytes);
+    try std.testing.expectEqual(@as(u16, 4_001), plain.ip4.port);
 }

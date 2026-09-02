@@ -24,19 +24,22 @@ pub const ReleaseError = error{StaleDatagram};
 
 pub const SendError = net.Socket.SendError || error{DatagramTooLarge};
 
+pub const Family = enum { ip4, ip6 };
+
 pub const Udp = struct {
     socket: net.Socket,
+    family: Family,
     buffer: [constants.datagram_size_max]u8 = undefined,
     admitted: ?u64 = null,
     next_generation: u64 = 1,
 
     pub fn bind(io: std.Io, address: net.IpAddress) net.IpAddress.BindError!Udp {
         const socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
-        return .{ .socket = socket };
+        return .{ .socket = socket, .family = familyOf(socket.address) };
     }
 
     pub fn init(socket: net.Socket) Udp {
-        return .{ .socket = socket };
+        return .{ .socket = socket, .family = familyOf(socket.address) };
     }
 
     pub fn close(self: *const Udp, io: std.Io) void {
@@ -71,10 +74,25 @@ pub const Udp = struct {
 
     pub fn send(self: *const Udp, io: std.Io, destination: types.Address, bytes: []const u8) SendError!void {
         if (bytes.len > constants.datagram_size_max) return error.DatagramTooLarge;
-        const address = toNetwork(destination);
+        const address = toNetwork(destination, self.family);
         return self.socket.send(io, &address, bytes);
     }
 };
+
+fn familyOf(address: net.IpAddress) Family {
+    return switch (address) {
+        .ip4 => .ip4,
+        .ip6 => .ip6,
+    };
+}
+
+fn mappedIp4(octets: [4]u8) [16]u8 {
+    var bytes = [_]u8{0} ** 16;
+    bytes[10] = 0xff;
+    bytes[11] = 0xff;
+    @memcpy(bytes[12..16], &octets);
+    return bytes;
+}
 
 pub fn fromNetwork(address: net.IpAddress) types.Address {
     return switch (address) {
@@ -86,9 +104,14 @@ pub fn fromNetwork(address: net.IpAddress) types.Address {
     };
 }
 
-pub fn toNetwork(address: types.Address) net.IpAddress {
+pub fn toNetwork(address: types.Address, family: Family) net.IpAddress {
     return switch (address) {
-        .ip4 => |value| .{ .ip4 = .{ .bytes = value.octets, .port = value.port } },
+        .ip4 => |value| if (family == .ip6) .{ .ip6 = .{
+            .bytes = mappedIp4(value.octets),
+            .port = value.port,
+            .flow = 0,
+            .interface = .{ .index = 0 },
+        } } else .{ .ip4 = .{ .bytes = value.octets, .port = value.port } },
         .ip6 => |value| .{ .ip6 = .{
             .bytes = value.octets,
             .port = value.port,
