@@ -573,7 +573,7 @@ test "loadState scenarios" {
     };
 
     inline for (cases) |case| {
-        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8192 });
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 750_000 });
         defer pool.deinit();
 
         const state_ptr = try gen.generateElectraState(allocator, &pool, chain_config, 64);
@@ -790,7 +790,7 @@ test "diff helpers cases" {
 
 test "loadValidators/loadInactivityScores: rejection scenarios" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 180_000 });
     defer pool.deinit();
 
     const gen = @import("test_utils/generate_state.zig");

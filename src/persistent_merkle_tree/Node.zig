@@ -39,8 +39,12 @@ pub const Error = error{
     InvalidNode,
     /// Attempt to use a length beyond the tree's length at a given depth.
     InvalidLength,
+    /// The configured pool size cannot be represented by the free list.
+    InvalidPoolCapacity,
     /// Attempt to increment the reference count beyond `max_ref_count`.
     RefCountOverflow,
+    /// The fixed-capacity pool has no free user slots.
+    PoolExhausted,
     /// Out of memory.
     OutOfMemory,
 };
@@ -255,7 +259,7 @@ inline fn containerStructRef(payloads: []const u64, idx: u32) *ContainerStructRe
     return @ptrCast(@alignCast(payloadAsPtr(payloads[idx])));
 }
 
-/// Stores nodes in a memory pool, with reference counting and a free list.
+/// Stores nodes in a fixed-capacity memory pool, with reference counting and a free list.
 pub const Pool = struct {
     page_allocator: Allocator,
     allocator: Allocator,
@@ -269,13 +273,18 @@ pub const Pool = struct {
         page_allocator: Allocator = std.heap.page_allocator,
         // Pure-Zig default keeps the pool libc-free; hot paths pin c_allocator.
         allocator: Allocator = std.heap.smp_allocator,
-        // Default 0 = lazy growth via preheat/ensureCapacity. Pre-PR NAPI
-        // bindings relied on this to avoid hundreds of MB upfront. Bench
-        // sites that want a pre-sized pool pass an explicit value.
-        pool_size: u32 = 0,
+        /// Usable user slots. The zero-hash sentinels are allocated in addition.
+        pool_size: u32,
     };
 
     pub fn init(opts: InitOptions) Error!Pool {
+        const total_capacity = std.math.add(u32, opts.pool_size, max_depth) catch {
+            return error.InvalidPoolCapacity;
+        };
+        if (total_capacity > State.next_free_mask) {
+            return error.InvalidPoolCapacity;
+        }
+
         var pool: Pool = .{
             .page_allocator = opts.page_allocator,
             .allocator = opts.allocator,
@@ -285,9 +294,10 @@ pub const Pool = struct {
         };
 
         var list = std.MultiArrayList(Node).empty;
-        try list.resize(opts.page_allocator, opts.pool_size + max_depth);
-        list.len = opts.pool_size + max_depth;
+        try list.setCapacity(opts.page_allocator, total_capacity);
+        list.len = total_capacity;
         pool.nodes = list.slice();
+        std.debug.assert(pool.nodes.capacity == total_capacity);
 
         // Pre-populate zero-hash sentinels at indices 0..max_depth-1.
         for (0..max_depth) |i| {
@@ -336,23 +346,6 @@ pub const Pool = struct {
         self.* = undefined;
     }
 
-    /// Preheat the memory pool by extending the backing storage by
-    /// `additional_size` slots and threading them onto the free list.
-    pub fn preheat(self: *Pool, additional_size: u32) Allocator.Error!void {
-        const size = self.nodes.len;
-        const new_size = size + additional_size;
-
-        var list = self.nodes.toMultiArrayList();
-        try list.resize(self.page_allocator, new_size);
-        self.nodes = list.slice();
-
-        const state_col = self.nodes.items(.state);
-        for (size..new_size) |i| {
-            const next: Id = @enumFromInt(@as(u32, @intCast(i + 1)));
-            state_col[i] = State.initFree(next);
-        }
-    }
-
     /// Returns the number of nodes currently in use (not free).
     pub fn getNodesInUse(self: *Pool) usize {
         var count: usize = 0;
@@ -367,21 +360,22 @@ pub const Pool = struct {
     inline fn createUnsafe(self: *Pool) Id {
         const n: Id = self.next_free_node;
         const idx = @intFromEnum(n);
+        std.debug.assert(idx < self.nodes.len);
         const state_col = self.nodes.items(.state);
         std.debug.assert(state_col[idx].isFree());
         self.next_free_node = state_col[idx].nextFree();
         return n;
     }
 
-    fn create(self: *Pool) Allocator.Error!Id {
+    fn create(self: *Pool) error{PoolExhausted}!Id {
         std.debug.assert(@intFromEnum(self.next_free_node) <= self.nodes.len);
-        if (@intFromEnum(self.next_free_node) >= self.nodes.len) {
-            try self.preheat(1);
+        if (@intFromEnum(self.next_free_node) == self.nodes.len) {
+            return error.PoolExhausted;
         }
         return self.createUnsafe();
     }
 
-    pub fn createLeaf(self: *Pool, hash: *const [32]u8) Allocator.Error!Id {
+    pub fn createLeaf(self: *Pool, hash: *const [32]u8) error{PoolExhausted}!Id {
         const node_id = try self.create();
         const idx = @intFromEnum(node_id);
         self.nodes.items(.root)[idx] = hash.*;
@@ -389,7 +383,7 @@ pub const Pool = struct {
         return node_id;
     }
 
-    pub fn createLeafFromUint(self: *Pool, uint: u256) Allocator.Error!Id {
+    pub fn createLeafFromUint(self: *Pool, uint: u256) error{PoolExhausted}!Id {
         var hash: [32]u8 = undefined;
         std.mem.writeInt(u256, &hash, uint, .little);
         return self.createLeaf(&hash);
@@ -411,7 +405,6 @@ pub const Pool = struct {
         try self.refUnsafe(right_id);
         errdefer self.unrefUnsafe(right_id);
 
-        // `self.create()` may grow the pool — bind column slices AFTER it.
         const node_id = try self.create();
         const idx = @intFromEnum(node_id);
         self.nodes.items(.state)[idx] = State.initInUse(.branch, 0);
@@ -566,24 +559,16 @@ pub const Pool = struct {
     ///
     /// All nodes are allocated with refcount=0.
     /// Nodes allocated here are expected to be attached via `rebind`.
-    /// Returns true if pool had to allocate more memory, false otherwise.
-    pub fn alloc(self: *Pool, out: []Id) Allocator.Error!bool {
-        var allocated: bool = false;
+    pub fn alloc(self: *Pool, out: []Id) error{PoolExhausted}!void {
         for (0..out.len) |i| {
             std.debug.assert(@intFromEnum(self.next_free_node) <= self.nodes.len);
-            if (@intFromEnum(self.next_free_node) >= self.nodes.len) {
-                const remaining = out.len - i;
-                self.preheat(@intCast(remaining)) catch |err| {
-                    // Preheat ran out of memory: put back the slots we already took. They're
-                    // unreferenced, so push them back onto the free list (unref would underflow).
-                    const states_now = self.nodes.items(.state);
-                    for (out[0..i]) |id| {
-                        states_now[@intFromEnum(id)] = State.initFree(self.next_free_node);
-                        self.next_free_node = id;
-                    }
-                    return err;
-                };
-                allocated = true;
+            if (@intFromEnum(self.next_free_node) == self.nodes.len) {
+                const states = self.nodes.items(.state);
+                for (out[0..i]) |node_id| {
+                    states[@intFromEnum(node_id)] = State.initFree(self.next_free_node);
+                    self.next_free_node = node_id;
+                }
+                return error.PoolExhausted;
             }
             out[i] = self.createUnsafe();
 
@@ -595,7 +580,6 @@ pub const Pool = struct {
             self.nodes.items(.root)[idx] = lazy_sentinel;
             self.nodes.items(.state)[idx] = State.initInUse(.branch, 0);
         }
-        return allocated;
     }
 
     /// Unrefs each node in `out`.
@@ -960,7 +944,7 @@ pub const Id = enum(u32) {
         const path_rights = path_rights_buf[0..path_len];
         const path_parents = path_parents_buf[0..path_len];
 
-        _ = try pool.alloc(path_parents);
+        try pool.alloc(path_parents);
         errdefer pool.free(path_parents);
 
         const states = pool.nodes.items(.state);
@@ -1137,8 +1121,8 @@ pub const Id = enum(u32) {
         // This is initialized as 0 since the first index has no previous index
         var d_offset: Depth = 0;
 
-        var states = pool.nodes.items(.state);
-        var payloads = pool.nodes.items(.payload);
+        const states = pool.nodes.items(.state);
+        const payloads = pool.nodes.items(.payload);
 
         // For each index specified, maintain/update path_lefts and path_rights from root (depth 0) all the way to path_len
         // but only allocate and update path_parents from the next shared depth to path_len
@@ -1153,10 +1137,7 @@ pub const Id = enum(u32) {
                 0
             else
                 path_len - @as(Depth, @intCast(@bitSizeOf(usize) - @clz(index ^ indices[i + 1])));
-            if (try pool.alloc(path_parents[next_d_offset..path_len])) {
-                states = pool.nodes.items(.state);
-                payloads = pool.nodes.items(.payload);
-            }
+            try pool.alloc(path_parents[next_d_offset..path_len]);
 
             var path = gindex.toPath();
 
@@ -1291,7 +1272,7 @@ pub const Id = enum(u32) {
         const path_rights = path_rights_buf[0..path_len];
         const path_parents = path_parents_buf[0..path_len];
 
-        _ = try pool.alloc(path_parents);
+        try pool.alloc(path_parents);
         errdefer pool.free(path_parents);
 
         const states = pool.nodes.items(.state);
@@ -1389,8 +1370,8 @@ pub const Id = enum(u32) {
         // This is initialized as 0 since the first index has no previous index
         var d_offset: Depth = 0;
 
-        var states = pool.nodes.items(.state);
-        var payloads = pool.nodes.items(.payload);
+        const states = pool.nodes.items(.state);
+        const payloads = pool.nodes.items(.payload);
 
         // For each index specified, maintain/update path_lefts and path_rights from root (depth 0) all the way to path_len
         // but only allocate and update path_parents from the next shared depth to path_len
@@ -1405,10 +1386,7 @@ pub const Id = enum(u32) {
             else
                 path_len - @as(Depth, @intCast(@bitSizeOf(usize) - @clz(@intFromEnum(gindex) ^ @intFromEnum(gindices[i + 1]))));
 
-            if (try pool.alloc(path_parents_buf[next_d_offset..path_len])) {
-                states = pool.nodes.items(.state);
-                payloads = pool.nodes.items(.payload);
-            }
+            try pool.alloc(path_parents_buf[next_d_offset..path_len]);
 
             var path = gindex.toPath();
 
@@ -1537,6 +1515,44 @@ pub const Id = enum(u32) {
     }
 };
 
+fn fillCountAtLevel(contents_count: usize, level: Depth) usize {
+    var count = contents_count;
+    for (0..level) |_| {
+        count = count / 2 + count % 2;
+    }
+    return count;
+}
+
+fn restoreChildrenAndFreeParents(
+    pool: *Pool,
+    contents: []Id,
+    previous_count: usize,
+    parents_created: usize,
+) void {
+    var parent_index = parents_created;
+    while (parent_index > 0) {
+        parent_index -= 1;
+
+        const parent = contents[parent_index];
+        const parent_state = &pool.nodes.items(.state)[@intFromEnum(parent)];
+        std.debug.assert(parent_state.isBranch());
+        std.debug.assert(parent_state.refCount() == 0);
+        const children = childrenOf(parent, .branch, pool.nodes.items(.payload));
+
+        const child_index = parent_index * 2;
+        contents[child_index] = children.left;
+        if (child_index + 1 < previous_count) {
+            contents[child_index + 1] = children.right;
+        }
+
+        pool.unrefUnsafe(children.left);
+        pool.unrefUnsafe(children.right);
+        // Child refs are restored, so return only the parent slot.
+        parent_state.* = State.initFree(pool.next_free_node);
+        pool.next_free_node = parent;
+    }
+}
+
 /// Fill a view with the specified contents, returning the new root node id.
 ///
 /// Note: contents is mutated.
@@ -1551,8 +1567,23 @@ pub fn fillWithContents(pool: *Pool, contents: []Id, depth: Depth) !Id {
 
     var d = depth;
     var count = contents.len;
+    var i: usize = 0;
+    errdefer {
+        // The failing level may contain only a prefix of its parents. Restore those children
+        // first, then unwind each completed level until contents holds the original node IDs.
+        restoreChildrenAndFreeParents(pool, contents, count, i / 2);
+
+        var level = depth - d;
+        while (level > 0) {
+            const previous_count = fillCountAtLevel(contents.len, level - 1);
+            const parent_count = fillCountAtLevel(contents.len, level);
+            restoreChildrenAndFreeParents(pool, contents, previous_count, parent_count);
+            level -= 1;
+        }
+    }
+
     while (d > 0) : (d -= 1) {
-        var i: usize = 0;
+        i = 0;
         while (i < count - 1) : (i += 2) {
             contents[i / 2] = try pool.createBranch(contents[i], contents[i + 1]);
         }

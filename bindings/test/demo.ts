@@ -32,8 +32,6 @@ const hasPkix = printDuration("check for pkix file", () => {
   }
 });
 
-bindings.pool.ensureCapacity(10_000_000);
-
 const reader = await printDurationAsync("load era reader", () => era.era.EraReader.open(config, getFirstEraFilePath()));
 
 const nextReader = await printDurationAsync("load era reader", () =>

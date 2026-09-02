@@ -140,7 +140,6 @@ describe("BeaconStateView", () => {
     global.gc?.();
 
     // Phase 2: Create native BeaconStateView
-    bindings.pool.ensureCapacity(10_000_000);
     try {
       bindings.pubkeys.load("./mainnet.pkix", MAINNET_PUBKEY_CACHE_LIMIT);
     } catch (_e) {

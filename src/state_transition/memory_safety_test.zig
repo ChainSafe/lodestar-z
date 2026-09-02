@@ -23,11 +23,7 @@ test "upgradeStateToCapella and upgradeStateToDeneb should release temporary pay
     else
         config.minimal.chain_config;
 
-    var pool = try Node.Pool.init(.{
-        .page_allocator = allocator,
-        .allocator = allocator,
-        .pool_size = 10_000,
-    });
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 345_000 });
     defer pool.deinit();
 
     var bellatrix_value = ct.bellatrix.BeaconState.default_value;
@@ -120,7 +116,7 @@ test "deserializeContainerOverrideFields... cleans up pool nodes on error" {
 
 test "processRewardsAndPenalties - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
+    const pool_size = 200_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 

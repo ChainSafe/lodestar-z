@@ -4,11 +4,9 @@ const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
 const proof = @import("proof.zig");
 
-test "setNodesGrouped should release an intermediate root when a later group runs out of memory" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
-
+test "setNodesGrouped should release an intermediate root when a later group exhausts the pool" {
     var pool = try Node.Pool.init(.{
-        .page_allocator = failing.allocator(),
+        .page_allocator = std.testing.allocator,
         .allocator = std.testing.allocator,
         .pool_size = 16,
     });
@@ -33,18 +31,15 @@ test "setNodesGrouped should release an intermediate root when a later group run
     const replacement_data_node = try pool.createLeafFromUint(101);
     defer pool.unref(replacement_data_node);
 
-    // Setup is complete. Existing slots still work, but growing the pool now fails.
-    failing.fail_index = failing.alloc_index;
-
     var capacity_fill_nodes: std.ArrayList(Node.Id) = .empty;
     defer capacity_fill_nodes.deinit(std.testing.allocator);
 
     // Fill the pool, then give one slot back. The length update needs that one slot; the data
-    // update needs more space and is where OOM occurs.
+    // update needs more space and exhausts the fixed pool.
     while (pool.createLeafFromUint(0)) |id| {
         try capacity_fill_nodes.append(std.testing.allocator, id);
     } else |err| switch (err) {
-        error.OutOfMemory => {},
+        error.PoolExhausted => {},
     }
     pool.unref(capacity_fill_nodes.pop().?);
 
@@ -59,7 +54,7 @@ test "setNodesGrouped should release an intermediate root when a later group run
     var replacement_nodes = [_]Node.Id{ replacement_length_node, replacement_data_node };
 
     try std.testing.expectError(
-        error.OutOfMemory,
+        error.PoolExhausted,
         root.setNodesGrouped(&pool, &replacement_gindices, &replacement_nodes),
     );
 
@@ -78,7 +73,7 @@ test "setNodesGrouped should release an intermediate root when a later group run
     for (capacity_fill_nodes.items) |id| pool.unref(id);
 }
 
-test "compact multiproof reconstruction should reclaim partial nodes on OOM" {
+test "compact multiproof reconstruction should reclaim partial nodes on pool exhaustion" {
     var leaves = [_][32]u8{
         [_]u8{1} ** 32,
         [_]u8{2} ** 32,
@@ -88,19 +83,12 @@ test "compact multiproof reconstruction should reclaim partial nodes on OOM" {
 
     // One free slot fails on the right leaf; two fail on the parent branch.
     for ([_]usize{ 1, 2 }) |available_slots| {
-        var failing = std.testing.FailingAllocator.init(
-            std.testing.allocator,
-            .{ .resize_fail_index = 0 },
-        );
-
         var pool = try Node.Pool.init(.{
-            .page_allocator = failing.allocator(),
+            .page_allocator = std.testing.allocator,
             .allocator = std.testing.allocator,
             .pool_size = 8,
         });
         defer pool.deinit();
-
-        failing.fail_index = failing.alloc_index;
 
         var capacity_fill_nodes: std.ArrayList(Node.Id) = .empty;
         defer capacity_fill_nodes.deinit(std.testing.allocator);
@@ -108,7 +96,7 @@ test "compact multiproof reconstruction should reclaim partial nodes on OOM" {
         while (pool.createLeafFromUint(0)) |id| {
             try capacity_fill_nodes.append(std.testing.allocator, id);
         } else |err| switch (err) {
-            error.OutOfMemory => {},
+            error.PoolExhausted => {},
         }
         for (0..available_slots) |_| {
             pool.unref(capacity_fill_nodes.pop().?);
@@ -116,12 +104,111 @@ test "compact multiproof reconstruction should reclaim partial nodes on OOM" {
 
         const baseline = pool.getNodesInUse();
         try std.testing.expectError(
-            error.OutOfMemory,
+            error.PoolExhausted,
             proof.createNodeFromCompactMultiProof(&pool, &leaves, &descriptor),
         );
 
         try std.testing.expectEqual(baseline, pool.getNodesInUse());
 
         for (capacity_fill_nodes.items) |id| pool.unref(id);
+    }
+}
+
+test "createChunkedLeafEmpty should not consume slots or leak payloads on allocation failure" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var pool = try Node.Pool.init(.{
+        .page_allocator = std.testing.allocator,
+        .allocator = failing.allocator(),
+        .pool_size = 1,
+    });
+    defer pool.deinit();
+
+    // The first call fails before it can take a Pool slot.
+    const baseline = pool.getNodesInUse();
+    try std.testing.expectError(error.OutOfMemory, pool.createChunkedLeafEmpty(1));
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+
+    // With the only slot occupied, the next call allocates its payload and then fails to attach
+    // it. The payload must be freed on the way out.
+    failing.fail_index = std.math.maxInt(usize);
+    const leaf = try pool.createLeafFromUint(1);
+    defer pool.unref(leaf);
+
+    try std.testing.expectError(error.PoolExhausted, pool.createChunkedLeafEmpty(1));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "fillWithContents exhaustion should preserve inputs and restore pool slots" {
+    const test_cases = [_]struct {
+        contents_len: usize,
+        pool_size: u32,
+        aliased: bool,
+    }{
+        // Aliased inputs with a partially built level above one completed level.
+        .{ .contents_len = 8, .pool_size = 6, .aliased = true },
+        // Distinct inputs with no parent in the failing level above two completed levels.
+        .{ .contents_len = 8, .pool_size = 14, .aliased = false },
+        // Distinct inputs with an odd completed level whose last parent includes a zero child.
+        .{ .contents_len = 5, .pool_size = 9, .aliased = false },
+    };
+
+    for (test_cases) |test_case| {
+        var pool = try Node.Pool.init(.{
+            .page_allocator = std.testing.allocator,
+            .allocator = std.testing.allocator,
+            .pool_size = test_case.pool_size,
+        });
+        defer pool.deinit();
+
+        var contents: [8]Node.Id = undefined;
+        var initialized_count: usize = 0;
+        defer if (test_case.aliased) {
+            if (initialized_count == 1) pool.unref(contents[0]);
+        } else {
+            pool.free(contents[0..initialized_count]);
+        };
+
+        // Aliased IDs stress refcount rollback; distinct IDs make a bad restoration order visible.
+        if (test_case.aliased) {
+            contents[0] = try pool.createLeafFromUint(1);
+            initialized_count = 1;
+            @memset(contents[0..test_case.contents_len], contents[0]);
+        } else {
+            for (0..test_case.contents_len) |i| {
+                contents[i] = try pool.createLeafFromUint(i + 1);
+                initialized_count += 1;
+            }
+        }
+
+        var contents_before: [8]Node.Id = undefined;
+        @memcpy(
+            contents_before[0..test_case.contents_len],
+            contents[0..test_case.contents_len],
+        );
+        var states_before: [8]Node.State = undefined;
+        for (contents[0..test_case.contents_len], 0..) |node, i| {
+            states_before[i] = node.getState(&pool);
+        }
+        const nodes_in_use_before = pool.getNodesInUse();
+
+        // Each pool size runs out at the parent-building stage described by the case above.
+        try std.testing.expectError(
+            error.PoolExhausted,
+            Node.fillWithContents(&pool, contents[0..test_case.contents_len], 3),
+        );
+
+        // A failed build must leave every caller-owned ID, refcount, and Pool slot unchanged.
+        try std.testing.expectEqualSlices(
+            Node.Id,
+            contents_before[0..test_case.contents_len],
+            contents[0..test_case.contents_len],
+        );
+        try std.testing.expectEqual(nodes_in_use_before, pool.getNodesInUse());
+        for (contents[0..test_case.contents_len], 0..) |node, i| {
+            try std.testing.expectEqual(states_before[i], node.getState(&pool));
+        }
     }
 }

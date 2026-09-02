@@ -370,9 +370,6 @@ export declare class BeaconStateView {
 }
 
 declare const bindings: {
-  pool: {
-    ensureCapacity: (capacity: number) => void;
-  };
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
