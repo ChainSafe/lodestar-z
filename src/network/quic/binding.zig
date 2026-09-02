@@ -1,5 +1,5 @@
 const std = @import("std");
-const constants = @import("../constants.zig");
+const limits = @import("limits.zig");
 const types = @import("../types.zig");
 
 pub const c = @import("quiche_zig:quiche");
@@ -72,12 +72,12 @@ pub const Config = struct {
     pub fn init(idle_timeout_ms: u64, connection_window: u64, stream_window: u64) Error!Config {
         const ptr = c.quiche_config_new(c.QUICHE_PROTOCOL_VERSION) orelse return error.Unknown;
         c.quiche_config_set_max_idle_timeout(ptr, idle_timeout_ms);
-        c.quiche_config_set_max_recv_udp_payload_size(ptr, constants.recv_udp_payload_max);
+        c.quiche_config_set_max_recv_udp_payload_size(ptr, limits.recv_udp_payload_max);
         c.quiche_config_set_initial_max_data(ptr, connection_window);
         c.quiche_config_set_initial_max_stream_data_bidi_local(ptr, stream_window);
         c.quiche_config_set_initial_max_stream_data_bidi_remote(ptr, stream_window);
         c.quiche_config_set_initial_max_stream_data_uni(ptr, 0);
-        c.quiche_config_set_initial_max_streams_bidi(ptr, constants.peer_streams_bidi);
+        c.quiche_config_set_initial_max_streams_bidi(ptr, limits.peer_streams_bidi);
         c.quiche_config_set_initial_max_streams_uni(ptr, 0);
         c.quiche_config_set_max_connection_window(ptr, connection_window);
         c.quiche_config_set_max_stream_window(ptr, stream_window);
@@ -101,6 +101,8 @@ pub const SockAddr = struct {
         in: std.posix.sockaddr.in,
         in6: std.posix.sockaddr.in6,
     };
+
+    pub const unspecified: SockAddr = fromAddress(types.Address.unspecified);
 
     pub fn fromAddress(address: types.Address) SockAddr {
         return switch (address) {
@@ -129,11 +131,11 @@ pub const SockAddr = struct {
 };
 
 pub const Cid = struct {
-    bytes: [constants.cid_length_max]u8 = undefined,
+    bytes: [limits.cid_length_max]u8 = undefined,
     len: u8 = 0,
 
     pub fn fromSlice(bytes: []const u8) Cid {
-        std.debug.assert(bytes.len <= constants.cid_length_max);
+        std.debug.assert(bytes.len <= limits.cid_length_max);
         var cid = Cid{ .len = @intCast(bytes.len) };
         @memcpy(cid.bytes[0..bytes.len], bytes);
         return cid;
@@ -171,16 +173,16 @@ const token_length_max = 256;
 pub fn headerInfo(datagram: []const u8) Error!HeaderInfo {
     var version: u32 = 0;
     var packet_type: u8 = 0;
-    var scid: [constants.cid_length_max]u8 = undefined;
+    var scid: [limits.cid_length_max]u8 = undefined;
     var scid_len: usize = scid.len;
-    var dcid: [constants.cid_length_max]u8 = undefined;
+    var dcid: [limits.cid_length_max]u8 = undefined;
     var dcid_len: usize = dcid.len;
     var token: [token_length_max]u8 = undefined;
     var token_len: usize = token.len;
     _ = try check(c.quiche_header_info(
         datagram.ptr,
         datagram.len,
-        constants.local_cid_length,
+        limits.local_cid_length,
         &version,
         &packet_type,
         &scid,

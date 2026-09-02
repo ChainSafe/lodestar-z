@@ -1,16 +1,15 @@
 const std = @import("std");
 const network = @import("network");
 
-const constants = network.constants;
 const driver_mod = network.driver;
 const engine_mod = network.quic.engine;
-const keys = network.identity.keys;
-const multiaddr = network.identity.multiaddr;
-const multistream = network.multistream;
-const peer_id = network.identity.peer_id;
-const runtime = network.runtime;
+const keys = network.wire.keys;
+const limits = network.quic.limits;
+const multiaddr = network.wire.multiaddr;
+const multistream = network.wire.multistream;
+const peer_id = network.wire.peer_id;
 const tls = network.tls.context;
-const types = network.types;
+const udp_mod = network.udp;
 
 const ping_protocol = "/ipfs/ping/1.0.0";
 const ping_size = 32;
@@ -40,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
 const Node = struct {
     ctx: tls.Context = undefined,
     engine: engine_mod.Engine = undefined,
-    udp: runtime.Udp = undefined,
+    udp: udp_mod.Udp = undefined,
     driver: driver_mod.Driver = undefined,
 
     fn init(self: *Node, allocator: std.mem.Allocator, io: std.Io, bind: std.Io.net.IpAddress) !void {
@@ -51,7 +50,7 @@ const Node = struct {
         errdefer self.ctx.deinit();
         self.engine = try engine_mod.Engine.init(allocator, &self.ctx, .{});
         errdefer self.engine.deinit();
-        self.udp = try runtime.Udp.bind(io, bind);
+        self.udp = try udp_mod.Udp.bind(io, bind);
         errdefer self.udp.close(io);
         self.driver = driver_mod.Driver.init(&self.engine, &self.udp);
     }
@@ -74,7 +73,7 @@ const Outbox = struct {
 
     fn pump(self: *Outbox, engine: *engine_mod.Engine, stream: engine_mod.StreamHandle) !bool {
         var attempts: u32 = 0;
-        while (attempts < constants.send_burst_max) : (attempts += 1) {
+        while (attempts < limits.send_burst_max) : (attempts += 1) {
             const remaining = self.bytes[self.offset..];
             if (remaining.len == 0 and !self.fin) return true;
             self.offset += engine.write(stream, remaining, self.fin) catch |err| switch (err) {

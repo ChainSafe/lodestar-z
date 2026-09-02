@@ -1,8 +1,8 @@
 const std = @import("std");
 const cert = @import("cert.zig");
 const constants = @import("../constants.zig");
-const keys = @import("../identity/keys.zig");
-const peer_id = @import("../identity/peer_id.zig");
+const keys = @import("../wire/keys.zig");
+const peer_id = @import("../wire/peer_id.zig");
 const verify = @import("verify.zig");
 const c = @import("../quic/binding.zig").c;
 

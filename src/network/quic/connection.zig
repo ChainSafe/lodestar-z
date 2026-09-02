@@ -1,11 +1,13 @@
 const std = @import("std");
 const binding = @import("binding.zig");
-const constants = @import("../constants.zig");
-const peer_id = @import("../identity/peer_id.zig");
+const limits = @import("limits.zig");
+const peer_id = @import("../wire/peer_id.zig");
+const stream_table = @import("stream_table.zig");
 const tls = @import("../tls/context.zig");
 const types = @import("../types.zig");
 
 const c = binding.c;
+const StreamTable = stream_table.StreamTable;
 
 pub const Error = binding.Error || tls.Error || error{
     StreamTableFull,
@@ -16,87 +18,37 @@ pub const Error = binding.Error || tls.Error || error{
 };
 
 pub const State = enum { free, handshaking, established, closed };
-pub const Direction = enum { inbound, outbound };
-pub const ShutdownDirection = enum { read, write };
-
-pub const CloseReason = union(enum) {
-    host,
-    idle_timeout,
-    handshake_timeout,
-    peer_id_mismatch,
-    tls_failed,
-    peer_closed: struct { app: bool, code: u64 },
-    transport_error: u64,
-};
-
-pub const PendingClose = struct { reason: CloseReason, code: u64 };
-
-pub const crypto_error_first: u64 = 0x100;
-pub const crypto_error_last: u64 = 0x1ff;
-
-pub fn reasonFromLocalError(is_app: bool, code: u64) CloseReason {
-    if (!is_app and code >= crypto_error_first and code <= crypto_error_last) return .tls_failed;
-    return .{ .transport_error = code };
-}
-
-pub const app_error_normal: u64 = 0;
-pub const app_error_peer_id_mismatch: u64 = 1;
-pub const app_error_handshake_timeout: u64 = 2;
-pub const app_error_stream_table_full: u64 = 3;
-
-pub const Now = struct {
-    mono_ms: u64,
-    unix_s: i64,
-};
-
-pub const Read = struct {
-    len: usize,
-    fin: bool,
-    reset_code: ?u64 = null,
-};
-
-pub const Stream = struct {
-    id: u64 = 0,
-    active: bool = false,
-    opened_pending: bool = false,
-    fin_sent: bool = false,
-    fin_received: bool = false,
-};
 
 pub const OpenParams = struct {
-    direction: Direction,
+    direction: types.Direction,
     local: types.Address,
     peer: types.Address,
-    scid: [constants.local_cid_length]u8,
+    scid: [limits.local_cid_length]u8,
     expected_peer_id: ?peer_id.PeerId,
-    now: Now,
+    now: types.Now,
 };
-
-const local_stream_slots = constants.streams_per_connection / 2;
 
 pub const Slot = struct {
     state: State = .free,
     generation: u32 = 0,
-    direction: Direction = .inbound,
+    direction: types.Direction = .inbound,
     conn: ?*c.quiche_conn = null,
     handshake: tls.HandshakeState = .{},
-    peer: types.Address = undefined,
-    peer_sockaddr: binding.SockAddr = undefined,
-    local_sockaddr: binding.SockAddr = undefined,
+    peer: types.Address = .unspecified,
+    peer_sockaddr: binding.SockAddr = .unspecified,
+    local_sockaddr: binding.SockAddr = .unspecified,
     expected_peer_id: ?peer_id.PeerId = null,
     peer_id: ?peer_id.PeerId = null,
     scid: binding.Cid = .{},
     created_ms: u64 = 0,
     last_send_ms: u64 = 0,
-    close_reason: ?CloseReason = null,
-    pending_close: ?PendingClose = null,
+    close_reason: ?types.CloseReason = null,
+    pending_close: ?types.PendingClose = null,
     pending_close_armed: bool = false,
     connected_pending: bool = false,
     closed_pending: bool = false,
     closed_reported: bool = false,
-    streams_pending: u16 = 0,
-    next_local_stream_id: u64 = 0,
-    streams: [constants.streams_per_connection]Stream = [_]Stream{.{}} ** constants.streams_per_connection,
+    table: StreamTable = .{},
 
     pub fn open(
         self: *Slot,
@@ -121,9 +73,7 @@ pub const Slot = struct {
         self.connected_pending = false;
         self.closed_pending = false;
         self.closed_reported = false;
-        self.streams_pending = 0;
-        self.next_local_stream_id = if (params.direction == .outbound) 0 else 1;
-        self.streams = [_]Stream{.{}} ** constants.streams_per_connection;
+        self.table = StreamTable.init(params.direction);
 
         const ssl = try ctx.newSsl(&self.handshake);
         // quiche owns the SSL handle from this call onward and frees it even when construction fails, so the slot must never free it.
@@ -184,12 +134,12 @@ pub const Slot = struct {
         return c.quiche_conn_send_ack_eliciting(self.conn.?) == 0;
     }
 
-    pub fn close(self: *Slot, reason: CloseReason, code: u64) void {
+    pub fn close(self: *Slot, reason: types.CloseReason, code: u64) void {
         if (self.close_reason == null) self.close_reason = reason;
         _ = c.quiche_conn_close(self.conn.?, true, code, "", 0);
     }
 
-    pub fn deferClose(self: *Slot, reason: CloseReason, code: u64) void {
+    pub fn deferClose(self: *Slot, reason: types.CloseReason, code: u64) void {
         if (self.close_reason == null) self.close_reason = reason;
         self.pending_close = .{ .reason = reason, .code = code };
     }
@@ -202,7 +152,7 @@ pub const Slot = struct {
         return c.quiche_conn_is_closed(self.conn.?) or c.quiche_conn_is_draining(self.conn.?);
     }
 
-    pub fn closeReason(self: *const Slot) CloseReason {
+    pub fn closeReason(self: *const Slot) types.CloseReason {
         if (self.close_reason) |reason| return reason;
         if (self.handshake.failure != null) return .tls_failed;
         if (c.quiche_conn_is_timed_out(self.conn.?)) return .idle_timeout;
@@ -214,46 +164,24 @@ pub const Slot = struct {
             return .{ .peer_closed = .{ .app = is_app, .code = code } };
         }
         if (c.quiche_conn_local_error(self.conn.?, &is_app, &code, &reason_ptr, &reason_len)) {
-            return reasonFromLocalError(is_app, code);
+            return types.reasonFromLocalError(is_app, code);
         }
         return .{ .transport_error = 0 };
     }
 
-    pub fn isPeerInitiated(self: *const Slot, id: u64) bool {
-        const peer_bit: u64 = if (self.direction == .outbound) 1 else 0;
-        return (id & 0x3) == peer_bit;
-    }
-
-    pub fn streamIndex(self: *const Slot, id: u64) ?usize {
-        for (&self.streams, 0..) |*stream, index| {
-            if (stream.active and stream.id == id) return index;
-        }
-        return null;
-    }
-
-    fn clearStream(self: *Slot, index: usize) void {
-        if (self.streams[index].opened_pending) self.streams_pending -= 1;
-        self.streams[index] = .{};
-    }
-
-    fn freeStream(self: *Slot, peer_initiated: bool) ?usize {
-        const start: usize = if (peer_initiated) local_stream_slots else 0;
-        for (self.streams[start .. start + local_stream_slots], start..) |*stream, index| {
-            if (!stream.active) return index;
-        }
-        return null;
+    pub fn streamIndex(self: *const Slot, id: u64) ?u8 {
+        return self.table.find(id);
     }
 
     pub fn openStream(self: *Slot) Error!u64 {
         if (self.state != .established or self.close_reason != null) return error.NotEstablished;
         if (c.quiche_conn_peer_streams_left_bidi(self.conn.?) == 0) return error.StreamLimit;
-        const index = self.freeStream(false) orelse return error.StreamTableFull;
-        const id = self.next_local_stream_id;
+        const index = self.table.freeLocal() orelse return error.StreamTableFull;
+        const id = self.table.next_local_id;
         var code: u64 = 0;
         const rc = c.quiche_conn_stream_send(self.conn.?, id, "", 0, false, &code);
         if (rc != c.QUICHE_ERR_DONE) _ = try binding.check(rc);
-        self.next_local_stream_id += 4;
-        self.streams[index] = .{ .id = id, .active = true };
+        self.table.claimLocal(index, id);
         return id;
     }
 
@@ -262,85 +190,88 @@ pub const Slot = struct {
         defer c.quiche_stream_iter_free(iter);
         var id: u64 = 0;
         var seen: u16 = 0;
-        while (seen < constants.streams_per_connection and c.quiche_stream_iter_next(iter, &id)) : (seen += 1) {
-            if (!self.isPeerInitiated(id) or self.streamIndex(id) != null) continue;
-            if (self.freeStream(true)) |index| {
-                self.streams[index] = .{ .id = id, .active = true, .opened_pending = true };
-                self.streams_pending += 1;
-            } else {
-                self.shutdown(id, .read, app_error_stream_table_full);
-                self.shutdown(id, .write, app_error_stream_table_full);
+        while (seen < limits.streams_per_connection and c.quiche_stream_iter_next(iter, &id)) : (seen += 1) {
+            if (!StreamTable.isPeerInitiated(self.direction, id)) continue;
+            if (self.table.find(id) != null) continue;
+            if (self.table.claimPeer(id) == null) {
+                self.shutdown(id, .read, types.app_error_stream_table_full);
+                self.shutdown(id, .write, types.app_error_stream_table_full);
             }
         }
     }
 
-    pub fn read(self: *Slot, id: u64, buf: []u8) Error!Read {
-        const index = self.streamIndex(id) orelse return error.UnknownStream;
+    pub fn read(self: *Slot, id: u64, buf: []u8) Error!types.Read {
+        const index = self.table.find(id) orelse return error.UnknownStream;
         var fin = false;
         var code: u64 = 0;
         const rc = c.quiche_conn_stream_recv(self.conn.?, id, buf.ptr, buf.len, &fin, &code);
         if (rc == c.QUICHE_ERR_DONE) return .{ .len = 0, .fin = false };
         if (rc == c.QUICHE_ERR_STREAM_RESET) {
-            self.streams[index].fin_received = true;
-            if (c.quiche_conn_stream_capacity(self.conn.?, id) < 0) self.streams[index].fin_sent = true;
-            if (self.streams[index].fin_sent) self.clearStream(index);
+            self.table.markFinReceived(index);
+            if (c.quiche_conn_stream_capacity(self.conn.?, id) < 0) self.table.markFinSent(index);
+            if (self.table.entries[index].fin_sent) self.table.clear(index);
             return .{ .len = 0, .fin = true, .reset_code = code };
         }
         const length = try binding.check(rc);
         if (fin) {
-            self.streams[index].fin_received = true;
-            if (self.streams[index].fin_sent) self.clearStream(index);
+            self.table.markFinReceived(index);
+            if (self.table.entries[index].fin_sent) self.table.clear(index);
         }
         return .{ .len = length, .fin = fin };
     }
 
     pub fn write(self: *Slot, id: u64, bytes: []const u8, fin: bool) Error!usize {
-        const index = self.streamIndex(id) orelse return error.UnknownStream;
+        const index = self.table.find(id) orelse return error.UnknownStream;
         var code: u64 = 0;
         const rc = c.quiche_conn_stream_send(self.conn.?, id, bytes.ptr, bytes.len, fin, &code);
         if (rc == c.QUICHE_ERR_DONE) {
             const available = c.quiche_conn_stream_capacity(self.conn.?, id);
             if (available < 0 and available != c.QUICHE_ERR_DONE) {
-                self.clearStream(index);
+                self.table.clear(index);
                 return error.UnknownStream;
             }
             return error.WouldBlock;
         }
         if (rc == c.QUICHE_ERR_STREAM_STOPPED) {
-            self.streams[index].fin_sent = true;
-            if (self.streams[index].fin_received) self.clearStream(index);
+            self.table.markFinSent(index);
+            if (self.table.entries[index].fin_received) self.table.clear(index);
             return error.StreamStopped;
         }
         const length = try binding.check(rc);
         if (fin and length == bytes.len) {
-            self.streams[index].fin_sent = true;
-            if (self.streams[index].fin_received) self.clearStream(index);
+            self.table.markFinSent(index);
+            if (self.table.entries[index].fin_received) self.table.clear(index);
         }
         return length;
     }
 
     pub fn capacity(self: *Slot, id: u64) Error!usize {
-        if (self.streamIndex(id) == null) return error.UnknownStream;
+        if (self.table.find(id) == null) return error.UnknownStream;
         return binding.check(c.quiche_conn_stream_capacity(self.conn.?, id)) catch |err| switch (err) {
             error.InvalidStreamState => error.UnknownStream,
             else => err,
         };
     }
 
-    pub fn shutdown(self: *Slot, id: u64, direction: ShutdownDirection, code: u64) void {
+    pub fn shutdown(self: *Slot, id: u64, direction: types.ShutdownDirection, code: u64) void {
         const which: c_int = if (direction == .read) c.QUICHE_SHUTDOWN_READ else c.QUICHE_SHUTDOWN_WRITE;
         _ = c.quiche_conn_stream_shutdown(self.conn.?, id, @intCast(which), code);
-        const index = self.streamIndex(id) orelse return;
-        if (direction == .read) self.streams[index].fin_received = true else self.streams[index].fin_sent = true;
-        if (self.streams[index].fin_received and self.streams[index].fin_sent) self.clearStream(index);
+        const index = self.table.find(id) orelse return;
+        if (direction == .read) self.table.markFinReceived(index) else self.table.markFinSent(index);
+        const entry = self.table.entries[index];
+        if (entry.fin_received and entry.fin_sent) self.table.clear(index);
     }
 
     pub fn closeStream(self: *Slot, id: u64, code: u64) void {
-        const index = self.streamIndex(id) orelse return;
-        const stop_reading = !self.streams[index].fin_received;
-        const reset_writing = !self.streams[index].fin_sent;
+        const index = self.table.find(id) orelse return;
+        const stop_reading = !self.table.entries[index].fin_received;
+        const reset_writing = !self.table.entries[index].fin_sent;
         if (stop_reading) self.shutdown(id, .read, code);
         if (reset_writing) self.shutdown(id, .write, code);
-        if (self.streams[index].active) self.clearStream(index);
+        if (self.table.entries[index].id != null) self.table.clear(index);
     }
 };
+
+comptime {
+    std.debug.assert(@sizeOf(Slot) <= 4 * 1_024);
+}

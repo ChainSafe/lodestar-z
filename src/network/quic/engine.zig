@@ -1,18 +1,18 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const connection = @import("connection.zig");
-const constants = @import("../constants.zig");
-const peer_id = @import("../identity/peer_id.zig");
+const limits = @import("limits.zig");
+const peer_id = @import("../wire/peer_id.zig");
 const tls = @import("../tls/context.zig");
 const types = @import("../types.zig");
 
 const c = binding.c;
 
-pub const Now = connection.Now;
-pub const Direction = connection.Direction;
-pub const ShutdownDirection = connection.ShutdownDirection;
-pub const CloseReason = connection.CloseReason;
-pub const Read = connection.Read;
+pub const Now = types.Now;
+pub const Direction = types.Direction;
+pub const ShutdownDirection = types.ShutdownDirection;
+pub const CloseReason = types.CloseReason;
+pub const Read = types.Read;
 
 pub const Error = connection.Error || std.mem.Allocator.Error || error{
     TableFull,
@@ -37,13 +37,13 @@ pub const Event = union(enum) {
 };
 
 pub const Limits = struct {
-    connections_max: u16 = constants.connections_max_default,
-    handshaking_max: u16 = constants.handshaking_max,
-    handshaking_per_source_max: u16 = constants.handshaking_per_source_max,
-    receive_budget_bytes: u64 = constants.receive_budget_bytes,
-    idle_timeout_ms: u64 = constants.idle_timeout_ms,
-    handshake_timeout_ms: u64 = constants.handshake_timeout_ms,
-    keep_alive_ms: u64 = constants.keep_alive_ms,
+    connections_max: u16 = limits.connections_max_default,
+    handshaking_max: u16 = limits.handshaking_max,
+    handshaking_per_source_max: u16 = limits.handshaking_per_source_max,
+    receive_budget_bytes: u64 = limits.receive_budget_bytes,
+    idle_timeout_ms: u64 = limits.idle_timeout_ms,
+    handshake_timeout_ms: u64 = limits.handshake_timeout_ms,
+    keep_alive_ms: u64 = limits.keep_alive_ms,
 };
 
 pub const Counters = struct {
@@ -64,15 +64,15 @@ pub const ReceiveOutcome = union(enum) {
 };
 
 pub const EntropyPool = struct {
-    bytes: [constants.local_cid_length]u8 = undefined,
+    bytes: [limits.local_cid_length]u8 = undefined,
     fresh: bool = false,
 
-    pub fn fill(self: *EntropyPool, bytes: [constants.local_cid_length]u8) void {
+    pub fn fill(self: *EntropyPool, bytes: [limits.local_cid_length]u8) void {
         self.bytes = bytes;
         self.fresh = true;
     }
 
-    pub fn take(self: *EntropyPool) ?[constants.local_cid_length]u8 {
+    pub fn take(self: *EntropyPool) ?[limits.local_cid_length]u8 {
         if (!self.fresh) return null;
         self.fresh = false;
         return self.bytes;
@@ -99,31 +99,31 @@ pub const Engine = struct {
     handshaking: u16 = 0,
     counters: Counters = .{},
 
-    pub fn init(allocator: std.mem.Allocator, tls_ctx: *const tls.Context, limits: Limits) Error!Engine {
-        if (limits.connections_max == 0 or limits.connections_max > constants.connections_max_ceiling) return error.InvalidLimits;
-        if (limits.handshaking_max == 0 or limits.handshaking_max > limits.connections_max) return error.InvalidLimits;
-        if (limits.handshaking_per_source_max == 0) return error.InvalidLimits;
-        if (limits.idle_timeout_ms == 0 or limits.handshake_timeout_ms == 0 or limits.keep_alive_ms == 0) return error.InvalidLimits;
+    pub fn init(allocator: std.mem.Allocator, tls_ctx: *const tls.Context, wanted: Limits) Error!Engine {
+        if (wanted.connections_max == 0 or wanted.connections_max > limits.connections_max_ceiling) return error.InvalidLimits;
+        if (wanted.handshaking_max == 0 or wanted.handshaking_max > wanted.connections_max) return error.InvalidLimits;
+        if (wanted.handshaking_per_source_max == 0) return error.InvalidLimits;
+        if (wanted.idle_timeout_ms == 0 or wanted.handshake_timeout_ms == 0 or wanted.keep_alive_ms == 0) return error.InvalidLimits;
 
         const connection_window = std.math.clamp(
-            limits.receive_budget_bytes / limits.connections_max,
-            constants.connection_window_min,
-            constants.connection_window_max,
+            wanted.receive_budget_bytes / wanted.connections_max,
+            limits.connection_window_min,
+            limits.connection_window_max,
         );
         const stream_window = connection_window / 2;
 
-        var config = try binding.Config.init(limits.idle_timeout_ms, connection_window, stream_window);
+        var config = try binding.Config.init(wanted.idle_timeout_ms, connection_window, stream_window);
         errdefer config.deinit();
 
-        const slots = try allocator.alloc(connection.Slot, limits.connections_max);
+        const slots = try allocator.alloc(connection.Slot, wanted.connections_max);
         errdefer allocator.free(slots);
         @memset(slots, .{});
 
-        const routes = try allocator.alloc(Route, @as(usize, limits.connections_max) * 2);
+        const routes = try allocator.alloc(Route, @as(usize, wanted.connections_max) * 2);
         errdefer allocator.free(routes);
         @memset(routes, .{});
 
-        const active = try allocator.alloc(u16, limits.connections_max);
+        const active = try allocator.alloc(u16, wanted.connections_max);
         errdefer allocator.free(active);
         for (active, 0..) |*entry, index| entry.* = @intCast(index);
 
@@ -131,7 +131,7 @@ pub const Engine = struct {
             .allocator = allocator,
             .tls_ctx = tls_ctx,
             .config = config,
-            .limits = limits,
+            .limits = wanted,
             .slots = slots,
             .routes = routes,
             .active = active,
@@ -161,7 +161,7 @@ pub const Engine = struct {
         peer: types.Address,
         expected: peer_id.PeerId,
         now: Now,
-        entropy: [constants.local_cid_length]u8,
+        entropy: [limits.local_cid_length]u8,
     ) Error!Handle {
         const index = self.claimSlot() orelse return error.TableFull;
         const slot = &self.slots[index];
@@ -200,7 +200,7 @@ pub const Engine = struct {
             self.feed(index, datagram);
             return .{ .accepted = self.toHandle(index) };
         }
-        if (datagram.len < constants.client_initial_min) return self.drop(&self.counters.dropped_short_initial);
+        if (datagram.len < limits.client_initial_min) return self.drop(&self.counters.dropped_short_initial);
         if (header.packet_type == .version_negotiation or header.version == 0) {
             return self.drop(&self.counters.dropped_unroutable);
         }
@@ -251,7 +251,7 @@ pub const Engine = struct {
             if (slot.state == .handshaking and slot.close_reason == null and
                 now.mono_ms -| slot.created_ms >= self.limits.handshake_timeout_ms)
             {
-                slot.close(.handshake_timeout, connection.app_error_handshake_timeout);
+                slot.close(.handshake_timeout, types.app_error_handshake_timeout);
             }
             if (slot.state == .established and slot.close_reason == null and
                 now.mono_ms -| slot.last_send_ms >= self.limits.keep_alive_ms and
@@ -320,14 +320,14 @@ pub const Engine = struct {
                 count += 1;
                 slot.connected_pending = false;
             }
-            if (slot.streams_pending > 0) {
-                for (&slot.streams) |*stream| {
-                    if (!stream.opened_pending) continue;
+            if (slot.table.pending > 0) {
+                for (&slot.table.entries) |*entry| {
+                    if (!entry.opened_pending) continue;
                     if (count == events.len) return count;
-                    events[count] = .{ .stream_opened = .{ .conn = conn, .id = stream.id } };
+                    events[count] = .{ .stream_opened = .{ .conn = conn, .id = entry.id.? } };
                     count += 1;
-                    stream.opened_pending = false;
-                    slot.streams_pending -= 1;
+                    entry.opened_pending = false;
+                    slot.table.pending -= 1;
                 }
             }
             if (slot.closed_pending) {
@@ -379,7 +379,7 @@ pub const Engine = struct {
     pub fn eventsPending(self: *const Engine) bool {
         for (self.active[0..self.active_len]) |index| {
             const slot = &self.slots[index];
-            if (slot.connected_pending or slot.streams_pending > 0 or slot.closed_pending) return true;
+            if (slot.connected_pending or slot.table.pending > 0 or slot.closed_pending) return true;
         }
         return false;
     }
@@ -431,7 +431,7 @@ pub const Engine = struct {
             const slot = self.slot orelse return null;
             var id: u64 = 0;
             var seen: u16 = 0;
-            while (seen < constants.streams_per_connection and c.quiche_stream_iter_next(iter, &id)) : (seen += 1) {
+            while (seen < limits.streams_per_connection and c.quiche_stream_iter_next(iter, &id)) : (seen += 1) {
                 if (slot.streamIndex(id) != null) return .{ .conn = self.conn, .id = id };
             }
             return null;
@@ -521,12 +521,12 @@ pub const Engine = struct {
             if (slot.handshake.peer_id) |id| {
                 slot.peer_id = id;
                 if (slot.expected_peer_id != null and !slot.expected_peer_id.?.eql(&id)) {
-                    slot.deferClose(.peer_id_mismatch, connection.app_error_peer_id_mismatch);
+                    slot.deferClose(.peer_id_mismatch, types.app_error_peer_id_mismatch);
                 } else {
                     slot.connected_pending = true;
                 }
             } else {
-                slot.close(.tls_failed, connection.app_error_normal);
+                slot.close(.tls_failed, types.app_error_normal);
             }
             if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
         }

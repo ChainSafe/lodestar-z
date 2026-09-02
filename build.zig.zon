@@ -227,7 +227,7 @@
             .root_source_file = "src/discv5/root.zig",
         },
         .network_wire = .{
-            .root_source_file = "src/network/wire.zig",
+            .root_source_file = "src/network/wire/root.zig",
         },
         .network = .{
             .root_source_file = "src/network/root.zig",

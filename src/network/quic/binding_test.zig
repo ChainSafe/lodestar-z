@@ -1,12 +1,12 @@
 const std = @import("std");
 const binding = @import("binding.zig");
-const constants = @import("../constants.zig");
+const limits = @import("limits.zig");
 
 test "quiche config initializes with the transport bounds" {
     var config = try binding.Config.init(
-        constants.idle_timeout_ms,
-        constants.connection_window_max,
-        constants.connection_window_max / 2,
+        limits.idle_timeout_ms,
+        limits.connection_window_max,
+        limits.connection_window_max / 2,
     );
     defer config.deinit();
     try std.testing.expect(binding.versionSupported(1));
@@ -38,10 +38,10 @@ test "header info parses initial and short headers" {
     try std.testing.expectEqualSlices(u8, &([_]u8{0xbb} ** 4), parsed.scid.slice());
     try std.testing.expectEqual(@as(usize, 0), parsed.token_len);
 
-    const short = [_]u8{0x40} ++ [_]u8{0xcc} ** constants.local_cid_length ++ [_]u8{ 1, 2, 3, 4 };
+    const short = [_]u8{0x40} ++ [_]u8{0xcc} ** limits.local_cid_length ++ [_]u8{ 1, 2, 3, 4 };
     const short_parsed = try binding.headerInfo(&short);
     try std.testing.expectEqual(binding.PacketType.short, short_parsed.packet_type);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0xcc} ** constants.local_cid_length), short_parsed.dcid.slice());
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xcc} ** limits.local_cid_length), short_parsed.dcid.slice());
 
     try std.testing.expectError(error.BufferTooShort, binding.headerInfo(&.{0xc3}));
 }

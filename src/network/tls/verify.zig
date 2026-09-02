@@ -1,7 +1,7 @@
 const std = @import("std");
 const cert = @import("cert.zig");
-const peer_id = @import("../identity/peer_id.zig");
-const signed_key = @import("signed_key.zig");
+const peer_id = @import("../wire/peer_id.zig");
+const signed_key = @import("../wire/signed_key.zig");
 const c = @import("../quic/binding.zig").c;
 
 pub const Error = error{
