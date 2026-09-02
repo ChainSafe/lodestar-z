@@ -23,7 +23,13 @@ pub const StepResult = struct {
     datagram: DatagramResult = .timeout,
     datagrams_sent: u32 = 0,
     receive_errors: u32 = 0,
+    send_failures: u32 = 0,
     events: usize = 0,
+};
+
+pub const Drained = struct {
+    sent: u32 = 0,
+    failure: ?Error = null,
 };
 
 pub const Driver = struct {
@@ -44,10 +50,10 @@ pub const Driver = struct {
     pub fn dial(self: *Driver, io: std.Io, peer: types.Address, expected: peer_id.PeerId) Error!engine_mod.Handle {
         const now = try currentTime(io);
         const handle = try self.engine.dial(self.udp.localAddress(), peer, expected, now, try entropy(io));
-        _ = self.drain(io, handle.index, now) catch |err| {
+        if (self.drain(io, handle.index, now).failure) |err| {
             self.engine.close(handle, 0);
             return err;
-        };
+        }
         return handle;
     }
 
@@ -76,7 +82,9 @@ pub const Driver = struct {
         self.engine.tick(result.now);
         var index: u16 = 0;
         while (index < self.engine.slotCount()) : (index += 1) {
-            result.datagrams_sent += self.drain(io, index, result.now) catch 0;
+            const drained = self.drain(io, index, result.now);
+            result.datagrams_sent += drained.sent;
+            if (drained.failure != null) result.send_failures += 1;
         }
         result.events = self.engine.pollEvents(events);
         return result;
@@ -103,15 +111,21 @@ pub const Driver = struct {
         };
     }
 
-    fn drain(self: *Driver, io: std.Io, index: u16, now: engine_mod.Now) Error!u32 {
-        const peer = self.engine.peerAddress(index) orelse return 0;
-        var sent: u32 = 0;
-        while (sent < constants.send_burst_max) {
-            const datagram = try self.engine.send(index, now, &self.output) orelse break;
-            try self.send(io, peer, datagram);
-            sent += 1;
+    fn drain(self: *Driver, io: std.Io, index: u16, now: engine_mod.Now) Drained {
+        const peer = self.engine.peerAddress(index) orelse return .{};
+        var result = Drained{};
+        while (result.sent < constants.send_burst_max) {
+            const datagram = self.engine.send(index, now, &self.output) catch |err| {
+                result.failure = err;
+                return result;
+            } orelse break;
+            self.send(io, peer, datagram) catch |err| {
+                result.failure = err;
+                return result;
+            };
+            result.sent += 1;
         }
-        return sent;
+        return result;
     }
 
     fn send(self: *const Driver, io: std.Io, destination: types.Address, bytes: []const u8) Error!void {

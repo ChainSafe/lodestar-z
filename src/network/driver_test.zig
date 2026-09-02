@@ -6,6 +6,7 @@ const keys = @import("identity/keys.zig");
 const multistream = @import("multistream.zig");
 const runtime = @import("runtime.zig");
 const tls = @import("tls/context.zig");
+const types = @import("types.zig");
 
 const net = std.Io.net;
 
@@ -38,6 +39,8 @@ const Node = struct {
 fn stepBoth(a: *Node, b: *Node, events_a: []engine_mod.Event, events_b: []engine_mod.Event) !struct { a: usize, b: usize } {
     const ra = try a.driver.step(std.testing.io, events_a);
     const rb = try b.driver.step(std.testing.io, events_b);
+    try std.testing.expectEqual(@as(u32, 0), ra.send_failures);
+    try std.testing.expectEqual(@as(u32, 0), rb.send_failures);
     return .{ .a = ra.events, .b = rb.events };
 }
 
@@ -74,6 +77,35 @@ test "driver counts a hostile oversized datagram and keeps stepping" {
     const after = try node.driver.step(std.testing.io, &events);
     try std.testing.expectEqual(@as(u32, 0), after.receive_errors);
     try std.testing.expectEqual(driver_mod.DatagramResult.timeout, after.datagram);
+}
+
+test "driver surfaces a send failure to an unreachable destination" {
+    var node: Node = .{};
+    try node.init(4);
+    defer node.deinit();
+
+    const unreachable_peer = types.Address{ .ip6 = .{
+        .octets = [_]u8{0} ** 15 ++ [_]u8{1},
+        .port = 4_001,
+    } };
+    const now = try driver_mod.currentTime(std.testing.io);
+    _ = try node.engine.dial(
+        node.udp.localAddress(),
+        unreachable_peer,
+        node.ctx.local_peer_id,
+        now,
+        [_]u8{7} ** constants.local_cid_length,
+    );
+
+    var events: [4]engine_mod.Event = undefined;
+    const result = try node.driver.step(std.testing.io, &events);
+    try std.testing.expectEqual(@as(u32, 1), result.send_failures);
+    try std.testing.expectEqual(@as(u32, 0), result.datagrams_sent);
+
+    try std.testing.expectError(
+        error.DestinationUnreachable,
+        node.driver.dial(std.testing.io, unreachable_peer, node.ctx.local_peer_id),
+    );
 }
 
 test "driver completes a libp2p ping over loopback sockets" {
