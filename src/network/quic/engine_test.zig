@@ -420,6 +420,87 @@ test "engine drops new handshakes when the server table is full" {
     try std.testing.expectError(error.TableFull, pair.server.dial(server_address, client_address, pair.client_ctx.local_peer_id, pair.now, pair.nextEntropy()));
 }
 
+test "engine drops a routed packet that arrives from another source path" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.server.openStream(handles.server);
+    _ = try pair.server.write(stream, "spoof", false);
+
+    var out: [constants.datagram_size_max]u8 = undefined;
+    const datagram = (try pair.server.send(0, pair.now, &out)) orelse return error.TestUnexpectedResult;
+    var copy: [constants.datagram_size_max]u8 = undefined;
+    @memcpy(copy[0..datagram.len], datagram);
+
+    const wrong_source = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4_003 } };
+    const before = pair.client.counters.dropped_unroutable;
+    var response: [constants.datagram_size_max]u8 = undefined;
+    const outcome = pair.client.receive(
+        copy[0..datagram.len],
+        wrong_source,
+        client_address,
+        pair.now,
+        pair.nextEntropy(),
+        &response,
+    );
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, outcome);
+    try std.testing.expectEqual(before + 1, pair.client.counters.dropped_unroutable);
+}
+
+test "engine reports stream events one at a time when the slice is full" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const first = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(first, "one", false);
+    const second = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(second, "two", false);
+    try pair.pump();
+
+    var storage: [1]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&storage));
+    _ = try expectStreamOpened(storage[0], handles.server);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&storage));
+    _ = try expectStreamOpened(storage[0], handles.server);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.pollEvents(&storage));
+}
+
+test "engine survives an undecryptable packet routed to a live slot" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const scid = pair.client.slots[handles.client.index].scid;
+    var garbage: [1 + constants.local_cid_length + 32]u8 = undefined;
+    garbage[0] = 0x40;
+    @memcpy(garbage[1..][0..constants.local_cid_length], scid.slice());
+    for (garbage[1 + constants.local_cid_length ..], 0..) |*byte, index| byte.* = @truncate(index *% 7 +% 3);
+
+    const before_errors = pair.client.counters.recv_errors;
+    const before_accepted = pair.client.counters.accepted;
+    var response: [constants.datagram_size_max]u8 = undefined;
+    const outcome = pair.client.receive(
+        &garbage,
+        server_address,
+        client_address,
+        pair.now,
+        pair.nextEntropy(),
+        &response,
+    );
+    switch (outcome) {
+        .accepted => |handle| try std.testing.expectEqual(handles.client, handle),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(before_errors, pair.client.counters.recv_errors);
+    try std.testing.expectEqual(before_accepted + 1, pair.client.counters.accepted);
+    try std.testing.expect(pair.client.peerId(handles.client) != null);
+}
+
 test "engine answers unsupported versions and drops unroutable packets" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
