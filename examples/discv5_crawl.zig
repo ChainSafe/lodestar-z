@@ -151,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
         &records,
         deadline_ms,
     );
-    if (core.routing.count() == 0) return error.NoReachableBootnodes;
+    if (core.peerCount() == 0) return error.NoReachableBootnodes;
 
     std.debug.print(
         "node bound on {any}, authenticated {d}/{d} bootnodes\n",
@@ -161,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
     const elapsed_ms = (try discv5.driver.monotonicMilliseconds(io)) - started_ms;
     std.debug.print(
         "collected {d} validated peer records from {d} routing entries in {d} ms\n",
-        .{ records.count, core.routing.count(), elapsed_ms },
+        .{ records.count, core.peerCount(), elapsed_ms },
     );
     for (records.records[0..records.count]) |*record| printRecord(record);
 }
@@ -202,7 +202,7 @@ fn authenticateBootstraps(
     for (bootstraps, 0..) |*bootstrap, index| {
         const request = discv5.wire.message.Message{ .ping = .{
             .request_id = requestId(index + 1),
-            .enr_sequence = transport.core.channel.local_record.sequence,
+            .enr_sequence = transport.core.localRecord().sequence,
         } };
         bootstrap.handle = try transport.startCall(
             io,
@@ -317,7 +317,7 @@ fn startLookups(
         if (seeds.len == 0) return;
         try slot.operation.init(
             storage,
-            core.channel.local_record.node_id,
+            core.localRecord().node_id,
             target,
             seeds,
         );

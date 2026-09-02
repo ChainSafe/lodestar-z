@@ -14,7 +14,6 @@ pub const InitError = std.mem.Allocator.Error;
 pub const Error = error{
     AddressLimit,
     InvalidDistance,
-    InvalidLocalRecord,
     InvalidRecord,
     InvalidRemoteRecord,
     NoPendingRevalidation,
@@ -198,8 +197,7 @@ pub const Table = struct {
         distances: []const u16,
         out: []enr.Record,
     ) Error![]enr.Record {
-        if (!std.mem.eql(u8, &local_record.node_id, &self.local_id) or
-            local_record.length > local_record.bytes.len) return Error.InvalidLocalRecord;
+        std.debug.assert(std.mem.eql(u8, &local_record.node_id, &self.local_id));
         if (distances.len > protocol.distance_count) return Error.TooManyDistances;
         var requested = [_]bool{false} ** protocol.distance_count;
         for (distances) |distance| {
@@ -227,7 +225,7 @@ pub const Table = struct {
                 if (types.logDistance(&self.local_id, &entry.peer.node_id) != distance)
                     continue;
                 if (requester) |source| {
-                    if (!types.relayAllowed(source, entry.peer.address)) continue;
+                    if (!relayAllowed(source, entry.peer.address)) continue;
                 }
                 out[result_length] = entry.record;
                 result_length += 1;
@@ -401,7 +399,59 @@ fn sameSubnet(left: types.Address, right: types.Address) bool {
 fn recordRelayAllowed(record: *const enr.Record, requester: ?types.Address) bool {
     const source = requester orelse return true;
     const address = record.endpoint() orelse return false;
-    return types.relayAllowed(source, address);
+    return relayAllowed(source, address);
+}
+
+/// Public candidates may be relayed by anyone; special scopes only by a source in the same scope.
+pub fn relayAllowed(source: types.Address, candidate: types.Address) bool {
+    const source_class = addressClass(source);
+    const candidate_class = addressClass(candidate);
+    if (source_class == .invalid or candidate_class == .invalid) return false;
+    return switch (candidate_class) {
+        .public => true,
+        .private, .loopback, .link_local => source_class == candidate_class and
+            std.meta.activeTag(source) == std.meta.activeTag(candidate),
+        .invalid => false,
+    };
+}
+
+const AddressClass = enum {
+    invalid,
+    public,
+    private,
+    loopback,
+    link_local,
+};
+
+fn addressClass(address: types.Address) AddressClass {
+    return switch (address) {
+        .ip4 => |value| classifyIp4(value.octets),
+        .ip6 => |value| classifyIp6(value.octets),
+    };
+}
+
+fn classifyIp4(ip: [4]u8) AddressClass {
+    if (ip[0] == 0 or ip[0] >= 224) return .invalid;
+    if (ip[0] == 127) return .loopback;
+    if (ip[0] == 169 and ip[1] == 254) return .link_local;
+    if (ip[0] == 10 or
+        (ip[0] == 100 and ip[1] >= 64 and ip[1] <= 127) or
+        (ip[0] == 172 and ip[1] >= 16 and ip[1] <= 31) or
+        (ip[0] == 192 and ip[1] == 168)) return .private;
+    return .public;
+}
+
+fn classifyIp6(ip: [16]u8) AddressClass {
+    if (std.mem.allEqual(u8, &ip, 0) or ip[0] == 0xff) return .invalid;
+    if (std.mem.allEqual(u8, ip[0..15], 0) and ip[15] == 1) return .loopback;
+    if (std.mem.allEqual(u8, ip[0..10], 0) and ip[10] == 0xff and ip[11] == 0xff) {
+        return classifyIp4(ip[12..16].*);
+    }
+    if (std.mem.allEqual(u8, ip[0..12], 0)) return .invalid;
+    if (ip[0] == 0xfe and ip[1] & 0xc0 == 0x80) return .link_local;
+    if (ip[0] & 0xfe == 0xfc or
+        (ip[0] == 0xfe and ip[1] & 0xc0 == 0xc0)) return .private;
+    return .public;
 }
 
 fn bucketIndex(distance: u16) usize {

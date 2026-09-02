@@ -44,7 +44,7 @@ test "lookup uses the call table for bounded parallel queries" {
     var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
         &operation_candidates,
-        core.channel.local_record.node_id,
+        core.localRecord().node_id,
         [_]u8{0} ** 32,
         &seeds,
     );
@@ -57,7 +57,7 @@ test "lookup uses the call table for bounded parallel queries" {
             &packet_buffer,
             try message.RequestId.init(&.{@intCast(index + 1)}),
             1,
-            startEntropy(@intCast(index + 1)),
+            &startEntropy(@intCast(index + 1)),
         )).?;
         try std.testing.expect(operation.knownRecord(started[index].call.handle) != null);
     }
@@ -67,7 +67,7 @@ test "lookup uses the call table for bounded parallel queries" {
         &packet_buffer,
         try message.RequestId.init(&.{9}),
         1,
-        startEntropy(9),
+        &startEntropy(9),
     )) == null);
 
     try operation.onFailure(&core, started[0].call.handle);
@@ -76,7 +76,7 @@ test "lookup uses the call table for bounded parallel queries" {
         &packet_buffer,
         try message.RequestId.init(&.{4}),
         2,
-        startEntropy(4),
+        &startEntropy(4),
     )).?;
     try std.testing.expectEqual(lookup.parallelism, operation.waitingCount());
     for (1..4) |index| try completeNodes(
@@ -93,7 +93,7 @@ test "lookup uses the call table for bounded parallel queries" {
         &packet_buffer,
         try message.RequestId.init(&.{10}),
         10,
-        startEntropy(10),
+        &startEntropy(10),
     )) == null);
     try std.testing.expect(operation.isFinished());
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
@@ -111,7 +111,7 @@ test "lookup rejects relayed private and low-port candidates" {
     var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
         &operation_candidates,
-        core.channel.local_record.node_id,
+        core.localRecord().node_id,
         [_]u8{0} ** 32,
         &.{seed},
     );
@@ -123,7 +123,7 @@ test "lookup rejects relayed private and low-port candidates" {
         &packet_buffer,
         request_id,
         1,
-        startEntropy(1),
+        &startEntropy(1),
     )).?;
     var records = [_]enr.Record{
         fakeRecord(nodeId(20), address4(198, 51, 100, 20, 9_020), 1),
@@ -145,7 +145,7 @@ test "lookup rejects relayed private and low-port candidates" {
         &packet_buffer,
         try message.RequestId.init(&.{2}),
         3,
-        startEntropy(2),
+        &startEntropy(2),
     )).?;
     try std.testing.expectEqual(nodeId(20), next.peer.node_id);
     operation.cancel(&core);
@@ -164,7 +164,7 @@ test "lookup stops after the closest sixteen successful peers" {
     var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
         &operation_candidates,
-        core.channel.local_record.node_id,
+        core.localRecord().node_id,
         [_]u8{0} ** 32,
         &seeds,
     );
@@ -180,7 +180,7 @@ test "lookup stops after the closest sixteen successful peers" {
             &packet_buffer,
             request_id,
             @intCast(index + 1),
-            startEntropy(@intCast(index + 1)),
+            &startEntropy(@intCast(index + 1)),
         )).?;
         const records: []const enr.Record = if (index == 0) &.{farther} else &.{};
         try completeNodes(
@@ -198,7 +198,7 @@ test "lookup stops after the closest sixteen successful peers" {
         &packet_buffer,
         try message.RequestId.init(&.{20}),
         20,
-        startEntropy(20),
+        &startEntropy(20),
     )) == null);
     try std.testing.expect(operation.isFinished());
     var results: [lookup.result_max + 1]enr.Record = undefined;
@@ -228,7 +228,7 @@ test "empty lookup finishes without creating a call" {
     var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
         &operation_candidates,
-        core.channel.local_record.node_id,
+        core.localRecord().node_id,
         [_]u8{0} ** 32,
         &.{},
     );
@@ -238,7 +238,7 @@ test "empty lookup finishes without creating a call" {
         &packet_buffer,
         try message.RequestId.init(&.{1}),
         1,
-        startEntropy(1),
+        &startEntropy(1),
     )) == null);
     try std.testing.expect(operation.isFinished());
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());

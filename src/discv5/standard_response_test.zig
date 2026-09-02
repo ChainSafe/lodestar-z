@@ -6,8 +6,15 @@ const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 
+test "an unprepared plan is complete and yields nothing" {
+    const plan = response_mod.Plan{};
+    var raw: response_mod.RawRecords = undefined;
+    try std.testing.expect(plan.complete());
+    try std.testing.expect(plan.next(&raw) == null);
+}
+
 test "empty NODES response is one packet" {
-    var response: response_mod.Plan = undefined;
+    var response: response_mod.Plan = .{};
     try response_mod.prepareNodes(
         &response,
         testPeer(),
@@ -24,7 +31,7 @@ test "empty NODES response is one packet" {
 }
 
 test "maximum ENRs are fragmented by encoded size" {
-    var response: response_mod.Plan = undefined;
+    var response: response_mod.Plan = .{};
     for (&response.records) |*record| record.* = maximumRecord();
     try response_mod.prepareNodes(
         &response,
@@ -54,7 +61,7 @@ test "maximum ENRs are fragmented by encoded size" {
 }
 
 test "PONG reports the authenticated source address" {
-    var response: response_mod.Plan = undefined;
+    var response: response_mod.Plan = .{};
     const peer = types.Endpoint{
         .node_id = [_]u8{0x11} ** 32,
         .address = .{ .ip6 = .{

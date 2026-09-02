@@ -211,6 +211,19 @@ test "FINDNODE filters unsolicited and duplicate node IDs" {
     try std.testing.expectEqual(@as(usize, 1), result.accepted_nodes.count());
 }
 
+test "begin refuses a message that is not a request" {
+    var table: calls.Table = undefined;
+    try table.init(std.testing.allocator, 1);
+    defer table.deinit();
+    const pong = message.Message{ .pong = .{
+        .request_id = try message.RequestId.init(&.{0x01}),
+        .enr_sequence = 1,
+        .recipient_ip = .{ .ip4 = .{ 127, 0, 0, 1 } },
+        .recipient_port = 9_001,
+    } };
+    try std.testing.expectError(calls.Error.InvalidRequest, begin(&table, endpoint(1, 9_001), &pong, 10));
+}
+
 test "accept refuses a handle whose call ended after matching" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 1);

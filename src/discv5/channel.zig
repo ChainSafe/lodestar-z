@@ -130,6 +130,7 @@ pub const Channel = struct {
     pub fn deinit(self: *Self) void {
         self.sessions.deinit();
         std.crypto.secureZero(u8, std.mem.asBytes(&self.local_key));
+        self.* = undefined;
     }
 
     pub fn hasSession(self: *const Self, peer: types.Endpoint) bool {

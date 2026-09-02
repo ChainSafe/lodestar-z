@@ -422,3 +422,31 @@ fn makeRecord(node_id: types.NodeId, address: types.Address, sequence: u64) enr.
     }
     return record;
 }
+
+test "relay policy does not cross special address scopes" {
+    const public = address4(203, 0, 113, 1, 9_000);
+    const other_public = address4(198, 51, 100, 1, 9_000);
+    const private = address4(10, 0, 0, 1, 9_000);
+    const other_private = address4(192, 168, 1, 1, 9_000);
+    const loopback = address4(127, 0, 0, 1, 9_000);
+    const unspecified = address4(0, 0, 0, 0, 9_000);
+    try std.testing.expect(routing.relayAllowed(public, other_public));
+    try std.testing.expect(!routing.relayAllowed(public, private));
+    try std.testing.expect(routing.relayAllowed(private, other_private));
+    try std.testing.expect(routing.relayAllowed(loopback, loopback));
+    try std.testing.expect(!routing.relayAllowed(private, loopback));
+    try std.testing.expect(!routing.relayAllowed(public, unspecified));
+
+    const public6 = address6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const private6 = address6(.{ 0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    const other_private6 = address6(.{ 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 });
+    const multicast6 = address6(.{ 0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    try std.testing.expect(!routing.relayAllowed(public6, private6));
+    try std.testing.expect(routing.relayAllowed(private6, other_private6));
+    try std.testing.expect(!routing.relayAllowed(private, private6));
+    try std.testing.expect(!routing.relayAllowed(public6, multicast6));
+}
+
+fn address6(octets: [16]u8) types.Address {
+    return .{ .ip6 = .{ .octets = octets, .port = 9_000 } };
+}

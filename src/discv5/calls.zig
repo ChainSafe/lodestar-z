@@ -12,6 +12,7 @@ pub const Error = std.mem.Allocator.Error || message.Error || error{
     HandshakeAttempted,
     InvalidCapacity,
     InvalidNodeCount,
+    InvalidRequest,
     InvalidResponseCount,
     NonceInUse,
     PeerBusy,
@@ -117,6 +118,7 @@ pub const Table = struct {
         for (self.entries) |*entry| clearEntry(entry);
         self.allocator.free(self.next_generations);
         self.allocator.free(self.entries);
+        self.* = undefined;
     }
 
     pub fn begin(
@@ -410,7 +412,7 @@ fn expectedResponse(request: *const message.Message) Error!Expected {
             break :blk .{ .nodes = .{ .distances = distances } };
         },
         .talk_request => .talk_response,
-        else => Error.UnexpectedResponse,
+        else => Error.InvalidRequest,
     };
 }
 

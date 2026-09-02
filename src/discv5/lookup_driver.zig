@@ -2,18 +2,23 @@ const std = @import("std");
 const calls = @import("calls.zig");
 const driver = @import("driver.zig");
 const lookup = @import("lookup.zig");
+const constants = @import("wire/constants.zig");
 
 pub const operations_max: usize = calls.capacity_max / lookup.parallelism;
 
-pub const Error = driver.LookupError || error{TooManyLookups};
+pub const Error = driver.Error || lookup.Error || error{TooManyLookups};
 
-pub const StepResult = struct {
-    driver: driver.StepResult = .{},
+pub const Progress = struct {
     started: u16 = 0,
     responses: u16 = 0,
     failures: u16 = 0,
+};
+
+pub const StepResult = struct {
+    driver: driver.StepResult = .{},
     /// Index into `operations` of the lookup that consumed `driver.event`, if any.
     consumed: ?u16 = null,
+    progress: Progress = .{},
 };
 
 /// Borrows `operations` for this call only. Pass every lookup that still has waiting calls.
@@ -44,21 +49,40 @@ fn refill(
         var progressed = false;
         for (operations) |operation| {
             if (operation.isFinished() or operation.waitingCount() == lookup.parallelism) continue;
-            const started = transport.startLookupCall(io, operation) catch |err| switch (err) {
+            const started = startCall(transport, io, operation) catch |err| switch (err) {
                 calls.Error.PeerBusy, calls.Error.TableFull => continue,
                 error.DestinationUnreachable => {
-                    result.failures += 1;
+                    result.progress.failures += 1;
                     progressed = true;
                     continue;
                 },
                 else => return err,
             };
             if (!started) continue;
-            result.started += 1;
+            result.progress.started += 1;
             progressed = true;
         }
         if (!progressed) return;
     }
+}
+
+fn startCall(transport: *driver.Driver, io: std.Io, operation: *lookup.Lookup) Error!bool {
+    var context = try driver.sendContext(io);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&context.entropy));
+    const request_id = try driver.requestId(io);
+    var out: [constants.packet_size_max]u8 = undefined;
+    const started = try operation.startNext(
+        transport.core,
+        &out,
+        request_id,
+        context.now_ms,
+        &context.entropy,
+    ) orelse return false;
+    transport.transmit(io, started.peer.address, out[0..started.call.packet_length]) catch |err| {
+        operation.onFailure(transport.core, started.call.handle) catch unreachable;
+        return err;
+    };
+    return true;
 }
 
 fn consumeExpiries(
@@ -71,7 +95,7 @@ fn consumeExpiries(
     for (expired_calls[0..result.driver.calls_expired]) |item| {
         if (owner(operations, item.handle)) |index| {
             try operations[index].onFailure(transport.core, item.handle);
-            result.failures += 1;
+            result.progress.failures += 1;
             continue;
         }
         expired_calls[retained] = item;
@@ -92,7 +116,7 @@ fn consumeEvent(
     const index = owner(operations, response.matched.handle) orelse return;
     try operations[index].onResponse(transport.core, &response, result.driver.now_ms);
     result.consumed = @intCast(index);
-    result.responses += 1;
+    result.progress.responses += 1;
 }
 
 fn owner(operations: []const *lookup.Lookup, handle: calls.Handle) ?usize {
