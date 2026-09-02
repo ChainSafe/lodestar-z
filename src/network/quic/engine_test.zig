@@ -421,7 +421,7 @@ test "engine keeps received data readable after a local close" {
 
     var storage: [8]Event = undefined;
     const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
-    pair.server.close(handles.server, 0);
+    _ = pair.server.close(handles.server, 0);
 
     var buffer: [16]u8 = undefined;
     const received = try pair.server.read(inbound, &buffer);
@@ -438,7 +438,7 @@ test "engine keeps received data readable until the closed event is drained" {
     const stream = try pair.server.openStream(handles.server);
     try std.testing.expectEqual(@as(usize, 3), try pair.server.write(stream, "bye", true));
     _ = try pair.transfer(&pair.server, &pair.client, server_address, client_address, false);
-    pair.server.close(handles.server, 0);
+    _ = pair.server.close(handles.server, 0);
     try pair.pump();
 
     var storage: [1]Event = undefined;
@@ -483,7 +483,7 @@ test "engine reports a host close on both sides" {
     defer pair.deinit();
     const handles = try connectPair(&pair);
 
-    pair.client.close(handles.client, 42);
+    _ = pair.client.close(handles.client, 42);
     try pair.pump();
 
     var storage: [8]Event = undefined;
@@ -626,7 +626,7 @@ test "engine reclaims slots across many connection lifetimes" {
         try pair.pump();
         _ = pair.events(&pair.client, &storage);
         _ = pair.events(&pair.server, &storage);
-        pair.client.close(handle, 0);
+        _ = pair.client.close(handle, 0);
         try pair.pump();
         _ = pair.events(&pair.client, &storage);
         _ = pair.events(&pair.server, &storage);
@@ -791,6 +791,95 @@ test "engine routes a replayed client Initial to the existing connection" {
     try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
     var indices: [constants.connections_max_default]u16 = undefined;
     try std.testing.expectEqual(@as(usize, 1), pair.server.activeIndices(&indices));
+}
+
+test "engine feeds an unrouted short header from a known peer to its slot" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    var reset: [1 + constants.local_cid_length + 24]u8 = undefined;
+    reset[0] = 0x40;
+    for (reset[1..], 0..) |*byte, index| byte.* = @truncate(index *% 37 +% 11);
+
+    const before_unroutable = pair.client.counters.dropped_unroutable;
+    const before_touched = pair.client.counters.accepted + pair.client.counters.recv_errors;
+    var response: [constants.datagram_size_max]u8 = undefined;
+    const outcome = pair.client.receive(
+        &reset,
+        server_address,
+        client_address,
+        pair.now,
+        pair.nextPool(),
+        &response,
+    );
+    switch (outcome) {
+        .accepted => |handle| try std.testing.expectEqual(handles.client, handle),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(before_unroutable, pair.client.counters.dropped_unroutable);
+    try std.testing.expectEqual(
+        before_touched + 1,
+        pair.client.counters.accepted + pair.client.counters.recv_errors,
+    );
+
+    const stranger = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 9 }, .port = 4_009 } };
+    try std.testing.expectEqual(
+        engine_mod.ReceiveOutcome.dropped,
+        pair.client.receive(&reset, stranger, client_address, pair.now, pair.nextPool(), &response),
+    );
+    try std.testing.expectEqual(before_unroutable + 1, pair.client.counters.dropped_unroutable);
+}
+
+test "engine close reports whether it issued the close" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    try std.testing.expect(pair.client.close(handles.client, 0));
+    try std.testing.expect(!pair.client.close(handles.client, 0));
+}
+
+test "engine abandon frees a dialing slot without an event" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+
+    const handle = try pair.dial();
+    var indices: [constants.connections_max_default]u16 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), pair.client.activeIndices(&indices));
+
+    try std.testing.expect(pair.client.abandon(handle));
+    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices(&indices));
+    try std.testing.expect(!pair.client.abandon(handle));
+
+    var storage: [8]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 0), pair.client.pollEvents(&storage));
+    try std.testing.expect(!pair.client.eventsPending());
+    try std.testing.expectError(error.StaleHandle, pair.client.openStream(handle));
+}
+
+test "engine reports pending events that did not fit the slice" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const first = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(first, "one", false);
+    const second = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(second, "two", false);
+    try pair.pump();
+
+    try std.testing.expect(pair.server.eventsPending());
+    var storage: [1]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&storage));
+    try std.testing.expect(pair.server.eventsPending());
+    try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&storage));
+    try std.testing.expect(!pair.server.eventsPending());
+    try std.testing.expectEqual(@as(usize, 0), pair.server.pollEvents(&storage));
 }
 
 test "engine drops version negotiation packets instead of reflecting them" {

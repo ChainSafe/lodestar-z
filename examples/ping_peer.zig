@@ -221,7 +221,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
         const active = stream orelse continue;
         if (!try out.pump(&node.engine, active)) continue;
         if (state == .closing) {
-            node.engine.close(handle, 0);
+            _ = node.engine.close(handle, 0);
             state = .done;
             continue;
         }

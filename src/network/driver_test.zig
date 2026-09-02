@@ -109,6 +109,9 @@ test "driver surfaces a send failure to an unreachable destination" {
     const result = try node.driver.step(std.testing.io, &events);
     try std.testing.expectEqual(@as(u32, 1), result.send_failures);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_sent);
+    try std.testing.expect(result.first_failure != null);
+    try std.testing.expectEqual(driver_mod.Error.DestinationUnreachable, result.first_failure.?.err);
+    try std.testing.expectEqual(@as(u16, 0), result.first_failure.?.conn.index);
 
     try std.testing.expectError(
         error.DestinationUnreachable,
@@ -193,7 +196,7 @@ test "driver completes a libp2p ping over loopback sockets" {
     try std.testing.expect(accepted);
     try std.testing.expectEqualSlices(u8, &payload, &echo);
 
-    client.engine.close(handle, 0);
+    _ = client.engine.close(handle, 0);
     var closed = false;
     rounds = 0;
     while (rounds < 100 and !closed) : (rounds += 1) {

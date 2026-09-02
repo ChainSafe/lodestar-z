@@ -183,7 +183,11 @@ pub const Engine = struct {
             self.feed(index, datagram);
             return .{ .accepted = self.toHandle(index) };
         }
-        if (header.packet_type == .short) return self.drop(&self.counters.dropped_unroutable);
+        if (header.packet_type == .short) {
+            const index = self.slotForPeer(from) orelse return self.drop(&self.counters.dropped_unroutable);
+            self.feed(index, datagram);
+            return .{ .accepted = self.toHandle(index) };
+        }
         if (datagram.len < constants.client_initial_min) return self.drop(&self.counters.dropped_short_initial);
         if (header.packet_type == .version_negotiation or header.version == 0) {
             return self.drop(&self.counters.dropped_unroutable);
@@ -326,9 +330,27 @@ pub const Engine = struct {
         return count;
     }
 
-    pub fn close(self: *Engine, conn: Handle, code: u64) void {
-        const slot = self.liveSlot(conn) catch return;
+    pub fn close(self: *Engine, conn: Handle, code: u64) bool {
+        const slot = self.liveSlot(conn) catch return false;
         slot.close(.host, code);
+        return true;
+    }
+
+    pub fn abandon(self: *Engine, conn: Handle) bool {
+        const slot = self.readableSlot(conn) catch return false;
+        if (slot.state != .handshaking or slot.closed_pending) return false;
+        if (slot.direction == .inbound) self.handshaking -= 1;
+        self.removeRoutesFor(conn.index);
+        self.releaseSlot(conn.index);
+        return true;
+    }
+
+    pub fn eventsPending(self: *const Engine) bool {
+        for (self.active[0..self.active_len]) |index| {
+            const slot = &self.slots[index];
+            if (slot.connected_pending or slot.streams_pending > 0 or slot.closed_pending) return true;
+        }
+        return false;
     }
 
     pub fn peerId(self: *Engine, conn: Handle) ?peer_id.PeerId {
@@ -478,6 +500,17 @@ pub const Engine = struct {
             slot.closed_pending = true;
             self.removeRoutesFor(index);
         }
+    }
+
+    fn slotForPeer(self: *const Engine, from: types.Address) ?u16 {
+        var found: ?u16 = null;
+        for (self.active[0..self.active_len]) |index| {
+            const slot = &self.slots[index];
+            if (slot.state == .closed or !slot.peer.eql(from)) continue;
+            if (found != null) return null;
+            found = index;
+        }
+        return found;
     }
 
     fn handshakingFromSource(self: *const Engine, from: types.Address) u16 {
