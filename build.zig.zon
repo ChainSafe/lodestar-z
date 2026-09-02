@@ -231,7 +231,7 @@
         },
         .network = .{
             .root_source_file = "src/network/root.zig",
-            .imports = .{"quiche_zig:quiche"},
+            .imports = .{ "quiche_zig:quiche", .consensus_types, .config, .constants, .preset, .ssz, .snappy },
         },
     },
     .executables = .{
