@@ -7,5 +7,6 @@ test {
     _ = connection;
     _ = engine;
     _ = @import("binding_test.zig");
+    _ = @import("connection_test.zig");
     _ = @import("engine_test.zig");
 }

@@ -31,6 +31,14 @@ pub const CloseReason = union(enum) {
 
 pub const PendingClose = struct { reason: CloseReason, code: u64 };
 
+pub const crypto_error_first: u64 = 0x100;
+pub const crypto_error_last: u64 = 0x1ff;
+
+pub fn reasonFromLocalError(is_app: bool, code: u64) CloseReason {
+    if (!is_app and code >= crypto_error_first and code <= crypto_error_last) return .tls_failed;
+    return .{ .transport_error = code };
+}
+
 pub const app_error_normal: u64 = 0;
 pub const app_error_peer_id_mismatch: u64 = 1;
 pub const app_error_handshake_timeout: u64 = 2;
@@ -207,7 +215,7 @@ pub const Slot = struct {
             return .{ .peer_closed = .{ .app = is_app, .code = code } };
         }
         if (c.quiche_conn_local_error(self.conn.?, &is_app, &code, &reason_ptr, &reason_len)) {
-            return .{ .transport_error = code };
+            return reasonFromLocalError(is_app, code);
         }
         return .{ .transport_error = 0 };
     }
