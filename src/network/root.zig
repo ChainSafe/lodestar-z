@@ -6,6 +6,7 @@ pub const identity = @import("identity/root.zig");
 pub const quic = @import("quic/root.zig");
 pub const tls = @import("tls/root.zig");
 pub const runtime = @import("runtime.zig");
+pub const driver = @import("driver.zig");
 
 test {
     _ = constants;
@@ -16,7 +17,9 @@ test {
     _ = quic;
     _ = tls;
     _ = runtime;
+    _ = driver;
     _ = @import("varint_test.zig");
     _ = @import("multistream_test.zig");
     _ = @import("runtime_test.zig");
+    _ = @import("driver_test.zig");
 }
