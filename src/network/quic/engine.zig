@@ -307,6 +307,11 @@ pub const Engine = struct {
         return slot.write(stream.id, bytes, fin);
     }
 
+    pub fn streamCapacity(self: *Engine, stream: StreamHandle) Error!usize {
+        const slot = try self.liveSlot(stream.conn);
+        return slot.capacity(stream.id);
+    }
+
     pub fn shutdown(self: *Engine, stream: StreamHandle, direction: ShutdownDirection, code: u64) void {
         const slot = self.liveSlot(stream.conn) catch return;
         if (slot.streamIndex(stream.id) == null) return;

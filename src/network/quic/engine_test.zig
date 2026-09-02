@@ -312,6 +312,62 @@ test "engine releases a stopped and reset stream entry" {
     try std.testing.expectError(error.UnknownStream, pair.server.read(stream, &buffer));
 }
 
+const bulk_length = 64 * 1_024;
+
+test "engine reports a blocked stream and recovers capacity after a pump" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.client.openStream(handles.client);
+    var payload: [bulk_length]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% 5);
+
+    var sent = try pair.client.write(stream, &payload, false);
+    try std.testing.expect(sent > 0);
+    try std.testing.expect(sent < payload.len);
+    var blocked = false;
+    var attempts: usize = 0;
+    while (attempts < 64 and !blocked and sent < payload.len) : (attempts += 1) {
+        sent += pair.client.write(stream, payload[sent..], false) catch |err| switch (err) {
+            error.WouldBlock => blk: {
+                blocked = true;
+                break :blk 0;
+            },
+            else => return err,
+        };
+    }
+    try std.testing.expect(blocked);
+
+    try pair.pump();
+    try std.testing.expect(try pair.client.streamCapacity(stream) > 0);
+
+    var storage: [8]Event = undefined;
+    const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    var received: usize = 0;
+    var scratch: [4_096]u8 = undefined;
+    var pumps: usize = 0;
+    while (pumps < 64 and received < payload.len) : (pumps += 1) {
+        var writes: usize = 0;
+        while (writes < 64 and sent < payload.len) : (writes += 1) {
+            sent += pair.client.write(stream, payload[sent..], false) catch |err| switch (err) {
+                error.WouldBlock => break,
+                else => return err,
+            };
+        }
+        try pair.pump();
+        var reads: usize = 0;
+        while (reads < 64) : (reads += 1) {
+            const chunk = try pair.server.read(inbound, &scratch);
+            if (chunk.len == 0) break;
+            try std.testing.expectEqualSlices(u8, payload[received..][0..chunk.len], scratch[0..chunk.len]);
+            received += chunk.len;
+        }
+    }
+    try std.testing.expectEqual(payload.len, received);
+}
+
 test "engine bounds streams per connection" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
