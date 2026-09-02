@@ -1,6 +1,6 @@
 const std = @import("std");
 const enr = @import("identity/enr.zig");
-const standard_response = @import("standard_response.zig");
+const ResponsePlan = @import("ResponsePlan.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
@@ -9,21 +9,20 @@ const test_support = @import("test_support.zig");
 const fakeEndpoint = test_support.fakeEndpoint;
 
 test "an unprepared plan is complete and yields nothing" {
-    const plan = standard_response.Plan{};
-    var raw: standard_response.RawRecords = undefined;
+    const plan = ResponsePlan{};
+    var raw: ResponsePlan.RawRecords = undefined;
     try std.testing.expect(plan.complete());
     try std.testing.expect(plan.next(&raw) == null);
 }
 
 test "empty NODES response is one packet" {
-    var response: standard_response.Plan = .{};
-    try standard_response.prepareNodes(
-        &response,
+    var response: ResponsePlan = .{};
+    try response.prepareNodes(
         fakeEndpoint(0x11, 9_001),
         try message.RequestId.init(&.{0x01}),
         0,
     );
-    var raw: standard_response.RawRecords = undefined;
+    var raw: ResponsePlan.RawRecords = undefined;
     const next = response.next(&raw).?;
     try std.testing.expectEqual(@as(u64, 1), next.nodes.total);
     try std.testing.expectEqual(@as(usize, 0), next.nodes.enrs.len);
@@ -33,10 +32,9 @@ test "empty NODES response is one packet" {
 }
 
 test "maximum ENRs are fragmented by encoded size" {
-    var response: standard_response.Plan = .{};
+    var response: ResponsePlan = .{};
     for (&response.records) |*record| record.* = maximumRecord();
-    try standard_response.prepareNodes(
-        &response,
+    try response.prepareNodes(
         fakeEndpoint(0x11, 9_001),
         try message.RequestId.init(&.{0x01}),
         response.records.len,
@@ -44,8 +42,8 @@ test "maximum ENRs are fragmented by encoded size" {
 
     var packet_count: usize = 0;
     var record_count: usize = 0;
-    var raw: standard_response.RawRecords = undefined;
-    var retry_raw: standard_response.RawRecords = undefined;
+    var raw: ResponsePlan.RawRecords = undefined;
+    var retry_raw: ResponsePlan.RawRecords = undefined;
     while (response.next(&raw)) |next| {
         const retry = response.next(&retry_raw).?;
         try std.testing.expectEqual(next.nodes.enrs.len, retry.nodes.enrs.len);
@@ -63,7 +61,7 @@ test "maximum ENRs are fragmented by encoded size" {
 }
 
 test "PONG reports the authenticated source address" {
-    var response: standard_response.Plan = .{};
+    var response: ResponsePlan = .{};
     const peer = types.Endpoint{
         .node_id = [_]u8{0x11} ** 32,
         .address = .{ .ip6 = .{
@@ -71,13 +69,12 @@ test "PONG reports the authenticated source address" {
             .port = 9_001,
         } },
     };
-    standard_response.preparePong(
-        &response,
+    response.preparePong(
         peer,
         try message.RequestId.init(&.{0x01}),
         7,
     );
-    var raw: standard_response.RawRecords = undefined;
+    var raw: ResponsePlan.RawRecords = undefined;
     const next = response.next(&raw).?;
     try std.testing.expectEqual(@as(u64, 7), next.pong.enr_sequence);
     try std.testing.expectEqual(@as(u16, 9_001), next.pong.recipient_port);

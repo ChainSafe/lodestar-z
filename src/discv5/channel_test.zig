@@ -1,5 +1,5 @@
 const std = @import("std");
-const channel = @import("channel.zig");
+const Channel = @import("Channel.zig");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
 const test_support = @import("test_support.zig");
@@ -171,7 +171,7 @@ test "handshake rejects a request that cannot fit beside the local record" {
     const who = try pair.challenge(&plaintext, null, 1);
     const entropy = handshakeEntropy(0x30);
     try std.testing.expectError(
-        channel.Error.RequestTooLargeForHandshake,
+        Channel.Error.RequestTooLargeForHandshake,
         pair.node_a.answerChallenge(
             &pair.a_to_b,
             .{
@@ -195,7 +195,7 @@ test "established seal requires a session" {
 
     const entropy = sealEntropy(0x10);
     try std.testing.expectError(
-        channel.Error.MissingSession,
+        Channel.Error.MissingSession,
         pair.node_a.sealEstablished(&pair.a_to_b, pair.peerB(), "ping", &entropy, 1),
     );
 }
@@ -223,15 +223,15 @@ test "channel rejects a foreign local record and zero timeouts" {
     const key_a = try keyPair(0x11);
     const key_b = try keyPair(0x22);
     const record_b = try enr.Record.create(&key_b, 1, loopback(2, 9_002));
-    var invalid: channel.Channel = undefined;
+    var invalid: Channel = undefined;
     try std.testing.expectError(
-        channel.Error.InvalidLocalRecord,
+        Channel.Error.InvalidLocalRecord,
         invalid.init(std.testing.allocator, key_a, record_b, channelConfig()),
     );
     var config = channelConfig();
     config.session_idle_timeout_ms = 0;
     try std.testing.expectError(
-        channel.Error.InvalidTimeout,
+        Channel.Error.InvalidTimeout,
         invalid.init(std.testing.allocator, key_b, record_b, config),
     );
 }
@@ -241,9 +241,9 @@ const Pair = struct {
     address_b: types.Address,
     record_a: enr.Record,
     record_b: enr.Record,
-    node_a: channel.Channel,
-    node_b: channel.Channel,
-    scratch: channel.Scratch,
+    node_a: Channel,
+    node_b: Channel,
+    scratch: Channel.Scratch,
     a_to_b: [constants.packet_size_max]u8,
     b_to_a: [constants.packet_size_max]u8,
 
@@ -273,7 +273,7 @@ const Pair = struct {
         return .{ .node_id = self.record_b.node_id, .address = self.address_b };
     }
 
-    fn identityA(self: *const Pair) channel.KnownIdentity {
+    fn identityA(self: *const Pair) Channel.KnownIdentity {
         return .{ .sequence = self.record_a.sequence, .public_key = self.record_a.public_key };
     }
 
@@ -281,9 +281,9 @@ const Pair = struct {
     fn challenge(
         self: *Pair,
         plaintext: []const u8,
-        known: ?channel.KnownIdentity,
+        known: ?Channel.KnownIdentity,
         now_ms: u64,
-    ) !channel.Whoareyou {
+    ) !Channel.Whoareyou {
         const seal_entropy = sealEntropy(0x10);
         const sealed = try self.node_a.seal(
             &self.a_to_b,
@@ -325,7 +325,7 @@ const Pair = struct {
     fn challengeAndHandshake(
         self: *Pair,
         plaintext: []const u8,
-        known: ?channel.KnownIdentity,
+        known: ?Channel.KnownIdentity,
         now_ms: u64,
     ) !u16 {
         const who = try self.challenge(plaintext, known, now_ms);
@@ -339,7 +339,7 @@ const Pair = struct {
             .entropy = &entropy,
             .now_ms = now_ms,
         });
-        try std.testing.expectEqual(channel.handshakeNonce(&entropy), handshake.nonce);
+        try std.testing.expectEqual(Channel.handshakeNonce(&entropy), handshake.nonce);
         return handshake.packet_length;
     }
 };

@@ -1,6 +1,6 @@
 const std = @import("std");
 const enr = @import("identity/enr.zig");
-const routing = @import("routing.zig");
+const RoutingTable = @import("RoutingTable.zig");
 const types = @import("types.zig");
 const test_support = @import("test_support.zig");
 
@@ -10,28 +10,28 @@ const fakeRecord = test_support.fakeRecord;
 
 test "routing table revalidates the least recent entry before replacement" {
     const local_id = [_]u8{0} ** 32;
-    var table: routing.Table = undefined;
+    var table: RoutingTable = undefined;
     try table.init(std.testing.allocator, local_id);
     defer table.deinit(std.testing.allocator);
 
-    var ids: [routing.bucket_size + 2]types.NodeId = undefined;
-    for (0..routing.bucket_size) |index| {
+    var ids: [RoutingTable.bucket_size + 2]types.NodeId = undefined;
+    for (0..RoutingTable.bucket_size) |index| {
         ids[index] = nodeAtDistance(256, @intCast(index + 1));
         const address = address4(10, @intCast(index + 1), 0, 1, @intCast(9_000 + index));
         var record = fakeRecord(ids[index], address, 1);
         const peer = types.Endpoint{ .node_id = ids[index], .address = address };
         try std.testing.expectEqual(
-            routing.PutResult.inserted,
+            RoutingTable.PutResult.inserted,
             try table.upsertVerified(&peer, &record, @intCast(index)),
         );
     }
-    try std.testing.expectEqual(routing.bucket_size, table.count());
+    try std.testing.expectEqual(RoutingTable.bucket_size, table.count());
 
-    ids[routing.bucket_size] = nodeAtDistance(256, 17);
+    ids[RoutingTable.bucket_size] = nodeAtDistance(256, 17);
     const candidate_address = address4(10, 17, 0, 1, 9_017);
-    var candidate_record = fakeRecord(ids[routing.bucket_size], candidate_address, 1);
+    var candidate_record = fakeRecord(ids[RoutingTable.bucket_size], candidate_address, 1);
     const candidate_peer = types.Endpoint{
-        .node_id = ids[routing.bucket_size],
+        .node_id = ids[RoutingTable.bucket_size],
         .address = candidate_address,
     };
     const first_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 20);
@@ -43,7 +43,7 @@ test "routing table revalidates the least recent entry before replacement" {
     var first_record = fakeRecord(ids[0], address4(10, 1, 0, 1, 9_000), 1);
     const first_peer = types.Endpoint{ .node_id = ids[0], .address = first_record.endpoint().? };
     try std.testing.expectEqual(
-        routing.PutResult.refreshed,
+        RoutingTable.PutResult.refreshed,
         try table.upsertVerified(&first_peer, &first_record, 21),
     );
     try std.testing.expectEqual(@as(usize, 0), table.pendingCount());
@@ -51,20 +51,20 @@ test "routing table revalidates the least recent entry before replacement" {
 
     const second_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 22);
     try expectPending(second_pending, &ids[1]);
-    ids[routing.bucket_size + 1] = nodeAtDistance(256, 18);
+    ids[RoutingTable.bucket_size + 1] = nodeAtDistance(256, 18);
     const busy_address = address4(10, 18, 0, 1, 9_018);
-    var busy_record = fakeRecord(ids[routing.bucket_size + 1], busy_address, 1);
+    var busy_record = fakeRecord(ids[RoutingTable.bucket_size + 1], busy_address, 1);
     const busy_peer = types.Endpoint{
-        .node_id = ids[routing.bucket_size + 1],
+        .node_id = ids[RoutingTable.bucket_size + 1],
         .address = busy_address,
     };
     try std.testing.expectEqual(
-        routing.PutResult.pending_busy,
+        RoutingTable.PutResult.pending_busy,
         try table.upsertVerified(&busy_peer, &busy_record, 23),
     );
 
     try std.testing.expectEqual(
-        routing.ResolveResult.retained,
+        RoutingTable.ResolveResult.retained,
         try table.resolveRevalidation(&ids[1], true, 24),
     );
     const third_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 25);
@@ -76,31 +76,31 @@ test "routing table revalidates the least recent entry before replacement" {
     switch (resolution) {
         .replaced => |node_id| try std.testing.expectEqualSlices(
             u8,
-            &ids[routing.bucket_size],
+            &ids[RoutingTable.bucket_size],
             &node_id,
         ),
         .retained => return error.TestUnexpectedResult,
     }
     try std.testing.expect(!table.contains(&ids[2]));
-    try std.testing.expect(table.contains(&ids[routing.bucket_size]));
+    try std.testing.expect(table.contains(&ids[RoutingTable.bucket_size]));
     try std.testing.expectEqual(
         @as(u64, 2),
-        table.get(&ids[routing.bucket_size]).?.record.sequence,
+        table.get(&ids[RoutingTable.bucket_size]).?.record.sequence,
     );
-    try std.testing.expectEqual(routing.bucket_size, table.count());
+    try std.testing.expectEqual(RoutingTable.bucket_size, table.count());
     try std.testing.expectError(
-        routing.Error.NoPendingRevalidation,
+        RoutingTable.Error.NoPendingRevalidation,
         table.resolveRevalidation(&ids[2], false, 28),
     );
 }
 
 test "routing table enforces bucket and table subnet limits" {
     const local_id = [_]u8{0} ** 32;
-    var table: routing.Table = undefined;
+    var table: RoutingTable = undefined;
     try table.init(std.testing.allocator, local_id);
     defer table.deinit(std.testing.allocator);
 
-    for (1..routing.bucket_subnet_limit + 1) |salt| {
+    for (1..RoutingTable.bucket_subnet_limit + 1) |salt| {
         const node_id = nodeAtDistance(256, @intCast(salt));
         const address = address4(192, 0, 2, @intCast(salt), @intCast(9_000 + salt));
         var record = fakeRecord(node_id, address, 1);
@@ -115,14 +115,14 @@ test "routing table enforces bucket and table subnet limits" {
         .address = rejected_address,
     };
     try std.testing.expectError(
-        routing.Error.AddressLimit,
+        RoutingTable.Error.AddressLimit,
         table.upsertVerified(&rejected_peer, &rejected_record, 1),
     );
 
-    var other_table: routing.Table = undefined;
+    var other_table: RoutingTable = undefined;
     try other_table.init(std.testing.allocator, local_id);
     defer other_table.deinit(std.testing.allocator);
-    for (0..routing.table_subnet_limit) |index| {
+    for (0..RoutingTable.table_subnet_limit) |index| {
         const node_id = nodeAtDistance(@intCast(241 + index), @intCast(index + 1));
         const address = address4(198, 51, 100, @intCast(index + 1), @intCast(10_000 + index));
         var record = fakeRecord(node_id, address, 1);
@@ -137,19 +137,19 @@ test "routing table enforces bucket and table subnet limits" {
         .address = table_rejected_address,
     };
     try std.testing.expectError(
-        routing.Error.AddressLimit,
+        RoutingTable.Error.AddressLimit,
         other_table.upsertVerified(&table_rejected_peer, &table_rejected_record, 1),
     );
 }
 
 test "routing table compresses distances one through 240 into one bucket" {
     const local_id = [_]u8{0} ** 32;
-    var table: routing.Table = undefined;
+    var table: RoutingTable = undefined;
     try table.init(std.testing.allocator, local_id);
     defer table.deinit(std.testing.allocator);
 
     var oldest: types.NodeId = undefined;
-    for (0..routing.bucket_size) |index| {
+    for (0..RoutingTable.bucket_size) |index| {
         const distance: u16 = @intCast(225 + index);
         const node_id = nodeAtDistance(distance, @intCast(index + 1));
         if (index == 0) oldest = node_id;
@@ -157,7 +157,7 @@ test "routing table compresses distances one through 240 into one bucket" {
         var record = fakeRecord(node_id, address, 1);
         const peer = types.Endpoint{ .node_id = node_id, .address = address };
         try std.testing.expectEqual(
-            routing.PutResult.inserted,
+            RoutingTable.PutResult.inserted,
             try table.upsertVerified(&peer, &record, 1),
         );
     }
@@ -176,7 +176,7 @@ test "routing table compresses distances one through 240 into one bucket" {
 
 test "routing table applies ENR updates atomically and ignores stale endpoints" {
     const local_id = [_]u8{0} ** 32;
-    var table: routing.Table = undefined;
+    var table: RoutingTable = undefined;
     try table.init(std.testing.allocator, local_id);
     defer table.deinit(std.testing.allocator);
 
@@ -190,7 +190,7 @@ test "routing table applies ENR updates atomically and ignores stale endpoints" 
     var stale_record = fakeRecord(node_id, stale_address, 1);
     const stale_peer = types.Endpoint{ .node_id = node_id, .address = stale_address };
     try std.testing.expectEqual(
-        routing.PutResult.refreshed,
+        RoutingTable.PutResult.refreshed,
         try table.upsertVerified(&stale_peer, &stale_record, 2),
     );
     try std.testing.expect(std.meta.eql(
@@ -200,7 +200,7 @@ test "routing table applies ENR updates atomically and ignores stale endpoints" 
 
     var updated_record = fakeRecord(node_id, stale_address, 3);
     try std.testing.expectEqual(
-        routing.PutResult.updated,
+        RoutingTable.PutResult.updated,
         try table.upsertVerified(&stale_peer, &updated_record, 3),
     );
     const updated = table.get(&node_id).?;
@@ -210,11 +210,11 @@ test "routing table applies ENR updates atomically and ignores stale endpoints" 
 
 test "routing table applies subnet limits to IPv6 prefixes" {
     const local_id = [_]u8{0} ** 32;
-    var table: routing.Table = undefined;
+    var table: RoutingTable = undefined;
     try table.init(std.testing.allocator, local_id);
     defer table.deinit(std.testing.allocator);
 
-    for (1..routing.bucket_subnet_limit + 1) |salt| {
+    for (1..RoutingTable.bucket_subnet_limit + 1) |salt| {
         const node_id = nodeAtDistance(256, @intCast(salt));
         var octets = [_]u8{0} ** 16;
         octets[0..8].* = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 1 };
@@ -241,19 +241,19 @@ test "routing table applies subnet limits to IPv6 prefixes" {
         .address = rejected_address,
     };
     try std.testing.expectError(
-        routing.Error.AddressLimit,
+        RoutingTable.Error.AddressLimit,
         table.upsertVerified(&rejected_peer, &rejected_record, 1),
     );
 }
 
 test "routing FINDNODE selection filters exact distances and caps the aggregate" {
     const local_id = [_]u8{0} ** 32;
-    var table: routing.Table = undefined;
+    var table: RoutingTable = undefined;
     try table.init(std.testing.allocator, local_id);
     defer table.deinit(std.testing.allocator);
 
     var local_record = fakeRecord(local_id, address4(127, 0, 0, 1, 9_000), 1);
-    for (0..routing.bucket_size) |index| {
+    for (0..RoutingTable.bucket_size) |index| {
         const node_id = nodeAtDistance(256, @intCast(index + 1));
         const address = address4(10, @intCast(index + 1), 0, 1, @intCast(9_001 + index));
         var record = fakeRecord(node_id, address, 1);
@@ -282,23 +282,23 @@ test "routing FINDNODE selection filters exact distances and caps the aggregate"
     try std.testing.expectEqualSlices(u8, &distance_241_id, &sparse[0].node_id);
 
     try std.testing.expectError(
-        routing.Error.InvalidDistance,
+        RoutingTable.Error.InvalidDistance,
         table.findNodes(&local_record, null, &.{ 0, 257 }, &out),
     );
     var too_many = [_]u16{0} ** (types.distance_count + 1);
     try std.testing.expectError(
-        routing.Error.TooManyDistances,
+        RoutingTable.Error.TooManyDistances,
         table.findNodes(&local_record, null, &too_many, &out),
     );
 }
 
 test "routing closest selection is sorted and bounded" {
     const local_id = [_]u8{0} ** 32;
-    var table: routing.Table = undefined;
+    var table: RoutingTable = undefined;
     try table.init(std.testing.allocator, local_id);
     defer table.deinit(std.testing.allocator);
 
-    for (0..routing.bucket_size + 2) |index| {
+    for (0..RoutingTable.bucket_size + 2) |index| {
         const distance: u16 = @intCast(239 + index);
         const node_id = nodeAtDistance(distance, @intCast(index + 1));
         const address = address4(10, @intCast(index + 1), 2, 1, @intCast(12_000 + index));
@@ -307,9 +307,9 @@ test "routing closest selection is sorted and bounded" {
         _ = try table.upsertVerified(&peer, &record, 1);
     }
 
-    var out: [routing.bucket_size + 4]routing.Entry = undefined;
+    var out: [RoutingTable.bucket_size + 4]RoutingTable.Entry = undefined;
     const selected = table.closest(&local_id, &out);
-    try std.testing.expectEqual(routing.bucket_size, selected.len);
+    try std.testing.expectEqual(RoutingTable.bucket_size, selected.len);
     for (selected[1..], selected[0 .. selected.len - 1]) |entry, previous| {
         try std.testing.expect(std.mem.order(
             u8,
@@ -329,7 +329,7 @@ test "routing closest selection is sorted and bounded" {
 
 test "routing FINDNODE does not relay special-scope addresses" {
     const local_id = [_]u8{0} ** 32;
-    var table: routing.Table = undefined;
+    var table: RoutingTable = undefined;
     try table.init(std.testing.allocator, local_id);
     defer table.deinit(std.testing.allocator);
 
@@ -358,7 +358,7 @@ test "routing FINDNODE does not relay special-scope addresses" {
 
 test "routing table rejects inconsistent records and unusable endpoints" {
     const local_id = [_]u8{0} ** 32;
-    var table: routing.Table = undefined;
+    var table: RoutingTable = undefined;
     try table.init(std.testing.allocator, local_id);
     defer table.deinit(std.testing.allocator);
 
@@ -367,31 +367,31 @@ test "routing table rejects inconsistent records and unusable endpoints" {
     var record = fakeRecord(remote_id, address, 1);
     var peer = types.Endpoint{ .node_id = local_id, .address = address };
     try std.testing.expectError(
-        routing.Error.SelfEntry,
+        RoutingTable.Error.SelfEntry,
         table.upsertVerified(&peer, &record, 1),
     );
 
     peer.node_id = remote_id;
     record.node_id = nodeAtDistance(255, 2);
     try std.testing.expectError(
-        routing.Error.InvalidRemoteRecord,
+        RoutingTable.Error.InvalidRemoteRecord,
         table.upsertVerified(&peer, &record, 1),
     );
     record.node_id = remote_id;
     peer.address = address4(203, 0, 113, 2, 9_000);
     try std.testing.expectError(
-        routing.Error.InvalidRemoteRecord,
+        RoutingTable.Error.InvalidRemoteRecord,
         table.upsertVerified(&peer, &record, 1),
     );
     peer.address = address4(203, 0, 113, 1, 0);
     record.udp = 0;
     try std.testing.expectError(
-        routing.Error.InvalidRemoteRecord,
+        RoutingTable.Error.InvalidRemoteRecord,
         table.upsertVerified(&peer, &record, 1),
     );
 }
 
-fn expectPending(result: routing.PutResult, expected: *const types.NodeId) !void {
+fn expectPending(result: RoutingTable.PutResult, expected: *const types.NodeId) !void {
     switch (result) {
         .pending => |node_id| try std.testing.expectEqualSlices(u8, expected, &node_id),
         else => return error.TestUnexpectedResult,
@@ -416,12 +416,12 @@ test "relay policy does not cross special address scopes" {
     const other_private = address4(192, 168, 1, 1, 9_000);
     const loopback = address4(127, 0, 0, 1, 9_000);
     const unspecified = address4(0, 0, 0, 0, 9_000);
-    try std.testing.expect(routing.relayAllowed(public, other_public));
-    try std.testing.expect(!routing.relayAllowed(public, private));
-    try std.testing.expect(routing.relayAllowed(private, other_private));
-    try std.testing.expect(routing.relayAllowed(loopback, loopback));
-    try std.testing.expect(!routing.relayAllowed(private, loopback));
-    try std.testing.expect(!routing.relayAllowed(public, unspecified));
+    try std.testing.expect(RoutingTable.relayAllowed(public, other_public));
+    try std.testing.expect(!RoutingTable.relayAllowed(public, private));
+    try std.testing.expect(RoutingTable.relayAllowed(private, other_private));
+    try std.testing.expect(RoutingTable.relayAllowed(loopback, loopback));
+    try std.testing.expect(!RoutingTable.relayAllowed(private, loopback));
+    try std.testing.expect(!RoutingTable.relayAllowed(public, unspecified));
 
     const public6 = address6(
         .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
@@ -430,8 +430,8 @@ test "relay policy does not cross special address scopes" {
     const private6 = address6(.{ 0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 9_000);
     const other_private6 = address6(.{ 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 }, 9_000);
     const multicast6 = address6(.{ 0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 9_000);
-    try std.testing.expect(!routing.relayAllowed(public6, private6));
-    try std.testing.expect(routing.relayAllowed(private6, other_private6));
-    try std.testing.expect(!routing.relayAllowed(private, private6));
-    try std.testing.expect(!routing.relayAllowed(public6, multicast6));
+    try std.testing.expect(!RoutingTable.relayAllowed(public6, private6));
+    try std.testing.expect(RoutingTable.relayAllowed(private6, other_private6));
+    try std.testing.expect(!RoutingTable.relayAllowed(private, private6));
+    try std.testing.expect(!RoutingTable.relayAllowed(public6, multicast6));
 }
