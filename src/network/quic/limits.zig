@@ -18,6 +18,7 @@ pub const connection_window_max: u64 = 16 * 1_024 * 1_024;
 pub const send_burst_max: u32 = 256;
 pub const local_cid_length: usize = 16;
 pub const cid_length_max: usize = 20;
+pub const path_events_per_call_max: u8 = 8;
 
 comptime {
     std.debug.assert(local_cid_length <= cid_length_max);

@@ -72,8 +72,7 @@ pub const Driver = struct {
         expected: peer_id.PeerId,
     ) DialError!engine_mod.Handle {
         const now = try currentTime(io);
-        const local = self.udp.localAddress();
-        const handle = try self.engine.dial(&local, &peer, expected, now, try entropy(io));
+        const handle = try self.engine.dial(&peer, expected, now, try entropy(io));
         assert(handle.index < self.engine.driverView().slotCount());
         if (self.drain(io, handle.index, now).failure) |err| {
             _ = self.engine.abandon(handle);
@@ -102,11 +101,9 @@ pub const Driver = struct {
             };
             result.datagrams_received += 1;
             defer self.udp.release(admitted.handle) catch unreachable;
-            const local = self.udp.localAddress();
             switch (self.engine.driverView().receive(
                 admitted.bytes,
                 &admitted.from,
-                &local,
                 result.now,
                 &self.pool,
                 &self.output,
@@ -175,11 +172,10 @@ pub const Driver = struct {
 
     fn drain(self: *Driver, io: std.Io, index: u16, now: engine_mod.Now) Drained {
         const view = self.engine.driverView();
-        const peer = view.peerAddressAt(index) orelse return .{};
         var result = Drained{};
         while (result.sent < limits.send_burst_max) {
-            const datagram = view.send(index, now, &self.output) orelse break;
-            self.send(io, &peer, datagram) catch |err| {
+            const sent = view.send(index, now, &self.output) orelse break;
+            self.send(io, &sent.to, sent.bytes) catch |err| {
                 result.failure = err;
                 return result;
             };

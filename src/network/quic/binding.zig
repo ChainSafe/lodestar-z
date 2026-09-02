@@ -127,7 +127,45 @@ pub const SockAddr = struct {
     pub fn any(self: *const SockAddr) *const std.posix.sockaddr {
         return &self.storage.any;
     }
+
+    pub fn fromStorage(
+        storage: *const c.struct_sockaddr_storage,
+        len: std.posix.socklen_t,
+    ) ?SockAddr {
+        if (len == 0 or len > @sizeOf(Storage)) return null;
+        var result = SockAddr{ .storage = undefined, .len = len };
+        @memcpy(std.mem.asBytes(&result.storage)[0..len], std.mem.asBytes(storage)[0..len]);
+        return result;
+    }
+
+    pub fn toAddress(self: *const SockAddr) ?types.Address {
+        std.debug.assert(self.len <= @sizeOf(Storage));
+        switch (self.storage.any.family) {
+            std.posix.AF.INET => {
+                if (self.len < @sizeOf(std.posix.sockaddr.in)) return null;
+                const in = self.storage.in;
+                return .{ .ip4 = .{
+                    .octets = @bitCast(in.addr),
+                    .port = std.mem.bigToNative(u16, in.port),
+                } };
+            },
+            std.posix.AF.INET6 => {
+                if (self.len < @sizeOf(std.posix.sockaddr.in6)) return null;
+                const in6 = self.storage.in6;
+                const port = std.mem.bigToNative(u16, in6.port);
+                if (isMappedIp4(in6.addr)) {
+                    return .{ .ip4 = .{ .octets = in6.addr[12..16].*, .port = port } };
+                }
+                return .{ .ip6 = .{ .octets = in6.addr, .port = port, .interface = in6.scope_id } };
+            },
+            else => return null,
+        }
+    }
 };
+
+fn isMappedIp4(bytes: [16]u8) bool {
+    return std.mem.allEqual(u8, bytes[0..10], 0) and bytes[10] == 0xff and bytes[11] == 0xff;
+}
 
 pub const Cid = struct {
     bytes: [limits.cid_length_max]u8 = undefined,

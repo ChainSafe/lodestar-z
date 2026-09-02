@@ -380,7 +380,7 @@ test "engine keeps received data readable until the closed event is drained" {
 
     const stream = try pair.server.openStream(handles.server);
     try std.testing.expectEqual(@as(usize, 3), try pair.server.write(stream, "bye", true));
-    _ = try pair.transfer(&pair.server, &pair.client, server_address, client_address, false);
+    _ = try pair.transfer(&pair.server, &pair.client, server_address, false);
     _ = pair.server.close(handles.server, 0);
     try pair.pump();
 

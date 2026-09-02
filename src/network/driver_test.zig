@@ -169,9 +169,7 @@ test "driver surfaces a send failure to an unreachable destination" {
         .port = 4_001,
     } };
     const now = try driver_mod.currentTime(std.testing.io);
-    const local = node.udp.localAddress();
     _ = try node.engine.dial(
-        &local,
         &unreachable_peer,
         node.ctx.local_peer_id,
         now,

@@ -17,8 +17,8 @@ fn dialInitial(pair: *Pair, out: []u8) ![]u8 {
     var scratch: [constants.datagram_size_max]u8 = undefined;
     const datagram = pair.client.driverView().send(handle.index, pair.now, &scratch) orelse
         return error.TestUnexpectedResult;
-    @memcpy(out[0..datagram.len], datagram);
-    return out[0..datagram.len];
+    @memcpy(out[0..datagram.bytes.len], datagram.bytes);
+    return out[0..datagram.bytes.len];
 }
 
 test "engine drops new handshakes when the server table is full" {
@@ -41,7 +41,6 @@ test "engine drops new handshakes when the server table is full" {
         try expectClosed(client_events[0], second, .outbound, null),
     );
     try std.testing.expectError(error.TableFull, pair.server.dial(
-        &server_address,
         &client_address,
         pair.client_ctx.local_peer_id,
         pair.now,
@@ -67,7 +66,6 @@ test "engine caps inbound handshakes per source address" {
         const outcome = pair.server.driverView().receive(
             initial,
             &client_address,
-            &server_address,
             pair.now,
             pair.nextPool(),
             &response,
@@ -87,7 +85,6 @@ test "engine caps inbound handshakes per source address" {
     const foreign = pair.server.driverView().receive(
         other,
         &elsewhere,
-        &server_address,
         pair.now,
         pair.nextPool(),
         &response,
@@ -115,7 +112,6 @@ test "engine drops an inbound Initial when the entropy pool is stale" {
         pair.server.driverView().receive(
             initial,
             &client_address,
-            &server_address,
             pair.now,
             &stale,
             &response,
@@ -146,7 +142,6 @@ test "engine drops version negotiation packets instead of reflecting them" {
         pair.server.driverView().receive(
             &packet,
             &client_address,
-            &server_address,
             pair.now,
             pair.nextPool(),
             &response,
@@ -176,7 +171,6 @@ test "engine answers unsupported versions and drops unroutable packets" {
     const outcome = pair.server.driverView().receive(
         &initial,
         &client_address,
-        &server_address,
         pair.now,
         pair.nextPool(),
         &response,
@@ -191,7 +185,6 @@ test "engine answers unsupported versions and drops unroutable packets" {
     try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.driverView().receive(
         &short,
         &client_address,
-        &server_address,
         pair.now,
         pair.nextPool(),
         &response,
@@ -202,7 +195,6 @@ test "engine answers unsupported versions and drops unroutable packets" {
     try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.driverView().receive(
         &tiny,
         &client_address,
-        &server_address,
         pair.now,
         pair.nextPool(),
         &response,

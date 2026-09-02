@@ -25,6 +25,11 @@ pub const OpenedStream = struct {
     index: u8,
 };
 
+pub const Sent = struct {
+    bytes: []u8,
+    to: types.Address,
+};
+
 pub const OpenParams = struct {
     direction: types.Direction,
     local: types.Address,
@@ -54,6 +59,7 @@ pub const Slot = struct {
     connected_pending: bool = false,
     closed_pending: bool = false,
     closed_reported: bool = false,
+    path_changed_pending: ?types.Address = null,
     table: StreamTable = .{},
 
     pub fn open(
@@ -80,6 +86,7 @@ pub const Slot = struct {
         self.connected_pending = false;
         self.closed_pending = false;
         self.closed_reported = false;
+        self.path_changed_pending = null;
         self.table = StreamTable.init(params.direction);
 
         const ssl = try ctx.newSsl(&self.handshake);
@@ -107,23 +114,48 @@ pub const Slot = struct {
         self.generation +%= 1;
     }
 
-    pub fn recv(self: *Slot, datagram: []u8) Error!void {
+    pub fn recv(self: *Slot, datagram: []u8, from: *const binding.SockAddr) Error!void {
+        assert(self.conn != null);
+        assert(from.len > 0);
         var info = c.quiche_recv_info{
-            .from = @ptrCast(@constCast(self.peer_sockaddr.any())),
-            .from_len = self.peer_sockaddr.len,
+            .from = @ptrCast(@constCast(from.any())),
+            .from_len = from.len,
             .to = @ptrCast(@constCast(self.local_sockaddr.any())),
             .to_len = self.local_sockaddr.len,
         };
         _ = try binding.check(c.quiche_conn_recv(self.conn.?, datagram.ptr, datagram.len, &info));
     }
 
-    pub fn send(self: *Slot, now_ms: u64, out: []u8) Error!?[]u8 {
+    pub fn send(self: *Slot, now_ms: u64, out: []u8) Error!?Sent {
+        assert(self.conn != null);
         var info: c.quiche_send_info = undefined;
         const rc = c.quiche_conn_send(self.conn.?, out.ptr, out.len, &info);
         const length = try binding.check(rc) orelse return null;
         assert(length <= out.len);
         self.last_send_ms = now_ms;
-        return out[0..length];
+        const destination = binding.SockAddr.fromStorage(&info.to, info.to_len);
+        const to = if (destination) |addr| addr.toAddress() orelse self.peer else self.peer;
+        return .{ .bytes = out[0..length], .to = to };
+    }
+
+    pub fn drainPathEvents(self: *Slot) ?types.Address {
+        assert(self.conn != null);
+        var migrated: ?types.Address = null;
+        var drained: u8 = 0;
+        while (drained < limits.path_events_per_call_max) : (drained += 1) {
+            const event = c.quiche_conn_path_event_next(self.conn.?) orelse break;
+            defer c.quiche_path_event_free(event);
+            if (c.quiche_path_event_type(event) != c.QUICHE_PATH_EVENT_PEER_MIGRATED) continue;
+            var local: c.struct_sockaddr_storage = undefined;
+            var local_len: c.socklen_t = 0;
+            var peer: c.struct_sockaddr_storage = undefined;
+            var peer_len: c.socklen_t = 0;
+            c.quiche_path_event_peer_migrated(event, &local, &local_len, &peer, &peer_len);
+            const sockaddr = binding.SockAddr.fromStorage(&peer, peer_len) orelse continue;
+            migrated = sockaddr.toAddress() orelse continue;
+        }
+        assert(drained <= limits.path_events_per_call_max);
+        return migrated;
     }
 
     pub fn onTimeout(self: *Slot) void {
