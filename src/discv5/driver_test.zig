@@ -153,7 +153,7 @@ test "driver releases a malformed datagram before the next step" {
     var expired: [4]calls.Expired = undefined;
     const rejected = try pair.driver_a.step(std.testing.io, &expired);
     try std.testing.expect(rejected.datagram == .rejected);
-    try std.testing.expectEqual(error.InvalidPacket, rejected.datagram.rejected);
+    try std.testing.expectEqual(types.RejectReason.malformed_packet, rejected.datagram.rejected);
 
     const request = message.Message{ .ping = .{
         .request_id = try message.RequestId.init(&.{0x44}),
@@ -197,7 +197,7 @@ test "driver returns call expiries when rejecting a malformed datagram" {
     var expired: [4]calls.Expired = undefined;
     const result = try pair.driver_a.step(std.testing.io, &expired);
     try std.testing.expect(result.datagram == .rejected);
-    try std.testing.expectEqual(error.InvalidPacket, result.datagram.rejected);
+    try std.testing.expectEqual(types.RejectReason.malformed_packet, result.datagram.rejected);
     try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
     try std.testing.expectEqual(handle, expired[0].handle);
 }

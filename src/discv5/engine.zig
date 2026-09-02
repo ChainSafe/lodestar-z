@@ -69,9 +69,15 @@ pub const Event = union(enum) {
     response: AuthenticatedResponse,
 };
 
-pub const Outcome = struct {
+pub const Accepted = struct {
     packet_length: u16 = 0,
     event: Event = .none,
+};
+
+/// Peer-caused conditions arrive as `rejected`; an error from `receive` is a local failure.
+pub const Outcome = union(enum) {
+    accepted: Accepted,
+    rejected: types.RejectReason,
 };
 
 pub const Scratch = struct {
@@ -303,8 +309,21 @@ pub const Engine = struct {
         args: ReceiveArgs,
         scratch: *Scratch,
     ) Error!Outcome {
-        const inbound = try self.channel.receive(raw, from, args.now_ms, &scratch.channel);
-        return switch (inbound) {
+        return self.process(out, raw, from, args, scratch) catch |err| {
+            const reason = rejectReason(err) orelse return err;
+            return .{ .rejected = reason };
+        };
+    }
+
+    fn process(
+        self: *Self,
+        out: []u8,
+        raw: []const u8,
+        from: types.Address,
+        args: ReceiveArgs,
+        scratch: *Scratch,
+    ) Error!Outcome {
+        return switch (self.channel.receive(raw, from, args.now_ms, &scratch.channel)) {
             .authenticated => |authenticated| self.receiveAuthenticated(
                 authenticated,
                 args.now_ms,
@@ -312,6 +331,7 @@ pub const Engine = struct {
             ),
             .unauthenticated => |unauthenticated| self.issueChallenge(out, unauthenticated, args),
             .whoareyou => |whoareyou| self.recoverCall(out, whoareyou, args),
+            .rejected => |reason| .{ .rejected = reason },
         };
     }
 
@@ -401,7 +421,7 @@ pub const Engine = struct {
             scratch,
         );
         self.routeAuthenticated(authenticated.peer, authenticated.record, now_ms);
-        return .{ .event = event };
+        return .{ .accepted = .{ .event = event } };
     }
 
     fn issueChallenge(
@@ -418,7 +438,7 @@ pub const Engine = struct {
             &args.entropy.challenge,
             args.now_ms,
         );
-        return .{ .packet_length = packet_length orelse 0 };
+        return .{ .accepted = .{ .packet_length = packet_length orelse 0 } };
     }
 
     fn knownIdentity(self: *const Self, node_id: *const types.NodeId) ?channel_mod.KnownIdentity {
@@ -460,7 +480,7 @@ pub const Engine = struct {
             .entropy = &args.entropy.handshake,
             .now_ms = args.now_ms,
         });
-        return .{ .packet_length = sealed.packet_length };
+        return .{ .accepted = .{ .packet_length = sealed.packet_length } };
     }
 
     fn dispatch(
@@ -540,6 +560,33 @@ pub const Engine = struct {
         _ = self.routing.upsertVerified(&peer, &record, now_ms) catch return;
     }
 };
+
+fn rejectReason(err: Error) ?types.RejectReason {
+    return switch (err) {
+        Error.InvalidMessage,
+        Error.UnsupportedMessage,
+        Error.InvalidEncoding,
+        Error.Overflow,
+        Error.UnexpectedType,
+        => .malformed_message,
+        Error.InvalidRecord,
+        Error.TooManyFields,
+        Error.UnsupportedScheme,
+        Error.InvalidSignature,
+        Error.InvalidPublicKey,
+        Error.InvalidRemoteRecord,
+        => .invalid_record,
+        Error.UnexpectedChallenge, Error.HandshakeAttempted => .unexpected_challenge,
+        Error.RequestTooLargeForHandshake => .request_too_large,
+        Error.UnknownCall,
+        Error.CallExpired,
+        Error.RequestIdMismatch,
+        Error.UnexpectedResponse,
+        => .unsolicited_response,
+        Error.InvalidResponseCount, Error.InvalidNodeCount => .invalid_response,
+        else => null,
+    };
+}
 
 fn requestEvent(peer: types.Endpoint, request: Request, record: ?enr.Record) Event {
     return .{ .request = .{ .peer = peer, .message = request, .record = record } };

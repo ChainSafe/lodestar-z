@@ -26,7 +26,7 @@ pub const Config = struct {
 pub const DatagramResult = union(enum) {
     timeout,
     accepted,
-    rejected: engine.Error,
+    rejected: types.RejectReason,
 };
 
 pub const StepResult = struct {
@@ -194,21 +194,24 @@ pub const Driver = struct {
     ) Error!void {
         var entropy = try receiveEntropy(io);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
-        const outcome = self.core.receive(
+        const accepted = switch (try self.core.receive(
             &self.output,
             datagram.bytes,
             datagram.from,
             .{ .now_ms = result.now_ms, .entropy = entropy },
             &self.scratch,
-        ) catch |err| {
-            result.datagram = .{ .rejected = err };
-            return;
+        )) {
+            .accepted => |accepted| accepted,
+            .rejected => |reason| {
+                result.datagram = .{ .rejected = reason };
+                return;
+            },
         };
         result.datagram = .accepted;
-        if (outcome.packet_length > 0) {
-            try self.send(io, datagram.from, self.output[0..outcome.packet_length]);
+        if (accepted.packet_length > 0) {
+            try self.send(io, datagram.from, self.output[0..accepted.packet_length]);
         }
-        result.event = try self.handleEvent(io, outcome.event, result);
+        result.event = try self.handleEvent(io, accepted.event, result);
     }
 
     fn handleEvent(

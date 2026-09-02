@@ -66,6 +66,19 @@ pub const Endpoint = struct {
     address: Address,
 };
 
+/// Why an authenticated-or-not datagram was not acted on. Every arm is caused by the peer.
+pub const RejectReason = enum {
+    malformed_packet,
+    malformed_message,
+    invalid_record,
+    unexpected_handshake,
+    invalid_handshake,
+    unexpected_challenge,
+    request_too_large,
+    unsolicited_response,
+    invalid_response,
+};
+
 /// Keeps `out[0..length]` ordered by XOR distance to `target`, dropping the farthest when full.
 pub fn insertClosest(
     comptime T: type,
