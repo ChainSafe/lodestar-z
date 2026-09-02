@@ -1,12 +1,13 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const engine_mod = @import("quic/engine.zig");
-const peer_id = @import("identity/peer_id.zig");
-const runtime = @import("runtime.zig");
+const limits = @import("quic/limits.zig");
+const peer_id = @import("wire/peer_id.zig");
 const types = @import("types.zig");
+const udp_mod = @import("udp.zig");
 
-pub const Error = engine_mod.Error || runtime.ReceiveTimeoutError || runtime.ReleaseError ||
-    runtime.SendError || std.Io.RandomSecureError || error{
+pub const Error = engine_mod.Error || udp_mod.ReceiveTimeoutError || udp_mod.ReleaseError ||
+    udp_mod.SendError || std.Io.RandomSecureError || error{
     ClockOutOfRange,
     DestinationUnreachable,
     InvalidPollInterval,
@@ -17,7 +18,7 @@ pub const Config = struct {
 };
 
 const Received = union(enum) {
-    datagram: runtime.Datagram,
+    datagram: udp_mod.Datagram,
     dropped,
     timeout,
 };
@@ -43,16 +44,16 @@ pub const Drained = struct {
 
 pub const Driver = struct {
     engine: *engine_mod.Engine,
-    udp: *runtime.Udp,
+    udp: *udp_mod.Udp,
     config: Config,
     pool: engine_mod.EntropyPool = .{},
     output: [constants.datagram_size_max]u8 = undefined,
 
-    pub fn init(engine: *engine_mod.Engine, udp: *runtime.Udp) Driver {
+    pub fn init(engine: *engine_mod.Engine, udp: *udp_mod.Udp) Driver {
         return .{ .engine = engine, .udp = udp, .config = .{} };
     }
 
-    pub fn initWithConfig(engine: *engine_mod.Engine, udp: *runtime.Udp, config: Config) Error!Driver {
+    pub fn initWithConfig(engine: *engine_mod.Engine, udp: *udp_mod.Udp, config: Config) Error!Driver {
         if (config.poll_interval_ms == 0) return error.InvalidPollInterval;
         return .{ .engine = engine, .udp = udp, .config = config };
     }
@@ -98,7 +99,7 @@ pub const Driver = struct {
         }
         result.now = try currentTime(io);
         self.engine.tick(result.now);
-        var indices: [constants.connections_max_ceiling]u16 = undefined;
+        var indices: [limits.connections_max_ceiling]u16 = undefined;
         const active = self.engine.activeIndices(&indices);
         for (indices[0..active]) |index| {
             const drained = self.drain(io, index, result.now);
@@ -143,7 +144,7 @@ pub const Driver = struct {
     fn drain(self: *Driver, io: std.Io, index: u16, now: engine_mod.Now) Drained {
         const peer = self.engine.peerAddress(index) orelse return .{};
         var result = Drained{};
-        while (result.sent < constants.send_burst_max) {
+        while (result.sent < limits.send_burst_max) {
             const datagram = self.engine.send(index, now, &self.output) catch |err| {
                 result.failure = err;
                 return result;
@@ -178,8 +179,8 @@ pub fn currentTime(io: std.Io) Error!engine_mod.Now {
     return .{ .mono_ms = @intCast(mono), .unix_s = wall };
 }
 
-fn entropy(io: std.Io) std.Io.RandomSecureError![constants.local_cid_length]u8 {
-    var bytes: [constants.local_cid_length]u8 = undefined;
+fn entropy(io: std.Io) std.Io.RandomSecureError![limits.local_cid_length]u8 {
+    var bytes: [limits.local_cid_length]u8 = undefined;
     try std.Io.randomSecure(io, &bytes);
     return bytes;
 }

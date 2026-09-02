@@ -1,5 +1,5 @@
 const std = @import("std");
-const keys = @import("../identity/keys.zig");
+const keys = @import("keys.zig");
 const signed_key = @import("signed_key.zig");
 
 pub const spec_spki = "3059301306072a8648ce3d020106082a8648ce3d030107034200040c901d423c831ca85e27c73c263ba132721bb9d7a84c4f0380b2a6756fd601331c8870234dec878504c174144fa4b14b66a651691606d8173e55bd37e381569e";

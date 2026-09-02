@@ -1,7 +1,7 @@
 const std = @import("std");
 const cert = @import("cert.zig");
-const keys = @import("../identity/keys.zig");
-const signed_key = @import("signed_key.zig");
+const keys = @import("../wire/keys.zig");
+const signed_key = @import("../wire/signed_key.zig");
 const c = @import("../quic/binding.zig").c;
 
 const now_unix: i64 = 1_700_000_000;

@@ -1,40 +1,16 @@
 const std = @import("std");
-const constants = @import("constants.zig");
 const driver_mod = @import("driver.zig");
 const engine_mod = @import("quic/engine.zig");
-const keys = @import("identity/keys.zig");
-const multistream = @import("multistream.zig");
-const runtime = @import("runtime.zig");
-const tls = @import("tls/context.zig");
+const limits = @import("quic/limits.zig");
+const multistream = @import("wire/multistream.zig");
+const support = @import("test_support.zig");
 const types = @import("types.zig");
+const udp_mod = @import("udp.zig");
 
 const net = std.Io.net;
+const Node = support.Node;
 
 const ping_protocol = "/ipfs/ping/1.0.0";
-
-const Node = struct {
-    ctx: tls.Context = undefined,
-    engine: engine_mod.Engine = undefined,
-    udp: runtime.Udp = undefined,
-    driver: driver_mod.Driver = undefined,
-
-    fn init(self: *Node, seed: u8) !void {
-        const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
-        self.ctx = try tls.Context.init(&key, (try driver_mod.currentTime(std.testing.io)).unix_s, [_]u8{seed} ** 8);
-        errdefer self.ctx.deinit();
-        self.engine = try engine_mod.Engine.init(std.testing.allocator, &self.ctx, .{});
-        errdefer self.engine.deinit();
-        self.udp = try runtime.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
-        errdefer self.udp.close(std.testing.io);
-        self.driver = try driver_mod.Driver.initWithConfig(&self.engine, &self.udp, .{ .poll_interval_ms = 10 });
-    }
-
-    fn deinit(self: *Node) void {
-        self.udp.close(std.testing.io);
-        self.engine.deinit();
-        self.ctx.deinit();
-    }
-};
 
 fn writeSome(engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, bytes: []const u8, fin: bool) !usize {
     return engine.write(stream, bytes, fin) catch |err| switch (err) {
@@ -53,7 +29,7 @@ fn stepBoth(a: *Node, b: *Node, events_a: []engine_mod.Event, events_b: []engine
 
 test "driver rejects a zero poll interval" {
     var core: engine_mod.Engine = undefined;
-    var udp = try runtime.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    var udp = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer udp.close(std.testing.io);
     try std.testing.expectError(error.InvalidPollInterval, driver_mod.Driver.initWithConfig(&core, &udp, .{ .poll_interval_ms = 0 }));
 }
@@ -68,7 +44,7 @@ test "driver counts a hostile oversized datagram and keeps stepping" {
     defer stranger.close(std.testing.io);
 
     const oversized = [_]u8{0x5a} ** 2_000;
-    const destination = runtime.toNetwork(node.udp.localAddress(), node.udp.family);
+    const destination = udp_mod.toNetwork(node.udp.localAddress(), node.udp.family);
     try stranger.send(std.testing.io, &destination, &oversized);
 
     var events: [4]engine_mod.Event = undefined;
@@ -98,7 +74,7 @@ test "driver keeps batching past a counted receive error" {
     defer stranger.close(std.testing.io);
 
     const oversized = [_]u8{0x5a} ** 2_000;
-    const destination = runtime.toNetwork(node.udp.localAddress(), node.udp.family);
+    const destination = udp_mod.toNetwork(node.udp.localAddress(), node.udp.family);
     var sent: usize = 0;
     while (sent < 3) : (sent += 1) try stranger.send(std.testing.io, &destination, &oversized);
 
@@ -124,7 +100,7 @@ test "driver surfaces a send failure to an unreachable destination" {
         unreachable_peer,
         node.ctx.local_peer_id,
         now,
-        [_]u8{7} ** constants.local_cid_length,
+        [_]u8{7} ** limits.local_cid_length,
     );
 
     var events: [4]engine_mod.Event = undefined;

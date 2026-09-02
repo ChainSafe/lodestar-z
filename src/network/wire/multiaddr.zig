@@ -1,7 +1,7 @@
 const std = @import("std");
+const address_mod = @import("address.zig");
 const peer_id = @import("peer_id.zig");
-const types = @import("../types.zig");
-const varint = @import("../varint.zig");
+const varint = @import("varint.zig");
 
 pub const binary_length_max = 65;
 pub const text_length_max = 160;
@@ -15,7 +15,7 @@ const code_quic_v1: u64 = 461;
 pub const Error = error{ InvalidMultiaddr, BufferTooSmall } || peer_id.Error || varint.Error;
 
 pub const Multiaddr = struct {
-    address: types.Address,
+    address: address_mod.Address,
     peer: ?peer_id.PeerId = null,
 
     pub fn encode(self: *const Multiaddr, out: []u8) Error![]u8 {
@@ -45,7 +45,7 @@ pub const Multiaddr = struct {
 
     pub fn decode(bytes: []const u8) Error!Multiaddr {
         var cursor: usize = 0;
-        var address: types.Address = switch (try takeVarint(bytes, &cursor)) {
+        var address: address_mod.Address = switch (try takeVarint(bytes, &cursor)) {
             code_ip4 => .{ .ip4 = .{ .octets = (try take(bytes, &cursor, 4))[0..4].*, .port = 0 } },
             code_ip6 => .{ .ip6 = .{ .octets = (try take(bytes, &cursor, 16))[0..16].*, .port = 0 } },
             else => return error.InvalidMultiaddr,
@@ -109,7 +109,7 @@ pub const Multiaddr = struct {
         const port = std.fmt.parseInt(u16, port_text, 10) catch return error.InvalidMultiaddr;
         if (!std.mem.eql(u8, parts.next() orelse return error.InvalidMultiaddr, "quic-v1")) return error.InvalidMultiaddr;
 
-        const address: types.Address = if (std.mem.eql(u8, family, "ip4")) blk: {
+        const address: address_mod.Address = if (std.mem.eql(u8, family, "ip4")) blk: {
             const parsed = std.Io.net.IpAddress.parseIp4(host, port) catch return error.InvalidMultiaddr;
             break :blk .{ .ip4 = .{ .octets = parsed.ip4.bytes, .port = port } };
         } else if (std.mem.eql(u8, family, "ip6")) blk: {

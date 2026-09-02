@@ -1,5 +1,5 @@
 const std = @import("std");
-const keys = @import("../identity/keys.zig");
+const keys = @import("keys.zig");
 
 pub const prefix = "libp2p-tls-handshake:";
 pub const spki_length_max = 128;

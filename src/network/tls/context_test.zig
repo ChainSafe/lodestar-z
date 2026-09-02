@@ -1,7 +1,7 @@
 const std = @import("std");
 const context = @import("context.zig");
-const keys = @import("../identity/keys.zig");
-const peer_id = @import("../identity/peer_id.zig");
+const keys = @import("../wire/keys.zig");
+const peer_id = @import("../wire/peer_id.zig");
 const c = @import("../quic/binding.zig").c;
 
 test "context owns the certificate and derives the local peer id" {
