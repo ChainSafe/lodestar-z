@@ -210,13 +210,13 @@ test "driver completes a caller-owned lookup across multiple peers" {
     var seed_buffer: [lookup.result_max]routing.Entry = undefined;
     const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
     var operation: lookup.Lookup = undefined;
+    var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
-        std.testing.allocator,
+        &operation_candidates,
         network.record_a.node_id,
         network.record_c.node_id,
         seeds,
     );
-    defer operation.deinit();
 
     var expired: [4]calls.Expired = undefined;
     const first = try lookup_driver.step(
@@ -278,13 +278,13 @@ test "lookup expiry is consumed without hiding an unrelated call expiry" {
     var seed_buffer: [lookup.result_max]routing.Entry = undefined;
     const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
     var operation: lookup.Lookup = undefined;
+    var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
-        std.testing.allocator,
+        &operation_candidates,
         network.record_a.node_id,
         network.record_c.node_id,
         seeds,
     );
-    defer operation.deinit();
 
     var expired: [4]calls.Expired = undefined;
     const result = try lookup_driver.step(
@@ -323,16 +323,14 @@ test "lookup step preserves an unrelated response event" {
     var seed_buffer: [lookup.result_max]routing.Entry = undefined;
     const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
     var operation: lookup.Lookup = undefined;
+    var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
-        std.testing.allocator,
+        &operation_candidates,
         network.record_a.node_id,
         network.record_c.node_id,
         seeds,
     );
-    defer {
-        operation.cancel(&network.node_a);
-        operation.deinit();
-    }
+    defer operation.cancel(&network.node_a);
 
     const result = try lookup_driver.step(
         &network.driver_a,
@@ -363,32 +361,28 @@ test "two caller-owned lookups share one driver" {
         &seeds_b_buffer,
     );
     var operation_b: lookup.Lookup = undefined;
+    var operation_b_candidates: lookup.Candidates = undefined;
     try operation_b.init(
-        std.testing.allocator,
+        &operation_b_candidates,
         network.record_a.node_id,
         network.record_b.node_id,
         seeds_b,
     );
-    defer {
-        operation_b.cancel(&network.node_a);
-        operation_b.deinit();
-    }
+    defer operation_b.cancel(&network.node_a);
     var seeds_c_buffer: [lookup.result_max]routing.Entry = undefined;
     const seeds_c = network.node_a.closestNodes(
         &network.record_c.node_id,
         &seeds_c_buffer,
     );
     var operation_c: lookup.Lookup = undefined;
+    var operation_c_candidates: lookup.Candidates = undefined;
     try operation_c.init(
-        std.testing.allocator,
+        &operation_c_candidates,
         network.record_a.node_id,
         network.record_c.node_id,
         seeds_c,
     );
-    defer {
-        operation_c.cancel(&network.node_a);
-        operation_c.deinit();
-    }
+    defer operation_c.cancel(&network.node_a);
 
     var expired: [4]calls.Expired = undefined;
     var responses_b: usize = 0;
