@@ -8,21 +8,27 @@ const lookup = @import("lookup.zig");
 const lookup_driver = @import("lookup_driver.zig");
 const message = @import("wire/message.zig");
 const routing = @import("routing.zig");
-const runtime = @import("runtime.zig");
+const udp = @import("udp.zig");
 const session = @import("session.zig");
 const test_support = @import("test_support.zig");
 const types = @import("types.zig");
+
+const address4 = test_support.address4;
+const endpoint = test_support.endpoint;
+const fakeRecord = test_support.fakeRecord;
+const installSession = test_support.installSession;
+const keyPair = test_support.keyPair;
 
 const net = std.Io.net;
 
 test "driver rejects invalid polling and missing expiry storage" {
     var core: engine.Engine = undefined;
-    var udp = runtime.Udp.init(undefined);
+    var adapter = udp.Adapter.init(undefined);
     try std.testing.expectError(
         error.InvalidPollInterval,
-        driver.Driver.initWithConfig(&core, &udp, .{ .poll_interval_ms = 0 }),
+        driver.Driver.initWithConfig(&core, &adapter, .{ .poll_interval_ms = 0 }),
     );
-    var instance = driver.Driver.init(&core, &udp);
+    var instance = driver.Driver.init(&core, &adapter);
     try std.testing.expectError(
         error.MissingExpiryStorage,
         instance.step(undefined, &.{}),
@@ -420,8 +426,8 @@ test "two caller-owned lookups share one driver" {
 }
 
 const Pair = struct {
-    udp_a: runtime.Udp,
-    udp_b: runtime.Udp,
+    udp_a: udp.Adapter,
+    udp_b: udp.Adapter,
     record_a: enr.Record,
     record_b: enr.Record,
     node_a: engine.Engine,
@@ -432,15 +438,15 @@ const Pair = struct {
 
     fn init(self: *Pair, request_timeout_ms: u64, install_session: bool) !void {
         const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-        self.udp_a = try runtime.Udp.bind(std.testing.io, loopback);
+        self.udp_a = try udp.Adapter.bind(std.testing.io, loopback);
         errdefer self.udp_a.close(std.testing.io);
-        self.udp_b = try runtime.Udp.bind(std.testing.io, loopback);
+        self.udp_b = try udp.Adapter.bind(std.testing.io, loopback);
         errdefer self.udp_b.close(std.testing.io);
 
-        const key_a = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-        const key_b = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
-        self.record_a = try test_support.buildRecord(&key_a, 1, self.udp_a.localAddress());
-        self.record_b = try test_support.buildRecord(&key_b, 1, self.udp_b.localAddress());
+        const key_a = try keyPair(0x11);
+        const key_b = try keyPair(0x22);
+        self.record_a = try enr.Record.create(&key_a, 1, self.udp_a.localAddress());
+        self.record_b = try enr.Record.create(&key_b, 1, self.udp_b.localAddress());
         const config = engine.Config{
             .session_capacity = 4,
             .challenge_capacity = 4,
@@ -494,7 +500,7 @@ const Pair = struct {
         for (1..routing.bucket_size) |index| {
             const node_id = variantNodeId(self.record_b.node_id, @intCast(index));
             const address = address4(10, @intCast(index), 0, 1, @intCast(10_000 + index));
-            var record = fakeRecord(node_id, address);
+            var record = fakeRecord(node_id, address, 0);
             const peer = types.Endpoint{ .node_id = node_id, .address = address };
             try std.testing.expectEqual(
                 routing.PutResult.inserted,
@@ -503,7 +509,7 @@ const Pair = struct {
         }
         self.candidate_id = variantNodeId(self.record_b.node_id, routing.bucket_size);
         const candidate_address = address4(10, 200, 0, 1, 10_200);
-        var candidate_record = fakeRecord(self.candidate_id, candidate_address);
+        var candidate_record = fakeRecord(self.candidate_id, candidate_address, 0);
         const candidate_peer = types.Endpoint{
             .node_id = self.candidate_id,
             .address = candidate_address,
@@ -521,9 +527,9 @@ const Pair = struct {
 };
 
 const LookupNetwork = struct {
-    udp_a: runtime.Udp,
-    udp_b: runtime.Udp,
-    udp_c: runtime.Udp,
+    udp_a: udp.Adapter,
+    udp_b: udp.Adapter,
+    udp_c: udp.Adapter,
     record_a: enr.Record,
     record_b: enr.Record,
     record_c: enr.Record,
@@ -536,19 +542,19 @@ const LookupNetwork = struct {
 
     fn init(self: *LookupNetwork, request_timeout_ms: u64) !void {
         const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-        self.udp_a = try runtime.Udp.bind(std.testing.io, loopback);
+        self.udp_a = try udp.Adapter.bind(std.testing.io, loopback);
         errdefer self.udp_a.close(std.testing.io);
-        self.udp_b = try runtime.Udp.bind(std.testing.io, loopback);
+        self.udp_b = try udp.Adapter.bind(std.testing.io, loopback);
         errdefer self.udp_b.close(std.testing.io);
-        self.udp_c = try runtime.Udp.bind(std.testing.io, loopback);
+        self.udp_c = try udp.Adapter.bind(std.testing.io, loopback);
         errdefer self.udp_c.close(std.testing.io);
 
-        const key_a = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-        const key_b = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
-        const key_c = try crypto.keyPairFromSecret(&([_]u8{0x33} ** 32));
-        self.record_a = try test_support.buildRecord(&key_a, 1, self.udp_a.localAddress());
-        self.record_b = try test_support.buildRecord(&key_b, 1, self.udp_b.localAddress());
-        self.record_c = try test_support.buildRecord(&key_c, 1, self.udp_c.localAddress());
+        const key_a = try keyPair(0x11);
+        const key_b = try keyPair(0x22);
+        const key_c = try keyPair(0x33);
+        self.record_a = try enr.Record.create(&key_a, 1, self.udp_a.localAddress());
+        self.record_b = try enr.Record.create(&key_b, 1, self.udp_b.localAddress());
+        self.record_c = try enr.Record.create(&key_c, 1, self.udp_c.localAddress());
         const config = engine.Config{
             .session_capacity = 4,
             .challenge_capacity = 4,
@@ -564,10 +570,10 @@ const LookupNetwork = struct {
         try self.node_c.initWithConfig(std.testing.allocator, key_c, self.record_c, config);
         errdefer self.node_c.deinit();
 
-        installSession(&self.node_a, &self.record_b, 0x51);
-        installSession(&self.node_b, &self.record_a, 0x51);
-        installSession(&self.node_a, &self.record_c, 0x52);
-        installSession(&self.node_c, &self.record_a, 0x52);
+        installSession(&self.node_a, endpoint(&self.record_b), 0x51);
+        installSession(&self.node_b, endpoint(&self.record_a), 0x51);
+        installSession(&self.node_a, endpoint(&self.record_c), 0x52);
+        installSession(&self.node_c, endpoint(&self.record_a), 0x52);
         self.driver_a = try makeDriver(&self.node_a, &self.udp_a);
         self.driver_b = try makeDriver(&self.node_b, &self.udp_b);
         self.driver_c = try makeDriver(&self.node_c, &self.udp_c);
@@ -588,39 +594,12 @@ const LookupNetwork = struct {
     }
 };
 
-fn makeDriver(core: *engine.Engine, udp: *runtime.Udp) !driver.Driver {
-    return driver.Driver.initWithConfig(core, udp, .{ .poll_interval_ms = 10 });
-}
-
-fn installSession(core: *engine.Engine, record: *const enr.Record, key_byte: u8) void {
-    const key = [_]u8{key_byte} ** 16;
-    const active = session.Session{ .read_key = key, .write_key = key };
-    core.channel.sessions.install(endpoint(record), &active, 0);
-}
-
-fn endpoint(record: *const enr.Record) types.Endpoint {
-    return .{ .node_id = record.node_id, .address = record.endpoint().? };
+fn makeDriver(core: *engine.Engine, adapter: *udp.Adapter) !driver.Driver {
+    return driver.Driver.initWithConfig(core, adapter, .{ .poll_interval_ms = 10 });
 }
 
 fn variantNodeId(base: types.NodeId, salt: u8) types.NodeId {
     var result = base;
     result[31] ^= salt;
     return result;
-}
-
-fn fakeRecord(node_id: types.NodeId, address: types.Address) enr.Record {
-    var record = std.mem.zeroes(enr.Record);
-    record.node_id = node_id;
-    switch (address) {
-        .ip4 => |value| {
-            record.ip4 = value.octets;
-            record.udp = value.port;
-        },
-        .ip6 => unreachable,
-    }
-    return record;
-}
-
-fn address4(a: u8, b: u8, c: u8, d: u8, port: u16) types.Address {
-    return .{ .ip4 = .{ .octets = .{ a, b, c, d }, .port = port } };
 }

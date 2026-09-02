@@ -1,15 +1,17 @@
 const std = @import("std");
 const calls = @import("calls.zig");
-const protocol = @import("protocol.zig");
 const message = @import("wire/message.zig");
 const constants = @import("wire/constants.zig");
 const types = @import("types.zig");
+const test_support = @import("test_support.zig");
+
+const fakeEndpoint = test_support.fakeEndpoint;
 
 test "one active call per peer uses stale-safe handles" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 2);
     defer table.deinit();
-    const peer = endpoint(1, 9_001);
+    const peer = fakeEndpoint(1, 9_001);
     const ping = pingRequest(1);
     const first = try begin(&table, peer, &ping, 10);
     try std.testing.expectError(calls.Error.PeerBusy, begin(&table, peer, &ping, 10));
@@ -30,7 +32,7 @@ test "call table owns encoded request bytes and tracks challenge nonce" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 2);
     defer table.deinit();
-    const peer = endpoint(1, 9_001);
+    const peer = fakeEndpoint(1, 9_001);
     var portal_protocol = [_]u8{ 'p', 'o', 'r', 't', 'a', 'l' };
     var payload = [_]u8{ 1, 2, 3 };
     const request = message.Message{ .talk_request = .{
@@ -81,8 +83,8 @@ test "only sent calls participate in nonce and response matching" {
     try table.init(std.testing.allocator, 2);
     defer table.deinit();
     const ping = pingRequest(1);
-    const peer_a = endpoint(1, 9_001);
-    var peer_b = endpoint(2, 9_002);
+    const peer_a = fakeEndpoint(1, 9_001);
+    var peer_b = fakeEndpoint(2, 9_002);
     peer_b.address = peer_a.address;
     const handle_a = try begin(&table, peer_a, &ping, 100);
     const handle_b = try begin(&table, peer_b, &ping, 100);
@@ -105,7 +107,7 @@ test "response matching validates type ID and NODES packet count before mutation
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 2);
     defer table.deinit();
-    const peer = endpoint(1, 9_001);
+    const peer = fakeEndpoint(1, 9_001);
     const nonce = [_]u8{0x11} ** 12;
     const request = message.Message{ .find_node = .{
         .request_id = try message.RequestId.init(&.{0x01}),
@@ -144,8 +146,8 @@ test "expiry is bounded by caller output and removes exact generations" {
     try table.init(std.testing.allocator, 2);
     defer table.deinit();
     const ping = pingRequest(1);
-    const first = try begin(&table, endpoint(1, 9_001), &ping, 10);
-    _ = try begin(&table, endpoint(2, 9_002), &ping, 10);
+    const first = try begin(&table, fakeEndpoint(1, 9_001), &ping, 10);
+    _ = try begin(&table, fakeEndpoint(2, 9_002), &ping, 10);
     var expired: [1]calls.Expired = undefined;
     try std.testing.expectEqual(@as(usize, 1), table.expire(10, &expired));
     try std.testing.expectEqual(first, expired[0].handle);
@@ -159,7 +161,7 @@ test "FINDNODE accepts only requested unique records and caps the exchange" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 1);
     defer table.deinit();
-    const peer = endpoint(0, 9_001);
+    const peer = fakeEndpoint(0, 9_001);
     const request = message.Message{ .find_node = .{
         .request_id = try message.RequestId.init(&.{0x01}),
         .distances = &.{256},
@@ -167,13 +169,13 @@ test "FINDNODE accepts only requested unique records and caps the exchange" {
     const handle = try begin(&table, peer, &request, 100);
     try table.markSent(handle, &([_]u8{0x11} ** 12), 100);
 
-    var node_ids: [protocol.findnode_result_max]types.NodeId = undefined;
+    var node_ids: [types.findnode_result_max]types.NodeId = undefined;
     for (&node_ids, 0..) |*node_id, index| {
         node_id.* = [_]u8{0} ** 32;
         node_id[0] = 0x80;
         node_id[31] = @intCast(index);
     }
-    var raw: [protocol.findnode_result_max][]const u8 = undefined;
+    var raw: [types.findnode_result_max][]const u8 = undefined;
     @memset(&raw, &.{});
     const response = message.Message{ .nodes = .{
         .request_id = request.find_node.request_id,
@@ -182,7 +184,7 @@ test "FINDNODE accepts only requested unique records and caps the exchange" {
     } };
     const result = try accept(&table, peer, &response, 99, &node_ids);
     try std.testing.expect(result.matched.terminal);
-    try std.testing.expectEqual(protocol.findnode_result_max, result.accepted_nodes.count());
+    try std.testing.expectEqual(types.findnode_result_max, result.accepted_nodes.count());
     try std.testing.expectEqual(@as(usize, 0), table.count());
 }
 
@@ -190,7 +192,7 @@ test "FINDNODE filters unsolicited and duplicate node IDs" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 1);
     defer table.deinit();
-    const peer = endpoint(0, 9_001);
+    const peer = fakeEndpoint(0, 9_001);
     const request = message.Message{ .find_node = .{
         .request_id = try message.RequestId.init(&.{0x01}),
         .distances = &.{256},
@@ -221,14 +223,17 @@ test "begin refuses a message that is not a request" {
         .recipient_ip = .{ .ip4 = .{ 127, 0, 0, 1 } },
         .recipient_port = 9_001,
     } };
-    try std.testing.expectError(calls.Error.InvalidRequest, begin(&table, endpoint(1, 9_001), &pong, 10));
+    try std.testing.expectError(
+        calls.Error.InvalidRequest,
+        begin(&table, fakeEndpoint(1, 9_001), &pong, 10),
+    );
 }
 
 test "accept refuses a handle whose call ended after matching" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 1);
     defer table.deinit();
-    const peer = endpoint(1, 9_001);
+    const peer = fakeEndpoint(1, 9_001);
     const request = pingRequest(1);
     const handle = try begin(&table, peer, &request, 100);
     try table.markSent(handle, &([_]u8{0x11} ** 12), 100);
@@ -251,7 +256,7 @@ test "responses at the deadline are not published" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 1);
     defer table.deinit();
-    const peer = endpoint(1, 9_001);
+    const peer = fakeEndpoint(1, 9_001);
     const request = pingRequest(1);
     const handle = try begin(&table, peer, &request, 100);
     try table.markSent(handle, &([_]u8{0x11} ** 12), 100);
@@ -309,11 +314,4 @@ fn nodesResponse(id: u8, total: u64) message.Message {
         .total = total,
         .enrs = &.{},
     } };
-}
-
-fn endpoint(id: u8, port: u16) types.Endpoint {
-    return .{
-        .node_id = [_]u8{id} ** 32,
-        .address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, id }, .port = port } },
-    };
 }

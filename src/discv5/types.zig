@@ -2,6 +2,11 @@ const std = @import("std");
 
 pub const NodeId = [32]u8;
 
+pub const distance_max: u16 = 256;
+pub const distance_count: usize = distance_max + 1;
+pub const findnode_result_max: usize = 16;
+pub const findnode_response_packets_max: u8 = 16;
+
 pub fn logDistance(left: *const NodeId, right: *const NodeId) u16 {
     for (left, right, 0..) |left_byte, right_byte, index| {
         const difference = left_byte ^ right_byte;

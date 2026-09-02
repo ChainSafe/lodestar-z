@@ -2,14 +2,13 @@ const std = @import("std");
 const calls = @import("calls.zig");
 const engine = @import("engine.zig");
 const enr = @import("identity/enr.zig");
-const protocol = @import("protocol.zig");
-const runtime = @import("runtime.zig");
+const udp = @import("udp.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 
-pub const Error = engine.Error || runtime.ReceiveTimeoutError || runtime.ReleaseError ||
-    runtime.SendError || std.Io.RandomSecureError || error{
+pub const Error = engine.Error || udp.ReceiveTimeoutError || udp.ReleaseError ||
+    udp.SendError || std.Io.RandomSecureError || error{
     ClockOutOfRange,
     DestinationUnreachable,
     InvalidPollInterval,
@@ -52,23 +51,23 @@ pub const Driver = struct {
     const Self = @This();
 
     core: *engine.Engine,
-    udp: *runtime.Udp,
+    udp: *udp.Adapter,
     config: Config,
     scratch: engine.Scratch = .{},
     response: engine.StandardResponse = .{},
     output: [constants.packet_size_max]u8 = undefined,
 
-    pub fn init(core: *engine.Engine, udp: *runtime.Udp) Self {
-        return .{ .core = core, .udp = udp, .config = .{} };
+    pub fn init(core: *engine.Engine, adapter: *udp.Adapter) Self {
+        return .{ .core = core, .udp = adapter, .config = .{} };
     }
 
     pub fn initWithConfig(
         core: *engine.Engine,
-        udp: *runtime.Udp,
+        adapter: *udp.Adapter,
         config: Config,
     ) Error!Self {
         if (config.poll_interval_ms == 0) return error.InvalidPollInterval;
-        return .{ .core = core, .udp = udp, .config = config };
+        return .{ .core = core, .udp = adapter, .config = config };
     }
 
     pub fn startCall(
@@ -172,7 +171,7 @@ pub const Driver = struct {
         result.progress.maintenance_started = try self.startMaintenance(io, result.now_ms);
     }
 
-    fn receiveDatagram(self: *Self, io: std.Io) Error!?runtime.Datagram {
+    fn receiveDatagram(self: *Self, io: std.Io) Error!?udp.Datagram {
         const timeout = std.Io.Timeout{ .duration = .{
             .raw = .fromMilliseconds(self.config.poll_interval_ms),
             .clock = .awake,
@@ -186,7 +185,7 @@ pub const Driver = struct {
     fn processDatagram(
         self: *Self,
         io: std.Io,
-        datagram: runtime.Datagram,
+        datagram: udp.Datagram,
         result: *StepResult,
     ) Error!void {
         var entropy = try receiveEntropy(io);
@@ -226,7 +225,7 @@ pub const Driver = struct {
             .ping, .find_node => {},
         }
         try self.core.prepareStandardResponse(&request, &self.response);
-        while (result.progress.standard_responses < protocol.findnode_response_packets_max) {
+        while (result.progress.standard_responses < types.findnode_response_packets_max) {
             var entropy = try startEntropy(io);
             defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
             const packet_length = try self.core.sendNextStandardResponse(

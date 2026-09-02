@@ -1,6 +1,6 @@
 const std = @import("std");
 const calls = @import("calls.zig");
-const engine_mod = @import("engine.zig");
+const engine = @import("engine.zig");
 const enr = @import("identity/enr.zig");
 const routing = @import("routing.zig");
 const types = @import("types.zig");
@@ -12,7 +12,7 @@ pub const request_distance_count: usize = 3;
 pub const candidate_capacity: usize = routing.table_capacity;
 pub const discovered_port_min: u16 = 1_025;
 
-pub const Error = engine_mod.Error || error{
+pub const Error = engine.Error || error{
     InvalidSeed,
     TooManySeeds,
     UnexpectedResponse,
@@ -20,7 +20,7 @@ pub const Error = engine_mod.Error || error{
 };
 
 pub const Started = struct {
-    call: engine_mod.StartResult,
+    call: engine.StartResult,
     peer: types.Endpoint,
 };
 
@@ -90,11 +90,11 @@ pub const Lookup = struct {
 
     pub fn startNext(
         self: *Self,
-        core: *engine_mod.Engine,
+        core: *engine.Engine,
         out: []u8,
         request_id: message.RequestId,
         now_ms: u64,
-        entropy: *const engine_mod.StartEntropy,
+        entropy: *const engine.StartEntropy,
     ) Error!?Started {
         if (self.finished or self.waiting_count == parallelism) return null;
         const index = self.nextCandidateIndex() orelse {
@@ -132,8 +132,8 @@ pub const Lookup = struct {
 
     pub fn onResponse(
         self: *Self,
-        core: *engine_mod.Engine,
-        response: *const engine_mod.AuthenticatedResponse,
+        core: *engine.Engine,
+        response: *const engine.AuthenticatedResponse,
         now_ms: u64,
     ) Error!void {
         if (response.matched.response != .nodes) return Error.UnexpectedResponse;
@@ -157,7 +157,7 @@ pub const Lookup = struct {
 
     pub fn onFailure(
         self: *Self,
-        core: *engine_mod.Engine,
+        core: *engine.Engine,
         handle: calls.Handle,
     ) Error!void {
         const index = self.waitingIndex(handle) orelse return Error.UnknownQuery;
@@ -166,7 +166,7 @@ pub const Lookup = struct {
         self.waiting_count -= 1;
     }
 
-    pub fn cancel(self: *Self, core: *engine_mod.Engine) void {
+    pub fn cancel(self: *Self, core: *engine.Engine) void {
         for (self.activeCandidatesMut()) |*candidate| switch (candidate.state) {
             .waiting => |handle| {
                 _ = core.cancelCall(handle);

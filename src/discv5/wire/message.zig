@@ -1,7 +1,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
-const protocol = @import("../protocol.zig");
 const rlp = @import("rlp.zig");
+const types = @import("../types.zig");
 
 pub const Error = rlp.Error || error{
     InvalidMessage,
@@ -68,8 +68,8 @@ pub const TalkResponse = struct {
 };
 
 pub const DecodeScratch = struct {
-    distances: [protocol.distance_count]u16 = undefined,
-    enrs: [protocol.findnode_result_max][]const u8 = undefined,
+    distances: [types.distance_count]u16 = undefined,
+    enrs: [types.findnode_result_max][]const u8 = undefined,
 };
 
 pub const Message = union(enum) {
@@ -156,18 +156,18 @@ fn encodePong(writer: *rlp.Writer, pong: *const Pong) Error!void {
 }
 
 fn encodeFindNode(writer: *rlp.Writer, find_node: *const FindNode) Error!void {
-    if (find_node.distances.len > protocol.distance_count) return Error.InvalidMessage;
+    if (find_node.distances.len > types.distance_count) return Error.InvalidMessage;
     try writer.writeBytes(find_node.request_id.slice());
     const distances_mark = try writer.beginList();
     for (find_node.distances) |distance| {
-        if (distance > protocol.distance_max) return Error.InvalidMessage;
+        if (distance > types.distance_max) return Error.InvalidMessage;
         try writer.writeUint(distance);
     }
     writer.finishList(distances_mark);
 }
 
 fn encodeNodes(writer: *rlp.Writer, nodes: *const Nodes) Error!void {
-    if (nodes.enrs.len > protocol.findnode_result_max) return Error.InvalidMessage;
+    if (nodes.enrs.len > types.findnode_result_max) return Error.InvalidMessage;
     try writer.writeBytes(nodes.request_id.slice());
     try writer.writeUint(nodes.total);
     const enrs_mark = try writer.beginList();
@@ -219,11 +219,11 @@ fn decodeFindNode(data: []const u8, scratch: *DecodeScratch) Error!FindNode {
     const request_id = try readRequestId(&list);
     var distances = try readList(&list);
     const encoded_distances = distances;
-    var seen = std.StaticBitSet(protocol.distance_count).initEmpty();
+    var seen = std.StaticBitSet(types.distance_count).initEmpty();
     var distances_count: usize = 0;
     while (!distances.atEnd()) {
         const distance = try readUint(&distances);
-        if (distance > protocol.distance_max) return Error.InvalidMessage;
+        if (distance > types.distance_max) return Error.InvalidMessage;
         const index: usize = @intCast(distance);
         if (seen.isSet(index)) continue;
         seen.set(index);
@@ -232,7 +232,7 @@ fn decodeFindNode(data: []const u8, scratch: *DecodeScratch) Error!FindNode {
     try expectEnd(&list);
 
     distances = encoded_distances;
-    seen = std.StaticBitSet(protocol.distance_count).initEmpty();
+    seen = std.StaticBitSet(types.distance_count).initEmpty();
     var stored: usize = 0;
     while (!distances.atEnd()) {
         const distance = try readUint(&distances);
@@ -255,7 +255,7 @@ fn decodeNodes(data: []const u8, scratch: *DecodeScratch) Error!Nodes {
     var enrs_count: usize = 0;
     while (!enrs.atEnd()) {
         _ = enrs.readRawItem() catch return Error.InvalidEncoding;
-        if (enrs_count == protocol.findnode_result_max) return Error.InvalidMessage;
+        if (enrs_count == types.findnode_result_max) return Error.InvalidMessage;
         enrs_count += 1;
     }
     try expectEnd(&list);

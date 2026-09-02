@@ -1,12 +1,15 @@
 const std = @import("std");
 const session = @import("session.zig");
 const types = @import("types.zig");
+const test_support = @import("test_support.zig");
+
+const fakeEndpoint = test_support.fakeEndpoint;
 
 test "session table keeps key direction and bounded nonces" {
     var table: session.Store = undefined;
     try table.init(std.testing.allocator, 2, 2);
     defer table.deinit();
-    const peer = endpoint(1, 9_001);
+    const peer = fakeEndpoint(1, 9_001);
     const read_key = [_]u8{0x11} ** 16;
     const write_key = [_]u8{0x22} ** 16;
     const active = session.Session{ .read_key = read_key, .write_key = write_key };
@@ -42,7 +45,7 @@ test "nonce exhaustion retires the unusable session" {
     var table: session.Store = undefined;
     try table.init(std.testing.allocator, 1, 1);
     defer table.deinit();
-    const peer = endpoint(1, 9_001);
+    const peer = fakeEndpoint(1, 9_001);
     const key = [_]u8{0x11} ** 16;
     const active = session.Session{
         .read_key = key,
@@ -62,27 +65,27 @@ test "challenge churn preserves established sessions" {
     var table: session.Store = undefined;
     try table.init(std.testing.allocator, 1, 2);
     defer table.deinit();
-    const established = endpoint(1, 9_001);
+    const established = fakeEndpoint(1, 9_001);
     const key = [_]u8{0x11} ** 16;
     const active = session.Session{ .read_key = key, .write_key = key };
     table.install(established, &active, 1);
     const challenge = [_]u8{0x55} ** 63;
-    try std.testing.expect(table.putChallenge(endpoint(2, 9_002), &challenge, null, 2));
-    try std.testing.expect(table.putChallenge(endpoint(3, 9_003), &challenge, null, 3));
-    try std.testing.expect(table.putChallenge(endpoint(4, 9_004), &challenge, null, 4));
+    try std.testing.expect(table.putChallenge(fakeEndpoint(2, 9_002), &challenge, null, 2));
+    try std.testing.expect(table.putChallenge(fakeEndpoint(3, 9_003), &challenge, null, 3));
+    try std.testing.expect(table.putChallenge(fakeEndpoint(4, 9_004), &challenge, null, 4));
 
     try std.testing.expectEqual(@as(usize, 1), table.sessionCount());
     try std.testing.expectEqual(key, table.readKey(established).?);
-    try std.testing.expect(table.getChallenge(endpoint(2, 9_002)) == null);
-    try std.testing.expect(table.getChallenge(endpoint(3, 9_003)) != null);
-    try std.testing.expect(table.getChallenge(endpoint(4, 9_004)) != null);
+    try std.testing.expect(table.getChallenge(fakeEndpoint(2, 9_002)) == null);
+    try std.testing.expect(table.getChallenge(fakeEndpoint(3, 9_003)) != null);
+    try std.testing.expect(table.getChallenge(fakeEndpoint(4, 9_004)) != null);
 }
 
 test "install consumes a challenge and expiration removes pending challenges" {
     var table: session.Store = undefined;
     try table.init(std.testing.allocator, 2, 2);
     defer table.deinit();
-    const peer = endpoint(1, 9_001);
+    const peer = fakeEndpoint(1, 9_001);
     const challenge = [_]u8{0x55} ** 63;
     try std.testing.expect(table.putChallenge(peer, &challenge, null, 10));
     var replacement = challenge;
@@ -95,7 +98,7 @@ test "install consumes a challenge and expiration removes pending challenges" {
     table.install(peer, &active, 20);
     try std.testing.expectEqual(@as(usize, 0), table.challengeCount());
 
-    try std.testing.expect(table.putChallenge(endpoint(2, 9_002), &challenge, null, 30));
+    try std.testing.expect(table.putChallenge(fakeEndpoint(2, 9_002), &challenge, null, 30));
     try std.testing.expectEqual(@as(usize, 1), table.expireChallenges(40, 10));
     try std.testing.expectEqual(@as(usize, 0), table.challengeCount());
     try std.testing.expectEqual(@as(usize, 1), table.sessionCount());
@@ -105,21 +108,14 @@ test "idle session expiration is independent from challenges" {
     var table: session.Store = undefined;
     try table.init(std.testing.allocator, 1, 1);
     defer table.deinit();
-    const peer = endpoint(1, 9_001);
+    const peer = fakeEndpoint(1, 9_001);
     const key = [_]u8{0x11} ** 16;
     const active = session.Session{ .read_key = key, .write_key = key };
     table.install(peer, &active, 10);
     const challenge = [_]u8{0x55} ** 63;
-    try std.testing.expect(table.putChallenge(endpoint(2, 9_002), &challenge, null, 15));
+    try std.testing.expect(table.putChallenge(fakeEndpoint(2, 9_002), &challenge, null, 15));
     try std.testing.expectEqual(key, table.readKey(peer).?);
     try std.testing.expectEqual(@as(usize, 1), table.expireSessions(20, 10));
     try std.testing.expectEqual(@as(usize, 0), table.sessionCount());
     try std.testing.expectEqual(@as(usize, 1), table.challengeCount());
-}
-
-fn endpoint(id: u8, port: u16) types.Endpoint {
-    return .{
-        .node_id = [_]u8{id} ** 32,
-        .address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, id }, .port = port } },
-    };
 }

@@ -1,7 +1,7 @@
 const std = @import("std");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
-const handshake_mod = @import("identity/handshake.zig");
+const handshake = @import("identity/handshake.zig");
 const session = @import("session.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
@@ -237,7 +237,7 @@ pub const Channel = struct {
         return @intCast(encoded.len);
     }
 
-    pub fn handshake(self: *Self, out: []u8, args: HandshakeArgs) Error!Sealed {
+    pub fn answerChallenge(self: *Self, out: []u8, args: HandshakeArgs) Error!Sealed {
         const local_enr: []const u8 = if (args.enr_sequence < self.local_record.sequence)
             self.local_record.slice()
         else
@@ -247,7 +247,7 @@ pub const Channel = struct {
         var ephemeral_key = try crypto.keyPairFromSecret(&args.entropy.ephemeral_secret);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&ephemeral_key));
         const ephemeral_public_key = crypto.compressedPublicKey(&ephemeral_key);
-        var keys = try handshake_mod.deriveKeys(
+        var keys = try handshake.deriveKeys(
             &ephemeral_key,
             args.remote_public_key,
             &self.local_record.node_id,
@@ -255,7 +255,7 @@ pub const Channel = struct {
             args.challenge_data,
         );
         defer std.crypto.secureZero(u8, std.mem.asBytes(&keys));
-        const signature = try handshake_mod.signProof(
+        const signature = try handshake.signProof(
             &self.local_key,
             args.challenge_data,
             &ephemeral_public_key,
@@ -333,14 +333,14 @@ pub const Channel = struct {
                 IdentityError.MissingIdentity => .invalid_handshake,
                 else => .invalid_record,
             });
-        handshake_mod.verifyProof(
+        handshake.verifyProof(
             authdata.id_signature,
             &identity.public_key,
             &stored.data,
             authdata.ephemeral_key,
             &self.local_record.node_id,
         ) catch return rejected(.invalid_handshake);
-        var keys = handshake_mod.deriveKeys(
+        var keys = handshake.deriveKeys(
             &self.local_key,
             authdata.ephemeral_key,
             &peer.node_id,
@@ -408,7 +408,9 @@ fn selectIdentity(
 ) IdentityError!Identity {
     if (encoded) |raw| {
         const record = try enr.Record.init(raw);
-        if (!std.mem.eql(u8, &record.node_id, expected_id)) return IdentityError.InvalidRemoteRecord;
+        if (!std.mem.eql(u8, &record.node_id, expected_id)) {
+            return IdentityError.InvalidRemoteRecord;
+        }
         const newer = if (known) |identity| record.sequence > identity.sequence else true;
         if (newer) return .{ .public_key = record.public_key, .update = record };
     }

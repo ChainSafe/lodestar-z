@@ -9,6 +9,12 @@ const session = @import("session.zig");
 const test_support = @import("test_support.zig");
 const types = @import("types.zig");
 
+const address4 = test_support.address4;
+const fakeRecord = test_support.fakeRecord;
+const installSession = test_support.installSession;
+const keyPair = test_support.keyPair;
+const sealEntropy = test_support.sealEntropy;
+
 test "lookup requests the target distance and adjacent buckets" {
     const zero = [_]u8{0} ** 32;
     var distance_255 = zero;
@@ -38,7 +44,7 @@ test "lookup uses the call table for bounded parallel queries" {
     var seeds: [4]routing.Entry = undefined;
     for (&seeds, 0..) |*seed, index| {
         seed.* = fakeEntry(@intCast(index + 1));
-        installSession(&core, seed.peer);
+        installSession(&core, seed.peer, 0x55);
     }
     var operation: lookup.Lookup = undefined;
     var operation_candidates: lookup.Candidates = undefined;
@@ -57,7 +63,7 @@ test "lookup uses the call table for bounded parallel queries" {
             &packet_buffer,
             try message.RequestId.init(&.{@intCast(index + 1)}),
             1,
-            &startEntropy(@intCast(index + 1)),
+            &sealEntropy(@intCast(index + 1)),
         )).?;
         try std.testing.expect(operation.knownRecord(started[index].call.handle) != null);
     }
@@ -67,7 +73,7 @@ test "lookup uses the call table for bounded parallel queries" {
         &packet_buffer,
         try message.RequestId.init(&.{9}),
         1,
-        &startEntropy(9),
+        &sealEntropy(9),
     )) == null);
 
     try operation.onFailure(&core, started[0].call.handle);
@@ -76,7 +82,7 @@ test "lookup uses the call table for bounded parallel queries" {
         &packet_buffer,
         try message.RequestId.init(&.{4}),
         2,
-        &startEntropy(4),
+        &sealEntropy(4),
     )).?;
     try std.testing.expectEqual(lookup.parallelism, operation.waitingCount());
     for (1..4) |index| try completeNodes(
@@ -93,7 +99,7 @@ test "lookup uses the call table for bounded parallel queries" {
         &packet_buffer,
         try message.RequestId.init(&.{10}),
         10,
-        &startEntropy(10),
+        &sealEntropy(10),
     )) == null);
     try std.testing.expect(operation.isFinished());
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
@@ -106,7 +112,7 @@ test "lookup rejects relayed private and low-port candidates" {
     var core = try initEngine();
     defer core.deinit();
     const seed = fakeEntry(1);
-    installSession(&core, seed.peer);
+    installSession(&core, seed.peer, 0x55);
     var operation: lookup.Lookup = undefined;
     var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
@@ -123,7 +129,7 @@ test "lookup rejects relayed private and low-port candidates" {
         &packet_buffer,
         request_id,
         1,
-        &startEntropy(1),
+        &sealEntropy(1),
     )).?;
     var records = [_]enr.Record{
         fakeRecord(nodeId(20), address4(198, 51, 100, 20, 9_020), 1),
@@ -145,7 +151,7 @@ test "lookup rejects relayed private and low-port candidates" {
         &packet_buffer,
         try message.RequestId.init(&.{2}),
         3,
-        &startEntropy(2),
+        &sealEntropy(2),
     )).?;
     try std.testing.expectEqual(nodeId(20), next.peer.node_id);
     operation.cancel(&core);
@@ -158,7 +164,7 @@ test "lookup stops after the closest sixteen successful peers" {
     var seeds: [lookup.result_max]routing.Entry = undefined;
     for (&seeds, 0..) |*seed, index| {
         seed.* = fakeEntry(@intCast(index + 1));
-        installSession(&core, seed.peer);
+        installSession(&core, seed.peer, 0x55);
     }
     var operation: lookup.Lookup = undefined;
     var operation_candidates: lookup.Candidates = undefined;
@@ -180,7 +186,7 @@ test "lookup stops after the closest sixteen successful peers" {
             &packet_buffer,
             request_id,
             @intCast(index + 1),
-            &startEntropy(@intCast(index + 1)),
+            &sealEntropy(@intCast(index + 1)),
         )).?;
         const records: []const enr.Record = if (index == 0) &.{farther} else &.{};
         try completeNodes(
@@ -198,13 +204,16 @@ test "lookup stops after the closest sixteen successful peers" {
         &packet_buffer,
         try message.RequestId.init(&.{20}),
         20,
-        &startEntropy(20),
+        &sealEntropy(20),
     )) == null);
     try std.testing.expect(operation.isFinished());
     var results: [lookup.result_max + 1]enr.Record = undefined;
     const selected = operation.results(&results);
     try std.testing.expectEqual(lookup.result_max, selected.len);
-    for (selected, 1..) |record, id| try std.testing.expectEqual(nodeId(@intCast(id)), record.node_id);
+    for (selected, 1..) |record, id| try std.testing.expectEqual(
+        nodeId(@intCast(id)),
+        record.node_id,
+    );
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
 }
 
@@ -238,15 +247,15 @@ test "empty lookup finishes without creating a call" {
         &packet_buffer,
         try message.RequestId.init(&.{1}),
         1,
-        &startEntropy(1),
+        &sealEntropy(1),
     )) == null);
     try std.testing.expect(operation.isFinished());
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
 }
 
 fn initEngine() !engine.Engine {
-    const key = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-    const local_record = try test_support.buildRecord(
+    const key = try keyPair(0x11);
+    const local_record = try enr.Record.create(
         &key,
         1,
         address4(203, 0, 113, 1, 9_000),
@@ -302,45 +311,9 @@ fn fakeEntry(id: u8) routing.Entry {
     };
 }
 
-fn fakeRecord(node_id: types.NodeId, endpoint: types.Address, sequence: u64) enr.Record {
-    var record = std.mem.zeroes(enr.Record);
-    record.node_id = node_id;
-    record.sequence = sequence;
-    switch (endpoint) {
-        .ip4 => |value| {
-            record.ip4 = value.octets;
-            record.udp = value.port;
-        },
-        .ip6 => |value| {
-            record.ip6 = value.octets;
-            record.udp6 = value.port;
-        },
-    }
-    return record;
-}
-
 fn nodeId(id: u8) types.NodeId {
     var node_id = [_]u8{0} ** 32;
     node_id[0] = 0x80;
     node_id[31] = id;
     return node_id;
-}
-
-fn installSession(core: *engine.Engine, peer: types.Endpoint) void {
-    const key = [_]u8{0x55} ** 16;
-    const active = session.Session{ .read_key = key, .write_key = key };
-    core.channel.sessions.install(peer, &active, 0);
-}
-
-fn startEntropy(seed: u8) engine.StartEntropy {
-    return .{
-        .masking_iv = [_]u8{seed} ** 16,
-        .nonce = [_]u8{seed +% 1} ** 12,
-        .nonce_tail = [_]u8{seed +% 2} ** 8,
-        .sessionless_key = [_]u8{seed +% 3} ** 16,
-    };
-}
-
-fn address4(a: u8, b: u8, c: u8, d: u8, port: u16) types.Address {
-    return .{ .ip4 = .{ .octets = .{ a, b, c, d }, .port = port } };
 }

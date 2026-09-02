@@ -35,7 +35,7 @@ pub const SendError = net.Socket.SendError || error{
 };
 
 /// Caller serializes all methods and releases each datagram before receiving another.
-pub const Udp = struct {
+pub const Adapter = struct {
     const Self = @This();
 
     socket: net.Socket,
@@ -150,5 +150,5 @@ fn isMappedIp4(ip: [16]u8) bool {
 }
 
 comptime {
-    std.debug.assert(@sizeOf(Udp) <= 2 * 1_024);
+    std.debug.assert(@sizeOf(Adapter) <= 2 * 1_024);
 }

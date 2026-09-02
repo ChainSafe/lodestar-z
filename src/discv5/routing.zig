@@ -1,6 +1,5 @@
 const std = @import("std");
 const enr = @import("identity/enr.zig");
-const protocol = @import("protocol.zig");
 const types = @import("types.zig");
 
 pub const bucket_size: usize = 16;
@@ -198,14 +197,14 @@ pub const Table = struct {
         out: []enr.Record,
     ) Error![]enr.Record {
         std.debug.assert(std.mem.eql(u8, &local_record.node_id, &self.local_id));
-        if (distances.len > protocol.distance_count) return Error.TooManyDistances;
-        var requested = [_]bool{false} ** protocol.distance_count;
+        if (distances.len > types.distance_count) return Error.TooManyDistances;
+        var requested = [_]bool{false} ** types.distance_count;
         for (distances) |distance| {
-            if (distance > protocol.distance_max) return Error.InvalidDistance;
+            if (distance > types.distance_max) return Error.InvalidDistance;
             requested[distance] = true;
         }
 
-        const limit = @min(out.len, protocol.findnode_result_max);
+        const limit = @min(out.len, types.findnode_result_max);
         var result_length: usize = 0;
         if (requested[0] and result_length < limit and
             recordRelayAllowed(local_record, requester))
@@ -213,7 +212,7 @@ pub const Table = struct {
             out[result_length] = local_record.*;
             result_length += 1;
         }
-        for (1..protocol.distance_count) |distance| {
+        for (1..types.distance_count) |distance| {
             if (result_length == limit) break;
             if (!requested[distance]) continue;
             const index = bucketIndex(@intCast(distance));
@@ -455,7 +454,7 @@ fn classifyIp6(ip: [16]u8) AddressClass {
 }
 
 fn bucketIndex(distance: u16) usize {
-    const bucket_min_distance = protocol.distance_max - bucket_count;
+    const bucket_min_distance = types.distance_max - bucket_count;
     if (distance <= bucket_min_distance) return 0;
     return @intCast(distance - bucket_min_distance - 1);
 }
@@ -466,7 +465,7 @@ fn bucketOffset(index: usize) usize {
 }
 
 comptime {
-    std.debug.assert(bucket_count == protocol.distance_max / 15);
+    std.debug.assert(bucket_count == types.distance_max / 15);
     std.debug.assert(table_capacity == 272);
     std.debug.assert(bucket_subnet_limit <= bucket_size);
     std.debug.assert(table_subnet_limit <= table_capacity);
