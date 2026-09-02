@@ -1,5 +1,5 @@
 const std = @import("std");
-const udp = @import("udp.zig");
+const Udp = @import("Udp.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 
@@ -7,9 +7,9 @@ const net = std.Io.net;
 
 test "UDP admits one borrowed datagram at a time" {
     const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-    var receiver = try udp.Adapter.bind(std.testing.io, loopback);
+    var receiver = try Udp.bind(std.testing.io, loopback);
     defer receiver.close(std.testing.io);
-    var sender = try udp.Adapter.bind(std.testing.io, loopback);
+    var sender = try Udp.bind(std.testing.io, loopback);
     defer sender.close(std.testing.io);
 
     const payload = [_]u8{0x44} ** constants.packet_size_min;
@@ -41,7 +41,7 @@ test "UDP admits one borrowed datagram at a time" {
 }
 
 test "UDP rejects oversized sends before I/O" {
-    var adapter = udp.Adapter.init(undefined);
+    var adapter = Udp.init(undefined);
     const oversized = [_]u8{0x44} ** (constants.packet_size_max + 1);
     try std.testing.expectError(
         error.DatagramTooLarge,

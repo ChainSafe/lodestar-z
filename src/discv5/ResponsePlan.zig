@@ -4,6 +4,8 @@ const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 
+const ResponsePlan = @This();
+
 pub const Error = message.Error;
 
 const Nodes = struct {
@@ -13,54 +15,52 @@ const Nodes = struct {
 
 pub const RawRecords = [types.findnode_result_max][]const u8;
 
-pub const Plan = struct {
-    peer: types.Endpoint = undefined,
-    records: [types.findnode_result_max]enr.Record = undefined,
-    boundaries: [types.findnode_response_packets_max + 1]u8 = undefined,
-    sent: u8 = 0,
-    body: union(enum) {
-        none,
-        pong: message.Pong,
-        nodes: Nodes,
-    } = .none,
+peer: types.Endpoint = undefined,
+records: [types.findnode_result_max]enr.Record = undefined,
+boundaries: [types.findnode_response_packets_max + 1]u8 = undefined,
+sent: u8 = 0,
+body: union(enum) {
+    none,
+    pong: message.Pong,
+    nodes: Nodes,
+} = .none,
 
-    /// The returned NODES message borrows `raw` for its record slices.
-    pub fn next(self: *const Plan, raw: *RawRecords) ?message.Message {
-        return switch (self.body) {
-            .none => null,
-            .pong => |value| if (self.sent == 0) .{ .pong = value } else null,
-            .nodes => |value| blk: {
-                if (self.sent == value.packet_count) break :blk null;
-                std.debug.assert(self.sent < value.packet_count);
-                const start = self.boundaries[self.sent];
-                const end = self.boundaries[self.sent + 1];
-                std.debug.assert(start <= end);
-                std.debug.assert(end <= self.records.len);
-                break :blk .{ .nodes = .{
-                    .request_id = value.request_id,
-                    .total = value.packet_count,
-                    .enrs = sliceRecords(self.records[start..end], raw),
-                } };
-            },
-        };
-    }
+/// The returned NODES message borrows `raw` for its record slices.
+pub fn next(self: *const ResponsePlan, raw: *RawRecords) ?message.Message {
+    return switch (self.body) {
+        .none => null,
+        .pong => |value| if (self.sent == 0) .{ .pong = value } else null,
+        .nodes => |value| blk: {
+            if (self.sent == value.packet_count) break :blk null;
+            std.debug.assert(self.sent < value.packet_count);
+            const start = self.boundaries[self.sent];
+            const end = self.boundaries[self.sent + 1];
+            std.debug.assert(start <= end);
+            std.debug.assert(end <= self.records.len);
+            break :blk .{ .nodes = .{
+                .request_id = value.request_id,
+                .total = value.packet_count,
+                .enrs = sliceRecords(self.records[start..end], raw),
+            } };
+        },
+    };
+}
 
-    pub fn markSent(self: *Plan) void {
-        std.debug.assert(!self.complete());
-        self.sent += 1;
-    }
+pub fn markSent(self: *ResponsePlan) void {
+    std.debug.assert(!self.complete());
+    self.sent += 1;
+}
 
-    pub fn complete(self: *const Plan) bool {
-        return switch (self.body) {
-            .none => true,
-            .pong => self.sent == 1,
-            .nodes => |value| self.sent == value.packet_count,
-        };
-    }
-};
+pub fn complete(self: *const ResponsePlan) bool {
+    return switch (self.body) {
+        .none => true,
+        .pong => self.sent == 1,
+        .nodes => |value| self.sent == value.packet_count,
+    };
+}
 
 pub fn preparePong(
-    plan: *Plan,
+    plan: *ResponsePlan,
     peer: types.Endpoint,
     request_id: message.RequestId,
     local_enr_sequence: u64,
@@ -84,7 +84,7 @@ pub fn preparePong(
 }
 
 pub fn prepareNodes(
-    plan: *Plan,
+    plan: *ResponsePlan,
     peer: types.Endpoint,
     request_id: message.RequestId,
     record_count: usize,
@@ -136,7 +136,7 @@ fn sliceRecords(records: []const enr.Record, raw: *RawRecords) []const []const u
     return raw[0..records.len];
 }
 
-fn setNodes(plan: *Plan, request_id: message.RequestId, packet_count: u8) void {
+fn setNodes(plan: *ResponsePlan, request_id: message.RequestId, packet_count: u8) void {
     std.debug.assert(packet_count > 0);
     std.debug.assert(packet_count <= types.findnode_response_packets_max);
     plan.body = .{ .nodes = .{
@@ -146,5 +146,5 @@ fn setNodes(plan: *Plan, request_id: message.RequestId, packet_count: u8) void {
 }
 
 comptime {
-    std.debug.assert(@sizeOf(Plan) <= 8 * 1_024);
+    std.debug.assert(@sizeOf(ResponsePlan) <= 8 * 1_024);
 }

@@ -1,18 +1,18 @@
 const std = @import("std");
-const session = @import("session.zig");
+const SessionStore = @import("SessionStore.zig");
 const types = @import("types.zig");
 const test_support = @import("test_support.zig");
 
 const fakeEndpoint = test_support.fakeEndpoint;
 
 test "session table keeps key direction and bounded nonces" {
-    var table: session.Store = undefined;
+    var table: SessionStore = undefined;
     try table.init(std.testing.allocator, 2, 2);
     defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const read_key = [_]u8{0x11} ** 16;
     const write_key = [_]u8{0x22} ** 16;
-    const active = session.Session{ .read_key = read_key, .write_key = write_key };
+    const active = SessionStore.Session{ .read_key = read_key, .write_key = write_key };
     table.install(peer, &active, 1);
 
     try std.testing.expectEqual(read_key, table.readKey(peer).?);
@@ -26,35 +26,35 @@ test "session table keeps key direction and bounded nonces" {
 }
 
 test "session table rejects zero and excessive configured capacities" {
-    var table: session.Store = undefined;
+    var table: SessionStore = undefined;
     try std.testing.expectError(
-        session.Error.InvalidCapacity,
+        SessionStore.Error.InvalidCapacity,
         table.init(std.testing.allocator, 0, 1),
     );
     try std.testing.expectError(
-        session.Error.InvalidCapacity,
-        table.init(std.testing.allocator, session.session_capacity_max + 1, 1),
+        SessionStore.Error.InvalidCapacity,
+        table.init(std.testing.allocator, SessionStore.session_capacity_max + 1, 1),
     );
     try std.testing.expectError(
-        session.Error.InvalidCapacity,
-        table.init(std.testing.allocator, 1, session.challenge_capacity_max + 1),
+        SessionStore.Error.InvalidCapacity,
+        table.init(std.testing.allocator, 1, SessionStore.challenge_capacity_max + 1),
     );
 }
 
 test "nonce exhaustion retires the unusable session" {
-    var table: session.Store = undefined;
+    var table: SessionStore = undefined;
     try table.init(std.testing.allocator, 1, 1);
     defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const key = [_]u8{0x11} ** 16;
-    const active = session.Session{
+    const active = SessionStore.Session{
         .read_key = key,
         .write_key = key,
         .nonce_counter = std.math.maxInt(u32),
     };
     table.install(peer, &active, 1);
     try std.testing.expectError(
-        session.Error.NonceExhausted,
+        SessionStore.Error.NonceExhausted,
         table.outbound(peer, &([_]u8{0x22} ** 8), 2),
     );
     try std.testing.expectEqual(@as(usize, 0), table.sessionCount());
@@ -62,12 +62,12 @@ test "nonce exhaustion retires the unusable session" {
 }
 
 test "challenge churn preserves established sessions" {
-    var table: session.Store = undefined;
+    var table: SessionStore = undefined;
     try table.init(std.testing.allocator, 1, 2);
     defer table.deinit(std.testing.allocator);
     const established = fakeEndpoint(1, 9_001);
     const key = [_]u8{0x11} ** 16;
-    const active = session.Session{ .read_key = key, .write_key = key };
+    const active = SessionStore.Session{ .read_key = key, .write_key = key };
     table.install(established, &active, 1);
     const challenge = [_]u8{0x55} ** 63;
     try std.testing.expect(table.putChallenge(fakeEndpoint(2, 9_002), &challenge, null, 2));
@@ -82,7 +82,7 @@ test "challenge churn preserves established sessions" {
 }
 
 test "install consumes a challenge and expiration removes pending challenges" {
-    var table: session.Store = undefined;
+    var table: SessionStore = undefined;
     try table.init(std.testing.allocator, 2, 2);
     defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
@@ -94,7 +94,7 @@ test "install consumes a challenge and expiration removes pending challenges" {
     try std.testing.expectEqual(challenge, table.getChallenge(peer).?.data);
     try std.testing.expectEqual(@as(usize, 0), table.expireChallenges(19, 10));
     const key = [_]u8{0x11} ** 16;
-    const active = session.Session{ .read_key = key, .write_key = key };
+    const active = SessionStore.Session{ .read_key = key, .write_key = key };
     table.install(peer, &active, 20);
     try std.testing.expectEqual(@as(usize, 0), table.challengeCount());
 
@@ -105,12 +105,12 @@ test "install consumes a challenge and expiration removes pending challenges" {
 }
 
 test "idle session expiration is independent from challenges" {
-    var table: session.Store = undefined;
+    var table: SessionStore = undefined;
     try table.init(std.testing.allocator, 1, 1);
     defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const key = [_]u8{0x11} ** 16;
-    const active = session.Session{ .read_key = key, .write_key = key };
+    const active = SessionStore.Session{ .read_key = key, .write_key = key };
     table.install(peer, &active, 10);
     const challenge = [_]u8{0x55} ** 63;
     try std.testing.expect(table.putChallenge(fakeEndpoint(2, 9_002), &challenge, null, 15));

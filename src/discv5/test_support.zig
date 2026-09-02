@@ -1,9 +1,9 @@
 const std = @import("std");
-const channel = @import("channel.zig");
+const Channel = @import("Channel.zig");
 const crypto = @import("identity/crypto.zig");
-const engine = @import("engine.zig");
+const Engine = @import("Engine.zig");
 const enr = @import("identity/enr.zig");
-const session = @import("session.zig");
+const SessionStore = @import("SessionStore.zig");
 const types = @import("types.zig");
 
 pub fn keyPair(seed: u8) !crypto.KeyPair {
@@ -47,13 +47,13 @@ pub fn fakeRecord(node_id: types.NodeId, address: types.Address, sequence: u64) 
     return rec;
 }
 
-pub fn installSession(core: *engine.Engine, peer: types.Endpoint, key_byte: u8) void {
+pub fn installSession(core: *Engine, peer: types.Endpoint, key_byte: u8) void {
     const key = [_]u8{key_byte} ** 16;
-    const active = session.Session{ .read_key = key, .write_key = key };
+    const active = SessionStore.Session{ .read_key = key, .write_key = key };
     core.channel.sessions.install(peer, &active, 0);
 }
 
-pub fn sealEntropy(seed: u8) channel.SealEntropy {
+pub fn sealEntropy(seed: u8) Channel.SealEntropy {
     return .{
         .masking_iv = [_]u8{seed} ** 16,
         .nonce = [_]u8{seed +% 1} ** 12,
@@ -62,14 +62,14 @@ pub fn sealEntropy(seed: u8) channel.SealEntropy {
     };
 }
 
-pub fn challengeEntropy(seed: u8) channel.ChallengeEntropy {
+pub fn challengeEntropy(seed: u8) Channel.ChallengeEntropy {
     return .{
         .masking_iv = [_]u8{seed} ** 16,
         .id_nonce = [_]u8{seed +% 1} ** 16,
     };
 }
 
-pub fn handshakeEntropy(seed: u8) channel.HandshakeEntropy {
+pub fn handshakeEntropy(seed: u8) Channel.HandshakeEntropy {
     return .{
         .masking_iv = [_]u8{seed} ** 16,
         .nonce_tail = [_]u8{seed +% 1} ** 8,
@@ -77,7 +77,7 @@ pub fn handshakeEntropy(seed: u8) channel.HandshakeEntropy {
     };
 }
 
-pub fn receiveArgs(now_ms: u64, seed: u8) engine.ReceiveArgs {
+pub fn receiveArgs(now_ms: u64, seed: u8) Engine.ReceiveArgs {
     return .{
         .now_ms = now_ms,
         .entropy = .{
@@ -87,7 +87,7 @@ pub fn receiveArgs(now_ms: u64, seed: u8) engine.ReceiveArgs {
     };
 }
 
-pub fn engineConfig() engine.Config {
+pub fn engineConfig() Engine.Config {
     return .{
         .session_capacity = 4,
         .challenge_capacity = 4,
@@ -98,7 +98,7 @@ pub fn engineConfig() engine.Config {
     };
 }
 
-pub fn channelConfig() channel.Config {
+pub fn channelConfig() Channel.Config {
     return .{
         .session_capacity = 4,
         .challenge_capacity = 4,

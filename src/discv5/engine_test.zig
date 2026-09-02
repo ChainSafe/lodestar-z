@@ -1,11 +1,12 @@
 const std = @import("std");
-const calls = @import("calls.zig");
-const engine = @import("engine.zig");
+const CallTable = @import("CallTable.zig");
+const Engine = @import("Engine.zig");
+const ResponsePlan = @import("ResponsePlan.zig");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
 const message = @import("wire/message.zig");
 const packet = @import("wire/packet.zig");
-const engine_session = @import("session.zig");
+const engine_session = @import("SessionStore.zig");
 const test_support = @import("test_support.zig");
 const types = @import("types.zig");
 
@@ -15,7 +16,7 @@ const loopback = test_support.loopback;
 const receiveArgs = test_support.receiveArgs;
 const sealEntropy = test_support.sealEntropy;
 
-const TestEngine = engine.Engine;
+const TestEngine = Engine;
 
 test "paired engines recover a session and complete one call without queues" {
     var pair: Pair = undefined;
@@ -38,11 +39,11 @@ const Pair = struct {
     node_b: TestEngine,
     a_to_b: [1_280]u8,
     b_to_a: [1_280]u8,
-    scratch_a: engine.Scratch,
-    scratch_b: engine.Scratch,
+    scratch_a: Engine.Scratch,
+    scratch_b: Engine.Scratch,
 
     const Recovery = struct {
-        started: engine.StartResult,
+        started: Engine.StartResult,
         handshake_length: u16,
     };
 
@@ -85,7 +86,7 @@ const Pair = struct {
             1,
             &sealEntropy(0x10),
         );
-        try std.testing.expectError(calls.Error.PeerBusy, self.node_a.startCall(
+        try std.testing.expectError(CallTable.Error.PeerBusy, self.node_a.startCall(
             &self.a_to_b,
             self.peerB(),
             &self.record_b,
@@ -122,7 +123,7 @@ const Pair = struct {
         return .{ .started = started, .handshake_length = response.accepted.packet_length };
     }
 
-    fn authenticate(self: *Pair, handshake_length: u16) !engine.AuthenticatedRequest {
+    fn authenticate(self: *Pair, handshake_length: u16) !Engine.AuthenticatedRequest {
         var corrupted = self.a_to_b;
         corrupted[handshake_length - 1] ^= 1;
         const corrupted_outcome = try self.node_b.receive(
@@ -159,10 +160,10 @@ const Pair = struct {
 
     fn completePong(
         self: *Pair,
-        started: engine.StartResult,
-        request: *const engine.AuthenticatedRequest,
+        started: Engine.StartResult,
+        request: *const Engine.AuthenticatedRequest,
     ) !void {
-        var response: engine.StandardResponse = .{};
+        var response: ResponsePlan = .{};
         try self.node_b.prepareStandardResponse(request, &response);
         var too_small: [1]u8 = undefined;
         try std.testing.expectError(
@@ -257,7 +258,7 @@ const Pair = struct {
         try std.testing.expectEqual(@as(u16, 0), received.accepted.packet_length);
         try std.testing.expect(received.accepted.event == .request);
         try std.testing.expect(received.accepted.event.request.record == null);
-        var expired: [1]calls.Expired = undefined;
+        var expired: [1]CallTable.Expired = undefined;
         const tick = self.node_a.tick(116, &expired);
         try std.testing.expectEqual(@as(usize, 1), tick.calls);
         try std.testing.expectEqual(started.handle, expired[0].handle);
@@ -345,7 +346,7 @@ const Pair = struct {
             &self.scratch_a,
         );
         try std.testing.expect(received.accepted.event == .request);
-        var response: engine.StandardResponse = .{};
+        var response: ResponsePlan = .{};
         try self.node_a.prepareStandardResponse(
             &received.accepted.event.request,
             &response,
@@ -401,7 +402,7 @@ test "engine rejects a local record owned by another key" {
     const record_b = try enr.Record.create(&key_b, 1, loopback(2, 9_002));
     var invalid: TestEngine = undefined;
     try std.testing.expectError(
-        engine.Error.InvalidLocalRecord,
+        Engine.Error.InvalidLocalRecord,
         invalid.init(std.testing.allocator, key_a, record_b),
     );
 }
@@ -426,7 +427,7 @@ test "cold oversized requests fail before transmission" {
     } };
     var output = [_]u8{0xa5} ** 1_280;
     const before = output;
-    try std.testing.expectError(engine.Error.SessionRequired, node.startCall(
+    try std.testing.expectError(Engine.Error.SessionRequired, node.startCall(
         &output,
         peer,
         &remote_record,
@@ -461,7 +462,7 @@ test "engine configuration rejects zero retention windows" {
     var config = engineConfig();
     config.challenge_timeout_ms = 0;
     try std.testing.expectError(
-        engine.Error.InvalidTimeout,
+        Engine.Error.InvalidTimeout,
         node.initWithConfig(std.testing.allocator, key, local_record, config),
     );
 }

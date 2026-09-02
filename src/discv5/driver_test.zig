@@ -1,15 +1,15 @@
 const std = @import("std");
-const calls = @import("calls.zig");
+const CallTable = @import("CallTable.zig");
 const crypto = @import("identity/crypto.zig");
-const driver = @import("driver.zig");
-const engine = @import("engine.zig");
+const Driver = @import("Driver.zig");
+const Engine = @import("Engine.zig");
 const enr = @import("identity/enr.zig");
-const lookup = @import("lookup.zig");
+const Lookup = @import("Lookup.zig");
 const lookup_driver = @import("lookup_driver.zig");
 const message = @import("wire/message.zig");
-const routing = @import("routing.zig");
-const udp = @import("udp.zig");
-const session = @import("session.zig");
+const RoutingTable = @import("RoutingTable.zig");
+const Udp = @import("Udp.zig");
+const SessionStore = @import("SessionStore.zig");
 const test_support = @import("test_support.zig");
 const types = @import("types.zig");
 
@@ -22,13 +22,13 @@ const keyPair = test_support.keyPair;
 const net = std.Io.net;
 
 test "driver rejects invalid polling and missing expiry storage" {
-    var core: engine.Engine = undefined;
-    var adapter = udp.Adapter.init(undefined);
+    var core: Engine = undefined;
+    var adapter = Udp.init(undefined);
     try std.testing.expectError(
         error.InvalidPollInterval,
-        driver.Driver.initWithConfig(&core, &adapter, .{ .poll_interval_ms = 0 }),
+        Driver.initWithConfig(&core, &adapter, .{ .poll_interval_ms = 0 }),
     );
-    var instance = driver.Driver.init(&core, &adapter);
+    var instance = Driver.init(&core, &adapter);
     try std.testing.expectError(
         error.MissingExpiryStorage,
         instance.step(undefined, &.{}),
@@ -41,7 +41,7 @@ test "driver retains a routing incumbent that answers revalidation" {
     defer pair.deinit();
     try pair.fillBucket();
 
-    var expired: [4]calls.Expired = undefined;
+    var expired: [4]CallTable.Expired = undefined;
     const started = try pair.driver_a.step(std.testing.io, &expired);
     try std.testing.expect(started.progress.maintenance_started);
     try std.testing.expectEqual(@as(usize, 0), started.calls_expired);
@@ -67,7 +67,7 @@ test "driver replaces a routing incumbent when revalidation expires" {
     defer pair.deinit();
     try pair.fillBucket();
 
-    var expired: [4]calls.Expired = undefined;
+    var expired: [4]CallTable.Expired = undefined;
     const result = try pair.driver_a.step(std.testing.io, &expired);
     try std.testing.expect(result.progress.maintenance_started);
     try std.testing.expectEqual(@as(usize, 0), result.calls_expired);
@@ -93,7 +93,7 @@ test "driver completes a cold call through challenge and handshake" {
         &pair.record_b,
         &request,
     );
-    var expired: [4]calls.Expired = undefined;
+    var expired: [4]CallTable.Expired = undefined;
     try std.testing.expect((try pair.driver_b.step(std.testing.io, &expired)).event == .none);
     try std.testing.expect((try pair.driver_a.step(std.testing.io, &expired)).event == .none);
     const request_step = try pair.driver_b.step(std.testing.io, &expired);
@@ -122,7 +122,7 @@ test "driver leaves TALK response policy with the application" {
         &pair.record_b,
         &request,
     );
-    var expired: [4]calls.Expired = undefined;
+    var expired: [4]CallTable.Expired = undefined;
     const received = try pair.driver_b.step(std.testing.io, &expired);
     try std.testing.expect(received.event == .request);
     try std.testing.expect(received.event.request.message == .talk_request);
@@ -156,7 +156,7 @@ test "driver releases a malformed datagram before the next step" {
         pair.udp_a.localAddress(),
         &.{0xff},
     );
-    var expired: [4]calls.Expired = undefined;
+    var expired: [4]CallTable.Expired = undefined;
     const rejected = try pair.driver_a.step(std.testing.io, &expired);
     try std.testing.expect(rejected.datagram == .rejected);
     try std.testing.expectEqual(types.RejectReason.malformed_packet, rejected.datagram.rejected);
@@ -200,7 +200,7 @@ test "driver returns call expiries when rejecting a malformed datagram" {
         &.{0xff},
     );
 
-    var expired: [4]calls.Expired = undefined;
+    var expired: [4]CallTable.Expired = undefined;
     const result = try pair.driver_a.step(std.testing.io, &expired);
     try std.testing.expect(result.datagram == .rejected);
     try std.testing.expectEqual(types.RejectReason.malformed_packet, result.datagram.rejected);
@@ -213,10 +213,10 @@ test "driver completes a caller-owned lookup across multiple peers" {
     try network.init(1_000);
     defer network.deinit();
 
-    var seed_buffer: [lookup.result_max]routing.Entry = undefined;
+    var seed_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
     const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
-    var operation: lookup.Lookup = undefined;
-    var operation_candidates: lookup.Candidates = undefined;
+    var operation: Lookup = undefined;
+    var operation_candidates: Lookup.Candidates = undefined;
     try operation.init(
         &operation_candidates,
         network.record_a.node_id,
@@ -224,7 +224,7 @@ test "driver completes a caller-owned lookup across multiple peers" {
         seeds,
     );
 
-    var expired: [4]calls.Expired = undefined;
+    var expired: [4]CallTable.Expired = undefined;
     const first = try lookup_driver.step(
         &network.driver_a,
         std.testing.io,
@@ -259,7 +259,7 @@ test "driver completes a caller-owned lookup across multiple peers" {
     try std.testing.expectEqual(@as(usize, 0), network.node_a.calls.count());
     try std.testing.expect(network.node_a.routing.contains(&network.record_c.node_id));
 
-    var records: [lookup.result_max]enr.Record = undefined;
+    var records: [Lookup.result_max]enr.Record = undefined;
     const results = operation.results(&records);
     try std.testing.expectEqual(@as(usize, 2), results.len);
     try std.testing.expectEqual(network.record_c.node_id, results[0].node_id);
@@ -281,10 +281,10 @@ test "lookup expiry is consumed without hiding an unrelated call expiry" {
         &network.record_c,
         &request,
     );
-    var seed_buffer: [lookup.result_max]routing.Entry = undefined;
+    var seed_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
     const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
-    var operation: lookup.Lookup = undefined;
-    var operation_candidates: lookup.Candidates = undefined;
+    var operation: Lookup = undefined;
+    var operation_candidates: Lookup.Candidates = undefined;
     try operation.init(
         &operation_candidates,
         network.record_a.node_id,
@@ -292,7 +292,7 @@ test "lookup expiry is consumed without hiding an unrelated call expiry" {
         seeds,
     );
 
-    var expired: [4]calls.Expired = undefined;
+    var expired: [4]CallTable.Expired = undefined;
     const result = try lookup_driver.step(
         &network.driver_a,
         std.testing.io,
@@ -322,14 +322,14 @@ test "lookup step preserves an unrelated response event" {
         &network.record_c,
         &request,
     );
-    var expired: [4]calls.Expired = undefined;
+    var expired: [4]CallTable.Expired = undefined;
     const answered = try network.driver_c.step(std.testing.io, &expired);
     try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
 
-    var seed_buffer: [lookup.result_max]routing.Entry = undefined;
+    var seed_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
     const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
-    var operation: lookup.Lookup = undefined;
-    var operation_candidates: lookup.Candidates = undefined;
+    var operation: Lookup = undefined;
+    var operation_candidates: Lookup.Candidates = undefined;
     try operation.init(
         &operation_candidates,
         network.record_a.node_id,
@@ -361,13 +361,13 @@ test "two caller-owned lookups share one driver" {
 
     const peer_c = endpoint(&network.record_c);
     _ = try network.node_a.confirmPeer(&peer_c, &network.record_c, 0);
-    var seeds_b_buffer: [lookup.result_max]routing.Entry = undefined;
+    var seeds_b_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
     const seeds_b = network.node_a.closestNodes(
         &network.record_b.node_id,
         &seeds_b_buffer,
     );
-    var operation_b: lookup.Lookup = undefined;
-    var operation_b_candidates: lookup.Candidates = undefined;
+    var operation_b: Lookup = undefined;
+    var operation_b_candidates: Lookup.Candidates = undefined;
     try operation_b.init(
         &operation_b_candidates,
         network.record_a.node_id,
@@ -375,13 +375,13 @@ test "two caller-owned lookups share one driver" {
         seeds_b,
     );
     defer operation_b.cancel(&network.node_a);
-    var seeds_c_buffer: [lookup.result_max]routing.Entry = undefined;
+    var seeds_c_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
     const seeds_c = network.node_a.closestNodes(
         &network.record_c.node_id,
         &seeds_c_buffer,
     );
-    var operation_c: lookup.Lookup = undefined;
-    var operation_c_candidates: lookup.Candidates = undefined;
+    var operation_c: Lookup = undefined;
+    var operation_c_candidates: Lookup.Candidates = undefined;
     try operation_c.init(
         &operation_c_candidates,
         network.record_a.node_id,
@@ -390,7 +390,7 @@ test "two caller-owned lookups share one driver" {
     );
     defer operation_c.cancel(&network.node_a);
 
-    var expired: [4]calls.Expired = undefined;
+    var expired: [4]CallTable.Expired = undefined;
     var responses_b: usize = 0;
     var responses_c: usize = 0;
     for (0..32) |_| {
@@ -416,7 +416,7 @@ test "two caller-owned lookups share one driver" {
     try std.testing.expectEqual(@as(usize, 2), responses_c);
     try std.testing.expectEqual(@as(usize, 0), network.node_a.calls.count());
 
-    var records: [lookup.result_max]enr.Record = undefined;
+    var records: [Lookup.result_max]enr.Record = undefined;
     const results_b = operation_b.results(&records);
     try std.testing.expectEqual(@as(usize, 2), results_b.len);
     try std.testing.expectEqual(network.record_b.node_id, results_b[0].node_id);
@@ -426,28 +426,28 @@ test "two caller-owned lookups share one driver" {
 }
 
 const Pair = struct {
-    udp_a: udp.Adapter,
-    udp_b: udp.Adapter,
+    udp_a: Udp,
+    udp_b: Udp,
     record_a: enr.Record,
     record_b: enr.Record,
-    node_a: engine.Engine,
-    node_b: engine.Engine,
-    driver_a: driver.Driver,
-    driver_b: driver.Driver,
+    node_a: Engine,
+    node_b: Engine,
+    driver_a: Driver,
+    driver_b: Driver,
     candidate_id: types.NodeId,
 
     fn init(self: *Pair, request_timeout_ms: u64, install_session: bool) !void {
         const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-        self.udp_a = try udp.Adapter.bind(std.testing.io, loopback);
+        self.udp_a = try Udp.bind(std.testing.io, loopback);
         errdefer self.udp_a.close(std.testing.io);
-        self.udp_b = try udp.Adapter.bind(std.testing.io, loopback);
+        self.udp_b = try Udp.bind(std.testing.io, loopback);
         errdefer self.udp_b.close(std.testing.io);
 
         const key_a = try keyPair(0x11);
         const key_b = try keyPair(0x22);
         self.record_a = try enr.Record.create(&key_a, 1, self.udp_a.localAddress());
         self.record_b = try enr.Record.create(&key_b, 1, self.udp_b.localAddress());
-        const config = engine.Config{
+        const config = Engine.Config{
             .session_capacity = 4,
             .challenge_capacity = 4,
             .call_capacity = 4,
@@ -464,16 +464,19 @@ const Pair = struct {
             const peer_a = endpoint(&self.record_a);
             const peer_b = endpoint(&self.record_b);
             const session_key = [_]u8{0x55} ** 16;
-            const active = session.Session{ .read_key = session_key, .write_key = session_key };
+            const active = SessionStore.Session{
+                .read_key = session_key,
+                .write_key = session_key,
+            };
             self.node_a.channel.sessions.install(peer_b, &active, 0);
             self.node_b.channel.sessions.install(peer_a, &active, 0);
         }
-        self.driver_a = try driver.Driver.initWithConfig(
+        self.driver_a = try Driver.initWithConfig(
             &self.node_a,
             &self.udp_a,
             .{ .poll_interval_ms = 10 },
         );
-        self.driver_b = try driver.Driver.initWithConfig(
+        self.driver_b = try Driver.initWithConfig(
             &self.node_b,
             &self.udp_b,
             .{ .poll_interval_ms = 10 },
@@ -494,20 +497,20 @@ const Pair = struct {
             &self.record_b.node_id,
         ) > 8);
         try std.testing.expectEqual(
-            routing.PutResult.inserted,
+            RoutingTable.PutResult.inserted,
             try self.node_a.confirmPeer(&incumbent_peer, &self.record_b, 0),
         );
-        for (1..routing.bucket_size) |index| {
+        for (1..RoutingTable.bucket_size) |index| {
             const node_id = variantNodeId(self.record_b.node_id, @intCast(index));
             const address = address4(10, @intCast(index), 0, 1, @intCast(10_000 + index));
             var record = fakeRecord(node_id, address, 0);
             const peer = types.Endpoint{ .node_id = node_id, .address = address };
             try std.testing.expectEqual(
-                routing.PutResult.inserted,
+                RoutingTable.PutResult.inserted,
                 try self.node_a.confirmPeer(&peer, &record, @intCast(index)),
             );
         }
-        self.candidate_id = variantNodeId(self.record_b.node_id, routing.bucket_size);
+        self.candidate_id = variantNodeId(self.record_b.node_id, RoutingTable.bucket_size);
         const candidate_address = address4(10, 200, 0, 1, 10_200);
         var candidate_record = fakeRecord(self.candidate_id, candidate_address, 0);
         const candidate_peer = types.Endpoint{
@@ -527,26 +530,26 @@ const Pair = struct {
 };
 
 const LookupNetwork = struct {
-    udp_a: udp.Adapter,
-    udp_b: udp.Adapter,
-    udp_c: udp.Adapter,
+    udp_a: Udp,
+    udp_b: Udp,
+    udp_c: Udp,
     record_a: enr.Record,
     record_b: enr.Record,
     record_c: enr.Record,
-    node_a: engine.Engine,
-    node_b: engine.Engine,
-    node_c: engine.Engine,
-    driver_a: driver.Driver,
-    driver_b: driver.Driver,
-    driver_c: driver.Driver,
+    node_a: Engine,
+    node_b: Engine,
+    node_c: Engine,
+    driver_a: Driver,
+    driver_b: Driver,
+    driver_c: Driver,
 
     fn init(self: *LookupNetwork, request_timeout_ms: u64) !void {
         const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-        self.udp_a = try udp.Adapter.bind(std.testing.io, loopback);
+        self.udp_a = try Udp.bind(std.testing.io, loopback);
         errdefer self.udp_a.close(std.testing.io);
-        self.udp_b = try udp.Adapter.bind(std.testing.io, loopback);
+        self.udp_b = try Udp.bind(std.testing.io, loopback);
         errdefer self.udp_b.close(std.testing.io);
-        self.udp_c = try udp.Adapter.bind(std.testing.io, loopback);
+        self.udp_c = try Udp.bind(std.testing.io, loopback);
         errdefer self.udp_c.close(std.testing.io);
 
         const key_a = try keyPair(0x11);
@@ -555,7 +558,7 @@ const LookupNetwork = struct {
         self.record_a = try enr.Record.create(&key_a, 1, self.udp_a.localAddress());
         self.record_b = try enr.Record.create(&key_b, 1, self.udp_b.localAddress());
         self.record_c = try enr.Record.create(&key_c, 1, self.udp_c.localAddress());
-        const config = engine.Config{
+        const config = Engine.Config{
             .session_capacity = 4,
             .challenge_capacity = 4,
             .call_capacity = 4,
@@ -594,8 +597,8 @@ const LookupNetwork = struct {
     }
 };
 
-fn makeDriver(core: *engine.Engine, adapter: *udp.Adapter) !driver.Driver {
-    return driver.Driver.initWithConfig(core, adapter, .{ .poll_interval_ms = 10 });
+fn makeDriver(core: *Engine, adapter: *Udp) !Driver {
+    return Driver.initWithConfig(core, adapter, .{ .poll_interval_ms = 10 });
 }
 
 fn variantNodeId(base: types.NodeId, salt: u8) types.NodeId {

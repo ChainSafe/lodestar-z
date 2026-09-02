@@ -1,5 +1,5 @@
 const std = @import("std");
-const calls = @import("calls.zig");
+const CallTable = @import("CallTable.zig");
 const message = @import("wire/message.zig");
 const constants = @import("wire/constants.zig");
 const types = @import("types.zig");
@@ -8,17 +8,17 @@ const test_support = @import("test_support.zig");
 const fakeEndpoint = test_support.fakeEndpoint;
 
 test "one active call per peer uses stale-safe handles" {
-    var table: calls.Table = undefined;
+    var table: CallTable = undefined;
     try table.init(std.testing.allocator, 2);
     defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const ping = pingRequest(1);
     const first = try begin(&table, peer, &ping, 10);
-    try std.testing.expectError(calls.Error.PeerBusy, begin(&table, peer, &ping, 10));
+    try std.testing.expectError(CallTable.Error.PeerBusy, begin(&table, peer, &ping, 10));
     var moved_peer = peer;
     moved_peer.address.ip4.port = 9_101;
     try std.testing.expectError(
-        calls.Error.PeerBusy,
+        CallTable.Error.PeerBusy,
         begin(&table, moved_peer, &ping, 10),
     );
     try std.testing.expect(table.cancel(first));
@@ -29,7 +29,7 @@ test "one active call per peer uses stale-safe handles" {
 }
 
 test "call table owns encoded request bytes and tracks challenge nonce" {
-    var table: calls.Table = undefined;
+    var table: CallTable = undefined;
     try table.init(std.testing.allocator, 2);
     defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
@@ -54,32 +54,32 @@ test "call table owns encoded request bytes and tracks challenge nonce" {
         (try table.acceptChallenge(peer.address, &nonce, 9)).?,
     );
     try std.testing.expectError(
-        calls.Error.HandshakeAttempted,
+        CallTable.Error.HandshakeAttempted,
         table.acceptChallenge(peer.address, &nonce, 9),
     );
     const replacement_nonce = [_]u8{0x22} ** 12;
     try table.markSent(handle, &replacement_nonce, 20);
     try std.testing.expect((try table.acceptChallenge(peer.address, &nonce, 9)) == null);
     try std.testing.expectError(
-        calls.Error.HandshakeAttempted,
+        CallTable.Error.HandshakeAttempted,
         table.acceptChallenge(peer.address, &replacement_nonce, 19),
     );
 }
 
 test "call table rejects zero and excessive configured capacities" {
-    var table: calls.Table = undefined;
+    var table: CallTable = undefined;
     try std.testing.expectError(
-        calls.Error.InvalidCapacity,
+        CallTable.Error.InvalidCapacity,
         table.init(std.testing.allocator, 0),
     );
     try std.testing.expectError(
-        calls.Error.InvalidCapacity,
-        table.init(std.testing.allocator, calls.capacity_max + 1),
+        CallTable.Error.InvalidCapacity,
+        table.init(std.testing.allocator, CallTable.capacity_max + 1),
     );
 }
 
 test "only sent calls participate in nonce and response matching" {
-    var table: calls.Table = undefined;
+    var table: CallTable = undefined;
     try table.init(std.testing.allocator, 2);
     defer table.deinit(std.testing.allocator);
     const ping = pingRequest(1);
@@ -91,7 +91,7 @@ test "only sent calls participate in nonce and response matching" {
     const nonce = [_]u8{0x11} ** 12;
     try table.markSent(handle_a, &nonce, 100);
     try std.testing.expectError(
-        calls.Error.NonceInUse,
+        CallTable.Error.NonceInUse,
         table.markSent(handle_b, &nonce, 100),
     );
     const pong = message.Message{ .pong = .{
@@ -100,11 +100,14 @@ test "only sent calls participate in nonce and response matching" {
         .recipient_ip = .{ .ip4 = .{ 127, 0, 0, 1 } },
         .recipient_port = 9_001,
     } };
-    try std.testing.expectError(calls.Error.UnknownCall, accept(&table, peer_b, &pong, 99, &.{}));
+    try std.testing.expectError(
+        CallTable.Error.UnknownCall,
+        accept(&table, peer_b, &pong, 99, &.{}),
+    );
 }
 
 test "response matching validates type ID and NODES packet count before mutation" {
-    var table: calls.Table = undefined;
+    var table: CallTable = undefined;
     try table.init(std.testing.allocator, 2);
     defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
@@ -117,12 +120,12 @@ test "response matching validates type ID and NODES packet count before mutation
     try table.markSent(handle, &nonce, 100);
     const wrong_id = nodesResponse(2, 2);
     try std.testing.expectError(
-        calls.Error.RequestIdMismatch,
+        CallTable.Error.RequestIdMismatch,
         accept(&table, peer, &wrong_id, 99, &.{}),
     );
     const invalid_total = nodesResponse(1, 0);
     try std.testing.expectError(
-        calls.Error.InvalidResponseCount,
+        CallTable.Error.InvalidResponseCount,
         accept(&table, peer, &invalid_total, 99, &.{}),
     );
 
@@ -132,7 +135,7 @@ test "response matching validates type ID and NODES packet count before mutation
     try std.testing.expect(!first_result.matched.terminal);
     const inconsistent = nodesResponse(1, 3);
     try std.testing.expectError(
-        calls.Error.InvalidResponseCount,
+        CallTable.Error.InvalidResponseCount,
         accept(&table, peer, &inconsistent, 99, &.{}),
     );
     const second = nodesResponse(1, 2);
@@ -142,23 +145,23 @@ test "response matching validates type ID and NODES packet count before mutation
 }
 
 test "expiry is bounded by caller output and removes exact generations" {
-    var table: calls.Table = undefined;
+    var table: CallTable = undefined;
     try table.init(std.testing.allocator, 2);
     defer table.deinit(std.testing.allocator);
     const ping = pingRequest(1);
     const first = try begin(&table, fakeEndpoint(1, 9_001), &ping, 10);
     _ = try begin(&table, fakeEndpoint(2, 9_002), &ping, 10);
-    var expired: [1]calls.Expired = undefined;
+    var expired: [1]CallTable.Expired = undefined;
     try std.testing.expectEqual(@as(usize, 1), table.expire(10, &expired));
     try std.testing.expectEqual(first, expired[0].handle);
-    try std.testing.expectEqual(calls.Owner.caller, expired[0].owner);
+    try std.testing.expectEqual(CallTable.Owner.caller, expired[0].owner);
     try std.testing.expectEqual(@as(usize, 1), table.count());
     try std.testing.expectEqual(@as(usize, 1), table.expire(10, &expired));
     try std.testing.expectEqual(@as(usize, 0), table.count());
 }
 
 test "FINDNODE accepts only requested unique records and caps the exchange" {
-    var table: calls.Table = undefined;
+    var table: CallTable = undefined;
     try table.init(std.testing.allocator, 1);
     defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(0, 9_001);
@@ -189,7 +192,7 @@ test "FINDNODE accepts only requested unique records and caps the exchange" {
 }
 
 test "FINDNODE filters unsolicited and duplicate node IDs" {
-    var table: calls.Table = undefined;
+    var table: CallTable = undefined;
     try table.init(std.testing.allocator, 1);
     defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(0, 9_001);
@@ -214,7 +217,7 @@ test "FINDNODE filters unsolicited and duplicate node IDs" {
 }
 
 test "begin refuses a message that is not a request" {
-    var table: calls.Table = undefined;
+    var table: CallTable = undefined;
     try table.init(std.testing.allocator, 1);
     defer table.deinit(std.testing.allocator);
     const pong = message.Message{ .pong = .{
@@ -224,13 +227,13 @@ test "begin refuses a message that is not a request" {
         .recipient_port = 9_001,
     } };
     try std.testing.expectError(
-        calls.Error.InvalidRequest,
+        CallTable.Error.InvalidRequest,
         begin(&table, fakeEndpoint(1, 9_001), &pong, 10),
     );
 }
 
 test "accept refuses a handle whose call ended after matching" {
-    var table: calls.Table = undefined;
+    var table: CallTable = undefined;
     try table.init(std.testing.allocator, 1);
     defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
@@ -247,13 +250,13 @@ test "accept refuses a handle whose call ended after matching" {
     try std.testing.expectEqual(handle, matched);
     try std.testing.expect(table.cancel(handle));
     try std.testing.expectError(
-        calls.Error.StaleHandle,
+        CallTable.Error.StaleHandle,
         table.accept(matched, &response, &.{}),
     );
 }
 
 test "responses at the deadline are not published" {
-    var table: calls.Table = undefined;
+    var table: CallTable = undefined;
     try table.init(std.testing.allocator, 1);
     defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
@@ -267,18 +270,18 @@ test "responses at the deadline are not published" {
         .recipient_port = 9_001,
     } };
     try std.testing.expectError(
-        calls.Error.CallExpired,
+        CallTable.Error.CallExpired,
         accept(&table, peer, &response, 100, &.{}),
     );
     try std.testing.expectEqual(@as(usize, 1), table.count());
 }
 
 fn begin(
-    table: *calls.Table,
+    table: *CallTable,
     peer: types.Endpoint,
     request: *const message.Message,
     deadline_ms: u64,
-) !calls.Handle {
+) !CallTable.Handle {
     const remote_public_key = [_]u8{0x02} ** 33;
     return table.begin(
         peer,
@@ -291,12 +294,12 @@ fn begin(
 }
 
 fn accept(
-    table: *calls.Table,
+    table: *CallTable,
     peer: types.Endpoint,
     response: *const message.Message,
     now_ms: u64,
     node_ids: []const types.NodeId,
-) !calls.MatchResult {
+) !CallTable.MatchResult {
     const handle = try table.match(peer, response, now_ms);
     return table.accept(handle, response, node_ids);
 }

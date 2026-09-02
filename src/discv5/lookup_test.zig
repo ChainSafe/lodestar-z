@@ -1,11 +1,11 @@
 const std = @import("std");
-const engine = @import("engine.zig");
+const Engine = @import("Engine.zig");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
-const lookup = @import("lookup.zig");
+const Lookup = @import("Lookup.zig");
 const message = @import("wire/message.zig");
-const routing = @import("routing.zig");
-const session = @import("session.zig");
+const RoutingTable = @import("RoutingTable.zig");
+const SessionStore = @import("SessionStore.zig");
 const test_support = @import("test_support.zig");
 const types = @import("types.zig");
 
@@ -22,32 +22,32 @@ test "lookup requests the target distance and adjacent buckets" {
     try std.testing.expectEqualSlices(
         u16,
         &.{ 255, 256, 254 },
-        &lookup.requestDistances(&zero, &distance_255),
+        &Lookup.requestDistances(&zero, &distance_255),
     );
     try std.testing.expectEqualSlices(
         u16,
         &.{ 0, 1, 2 },
-        &lookup.requestDistances(&zero, &zero),
+        &Lookup.requestDistances(&zero, &zero),
     );
     var distance_256 = zero;
     distance_256[0] = 0x80;
     try std.testing.expectEqualSlices(
         u16,
         &.{ 256, 255, 254 },
-        &lookup.requestDistances(&zero, &distance_256),
+        &Lookup.requestDistances(&zero, &distance_256),
     );
 }
 
 test "lookup uses the call table for bounded parallel queries" {
     var core = try initEngine();
     defer core.deinit(std.testing.allocator);
-    var seeds: [4]routing.Entry = undefined;
+    var seeds: [4]RoutingTable.Entry = undefined;
     for (&seeds, 0..) |*seed, index| {
         seed.* = fakeEntry(@intCast(index + 1));
         installSession(&core, seed.peer, 0x55);
     }
-    var operation: lookup.Lookup = undefined;
-    var operation_candidates: lookup.Candidates = undefined;
+    var operation: Lookup = undefined;
+    var operation_candidates: Lookup.Candidates = undefined;
     try operation.init(
         &operation_candidates,
         core.localRecord().node_id,
@@ -56,7 +56,7 @@ test "lookup uses the call table for bounded parallel queries" {
     );
 
     var packet_buffer: [1_280]u8 = undefined;
-    var started: [4]lookup.Started = undefined;
+    var started: [4]Lookup.Started = undefined;
     for (0..3) |index| {
         started[index] = (try operation.startNext(
             &core,
@@ -67,7 +67,7 @@ test "lookup uses the call table for bounded parallel queries" {
         )).?;
         try std.testing.expect(operation.knownRecord(started[index].call.handle) != null);
     }
-    try std.testing.expectEqual(lookup.parallelism, operation.waitingCount());
+    try std.testing.expectEqual(Lookup.parallelism, operation.waitingCount());
     try std.testing.expect((try operation.startNext(
         &core,
         &packet_buffer,
@@ -84,7 +84,7 @@ test "lookup uses the call table for bounded parallel queries" {
         2,
         &sealEntropy(4),
     )).?;
-    try std.testing.expectEqual(lookup.parallelism, operation.waitingCount());
+    try std.testing.expectEqual(Lookup.parallelism, operation.waitingCount());
     for (1..4) |index| try completeNodes(
         &core,
         &operation,
@@ -104,7 +104,7 @@ test "lookup uses the call table for bounded parallel queries" {
     try std.testing.expect(operation.isFinished());
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
 
-    var results: [lookup.result_max]enr.Record = undefined;
+    var results: [Lookup.result_max]enr.Record = undefined;
     try std.testing.expectEqual(@as(usize, 3), operation.results(&results).len);
 }
 
@@ -113,8 +113,8 @@ test "lookup rejects relayed private and low-port candidates" {
     defer core.deinit(std.testing.allocator);
     const seed = fakeEntry(1);
     installSession(&core, seed.peer, 0x55);
-    var operation: lookup.Lookup = undefined;
-    var operation_candidates: lookup.Candidates = undefined;
+    var operation: Lookup = undefined;
+    var operation_candidates: Lookup.Candidates = undefined;
     try operation.init(
         &operation_candidates,
         core.localRecord().node_id,
@@ -161,13 +161,13 @@ test "lookup rejects relayed private and low-port candidates" {
 test "lookup stops after the closest sixteen successful peers" {
     var core = try initEngine();
     defer core.deinit(std.testing.allocator);
-    var seeds: [lookup.result_max]routing.Entry = undefined;
+    var seeds: [Lookup.result_max]RoutingTable.Entry = undefined;
     for (&seeds, 0..) |*seed, index| {
         seed.* = fakeEntry(@intCast(index + 1));
         installSession(&core, seed.peer, 0x55);
     }
-    var operation: lookup.Lookup = undefined;
-    var operation_candidates: lookup.Candidates = undefined;
+    var operation: Lookup = undefined;
+    var operation_candidates: Lookup.Candidates = undefined;
     try operation.init(
         &operation_candidates,
         core.localRecord().node_id,
@@ -179,7 +179,7 @@ test "lookup stops after the closest sixteen successful peers" {
     var farther_id = [_]u8{0xff} ** 32;
     farther_id[31] = 1;
     const farther = fakeRecord(farther_id, address4(198, 51, 100, 40, 9_040), 1);
-    for (0..lookup.result_max) |index| {
+    for (0..Lookup.result_max) |index| {
         const request_id = try message.RequestId.init(&.{@intCast(index + 1)});
         const started = (try operation.startNext(
             &core,
@@ -198,7 +198,7 @@ test "lookup stops after the closest sixteen successful peers" {
             @intCast(index + 2),
         );
     }
-    try std.testing.expectEqual(lookup.result_max + 1, operation.candidateCount());
+    try std.testing.expectEqual(Lookup.result_max + 1, operation.candidateCount());
     try std.testing.expect((try operation.startNext(
         &core,
         &packet_buffer,
@@ -207,9 +207,9 @@ test "lookup stops after the closest sixteen successful peers" {
         &sealEntropy(20),
     )) == null);
     try std.testing.expect(operation.isFinished());
-    var results: [lookup.result_max + 1]enr.Record = undefined;
+    var results: [Lookup.result_max + 1]enr.Record = undefined;
     const selected = operation.results(&results);
-    try std.testing.expectEqual(lookup.result_max, selected.len);
+    try std.testing.expectEqual(Lookup.result_max, selected.len);
     for (selected, 1..) |record, id| try std.testing.expectEqual(
         nodeId(@intCast(id)),
         record.node_id,
@@ -220,9 +220,9 @@ test "lookup stops after the closest sixteen successful peers" {
 test "lookup initialization cleans up after an invalid seed" {
     var seed = fakeEntry(1);
     seed.record.node_id = nodeId(2);
-    var operation: lookup.Lookup = undefined;
-    var operation_candidates: lookup.Candidates = undefined;
-    try std.testing.expectError(lookup.Error.InvalidSeed, operation.init(
+    var operation: Lookup = undefined;
+    var operation_candidates: Lookup.Candidates = undefined;
+    try std.testing.expectError(Lookup.Error.InvalidSeed, operation.init(
         &operation_candidates,
         [_]u8{0} ** 32,
         [_]u8{0xff} ** 32,
@@ -233,8 +233,8 @@ test "lookup initialization cleans up after an invalid seed" {
 test "empty lookup finishes without creating a call" {
     var core = try initEngine();
     defer core.deinit(std.testing.allocator);
-    var operation: lookup.Lookup = undefined;
-    var operation_candidates: lookup.Candidates = undefined;
+    var operation: Lookup = undefined;
+    var operation_candidates: Lookup.Candidates = undefined;
     try operation.init(
         &operation_candidates,
         core.localRecord().node_id,
@@ -253,14 +253,14 @@ test "empty lookup finishes without creating a call" {
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
 }
 
-fn initEngine() !engine.Engine {
+fn initEngine() !Engine {
     const key = try keyPair(0x11);
     const local_record = try enr.Record.create(
         &key,
         1,
         address4(203, 0, 113, 1, 9_000),
     );
-    var core: engine.Engine = undefined;
+    var core: Engine = undefined;
     try core.initWithConfig(std.testing.allocator, key, local_record, .{
         .session_capacity = 8,
         .challenge_capacity = 4,
@@ -273,14 +273,14 @@ fn initEngine() !engine.Engine {
 }
 
 fn completeNodes(
-    core: *engine.Engine,
-    operation: *lookup.Lookup,
-    started: lookup.Started,
+    core: *Engine,
+    operation: *Lookup,
+    started: Lookup.Started,
     request_id: message.RequestId,
     records: []const enr.Record,
     now_ms: u64,
 ) !void {
-    var node_ids: [lookup.result_max]types.NodeId = undefined;
+    var node_ids: [Lookup.result_max]types.NodeId = undefined;
     for (records, node_ids[0..records.len]) |record, *node_id| node_id.* = record.node_id;
     const raw_records = [_][]const u8{};
     const response_message = message.Message{ .nodes = .{
@@ -290,7 +290,7 @@ fn completeNodes(
     } };
     const handle = try core.calls.match(started.peer, &response_message, now_ms);
     const matched = try core.calls.accept(handle, &response_message, node_ids[0..0]);
-    var response = engine.AuthenticatedResponse{
+    var response = Engine.AuthenticatedResponse{
         .peer = started.peer,
         .matched = matched.matched,
         .record = null,
@@ -299,7 +299,7 @@ fn completeNodes(
     try operation.onResponse(core, &response, now_ms);
 }
 
-fn fakeEntry(id: u8) routing.Entry {
+fn fakeEntry(id: u8) RoutingTable.Entry {
     const peer = types.Endpoint{
         .node_id = nodeId(id),
         .address = address4(203, id, 1, 1, 9_000 + @as(u16, id)),
