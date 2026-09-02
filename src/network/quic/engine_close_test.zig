@@ -151,10 +151,13 @@ test "engine rejects a forged certificate with tls_failed" {
     const server_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{2}));
     const other = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{9}));
     const server_public = server_key.publicKey();
-    var forged_ctx = try tls.Context.initWith(&server_public, &other, now_unix, [_]u8{7} ** 8);
-    defer forged_ctx.deinit();
+    const forged_ctx = try tls.Context.initWith(&server_public, &other, now_unix, [_]u8{7} ** 8);
     pair.server.deinit();
-    pair.server = try Engine.init(std.testing.allocator, &forged_ctx, .{}, &server_address, 0);
+    pair.server = try Engine.init(std.testing.allocator, .{
+        .tls = forged_ctx,
+        .local = server_address,
+        .seed = 0,
+    });
 
     const handle = try pair.dial();
     try pair.pump();

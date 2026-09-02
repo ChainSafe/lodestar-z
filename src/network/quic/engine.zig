@@ -71,12 +71,6 @@ pub const DriverView = struct {
         return self.engine.nextTimeoutMs();
     }
 
-    pub fn send(self: DriverView, index: u16, now: Now, out: []u8) ?Sent {
-        assert(index < self.engine.slots.len);
-        assert(out.len >= limits.recv_udp_payload_max);
-        return self.engine.send(index, now, out);
-    }
-
     pub fn sendBatch(self: DriverView, index: u16, now: Now, batch: *SendBatch) u8 {
         assert(index < self.engine.slots.len);
         var count: u8 = 0;
@@ -109,18 +103,6 @@ pub const DriverView = struct {
         assert(engine.active.len == engine.slots.len);
         assert(engine.active_len <= engine.active.len);
         return engine.active[0..engine.active_len];
-    }
-
-    pub fn peerAddressAt(self: DriverView, index: u16) ?Address {
-        assert(index < self.engine.slots.len);
-        assert(self.engine.slots.len == self.engine.active.len);
-        return self.engine.peerAddressAt(index);
-    }
-
-    pub fn handleAt(self: DriverView, index: u16) ?Handle {
-        assert(index < self.engine.slots.len);
-        assert(self.engine.slots.len == self.engine.active.len);
-        return self.engine.handleAt(index);
     }
 
     pub fn releaseReported(self: DriverView) void {
@@ -157,9 +139,16 @@ pub const DriverView = struct {
     }
 };
 
+pub const Options = struct {
+    tls: tls.Context,
+    limits: Limits = .{},
+    local: Address,
+    seed: u64,
+};
+
 pub const Engine = struct {
     allocator: std.mem.Allocator,
-    tls_ctx: *const tls.Context,
+    tls: tls.Context,
     config: binding.Config,
     limits: Limits,
     local: Address,
@@ -177,13 +166,8 @@ pub const Engine = struct {
     outbound: u16 = 0,
     counters: Counters = .{},
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        tls_ctx: *const tls.Context,
-        wanted: Limits,
-        local: *const Address,
-        seed: u64,
-    ) Error!Engine {
+    pub fn init(allocator: std.mem.Allocator, options: Options) Error!Engine {
+        const wanted = options.limits;
         if (wanted.connections_max == 0) return error.InvalidLimits;
         if (wanted.connections_max > limits.connections_max_ceiling) return error.InvalidLimits;
         if (wanted.handshaking_max == 0 or wanted.handshaking_max > wanted.connections_max) {
@@ -216,7 +200,11 @@ pub const Engine = struct {
         errdefer allocator.free(slots);
         @memset(slots, .{});
 
-        var routes = try route_table.RouteTable.init(allocator, wanted.connections_max, seed);
+        var routes = try route_table.RouteTable.init(
+            allocator,
+            wanted.connections_max,
+            options.seed,
+        );
         errdefer routes.deinit(allocator);
 
         const active = try allocator.alloc(u16, wanted.connections_max);
@@ -232,10 +220,10 @@ pub const Engine = struct {
 
         return .{
             .allocator = allocator,
-            .tls_ctx = tls_ctx,
+            .tls = options.tls,
             .config = config,
             .limits = wanted,
-            .local = local.*,
+            .local = options.local,
             .slots = slots,
             .routes = routes,
             .active = active,
@@ -251,6 +239,7 @@ pub const Engine = struct {
         for (self.slots) |*slot| {
             if (slot.state != .free) slot.release();
         }
+        self.tls.deinit();
         self.peers.deinit(self.allocator);
         self.allocator.free(self.activity);
         self.allocator.free(self.active);
@@ -292,7 +281,7 @@ pub const Engine = struct {
         const index = self.claimSlot() orelse return error.TableFull;
         assert(index < self.slots.len);
         const slot = &self.slots[index];
-        slot.open(self.tls_ctx, &self.config, .{
+        slot.open(&self.tls, &self.config, .{
             .direction = .outbound,
             .local = self.local,
             .peer = peer.*,
@@ -568,7 +557,7 @@ pub const Engine = struct {
         const index = self.claimSlot() orelse return drop(&self.counters.dropped_full);
 
         const slot = &self.slots[index];
-        slot.open(self.tls_ctx, &self.config, .{
+        slot.open(&self.tls, &self.config, .{
             .direction = .inbound,
             .local = self.local,
             .peer = from.*,
@@ -675,20 +664,6 @@ pub const Engine = struct {
         };
         if (sent == null) self.refresh(index);
         return sent;
-    }
-
-    fn peerAddressAt(self: *const Engine, index: u16) ?Address {
-        if (index >= self.slots.len) return null;
-        const slot = &self.slots[index];
-        if (slot.state == .free) return null;
-        return slot.peer;
-    }
-
-    fn handleAt(self: *const Engine, index: u16) ?Handle {
-        if (index >= self.slots.len) return null;
-        const slot = &self.slots[index];
-        if (slot.state == .free) return null;
-        return .{ .index = index, .generation = slot.generation };
     }
 
     fn releaseReported(self: *Engine) void {
