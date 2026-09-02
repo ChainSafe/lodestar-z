@@ -1,8 +1,8 @@
-import { quic } from "@chainsafe/libp2p-quic";
-import { generateKeyPair } from "@libp2p/crypto/keys";
-import { ping } from "@libp2p/ping";
-import { multiaddr } from "@multiformats/multiaddr";
-import { createLibp2p } from "libp2p";
+import {quic} from "@chainsafe/libp2p-quic";
+import {generateKeyPair} from "@libp2p/crypto/keys";
+import {ping} from "@libp2p/ping";
+import {multiaddr} from "@multiformats/multiaddr";
+import {createLibp2p} from "libp2p";
 
 const mode = process.argv[2];
 if (mode !== "listen" && mode !== "dial") {
@@ -11,10 +11,10 @@ if (mode !== "listen" && mode !== "dial") {
 }
 
 const node = await createLibp2p({
+  addresses: {listen: mode === "listen" ? ["/ip4/127.0.0.1/udp/0/quic-v1"] : []},
   privateKey: await generateKeyPair("secp256k1"),
-  addresses: { listen: mode === "listen" ? ["/ip4/127.0.0.1/udp/0/quic-v1"] : [] },
+  services: {ping: ping()},
   transports: [quic()],
-  services: { ping: ping() },
 });
 await node.start();
 
