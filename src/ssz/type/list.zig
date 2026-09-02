@@ -787,10 +787,8 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
             }
 
             pub fn length(data: []const u8) !usize {
-                var elements = try VariableElementIterator(Self).init(data);
-                const len = elements.len;
-                while (try elements.next()) |_| {}
-                return len;
+                const elements = try VariableElementIterator(Self).init(data);
+                return elements.len;
             }
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
