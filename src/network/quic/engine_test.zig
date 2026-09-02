@@ -139,3 +139,115 @@ test "engine rejects invalid limits" {
     try std.testing.expectError(error.InvalidLimits, Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 2_000 }));
     try std.testing.expectError(error.InvalidLimits, Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 4, .handshaking_max = 8 }));
 }
+
+fn connectPair(pair: *Pair) !struct { client: engine_mod.Handle, server: engine_mod.Handle } {
+    _ = try pair.dial();
+    try pair.pump();
+    var storage: [8]Event = undefined;
+    const client_handle = try expectConnected(pair.events(&pair.client, &storage)[0], .outbound, &pair.server_ctx);
+    const server_handle = try expectConnected(pair.events(&pair.server, &storage)[0], .inbound, &pair.client_ctx);
+    return .{ .client = client_handle, .server = server_handle };
+}
+
+fn expectStreamOpened(event: Event, conn: engine_mod.Handle) !engine_mod.StreamHandle {
+    switch (event) {
+        .stream_opened => |stream| {
+            try std.testing.expectEqual(conn, stream.conn);
+            return stream;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "engine streams echo data with fin in both directions" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.client.openStream(handles.client);
+    try std.testing.expectEqual(@as(u64, 0), stream.id);
+    try std.testing.expectEqual(@as(usize, 4), try pair.client.write(stream, "ping", true));
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const server_events = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), server_events.len);
+    const inbound = try expectStreamOpened(server_events[0], handles.server);
+    try std.testing.expectEqual(@as(u64, 0), inbound.id);
+
+    var buffer: [16]u8 = undefined;
+    const received = try pair.server.read(inbound, &buffer);
+    try std.testing.expectEqualStrings("ping", buffer[0..received.len]);
+    try std.testing.expect(received.fin);
+    try std.testing.expectEqual(@as(usize, 4), try pair.server.write(inbound, "pong", true));
+    try pair.pump();
+
+    var readable = pair.client.readable(handles.client);
+    defer readable.deinit();
+    const ready = readable.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(stream.id, ready.id);
+    const reply = try pair.client.read(ready, &buffer);
+    try std.testing.expectEqualStrings("pong", buffer[0..reply.len]);
+    try std.testing.expect(reply.fin);
+    try std.testing.expectError(error.UnknownStream, pair.client.read(stream, &buffer));
+    try std.testing.expectError(error.UnknownStream, pair.server.read(inbound, &buffer));
+}
+
+test "engine server can open a stream toward the client" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.server.openStream(handles.server);
+    try std.testing.expectEqual(@as(u64, 1), stream.id);
+    _ = try pair.server.write(stream, "hello", false);
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    const inbound = try expectStreamOpened(client_events[0], handles.client);
+    var buffer: [16]u8 = undefined;
+    const received = try pair.client.read(inbound, &buffer);
+    try std.testing.expectEqualStrings("hello", buffer[0..received.len]);
+    try std.testing.expect(!received.fin);
+
+    pair.client.closeStream(inbound, 7);
+    try pair.pump();
+    try std.testing.expectError(error.UnknownStream, pair.client.read(inbound, &buffer));
+    try std.testing.expectError(error.StreamStopped, pair.server.write(stream, "more", false));
+}
+
+test "engine bounds streams per connection" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    var opened: usize = 0;
+    while (opened < constants.peer_streams_bidi) : (opened += 1) {
+        const stream = try pair.client.openStream(handles.client);
+        _ = try pair.client.write(stream, "x", false);
+    }
+    try std.testing.expectError(error.StreamLimit, pair.client.openStream(handles.client));
+    try pair.pump();
+
+    var storage: [constants.streams_per_connection]Event = undefined;
+    const server_events = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, constants.peer_streams_bidi), server_events.len);
+    for (server_events) |event| _ = try expectStreamOpened(event, handles.server);
+}
+
+test "engine stale handles are rejected" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+    const stale = engine_mod.Handle{ .index = handles.client.index, .generation = handles.client.generation +% 1 };
+    try std.testing.expectError(error.StaleHandle, pair.client.openStream(stale));
+    try std.testing.expect(pair.client.peerId(stale) == null);
+    const out_of_range = engine_mod.Handle{ .index = 9_999, .generation = 0 };
+    try std.testing.expectError(error.StaleHandle, pair.client.openStream(out_of_range));
+}
