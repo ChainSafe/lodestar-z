@@ -43,7 +43,7 @@ test "lookup uses the call table for bounded parallel queries" {
     var operation: lookup.Lookup = undefined;
     try operation.init(
         std.testing.allocator,
-        core.local_record.node_id,
+        core.channel.local_record.node_id,
         [_]u8{0} ** 32,
         &seeds,
     );
@@ -110,7 +110,7 @@ test "lookup rejects relayed private and low-port candidates" {
     var operation: lookup.Lookup = undefined;
     try operation.init(
         std.testing.allocator,
-        core.local_record.node_id,
+        core.channel.local_record.node_id,
         [_]u8{0} ** 32,
         &.{seed},
     );
@@ -163,7 +163,7 @@ test "lookup stops after the closest sixteen successful peers" {
     var operation: lookup.Lookup = undefined;
     try operation.init(
         std.testing.allocator,
-        core.local_record.node_id,
+        core.channel.local_record.node_id,
         [_]u8{0} ** 32,
         &seeds,
     );
@@ -226,7 +226,7 @@ test "empty lookup finishes without creating a call" {
     var operation: lookup.Lookup = undefined;
     try operation.init(
         std.testing.allocator,
-        core.local_record.node_id,
+        core.channel.local_record.node_id,
         [_]u8{0} ** 32,
         &.{},
     );
@@ -328,7 +328,7 @@ fn nodeId(id: u8) types.NodeId {
 fn installSession(core: *engine.Engine, peer: types.Endpoint) void {
     const key = [_]u8{0x55} ** 16;
     const active = session.Session{ .read_key = key, .write_key = key };
-    core.sessions.install(peer, &active, 0);
+    core.channel.sessions.install(peer, &active, 0);
 }
 
 fn startEntropy(seed: u8) engine.StartEntropy {

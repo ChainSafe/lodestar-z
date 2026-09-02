@@ -465,8 +465,8 @@ const Pair = struct {
             const peer_b = endpoint(&self.record_b);
             const session_key = [_]u8{0x55} ** 16;
             const active = session.Session{ .read_key = session_key, .write_key = session_key };
-            self.node_a.sessions.install(peer_b, &active, 0);
-            self.node_b.sessions.install(peer_a, &active, 0);
+            self.node_a.channel.sessions.install(peer_b, &active, 0);
+            self.node_b.channel.sessions.install(peer_a, &active, 0);
         }
         self.driver_a = try driver.Driver.initWithConfig(
             &self.node_a,
@@ -601,7 +601,7 @@ fn makeDriver(core: *engine.Engine, udp: *runtime.Udp) !driver.Driver {
 fn installSession(core: *engine.Engine, record: *const enr.Record, key_byte: u8) void {
     const key = [_]u8{key_byte} ** 16;
     const active = session.Session{ .read_key = key, .write_key = key };
-    core.sessions.install(endpoint(record), &active, 0);
+    core.channel.sessions.install(endpoint(record), &active, 0);
 }
 
 fn endpoint(record: *const enr.Record) types.Endpoint {

@@ -240,7 +240,7 @@ fn authenticateBootstraps(
     for (bootstraps, 0..) |*bootstrap, index| {
         const request = discv5.wire.message.Message{ .ping = .{
             .request_id = requestId(index + 1),
-            .enr_sequence = transport.core.local_record.sequence,
+            .enr_sequence = transport.core.channel.local_record.sequence,
         } };
         bootstrap.handle = try transport.startCall(
             io,
@@ -343,7 +343,7 @@ fn startLookups(
         if (seeds.len == 0) return;
         try slot.operation.init(
             allocator,
-            core.local_record.node_id,
+            core.channel.local_record.node_id,
             target,
             seeds,
         );

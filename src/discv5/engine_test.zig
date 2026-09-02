@@ -106,7 +106,7 @@ const Pair = struct {
         const handshake_packet = try packet.decode(
             self.a_to_b[0..response.packet_length],
             &self.record_b.node_id,
-            &self.scratch_b.packet_decode,
+            &self.scratch_b.channel.packet_decode,
         );
         try std.testing.expectEqualSlices(
             u8,
@@ -126,8 +126,8 @@ const Pair = struct {
             receiveArgs(4, 0x50),
             &self.scratch_b,
         ));
-        try std.testing.expectEqual(@as(usize, 0), self.node_b.sessions.sessionCount());
-        try std.testing.expectEqual(@as(usize, 1), self.node_b.sessions.challengeCount());
+        try std.testing.expectEqual(@as(usize, 0), self.node_b.channel.sessions.sessionCount());
+        try std.testing.expectEqual(@as(usize, 1), self.node_b.channel.sessions.challengeCount());
         const authenticated = try self.node_b.receive(
             &self.b_to_a,
             self.a_to_b[0..handshake_length],
@@ -142,8 +142,8 @@ const Pair = struct {
             authenticated.event.request.record.?.node_id,
         );
         try std.testing.expect(self.node_b.routing.contains(&self.record_a.node_id));
-        try std.testing.expectEqual(@as(usize, 1), self.node_b.sessions.sessionCount());
-        try std.testing.expectEqual(@as(usize, 0), self.node_b.sessions.challengeCount());
+        try std.testing.expectEqual(@as(usize, 1), self.node_b.channel.sessions.sessionCount());
+        try std.testing.expectEqual(@as(usize, 0), self.node_b.channel.sessions.challengeCount());
         return authenticated.event.request;
     }
 
@@ -171,7 +171,7 @@ const Pair = struct {
         const response_packet = try packet.decode(
             self.b_to_a[0..length],
             &self.record_a.node_id,
-            &self.scratch_a.packet_decode,
+            &self.scratch_a.channel.packet_decode,
         );
         try std.testing.expectEqualSlices(
             u8,
@@ -224,7 +224,7 @@ const Pair = struct {
         const direct_packet = try packet.decode(
             self.a_to_b[0..started.packet_length],
             &self.record_b.node_id,
-            &self.scratch_b.packet_decode,
+            &self.scratch_b.channel.packet_decode,
         );
         try std.testing.expectEqualSlices(
             u8,
@@ -414,7 +414,7 @@ test "cold oversized requests fail before transmission" {
         .read_key = session_key,
         .write_key = session_key,
     };
-    node.sessions.install(peer, &active, 2);
+    node.channel.sessions.install(peer, &active, 2);
     const started = try node.startCall(
         &output,
         peer,
@@ -451,11 +451,15 @@ fn receiveArgs(now_ms: u64, seed: u8) engine.ReceiveArgs {
     return .{
         .now_ms = now_ms,
         .entropy = .{
-            .challenge_masking_iv = [_]u8{seed} ** 16,
-            .id_nonce = [_]u8{seed +% 1} ** 16,
-            .handshake_masking_iv = [_]u8{seed +% 2} ** 16,
-            .handshake_nonce_tail = [_]u8{seed +% 3} ** 8,
-            .ephemeral_secret = [_]u8{seed +% 4} ** 32,
+            .challenge = .{
+                .masking_iv = [_]u8{seed} ** 16,
+                .id_nonce = [_]u8{seed +% 1} ** 16,
+            },
+            .handshake = .{
+                .masking_iv = [_]u8{seed +% 2} ** 16,
+                .nonce_tail = [_]u8{seed +% 3} ** 8,
+                .ephemeral_secret = [_]u8{seed +% 4} ** 32,
+            },
         },
     };
 }
