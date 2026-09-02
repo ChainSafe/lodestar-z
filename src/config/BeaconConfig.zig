@@ -290,9 +290,6 @@ pub fn getDomainForVoluntaryExit(self: *const BeaconConfig, state_epoch: Epoch, 
     }
 }
 
-// TODO: forkDigest2ForkName, forkDigest2ForkNameOption, forkName2ForkDigest, forkName2ForkDigestHex
-// may not need it for state-transition
-
 fn computeDomain(domain_type: DomainType, fork_version: Version, genesis_validators_root: Root, out: *[32]u8) void {
     var fork_data_root: [32]u8 = undefined;
     computeForkDataRoot(fork_version, genesis_validators_root, &fork_data_root);
@@ -302,7 +299,7 @@ fn computeDomain(domain_type: DomainType, fork_version: Version, genesis_validat
     @memcpy(out[4..32], fork_data_root[0..28]);
 }
 
-fn computeForkDataRoot(current_version: Version, genesis_validators_root: Root, out: *[32]u8) void {
+pub fn computeForkDataRoot(current_version: Version, genesis_validators_root: Root, out: *[32]u8) void {
     const fork_data: ForkData = .{
         .current_version = current_version,
         .genesis_validators_root = genesis_validators_root,
