@@ -396,6 +396,52 @@ test "engine bounds streams per connection" {
     for (server_events) |event| _ = try expectStreamOpened(event, handles.server);
 }
 
+test "engine keeps received data readable after a local close" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(stream, "ping", true);
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    pair.server.close(handles.server, 0);
+
+    var buffer: [16]u8 = undefined;
+    const received = try pair.server.read(inbound, &buffer);
+    try std.testing.expectEqualStrings("ping", buffer[0..received.len]);
+    try std.testing.expect(received.fin);
+}
+
+test "engine keeps received data readable until the closed event is drained" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.server.openStream(handles.server);
+    try std.testing.expectEqual(@as(usize, 3), try pair.server.write(stream, "bye", true));
+    _ = try pair.transfer(&pair.server, &pair.client, server_address, client_address, false);
+    pair.server.close(handles.server, 0);
+    try pair.pump();
+
+    var storage: [1]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), pair.client.pollEvents(&storage));
+    const inbound = try expectStreamOpened(storage[0], handles.client);
+
+    var buffer: [16]u8 = undefined;
+    const final = try pair.client.read(inbound, &buffer);
+    try std.testing.expectEqualStrings("bye", buffer[0..final.len]);
+    try std.testing.expect(final.fin);
+
+    try std.testing.expectEqual(@as(usize, 1), pair.client.pollEvents(&storage));
+    _ = try expectClosed(storage[0], handles.client);
+    try std.testing.expectError(error.StaleHandle, pair.client.read(inbound, &buffer));
+}
+
 test "engine stale handles are rejected" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});

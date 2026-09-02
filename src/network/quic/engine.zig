@@ -287,7 +287,7 @@ pub const Engine = struct {
     }
 
     pub fn peerId(self: *Engine, conn: Handle) ?peer_id.PeerId {
-        const slot = self.liveSlot(conn) catch return null;
+        const slot = self.readableSlot(conn) catch return null;
         return slot.peer_id;
     }
 
@@ -298,7 +298,7 @@ pub const Engine = struct {
     }
 
     pub fn read(self: *Engine, stream: StreamHandle, buf: []u8) Error!Read {
-        const slot = try self.liveSlot(stream.conn);
+        const slot = try self.readableSlot(stream.conn);
         return slot.read(stream.id, buf);
     }
 
@@ -308,7 +308,7 @@ pub const Engine = struct {
     }
 
     pub fn streamCapacity(self: *Engine, stream: StreamHandle) Error!usize {
-        const slot = try self.liveSlot(stream.conn);
+        const slot = try self.readableSlot(stream.conn);
         return slot.capacity(stream.id);
     }
 
@@ -349,12 +349,12 @@ pub const Engine = struct {
     pub const WritableIterator = StreamIterator;
 
     pub fn readable(self: *Engine, conn: Handle) ReadableIterator {
-        const slot = self.liveSlot(conn) catch return .{ .iter = null, .slot = null, .conn = conn };
+        const slot = self.readableSlot(conn) catch return .{ .iter = null, .slot = null, .conn = conn };
         return .{ .iter = c.quiche_conn_readable(slot.conn.?), .slot = slot, .conn = conn };
     }
 
     pub fn writable(self: *Engine, conn: Handle) WritableIterator {
-        const slot = self.liveSlot(conn) catch return .{ .iter = null, .slot = null, .conn = conn };
+        const slot = self.readableSlot(conn) catch return .{ .iter = null, .slot = null, .conn = conn };
         return .{ .iter = c.quiche_conn_writable(slot.conn.?), .slot = slot, .conn = conn };
     }
 
@@ -374,6 +374,13 @@ pub const Engine = struct {
             count += 1;
         }
         return count;
+    }
+
+    fn readableSlot(self: *Engine, conn: Handle) Error!*connection.Slot {
+        if (conn.index >= self.slots.len) return error.StaleHandle;
+        const slot = &self.slots[conn.index];
+        if (slot.generation != conn.generation or slot.conn == null) return error.StaleHandle;
+        return slot;
     }
 
     fn liveSlot(self: *Engine, conn: Handle) Error!*connection.Slot {
@@ -405,7 +412,6 @@ pub const Engine = struct {
             self.counters.recv_errors += 1;
         }
         self.refresh(index);
-        if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
     }
 
     fn refresh(self: *Engine, index: u16) void {
@@ -428,6 +434,7 @@ pub const Engine = struct {
                 slot.close(.tls_failed, connection.app_error_normal);
             }
         }
+        if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
         if (slot.state != .closed and slot.isFinished()) {
             if (slot.state == .handshaking and slot.direction == .inbound) self.handshaking -= 1;
             slot.state = .closed;
