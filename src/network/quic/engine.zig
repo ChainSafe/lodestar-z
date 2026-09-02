@@ -155,6 +155,9 @@ pub const Engine = struct {
         }
         if (header.packet_type == .short) return self.drop(&self.counters.dropped_unroutable);
         if (datagram.len < constants.client_initial_min) return self.drop(&self.counters.dropped_short_initial);
+        if (header.packet_type == .version_negotiation or header.version == 0) {
+            return self.drop(&self.counters.dropped_unroutable);
+        }
         if (!binding.versionSupported(header.version)) {
             const written = binding.check(c.quiche_negotiate_version(
                 header.scid.slice().ptr,
