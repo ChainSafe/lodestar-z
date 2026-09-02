@@ -6,8 +6,10 @@ pub const tls = @import("tls/root.zig");
 pub const udp = @import("udp.zig");
 pub const driver = @import("driver.zig");
 pub const transport = @import("transport.zig");
+pub const negotiate = @import("negotiate.zig");
 
 pub const Transport = transport.Transport;
+pub const Negotiator = negotiate.Negotiator;
 pub const Engine = quic.engine.Engine;
 pub const Driver = driver.Driver;
 pub const Udp = udp.Udp;
@@ -33,8 +35,10 @@ test {
     _ = udp;
     _ = driver;
     _ = transport;
+    _ = negotiate;
     _ = @import("types_test.zig");
     _ = @import("udp_test.zig");
     _ = @import("driver_test.zig");
     _ = @import("transport_test.zig");
+    _ = @import("negotiate_test.zig");
 }
