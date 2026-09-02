@@ -15,7 +15,7 @@ const expectClosed = support.expectClosed;
 fn dialInitial(pair: *Pair, out: []u8) ![]u8 {
     const handle = try pair.dial();
     var scratch: [constants.datagram_size_max]u8 = undefined;
-    const datagram = (try pair.client.send(handle.index, pair.now, &scratch)) orelse
+    const datagram = pair.client.driverView().send(handle.index, pair.now, &scratch) orelse
         return error.TestUnexpectedResult;
     @memcpy(out[0..datagram.len], datagram);
     return out[0..datagram.len];
@@ -37,7 +37,13 @@ test "engine drops new handshakes when the server table is full" {
     const client_events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), client_events.len);
     try std.testing.expectEqual(engine_mod.CloseReason.handshake_timeout, try expectClosed(client_events[0], second));
-    try std.testing.expectError(error.TableFull, pair.server.dial(server_address, client_address, pair.client_ctx.local_peer_id, pair.now, pair.nextEntropy()));
+    try std.testing.expectError(error.TableFull, pair.server.dial(
+        &server_address,
+        &client_address,
+        pair.client_ctx.local_peer_id,
+        pair.now,
+        pair.nextEntropy(),
+    ));
 }
 
 test "engine caps inbound handshakes per source address" {
@@ -55,7 +61,15 @@ test "engine caps inbound handshakes per source address" {
     while (attempt < limits.handshaking_per_source_max + 1) : (attempt += 1) {
         const initial = try dialInitial(&pair, &packet);
         try std.testing.expect(initial.len >= limits.client_initial_min);
-        switch (pair.server.receive(initial, client_address, server_address, pair.now, pair.nextPool(), &response)) {
+        const outcome = pair.server.driverView().receive(
+            initial,
+            &client_address,
+            &server_address,
+            pair.now,
+            pair.nextPool(),
+            &response,
+        );
+        switch (outcome) {
             .accepted => admitted += 1,
             else => {},
         }
@@ -67,7 +81,15 @@ test "engine caps inbound handshakes per source address" {
 
     const elsewhere = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 4_001 } };
     const other = try dialInitial(&pair, &packet);
-    switch (pair.server.receive(other, elsewhere, server_address, pair.now, pair.nextPool(), &response)) {
+    const foreign = pair.server.driverView().receive(
+        other,
+        &elsewhere,
+        &server_address,
+        pair.now,
+        pair.nextPool(),
+        &response,
+    );
+    switch (foreign) {
         .accepted => {},
         else => return error.TestUnexpectedResult,
     }
@@ -87,13 +109,19 @@ test "engine drops an inbound Initial when the entropy pool is stale" {
     var response: [constants.datagram_size_max]u8 = undefined;
     try std.testing.expectEqual(
         engine_mod.ReceiveOutcome.dropped,
-        pair.server.receive(initial, client_address, server_address, pair.now, &stale, &response),
+        pair.server.driverView().receive(
+            initial,
+            &client_address,
+            &server_address,
+            pair.now,
+            &stale,
+            &response,
+        ),
     );
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_no_entropy);
     try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
 
-    var indices: [limits.connections_max_default]u16 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices(&indices));
+    try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
 }
 
 test "engine drops version negotiation packets instead of reflecting them" {
@@ -112,7 +140,14 @@ test "engine drops version negotiation packets instead of reflecting them" {
     const before = pair.server.counters.dropped_unroutable;
     try std.testing.expectEqual(
         engine_mod.ReceiveOutcome.dropped,
-        pair.server.receive(&packet, client_address, server_address, pair.now, pair.nextPool(), &response),
+        pair.server.driverView().receive(
+            &packet,
+            &client_address,
+            &server_address,
+            pair.now,
+            pair.nextPool(),
+            &response,
+        ),
     );
     try std.testing.expectEqual(before + 1, pair.server.counters.dropped_unroutable);
     try std.testing.expectEqual(@as(u64, 0), pair.server.counters.version_negotiations);
@@ -135,7 +170,14 @@ test "engine answers unsupported versions and drops unroutable packets" {
     @memset(initial[15..19], 0xbb);
     initial[19] = 0x00;
     var response: [constants.datagram_size_max]u8 = undefined;
-    const outcome = pair.server.receive(&initial, client_address, server_address, pair.now, pair.nextPool(), &response);
+    const outcome = pair.server.driverView().receive(
+        &initial,
+        &client_address,
+        &server_address,
+        pair.now,
+        pair.nextPool(),
+        &response,
+    );
     switch (outcome) {
         .version_negotiation => |bytes| try std.testing.expect(bytes.len > 0),
         else => return error.TestUnexpectedResult,
@@ -143,11 +185,25 @@ test "engine answers unsupported versions and drops unroutable packets" {
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.version_negotiations);
 
     var short = [_]u8{0x40} ++ [_]u8{0xcc} ** limits.local_cid_length ++ [_]u8{0} ** 20;
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(&short, client_address, server_address, pair.now, pair.nextPool(), &response));
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.driverView().receive(
+        &short,
+        &client_address,
+        &server_address,
+        pair.now,
+        pair.nextPool(),
+        &response,
+    ));
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_unroutable);
 
     var tiny = [_]u8{ 0xc3, 0, 0, 0, 1, 0x08 } ++ [_]u8{0xaa} ** 8 ++ [_]u8{0x04} ++ [_]u8{0xbb} ** 4 ++ [_]u8{0x00};
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(&tiny, client_address, server_address, pair.now, pair.nextPool(), &response));
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.driverView().receive(
+        &tiny,
+        &client_address,
+        &server_address,
+        pair.now,
+        pair.nextPool(),
+        &response,
+    ));
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_short_initial);
     try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
 }

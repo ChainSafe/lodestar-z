@@ -20,17 +20,18 @@ test "engine drops a routed packet that arrives from another source path" {
     _ = try pair.server.write(stream, "spoof", false);
 
     var out: [constants.datagram_size_max]u8 = undefined;
-    const datagram = (try pair.server.send(0, pair.now, &out)) orelse return error.TestUnexpectedResult;
+    const datagram = pair.server.driverView().send(0, pair.now, &out) orelse
+        return error.TestUnexpectedResult;
     var copy: [constants.datagram_size_max]u8 = undefined;
     @memcpy(copy[0..datagram.len], datagram);
 
     const wrong_source = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4_003 } };
     const before = pair.client.counters.dropped_unroutable;
     var response: [constants.datagram_size_max]u8 = undefined;
-    const outcome = pair.client.receive(
+    const outcome = pair.client.driverView().receive(
         copy[0..datagram.len],
-        wrong_source,
-        client_address,
+        &wrong_source,
+        &client_address,
         pair.now,
         pair.nextPool(),
         &response,
@@ -54,10 +55,10 @@ test "engine survives an undecryptable packet routed to a live slot" {
     const before_errors = pair.client.counters.recv_errors;
     const before_accepted = pair.client.counters.accepted;
     var response: [constants.datagram_size_max]u8 = undefined;
-    const outcome = pair.client.receive(
+    const outcome = pair.client.driverView().receive(
         &garbage,
-        server_address,
-        client_address,
+        &server_address,
+        &client_address,
         pair.now,
         pair.nextPool(),
         &response,
@@ -82,10 +83,10 @@ test "engine routes a replayed client Initial to the existing connection" {
     @memcpy(replay[0..pair.first_initial_len], pair.first_initial[0..pair.first_initial_len]);
 
     var response: [constants.datagram_size_max]u8 = undefined;
-    const outcome = pair.server.receive(
+    const outcome = pair.server.driverView().receive(
         replay[0..pair.first_initial_len],
-        client_address,
-        server_address,
+        &client_address,
+        &server_address,
         pair.now,
         pair.nextPool(),
         &response,
@@ -95,8 +96,7 @@ test "engine routes a replayed client Initial to the existing connection" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
-    var indices: [limits.connections_max_default]u16 = undefined;
-    try std.testing.expectEqual(@as(usize, 1), pair.server.activeIndices(&indices));
+    try std.testing.expectEqual(@as(usize, 1), pair.server.driverView().activeIndices().len);
 }
 
 test "engine feeds an unrouted short header from a known peer to its slot" {
@@ -112,10 +112,10 @@ test "engine feeds an unrouted short header from a known peer to its slot" {
     const before_unroutable = pair.client.counters.dropped_unroutable;
     const before_touched = pair.client.counters.accepted + pair.client.counters.recv_errors;
     var response: [constants.datagram_size_max]u8 = undefined;
-    const outcome = pair.client.receive(
+    const outcome = pair.client.driverView().receive(
         &reset,
-        server_address,
-        client_address,
+        &server_address,
+        &client_address,
         pair.now,
         pair.nextPool(),
         &response,
@@ -133,7 +133,14 @@ test "engine feeds an unrouted short header from a known peer to its slot" {
     const stranger = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 9 }, .port = 4_009 } };
     try std.testing.expectEqual(
         engine_mod.ReceiveOutcome.dropped,
-        pair.client.receive(&reset, stranger, client_address, pair.now, pair.nextPool(), &response),
+        pair.client.driverView().receive(
+            &reset,
+            &stranger,
+            &client_address,
+            pair.now,
+            pair.nextPool(),
+            &response,
+        ),
     );
     try std.testing.expectEqual(before_unroutable + 1, pair.client.counters.dropped_unroutable);
 }

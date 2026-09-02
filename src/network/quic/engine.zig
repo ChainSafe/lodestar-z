@@ -6,6 +6,7 @@ const peer_id = @import("../wire/peer_id.zig");
 const tls = @import("../tls/context.zig");
 const types = @import("../types.zig");
 
+const assert = std.debug.assert;
 const c = binding.c;
 
 pub const Now = types.Now;
@@ -13,11 +14,25 @@ pub const Direction = types.Direction;
 pub const ShutdownDirection = types.ShutdownDirection;
 pub const CloseReason = types.CloseReason;
 pub const Read = types.Read;
+pub const Address = types.Address;
 
-pub const Error = connection.Error || std.mem.Allocator.Error || error{
-    TableFull,
+pub const Error = std.mem.Allocator.Error || error{InvalidLimits};
+
+pub const StreamError = error{
     StaleHandle,
-    InvalidLimits,
+    UnknownStream,
+    WouldBlock,
+    StreamStopped,
+    StreamLimit,
+    StreamTableFull,
+    NotEstablished,
+    Transport,
+};
+
+pub const DialError = error{
+    TableFull,
+    DialLimit,
+    OpenFailed,
 };
 
 pub const Handle = struct {
@@ -28,6 +43,7 @@ pub const Handle = struct {
 pub const StreamHandle = struct {
     conn: Handle,
     id: u64,
+    slot: u8,
 };
 
 pub const Event = union(enum) {
@@ -54,6 +70,8 @@ pub const Counters = struct {
     dropped_source_limit: u64 = 0,
     dropped_no_entropy: u64 = 0,
     recv_errors: u64 = 0,
+    send_errors: u64 = 0,
+    stream_errors: u64 = 0,
     version_negotiations: u64 = 0,
 };
 
@@ -85,6 +103,77 @@ const Route = struct {
     active: bool = false,
 };
 
+const PeerEntry = struct {
+    key: u64 = 0,
+    index: u16 = 0,
+    generation: u32 = 0,
+    used: bool = false,
+};
+
+const peer_key_mixer: u64 = 0x9E37_79B9_7F4A_7C15;
+
+const Stream = struct {
+    slot: *connection.Slot,
+    index: u8,
+    id: u64,
+};
+
+pub const DriverView = struct {
+    engine: *Engine,
+
+    pub fn receive(
+        self: DriverView,
+        datagram: []u8,
+        from: *const Address,
+        local: *const Address,
+        now: Now,
+        entropy: *EntropyPool,
+        out: []u8,
+    ) ReceiveOutcome {
+        return self.engine.receive(datagram, from, local, now, entropy, out);
+    }
+
+    pub fn tick(self: DriverView, now: Now) void {
+        self.engine.tick(now);
+    }
+
+    pub fn slotCount(self: DriverView) u16 {
+        const engine = self.engine;
+        assert(engine.slots.len > 0);
+        assert(engine.slots.len <= limits.connections_max_ceiling);
+        return @intCast(engine.slots.len);
+    }
+
+    pub fn nextTimeoutMs(self: DriverView) ?u64 {
+        return self.engine.nextTimeoutMs();
+    }
+
+    pub fn send(self: DriverView, index: u16, now: Now, out: []u8) ?[]u8 {
+        assert(index < self.engine.slots.len);
+        assert(out.len >= limits.recv_udp_payload_max);
+        return self.engine.send(index, now, out);
+    }
+
+    pub fn activeIndices(self: DriverView) []const u16 {
+        const engine = self.engine;
+        assert(engine.active.len == engine.slots.len);
+        assert(engine.active_len <= engine.active.len);
+        return engine.active[0..engine.active_len];
+    }
+
+    pub fn peerAddressAt(self: DriverView, index: u16) ?Address {
+        assert(index < self.engine.slots.len);
+        assert(self.engine.slots.len == self.engine.active.len);
+        return self.engine.peerAddressAt(index);
+    }
+
+    pub fn handleAt(self: DriverView, index: u16) ?Handle {
+        assert(index < self.engine.slots.len);
+        assert(self.engine.slots.len == self.engine.active.len);
+        return self.engine.handleAt(index);
+    }
+};
+
 pub const Engine = struct {
     allocator: std.mem.Allocator,
     tls_ctx: *const tls.Context,
@@ -93,6 +182,7 @@ pub const Engine = struct {
     slots: []connection.Slot,
     routes: []Route,
     active: []u16,
+    peers: []PeerEntry,
     active_len: u16 = 0,
     connection_window: u64,
     stream_window: u64,
@@ -111,8 +201,15 @@ pub const Engine = struct {
             limits.connection_window_max,
         );
         const stream_window = connection_window / 2;
+        const peers_wanted = 2 * @as(usize, wanted.connections_max);
+        const peers_len = std.math.ceilPowerOfTwoAssert(usize, peers_wanted);
+        assert(peers_len >= peers_wanted);
 
-        var config = try binding.Config.init(wanted.idle_timeout_ms, connection_window, stream_window);
+        var config = binding.Config.init(
+            wanted.idle_timeout_ms,
+            connection_window,
+            stream_window,
+        ) catch return error.OutOfMemory;
         errdefer config.deinit();
 
         const slots = try allocator.alloc(connection.Slot, wanted.connections_max);
@@ -127,6 +224,10 @@ pub const Engine = struct {
         errdefer allocator.free(active);
         for (active, 0..) |*entry, index| entry.* = @intCast(index);
 
+        const peers = try allocator.alloc(PeerEntry, peers_len);
+        errdefer allocator.free(peers);
+        @memset(peers, .{});
+
         return .{
             .allocator = allocator,
             .tls_ctx = tls_ctx,
@@ -135,6 +236,7 @@ pub const Engine = struct {
             .slots = slots,
             .routes = routes,
             .active = active,
+            .peers = peers,
             .connection_window = connection_window,
             .stream_window = stream_window,
         };
@@ -144,6 +246,7 @@ pub const Engine = struct {
         for (self.slots) |*slot| {
             if (slot.state != .free) slot.release();
         }
+        self.allocator.free(self.peers);
         self.allocator.free(self.active);
         self.allocator.free(self.routes);
         self.allocator.free(self.slots);
@@ -151,47 +254,293 @@ pub const Engine = struct {
         self.* = undefined;
     }
 
-    pub fn slotCount(self: *const Engine) u16 {
-        return @intCast(self.slots.len);
+    pub fn driverView(self: *Engine) DriverView {
+        assert(self.slots.len > 0);
+        assert(self.active_len <= self.slots.len);
+        return .{ .engine = self };
+    }
+
+    pub fn connectionWindow(self: *const Engine) u64 {
+        assert(self.connection_window >= limits.connection_window_min);
+        assert(self.connection_window <= limits.connection_window_max);
+        return self.connection_window;
+    }
+
+    pub fn streamWindow(self: *const Engine) u64 {
+        assert(self.stream_window > 0);
+        assert(self.stream_window <= self.connection_window);
+        return self.stream_window;
     }
 
     pub fn dial(
         self: *Engine,
-        local: types.Address,
-        peer: types.Address,
+        local: *const Address,
+        peer: *const Address,
         expected: peer_id.PeerId,
         now: Now,
         entropy: [limits.local_cid_length]u8,
-    ) Error!Handle {
+    ) DialError!Handle {
+        assert(self.active_len <= self.active.len);
         const index = self.claimSlot() orelse return error.TableFull;
+        assert(index < self.slots.len);
         const slot = &self.slots[index];
         slot.open(self.tls_ctx, &self.config, .{
             .direction = .outbound,
-            .local = local,
-            .peer = peer,
+            .local = local.*,
+            .peer = peer.*,
             .scid = entropy,
             .expected_peer_id = expected,
             .now = now,
-        }) catch |err| {
+        }) catch {
             self.unclaimSlot(index);
-            return err;
+            return error.OpenFailed;
         };
         self.addRoute(&slot.scid, index);
         return .{ .index = index, .generation = slot.generation };
     }
 
-    pub fn receive(
+    pub fn close(self: *Engine, conn: Handle, code: u64) bool {
+        const slot = self.liveSlot(conn) catch return false;
+        assert(slot.conn != null);
+        assert(slot.close_reason == null);
+        slot.close(.host, code);
+        return true;
+    }
+
+    pub fn abandon(self: *Engine, conn: Handle) bool {
+        const slot = self.readableSlot(conn) catch return false;
+        switch (slot.state) {
+            .handshaking => {
+                if (slot.closed_pending) return false;
+                if (slot.direction == .inbound) self.handshaking -= 1;
+            },
+            .closed => if (!slot.closed_pending or slot.closed_reported) return false,
+            else => return false,
+        }
+        assert(conn.index < self.slots.len);
+        assert(self.active_len > 0);
+        self.removeRoutesFor(conn.index);
+        self.releaseSlot(conn.index);
+        return true;
+    }
+
+    pub fn peerId(self: *const Engine, conn: Handle) ?peer_id.PeerId {
+        const slot = self.liveView(conn) orelse return null;
+        assert(slot.state != .free);
+        assert(slot.generation == conn.generation);
+        return slot.peer_id;
+    }
+
+    pub fn peerAddress(self: *const Engine, conn: Handle) ?Address {
+        const slot = self.liveView(conn) orelse return null;
+        assert(slot.state != .free);
+        assert(slot.generation == conn.generation);
+        return slot.peer;
+    }
+
+    pub fn direction(self: *const Engine, conn: Handle) ?Direction {
+        const slot = self.liveView(conn) orelse return null;
+        assert(slot.state != .free);
+        assert(slot.generation == conn.generation);
+        return slot.direction;
+    }
+
+    pub fn connectionAgeMs(self: *const Engine, conn: Handle, now: Now) ?u64 {
+        const slot = self.liveView(conn) orelse return null;
+        assert(slot.state != .free);
+        assert(slot.conn != null);
+        return now.mono_ms -| slot.created_ms;
+    }
+
+    pub fn findByPeerId(self: *const Engine, id: *const peer_id.PeerId) ?Handle {
+        assert(self.peers.len >= 2 * self.slots.len);
+        assert(std.math.isPowerOfTwo(self.peers.len));
+        const key = peerKey(id);
+        const mask = self.peers.len - 1;
+        var cursor = self.peerBucket(key);
+        var probes: usize = 0;
+        while (probes < self.peers.len) : (probes += 1) {
+            const entry = self.peers[cursor];
+            if (!entry.used) return null;
+            if (entry.key == key and self.peerEntryMatches(entry, id)) {
+                return .{ .index = entry.index, .generation = entry.generation };
+            }
+            cursor = (cursor + 1) & mask;
+        }
+        return null;
+    }
+
+    pub fn openStream(self: *Engine, conn: Handle) StreamError!StreamHandle {
+        const slot = try self.liveSlot(conn);
+        const opened = slot.openStream() catch |err| return self.streamError(err);
+        assert(opened.index < limits.streams_per_connection);
+        assert(slot.table.matches(opened.index, opened.id));
+        return .{ .conn = conn, .id = opened.id, .slot = opened.index };
+    }
+
+    pub fn read(self: *Engine, stream: StreamHandle, buf: []u8) StreamError!Read {
+        const target = try self.readableStream(stream);
+        assert(target.slot.table.matches(target.index, target.id));
+        const result = target.slot.read(target.index, target.id, buf) catch |err|
+            return self.streamError(err);
+        assert(result.len <= buf.len);
+        if (result.len > 0) assert(result.reset_code == null);
+        return result;
+    }
+
+    pub fn write(
+        self: *Engine,
+        stream: StreamHandle,
+        bytes: []const u8,
+        fin: bool,
+    ) StreamError!usize {
+        const target = try self.liveStream(stream);
+        assert(target.slot.table.matches(target.index, target.id));
+        const written = target.slot.write(target.index, target.id, bytes, fin) catch |err|
+            return self.streamError(err);
+        assert(written <= bytes.len);
+        return written;
+    }
+
+    pub fn streamCapacity(self: *Engine, stream: StreamHandle) StreamError!usize {
+        const target = try self.readableStream(stream);
+        assert(target.slot.table.matches(target.index, target.id));
+        const available = target.slot.capacity(target.index, target.id) catch |err|
+            return self.streamError(err);
+        assert(target.index < limits.streams_per_connection);
+        return available;
+    }
+
+    pub fn shutdown(self: *Engine, stream: StreamHandle, dir: ShutdownDirection, code: u64) void {
+        const target = self.liveStream(stream) catch return;
+        assert(target.index < limits.streams_per_connection);
+        assert(target.slot.conn != null);
+        target.slot.shutdown(target.index, target.id, dir, code);
+    }
+
+    pub fn closeStream(self: *Engine, stream: StreamHandle, code: u64) void {
+        const target = self.liveStream(stream) catch return;
+        assert(target.index < limits.streams_per_connection);
+        assert(target.slot.conn != null);
+        target.slot.closeStream(target.index, target.id, code);
+    }
+
+    pub const StreamIterator = struct {
+        iter: ?*c.quiche_stream_iter,
+        slot: ?*connection.Slot,
+        conn: Handle,
+
+        pub fn next(self: *StreamIterator) ?StreamHandle {
+            const iter = self.iter orelse return null;
+            const slot = self.slot orelse return null;
+            var id: u64 = 0;
+            var seen: u16 = 0;
+            while (seen < limits.streams_per_connection) : (seen += 1) {
+                if (!c.quiche_stream_iter_next(iter, &id)) return null;
+                const index = slot.streamIndex(id) orelse continue;
+                assert(slot.table.matches(index, id));
+                return .{ .conn = self.conn, .id = id, .slot = index };
+            }
+            return null;
+        }
+
+        pub fn deinit(self: *StreamIterator) void {
+            if (self.iter) |iter| c.quiche_stream_iter_free(iter);
+            self.* = undefined;
+        }
+    };
+
+    pub const ReadableIterator = StreamIterator;
+    pub const WritableIterator = StreamIterator;
+
+    pub fn readable(self: *Engine, conn: Handle) ReadableIterator {
+        const slot = self.readableSlot(conn) catch
+            return .{ .iter = null, .slot = null, .conn = conn };
+        assert(slot.conn != null);
+        assert(slot.generation == conn.generation);
+        return .{ .iter = c.quiche_conn_readable(slot.conn.?), .slot = slot, .conn = conn };
+    }
+
+    pub fn writable(self: *Engine, conn: Handle) WritableIterator {
+        const slot = self.readableSlot(conn) catch
+            return .{ .iter = null, .slot = null, .conn = conn };
+        assert(slot.conn != null);
+        assert(slot.generation == conn.generation);
+        return .{ .iter = c.quiche_conn_writable(slot.conn.?), .slot = slot, .conn = conn };
+    }
+
+    pub fn pollEvents(self: *Engine, events: []Event) usize {
+        self.releaseReportedSlots();
+        var count: usize = 0;
+        var cursor: u16 = 0;
+        while (cursor < self.active_len) {
+            const index = self.active[cursor];
+            assert(index < self.slots.len);
+            const slot = &self.slots[index];
+            const conn = Handle{ .index = index, .generation = slot.generation };
+            if (slot.connected_pending) {
+                if (count == events.len) return count;
+                events[count] = .{ .connected = .{
+                    .conn = conn,
+                    .peer_id = slot.peer_id.?,
+                    .direction = slot.direction,
+                } };
+                count += 1;
+                slot.connected_pending = false;
+            }
+            if (slot.table.pending > 0) {
+                for (&slot.table.entries, 0..) |*entry, table_index| {
+                    if (!entry.opened_pending) continue;
+                    if (count == events.len) return count;
+                    events[count] = .{ .stream_opened = .{
+                        .conn = conn,
+                        .id = entry.id.?,
+                        .slot = @intCast(table_index),
+                    } };
+                    count += 1;
+                    entry.opened_pending = false;
+                    slot.table.pending -= 1;
+                }
+            }
+            if (slot.closed_pending) {
+                if (count == events.len) return count;
+                events[count] = .{ .closed = .{ .conn = conn, .reason = slot.close_reason.? } };
+                count += 1;
+                slot.closed_pending = false;
+                slot.closed_reported = true;
+            }
+            cursor += 1;
+        }
+        assert(count <= events.len);
+        return count;
+    }
+
+    pub fn eventsPending(self: *const Engine) bool {
+        assert(self.active_len <= self.active.len);
+        for (self.active[0..self.active_len]) |index| {
+            assert(index < self.slots.len);
+            const slot = &self.slots[index];
+            if (slot.connected_pending) return true;
+            if (slot.table.pending > 0) return true;
+            if (slot.closed_pending) return true;
+        }
+        return false;
+    }
+
+    fn receive(
         self: *Engine,
         datagram: []u8,
-        from: types.Address,
-        local: types.Address,
+        from: *const Address,
+        local: *const Address,
         now: Now,
         entropy: *EntropyPool,
         out: []u8,
     ) ReceiveOutcome {
         const header = binding.headerInfo(datagram) catch return self.drop(&self.counters.dropped_unroutable);
         if (self.findRoute(&header.dcid)) |index| {
-            if (!self.slots[index].peer.eql(from)) return self.drop(&self.counters.dropped_unroutable);
+            if (!self.slots[index].peer.eql(from.*)) {
+                return self.drop(&self.counters.dropped_unroutable);
+            }
             self.feed(index, datagram);
             return .{ .accepted = self.toHandle(index) };
         }
@@ -205,16 +554,7 @@ pub const Engine = struct {
             return self.drop(&self.counters.dropped_unroutable);
         }
         if (!binding.versionSupported(header.version)) {
-            const written = binding.check(c.quiche_negotiate_version(
-                header.scid.slice().ptr,
-                header.scid.len,
-                header.dcid.slice().ptr,
-                header.dcid.len,
-                out.ptr,
-                out.len,
-            )) catch return self.drop(&self.counters.dropped_unroutable);
-            self.counters.version_negotiations += 1;
-            return .{ .version_negotiation = out[0..written] };
+            return self.negotiateVersion(&header, out);
         }
         if (header.packet_type != .initial) return self.drop(&self.counters.dropped_unroutable);
         if (self.handshaking >= self.limits.handshaking_max) return self.drop(&self.counters.dropped_full);
@@ -227,8 +567,8 @@ pub const Engine = struct {
         const slot = &self.slots[index];
         slot.open(self.tls_ctx, &self.config, .{
             .direction = .inbound,
-            .local = local,
-            .peer = from,
+            .local = local.*,
+            .peer = from.*,
             .scid = scid,
             .expected_peer_id = null,
             .now = now,
@@ -243,7 +583,26 @@ pub const Engine = struct {
         return .{ .accepted = self.toHandle(index) };
     }
 
-    pub fn tick(self: *Engine, now: Now) void {
+    fn negotiateVersion(
+        self: *Engine,
+        header: *const binding.HeaderInfo,
+        out: []u8,
+    ) ReceiveOutcome {
+        const written = binding.check(c.quiche_negotiate_version(
+            header.scid.slice().ptr,
+            header.scid.len,
+            header.dcid.slice().ptr,
+            header.dcid.len,
+            out.ptr,
+            out.len,
+        )) catch return self.drop(&self.counters.dropped_unroutable);
+        const length = written orelse return self.drop(&self.counters.dropped_unroutable);
+        assert(length <= out.len);
+        self.counters.version_negotiations += 1;
+        return .{ .version_negotiation = out[0..length] };
+    }
+
+    fn tick(self: *Engine, now: Now) void {
         for (self.active[0..self.active_len]) |index| {
             const slot = &self.slots[index];
             if (slot.state == .closed) continue;
@@ -272,7 +631,7 @@ pub const Engine = struct {
         }
     }
 
-    pub fn nextTimeoutMs(self: *const Engine) ?u64 {
+    fn nextTimeoutMs(self: *const Engine) ?u64 {
         var earliest: ?u64 = null;
         for (self.active[0..self.active_len]) |index| {
             const slot = &self.slots[index];
@@ -283,63 +642,31 @@ pub const Engine = struct {
         return earliest;
     }
 
-    pub fn send(self: *Engine, index: u16, now: Now, out: []u8) Error!?[]u8 {
+    fn send(self: *Engine, index: u16, now: Now, out: []u8) ?[]u8 {
         if (index >= self.slots.len) return null;
         const slot = &self.slots[index];
         if (slot.state == .free or slot.state == .closed) return null;
-        const datagram = slot.send(now.mono_ms, out) catch |err| {
+        const datagram = slot.send(now.mono_ms, out) catch {
+            self.counters.send_errors += 1;
             self.refresh(index);
-            return err;
+            return null;
         };
         if (datagram == null) self.refresh(index);
         return datagram;
     }
 
-    pub fn peerAddress(self: *const Engine, index: u16) ?types.Address {
+    fn peerAddressAt(self: *const Engine, index: u16) ?Address {
         if (index >= self.slots.len) return null;
         const slot = &self.slots[index];
         if (slot.state == .free) return null;
         return slot.peer;
     }
 
-    pub fn pollEvents(self: *Engine, events: []Event) usize {
-        self.releaseReportedSlots();
-        var count: usize = 0;
-        var cursor: u16 = 0;
-        while (cursor < self.active_len) {
-            const index = self.active[cursor];
-            const slot = &self.slots[index];
-            const conn = Handle{ .index = index, .generation = slot.generation };
-            if (slot.connected_pending) {
-                if (count == events.len) return count;
-                events[count] = .{ .connected = .{
-                    .conn = conn,
-                    .peer_id = slot.peer_id.?,
-                    .direction = slot.direction,
-                } };
-                count += 1;
-                slot.connected_pending = false;
-            }
-            if (slot.table.pending > 0) {
-                for (&slot.table.entries) |*entry| {
-                    if (!entry.opened_pending) continue;
-                    if (count == events.len) return count;
-                    events[count] = .{ .stream_opened = .{ .conn = conn, .id = entry.id.? } };
-                    count += 1;
-                    entry.opened_pending = false;
-                    slot.table.pending -= 1;
-                }
-            }
-            if (slot.closed_pending) {
-                if (count == events.len) return count;
-                events[count] = .{ .closed = .{ .conn = conn, .reason = slot.close_reason.? } };
-                count += 1;
-                slot.closed_pending = false;
-                slot.closed_reported = true;
-            }
-            cursor += 1;
-        }
-        return count;
+    fn handleAt(self: *const Engine, index: u16) ?Handle {
+        if (index >= self.slots.len) return null;
+        const slot = &self.slots[index];
+        if (slot.state == .free) return null;
+        return .{ .index = index, .generation = slot.generation };
     }
 
     fn releaseReportedSlots(self: *Engine) void {
@@ -355,128 +682,45 @@ pub const Engine = struct {
         }
     }
 
-    pub fn close(self: *Engine, conn: Handle, code: u64) bool {
-        const slot = self.liveSlot(conn) catch return false;
-        slot.close(.host, code);
-        return true;
-    }
-
-    pub fn abandon(self: *Engine, conn: Handle) bool {
-        const slot = self.readableSlot(conn) catch return false;
-        switch (slot.state) {
-            .handshaking => {
-                if (slot.closed_pending) return false;
-                if (slot.direction == .inbound) self.handshaking -= 1;
+    fn streamError(self: *Engine, err: connection.Error) StreamError {
+        return switch (err) {
+            error.UnknownStream => error.UnknownStream,
+            error.WouldBlock => error.WouldBlock,
+            error.StreamStopped => error.StreamStopped,
+            error.StreamLimit => error.StreamLimit,
+            error.StreamTableFull => error.StreamTableFull,
+            error.NotEstablished => error.NotEstablished,
+            else => {
+                self.counters.stream_errors += 1;
+                return error.Transport;
             },
-            .closed => if (!slot.closed_pending or slot.closed_reported) return false,
-            else => return false,
-        }
-        self.removeRoutesFor(conn.index);
-        self.releaseSlot(conn.index);
-        return true;
+        };
     }
 
-    pub fn eventsPending(self: *const Engine) bool {
-        for (self.active[0..self.active_len]) |index| {
-            const slot = &self.slots[index];
-            if (slot.connected_pending or slot.table.pending > 0 or slot.closed_pending) return true;
-        }
-        return false;
-    }
-
-    pub fn peerId(self: *Engine, conn: Handle) ?peer_id.PeerId {
-        const slot = self.readableSlot(conn) catch return null;
-        return slot.peer_id;
-    }
-
-    pub fn openStream(self: *Engine, conn: Handle) Error!StreamHandle {
-        const slot = try self.liveSlot(conn);
-        const id = try slot.openStream();
-        return .{ .conn = conn, .id = id };
-    }
-
-    pub fn read(self: *Engine, stream: StreamHandle, buf: []u8) Error!Read {
-        const slot = try self.readableSlot(stream.conn);
-        return slot.read(stream.id, buf);
-    }
-
-    pub fn write(self: *Engine, stream: StreamHandle, bytes: []const u8, fin: bool) Error!usize {
+    fn liveStream(self: *Engine, stream: StreamHandle) StreamError!Stream {
         const slot = try self.liveSlot(stream.conn);
-        return slot.write(stream.id, bytes, fin);
+        if (!slot.table.matches(stream.slot, stream.id)) return error.UnknownStream;
+        assert(stream.slot < limits.streams_per_connection);
+        assert(slot.conn != null);
+        return .{ .slot = slot, .index = stream.slot, .id = stream.id };
     }
 
-    pub fn streamCapacity(self: *Engine, stream: StreamHandle) Error!usize {
+    fn readableStream(self: *Engine, stream: StreamHandle) StreamError!Stream {
         const slot = try self.readableSlot(stream.conn);
-        return slot.capacity(stream.id);
+        if (!slot.table.matches(stream.slot, stream.id)) return error.UnknownStream;
+        assert(stream.slot < limits.streams_per_connection);
+        assert(slot.conn != null);
+        return .{ .slot = slot, .index = stream.slot, .id = stream.id };
     }
 
-    pub fn shutdown(self: *Engine, stream: StreamHandle, direction: ShutdownDirection, code: u64) void {
-        const slot = self.liveSlot(stream.conn) catch return;
-        if (slot.streamIndex(stream.id) == null) return;
-        slot.shutdown(stream.id, direction, code);
-    }
-
-    pub fn closeStream(self: *Engine, stream: StreamHandle, code: u64) void {
-        const slot = self.liveSlot(stream.conn) catch return;
-        slot.closeStream(stream.id, code);
-    }
-
-    pub const StreamIterator = struct {
-        iter: ?*c.quiche_stream_iter,
-        slot: ?*connection.Slot,
-        conn: Handle,
-
-        pub fn next(self: *StreamIterator) ?StreamHandle {
-            const iter = self.iter orelse return null;
-            const slot = self.slot orelse return null;
-            var id: u64 = 0;
-            var seen: u16 = 0;
-            while (seen < limits.streams_per_connection and c.quiche_stream_iter_next(iter, &id)) : (seen += 1) {
-                if (slot.streamIndex(id) != null) return .{ .conn = self.conn, .id = id };
-            }
-            return null;
-        }
-
-        pub fn deinit(self: *StreamIterator) void {
-            if (self.iter) |iter| c.quiche_stream_iter_free(iter);
-            self.* = undefined;
-        }
-    };
-
-    pub const ReadableIterator = StreamIterator;
-    pub const WritableIterator = StreamIterator;
-
-    pub fn readable(self: *Engine, conn: Handle) ReadableIterator {
-        const slot = self.readableSlot(conn) catch return .{ .iter = null, .slot = null, .conn = conn };
-        return .{ .iter = c.quiche_conn_readable(slot.conn.?), .slot = slot, .conn = conn };
-    }
-
-    pub fn writable(self: *Engine, conn: Handle) WritableIterator {
-        const slot = self.readableSlot(conn) catch return .{ .iter = null, .slot = null, .conn = conn };
-        return .{ .iter = c.quiche_conn_writable(slot.conn.?), .slot = slot, .conn = conn };
-    }
-
-    pub fn handle(self: *const Engine, index: u16) ?Handle {
-        if (index >= self.slots.len) return null;
-        const slot = &self.slots[index];
-        if (slot.state == .free) return null;
-        return .{ .index = index, .generation = slot.generation };
-    }
-
-    pub fn activeIndices(self: *const Engine, out: []u16) usize {
-        const count = @min(out.len, self.active_len);
-        @memcpy(out[0..count], self.active[0..count]);
-        return count;
-    }
-
-    fn readableSlot(self: *Engine, conn: Handle) Error!*connection.Slot {
+    fn readableSlot(self: *Engine, conn: Handle) StreamError!*connection.Slot {
         if (conn.index >= self.slots.len) return error.StaleHandle;
         const slot = &self.slots[conn.index];
         if (slot.generation != conn.generation or slot.conn == null) return error.StaleHandle;
         return slot;
     }
 
-    fn liveSlot(self: *Engine, conn: Handle) Error!*connection.Slot {
+    fn liveSlot(self: *Engine, conn: Handle) StreamError!*connection.Slot {
         if (conn.index >= self.slots.len) return error.StaleHandle;
         const slot = &self.slots[conn.index];
         if (slot.generation != conn.generation or slot.state == .free or slot.state == .closed or
@@ -484,6 +728,13 @@ pub const Engine = struct {
         {
             return error.StaleHandle;
         }
+        return slot;
+    }
+
+    fn liveView(self: *const Engine, conn: Handle) ?*const connection.Slot {
+        if (conn.index >= self.slots.len) return null;
+        const slot = &self.slots[conn.index];
+        if (slot.generation != conn.generation or slot.state == .free) return null;
         return slot;
     }
 
@@ -520,6 +771,12 @@ pub const Engine = struct {
             if (slot.direction == .inbound) self.handshaking -= 1;
             if (slot.handshake.peer_id) |id| {
                 slot.peer_id = id;
+                self.peerIndexInsert(.{
+                    .key = peerKey(&id),
+                    .index = index,
+                    .generation = slot.generation,
+                    .used = true,
+                });
                 if (slot.expected_peer_id != null and !slot.expected_peer_id.?.eql(&id)) {
                     slot.deferClose(.peer_id_mismatch, types.app_error_peer_id_mismatch);
                 } else {
@@ -540,23 +797,23 @@ pub const Engine = struct {
         }
     }
 
-    fn slotForPeer(self: *const Engine, from: types.Address) ?u16 {
+    fn slotForPeer(self: *const Engine, from: *const Address) ?u16 {
         var found: ?u16 = null;
         for (self.active[0..self.active_len]) |index| {
             const slot = &self.slots[index];
-            if (slot.state == .closed or !slot.peer.eql(from)) continue;
+            if (slot.state == .closed or !slot.peer.eql(from.*)) continue;
             if (found != null) return null;
             found = index;
         }
         return found;
     }
 
-    fn handshakingFromSource(self: *const Engine, from: types.Address) u16 {
+    fn handshakingFromSource(self: *const Engine, from: *const Address) u16 {
         var count: u16 = 0;
         for (self.active[0..self.active_len]) |index| {
             const slot = &self.slots[index];
             if (slot.state != .handshaking or slot.direction != .inbound) continue;
-            if (slot.peer.sameHost(from)) count += 1;
+            if (slot.peer.sameHost(from.*)) count += 1;
         }
         return count;
     }
@@ -580,8 +837,72 @@ pub const Engine = struct {
     }
 
     fn releaseSlot(self: *Engine, index: u16) void {
-        self.slots[index].release();
+        const slot = &self.slots[index];
+        if (slot.peer_id) |id| self.peerIndexRemove(peerKey(&id), index);
+        slot.release();
         self.unclaimSlot(index);
+    }
+
+    fn peerBucket(self: *const Engine, key: u64) usize {
+        const mask = self.peers.len - 1;
+        const mixed = key *% peer_key_mixer;
+        return @as(usize, @truncate(mixed >> 32)) & mask;
+    }
+
+    fn peerEntryMatches(self: *const Engine, entry: PeerEntry, id: *const peer_id.PeerId) bool {
+        assert(entry.used);
+        if (entry.index >= self.slots.len) return false;
+        const slot = &self.slots[entry.index];
+        if (slot.generation != entry.generation or slot.state == .free) return false;
+        const stored = slot.peer_id orelse return false;
+        return stored.eql(id);
+    }
+
+    fn peerIndexInsert(self: *Engine, entry: PeerEntry) void {
+        assert(entry.used);
+        assert(entry.index < self.slots.len);
+        const mask = self.peers.len - 1;
+        var cursor = self.peerBucket(entry.key);
+        var probes: usize = 0;
+        while (probes < self.peers.len) : (probes += 1) {
+            if (!self.peers[cursor].used) {
+                self.peers[cursor] = entry;
+                return;
+            }
+            cursor = (cursor + 1) & mask;
+        }
+        unreachable;
+    }
+
+    fn peerIndexRemove(self: *Engine, key: u64, index: u16) void {
+        assert(index < self.slots.len);
+        const mask = self.peers.len - 1;
+        var cursor = self.peerBucket(key);
+        var probes: usize = 0;
+        while (probes < self.peers.len) : (probes += 1) {
+            const entry = self.peers[cursor];
+            if (!entry.used) return;
+            if (entry.key == key and entry.index == index) {
+                self.peerIndexEvict(cursor);
+                return;
+            }
+            cursor = (cursor + 1) & mask;
+        }
+    }
+
+    fn peerIndexEvict(self: *Engine, at: usize) void {
+        assert(self.peers[at].used);
+        const mask = self.peers.len - 1;
+        self.peers[at] = .{};
+        var cursor = (at + 1) & mask;
+        var probes: usize = 0;
+        while (probes < self.peers.len) : (probes += 1) {
+            const entry = self.peers[cursor];
+            if (!entry.used) return;
+            self.peers[cursor] = .{};
+            self.peerIndexInsert(entry);
+            cursor = (cursor + 1) & mask;
+        }
     }
 
     fn findRoute(self: *const Engine, cid: *const binding.Cid) ?u16 {
@@ -606,3 +927,12 @@ pub const Engine = struct {
         }
     }
 };
+
+fn peerKey(id: *const peer_id.PeerId) u64 {
+    return std.mem.readInt(u64, id.bytes[0..8], .big);
+}
+
+comptime {
+    assert(peer_id.length >= @sizeOf(u64));
+    assert(limits.streams_per_connection <= std.math.maxInt(u8) + 1);
+}

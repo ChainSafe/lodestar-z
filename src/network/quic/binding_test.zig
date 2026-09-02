@@ -14,7 +14,7 @@ test "quiche config initializes with the transport bounds" {
 }
 
 test "quiche error codes map to tagged errors" {
-    try std.testing.expectError(error.Done, binding.check(binding.c.QUICHE_ERR_DONE));
+    try std.testing.expect((try binding.check(binding.c.QUICHE_ERR_DONE)) == null);
     try std.testing.expectError(error.StreamReset, binding.check(binding.c.QUICHE_ERR_STREAM_RESET));
     try std.testing.expectError(error.Unknown, binding.check(@as(isize, -999)));
     try std.testing.expectEqual(@as(usize, 7), try binding.check(@as(isize, 7)));

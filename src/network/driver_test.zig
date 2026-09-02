@@ -95,9 +95,10 @@ test "driver surfaces a send failure to an unreachable destination" {
         .port = 4_001,
     } };
     const now = try driver_mod.currentTime(std.testing.io);
+    const local = node.udp.localAddress();
     _ = try node.engine.dial(
-        node.udp.localAddress(),
-        unreachable_peer,
+        &local,
+        &unreachable_peer,
         node.ctx.local_peer_id,
         now,
         [_]u8{7} ** limits.local_cid_length,
@@ -108,8 +109,9 @@ test "driver surfaces a send failure to an unreachable destination" {
     try std.testing.expectEqual(@as(u32, 1), result.send_failures);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_sent);
     try std.testing.expect(result.first_failure != null);
-    try std.testing.expectEqual(driver_mod.Error.DestinationUnreachable, result.first_failure.?.err);
-    try std.testing.expectEqual(@as(u16, 0), result.first_failure.?.conn.index);
+    const failure = result.first_failure.?;
+    try std.testing.expectEqual(driver_mod.StepError.DestinationUnreachable, failure.err);
+    try std.testing.expectEqual(@as(u16, 0), failure.conn.index);
 
     try std.testing.expectError(
         error.DestinationUnreachable,

@@ -1,7 +1,6 @@
 const std = @import("std");
 const engine_mod = @import("engine.zig");
 const keys = @import("../wire/keys.zig");
-const limits = @import("limits.zig");
 const support = @import("../test_support.zig");
 const tls = @import("../tls/context.zig");
 
@@ -31,6 +30,41 @@ test "engine stale handles are rejected" {
     try std.testing.expect(pair.client.peerId(stale) == null);
     const out_of_range = engine_mod.Handle{ .index = 9_999, .generation = 0 };
     try std.testing.expectError(error.StaleHandle, pair.client.openStream(out_of_range));
+
+    const stream = try pair.client.openStream(handles.client);
+    var buffer: [16]u8 = undefined;
+    const wrong_slot = engine_mod.StreamHandle{
+        .conn = stream.conn,
+        .id = stream.id,
+        .slot = stream.slot + 1,
+    };
+    try std.testing.expectError(error.UnknownStream, pair.client.read(wrong_slot, &buffer));
+    try std.testing.expectError(error.UnknownStream, pair.client.write(wrong_slot, "x", false));
+    try std.testing.expectError(error.UnknownStream, pair.client.streamCapacity(wrong_slot));
+
+    const past_table = engine_mod.StreamHandle{ .conn = stream.conn, .id = stream.id, .slot = 255 };
+    try std.testing.expectError(error.UnknownStream, pair.client.read(past_table, &buffer));
+    try std.testing.expectError(error.UnknownStream, pair.client.write(past_table, "x", false));
+
+    const other = try pair.client.openStream(handles.client);
+    try std.testing.expect(other.slot != stream.slot);
+    try std.testing.expect(other.id != stream.id);
+    const aliased = engine_mod.StreamHandle{
+        .conn = stream.conn,
+        .id = stream.id,
+        .slot = other.slot,
+    };
+    try std.testing.expectError(error.UnknownStream, pair.client.read(aliased, &buffer));
+    try std.testing.expectError(error.UnknownStream, pair.client.write(aliased, "x", false));
+    try std.testing.expectError(error.UnknownStream, pair.client.streamCapacity(aliased));
+
+    const stale_stream = engine_mod.StreamHandle{
+        .conn = stale,
+        .id = stream.id,
+        .slot = stream.slot,
+    };
+    try std.testing.expectError(error.StaleHandle, pair.client.read(stale_stream, &buffer));
+    try std.testing.expectEqual(@as(usize, 1), try pair.client.write(stream, "x", false));
 }
 
 test "engine reports a host close on both sides" {
@@ -58,7 +92,13 @@ test "engine closes on peer id mismatch" {
     defer pair.deinit();
 
     const wrong = pair.client_ctx.local_peer_id;
-    const handle = try pair.client.dial(client_address, server_address, wrong, pair.now, pair.nextEntropy());
+    const handle = try pair.client.dial(
+        &client_address,
+        &server_address,
+        wrong,
+        pair.now,
+        pair.nextEntropy(),
+    );
     try pair.pump();
 
     var storage: [8]Event = undefined;
@@ -169,12 +209,11 @@ test "engine reclaims slots across many connection lifetimes" {
         _ = pair.events(&pair.server, &storage);
     }
 
-    var indices: [4]u16 = undefined;
-    try std.testing.expectEqual(@as(usize, 1), pair.client.activeIndices(&indices));
+    try std.testing.expectEqual(@as(usize, 1), pair.client.driverView().activeIndices().len);
     _ = pair.events(&pair.client, &storage);
     _ = pair.events(&pair.server, &storage);
-    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices(&indices));
-    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices(&indices));
+    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
     try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
     try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
     for (pair.client.slots) |*slot| try std.testing.expect(slot.conn == null);
@@ -192,8 +231,7 @@ test "engine abandon frees a closed slot whose event was never reported" {
     try std.testing.expect(pair.client.eventsPending());
 
     try std.testing.expect(pair.client.abandon(handles.client));
-    var indices: [limits.connections_max_default]u16 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices(&indices));
+    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().activeIndices().len);
     try std.testing.expect(!pair.client.eventsPending());
 
     var storage: [8]Event = undefined;
@@ -217,11 +255,10 @@ test "engine abandon frees a dialing slot without an event" {
     defer pair.deinit();
 
     const handle = try pair.dial();
-    var indices: [limits.connections_max_default]u16 = undefined;
-    try std.testing.expectEqual(@as(usize, 1), pair.client.activeIndices(&indices));
+    try std.testing.expectEqual(@as(usize, 1), pair.client.driverView().activeIndices().len);
 
     try std.testing.expect(pair.client.abandon(handle));
-    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices(&indices));
+    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().activeIndices().len);
     try std.testing.expect(!pair.client.abandon(handle));
 
     var storage: [8]Event = undefined;
