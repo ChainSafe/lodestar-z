@@ -28,6 +28,8 @@ pub const Pair = struct {
     now: Now = .{ .mono_ms = 1_000, .unix_s = now_unix },
     entropy: u8 = 0,
     pool: engine_mod.EntropyPool = .{},
+    first_initial: [constants.datagram_size_max]u8 = undefined,
+    first_initial_len: usize = 0,
     drop_to_server: bool = false,
 
     pub fn init(self: *Pair, client_limits: Limits, server_limits: Limits) !void {
@@ -42,6 +44,7 @@ pub const Pair = struct {
         self.server = try Engine.init(std.testing.allocator, &self.server_ctx, server_limits);
         self.now = .{ .mono_ms = 1_000, .unix_s = now_unix };
         self.entropy = 0;
+        self.first_initial_len = 0;
         self.drop_to_server = false;
     }
 
@@ -91,6 +94,10 @@ pub const Pair = struct {
                 var out: [constants.datagram_size_max]u8 = undefined;
                 const datagram = try from.send(index, self.now, &out) orelse break;
                 moved = true;
+                if (from == &self.client and self.first_initial_len == 0) {
+                    @memcpy(self.first_initial[0..datagram.len], datagram);
+                    self.first_initial_len = datagram.len;
+                }
                 if (drop) continue;
                 var copy: [constants.datagram_size_max]u8 = undefined;
                 @memcpy(copy[0..datagram.len], datagram);
@@ -713,6 +720,77 @@ test "engine survives an undecryptable packet routed to a live slot" {
     try std.testing.expectEqual(before_errors, pair.client.counters.recv_errors);
     try std.testing.expectEqual(before_accepted + 1, pair.client.counters.accepted);
     try std.testing.expect(pair.client.peerId(handles.client) != null);
+}
+
+fn dialInitial(pair: *Pair, out: []u8) ![]u8 {
+    const handle = try pair.dial();
+    var scratch: [constants.datagram_size_max]u8 = undefined;
+    const datagram = (try pair.client.send(handle.index, pair.now, &scratch)) orelse
+        return error.TestUnexpectedResult;
+    @memcpy(out[0..datagram.len], datagram);
+    return out[0..datagram.len];
+}
+
+test "engine caps inbound handshakes per source address" {
+    var pair: Pair = .{};
+    try pair.init(
+        .{ .connections_max = 8, .handshaking_max = 8 },
+        .{ .connections_max = 8, .handshaking_max = 8 },
+    );
+    defer pair.deinit();
+
+    var response: [constants.datagram_size_max]u8 = undefined;
+    var packet: [constants.datagram_size_max]u8 = undefined;
+    var admitted: u16 = 0;
+    var attempt: u16 = 0;
+    while (attempt < constants.handshaking_per_source_max + 1) : (attempt += 1) {
+        const initial = try dialInitial(&pair, &packet);
+        try std.testing.expect(initial.len >= constants.client_initial_min);
+        switch (pair.server.receive(initial, client_address, server_address, pair.now, pair.nextPool(), &response)) {
+            .accepted => admitted += 1,
+            else => {},
+        }
+    }
+
+    try std.testing.expectEqual(constants.handshaking_per_source_max, admitted);
+    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_source_limit);
+    try std.testing.expectEqual(constants.handshaking_per_source_max, pair.server.handshaking);
+
+    const elsewhere = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 4_001 } };
+    const other = try dialInitial(&pair, &packet);
+    switch (pair.server.receive(other, elsewhere, server_address, pair.now, pair.nextPool(), &response)) {
+        .accepted => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(constants.handshaking_per_source_max + 1, pair.server.handshaking);
+}
+
+test "engine routes a replayed client Initial to the existing connection" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    try std.testing.expect(pair.first_initial_len >= constants.client_initial_min);
+    var replay: [constants.datagram_size_max]u8 = undefined;
+    @memcpy(replay[0..pair.first_initial_len], pair.first_initial[0..pair.first_initial_len]);
+
+    var response: [constants.datagram_size_max]u8 = undefined;
+    const outcome = pair.server.receive(
+        replay[0..pair.first_initial_len],
+        client_address,
+        server_address,
+        pair.now,
+        pair.nextPool(),
+        &response,
+    );
+    switch (outcome) {
+        .accepted => |handle| try std.testing.expectEqual(handles.server, handle),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+    var indices: [constants.connections_max_default]u16 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), pair.server.activeIndices(&indices));
 }
 
 test "engine drops version negotiation packets instead of reflecting them" {
