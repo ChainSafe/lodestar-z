@@ -1,3 +1,6 @@
+//! The lookup driver advances a caller-owned set of lookups through the synchronous driver, one
+//! step at a time.
+
 const std = @import("std");
 const CallTable = @import("CallTable.zig");
 const Driver = @import("Driver.zig");
@@ -16,12 +19,12 @@ pub const Progress = struct {
 
 pub const StepResult = struct {
     driver: Driver.StepResult = .{},
-    /// Index into `operations` of the lookup that consumed `Driver.event`, if any.
+    /// The index into `operations` of the lookup that consumed `driver.event`, if any.
     consumed: ?u16 = null,
     progress: Progress = .{},
 };
 
-/// Borrows `operations` for this call only. Pass every lookup that still has waiting CallTable.
+/// Borrows `operations` for this call only. Pass every lookup that still has waiting calls.
 pub fn step(
     transport: *Driver,
     io: std.Io,
@@ -45,6 +48,7 @@ fn refill(
     operations: []const *Lookup,
     result: *StepResult,
 ) Error!void {
+    // Each round starts one call per lookup, so no lookup starves another.
     for (0..Lookup.parallelism) |_| {
         var progressed = false;
         for (operations) |operation| {

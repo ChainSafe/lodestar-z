@@ -1,3 +1,7 @@
+//! A CallTable holds one entry per in-flight request. The entry owns the encoded request, the
+//! deadline, and NODES accumulation. Handles carry a generation, so a stale handle can never
+//! touch a reused slot.
+
 const std = @import("std");
 const message = @import("wire/message.zig");
 const constants = @import("wire/constants.zig");
@@ -36,6 +40,7 @@ pub const Response = union(enum) {
     talk_response: message.TalkResponse,
 };
 
+/// Results of routing revalidation stay inside the engine and never reach the caller.
 pub const Owner = enum {
     caller,
     routing_revalidation,
@@ -119,6 +124,7 @@ pub fn deinit(self: *CallTable, allocator: std.mem.Allocator) void {
     self.* = undefined;
 }
 
+/// Encodes and stores the request. The call takes part in matching only after `markSent`.
 pub fn begin(
     self: *CallTable,
     peer: types.Endpoint,
@@ -170,6 +176,7 @@ pub fn endpoint(self: *const CallTable, handle: Handle) ?types.Endpoint {
     return entry.peer;
 }
 
+/// Records the nonce the packet carried. A WHOAREYOU is matched back to its call by that nonce.
 pub fn markSent(
     self: *CallTable,
     handle: Handle,
@@ -184,6 +191,8 @@ pub fn markSent(
     entry.deadline_ms = deadline_ms;
 }
 
+/// Claims the live call whose packet carried `nonce` for one handshake attempt. Returns null
+/// when no live call matches.
 pub fn acceptChallenge(
     self: *CallTable,
     address: types.Address,
@@ -198,6 +207,8 @@ pub fn acceptChallenge(
     return .{ .index = @intCast(index), .generation = entry.generation };
 }
 
+/// Runs every check that can fail without touching state, so callers can validate NODES
+/// records between `match` and `accept`.
 pub fn match(
     self: *const CallTable,
     peer: types.Endpoint,
@@ -217,6 +228,8 @@ pub fn match(
     return .{ .index = @intCast(index), .generation = entry.generation };
 }
 
+/// Applies a matched response. A non-terminal NODES fragment keeps the entry open, and
+/// `accepted_nodes` marks the records that were new and at a requested distance.
 pub fn accept(
     self: *CallTable,
     handle: Handle,
@@ -247,6 +260,8 @@ pub fn cancel(self: *CallTable, handle: Handle) bool {
     return true;
 }
 
+/// Removes calls past their deadline, at most `out.len` per invocation. The rest wait for the
+/// next tick.
 pub fn expire(self: *CallTable, now_ms: u64, out: []Expired) usize {
     var expired_count: usize = 0;
     for (self.entries, 0..) |*slot, index| {

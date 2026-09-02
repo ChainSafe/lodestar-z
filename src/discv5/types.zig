@@ -1,3 +1,6 @@
+//! Every layer shares the node identity, distance arithmetic, endpoint addresses, and protocol
+//! constants defined here.
+
 const std = @import("std");
 
 pub const NodeId = [32]u8;
@@ -7,6 +10,7 @@ pub const distance_count: usize = distance_max + 1;
 pub const findnode_result_max: usize = 16;
 pub const findnode_response_packets_max: u8 = 16;
 
+/// Returns the log2 XOR distance, which is 0 for equal IDs and 256 when the top bits differ.
 pub fn logDistance(left: *const NodeId, right: *const NodeId) u16 {
     for (left, right, 0..) |left_byte, right_byte, index| {
         const difference = left_byte ^ right_byte;
@@ -17,6 +21,7 @@ pub fn logDistance(left: *const NodeId, right: *const NodeId) u16 {
     return 0;
 }
 
+/// Returns true when `left` is strictly closer to `target` than `right`.
 pub fn xorCloser(
     left: *const NodeId,
     right: *const NodeId,
@@ -38,6 +43,7 @@ pub const Address = union(enum) {
     ip6: struct {
         octets: [16]u8,
         port: u16,
+        /// The IPv6 scope ID, which is part of endpoint identity.
         interface: u32 = 0,
     },
 
@@ -59,7 +65,8 @@ pub const Endpoint = struct {
     address: Address,
 };
 
-/// Why an authenticated-or-not datagram was not acted on. Every arm is caused by the peer.
+/// The reason a datagram was not acted on. Every arm is caused by the peer, never by the local
+/// node.
 pub const RejectReason = enum {
     malformed_packet,
     malformed_message,

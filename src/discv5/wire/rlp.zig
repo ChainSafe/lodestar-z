@@ -1,3 +1,6 @@
+//! A minimal RLP codec over caller-owned buffers. The writer reserves three bytes for each list
+//! prefix and shifts the payload back once the length is known, so nothing is encoded twice.
+
 const std = @import("std");
 const constants = @import("constants.zig");
 
@@ -146,6 +149,8 @@ pub const Reader = struct {
         payload_end: usize,
     };
 
+    // Non-canonical forms are rejected. That covers a prefixed single byte, a long form for a
+    // payload under 56 bytes, and a length with leading zeros.
     fn readItem(self: *Reader) Error!Item {
         if (self.position == self.data.len) return Error.InvalidEncoding;
         const prefix = self.data[self.position];

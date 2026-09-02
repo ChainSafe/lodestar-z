@@ -1,3 +1,6 @@
+//! A Lookup is one iterative FINDNODE walk toward a target. It holds only candidates and call
+//! handles, while deadlines and response accumulation stay in the call table.
+
 const std = @import("std");
 const CallTable = @import("CallTable.zig");
 const Engine = @import("Engine.zig");
@@ -87,6 +90,9 @@ pub fn ownsCall(self: *const Lookup, handle: CallTable.Handle) bool {
     return self.waitingIndex(handle) != null;
 }
 
+/// Starts at most one call, to the closest unqueried candidate that could still improve the
+/// sixteen best results. Returns null when nothing can start, and the lookup is finished once
+/// that happens with no calls waiting.
 pub fn startNext(
     self: *Lookup,
     core: *Engine,
@@ -129,6 +135,8 @@ pub fn knownRecord(
     return &self.candidates[index].record;
 }
 
+/// Adds discovered records as candidates and, on the terminal fragment, confirms the responder
+/// in routing.
 pub fn onResponse(
     self: *Lookup,
     core: *Engine,
@@ -260,6 +268,8 @@ fn nextCandidateIndex(self: *const Lookup) ?usize {
     return selected;
 }
 
+// The sixteenth-closest success bounds the result set. A candidate farther away cannot improve
+// it.
 fn successBoundary(self: *const Lookup) ?types.NodeId {
     var closest: [result_max]*const Candidate = undefined;
     var length: usize = 0;
@@ -304,6 +314,8 @@ fn activeCandidatesMut(self: *Lookup) []Candidate {
     return self.candidates[0..self.candidate_count];
 }
 
+/// Returns the target's distance from `destination` together with the nearest distance on
+/// either side, so one query covers the bucket and its neighbours.
 pub fn requestDistances(
     target: *const types.NodeId,
     destination: *const types.NodeId,

@@ -1,3 +1,7 @@
+//! A RoutingTable keeps Kademlia buckets ordered from least to most recently verified. A full
+//! bucket holds one pending candidate until a revalidation PING decides whether the incumbent
+//! stays.
+
 const std = @import("std");
 const enr = @import("identity/enr.zig");
 const types = @import("types.zig");
@@ -89,6 +93,7 @@ pub fn pendingCount(self: *const RoutingTable) usize {
     return count_value;
 }
 
+/// Returns the incumbent that a pending candidate is waiting to replace, if there is one.
 pub fn revalidationTarget(self: *const RoutingTable) ?Entry {
     for (self.pending, 0..) |candidate, index| {
         const pending = candidate orelse continue;
@@ -110,6 +115,8 @@ pub fn get(self: *const RoutingTable, node_id: *const types.NodeId) ?Entry {
     return self.bucketEntries(index)[position];
 }
 
+/// Admits or refreshes a directly authenticated peer. When the bucket is full, the record
+/// becomes its one pending candidate and the result names the incumbent to revalidate.
 pub fn upsertVerified(
     self: *RoutingTable,
     peer: *const types.Endpoint,
@@ -158,6 +165,8 @@ pub fn upsertVerified(
     return .{ .pending = oldest };
 }
 
+/// Settles the pending candidate for `node_id`. An alive incumbent becomes the most recent
+/// entry, and a dead one is replaced.
 pub fn resolveRevalidation(
     self: *RoutingTable,
     node_id: *const types.NodeId,
@@ -186,6 +195,9 @@ pub fn resolveRevalidation(
     return .{ .replaced = candidate.entry.peer.node_id };
 }
 
+/// Returns records at the requested distances, most recently verified first, with the local
+/// record standing in for distance 0. The folded bucket is filtered by exact distance, and every
+/// record is filtered by relay scope against `requester`.
 pub fn findNodes(
     self: *const RoutingTable,
     local_record: *const enr.Record,
@@ -378,6 +390,7 @@ fn recordHasAddress(record: *const enr.Record, address: types.Address) bool {
     };
 }
 
+// Same IPv4 /24 or IPv6 /64.
 fn sameSubnet(left: types.Address, right: types.Address) bool {
     return switch (left) {
         .ip4 => |value| switch (right) {
@@ -397,7 +410,8 @@ fn recordRelayAllowed(record: *const enr.Record, requester: ?types.Address) bool
     return relayAllowed(source, address);
 }
 
-/// Public candidates may be relayed by anyone; special scopes only by a source in the same scope.
+/// A public candidate may be relayed by anyone. A candidate in a special scope may be relayed
+/// only by a source in that same scope and address family.
 pub fn relayAllowed(source: types.Address, candidate: types.Address) bool {
     const source_class = addressClass(source);
     const candidate_class = addressClass(candidate);
@@ -449,6 +463,8 @@ fn classifyIp6(ip: [16]u8) AddressClass {
     return .public;
 }
 
+// Bucket 0 folds distances 1 through 240 together and every remaining distance gets its own
+// bucket. Random node IDs are almost never that close, so the fold loses nothing in practice.
 fn bucketIndex(distance: u16) usize {
     const bucket_min_distance = types.distance_max - bucket_count;
     if (distance <= bucket_min_distance) return 0;

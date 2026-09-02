@@ -1,3 +1,6 @@
+//! Decoding an RPC message never touches scratch until the whole message has been validated, so
+//! a rejected message cannot publish partial state.
+
 const std = @import("std");
 const constants = @import("constants.zig");
 const rlp = @import("rlp.zig");
@@ -218,6 +221,7 @@ fn decodeFindNode(data: []const u8, scratch: *DecodeScratch) Error!FindNode {
     var list = try readMessageList(data);
     const request_id = try readRequestId(&list);
     var distances = try readList(&list);
+    // The first pass validates every item before the second pass writes to scratch.
     const encoded_distances = distances;
     var seen = std.StaticBitSet(types.distance_count).initEmpty();
     var distances_count: usize = 0;
@@ -251,6 +255,7 @@ fn decodeNodes(data: []const u8, scratch: *DecodeScratch) Error!Nodes {
     const request_id = try readRequestId(&list);
     const total = try readUint(&list);
     var enrs = try readList(&list);
+    // The first pass validates every item before the second pass writes to scratch.
     const encoded_enrs = enrs;
     var enrs_count: usize = 0;
     while (!enrs.atEnd()) {

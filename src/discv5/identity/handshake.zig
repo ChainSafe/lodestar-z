@@ -1,3 +1,6 @@
+//! The v4 handshake derives session keys with HKDF and proves the static key with a signature
+//! bound to one challenge, following the discv5 theory spec.
+
 const std = @import("std");
 const crypto = @import("crypto.zig");
 const types = @import("../types.zig");
@@ -15,6 +18,8 @@ pub const Keys = struct {
     recipient: [16]u8,
 };
 
+/// Runs HKDF-SHA256 with the challenge data as salt and both node IDs as info. The `initiator`
+/// key belongs to whichever side answered the WHOAREYOU.
 pub fn deriveKeys(
     private_key: *const crypto.KeyPair,
     public_key: *const [33]u8,
@@ -42,6 +47,8 @@ pub fn deriveKeys(
     };
 }
 
+/// Signs the challenge, the ephemeral key, and the recipient ID together, so a proof cannot be
+/// replayed to another node or reused for another challenge.
 pub fn signProof(
     static_key: *const crypto.KeyPair,
     challenge_data: *const [constants.whoareyou_packet_size]u8,
