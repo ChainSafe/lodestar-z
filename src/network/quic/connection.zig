@@ -95,6 +95,7 @@ pub const Slot = struct {
     pending_close_armed: bool = false,
     connected_pending: bool = false,
     closed_pending: bool = false,
+    closed_reported: bool = false,
     streams_pending: u16 = 0,
     next_local_stream_id: u64 = 0,
     streams: [constants.streams_per_connection]Stream = [_]Stream{.{}} ** constants.streams_per_connection,
@@ -122,6 +123,7 @@ pub const Slot = struct {
         self.pending_close_armed = false;
         self.connected_pending = false;
         self.closed_pending = false;
+        self.closed_reported = false;
         self.streams_pending = 0;
         self.next_local_stream_id = if (params.direction == .outbound) 0 else 1;
         self.streams = [_]Stream{.{}} ** constants.streams_per_connection;

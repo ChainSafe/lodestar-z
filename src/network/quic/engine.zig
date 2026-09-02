@@ -303,6 +303,7 @@ pub const Engine = struct {
     }
 
     pub fn pollEvents(self: *Engine, events: []Event) usize {
+        self.releaseReportedSlots();
         var count: usize = 0;
         var cursor: u16 = 0;
         while (cursor < self.active_len) {
@@ -334,12 +335,24 @@ pub const Engine = struct {
                 events[count] = .{ .closed = .{ .conn = conn, .reason = slot.close_reason.? } };
                 count += 1;
                 slot.closed_pending = false;
+                slot.closed_reported = true;
+            }
+            cursor += 1;
+        }
+        return count;
+    }
+
+    fn releaseReportedSlots(self: *Engine) void {
+        var cursor: u16 = 0;
+        while (cursor < self.active_len) {
+            const index = self.active[cursor];
+            const slot = &self.slots[index];
+            if (slot.state == .closed and slot.closed_reported) {
                 self.releaseSlot(index);
                 continue;
             }
             cursor += 1;
         }
-        return count;
     }
 
     pub fn close(self: *Engine, conn: Handle, code: u64) bool {
