@@ -52,6 +52,7 @@ pub const Counters = struct {
     dropped_short_initial: u64 = 0,
     dropped_full: u64 = 0,
     dropped_source_limit: u64 = 0,
+    dropped_no_entropy: u64 = 0,
     recv_errors: u64 = 0,
     version_negotiations: u64 = 0,
 };
@@ -71,8 +72,8 @@ pub const EntropyPool = struct {
         self.fresh = true;
     }
 
-    pub fn take(self: *EntropyPool) [constants.local_cid_length]u8 {
-        std.debug.assert(self.fresh);
+    pub fn take(self: *EntropyPool) ?[constants.local_cid_length]u8 {
+        if (!self.fresh) return null;
         self.fresh = false;
         return self.bytes;
     }
@@ -169,7 +170,6 @@ pub const Engine = struct {
             .local = local,
             .peer = peer,
             .scid = entropy,
-            .odcid = null,
             .expected_peer_id = expected,
             .now = now,
         }) catch |err| {
@@ -221,6 +221,7 @@ pub const Engine = struct {
         if (self.handshakingFromSource(from) >= self.limits.handshaking_per_source_max) {
             return self.drop(&self.counters.dropped_source_limit);
         }
+        const scid = entropy.take() orelse return self.drop(&self.counters.dropped_no_entropy);
         const index = self.claimSlot() orelse return self.drop(&self.counters.dropped_full);
 
         const slot = &self.slots[index];
@@ -228,8 +229,7 @@ pub const Engine = struct {
             .direction = .inbound,
             .local = local,
             .peer = from,
-            .scid = entropy.take(),
-            .odcid = header.dcid,
+            .scid = scid,
             .expected_peer_id = null,
             .now = now,
         }) catch {
@@ -363,8 +363,14 @@ pub const Engine = struct {
 
     pub fn abandon(self: *Engine, conn: Handle) bool {
         const slot = self.readableSlot(conn) catch return false;
-        if (slot.state != .handshaking or slot.closed_pending) return false;
-        if (slot.direction == .inbound) self.handshaking -= 1;
+        switch (slot.state) {
+            .handshaking => {
+                if (slot.closed_pending) return false;
+                if (slot.direction == .inbound) self.handshaking -= 1;
+            },
+            .closed => if (!slot.closed_pending or slot.closed_reported) return false,
+            else => return false,
+        }
         self.removeRoutesFor(conn.index);
         self.releaseSlot(conn.index);
         return true;

@@ -68,7 +68,6 @@ pub const OpenParams = struct {
     local: types.Address,
     peer: types.Address,
     scid: [constants.local_cid_length]u8,
-    odcid: ?binding.Cid,
     expected_peer_id: ?peer_id.PeerId,
     now: Now,
 };
@@ -87,7 +86,6 @@ pub const Slot = struct {
     expected_peer_id: ?peer_id.PeerId = null,
     peer_id: ?peer_id.PeerId = null,
     scid: binding.Cid = .{},
-    odcid: ?binding.Cid = null,
     created_ms: u64 = 0,
     last_send_ms: u64 = 0,
     close_reason: ?CloseReason = null,
@@ -115,7 +113,6 @@ pub const Slot = struct {
         self.expected_peer_id = params.expected_peer_id;
         self.peer_id = null;
         self.scid = binding.Cid.fromSlice(&params.scid);
-        self.odcid = params.odcid;
         self.created_ms = params.now.mono_ms;
         self.last_send_ms = params.now.mono_ms;
         self.close_reason = null;

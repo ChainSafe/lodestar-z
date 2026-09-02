@@ -810,6 +810,48 @@ test "engine caps inbound handshakes per source address" {
     try std.testing.expectEqual(constants.handshaking_per_source_max + 1, pair.server.handshaking);
 }
 
+test "engine drops an inbound Initial when the entropy pool is stale" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+
+    var packet: [constants.datagram_size_max]u8 = undefined;
+    const initial = try dialInitial(&pair, &packet);
+
+    var stale = engine_mod.EntropyPool{};
+    try std.testing.expect(stale.take() == null);
+    var response: [constants.datagram_size_max]u8 = undefined;
+    try std.testing.expectEqual(
+        engine_mod.ReceiveOutcome.dropped,
+        pair.server.receive(initial, client_address, server_address, pair.now, &stale, &response),
+    );
+    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_no_entropy);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+
+    var indices: [constants.connections_max_default]u16 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices(&indices));
+}
+
+test "engine abandon frees a closed slot whose event was never reported" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    try std.testing.expect(pair.client.close(handles.client, 0));
+    try pair.pump();
+    try std.testing.expect(pair.client.eventsPending());
+
+    try std.testing.expect(pair.client.abandon(handles.client));
+    var indices: [constants.connections_max_default]u16 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices(&indices));
+    try std.testing.expect(!pair.client.eventsPending());
+
+    var storage: [8]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 0), pair.client.pollEvents(&storage));
+    try std.testing.expect(!pair.client.abandon(handles.client));
+}
+
 test "engine routes a replayed client Initial to the existing connection" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});

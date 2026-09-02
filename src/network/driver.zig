@@ -16,12 +16,18 @@ pub const Config = struct {
     poll_interval_ms: u32 = constants.poll_interval_ms,
 };
 
-pub const DatagramResult = enum { timeout, accepted, version_negotiation, dropped };
+const Received = union(enum) {
+    datagram: runtime.Datagram,
+    dropped,
+    timeout,
+};
 
 pub const StepResult = struct {
     now: engine_mod.Now,
-    datagram: DatagramResult = .timeout,
     datagrams_received: u32 = 0,
+    datagrams_accepted: u32 = 0,
+    datagrams_dropped: u32 = 0,
+    version_negotiations: u32 = 0,
     datagrams_sent: u32 = 0,
     receive_errors: u32 = 0,
     send_failures: u32 = 0,
@@ -66,25 +72,29 @@ pub const Driver = struct {
         var batch: u32 = 0;
         while (batch < constants.receive_batch_max) : (batch += 1) {
             if (!self.pool.fresh) self.pool.fill(try entropy(io));
-            const admitted = (try self.receiveDatagram(io, &result, batch == 0)) orelse break;
+            const received = try self.receiveDatagram(io, &result, batch == 0);
+            const admitted = switch (received) {
+                .timeout => break,
+                .dropped => continue,
+                .datagram => |datagram| datagram,
+            };
             result.datagrams_received += 1;
             defer self.udp.release(admitted.handle) catch unreachable;
-            const outcome = self.engine.receive(
+            switch (self.engine.receive(
                 admitted.bytes,
                 admitted.from,
                 self.udp.localAddress(),
                 result.now,
                 &self.pool,
                 &self.output,
-            );
-            result.datagram = switch (outcome) {
-                .accepted => .accepted,
-                .version_negotiation => |bytes| blk: {
+            )) {
+                .accepted => result.datagrams_accepted += 1,
+                .version_negotiation => |bytes| {
                     self.send(io, admitted.from, bytes) catch {};
-                    break :blk .version_negotiation;
+                    result.version_negotiations += 1;
                 },
-                .dropped => .dropped,
-            };
+                .dropped => result.datagrams_dropped += 1,
+            }
         }
         result.now = try currentTime(io);
         self.engine.tick(result.now);
@@ -105,7 +115,7 @@ pub const Driver = struct {
         return result;
     }
 
-    fn receiveDatagram(self: *Driver, io: std.Io, result: *StepResult, wait: bool) Error!?runtime.Datagram {
+    fn receiveDatagram(self: *Driver, io: std.Io, result: *StepResult, wait: bool) Error!Received {
         const timeout: std.Io.Timeout = if (wait) blk: {
             var wait_ms: u64 = self.config.poll_interval_ms;
             if (self.engine.nextTimeoutMs()) |earliest| wait_ms = @min(wait_ms, earliest);
@@ -114,19 +124,20 @@ pub const Driver = struct {
                 .clock = .awake,
             } };
         } else .{ .duration = .{ .raw = .zero, .clock = .awake } };
-        return self.udp.receiveTimeout(io, timeout) catch |err| switch (err) {
-            error.Timeout => null,
+        const datagram = self.udp.receiveTimeout(io, timeout) catch |err| switch (err) {
+            error.Timeout => return .timeout,
             error.DatagramTooLarge,
             error.PortUnreachable,
             error.ConnectionResetByPeer,
             error.NetworkDown,
             error.SystemResources,
-            => blk: {
+            => {
                 result.receive_errors += 1;
-                break :blk null;
+                return .dropped;
             },
-            else => err,
+            else => return err,
         };
+        return .{ .datagram = datagram };
     }
 
     fn drain(self: *Driver, io: std.Io, index: u16, now: engine_mod.Now) Drained {
