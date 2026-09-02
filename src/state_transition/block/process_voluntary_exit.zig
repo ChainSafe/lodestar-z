@@ -128,7 +128,7 @@ fn makeSignedVoluntaryExit(epoch: u64, validator_index: u64) SignedVoluntaryExit
 
 test "voluntary exit - valid" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
@@ -152,7 +152,7 @@ test "voluntary exit - valid" {
 
 test "voluntary exit - inactive validator (out of bounds index)" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
@@ -176,7 +176,7 @@ test "voluntary exit - inactive validator (out of bounds index)" {
 
 test "voluntary exit - inactive validator (not active in current epoch)" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
@@ -207,7 +207,7 @@ test "voluntary exit - inactive validator (not active in current epoch)" {
 
 test "voluntary exit - already exited validator" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
@@ -238,7 +238,7 @@ test "voluntary exit - already exited validator" {
 
 test "voluntary exit - early epoch" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
@@ -264,7 +264,7 @@ test "voluntary exit - early epoch" {
 
 test "voluntary exit - short time active" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
