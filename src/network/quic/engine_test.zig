@@ -244,6 +244,74 @@ test "engine server can open a stream toward the client" {
     try std.testing.expectError(error.StreamStopped, pair.server.write(stream, "more", false));
 }
 
+fn activePeerStreams(engine: *const Engine, handle: engine_mod.Handle) usize {
+    var count: usize = 0;
+    for (engine.slots[handle.index].streams[constants.streams_per_connection / 2 ..]) |*stream| {
+        if (stream.active) count += 1;
+    }
+    return count;
+}
+
+test "engine releases a peer-reset stream entry and frees the peer half" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(stream, "x", false);
+    try pair.pump();
+
+    var storage: [constants.streams_per_connection]Event = undefined;
+    const opened = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), opened.len);
+    const inbound = try expectStreamOpened(opened[0], handles.server);
+
+    pair.client.shutdown(stream, .write, 7);
+    pair.client.shutdown(stream, .read, 7);
+    try pair.pump();
+
+    var buffer: [16]u8 = undefined;
+    const reset = try pair.server.read(inbound, &buffer);
+    try std.testing.expectEqual(@as(usize, 0), reset.len);
+    try std.testing.expect(reset.fin);
+    try std.testing.expectEqual(@as(u64, 7), reset.reset_code.?);
+    try std.testing.expectError(error.UnknownStream, pair.server.read(inbound, &buffer));
+    try std.testing.expectEqual(@as(usize, 0), activePeerStreams(&pair.server, handles.server));
+
+    var reopened: usize = 0;
+    while (reopened < constants.peer_streams_bidi) : (reopened += 1) {
+        const next = try pair.client.openStream(handles.client);
+        _ = try pair.client.write(next, "y", false);
+        try pair.pump();
+    }
+    const events = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, constants.peer_streams_bidi), events.len);
+    for (events) |event| _ = try expectStreamOpened(event, handles.server);
+}
+
+test "engine releases a stopped and reset stream entry" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.server.openStream(handles.server);
+    _ = try pair.server.write(stream, "hello", false);
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const inbound = try expectStreamOpened(pair.events(&pair.client, &storage)[0], handles.client);
+    pair.client.closeStream(inbound, 9);
+    try pair.pump();
+
+    try std.testing.expectError(error.StreamStopped, pair.server.write(stream, "more", false));
+    var buffer: [16]u8 = undefined;
+    const ended = try pair.server.read(stream, &buffer);
+    try std.testing.expect(ended.fin);
+    try std.testing.expectError(error.UnknownStream, pair.server.read(stream, &buffer));
+}
+
 test "engine bounds streams per connection" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
