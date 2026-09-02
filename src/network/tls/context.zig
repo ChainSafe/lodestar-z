@@ -14,13 +14,26 @@ pub const HandshakeState = struct {
     now_unix: i64 = 0,
     peer_id: ?peer_id.PeerId = null,
     failure: ?verify.Error = null,
-    keylog: [keylog_capacity]u8 = undefined,
+    keylog: []u8 = &.{},
     keylog_len: u16 = 0,
     keylog_dropped: u16 = 0,
 
+    pub fn appendKeylog(self: *HandshakeState, line: []const u8) bool {
+        std.debug.assert(self.keylog.len <= keylog_capacity);
+        std.debug.assert(self.keylog_len <= self.keylog.len);
+        if (line.len + 1 > self.keylog.len - self.keylog_len) {
+            self.keylog_dropped +|= 1;
+            return false;
+        }
+        @memcpy(self.keylog[self.keylog_len..][0..line.len], line);
+        self.keylog[self.keylog_len + line.len] = '\n';
+        self.keylog_len += @intCast(line.len + 1);
+        return true;
+    }
+
     pub fn takeKeylog(self: *HandshakeState, out: []u8) usize {
-        std.debug.assert(self.keylog_len <= keylog_capacity);
-        std.debug.assert(out.len >= keylog_capacity);
+        std.debug.assert(self.keylog_len <= self.keylog.len);
+        std.debug.assert(out.len >= self.keylog.len);
         const length = self.keylog_len;
         @memcpy(out[0..length], self.keylog[0..length]);
         self.keylog_len = 0;
@@ -126,15 +139,7 @@ fn verifyCallback(ssl: ?*c.SSL, out_alert: [*c]u8) callconv(.c) c.enum_ssl_verif
 fn keylogCallback(ssl: ?*const c.SSL, line: [*c]const u8) callconv(.c) void {
     const handle = ssl orelse return;
     const state = handshakeState(@constCast(handle)) orelse return;
-    const text = std.mem.span(line);
-    std.debug.assert(state.keylog_len <= keylog_capacity);
-    if (text.len + 1 > keylog_capacity - state.keylog_len) {
-        state.keylog_dropped +|= 1;
-        return;
-    }
-    @memcpy(state.keylog[state.keylog_len..][0..text.len], text);
-    state.keylog[state.keylog_len + text.len] = '\n';
-    state.keylog_len += @intCast(text.len + 1);
+    _ = state.appendKeylog(std.mem.span(line));
 }
 
 fn alpnSelect(

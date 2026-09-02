@@ -7,6 +7,7 @@ pub const udp = @import("udp.zig");
 pub const driver = @import("driver.zig");
 pub const transport = @import("transport.zig");
 pub const negotiate = @import("negotiate.zig");
+pub const stream_io = @import("stream_io.zig");
 
 pub const Transport = transport.Transport;
 pub const Negotiator = negotiate.Negotiator;
@@ -36,6 +37,7 @@ test {
     _ = driver;
     _ = transport;
     _ = negotiate;
+    _ = stream_io;
     _ = @import("types_test.zig");
     _ = @import("udp_test.zig");
     _ = @import("driver_test.zig");

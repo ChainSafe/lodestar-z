@@ -56,9 +56,11 @@ pub const Transport = struct {
         errdefer context.deinit();
         target.udp = try udp_mod.Udp.bind(io, options.bind);
         errdefer target.udp.close(io);
+        var engine_limits = options.limits;
+        engine_limits.keylog = options.keylog_path != null;
         target.engine = try engine_mod.Engine.init(allocator, .{
             .tls = context,
-            .limits = options.limits,
+            .limits = engine_limits,
             .local = target.udp.localAddress(),
             .seed = std.mem.readInt(u64, &seed_bytes, .little),
         });

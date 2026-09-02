@@ -156,6 +156,7 @@ pub const Engine = struct {
     routes: route_table.RouteTable,
     active: []u16,
     activity: []bool,
+    keylog_arena: []u8,
     peers: peer_index.PeerIndex,
     active_len: u16 = 0,
     connection_window: u64,
@@ -215,6 +216,13 @@ pub const Engine = struct {
         errdefer allocator.free(activity);
         @memset(activity, false);
 
+        const keylog_len: usize = if (wanted.keylog)
+            tls.keylog_capacity * @as(usize, wanted.connections_max)
+        else
+            0;
+        const keylog_arena = try allocator.alloc(u8, keylog_len);
+        errdefer allocator.free(keylog_arena);
+
         var peers = try peer_index.PeerIndex.init(allocator, wanted.connections_max);
         errdefer peers.deinit(allocator);
 
@@ -228,6 +236,7 @@ pub const Engine = struct {
             .routes = routes,
             .active = active,
             .activity = activity,
+            .keylog_arena = keylog_arena,
             .peers = peers,
             .connection_window = connection_window,
             .stream_window = stream_window,
@@ -241,6 +250,7 @@ pub const Engine = struct {
         }
         self.tls.deinit();
         self.peers.deinit(self.allocator);
+        self.allocator.free(self.keylog_arena);
         self.allocator.free(self.activity);
         self.allocator.free(self.active);
         self.routes.deinit(self.allocator);
@@ -288,6 +298,7 @@ pub const Engine = struct {
             .scid = entropy,
             .expected_peer_id = expected,
             .now = now,
+            .keylog = self.keylogFor(index),
         }) catch {
             self.unclaimSlot(index);
             return error.OpenFailed;
@@ -564,6 +575,7 @@ pub const Engine = struct {
             .scid = scid,
             .expected_peer_id = null,
             .now = now,
+            .keylog = self.keylogFor(index),
         }) catch {
             self.unclaimSlot(index);
             return drop(&self.counters.recv_errors);
@@ -906,6 +918,14 @@ pub const Engine = struct {
         slot.release();
         self.unclaimSlot(index);
         assert(slot.state == .free);
+    }
+
+    fn keylogFor(self: *const Engine, index: u16) []u8 {
+        assert(index < self.slots.len);
+        if (self.keylog_arena.len == 0) return &.{};
+        assert(self.keylog_arena.len == tls.keylog_capacity * self.slots.len);
+        const start = tls.keylog_capacity * @as(usize, index);
+        return self.keylog_arena[start..][0..tls.keylog_capacity];
     }
 
     fn peerEntryMatches(

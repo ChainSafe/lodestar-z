@@ -67,6 +67,7 @@ pub const Limits = struct {
     idle_timeout_ms: u64 = limits.idle_timeout_ms,
     handshake_timeout_ms: u64 = limits.handshake_timeout_ms,
     keep_alive_ms: u64 = limits.keep_alive_ms,
+    keylog: bool = false,
     admit: ?*const fn (context: ?*anyopaque, from: *const Address) bool = null,
     admit_context: ?*anyopaque = null,
 };

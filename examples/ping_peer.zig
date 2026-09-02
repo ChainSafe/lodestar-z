@@ -6,6 +6,7 @@ const keys = network.wire.keys;
 const multiaddr = network.wire.multiaddr;
 const negotiate = network.negotiate;
 const peer_id = network.wire.peer_id;
+const stream_io = network.stream_io;
 
 const ping_protocol = "/ipfs/ping/1.0.0";
 const ping_size = 32;
@@ -38,7 +39,7 @@ fn initNode(node: *network.Transport, allocator: std.mem.Allocator, io: std.Io, 
 
 const Session = struct {
     stream: engine_mod.StreamHandle = undefined,
-    out: negotiate.Outbox = .{},
+    out: stream_io.Outbox = .{},
     buffer: [read_max]u8 = undefined,
     closing: bool = false,
     active: bool = false,
@@ -147,7 +148,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     var echo: [ping_size]u8 = undefined;
     var echoed: usize = 0;
     var sent_at: u64 = 0;
-    var out: negotiate.Outbox = .{};
+    var out: stream_io.Outbox = .{};
     var stream: ?engine_mod.StreamHandle = null;
     var state: enum { connecting, negotiating, pinging, closing, done } = .connecting;
     var events: [16]engine_mod.Event = undefined;
