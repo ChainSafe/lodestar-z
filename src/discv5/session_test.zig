@@ -8,7 +8,7 @@ const fakeEndpoint = test_support.fakeEndpoint;
 test "session table keeps key direction and bounded nonces" {
     var table: session.Store = undefined;
     try table.init(std.testing.allocator, 2, 2);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const read_key = [_]u8{0x11} ** 16;
     const write_key = [_]u8{0x22} ** 16;
@@ -44,7 +44,7 @@ test "session table rejects zero and excessive configured capacities" {
 test "nonce exhaustion retires the unusable session" {
     var table: session.Store = undefined;
     try table.init(std.testing.allocator, 1, 1);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const key = [_]u8{0x11} ** 16;
     const active = session.Session{
@@ -64,7 +64,7 @@ test "nonce exhaustion retires the unusable session" {
 test "challenge churn preserves established sessions" {
     var table: session.Store = undefined;
     try table.init(std.testing.allocator, 1, 2);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const established = fakeEndpoint(1, 9_001);
     const key = [_]u8{0x11} ** 16;
     const active = session.Session{ .read_key = key, .write_key = key };
@@ -84,7 +84,7 @@ test "challenge churn preserves established sessions" {
 test "install consumes a challenge and expiration removes pending challenges" {
     var table: session.Store = undefined;
     try table.init(std.testing.allocator, 2, 2);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const challenge = [_]u8{0x55} ** 63;
     try std.testing.expect(table.putChallenge(peer, &challenge, null, 10));
@@ -107,7 +107,7 @@ test "install consumes a challenge and expiration removes pending challenges" {
 test "idle session expiration is independent from challenges" {
     var table: session.Store = undefined;
     try table.init(std.testing.allocator, 1, 1);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const key = [_]u8{0x11} ** 16;
     const active = session.Session{ .read_key = key, .write_key = key };

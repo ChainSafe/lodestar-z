@@ -255,14 +255,14 @@ const Pair = struct {
         self.record_a = try enr.Record.create(&key_a, 1, self.address_a);
         self.record_b = try enr.Record.create(&key_b, 1, self.address_b);
         try self.node_a.init(std.testing.allocator, key_a, self.record_a, channelConfig());
-        errdefer self.node_a.deinit();
+        errdefer self.node_a.deinit(std.testing.allocator);
         try self.node_b.init(std.testing.allocator, key_b, self.record_b, channelConfig());
         self.scratch = .{};
     }
 
     fn deinit(self: *Pair) void {
-        self.node_b.deinit();
-        self.node_a.deinit();
+        self.node_b.deinit(std.testing.allocator);
+        self.node_a.deinit(std.testing.allocator);
     }
 
     fn peerA(self: *const Pair) types.Endpoint {

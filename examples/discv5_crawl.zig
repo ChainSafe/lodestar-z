@@ -38,7 +38,6 @@ const LookupSlot = struct {
 };
 
 const RecordSet = struct {
-    allocator: std.mem.Allocator,
     records: []discv5.identity.enr.Record,
     indices: std.AutoHashMapUnmanaged(discv5.types.NodeId, u16),
     count: u16 = 0,
@@ -51,12 +50,12 @@ const RecordSet = struct {
         errdefer indices.deinit(allocator);
         try indices.ensureTotalCapacity(allocator, @intCast(record_capacity));
 
-        return .{ .allocator = allocator, .records = records, .indices = indices };
+        return .{ .records = records, .indices = indices };
     }
 
-    fn deinit(self: *RecordSet) void {
-        self.indices.deinit(self.allocator);
-        self.allocator.free(self.records);
+    fn deinit(self: *RecordSet, allocator: std.mem.Allocator) void {
+        self.indices.deinit(allocator);
+        allocator.free(self.records);
         self.* = undefined;
     }
 
@@ -129,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
         .challenge_timeout_ms = 1_000,
         .session_idle_timeout_ms = 86_400_000,
     });
-    defer core.deinit();
+    defer core.deinit(allocator);
     var transport = try discv5.driver.Driver.initWithConfig(
         &core,
         &udp,
@@ -143,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
         &bootstraps,
     );
     var records = try RecordSet.init(allocator);
-    defer records.deinit();
+    defer records.deinit(allocator);
     const authenticated = try authenticateBootstraps(
         io,
         &transport,

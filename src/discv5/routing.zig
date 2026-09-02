@@ -47,7 +47,6 @@ const Pending = struct {
 pub const Table = struct {
     const Self = @This();
 
-    allocator: std.mem.Allocator,
     local_id: types.NodeId,
     entries: []Entry,
     pending: []?Pending,
@@ -64,7 +63,6 @@ pub const Table = struct {
         const pending = try allocator.alloc(?Pending, bucket_count);
         @memset(pending, null);
         self.* = .{
-            .allocator = allocator,
             .local_id = local_id,
             .entries = entries,
             .pending = pending,
@@ -73,9 +71,9 @@ pub const Table = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.pending);
-        self.allocator.free(self.entries);
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        allocator.free(self.pending);
+        allocator.free(self.entries);
         self.* = undefined;
     }
 
