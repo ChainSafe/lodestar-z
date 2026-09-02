@@ -90,6 +90,45 @@ test "transport moves a bulk payload over loopback sockets with batched sends" {
     try std.testing.expect(send_calls < datagrams_sent);
 }
 
+test "transport appends TLS key material to the configured keylog file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var keylog: [80]u8 = undefined;
+    const keylog_path = try std.fmt.bufPrint(&keylog, ".zig-cache/tmp/{s}/keys.log", .{&tmp.sub_path});
+    const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{24}));
+
+    var dialer: Transport = .{};
+    try dialer.init(std.testing.allocator, std.testing.io, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .keylog_path = keylog_path,
+    });
+    defer dialer.deinit(std.testing.io);
+    var listener: Transport = .{};
+    try initTransport(&listener, 25);
+    defer listener.deinit(std.testing.io);
+
+    const target = listener.localMultiaddr();
+    _ = try dialer.dial(std.testing.io, &target);
+    var dialer_events: [8]engine_mod.Event = undefined;
+    var listener_events: [8]engine_mod.Event = undefined;
+    var activity: [4]engine_mod.Handle = undefined;
+    var connected = false;
+    var rounds: usize = 0;
+    while (rounds < 200 and !connected) : (rounds += 1) {
+        const dialed = try dialer.step(std.testing.io, &dialer_events, &activity, step_options);
+        _ = try listener.step(std.testing.io, &listener_events, &activity, step_options);
+        for (dialer_events[0..dialed.events]) |event| {
+            if (event == .connected) connected = true;
+        }
+    }
+    try std.testing.expect(connected);
+    try std.testing.expectEqual(@as(u32, 0), dialer.keylog_failures);
+    const written = try tmp.dir.statFile(std.testing.io, "keys.log", .{});
+    try std.testing.expect(written.size > 0);
+    try std.testing.expectEqual(written.size, dialer.keylog_offset);
+}
+
 test "transport refuses to dial a multiaddr without a peer id" {
     var dialer: Transport = .{};
     try initTransport(&dialer, 23);

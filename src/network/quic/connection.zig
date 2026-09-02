@@ -18,6 +18,18 @@ pub const Error = binding.Error || tls.Error || error{
     WouldBlock,
 };
 
+pub const Stats = struct {
+    rtt_ms: u32,
+    min_rtt_ms: u32,
+    cwnd: u64,
+    sent: u64,
+    recv: u64,
+    lost: u64,
+    sent_bytes: u64,
+    recv_bytes: u64,
+    pto_count: u64,
+};
+
 pub const State = enum { free, handshaking, established, closed };
 
 pub const OpenedStream = struct {
@@ -102,6 +114,32 @@ pub const Slot = struct {
             params.direction == .inbound,
         ) orelse return error.Unknown;
         self.state = .handshaking;
+    }
+
+    pub fn takeKeylog(self: *Slot, out: []u8) usize {
+        assert(self.state != .free);
+        assert(out.len >= tls.keylog_capacity);
+        return self.handshake.takeKeylog(out);
+    }
+
+    pub fn stats(self: *const Slot) Stats {
+        assert(self.conn != null);
+        var totals: c.quiche_stats = undefined;
+        c.quiche_conn_stats(self.conn.?, &totals);
+        var path: c.quiche_path_stats = undefined;
+        const rc = c.quiche_conn_path_stats(self.conn.?, 0, &path);
+        const has_path = rc == 0;
+        return .{
+            .rtt_ms = if (has_path) nanosToMillis(path.rtt) else 0,
+            .min_rtt_ms = if (has_path) nanosToMillis(path.min_rtt) else 0,
+            .cwnd = if (has_path) path.cwnd else 0,
+            .sent = totals.sent,
+            .recv = totals.recv,
+            .lost = totals.lost,
+            .sent_bytes = totals.sent_bytes,
+            .recv_bytes = totals.recv_bytes,
+            .pto_count = if (has_path) path.total_pto_count else 0,
+        };
     }
 
     pub fn release(self: *Slot) void {
@@ -339,6 +377,11 @@ pub const Slot = struct {
     }
 };
 
+fn nanosToMillis(nanos: u64) u32 {
+    const millis = nanos / std.time.ns_per_ms;
+    return @intCast(@min(millis, std.math.maxInt(u32)));
+}
+
 comptime {
-    assert(@sizeOf(Slot) <= 4 * 1_024);
+    assert(@sizeOf(Slot) <= 6 * 1_024);
 }

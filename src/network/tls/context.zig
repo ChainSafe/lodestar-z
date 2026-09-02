@@ -8,10 +8,24 @@ const c = @import("../quic/binding.zig").c;
 
 pub const Error = error{OpenSslFailed} || cert.Error;
 
+pub const keylog_capacity: usize = 1_280;
+
 pub const HandshakeState = struct {
     now_unix: i64 = 0,
     peer_id: ?peer_id.PeerId = null,
     failure: ?verify.Error = null,
+    keylog: [keylog_capacity]u8 = undefined,
+    keylog_len: u16 = 0,
+    keylog_dropped: u16 = 0,
+
+    pub fn takeKeylog(self: *HandshakeState, out: []u8) usize {
+        std.debug.assert(self.keylog_len <= keylog_capacity);
+        std.debug.assert(out.len >= keylog_capacity);
+        const length = self.keylog_len;
+        @memcpy(out[0..length], self.keylog[0..length]);
+        self.keylog_len = 0;
+        return length;
+    }
 };
 
 const alpn_protos = [_]u8{constants.alpn.len} ++ constants.alpn.*;
@@ -51,6 +65,7 @@ pub const Context = struct {
         if (c.SSL_CTX_use_PrivateKey(ssl_ctx, certificate.key) != 1) return error.OpenSslFailed;
         if (c.SSL_CTX_set_alpn_protos(ssl_ctx, &alpn_protos, alpn_protos.len) != 0) return error.OpenSslFailed;
         c.SSL_CTX_set_alpn_select_cb(ssl_ctx, alpnSelect, null);
+        c.SSL_CTX_set_keylog_callback(ssl_ctx, keylogCallback);
         c.SSL_CTX_set_custom_verify(
             ssl_ctx,
             c.SSL_VERIFY_PEER | c.SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
@@ -100,6 +115,20 @@ fn verifyCallback(ssl: ?*c.SSL, out_alert: [*c]u8) callconv(.c) c.enum_ssl_verif
         return c.ssl_verify_invalid;
     };
     return c.ssl_verify_ok;
+}
+
+fn keylogCallback(ssl: ?*const c.SSL, line: [*c]const u8) callconv(.c) void {
+    const handle = ssl orelse return;
+    const state = handshakeState(@constCast(handle)) orelse return;
+    const text = std.mem.span(line);
+    std.debug.assert(state.keylog_len <= keylog_capacity);
+    if (text.len + 1 > keylog_capacity - state.keylog_len) {
+        state.keylog_dropped +|= 1;
+        return;
+    }
+    @memcpy(state.keylog[state.keylog_len..][0..text.len], text);
+    state.keylog[state.keylog_len + text.len] = '\n';
+    state.keylog_len += @intCast(text.len + 1);
 }
 
 fn alpnSelect(
