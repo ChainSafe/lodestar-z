@@ -8,7 +8,7 @@ const Gindex = @import("gindex.zig").Gindex;
 const ChunkedLeaf = @import("ChunkedLeaf.zig");
 
 // Allocate until the fixed pool is full. Returns the filler nodes to the caller for cleanup.
-fn drainPoolToFull(pool: *Node.Pool, out: *std.ArrayList(Node.Id)) !void {
+fn fillPoolToCapacity(pool: *Node.Pool, out: *std.ArrayList(Node.Id)) !void {
     while (pool.createLeafFromUint(0)) |id| {
         try out.append(std.testing.allocator, id);
     } else |err| switch (err) {
@@ -30,7 +30,7 @@ test "FillWithContentsIterator - pool exhaustion with distinct nodes does not le
 
     var drained: std.ArrayList(Node.Id) = .empty;
     defer drained.deinit(std.testing.allocator);
-    try drainPoolToFull(&pool, &drained);
+    try fillPoolToCapacity(&pool, &drained);
 
     var iter = Node.FillWithContentsIterator.init(&pool, 1);
     try iter.append(a); // stored in lefts[0], no allocation
@@ -53,7 +53,7 @@ test "FillWithContentsIterator - pool exhaustion with aliased node does not doub
 
     var drained: std.ArrayList(Node.Id) = .empty;
     defer drained.deinit(std.testing.allocator);
-    try drainPoolToFull(&pool, &drained);
+    try fillPoolToCapacity(&pool, &drained);
 
     var iter = Node.FillWithContentsIterator.init(&pool, 1);
     try iter.append(x); // lefts[0] = x
@@ -437,7 +437,7 @@ test "setNodesAtDepth - later pool exhaustion rolls back without panicking on a 
     var filler: std.ArrayList(Node.Id) = .empty;
     defer filler.deinit(std.testing.allocator);
 
-    try drainPoolToFull(&pool, &filler);
+    try fillPoolToCapacity(&pool, &filler);
     pool.unref(filler.pop().?);
     pool.unref(filler.pop().?);
 
@@ -489,7 +489,7 @@ test "setNodes - later pool exhaustion rolls back without panicking on a freed s
     var filler: std.ArrayList(Node.Id) = .empty;
     defer filler.deinit(std.testing.allocator);
 
-    try drainPoolToFull(&pool, &filler);
+    try fillPoolToCapacity(&pool, &filler);
     pool.unref(filler.pop().?);
     pool.unref(filler.pop().?);
 

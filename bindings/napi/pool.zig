@@ -7,6 +7,7 @@ const RefCount = @import("state_transition").RefCount;
 const allocator = std.heap.page_allocator;
 
 const pool_size_environment_variable = "LODESTAR_Z_NODE_POOL_CAPACITY";
+// Arbitrary limit to avoid excessive memory usage.
 const default_pool_size: u32 = 10_000_000;
 
 const PoolRc = RefCount(Node.Pool);
