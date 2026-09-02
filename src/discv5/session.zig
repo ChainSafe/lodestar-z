@@ -46,7 +46,6 @@ const ChallengeEntry = struct {
 };
 
 pub const Store = struct {
-    allocator: std.mem.Allocator,
     sessions: SessionMap,
     session_capacity: u32,
     challenges: []?ChallengeEntry,
@@ -69,18 +68,17 @@ pub const Store = struct {
 
         @memset(challenges, null);
         self.* = .{
-            .allocator = allocator,
             .sessions = sessions,
             .session_capacity = @intCast(session_capacity),
             .challenges = challenges,
         };
     }
 
-    pub fn deinit(self: *Store) void {
+    pub fn deinit(self: *Store, allocator: std.mem.Allocator) void {
         var iterator = self.sessions.valueIterator();
         while (iterator.next()) |entry| clearSession(entry);
-        self.sessions.deinit(self.allocator);
-        self.allocator.free(self.challenges);
+        self.sessions.deinit(allocator);
+        allocator.free(self.challenges);
         self.* = undefined;
     }
 
@@ -248,5 +246,5 @@ fn clearSession(entry: *SessionEntry) void {
 comptime {
     std.debug.assert(@sizeOf(SessionEntry) <= 128);
     std.debug.assert(@sizeOf(ChallengeEntry) <= 208);
-    std.debug.assert(@sizeOf(Store) <= 64);
+    std.debug.assert(@sizeOf(Store) <= 48);
 }

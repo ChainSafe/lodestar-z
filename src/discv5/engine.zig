@@ -131,17 +131,17 @@ pub const Engine = struct {
             .challenge_timeout_ms = config.challenge_timeout_ms,
             .session_idle_timeout_ms = config.session_idle_timeout_ms,
         });
-        errdefer self.channel.deinit();
+        errdefer self.channel.deinit(allocator);
         try self.calls.init(allocator, config.call_capacity);
-        errdefer self.calls.deinit();
+        errdefer self.calls.deinit(allocator);
         try self.routing.init(allocator, local_record.node_id);
         self.config = config;
     }
 
-    pub fn deinit(self: *Self) void {
-        self.routing.deinit();
-        self.calls.deinit();
-        self.channel.deinit();
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        self.routing.deinit(allocator);
+        self.calls.deinit(allocator);
+        self.channel.deinit(allocator);
         self.* = undefined;
     }
 
@@ -675,7 +675,7 @@ test "NODES record validation rejects malformed ENRs before publication" {
 test "unsolicited NODES fails before record validation" {
     var core: Engine = undefined;
     try core.calls.init(std.testing.allocator, 1);
-    defer core.calls.deinit();
+    defer core.calls.deinit(std.testing.allocator);
     const peer = types.Endpoint{
         .node_id = [_]u8{0x11} ** 32,
         .address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_001 } },

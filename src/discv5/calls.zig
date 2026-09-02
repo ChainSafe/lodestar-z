@@ -89,7 +89,6 @@ const Entry = struct {
 };
 
 pub const Table = struct {
-    allocator: std.mem.Allocator,
     entries: []?Entry,
     next_generations: []u64,
 
@@ -107,16 +106,15 @@ pub const Table = struct {
         @memset(entries, null);
         @memset(next_generations, 1);
         self.* = .{
-            .allocator = allocator,
             .entries = entries,
             .next_generations = next_generations,
         };
     }
 
-    pub fn deinit(self: *Table) void {
+    pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
         for (self.entries) |*entry| clearEntry(entry);
-        self.allocator.free(self.next_generations);
-        self.allocator.free(self.entries);
+        allocator.free(self.next_generations);
+        allocator.free(self.entries);
         self.* = undefined;
     }
 
@@ -446,5 +444,5 @@ fn clearEntry(entry: *?Entry) void {
 
 comptime {
     std.debug.assert(@sizeOf(Entry) <= 2_048);
-    std.debug.assert(@sizeOf(Table) <= 64);
+    std.debug.assert(@sizeOf(Table) <= 48);
 }

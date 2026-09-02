@@ -127,8 +127,8 @@ pub const Channel = struct {
         self.config = config;
     }
 
-    pub fn deinit(self: *Self) void {
-        self.sessions.deinit();
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        self.sessions.deinit(allocator);
         std.crypto.secureZero(u8, std.mem.asBytes(&self.local_key));
         self.* = undefined;
     }

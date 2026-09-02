@@ -54,15 +54,15 @@ const Pair = struct {
         self.record_a = try enr.Record.create(&key_a, 1, self.address_a);
         self.record_b = try enr.Record.create(&key_b, 1, self.address_b);
         try self.node_a.initWithConfig(std.testing.allocator, key_a, self.record_a, engineConfig());
-        errdefer self.node_a.deinit();
+        errdefer self.node_a.deinit(std.testing.allocator);
         try self.node_b.initWithConfig(std.testing.allocator, key_b, self.record_b, engineConfig());
         self.scratch_a = .{};
         self.scratch_b = .{};
     }
 
     fn deinit(self: *Pair) void {
-        self.node_b.deinit();
-        self.node_a.deinit();
+        self.node_b.deinit(std.testing.allocator);
+        self.node_a.deinit(std.testing.allocator);
     }
 
     fn beginRecovery(self: *Pair) !Recovery {
@@ -411,7 +411,7 @@ test "cold oversized requests fail before transmission" {
     const local_record = try enr.Record.create(&key, 1, loopback(1, 9_001));
     var node: TestEngine = undefined;
     try node.initWithConfig(std.testing.allocator, key, local_record, engineConfig());
-    defer node.deinit();
+    defer node.deinit(std.testing.allocator);
     const remote_key = try keyPair(0x22);
     const remote_record = try enr.Record.create(&remote_key, 1, loopback(2, 9_002));
     const peer = types.Endpoint{

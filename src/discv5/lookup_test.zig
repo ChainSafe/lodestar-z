@@ -40,7 +40,7 @@ test "lookup requests the target distance and adjacent buckets" {
 
 test "lookup uses the call table for bounded parallel queries" {
     var core = try initEngine();
-    defer core.deinit();
+    defer core.deinit(std.testing.allocator);
     var seeds: [4]routing.Entry = undefined;
     for (&seeds, 0..) |*seed, index| {
         seed.* = fakeEntry(@intCast(index + 1));
@@ -110,7 +110,7 @@ test "lookup uses the call table for bounded parallel queries" {
 
 test "lookup rejects relayed private and low-port candidates" {
     var core = try initEngine();
-    defer core.deinit();
+    defer core.deinit(std.testing.allocator);
     const seed = fakeEntry(1);
     installSession(&core, seed.peer, 0x55);
     var operation: lookup.Lookup = undefined;
@@ -160,7 +160,7 @@ test "lookup rejects relayed private and low-port candidates" {
 
 test "lookup stops after the closest sixteen successful peers" {
     var core = try initEngine();
-    defer core.deinit();
+    defer core.deinit(std.testing.allocator);
     var seeds: [lookup.result_max]routing.Entry = undefined;
     for (&seeds, 0..) |*seed, index| {
         seed.* = fakeEntry(@intCast(index + 1));
@@ -232,7 +232,7 @@ test "lookup initialization cleans up after an invalid seed" {
 
 test "empty lookup finishes without creating a call" {
     var core = try initEngine();
-    defer core.deinit();
+    defer core.deinit(std.testing.allocator);
     var operation: lookup.Lookup = undefined;
     var operation_candidates: lookup.Candidates = undefined;
     try operation.init(

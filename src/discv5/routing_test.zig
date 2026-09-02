@@ -12,7 +12,7 @@ test "routing table revalidates the least recent entry before replacement" {
     const local_id = [_]u8{0} ** 32;
     var table: routing.Table = undefined;
     try table.init(std.testing.allocator, local_id);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
 
     var ids: [routing.bucket_size + 2]types.NodeId = undefined;
     for (0..routing.bucket_size) |index| {
@@ -98,7 +98,7 @@ test "routing table enforces bucket and table subnet limits" {
     const local_id = [_]u8{0} ** 32;
     var table: routing.Table = undefined;
     try table.init(std.testing.allocator, local_id);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
 
     for (1..routing.bucket_subnet_limit + 1) |salt| {
         const node_id = nodeAtDistance(256, @intCast(salt));
@@ -121,7 +121,7 @@ test "routing table enforces bucket and table subnet limits" {
 
     var other_table: routing.Table = undefined;
     try other_table.init(std.testing.allocator, local_id);
-    defer other_table.deinit();
+    defer other_table.deinit(std.testing.allocator);
     for (0..routing.table_subnet_limit) |index| {
         const node_id = nodeAtDistance(@intCast(241 + index), @intCast(index + 1));
         const address = address4(198, 51, 100, @intCast(index + 1), @intCast(10_000 + index));
@@ -146,7 +146,7 @@ test "routing table compresses distances one through 240 into one bucket" {
     const local_id = [_]u8{0} ** 32;
     var table: routing.Table = undefined;
     try table.init(std.testing.allocator, local_id);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
 
     var oldest: types.NodeId = undefined;
     for (0..routing.bucket_size) |index| {
@@ -178,7 +178,7 @@ test "routing table applies ENR updates atomically and ignores stale endpoints" 
     const local_id = [_]u8{0} ** 32;
     var table: routing.Table = undefined;
     try table.init(std.testing.allocator, local_id);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
 
     const node_id = nodeAtDistance(256, 1);
     const original_address = address4(203, 0, 113, 1, 9_000);
@@ -212,7 +212,7 @@ test "routing table applies subnet limits to IPv6 prefixes" {
     const local_id = [_]u8{0} ** 32;
     var table: routing.Table = undefined;
     try table.init(std.testing.allocator, local_id);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
 
     for (1..routing.bucket_subnet_limit + 1) |salt| {
         const node_id = nodeAtDistance(256, @intCast(salt));
@@ -250,7 +250,7 @@ test "routing FINDNODE selection filters exact distances and caps the aggregate"
     const local_id = [_]u8{0} ** 32;
     var table: routing.Table = undefined;
     try table.init(std.testing.allocator, local_id);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
 
     var local_record = fakeRecord(local_id, address4(127, 0, 0, 1, 9_000), 1);
     for (0..routing.bucket_size) |index| {
@@ -296,7 +296,7 @@ test "routing closest selection is sorted and bounded" {
     const local_id = [_]u8{0} ** 32;
     var table: routing.Table = undefined;
     try table.init(std.testing.allocator, local_id);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
 
     for (0..routing.bucket_size + 2) |index| {
         const distance: u16 = @intCast(239 + index);
@@ -331,7 +331,7 @@ test "routing FINDNODE does not relay special-scope addresses" {
     const local_id = [_]u8{0} ** 32;
     var table: routing.Table = undefined;
     try table.init(std.testing.allocator, local_id);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
 
     var local_record = fakeRecord(local_id, address4(127, 0, 0, 1, 9_000), 1);
     const private_id = nodeAtDistance(256, 1);
@@ -360,7 +360,7 @@ test "routing table rejects inconsistent records and unusable endpoints" {
     const local_id = [_]u8{0} ** 32;
     var table: routing.Table = undefined;
     try table.init(std.testing.allocator, local_id);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
 
     const remote_id = nodeAtDistance(256, 1);
     const address = address4(203, 0, 113, 1, 9_000);

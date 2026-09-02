@@ -10,7 +10,7 @@ const fakeEndpoint = test_support.fakeEndpoint;
 test "one active call per peer uses stale-safe handles" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 2);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const ping = pingRequest(1);
     const first = try begin(&table, peer, &ping, 10);
@@ -31,7 +31,7 @@ test "one active call per peer uses stale-safe handles" {
 test "call table owns encoded request bytes and tracks challenge nonce" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 2);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     var portal_protocol = [_]u8{ 'p', 'o', 'r', 't', 'a', 'l' };
     var payload = [_]u8{ 1, 2, 3 };
@@ -81,7 +81,7 @@ test "call table rejects zero and excessive configured capacities" {
 test "only sent calls participate in nonce and response matching" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 2);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const ping = pingRequest(1);
     const peer_a = fakeEndpoint(1, 9_001);
     var peer_b = fakeEndpoint(2, 9_002);
@@ -106,7 +106,7 @@ test "only sent calls participate in nonce and response matching" {
 test "response matching validates type ID and NODES packet count before mutation" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 2);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const nonce = [_]u8{0x11} ** 12;
     const request = message.Message{ .find_node = .{
@@ -144,7 +144,7 @@ test "response matching validates type ID and NODES packet count before mutation
 test "expiry is bounded by caller output and removes exact generations" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 2);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const ping = pingRequest(1);
     const first = try begin(&table, fakeEndpoint(1, 9_001), &ping, 10);
     _ = try begin(&table, fakeEndpoint(2, 9_002), &ping, 10);
@@ -160,7 +160,7 @@ test "expiry is bounded by caller output and removes exact generations" {
 test "FINDNODE accepts only requested unique records and caps the exchange" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 1);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(0, 9_001);
     const request = message.Message{ .find_node = .{
         .request_id = try message.RequestId.init(&.{0x01}),
@@ -191,7 +191,7 @@ test "FINDNODE accepts only requested unique records and caps the exchange" {
 test "FINDNODE filters unsolicited and duplicate node IDs" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 1);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(0, 9_001);
     const request = message.Message{ .find_node = .{
         .request_id = try message.RequestId.init(&.{0x01}),
@@ -216,7 +216,7 @@ test "FINDNODE filters unsolicited and duplicate node IDs" {
 test "begin refuses a message that is not a request" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 1);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const pong = message.Message{ .pong = .{
         .request_id = try message.RequestId.init(&.{0x01}),
         .enr_sequence = 1,
@@ -232,7 +232,7 @@ test "begin refuses a message that is not a request" {
 test "accept refuses a handle whose call ended after matching" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 1);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const request = pingRequest(1);
     const handle = try begin(&table, peer, &request, 100);
@@ -255,7 +255,7 @@ test "accept refuses a handle whose call ended after matching" {
 test "responses at the deadline are not published" {
     var table: calls.Table = undefined;
     try table.init(std.testing.allocator, 1);
-    defer table.deinit();
+    defer table.deinit(std.testing.allocator);
     const peer = fakeEndpoint(1, 9_001);
     const request = pingRequest(1);
     const handle = try begin(&table, peer, &request, 100);

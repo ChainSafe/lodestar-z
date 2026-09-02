@@ -456,9 +456,9 @@ const Pair = struct {
             .session_idle_timeout_ms = std.math.maxInt(u64),
         };
         try self.node_a.initWithConfig(std.testing.allocator, key_a, self.record_a, config);
-        errdefer self.node_a.deinit();
+        errdefer self.node_a.deinit(std.testing.allocator);
         try self.node_b.initWithConfig(std.testing.allocator, key_b, self.record_b, config);
-        errdefer self.node_b.deinit();
+        errdefer self.node_b.deinit(std.testing.allocator);
 
         if (install_session) {
             const peer_a = endpoint(&self.record_a);
@@ -481,8 +481,8 @@ const Pair = struct {
     }
 
     fn deinit(self: *Pair) void {
-        self.node_b.deinit();
-        self.node_a.deinit();
+        self.node_b.deinit(std.testing.allocator);
+        self.node_a.deinit(std.testing.allocator);
         self.udp_b.close(std.testing.io);
         self.udp_a.close(std.testing.io);
     }
@@ -564,11 +564,11 @@ const LookupNetwork = struct {
             .session_idle_timeout_ms = std.math.maxInt(u64),
         };
         try self.node_a.initWithConfig(std.testing.allocator, key_a, self.record_a, config);
-        errdefer self.node_a.deinit();
+        errdefer self.node_a.deinit(std.testing.allocator);
         try self.node_b.initWithConfig(std.testing.allocator, key_b, self.record_b, config);
-        errdefer self.node_b.deinit();
+        errdefer self.node_b.deinit(std.testing.allocator);
         try self.node_c.initWithConfig(std.testing.allocator, key_c, self.record_c, config);
-        errdefer self.node_c.deinit();
+        errdefer self.node_c.deinit(std.testing.allocator);
 
         installSession(&self.node_a, endpoint(&self.record_b), 0x51);
         installSession(&self.node_b, endpoint(&self.record_a), 0x51);
@@ -585,9 +585,9 @@ const LookupNetwork = struct {
     }
 
     fn deinit(self: *LookupNetwork) void {
-        self.node_c.deinit();
-        self.node_b.deinit();
-        self.node_a.deinit();
+        self.node_c.deinit(std.testing.allocator);
+        self.node_b.deinit(std.testing.allocator);
+        self.node_a.deinit(std.testing.allocator);
         self.udp_c.close(std.testing.io);
         self.udp_b.close(std.testing.io);
         self.udp_a.close(std.testing.io);
