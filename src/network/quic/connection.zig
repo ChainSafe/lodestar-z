@@ -43,6 +43,7 @@ pub const Now = struct {
 pub const Read = struct {
     len: usize,
     fin: bool,
+    reset_code: ?u64 = null,
 };
 
 pub const Stream = struct {
@@ -271,6 +272,12 @@ pub const Slot = struct {
         var code: u64 = 0;
         const rc = c.quiche_conn_stream_recv(self.conn.?, id, buf.ptr, buf.len, &fin, &code);
         if (rc == c.QUICHE_ERR_DONE) return .{ .len = 0, .fin = false };
+        if (rc == c.QUICHE_ERR_STREAM_RESET) {
+            self.streams[index].fin_received = true;
+            if (c.quiche_conn_stream_capacity(self.conn.?, id) < 0) self.streams[index].fin_sent = true;
+            if (self.streams[index].fin_sent) self.clearStream(index);
+            return .{ .len = 0, .fin = true, .reset_code = code };
+        }
         const length = try binding.check(rc);
         if (fin) {
             self.streams[index].fin_received = true;
@@ -284,6 +291,11 @@ pub const Slot = struct {
         var code: u64 = 0;
         const rc = c.quiche_conn_stream_send(self.conn.?, id, bytes.ptr, bytes.len, fin, &code);
         if (rc == c.QUICHE_ERR_DONE) return 0;
+        if (rc == c.QUICHE_ERR_STREAM_STOPPED) {
+            self.streams[index].fin_sent = true;
+            if (self.streams[index].fin_received) self.clearStream(index);
+            return error.StreamStopped;
+        }
         const length = try binding.check(rc);
         if (fin and length == bytes.len) {
             self.streams[index].fin_sent = true;
@@ -295,12 +307,15 @@ pub const Slot = struct {
     pub fn shutdown(self: *Slot, id: u64, direction: ShutdownDirection, code: u64) void {
         const which: c_int = if (direction == .read) c.QUICHE_SHUTDOWN_READ else c.QUICHE_SHUTDOWN_WRITE;
         _ = c.quiche_conn_stream_shutdown(self.conn.?, id, @intCast(which), code);
+        const index = self.streamIndex(id) orelse return;
+        if (direction == .read) self.streams[index].fin_received = true else self.streams[index].fin_sent = true;
+        if (self.streams[index].fin_received and self.streams[index].fin_sent) self.clearStream(index);
     }
 
     pub fn closeStream(self: *Slot, id: u64, code: u64) void {
         const index = self.streamIndex(id) orelse return;
         if (!self.streams[index].fin_received) self.shutdown(id, .read, code);
         if (!self.streams[index].fin_sent) self.shutdown(id, .write, code);
-        self.clearStream(index);
+        if (self.streams[index].active) self.clearStream(index);
     }
 };
