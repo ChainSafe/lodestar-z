@@ -38,6 +38,7 @@ pub const app_error_normal: u64 = 0;
 pub const app_error_peer_id_mismatch: u64 = 1;
 pub const app_error_handshake_timeout: u64 = 2;
 pub const app_error_stream_table_full: u64 = 3;
+pub const app_error_negotiation_failed: u64 = 4;
 
 pub const crypto_error_first: u64 = 0x100;
 pub const crypto_error_last: u64 = 0x1ff;
