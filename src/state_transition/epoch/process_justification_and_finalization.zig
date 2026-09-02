@@ -6,6 +6,7 @@ const Checkpoint = types.phase0.Checkpoint.Type;
 const JustificationBits = types.phase0.JustificationBits.Type;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const GENESIS_EPOCH = @import("preset").GENESIS_EPOCH;
+const SLOTS_PER_EPOCH = @import("preset").preset.SLOTS_PER_EPOCH;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const getBlockRoot = @import("../utils/block_root.zig").getBlockRoot;
 
@@ -62,7 +63,7 @@ pub fn weighJustificationAndFinalization(
     }
     bits[0] = false;
 
-    if (previous_epoch_target_balance * 3 > total_active_balance * 2) {
+    if (previous_epoch_target_balance * 3 >= total_active_balance * 2) {
         const new_current_justified_checkpoint = Checkpoint{
             .epoch = previous_epoch,
             .root = (try getBlockRoot(fork, state, previous_epoch)).*,
@@ -71,7 +72,7 @@ pub fn weighJustificationAndFinalization(
         bits[1] = true;
     }
 
-    if (current_epoch_target_balance * 3 > total_active_balance * 2) {
+    if (current_epoch_target_balance * 3 >= total_active_balance * 2) {
         const new_current_justified_checkpoint = Checkpoint{
             .epoch = current_epoch,
             .root = (try getBlockRoot(fork, state, current_epoch)).*,
@@ -105,7 +106,7 @@ pub fn weighJustificationAndFinalization(
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const Node = @import("persistent_merkle_tree").Node;
 
-test "processJustificationAndFinalization - sanity" {
+test "weighJustificationAndFinalization justifies exact two-thirds participation" {
     const allocator = std.testing.allocator;
     const pool_size = 10_000 * 5;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
@@ -114,9 +115,20 @@ test "processJustificationAndFinalization - sanity" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
     defer test_state.deinit();
 
-    try processJustificationAndFinalization(
+    var state = test_state.cached_state.state.castToFork(.electra);
+    try state.setSlot(3 * SLOTS_PER_EPOCH + 1);
+
+    try weighJustificationAndFinalization(
         .electra,
-        test_state.cached_state.state.castToFork(.electra),
-        test_state.epoch_transition_cache,
+        state,
+        3,
+        2,
+        2,
     );
+
+    var justification_bits = try state.justificationBits();
+    var bits: [types.phase0.JustificationBits.length]bool = undefined;
+    try justification_bits.toBoolArrayInto(&bits);
+    try std.testing.expect(bits[0]);
+    try std.testing.expect(bits[1]);
 }
