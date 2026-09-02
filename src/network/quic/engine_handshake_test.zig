@@ -172,6 +172,28 @@ test "engine captures TLS key material per connection only when keylog is enable
     try std.testing.expect(pair.server.slots[handles.server.index].handshake.keylog_dropped > 0);
 }
 
+test "handshake state drops key lines that do not fit and counts them" {
+    var storage: [tls.keylog_capacity]u8 = undefined;
+    var state = tls.HandshakeState{ .keylog = &storage };
+    const line = "CLIENT_TRAFFIC_SECRET_0 " ++ "a" ** 200;
+    var appended: usize = 0;
+    while (state.appendKeylog(line)) appended += 1;
+    try std.testing.expectEqual(tls.keylog_capacity / (line.len + 1), appended);
+    try std.testing.expectEqual(@as(u16, 1), state.keylog_dropped);
+
+    var out: [tls.keylog_capacity]u8 = undefined;
+    const taken = state.takeKeylog(&out);
+    try std.testing.expectEqual(appended * (line.len + 1), taken);
+    try std.testing.expectEqual(@as(u16, 0), state.keylog_len);
+    try std.testing.expect(std.mem.startsWith(u8, out[0..taken], line));
+    try std.testing.expect(state.appendKeylog(line));
+
+    var disabled = tls.HandshakeState{};
+    try std.testing.expect(!disabled.appendKeylog("x"));
+    try std.testing.expectEqual(@as(u16, 1), disabled.keylog_dropped);
+    try std.testing.expectEqual(@as(usize, 0), disabled.takeKeylog(&out));
+}
+
 fn standaloneEngine(seed: u8, engine_limits: engine_mod.Limits) !Engine {
     const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
     var ctx = try tls.Context.init(&host, now_unix, [_]u8{seed} ** 8);

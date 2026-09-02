@@ -46,6 +46,43 @@ test "engine consults the admission predicate before opening an inbound slot" {
     try std.testing.expectEqual(@as(usize, 1), pair.server.driverView().activeIndices().len);
 }
 
+fn countCalls(context: ?*anyopaque, _: *const types.Address) bool {
+    const calls: *u32 = @ptrCast(@alignCast(context.?));
+    calls.* += 1;
+    return true;
+}
+
+test "engine consults the admission predicate once per new Initial and never for routed traffic" {
+    var calls: u32 = 0;
+    var pair: Pair = .{};
+    try pair.init(.{}, .{ .admit = countCalls, .admit_context = @ptrCast(&calls) });
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+    try std.testing.expectEqual(@as(u32, 1), calls);
+
+    const stream = try pair.client.openStream(handles.client);
+    try std.testing.expectEqual(@as(usize, 5), try pair.client.write(stream, "hello", false));
+    try pair.pump();
+    var storage: [8]Event = undefined;
+    const inbound = try support.expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    var buffer: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 5), (try pair.server.read(inbound, &buffer)).len);
+    try std.testing.expectEqual(@as(u32, 1), calls);
+
+    var replay: [constants.datagram_size_max]u8 = undefined;
+    @memcpy(replay[0..pair.first_initial_len], pair.first_initial[0..pair.first_initial_len]);
+    var response: [constants.datagram_size_max]u8 = undefined;
+    _ = pair.server.driverView().receive(
+        replay[0..pair.first_initial_len],
+        &client_address,
+        pair.now,
+        pair.nextPool(),
+        &response,
+    );
+    try std.testing.expectEqual(@as(u32, 1), calls);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.counters.dropped_rejected);
+}
+
 test "engine bounds concurrent dials and outbound connections" {
     var pair: Pair = .{};
     try pair.init(.{ .dialing_max = 2, .outbound_max = 3 }, .{ .handshaking_per_source_max = 8 });

@@ -129,6 +129,24 @@ test "transport appends TLS key material to the configured keylog file" {
     try std.testing.expectEqual(written.size, dialer.keylog_offset);
 }
 
+test "transport socket refuses a batch that carries an oversized datagram" {
+    var node: Transport = .{};
+    try initTransport(&node, 26);
+    defer node.deinit(std.testing.io);
+
+    var oversized: [1_501]u8 = undefined;
+    @memset(&oversized, 0x5a);
+    var fitting: [8]u8 = undefined;
+    @memset(&fitting, 0x5b);
+    const to = node.localAddress();
+    const batch = [_]engine_mod.Sent{
+        .{ .bytes = &fitting, .to = to },
+        .{ .bytes = &oversized, .to = to },
+    };
+    try std.testing.expectError(error.DatagramTooLarge, node.udp.sendMany(std.testing.io, &batch));
+    try node.udp.sendMany(std.testing.io, batch[0..1]);
+}
+
 test "transport refuses to dial a multiaddr without a peer id" {
     var dialer: Transport = .{};
     try initTransport(&dialer, 23);
