@@ -462,17 +462,18 @@ test "engine keeps received data readable until the closed event is drained" {
     _ = pair.server.close(handles.server, 0);
     try pair.pump();
 
-    var storage: [1]Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), pair.client.pollEvents(&storage));
-    const inbound = try expectStreamOpened(storage[0], handles.client);
+    var storage: [8]Event = undefined;
+    const events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 2), events.len);
+    const inbound = try expectStreamOpened(events[0], handles.client);
+    _ = try expectClosed(events[1], handles.client);
 
     var buffer: [16]u8 = undefined;
     const final = try pair.client.read(inbound, &buffer);
     try std.testing.expectEqualStrings("bye", buffer[0..final.len]);
     try std.testing.expect(final.fin);
 
-    try std.testing.expectEqual(@as(usize, 1), pair.client.pollEvents(&storage));
-    _ = try expectClosed(storage[0], handles.client);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.pollEvents(&storage));
     try std.testing.expectError(error.StaleHandle, pair.client.read(inbound, &buffer));
 }
 
@@ -654,6 +655,9 @@ test "engine reclaims slots across many connection lifetimes" {
     }
 
     var indices: [4]u16 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), pair.client.activeIndices(&indices));
+    _ = pair.events(&pair.client, &storage);
+    _ = pair.events(&pair.server, &storage);
     try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices(&indices));
     try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices(&indices));
     try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
