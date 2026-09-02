@@ -33,7 +33,6 @@ const LookupSlot = struct {
     fn cancel(self: *LookupSlot, core: *discv5.engine.Engine) void {
         if (!self.active) return;
         self.operation.cancel(core);
-        self.operation.deinit();
         self.active = false;
     }
 };
@@ -259,6 +258,8 @@ fn crawl(
     records: *RecordSet,
     deadline_ms: u64,
 ) !void {
+    const candidates = try allocator.alloc(discv5.lookup.Candidates, lookup_concurrency);
+    defer allocator.free(candidates);
     var slots = [_]LookupSlot{.{}} ** lookup_concurrency;
     defer for (&slots) |*slot| slot.cancel(transport.core);
     var expired: [call_capacity]discv5.calls.Expired = undefined;
@@ -269,7 +270,7 @@ fn crawl(
 
     for (0..driver_steps_max) |_| {
         if (try discv5.driver.monotonicMilliseconds(io) >= deadline_ms) break;
-        try startLookups(io, allocator, transport.core, &slots, &launched);
+        try startLookups(io, transport.core, &slots, candidates, &launched);
 
         const active = activeLookups(&slots, &operations);
         const result = try discv5.lookup_driver.step(transport, io, active, &expired);
@@ -302,12 +303,12 @@ fn printRejections(rejections: *const std.EnumArray(discv5.types.RejectReason, u
 
 fn startLookups(
     io: std.Io,
-    allocator: std.mem.Allocator,
     core: *discv5.engine.Engine,
     slots: *[lookup_concurrency]LookupSlot,
+    candidates: []discv5.lookup.Candidates,
     launched: *usize,
 ) !void {
-    for (slots) |*slot| {
+    for (slots, candidates) |*slot, *storage| {
         if (slot.active or launched.* == lookup_total_max) continue;
         var target: discv5.types.NodeId = undefined;
         try std.Io.randomSecure(io, &target);
@@ -315,7 +316,7 @@ fn startLookups(
         const seeds = core.closestNodes(&target, &seeds_buffer);
         if (seeds.len == 0) return;
         try slot.operation.init(
-            allocator,
+            storage,
             core.channel.local_record.node_id,
             target,
             seeds,

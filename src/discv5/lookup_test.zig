@@ -41,13 +41,13 @@ test "lookup uses the call table for bounded parallel queries" {
         installSession(&core, seed.peer);
     }
     var operation: lookup.Lookup = undefined;
+    var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
-        std.testing.allocator,
+        &operation_candidates,
         core.channel.local_record.node_id,
         [_]u8{0} ** 32,
         &seeds,
     );
-    defer operation.deinit();
 
     var packet_buffer: [1_280]u8 = undefined;
     var started: [4]lookup.Started = undefined;
@@ -108,13 +108,13 @@ test "lookup rejects relayed private and low-port candidates" {
     const seed = fakeEntry(1);
     installSession(&core, seed.peer);
     var operation: lookup.Lookup = undefined;
+    var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
-        std.testing.allocator,
+        &operation_candidates,
         core.channel.local_record.node_id,
         [_]u8{0} ** 32,
         &.{seed},
     );
-    defer operation.deinit();
 
     var packet_buffer: [1_280]u8 = undefined;
     const request_id = try message.RequestId.init(&.{1});
@@ -161,13 +161,13 @@ test "lookup stops after the closest sixteen successful peers" {
         installSession(&core, seed.peer);
     }
     var operation: lookup.Lookup = undefined;
+    var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
-        std.testing.allocator,
+        &operation_candidates,
         core.channel.local_record.node_id,
         [_]u8{0} ** 32,
         &seeds,
     );
-    defer operation.deinit();
 
     var packet_buffer: [1_280]u8 = undefined;
     var farther_id = [_]u8{0xff} ** 32;
@@ -212,8 +212,9 @@ test "lookup initialization cleans up after an invalid seed" {
     var seed = fakeEntry(1);
     seed.record.node_id = nodeId(2);
     var operation: lookup.Lookup = undefined;
+    var operation_candidates: lookup.Candidates = undefined;
     try std.testing.expectError(lookup.Error.InvalidSeed, operation.init(
-        std.testing.allocator,
+        &operation_candidates,
         [_]u8{0} ** 32,
         [_]u8{0xff} ** 32,
         &.{seed},
@@ -224,13 +225,13 @@ test "empty lookup finishes without creating a call" {
     var core = try initEngine();
     defer core.deinit();
     var operation: lookup.Lookup = undefined;
+    var operation_candidates: lookup.Candidates = undefined;
     try operation.init(
-        std.testing.allocator,
+        &operation_candidates,
         core.channel.local_record.node_id,
         [_]u8{0} ** 32,
         &.{},
     );
-    defer operation.deinit();
     var packet_buffer: [1_280]u8 = undefined;
     try std.testing.expect((try operation.startNext(
         &core,

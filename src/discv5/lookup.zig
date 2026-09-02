@@ -12,7 +12,7 @@ pub const request_distance_count: usize = 3;
 pub const candidate_capacity: usize = routing.table_capacity;
 pub const discovered_port_min: u16 = 1_025;
 
-pub const Error = std.mem.Allocator.Error || engine_mod.Error || error{
+pub const Error = engine_mod.Error || error{
     InvalidSeed,
     TooManySeeds,
     UnexpectedResponse,
@@ -31,35 +31,35 @@ const State = union(enum) {
     failed,
 };
 
-const Candidate = struct {
+pub const Candidate = struct {
     peer: types.Endpoint,
     record: enr.Record,
     state: State,
 };
 
+pub const Candidates = [candidate_capacity]Candidate;
+
 pub const Lookup = struct {
     const Self = @This();
 
-    allocator: std.mem.Allocator,
     local_id: types.NodeId,
     target: types.NodeId,
-    candidates: []Candidate,
+    candidates: *Candidates,
     candidate_count: u16,
     waiting_count: u8,
     queries_started: u16,
     finished: bool,
 
+    /// Borrows `candidates` for the life of the lookup and allocates nothing.
     pub fn init(
         self: *Self,
-        allocator: std.mem.Allocator,
+        candidates: *Candidates,
         local_id: types.NodeId,
         target: types.NodeId,
         seeds: []const routing.Entry,
     ) Error!void {
         if (seeds.len > result_max) return Error.TooManySeeds;
-        const candidates = try allocator.alloc(Candidate, candidate_capacity);
         self.* = .{
-            .allocator = allocator,
             .local_id = local_id,
             .target = target,
             .candidates = candidates,
@@ -68,13 +68,7 @@ pub const Lookup = struct {
             .queries_started = 0,
             .finished = false,
         };
-        errdefer self.deinit();
         for (seeds) |*seed| try self.addSeed(seed);
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.candidates);
-        self.* = undefined;
     }
 
     pub fn candidateCount(self: *const Self) usize {
