@@ -48,8 +48,14 @@ pub const StreamHandle = struct {
 
 pub const Event = union(enum) {
     connected: struct { conn: Handle, peer_id: peer_id.PeerId, direction: Direction },
-    closed: struct { conn: Handle, reason: CloseReason },
+    closed: struct {
+        conn: Handle,
+        peer_id: ?peer_id.PeerId,
+        direction: Direction,
+        reason: CloseReason,
+    },
     stream_opened: StreamHandle,
+    stream_closed: struct { stream: StreamHandle, reset_code: ?u64 },
 };
 
 pub const Limits = struct {
@@ -172,6 +178,39 @@ pub const DriverView = struct {
         assert(self.engine.slots.len == self.engine.active.len);
         return self.engine.handleAt(index);
     }
+
+    pub fn releaseReported(self: DriverView) void {
+        const engine = self.engine;
+        assert(engine.active_len <= engine.active.len);
+        assert(engine.active.len == engine.slots.len);
+        engine.releaseReported();
+    }
+
+    pub fn takeActivity(self: DriverView, out: []Handle) usize {
+        const engine = self.engine;
+        assert(engine.activity.len == engine.slots.len);
+        assert(engine.active_len <= engine.active.len);
+        var count: usize = 0;
+        for (engine.active[0..engine.active_len]) |index| {
+            if (!engine.activity[index]) continue;
+            if (count == out.len) break;
+            out[count] = .{ .index = index, .generation = engine.slots[index].generation };
+            engine.activity[index] = false;
+            count += 1;
+        }
+        assert(count <= out.len);
+        return count;
+    }
+
+    pub fn activityPending(self: DriverView) bool {
+        const engine = self.engine;
+        assert(engine.activity.len == engine.slots.len);
+        assert(engine.active_len <= engine.active.len);
+        for (engine.active[0..engine.active_len]) |index| {
+            if (engine.activity[index]) return true;
+        }
+        return false;
+    }
 };
 
 pub const Engine = struct {
@@ -182,6 +221,7 @@ pub const Engine = struct {
     slots: []connection.Slot,
     routes: []Route,
     active: []u16,
+    activity: []bool,
     peers: []PeerEntry,
     active_len: u16 = 0,
     connection_window: u64,
@@ -224,6 +264,10 @@ pub const Engine = struct {
         errdefer allocator.free(active);
         for (active, 0..) |*entry, index| entry.* = @intCast(index);
 
+        const activity = try allocator.alloc(bool, wanted.connections_max);
+        errdefer allocator.free(activity);
+        @memset(activity, false);
+
         const peers = try allocator.alloc(PeerEntry, peers_len);
         errdefer allocator.free(peers);
         @memset(peers, .{});
@@ -236,6 +280,7 @@ pub const Engine = struct {
             .slots = slots,
             .routes = routes,
             .active = active,
+            .activity = activity,
             .peers = peers,
             .connection_window = connection_window,
             .stream_window = stream_window,
@@ -247,6 +292,7 @@ pub const Engine = struct {
             if (slot.state != .free) slot.release();
         }
         self.allocator.free(self.peers);
+        self.allocator.free(self.activity);
         self.allocator.free(self.active);
         self.allocator.free(self.routes);
         self.allocator.free(self.slots);
@@ -314,7 +360,7 @@ pub const Engine = struct {
                 if (slot.closed_pending) return false;
                 if (slot.direction == .inbound) self.handshaking -= 1;
             },
-            .closed => if (!slot.closed_pending or slot.closed_reported) return false,
+            .closed => if (!slot.closed_pending and !slot.closed_reported) return false,
             else => return false,
         }
         assert(conn.index < self.slots.len);
@@ -438,7 +484,8 @@ pub const Engine = struct {
             while (seen < limits.streams_per_connection) : (seen += 1) {
                 if (!c.quiche_stream_iter_next(iter, &id)) return null;
                 const index = slot.streamIndex(id) orelse continue;
-                assert(slot.table.matches(index, id));
+                assert(index < limits.streams_per_connection);
+                if (!slot.table.matches(index, id)) continue;
                 return .{ .conn = self.conn, .id = id, .slot = index };
             }
             return null;
@@ -470,11 +517,9 @@ pub const Engine = struct {
     }
 
     pub fn pollEvents(self: *Engine, events: []Event) usize {
-        self.releaseReportedSlots();
+        assert(self.active_len <= self.active.len);
         var count: usize = 0;
-        var cursor: u16 = 0;
-        while (cursor < self.active_len) {
-            const index = self.active[cursor];
+        for (self.active[0..self.active_len]) |index| {
             assert(index < self.slots.len);
             const slot = &self.slots[index];
             const conn = Handle{ .index = index, .generation = slot.generation };
@@ -489,27 +534,21 @@ pub const Engine = struct {
                 slot.connected_pending = false;
             }
             if (slot.table.pending > 0) {
-                for (&slot.table.entries, 0..) |*entry, table_index| {
-                    if (!entry.opened_pending) continue;
-                    if (count == events.len) return count;
-                    events[count] = .{ .stream_opened = .{
-                        .conn = conn,
-                        .id = entry.id.?,
-                        .slot = @intCast(table_index),
-                    } };
-                    count += 1;
-                    entry.opened_pending = false;
-                    slot.table.pending -= 1;
-                }
+                count = pollStreamEvents(slot, conn, events, count);
+                if (count == events.len) return count;
             }
             if (slot.closed_pending) {
                 if (count == events.len) return count;
-                events[count] = .{ .closed = .{ .conn = conn, .reason = slot.close_reason.? } };
+                events[count] = .{ .closed = .{
+                    .conn = conn,
+                    .peer_id = slot.peer_id,
+                    .direction = slot.direction,
+                    .reason = slot.close_reason.?,
+                } };
                 count += 1;
                 slot.closed_pending = false;
                 slot.closed_reported = true;
             }
-            cursor += 1;
         }
         assert(count <= events.len);
         return count;
@@ -606,7 +645,9 @@ pub const Engine = struct {
         for (self.active[0..self.active_len]) |index| {
             const slot = &self.slots[index];
             if (slot.state == .closed) continue;
+            const expired = if (slot.timeoutMs()) |remaining| remaining == 0 else false;
             slot.onTimeout();
+            if (expired) self.activity[index] = true;
             if (slot.state == .handshaking and slot.close_reason == null and
                 now.mono_ms -| slot.created_ms >= self.limits.handshake_timeout_ms)
             {
@@ -617,6 +658,7 @@ pub const Engine = struct {
                 slot.keepAlive())
             {
                 slot.last_send_ms = now.mono_ms;
+                self.activity[index] = true;
             }
             if (slot.pending_close) |pending| {
                 if (slot.pending_close_armed) {
@@ -669,12 +711,17 @@ pub const Engine = struct {
         return .{ .index = index, .generation = slot.generation };
     }
 
-    fn releaseReportedSlots(self: *Engine) void {
+    fn releaseReported(self: *Engine) void {
+        assert(self.active_len <= self.active.len);
         var cursor: u16 = 0;
         while (cursor < self.active_len) {
             const index = self.active[cursor];
+            assert(index < self.slots.len);
             const slot = &self.slots[index];
             if (slot.state == .closed and slot.closed_reported) {
+                assert(!slot.connected_pending);
+                assert(!slot.closed_pending);
+                assert(slot.table.pending == 0);
                 self.releaseSlot(index);
                 continue;
             }
@@ -754,6 +801,7 @@ pub const Engine = struct {
         var received = true;
         if (slot.recv(datagram)) |_| {
             self.counters.accepted += 1;
+            self.activity[index] = true;
         } else |_| {
             self.counters.recv_errors += 1;
             received = false;
@@ -822,6 +870,7 @@ pub const Engine = struct {
         if (self.active_len == self.active.len) return null;
         const index = self.active[self.active_len];
         self.active_len += 1;
+        self.activity[index] = false;
         return index;
     }
 
@@ -927,6 +976,38 @@ pub const Engine = struct {
         }
     }
 };
+
+fn pollStreamEvents(
+    slot: *connection.Slot,
+    conn: Handle,
+    events: []Event,
+    start: usize,
+) usize {
+    assert(slot.table.pending > 0);
+    assert(start <= events.len);
+    var count = start;
+    for (0..limits.streams_per_connection) |position| {
+        const index: u8 = @intCast(position);
+        const entry = &slot.table.entries[index];
+        if (entry.opened_pending) {
+            if (count == events.len) return count;
+            events[count] = .{ .stream_opened = .{ .conn = conn, .id = entry.id, .slot = index } };
+            count += 1;
+            slot.table.takeOpened(index);
+        }
+        if (entry.closed_pending) {
+            if (count == events.len) return count;
+            const closed = slot.table.takeClosed(index).?;
+            events[count] = .{ .stream_closed = .{
+                .stream = .{ .conn = conn, .id = closed.id, .slot = index },
+                .reset_code = closed.reset_code,
+            } };
+            count += 1;
+        }
+    }
+    assert(count <= events.len);
+    return count;
+}
 
 fn peerKey(id: *const peer_id.PeerId) u64 {
     return std.mem.readInt(u64, id.bytes[0..8], .big);

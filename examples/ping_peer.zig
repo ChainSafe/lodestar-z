@@ -123,8 +123,9 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
 
     var sessions = [_]Session{.{}} ** sessions_max;
     var events: [16]engine_mod.Event = undefined;
+    var activity: [8]engine_mod.Handle = undefined;
     while (true) {
-        const result = try node.driver.step(io, &events);
+        const result = try node.driver.step(io, &events, &activity, .{});
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| printPeer("connected", &connected.peer_id),
             .closed => |closed| {
@@ -139,6 +140,13 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
                     continue;
                 };
                 free.* = .{ .stream = stream, .listener = multistream.Listener.init(&supported), .active = true };
+            },
+            .stream_closed => |closed| {
+                for (&sessions) |*session| {
+                    if (session.active and std.meta.eql(session.stream, closed.stream)) {
+                        session.active = false;
+                    }
+                }
             },
         };
         for (&sessions) |*session| {
@@ -218,9 +226,10 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     var stream: ?engine_mod.StreamHandle = null;
     var state: enum { connecting, negotiating, pinging, closing, done } = .connecting;
     var events: [16]engine_mod.Event = undefined;
+    var activity: [8]engine_mod.Handle = undefined;
     var steps: u32 = 0;
     while (steps < dial_steps_max and state != .done) : (steps += 1) {
-        const result = try node.driver.step(io, &events);
+        const result = try node.driver.step(io, &events, &activity, .{});
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| {
                 printPeer("connected", &connected.peer_id);
@@ -233,6 +242,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
                 return error.ConnectionClosed;
             },
             .stream_opened => |opened| node.engine.closeStream(opened, 0),
+            .stream_closed => {},
         };
         const active = stream orelse continue;
         if (!try out.pump(&node.engine, active)) continue;
@@ -274,7 +284,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
         }
     }
     if (state != .done) return error.Timeout;
-    _ = try node.driver.step(io, &events);
+    _ = try node.driver.step(io, &events, &activity, .{});
 }
 
 fn printPeer(label: []const u8, id: *const peer_id.PeerId) void {

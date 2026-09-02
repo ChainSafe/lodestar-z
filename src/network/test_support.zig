@@ -126,6 +126,7 @@ pub const Pair = struct {
     }
 
     pub fn events(_: *Pair, engine: *Engine, storage: []Event) []Event {
+        engine.driverView().releaseReported();
         return storage[0..engine.pollEvents(storage)];
     }
 };
@@ -144,7 +145,7 @@ pub const Node = struct {
         errdefer self.engine.deinit();
         self.udp = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
         errdefer self.udp.close(std.testing.io);
-        self.driver = try driver_mod.Driver.initWithConfig(&self.engine, &self.udp, .{ .poll_interval_ms = 10 });
+        self.driver = driver_mod.Driver.init(&self.engine, &self.udp);
     }
 
     pub fn deinit(self: *Node) void {
@@ -184,11 +185,33 @@ pub fn expectStreamOpened(event: Event, conn: engine_mod.Handle) !engine_mod.Str
     }
 }
 
-pub fn expectClosed(event: Event, conn: engine_mod.Handle) !engine_mod.CloseReason {
+pub fn expectClosed(
+    event: Event,
+    conn: engine_mod.Handle,
+    direction: engine_mod.Direction,
+    peer: ?*const tls.Context,
+) !engine_mod.CloseReason {
     switch (event) {
         .closed => |closed| {
             try std.testing.expectEqual(conn, closed.conn);
+            try std.testing.expectEqual(direction, closed.direction);
+            if (peer) |ctx| {
+                try std.testing.expect(closed.peer_id != null);
+                try std.testing.expect(closed.peer_id.?.eql(&ctx.local_peer_id));
+            } else {
+                try std.testing.expect(closed.peer_id == null);
+            }
             return closed.reason;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+pub fn expectStreamClosed(event: Event, stream: engine_mod.StreamHandle) !?u64 {
+    switch (event) {
+        .stream_closed => |closed| {
+            try std.testing.expectEqual(stream, closed.stream);
+            return closed.reset_code;
         },
         else => return error.TestUnexpectedResult,
     }

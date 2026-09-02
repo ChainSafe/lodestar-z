@@ -36,7 +36,10 @@ test "engine drops new handshakes when the server table is full" {
     var storage: [8]Event = undefined;
     const client_events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), client_events.len);
-    try std.testing.expectEqual(engine_mod.CloseReason.handshake_timeout, try expectClosed(client_events[0], second));
+    try std.testing.expectEqual(
+        engine_mod.CloseReason.handshake_timeout,
+        try expectClosed(client_events[0], second, .outbound, null),
+    );
     try std.testing.expectError(error.TableFull, pair.server.dial(
         &server_address,
         &client_address,

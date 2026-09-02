@@ -12,6 +12,7 @@ const server_address = support.server_address;
 const connectPair = support.connectPair;
 const expectClosed = support.expectClosed;
 const expectStreamOpened = support.expectStreamOpened;
+const expectStreamClosed = support.expectStreamClosed;
 
 test "engine stream errors leak no quiche or openssl member" {
     comptime {
@@ -93,7 +94,7 @@ fn activePeerStreams(engine: *const Engine, handle: engine_mod.Handle) usize {
     var count: usize = 0;
     const peer_half = engine.slots[handle.index].table.entries[limits.streams_per_connection / 2 ..];
     for (peer_half) |*entry| {
-        if (entry.id != null) count += 1;
+        if (entry.claimed) count += 1;
     }
     return count;
 }
@@ -123,7 +124,16 @@ test "engine releases a peer-reset stream entry and frees the peer half" {
     try std.testing.expect(reset.fin);
     try std.testing.expectEqual(@as(u64, 7), reset.reset_code.?);
     try std.testing.expectError(error.UnknownStream, pair.server.read(inbound, &buffer));
+    try std.testing.expectEqual(@as(usize, 1), activePeerStreams(&pair.server, handles.server));
+
+    const closed = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), closed.len);
+    try std.testing.expectEqual(@as(u64, 7), (try expectStreamClosed(closed[0], inbound)).?);
     try std.testing.expectEqual(@as(usize, 0), activePeerStreams(&pair.server, handles.server));
+
+    const dialer_closed = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), dialer_closed.len);
+    try std.testing.expect(try expectStreamClosed(dialer_closed[0], stream) == null);
 
     var reopened: usize = 0;
     while (reopened < limits.peer_streams_bidi) : (reopened += 1) {
@@ -176,6 +186,86 @@ test "engine releases a stopped and reset stream entry" {
     const ended = try pair.server.read(stream, &buffer);
     try std.testing.expect(ended.fin);
     try std.testing.expectError(error.UnknownStream, pair.server.read(stream, &buffer));
+}
+
+test "engine reports a stream close on each side of a fin exchange" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(stream, "ping", true);
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    var buffer: [16]u8 = undefined;
+    _ = try pair.server.read(inbound, &buffer);
+    try std.testing.expectEqual(@as(usize, 4), try pair.server.write(inbound, "pong", true));
+    try pair.pump();
+
+    const server_events = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), server_events.len);
+    try std.testing.expect(try expectStreamClosed(server_events[0], inbound) == null);
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.server, &storage).len);
+
+    const reply = try pair.client.read(stream, &buffer);
+    try std.testing.expectEqualStrings("pong", buffer[0..reply.len]);
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    try std.testing.expect(try expectStreamClosed(client_events[0], stream) == null);
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
+}
+
+test "engine reports a stream close on both sides of a reset" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(stream, "x", false);
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    pair.client.shutdown(stream, .write, 7);
+    pair.client.shutdown(stream, .read, 7);
+    try pair.pump();
+
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    try std.testing.expect(try expectStreamClosed(client_events[0], stream) == null);
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
+
+    var buffer: [16]u8 = undefined;
+    const reset = try pair.server.read(inbound, &buffer);
+    try std.testing.expectEqual(@as(u64, 7), reset.reset_code.?);
+    const server_events = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), server_events.len);
+    try std.testing.expectEqual(@as(u64, 7), (try expectStreamClosed(server_events[0], inbound)).?);
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.server, &storage).len);
+}
+
+test "engine reports a stream close once for a host stream close" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.client.openStream(handles.client);
+    _ = try pair.client.write(stream, "x", false);
+    pair.client.closeStream(stream, 9);
+
+    var storage: [8]Event = undefined;
+    const events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expect(try expectStreamClosed(events[0], stream) == null);
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
+    try std.testing.expectError(error.UnknownStream, pair.client.write(stream, "y", false));
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectError(error.UnknownStream, pair.client.read(stream, &buffer));
 }
 
 const bulk_length = 64 * 1_024;
@@ -298,14 +388,14 @@ test "engine keeps received data readable until the closed event is drained" {
     const events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 2), events.len);
     const inbound = try expectStreamOpened(events[0], handles.client);
-    _ = try expectClosed(events[1], handles.client);
+    _ = try expectClosed(events[1], handles.client, .outbound, &pair.server_ctx);
 
     var buffer: [16]u8 = undefined;
     const final = try pair.client.read(inbound, &buffer);
     try std.testing.expectEqualStrings("bye", buffer[0..final.len]);
     try std.testing.expect(final.fin);
 
-    try std.testing.expectEqual(@as(usize, 0), pair.client.pollEvents(&storage));
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
     try std.testing.expectError(error.StaleHandle, pair.client.read(inbound, &buffer));
 }
 
