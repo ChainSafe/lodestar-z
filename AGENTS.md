@@ -331,42 +331,9 @@ test {
   the new file as imports and aliases.
 - Private test helpers move with the tests they serve.
 - Do not widen a declaration to `pub` only to relocate a test. Tests that exercise private
-  internals stay inline. `cpu_count.zig`, `load_state.zig`, `proto_array.zig` and `fork_choice.zig`
-  are deliberate examples.
-- `memory_safety_test.zig` files cover a whole module rather than one file, so they stay wired
-  from the package `root.zig`.
-
-Test discovery is easy to break silently. Zig only collects tests from files reached through an
-analyzed `test` block, so a `_test.zig` that nothing imports compiles cleanly and runs nothing,
-and the build still reports success. Re-exporting a file is not enough:
-
-```zig
-// Does NOT pull in era.zig's tests.
-pub const era = @import("era.zig");
-
-// Does.
-test {
-    _ = @import("era.zig");
-}
-```
-
-Every package `root.zig` should name its files in a `test` block rather than relying on
-`refAllDecls` reaching them through the re-export list. When adding a test file, confirm the count
-reported by `zig build test:<module> --summary all` actually goes up.
-
-`zig build test:tidy` checks all of this and runs in CI. It verifies that every `_test.zig` is
-imported, pairs with a module, and is wired from that module; that a `root.zig` whose siblings have
-tests declares a `test` block; that no `src/` or `bindings/` file is imported by nothing; that every
-module in `build.zig.zon` has a CI step; and that no `src/` file exceeds the inline test limits.
-
-Tidy reads the parsed AST, so a brace or the word `test` inside a comment or string cannot skew a
-count, and it takes its file list from `git ls-files`, so it sees exactly what is committed. A file
-you have not staged yet is invisible to it.
-
-Exemptions live in the allowlists in `test/tidy.zig` rather than in prose, so adding one is a
-reviewable diff, and tidy fails when an entry no longer needs its exemption. Each rule has a test
-in the same file that feeds it synthetic source and asserts the exact diagnostics, so a rule that
-stops catching anything fails rather than going quiet. Add one alongside any new rule.
+  internals stay inline.
+- A test file covering a whole module rather than one sibling module stays wired from the package
+  `root.zig`.
 
 ## Pull request guidelines
 

@@ -127,28 +127,6 @@ A few things to keep in mind:
 - Do not mark a declaration `pub` just so a test can reach it from the sibling file. Tests that
   deliberately exercise private internals belong inline; `src/cpu_count.zig` and
   `src/state_transition/load_state.zig` are examples.
-- Zig only runs tests in files reached through an analyzed `test` block. A `_test.zig` that nothing
-  imports compiles fine, runs nothing, and still reports success, so check that
-  `zig build test:<module> --summary all` reports more tests after you add one.
-
-These rules are enforced, not just documented. Run:
-
-```sh
-zig build test:tidy
-```
-
-It checks that every `_test.zig` is imported, pairs with a module and is wired from that module,
-that a `root.zig` whose siblings have tests declares a `test` block, that no shipped file is
-imported by nothing, that every module has a CI step, and that no file exceeds the inline test
-limits. CI runs it alongside `zig fmt --check`.
-
-Tidy takes its file list from `git ls-files`, so a file you have not staged yet is invisible to it.
-Run it again after `git add` when you add new files.
-
-If your file genuinely needs to keep bulky tests inline because they touch private declarations,
-add it to `inline_test_allowlist` in `test/tidy.zig` with a comment naming the declarations
-involved. Tidy fails if an allowlisted file later drops below the limits, so exemptions cannot
-outlive their reason.
 
 If you created new unit tests, you can run them individually.
 For example, if you made a new unit test in the `ssz` package:
@@ -174,6 +152,15 @@ And format all files:
 ```sh
 zig fmt .
 ```
+
+`tidy` is a custom linter for repo-wide rules that a formatter cannot express, currently covering
+test layout and test discovery. CI runs it, and so should you:
+
+```sh
+zig build test:tidy
+```
+
+It takes its file list from `git ls-files`, so run it after `git add` when you add new files.
 
 If you made a change to the bindings, make sure the bindings tests pass:
 
