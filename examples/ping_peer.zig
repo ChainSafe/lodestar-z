@@ -114,15 +114,32 @@ fn freeSession(sessions: []Session) ?*Session {
     return null;
 }
 
+fn writeAll(
+    engine: *engine_mod.Engine,
+    stream: engine_mod.StreamHandle,
+    bytes: []const u8,
+    fin: bool,
+) !void {
+    var written: usize = 0;
+    var attempts: u32 = 0;
+    while (attempts < constants.send_burst_max) : (attempts += 1) {
+        const count = try engine.write(stream, bytes[written..], fin);
+        written += count;
+        if (written == bytes.len) return;
+        if (count == 0) return error.ShortWrite;
+    }
+    return error.ShortWrite;
+}
+
 fn serve(engine: *engine_mod.Engine, session: *Session) !void {
     var buffer: [256]u8 = undefined;
     const read = try engine.read(session.stream, &buffer);
     if (read.len == 0 and !read.fin) return;
     var cursor: usize = 0;
     if (!session.negotiated and read.len > 0) {
-        var reply: [2 * multistream.message_length_max]u8 = undefined;
+        var reply: [multistream.listener_write_max]u8 = undefined;
         const outcome = try session.listener.feed(buffer[0..read.len], &reply);
-        if (outcome.write.len > 0) _ = try engine.write(session.stream, outcome.write, false);
+        if (outcome.write.len > 0) try writeAll(engine, session.stream, outcome.write, false);
         switch (outcome.status) {
             .selected => session.negotiated = true,
             .failed => return error.NegotiationFailed,
@@ -131,10 +148,10 @@ fn serve(engine: *engine_mod.Engine, session: *Session) !void {
         cursor = outcome.consumed;
     }
     if (session.negotiated and cursor < read.len) {
-        _ = try engine.write(session.stream, buffer[cursor..read.len], false);
+        try writeAll(engine, session.stream, buffer[cursor..read.len], false);
     }
     if (read.fin) {
-        _ = try engine.write(session.stream, "", true);
+        try writeAll(engine, session.stream, "", true);
         session.active = false;
     }
 }
@@ -169,7 +186,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
                 const opened = try node.engine.openStream(handle);
                 var hello: [2 * multistream.message_length_max]u8 = undefined;
                 const hello_bytes = try dialer.initialWrite(&hello);
-                _ = try node.engine.write(opened, hello_bytes, false);
+                try writeAll(&node.engine, opened, hello_bytes, false);
                 stream = opened;
                 state = .negotiating;
             },
@@ -189,7 +206,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
                 switch (outcome.status) {
                     .accepted => {
                         sent_at = result.now.mono_ms;
-                        _ = try node.engine.write(active, &payload, false);
+                        try writeAll(&node.engine, active, &payload, false);
                         state = .pinging;
                     },
                     .rejected => return error.ProtocolRejected,
@@ -202,8 +219,8 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
                 echoed += take;
                 if (echoed == ping_size) {
                     if (!std.mem.eql(u8, &payload, &echo)) return error.PingMismatch;
-                    std.debug.print("ping rtt_ms={d}\n", .{result.now.mono_ms - sent_at});
-                    _ = try node.engine.write(active, "", true);
+                    std.debug.print("ping rtt_ms={d}\n", .{result.now.mono_ms -| sent_at});
+                    try writeAll(&node.engine, active, "", true);
                     node.engine.close(handle, 0);
                     state = .done;
                 }

@@ -50,8 +50,8 @@ pub const Udp = struct {
     pub fn receiveTimeout(self: *Udp, io: std.Io, timeout: std.Io.Timeout) ReceiveTimeoutError!Datagram {
         if (self.admitted != null) return error.AdmissionUnavailable;
         const incoming = try self.socket.receiveTimeout(io, &self.buffer, timeout);
-        const successor = std.math.add(u64, self.next_generation, 1) catch return error.GenerationExhausted;
         if (incoming.flags.trunc) return error.DatagramTooLarge;
+        const successor = std.math.add(u64, self.next_generation, 1) catch return error.GenerationExhausted;
         std.debug.assert(incoming.data.len <= self.buffer.len);
         const generation = self.next_generation;
         self.next_generation = successor;

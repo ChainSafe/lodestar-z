@@ -5,6 +5,7 @@ const varint = @import("varint.zig");
 pub const header = "/multistream/1.0.0";
 pub const na = "na";
 pub const message_length_max = 2 + constants.protocol_id_length_max + 1;
+pub const listener_write_max = 4 * message_length_max;
 
 pub const Error = error{ Malformed, TooLong, BufferTooSmall } || varint.Error;
 

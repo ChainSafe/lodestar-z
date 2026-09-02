@@ -117,6 +117,7 @@ pub const Slot = struct {
         self.streams = [_]Stream{.{}} ** constants.streams_per_connection;
 
         const ssl = try ctx.newSsl(&self.handshake);
+        // quiche owns the SSL handle from this call onward and frees it even when construction fails, so the slot must never free it.
         self.conn = c.quiche_conn_new_with_tls(
             self.scid.slice().ptr,
             self.scid.len,
@@ -170,8 +171,8 @@ pub const Slot = struct {
         return if (value == std.math.maxInt(u64)) null else value;
     }
 
-    pub fn keepAlive(self: *Slot) void {
-        _ = c.quiche_conn_send_ack_eliciting(self.conn.?);
+    pub fn keepAlive(self: *Slot) bool {
+        return c.quiche_conn_send_ack_eliciting(self.conn.?) == 0;
     }
 
     pub fn close(self: *Slot, reason: CloseReason, code: u64) void {

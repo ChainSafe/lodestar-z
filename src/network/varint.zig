@@ -34,7 +34,10 @@ pub fn decode(bytes: []const u8) Error!Decoded {
         if (index == length_max - 1 and payload > 1) return error.Overflow;
         const shift: u6 = @intCast(index * 7);
         value |= payload << shift;
-        if (byte & 0x80 == 0) return .{ .value = value, .length = index + 1 };
+        if (byte & 0x80 == 0) {
+            if (index + 1 > encodedLength(value)) return error.Overflow;
+            return .{ .value = value, .length = index + 1 };
+        }
     }
     return error.Overflow;
 }

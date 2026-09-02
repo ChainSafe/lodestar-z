@@ -71,7 +71,6 @@ pub const Config = struct {
 
     pub fn init(idle_timeout_ms: u64) Error!Config {
         const ptr = c.quiche_config_new(c.QUICHE_PROTOCOL_VERSION) orelse return error.Unknown;
-        c.quiche_config_verify_peer(ptr, true);
         c.quiche_config_set_max_idle_timeout(ptr, idle_timeout_ms);
         c.quiche_config_set_max_recv_udp_payload_size(ptr, constants.recv_udp_payload_max);
         c.quiche_config_set_initial_max_data(ptr, constants.connection_window);

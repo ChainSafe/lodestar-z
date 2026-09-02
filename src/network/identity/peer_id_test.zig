@@ -17,7 +17,7 @@ test "peer id derives the libp2p spec vector" {
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x25, 0x08, 0x02, 0x12, 0x21 }, id.bytes[0..6]);
     var text: [peer_id.text_length_max]u8 = undefined;
     try std.testing.expectEqualStrings(spec_peer_id, id.toText(&text));
-    try std.testing.expectEqualSlices(u8, &key.bytes, &id.publicKey().bytes);
+    try std.testing.expectEqualSlices(u8, &key.bytes, &(try id.publicKey()).bytes);
 }
 
 test "peer id parses text and bytes" {
