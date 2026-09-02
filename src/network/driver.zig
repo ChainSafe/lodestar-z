@@ -22,6 +22,7 @@ pub const StepResult = struct {
     now: engine_mod.Now,
     datagram: DatagramResult = .timeout,
     datagrams_sent: u32 = 0,
+    receive_errors: u32 = 0,
     events: usize = 0,
 };
 
@@ -52,7 +53,7 @@ pub const Driver = struct {
 
     pub fn step(self: *Driver, io: std.Io, events: []engine_mod.Event) Error!StepResult {
         var result = StepResult{ .now = try currentTime(io) };
-        if (try self.receiveDatagram(io)) |admitted| {
+        if (try self.receiveDatagram(io, &result)) |admitted| {
             defer self.udp.release(admitted.handle) catch unreachable;
             const outcome = self.engine.receive(
                 admitted.bytes,
@@ -81,7 +82,7 @@ pub const Driver = struct {
         return result;
     }
 
-    fn receiveDatagram(self: *Driver, io: std.Io) Error!?runtime.Datagram {
+    fn receiveDatagram(self: *Driver, io: std.Io, result: *StepResult) Error!?runtime.Datagram {
         var wait_ms: u64 = self.config.poll_interval_ms;
         if (self.engine.nextTimeoutMs()) |timeout| wait_ms = @min(wait_ms, timeout);
         const timeout = std.Io.Timeout{ .duration = .{
@@ -90,6 +91,14 @@ pub const Driver = struct {
         } };
         return self.udp.receiveTimeout(io, timeout) catch |err| switch (err) {
             error.Timeout => null,
+            error.DatagramTooLarge,
+            error.PortUnreachable,
+            error.ConnectionResetByPeer,
+            error.NetworkDown,
+            => blk: {
+                result.receive_errors += 1;
+                break :blk null;
+            },
             else => err,
         };
     }

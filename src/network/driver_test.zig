@@ -47,6 +47,35 @@ test "driver rejects a zero poll interval" {
     try std.testing.expectError(error.InvalidPollInterval, driver_mod.Driver.initWithConfig(&core, &udp, .{ .poll_interval_ms = 0 }));
 }
 
+test "driver counts a hostile oversized datagram and keeps stepping" {
+    var node: Node = .{};
+    try node.init(3);
+    defer node.deinit();
+
+    const loopback = net.IpAddress{ .ip4 = .loopback(0) };
+    var stranger = try loopback.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer stranger.close(std.testing.io);
+
+    const oversized = [_]u8{0x5a} ** 2_000;
+    const destination = runtime.toNetwork(node.udp.localAddress());
+    try stranger.send(std.testing.io, &destination, &oversized);
+
+    var events: [4]engine_mod.Event = undefined;
+    var errors: u32 = 0;
+    var rounds: usize = 0;
+    while (rounds < 50 and errors == 0) : (rounds += 1) {
+        const result = try node.driver.step(std.testing.io, &events);
+        try std.testing.expectEqual(driver_mod.DatagramResult.timeout, result.datagram);
+        try std.testing.expectEqual(@as(usize, 0), result.events);
+        errors += result.receive_errors;
+    }
+    try std.testing.expectEqual(@as(u32, 1), errors);
+
+    const after = try node.driver.step(std.testing.io, &events);
+    try std.testing.expectEqual(@as(u32, 0), after.receive_errors);
+    try std.testing.expectEqual(driver_mod.DatagramResult.timeout, after.datagram);
+}
+
 test "driver completes a libp2p ping over loopback sockets" {
     var client: Node = .{};
     try client.init(1);
