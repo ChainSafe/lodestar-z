@@ -352,7 +352,12 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         }
 
         pub const serialized = struct {
-            pub fn validate(data: []const u8) !void {
+            const Parsed = struct {
+                bit_len: usize,
+                padding_bit_index: u3,
+            };
+
+            inline fn parse(data: []const u8) !Parsed {
                 if (data.len == 0) {
                     return error.InvalidSize;
                 }
@@ -369,57 +374,38 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                 if (bit_len > limit) {
                     return error.tooLarge;
                 }
+                return .{
+                    .bit_len = bit_len,
+                    .padding_bit_index = last_1_index,
+                };
+            }
+
+            pub fn validate(data: []const u8) !void {
+                _ = try parse(data);
             }
 
             pub fn length(data: []const u8) !usize {
-                if (data.len == 0) {
-                    return error.InvalidSize;
-                }
-
-                // ensure padding bit and trailing zeros in last byte
-                const last_byte = data[data.len - 1];
-
-                const last_byte_clz = @clz(last_byte);
-                if (last_byte_clz == 8) {
-                    return error.noPaddingBit;
-                }
-                const last_1_index: u3 = @intCast(7 - last_byte_clz);
-                const bit_len = (data.len - 1) * 8 + last_1_index;
-                if (bit_len > limit) {
-                    return error.tooLarge;
-                }
-                return bit_len;
+                return (try parse(data)).bit_len;
             }
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
-                if (data.len == 0) {
-                    return error.InvalidSize;
-                }
-
-                // ensure padding bit and trailing zeros in last byte
-                const last_byte = data[data.len - 1];
-
-                const last_byte_clz = @clz(last_byte);
-                if (last_byte_clz == 8) {
-                    return error.noPaddingBit;
-                }
-                const last_1_index: u3 = @intCast(7 - last_byte_clz);
-                const bit_len = (data.len - 1) * 8 + last_1_index;
-                const chunk_count = (bit_len + 255) / 256;
+                const parsed = try parse(data);
+                const chunk_count = (parsed.bit_len + 255) / 256;
                 const chunks = try allocator.alloc([32]u8, (chunk_count + 1) / 2 * 2);
                 defer allocator.free(chunks);
 
                 @memset(chunks, [_]u8{0} ** 32);
-                if (bit_len % 8 == 0) {
+                if (parsed.bit_len % 8 == 0) {
                     @memcpy(@as([]u8, @ptrCast(chunks))[0 .. data.len - 1], data[0 .. data.len - 1]);
                 } else {
                     @memcpy(@as([]u8, @ptrCast(chunks))[0..data.len], data);
                     // remove padding bit
-                    @as([]u8, @ptrCast(chunks))[data.len - 1] ^= @as(u8, 1) << last_1_index;
+                    @as([]u8, @ptrCast(chunks))[data.len - 1] ^=
+                        @as(u8, 1) << parsed.padding_bit_index;
                 }
 
                 try merkleize(@ptrCast(chunks), chunk_depth, out);
-                mixInLength(bit_len, out);
+                mixInLength(parsed.bit_len, out);
             }
         };
 
@@ -747,7 +733,7 @@ test "BitList resize and set should enforce length bounds" {
 }
 
 // Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/bitList/valid.test.ts#L44-L69
-test "BitListType - padding bit test cases" {
+test "BitListType serialized forms should enforce padding and limit" {
     const allocator = std.testing.allocator;
 
     const TestCase = struct {
@@ -785,6 +771,16 @@ test "BitListType - padding bit test cases" {
         try deserialized.toBoolSlice(&deserialized_bools);
         try std.testing.expectEqualSlices(bool, tc.bools, deserialized_bools);
     }
+
+    const over_limit = [_]u8{ 0x00, 0x02 };
+    try std.testing.expectError(error.tooLarge, Bits.serialized.validate(&over_limit));
+    try std.testing.expectError(error.tooLarge, Bits.serialized.length(&over_limit));
+
+    var root: [32]u8 = undefined;
+    try std.testing.expectError(
+        error.tooLarge,
+        Bits.serialized.hashTreeRoot(allocator, &over_limit, &root),
+    );
 }
 
 // Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/bitList/valid.test.ts#L5-L41
