@@ -55,6 +55,28 @@ test "verify round trips our own certificate and catches a foreign signer" {
     try std.testing.expectError(error.HostSignatureInvalid, verify.verifyDer(try forged.der(&buffer), now_unix));
 }
 
+test "verify rejects a certificate with a trailing byte" {
+    const der = hex(spec_secp256k1_cert ++ "00");
+    try std.testing.expectError(error.CertificateMalformed, verify.verifyDer(&der, now_unix));
+}
+
+test "verify rejects a certificate whose libp2p extension was removed" {
+    const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{4}));
+    var own = try cert.Certificate.create(&host, now_unix, .{ 4, 4, 4, 4, 4, 4, 4, 4 });
+    defer own.deinit();
+
+    const oid = c.OBJ_txt2obj(cert.extension_oid, 1) orelse return error.TestUnexpectedResult;
+    defer c.ASN1_OBJECT_free(oid);
+    const index = c.X509_get_ext_by_OBJ(own.x509, oid, -1);
+    try std.testing.expect(index >= 0);
+    const removed = c.X509_delete_ext(own.x509, index) orelse return error.TestUnexpectedResult;
+    c.X509_EXTENSION_free(removed);
+    try std.testing.expect(c.X509_sign(own.x509, own.key, c.EVP_sha256()) > 0);
+
+    var buffer: [cert.der_length_max]u8 = undefined;
+    try std.testing.expectError(error.ExtensionMissing, verify.verifyDer(try own.der(&buffer), now_unix));
+}
+
 test "verify rejects an unknown critical extension" {
     const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{1}));
     var own = try cert.Certificate.create(&host, now_unix, .{ 3, 3, 3, 3, 3, 3, 3, 3 });
