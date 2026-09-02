@@ -61,6 +61,10 @@
             .url = "git+https://github.com/lalinsky/zio?ref=v0.14.0#aa860381beb42bc077e24ef304827cbdc23fcef9",
             .hash = "zio-0.14.0-xHbVVPxFHgBCop4CvfF4u360kzWlHD4FS8Ud-RIkPcZ7",
         },
+        .quiche_zig = .{
+            .url = "git+https://github.com/chainsafe/quiche-zig#2e0b489b3c9900f658ca97b766b802003525cdb0",
+            .hash = "quiche-0.1.0-rnTCo4cQAACPgyY1ZYEYw7Yw0JNl2jGqlVLz6pOmA06t",
+        },
     },
     .options_modules = .{
         .build_options = .{
@@ -227,6 +231,7 @@
         },
         .network = .{
             .root_source_file = "src/network/root.zig",
+            .imports = .{"quiche_zig:quiche"},
         },
     },
     .executables = .{
