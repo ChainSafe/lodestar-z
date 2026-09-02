@@ -21,6 +21,35 @@ fn dialInitial(pair: *Pair, out: []u8) ![]u8 {
     return out[0..datagram.bytes.len];
 }
 
+test "engine bounds concurrent dials and outbound connections" {
+    var pair: Pair = .{};
+    try pair.init(.{ .dialing_max = 2, .outbound_max = 3 }, .{ .handshaking_per_source_max = 8 });
+    defer pair.deinit();
+
+    _ = try pair.dial();
+    _ = try pair.dial();
+    try std.testing.expectError(error.DialLimit, pair.dial());
+    try std.testing.expectEqual(@as(u16, 2), pair.client.dialing);
+    try std.testing.expectEqual(@as(u16, 2), pair.client.outbound);
+
+    try pair.pump();
+    try std.testing.expectEqual(@as(u16, 0), pair.client.dialing);
+    try std.testing.expectEqual(@as(u16, 2), pair.client.outbound);
+    const third = try pair.dial();
+    try std.testing.expectError(error.DialLimit, pair.dial());
+    try pair.pump();
+    try std.testing.expectEqual(@as(u16, 3), pair.client.outbound);
+
+    _ = pair.client.close(third, 0);
+    try pair.pump();
+    var storage: [16]engine_mod.Event = undefined;
+    _ = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(u16, 2), pair.client.outbound);
+    _ = try pair.dial();
+    try std.testing.expectEqual(@as(u16, 3), pair.client.outbound);
+    try std.testing.expectEqual(@as(u16, 1), pair.client.dialing);
+}
+
 test "engine drops new handshakes when the server table is full" {
     var pair: Pair = .{};
     try pair.init(.{ .connections_max = 4, .handshaking_max = 4, .handshake_timeout_ms = 100 }, .{ .connections_max = 1, .handshaking_max = 1 });

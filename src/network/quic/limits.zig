@@ -5,6 +5,7 @@ pub const connections_max_default: u16 = 128;
 pub const connections_max_ceiling: u16 = 1_024;
 pub const handshaking_max: u16 = 32;
 pub const handshaking_per_source_max: u16 = 4;
+pub const dialing_max: u16 = 16;
 pub const peer_streams_bidi: u64 = 64;
 pub const streams_per_connection: u16 = 128;
 pub const idle_timeout_ms: u64 = 10_000;
@@ -26,6 +27,8 @@ comptime {
     std.debug.assert(recv_udp_payload_max <= constants.datagram_size_max);
     std.debug.assert(connection_window_min <= connection_window_max);
     std.debug.assert(handshaking_max <= connections_max_default);
+    std.debug.assert(dialing_max <= connections_max_default - handshaking_max);
+    std.debug.assert(send_burst_max % constants.send_batch_max == 0);
     std.debug.assert(connections_max_default <= connections_max_ceiling);
     std.debug.assert(streams_per_connection == 2 * peer_streams_bidi);
     std.debug.assert(receive_budget_bytes / connections_max_default >= connection_window_min);

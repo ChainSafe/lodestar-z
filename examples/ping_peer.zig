@@ -1,15 +1,12 @@
 const std = @import("std");
 const network = @import("network");
 
-const driver_mod = network.driver;
 const engine_mod = network.quic.engine;
 const keys = network.wire.keys;
 const limits = network.quic.limits;
 const multiaddr = network.wire.multiaddr;
 const multistream = network.wire.multistream;
 const peer_id = network.wire.peer_id;
-const tls = network.tls.context;
-const udp_mod = network.udp;
 
 const ping_protocol = "/ipfs/ping/1.0.0";
 const ping_size = 32;
@@ -36,32 +33,10 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(2);
 }
 
-const Node = struct {
-    ctx: tls.Context = undefined,
-    engine: engine_mod.Engine = undefined,
-    udp: udp_mod.Udp = undefined,
-    driver: driver_mod.Driver = undefined,
-
-    fn init(self: *Node, allocator: std.mem.Allocator, io: std.Io, bind: std.Io.net.IpAddress) !void {
-        const key = keys.KeyPair.generate(io);
-        var serial: [8]u8 = undefined;
-        try std.Io.randomSecure(io, &serial);
-        self.ctx = try tls.Context.init(&key, (try driver_mod.currentTime(io)).unix_s, serial);
-        errdefer self.ctx.deinit();
-        self.udp = try udp_mod.Udp.bind(io, bind);
-        errdefer self.udp.close(io);
-        const local = self.udp.localAddress();
-        self.engine = try engine_mod.Engine.init(allocator, &self.ctx, .{}, &local);
-        errdefer self.engine.deinit();
-        self.driver = driver_mod.Driver.init(&self.engine, &self.udp);
-    }
-
-    fn deinit(self: *Node, io: std.Io) void {
-        self.udp.close(io);
-        self.engine.deinit();
-        self.ctx.deinit();
-    }
-};
+fn initNode(node: *network.Transport, allocator: std.mem.Allocator, io: std.Io, bind: std.Io.net.IpAddress) !void {
+    const key = keys.KeyPair.generate(io);
+    try node.init(allocator, io, .{ .host = &key, .bind = bind });
+}
 
 const Outbox = struct {
     bytes: []const u8 = &.{},
@@ -114,11 +89,11 @@ fn dropPrefix(pending: []u8, length: usize, count: usize) usize {
 }
 
 fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16) !void {
-    var node: Node = .{};
-    try node.init(allocator, io, try std.Io.net.IpAddress.parseIp4(host, port));
+    var node: network.Transport = .{};
+    try initNode(&node, allocator, io, try std.Io.net.IpAddress.parseIp4(host, port));
     defer node.deinit(io);
 
-    const local = multiaddr.Multiaddr{ .address = node.udp.localAddress(), .peer = node.ctx.local_peer_id };
+    const local = node.localMultiaddr();
     var text: [multiaddr.text_length_max]u8 = undefined;
     std.debug.print("{s}\n", .{try local.toText(&text)});
 
@@ -126,7 +101,7 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
     var events: [16]engine_mod.Event = undefined;
     var activity: [8]engine_mod.Handle = undefined;
     while (true) {
-        const result = try node.driver.step(io, &events, &activity, .{});
+        const result = try node.step(io, &events, &activity, .{});
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| printPeer("connected", &connected.peer_id),
             .closed => |closed| {
@@ -205,16 +180,15 @@ fn serve(engine: *engine_mod.Engine, session: *Session) !void {
 
 fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     const target = try multiaddr.Multiaddr.parse(text);
-    const expected = target.peer orelse return error.MissingPeerId;
     const bind: std.Io.net.IpAddress = switch (target.address) {
         .ip4 => .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } },
         .ip6 => .{ .ip6 = .{ .bytes = [_]u8{0} ** 16, .port = 0, .flow = 0, .interface = .{ .index = 0 } } },
     };
-    var node: Node = .{};
-    try node.init(allocator, io, bind);
+    var node: network.Transport = .{};
+    try initNode(&node, allocator, io, bind);
     defer node.deinit(io);
 
-    const handle = try node.driver.dial(io, target.address, expected);
+    const handle = try node.dial(io, &target);
     var dialer = try multistream.Dialer.init(ping_protocol);
     var payload: [ping_size]u8 = undefined;
     try std.Io.randomSecure(io, &payload);
@@ -231,7 +205,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     var activity: [8]engine_mod.Handle = undefined;
     var steps: u32 = 0;
     while (steps < dial_steps_max and state != .done) : (steps += 1) {
-        const result = try node.driver.step(io, &events, &activity, .{});
+        const result = try node.step(io, &events, &activity, .{});
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| {
                 printPeer("connected", &connected.peer_id);
@@ -287,7 +261,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
         }
     }
     if (state != .done) return error.Timeout;
-    _ = try node.driver.step(io, &events, &activity, .{});
+    _ = try node.step(io, &events, &activity, .{});
 }
 
 fn printPeer(label: []const u8, id: *const peer_id.PeerId) void {

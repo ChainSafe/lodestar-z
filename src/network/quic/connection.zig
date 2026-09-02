@@ -25,10 +25,7 @@ pub const OpenedStream = struct {
     index: u8,
 };
 
-pub const Sent = struct {
-    bytes: []u8,
-    to: types.Address,
-};
+pub const Sent = types.Sent;
 
 pub const OpenParams = struct {
     direction: types.Direction,

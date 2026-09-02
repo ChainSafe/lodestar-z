@@ -1,6 +1,7 @@
 const std = @import("std");
 const binding = @import("binding.zig");
 const connection = @import("connection.zig");
+const constants = @import("../constants.zig");
 const limits = @import("limits.zig");
 const peer_id = @import("../wire/peer_id.zig");
 const tls = @import("../tls/context.zig");
@@ -63,6 +64,8 @@ pub const Limits = struct {
     connections_max: u16 = limits.connections_max_default,
     handshaking_max: u16 = limits.handshaking_max,
     handshaking_per_source_max: u16 = limits.handshaking_per_source_max,
+    dialing_max: u16 = limits.dialing_max,
+    outbound_max: ?u16 = null,
     receive_budget_bytes: u64 = limits.receive_budget_bytes,
     idle_timeout_ms: u64 = limits.idle_timeout_ms,
     handshake_timeout_ms: u64 = limits.handshake_timeout_ms,
@@ -84,6 +87,11 @@ pub const Counters = struct {
 };
 
 pub const Sent = connection.Sent;
+
+pub const SendBatch = struct {
+    buffers: [constants.send_batch_max][constants.datagram_size_max]u8 = undefined,
+    sent: [constants.send_batch_max]Sent = undefined,
+};
 
 pub const ReceiveOutcome = union(enum) {
     accepted: Handle,
@@ -165,6 +173,25 @@ pub const DriverView = struct {
         return self.engine.send(index, now, out);
     }
 
+    pub fn sendBatch(self: DriverView, index: u16, now: Now, batch: *SendBatch) u8 {
+        assert(index < self.engine.slots.len);
+        var count: u8 = 0;
+        while (count < constants.send_batch_max) : (count += 1) {
+            const sent = self.engine.send(index, now, &batch.buffers[count]) orelse break;
+            batch.sent[count] = sent;
+        }
+        assert(count <= constants.send_batch_max);
+        return count;
+    }
+
+    pub fn failSend(self: DriverView, index: u16) void {
+        assert(index < self.engine.slots.len);
+        const slot = &self.engine.slots[index];
+        assert(slot.state != .free);
+        if (slot.state == .closed) return;
+        self.engine.markClosed(index, .send_failed);
+    }
+
     pub fn activeIndices(self: DriverView) []const u16 {
         const engine = self.engine;
         assert(engine.active.len == engine.slots.len);
@@ -232,7 +259,10 @@ pub const Engine = struct {
     active_len: u16 = 0,
     connection_window: u64,
     stream_window: u64,
+    outbound_max: u16,
     handshaking: u16 = 0,
+    dialing: u16 = 0,
+    outbound: u16 = 0,
     counters: Counters = .{},
 
     pub fn init(
@@ -245,6 +275,10 @@ pub const Engine = struct {
         if (wanted.handshaking_max == 0 or wanted.handshaking_max > wanted.connections_max) return error.InvalidLimits;
         if (wanted.handshaking_per_source_max == 0) return error.InvalidLimits;
         if (wanted.idle_timeout_ms == 0 or wanted.handshake_timeout_ms == 0 or wanted.keep_alive_ms == 0) return error.InvalidLimits;
+        if (wanted.dialing_max == 0) return error.InvalidLimits;
+        const outbound_max = wanted.outbound_max orelse
+            @max(1, wanted.connections_max - wanted.connections_max / 4);
+        if (outbound_max == 0 or outbound_max > wanted.connections_max) return error.InvalidLimits;
 
         const connection_window = std.math.clamp(
             wanted.receive_budget_bytes / wanted.connections_max,
@@ -296,6 +330,7 @@ pub const Engine = struct {
             .peers = peers,
             .connection_window = connection_window,
             .stream_window = stream_window,
+            .outbound_max = outbound_max,
         };
     }
 
@@ -338,6 +373,9 @@ pub const Engine = struct {
         entropy: [limits.local_cid_length]u8,
     ) DialError!Handle {
         assert(self.active_len <= self.active.len);
+        assert(self.dialing <= self.outbound);
+        if (self.dialing >= self.limits.dialing_max) return error.DialLimit;
+        if (self.outbound >= self.outbound_max) return error.DialLimit;
         const index = self.claimSlot() orelse return error.TableFull;
         assert(index < self.slots.len);
         const slot = &self.slots[index];
@@ -353,6 +391,10 @@ pub const Engine = struct {
             return error.OpenFailed;
         };
         self.addRoute(&slot.scid, index);
+        self.dialing += 1;
+        self.outbound += 1;
+        assert(self.dialing <= self.limits.dialing_max);
+        assert(self.outbound <= self.outbound_max);
         return .{ .index = index, .generation = slot.generation };
     }
 
@@ -369,7 +411,14 @@ pub const Engine = struct {
         switch (slot.state) {
             .handshaking => {
                 if (slot.closed_pending) return false;
-                if (slot.direction == .inbound) self.handshaking -= 1;
+                if (slot.direction == .inbound) {
+                    self.handshaking -= 1;
+                } else {
+                    assert(self.dialing > 0);
+                    assert(self.outbound > 0);
+                    self.dialing -= 1;
+                    self.outbound -= 1;
+                }
             },
             .closed => if (!slot.closed_pending and !slot.closed_reported) return false,
             else => return false,
@@ -848,7 +897,12 @@ pub const Engine = struct {
         const slot = &self.slots[index];
         if (slot.state == .handshaking and slot.isEstablished()) {
             slot.state = .established;
-            if (slot.direction == .inbound) self.handshaking -= 1;
+            if (slot.direction == .inbound) {
+                self.handshaking -= 1;
+            } else {
+                assert(self.dialing > 0);
+                self.dialing -= 1;
+            }
             if (slot.handshake.peer_id) |id| {
                 slot.peer_id = id;
                 self.peerIndexInsert(.{
@@ -868,13 +922,31 @@ pub const Engine = struct {
             if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
         }
         if (slot.state != .closed and slot.isFinished()) {
-            if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
-            if (slot.state == .handshaking and slot.direction == .inbound) self.handshaking -= 1;
-            slot.state = .closed;
-            slot.close_reason = slot.closeReason();
-            slot.closed_pending = true;
-            self.removeRoutesFor(index);
+            self.markClosed(index, slot.closeReason());
         }
+    }
+
+    fn markClosed(self: *Engine, index: u16, reason: CloseReason) void {
+        const slot = &self.slots[index];
+        assert(slot.state == .handshaking or slot.state == .established);
+        if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
+        if (slot.state == .handshaking) {
+            if (slot.direction == .inbound) {
+                self.handshaking -= 1;
+            } else {
+                assert(self.dialing > 0);
+                self.dialing -= 1;
+            }
+        }
+        if (slot.direction == .outbound) {
+            assert(self.outbound > 0);
+            self.outbound -= 1;
+        }
+        slot.state = .closed;
+        slot.close_reason = reason;
+        slot.closed_pending = true;
+        self.removeRoutesFor(index);
+        assert(self.dialing <= self.outbound);
     }
 
     fn slotForPeer(self: *const Engine, from: *const Address) ?u16 {

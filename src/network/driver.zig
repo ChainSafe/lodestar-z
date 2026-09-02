@@ -20,6 +20,8 @@ pub const StepOptions = struct {
     wait_max_ms: u32 = constants.poll_interval_ms,
 };
 
+const drain_rounds_max: u32 = @divExact(limits.send_burst_max, constants.send_batch_max);
+
 const Received = union(enum) {
     datagram: udp_mod.Datagram,
     dropped,
@@ -33,9 +35,9 @@ pub const StepResult = struct {
     datagrams_dropped: u32 = 0,
     version_negotiations: u32 = 0,
     datagrams_sent: u32 = 0,
+    send_calls: u32 = 0,
     receive_errors: u32 = 0,
     send_failures: u32 = 0,
-    first_failure: ?struct { conn: engine_mod.Handle, err: StepError } = null,
     events: usize = 0,
     events_pending: bool = false,
     activity: usize = 0,
@@ -44,6 +46,7 @@ pub const StepResult = struct {
 
 pub const Drained = struct {
     sent: u32 = 0,
+    calls: u32 = 0,
     failure: ?StepError = null,
 };
 
@@ -51,6 +54,7 @@ pub const Driver = struct {
     engine: *engine_mod.Engine,
     udp: *udp_mod.Udp,
     pool: engine_mod.EntropyPool = .{},
+    batch: engine_mod.SendBatch = .{},
     output: [constants.datagram_size_max]u8 = undefined,
 
     pub fn init(engine: *engine_mod.Engine, udp: *udp_mod.Udp) Driver {
@@ -75,7 +79,8 @@ pub const Driver = struct {
         const handle = try self.engine.dial(&peer, expected, now, try entropy(io));
         assert(handle.index < self.engine.driverView().slotCount());
         if (self.drain(io, handle.index, now).failure) |err| {
-            _ = self.engine.abandon(handle);
+            self.engine.driverView().failSend(handle.index);
+            assert(self.engine.abandon(handle));
             return err;
         }
         return handle;
@@ -122,11 +127,10 @@ pub const Driver = struct {
         for (view.activeIndices()) |index| {
             const drained = self.drain(io, index, result.now);
             result.datagrams_sent += drained.sent;
-            if (drained.failure) |err| {
+            result.send_calls += drained.calls;
+            if (drained.failure != null) {
                 result.send_failures += 1;
-                if (result.first_failure == null) {
-                    result.first_failure = .{ .conn = view.handleAt(index).?, .err = err };
-                }
+                view.failSend(index);
             }
         }
         view.releaseReported();
@@ -173,16 +177,25 @@ pub const Driver = struct {
     fn drain(self: *Driver, io: std.Io, index: u16, now: engine_mod.Now) Drained {
         const view = self.engine.driverView();
         var result = Drained{};
-        while (result.sent < limits.send_burst_max) {
-            const sent = view.send(index, now, &self.output) orelse break;
-            self.send(io, &sent.to, sent.bytes) catch |err| {
+        var rounds: u32 = 0;
+        while (rounds < drain_rounds_max) : (rounds += 1) {
+            const count = view.sendBatch(index, now, &self.batch);
+            if (count == 0) break;
+            self.sendMany(io, self.batch.sent[0..count]) catch |err| {
                 result.failure = err;
                 return result;
             };
-            result.sent += 1;
+            result.sent += count;
+            result.calls += 1;
+            if (count < constants.send_batch_max) break;
         }
         assert(result.sent <= limits.send_burst_max);
+        assert(result.calls <= drain_rounds_max);
         return result;
+    }
+
+    fn sendMany(self: *const Driver, io: std.Io, batch: []const types.Sent) StepError!void {
+        return self.udp.sendMany(io, batch) catch |err| mapSendError(err);
     }
 
     fn send(
@@ -191,18 +204,22 @@ pub const Driver = struct {
         destination: *const types.Address,
         bytes: []const u8,
     ) StepError!void {
-        return self.udp.send(io, destination, bytes) catch |err| switch (err) {
-            error.AccessDenied,
-            error.AddressFamilyUnsupported,
-            error.ConnectionRefused,
-            error.ConnectionResetByPeer,
-            error.HostUnreachable,
-            error.NetworkUnreachable,
-            => error.DestinationUnreachable,
-            else => err,
-        };
+        return self.udp.send(io, destination, bytes) catch |err| mapSendError(err);
     }
 };
+
+fn mapSendError(err: udp_mod.SendError) StepError {
+    return switch (err) {
+        error.AccessDenied,
+        error.AddressFamilyUnsupported,
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.HostUnreachable,
+        error.NetworkUnreachable,
+        => error.DestinationUnreachable,
+        else => err,
+    };
+}
 
 pub fn currentTime(io: std.Io) error{ClockOutOfRange}!engine_mod.Now {
     const mono = std.Io.Clock.awake.now(io).toMilliseconds();
@@ -218,5 +235,6 @@ fn entropy(io: std.Io) std.Io.RandomSecureError![limits.local_cid_length]u8 {
 }
 
 comptime {
-    assert(@sizeOf(Driver) <= 4 * 1_024);
+    assert(drain_rounds_max > 0);
+    assert(@sizeOf(Driver) <= 32 * 1_024);
 }

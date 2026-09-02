@@ -82,6 +82,26 @@ pub const Udp = struct {
         const address = toNetwork(destination.*, self.family);
         return self.socket.send(io, &address, bytes);
     }
+
+    pub fn sendMany(self: *const Udp, io: std.Io, batch: []const types.Sent) SendError!void {
+        std.debug.assert(batch.len <= constants.send_batch_max);
+        std.debug.assert(batch.len > 0);
+        var addresses: [constants.send_batch_max]net.IpAddress = undefined;
+        var messages: [constants.send_batch_max]net.OutgoingMessage = undefined;
+        for (batch, 0..) |sent, position| {
+            if (sent.bytes.len > constants.datagram_size_max) return error.DatagramTooLarge;
+            addresses[position] = toNetwork(sent.to, self.family);
+            messages[position] = .{
+                .address = &addresses[position],
+                .data_ptr = sent.bytes.ptr,
+                .data_len = sent.bytes.len,
+            };
+        }
+        try self.socket.sendMany(io, messages[0..batch.len], .{});
+        for (messages[0..batch.len], batch) |message, sent| {
+            if (message.data_len != sent.bytes.len) return error.MessageOversize;
+        }
+    }
 };
 
 fn familyOf(address: net.IpAddress) Family {
