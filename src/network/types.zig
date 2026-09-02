@@ -21,4 +21,17 @@ pub const Address = union(enum) {
     pub fn eql(self: Address, other: Address) bool {
         return std.meta.eql(self, other);
     }
+
+    pub fn sameHost(self: Address, other: Address) bool {
+        return switch (self) {
+            .ip4 => |value| switch (other) {
+                .ip4 => |peer| std.mem.eql(u8, &value.octets, &peer.octets),
+                .ip6 => false,
+            },
+            .ip6 => |value| switch (other) {
+                .ip4 => false,
+                .ip6 => |peer| std.mem.eql(u8, &value.octets, &peer.octets),
+            },
+        };
+    }
 };

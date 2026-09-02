@@ -39,6 +39,7 @@ pub const Event = union(enum) {
 pub const Limits = struct {
     connections_max: u16 = constants.connections_max_default,
     handshaking_max: u16 = constants.handshaking_max,
+    handshaking_per_source_max: u16 = constants.handshaking_per_source_max,
     idle_timeout_ms: u64 = constants.idle_timeout_ms,
     handshake_timeout_ms: u64 = constants.handshake_timeout_ms,
     keep_alive_ms: u64 = constants.keep_alive_ms,
@@ -49,6 +50,7 @@ pub const Counters = struct {
     dropped_unroutable: u64 = 0,
     dropped_short_initial: u64 = 0,
     dropped_full: u64 = 0,
+    dropped_source_limit: u64 = 0,
     recv_errors: u64 = 0,
     version_negotiations: u64 = 0,
 };
@@ -96,6 +98,7 @@ pub const Engine = struct {
     pub fn init(allocator: std.mem.Allocator, tls_ctx: *const tls.Context, limits: Limits) Error!Engine {
         if (limits.connections_max == 0 or limits.connections_max > constants.connections_max_ceiling) return error.InvalidLimits;
         if (limits.handshaking_max == 0 or limits.handshaking_max > limits.connections_max) return error.InvalidLimits;
+        if (limits.handshaking_per_source_max == 0) return error.InvalidLimits;
         if (limits.idle_timeout_ms == 0 or limits.handshake_timeout_ms == 0 or limits.keep_alive_ms == 0) return error.InvalidLimits;
 
         var config = try binding.Config.init(limits.idle_timeout_ms);
@@ -199,6 +202,9 @@ pub const Engine = struct {
         }
         if (header.packet_type != .initial) return self.drop(&self.counters.dropped_unroutable);
         if (self.handshaking >= self.limits.handshaking_max) return self.drop(&self.counters.dropped_full);
+        if (self.handshakingFromSource(from) >= self.limits.handshaking_per_source_max) {
+            return self.drop(&self.counters.dropped_source_limit);
+        }
         const index = self.claimSlot() orelse return self.drop(&self.counters.dropped_full);
 
         const slot = &self.slots[index];
@@ -453,10 +459,6 @@ pub const Engine = struct {
         if (slot.state == .handshaking and slot.isEstablished()) {
             slot.state = .established;
             if (slot.direction == .inbound) self.handshaking -= 1;
-            if (slot.odcid) |*odcid| {
-                self.removeRoute(odcid, index);
-                slot.odcid = null;
-            }
             if (slot.handshake.peer_id) |id| {
                 slot.peer_id = id;
                 if (slot.expected_peer_id != null and !slot.expected_peer_id.?.eql(&id)) {
@@ -476,6 +478,16 @@ pub const Engine = struct {
             slot.closed_pending = true;
             self.removeRoutesFor(index);
         }
+    }
+
+    fn handshakingFromSource(self: *const Engine, from: types.Address) u16 {
+        var count: u16 = 0;
+        for (self.active[0..self.active_len]) |index| {
+            const slot = &self.slots[index];
+            if (slot.state != .handshaking or slot.direction != .inbound) continue;
+            if (slot.peer.sameHost(from)) count += 1;
+        }
+        return count;
     }
 
     fn claimSlot(self: *Engine) ?u16 {
@@ -515,12 +527,6 @@ pub const Engine = struct {
             return;
         }
         unreachable;
-    }
-
-    fn removeRoute(self: *Engine, cid: *const binding.Cid, index: u16) void {
-        for (self.routes) |*route| {
-            if (route.active and route.index == index and route.cid.eql(cid)) route.active = false;
-        }
     }
 
     fn removeRoutesFor(self: *Engine, index: u16) void {
