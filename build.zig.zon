@@ -247,6 +247,12 @@
                 .imports = .{.discv5},
             },
         },
+        .ping_peer = .{
+            .root_module = .{
+                .root_source_file = "examples/ping_peer.zig",
+                .imports = .{.network},
+            },
+        },
         .download_era_files = .{
             .root_module = .{
                 .root_source_file = "scripts/download_era_files.zig",
