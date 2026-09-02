@@ -25,7 +25,9 @@ pub const StepResult = struct {
     datagrams_sent: u32 = 0,
     receive_errors: u32 = 0,
     send_failures: u32 = 0,
+    first_failure: ?struct { conn: engine_mod.Handle, err: Error } = null,
     events: usize = 0,
+    events_pending: bool = false,
 };
 
 pub const Drained = struct {
@@ -53,7 +55,7 @@ pub const Driver = struct {
         const now = try currentTime(io);
         const handle = try self.engine.dial(self.udp.localAddress(), peer, expected, now, try entropy(io));
         if (self.drain(io, handle.index, now).failure) |err| {
-            self.engine.close(handle, 0);
+            _ = self.engine.abandon(handle);
             return err;
         }
         return handle;
@@ -91,9 +93,15 @@ pub const Driver = struct {
         for (indices[0..active]) |index| {
             const drained = self.drain(io, index, result.now);
             result.datagrams_sent += drained.sent;
-            if (drained.failure != null) result.send_failures += 1;
+            if (drained.failure) |err| {
+                result.send_failures += 1;
+                if (result.first_failure == null) {
+                    result.first_failure = .{ .conn = self.engine.handle(index).?, .err = err };
+                }
+            }
         }
         result.events = self.engine.pollEvents(events);
+        result.events_pending = self.engine.eventsPending();
         return result;
     }
 
@@ -112,6 +120,7 @@ pub const Driver = struct {
             error.PortUnreachable,
             error.ConnectionResetByPeer,
             error.NetworkDown,
+            error.SystemResources,
             => blk: {
                 result.receive_errors += 1;
                 break :blk null;
