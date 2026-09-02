@@ -1,4 +1,5 @@
 pub const calls = @import("calls.zig");
+pub const channel = @import("channel.zig");
 pub const driver = @import("driver.zig");
 pub const engine = @import("engine.zig");
 pub const identity = @import("identity/root.zig");
@@ -13,6 +14,7 @@ pub const wire = @import("wire/root.zig");
 
 test {
     _ = calls;
+    _ = channel;
     _ = driver;
     _ = engine;
     _ = identity;

@@ -1,48 +1,30 @@
 const std = @import("std");
 const calls_mod = @import("calls.zig");
+const channel_mod = @import("channel.zig");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
-const handshake = @import("identity/handshake.zig");
 const protocol = @import("protocol.zig");
 const routing_mod = @import("routing.zig");
-const session_mod = @import("session.zig");
 const standard_response = @import("standard_response.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
-const packet = @import("wire/packet.zig");
 
-pub const Error = calls_mod.Error || crypto.Error || enr.Error || packet.Error ||
-    routing_mod.Error || routing_mod.InitError || session_mod.Error || standard_response.Error || error{
+pub const Error = calls_mod.Error || channel_mod.Error || routing_mod.Error ||
+    routing_mod.InitError || standard_response.Error || error{
     ApplicationResponseRequired,
     ClockOverflow,
-    InvalidLocalRecord,
-    InvalidRemoteRecord,
-    InvalidTimeout,
     MissingCall,
-    MissingIdentity,
-    MissingSession,
-    RequestTooLargeForHandshake,
     SessionRequired,
     UnexpectedChallenge,
-    UnexpectedHandshake,
 };
 
 pub const StandardResponse = standard_response.Plan;
-
-pub const StartEntropy = struct {
-    masking_iv: [constants.masking_iv_size]u8,
-    nonce: [constants.nonce_size]u8,
-    nonce_tail: [8]u8,
-    sessionless_key: [16]u8,
-};
+pub const StartEntropy = channel_mod.SealEntropy;
 
 pub const ReceiveEntropy = struct {
-    challenge_masking_iv: [constants.masking_iv_size]u8,
-    id_nonce: [constants.id_nonce_size]u8,
-    handshake_masking_iv: [constants.masking_iv_size]u8,
-    handshake_nonce_tail: [8]u8,
-    ephemeral_secret: [32]u8,
+    challenge: channel_mod.ChallengeEntropy,
+    handshake: channel_mod.HandshakeEntropy,
 };
 
 pub const StartResult = struct {
@@ -93,8 +75,7 @@ pub const Outcome = struct {
 };
 
 pub const Scratch = struct {
-    packet_decode: packet.DecodeScratch = .{},
-    packet_decrypt: packet.DecryptScratch = .{},
+    channel: channel_mod.Scratch = .{},
     message_decode: message.DecodeScratch = .{},
     node_records: [protocol.findnode_result_max]enr.Record = undefined,
     node_ids: [protocol.findnode_result_max]types.NodeId = undefined,
@@ -103,17 +84,6 @@ pub const Scratch = struct {
 pub const ReceiveArgs = struct {
     now_ms: u64,
     entropy: ReceiveEntropy,
-};
-
-const OutboundHandshake = struct {
-    peer: types.Endpoint,
-    handle: calls_mod.Handle,
-    keys: *const handshake.Keys,
-    signature: [64]u8,
-    ephemeral_public_key: [33]u8,
-    nonce: [constants.nonce_size]u8,
-    local_enr: []const u8,
-    deadline_ms: u64,
 };
 
 pub const Config = struct {
@@ -128,10 +98,8 @@ pub const Config = struct {
 pub const Engine = struct {
     const Self = @This();
 
-    local_key: crypto.KeyPair,
-    local_record: enr.Record,
     config: Config,
-    sessions: session_mod.Store,
+    channel: channel_mod.Channel,
     calls: calls_mod.Table,
     routing: routing_mod.Table,
 
@@ -151,30 +119,24 @@ pub const Engine = struct {
         local_record: enr.Record,
         config: Config,
     ) Error!void {
-        const public_key = crypto.compressedPublicKey(&local_key);
-        if (!std.mem.eql(u8, &public_key, &local_record.public_key))
-            return Error.InvalidLocalRecord;
-        if (config.request_timeout_ms == 0 or config.challenge_timeout_ms == 0 or
-            config.session_idle_timeout_ms == 0) return Error.InvalidTimeout;
-        try self.sessions.init(
-            allocator,
-            config.session_capacity,
-            config.challenge_capacity,
-        );
-        errdefer self.sessions.deinit();
+        if (config.request_timeout_ms == 0) return Error.InvalidTimeout;
+        try self.channel.init(allocator, local_key, local_record, .{
+            .session_capacity = config.session_capacity,
+            .challenge_capacity = config.challenge_capacity,
+            .challenge_timeout_ms = config.challenge_timeout_ms,
+            .session_idle_timeout_ms = config.session_idle_timeout_ms,
+        });
+        errdefer self.channel.deinit();
         try self.calls.init(allocator, config.call_capacity);
         errdefer self.calls.deinit();
         try self.routing.init(allocator, local_record.node_id);
         self.config = config;
-        self.local_key = local_key;
-        self.local_record = local_record;
     }
 
     pub fn deinit(self: *Self) void {
         self.routing.deinit();
         self.calls.deinit();
-        self.sessions.deinit();
-        std.crypto.secureZero(u8, std.mem.asBytes(&self.local_key));
+        self.channel.deinit();
     }
 
     pub fn startCall(
@@ -209,7 +171,7 @@ pub const Engine = struct {
         const target = self.routing.revalidationTarget() orelse return null;
         const request = message.Message{ .ping = .{
             .request_id = request_id,
-            .enr_sequence = self.local_record.sequence,
+            .enr_sequence = self.channel.local_record.sequence,
         } };
         const call = try self.beginCall(
             out,
@@ -234,20 +196,15 @@ pub const Engine = struct {
         owner: calls_mod.Owner,
     ) Error!StartResult {
         const deadline_ms = try deadline(now_ms, self.config.request_timeout_ms);
-        const has_session = self.sessions.hasSession(peer);
-        const request_capacity = if (has_session)
-            constants.ordinary_plaintext_size_max
-        else
-            try packet.handshakePlaintextCapacity(self.local_record.length);
         const handle = self.calls.begin(
             peer,
             remote_public_key,
             request,
             deadline_ms,
-            request_capacity,
+            try self.channel.requestCapacity(peer),
             owner,
         ) catch |err| switch (err) {
-            calls_mod.Error.RequestTooLarge => return if (has_session)
+            calls_mod.Error.RequestTooLarge => return if (self.channel.hasSession(peer))
                 err
             else
                 Error.SessionRequired,
@@ -258,26 +215,9 @@ pub const Engine = struct {
             std.debug.assert(cancelled);
         }
         const plaintext = self.calls.requestBytes(handle) orelse return Error.MissingCall;
-        if (out.len < try packet.ordinaryPacketLength(plaintext.len))
-            return Error.BufferTooSmall;
-        var outbound = try self.sessions.outbound(peer, &entropy.nonce_tail, now_ms);
-        defer if (outbound) |*active| {
-            std.crypto.secureZero(u8, std.mem.asBytes(active));
-        };
-        const write_key = if (outbound) |*active| &active.write_key else &entropy.sessionless_key;
-        const nonce = if (outbound) |*active| &active.nonce else &entropy.nonce;
-        try self.calls.markSent(handle, nonce, deadline_ms);
-        const encoded = try packet.encodeOrdinary(out, .{
-            .packet = .{
-                .masking_iv = &entropy.masking_iv,
-                .recipient_id = &peer.node_id,
-                .nonce = nonce,
-                .write_key = write_key,
-                .plaintext = plaintext,
-            },
-            .source_id = &self.local_record.node_id,
-        });
-        return .{ .handle = handle, .packet_length = @intCast(encoded.len) };
+        const sealed = try self.channel.seal(out, peer, plaintext, &entropy, now_ms);
+        try self.calls.markSent(handle, &sealed.nonce, deadline_ms);
+        return .{ .handle = handle, .packet_length = sealed.packet_length };
     }
 
     pub fn sendResponse(
@@ -302,7 +242,7 @@ pub const Engine = struct {
                 response,
                 request.peer,
                 ping.request_id,
-                self.local_record.sequence,
+                self.channel.local_record.sequence,
             ),
             .find_node => |find_node| blk: {
                 const records = try self.findNodes(
@@ -351,25 +291,8 @@ pub const Engine = struct {
     ) Error!u16 {
         var plaintext_buffer: [constants.ordinary_plaintext_size_max]u8 = undefined;
         const plaintext = try response.encode(&plaintext_buffer);
-        if (out.len < try packet.ordinaryPacketLength(plaintext.len))
-            return Error.BufferTooSmall;
-        var outbound = (try self.sessions.outbound(
-            peer,
-            &entropy.nonce_tail,
-            now_ms,
-        )) orelse return Error.MissingSession;
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&outbound));
-        const encoded = try packet.encodeOrdinary(out, .{
-            .packet = .{
-                .masking_iv = &entropy.masking_iv,
-                .recipient_id = &peer.node_id,
-                .nonce = &outbound.nonce,
-                .write_key = &outbound.write_key,
-                .plaintext = plaintext,
-            },
-            .source_id = &self.local_record.node_id,
-        });
-        return @intCast(encoded.len);
+        const sealed = try self.channel.sealEstablished(out, peer, plaintext, &entropy, now_ms);
+        return sealed.packet_length;
     }
 
     pub fn receive(
@@ -380,22 +303,15 @@ pub const Engine = struct {
         args: ReceiveArgs,
         scratch: *Scratch,
     ) Error!Outcome {
-        const decoded = try packet.decode(
-            raw,
-            &self.local_record.node_id,
-            &scratch.packet_decode,
-        );
-        return switch (decoded.form) {
-            .message => |ordinary| self.receiveOrdinary(
-                out,
-                &decoded,
-                ordinary.source_id,
-                from,
-                args,
+        const inbound = try self.channel.receive(raw, from, args.now_ms, &scratch.channel);
+        return switch (inbound) {
+            .authenticated => |authenticated| self.receiveAuthenticated(
+                authenticated,
+                args.now_ms,
                 scratch,
             ),
-            .whoareyou => self.receiveWho(out, &decoded, from, args),
-            .handshake => self.receiveHandshake(&decoded, from, args, scratch),
+            .unauthenticated => |unauthenticated| self.issueChallenge(out, unauthenticated, args),
+            .whoareyou => |whoareyou| self.recoverCall(out, whoareyou, args),
         };
     }
 
@@ -424,17 +340,12 @@ pub const Engine = struct {
                 maintenance_count += 1;
             },
         };
+        const expired = self.channel.expire(now_ms);
         return .{
             .calls = caller_count,
             .maintenance_calls = maintenance_count,
-            .challenges = self.sessions.expireChallenges(
-                now_ms,
-                self.config.challenge_timeout_ms,
-            ),
-            .sessions = self.sessions.expireSessions(
-                now_ms,
-                self.config.session_idle_timeout_ms,
-            ),
+            .challenges = expired.challenges,
+            .sessions = expired.sessions,
         };
     }
 
@@ -457,7 +368,7 @@ pub const Engine = struct {
         distances: []const u16,
         out: []enr.Record,
     ) routing_mod.Error![]enr.Record {
-        return self.routing.findNodes(&self.local_record, requester, distances, out);
+        return self.routing.findNodes(&self.channel.local_record, requester, distances, out);
     }
 
     pub fn closestNodes(
@@ -472,78 +383,58 @@ pub const Engine = struct {
         return self.routing.revalidationTarget() != null;
     }
 
-    fn receiveOrdinary(
+    fn receiveAuthenticated(
         self: *Self,
-        out: []u8,
-        decoded: *const packet.Packet,
-        source_id: types.NodeId,
-        from: types.Address,
-        args: ReceiveArgs,
+        authenticated: channel_mod.Authenticated,
+        now_ms: u64,
         scratch: *Scratch,
     ) Error!Outcome {
-        const peer = types.Endpoint{ .node_id = source_id, .address = from };
-        var read_key = self.sessions.readKey(peer) orelse
-            return self.issueChallenge(out, decoded, peer, args);
-        defer std.crypto.secureZero(u8, &read_key);
-        const plaintext = packet.decrypt(
-            decoded,
-            &read_key,
-            &scratch.packet_decrypt,
-        ) catch |err| switch (err) {
-            packet.Error.DecryptionFailed => return self.issueChallenge(out, decoded, peer, args),
-            else => return err,
-        };
-        const touched = self.sessions.touch(peer, args.now_ms);
-        std.debug.assert(touched);
-        const decoded_message = try message.Message.decode(
-            plaintext,
+        const decoded = try message.Message.decode(
+            authenticated.plaintext,
             &scratch.message_decode,
         );
         const event = try self.dispatch(
-            peer,
-            decoded_message,
-            null,
-            args.now_ms,
+            authenticated.peer,
+            decoded,
+            authenticated.record,
+            now_ms,
             scratch,
         );
-        self.routeAuthenticated(peer, null, args.now_ms);
+        self.routeAuthenticated(authenticated.peer, authenticated.record, now_ms);
         return .{ .event = event };
     }
 
     fn issueChallenge(
         self: *Self,
         out: []u8,
-        decoded: *const packet.Packet,
-        peer: types.Endpoint,
+        unauthenticated: channel_mod.Unauthenticated,
         args: ReceiveArgs,
     ) Error!Outcome {
-        var challenge_data: [constants.whoareyou_packet_size]u8 = undefined;
-        const known_sequence = if (self.routing.get(&peer.node_id)) |entry|
-            entry.record.sequence
-        else
-            0;
-        const encoded = try packet.encodeWhoareyou(out, .{
-            .masking_iv = &args.entropy.challenge_masking_iv,
-            .recipient_id = &peer.node_id,
-            .request_nonce = &decoded.static_header.nonce,
-            .id_nonce = &args.entropy.id_nonce,
-            .enr_sequence = known_sequence,
-        }, &challenge_data);
-        if (!self.sessions.putChallenge(peer, &challenge_data, args.now_ms))
-            return .{};
-        return .{ .packet_length = @intCast(encoded.len) };
+        const packet_length = try self.channel.challenge(
+            out,
+            unauthenticated.peer,
+            &unauthenticated.request_nonce,
+            self.knownIdentity(&unauthenticated.peer.node_id),
+            &args.entropy.challenge,
+            args.now_ms,
+        );
+        return .{ .packet_length = packet_length orelse 0 };
     }
 
-    fn receiveWho(
+    fn knownIdentity(self: *const Self, node_id: *const types.NodeId) ?channel_mod.KnownIdentity {
+        const entry = self.routing.get(node_id) orelse return null;
+        return .{ .sequence = entry.record.sequence, .public_key = entry.record.public_key };
+    }
+
+    fn recoverCall(
         self: *Self,
         out: []u8,
-        decoded: *const packet.Packet,
-        from: types.Address,
+        whoareyou: channel_mod.Whoareyou,
         args: ReceiveArgs,
     ) Error!Outcome {
         const handle = (try self.calls.acceptChallenge(
-            from,
-            &decoded.static_header.nonce,
+            whoareyou.from,
+            &whoareyou.request_nonce,
             args.now_ms,
         )) orelse return Error.UnexpectedChallenge;
         errdefer {
@@ -553,147 +444,23 @@ pub const Engine = struct {
         const peer = self.calls.endpoint(handle) orelse return Error.MissingCall;
         const remote_public_key = self.calls.remotePublicKey(handle) orelse
             return Error.MissingCall;
-        const local_enr = if (decoded.form.whoareyou.enr_sequence < self.local_record.sequence)
-            self.local_record.slice()
-        else
-            &.{};
         const plaintext = self.calls.requestBytes(handle) orelse return Error.MissingCall;
-        if (plaintext.len > try packet.handshakePlaintextCapacity(local_enr.len))
-            return Error.RequestTooLargeForHandshake;
-        const response_deadline = try deadline(
-            args.now_ms,
-            self.config.request_timeout_ms,
-        );
-        const challenge_data = try challengeData(decoded);
-        var ephemeral_key = try crypto.keyPairFromSecret(
-            &args.entropy.ephemeral_secret,
-        );
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&ephemeral_key));
-        const ephemeral_public_key = crypto.compressedPublicKey(&ephemeral_key);
-        var keys = try handshake.deriveKeys(
-            &ephemeral_key,
-            &remote_public_key,
-            &self.local_record.node_id,
-            &peer.node_id,
-            &challenge_data,
-        );
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&keys));
-        const signature = try handshake.signProof(
-            &self.local_key,
-            &challenge_data,
-            &ephemeral_public_key,
-            &peer.node_id,
-        );
-        return self.sendHandshake(out, args, .{
-            .peer = peer,
-            .handle = handle,
-            .keys = &keys,
-            .signature = signature,
-            .ephemeral_public_key = ephemeral_public_key,
-            .nonce = session_mod.makeNonce(
-                session_mod.first_nonce_counter,
-                &args.entropy.handshake_nonce_tail,
-            ),
-            .local_enr = local_enr,
-            .deadline_ms = response_deadline,
-        });
-    }
-
-    fn sendHandshake(
-        self: *Self,
-        out: []u8,
-        args: ReceiveArgs,
-        prepared: OutboundHandshake,
-    ) Error!Outcome {
-        var authdata_buffer: [constants.handshake_authdata_size_max]u8 = undefined;
-        const authdata = try packet.buildHandshakeAuthdata(&authdata_buffer, .{
-            .source_id = &self.local_record.node_id,
-            .id_signature = &prepared.signature,
-            .ephemeral_key = &prepared.ephemeral_public_key,
-            .enr = prepared.local_enr,
-        });
-        const plaintext = self.calls.requestBytes(prepared.handle) orelse
-            return Error.MissingCall;
-        const encoded = try packet.encodeHandshake(out, .{
-            .packet = .{
-                .masking_iv = &args.entropy.handshake_masking_iv,
-                .recipient_id = &prepared.peer.node_id,
-                .nonce = &prepared.nonce,
-                .write_key = &prepared.keys.initiator,
-                .plaintext = plaintext,
-            },
-            .authdata = authdata,
-        });
+        const deadline_ms = try deadline(args.now_ms, self.config.request_timeout_ms);
         try self.calls.markSent(
-            prepared.handle,
-            &prepared.nonce,
-            prepared.deadline_ms,
+            handle,
+            &channel_mod.handshakeNonce(&args.entropy.handshake),
+            deadline_ms,
         );
-        var active = session_mod.Session{
-            .read_key = prepared.keys.recipient,
-            .write_key = prepared.keys.initiator,
-            .nonce_counter = session_mod.first_nonce_counter,
-        };
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&active));
-        self.sessions.install(prepared.peer, &active, args.now_ms);
-        return .{ .packet_length = @intCast(encoded.len) };
-    }
-
-    fn receiveHandshake(
-        self: *Self,
-        decoded: *const packet.Packet,
-        from: types.Address,
-        args: ReceiveArgs,
-        scratch: *Scratch,
-    ) Error!Outcome {
-        const authdata = decoded.form.handshake;
-        const peer = types.Endpoint{ .node_id = authdata.source_id, .address = from };
-        const challenge = self.sessions.getChallenge(peer) orelse
-            return Error.UnexpectedHandshake;
-        const known_record: ?enr.Record = if (self.routing.get(&peer.node_id)) |entry|
-            entry.record
-        else
-            null;
-        const records = try selectRecord(authdata.enr, known_record, &peer.node_id);
-        try handshake.verifyProof(
-            authdata.id_signature,
-            &records.selected.public_key,
-            &challenge.data,
-            authdata.ephemeral_key,
-            &self.local_record.node_id,
-        );
-        var keys = try handshake.deriveKeys(
-            &self.local_key,
-            authdata.ephemeral_key,
-            &peer.node_id,
-            &self.local_record.node_id,
-            &challenge.data,
-        );
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&keys));
-        const plaintext = try packet.decrypt(
-            decoded,
-            &keys.initiator,
-            &scratch.packet_decrypt,
-        );
-        const decoded_message = try message.Message.decode(
-            plaintext,
-            &scratch.message_decode,
-        );
-        const event = try self.dispatch(
-            peer,
-            decoded_message,
-            records.update,
-            args.now_ms,
-            scratch,
-        );
-        var active = session_mod.Session{
-            .read_key = keys.initiator,
-            .write_key = keys.recipient,
-        };
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&active));
-        self.sessions.install(peer, &active, args.now_ms);
-        self.routeAuthenticated(peer, &records.selected, args.now_ms);
-        return .{ .event = event };
+        const sealed = try self.channel.handshake(out, .{
+            .peer = peer,
+            .remote_public_key = &remote_public_key,
+            .plaintext = plaintext,
+            .challenge_data = &whoareyou.challenge_data,
+            .enr_sequence = whoareyou.enr_sequence,
+            .entropy = &args.entropy.handshake,
+            .now_ms = args.now_ms,
+        });
+        return .{ .packet_length = sealed.packet_length };
     }
 
     fn dispatch(
@@ -765,16 +532,12 @@ pub const Engine = struct {
     fn routeAuthenticated(
         self: *Self,
         peer: types.Endpoint,
-        supplied_record: ?*const enr.Record,
+        supplied_record: ?enr.Record,
         now_ms: u64,
     ) void {
-        var stored_record: ?enr.Record = null;
-        const record = supplied_record orelse blk: {
-            const entry = self.routing.get(&peer.node_id) orelse return;
-            stored_record = entry.record;
-            break :blk &stored_record.?;
-        };
-        _ = self.routing.upsertVerified(&peer, record, now_ms) catch return;
+        const record = supplied_record orelse
+            (self.routing.get(&peer.node_id) orelse return).record;
+        _ = self.routing.upsertVerified(&peer, &record, now_ms) catch return;
     }
 };
 
@@ -817,41 +580,6 @@ fn retainAcceptedNodeRecords(
         .raw = scratch.message_decode.enrs[0..retained],
         .records = scratch.node_records[0..retained],
     };
-}
-
-const SelectedRecord = struct {
-    selected: enr.Record,
-    update: ?enr.Record,
-};
-
-fn selectRecord(
-    encoded: ?[]const u8,
-    known: ?enr.Record,
-    expected_id: *const types.NodeId,
-) Error!SelectedRecord {
-    const provided = if (encoded) |raw| try enr.Record.init(raw) else null;
-    if (provided) |record| if (!std.mem.eql(u8, &record.node_id, expected_id))
-        return Error.InvalidRemoteRecord;
-    const update = if (provided) |record|
-        if (known) |known_record|
-            if (record.sequence > known_record.sequence) record else null
-        else
-            record
-    else
-        null;
-    const selected = update orelse known orelse return Error.MissingIdentity;
-    return .{ .selected = selected, .update = update };
-}
-
-fn challengeData(
-    decoded: *const packet.Packet,
-) Error![constants.whoareyou_packet_size]u8 {
-    if (decoded.header.len + constants.masking_iv_size != constants.whoareyou_packet_size)
-        return Error.InvalidPacket;
-    var data: [constants.whoareyou_packet_size]u8 = undefined;
-    @memcpy(data[0..constants.masking_iv_size], &decoded.masking_iv);
-    @memcpy(data[constants.masking_iv_size..], decoded.header);
-    return data;
 }
 
 fn deadline(now_ms: u64, timeout_ms: u64) Error!u64 {

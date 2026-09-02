@@ -67,9 +67,9 @@ test "challenge churn preserves established sessions" {
     const active = session.Session{ .read_key = key, .write_key = key };
     table.install(established, &active, 1);
     const challenge = [_]u8{0x55} ** 63;
-    try std.testing.expect(table.putChallenge(endpoint(2, 9_002), &challenge, 2));
-    try std.testing.expect(table.putChallenge(endpoint(3, 9_003), &challenge, 3));
-    try std.testing.expect(table.putChallenge(endpoint(4, 9_004), &challenge, 4));
+    try std.testing.expect(table.putChallenge(endpoint(2, 9_002), &challenge, null, 2));
+    try std.testing.expect(table.putChallenge(endpoint(3, 9_003), &challenge, null, 3));
+    try std.testing.expect(table.putChallenge(endpoint(4, 9_004), &challenge, null, 4));
 
     try std.testing.expectEqual(@as(usize, 1), table.sessionCount());
     try std.testing.expectEqual(key, table.readKey(established).?);
@@ -84,10 +84,10 @@ test "install consumes a challenge and expiration removes pending challenges" {
     defer table.deinit();
     const peer = endpoint(1, 9_001);
     const challenge = [_]u8{0x55} ** 63;
-    try std.testing.expect(table.putChallenge(peer, &challenge, 10));
+    try std.testing.expect(table.putChallenge(peer, &challenge, null, 10));
     var replacement = challenge;
     replacement[0] = 0x66;
-    try std.testing.expect(!table.putChallenge(peer, &replacement, 11));
+    try std.testing.expect(!table.putChallenge(peer, &replacement, null, 11));
     try std.testing.expectEqual(challenge, table.getChallenge(peer).?.data);
     try std.testing.expectEqual(@as(usize, 0), table.expireChallenges(19, 10));
     const key = [_]u8{0x11} ** 16;
@@ -95,7 +95,7 @@ test "install consumes a challenge and expiration removes pending challenges" {
     table.install(peer, &active, 20);
     try std.testing.expectEqual(@as(usize, 0), table.challengeCount());
 
-    try std.testing.expect(table.putChallenge(endpoint(2, 9_002), &challenge, 30));
+    try std.testing.expect(table.putChallenge(endpoint(2, 9_002), &challenge, null, 30));
     try std.testing.expectEqual(@as(usize, 1), table.expireChallenges(40, 10));
     try std.testing.expectEqual(@as(usize, 0), table.challengeCount());
     try std.testing.expectEqual(@as(usize, 1), table.sessionCount());
@@ -110,7 +110,7 @@ test "idle session expiration is independent from challenges" {
     const active = session.Session{ .read_key = key, .write_key = key };
     table.install(peer, &active, 10);
     const challenge = [_]u8{0x55} ** 63;
-    try std.testing.expect(table.putChallenge(endpoint(2, 9_002), &challenge, 15));
+    try std.testing.expect(table.putChallenge(endpoint(2, 9_002), &challenge, null, 15));
     try std.testing.expectEqual(key, table.readKey(peer).?);
     try std.testing.expectEqual(@as(usize, 1), table.expireSessions(20, 10));
     try std.testing.expectEqual(@as(usize, 0), table.sessionCount());

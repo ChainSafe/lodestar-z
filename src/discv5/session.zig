@@ -22,9 +22,15 @@ pub const Outbound = struct {
     nonce: [constants.nonce_size]u8,
 };
 
+pub const KnownIdentity = struct {
+    sequence: u64,
+    public_key: [33]u8,
+};
+
 pub const Challenge = struct {
     data: [constants.whoareyou_packet_size]u8,
     sent_at_ms: u64,
+    known: ?KnownIdentity,
 };
 
 const SessionEntry = struct {
@@ -134,13 +140,14 @@ pub const Store = struct {
         self: *Store,
         peer: types.Endpoint,
         data: *const [constants.whoareyou_packet_size]u8,
+        known: ?KnownIdentity,
         now_ms: u64,
     ) bool {
         if (self.findChallenge(peer) != null) return false;
         const index = self.challengeIndexForInsert();
         self.challenges[index] = .{
             .peer = peer,
-            .value = .{ .data = data.*, .sent_at_ms = now_ms },
+            .value = .{ .data = data.*, .sent_at_ms = now_ms, .known = known },
         };
         return true;
     }
@@ -239,6 +246,6 @@ fn clearSession(entry: *SessionEntry) void {
 
 comptime {
     std.debug.assert(@sizeOf(SessionEntry) <= 128);
-    std.debug.assert(@sizeOf(ChallengeEntry) <= 160);
+    std.debug.assert(@sizeOf(ChallengeEntry) <= 208);
     std.debug.assert(@sizeOf(Store) <= 64);
 }
