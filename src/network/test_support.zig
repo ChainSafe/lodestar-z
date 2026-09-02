@@ -29,29 +29,36 @@ pub const Pair = struct {
     drop_to_server: bool = false,
     client_source: types.Address = client_address,
     drop_to_address: ?types.Address = null,
+    batch: engine_mod.SendBatch = undefined,
 
     pub fn init(self: *Pair, client_limits: Limits, server_limits: Limits) !void {
         const client_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{1}));
         const server_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{2}));
         self.client_ctx = try tls.Context.init(&client_key, now_unix, [_]u8{1} ** 8);
-        errdefer self.client_ctx.deinit();
-        self.server_ctx = try tls.Context.init(&server_key, now_unix, [_]u8{2} ** 8);
-        errdefer self.server_ctx.deinit();
-        self.client = try Engine.init(
-            std.testing.allocator,
-            &self.client_ctx,
-            client_limits,
-            &client_address,
-            1,
-        );
-        errdefer self.client.deinit();
-        self.server = try Engine.init(
-            std.testing.allocator,
-            &self.server_ctx,
-            server_limits,
-            &server_address,
-            2,
-        );
+        self.server_ctx = tls.Context.init(&server_key, now_unix, [_]u8{2} ** 8) catch |err| {
+            self.client_ctx.deinit();
+            return err;
+        };
+        self.client = Engine.init(std.testing.allocator, .{
+            .tls = self.client_ctx,
+            .limits = client_limits,
+            .local = client_address,
+            .seed = 1,
+        }) catch |err| {
+            self.server_ctx.deinit();
+            self.client_ctx.deinit();
+            return err;
+        };
+        self.server = Engine.init(std.testing.allocator, .{
+            .tls = self.server_ctx,
+            .limits = server_limits,
+            .local = server_address,
+            .seed = 2,
+        }) catch |err| {
+            self.client.deinit();
+            self.server_ctx.deinit();
+            return err;
+        };
         self.now = .{ .mono_ms = 1_000, .unix_s = now_unix };
         self.entropy = 0;
         self.first_initial_len = 0;
@@ -63,8 +70,14 @@ pub const Pair = struct {
     pub fn deinit(self: *Pair) void {
         self.server.deinit();
         self.client.deinit();
-        self.server_ctx.deinit();
-        self.client_ctx.deinit();
+    }
+
+    pub fn sendOne(self: *Pair, engine: *Engine, index: u16, out: []u8) ?[]u8 {
+        const count = engine.driverView().sendBatch(index, self.now, &self.batch);
+        if (count == 0) return null;
+        const first = self.batch.sent[0].bytes;
+        @memcpy(out[0..first.len], first);
+        return out[0..first.len];
     }
 
     pub fn nextEntropy(self: *Pair) [limits.local_cid_length]u8 {
@@ -114,27 +127,29 @@ pub const Pair = struct {
         var index: u16 = 0;
         while (index < from.driverView().slotCount()) : (index += 1) {
             var budget: u32 = 0;
-            while (budget < limits.send_burst_max) : (budget += 1) {
-                var out: [constants.datagram_size_max]u8 = undefined;
-                const sent = from.driverView().send(index, self.now, &out) orelse break;
-                const datagram = sent.bytes;
+            while (budget < limits.send_burst_max) {
+                const count = from.driverView().sendBatch(index, self.now, &self.batch);
+                if (count == 0) break;
+                budget += count;
                 moved = true;
-                if (from == &self.client and self.first_initial_len == 0) {
-                    @memcpy(self.first_initial[0..datagram.len], datagram);
-                    self.first_initial_len = datagram.len;
+                for (self.batch.sent[0..count]) |sent| {
+                    const datagram = sent.bytes;
+                    if (from == &self.client and self.first_initial_len == 0) {
+                        @memcpy(self.first_initial[0..datagram.len], datagram);
+                        self.first_initial_len = datagram.len;
+                    }
+                    if (drop) continue;
+                    if (self.drop_to_address) |blocked| if (sent.to.eql(blocked)) continue;
+                    var response: [constants.datagram_size_max]u8 = undefined;
+                    _ = to.driverView().receive(
+                        datagram,
+                        &from_address,
+                        self.now,
+                        self.nextPool(),
+                        &response,
+                    );
                 }
-                if (drop) continue;
-                if (self.drop_to_address) |blocked| if (sent.to.eql(blocked)) continue;
-                var copy: [constants.datagram_size_max]u8 = undefined;
-                @memcpy(copy[0..datagram.len], datagram);
-                var response: [constants.datagram_size_max]u8 = undefined;
-                _ = to.driverView().receive(
-                    copy[0..datagram.len],
-                    &from_address,
-                    self.now,
-                    self.nextPool(),
-                    &response,
-                );
+                if (count < constants.send_batch_max) break;
             }
         }
         return moved;

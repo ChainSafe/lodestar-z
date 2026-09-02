@@ -14,11 +14,7 @@ const expectClosed = support.expectClosed;
 
 fn dialInitial(pair: *Pair, out: []u8) ![]u8 {
     const handle = try pair.dial();
-    var scratch: [constants.datagram_size_max]u8 = undefined;
-    const datagram = pair.client.driverView().send(handle.index, pair.now, &scratch) orelse
-        return error.TestUnexpectedResult;
-    @memcpy(out[0..datagram.bytes.len], datagram.bytes);
-    return out[0..datagram.bytes.len];
+    return pair.sendOne(&pair.client, handle.index, out) orelse error.TestUnexpectedResult;
 }
 
 fn rejectPort(context: ?*anyopaque, from: *const types.Address) bool {

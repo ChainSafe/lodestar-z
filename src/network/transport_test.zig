@@ -123,7 +123,7 @@ test "transport appends TLS key material to the configured keylog file" {
         }
     }
     try std.testing.expect(connected);
-    try std.testing.expectEqual(@as(u32, 0), dialer.keylog_failures);
+    try std.testing.expect(dialer.keylog != null);
     const written = try tmp.dir.statFile(std.testing.io, "keys.log", .{});
     try std.testing.expect(written.size > 0);
     try std.testing.expectEqual(written.size, dialer.keylog_offset);

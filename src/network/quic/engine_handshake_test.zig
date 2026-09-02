@@ -114,21 +114,17 @@ test "engine reports connection metadata through handles" {
 }
 
 test "engine clamps receive windows to the total budget" {
-    const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{4}));
-    var ctx = try tls.Context.init(&host, now_unix, [_]u8{4} ** 8);
-    defer ctx.deinit();
-
-    var few = try Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 4, .handshaking_max = 4 }, &client_address, 0);
+    var few = try standaloneEngine(4, .{ .connections_max = 4, .handshaking_max = 4 });
     defer few.deinit();
     try std.testing.expectEqual(limits.connection_window_max, few.connectionWindow());
     try std.testing.expectEqual(limits.connection_window_max / 2, few.streamWindow());
 
-    var many = try Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 1_024 }, &client_address, 0);
+    var many = try standaloneEngine(5, .{ .connections_max = 1_024 });
     defer many.deinit();
     try std.testing.expectEqual(limits.connection_window_min, many.connectionWindow());
     try std.testing.expectEqual(limits.connection_window_min / 2, many.streamWindow());
 
-    var standard = try Engine.init(std.testing.allocator, &ctx, .{}, &client_address, 0);
+    var standard = try standaloneEngine(6, .{});
     defer standard.deinit();
     try std.testing.expectEqual(@as(u64, 4 * 1_024 * 1_024), standard.connectionWindow());
     try std.testing.expectEqual(@as(u64, 2 * 1_024 * 1_024), standard.streamWindow());
@@ -172,11 +168,23 @@ test "engine captures TLS key material per connection for the host to drain" {
     try std.testing.expect(pair.server.driverView().takeKeylog(handles.server.index, &lines) > 0);
 }
 
+fn standaloneEngine(seed: u8, engine_limits: engine_mod.Limits) !Engine {
+    const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
+    var ctx = try tls.Context.init(&host, now_unix, [_]u8{seed} ** 8);
+    errdefer ctx.deinit();
+    return Engine.init(std.testing.allocator, .{
+        .tls = ctx,
+        .limits = engine_limits,
+        .local = client_address,
+        .seed = seed,
+    });
+}
+
 test "engine rejects invalid limits" {
-    const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{3}));
-    var ctx = try tls.Context.init(&host, now_unix, [_]u8{3} ** 8);
-    defer ctx.deinit();
-    try std.testing.expectError(error.InvalidLimits, Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 0 }, &client_address, 0));
-    try std.testing.expectError(error.InvalidLimits, Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 2_000 }, &client_address, 0));
-    try std.testing.expectError(error.InvalidLimits, Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 4, .handshaking_max = 8 }, &client_address, 0));
+    try std.testing.expectError(error.InvalidLimits, standaloneEngine(3, .{ .connections_max = 0 }));
+    try std.testing.expectError(error.InvalidLimits, standaloneEngine(3, .{ .connections_max = 2_000 }));
+    try std.testing.expectError(
+        error.InvalidLimits,
+        standaloneEngine(3, .{ .connections_max = 4, .handshaking_max = 8 }),
+    );
 }
