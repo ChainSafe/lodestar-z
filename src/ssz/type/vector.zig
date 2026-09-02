@@ -512,8 +512,13 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
             }
 
             var elements = try VariableElementIterator(Self).init(data);
+            errdefer {
+                Self.deinit(allocator, out);
+                out.* = default_value;
+            }
+
             var i: usize = 0;
-            while (elements.next()) |element_bytes| : (i += 1) {
+            while (try elements.next()) |element_bytes| : (i += 1) {
                 try Element.deserializeFromBytes(allocator, element_bytes, &out[i]);
             }
             std.debug.assert(i == length);
@@ -526,7 +531,7 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                 }
 
                 var elements = try VariableElementIterator(Self).init(data);
-                while (elements.next()) |element_bytes| {
+                while (try elements.next()) |element_bytes| {
                     try Element.serialized.validate(element_bytes);
                 }
             }
@@ -535,7 +540,7 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                 var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
                 var elements = try VariableElementIterator(Self).init(data);
                 var i: usize = 0;
-                while (elements.next()) |element_bytes| : (i += 1) {
+                while (try elements.next()) |element_bytes| : (i += 1) {
                     try Element.serialized.hashTreeRoot(allocator, element_bytes, &chunks[i]);
                 }
                 std.debug.assert(i == length);
@@ -569,7 +574,7 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                 errdefer pool.free(&nodes);
 
                 var i: usize = 0;
-                while (elements.next()) |elem_bytes| : (i += 1) {
+                while (try elements.next()) |elem_bytes| : (i += 1) {
                     nodes[i] = try Element.tree.deserializeFromBytes(pool, elem_bytes);
                 }
                 std.debug.assert(i == length);
