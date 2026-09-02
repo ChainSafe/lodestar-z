@@ -384,7 +384,7 @@ pub const ReqResp = struct {
         fork: ?config.ForkSeq,
         now: Now,
     ) RespondError!void {
-        const slot = self.servingSlot(handle) orelse return error.StaleHandle;
+        const slot = try self.servingSlot(handle);
         const bounds = slot.protocol.info();
         if (slot.chunks >= bounds.chunks_max) return error.TooManyChunks;
         if (ssz.len > bounds.response_max) return error.ChunkTooLarge;
@@ -406,7 +406,7 @@ pub const ReqResp = struct {
     ) RespondError!void {
         assert(code != constants.result_success);
         assert(message.len <= codec.error_message_max);
-        const slot = self.servingSlot(handle) orelse return error.StaleHandle;
+        const slot = try self.servingSlot(handle);
         @memcpy(slot.error_message[0..message.len], message);
         slot.error_len = @intCast(message.len);
         self.queueChunk(slot, code, null, slot.error_message[0..message.len], true, now);
@@ -766,8 +766,10 @@ pub const ReqResp = struct {
         };
         if (slot.outbox.offset != before) slot.progress_ms = now.mono_ms;
         if (slot.writing or !slot.outbox.idle()) return;
-        slot.chunks += 1;
-        self.counters.chunks_sent += 1;
+        if (slot.pending_result == constants.result_success) {
+            slot.chunks += 1;
+            self.counters.chunks_sent += 1;
+        }
         if (slot.close_after_write) {
             self.counters.requests_served += 1;
             self.complete(
@@ -854,10 +856,10 @@ pub const ReqResp = struct {
         slot.decoding = true;
     }
 
-    fn servingSlot(self: *ReqResp, handle: RequestHandle) ?*Slot {
-        if (handle.direction != .inbound) return null;
-        const slot = self.slotFor(handle) orelse return null;
-        if (slot.state != .serving) return null;
+    fn servingSlot(self: *ReqResp, handle: RequestHandle) RespondError!*Slot {
+        if (handle.direction != .inbound) return error.StaleHandle;
+        const slot = self.slotFor(handle) orelse return error.StaleHandle;
+        if (slot.state != .serving) return error.Busy;
         return slot;
     }
 
