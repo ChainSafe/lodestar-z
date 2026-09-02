@@ -49,7 +49,7 @@ test "engine counts only inbound handshakes against the permit bound" {
     try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
     try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
 
-    try std.testing.expect(try pair.transfer(&pair.client, &pair.server, client_address, server_address, false));
+    try std.testing.expect(try pair.transfer(&pair.client, &pair.server, client_address, false));
     try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
     try std.testing.expectEqual(@as(u16, 1), pair.server.handshaking);
 
@@ -118,17 +118,17 @@ test "engine clamps receive windows to the total budget" {
     var ctx = try tls.Context.init(&host, now_unix, [_]u8{4} ** 8);
     defer ctx.deinit();
 
-    var few = try Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 4, .handshaking_max = 4 });
+    var few = try Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 4, .handshaking_max = 4 }, &client_address);
     defer few.deinit();
     try std.testing.expectEqual(limits.connection_window_max, few.connectionWindow());
     try std.testing.expectEqual(limits.connection_window_max / 2, few.streamWindow());
 
-    var many = try Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 1_024 });
+    var many = try Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 1_024 }, &client_address);
     defer many.deinit();
     try std.testing.expectEqual(limits.connection_window_min, many.connectionWindow());
     try std.testing.expectEqual(limits.connection_window_min / 2, many.streamWindow());
 
-    var standard = try Engine.init(std.testing.allocator, &ctx, .{});
+    var standard = try Engine.init(std.testing.allocator, &ctx, .{}, &client_address);
     defer standard.deinit();
     try std.testing.expectEqual(@as(u64, 4 * 1_024 * 1_024), standard.connectionWindow());
     try std.testing.expectEqual(@as(u64, 2 * 1_024 * 1_024), standard.streamWindow());
@@ -138,7 +138,7 @@ test "engine rejects invalid limits" {
     const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{3}));
     var ctx = try tls.Context.init(&host, now_unix, [_]u8{3} ** 8);
     defer ctx.deinit();
-    try std.testing.expectError(error.InvalidLimits, Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 0 }));
-    try std.testing.expectError(error.InvalidLimits, Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 2_000 }));
-    try std.testing.expectError(error.InvalidLimits, Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 4, .handshaking_max = 8 }));
+    try std.testing.expectError(error.InvalidLimits, Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 0 }, &client_address));
+    try std.testing.expectError(error.InvalidLimits, Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 2_000 }, &client_address));
+    try std.testing.expectError(error.InvalidLimits, Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 4, .handshaking_max = 8 }, &client_address));
 }

@@ -56,6 +56,7 @@ pub const Event = union(enum) {
     },
     stream_opened: StreamHandle,
     stream_closed: struct { stream: StreamHandle, reset_code: ?u64 },
+    path_changed: struct { conn: Handle, peer: Address },
 };
 
 pub const Limits = struct {
@@ -79,7 +80,10 @@ pub const Counters = struct {
     send_errors: u64 = 0,
     stream_errors: u64 = 0,
     version_negotiations: u64 = 0,
+    path_changes: u64 = 0,
 };
+
+pub const Sent = connection.Sent;
 
 pub const ReceiveOutcome = union(enum) {
     accepted: Handle,
@@ -131,12 +135,13 @@ pub const DriverView = struct {
         self: DriverView,
         datagram: []u8,
         from: *const Address,
-        local: *const Address,
         now: Now,
         entropy: *EntropyPool,
         out: []u8,
     ) ReceiveOutcome {
-        return self.engine.receive(datagram, from, local, now, entropy, out);
+        assert(datagram.len <= out.len);
+        assert(self.engine.slots.len > 0);
+        return self.engine.receive(datagram, from, now, entropy, out);
     }
 
     pub fn tick(self: DriverView, now: Now) void {
@@ -154,7 +159,7 @@ pub const DriverView = struct {
         return self.engine.nextTimeoutMs();
     }
 
-    pub fn send(self: DriverView, index: u16, now: Now, out: []u8) ?[]u8 {
+    pub fn send(self: DriverView, index: u16, now: Now, out: []u8) ?Sent {
         assert(index < self.engine.slots.len);
         assert(out.len >= limits.recv_udp_payload_max);
         return self.engine.send(index, now, out);
@@ -218,6 +223,7 @@ pub const Engine = struct {
     tls_ctx: *const tls.Context,
     config: binding.Config,
     limits: Limits,
+    local: Address,
     slots: []connection.Slot,
     routes: []Route,
     active: []u16,
@@ -229,7 +235,12 @@ pub const Engine = struct {
     handshaking: u16 = 0,
     counters: Counters = .{},
 
-    pub fn init(allocator: std.mem.Allocator, tls_ctx: *const tls.Context, wanted: Limits) Error!Engine {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        tls_ctx: *const tls.Context,
+        wanted: Limits,
+        local: *const Address,
+    ) Error!Engine {
         if (wanted.connections_max == 0 or wanted.connections_max > limits.connections_max_ceiling) return error.InvalidLimits;
         if (wanted.handshaking_max == 0 or wanted.handshaking_max > wanted.connections_max) return error.InvalidLimits;
         if (wanted.handshaking_per_source_max == 0) return error.InvalidLimits;
@@ -277,6 +288,7 @@ pub const Engine = struct {
             .tls_ctx = tls_ctx,
             .config = config,
             .limits = wanted,
+            .local = local.*,
             .slots = slots,
             .routes = routes,
             .active = active,
@@ -320,7 +332,6 @@ pub const Engine = struct {
 
     pub fn dial(
         self: *Engine,
-        local: *const Address,
         peer: *const Address,
         expected: peer_id.PeerId,
         now: Now,
@@ -332,7 +343,7 @@ pub const Engine = struct {
         const slot = &self.slots[index];
         slot.open(self.tls_ctx, &self.config, .{
             .direction = .outbound,
-            .local = local.*,
+            .local = self.local,
             .peer = peer.*,
             .scid = entropy,
             .expected_peer_id = expected,
@@ -533,6 +544,12 @@ pub const Engine = struct {
                 count += 1;
                 slot.connected_pending = false;
             }
+            if (slot.path_changed_pending) |peer| {
+                if (count == events.len) return count;
+                events[count] = .{ .path_changed = .{ .conn = conn, .peer = peer } };
+                count += 1;
+                slot.path_changed_pending = null;
+            }
             if (slot.table.pending > 0) {
                 count = pollStreamEvents(slot, conn, events, count);
                 if (count == events.len) return count;
@@ -560,6 +577,7 @@ pub const Engine = struct {
             assert(index < self.slots.len);
             const slot = &self.slots[index];
             if (slot.connected_pending) return true;
+            if (slot.path_changed_pending != null) return true;
             if (slot.table.pending > 0) return true;
             if (slot.closed_pending) return true;
         }
@@ -570,22 +588,18 @@ pub const Engine = struct {
         self: *Engine,
         datagram: []u8,
         from: *const Address,
-        local: *const Address,
         now: Now,
         entropy: *EntropyPool,
         out: []u8,
     ) ReceiveOutcome {
         const header = binding.headerInfo(datagram) catch return self.drop(&self.counters.dropped_unroutable);
         if (self.findRoute(&header.dcid)) |index| {
-            if (!self.slots[index].peer.eql(from.*)) {
-                return self.drop(&self.counters.dropped_unroutable);
-            }
-            self.feed(index, datagram);
+            self.feed(index, datagram, from);
             return .{ .accepted = self.toHandle(index) };
         }
         if (header.packet_type == .short) {
             const index = self.slotForPeer(from) orelse return self.drop(&self.counters.dropped_unroutable);
-            self.feed(index, datagram);
+            self.feed(index, datagram, from);
             return .{ .accepted = self.toHandle(index) };
         }
         if (datagram.len < limits.client_initial_min) return self.drop(&self.counters.dropped_short_initial);
@@ -606,7 +620,7 @@ pub const Engine = struct {
         const slot = &self.slots[index];
         slot.open(self.tls_ctx, &self.config, .{
             .direction = .inbound,
-            .local = local.*,
+            .local = self.local,
             .peer = from.*,
             .scid = scid,
             .expected_peer_id = null,
@@ -618,7 +632,7 @@ pub const Engine = struct {
         self.addRoute(&slot.scid, index);
         self.addRoute(&header.dcid, index);
         self.handshaking += 1;
-        self.feed(index, datagram);
+        self.feed(index, datagram, from);
         return .{ .accepted = self.toHandle(index) };
     }
 
@@ -670,6 +684,7 @@ pub const Engine = struct {
                 }
             }
             self.refresh(index);
+            self.observePath(index);
         }
     }
 
@@ -684,17 +699,17 @@ pub const Engine = struct {
         return earliest;
     }
 
-    fn send(self: *Engine, index: u16, now: Now, out: []u8) ?[]u8 {
+    fn send(self: *Engine, index: u16, now: Now, out: []u8) ?Sent {
         if (index >= self.slots.len) return null;
         const slot = &self.slots[index];
         if (slot.state == .free or slot.state == .closed) return null;
-        const datagram = slot.send(now.mono_ms, out) catch {
+        const sent = slot.send(now.mono_ms, out) catch {
             self.counters.send_errors += 1;
             self.refresh(index);
             return null;
         };
-        if (datagram == null) self.refresh(index);
-        return datagram;
+        if (sent == null) self.refresh(index);
+        return sent;
     }
 
     fn peerAddressAt(self: *const Engine, index: u16) ?Address {
@@ -720,6 +735,7 @@ pub const Engine = struct {
             const slot = &self.slots[index];
             if (slot.state == .closed and slot.closed_reported) {
                 assert(!slot.connected_pending);
+                assert(slot.path_changed_pending == null);
                 assert(!slot.closed_pending);
                 assert(slot.table.pending == 0);
                 self.releaseSlot(index);
@@ -794,12 +810,13 @@ pub const Engine = struct {
         return .dropped;
     }
 
-    fn feed(self: *Engine, index: u16, datagram: []u8) void {
+    fn feed(self: *Engine, index: u16, datagram: []u8, from: *const Address) void {
         const slot = &self.slots[index];
         if (slot.state == .closed) return;
         const was_established = slot.state == .established;
+        const source = binding.SockAddr.fromAddress(from.*);
         var received = true;
-        if (slot.recv(datagram)) |_| {
+        if (slot.recv(datagram, &source)) |_| {
             self.counters.accepted += 1;
             self.activity[index] = true;
         } else |_| {
@@ -810,6 +827,21 @@ pub const Engine = struct {
         if (received and was_established and slot.state == .established and slot.pending_close == null) {
             slot.discoverPeerStreams();
         }
+        self.observePath(index);
+    }
+
+    fn observePath(self: *Engine, index: u16) void {
+        assert(index < self.slots.len);
+        const slot = &self.slots[index];
+        if (slot.state == .closed or slot.conn == null) return;
+        const peer = slot.drainPathEvents() orelse return;
+        assert(slot.state != .free);
+        if (peer.eql(slot.peer)) return;
+        slot.peer = peer;
+        slot.peer_sockaddr = binding.SockAddr.fromAddress(peer);
+        slot.path_changed_pending = peer;
+        self.counters.path_changes += 1;
+        self.activity[index] = true;
     }
 
     fn refresh(self: *Engine, index: u16) void {

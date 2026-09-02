@@ -48,10 +48,11 @@ const Node = struct {
         try std.Io.randomSecure(io, &serial);
         self.ctx = try tls.Context.init(&key, (try driver_mod.currentTime(io)).unix_s, serial);
         errdefer self.ctx.deinit();
-        self.engine = try engine_mod.Engine.init(allocator, &self.ctx, .{});
-        errdefer self.engine.deinit();
         self.udp = try udp_mod.Udp.bind(io, bind);
         errdefer self.udp.close(io);
+        const local = self.udp.localAddress();
+        self.engine = try engine_mod.Engine.init(allocator, &self.ctx, .{}, &local);
+        errdefer self.engine.deinit();
         self.driver = driver_mod.Driver.init(&self.engine, &self.udp);
     }
 
@@ -141,6 +142,7 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
                 };
                 free.* = .{ .stream = stream, .listener = multistream.Listener.init(&supported), .active = true };
             },
+            .path_changed => |changed| std.debug.print("path changed port={d}\n", .{changed.peer.port()}),
             .stream_closed => |closed| {
                 for (&sessions) |*session| {
                     if (session.active and std.meta.eql(session.stream, closed.stream)) {
@@ -242,6 +244,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
                 return error.ConnectionClosed;
             },
             .stream_opened => |opened| node.engine.closeStream(opened, 0),
+            .path_changed => |changed| std.debug.print("path changed port={d}\n", .{changed.peer.port()}),
             .stream_closed => {},
         };
         const active = stream orelse continue;

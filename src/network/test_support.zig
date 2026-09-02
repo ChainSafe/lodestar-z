@@ -28,6 +28,8 @@ pub const Pair = struct {
     first_initial: [constants.datagram_size_max]u8 = undefined,
     first_initial_len: usize = 0,
     drop_to_server: bool = false,
+    client_source: types.Address = client_address,
+    drop_to_address: ?types.Address = null,
 
     pub fn init(self: *Pair, client_limits: Limits, server_limits: Limits) !void {
         const client_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{1}));
@@ -36,13 +38,25 @@ pub const Pair = struct {
         errdefer self.client_ctx.deinit();
         self.server_ctx = try tls.Context.init(&server_key, now_unix, [_]u8{2} ** 8);
         errdefer self.server_ctx.deinit();
-        self.client = try Engine.init(std.testing.allocator, &self.client_ctx, client_limits);
+        self.client = try Engine.init(
+            std.testing.allocator,
+            &self.client_ctx,
+            client_limits,
+            &client_address,
+        );
         errdefer self.client.deinit();
-        self.server = try Engine.init(std.testing.allocator, &self.server_ctx, server_limits);
+        self.server = try Engine.init(
+            std.testing.allocator,
+            &self.server_ctx,
+            server_limits,
+            &server_address,
+        );
         self.now = .{ .mono_ms = 1_000, .unix_s = now_unix };
         self.entropy = 0;
         self.first_initial_len = 0;
         self.drop_to_server = false;
+        self.client_source = client_address;
+        self.drop_to_address = null;
     }
 
     pub fn deinit(self: *Pair) void {
@@ -64,7 +78,6 @@ pub const Pair = struct {
 
     pub fn dial(self: *Pair) !engine_mod.Handle {
         return self.client.dial(
-            &client_address,
             &server_address,
             self.server_ctx.local_peer_id,
             self.now,
@@ -79,8 +92,9 @@ pub const Pair = struct {
     pub fn pump(self: *Pair) !void {
         var rounds: usize = 0;
         while (rounds < 64) : (rounds += 1) {
-            var moved = try self.transfer(&self.client, &self.server, client_address, server_address, self.drop_to_server);
-            moved = try self.transfer(&self.server, &self.client, server_address, client_address, false) or moved;
+            const source = self.client_source;
+            var moved = try self.transfer(&self.client, &self.server, source, self.drop_to_server);
+            moved = try self.transfer(&self.server, &self.client, server_address, false) or moved;
             self.client.driverView().tick(self.now);
             self.server.driverView().tick(self.now);
             if (!moved) return;
@@ -93,7 +107,6 @@ pub const Pair = struct {
         from: *Engine,
         to: *Engine,
         from_address: types.Address,
-        to_address: types.Address,
         drop: bool,
     ) !bool {
         var moved = false;
@@ -102,20 +115,21 @@ pub const Pair = struct {
             var budget: u32 = 0;
             while (budget < limits.send_burst_max) : (budget += 1) {
                 var out: [constants.datagram_size_max]u8 = undefined;
-                const datagram = from.driverView().send(index, self.now, &out) orelse break;
+                const sent = from.driverView().send(index, self.now, &out) orelse break;
+                const datagram = sent.bytes;
                 moved = true;
                 if (from == &self.client and self.first_initial_len == 0) {
                     @memcpy(self.first_initial[0..datagram.len], datagram);
                     self.first_initial_len = datagram.len;
                 }
                 if (drop) continue;
+                if (self.drop_to_address) |blocked| if (sent.to.eql(blocked)) continue;
                 var copy: [constants.datagram_size_max]u8 = undefined;
                 @memcpy(copy[0..datagram.len], datagram);
                 var response: [constants.datagram_size_max]u8 = undefined;
                 _ = to.driverView().receive(
                     copy[0..datagram.len],
                     &from_address,
-                    &to_address,
                     self.now,
                     self.nextPool(),
                     &response,
@@ -141,10 +155,11 @@ pub const Node = struct {
         const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{seed}));
         self.ctx = try tls.Context.init(&key, (try driver_mod.currentTime(std.testing.io)).unix_s, [_]u8{seed} ** 8);
         errdefer self.ctx.deinit();
-        self.engine = try engine_mod.Engine.init(std.testing.allocator, &self.ctx, .{});
-        errdefer self.engine.deinit();
         self.udp = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
         errdefer self.udp.close(std.testing.io);
+        const local = self.udp.localAddress();
+        self.engine = try engine_mod.Engine.init(std.testing.allocator, &self.ctx, .{}, &local);
+        errdefer self.engine.deinit();
         self.driver = driver_mod.Driver.init(&self.engine, &self.udp);
     }
 
