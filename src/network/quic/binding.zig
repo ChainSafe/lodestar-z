@@ -69,18 +69,18 @@ pub fn versionSupported(version: u32) bool {
 pub const Config = struct {
     ptr: *c.quiche_config,
 
-    pub fn init(idle_timeout_ms: u64) Error!Config {
+    pub fn init(idle_timeout_ms: u64, connection_window: u64, stream_window: u64) Error!Config {
         const ptr = c.quiche_config_new(c.QUICHE_PROTOCOL_VERSION) orelse return error.Unknown;
         c.quiche_config_set_max_idle_timeout(ptr, idle_timeout_ms);
         c.quiche_config_set_max_recv_udp_payload_size(ptr, constants.recv_udp_payload_max);
-        c.quiche_config_set_initial_max_data(ptr, constants.connection_window);
-        c.quiche_config_set_initial_max_stream_data_bidi_local(ptr, constants.stream_window);
-        c.quiche_config_set_initial_max_stream_data_bidi_remote(ptr, constants.stream_window);
+        c.quiche_config_set_initial_max_data(ptr, connection_window);
+        c.quiche_config_set_initial_max_stream_data_bidi_local(ptr, stream_window);
+        c.quiche_config_set_initial_max_stream_data_bidi_remote(ptr, stream_window);
         c.quiche_config_set_initial_max_stream_data_uni(ptr, 0);
         c.quiche_config_set_initial_max_streams_bidi(ptr, constants.peer_streams_bidi);
         c.quiche_config_set_initial_max_streams_uni(ptr, 0);
-        c.quiche_config_set_max_connection_window(ptr, constants.connection_window);
-        c.quiche_config_set_max_stream_window(ptr, constants.stream_window);
+        c.quiche_config_set_max_connection_window(ptr, connection_window);
+        c.quiche_config_set_max_stream_window(ptr, stream_window);
         c.quiche_config_set_active_connection_id_limit(ptr, 2);
         c.quiche_config_set_disable_active_migration(ptr, true);
         return .{ .ptr = ptr };

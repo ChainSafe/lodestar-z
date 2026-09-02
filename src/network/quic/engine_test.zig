@@ -168,6 +168,27 @@ test "engine counts only inbound handshakes against the permit bound" {
     try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
 }
 
+test "engine clamps receive windows to the total budget" {
+    const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{4}));
+    var ctx = try tls.Context.init(&host, now_unix, [_]u8{4} ** 8);
+    defer ctx.deinit();
+
+    var few = try Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 4, .handshaking_max = 4 });
+    defer few.deinit();
+    try std.testing.expectEqual(constants.connection_window_max, few.connection_window);
+    try std.testing.expectEqual(constants.connection_window_max / 2, few.stream_window);
+
+    var many = try Engine.init(std.testing.allocator, &ctx, .{ .connections_max = 1_024 });
+    defer many.deinit();
+    try std.testing.expectEqual(constants.connection_window_min, many.connection_window);
+    try std.testing.expectEqual(constants.connection_window_min / 2, many.stream_window);
+
+    var standard = try Engine.init(std.testing.allocator, &ctx, .{});
+    defer standard.deinit();
+    try std.testing.expectEqual(@as(u64, 4 * 1_024 * 1_024), standard.connection_window);
+    try std.testing.expectEqual(@as(u64, 2 * 1_024 * 1_024), standard.stream_window);
+}
+
 test "engine rejects invalid limits" {
     const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{3}));
     var ctx = try tls.Context.init(&host, now_unix, [_]u8{3} ** 8);
