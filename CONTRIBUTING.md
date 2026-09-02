@@ -92,6 +92,45 @@ zig build run:write_ssz_static_spec_tests
 zig build run:write_bls_spec_tests
 ```
 
+### Test layout
+
+Tests live beside the code they cover. Small ones sit inline in the module as `test` blocks. Once a
+file's tests reach roughly 100 lines or 8 tests, move them into a sibling `<module>_test.zig` so
+the implementation stays readable, and wire it back from the module itself:
+
+```zig
+// src/clock/slot_math.zig
+
+// ... implementation ...
+
+test {
+    _ = @import("slot_math_test.zig");
+}
+```
+
+```zig
+// src/clock/slot_math_test.zig
+const std = @import("std");
+const slot_math = @import("slot_math.zig");
+const slotAtMs = slot_math.slotAtMs;
+
+test "slotAtMs returns genesis slot at genesis" {
+    // ...
+}
+```
+
+A few things to keep in mind:
+
+- Name the test file after its module in snake_case. `Node.zig` pairs with `node_test.zig`.
+- Put the `test { _ = @import(...); }` block in the module under test rather than in the package
+  `root.zig`, so moving or deleting a module carries its tests along with it.
+- Do not mark a declaration `pub` just so a test can reach it from the sibling file. Tests that
+  deliberately exercise private internals belong inline; `src/cpu_count.zig` and
+  `src/state_transition/load_state.zig` are examples.
+- Zig only runs tests in files reached through an analyzed `test` block. A `_test.zig` that nothing
+  imports compiles fine, runs nothing, and still reports success, so check that
+  `zig build test:<module> --summary all` reports more tests after you add one.
+
 If you created new unit tests, you can run them individually.
 For example, if you made a new unit test in the `ssz` package:
 

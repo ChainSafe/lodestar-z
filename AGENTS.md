@@ -21,6 +21,10 @@
   trust boundary, native dependency, persistence path or format, shared mutable cache or pool,
   externally influenced native input, or supported integration. Update the normative threat model
   only when the security contract changes; otherwise update the implementation map.
+- **Test file layout:** once a file's `test` blocks reach roughly 100 lines or 8 tests, move them
+  to a sibling `<module>_test.zig` and wire it from the module itself with
+  `test { _ = @import("<module>_test.zig"); }`. Never mark a declaration `pub` only to relocate a
+  test.
 - **Incremental commits:** after review starts, do not force-push unless a maintainer requests it.
 - **Communication style:** do not use em dashes. Keep communication succinct and human-friendly.
 
@@ -300,6 +304,52 @@ Zig code must make allocator and ownership boundaries explicit:
 - Run both minimal and mainnet tests when preset-dependent limits or behavior change.
 - Build and run binding tests for changes under `bindings/` or exported native APIs.
 - Fuzz parsers, deserializers, and cryptographic boundaries when introducing new input shapes.
+
+### Test file layout
+
+Keep tests beside the code they cover without letting them crowd it out.
+
+- A handful of short inline `test` blocks is fine. Once a file's test blocks reach roughly 100
+  lines or 8 tests, move them to a sibling `<module>_test.zig`.
+- Name the test file after its module in snake_case. `slot_math.zig` pairs with
+  `slot_math_test.zig`, and `Node.zig` pairs with `node_test.zig`.
+- Wire the import from the module under test, not from the package `root.zig`:
+
+```zig
+// slot_math.zig
+test {
+    _ = @import("slot_math_test.zig");
+}
+```
+
+  Keeping the import local means the pairing survives moving or deleting the module, and no
+  package root has to be updated.
+- Move only the tests. Leave the test bodies unchanged and rebuild the prelude they relied on in
+  the new file as imports and aliases.
+- Private test helpers move with the tests they serve.
+- Do not widen a declaration to `pub` only to relocate a test. Tests that exercise private
+  internals stay inline. `cpu_count.zig`, `load_state.zig`, `proto_array.zig` and `fork_choice.zig`
+  are deliberate examples.
+- `memory_safety_test.zig` files cover a whole module rather than one file, so they stay wired
+  from the package `root.zig`.
+
+Test discovery is easy to break silently. Zig only collects tests from files reached through an
+analyzed `test` block, so a `_test.zig` that nothing imports compiles cleanly and runs nothing,
+and the build still reports success. Re-exporting a file is not enough:
+
+```zig
+// Does NOT pull in era.zig's tests.
+pub const era = @import("era.zig");
+
+// Does.
+test {
+    _ = @import("era.zig");
+}
+```
+
+Every package `root.zig` should name its files in a `test` block rather than relying on
+`refAllDecls` reaching them through the re-export list. When adding a test file, confirm the count
+reported by `zig build test:<module> --summary all` actually goes up.
 
 ## Pull request guidelines
 
