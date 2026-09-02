@@ -27,4 +27,5 @@ test {
     _ = @import("limiter_test.zig");
     _ = @import("protocol_test.zig");
     _ = @import("reqresp_test.zig");
+    _ = @import("reqresp_failures_test.zig");
 }
