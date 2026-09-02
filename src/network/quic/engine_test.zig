@@ -137,6 +137,24 @@ test "engine handshake connects both sides with verified peer ids" {
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
 }
 
+test "engine counts only inbound handshakes against the permit bound" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+
+    _ = try pair.dial();
+    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+
+    try std.testing.expect(try pair.transfer(&pair.client, &pair.server, client_address, server_address, false));
+    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
+    try std.testing.expectEqual(@as(u16, 1), pair.server.handshaking);
+
+    try pair.pump();
+    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+}
+
 test "engine rejects invalid limits" {
     const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{3}));
     var ctx = try tls.Context.init(&host, now_unix, [_]u8{3} ** 8);

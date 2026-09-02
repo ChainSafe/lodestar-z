@@ -16,7 +16,6 @@ pub const Read = connection.Read;
 
 pub const Error = connection.Error || std.mem.Allocator.Error || error{
     TableFull,
-    HandshakingFull,
     StaleHandle,
     InvalidLimits,
 };
@@ -124,7 +123,6 @@ pub const Engine = struct {
         now: Now,
         entropy: [constants.local_cid_length]u8,
     ) Error!Handle {
-        if (self.handshaking >= self.limits.handshaking_max) return error.HandshakingFull;
         const index = self.freeSlot() orelse return error.TableFull;
         const slot = &self.slots[index];
         try slot.open(self.tls_ctx, &self.config, .{
@@ -137,7 +135,6 @@ pub const Engine = struct {
             .now = now,
         });
         self.addRoute(&slot.scid, index);
-        self.handshaking += 1;
         return .{ .index = index, .generation = slot.generation };
     }
 
@@ -382,7 +379,7 @@ pub const Engine = struct {
         const slot = &self.slots[index];
         if (slot.state == .handshaking and slot.isEstablished()) {
             slot.state = .established;
-            self.handshaking -= 1;
+            if (slot.direction == .inbound) self.handshaking -= 1;
             if (slot.odcid) |*odcid| {
                 self.removeRoute(odcid);
                 slot.odcid = null;
@@ -399,7 +396,7 @@ pub const Engine = struct {
             }
         }
         if (slot.state != .closed and slot.isFinished()) {
-            if (slot.state == .handshaking) self.handshaking -= 1;
+            if (slot.state == .handshaking and slot.direction == .inbound) self.handshaking -= 1;
             slot.state = .closed;
             slot.close_reason = slot.closeReason();
             slot.closed_pending = true;
