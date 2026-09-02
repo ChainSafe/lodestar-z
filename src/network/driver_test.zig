@@ -36,6 +36,13 @@ const Node = struct {
     }
 };
 
+fn writeSome(engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, bytes: []const u8, fin: bool) !usize {
+    return engine.write(stream, bytes, fin) catch |err| switch (err) {
+        error.WouldBlock => 0,
+        else => err,
+    };
+}
+
 fn stepBoth(a: *Node, b: *Node, events_a: []engine_mod.Event, events_b: []engine_mod.Event) !struct { a: usize, b: usize } {
     const ra = try a.driver.step(std.testing.io, events_a);
     const rb = try b.driver.step(std.testing.io, events_b);
@@ -141,7 +148,7 @@ test "driver completes a libp2p ping over loopback sockets" {
     var dialer = try multistream.Dialer.init(ping_protocol);
     var hello: [2 * multistream.message_length_max]u8 = undefined;
     const hello_bytes = try dialer.initialWrite(&hello);
-    try std.testing.expectEqual(hello_bytes.len, try client.engine.write(stream, hello_bytes, false));
+    try std.testing.expectEqual(hello_bytes.len, try writeSome(&client.engine, stream, hello_bytes, false));
 
     var listener = multistream.Listener.init(&.{ping_protocol});
     var inbound: ?engine_mod.StreamHandle = null;
@@ -163,11 +170,11 @@ test "driver completes a libp2p ping over loopback sockets" {
             if (read.len > 0 and !negotiated) {
                 var reply: [multistream.listener_write_max]u8 = undefined;
                 const outcome = try listener.feed(buffer[0..read.len], &reply);
-                if (outcome.write.len > 0) _ = try server.engine.write(server_stream, outcome.write, false);
+                if (outcome.write.len > 0) _ = try writeSome(&server.engine, server_stream, outcome.write, false);
                 if (outcome.status == .selected) negotiated = true;
                 cursor = outcome.consumed;
             }
-            if (negotiated and cursor < read.len) _ = try server.engine.write(server_stream, buffer[cursor..read.len], false);
+            if (negotiated and cursor < read.len) _ = try writeSome(&server.engine, server_stream, buffer[cursor..read.len], false);
         }
         var client_buffer: [256]u8 = undefined;
         const client_read = try client.engine.read(stream, &client_buffer);
@@ -175,7 +182,7 @@ test "driver completes a libp2p ping over loopback sockets" {
             const outcome = try dialer.feed(client_buffer[0..client_read.len]);
             if (outcome.status == .accepted) {
                 accepted = true;
-                try std.testing.expectEqual(@as(usize, 32), try client.engine.write(stream, &payload, false));
+                try std.testing.expectEqual(@as(usize, 32), try writeSome(&client.engine, stream, &payload, false));
             }
         } else if (client_read.len > 0) {
             @memcpy(echo[echoed..][0..client_read.len], client_buffer[0..client_read.len]);

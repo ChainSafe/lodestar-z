@@ -12,6 +12,7 @@ pub const Error = binding.Error || tls.Error || error{
     StreamLimit,
     UnknownStream,
     NotEstablished,
+    WouldBlock,
 };
 
 pub const State = enum { free, handshaking, established, closed };
@@ -290,7 +291,14 @@ pub const Slot = struct {
         const index = self.streamIndex(id) orelse return error.UnknownStream;
         var code: u64 = 0;
         const rc = c.quiche_conn_stream_send(self.conn.?, id, bytes.ptr, bytes.len, fin, &code);
-        if (rc == c.QUICHE_ERR_DONE) return 0;
+        if (rc == c.QUICHE_ERR_DONE) {
+            const available = c.quiche_conn_stream_capacity(self.conn.?, id);
+            if (available < 0 and available != c.QUICHE_ERR_DONE) {
+                self.clearStream(index);
+                return error.UnknownStream;
+            }
+            return error.WouldBlock;
+        }
         if (rc == c.QUICHE_ERR_STREAM_STOPPED) {
             self.streams[index].fin_sent = true;
             if (self.streams[index].fin_received) self.clearStream(index);
@@ -302,6 +310,14 @@ pub const Slot = struct {
             if (self.streams[index].fin_received) self.clearStream(index);
         }
         return length;
+    }
+
+    pub fn capacity(self: *Slot, id: u64) Error!usize {
+        if (self.streamIndex(id) == null) return error.UnknownStream;
+        return binding.check(c.quiche_conn_stream_capacity(self.conn.?, id)) catch |err| switch (err) {
+            error.InvalidStreamState => error.UnknownStream,
+            else => err,
+        };
     }
 
     pub fn shutdown(self: *Slot, id: u64, direction: ShutdownDirection, code: u64) void {

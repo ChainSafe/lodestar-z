@@ -123,7 +123,10 @@ fn writeAll(
     var written: usize = 0;
     var attempts: u32 = 0;
     while (attempts < constants.send_burst_max) : (attempts += 1) {
-        const count = try engine.write(stream, bytes[written..], fin);
+        const count = engine.write(stream, bytes[written..], fin) catch |err| switch (err) {
+            error.WouldBlock => 0,
+            else => return err,
+        };
         written += count;
         if (written == bytes.len) return;
         if (count == 0) return error.ShortWrite;
