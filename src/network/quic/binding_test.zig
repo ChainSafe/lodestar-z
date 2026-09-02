@@ -3,7 +3,11 @@ const binding = @import("binding.zig");
 const constants = @import("../constants.zig");
 
 test "quiche config initializes with the transport bounds" {
-    var config = try binding.Config.init(constants.idle_timeout_ms);
+    var config = try binding.Config.init(
+        constants.idle_timeout_ms,
+        constants.connection_window_max,
+        constants.connection_window_max / 2,
+    );
     defer config.deinit();
     try std.testing.expect(binding.versionSupported(1));
     try std.testing.expect(!binding.versionSupported(0xdead_beef));

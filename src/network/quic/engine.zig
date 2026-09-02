@@ -40,6 +40,7 @@ pub const Limits = struct {
     connections_max: u16 = constants.connections_max_default,
     handshaking_max: u16 = constants.handshaking_max,
     handshaking_per_source_max: u16 = constants.handshaking_per_source_max,
+    receive_budget_bytes: u64 = constants.receive_budget_bytes,
     idle_timeout_ms: u64 = constants.idle_timeout_ms,
     handshake_timeout_ms: u64 = constants.handshake_timeout_ms,
     keep_alive_ms: u64 = constants.keep_alive_ms,
@@ -92,6 +93,8 @@ pub const Engine = struct {
     routes: []Route,
     active: []u16,
     active_len: u16 = 0,
+    connection_window: u64,
+    stream_window: u64,
     handshaking: u16 = 0,
     counters: Counters = .{},
 
@@ -101,7 +104,14 @@ pub const Engine = struct {
         if (limits.handshaking_per_source_max == 0) return error.InvalidLimits;
         if (limits.idle_timeout_ms == 0 or limits.handshake_timeout_ms == 0 or limits.keep_alive_ms == 0) return error.InvalidLimits;
 
-        var config = try binding.Config.init(limits.idle_timeout_ms);
+        const connection_window = std.math.clamp(
+            limits.receive_budget_bytes / limits.connections_max,
+            constants.connection_window_min,
+            constants.connection_window_max,
+        );
+        const stream_window = connection_window / 2;
+
+        var config = try binding.Config.init(limits.idle_timeout_ms, connection_window, stream_window);
         errdefer config.deinit();
 
         const slots = try allocator.alloc(connection.Slot, limits.connections_max);
@@ -124,6 +134,8 @@ pub const Engine = struct {
             .slots = slots,
             .routes = routes,
             .active = active,
+            .connection_window = connection_window,
+            .stream_window = stream_window,
         };
     }
 
