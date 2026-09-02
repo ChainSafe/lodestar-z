@@ -46,6 +46,7 @@ pub const OpenParams = struct {
     scid: [limits.local_cid_length]u8,
     expected_peer_id: ?peer_id.PeerId,
     now: types.Now,
+    keylog: []u8 = &.{},
 };
 
 pub const Slot = struct {
@@ -79,7 +80,8 @@ pub const Slot = struct {
     ) Error!void {
         assert(self.state == .free);
         assert(self.conn == null);
-        self.handshake = .{ .now_unix = params.now.unix_s };
+        assert(params.keylog.len == 0 or params.keylog.len == tls.keylog_capacity);
+        self.handshake = .{ .now_unix = params.now.unix_s, .keylog = params.keylog };
         self.direction = params.direction;
         self.peer = params.peer;
         self.peer_sockaddr = binding.SockAddr.fromAddress(params.peer);
@@ -402,5 +404,5 @@ fn nanosToMillis(nanos: u64) u32 {
 }
 
 comptime {
-    assert(@sizeOf(Slot) <= 6 * 1_024);
+    assert(@sizeOf(Slot) <= 4 * 1_024);
 }

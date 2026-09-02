@@ -153,9 +153,9 @@ test "engine reports connection stats for live handles only" {
     try std.testing.expect(pair.client.connectionStats(stale) == null);
 }
 
-test "engine captures TLS key material per connection for the host to drain" {
+test "engine captures TLS key material per connection only when keylog is enabled" {
     var pair: Pair = .{};
-    try pair.init(.{}, .{});
+    try pair.init(.{ .keylog = true }, .{});
     defer pair.deinit();
     const handles = try connectPair(&pair);
 
@@ -165,7 +165,11 @@ test "engine captures TLS key material per connection for the host to drain" {
     try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "CLIENT_TRAFFIC_SECRET_0") != null);
     try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "SERVER_TRAFFIC_SECRET_0") != null);
     try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().takeKeylog(handles.client.index, &lines));
-    try std.testing.expect(pair.server.driverView().takeKeylog(handles.server.index, &lines) > 0);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.slots[handles.client.index].handshake.keylog_dropped);
+
+    try std.testing.expectEqual(@as(usize, 0), pair.server.keylog_arena.len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().takeKeylog(handles.server.index, &lines));
+    try std.testing.expect(pair.server.slots[handles.server.index].handshake.keylog_dropped > 0);
 }
 
 fn standaloneEngine(seed: u8, engine_limits: engine_mod.Limits) !Engine {
