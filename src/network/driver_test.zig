@@ -53,7 +53,8 @@ fn stepBoth(a: *Node, b: *Node, events_a: []engine_mod.Event, events_b: []engine
 
 test "driver rejects a zero poll interval" {
     var core: engine_mod.Engine = undefined;
-    var udp = runtime.Udp.init(undefined);
+    var udp = try runtime.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer udp.close(std.testing.io);
     try std.testing.expectError(error.InvalidPollInterval, driver_mod.Driver.initWithConfig(&core, &udp, .{ .poll_interval_ms = 0 }));
 }
 
@@ -67,7 +68,7 @@ test "driver counts a hostile oversized datagram and keeps stepping" {
     defer stranger.close(std.testing.io);
 
     const oversized = [_]u8{0x5a} ** 2_000;
-    const destination = runtime.toNetwork(node.udp.localAddress());
+    const destination = runtime.toNetwork(node.udp.localAddress(), node.udp.family);
     try stranger.send(std.testing.io, &destination, &oversized);
 
     var events: [4]engine_mod.Event = undefined;
