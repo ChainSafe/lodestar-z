@@ -356,10 +356,17 @@ reported by `zig build test:<module> --summary all` actually goes up.
 
 `zig build test:tidy` checks all of this and runs in CI. It verifies that every `_test.zig` is
 imported, pairs with a module, and is wired from that module; that a `root.zig` whose siblings have
-tests declares a `test` block; that every module in `build.zig.zon` has a CI step; and that no file
-exceeds the inline test limits without an entry in `inline_test_allowlist` in `test/tidy.zig`.
-Exemptions live in that allowlist rather than in prose, so adding one is a reviewable diff, and
-tidy fails when an entry no longer needs the exemption.
+tests declares a `test` block; that no `src/` or `bindings/` file is imported by nothing; that every
+module in `build.zig.zon` has a CI step; and that no `src/` file exceeds the inline test limits.
+
+Tidy reads the parsed AST, so a brace or the word `test` inside a comment or string cannot skew a
+count, and it takes its file list from `git ls-files`, so it sees exactly what is committed. A file
+you have not staged yet is invisible to it.
+
+Exemptions live in the allowlists in `test/tidy.zig` rather than in prose, so adding one is a
+reviewable diff, and tidy fails when an entry no longer needs its exemption. Each rule has a test
+in the same file that feeds it synthetic source and asserts the exact diagnostics, so a rule that
+stops catching anything fails rather than going quiet. Add one alongside any new rule.
 
 ## Pull request guidelines
 

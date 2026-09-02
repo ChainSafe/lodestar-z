@@ -138,8 +138,12 @@ zig build test:tidy
 ```
 
 It checks that every `_test.zig` is imported, pairs with a module and is wired from that module,
-that a `root.zig` whose siblings have tests declares a `test` block, that every module has a CI
-step, and that no file exceeds the inline test limits. CI runs it alongside `zig fmt --check`.
+that a `root.zig` whose siblings have tests declares a `test` block, that no shipped file is
+imported by nothing, that every module has a CI step, and that no file exceeds the inline test
+limits. CI runs it alongside `zig fmt --check`.
+
+Tidy takes its file list from `git ls-files`, so a file you have not staged yet is invisible to it.
+Run it again after `git add` when you add new files.
 
 If your file genuinely needs to keep bulky tests inline because they touch private declarations,
 add it to `inline_test_allowlist` in `test/tidy.zig` with a comment naming the declarations
