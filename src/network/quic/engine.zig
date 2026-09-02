@@ -493,12 +493,18 @@ pub const Engine = struct {
     fn feed(self: *Engine, index: u16, datagram: []u8) void {
         const slot = &self.slots[index];
         if (slot.state == .closed) return;
+        const was_established = slot.state == .established;
+        var received = true;
         if (slot.recv(datagram)) |_| {
             self.counters.accepted += 1;
         } else |_| {
             self.counters.recv_errors += 1;
+            received = false;
         }
         self.refresh(index);
+        if (received and was_established and slot.state == .established and slot.pending_close == null) {
+            slot.discoverPeerStreams();
+        }
     }
 
     fn refresh(self: *Engine, index: u16) void {
@@ -516,9 +522,10 @@ pub const Engine = struct {
             } else {
                 slot.close(.tls_failed, connection.app_error_normal);
             }
+            if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
         }
-        if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
         if (slot.state != .closed and slot.isFinished()) {
+            if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
             if (slot.state == .handshaking and slot.direction == .inbound) self.handshaking -= 1;
             slot.state = .closed;
             slot.close_reason = slot.closeReason();
