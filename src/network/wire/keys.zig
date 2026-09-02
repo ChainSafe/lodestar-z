@@ -37,12 +37,19 @@ pub const PublicKey = struct {
 
     pub fn decodeProtobuf(bytes: []const u8) Error!PublicKey {
         if (bytes.len != protobuf_length) return error.InvalidProtobuf;
-        if (!std.mem.eql(u8, bytes[0..protobuf_prefix.len], &protobuf_prefix)) return error.InvalidProtobuf;
+        if (!std.mem.eql(u8, bytes[0..protobuf_prefix.len], &protobuf_prefix)) {
+            return error.InvalidProtobuf;
+        }
         return fromBytes(bytes[protobuf_prefix.len..][0..public_key_length]);
     }
 
-    pub fn verify(self: *const PublicKey, message: []const u8, signature_der: []const u8) Error!void {
-        const signature = Ecdsa.Signature.fromDer(signature_der) catch return error.InvalidSignature;
+    pub fn verify(
+        self: *const PublicKey,
+        message: []const u8,
+        signature_der: []const u8,
+    ) Error!void {
+        const signature = Ecdsa.Signature.fromDer(signature_der) catch
+            return error.InvalidSignature;
         const key = Ecdsa.PublicKey.fromSec1(&self.bytes) catch return error.InvalidPublicKey;
         signature.verify(message, key) catch return error.SignatureVerificationFailed;
     }

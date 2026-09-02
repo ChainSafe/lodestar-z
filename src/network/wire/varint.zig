@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const Error = error{ Truncated, Overflow };
 pub const length_max = 10;
 
@@ -10,6 +12,8 @@ pub fn encodedLength(value: u64) usize {
     var length: usize = 1;
     var rest = value >> 7;
     while (rest != 0) : (rest >>= 7) length += 1;
+    std.debug.assert(length >= 1);
+    std.debug.assert(length <= length_max);
     return length;
 }
 
@@ -22,6 +26,8 @@ pub fn encode(value: u64, out: []u8) Error![]u8 {
         rest >>= 7;
         byte.* = if (index + 1 < length) low | 0x80 else low;
     }
+    std.debug.assert(rest == 0);
+    std.debug.assert(out[length - 1] & 0x80 == 0);
     return out[0..length];
 }
 
@@ -36,6 +42,8 @@ pub fn decode(bytes: []const u8) Error!Decoded {
         value |= payload << shift;
         if (byte & 0x80 == 0) {
             if (index + 1 > encodedLength(value)) return error.Overflow;
+            std.debug.assert(index + 1 == encodedLength(value));
+            std.debug.assert(index + 1 <= bytes.len);
             return .{ .value = value, .length = index + 1 };
         }
     }

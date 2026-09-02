@@ -56,7 +56,16 @@ pub const Transport = struct {
         target.udp = try udp_mod.Udp.bind(io, options.bind);
         errdefer target.udp.close(io);
         const local = target.udp.localAddress();
-        target.engine = try engine_mod.Engine.init(allocator, &target.tls, options.limits, &local);
+        var seed_bytes: [8]u8 = undefined;
+        try std.Io.randomSecure(io, &seed_bytes);
+        const seed = std.mem.readInt(u64, &seed_bytes, .little);
+        target.engine = try engine_mod.Engine.init(
+            allocator,
+            &target.tls,
+            options.limits,
+            &local,
+            seed,
+        );
         errdefer target.engine.deinit();
         target.driver = driver_mod.Driver.init(&target.engine, &target.udp);
         assert(target.driver.engine == &target.engine);

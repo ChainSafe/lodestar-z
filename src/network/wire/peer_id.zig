@@ -18,7 +18,9 @@ pub const PeerId = struct {
 
     pub fn fromBytes(bytes: []const u8) Error!PeerId {
         if (bytes.len != length) return error.InvalidPeerId;
-        if (!std.mem.eql(u8, bytes[0..multihash_prefix.len], &multihash_prefix)) return error.InvalidPeerId;
+        if (!std.mem.eql(u8, bytes[0..multihash_prefix.len], &multihash_prefix)) {
+            return error.InvalidPeerId;
+        }
         _ = try keys.PublicKey.decodeProtobuf(bytes[multihash_prefix.len..]);
         return .{ .bytes = bytes[0..length].* };
     }

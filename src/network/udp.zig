@@ -35,6 +35,8 @@ pub const Udp = struct {
 
     pub fn bind(io: std.Io, address: net.IpAddress) net.IpAddress.BindError!Udp {
         const socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+        std.debug.assert(familyOf(socket.address) == familyOf(address));
+        std.debug.assert(socket.address.getPort() != 0 or address.getPort() == 0);
         return .{ .socket = socket, .family = familyOf(socket.address) };
     }
 
@@ -43,18 +45,26 @@ pub const Udp = struct {
     }
 
     pub fn close(self: *const Udp, io: std.Io) void {
+        std.debug.assert(self.admitted == null);
         self.socket.close(io);
     }
 
     pub fn localAddress(self: *const Udp) types.Address {
-        return fromNetwork(self.socket.address);
+        const address = fromNetwork(self.socket.address);
+        std.debug.assert(self.family == .ip6 or address == .ip4);
+        return address;
     }
 
-    pub fn receiveTimeout(self: *Udp, io: std.Io, timeout: std.Io.Timeout) ReceiveTimeoutError!Datagram {
+    pub fn receiveTimeout(
+        self: *Udp,
+        io: std.Io,
+        timeout: std.Io.Timeout,
+    ) ReceiveTimeoutError!Datagram {
         if (self.admitted != null) return error.AdmissionUnavailable;
         const incoming = try self.socket.receiveTimeout(io, &self.buffer, timeout);
         if (incoming.flags.trunc) return error.DatagramTooLarge;
-        const successor = std.math.add(u64, self.next_generation, 1) catch return error.GenerationExhausted;
+        const successor = std.math.add(u64, self.next_generation, 1) catch
+            return error.GenerationExhausted;
         std.debug.assert(incoming.data.len <= self.buffer.len);
         const generation = self.next_generation;
         self.next_generation = successor;
@@ -67,9 +77,11 @@ pub const Udp = struct {
     }
 
     pub fn release(self: *Udp, handle: Handle) ReleaseError!void {
+        std.debug.assert(handle.generation > 0);
         const admitted = self.admitted orelse return error.StaleDatagram;
         if (admitted != handle.generation) return error.StaleDatagram;
         self.admitted = null;
+        std.debug.assert(self.next_generation > handle.generation);
     }
 
     pub fn send(
@@ -78,6 +90,7 @@ pub const Udp = struct {
         destination: *const types.Address,
         bytes: []const u8,
     ) SendError!void {
+        std.debug.assert(bytes.len > 0);
         if (bytes.len > constants.datagram_size_max) return error.DatagramTooLarge;
         const address = toNetwork(destination.*, self.family);
         return self.socket.send(io, &address, bytes);
@@ -125,7 +138,11 @@ pub fn fromNetwork(address: net.IpAddress) types.Address {
         .ip6 => |value| if (isMappedIp4(value.bytes))
             .{ .ip4 = .{ .octets = value.bytes[12..16].*, .port = value.port } }
         else
-            .{ .ip6 = .{ .octets = value.bytes, .port = value.port, .interface = value.interface.index } },
+            .{ .ip6 = .{
+                .octets = value.bytes,
+                .port = value.port,
+                .interface = value.interface.index,
+            } },
     };
 }
 

@@ -71,8 +71,12 @@ pub const Dialer = struct {
                 self.header_seen = true;
                 continue;
             }
-            if (std.mem.eql(u8, message.token, self.protocol)) return .{ .consumed = consumed, .status = .accepted };
-            if (std.mem.eql(u8, message.token, na)) return .{ .consumed = consumed, .status = .rejected };
+            if (std.mem.eql(u8, message.token, self.protocol)) {
+                return .{ .consumed = consumed, .status = .accepted };
+            }
+            if (std.mem.eql(u8, message.token, na)) {
+                return .{ .consumed = consumed, .status = .rejected };
+            }
             return error.Malformed;
         }
         return .{ .consumed = consumed, .status = .pending };
@@ -119,7 +123,11 @@ pub const Listener = struct {
             for (self.supported, 0..) |protocol, index| {
                 if (!std.mem.eql(u8, message.token, protocol)) continue;
                 written += (try encodeMessage(protocol, out[written..])).len;
-                return .{ .consumed = consumed, .write = out[0..written], .status = .{ .selected = index } };
+                return .{
+                    .consumed = consumed,
+                    .write = out[0..written],
+                    .status = .{ .selected = index },
+                };
             }
             written += (try encodeMessage(na, out[written..])).len;
         }

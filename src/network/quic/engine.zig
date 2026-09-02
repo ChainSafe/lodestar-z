@@ -3,6 +3,7 @@ const binding = @import("binding.zig");
 const connection = @import("connection.zig");
 const constants = @import("../constants.zig");
 const limits = @import("limits.zig");
+const route_table = @import("route_table.zig");
 const peer_id = @import("../wire/peer_id.zig");
 const tls = @import("../tls/context.zig");
 const types = @import("../types.zig");
@@ -118,12 +119,6 @@ pub const EntropyPool = struct {
         self.fresh = false;
         return self.bytes;
     }
-};
-
-const Route = struct {
-    cid: binding.Cid = .{},
-    index: u16 = 0,
-    active: bool = false,
 };
 
 const PeerEntry = struct {
@@ -265,7 +260,7 @@ pub const Engine = struct {
     limits: Limits,
     local: Address,
     slots: []connection.Slot,
-    routes: []Route,
+    routes: route_table.RouteTable,
     active: []u16,
     activity: []bool,
     peers: []PeerEntry,
@@ -283,11 +278,17 @@ pub const Engine = struct {
         tls_ctx: *const tls.Context,
         wanted: Limits,
         local: *const Address,
+        seed: u64,
     ) Error!Engine {
-        if (wanted.connections_max == 0 or wanted.connections_max > limits.connections_max_ceiling) return error.InvalidLimits;
-        if (wanted.handshaking_max == 0 or wanted.handshaking_max > wanted.connections_max) return error.InvalidLimits;
+        if (wanted.connections_max == 0) return error.InvalidLimits;
+        if (wanted.connections_max > limits.connections_max_ceiling) return error.InvalidLimits;
+        if (wanted.handshaking_max == 0 or wanted.handshaking_max > wanted.connections_max) {
+            return error.InvalidLimits;
+        }
         if (wanted.handshaking_per_source_max == 0) return error.InvalidLimits;
-        if (wanted.idle_timeout_ms == 0 or wanted.handshake_timeout_ms == 0 or wanted.keep_alive_ms == 0) return error.InvalidLimits;
+        if (wanted.idle_timeout_ms == 0) return error.InvalidLimits;
+        if (wanted.handshake_timeout_ms == 0) return error.InvalidLimits;
+        if (wanted.keep_alive_ms == 0) return error.InvalidLimits;
         if (wanted.dialing_max == 0) return error.InvalidLimits;
         const outbound_max = wanted.outbound_max orelse
             @max(1, wanted.connections_max - wanted.connections_max / 4);
@@ -314,9 +315,8 @@ pub const Engine = struct {
         errdefer allocator.free(slots);
         @memset(slots, .{});
 
-        const routes = try allocator.alloc(Route, @as(usize, wanted.connections_max) * 2);
-        errdefer allocator.free(routes);
-        @memset(routes, .{});
+        var routes = try route_table.RouteTable.init(allocator, wanted.connections_max, seed);
+        errdefer routes.deinit(allocator);
 
         const active = try allocator.alloc(u16, wanted.connections_max);
         errdefer allocator.free(active);
@@ -354,7 +354,7 @@ pub const Engine = struct {
         self.allocator.free(self.peers);
         self.allocator.free(self.activity);
         self.allocator.free(self.active);
-        self.allocator.free(self.routes);
+        self.routes.deinit(self.allocator);
         self.allocator.free(self.slots);
         self.config.deinit();
         self.* = undefined;
@@ -403,7 +403,11 @@ pub const Engine = struct {
             self.unclaimSlot(index);
             return error.OpenFailed;
         };
-        self.addRoute(&slot.scid, index);
+        self.addRoute(&slot.scid, index) catch {
+            slot.release();
+            self.unclaimSlot(index);
+            return error.TableFull;
+        };
         self.dialing += 1;
         self.outbound += 1;
         assert(self.dialing <= self.limits.dialing_max);
@@ -551,49 +555,69 @@ pub const Engine = struct {
         target.slot.closeStream(target.index, target.id, code);
     }
 
-    pub const StreamIterator = struct {
-        iter: ?*c.quiche_stream_iter,
-        slot: ?*connection.Slot,
-        conn: Handle,
+    pub const Readiness = enum { readable, writable };
 
-        pub fn next(self: *StreamIterator) ?StreamHandle {
-            const iter = self.iter orelse return null;
-            const slot = self.slot orelse return null;
-            var id: u64 = 0;
-            var seen: u16 = 0;
-            while (seen < limits.streams_per_connection) : (seen += 1) {
-                if (!c.quiche_stream_iter_next(iter, &id)) return null;
-                const index = slot.streamIndex(id) orelse continue;
-                assert(index < limits.streams_per_connection);
-                if (!slot.table.matches(index, id)) continue;
-                return .{ .conn = self.conn, .id = id, .slot = index };
+    pub fn StreamIterator(comptime readiness: Readiness) type {
+        return struct {
+            const Self = @This();
+
+            iter: ?*c.quiche_stream_iter,
+            slot: ?*connection.Slot,
+            conn: Handle,
+            seen: u16 = 0,
+
+            fn open(slot: *connection.Slot, conn: Handle) Self {
+                assert(slot.conn != null);
+                assert(slot.generation == conn.generation);
+                const iter = switch (readiness) {
+                    .readable => c.quiche_conn_readable(slot.conn.?),
+                    .writable => c.quiche_conn_writable(slot.conn.?),
+                };
+                return .{ .iter = iter, .slot = slot, .conn = conn };
             }
-            return null;
-        }
 
-        pub fn deinit(self: *StreamIterator) void {
-            if (self.iter) |iter| c.quiche_stream_iter_free(iter);
-            self.* = undefined;
-        }
-    };
+            fn empty(conn: Handle) Self {
+                return .{ .iter = null, .slot = null, .conn = conn };
+            }
 
-    pub const ReadableIterator = StreamIterator;
-    pub const WritableIterator = StreamIterator;
+            pub fn next(self: *Self) ?StreamHandle {
+                const iter = self.iter orelse return null;
+                const slot = self.slot orelse return null;
+                assert(self.seen <= limits.streams_per_connection);
+                var id: u64 = 0;
+                while (self.seen < limits.streams_per_connection) : (self.seen += 1) {
+                    if (!c.quiche_stream_iter_next(iter, &id)) return null;
+                    const index = slot.streamIndex(id) orelse continue;
+                    assert(index < limits.streams_per_connection);
+                    if (!slot.table.matches(index, id)) continue;
+                    self.seen += 1;
+                    return .{ .conn = self.conn, .id = id, .slot = index };
+                }
+                return null;
+            }
+
+            pub fn deinit(self: *Self) void {
+                if (self.iter) |iter| c.quiche_stream_iter_free(iter);
+                self.* = undefined;
+            }
+        };
+    }
+
+    pub const ReadableIterator = StreamIterator(.readable);
+    pub const WritableIterator = StreamIterator(.writable);
 
     pub fn readable(self: *Engine, conn: Handle) ReadableIterator {
-        const slot = self.readableSlot(conn) catch
-            return .{ .iter = null, .slot = null, .conn = conn };
+        const slot = self.readableSlot(conn) catch return ReadableIterator.empty(conn);
         assert(slot.conn != null);
         assert(slot.generation == conn.generation);
-        return .{ .iter = c.quiche_conn_readable(slot.conn.?), .slot = slot, .conn = conn };
+        return ReadableIterator.open(slot, conn);
     }
 
     pub fn writable(self: *Engine, conn: Handle) WritableIterator {
-        const slot = self.readableSlot(conn) catch
-            return .{ .iter = null, .slot = null, .conn = conn };
+        const slot = self.readableSlot(conn) catch return WritableIterator.empty(conn);
         assert(slot.conn != null);
         assert(slot.generation == conn.generation);
-        return .{ .iter = c.quiche_conn_writable(slot.conn.?), .slot = slot, .conn = conn };
+        return WritableIterator.open(slot, conn);
     }
 
     pub fn pollEvents(self: *Engine, events: []Event) usize {
@@ -661,35 +685,41 @@ pub const Engine = struct {
         entropy: *EntropyPool,
         out: []u8,
     ) ReceiveOutcome {
-        const header = binding.headerInfo(datagram) catch return self.drop(&self.counters.dropped_unroutable);
+        const header = binding.headerInfo(datagram) catch
+            return drop(&self.counters.dropped_unroutable);
         if (self.findRoute(&header.dcid)) |index| {
             self.feed(index, datagram, from);
             return .{ .accepted = self.toHandle(index) };
         }
         if (header.packet_type == .short) {
-            const index = self.slotForPeer(from) orelse return self.drop(&self.counters.dropped_unroutable);
+            const index = self.slotForPeer(from) orelse
+                return drop(&self.counters.dropped_unroutable);
             self.feed(index, datagram, from);
             return .{ .accepted = self.toHandle(index) };
         }
-        if (datagram.len < limits.client_initial_min) return self.drop(&self.counters.dropped_short_initial);
+        if (datagram.len < limits.client_initial_min) {
+            return drop(&self.counters.dropped_short_initial);
+        }
         if (header.packet_type == .version_negotiation or header.version == 0) {
-            return self.drop(&self.counters.dropped_unroutable);
+            return drop(&self.counters.dropped_unroutable);
         }
         if (!binding.versionSupported(header.version)) {
             return self.negotiateVersion(&header, out);
         }
-        if (header.packet_type != .initial) return self.drop(&self.counters.dropped_unroutable);
-        if (self.handshaking >= self.limits.handshaking_max) return self.drop(&self.counters.dropped_full);
+        if (header.packet_type != .initial) return drop(&self.counters.dropped_unroutable);
+        if (self.handshaking >= self.limits.handshaking_max) {
+            return drop(&self.counters.dropped_full);
+        }
         if (self.handshakingFromSource(from) >= self.limits.handshaking_per_source_max) {
-            return self.drop(&self.counters.dropped_source_limit);
+            return drop(&self.counters.dropped_source_limit);
         }
         if (self.limits.admit) |admit| {
             if (!admit(self.limits.admit_context, from)) {
-                return self.drop(&self.counters.dropped_rejected);
+                return drop(&self.counters.dropped_rejected);
             }
         }
-        const scid = entropy.take() orelse return self.drop(&self.counters.dropped_no_entropy);
-        const index = self.claimSlot() orelse return self.drop(&self.counters.dropped_full);
+        const scid = entropy.take() orelse return drop(&self.counters.dropped_no_entropy);
+        const index = self.claimSlot() orelse return drop(&self.counters.dropped_full);
 
         const slot = &self.slots[index];
         slot.open(self.tls_ctx, &self.config, .{
@@ -701,11 +731,21 @@ pub const Engine = struct {
             .now = now,
         }) catch {
             self.unclaimSlot(index);
-            return self.drop(&self.counters.recv_errors);
+            return drop(&self.counters.recv_errors);
         };
-        self.addRoute(&slot.scid, index);
-        self.addRoute(&header.dcid, index);
+        self.addRoute(&slot.scid, index) catch {
+            slot.release();
+            self.unclaimSlot(index);
+            return drop(&self.counters.dropped_full);
+        };
+        self.addRoute(&header.dcid, index) catch {
+            self.removeRoutesFor(index);
+            slot.release();
+            self.unclaimSlot(index);
+            return drop(&self.counters.dropped_full);
+        };
         self.handshaking += 1;
+        assert(self.handshaking <= self.limits.handshaking_max);
         self.feed(index, datagram, from);
         return .{ .accepted = self.toHandle(index) };
     }
@@ -722,16 +762,19 @@ pub const Engine = struct {
             header.dcid.len,
             out.ptr,
             out.len,
-        )) catch return self.drop(&self.counters.dropped_unroutable);
-        const length = written orelse return self.drop(&self.counters.dropped_unroutable);
+        )) catch return drop(&self.counters.dropped_unroutable);
+        const length = written orelse return drop(&self.counters.dropped_unroutable);
         assert(length <= out.len);
         self.counters.version_negotiations += 1;
         return .{ .version_negotiation = out[0..length] };
     }
 
     fn tick(self: *Engine, now: Now) void {
+        assert(self.active_len <= self.active.len);
+        assert(self.handshaking <= self.limits.handshaking_max);
         for (self.active[0..self.active_len]) |index| {
             const slot = &self.slots[index];
+            assert(slot.state != .free);
             if (slot.state == .closed) continue;
             const expired = if (slot.timeoutMs()) |remaining| remaining == 0 else false;
             slot.onTimeout();
@@ -763,9 +806,11 @@ pub const Engine = struct {
     }
 
     fn nextTimeoutMs(self: *const Engine) ?u64 {
+        assert(self.active_len <= self.active.len);
         var earliest: ?u64 = null;
         for (self.active[0..self.active_len]) |index| {
             const slot = &self.slots[index];
+            assert(slot.state != .free);
             if (slot.state == .closed) continue;
             const timeout = slot.timeoutMs() orelse continue;
             if (earliest == null or timeout < earliest.?) earliest = timeout;
@@ -879,13 +924,16 @@ pub const Engine = struct {
         return .{ .index = index, .generation = self.slots[index].generation };
     }
 
-    fn drop(_: *Engine, counter: *u64) ReceiveOutcome {
+    fn drop(counter: *u64) ReceiveOutcome {
         counter.* += 1;
         return .dropped;
     }
 
     fn feed(self: *Engine, index: u16, datagram: []u8, from: *const Address) void {
+        assert(index < self.slots.len);
+        assert(datagram.len > 0);
         const slot = &self.slots[index];
+        assert(slot.state != .free);
         if (slot.state == .closed) return;
         const was_established = slot.state == .established;
         const source = binding.SockAddr.fromAddress(from.*);
@@ -898,7 +946,8 @@ pub const Engine = struct {
             received = false;
         }
         self.refresh(index);
-        if (received and was_established and slot.state == .established and slot.pending_close == null) {
+        const still_live = slot.state == .established and slot.pending_close == null;
+        if (received and was_established and still_live) {
             slot.discoverPeerStreams();
         }
         self.observePath(index);
@@ -944,7 +993,9 @@ pub const Engine = struct {
             } else {
                 slot.close(.tls_failed, types.app_error_normal);
             }
-            if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
+            if (slot.state == .established and slot.pending_close == null) {
+                slot.discoverPeerStreams();
+            }
         }
         if (slot.state != .closed and slot.isFinished()) {
             self.markClosed(index, slot.closeReason());
@@ -954,7 +1005,9 @@ pub const Engine = struct {
     fn markClosed(self: *Engine, index: u16, reason: CloseReason) void {
         const slot = &self.slots[index];
         assert(slot.state == .handshaking or slot.state == .established);
-        if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
+        if (slot.state == .established and slot.pending_close == null) {
+            slot.discoverPeerStreams();
+        }
         if (slot.state == .handshaking) {
             if (slot.direction == .inbound) {
                 self.handshaking -= 1;
@@ -975,9 +1028,11 @@ pub const Engine = struct {
     }
 
     fn slotForPeer(self: *const Engine, from: *const Address) ?u16 {
+        assert(self.active_len <= self.active.len);
         var found: ?u16 = null;
         for (self.active[0..self.active_len]) |index| {
             const slot = &self.slots[index];
+            assert(slot.state != .free);
             if (slot.state == .closed or !slot.peer.eql(from.*)) continue;
             if (found != null) return null;
             found = index;
@@ -986,24 +1041,31 @@ pub const Engine = struct {
     }
 
     fn handshakingFromSource(self: *const Engine, from: *const Address) u16 {
+        assert(self.active_len <= self.active.len);
         var count: u16 = 0;
         for (self.active[0..self.active_len]) |index| {
             const slot = &self.slots[index];
             if (slot.state != .handshaking or slot.direction != .inbound) continue;
             if (slot.peer.sameHost(from.*)) count += 1;
         }
+        assert(count <= self.handshaking);
         return count;
     }
 
     fn claimSlot(self: *Engine) ?u16 {
+        assert(self.active.len == self.slots.len);
+        assert(self.active_len <= self.active.len);
         if (self.active_len == self.active.len) return null;
         const index = self.active[self.active_len];
+        assert(self.slots[index].state == .free);
         self.active_len += 1;
         self.activity[index] = false;
         return index;
     }
 
     fn unclaimSlot(self: *Engine, index: u16) void {
+        assert(index < self.slots.len);
+        assert(self.active_len > 0);
         var cursor: u16 = 0;
         while (cursor < self.active_len) : (cursor += 1) {
             if (self.active[cursor] != index) continue;
@@ -1012,13 +1074,17 @@ pub const Engine = struct {
             self.active[self.active_len] = index;
             return;
         }
+        unreachable;
     }
 
     fn releaseSlot(self: *Engine, index: u16) void {
+        assert(index < self.slots.len);
         const slot = &self.slots[index];
+        assert(slot.state != .free);
         if (slot.peer_id) |id| self.peerIndexRemove(peerKey(&id), index);
         slot.release();
         self.unclaimSlot(index);
+        assert(slot.state == .free);
     }
 
     fn peerBucket(self: *const Engine, key: u64) usize {
@@ -1084,25 +1150,22 @@ pub const Engine = struct {
     }
 
     fn findRoute(self: *const Engine, cid: *const binding.Cid) ?u16 {
-        for (self.routes) |*route| {
-            if (route.active and route.cid.eql(cid)) return route.index;
-        }
-        return null;
+        const index = self.routes.find(cid) orelse return null;
+        assert(index < self.slots.len);
+        assert(self.slots[index].state != .free);
+        return index;
     }
 
-    fn addRoute(self: *Engine, cid: *const binding.Cid, index: u16) void {
-        for (self.routes) |*route| {
-            if (route.active) continue;
-            route.* = .{ .cid = cid.*, .index = index, .active = true };
-            return;
-        }
-        unreachable;
+    fn addRoute(self: *Engine, cid: *const binding.Cid, index: u16) route_table.Error!void {
+        assert(index < self.slots.len);
+        assert(self.routes.count <= route_table.routes_per_slot * self.slots.len);
+        try self.routes.insert(cid, index);
     }
 
     fn removeRoutesFor(self: *Engine, index: u16) void {
-        for (self.routes) |*route| {
-            if (route.active and route.index == index) route.active = false;
-        }
+        assert(index < self.slots.len);
+        self.routes.removeAll(index);
+        assert(self.routes.count <= route_table.routes_per_slot * self.slots.len);
     }
 };
 

@@ -42,6 +42,7 @@ pub const Pair = struct {
             &self.client_ctx,
             client_limits,
             &client_address,
+            1,
         );
         errdefer self.client.deinit();
         self.server = try Engine.init(
@@ -49,6 +50,7 @@ pub const Pair = struct {
             &self.server_ctx,
             server_limits,
             &server_address,
+            2,
         );
         self.now = .{ .mono_ms = 1_000, .unix_s = now_unix };
         self.entropy = 0;
