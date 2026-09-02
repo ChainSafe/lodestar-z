@@ -679,6 +679,28 @@ test "engine survives an undecryptable packet routed to a live slot" {
     try std.testing.expect(pair.client.peerId(handles.client) != null);
 }
 
+test "engine drops version negotiation packets instead of reflecting them" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+
+    var packet = [_]u8{0} ** constants.client_initial_min;
+    packet[0] = 0xc0;
+    packet[5] = 0x08;
+    @memset(packet[6..14], 0xaa);
+    packet[14] = 0x05;
+    @memset(packet[15..20], 0xbb);
+
+    var response: [constants.datagram_size_max]u8 = undefined;
+    const before = pair.server.counters.dropped_unroutable;
+    try std.testing.expectEqual(
+        engine_mod.ReceiveOutcome.dropped,
+        pair.server.receive(&packet, client_address, server_address, pair.now, pair.nextEntropy(), &response),
+    );
+    try std.testing.expectEqual(before + 1, pair.server.counters.dropped_unroutable);
+    try std.testing.expectEqual(@as(u64, 0), pair.server.counters.version_negotiations);
+}
+
 test "engine answers unsupported versions and drops unroutable packets" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
