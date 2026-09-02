@@ -301,7 +301,8 @@ pub fn maskedChecksum(data: []const u8) u32 {
 
 pub fn frameCount(ssz_len: usize) usize {
     assert(ssz_len <= constants.MAX_PAYLOAD_SIZE);
-    const frames = std.math.divCeil(usize, ssz_len, constants.frame_uncompressed_max) catch unreachable;
+    const frames = std.math.divCeil(usize, ssz_len, constants.frame_uncompressed_max) catch
+        unreachable;
     return @max(frames, 1);
 }
 
