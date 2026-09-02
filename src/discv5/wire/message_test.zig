@@ -1,8 +1,8 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const message = @import("message.zig");
-const protocol = @import("../protocol.zig");
 const rlp = @import("rlp.zig");
+const types = @import("../types.zig");
 
 test "request IDs preserve length and reject more than eight bytes" {
     const short = try message.RequestId.init(&.{ 0x01, 0x00 });
@@ -92,7 +92,7 @@ test "FINDNODE validates every distance before publishing scratch" {
 
 test "NODES enforces the bounded ENR count" {
     const request_id = try message.RequestId.init(&.{});
-    const enrs = [_][]const u8{&.{0x80}} ** (protocol.findnode_result_max + 1);
+    const enrs = [_][]const u8{&.{0x80}} ** (types.findnode_result_max + 1);
     const nodes = message.Message{ .nodes = .{
         .request_id = request_id,
         .total = 1,
@@ -132,7 +132,7 @@ test "FINDNODE decoder bounds large duplicate lists by distinct values" {
 
     const outbound = message.Message{ .find_node = .{
         .request_id = try message.RequestId.init(&.{0x01}),
-        .distances = &([_]u16{0} ** (protocol.distance_count + 1)),
+        .distances = &([_]u16{0} ** (types.distance_count + 1)),
     } };
     try std.testing.expectError(message.Error.InvalidMessage, outbound.encode(&encoded));
 }

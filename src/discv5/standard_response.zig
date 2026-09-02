@@ -1,6 +1,5 @@
 const std = @import("std");
 const enr = @import("identity/enr.zig");
-const protocol = @import("protocol.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
@@ -12,12 +11,12 @@ const Nodes = struct {
     packet_count: u8,
 };
 
-pub const RawRecords = [protocol.findnode_result_max][]const u8;
+pub const RawRecords = [types.findnode_result_max][]const u8;
 
 pub const Plan = struct {
     peer: types.Endpoint = undefined,
-    records: [protocol.findnode_result_max]enr.Record = undefined,
-    boundaries: [protocol.findnode_response_packets_max + 1]u8 = undefined,
+    records: [types.findnode_result_max]enr.Record = undefined,
+    boundaries: [types.findnode_response_packets_max + 1]u8 = undefined,
     sent: u8 = 0,
     body: union(enum) {
         none,
@@ -90,7 +89,7 @@ pub fn prepareNodes(
     request_id: message.RequestId,
     record_count: usize,
 ) Error!void {
-    if (record_count > protocol.findnode_result_max) return Error.InvalidMessage;
+    if (record_count > types.findnode_result_max) return Error.InvalidMessage;
     plan.peer = peer;
     plan.sent = 0;
     if (record_count == 0) {
@@ -106,7 +105,7 @@ pub fn prepareNodes(
     var record_start: usize = 0;
     var encoded: [constants.ordinary_plaintext_size_max]u8 = undefined;
     while (record_start < record_count) {
-        std.debug.assert(packet_count < protocol.findnode_response_packets_max);
+        std.debug.assert(packet_count < types.findnode_response_packets_max);
         plan.boundaries[packet_count] = @intCast(record_start);
         var record_end = record_start;
         while (record_end < record_count) {
@@ -114,7 +113,7 @@ pub fn prepareNodes(
                 .nodes = .{
                     .request_id = request_id,
                     // Counts 1 through 16 have the same one-byte RLP width.
-                    .total = protocol.findnode_response_packets_max,
+                    .total = types.findnode_response_packets_max,
                     .enrs = raw[record_start .. record_end + 1],
                 },
             };
@@ -139,7 +138,7 @@ fn sliceRecords(records: []const enr.Record, raw: *RawRecords) []const []const u
 
 fn setNodes(plan: *Plan, request_id: message.RequestId, packet_count: u8) void {
     std.debug.assert(packet_count > 0);
-    std.debug.assert(packet_count <= protocol.findnode_response_packets_max);
+    std.debug.assert(packet_count <= types.findnode_response_packets_max);
     plan.body = .{ .nodes = .{
         .request_id = request_id,
         .packet_count = packet_count,

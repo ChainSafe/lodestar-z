@@ -9,6 +9,12 @@ const engine_session = @import("session.zig");
 const test_support = @import("test_support.zig");
 const types = @import("types.zig");
 
+const engineConfig = test_support.engineConfig;
+const keyPair = test_support.keyPair;
+const loopback = test_support.loopback;
+const receiveArgs = test_support.receiveArgs;
+const sealEntropy = test_support.sealEntropy;
+
 const TestEngine = engine.Engine;
 
 test "paired engines recover a session and complete one call without queues" {
@@ -41,15 +47,15 @@ const Pair = struct {
     };
 
     fn init(self: *Pair) !void {
-        self.address_a = address(1, 9_001);
-        self.address_b = address(2, 9_002);
-        const key_a = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-        const key_b = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
-        self.record_a = try test_support.buildRecord(&key_a, 1, self.address_a);
-        self.record_b = try test_support.buildRecord(&key_b, 1, self.address_b);
-        try self.node_a.initWithConfig(std.testing.allocator, key_a, self.record_a, testConfig());
+        self.address_a = loopback(1, 9_001);
+        self.address_b = loopback(2, 9_002);
+        const key_a = try keyPair(0x11);
+        const key_b = try keyPair(0x22);
+        self.record_a = try enr.Record.create(&key_a, 1, self.address_a);
+        self.record_b = try enr.Record.create(&key_b, 1, self.address_b);
+        try self.node_a.initWithConfig(std.testing.allocator, key_a, self.record_a, engineConfig());
         errdefer self.node_a.deinit();
-        try self.node_b.initWithConfig(std.testing.allocator, key_b, self.record_b, testConfig());
+        try self.node_b.initWithConfig(std.testing.allocator, key_b, self.record_b, engineConfig());
         self.scratch_a = .{};
         self.scratch_b = .{};
     }
@@ -68,7 +74,7 @@ const Pair = struct {
             &self.record_b,
             &ping_message,
             1,
-            &startEntropy(0x08),
+            &sealEntropy(0x08),
         ));
         try std.testing.expectEqual(@as(usize, 0), self.node_a.calls.count());
         const started = try self.node_a.startCall(
@@ -77,7 +83,7 @@ const Pair = struct {
             &self.record_b,
             &ping_message,
             1,
-            &startEntropy(0x10),
+            &sealEntropy(0x10),
         );
         try std.testing.expectError(calls.Error.PeerBusy, self.node_a.startCall(
             &self.a_to_b,
@@ -85,7 +91,7 @@ const Pair = struct {
             &self.record_b,
             &ping_message,
             1,
-            &startEntropy(0x20),
+            &sealEntropy(0x20),
         ));
         const challenge = try self.node_b.receive(
             &self.b_to_a,
@@ -126,7 +132,10 @@ const Pair = struct {
             receiveArgs(4, 0x50),
             &self.scratch_b,
         );
-        try std.testing.expectEqual(types.RejectReason.invalid_handshake, corrupted_outcome.rejected);
+        try std.testing.expectEqual(
+            types.RejectReason.invalid_handshake,
+            corrupted_outcome.rejected,
+        );
         try std.testing.expectEqual(@as(usize, 0), self.node_b.channel.sessions.sessionCount());
         try std.testing.expectEqual(@as(usize, 1), self.node_b.channel.sessions.challengeCount());
         const authenticated = try self.node_b.receive(
@@ -156,18 +165,21 @@ const Pair = struct {
         var response: engine.StandardResponse = .{};
         try self.node_b.prepareStandardResponse(request, &response);
         var too_small: [1]u8 = undefined;
-        try std.testing.expectError(packet.Error.BufferTooSmall, self.node_b.sendNextStandardResponse(
-            &too_small,
-            &response,
-            6,
-            &startEntropy(0x70),
-        ));
+        try std.testing.expectError(
+            packet.Error.BufferTooSmall,
+            self.node_b.sendNextStandardResponse(
+                &too_small,
+                &response,
+                6,
+                &sealEntropy(0x70),
+            ),
+        );
         try std.testing.expect(!response.complete());
         const length = (try self.node_b.sendNextStandardResponse(
             &self.b_to_a,
             &response,
             6,
-            &startEntropy(0x70),
+            &sealEntropy(0x70),
         )).?;
         const response_packet = try packet.decode(
             self.b_to_a[0..length],
@@ -184,7 +196,7 @@ const Pair = struct {
             &self.b_to_a,
             &response,
             6,
-            &startEntropy(0x70),
+            &sealEntropy(0x70),
         )) == null);
         const completed = try self.node_a.receive(
             &self.a_to_b,
@@ -195,7 +207,10 @@ const Pair = struct {
         );
         try std.testing.expect(completed.accepted.event == .response);
         try std.testing.expect(completed.accepted.event.response.matched.terminal);
-        try std.testing.expectEqual(started.handle, completed.accepted.event.response.matched.handle);
+        try std.testing.expectEqual(
+            started.handle,
+            completed.accepted.event.response.matched.handle,
+        );
         const pong = completed.accepted.event.response.matched.response.pong;
         try std.testing.expectEqual(self.record_b.sequence, pong.enr_sequence);
         try std.testing.expectEqual(self.address_a.ip4.octets, pong.recipient_ip.ip4);
@@ -220,7 +235,7 @@ const Pair = struct {
             &self.record_b,
             &ping_message,
             16,
-            &startEntropy(0x90),
+            &sealEntropy(0x90),
         );
         const direct_packet = try packet.decode(
             self.a_to_b[0..started.packet_length],
@@ -249,7 +264,10 @@ const Pair = struct {
     }
 
     fn filterFindNodeRecords(self: *Pair) !void {
-        const requested_distance = types.logDistance(&self.record_b.node_id, &self.record_a.node_id);
+        const requested_distance = types.logDistance(
+            &self.record_b.node_id,
+            &self.record_a.node_id,
+        );
         const request = message.Message{ .find_node = .{
             .request_id = try message.RequestId.init(&.{0x03}),
             .distances = &.{requested_distance},
@@ -260,7 +278,7 @@ const Pair = struct {
             &self.record_b,
             &request,
             12,
-            &startEntropy(0x81),
+            &sealEntropy(0x81),
         );
         const received = try self.node_b.receive(
             &self.b_to_a,
@@ -282,7 +300,7 @@ const Pair = struct {
             self.peerA(),
             &response,
             14,
-            &startEntropy(0x83),
+            &sealEntropy(0x83),
         );
         const completed = try self.node_a.receive(
             &self.a_to_b,
@@ -292,7 +310,10 @@ const Pair = struct {
             &self.scratch_a,
         );
         try std.testing.expect(completed.accepted.event == .response);
-        try std.testing.expectEqual(@as(usize, 1), completed.accepted.event.response.node_records.len);
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            completed.accepted.event.response.node_records.len,
+        );
         try std.testing.expectEqual(
             self.record_a.node_id,
             completed.accepted.event.response.node_records[0].node_id,
@@ -314,7 +335,7 @@ const Pair = struct {
             &self.record_a,
             &request,
             8,
-            &startEntropy(0xb0),
+            &sealEntropy(0xb0),
         );
         const received = try self.node_a.receive(
             &self.a_to_b,
@@ -333,7 +354,7 @@ const Pair = struct {
             &self.a_to_b,
             &response,
             10,
-            &startEntropy(0xb2),
+            &sealEntropy(0xb2),
         )).?;
         try std.testing.expect(response.complete());
         const completed = try self.node_b.receive(
@@ -344,8 +365,14 @@ const Pair = struct {
             &self.scratch_b,
         );
         try std.testing.expect(completed.accepted.event == .response);
-        try std.testing.expectEqual(started.handle, completed.accepted.event.response.matched.handle);
-        try std.testing.expectEqual(@as(usize, 1), completed.accepted.event.response.node_records.len);
+        try std.testing.expectEqual(
+            started.handle,
+            completed.accepted.event.response.matched.handle,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            completed.accepted.event.response.node_records.len,
+        );
         try std.testing.expectEqual(
             self.record_a.node_id,
             completed.accepted.event.response.node_records[0].node_id,
@@ -369,9 +396,9 @@ const Pair = struct {
 };
 
 test "engine rejects a local record owned by another key" {
-    const key_a = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-    const key_b = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
-    const record_b = try test_support.buildRecord(&key_b, 1, address(2, 9_002));
+    const key_a = try keyPair(0x11);
+    const key_b = try keyPair(0x22);
+    const record_b = try enr.Record.create(&key_b, 1, loopback(2, 9_002));
     var invalid: TestEngine = undefined;
     try std.testing.expectError(
         engine.Error.InvalidLocalRecord,
@@ -380,16 +407,16 @@ test "engine rejects a local record owned by another key" {
 }
 
 test "cold oversized requests fail before transmission" {
-    const key = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-    const local_record = try test_support.buildRecord(&key, 1, address(1, 9_001));
+    const key = try keyPair(0x11);
+    const local_record = try enr.Record.create(&key, 1, loopback(1, 9_001));
     var node: TestEngine = undefined;
-    try node.initWithConfig(std.testing.allocator, key, local_record, testConfig());
+    try node.initWithConfig(std.testing.allocator, key, local_record, engineConfig());
     defer node.deinit();
-    const remote_key = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
-    const remote_record = try test_support.buildRecord(&remote_key, 1, address(2, 9_002));
+    const remote_key = try keyPair(0x22);
+    const remote_record = try enr.Record.create(&remote_key, 1, loopback(2, 9_002));
     const peer = types.Endpoint{
         .node_id = remote_record.node_id,
-        .address = address(2, 9_002),
+        .address = loopback(2, 9_002),
     };
     const payload = [_]u8{0x55} ** 1_100;
     const request = message.Message{ .talk_request = .{
@@ -405,7 +432,7 @@ test "cold oversized requests fail before transmission" {
         &remote_record,
         &request,
         1,
-        &startEntropy(0x10),
+        &sealEntropy(0x10),
     ));
     try std.testing.expectEqualSlices(u8, &before, &output);
     try std.testing.expectEqual(@as(usize, 0), node.calls.count());
@@ -422,60 +449,19 @@ test "cold oversized requests fail before transmission" {
         &remote_record,
         &request,
         3,
-        &startEntropy(0x20),
+        &sealEntropy(0x20),
     );
     try std.testing.expect(started.packet_length > 1_100);
 }
 
 test "engine configuration rejects zero retention windows" {
-    const key = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-    const local_record = try test_support.buildRecord(&key, 1, address(1, 9_001));
+    const key = try keyPair(0x11);
+    const local_record = try enr.Record.create(&key, 1, loopback(1, 9_001));
     var node: TestEngine = undefined;
-    var config = testConfig();
+    var config = engineConfig();
     config.challenge_timeout_ms = 0;
     try std.testing.expectError(
         engine.Error.InvalidTimeout,
         node.initWithConfig(std.testing.allocator, key, local_record, config),
     );
-}
-
-fn startEntropy(seed: u8) engine.StartEntropy {
-    return .{
-        .masking_iv = [_]u8{seed} ** 16,
-        .nonce = [_]u8{seed +% 1} ** 12,
-        .nonce_tail = [_]u8{seed +% 2} ** 8,
-        .sessionless_key = [_]u8{seed +% 3} ** 16,
-    };
-}
-
-fn receiveArgs(now_ms: u64, seed: u8) engine.ReceiveArgs {
-    return .{
-        .now_ms = now_ms,
-        .entropy = .{
-            .challenge = .{
-                .masking_iv = [_]u8{seed} ** 16,
-                .id_nonce = [_]u8{seed +% 1} ** 16,
-            },
-            .handshake = .{
-                .masking_iv = [_]u8{seed +% 2} ** 16,
-                .nonce_tail = [_]u8{seed +% 3} ** 8,
-                .ephemeral_secret = [_]u8{seed +% 4} ** 32,
-            },
-        },
-    };
-}
-
-fn testConfig() engine.Config {
-    return .{
-        .session_capacity = 4,
-        .challenge_capacity = 4,
-        .call_capacity = 4,
-        .request_timeout_ms = 100,
-        .challenge_timeout_ms = 100,
-        .session_idle_timeout_ms = 1_000,
-    };
-}
-
-fn address(id: u8, port: u16) types.Address {
-    return .{ .ip4 = .{ .octets = .{ 127, 0, 0, id }, .port = port } };
 }

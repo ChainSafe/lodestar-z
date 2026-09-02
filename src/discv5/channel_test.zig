@@ -7,6 +7,13 @@ const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const packet = @import("wire/packet.zig");
 
+const challengeEntropy = test_support.challengeEntropy;
+const channelConfig = test_support.channelConfig;
+const handshakeEntropy = test_support.handshakeEntropy;
+const keyPair = test_support.keyPair;
+const loopback = test_support.loopback;
+const sealEntropy = test_support.sealEntropy;
+
 test "cold packet is challenged and the handshake delivers the sender record" {
     var pair: Pair = undefined;
     try pair.init();
@@ -78,7 +85,7 @@ test "handshake without a record needs an identity captured at challenge time" {
 
     const who = try pair.challenge("ping", null, 1);
     const entropy = handshakeEntropy(0x30);
-    const handshake = try pair.node_a.handshake(&pair.a_to_b, .{
+    const handshake = try pair.node_a.answerChallenge(&pair.a_to_b, .{
         .peer = pair.peerB(),
         .remote_public_key = &pair.record_b.public_key,
         .plaintext = "ping",
@@ -163,18 +170,21 @@ test "handshake rejects a request that cannot fit beside the local record" {
     const plaintext = [_]u8{0x55} ** 1_100;
     const who = try pair.challenge(&plaintext, null, 1);
     const entropy = handshakeEntropy(0x30);
-    try std.testing.expectError(channel.Error.RequestTooLargeForHandshake, pair.node_a.handshake(
-        &pair.a_to_b,
-        .{
-            .peer = pair.peerB(),
-            .remote_public_key = &pair.record_b.public_key,
-            .plaintext = &plaintext,
-            .challenge_data = &who.challenge_data,
-            .enr_sequence = who.enr_sequence,
-            .entropy = &entropy,
-            .now_ms = 1,
-        },
-    ));
+    try std.testing.expectError(
+        channel.Error.RequestTooLargeForHandshake,
+        pair.node_a.answerChallenge(
+            &pair.a_to_b,
+            .{
+                .peer = pair.peerB(),
+                .remote_public_key = &pair.record_b.public_key,
+                .plaintext = &plaintext,
+                .challenge_data = &who.challenge_data,
+                .enr_sequence = who.enr_sequence,
+                .entropy = &entropy,
+                .now_ms = 1,
+            },
+        ),
+    );
     try std.testing.expect(!pair.node_a.hasSession(pair.peerB()));
 }
 
@@ -197,28 +207,28 @@ test "expire removes stale challenges and idle sessions" {
 
     _ = try pair.challenge("ping", null, 1);
     try std.testing.expectEqual(@as(usize, 1), pair.node_b.sessions.challengeCount());
-    const challenges = pair.node_b.expire(1 + testConfig().challenge_timeout_ms);
+    const challenges = pair.node_b.expire(1 + channelConfig().challenge_timeout_ms);
     try std.testing.expectEqual(@as(usize, 1), challenges.challenges);
     try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.challengeCount());
 
     const length = try pair.challengeAndHandshake("ping", null, 200);
     _ = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 200, &pair.scratch);
     try std.testing.expect(pair.node_b.hasSession(pair.peerA()));
-    const sessions = pair.node_b.expire(200 + testConfig().session_idle_timeout_ms);
+    const sessions = pair.node_b.expire(200 + channelConfig().session_idle_timeout_ms);
     try std.testing.expectEqual(@as(usize, 1), sessions.sessions);
     try std.testing.expect(!pair.node_b.hasSession(pair.peerA()));
 }
 
 test "channel rejects a foreign local record and zero timeouts" {
-    const key_a = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-    const key_b = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
-    const record_b = try test_support.buildRecord(&key_b, 1, address(2, 9_002));
+    const key_a = try keyPair(0x11);
+    const key_b = try keyPair(0x22);
+    const record_b = try enr.Record.create(&key_b, 1, loopback(2, 9_002));
     var invalid: channel.Channel = undefined;
     try std.testing.expectError(
         channel.Error.InvalidLocalRecord,
-        invalid.init(std.testing.allocator, key_a, record_b, testConfig()),
+        invalid.init(std.testing.allocator, key_a, record_b, channelConfig()),
     );
-    var config = testConfig();
+    var config = channelConfig();
     config.session_idle_timeout_ms = 0;
     try std.testing.expectError(
         channel.Error.InvalidTimeout,
@@ -238,15 +248,15 @@ const Pair = struct {
     b_to_a: [constants.packet_size_max]u8,
 
     fn init(self: *Pair) !void {
-        self.address_a = address(1, 9_001);
-        self.address_b = address(2, 9_002);
-        const key_a = try crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
-        const key_b = try crypto.keyPairFromSecret(&([_]u8{0x22} ** 32));
-        self.record_a = try test_support.buildRecord(&key_a, 1, self.address_a);
-        self.record_b = try test_support.buildRecord(&key_b, 1, self.address_b);
-        try self.node_a.init(std.testing.allocator, key_a, self.record_a, testConfig());
+        self.address_a = loopback(1, 9_001);
+        self.address_b = loopback(2, 9_002);
+        const key_a = try keyPair(0x11);
+        const key_b = try keyPair(0x22);
+        self.record_a = try enr.Record.create(&key_a, 1, self.address_a);
+        self.record_b = try enr.Record.create(&key_b, 1, self.address_b);
+        try self.node_a.init(std.testing.allocator, key_a, self.record_a, channelConfig());
         errdefer self.node_a.deinit();
-        try self.node_b.init(std.testing.allocator, key_b, self.record_b, testConfig());
+        try self.node_b.init(std.testing.allocator, key_b, self.record_b, channelConfig());
         self.scratch = .{};
     }
 
@@ -320,7 +330,7 @@ const Pair = struct {
     ) !u16 {
         const who = try self.challenge(plaintext, known, now_ms);
         const entropy = handshakeEntropy(0x30);
-        const handshake = try self.node_a.handshake(&self.a_to_b, .{
+        const handshake = try self.node_a.answerChallenge(&self.a_to_b, .{
             .peer = self.peerB(),
             .remote_public_key = &self.record_b.public_key,
             .plaintext = plaintext,
@@ -333,40 +343,3 @@ const Pair = struct {
         return handshake.packet_length;
     }
 };
-
-fn testConfig() channel.Config {
-    return .{
-        .session_capacity = 4,
-        .challenge_capacity = 4,
-        .challenge_timeout_ms = 100,
-        .session_idle_timeout_ms = 1_000,
-    };
-}
-
-fn sealEntropy(seed: u8) channel.SealEntropy {
-    return .{
-        .masking_iv = [_]u8{seed} ** 16,
-        .nonce = [_]u8{seed +% 1} ** 12,
-        .nonce_tail = [_]u8{seed +% 2} ** 8,
-        .sessionless_key = [_]u8{seed +% 3} ** 16,
-    };
-}
-
-fn challengeEntropy(seed: u8) channel.ChallengeEntropy {
-    return .{
-        .masking_iv = [_]u8{seed} ** 16,
-        .id_nonce = [_]u8{seed +% 1} ** 16,
-    };
-}
-
-fn handshakeEntropy(seed: u8) channel.HandshakeEntropy {
-    return .{
-        .masking_iv = [_]u8{seed} ** 16,
-        .nonce_tail = [_]u8{seed +% 1} ** 8,
-        .ephemeral_secret = [_]u8{seed +% 2} ** 32,
-    };
-}
-
-fn address(id: u8, port: u16) types.Address {
-    return .{ .ip4 = .{ .octets = .{ 127, 0, 0, id }, .port = port } };
-}

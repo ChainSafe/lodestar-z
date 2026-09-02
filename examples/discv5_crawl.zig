@@ -104,8 +104,8 @@ pub fn main(init: std.process.Init) !void {
         return error.ClockOutOfRange;
 
     const bind_address = try net.IpAddress.parseLiteral(args[1]);
-    const advertised_address = discv5.runtime.fromNetwork(try net.IpAddress.parseLiteral(args[2]));
-    var udp = try discv5.runtime.Udp.bind(io, bind_address);
+    const advertised_address = discv5.udp.fromNetwork(try net.IpAddress.parseLiteral(args[2]));
+    var udp = try discv5.udp.Adapter.bind(io, bind_address);
     defer udp.close(io);
     const bound_address = udp.localAddress();
     if (std.meta.activeTag(bound_address) != std.meta.activeTag(advertised_address))

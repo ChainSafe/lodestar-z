@@ -1,17 +1,16 @@
 const std = @import("std");
-const calls_mod = @import("calls.zig");
-const channel_mod = @import("channel.zig");
+const calls = @import("calls.zig");
+const channel = @import("channel.zig");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
-const protocol = @import("protocol.zig");
-const routing_mod = @import("routing.zig");
+const routing = @import("routing.zig");
 const standard_response = @import("standard_response.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 
-pub const Error = calls_mod.Error || channel_mod.Error || routing_mod.Error ||
-    routing_mod.InitError || standard_response.Error || error{
+pub const Error = calls.Error || channel.Error || routing.Error ||
+    routing.InitError || standard_response.Error || error{
     ApplicationResponseRequired,
     ClockOverflow,
     MissingCall,
@@ -20,15 +19,15 @@ pub const Error = calls_mod.Error || channel_mod.Error || routing_mod.Error ||
 };
 
 pub const StandardResponse = standard_response.Plan;
-pub const StartEntropy = channel_mod.SealEntropy;
+pub const StartEntropy = channel.SealEntropy;
 
 pub const ReceiveEntropy = struct {
-    challenge: channel_mod.ChallengeEntropy,
-    handshake: channel_mod.HandshakeEntropy,
+    challenge: channel.ChallengeEntropy,
+    handshake: channel.HandshakeEntropy,
 };
 
 pub const StartResult = struct {
-    handle: calls_mod.Handle,
+    handle: calls.Handle,
     packet_length: u16,
 };
 
@@ -58,7 +57,7 @@ pub const AuthenticatedRequest = struct {
 
 pub const AuthenticatedResponse = struct {
     peer: types.Endpoint,
-    matched: calls_mod.Matched,
+    matched: calls.Matched,
     record: ?enr.Record,
     node_records: []const enr.Record,
 };
@@ -81,10 +80,10 @@ pub const Outcome = union(enum) {
 };
 
 pub const Scratch = struct {
-    channel: channel_mod.Scratch = .{},
+    channel: channel.Scratch = .{},
     message_decode: message.DecodeScratch = .{},
-    node_records: [protocol.findnode_result_max]enr.Record = undefined,
-    node_ids: [protocol.findnode_result_max]types.NodeId = undefined,
+    node_records: [types.findnode_result_max]enr.Record = undefined,
+    node_ids: [types.findnode_result_max]types.NodeId = undefined,
 };
 
 pub const ReceiveArgs = struct {
@@ -105,9 +104,9 @@ pub const Engine = struct {
     const Self = @This();
 
     config: Config,
-    channel: channel_mod.Channel,
-    calls: calls_mod.Table,
-    routing: routing_mod.Table,
+    channel: channel.Channel,
+    calls: calls.Table,
+    routing: routing.Table,
 
     pub fn init(
         self: *Self,
@@ -208,7 +207,7 @@ pub const Engine = struct {
         request: *const message.Message,
         now_ms: u64,
         entropy: *const StartEntropy,
-        owner: calls_mod.Owner,
+        owner: calls.Owner,
     ) Error!StartResult {
         const deadline_ms = try deadline(now_ms, self.config.request_timeout_ms);
         const handle = self.calls.begin(
@@ -219,7 +218,7 @@ pub const Engine = struct {
             try self.channel.requestCapacity(peer),
             owner,
         ) catch |err| switch (err) {
-            calls_mod.Error.RequestTooLarge => return if (self.channel.hasSession(peer))
+            calls.Error.RequestTooLarge => return if (self.channel.hasSession(peer))
                 err
             else
                 Error.SessionRequired,
@@ -347,7 +346,7 @@ pub const Engine = struct {
     pub fn tick(
         self: *Self,
         now_ms: u64,
-        expired_calls: []calls_mod.Expired,
+        expired_calls: []calls.Expired,
     ) TickResult {
         const expired_count = self.calls.expire(now_ms, expired_calls);
         var caller_count: usize = 0;
@@ -363,7 +362,7 @@ pub const Engine = struct {
                     false,
                     now_ms,
                 ) catch |err| switch (err) {
-                    routing_mod.Error.NoPendingRevalidation => {},
+                    routing.Error.NoPendingRevalidation => {},
                     else => unreachable,
                 };
                 maintenance_count += 1;
@@ -378,7 +377,7 @@ pub const Engine = struct {
         };
     }
 
-    pub fn cancelCall(self: *Self, handle: calls_mod.Handle) bool {
+    pub fn cancelCall(self: *Self, handle: calls.Handle) bool {
         return self.calls.cancel(handle);
     }
 
@@ -387,7 +386,7 @@ pub const Engine = struct {
         peer: *const types.Endpoint,
         record: *const enr.Record,
         now_ms: u64,
-    ) routing_mod.Error!routing_mod.PutResult {
+    ) routing.Error!routing.PutResult {
         return self.routing.upsertVerified(peer, record, now_ms);
     }
 
@@ -396,15 +395,15 @@ pub const Engine = struct {
         requester: types.Address,
         distances: []const u16,
         out: []enr.Record,
-    ) routing_mod.Error![]enr.Record {
+    ) routing.Error![]enr.Record {
         return self.routing.findNodes(&self.channel.local_record, requester, distances, out);
     }
 
     pub fn closestNodes(
         self: *const Self,
         target: *const types.NodeId,
-        out: []routing_mod.Entry,
-    ) []routing_mod.Entry {
+        out: []routing.Entry,
+    ) []routing.Entry {
         return self.routing.closest(target, out);
     }
 
@@ -414,7 +413,7 @@ pub const Engine = struct {
 
     fn receiveAuthenticated(
         self: *Self,
-        authenticated: channel_mod.Authenticated,
+        authenticated: channel.Authenticated,
         now_ms: u64,
         scratch: *Scratch,
     ) Error!Outcome {
@@ -436,7 +435,7 @@ pub const Engine = struct {
     fn issueChallenge(
         self: *Self,
         out: []u8,
-        unauthenticated: channel_mod.Unauthenticated,
+        unauthenticated: channel.Unauthenticated,
         args: ReceiveArgs,
     ) Error!Outcome {
         const packet_length = try self.channel.challenge(
@@ -450,7 +449,7 @@ pub const Engine = struct {
         return .{ .accepted = .{ .packet_length = packet_length orelse 0 } };
     }
 
-    fn knownIdentity(self: *const Self, node_id: *const types.NodeId) ?channel_mod.KnownIdentity {
+    fn knownIdentity(self: *const Self, node_id: *const types.NodeId) ?channel.KnownIdentity {
         const entry = self.routing.get(node_id) orelse return null;
         return .{ .sequence = entry.record.sequence, .public_key = entry.record.public_key };
     }
@@ -458,7 +457,7 @@ pub const Engine = struct {
     fn recoverCall(
         self: *Self,
         out: []u8,
-        whoareyou: channel_mod.Whoareyou,
+        whoareyou: channel.Whoareyou,
         args: ReceiveArgs,
     ) Error!Outcome {
         const handle = (try self.calls.acceptChallenge(
@@ -477,10 +476,10 @@ pub const Engine = struct {
         const deadline_ms = try deadline(args.now_ms, self.config.request_timeout_ms);
         try self.calls.markSent(
             handle,
-            &channel_mod.handshakeNonce(&args.entropy.handshake),
+            &channel.handshakeNonce(&args.entropy.handshake),
             deadline_ms,
         );
-        const sealed = try self.channel.handshake(out, .{
+        const sealed = try self.channel.answerChallenge(out, .{
             .peer = peer,
             .remote_public_key = &remote_public_key,
             .plaintext = plaintext,
@@ -601,7 +600,10 @@ fn requestEvent(peer: types.Endpoint, request: Request, record: ?enr.Record) Eve
     return .{ .request = .{ .peer = peer, .message = request, .record = record } };
 }
 
-fn validateNodeRecords(raw_records: []const []const u8, scratch: *Scratch) Error![]const enr.Record {
+fn validateNodeRecords(
+    raw_records: []const []const u8,
+    scratch: *Scratch,
+) Error![]const enr.Record {
     if (raw_records.len > scratch.node_records.len) return Error.InvalidMessage;
     for (raw_records, scratch.node_records[0..raw_records.len]) |raw, *record| {
         record.* = try enr.Record.init(raw);
@@ -621,7 +623,7 @@ const FilteredNodeRecords = struct {
 fn retainAcceptedNodeRecords(
     raw_records: []const []const u8,
     parsed_records: []const enr.Record,
-    accepted: calls_mod.AcceptedNodes,
+    accepted: calls.AcceptedNodes,
     scratch: *Scratch,
 ) FilteredNodeRecords {
     std.debug.assert(raw_records.len == parsed_records.len);
@@ -647,9 +649,9 @@ fn validateResponse(value: *const message.Message) Error!void {
     switch (value.*) {
         .pong, .talk_response => {},
         .nodes => |nodes| {
-            if (nodes.total == 0 or nodes.total > protocol.findnode_response_packets_max)
+            if (nodes.total == 0 or nodes.total > types.findnode_response_packets_max)
                 return Error.InvalidResponseCount;
-            if (nodes.enrs.len > protocol.findnode_result_max)
+            if (nodes.enrs.len > types.findnode_result_max)
                 return Error.InvalidMessage;
             for (nodes.enrs) |raw| _ = try enr.Record.init(raw);
         },
@@ -686,7 +688,7 @@ test "unsolicited NODES fails before record validation" {
     } };
     var scratch: Scratch = .{};
     try std.testing.expectError(
-        calls_mod.Error.UnknownCall,
+        calls.Error.UnknownCall,
         core.dispatchResponse(peer, response, null, 0, &scratch),
     );
 }

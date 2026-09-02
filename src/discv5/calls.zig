@@ -1,7 +1,6 @@
 const std = @import("std");
 const message = @import("wire/message.zig");
 const constants = @import("wire/constants.zig");
-const protocol = @import("protocol.zig");
 const types = @import("types.zig");
 
 pub const capacity_max: usize = 256;
@@ -46,7 +45,7 @@ pub const Matched = struct {
     terminal: bool,
 };
 
-pub const AcceptedNodes = std.StaticBitSet(protocol.findnode_result_max);
+pub const AcceptedNodes = std.StaticBitSet(types.findnode_result_max);
 
 pub const MatchResult = struct {
     matched: Matched,
@@ -61,8 +60,8 @@ pub const Expired = struct {
 };
 
 const NodesState = struct {
-    distances: std.StaticBitSet(protocol.distance_count),
-    seen: [protocol.findnode_result_max]types.NodeId = undefined,
+    distances: std.StaticBitSet(types.distance_count),
+    seen: [types.findnode_result_max]types.NodeId = undefined,
     accepted: u8 = 0,
     total: u8 = 0,
     received: u8 = 0,
@@ -284,7 +283,7 @@ pub const Table = struct {
         nodes: message.Nodes,
         node_ids: []const types.NodeId,
     ) Error!MatchResult {
-        if (node_ids.len != nodes.enrs.len or node_ids.len > protocol.findnode_result_max)
+        if (node_ids.len != nodes.enrs.len or node_ids.len > types.findnode_result_max)
             return Error.InvalidNodeCount;
         const state = &self.entries[index].?.expected.nodes;
         try validateNodesHeader(state, nodes.total);
@@ -292,7 +291,7 @@ pub const Table = struct {
 
         var accepted_nodes = AcceptedNodes.initEmpty();
         for (node_ids, 0..) |*node_id, node_index| {
-            if (state.accepted == protocol.findnode_result_max) break;
+            if (state.accepted == types.findnode_result_max) break;
             const distance = types.logDistance(&self.entries[index].?.peer.node_id, node_id);
             if (!state.distances.isSet(distance)) continue;
             if (containsNode(state.seen[0..state.accepted], node_id)) continue;
@@ -304,7 +303,7 @@ pub const Table = struct {
         state.total = total;
         state.received += 1;
         const terminal = state.received == total or
-            state.accepted == protocol.findnode_result_max;
+            state.accepted == types.findnode_result_max;
         const result = MatchResult{
             .matched = .{
                 .handle = handle,
@@ -402,11 +401,11 @@ fn expectedResponse(request: *const message.Message) Error!Expected {
     return switch (request.*) {
         .ping => .pong,
         .find_node => |find_node| blk: {
-            if (find_node.distances.len > protocol.distance_count)
+            if (find_node.distances.len > types.distance_count)
                 return Error.InvalidMessage;
-            var distances = std.StaticBitSet(protocol.distance_count).initEmpty();
+            var distances = std.StaticBitSet(types.distance_count).initEmpty();
             for (find_node.distances) |distance| {
-                if (distance > protocol.distance_max) return Error.InvalidMessage;
+                if (distance > types.distance_max) return Error.InvalidMessage;
                 distances.set(distance);
             }
             break :blk .{ .nodes = .{ .distances = distances } };
@@ -431,7 +430,7 @@ fn containsNode(nodes: []const types.NodeId, target: *const types.NodeId) bool {
 }
 
 fn validateNodesHeader(state: *const NodesState, total_value: u64) Error!void {
-    if (total_value == 0 or total_value > protocol.findnode_response_packets_max)
+    if (total_value == 0 or total_value > types.findnode_response_packets_max)
         return Error.InvalidResponseCount;
     const total: u8 = @intCast(total_value);
     if (state.total != 0 and state.total != total) return Error.InvalidResponseCount;
