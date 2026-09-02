@@ -150,7 +150,7 @@ pub const Engine = struct {
         const header = binding.headerInfo(datagram) catch return self.drop(&self.counters.dropped_unroutable);
         if (self.findRoute(&header.dcid)) |index| {
             if (!self.slots[index].peer.eql(from)) return self.drop(&self.counters.dropped_unroutable);
-            self.feed(index, datagram, now);
+            self.feed(index, datagram);
             return .{ .accepted = self.toHandle(index) };
         }
         if (header.packet_type == .short) return self.drop(&self.counters.dropped_unroutable);
@@ -184,7 +184,7 @@ pub const Engine = struct {
         self.addRoute(&slot.scid, index);
         self.addRoute(&header.dcid, index);
         self.handshaking += 1;
-        self.feed(index, datagram, now);
+        self.feed(index, datagram);
         return .{ .accepted = self.toHandle(index) };
     }
 
@@ -193,14 +193,14 @@ pub const Engine = struct {
             if (slot.state == .free or slot.state == .closed) continue;
             slot.onTimeout();
             if (slot.state == .handshaking and slot.close_reason == null and
-                now.mono_ms - slot.created_ms >= self.limits.handshake_timeout_ms)
+                now.mono_ms -| slot.created_ms >= self.limits.handshake_timeout_ms)
             {
                 slot.close(.handshake_timeout, connection.app_error_handshake_timeout);
             }
             if (slot.state == .established and slot.close_reason == null and
-                now.mono_ms - slot.last_send_ms >= self.limits.keep_alive_ms)
+                now.mono_ms -| slot.last_send_ms >= self.limits.keep_alive_ms and
+                slot.keepAlive())
             {
-                slot.keepAlive();
                 slot.last_send_ms = now.mono_ms;
             }
             if (slot.pending_close) |pending| {
@@ -227,6 +227,7 @@ pub const Engine = struct {
     }
 
     pub fn send(self: *Engine, index: u16, now: Now, out: []u8) Error!?[]u8 {
+        if (index >= self.slots.len) return null;
         const slot = &self.slots[index];
         if (slot.state == .free or slot.state == .closed) return null;
         const datagram = slot.send(now.mono_ms, out) catch |err| {
@@ -238,6 +239,7 @@ pub const Engine = struct {
     }
 
     pub fn peerAddress(self: *const Engine, index: u16) ?types.Address {
+        if (index >= self.slots.len) return null;
         const slot = &self.slots[index];
         if (slot.state == .free) return null;
         return slot.peer;
@@ -347,7 +349,7 @@ pub const Engine = struct {
         if (handle.index >= self.slots.len) return error.StaleHandle;
         const slot = &self.slots[handle.index];
         if (slot.generation != handle.generation or slot.state == .free or slot.state == .closed or
-            slot.pending_close != null)
+            slot.pending_close != null or slot.close_reason != null)
         {
             return error.StaleHandle;
         }
@@ -363,16 +365,16 @@ pub const Engine = struct {
         return .dropped;
     }
 
-    fn feed(self: *Engine, index: u16, datagram: []u8, now: Now) void {
+    fn feed(self: *Engine, index: u16, datagram: []u8) void {
         const slot = &self.slots[index];
         if (slot.state == .closed) return;
-        slot.recv(datagram) catch {
+        if (slot.recv(datagram)) |_| {
+            self.counters.accepted += 1;
+        } else |_| {
             self.counters.recv_errors += 1;
-        };
-        self.counters.accepted += 1;
+        }
         self.refresh(index);
         if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
-        _ = now;
     }
 
     fn refresh(self: *Engine, index: u16) void {
@@ -381,7 +383,7 @@ pub const Engine = struct {
             slot.state = .established;
             if (slot.direction == .inbound) self.handshaking -= 1;
             if (slot.odcid) |*odcid| {
-                self.removeRoute(odcid);
+                self.removeRoute(odcid, index);
                 slot.odcid = null;
             }
             if (slot.handshake.peer_id) |id| {
@@ -427,9 +429,9 @@ pub const Engine = struct {
         unreachable;
     }
 
-    fn removeRoute(self: *Engine, cid: *const binding.Cid) void {
+    fn removeRoute(self: *Engine, cid: *const binding.Cid, index: u16) void {
         for (self.routes) |*route| {
-            if (route.active and route.cid.eql(cid)) route.active = false;
+            if (route.active and route.index == index and route.cid.eql(cid)) route.active = false;
         }
     }
 

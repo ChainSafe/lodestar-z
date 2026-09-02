@@ -161,7 +161,7 @@ test "driver completes a libp2p ping over loopback sockets" {
             const read = try server.engine.read(server_stream, &buffer);
             var cursor: usize = 0;
             if (read.len > 0 and !negotiated) {
-                var reply: [2 * multistream.message_length_max]u8 = undefined;
+                var reply: [multistream.listener_write_max]u8 = undefined;
                 const outcome = try listener.feed(buffer[0..read.len], &reply);
                 if (outcome.write.len > 0) _ = try server.engine.write(server_stream, outcome.write, false);
                 if (outcome.status == .selected) negotiated = true;

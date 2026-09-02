@@ -23,8 +23,8 @@ pub const PeerId = struct {
         return .{ .bytes = bytes[0..length].* };
     }
 
-    pub fn publicKey(self: *const PeerId) keys.PublicKey {
-        return keys.PublicKey.decodeProtobuf(self.bytes[multihash_prefix.len..]) catch unreachable;
+    pub fn publicKey(self: *const PeerId) keys.Error!keys.PublicKey {
+        return keys.PublicKey.decodeProtobuf(self.bytes[multihash_prefix.len..]);
     }
 
     pub fn eql(self: *const PeerId, other: *const PeerId) bool {

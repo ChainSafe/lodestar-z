@@ -28,3 +28,12 @@ test "varint rejects truncated and overflowing input" {
     var small: [1]u8 = undefined;
     try std.testing.expectError(error.Truncated, varint.encode(128, &small));
 }
+
+test "varint rejects non-minimal encodings" {
+    try std.testing.expectError(error.Overflow, varint.decode(&.{ 0x84, 0x00 }));
+    try std.testing.expectError(error.Overflow, varint.decode(&.{ 0x80, 0x00 }));
+    try std.testing.expectError(error.Overflow, varint.decode(&([_]u8{0x80} ** 9 ++ [_]u8{0x00})));
+    const decoded = try varint.decode(&.{0x04});
+    try std.testing.expectEqual(@as(u64, 4), decoded.value);
+    try std.testing.expectEqual(@as(usize, 1), decoded.length);
+}
