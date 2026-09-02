@@ -1,9 +1,10 @@
 //! Tests for `bit_list.zig`.
 
 const std = @import("std");
-const expectEqualRootsAlloc = @import("test_utils.zig").expectEqualRootsAlloc;
-const expectEqualSerializedAlloc = @import("test_utils.zig").expectEqualSerializedAlloc;
-const TypeTestCase = @import("test_utils.zig").TypeTestCase;
+const test_utils = @import("test_utils.zig");
+const expectEqualRootsAlloc = test_utils.expectEqualRootsAlloc;
+const expectEqualSerializedAlloc = test_utils.expectEqualSerializedAlloc;
+const TypeTestCase = test_utils.TypeTestCase;
 const Node = @import("persistent_merkle_tree").Node;
 const BitListType = @import("bit_list.zig").BitListType;
 

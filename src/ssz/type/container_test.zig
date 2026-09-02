@@ -1,8 +1,9 @@
 //! Tests for `container.zig`.
 
 const std = @import("std");
-const expectEqualRootsAlloc = @import("test_utils.zig").expectEqualRootsAlloc;
-const expectEqualSerializedAlloc = @import("test_utils.zig").expectEqualSerializedAlloc;
+const test_utils = @import("test_utils.zig");
+const expectEqualRootsAlloc = test_utils.expectEqualRootsAlloc;
+const expectEqualSerializedAlloc = test_utils.expectEqualSerializedAlloc;
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
 const Gindex = pmt.Gindex;
@@ -12,10 +13,11 @@ const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedListType = @import("list.zig").FixedListType;
 const FixedVectorType = @import("vector.zig").FixedVectorType;
 const proof = pmt.proof;
-const TypeTestCase = @import("test_utils.zig").TypeTestCase;
-const FixedContainerType = @import("container.zig").FixedContainerType;
-const StructContainerType = @import("container.zig").StructContainerType;
-const VariableContainerType = @import("container.zig").VariableContainerType;
+const TypeTestCase = test_utils.TypeTestCase;
+const container = @import("container.zig");
+const FixedContainerType = container.FixedContainerType;
+const StructContainerType = container.StructContainerType;
+const VariableContainerType = container.VariableContainerType;
 
 test "ContainerType - sanity" {
     // create a fixed container type and instance and round-trip serialize

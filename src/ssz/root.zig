@@ -72,6 +72,9 @@ test "redundant SSZ helper APIs are not exposed" {
 }
 
 test {
+    _ = types;
+    _ = tree_view;
+    _ = hasher;
     _ = @import("memory_safety_test.zig");
     testing.refAllDecls(@This());
 }

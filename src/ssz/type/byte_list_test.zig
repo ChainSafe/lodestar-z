@@ -1,10 +1,11 @@
 //! Tests for `byte_list.zig`.
 
 const std = @import("std");
-const expectEqualRootsAlloc = @import("test_utils.zig").expectEqualRootsAlloc;
-const expectEqualSerializedAlloc = @import("test_utils.zig").expectEqualSerializedAlloc;
+const test_utils = @import("test_utils.zig");
+const expectEqualRootsAlloc = test_utils.expectEqualRootsAlloc;
+const expectEqualSerializedAlloc = test_utils.expectEqualSerializedAlloc;
 const Node = @import("persistent_merkle_tree").Node;
-const TypeTestCase = @import("test_utils.zig").TypeTestCase;
+const TypeTestCase = test_utils.TypeTestCase;
 const ByteListType = @import("byte_list.zig").ByteListType;
 
 test "clone" {

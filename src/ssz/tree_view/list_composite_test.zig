@@ -2,9 +2,10 @@
 
 const std = @import("std");
 const Node = @import("persistent_merkle_tree").Node;
-const FixedContainerType = @import("../type/container.zig").FixedContainerType;
-const VariableContainerType = @import("../type/container.zig").VariableContainerType;
-const StructContainerType = @import("../type/container.zig").StructContainerType;
+const container = @import("../type/container.zig");
+const FixedContainerType = container.FixedContainerType;
+const VariableContainerType = container.VariableContainerType;
+const StructContainerType = container.StructContainerType;
 const UintType = @import("../type/uint.zig").UintType;
 const ByteVectorType = @import("../type/byte_vector.zig").ByteVectorType;
 const ByteListType = @import("../type/byte_list.zig").ByteListType;

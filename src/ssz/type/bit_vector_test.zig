@@ -1,10 +1,11 @@
 //! Tests for `bit_vector.zig`.
 
 const std = @import("std");
-const expectEqualRoots = @import("test_utils.zig").expectEqualRoots;
-const expectEqualSerialized = @import("test_utils.zig").expectEqualSerialized;
+const test_utils = @import("test_utils.zig");
+const expectEqualRoots = test_utils.expectEqualRoots;
+const expectEqualSerialized = test_utils.expectEqualSerialized;
 const Node = @import("persistent_merkle_tree").Node;
-const TypeTestCase = @import("test_utils.zig").TypeTestCase;
+const TypeTestCase = test_utils.TypeTestCase;
 const BitVectorType = @import("bit_vector.zig").BitVectorType;
 
 test "BitVectorType - sanity" {
