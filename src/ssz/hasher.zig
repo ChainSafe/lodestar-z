@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const isBasicType = @import("type/type_kind.zig").isBasicType;
+const isFixedType = @import("type/type_kind.zig").isFixedType;
 const isBitListType = @import("type/bit_list.zig").isBitListType;
 const h = @import("hashing");
 
@@ -24,7 +25,7 @@ pub fn Hasher(comptime ST: type) type {
                         return try HasherData.initCapacity(allocator, hasher_size, children);
                     }
                 },
-                .container => {
+                .container, .progressive_container => {
                     const hasher_size = if (ST.chunk_count % 2 == 1) ST.chunk_count + 1 else ST.chunk_count;
                     var children = try allocator.alloc(HasherData, ST.fields.len);
                     errdefer allocator.free(children);
@@ -44,7 +45,7 @@ pub fn Hasher(comptime ST: type) type {
                     }
                     return try HasherData.initCapacity(allocator, hasher_size, children);
                 },
-                .list => {
+                .list, .progressive_list, .progressive_bit_list => {
                     // we don't preallocate here since we need the length
                     const hasher_size = 0;
                     if (comptime isBasicType(ST.Element)) {
@@ -59,6 +60,9 @@ pub fn Hasher(comptime ST: type) type {
 
                         return try HasherData.initCapacity(allocator, hasher_size, children);
                     }
+                },
+                .compatible_union => {
+                    return try HasherData.initCapacity(allocator, 0, null);
                 },
                 else => unreachable,
             }
@@ -78,6 +82,9 @@ pub fn Hasher(comptime ST: type) type {
                 }
             } else {
                 switch (ST.kind) {
+                    .progressive_list, .progressive_bit_list => {
+                        try ST.hashTreeRoot(scratch.allocator, value, out);
+                    },
                     .list => {
                         const chunk_count = ST.chunkCount(value);
                         const hasher_size = if (chunk_count % 2 == 1) chunk_count + 1 else chunk_count;
@@ -94,7 +101,7 @@ pub fn Hasher(comptime ST: type) type {
                             }
                         }
                         try h.merkleize(@ptrCast(scratch.chunks.items), ST.chunk_depth, out);
-                        if (ST.Element.kind == .bool) {
+                        if (comptime isBitListType(ST)) {
                             h.mixInLength(value.bit_len, out);
                         } else {
                             h.mixInLength(value.items.len, out);
@@ -118,6 +125,16 @@ pub fn Hasher(comptime ST: type) type {
                             try Hasher(field.type).hash(&scratch.children.?[i], field_value_ptr, &scratch.chunks.items[i]);
                         }
                         try h.merkleize(@ptrCast(scratch.chunks.items), ST.chunk_depth, out);
+                    },
+                    .progressive_container => {
+                        if (comptime isFixedType(ST)) {
+                            try ST.hashTreeRoot(value, out);
+                        } else {
+                            try ST.hashTreeRoot(scratch.allocator, value, out);
+                        }
+                    },
+                    .compatible_union => {
+                        try ST.hashTreeRoot(scratch.allocator, value, out);
                     },
                     else => unreachable,
                 }
@@ -152,3 +169,27 @@ pub const HasherData = struct {
         chunks.deinit(allocator);
     }
 };
+
+test "Hasher should hash ordinary boolean lists as basic lists" {
+    const BooleanList = @import("type/list.zig").FixedListType(
+        @import("type/bool.zig").BoolType(),
+        64,
+        .{},
+    );
+    const allocator = std.testing.allocator;
+
+    var value = BooleanList.default_value;
+    defer BooleanList.deinit(allocator, &value);
+    try value.appendSlice(allocator, &.{ true, false, true });
+
+    var scratch = try Hasher(BooleanList).init(allocator);
+    defer scratch.deinit(allocator);
+
+    var expected: [32]u8 = undefined;
+    try BooleanList.hashTreeRoot(allocator, &value, &expected);
+
+    var actual: [32]u8 = undefined;
+    try Hasher(BooleanList).hash(&scratch, &value, &actual);
+
+    try std.testing.expectEqual(expected, actual);
+}

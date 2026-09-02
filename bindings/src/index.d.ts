@@ -376,30 +376,6 @@ declare const bindings: {
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
-  shuffle: {
-    /** Shuffles `out` in place, no allocation. */
-    innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
-    unshuffleList: (activeIndices: Uint32Array, seed: Uint8Array, rounds: number) => Uint32Array;
-    computeProposerIndex: (
-      seed: Uint8Array,
-      activeIndices: Uint32Array,
-      effectiveBalanceIncrements: Uint16Array,
-      randByteCount: 1 | 2,
-      maxEffectiveBalance: number,
-      effectiveBalanceIncrement: number,
-      rounds: number
-    ) => number;
-    computeSyncCommitteeIndices: (
-      seed: Uint8Array,
-      activeIndices: Uint32Array,
-      effectiveBalanceIncrements: Uint16Array,
-      randByteCount: 1 | 2,
-      syncCommitteeSize: number,
-      maxEffectiveBalance: number,
-      effectiveBalanceIncrement: number,
-      rounds: number
-    ) => Uint32Array;
-  };
   stateTransition: {
     deinitReusedEpochTransitionCache: () => void;
   };
