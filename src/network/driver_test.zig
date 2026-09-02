@@ -11,6 +11,7 @@ const net = std.Io.net;
 const Node = support.Node;
 
 const ping_protocol = "/ipfs/ping/1.0.0";
+const step_options = driver_mod.StepOptions{ .wait_max_ms = 10 };
 
 fn writeSome(engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, bytes: []const u8, fin: bool) !usize {
     return engine.write(stream, bytes, fin) catch |err| switch (err) {
@@ -20,18 +21,89 @@ fn writeSome(engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, bytes:
 }
 
 fn stepBoth(a: *Node, b: *Node, events_a: []engine_mod.Event, events_b: []engine_mod.Event) !struct { a: usize, b: usize } {
-    const ra = try a.driver.step(std.testing.io, events_a);
-    const rb = try b.driver.step(std.testing.io, events_b);
+    var activity: [4]engine_mod.Handle = undefined;
+    const ra = try a.driver.step(std.testing.io, events_a, &activity, step_options);
+    const rb = try b.driver.step(std.testing.io, events_b, &activity, step_options);
     try std.testing.expectEqual(@as(u32, 0), ra.send_failures);
     try std.testing.expectEqual(@as(u32, 0), rb.send_failures);
     return .{ .a = ra.events, .b = rb.events };
 }
 
-test "driver rejects a zero poll interval" {
-    var core: engine_mod.Engine = undefined;
-    var udp = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
-    defer udp.close(std.testing.io);
-    try std.testing.expectError(error.InvalidPollInterval, driver_mod.Driver.initWithConfig(&core, &udp, .{ .poll_interval_ms = 0 }));
+test "driver bounds an idle step by the requested wait" {
+    var node: Node = .{};
+    try node.init(6);
+    defer node.deinit();
+
+    var events: [4]engine_mod.Event = undefined;
+    var activity: [4]engine_mod.Handle = undefined;
+    const started = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
+    const result = try node.driver.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 5 });
+    const elapsed = std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - started;
+    try std.testing.expect(elapsed < 200);
+    try std.testing.expectEqual(@as(usize, 0), result.events);
+    try std.testing.expectEqual(@as(usize, 0), result.activity);
+    try std.testing.expect(!result.activity_pending);
+    try std.testing.expect(node.driver.nextTimeoutMs() == null);
+
+    const floored = try node.driver.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(@as(u32, 0), floored.datagrams_received);
+}
+
+test "driver reports activity for the connections that received datagrams" {
+    var client: Node = .{};
+    try client.init(7);
+    defer client.deinit();
+    var server: Node = .{};
+    try server.init(8);
+    defer server.deinit();
+
+    const handle = try client.driver.dial(
+        std.testing.io,
+        server.udp.localAddress(),
+        server.ctx.local_peer_id,
+    );
+
+    var client_events: [8]engine_mod.Event = undefined;
+    var server_events: [8]engine_mod.Event = undefined;
+    var activity: [4]engine_mod.Handle = undefined;
+    var none: [0]engine_mod.Handle = undefined;
+    var stream: ?engine_mod.StreamHandle = null;
+    var reported: usize = 0;
+    var deferred: usize = 0;
+    var rounds: usize = 0;
+    while (rounds < 50 and (reported == 0 or deferred == 0)) : (rounds += 1) {
+        if (stream) |open| _ = try writeSome(&client.engine, open, "ping", false);
+        _ = try server.driver.step(std.testing.io, &server_events, &activity, step_options);
+        const narrow =
+            try client.driver.step(std.testing.io, client_events[0..0], none[0..0], step_options);
+        try std.testing.expectEqual(@as(usize, 0), narrow.activity);
+        if (narrow.activity_pending) deferred += 1;
+        const wide =
+            try client.driver.step(std.testing.io, &client_events, &activity, step_options);
+        for (activity[0..wide.activity]) |seen| try std.testing.expectEqual(handle, seen);
+        if (wide.activity > 0) try std.testing.expect(!wide.activity_pending);
+        reported += wide.activity;
+        for (client_events[0..wide.events]) |event| {
+            if (event != .connected) continue;
+            if (stream == null) stream = try client.engine.openStream(handle);
+        }
+    }
+    try std.testing.expect(reported > 0);
+    try std.testing.expect(deferred > 0);
+
+    var quiet = false;
+    var idle: usize = 0;
+    while (idle < 50 and !quiet) : (idle += 1) {
+        _ = try server.driver.step(std.testing.io, &server_events, &activity, step_options);
+        const result =
+            try client.driver.step(std.testing.io, &client_events, &activity, step_options);
+        for (activity[0..result.activity]) |seen| try std.testing.expectEqual(handle, seen);
+        if (result.datagrams_accepted > 0) continue;
+        if (result.activity > 0) continue;
+        try std.testing.expect(!result.activity_pending);
+        quiet = true;
+    }
+    try std.testing.expect(quiet);
 }
 
 test "driver counts a hostile oversized datagram and keeps stepping" {
@@ -48,10 +120,11 @@ test "driver counts a hostile oversized datagram and keeps stepping" {
     try stranger.send(std.testing.io, &destination, &oversized);
 
     var events: [4]engine_mod.Event = undefined;
+    var activity: [4]engine_mod.Handle = undefined;
     var errors: u32 = 0;
     var rounds: usize = 0;
     while (rounds < 50 and errors == 0) : (rounds += 1) {
-        const result = try node.driver.step(std.testing.io, &events);
+        const result = try node.driver.step(std.testing.io, &events, &activity, step_options);
         try std.testing.expectEqual(@as(u32, 0), result.datagrams_accepted);
         try std.testing.expectEqual(@as(u32, 0), result.datagrams_received);
         try std.testing.expectEqual(@as(usize, 0), result.events);
@@ -59,7 +132,7 @@ test "driver counts a hostile oversized datagram and keeps stepping" {
     }
     try std.testing.expectEqual(@as(u32, 1), errors);
 
-    const after = try node.driver.step(std.testing.io, &events);
+    const after = try node.driver.step(std.testing.io, &events, &activity, step_options);
     try std.testing.expectEqual(@as(u32, 0), after.receive_errors);
     try std.testing.expectEqual(@as(u32, 0), after.datagrams_accepted);
 }
@@ -79,7 +152,8 @@ test "driver keeps batching past a counted receive error" {
     while (sent < 3) : (sent += 1) try stranger.send(std.testing.io, &destination, &oversized);
 
     var events: [4]engine_mod.Event = undefined;
-    const result = try node.driver.step(std.testing.io, &events);
+    var activity: [4]engine_mod.Handle = undefined;
+    const result = try node.driver.step(std.testing.io, &events, &activity, step_options);
     try std.testing.expect(result.receive_errors >= 2);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_received);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_accepted);
@@ -105,7 +179,8 @@ test "driver surfaces a send failure to an unreachable destination" {
     );
 
     var events: [4]engine_mod.Event = undefined;
-    const result = try node.driver.step(std.testing.io, &events);
+    var activity: [4]engine_mod.Handle = undefined;
+    const result = try node.driver.step(std.testing.io, &events, &activity, step_options);
     try std.testing.expectEqual(@as(u32, 1), result.send_failures);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_sent);
     try std.testing.expect(result.first_failure != null);

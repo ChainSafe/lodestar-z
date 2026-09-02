@@ -99,6 +99,31 @@ test "engine routes a replayed client Initial to the existing connection" {
     try std.testing.expectEqual(@as(usize, 1), pair.server.driverView().activeIndices().len);
 }
 
+test "engine activity marks the slots that received datagrams" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    var taken: [4]engine_mod.Handle = undefined;
+    var drains: usize = 0;
+    while (drains < 8 and pair.client.driverView().takeActivity(&taken) > 0) : (drains += 1) {}
+    try std.testing.expect(!pair.client.driverView().activityPending());
+
+    const stream = try pair.server.openStream(handles.server);
+    _ = try pair.server.write(stream, "x", false);
+    const moved =
+        try pair.transfer(&pair.server, &pair.client, server_address, client_address, false);
+    try std.testing.expect(moved);
+
+    try std.testing.expect(pair.client.driverView().activityPending());
+    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().takeActivity(taken[0..0]));
+    try std.testing.expectEqual(@as(usize, 1), pair.client.driverView().takeActivity(&taken));
+    try std.testing.expectEqual(handles.client, taken[0]);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().takeActivity(&taken));
+    try std.testing.expect(!pair.client.driverView().activityPending());
+}
+
 test "engine feeds an unrouted short header from a known peer to its slot" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
