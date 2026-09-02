@@ -340,8 +340,16 @@ test "engine reports a blocked stream and recovers capacity after a pump" {
     }
     try std.testing.expect(blocked);
 
+    var while_blocked = pair.client.writable(handles.client);
+    try std.testing.expect(while_blocked.next() == null);
+    while_blocked.deinit();
+
     try pair.pump();
     try std.testing.expect(try pair.client.streamCapacity(stream) > 0);
+    var after_pump = pair.client.writable(handles.client);
+    defer after_pump.deinit();
+    const ready = after_pump.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(stream.id, ready.id);
 
     var storage: [8]Event = undefined;
     const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
