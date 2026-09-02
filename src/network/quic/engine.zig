@@ -249,11 +249,11 @@ pub const Engine = struct {
         var count: usize = 0;
         for (self.slots, 0..) |*slot, index| {
             if (slot.state == .free) continue;
-            const handle = Handle{ .index = @intCast(index), .generation = slot.generation };
+            const conn = Handle{ .index = @intCast(index), .generation = slot.generation };
             if (slot.connected_pending) {
                 if (count == events.len) return count;
                 events[count] = .{ .connected = .{
-                    .conn = handle,
+                    .conn = conn,
                     .peer_id = slot.peer_id.?,
                     .direction = slot.direction,
                 } };
@@ -264,7 +264,7 @@ pub const Engine = struct {
                 for (&slot.streams) |*stream| {
                     if (!stream.opened_pending) continue;
                     if (count == events.len) return count;
-                    events[count] = .{ .stream_opened = .{ .conn = handle, .id = stream.id } };
+                    events[count] = .{ .stream_opened = .{ .conn = conn, .id = stream.id } };
                     count += 1;
                     stream.opened_pending = false;
                     slot.streams_pending -= 1;
@@ -272,7 +272,7 @@ pub const Engine = struct {
             }
             if (slot.closed_pending) {
                 if (count == events.len) return count;
-                events[count] = .{ .closed = .{ .conn = handle, .reason = slot.close_reason.? } };
+                events[count] = .{ .closed = .{ .conn = conn, .reason = slot.close_reason.? } };
                 count += 1;
                 slot.closed_pending = false;
                 slot.release();
@@ -281,20 +281,20 @@ pub const Engine = struct {
         return count;
     }
 
-    pub fn close(self: *Engine, handle: Handle, code: u64) void {
-        const slot = self.liveSlot(handle) catch return;
+    pub fn close(self: *Engine, conn: Handle, code: u64) void {
+        const slot = self.liveSlot(conn) catch return;
         slot.close(.host, code);
     }
 
-    pub fn peerId(self: *Engine, handle: Handle) ?peer_id.PeerId {
-        const slot = self.liveSlot(handle) catch return null;
+    pub fn peerId(self: *Engine, conn: Handle) ?peer_id.PeerId {
+        const slot = self.liveSlot(conn) catch return null;
         return slot.peer_id;
     }
 
-    pub fn openStream(self: *Engine, handle: Handle) Error!StreamHandle {
-        const slot = try self.liveSlot(handle);
+    pub fn openStream(self: *Engine, conn: Handle) Error!StreamHandle {
+        const slot = try self.liveSlot(conn);
         const id = try slot.openStream();
-        return .{ .conn = handle, .id = id };
+        return .{ .conn = conn, .id = id };
     }
 
     pub fn read(self: *Engine, stream: StreamHandle, buf: []u8) Error!Read {
@@ -323,12 +323,12 @@ pub const Engine = struct {
         slot.closeStream(stream.id, code);
     }
 
-    pub const ReadableIterator = struct {
+    pub const StreamIterator = struct {
         iter: ?*c.quiche_stream_iter,
         slot: ?*connection.Slot,
         conn: Handle,
 
-        pub fn next(self: *ReadableIterator) ?StreamHandle {
+        pub fn next(self: *StreamIterator) ?StreamHandle {
             const iter = self.iter orelse return null;
             const slot = self.slot orelse return null;
             var id: u64 = 0;
@@ -339,21 +339,47 @@ pub const Engine = struct {
             return null;
         }
 
-        pub fn deinit(self: *ReadableIterator) void {
+        pub fn deinit(self: *StreamIterator) void {
             if (self.iter) |iter| c.quiche_stream_iter_free(iter);
             self.* = undefined;
         }
     };
 
-    pub fn readable(self: *Engine, handle: Handle) ReadableIterator {
-        const slot = self.liveSlot(handle) catch return .{ .iter = null, .slot = null, .conn = handle };
-        return .{ .iter = c.quiche_conn_readable(slot.conn.?), .slot = slot, .conn = handle };
+    pub const ReadableIterator = StreamIterator;
+    pub const WritableIterator = StreamIterator;
+
+    pub fn readable(self: *Engine, conn: Handle) ReadableIterator {
+        const slot = self.liveSlot(conn) catch return .{ .iter = null, .slot = null, .conn = conn };
+        return .{ .iter = c.quiche_conn_readable(slot.conn.?), .slot = slot, .conn = conn };
     }
 
-    fn liveSlot(self: *Engine, handle: Handle) Error!*connection.Slot {
-        if (handle.index >= self.slots.len) return error.StaleHandle;
-        const slot = &self.slots[handle.index];
-        if (slot.generation != handle.generation or slot.state == .free or slot.state == .closed or
+    pub fn writable(self: *Engine, conn: Handle) WritableIterator {
+        const slot = self.liveSlot(conn) catch return .{ .iter = null, .slot = null, .conn = conn };
+        return .{ .iter = c.quiche_conn_writable(slot.conn.?), .slot = slot, .conn = conn };
+    }
+
+    pub fn handle(self: *const Engine, index: u16) ?Handle {
+        if (index >= self.slots.len) return null;
+        const slot = &self.slots[index];
+        if (slot.state == .free) return null;
+        return .{ .index = index, .generation = slot.generation };
+    }
+
+    pub fn activeIndices(self: *const Engine, out: []u16) usize {
+        var count: usize = 0;
+        for (self.slots, 0..) |*slot, index| {
+            if (slot.state == .free) continue;
+            if (count == out.len) return count;
+            out[count] = @intCast(index);
+            count += 1;
+        }
+        return count;
+    }
+
+    fn liveSlot(self: *Engine, conn: Handle) Error!*connection.Slot {
+        if (conn.index >= self.slots.len) return error.StaleHandle;
+        const slot = &self.slots[conn.index];
+        if (slot.generation != conn.generation or slot.state == .free or slot.state == .closed or
             slot.pending_close != null or slot.close_reason != null)
         {
             return error.StaleHandle;
