@@ -16,8 +16,9 @@ const ping_protocol = "/ipfs/ping/1.0.0";
 const ping_size = 32;
 const sessions_max = 8;
 const dial_steps_max = 2_000;
-const read_max = 256;
-const session_write_max = multistream.listener_write_max + read_max;
+const pending_max = 2 * multistream.message_length_max;
+const read_max = multistream.message_length_max;
+const session_write_max = multistream.listener_write_max + pending_max;
 const supported = [_][]const u8{ping_protocol};
 
 pub fn main(init: std.process.Init) !void {
@@ -94,10 +95,23 @@ const Session = struct {
     listener: multistream.Listener = undefined,
     out: Outbox = .{},
     out_buffer: [session_write_max]u8 = undefined,
+    pending: [pending_max]u8 = undefined,
+    pending_len: usize = 0,
     negotiated: bool = false,
     closing: bool = false,
     active: bool = false,
 };
+
+fn appendPending(pending: []u8, length: usize, bytes: []const u8) !usize {
+    if (bytes.len > pending.len - length) return error.PendingOverflow;
+    @memcpy(pending[length..][0..bytes.len], bytes);
+    return length + bytes.len;
+}
+
+fn dropPrefix(pending: []u8, length: usize, count: usize) usize {
+    std.mem.copyForwards(u8, pending[0 .. length - count], pending[count..length]);
+    return length - count;
+}
 
 fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16) !void {
     var node: Node = .{};
@@ -155,24 +169,25 @@ fn serve(engine: *engine_mod.Engine, session: *Session) !void {
     var buffer: [read_max]u8 = undefined;
     const read = try engine.read(session.stream, &buffer);
     if (read.len == 0 and !read.fin) return;
-    var cursor: usize = 0;
+    session.pending_len = try appendPending(&session.pending, session.pending_len, buffer[0..read.len]);
+
     var length: usize = 0;
-    if (!session.negotiated and read.len > 0) {
+    if (!session.negotiated) {
         var reply: [multistream.listener_write_max]u8 = undefined;
-        const outcome = try session.listener.feed(buffer[0..read.len], &reply);
+        const outcome = try session.listener.feed(session.pending[0..session.pending_len], &reply);
+        session.pending_len = dropPrefix(&session.pending, session.pending_len, outcome.consumed);
+        @memcpy(session.out_buffer[0..outcome.write.len], outcome.write);
+        length = outcome.write.len;
         switch (outcome.status) {
             .selected => session.negotiated = true,
             .failed => return error.NegotiationFailed,
-            .pending => {},
+            .pending => if (session.pending_len == session.pending.len) return error.PendingOverflow,
         }
-        cursor = outcome.consumed;
-        @memcpy(session.out_buffer[0..outcome.write.len], outcome.write);
-        length = outcome.write.len;
     }
-    if (session.negotiated and cursor < read.len) {
-        const echo = buffer[cursor..read.len];
-        @memcpy(session.out_buffer[length..][0..echo.len], echo);
-        length += echo.len;
+    if (session.negotiated and session.pending_len > 0) {
+        @memcpy(session.out_buffer[length..][0..session.pending_len], session.pending[0..session.pending_len]);
+        length += session.pending_len;
+        session.pending_len = 0;
     }
     session.closing = read.fin;
     session.out.queue(session.out_buffer[0..length], read.fin);
@@ -199,6 +214,8 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     var sent_at: u64 = 0;
     var hello: [2 * multistream.message_length_max]u8 = undefined;
     var out: Outbox = .{};
+    var pending: [pending_max]u8 = undefined;
+    var pending_len: usize = 0;
     var stream: ?engine_mod.StreamHandle = null;
     var state: enum { connecting, negotiating, pinging, closing, done } = .connecting;
     var events: [16]engine_mod.Event = undefined;
@@ -228,32 +245,33 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
         var buffer: [read_max]u8 = undefined;
         const read = try node.engine.read(active, &buffer);
         if (read.len == 0) continue;
-        switch (state) {
-            .negotiating => {
-                const outcome = try dialer.feed(buffer[0..read.len]);
-                switch (outcome.status) {
-                    .accepted => {
-                        sent_at = result.now.mono_ms;
-                        out.queue(&payload, false);
-                        _ = try out.pump(&node.engine, active);
-                        state = .pinging;
-                    },
-                    .rejected => return error.ProtocolRejected,
-                    .pending => {},
-                }
-            },
-            .pinging => {
-                const take = @min(read.len, ping_size - echoed);
-                @memcpy(echo[echoed..][0..take], buffer[0..take]);
-                echoed += take;
-                if (echoed == ping_size) {
-                    if (!std.mem.eql(u8, &payload, &echo)) return error.PingMismatch;
-                    std.debug.print("ping rtt_ms={d}\n", .{result.now.mono_ms -| sent_at});
-                    out.queue("", true);
-                    state = .closing;
-                }
-            },
-            else => {},
+        pending_len = try appendPending(&pending, pending_len, buffer[0..read.len]);
+
+        if (state == .negotiating) {
+            const outcome = try dialer.feed(pending[0..pending_len]);
+            pending_len = dropPrefix(&pending, pending_len, outcome.consumed);
+            switch (outcome.status) {
+                .accepted => {
+                    sent_at = result.now.mono_ms;
+                    out.queue(&payload, false);
+                    _ = try out.pump(&node.engine, active);
+                    state = .pinging;
+                },
+                .rejected => return error.ProtocolRejected,
+                .pending => if (pending_len == pending.len) return error.PendingOverflow,
+            }
+        }
+        if (state == .pinging) {
+            const take = @min(pending_len, ping_size - echoed);
+            @memcpy(echo[echoed..][0..take], pending[0..take]);
+            echoed += take;
+            pending_len = dropPrefix(&pending, pending_len, take);
+            if (echoed == ping_size) {
+                if (!std.mem.eql(u8, &payload, &echo)) return error.PingMismatch;
+                std.debug.print("ping rtt_ms={d}\n", .{result.now.mono_ms -| sent_at});
+                out.queue("", true);
+                state = .closing;
+            }
         }
     }
     if (state != .done) return error.Timeout;
