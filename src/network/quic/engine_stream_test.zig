@@ -29,6 +29,31 @@ test "engine stream errors leak no quiche or openssl member" {
     try std.testing.expect(@typeInfo(engine_mod.StreamError).error_set != null);
 }
 
+test "engine reports a stopped write as a stream close carrying the peer's code" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.client.openStream(handles.client);
+    try std.testing.expectEqual(@as(usize, 1), try pair.client.write(stream, "x", true));
+    try pair.pump();
+    var storage: [8]@import("engine.zig").Event = undefined;
+    const inbound = try support.expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    var buffer: [8]u8 = undefined;
+    const read = try pair.server.read(inbound, &buffer);
+    try std.testing.expect(read.fin);
+    try std.testing.expectEqualStrings("x", buffer[0..read.len]);
+
+    pair.client.shutdown(stream, .read, 7);
+    try pair.pump();
+    try std.testing.expectError(error.StreamStopped, pair.server.write(inbound, "y", false));
+    const events = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqual(@as(?u64, 7), try support.expectStreamClosed(events[0], inbound));
+    try std.testing.expectError(error.UnknownStream, pair.server.write(inbound, "z", false));
+}
+
 test "engine streams echo data with fin in both directions" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
