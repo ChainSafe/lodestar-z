@@ -9,12 +9,14 @@ const packet = @import("wire/packet.zig");
 
 pub const Error = crypto.Error || enr.Error || packet.Error || session.Error || error{
     InvalidLocalRecord,
-    InvalidRemoteRecord,
     InvalidTimeout,
-    MissingIdentity,
     MissingSession,
     RequestTooLargeForHandshake,
-    UnexpectedHandshake,
+};
+
+const IdentityError = enr.Error || error{
+    InvalidRemoteRecord,
+    MissingIdentity,
 };
 
 pub const KnownIdentity = session.KnownIdentity;
@@ -71,6 +73,7 @@ pub const Inbound = union(enum) {
     authenticated: Authenticated,
     unauthenticated: Unauthenticated,
     whoareyou: Whoareyou,
+    rejected: types.RejectReason,
 };
 
 pub const HandshakeArgs = struct {
@@ -186,8 +189,9 @@ pub const Channel = struct {
         from: types.Address,
         now_ms: u64,
         scratch: *Scratch,
-    ) Error!Inbound {
-        const decoded = try packet.decode(raw, &self.local_record.node_id, &scratch.packet_decode);
+    ) Inbound {
+        const decoded = packet.decode(raw, &self.local_record.node_id, &scratch.packet_decode) catch
+            return rejected(.malformed_packet);
         return switch (decoded.form) {
             .message => |ordinary| self.receiveOrdinary(
                 &decoded,
@@ -297,7 +301,7 @@ pub const Channel = struct {
         peer: types.Endpoint,
         now_ms: u64,
         scratch: *Scratch,
-    ) Error!Inbound {
+    ) Inbound {
         var read_key = self.sessions.readKey(peer) orelse return unauthenticated(decoded, peer);
         defer std.crypto.secureZero(u8, &read_key);
         const plaintext = packet.decrypt(
@@ -306,7 +310,7 @@ pub const Channel = struct {
             &scratch.packet_decrypt,
         ) catch |err| switch (err) {
             packet.Error.DecryptionFailed => return unauthenticated(decoded, peer),
-            else => return err,
+            else => return rejected(.malformed_packet),
         };
         const touched = self.sessions.touch(peer, now_ms);
         std.debug.assert(touched);
@@ -320,25 +324,31 @@ pub const Channel = struct {
         peer: types.Endpoint,
         now_ms: u64,
         scratch: *Scratch,
-    ) Error!Inbound {
-        const stored = self.sessions.getChallenge(peer) orelse return Error.UnexpectedHandshake;
-        const identity = try selectIdentity(authdata.enr, stored.known, &peer.node_id);
-        try handshake_mod.verifyProof(
+    ) Inbound {
+        const stored = self.sessions.getChallenge(peer) orelse
+            return rejected(.unexpected_handshake);
+        const identity = selectIdentity(authdata.enr, stored.known, &peer.node_id) catch |err|
+            return rejected(switch (err) {
+                IdentityError.MissingIdentity => .invalid_handshake,
+                else => .invalid_record,
+            });
+        handshake_mod.verifyProof(
             authdata.id_signature,
             &identity.public_key,
             &stored.data,
             authdata.ephemeral_key,
             &self.local_record.node_id,
-        );
-        var keys = try handshake_mod.deriveKeys(
+        ) catch return rejected(.invalid_handshake);
+        var keys = handshake_mod.deriveKeys(
             &self.local_key,
             authdata.ephemeral_key,
             &peer.node_id,
             &self.local_record.node_id,
             &stored.data,
-        );
+        ) catch return rejected(.invalid_handshake);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&keys));
-        const plaintext = try packet.decrypt(decoded, &keys.initiator, &scratch.packet_decrypt);
+        const plaintext = packet.decrypt(decoded, &keys.initiator, &scratch.packet_decrypt) catch
+            return rejected(.invalid_handshake);
         var active = session.Session{
             .read_key = keys.initiator,
             .write_key = keys.recipient,
@@ -379,6 +389,10 @@ pub fn handshakeNonce(entropy: *const HandshakeEntropy) [constants.nonce_size]u8
     return session.makeNonce(session.first_nonce_counter, &entropy.nonce_tail);
 }
 
+fn rejected(reason: types.RejectReason) Inbound {
+    return .{ .rejected = reason };
+}
+
 fn unauthenticated(decoded: *const packet.Packet, peer: types.Endpoint) Inbound {
     return .{ .unauthenticated = .{
         .peer = peer,
@@ -390,14 +404,14 @@ fn selectIdentity(
     encoded: ?[]const u8,
     known: ?KnownIdentity,
     expected_id: *const types.NodeId,
-) Error!Identity {
+) IdentityError!Identity {
     if (encoded) |raw| {
         const record = try enr.Record.init(raw);
-        if (!std.mem.eql(u8, &record.node_id, expected_id)) return Error.InvalidRemoteRecord;
+        if (!std.mem.eql(u8, &record.node_id, expected_id)) return IdentityError.InvalidRemoteRecord;
         const newer = if (known) |identity| record.sequence > identity.sequence else true;
         if (newer) return .{ .public_key = record.public_key, .update = record };
     }
-    const identity = known orelse return Error.MissingIdentity;
+    const identity = known orelse return IdentityError.MissingIdentity;
     return .{ .public_key = identity.public_key, .update = null };
 }
 

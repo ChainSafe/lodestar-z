@@ -21,7 +21,7 @@ test "cold packet is challenged and the handshake delivers the sender record" {
     );
     try std.testing.expect(handshake_packet.form.handshake.enr != null);
 
-    const inbound = try pair.node_b.receive(
+    const inbound = pair.node_b.receive(
         pair.a_to_b[0..length],
         pair.address_a,
         2,
@@ -36,7 +36,7 @@ test "cold packet is challenged and the handshake delivers the sender record" {
 
     const entropy = sealEntropy(0x40);
     const reply = try pair.node_b.sealEstablished(&pair.b_to_a, pair.peerA(), "pong", &entropy, 3);
-    const answered = try pair.node_a.receive(
+    const answered = pair.node_a.receive(
         pair.b_to_a[0..reply.packet_length],
         pair.address_b,
         3,
@@ -60,7 +60,7 @@ test "handshake omits the local record when the challenger already knows it" {
     );
     try std.testing.expect(handshake_packet.form.handshake.enr == null);
 
-    const inbound = try pair.node_b.receive(
+    const inbound = pair.node_b.receive(
         pair.a_to_b[0..length],
         pair.address_a,
         2,
@@ -87,15 +87,13 @@ test "handshake without a record needs an identity captured at challenge time" {
         .entropy = &entropy,
         .now_ms = 1,
     });
-    try std.testing.expectError(
-        channel.Error.MissingIdentity,
-        pair.node_b.receive(
-            pair.a_to_b[0..handshake.packet_length],
-            pair.address_a,
-            2,
-            &pair.scratch,
-        ),
+    const inbound = pair.node_b.receive(
+        pair.a_to_b[0..handshake.packet_length],
+        pair.address_a,
+        2,
+        &pair.scratch,
     );
+    try std.testing.expectEqual(types.RejectReason.invalid_handshake, inbound.rejected);
     try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.sessionCount());
     try std.testing.expectEqual(@as(usize, 1), pair.node_b.sessions.challengeCount());
 }
@@ -107,15 +105,13 @@ test "corrupted handshake fails decryption and keeps the challenge" {
 
     const length = try pair.challengeAndHandshake("ping", null, 1);
     pair.a_to_b[length - 1] ^= 1;
-    try std.testing.expectError(
-        packet.Error.DecryptionFailed,
-        pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 2, &pair.scratch),
-    );
+    const corrupted = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 2, &pair.scratch);
+    try std.testing.expectEqual(types.RejectReason.invalid_handshake, corrupted.rejected);
     try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.sessionCount());
     try std.testing.expectEqual(@as(usize, 1), pair.node_b.sessions.challengeCount());
 
     pair.a_to_b[length - 1] ^= 1;
-    const inbound = try pair.node_b.receive(
+    const inbound = pair.node_b.receive(
         pair.a_to_b[0..length],
         pair.address_a,
         3,
@@ -132,7 +128,7 @@ test "a pending challenge is not reissued for the same peer" {
 
     const entropy = sealEntropy(0x10);
     const sealed = try pair.node_a.seal(&pair.a_to_b, pair.peerB(), "ping", &entropy, 1);
-    const inbound = try pair.node_b.receive(
+    const inbound = pair.node_b.receive(
         pair.a_to_b[0..sealed.packet_length],
         pair.address_a,
         1,
@@ -206,7 +202,7 @@ test "expire removes stale challenges and idle sessions" {
     try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.challengeCount());
 
     const length = try pair.challengeAndHandshake("ping", null, 200);
-    _ = try pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 200, &pair.scratch);
+    _ = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 200, &pair.scratch);
     try std.testing.expect(pair.node_b.hasSession(pair.peerA()));
     const sessions = pair.node_b.expire(200 + testConfig().session_idle_timeout_ms);
     try std.testing.expectEqual(@as(usize, 1), sessions.sessions);
@@ -286,7 +282,7 @@ const Pair = struct {
             &seal_entropy,
             now_ms,
         );
-        const inbound = try self.node_b.receive(
+        const inbound = self.node_b.receive(
             self.a_to_b[0..sealed.packet_length],
             self.address_a,
             now_ms,
@@ -304,7 +300,7 @@ const Pair = struct {
             now_ms,
         )).?;
         try std.testing.expectEqual(@as(u16, constants.whoareyou_packet_size), length);
-        const who = try self.node_a.receive(
+        const who = self.node_a.receive(
             self.b_to_a[0..length],
             self.address_b,
             now_ms,

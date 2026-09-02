@@ -94,17 +94,17 @@ const Pair = struct {
             receiveArgs(2, 0x30),
             &self.scratch_b,
         );
-        try std.testing.expectEqual(@as(u16, 63), challenge.packet_length);
+        try std.testing.expectEqual(@as(u16, 63), challenge.accepted.packet_length);
         const response = try self.node_a.receive(
             &self.a_to_b,
-            self.b_to_a[0..challenge.packet_length],
+            self.b_to_a[0..challenge.accepted.packet_length],
             self.address_b,
             receiveArgs(3, 0x40),
             &self.scratch_a,
         );
-        try std.testing.expect(response.packet_length > 63);
+        try std.testing.expect(response.accepted.packet_length > 63);
         const handshake_packet = try packet.decode(
-            self.a_to_b[0..response.packet_length],
+            self.a_to_b[0..response.accepted.packet_length],
             &self.record_b.node_id,
             &self.scratch_b.channel.packet_decode,
         );
@@ -113,19 +113,20 @@ const Pair = struct {
             &.{ 0, 0, 0, 1 },
             handshake_packet.static_header.nonce[0..4],
         );
-        return .{ .started = started, .handshake_length = response.packet_length };
+        return .{ .started = started, .handshake_length = response.accepted.packet_length };
     }
 
     fn authenticate(self: *Pair, handshake_length: u16) !engine.AuthenticatedRequest {
         var corrupted = self.a_to_b;
         corrupted[handshake_length - 1] ^= 1;
-        try std.testing.expectError(packet.Error.DecryptionFailed, self.node_b.receive(
+        const corrupted_outcome = try self.node_b.receive(
             &self.b_to_a,
             corrupted[0..handshake_length],
             self.address_a,
             receiveArgs(4, 0x50),
             &self.scratch_b,
-        ));
+        );
+        try std.testing.expectEqual(types.RejectReason.invalid_handshake, corrupted_outcome.rejected);
         try std.testing.expectEqual(@as(usize, 0), self.node_b.channel.sessions.sessionCount());
         try std.testing.expectEqual(@as(usize, 1), self.node_b.channel.sessions.challengeCount());
         const authenticated = try self.node_b.receive(
@@ -135,16 +136,16 @@ const Pair = struct {
             receiveArgs(5, 0x60),
             &self.scratch_b,
         );
-        try std.testing.expect(authenticated.event == .request);
-        try std.testing.expect(authenticated.event.request.record != null);
+        try std.testing.expect(authenticated.accepted.event == .request);
+        try std.testing.expect(authenticated.accepted.event.request.record != null);
         try std.testing.expectEqual(
             self.record_a.node_id,
-            authenticated.event.request.record.?.node_id,
+            authenticated.accepted.event.request.record.?.node_id,
         );
         try std.testing.expect(self.node_b.routing.contains(&self.record_a.node_id));
         try std.testing.expectEqual(@as(usize, 1), self.node_b.channel.sessions.sessionCount());
         try std.testing.expectEqual(@as(usize, 0), self.node_b.channel.sessions.challengeCount());
-        return authenticated.event.request;
+        return authenticated.accepted.event.request;
     }
 
     fn completePong(
@@ -192,10 +193,10 @@ const Pair = struct {
             receiveArgs(7, 0x80),
             &self.scratch_a,
         );
-        try std.testing.expect(completed.event == .response);
-        try std.testing.expect(completed.event.response.matched.terminal);
-        try std.testing.expectEqual(started.handle, completed.event.response.matched.handle);
-        const pong = completed.event.response.matched.response.pong;
+        try std.testing.expect(completed.accepted.event == .response);
+        try std.testing.expect(completed.accepted.event.response.matched.terminal);
+        try std.testing.expectEqual(started.handle, completed.accepted.event.response.matched.handle);
+        const pong = completed.accepted.event.response.matched.response.pong;
         try std.testing.expectEqual(self.record_b.sequence, pong.enr_sequence);
         try std.testing.expectEqual(self.address_a.ip4.octets, pong.recipient_ip.ip4);
         try std.testing.expectEqual(self.address_a.ip4.port, pong.recipient_port);
@@ -238,9 +239,9 @@ const Pair = struct {
             receiveArgs(17, 0xa0),
             &self.scratch_b,
         );
-        try std.testing.expectEqual(@as(u16, 0), received.packet_length);
-        try std.testing.expect(received.event == .request);
-        try std.testing.expect(received.event.request.record == null);
+        try std.testing.expectEqual(@as(u16, 0), received.accepted.packet_length);
+        try std.testing.expect(received.accepted.event == .request);
+        try std.testing.expect(received.accepted.event.request.record == null);
         var expired: [1]calls.Expired = undefined;
         const tick = self.node_a.tick(116, &expired);
         try std.testing.expectEqual(@as(usize, 1), tick.calls);
@@ -268,7 +269,7 @@ const Pair = struct {
             receiveArgs(13, 0x82),
             &self.scratch_b,
         );
-        try std.testing.expect(received.event == .request);
+        try std.testing.expect(received.accepted.event == .request);
 
         const raw_records = [_][]const u8{ self.record_a.slice(), self.record_b.slice() };
         const response = message.Message{ .nodes = .{
@@ -290,15 +291,15 @@ const Pair = struct {
             receiveArgs(15, 0x84),
             &self.scratch_a,
         );
-        try std.testing.expect(completed.event == .response);
-        try std.testing.expectEqual(@as(usize, 1), completed.event.response.node_records.len);
+        try std.testing.expect(completed.accepted.event == .response);
+        try std.testing.expectEqual(@as(usize, 1), completed.accepted.event.response.node_records.len);
         try std.testing.expectEqual(
             self.record_a.node_id,
-            completed.event.response.node_records[0].node_id,
+            completed.accepted.event.response.node_records[0].node_id,
         );
         try std.testing.expectEqual(
             @as(usize, 1),
-            completed.event.response.matched.response.nodes.enrs.len,
+            completed.accepted.event.response.matched.response.nodes.enrs.len,
         );
     }
 
@@ -322,10 +323,10 @@ const Pair = struct {
             receiveArgs(9, 0xb1),
             &self.scratch_a,
         );
-        try std.testing.expect(received.event == .request);
+        try std.testing.expect(received.accepted.event == .request);
         var response: engine.StandardResponse = undefined;
         try self.node_a.prepareStandardResponse(
-            &received.event.request,
+            &received.accepted.event.request,
             &response,
         );
         const response_length = (try self.node_a.sendNextStandardResponse(
@@ -342,12 +343,12 @@ const Pair = struct {
             receiveArgs(11, 0xb3),
             &self.scratch_b,
         );
-        try std.testing.expect(completed.event == .response);
-        try std.testing.expectEqual(started.handle, completed.event.response.matched.handle);
-        try std.testing.expectEqual(@as(usize, 1), completed.event.response.node_records.len);
+        try std.testing.expect(completed.accepted.event == .response);
+        try std.testing.expectEqual(started.handle, completed.accepted.event.response.matched.handle);
+        try std.testing.expectEqual(@as(usize, 1), completed.accepted.event.response.node_records.len);
         try std.testing.expectEqual(
             self.record_a.node_id,
-            completed.event.response.node_records[0].node_id,
+            completed.accepted.event.response.node_records[0].node_id,
         );
     }
 

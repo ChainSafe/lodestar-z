@@ -19,7 +19,6 @@ const lookup_concurrency: usize = 16;
 const lookup_total_max: usize = 64;
 const poll_interval_ms: u32 = 25;
 const record_capacity: usize = 8_192;
-const rejection_reason_capacity: usize = 16;
 
 const Bootstrap = struct {
     record: discv5.identity.enr.Record,
@@ -73,42 +72,6 @@ const RecordSet = struct {
         self.indices.putAssumeCapacityNoClobber(record.node_id, self.count);
         self.count += 1;
         return true;
-    }
-};
-
-const RejectionStats = struct {
-    const Entry = struct {
-        reason: discv5.engine.Error,
-        count: u32,
-    };
-
-    entries: [rejection_reason_capacity]Entry = undefined,
-    count: u8 = 0,
-    total: u32 = 0,
-    unclassified: u32 = 0,
-
-    fn add(self: *RejectionStats, reason: discv5.engine.Error) void {
-        self.total += 1;
-        for (self.entries[0..self.count]) |*entry| {
-            if (entry.reason != reason) continue;
-            entry.count += 1;
-            return;
-        }
-        if (self.count == self.entries.len) {
-            self.unclassified += 1;
-            return;
-        }
-        self.entries[self.count] = .{ .reason = reason, .count = 1 };
-        self.count += 1;
-    }
-
-    fn print(self: *const RejectionStats) void {
-        std.debug.print("rejected_datagrams={d}\n", .{self.total});
-        for (self.entries[0..self.count]) |entry| {
-            std.debug.print("  {s}={d}\n", .{ @errorName(entry.reason), entry.count });
-        }
-        if (self.unclassified > 0)
-            std.debug.print("  unclassified={d}\n", .{self.unclassified});
     }
 };
 
@@ -302,7 +265,7 @@ fn crawl(
     var operations: [lookup_concurrency]*discv5.lookup.Lookup = undefined;
     var launched: usize = 0;
     var completed: usize = 0;
-    var rejections = RejectionStats{};
+    var rejections = std.EnumArray(discv5.types.RejectReason, u32).initFill(0);
 
     for (0..driver_steps_max) |_| {
         if (try discv5.driver.monotonicMilliseconds(io) >= deadline_ms) break;
@@ -311,7 +274,7 @@ fn crawl(
         const active = activeLookups(&slots, &operations);
         const result = try discv5.lookup_driver.step(transport, io, active, &expired);
         switch (result.driver.datagram) {
-            .rejected => |reason| rejections.add(reason),
+            .rejected => |reason| rejections.getPtr(reason).* += 1,
             .timeout, .accepted => {},
         }
         if (result.consumed != null) {
@@ -324,7 +287,17 @@ fn crawl(
     }
 
     std.debug.print("lookups launched={d} completed={d}\n", .{ launched, completed });
-    rejections.print();
+    printRejections(&rejections);
+}
+
+fn printRejections(rejections: *const std.EnumArray(discv5.types.RejectReason, u32)) void {
+    var total: u32 = 0;
+    for (std.enums.values(discv5.types.RejectReason)) |reason| total += rejections.get(reason);
+    std.debug.print("rejected_datagrams={d}\n", .{total});
+    for (std.enums.values(discv5.types.RejectReason)) |reason| {
+        const count = rejections.get(reason);
+        if (count > 0) std.debug.print("  {s}={d}\n", .{ @tagName(reason), count });
+    }
 }
 
 fn startLookups(
@@ -429,5 +402,4 @@ comptime {
     std.debug.assert(lookup_concurrency * discv5.lookup.parallelism <= call_capacity);
     std.debug.assert(record_capacity <= std.math.maxInt(u16));
     std.debug.assert(record_capacity >= discv5.routing.table_capacity);
-    std.debug.assert(rejection_reason_capacity <= std.math.maxInt(u8));
 }
