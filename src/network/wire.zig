@@ -6,4 +6,5 @@ test {
     _ = constants;
     _ = types;
     _ = varint;
+    _ = @import("varint_test.zig");
 }
