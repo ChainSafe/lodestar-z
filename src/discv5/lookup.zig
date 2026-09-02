@@ -94,7 +94,7 @@ pub const Lookup = struct {
         out: []u8,
         request_id: message.RequestId,
         now_ms: u64,
-        entropy: engine_mod.StartEntropy,
+        entropy: *const engine_mod.StartEntropy,
     ) Error!?Started {
         if (self.finished or self.waiting_count == parallelism) return null;
         const index = self.nextCandidateIndex() orelse {
@@ -211,7 +211,7 @@ pub const Lookup = struct {
         if (std.mem.eql(u8, &record.node_id, &self.local_id)) return;
         const address = record.endpoint() orelse return;
         if (address.port() < discovered_port_min or
-            !types.relayAllowed(source, address)) return;
+            !routing.relayAllowed(source, address)) return;
         if (self.findCandidate(&record.node_id)) |index| {
             const candidate = &self.candidates[index];
             if (candidate.state == .unqueried and

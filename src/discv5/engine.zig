@@ -143,6 +143,15 @@ pub const Engine = struct {
         self.routing.deinit();
         self.calls.deinit();
         self.channel.deinit();
+        self.* = undefined;
+    }
+
+    pub fn localRecord(self: *const Self) *const enr.Record {
+        return &self.channel.local_record;
+    }
+
+    pub fn peerCount(self: *const Self) usize {
+        return self.routing.count();
     }
 
     pub fn startCall(
@@ -152,7 +161,7 @@ pub const Engine = struct {
         remote_record: *const enr.Record,
         request: *const message.Message,
         now_ms: u64,
-        entropy: StartEntropy,
+        entropy: *const StartEntropy,
     ) Error!StartResult {
         if (!std.mem.eql(u8, &peer.node_id, &remote_record.node_id))
             return Error.InvalidRemoteRecord;
@@ -172,7 +181,7 @@ pub const Engine = struct {
         out: []u8,
         request_id: message.RequestId,
         now_ms: u64,
-        entropy: StartEntropy,
+        entropy: *const StartEntropy,
     ) Error!?RevalidationStart {
         const target = self.routing.revalidationTarget() orelse return null;
         const request = message.Message{ .ping = .{
@@ -198,7 +207,7 @@ pub const Engine = struct {
         remote_public_key: *const [33]u8,
         request: *const message.Message,
         now_ms: u64,
-        entropy: StartEntropy,
+        entropy: *const StartEntropy,
         owner: calls_mod.Owner,
     ) Error!StartResult {
         const deadline_ms = try deadline(now_ms, self.config.request_timeout_ms);
@@ -221,7 +230,7 @@ pub const Engine = struct {
             std.debug.assert(cancelled);
         }
         const plaintext = self.calls.requestBytes(handle) orelse return Error.MissingCall;
-        const sealed = try self.channel.seal(out, peer, plaintext, &entropy, now_ms);
+        const sealed = try self.channel.seal(out, peer, plaintext, entropy, now_ms);
         try self.calls.markSent(handle, &sealed.nonce, deadline_ms);
         return .{ .handle = handle, .packet_length = sealed.packet_length };
     }
@@ -232,7 +241,7 @@ pub const Engine = struct {
         peer: types.Endpoint,
         response: *const message.Message,
         now_ms: u64,
-        entropy: StartEntropy,
+        entropy: *const StartEntropy,
     ) Error!u16 {
         try validateResponse(response);
         return self.sendPreparedResponse(out, peer, response, now_ms, entropy);
@@ -272,7 +281,7 @@ pub const Engine = struct {
         out: []u8,
         response: *StandardResponse,
         now_ms: u64,
-        entropy: StartEntropy,
+        entropy: *const StartEntropy,
     ) Error!?u16 {
         var raw_records: standard_response.RawRecords = undefined;
         const message_response = response.next(&raw_records) orelse return null;
@@ -293,11 +302,11 @@ pub const Engine = struct {
         peer: types.Endpoint,
         response: *const message.Message,
         now_ms: u64,
-        entropy: StartEntropy,
+        entropy: *const StartEntropy,
     ) Error!u16 {
         var plaintext_buffer: [constants.ordinary_plaintext_size_max]u8 = undefined;
         const plaintext = try response.encode(&plaintext_buffer);
-        const sealed = try self.channel.sealEstablished(out, peer, plaintext, &entropy, now_ms);
+        const sealed = try self.channel.sealEstablished(out, peer, plaintext, entropy, now_ms);
         return sealed.packet_length;
     }
 

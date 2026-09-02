@@ -81,6 +81,7 @@ pub const Store = struct {
         while (iterator.next()) |entry| clearSession(entry);
         self.sessions.deinit(self.allocator);
         self.allocator.free(self.challenges);
+        self.* = undefined;
     }
 
     pub fn hasSession(self: *const Store, peer: types.Endpoint) bool {

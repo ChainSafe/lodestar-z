@@ -20,13 +20,15 @@ pub const Plan = struct {
     boundaries: [protocol.findnode_response_packets_max + 1]u8 = undefined,
     sent: u8 = 0,
     body: union(enum) {
+        none,
         pong: message.Pong,
         nodes: Nodes,
-    } = undefined,
+    } = .none,
 
     /// The returned NODES message borrows `raw` for its record slices.
     pub fn next(self: *const Plan, raw: *RawRecords) ?message.Message {
         return switch (self.body) {
+            .none => null,
             .pong => |value| if (self.sent == 0) .{ .pong = value } else null,
             .nodes => |value| blk: {
                 if (self.sent == value.packet_count) break :blk null;
@@ -51,6 +53,7 @@ pub const Plan = struct {
 
     pub fn complete(self: *const Plan) bool {
         return switch (self.body) {
+            .none => true,
             .pong => self.sent == 1,
             .nodes => |value| self.sent == value.packet_count,
         };

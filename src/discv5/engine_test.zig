@@ -68,7 +68,7 @@ const Pair = struct {
             &self.record_b,
             &ping_message,
             1,
-            startEntropy(0x08),
+            &startEntropy(0x08),
         ));
         try std.testing.expectEqual(@as(usize, 0), self.node_a.calls.count());
         const started = try self.node_a.startCall(
@@ -77,7 +77,7 @@ const Pair = struct {
             &self.record_b,
             &ping_message,
             1,
-            startEntropy(0x10),
+            &startEntropy(0x10),
         );
         try std.testing.expectError(calls.Error.PeerBusy, self.node_a.startCall(
             &self.a_to_b,
@@ -85,7 +85,7 @@ const Pair = struct {
             &self.record_b,
             &ping_message,
             1,
-            startEntropy(0x20),
+            &startEntropy(0x20),
         ));
         const challenge = try self.node_b.receive(
             &self.b_to_a,
@@ -153,21 +153,21 @@ const Pair = struct {
         started: engine.StartResult,
         request: *const engine.AuthenticatedRequest,
     ) !void {
-        var response: engine.StandardResponse = undefined;
+        var response: engine.StandardResponse = .{};
         try self.node_b.prepareStandardResponse(request, &response);
         var too_small: [1]u8 = undefined;
         try std.testing.expectError(packet.Error.BufferTooSmall, self.node_b.sendNextStandardResponse(
             &too_small,
             &response,
             6,
-            startEntropy(0x70),
+            &startEntropy(0x70),
         ));
         try std.testing.expect(!response.complete());
         const length = (try self.node_b.sendNextStandardResponse(
             &self.b_to_a,
             &response,
             6,
-            startEntropy(0x70),
+            &startEntropy(0x70),
         )).?;
         const response_packet = try packet.decode(
             self.b_to_a[0..length],
@@ -184,7 +184,7 @@ const Pair = struct {
             &self.b_to_a,
             &response,
             6,
-            startEntropy(0x70),
+            &startEntropy(0x70),
         )) == null);
         const completed = try self.node_a.receive(
             &self.a_to_b,
@@ -220,7 +220,7 @@ const Pair = struct {
             &self.record_b,
             &ping_message,
             16,
-            startEntropy(0x90),
+            &startEntropy(0x90),
         );
         const direct_packet = try packet.decode(
             self.a_to_b[0..started.packet_length],
@@ -260,7 +260,7 @@ const Pair = struct {
             &self.record_b,
             &request,
             12,
-            startEntropy(0x81),
+            &startEntropy(0x81),
         );
         const received = try self.node_b.receive(
             &self.b_to_a,
@@ -282,7 +282,7 @@ const Pair = struct {
             self.peerA(),
             &response,
             14,
-            startEntropy(0x83),
+            &startEntropy(0x83),
         );
         const completed = try self.node_a.receive(
             &self.a_to_b,
@@ -314,7 +314,7 @@ const Pair = struct {
             &self.record_a,
             &request,
             8,
-            startEntropy(0xb0),
+            &startEntropy(0xb0),
         );
         const received = try self.node_a.receive(
             &self.a_to_b,
@@ -324,7 +324,7 @@ const Pair = struct {
             &self.scratch_a,
         );
         try std.testing.expect(received.accepted.event == .request);
-        var response: engine.StandardResponse = undefined;
+        var response: engine.StandardResponse = .{};
         try self.node_a.prepareStandardResponse(
             &received.accepted.event.request,
             &response,
@@ -333,7 +333,7 @@ const Pair = struct {
             &self.a_to_b,
             &response,
             10,
-            startEntropy(0xb2),
+            &startEntropy(0xb2),
         )).?;
         try std.testing.expect(response.complete());
         const completed = try self.node_b.receive(
@@ -405,7 +405,7 @@ test "cold oversized requests fail before transmission" {
         &remote_record,
         &request,
         1,
-        startEntropy(0x10),
+        &startEntropy(0x10),
     ));
     try std.testing.expectEqualSlices(u8, &before, &output);
     try std.testing.expectEqual(@as(usize, 0), node.calls.count());
@@ -422,7 +422,7 @@ test "cold oversized requests fail before transmission" {
         &remote_record,
         &request,
         3,
-        startEntropy(0x20),
+        &startEntropy(0x20),
     );
     try std.testing.expect(started.packet_length > 1_100);
 }

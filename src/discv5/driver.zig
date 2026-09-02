@@ -2,7 +2,6 @@ const std = @import("std");
 const calls = @import("calls.zig");
 const engine = @import("engine.zig");
 const enr = @import("identity/enr.zig");
-const lookup_mod = @import("lookup.zig");
 const protocol = @import("protocol.zig");
 const runtime = @import("runtime.zig");
 const types = @import("types.zig");
@@ -17,8 +16,6 @@ pub const Error = engine.Error || runtime.ReceiveTimeoutError || runtime.Release
     MissingExpiryStorage,
 };
 
-pub const LookupError = Error || lookup_mod.Error;
-
 pub const Config = struct {
     poll_interval_ms: u32 = 100,
 };
@@ -29,16 +26,26 @@ pub const DatagramResult = union(enum) {
     rejected: types.RejectReason,
 };
 
-pub const StepResult = struct {
-    now_ms: u64 = 0,
-    event: engine.Event = .none,
-    datagram: DatagramResult = .timeout,
-    calls_expired: usize = 0,
+pub const Progress = struct {
     maintenance_expired: usize = 0,
     challenges_expired: usize = 0,
     sessions_expired: usize = 0,
     standard_responses: u8 = 0,
     maintenance_started: bool = false,
+};
+
+pub const StepResult = struct {
+    now_ms: u64 = 0,
+    event: engine.Event = .none,
+    datagram: DatagramResult = .timeout,
+    calls_expired: usize = 0,
+    progress: Progress = .{},
+};
+
+/// Clock reading and fresh entropy for one outbound packet.
+pub const SendContext = struct {
+    now_ms: u64,
+    entropy: engine.StartEntropy,
 };
 
 pub const Driver = struct {
@@ -48,7 +55,7 @@ pub const Driver = struct {
     udp: *runtime.Udp,
     config: Config,
     scratch: engine.Scratch = .{},
-    response: engine.StandardResponse = undefined,
+    response: engine.StandardResponse = .{},
     output: [constants.packet_size_max]u8 = undefined,
 
     pub fn init(core: *engine.Engine, udp: *runtime.Udp) Self {
@@ -71,18 +78,17 @@ pub const Driver = struct {
         record: *const enr.Record,
         request: *const message.Message,
     ) Error!calls.Handle {
-        const now_ms = try monotonicMilliseconds(io);
-        var entropy = try startEntropy(io);
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
+        var context = try sendContext(io);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&context.entropy));
         const started = try self.core.startCall(
             &self.output,
             peer,
             record,
             request,
-            now_ms,
-            entropy,
+            context.now_ms,
+            &context.entropy,
         );
-        self.send(io, peer.address, self.output[0..started.packet_length]) catch |err| {
+        self.transmit(io, peer.address, self.output[0..started.packet_length]) catch |err| {
             const cancelled = self.core.cancelCall(started.handle);
             std.debug.assert(cancelled);
             return err;
@@ -96,44 +102,35 @@ pub const Driver = struct {
         peer: types.Endpoint,
         response: *const message.Message,
     ) Error!void {
-        const now_ms = try monotonicMilliseconds(io);
-        var entropy = try startEntropy(io);
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
+        var context = try sendContext(io);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&context.entropy));
         const packet_length = try self.core.sendResponse(
             &self.output,
             peer,
             response,
-            now_ms,
-            entropy,
+            context.now_ms,
+            &context.entropy,
         );
-        try self.send(io, peer.address, self.output[0..packet_length]);
+        try self.transmit(io, peer.address, self.output[0..packet_length]);
     }
 
-    pub fn startLookupCall(
-        self: *Self,
+    /// Failures tied to the destination collapse into `DestinationUnreachable`.
+    pub fn transmit(
+        self: *const Self,
         io: std.Io,
-        operation: *lookup_mod.Lookup,
-    ) LookupError!bool {
-        const now_ms = try monotonicMilliseconds(io);
-        const request_id = try randomRequestId(io);
-        var entropy = try startEntropy(io);
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
-        const started = try operation.startNext(
-            self.core,
-            &self.output,
-            request_id,
-            now_ms,
-            entropy,
-        ) orelse return false;
-        self.send(
-            io,
-            started.peer.address,
-            self.output[0..started.call.packet_length],
-        ) catch |err| {
-            operation.onFailure(self.core, started.call.handle) catch unreachable;
-            return err;
+        destination: types.Address,
+        bytes: []const u8,
+    ) Error!void {
+        return self.udp.send(io, destination, bytes) catch |err| switch (err) {
+            error.AccessDenied,
+            error.AddressFamilyUnsupported,
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            => error.DestinationUnreachable,
+            else => err,
         };
-        return true;
     }
 
     /// The returned event borrows driver scratch and remains valid until the next step.
@@ -165,14 +162,14 @@ pub const Driver = struct {
         const available = expired_calls[result.calls_expired..];
         const expired = self.core.tick(result.now_ms, available);
         result.calls_expired += expired.calls;
-        result.maintenance_expired += expired.maintenance_calls;
-        result.challenges_expired += expired.challenges;
-        result.sessions_expired += expired.sessions;
+        result.progress.maintenance_expired += expired.maintenance_calls;
+        result.progress.challenges_expired += expired.challenges;
+        result.progress.sessions_expired += expired.sessions;
     }
 
     fn maintain(self: *Self, io: std.Io, result: *StepResult) Error!void {
-        if (result.maintenance_started) return;
-        result.maintenance_started = try self.startMaintenance(io, result.now_ms);
+        if (result.progress.maintenance_started) return;
+        result.progress.maintenance_started = try self.startMaintenance(io, result.now_ms);
     }
 
     fn receiveDatagram(self: *Self, io: std.Io) Error!?runtime.Datagram {
@@ -209,7 +206,7 @@ pub const Driver = struct {
         };
         result.datagram = .accepted;
         if (accepted.packet_length > 0) {
-            try self.send(io, datagram.from, self.output[0..accepted.packet_length]);
+            try self.transmit(io, datagram.from, self.output[0..accepted.packet_length]);
         }
         result.event = try self.handleEvent(io, accepted.event, result);
     }
@@ -229,17 +226,17 @@ pub const Driver = struct {
             .ping, .find_node => {},
         }
         try self.core.prepareStandardResponse(&request, &self.response);
-        while (result.standard_responses < protocol.findnode_response_packets_max) {
+        while (result.progress.standard_responses < protocol.findnode_response_packets_max) {
             var entropy = try startEntropy(io);
             defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
             const packet_length = try self.core.sendNextStandardResponse(
                 &self.output,
                 &self.response,
                 result.now_ms,
-                entropy,
+                &entropy,
             ) orelse break;
-            try self.send(io, request.peer.address, self.output[0..packet_length]);
-            result.standard_responses += 1;
+            try self.transmit(io, request.peer.address, self.output[0..packet_length]);
+            result.progress.standard_responses += 1;
         }
         std.debug.assert(self.response.complete());
         return .none;
@@ -247,19 +244,19 @@ pub const Driver = struct {
 
     fn startMaintenance(self: *Self, io: std.Io, now_ms: u64) Error!bool {
         if (!self.core.hasPendingRevalidation()) return false;
-        const request_id = try randomRequestId(io);
+        const request_id = try requestId(io);
         var entropy = try startEntropy(io);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
         const started = self.core.startRevalidation(
             &self.output,
             request_id,
             now_ms,
-            entropy,
+            &entropy,
         ) catch |err| switch (err) {
             calls.Error.PeerBusy, calls.Error.TableFull => return false,
             else => return err,
         } orelse return false;
-        self.send(
+        self.transmit(
             io,
             started.peer.address,
             self.output[0..started.call.packet_length],
@@ -270,24 +267,6 @@ pub const Driver = struct {
         };
         return true;
     }
-
-    fn send(
-        self: *const Self,
-        io: std.Io,
-        destination: types.Address,
-        bytes: []const u8,
-    ) Error!void {
-        return self.udp.send(io, destination, bytes) catch |err| switch (err) {
-            error.AccessDenied,
-            error.AddressFamilyUnsupported,
-            error.ConnectionRefused,
-            error.ConnectionResetByPeer,
-            error.HostUnreachable,
-            error.NetworkUnreachable,
-            => error.DestinationUnreachable,
-            else => err,
-        };
-    }
 };
 
 pub fn monotonicMilliseconds(io: std.Io) Error!u64 {
@@ -296,7 +275,11 @@ pub fn monotonicMilliseconds(io: std.Io) Error!u64 {
     return @intCast(value);
 }
 
-fn randomRequestId(io: std.Io) std.Io.RandomSecureError!message.RequestId {
+pub fn sendContext(io: std.Io) Error!SendContext {
+    return .{ .now_ms = try monotonicMilliseconds(io), .entropy = try startEntropy(io) };
+}
+
+pub fn requestId(io: std.Io) std.Io.RandomSecureError!message.RequestId {
     var bytes: [8]u8 = undefined;
     try std.Io.randomSecure(io, &bytes);
     return message.RequestId.init(&bytes) catch unreachable;
