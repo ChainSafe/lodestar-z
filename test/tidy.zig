@@ -68,17 +68,6 @@ const unimported_file_allowlist = [_][]const u8{
     "src/state_transition/utils_test_root.zig",
 };
 
-/// Confirmed dead code, listed only so this lint stays green until the removal
-/// lands. Delete the file and its entry together; do not grow this list.
-const dead_file_removal_pending = [_][]const u8{
-    // Unfinished scratch from `cdd7a832 feat: refactor (#21)`. Nothing references
-    // `Serialized`, and its test block still has debug prints and a stray `s.foo`.
-    "src/ssz/type/serialized.zig",
-    // Orphaned by `2515713d feat: use high level zapi dsl (#320)`, which replaced
-    // manual property descriptors with the zapi DSL.
-    "bindings/napi/napi_property_descriptor.zig",
-};
-
 /// Rule scoping.
 ///
 /// Wiring and discovery rules run repo-wide, because a test that never runs is
@@ -463,7 +452,6 @@ fn tidyDeadFiles(
     for (files) |file| {
         if (!inScope(scope, file.path)) continue;
         if (listContains(&unimported_file_allowlist, file.path)) continue;
-        if (listContains(&dead_file_removal_pending, file.path)) continue;
         if (listContains(roots, file.path)) continue;
 
         var imported = false;
@@ -516,11 +504,6 @@ fn tidyAllowlists(files: []const File, errors: *Errors) void {
     for (unimported_file_allowlist) |allowed| {
         if (findFile(files, allowed) == null) {
             errors.addStaleAllowlistEntry(allowed, "the file does not exist");
-        }
-    }
-    for (dead_file_removal_pending) |allowed| {
-        if (findFile(files, allowed) == null) {
-            errors.addStaleAllowlistEntry(allowed, "the file is already gone, drop the entry");
         }
     }
 }
@@ -848,8 +831,7 @@ test "rule: stale allowlist entry" {
     tidyAllowlists(files, errors);
 
     try testing.expectEqual(
-        inline_test_allowlist.len + unimported_file_allowlist.len +
-            dead_file_removal_pending.len,
+        inline_test_allowlist.len + unimported_file_allowlist.len,
         errors.count,
     );
     try testing.expect(std.mem.indexOf(
