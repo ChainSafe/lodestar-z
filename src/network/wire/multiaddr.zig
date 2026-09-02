@@ -47,7 +47,10 @@ pub const Multiaddr = struct {
         var cursor: usize = 0;
         var address: address_mod.Address = switch (try takeVarint(bytes, &cursor)) {
             code_ip4 => .{ .ip4 = .{ .octets = (try take(bytes, &cursor, 4))[0..4].*, .port = 0 } },
-            code_ip6 => .{ .ip6 = .{ .octets = (try take(bytes, &cursor, 16))[0..16].*, .port = 0 } },
+            code_ip6 => .{ .ip6 = .{
+                .octets = (try take(bytes, &cursor, 16))[0..16].*,
+                .port = 0,
+            } },
             else => return error.InvalidMultiaddr,
         };
         if (try takeVarint(bytes, &cursor) != code_udp) return error.InvalidMultiaddr;
@@ -76,44 +79,56 @@ pub const Multiaddr = struct {
                 cursor += written.len;
             },
             .ip6 => |ip| {
-                cursor += (std.fmt.bufPrint(out[cursor..], "/ip6/", .{}) catch return error.BufferTooSmall).len;
+                const prefix = std.fmt.bufPrint(out[cursor..], "/ip6/", .{}) catch
+                    return error.BufferTooSmall;
+                cursor += prefix.len;
                 for (0..8) |group| {
                     const value = std.mem.readInt(u16, ip.octets[group * 2 ..][0..2], .big);
                     const written = if (group == 0)
-                        std.fmt.bufPrint(out[cursor..], "{x}", .{value}) catch return error.BufferTooSmall
+                        std.fmt.bufPrint(out[cursor..], "{x}", .{value}) catch
+                            return error.BufferTooSmall
                     else
-                        std.fmt.bufPrint(out[cursor..], ":{x}", .{value}) catch return error.BufferTooSmall;
+                        std.fmt.bufPrint(out[cursor..], ":{x}", .{value}) catch
+                            return error.BufferTooSmall;
                     cursor += written.len;
                 }
             },
         }
-        const tail = std.fmt.bufPrint(out[cursor..], "/udp/{d}/quic-v1", .{self.address.port()}) catch
+        const port = self.address.port();
+        const tail = std.fmt.bufPrint(out[cursor..], "/udp/{d}/quic-v1", .{port}) catch
             return error.BufferTooSmall;
         cursor += tail.len;
         if (self.peer) |id| {
             var text: [peer_id.text_length_max]u8 = undefined;
             const id_text = id.toText(&text);
-            const written = std.fmt.bufPrint(out[cursor..], "/p2p/{s}", .{id_text}) catch return error.BufferTooSmall;
+            const written = std.fmt.bufPrint(out[cursor..], "/p2p/{s}", .{id_text}) catch
+                return error.BufferTooSmall;
             cursor += written.len;
         }
         return out[0..cursor];
     }
 
     pub fn parse(text: []const u8) Error!Multiaddr {
-        if (text.len == 0 or text[0] != '/' or text.len > text_length_max) return error.InvalidMultiaddr;
+        if (text.len == 0 or text[0] != '/' or text.len > text_length_max) {
+            return error.InvalidMultiaddr;
+        }
         var parts = std.mem.splitScalar(u8, text[1..], '/');
         const family = parts.next() orelse return error.InvalidMultiaddr;
         const host = parts.next() orelse return error.InvalidMultiaddr;
-        if (!std.mem.eql(u8, parts.next() orelse return error.InvalidMultiaddr, "udp")) return error.InvalidMultiaddr;
+        const udp_part = parts.next() orelse return error.InvalidMultiaddr;
+        if (!std.mem.eql(u8, udp_part, "udp")) return error.InvalidMultiaddr;
         const port_text = parts.next() orelse return error.InvalidMultiaddr;
         const port = std.fmt.parseInt(u16, port_text, 10) catch return error.InvalidMultiaddr;
-        if (!std.mem.eql(u8, parts.next() orelse return error.InvalidMultiaddr, "quic-v1")) return error.InvalidMultiaddr;
+        const quic_part = parts.next() orelse return error.InvalidMultiaddr;
+        if (!std.mem.eql(u8, quic_part, "quic-v1")) return error.InvalidMultiaddr;
 
         const address: address_mod.Address = if (std.mem.eql(u8, family, "ip4")) blk: {
-            const parsed = std.Io.net.IpAddress.parseIp4(host, port) catch return error.InvalidMultiaddr;
+            const parsed = std.Io.net.IpAddress.parseIp4(host, port) catch
+                return error.InvalidMultiaddr;
             break :blk .{ .ip4 = .{ .octets = parsed.ip4.bytes, .port = port } };
         } else if (std.mem.eql(u8, family, "ip6")) blk: {
-            const parsed = std.Io.net.IpAddress.parseIp6(host, port) catch return error.InvalidMultiaddr;
+            const parsed = std.Io.net.IpAddress.parseIp6(host, port) catch
+                return error.InvalidMultiaddr;
             break :blk .{ .ip6 = .{ .octets = parsed.ip6.bytes, .port = port } };
         } else return error.InvalidMultiaddr;
 

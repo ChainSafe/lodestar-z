@@ -99,7 +99,8 @@ pub const Slot = struct {
         self.table = StreamTable.init(params.direction);
 
         const ssl = try ctx.newSsl(&self.handshake);
-        // quiche owns the SSL handle from this call onward and frees it even when construction fails, so the slot must never free it.
+        // quiche owns the SSL handle from this call onward and frees it even when construction
+        // fails, so the slot must never free it.
         self.conn = c.quiche_conn_new_with_tls(
             self.scid.slice().ptr,
             self.scid.len,
@@ -143,10 +144,12 @@ pub const Slot = struct {
     }
 
     pub fn release(self: *Slot) void {
+        assert(self.state != .free);
         if (self.conn) |conn| c.quiche_conn_free(conn);
         self.conn = null;
         self.state = .free;
         self.generation +%= 1;
+        assert(self.conn == null);
     }
 
     pub fn recv(self: *Slot, datagram: []u8, from: *const binding.SockAddr) Error!void {
@@ -194,24 +197,35 @@ pub const Slot = struct {
     }
 
     pub fn onTimeout(self: *Slot) void {
+        assert(self.conn != null);
+        assert(self.state != .free);
         c.quiche_conn_on_timeout(self.conn.?);
     }
 
     pub fn timeoutMs(self: *const Slot) ?u64 {
+        assert(self.conn != null);
+        assert(self.state != .free);
         const value = c.quiche_conn_timeout_as_millis(self.conn.?);
         return if (value == std.math.maxInt(u64)) null else value;
     }
 
     pub fn keepAlive(self: *Slot) bool {
+        assert(self.conn != null);
+        assert(self.state == .established);
         return c.quiche_conn_send_ack_eliciting(self.conn.?) == 0;
     }
 
     pub fn close(self: *Slot, reason: types.CloseReason, code: u64) void {
+        assert(self.conn != null);
+        assert(self.state != .free);
         if (self.close_reason == null) self.close_reason = reason;
         _ = c.quiche_conn_close(self.conn.?, true, code, "", 0);
+        assert(self.close_reason != null);
     }
 
     pub fn deferClose(self: *Slot, reason: types.CloseReason, code: u64) void {
+        assert(self.state == .established);
+        assert(self.pending_close == null);
         if (self.close_reason == null) self.close_reason = reason;
         self.pending_close = .{ .reason = reason, .code = code };
     }
@@ -262,7 +276,8 @@ pub const Slot = struct {
         defer c.quiche_stream_iter_free(iter);
         var id: u64 = 0;
         var seen: u16 = 0;
-        while (seen < limits.streams_per_connection and c.quiche_stream_iter_next(iter, &id)) : (seen += 1) {
+        while (seen < limits.streams_per_connection) : (seen += 1) {
+            if (!c.quiche_stream_iter_next(iter, &id)) break;
             if (!StreamTable.isPeerInitiated(self.direction, id)) continue;
             if (self.table.find(id) != null) continue;
             if (self.table.claimPeer(id) == null) {
@@ -343,7 +358,11 @@ pub const Slot = struct {
         assert(self.conn != null);
         assert(self.table.matches(index, id));
         self.shutdownRaw(id, direction, code);
-        if (direction == .read) self.table.markFinReceived(index) else self.table.markFinSent(index);
+        if (direction == .read) {
+            self.table.markFinReceived(index);
+        } else {
+            self.table.markFinSent(index);
+        }
         const entry = self.table.entries[index];
         if (entry.fin_received and entry.fin_sent) self.finishStream(index, null);
     }

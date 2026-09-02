@@ -59,11 +59,17 @@ pub const Context = struct {
         const ssl_ctx = c.SSL_CTX_new(c.TLS_method()) orelse return error.OpenSslFailed;
         errdefer c.SSL_CTX_free(ssl_ctx);
 
-        if (c.SSL_CTX_set_min_proto_version(ssl_ctx, c.TLS1_3_VERSION) != 1) return error.OpenSslFailed;
-        if (c.SSL_CTX_set_max_proto_version(ssl_ctx, c.TLS1_3_VERSION) != 1) return error.OpenSslFailed;
+        if (c.SSL_CTX_set_min_proto_version(ssl_ctx, c.TLS1_3_VERSION) != 1) {
+            return error.OpenSslFailed;
+        }
+        if (c.SSL_CTX_set_max_proto_version(ssl_ctx, c.TLS1_3_VERSION) != 1) {
+            return error.OpenSslFailed;
+        }
         if (c.SSL_CTX_use_certificate(ssl_ctx, certificate.x509) != 1) return error.OpenSslFailed;
         if (c.SSL_CTX_use_PrivateKey(ssl_ctx, certificate.key) != 1) return error.OpenSslFailed;
-        if (c.SSL_CTX_set_alpn_protos(ssl_ctx, &alpn_protos, alpn_protos.len) != 0) return error.OpenSslFailed;
+        if (c.SSL_CTX_set_alpn_protos(ssl_ctx, &alpn_protos, alpn_protos.len) != 0) {
+            return error.OpenSslFailed;
+        }
         c.SSL_CTX_set_alpn_select_cb(ssl_ctx, alpnSelect, null);
         c.SSL_CTX_set_keylog_callback(ssl_ctx, keylogCallback);
         c.SSL_CTX_set_custom_verify(
@@ -141,6 +147,14 @@ fn alpnSelect(
 ) callconv(.c) c_int {
     _ = ssl;
     _ = arg;
-    const result = c.SSL_select_next_proto(@ptrCast(out), out_len, in, in_len, &alpn_protos, alpn_protos.len);
-    return if (result == c.OPENSSL_NPN_NEGOTIATED) c.SSL_TLSEXT_ERR_OK else c.SSL_TLSEXT_ERR_ALERT_FATAL;
+    const result = c.SSL_select_next_proto(
+        @ptrCast(out),
+        out_len,
+        in,
+        in_len,
+        &alpn_protos,
+        alpn_protos.len,
+    );
+    if (result == c.OPENSSL_NPN_NEGOTIATED) return c.SSL_TLSEXT_ERR_OK;
+    return c.SSL_TLSEXT_ERR_ALERT_FATAL;
 }

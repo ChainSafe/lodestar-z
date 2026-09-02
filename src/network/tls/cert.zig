@@ -9,7 +9,8 @@ pub const der_length_max = 1_024;
 const not_before_offset_s: i64 = -3_600;
 const not_after_offset_s: i64 = 365 * 24 * 3_600;
 
-pub const Error = error{ OpenSslFailed, SignFailed, EncodeFailed } || signed_key.Error || keys.Error;
+pub const Error = error{ OpenSslFailed, SignFailed, EncodeFailed } || signed_key.Error ||
+    keys.Error;
 
 pub const Certificate = struct {
     key: *c.EVP_PKEY,
@@ -126,8 +127,11 @@ fn addExtension(
     defer c.ASN1_OBJECT_free(oid);
     const octets = c.ASN1_OCTET_STRING_new() orelse return error.OpenSslFailed;
     defer c.ASN1_OCTET_STRING_free(octets);
-    if (c.ASN1_OCTET_STRING_set(octets, value_der.ptr, @intCast(value_der.len)) != 1) return error.OpenSslFailed;
-    const extension = c.X509_EXTENSION_create_by_OBJ(null, oid, 1, octets) orelse return error.OpenSslFailed;
+    if (c.ASN1_OCTET_STRING_set(octets, value_der.ptr, @intCast(value_der.len)) != 1) {
+        return error.OpenSslFailed;
+    }
+    const extension = c.X509_EXTENSION_create_by_OBJ(null, oid, 1, octets) orelse
+        return error.OpenSslFailed;
     defer c.X509_EXTENSION_free(extension);
     if (c.X509_add_ext(x509, extension, -1) != 1) return error.OpenSslFailed;
 }

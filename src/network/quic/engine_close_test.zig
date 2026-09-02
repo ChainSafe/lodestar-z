@@ -154,7 +154,7 @@ test "engine rejects a forged certificate with tls_failed" {
     var forged_ctx = try tls.Context.initWith(&server_public, &other, now_unix, [_]u8{7} ** 8);
     defer forged_ctx.deinit();
     pair.server.deinit();
-    pair.server = try Engine.init(std.testing.allocator, &forged_ctx, .{}, &server_address);
+    pair.server = try Engine.init(std.testing.allocator, &forged_ctx, .{}, &server_address, 0);
 
     const handle = try pair.dial();
     try pair.pump();
