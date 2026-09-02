@@ -21,6 +21,7 @@ pub const DatagramResult = enum { timeout, accepted, version_negotiation, droppe
 pub const StepResult = struct {
     now: engine_mod.Now,
     datagram: DatagramResult = .timeout,
+    datagrams_received: u32 = 0,
     datagrams_sent: u32 = 0,
     receive_errors: u32 = 0,
     send_failures: u32 = 0,
@@ -36,6 +37,7 @@ pub const Driver = struct {
     engine: *engine_mod.Engine,
     udp: *runtime.Udp,
     config: Config,
+    pool: engine_mod.EntropyPool = .{},
     output: [constants.datagram_size_max]u8 = undefined,
 
     pub fn init(engine: *engine_mod.Engine, udp: *runtime.Udp) Driver {
@@ -59,14 +61,18 @@ pub const Driver = struct {
 
     pub fn step(self: *Driver, io: std.Io, events: []engine_mod.Event) Error!StepResult {
         var result = StepResult{ .now = try currentTime(io) };
-        if (try self.receiveDatagram(io, &result)) |admitted| {
+        var batch: u32 = 0;
+        while (batch < constants.receive_batch_max) : (batch += 1) {
+            if (!self.pool.fresh) self.pool.fill(try entropy(io));
+            const admitted = (try self.receiveDatagram(io, &result, batch == 0)) orelse break;
+            result.datagrams_received += 1;
             defer self.udp.release(admitted.handle) catch unreachable;
             const outcome = self.engine.receive(
                 admitted.bytes,
                 admitted.from,
                 self.udp.localAddress(),
                 result.now,
-                try entropy(io),
+                &self.pool,
                 &self.output,
             );
             result.datagram = switch (outcome) {
@@ -80,8 +86,9 @@ pub const Driver = struct {
         }
         result.now = try currentTime(io);
         self.engine.tick(result.now);
-        var index: u16 = 0;
-        while (index < self.engine.slotCount()) : (index += 1) {
+        var indices: [constants.connections_max_ceiling]u16 = undefined;
+        const active = self.engine.activeIndices(&indices);
+        for (indices[0..active]) |index| {
             const drained = self.drain(io, index, result.now);
             result.datagrams_sent += drained.sent;
             if (drained.failure != null) result.send_failures += 1;
@@ -90,13 +97,15 @@ pub const Driver = struct {
         return result;
     }
 
-    fn receiveDatagram(self: *Driver, io: std.Io, result: *StepResult) Error!?runtime.Datagram {
-        var wait_ms: u64 = self.config.poll_interval_ms;
-        if (self.engine.nextTimeoutMs()) |timeout| wait_ms = @min(wait_ms, timeout);
-        const timeout = std.Io.Timeout{ .duration = .{
-            .raw = .fromMilliseconds(@intCast(@max(wait_ms, 1))),
-            .clock = .awake,
-        } };
+    fn receiveDatagram(self: *Driver, io: std.Io, result: *StepResult, wait: bool) Error!?runtime.Datagram {
+        const timeout: std.Io.Timeout = if (wait) blk: {
+            var wait_ms: u64 = self.config.poll_interval_ms;
+            if (self.engine.nextTimeoutMs()) |earliest| wait_ms = @min(wait_ms, earliest);
+            break :blk .{ .duration = .{
+                .raw = .fromMilliseconds(@intCast(@max(wait_ms, 1))),
+                .clock = .awake,
+            } };
+        } else .{ .duration = .{ .raw = .zero, .clock = .awake } };
         return self.udp.receiveTimeout(io, timeout) catch |err| switch (err) {
             error.Timeout => null,
             error.DatagramTooLarge,

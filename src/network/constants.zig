@@ -12,6 +12,7 @@ pub const client_initial_min: usize = 1_200;
 pub const connection_window: u64 = 16 * 1_024 * 1_024;
 pub const stream_window: u64 = 8 * 1_024 * 1_024;
 pub const send_burst_max: u32 = 256;
+pub const receive_batch_max: u32 = 32;
 pub const poll_interval_ms: u32 = 50;
 pub const local_cid_length: usize = 16;
 pub const cid_length_max: usize = 20;

@@ -59,6 +59,22 @@ pub const ReceiveOutcome = union(enum) {
     dropped,
 };
 
+pub const EntropyPool = struct {
+    bytes: [constants.local_cid_length]u8 = undefined,
+    fresh: bool = false,
+
+    pub fn fill(self: *EntropyPool, bytes: [constants.local_cid_length]u8) void {
+        self.bytes = bytes;
+        self.fresh = true;
+    }
+
+    pub fn take(self: *EntropyPool) [constants.local_cid_length]u8 {
+        std.debug.assert(self.fresh);
+        self.fresh = false;
+        return self.bytes;
+    }
+};
+
 const Route = struct {
     cid: binding.Cid = .{},
     index: u16 = 0,
@@ -72,6 +88,8 @@ pub const Engine = struct {
     limits: Limits,
     slots: []connection.Slot,
     routes: []Route,
+    active: []u16,
+    active_len: u16 = 0,
     handshaking: u16 = 0,
     counters: Counters = .{},
 
@@ -91,6 +109,10 @@ pub const Engine = struct {
         errdefer allocator.free(routes);
         @memset(routes, .{});
 
+        const active = try allocator.alloc(u16, limits.connections_max);
+        errdefer allocator.free(active);
+        for (active, 0..) |*entry, index| entry.* = @intCast(index);
+
         return .{
             .allocator = allocator,
             .tls_ctx = tls_ctx,
@@ -98,6 +120,7 @@ pub const Engine = struct {
             .limits = limits,
             .slots = slots,
             .routes = routes,
+            .active = active,
         };
     }
 
@@ -105,6 +128,7 @@ pub const Engine = struct {
         for (self.slots) |*slot| {
             if (slot.state != .free) slot.release();
         }
+        self.allocator.free(self.active);
         self.allocator.free(self.routes);
         self.allocator.free(self.slots);
         self.config.deinit();
@@ -123,9 +147,9 @@ pub const Engine = struct {
         now: Now,
         entropy: [constants.local_cid_length]u8,
     ) Error!Handle {
-        const index = self.freeSlot() orelse return error.TableFull;
+        const index = self.claimSlot() orelse return error.TableFull;
         const slot = &self.slots[index];
-        try slot.open(self.tls_ctx, &self.config, .{
+        slot.open(self.tls_ctx, &self.config, .{
             .direction = .outbound,
             .local = local,
             .peer = peer,
@@ -133,7 +157,10 @@ pub const Engine = struct {
             .odcid = null,
             .expected_peer_id = expected,
             .now = now,
-        });
+        }) catch |err| {
+            self.unclaimSlot(index);
+            return err;
+        };
         self.addRoute(&slot.scid, index);
         return .{ .index = index, .generation = slot.generation };
     }
@@ -144,7 +171,7 @@ pub const Engine = struct {
         from: types.Address,
         local: types.Address,
         now: Now,
-        entropy: [constants.local_cid_length]u8,
+        entropy: *EntropyPool,
         out: []u8,
     ) ReceiveOutcome {
         const header = binding.headerInfo(datagram) catch return self.drop(&self.counters.dropped_unroutable);
@@ -172,18 +199,21 @@ pub const Engine = struct {
         }
         if (header.packet_type != .initial) return self.drop(&self.counters.dropped_unroutable);
         if (self.handshaking >= self.limits.handshaking_max) return self.drop(&self.counters.dropped_full);
-        const index = self.freeSlot() orelse return self.drop(&self.counters.dropped_full);
+        const index = self.claimSlot() orelse return self.drop(&self.counters.dropped_full);
 
         const slot = &self.slots[index];
         slot.open(self.tls_ctx, &self.config, .{
             .direction = .inbound,
             .local = local,
             .peer = from,
-            .scid = entropy,
+            .scid = entropy.take(),
             .odcid = header.dcid,
             .expected_peer_id = null,
             .now = now,
-        }) catch return self.drop(&self.counters.recv_errors);
+        }) catch {
+            self.unclaimSlot(index);
+            return self.drop(&self.counters.recv_errors);
+        };
         self.addRoute(&slot.scid, index);
         self.addRoute(&header.dcid, index);
         self.handshaking += 1;
@@ -192,8 +222,9 @@ pub const Engine = struct {
     }
 
     pub fn tick(self: *Engine, now: Now) void {
-        for (self.slots, 0..) |*slot, index| {
-            if (slot.state == .free or slot.state == .closed) continue;
+        for (self.active[0..self.active_len]) |index| {
+            const slot = &self.slots[index];
+            if (slot.state == .closed) continue;
             slot.onTimeout();
             if (slot.state == .handshaking and slot.close_reason == null and
                 now.mono_ms -| slot.created_ms >= self.limits.handshake_timeout_ms)
@@ -215,14 +246,15 @@ pub const Engine = struct {
                     slot.pending_close_armed = true;
                 }
             }
-            self.refresh(@intCast(index));
+            self.refresh(index);
         }
     }
 
     pub fn nextTimeoutMs(self: *const Engine) ?u64 {
         var earliest: ?u64 = null;
-        for (self.slots) |*slot| {
-            if (slot.state == .free or slot.state == .closed) continue;
+        for (self.active[0..self.active_len]) |index| {
+            const slot = &self.slots[index];
+            if (slot.state == .closed) continue;
             const timeout = slot.timeoutMs() orelse continue;
             if (earliest == null or timeout < earliest.?) earliest = timeout;
         }
@@ -250,9 +282,11 @@ pub const Engine = struct {
 
     pub fn pollEvents(self: *Engine, events: []Event) usize {
         var count: usize = 0;
-        for (self.slots, 0..) |*slot, index| {
-            if (slot.state == .free) continue;
-            const conn = Handle{ .index = @intCast(index), .generation = slot.generation };
+        var cursor: u16 = 0;
+        while (cursor < self.active_len) {
+            const index = self.active[cursor];
+            const slot = &self.slots[index];
+            const conn = Handle{ .index = index, .generation = slot.generation };
             if (slot.connected_pending) {
                 if (count == events.len) return count;
                 events[count] = .{ .connected = .{
@@ -278,8 +312,10 @@ pub const Engine = struct {
                 events[count] = .{ .closed = .{ .conn = conn, .reason = slot.close_reason.? } };
                 count += 1;
                 slot.closed_pending = false;
-                slot.release();
+                self.releaseSlot(index);
+                continue;
             }
+            cursor += 1;
         }
         return count;
     }
@@ -369,13 +405,8 @@ pub const Engine = struct {
     }
 
     pub fn activeIndices(self: *const Engine, out: []u16) usize {
-        var count: usize = 0;
-        for (self.slots, 0..) |*slot, index| {
-            if (slot.state == .free) continue;
-            if (count == out.len) return count;
-            out[count] = @intCast(index);
-            count += 1;
-        }
+        const count = @min(out.len, self.active_len);
+        @memcpy(out[0..count], self.active[0..count]);
         return count;
     }
 
@@ -447,11 +478,27 @@ pub const Engine = struct {
         }
     }
 
-    fn freeSlot(self: *const Engine) ?u16 {
-        for (self.slots, 0..) |*slot, index| {
-            if (slot.state == .free) return @intCast(index);
+    fn claimSlot(self: *Engine) ?u16 {
+        if (self.active_len == self.active.len) return null;
+        const index = self.active[self.active_len];
+        self.active_len += 1;
+        return index;
+    }
+
+    fn unclaimSlot(self: *Engine, index: u16) void {
+        var cursor: u16 = 0;
+        while (cursor < self.active_len) : (cursor += 1) {
+            if (self.active[cursor] != index) continue;
+            self.active_len -= 1;
+            self.active[cursor] = self.active[self.active_len];
+            self.active[self.active_len] = index;
+            return;
         }
-        return null;
+    }
+
+    fn releaseSlot(self: *Engine, index: u16) void {
+        self.slots[index].release();
+        self.unclaimSlot(index);
     }
 
     fn findRoute(self: *const Engine, cid: *const binding.Cid) ?u16 {
