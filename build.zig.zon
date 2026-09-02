@@ -222,6 +222,12 @@
         .discv5 = .{
             .root_source_file = "src/discv5/root.zig",
         },
+        .network_wire = .{
+            .root_source_file = "src/network/wire.zig",
+        },
+        .network = .{
+            .root_source_file = "src/network/root.zig",
+        },
     },
     .executables = .{
         .discv5_interop = .{
@@ -412,6 +418,8 @@
         .clock = .{ .root_module = .clock },
         .beacon_node = .{ .root_module = .beacon_node },
         .discv5 = .{ .root_module = .discv5 },
+        .network_wire = .{ .root_module = .network_wire },
+        .network = .{ .root_module = .network },
 
         .int = .{
             .root_module = .{
