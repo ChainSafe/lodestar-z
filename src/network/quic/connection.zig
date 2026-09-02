@@ -210,6 +210,11 @@ pub const Slot = struct {
         return null;
     }
 
+    fn clearStream(self: *Slot, index: usize) void {
+        if (self.streams[index].opened_pending) self.streams_pending -= 1;
+        self.streams[index] = .{};
+    }
+
     fn freeStream(self: *Slot, peer_initiated: bool) ?usize {
         const start: usize = if (peer_initiated) local_stream_slots else 0;
         for (self.streams[start .. start + local_stream_slots], start..) |*stream, index| {
@@ -257,7 +262,7 @@ pub const Slot = struct {
         const length = try binding.check(rc);
         if (fin) {
             self.streams[index].fin_received = true;
-            if (self.streams[index].fin_sent) self.streams[index] = .{};
+            if (self.streams[index].fin_sent) self.clearStream(index);
         }
         return .{ .len = length, .fin = fin };
     }
@@ -270,7 +275,7 @@ pub const Slot = struct {
         const length = try binding.check(rc);
         if (fin and length == bytes.len) {
             self.streams[index].fin_sent = true;
-            if (self.streams[index].fin_received) self.streams[index] = .{};
+            if (self.streams[index].fin_received) self.clearStream(index);
         }
         return length;
     }
@@ -284,6 +289,6 @@ pub const Slot = struct {
         const index = self.streamIndex(id) orelse return;
         if (!self.streams[index].fin_received) self.shutdown(id, .read, code);
         if (!self.streams[index].fin_sent) self.shutdown(id, .write, code);
-        self.streams[index] = .{};
+        self.clearStream(index);
     }
 };

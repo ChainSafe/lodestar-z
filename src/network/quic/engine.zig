@@ -283,6 +283,60 @@ pub const Engine = struct {
         return slot.peer_id;
     }
 
+    pub fn openStream(self: *Engine, handle: Handle) Error!StreamHandle {
+        const slot = try self.liveSlot(handle);
+        const id = try slot.openStream();
+        return .{ .conn = handle, .id = id };
+    }
+
+    pub fn read(self: *Engine, stream: StreamHandle, buf: []u8) Error!Read {
+        const slot = try self.liveSlot(stream.conn);
+        return slot.read(stream.id, buf);
+    }
+
+    pub fn write(self: *Engine, stream: StreamHandle, bytes: []const u8, fin: bool) Error!usize {
+        const slot = try self.liveSlot(stream.conn);
+        return slot.write(stream.id, bytes, fin);
+    }
+
+    pub fn shutdown(self: *Engine, stream: StreamHandle, direction: ShutdownDirection, code: u64) void {
+        const slot = self.liveSlot(stream.conn) catch return;
+        if (slot.streamIndex(stream.id) == null) return;
+        slot.shutdown(stream.id, direction, code);
+    }
+
+    pub fn closeStream(self: *Engine, stream: StreamHandle, code: u64) void {
+        const slot = self.liveSlot(stream.conn) catch return;
+        slot.closeStream(stream.id, code);
+    }
+
+    pub const ReadableIterator = struct {
+        iter: ?*c.quiche_stream_iter,
+        slot: ?*connection.Slot,
+        conn: Handle,
+
+        pub fn next(self: *ReadableIterator) ?StreamHandle {
+            const iter = self.iter orelse return null;
+            const slot = self.slot orelse return null;
+            var id: u64 = 0;
+            var seen: u16 = 0;
+            while (seen < constants.streams_per_connection and c.quiche_stream_iter_next(iter, &id)) : (seen += 1) {
+                if (slot.streamIndex(id) != null) return .{ .conn = self.conn, .id = id };
+            }
+            return null;
+        }
+
+        pub fn deinit(self: *ReadableIterator) void {
+            if (self.iter) |iter| c.quiche_stream_iter_free(iter);
+            self.* = undefined;
+        }
+    };
+
+    pub fn readable(self: *Engine, handle: Handle) ReadableIterator {
+        const slot = self.liveSlot(handle) catch return .{ .iter = null, .slot = null, .conn = handle };
+        return .{ .iter = c.quiche_conn_readable(slot.conn.?), .slot = slot, .conn = handle };
+    }
+
     fn liveSlot(self: *Engine, handle: Handle) Error!*connection.Slot {
         if (handle.index >= self.slots.len) return error.StaleHandle;
         const slot = &self.slots[handle.index];
