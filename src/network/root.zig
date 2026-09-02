@@ -3,6 +3,7 @@ pub const types = @import("types.zig");
 pub const varint = @import("varint.zig");
 pub const identity = @import("identity/root.zig");
 pub const quic = @import("quic/root.zig");
+pub const tls = @import("tls/root.zig");
 
 test {
     _ = constants;
@@ -10,5 +11,6 @@ test {
     _ = varint;
     _ = identity;
     _ = quic;
+    _ = tls;
     _ = @import("varint_test.zig");
 }
