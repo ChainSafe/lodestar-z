@@ -112,7 +112,7 @@ const Errors = struct {
 
     fn addOrphanTestFile(errors: *Errors, path: []const u8) void {
         errors.emit(
-            "{s}: error: test file is imported by nothing, so its tests never run\n",
+            "{s}: error: no `test {{ _ = @import(...); }}` pulls this in, so its tests never run\n",
             .{path},
         );
     }
@@ -126,7 +126,8 @@ const Errors = struct {
 
     fn addTestFileWiredElsewhere(errors: *Errors, path: []const u8, expected: []const u8) void {
         errors.emit(
-            "{s}: error: not imported by {s}, wire it from the module under test\n",
+            "{s}: error: {s} does not pull it in from a test block, " ++
+                "wire it from the module under test\n",
             .{ path, expected },
         );
     }
@@ -139,7 +140,7 @@ const Errors = struct {
     }
 
     fn addDeadFile(errors: *Errors, path: []const u8) void {
-        errors.emit("{s}: error: file is imported by nothing\n", .{path});
+        errors.emit("{s}: error: not reachable from any build root\n", .{path});
     }
 
     fn addModuleNotInCi(errors: *Errors, module: []const u8) void {
@@ -178,6 +179,19 @@ const InlineTests = struct {
     first_line: usize = 0,
 };
 
+/// One `@import` in a file.
+const Import = struct {
+    /// The literal, exactly as written.
+    path: []const u8,
+    /// Whether the import sits inside a root-level `test` declaration.
+    ///
+    /// This is the difference between wiring that works and wiring that only
+    /// looks like it does. Zig analyses a `test` block, so an import inside one
+    /// pulls in that file's tests. A plain top-level `const x = @import(...)`
+    /// that nothing references is never analysed, and its tests never run.
+    in_test_block: bool,
+};
+
 /// One analyzed file. Everything a rule needs is extracted during the single
 /// load pass, so no rule re-reads or re-parses.
 const File = struct {
@@ -186,7 +200,7 @@ const File = struct {
     basename: []const u8,
     /// `@import` targets, taken from the token stream, so a commented-out or
     /// stringified import is not mistaken for a real one.
-    imports: []const []const u8,
+    imports: []const Import,
     inline_tests: InlineTests,
 
     fn hasTestBlock(file: File) bool {
@@ -195,7 +209,17 @@ const File = struct {
 
     fn importsBasename(file: File, basename: []const u8) bool {
         for (file.imports) |import| {
-            if (std.mem.eql(u8, std.fs.path.basenamePosix(import), basename)) return true;
+            if (std.mem.eql(u8, std.fs.path.basenamePosix(import.path), basename)) return true;
+        }
+        return false;
+    }
+
+    /// Imports the file from inside a `test` block, which is the only form that
+    /// actually causes its tests to run.
+    fn wiresTests(file: File, basename: []const u8) bool {
+        for (file.imports) |import| {
+            if (!import.in_test_block) continue;
+            if (std.mem.eql(u8, std.fs.path.basenamePosix(import.path), basename)) return true;
         }
         return false;
     }
@@ -211,7 +235,24 @@ fn analyze(gpa: Allocator, path: []const u8, text: [:0]const u8, errors: *Errors
         errors.addParseError(path, location.line + 1);
     }
 
-    var imports: std.ArrayList([]const u8) = .empty;
+    const TokenSpan = struct { first: Ast.TokenIndex, last: Ast.TokenIndex };
+    var test_spans: std.ArrayList(TokenSpan) = .empty;
+    var inline_tests: InlineTests = .{};
+    for (tree.rootDecls()) |node| {
+        if (tree.nodeTag(node) != .test_decl) continue;
+        const first = tree.firstToken(node);
+        const last = tree.lastToken(node);
+        const line_first = tree.tokenLocation(0, first).line + 1;
+        const line_last = tree.tokenLocation(0, last).line + 1;
+        assert(line_last >= line_first);
+
+        try test_spans.append(gpa, .{ .first = first, .last = last });
+        inline_tests.count += 1;
+        inline_tests.lines += line_last - line_first + 1;
+        if (inline_tests.first_line == 0) inline_tests.first_line = line_first;
+    }
+
+    var imports: std.ArrayList(Import) = .empty;
     const token_tags = tree.tokens.items(.tag);
     for (token_tags, 0..) |tag, index| {
         if (tag != .builtin) continue;
@@ -222,19 +263,19 @@ fn analyze(gpa: Allocator, path: []const u8, text: [:0]const u8, errors: *Errors
 
         const literal = tree.tokenSlice(@intCast(index + 2));
         assert(literal.len >= 2);
-        try imports.append(gpa, try gpa.dupe(u8, literal[1 .. literal.len - 1]));
-    }
 
-    var inline_tests: InlineTests = .{};
-    for (tree.rootDecls()) |node| {
-        if (tree.nodeTag(node) != .test_decl) continue;
-        const line_first = tree.tokenLocation(0, tree.firstToken(node)).line + 1;
-        const line_last = tree.tokenLocation(0, tree.lastToken(node)).line + 1;
-        assert(line_last >= line_first);
-
-        inline_tests.count += 1;
-        inline_tests.lines += line_last - line_first + 1;
-        if (inline_tests.first_line == 0) inline_tests.first_line = line_first;
+        const token: Ast.TokenIndex = @intCast(index);
+        var in_test_block = false;
+        for (test_spans.items) |span| {
+            if (token >= span.first and token <= span.last) {
+                in_test_block = true;
+                break;
+            }
+        }
+        try imports.append(gpa, .{
+            .path = try gpa.dupe(u8, literal[1 .. literal.len - 1]),
+            .in_test_block = in_test_block,
+        });
     }
 
     return .{
@@ -381,15 +422,15 @@ fn tidyTestFileWiring(gpa: Allocator, files: []const File, errors: *Errors) !voi
     for (files) |file| {
         if (!isTestFile(file.basename)) continue;
 
-        var imported = false;
+        var wired = false;
         for (files) |other| {
             if (std.mem.eql(u8, other.path, file.path)) continue;
-            if (other.importsBasename(file.basename)) {
-                imported = true;
+            if (other.wiresTests(file.basename)) {
+                wired = true;
                 break;
             }
         }
-        if (!imported) {
+        if (!wired) {
             errors.addOrphanTestFile(file.path);
             continue;
         }
@@ -401,7 +442,7 @@ fn tidyTestFileWiring(gpa: Allocator, files: []const File, errors: *Errors) !voi
                 errors.addUnpairedTestFile(file.path, root_path);
                 continue;
             };
-            if (!root.importsBasename(file.basename)) {
+            if (!root.wiresTests(file.basename)) {
                 errors.addTestFileWiredElsewhere(file.path, root_path);
             }
             continue;
@@ -415,7 +456,7 @@ fn tidyTestFileWiring(gpa: Allocator, files: []const File, errors: *Errors) !voi
             errors.addUnpairedTestFile(file.path, snake);
             continue;
         };
-        if (!pair.importsBasename(file.basename)) {
+        if (!pair.wiresTests(file.basename)) {
             errors.addTestFileWiredElsewhere(file.path, pair.path);
         }
     }
@@ -440,29 +481,81 @@ fn tidyRootTestBlocks(files: []const File, errors: *Errors) void {
     }
 }
 
+/// Resolves an import literal against the importing file's directory.
+///
+/// Returns null for a module-name import such as `@import("hashing")`, which
+/// the build resolves to another module's root rather than to a path relative
+/// to this file.
+fn resolveImport(gpa: Allocator, dir: []const u8, literal: []const u8) !?[]const u8 {
+    if (!std.mem.endsWith(u8, literal, ".zig")) return null;
+
+    var segments: std.ArrayList([]const u8) = .empty;
+    var dir_parts = std.mem.splitScalar(u8, dir, '/');
+    while (dir_parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) continue;
+        try segments.append(gpa, part);
+    }
+
+    var parts = std.mem.splitScalar(u8, literal, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) continue;
+        if (std.mem.eql(u8, part, "..")) {
+            // An import climbing above the repository root is not ours to resolve.
+            if (segments.items.len == 0) return null;
+            _ = segments.pop();
+            continue;
+        }
+        try segments.append(gpa, part);
+    }
+    return try std.mem.join(gpa, "/", segments.items);
+}
+
 /// Zig's lazy compilation hides files that nothing imports: the compiler never
 /// sees them, so it cannot report them as unused, and any tests they hold are
 /// silently skipped.
+///
+/// Reachability is traversed from the roots the build declares, rather than
+/// asking whether each file has some incoming import. Those differ: two unused
+/// files that import each other each have an incoming import, yet neither is
+/// compiled and neither one's tests run.
 fn tidyDeadFiles(
+    gpa: Allocator,
     files: []const File,
     roots: []const []const u8,
     scope: []const []const u8,
     errors: *Errors,
-) void {
-    for (files) |file| {
-        if (!inScope(scope, file.path)) continue;
-        if (listContains(&unimported_file_allowlist, file.path)) continue;
-        if (listContains(roots, file.path)) continue;
+) !void {
+    const reachable = try gpa.alloc(bool, files.len);
+    @memset(reachable, false);
 
-        var imported = false;
-        for (files) |other| {
-            if (std.mem.eql(u8, other.path, file.path)) continue;
-            if (other.importsBasename(file.basename)) {
-                imported = true;
-                break;
+    var queue: std.ArrayList(usize) = .empty;
+    for (files, 0..) |file, index| {
+        if (!listContains(roots, file.path)) continue;
+        reachable[index] = true;
+        try queue.append(gpa, index);
+    }
+
+    var head: usize = 0;
+    while (head < queue.items.len) : (head += 1) {
+        const file = files[queue.items[head]];
+        for (file.imports) |import| {
+            const target = try resolveImport(gpa, file.dir, import.path) orelse continue;
+            for (files, 0..) |candidate, index| {
+                if (reachable[index]) continue;
+                if (!std.mem.eql(u8, candidate.path, target)) continue;
+                reachable[index] = true;
+                try queue.append(gpa, index);
             }
         }
-        if (!imported) errors.addDeadFile(file.path);
+    }
+    // Each file is enqueued at most once.
+    assert(queue.items.len <= files.len);
+
+    for (files, 0..) |file, index| {
+        if (reachable[index]) continue;
+        if (!inScope(scope, file.path)) continue;
+        if (listContains(&unimported_file_allowlist, file.path)) continue;
+        errors.addDeadFile(file.path);
     }
 }
 
@@ -514,8 +607,29 @@ fn tidyCiCoverage(gpa: Allocator, zon: []const u8, ci: []const u8, errors: *Erro
     const modules = try declaredTestModules(gpa, zon);
     for (modules) |module| {
         const needle = try std.fmt.allocPrint(gpa, "zig build test:{s}", .{module});
-        if (std.mem.indexOf(u8, ci, needle) == null) errors.addModuleNotInCi(module);
+        if (!containsStep(ci, needle)) errors.addModuleNotInCi(module);
     }
+}
+
+/// True when `haystack` contains `step` as a complete build target.
+///
+/// A plain substring search is not enough: `zig build test:ssz` occurs inside
+/// `zig build test:ssz_generic_spec_tests`, so dropping the real `test:ssz`
+/// step would still look covered. The match only counts when the target name
+/// ends there, rather than continuing into a longer name.
+fn containsStep(haystack: []const u8, step: []const u8) bool {
+    var offset: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, offset, step)) |at| {
+        offset = at + step.len;
+        if (offset == haystack.len) return true;
+        const next = haystack[offset];
+        // Zig build target names are identifiers, so anything outside that set
+        // terminates the name.
+        if (!std.ascii.isAlphanumeric(next) and next != '_' and next != '.' and next != '-') {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// Names declared one level inside `build.zig.zon`'s `.tests` block.
@@ -581,7 +695,7 @@ test "tidy" {
 
     try tidyTestFileWiring(arena, files, &errors);
     tidyRootTestBlocks(files, &errors);
-    tidyDeadFiles(files, roots, &dead_file_scope, &errors);
+    try tidyDeadFiles(arena, files, roots, &dead_file_scope, &errors);
     tidyInlineTests(files, &inline_test_scope, &errors);
     tidyAllowlists(files, &errors);
     try tidyCiCoverage(arena, zon, ci, &errors);
@@ -703,9 +817,71 @@ test "rule: orphan test file" {
     try tidyTestFileWiring(fixture.arena(), files, errors);
 
     try expectDiagnostics(fixture.output(),
-        \\src/foo_test.zig: error: test file is imported by nothing, so its tests never run
+        \\src/foo_test.zig: error: no `test { _ = @import(...); }` pulls this in, so its tests never run
         \\
     );
+}
+
+test "rule: a top-level import does not count as wiring" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    const errors = fixture.start();
+
+    // Zig never analyses an unreferenced top-level declaration, so this form
+    // compiles, looks wired, and runs none of foo_test.zig's tests.
+    const files = try analyzeAll(fixture.arena(), &.{
+        .{ "src/foo.zig", "const moved_tests = @import(\"foo_test.zig\");\n" },
+        .{ "src/foo_test.zig", "test \"t\" {}\n" },
+    }, errors);
+    try tidyTestFileWiring(fixture.arena(), files, errors);
+
+    try expectDiagnostics(fixture.output(),
+        \\src/foo_test.zig: error: no `test { _ = @import(...); }` pulls this in, so its tests never run
+        \\
+    );
+}
+
+test "rule: mutually importing files are still unreachable" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    const errors = fixture.start();
+
+    // Each has an incoming import, yet neither is reachable from a build root,
+    // so neither is compiled and neither one's tests run.
+    const files = try analyzeAll(fixture.arena(), &.{
+        .{ "src/root.zig", "pub const used = @import(\"used.zig\");\n" },
+        .{ "src/used.zig", "pub const x = 1;\n" },
+        .{ "src/a.zig", "const b = @import(\"b.zig\");\n" },
+        .{ "src/b.zig", "const a = @import(\"a.zig\");\n" },
+    }, errors);
+    try tidyDeadFiles(fixture.arena(), files, &.{"src/root.zig"}, &.{"src/"}, errors);
+
+    try expectDiagnostics(fixture.output(),
+        \\src/a.zig: error: not reachable from any build root
+        \\src/b.zig: error: not reachable from any build root
+        \\
+    );
+}
+
+test "rule: imports resolve across directories" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    const arena = fixture.arena();
+
+    try testing.expectEqualStrings(
+        "src/ssz/tree_view/root.zig",
+        (try resolveImport(arena, "src/ssz/type", "../tree_view/root.zig")).?,
+    );
+    try testing.expectEqualStrings(
+        "src/clock/config.zig",
+        (try resolveImport(arena, "src/clock", "config.zig")).?,
+    );
+    try testing.expectEqualStrings(
+        "src/clock/config.zig",
+        (try resolveImport(arena, "src/clock", "./config.zig")).?,
+    );
+    // A module-name import is resolved by the build, not against the file system.
+    try testing.expect((try resolveImport(arena, "src/clock", "persistent_merkle_tree")) == null);
 }
 
 test "rule: unpaired test file" {
@@ -738,7 +914,7 @@ test "rule: test file wired from a package root instead of its module" {
     try tidyTestFileWiring(fixture.arena(), files, errors);
 
     try expectDiagnostics(fixture.output(),
-        \\src/foo_test.zig: error: not imported by src/foo.zig, wire it from the module under test
+        \\src/foo_test.zig: error: src/foo.zig does not pull it in from a test block, wire it from the module under test
         \\
     );
 }
@@ -785,10 +961,10 @@ test "rule: dead file" {
         .{ "src/used.zig", "pub const x = 1;\n" },
         .{ "src/stray.zig", "pub const y = 2;\n" },
     }, errors);
-    tidyDeadFiles(files, &.{"src/root.zig"}, &.{"src/"}, errors);
+    try tidyDeadFiles(fixture.arena(), files, &.{"src/root.zig"}, &.{"src/"}, errors);
 
     try expectDiagnostics(fixture.output(),
-        \\src/stray.zig: error: file is imported by nothing
+        \\src/stray.zig: error: not reachable from any build root
         \\
     );
 }
@@ -839,6 +1015,14 @@ test "rule: stale allowlist entry" {
         fixture.output(),
         "src/cpu_count.zig: error: allowlisted but the file does not exist",
     ) != null);
+}
+
+test "rule: a longer target name does not satisfy a shorter one" {
+    // `zig build test:ssz` occurs inside `zig build test:ssz_generic_spec_tests`.
+    try testing.expect(!containsStep("run: zig build test:ssz_generic_spec_tests\n", "zig build test:ssz"));
+    try testing.expect(containsStep("run: zig build test:ssz\n", "zig build test:ssz"));
+    try testing.expect(containsStep("run: zig build test:ssz", "zig build test:ssz"));
+    try testing.expect(containsStep("zig build test:ssz -Dpreset=minimal\n", "zig build test:ssz"));
 }
 
 test "rule: module declared but absent from CI" {
