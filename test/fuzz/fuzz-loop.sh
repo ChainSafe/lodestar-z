@@ -10,12 +10,13 @@ LOGS_DIR="${FUZZ_DIR}/logs"
 SSZ_TARGETS=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists ssz_chunked_leaf_set)
 BLS_TARGETS=(bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig)
 DISCV5_TARGETS=(discv5_wire)
-ALL_TARGETS=("${SSZ_TARGETS[@]}" "${BLS_TARGETS[@]}" "${DISCV5_TARGETS[@]}")
+NETWORK_TARGETS=(network_wire)
+ALL_TARGETS=("${SSZ_TARGETS[@]}" "${BLS_TARGETS[@]}" "${DISCV5_TARGETS[@]}" "${NETWORK_TARGETS[@]}")
 
 usage() {
     echo "Usage: $0 [targets...]"
     echo ""
-    echo "Groups:  all, ssz, bls, discv5"
+    echo "Groups:  all, ssz, bls, discv5, network"
     echo "Targets: ${ALL_TARGETS[*]}"
     echo ""
     echo "Examples:"
@@ -23,6 +24,7 @@ usage() {
     echo "  $0 ssz                # fuzz all SSZ targets"
     echo "  $0 bls                # fuzz all BLS targets"
     echo "  $0 discv5             # fuzz all DiscV5 targets"
+    echo "  $0 network            # fuzz all network targets"
     echo "  $0 ssz bls_signature  # mix groups and individual targets"
     echo ""
     echo "Environment:"
@@ -40,6 +42,7 @@ resolve_targets() {
             ssz)       resolved+=("${SSZ_TARGETS[@]}") ;;
             bls)       resolved+=("${BLS_TARGETS[@]}") ;;
             discv5)    resolved+=("${DISCV5_TARGETS[@]}") ;;
+            network)   resolved+=("${NETWORK_TARGETS[@]}") ;;
             *)
                 # Validate that the target actually exists
                 local valid=false
@@ -52,7 +55,7 @@ resolve_targets() {
                 if ! $valid; then
                     echo "Error: unknown target '${arg}'" >&2
                     echo "Valid targets: ${ALL_TARGETS[*]}" >&2
-                    echo "Valid groups: all, ssz, bls, discv5" >&2
+                    echo "Valid groups: all, ssz, bls, discv5, network" >&2
                     exit 1
                 fi
                 resolved+=("$arg")
