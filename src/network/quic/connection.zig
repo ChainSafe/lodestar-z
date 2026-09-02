@@ -180,6 +180,7 @@ pub const Slot = struct {
     }
 
     pub fn deferClose(self: *Slot, reason: CloseReason, code: u64) void {
+        if (self.close_reason == null) self.close_reason = reason;
         self.pending_close = .{ .reason = reason, .code = code };
     }
 

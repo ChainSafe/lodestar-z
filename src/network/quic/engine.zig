@@ -349,7 +349,9 @@ pub const Engine = struct {
     fn liveSlot(self: *Engine, handle: Handle) Error!*connection.Slot {
         if (handle.index >= self.slots.len) return error.StaleHandle;
         const slot = &self.slots[handle.index];
-        if (slot.generation != handle.generation or slot.state == .free or slot.state == .closed) {
+        if (slot.generation != handle.generation or slot.state == .free or slot.state == .closed or
+            slot.pending_close != null)
+        {
             return error.StaleHandle;
         }
         return slot;
@@ -372,7 +374,7 @@ pub const Engine = struct {
         };
         self.counters.accepted += 1;
         self.refresh(index);
-        if (slot.state == .established) slot.discoverPeerStreams();
+        if (slot.state == .established and slot.pending_close == null) slot.discoverPeerStreams();
         _ = now;
     }
 

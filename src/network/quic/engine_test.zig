@@ -307,6 +307,7 @@ test "engine closes on peer id mismatch" {
     const server_handle = try expectConnected(server_events[0], .inbound, &pair.client_ctx);
     const reason = try expectClosed(server_events[1], server_handle);
     try std.testing.expectEqual(@as(u64, 1), reason.peer_closed.code);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
 }
 
 test "engine closes on handshake timeout when the server never answers" {
