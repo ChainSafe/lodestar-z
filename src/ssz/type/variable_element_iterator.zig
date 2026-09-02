@@ -1,5 +1,5 @@
-//! A zero-allocation, one-pass iterator for serialized elements in SSZ lists and vectors with
-//! variable-size elements.
+//! A zero-allocation, one-pass iterator for serialized elements in SSZ lists, vectors, and
+//! progressive lists with variable-size elements.
 //!
 //! SSZ encodes these collections as a table of 4-byte little-endian offsets followed by the
 //! element data. For example:
@@ -43,10 +43,10 @@ const std = @import("std");
 const TypeKind = @import("type_kind.zig").TypeKind;
 const isFixedType = @import("type_kind.zig").isFixedType;
 
-/// Returns an iterator over serialized elements of a variable-element SSZ list or vector.
+/// Returns an iterator over serialized elements of a variable-element SSZ list, vector, or progressive list.
 ///
 /// Pre-condition:
-/// `ST` must describe an SSZ list or vector with a variable-size element type.
+/// `ST` must describe an SSZ list, vector, or progressive list with a variable-size element type.
 ///
 /// `init` validates the first offset and collection bounds. `next` validates each subsequent
 /// offset before yielding an element.
@@ -56,9 +56,10 @@ const isFixedType = @import("type_kind.zig").isFixedType;
 pub fn VariableElementIterator(comptime ST: type) type {
     comptime {
         if (ST.kind != .vector and
-            ST.kind != .list)
+            ST.kind != .list and
+            ST.kind != .progressive_list)
         {
-            @compileError("ST must be a vector or list");
+            @compileError("ST must be a vector, list, or progressive list");
         }
         if (isFixedType(ST.Element)) {
             @compileError("ST.Element must not be a fixed type");
@@ -80,7 +81,7 @@ pub fn VariableElementIterator(comptime ST: type) type {
         /// Later offsets are validated by `next`.
         pub fn init(data: []const u8) !Self {
             if (data.len == 0) {
-                if (ST.kind == .vector) return error.offsetOutOfRange;
+                if (comptime ST.kind == .vector) return error.offsetOutOfRange;
                 return .{
                     .data = data,
                     .len = 0,
@@ -95,11 +96,11 @@ pub fn VariableElementIterator(comptime ST: type) type {
             if (first_offset % 4 != 0) return error.offsetNotDivisibleBy4;
 
             const len = first_offset / 4;
-            if (ST.kind == .vector and len != ST.length) {
-                return error.invalidOffsetCount;
+            if (comptime ST.kind == .vector) {
+                if (len != ST.length) return error.invalidOffsetCount;
             }
-            if (ST.kind == .list and len > ST.limit) {
-                return error.invalidOffsetCount;
+            if (comptime ST.kind == .list) {
+                if (len > ST.limit) return error.invalidOffsetCount;
             }
             if (first_offset > data.len) return error.offsetOutOfRange;
 
@@ -157,6 +158,11 @@ const VariableVector = struct {
     pub const length = 2;
 };
 
+const VariableProgressiveList = struct {
+    pub const kind = TypeKind.progressive_list;
+    pub const Element = VariableElement;
+};
+
 test "iterates validated variable elements" {
     const data = [_]u8{
         8,  0, 0, 0,
@@ -166,6 +172,21 @@ test "iterates validated variable elements" {
     };
 
     var elements = try VariableElementIterator(VariableList).init(&data);
+    try std.testing.expectEqual(@as(usize, 2), elements.len);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, (try elements.next()).?);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 4, 5 }, (try elements.next()).?);
+    try std.testing.expectEqual(null, try elements.next());
+}
+
+test "iterates progressive list elements" {
+    const data = [_]u8{
+        8,  0, 0, 0,
+        10, 0, 0, 0,
+        1,  2, 3, 4,
+        5,
+    };
+
+    var elements = try VariableElementIterator(VariableProgressiveList).init(&data);
     try std.testing.expectEqual(@as(usize, 2), elements.len);
     try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, (try elements.next()).?);
     try std.testing.expectEqualSlices(u8, &.{ 3, 4, 5 }, (try elements.next()).?);

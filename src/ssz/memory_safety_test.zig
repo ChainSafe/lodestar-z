@@ -1112,17 +1112,6 @@ test "progressive fixed list byte deserialization preserves out on malformed inp
     try std.testing.expectEqualSlices(bool, &.{ false, false }, out.items);
 }
 
-test "progressive list malformed offsets do not leak scratch allocation" {
-    const Items = FixedProgressiveListType(UintType(8));
-    const List = @import("type/progressive_list.zig").VariableProgressiveListType(Items);
-    const malformed = [_]u8{ 8, 0, 0, 0, 7, 0, 0, 0 };
-
-    try std.testing.expectError(
-        error.offsetNotIncreasing,
-        List.readVariableOffsets(std.testing.allocator, &malformed),
-    );
-}
-
 test "progressive list tree.toValue preserves out on malformed tree" {
     const List = FixedProgressiveListType(UintType(64));
     var pool = try Node.Pool.init(.{
