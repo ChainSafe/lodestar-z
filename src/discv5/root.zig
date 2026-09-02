@@ -27,6 +27,7 @@ test {
     _ = types;
     _ = wire;
     _ = @import("calls_test.zig");
+    _ = @import("channel_test.zig");
     _ = @import("driver_test.zig");
     _ = @import("engine_test.zig");
     _ = @import("lookup_test.zig");
