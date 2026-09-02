@@ -324,6 +324,26 @@ test "engine releases a peer-reset stream entry and frees the peer half" {
     for (events) |event| _ = try expectStreamOpened(event, handles.server);
 }
 
+test "engine keeps a queued fin intact when closing a stream" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stream = try pair.client.openStream(handles.client);
+    try std.testing.expectEqual(@as(usize, 4), try pair.client.write(stream, "tail", true));
+    pair.client.closeStream(stream, 0);
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    var buffer: [16]u8 = undefined;
+    const received = try pair.server.read(inbound, &buffer);
+    try std.testing.expectEqualStrings("tail", buffer[0..received.len]);
+    try std.testing.expect(received.fin);
+    try std.testing.expect(received.reset_code == null);
+}
+
 test "engine releases a stopped and reset stream entry" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});

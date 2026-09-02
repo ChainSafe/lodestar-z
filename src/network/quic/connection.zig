@@ -340,8 +340,10 @@ pub const Slot = struct {
 
     pub fn closeStream(self: *Slot, id: u64, code: u64) void {
         const index = self.streamIndex(id) orelse return;
-        if (!self.streams[index].fin_received) self.shutdown(id, .read, code);
-        if (!self.streams[index].fin_sent) self.shutdown(id, .write, code);
+        const stop_reading = !self.streams[index].fin_received;
+        const reset_writing = !self.streams[index].fin_sent;
+        if (stop_reading) self.shutdown(id, .read, code);
+        if (reset_writing) self.shutdown(id, .write, code);
         if (self.streams[index].active) self.clearStream(index);
     }
 };
