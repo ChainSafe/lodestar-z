@@ -70,7 +70,11 @@ pub const Limits = struct {
     idle_timeout_ms: u64 = limits.idle_timeout_ms,
     handshake_timeout_ms: u64 = limits.handshake_timeout_ms,
     keep_alive_ms: u64 = limits.keep_alive_ms,
+    admit: ?*const fn (context: ?*anyopaque, from: *const Address) bool = null,
+    admit_context: ?*anyopaque = null,
 };
+
+pub const Stats = connection.Stats;
 
 pub const Counters = struct {
     accepted: u64 = 0,
@@ -78,6 +82,7 @@ pub const Counters = struct {
     dropped_short_initial: u64 = 0,
     dropped_full: u64 = 0,
     dropped_source_limit: u64 = 0,
+    dropped_rejected: u64 = 0,
     dropped_no_entropy: u64 = 0,
     recv_errors: u64 = 0,
     send_errors: u64 = 0,
@@ -182,6 +187,14 @@ pub const DriverView = struct {
         }
         assert(count <= constants.send_batch_max);
         return count;
+    }
+
+    pub fn takeKeylog(self: DriverView, index: u16, out: []u8) usize {
+        assert(index < self.engine.slots.len);
+        assert(out.len >= tls.keylog_capacity);
+        const slot = &self.engine.slots[index];
+        if (slot.state == .free) return 0;
+        return slot.takeKeylog(out);
     }
 
     pub fn failSend(self: DriverView, index: u16) void {
@@ -451,6 +464,13 @@ pub const Engine = struct {
         return slot.direction;
     }
 
+    pub fn connectionStats(self: *const Engine, conn: Handle) ?Stats {
+        const slot = self.liveView(conn) orelse return null;
+        assert(slot.state != .free);
+        if (slot.conn == null) return null;
+        return slot.stats();
+    }
+
     pub fn connectionAgeMs(self: *const Engine, conn: Handle, now: Now) ?u64 {
         const slot = self.liveView(conn) orelse return null;
         assert(slot.state != .free);
@@ -662,6 +682,11 @@ pub const Engine = struct {
         if (self.handshaking >= self.limits.handshaking_max) return self.drop(&self.counters.dropped_full);
         if (self.handshakingFromSource(from) >= self.limits.handshaking_per_source_max) {
             return self.drop(&self.counters.dropped_source_limit);
+        }
+        if (self.limits.admit) |admit| {
+            if (!admit(self.limits.admit_context, from)) {
+                return self.drop(&self.counters.dropped_rejected);
+            }
         }
         const scid = entropy.take() orelse return self.drop(&self.counters.dropped_no_entropy);
         const index = self.claimSlot() orelse return self.drop(&self.counters.dropped_full);

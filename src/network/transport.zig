@@ -14,10 +14,12 @@ pub const Options = struct {
     host: *const keys.KeyPair,
     bind: std.Io.net.IpAddress,
     limits: engine_mod.Limits = .{},
+    keylog_path: ?[]const u8 = null,
 };
 
 pub const InitError = tls.Error || engine_mod.Error || std.Io.net.IpAddress.BindError ||
-    std.Io.RandomSecureError || error{ClockOutOfRange};
+    std.Io.RandomSecureError || std.Io.File.OpenError || std.Io.File.StatError ||
+    error{ClockOutOfRange};
 
 pub const DialError = driver_mod.DialError || error{MissingPeerId};
 
@@ -26,6 +28,9 @@ pub const Transport = struct {
     engine: engine_mod.Engine = undefined,
     udp: udp_mod.Udp = undefined,
     driver: driver_mod.Driver = undefined,
+    keylog: ?std.Io.File = null,
+    keylog_offset: u64 = 0,
+    keylog_failures: u32 = 0,
 
     pub fn init(
         target: *Transport,
@@ -36,6 +41,16 @@ pub const Transport = struct {
         var serial: [8]u8 = undefined;
         try std.Io.randomSecure(io, &serial);
         const now = try driver_mod.currentTime(io);
+        target.keylog = null;
+        target.keylog_offset = 0;
+        target.keylog_failures = 0;
+        if (options.keylog_path) |path| {
+            const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
+            errdefer file.close(io);
+            target.keylog_offset = (try file.stat(io)).size;
+            target.keylog = file;
+        }
+        errdefer if (target.keylog) |file| file.close(io);
         target.tls = try tls.Context.init(options.host, now.unix_s, serial);
         errdefer target.tls.deinit();
         target.udp = try udp_mod.Udp.bind(io, options.bind);
@@ -53,7 +68,23 @@ pub const Transport = struct {
         self.engine.deinit();
         self.udp.close(io);
         self.tls.deinit();
+        if (self.keylog) |file| file.close(io);
         self.* = undefined;
+    }
+
+    fn drainKeylog(self: *Transport, io: std.Io) void {
+        const file = self.keylog orelse return;
+        const view = self.engine.driverView();
+        var lines: [tls.keylog_capacity]u8 = undefined;
+        for (view.activeIndices()) |index| {
+            const length = view.takeKeylog(index, &lines);
+            if (length == 0) continue;
+            file.writePositionalAll(io, lines[0..length], self.keylog_offset) catch {
+                self.keylog_failures +|= 1;
+                continue;
+            };
+            self.keylog_offset += length;
+        }
     }
 
     pub fn peerId(self: *const Transport) peer_id.PeerId {
@@ -90,6 +121,8 @@ pub const Transport = struct {
     ) driver_mod.StepError!driver_mod.StepResult {
         assert(self.driver.engine == &self.engine);
         assert(self.driver.udp == &self.udp);
-        return self.driver.step(io, events, activity, options);
+        const result = try self.driver.step(io, events, activity, options);
+        self.drainKeylog(io);
+        return result;
     }
 };

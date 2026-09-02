@@ -134,6 +134,44 @@ test "engine clamps receive windows to the total budget" {
     try std.testing.expectEqual(@as(u64, 2 * 1_024 * 1_024), standard.streamWindow());
 }
 
+test "engine reports connection stats for live handles only" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    const stats = pair.client.connectionStats(handles.client) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(stats.sent > 0);
+    try std.testing.expect(stats.recv > 0);
+    try std.testing.expect(stats.sent_bytes > 0);
+    try std.testing.expect(stats.recv_bytes > 0);
+    try std.testing.expectEqual(@as(u64, 0), stats.lost);
+    try std.testing.expect(stats.rtt_ms <= 1_000);
+    try std.testing.expect(stats.min_rtt_ms <= stats.rtt_ms);
+    try std.testing.expect(stats.cwnd > 0);
+
+    const stale = engine_mod.Handle{
+        .index = handles.client.index,
+        .generation = handles.client.generation +% 1,
+    };
+    try std.testing.expect(pair.client.connectionStats(stale) == null);
+}
+
+test "engine captures TLS key material per connection for the host to drain" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    var lines: [tls.keylog_capacity]u8 = undefined;
+    const length = pair.client.driverView().takeKeylog(handles.client.index, &lines);
+    try std.testing.expect(length > 0);
+    try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "CLIENT_TRAFFIC_SECRET_0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "SERVER_TRAFFIC_SECRET_0") != null);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().takeKeylog(handles.client.index, &lines));
+    try std.testing.expect(pair.server.driverView().takeKeylog(handles.server.index, &lines) > 0);
+}
+
 test "engine rejects invalid limits" {
     const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{3}));
     var ctx = try tls.Context.init(&host, now_unix, [_]u8{3} ** 8);

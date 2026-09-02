@@ -21,6 +21,35 @@ fn dialInitial(pair: *Pair, out: []u8) ![]u8 {
     return out[0..datagram.bytes.len];
 }
 
+fn rejectPort(context: ?*anyopaque, from: *const types.Address) bool {
+    const blocked: *const u16 = @ptrCast(@alignCast(context.?));
+    return from.port() != blocked.*;
+}
+
+test "engine consults the admission predicate before opening an inbound slot" {
+    var blocked: u16 = client_address.port();
+    var pair: Pair = .{};
+    try pair.init(.{}, .{ .admit = rejectPort, .admit_context = @ptrCast(&blocked) });
+    defer pair.deinit();
+
+    _ = try pair.dial();
+    try pair.pump();
+    try std.testing.expect(pair.server.counters.dropped_rejected >= 1);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+
+    blocked = 0;
+    _ = try pair.dial();
+    try pair.pump();
+    var storage: [8]Event = undefined;
+    var connected = false;
+    for (pair.events(&pair.server, &storage)) |event| {
+        if (event == .connected) connected = true;
+    }
+    try std.testing.expect(connected);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.driverView().activeIndices().len);
+}
+
 test "engine bounds concurrent dials and outbound connections" {
     var pair: Pair = .{};
     try pair.init(.{ .dialing_max = 2, .outbound_max = 3 }, .{ .handshaking_per_source_max = 8 });

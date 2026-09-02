@@ -82,6 +82,21 @@ pub const Config = struct {
         c.quiche_config_set_max_stream_window(ptr, stream_window);
         c.quiche_config_set_active_connection_id_limit(ptr, 2);
         c.quiche_config_set_disable_active_migration(ptr, true);
+        c.quiche_config_set_disable_dcid_reuse(ptr, false);
+        c.quiche_config_set_cc_algorithm(ptr, c.QUICHE_CC_CUBIC);
+        c.quiche_config_enable_hystart(ptr, true);
+        c.quiche_config_enable_pacing(ptr, true);
+        c.quiche_config_set_initial_congestion_window_packets(
+            ptr,
+            limits.initial_congestion_window_packets,
+        );
+        c.quiche_config_set_max_send_udp_payload_size(ptr, limits.send_udp_payload_max);
+        c.quiche_config_discover_pmtu(ptr, false);
+        c.quiche_config_set_max_amplification_factor(ptr, limits.amplification_factor_max);
+        c.quiche_config_set_ack_delay_exponent(ptr, limits.ack_delay_exponent);
+        c.quiche_config_set_max_ack_delay(ptr, limits.ack_delay_max_ms);
+        c.quiche_config_enable_dgram(ptr, false, 0, 0);
+        c.quiche_config_grease(ptr, true);
         return .{ .ptr = ptr };
     }
 
