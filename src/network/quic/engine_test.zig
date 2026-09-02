@@ -27,6 +27,7 @@ pub const Pair = struct {
     server: Engine = undefined,
     now: Now = .{ .mono_ms = 1_000, .unix_s = now_unix },
     entropy: u8 = 0,
+    pool: engine_mod.EntropyPool = .{},
     drop_to_server: bool = false,
 
     pub fn init(self: *Pair, client_limits: Limits, server_limits: Limits) !void {
@@ -54,6 +55,11 @@ pub const Pair = struct {
     pub fn nextEntropy(self: *Pair) [constants.local_cid_length]u8 {
         self.entropy +%= 1;
         return [_]u8{self.entropy} ** constants.local_cid_length;
+    }
+
+    pub fn nextPool(self: *Pair) *engine_mod.EntropyPool {
+        self.pool.fill(self.nextEntropy());
+        return &self.pool;
     }
 
     pub fn dial(self: *Pair) !engine_mod.Handle {
@@ -89,7 +95,7 @@ pub const Pair = struct {
                 var copy: [constants.datagram_size_max]u8 = undefined;
                 @memcpy(copy[0..datagram.len], datagram);
                 var response: [constants.datagram_size_max]u8 = undefined;
-                _ = to.receive(copy[0..datagram.len], from_address, to_address, self.now, self.nextEntropy(), &response);
+                _ = to.receive(copy[0..datagram.len], from_address, to_address, self.now, self.nextPool(), &response);
             }
         }
         return moved;
@@ -598,6 +604,36 @@ test "engine drops new handshakes when the server table is full" {
     try std.testing.expectError(error.TableFull, pair.server.dial(server_address, client_address, pair.client_ctx.local_peer_id, pair.now, pair.nextEntropy()));
 }
 
+test "engine reclaims slots across many connection lifetimes" {
+    var pair: Pair = .{};
+    try pair.init(
+        .{ .connections_max = 4, .handshaking_max = 4 },
+        .{ .connections_max = 4, .handshaking_max = 4 },
+    );
+    defer pair.deinit();
+
+    var storage: [8]Event = undefined;
+    var round: usize = 0;
+    while (round < 100) : (round += 1) {
+        const handle = try pair.dial();
+        try pair.pump();
+        _ = pair.events(&pair.client, &storage);
+        _ = pair.events(&pair.server, &storage);
+        pair.client.close(handle, 0);
+        try pair.pump();
+        _ = pair.events(&pair.client, &storage);
+        _ = pair.events(&pair.server, &storage);
+    }
+
+    var indices: [4]u16 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices(&indices));
+    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices(&indices));
+    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+    for (pair.client.slots) |*slot| try std.testing.expect(slot.conn == null);
+    for (pair.server.slots) |*slot| try std.testing.expect(slot.conn == null);
+}
+
 test "engine drops a routed packet that arrives from another source path" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
@@ -620,7 +656,7 @@ test "engine drops a routed packet that arrives from another source path" {
         wrong_source,
         client_address,
         pair.now,
-        pair.nextEntropy(),
+        pair.nextPool(),
         &response,
     );
     try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, outcome);
@@ -667,7 +703,7 @@ test "engine survives an undecryptable packet routed to a live slot" {
         server_address,
         client_address,
         pair.now,
-        pair.nextEntropy(),
+        pair.nextPool(),
         &response,
     );
     switch (outcome) {
@@ -695,7 +731,7 @@ test "engine drops version negotiation packets instead of reflecting them" {
     const before = pair.server.counters.dropped_unroutable;
     try std.testing.expectEqual(
         engine_mod.ReceiveOutcome.dropped,
-        pair.server.receive(&packet, client_address, server_address, pair.now, pair.nextEntropy(), &response),
+        pair.server.receive(&packet, client_address, server_address, pair.now, pair.nextPool(), &response),
     );
     try std.testing.expectEqual(before + 1, pair.server.counters.dropped_unroutable);
     try std.testing.expectEqual(@as(u64, 0), pair.server.counters.version_negotiations);
@@ -718,7 +754,7 @@ test "engine answers unsupported versions and drops unroutable packets" {
     @memset(initial[15..19], 0xbb);
     initial[19] = 0x00;
     var response: [constants.datagram_size_max]u8 = undefined;
-    const outcome = pair.server.receive(&initial, client_address, server_address, pair.now, pair.nextEntropy(), &response);
+    const outcome = pair.server.receive(&initial, client_address, server_address, pair.now, pair.nextPool(), &response);
     switch (outcome) {
         .version_negotiation => |bytes| try std.testing.expect(bytes.len > 0),
         else => return error.TestUnexpectedResult,
@@ -726,11 +762,11 @@ test "engine answers unsupported versions and drops unroutable packets" {
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.version_negotiations);
 
     var short = [_]u8{0x40} ++ [_]u8{0xcc} ** constants.local_cid_length ++ [_]u8{0} ** 20;
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(&short, client_address, server_address, pair.now, pair.nextEntropy(), &response));
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(&short, client_address, server_address, pair.now, pair.nextPool(), &response));
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_unroutable);
 
     var tiny = [_]u8{ 0xc3, 0, 0, 0, 1, 0x08 } ++ [_]u8{0xaa} ** 8 ++ [_]u8{0x04} ++ [_]u8{0xbb} ** 4 ++ [_]u8{0x00};
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(&tiny, client_address, server_address, pair.now, pair.nextEntropy(), &response));
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(&tiny, client_address, server_address, pair.now, pair.nextPool(), &response));
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_short_initial);
     try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
 }
