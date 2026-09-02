@@ -21,6 +21,7 @@ test {
     testing.refAllDecls(electra);
     testing.refAllDecls(fulu);
     testing.refAllDecls(gloas);
+    _ = @import("reqresp_test.zig");
 }
 
 const src = blk: {
