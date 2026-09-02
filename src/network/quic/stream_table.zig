@@ -42,6 +42,12 @@ pub const StreamTable = struct {
         return null;
     }
 
+    pub fn matches(self: *const StreamTable, index: u8, id: u64) bool {
+        if (index >= limits.streams_per_connection) return false;
+        const claimed = self.entries[index].id orelse return false;
+        return claimed == id;
+    }
+
     pub fn freeLocal(self: *const StreamTable) ?u8 {
         return self.freeIn(0);
     }

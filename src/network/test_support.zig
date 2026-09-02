@@ -63,7 +63,13 @@ pub const Pair = struct {
     }
 
     pub fn dial(self: *Pair) !engine_mod.Handle {
-        return self.client.dial(client_address, server_address, self.server_ctx.local_peer_id, self.now, self.nextEntropy());
+        return self.client.dial(
+            &client_address,
+            &server_address,
+            self.server_ctx.local_peer_id,
+            self.now,
+            self.nextEntropy(),
+        );
     }
 
     pub fn advance(self: *Pair, ms: u64) void {
@@ -75,8 +81,8 @@ pub const Pair = struct {
         while (rounds < 64) : (rounds += 1) {
             var moved = try self.transfer(&self.client, &self.server, client_address, server_address, self.drop_to_server);
             moved = try self.transfer(&self.server, &self.client, server_address, client_address, false) or moved;
-            self.client.tick(self.now);
-            self.server.tick(self.now);
+            self.client.driverView().tick(self.now);
+            self.server.driverView().tick(self.now);
             if (!moved) return;
         }
         return error.PumpDidNotSettle;
@@ -92,11 +98,11 @@ pub const Pair = struct {
     ) !bool {
         var moved = false;
         var index: u16 = 0;
-        while (index < from.slotCount()) : (index += 1) {
+        while (index < from.driverView().slotCount()) : (index += 1) {
             var budget: u32 = 0;
             while (budget < limits.send_burst_max) : (budget += 1) {
                 var out: [constants.datagram_size_max]u8 = undefined;
-                const datagram = try from.send(index, self.now, &out) orelse break;
+                const datagram = from.driverView().send(index, self.now, &out) orelse break;
                 moved = true;
                 if (from == &self.client and self.first_initial_len == 0) {
                     @memcpy(self.first_initial[0..datagram.len], datagram);
@@ -106,7 +112,14 @@ pub const Pair = struct {
                 var copy: [constants.datagram_size_max]u8 = undefined;
                 @memcpy(copy[0..datagram.len], datagram);
                 var response: [constants.datagram_size_max]u8 = undefined;
-                _ = to.receive(copy[0..datagram.len], from_address, to_address, self.now, self.nextPool(), &response);
+                _ = to.driverView().receive(
+                    copy[0..datagram.len],
+                    &from_address,
+                    &to_address,
+                    self.now,
+                    self.nextPool(),
+                    &response,
+                );
             }
         }
         return moved;

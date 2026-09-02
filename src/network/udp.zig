@@ -72,9 +72,14 @@ pub const Udp = struct {
         self.admitted = null;
     }
 
-    pub fn send(self: *const Udp, io: std.Io, destination: types.Address, bytes: []const u8) SendError!void {
+    pub fn send(
+        self: *const Udp,
+        io: std.Io,
+        destination: *const types.Address,
+        bytes: []const u8,
+    ) SendError!void {
         if (bytes.len > constants.datagram_size_max) return error.DatagramTooLarge;
-        const address = toNetwork(destination, self.family);
+        const address = toNetwork(destination.*, self.family);
         return self.socket.send(io, &address, bytes);
     }
 };

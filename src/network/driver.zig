@@ -6,12 +6,16 @@ const peer_id = @import("wire/peer_id.zig");
 const types = @import("types.zig");
 const udp_mod = @import("udp.zig");
 
-pub const Error = engine_mod.Error || udp_mod.ReceiveTimeoutError || udp_mod.ReleaseError ||
-    udp_mod.SendError || std.Io.RandomSecureError || error{
+const assert = std.debug.assert;
+
+pub const StepError = udp_mod.ReceiveTimeoutError || udp_mod.SendError ||
+    std.Io.RandomSecureError || error{
     ClockOutOfRange,
     DestinationUnreachable,
     InvalidPollInterval,
 };
+
+pub const DialError = StepError || engine_mod.DialError;
 
 pub const Config = struct {
     poll_interval_ms: u32 = constants.poll_interval_ms,
@@ -32,14 +36,14 @@ pub const StepResult = struct {
     datagrams_sent: u32 = 0,
     receive_errors: u32 = 0,
     send_failures: u32 = 0,
-    first_failure: ?struct { conn: engine_mod.Handle, err: Error } = null,
+    first_failure: ?struct { conn: engine_mod.Handle, err: StepError } = null,
     events: usize = 0,
     events_pending: bool = false,
 };
 
 pub const Drained = struct {
     sent: u32 = 0,
-    failure: ?Error = null,
+    failure: ?StepError = null,
 };
 
 pub const Driver = struct {
@@ -53,14 +57,25 @@ pub const Driver = struct {
         return .{ .engine = engine, .udp = udp, .config = .{} };
     }
 
-    pub fn initWithConfig(engine: *engine_mod.Engine, udp: *udp_mod.Udp, config: Config) Error!Driver {
+    pub fn initWithConfig(
+        engine: *engine_mod.Engine,
+        udp: *udp_mod.Udp,
+        config: Config,
+    ) StepError!Driver {
         if (config.poll_interval_ms == 0) return error.InvalidPollInterval;
         return .{ .engine = engine, .udp = udp, .config = config };
     }
 
-    pub fn dial(self: *Driver, io: std.Io, peer: types.Address, expected: peer_id.PeerId) Error!engine_mod.Handle {
+    pub fn dial(
+        self: *Driver,
+        io: std.Io,
+        peer: types.Address,
+        expected: peer_id.PeerId,
+    ) DialError!engine_mod.Handle {
         const now = try currentTime(io);
-        const handle = try self.engine.dial(self.udp.localAddress(), peer, expected, now, try entropy(io));
+        const local = self.udp.localAddress();
+        const handle = try self.engine.dial(&local, &peer, expected, now, try entropy(io));
+        assert(handle.index < self.engine.driverView().slotCount());
         if (self.drain(io, handle.index, now).failure) |err| {
             _ = self.engine.abandon(handle);
             return err;
@@ -68,7 +83,7 @@ pub const Driver = struct {
         return handle;
     }
 
-    pub fn step(self: *Driver, io: std.Io, events: []engine_mod.Event) Error!StepResult {
+    pub fn step(self: *Driver, io: std.Io, events: []engine_mod.Event) StepError!StepResult {
         var result = StepResult{ .now = try currentTime(io) };
         var batch: u32 = 0;
         while (batch < constants.receive_batch_max) : (batch += 1) {
@@ -81,45 +96,52 @@ pub const Driver = struct {
             };
             result.datagrams_received += 1;
             defer self.udp.release(admitted.handle) catch unreachable;
-            switch (self.engine.receive(
+            const local = self.udp.localAddress();
+            switch (self.engine.driverView().receive(
                 admitted.bytes,
-                admitted.from,
-                self.udp.localAddress(),
+                &admitted.from,
+                &local,
                 result.now,
                 &self.pool,
                 &self.output,
             )) {
                 .accepted => result.datagrams_accepted += 1,
                 .version_negotiation => |bytes| {
-                    self.send(io, admitted.from, bytes) catch {};
+                    self.send(io, &admitted.from, bytes) catch {};
                     result.version_negotiations += 1;
                 },
                 .dropped => result.datagrams_dropped += 1,
             }
         }
         result.now = try currentTime(io);
-        self.engine.tick(result.now);
-        var indices: [limits.connections_max_ceiling]u16 = undefined;
-        const active = self.engine.activeIndices(&indices);
-        for (indices[0..active]) |index| {
+        const view = self.engine.driverView();
+        view.tick(result.now);
+        for (view.activeIndices()) |index| {
             const drained = self.drain(io, index, result.now);
             result.datagrams_sent += drained.sent;
             if (drained.failure) |err| {
                 result.send_failures += 1;
                 if (result.first_failure == null) {
-                    result.first_failure = .{ .conn = self.engine.handle(index).?, .err = err };
+                    result.first_failure = .{ .conn = view.handleAt(index).?, .err = err };
                 }
             }
         }
         result.events = self.engine.pollEvents(events);
         result.events_pending = self.engine.eventsPending();
+        assert(result.events <= events.len);
         return result;
     }
 
-    fn receiveDatagram(self: *Driver, io: std.Io, result: *StepResult, wait: bool) Error!Received {
+    fn receiveDatagram(
+        self: *Driver,
+        io: std.Io,
+        result: *StepResult,
+        wait: bool,
+    ) StepError!Received {
+        const view = self.engine.driverView();
         const timeout: std.Io.Timeout = if (wait) blk: {
             var wait_ms: u64 = self.config.poll_interval_ms;
-            if (self.engine.nextTimeoutMs()) |earliest| wait_ms = @min(wait_ms, earliest);
+            if (view.nextTimeoutMs()) |earliest| wait_ms = @min(wait_ms, earliest);
             break :blk .{ .duration = .{
                 .raw = .fromMilliseconds(@intCast(@max(wait_ms, 1))),
                 .clock = .awake,
@@ -142,23 +164,27 @@ pub const Driver = struct {
     }
 
     fn drain(self: *Driver, io: std.Io, index: u16, now: engine_mod.Now) Drained {
-        const peer = self.engine.peerAddress(index) orelse return .{};
+        const view = self.engine.driverView();
+        const peer = view.peerAddressAt(index) orelse return .{};
         var result = Drained{};
         while (result.sent < limits.send_burst_max) {
-            const datagram = self.engine.send(index, now, &self.output) catch |err| {
-                result.failure = err;
-                return result;
-            } orelse break;
-            self.send(io, peer, datagram) catch |err| {
+            const datagram = view.send(index, now, &self.output) orelse break;
+            self.send(io, &peer, datagram) catch |err| {
                 result.failure = err;
                 return result;
             };
             result.sent += 1;
         }
+        assert(result.sent <= limits.send_burst_max);
         return result;
     }
 
-    fn send(self: *const Driver, io: std.Io, destination: types.Address, bytes: []const u8) Error!void {
+    fn send(
+        self: *const Driver,
+        io: std.Io,
+        destination: *const types.Address,
+        bytes: []const u8,
+    ) StepError!void {
         return self.udp.send(io, destination, bytes) catch |err| switch (err) {
             error.AccessDenied,
             error.AddressFamilyUnsupported,
@@ -172,7 +198,7 @@ pub const Driver = struct {
     }
 };
 
-pub fn currentTime(io: std.Io) Error!engine_mod.Now {
+pub fn currentTime(io: std.Io) error{ClockOutOfRange}!engine_mod.Now {
     const mono = std.Io.Clock.awake.now(io).toMilliseconds();
     const wall = std.Io.Clock.real.now(io).toSeconds();
     if (mono < 0 or wall < 0) return error.ClockOutOfRange;
@@ -186,5 +212,5 @@ fn entropy(io: std.Io) std.Io.RandomSecureError![limits.local_cid_length]u8 {
 }
 
 comptime {
-    std.debug.assert(@sizeOf(Driver) <= 4 * 1_024);
+    assert(@sizeOf(Driver) <= 4 * 1_024);
 }

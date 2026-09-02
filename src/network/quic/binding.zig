@@ -5,7 +5,6 @@ const types = @import("../types.zig");
 pub const c = @import("quiche_zig:quiche");
 
 pub const Error = error{
-    Done,
     BufferTooShort,
     UnknownVersion,
     InvalidFrame,
@@ -31,11 +30,11 @@ pub const Error = error{
     Unknown,
 };
 
-pub fn check(rc: anytype) Error!usize {
+pub fn check(rc: anytype) Error!?usize {
     const value: isize = @intCast(rc);
     if (value >= 0) return @intCast(value);
+    if (value == c.QUICHE_ERR_DONE) return null;
     return switch (value) {
-        c.QUICHE_ERR_DONE => error.Done,
         c.QUICHE_ERR_BUFFER_TOO_SHORT => error.BufferTooShort,
         c.QUICHE_ERR_UNKNOWN_VERSION => error.UnknownVersion,
         c.QUICHE_ERR_INVALID_FRAME => error.InvalidFrame,
@@ -179,7 +178,7 @@ pub fn headerInfo(datagram: []const u8) Error!HeaderInfo {
     var dcid_len: usize = dcid.len;
     var token: [token_length_max]u8 = undefined;
     var token_len: usize = token.len;
-    _ = try check(c.quiche_header_info(
+    const written = try check(c.quiche_header_info(
         datagram.ptr,
         datagram.len,
         limits.local_cid_length,
@@ -192,6 +191,9 @@ pub fn headerInfo(datagram: []const u8) Error!HeaderInfo {
         &token,
         &token_len,
     ));
+    if (written == null) return error.InvalidPacket;
+    std.debug.assert(scid_len <= scid.len);
+    std.debug.assert(dcid_len <= dcid.len);
     return .{
         .version = version,
         .packet_type = @enumFromInt(packet_type),

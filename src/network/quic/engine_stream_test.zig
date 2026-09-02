@@ -1,4 +1,5 @@
 const std = @import("std");
+const binding = @import("binding.zig");
 const engine_mod = @import("engine.zig");
 const limits = @import("limits.zig");
 const support = @import("../test_support.zig");
@@ -11,6 +12,21 @@ const server_address = support.server_address;
 const connectPair = support.connectPair;
 const expectClosed = support.expectClosed;
 const expectStreamOpened = support.expectStreamOpened;
+
+test "engine stream errors leak no quiche or openssl member" {
+    comptime {
+        const leaked = [_][]const u8{ "Done", "OpenSslFailed", "TlsFail", "CryptoFail", "Unknown" };
+        for (@typeInfo(engine_mod.StreamError).error_set.?) |member| {
+            for (leaked) |name| std.debug.assert(!std.mem.eql(u8, member.name, name));
+        }
+        std.debug.assert(@typeInfo(engine_mod.StreamError).error_set.?.len == 8);
+        std.debug.assert(@typeInfo(engine_mod.DialError).error_set.?.len == 3);
+        for (@typeInfo(binding.Error).error_set.?) |member| {
+            std.debug.assert(!std.mem.eql(u8, member.name, "Done"));
+        }
+    }
+    try std.testing.expect(@typeInfo(engine_mod.StreamError).error_set != null);
+}
 
 test "engine streams echo data with fin in both directions" {
     var pair: Pair = .{};

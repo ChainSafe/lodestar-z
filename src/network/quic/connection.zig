@@ -6,6 +6,7 @@ const stream_table = @import("stream_table.zig");
 const tls = @import("../tls/context.zig");
 const types = @import("../types.zig");
 
+const assert = std.debug.assert;
 const c = binding.c;
 const StreamTable = stream_table.StreamTable;
 
@@ -18,6 +19,11 @@ pub const Error = binding.Error || tls.Error || error{
 };
 
 pub const State = enum { free, handshaking, established, closed };
+
+pub const OpenedStream = struct {
+    id: u64,
+    index: u8,
+};
 
 pub const OpenParams = struct {
     direction: types.Direction,
@@ -56,7 +62,8 @@ pub const Slot = struct {
         config: *const binding.Config,
         params: OpenParams,
     ) Error!void {
-        std.debug.assert(self.state == .free and self.conn == null);
+        assert(self.state == .free);
+        assert(self.conn == null);
         self.handshake = .{ .now_unix = params.now.unix_s };
         self.direction = params.direction;
         self.peer = params.peer;
@@ -107,16 +114,14 @@ pub const Slot = struct {
             .to = @ptrCast(@constCast(self.local_sockaddr.any())),
             .to_len = self.local_sockaddr.len,
         };
-        const rc = c.quiche_conn_recv(self.conn.?, datagram.ptr, datagram.len, &info);
-        if (rc == c.QUICHE_ERR_DONE) return;
-        _ = try binding.check(rc);
+        _ = try binding.check(c.quiche_conn_recv(self.conn.?, datagram.ptr, datagram.len, &info));
     }
 
     pub fn send(self: *Slot, now_ms: u64, out: []u8) Error!?[]u8 {
         var info: c.quiche_send_info = undefined;
         const rc = c.quiche_conn_send(self.conn.?, out.ptr, out.len, &info);
-        if (rc == c.QUICHE_ERR_DONE) return null;
-        const length = try binding.check(rc);
+        const length = try binding.check(rc) orelse return null;
+        assert(length <= out.len);
         self.last_send_ms = now_ms;
         return out[0..length];
     }
@@ -173,16 +178,16 @@ pub const Slot = struct {
         return self.table.find(id);
     }
 
-    pub fn openStream(self: *Slot) Error!u64 {
+    pub fn openStream(self: *Slot) Error!OpenedStream {
         if (self.state != .established or self.close_reason != null) return error.NotEstablished;
         if (c.quiche_conn_peer_streams_left_bidi(self.conn.?) == 0) return error.StreamLimit;
         const index = self.table.freeLocal() orelse return error.StreamTableFull;
         const id = self.table.next_local_id;
         var code: u64 = 0;
-        const rc = c.quiche_conn_stream_send(self.conn.?, id, "", 0, false, &code);
-        if (rc != c.QUICHE_ERR_DONE) _ = try binding.check(rc);
+        _ = try binding.check(c.quiche_conn_stream_send(self.conn.?, id, "", 0, false, &code));
         self.table.claimLocal(index, id);
-        return id;
+        assert(self.table.matches(index, id));
+        return .{ .id = id, .index = index };
     }
 
     pub fn discoverPeerStreams(self: *Slot) void {
@@ -194,25 +199,26 @@ pub const Slot = struct {
             if (!StreamTable.isPeerInitiated(self.direction, id)) continue;
             if (self.table.find(id) != null) continue;
             if (self.table.claimPeer(id) == null) {
-                self.shutdown(id, .read, types.app_error_stream_table_full);
-                self.shutdown(id, .write, types.app_error_stream_table_full);
+                self.shutdownRaw(id, .read, types.app_error_stream_table_full);
+                self.shutdownRaw(id, .write, types.app_error_stream_table_full);
             }
         }
     }
 
-    pub fn read(self: *Slot, id: u64, buf: []u8) Error!types.Read {
-        const index = self.table.find(id) orelse return error.UnknownStream;
+    pub fn read(self: *Slot, index: u8, id: u64, buf: []u8) Error!types.Read {
+        assert(self.conn != null);
+        assert(self.table.matches(index, id));
         var fin = false;
         var code: u64 = 0;
         const rc = c.quiche_conn_stream_recv(self.conn.?, id, buf.ptr, buf.len, &fin, &code);
-        if (rc == c.QUICHE_ERR_DONE) return .{ .len = 0, .fin = false };
         if (rc == c.QUICHE_ERR_STREAM_RESET) {
             self.table.markFinReceived(index);
             if (c.quiche_conn_stream_capacity(self.conn.?, id) < 0) self.table.markFinSent(index);
             if (self.table.entries[index].fin_sent) self.table.clear(index);
             return .{ .len = 0, .fin = true, .reset_code = code };
         }
-        const length = try binding.check(rc);
+        const length = try binding.check(rc) orelse return .{ .len = 0, .fin = false };
+        assert(length <= buf.len);
         if (fin) {
             self.table.markFinReceived(index);
             if (self.table.entries[index].fin_sent) self.table.clear(index);
@@ -220,24 +226,25 @@ pub const Slot = struct {
         return .{ .len = length, .fin = fin };
     }
 
-    pub fn write(self: *Slot, id: u64, bytes: []const u8, fin: bool) Error!usize {
-        const index = self.table.find(id) orelse return error.UnknownStream;
+    pub fn write(self: *Slot, index: u8, id: u64, bytes: []const u8, fin: bool) Error!usize {
+        assert(self.conn != null);
+        assert(self.table.matches(index, id));
         var code: u64 = 0;
         const rc = c.quiche_conn_stream_send(self.conn.?, id, bytes.ptr, bytes.len, fin, &code);
-        if (rc == c.QUICHE_ERR_DONE) {
+        if (rc == c.QUICHE_ERR_STREAM_STOPPED) {
+            self.table.markFinSent(index);
+            if (self.table.entries[index].fin_received) self.table.clear(index);
+            return error.StreamStopped;
+        }
+        const length = try binding.check(rc) orelse {
             const available = c.quiche_conn_stream_capacity(self.conn.?, id);
             if (available < 0 and available != c.QUICHE_ERR_DONE) {
                 self.table.clear(index);
                 return error.UnknownStream;
             }
             return error.WouldBlock;
-        }
-        if (rc == c.QUICHE_ERR_STREAM_STOPPED) {
-            self.table.markFinSent(index);
-            if (self.table.entries[index].fin_received) self.table.clear(index);
-            return error.StreamStopped;
-        }
-        const length = try binding.check(rc);
+        };
+        assert(length <= bytes.len);
         if (fin and length == bytes.len) {
             self.table.markFinSent(index);
             if (self.table.entries[index].fin_received) self.table.clear(index);
@@ -245,33 +252,51 @@ pub const Slot = struct {
         return length;
     }
 
-    pub fn capacity(self: *Slot, id: u64) Error!usize {
-        if (self.table.find(id) == null) return error.UnknownStream;
-        return binding.check(c.quiche_conn_stream_capacity(self.conn.?, id)) catch |err| switch (err) {
-            error.InvalidStreamState => error.UnknownStream,
-            else => err,
+    pub fn capacity(self: *Slot, index: u8, id: u64) Error!usize {
+        assert(self.conn != null);
+        assert(self.table.matches(index, id));
+        const rc = c.quiche_conn_stream_capacity(self.conn.?, id);
+        const available = binding.check(rc) catch |err| switch (err) {
+            error.InvalidStreamState => return error.UnknownStream,
+            else => return err,
         };
+        return available orelse error.WouldBlock;
     }
 
-    pub fn shutdown(self: *Slot, id: u64, direction: types.ShutdownDirection, code: u64) void {
-        const which: c_int = if (direction == .read) c.QUICHE_SHUTDOWN_READ else c.QUICHE_SHUTDOWN_WRITE;
-        _ = c.quiche_conn_stream_shutdown(self.conn.?, id, @intCast(which), code);
-        const index = self.table.find(id) orelse return;
+    pub fn shutdown(
+        self: *Slot,
+        index: u8,
+        id: u64,
+        direction: types.ShutdownDirection,
+        code: u64,
+    ) void {
+        assert(self.conn != null);
+        assert(self.table.matches(index, id));
+        self.shutdownRaw(id, direction, code);
         if (direction == .read) self.table.markFinReceived(index) else self.table.markFinSent(index);
         const entry = self.table.entries[index];
         if (entry.fin_received and entry.fin_sent) self.table.clear(index);
     }
 
-    pub fn closeStream(self: *Slot, id: u64, code: u64) void {
-        const index = self.table.find(id) orelse return;
-        const stop_reading = !self.table.entries[index].fin_received;
-        const reset_writing = !self.table.entries[index].fin_sent;
-        if (stop_reading) self.shutdown(id, .read, code);
-        if (reset_writing) self.shutdown(id, .write, code);
-        if (self.table.entries[index].id != null) self.table.clear(index);
+    pub fn closeStream(self: *Slot, index: u8, id: u64, code: u64) void {
+        assert(self.conn != null);
+        assert(self.table.matches(index, id));
+        const entry = self.table.entries[index];
+        if (!entry.fin_received) self.shutdownRaw(id, .read, code);
+        if (!entry.fin_sent) self.shutdownRaw(id, .write, code);
+        self.table.clear(index);
+        assert(self.table.entries[index].id == null);
+    }
+
+    fn shutdownRaw(self: *Slot, id: u64, direction: types.ShutdownDirection, code: u64) void {
+        const which: c_int = if (direction == .read)
+            c.QUICHE_SHUTDOWN_READ
+        else
+            c.QUICHE_SHUTDOWN_WRITE;
+        _ = c.quiche_conn_stream_shutdown(self.conn.?, id, @intCast(which), code);
     }
 };
 
 comptime {
-    std.debug.assert(@sizeOf(Slot) <= 4 * 1_024);
+    assert(@sizeOf(Slot) <= 4 * 1_024);
 }

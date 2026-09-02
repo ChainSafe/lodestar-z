@@ -19,7 +19,8 @@ test "UDP admits one mutable datagram at a time" {
     try std.testing.expect(receiver.localAddress().port() != 0);
 
     const payload = [_]u8{0x44} ** limits.client_initial_min;
-    try sender.send(std.testing.io, receiver.localAddress(), &payload);
+    const receiver_address = receiver.localAddress();
+    try sender.send(std.testing.io, &receiver_address, &payload);
     const first = try receiver.receiveTimeout(std.testing.io, oneSecond());
     try std.testing.expectEqualSlices(u8, &payload, first.bytes);
     first.bytes[0] = 0x00;
@@ -36,7 +37,7 @@ test "UDP admits one mutable datagram at a time" {
     try raw_sender.send(std.testing.io, &destination, &oversized);
     try std.testing.expectError(error.DatagramTooLarge, receiver.receiveTimeout(std.testing.io, oneSecond()));
 
-    try sender.send(std.testing.io, receiver.localAddress(), &payload);
+    try sender.send(std.testing.io, &receiver_address, &payload);
     const second = try receiver.receiveTimeout(std.testing.io, oneSecond());
     try std.testing.expect(second.handle.generation > first.handle.generation);
     try receiver.release(second.handle);
@@ -56,9 +57,10 @@ test "UDP rejects oversized sends before I/O" {
     var transport = udp_mod.Udp.init(socket);
     defer transport.close(std.testing.io);
     const oversized = [_]u8{0x44} ** (constants.datagram_size_max + 1);
+    const destination = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_001 } };
     try std.testing.expectError(
         error.DatagramTooLarge,
-        transport.send(undefined, .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_001 } }, &oversized),
+        transport.send(undefined, &destination, &oversized),
     );
 }
 
