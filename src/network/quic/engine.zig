@@ -206,6 +206,15 @@ pub const Engine = struct {
                 slot.keepAlive();
                 slot.last_send_ms = now.mono_ms;
             }
+            if (slot.pending_close) |pending| {
+                if (slot.pending_close_armed) {
+                    slot.pending_close = null;
+                    slot.pending_close_armed = false;
+                    slot.close(pending.reason, pending.code);
+                } else {
+                    slot.pending_close_armed = true;
+                }
+            }
             self.refresh(@intCast(index));
         }
     }
@@ -379,7 +388,7 @@ pub const Engine = struct {
             if (slot.handshake.peer_id) |id| {
                 slot.peer_id = id;
                 if (slot.expected_peer_id != null and !slot.expected_peer_id.?.eql(&id)) {
-                    slot.close(.peer_id_mismatch, connection.app_error_peer_id_mismatch);
+                    slot.deferClose(.peer_id_mismatch, connection.app_error_peer_id_mismatch);
                 } else {
                     slot.connected_pending = true;
                 }

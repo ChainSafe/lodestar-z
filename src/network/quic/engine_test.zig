@@ -14,6 +14,12 @@ pub const client_address = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 },
 pub const server_address = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4_002 } };
 pub const now_unix: i64 = 1_700_000_000;
 
+fn sleepMs(ms: i64) void {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    std.Io.sleep(threaded.io(), std.Io.Duration.fromMilliseconds(ms), .awake) catch {};
+}
+
 pub const Pair = struct {
     client_ctx: tls.Context = undefined,
     server_ctx: tls.Context = undefined,
@@ -250,4 +256,181 @@ test "engine stale handles are rejected" {
     try std.testing.expect(pair.client.peerId(stale) == null);
     const out_of_range = engine_mod.Handle{ .index = 9_999, .generation = 0 };
     try std.testing.expectError(error.StaleHandle, pair.client.openStream(out_of_range));
+}
+
+fn expectClosed(event: Event, conn: engine_mod.Handle) !engine_mod.CloseReason {
+    switch (event) {
+        .closed => |closed| {
+            try std.testing.expectEqual(conn, closed.conn);
+            return closed.reason;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "engine reports a host close on both sides" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    pair.client.close(handles.client, 42);
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const client_reason = try expectClosed(pair.events(&pair.client, &storage)[0], handles.client);
+    try std.testing.expectEqual(engine_mod.CloseReason.host, client_reason);
+    const server_reason = try expectClosed(pair.events(&pair.server, &storage)[0], handles.server);
+    try std.testing.expect(server_reason.peer_closed.app);
+    try std.testing.expectEqual(@as(u64, 42), server_reason.peer_closed.code);
+    try std.testing.expectError(error.StaleHandle, pair.client.openStream(handles.client));
+    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
+}
+
+test "engine closes on peer id mismatch" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+
+    const wrong = pair.client_ctx.local_peer_id;
+    const handle = try pair.client.dial(client_address, server_address, wrong, pair.now, pair.nextEntropy());
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    try std.testing.expectEqual(engine_mod.CloseReason.peer_id_mismatch, try expectClosed(client_events[0], handle));
+
+    var server_storage: [8]Event = undefined;
+    const server_events = pair.events(&pair.server, &server_storage);
+    try std.testing.expectEqual(@as(usize, 2), server_events.len);
+    const server_handle = try expectConnected(server_events[0], .inbound, &pair.client_ctx);
+    const reason = try expectClosed(server_events[1], server_handle);
+    try std.testing.expectEqual(@as(u64, 1), reason.peer_closed.code);
+}
+
+test "engine closes on handshake timeout when the server never answers" {
+    var pair: Pair = .{};
+    try pair.init(.{ .handshake_timeout_ms = 100 }, .{});
+    defer pair.deinit();
+    pair.drop_to_server = true;
+
+    const handle = try pair.dial();
+    try pair.pump();
+    pair.advance(100);
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    try std.testing.expectEqual(engine_mod.CloseReason.handshake_timeout, try expectClosed(client_events[0], handle));
+    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
+}
+
+test "engine rejects a forged certificate with tls_failed" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+
+    const server_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{2}));
+    const other = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{9}));
+    const server_public = server_key.publicKey();
+    var forged_ctx = try tls.Context.initWith(&server_public, &other, now_unix, [_]u8{7} ** 8);
+    defer forged_ctx.deinit();
+    pair.server.deinit();
+    pair.server = try Engine.init(std.testing.allocator, &forged_ctx, .{});
+
+    const handle = try pair.dial();
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    try std.testing.expectEqual(engine_mod.CloseReason.tls_failed, try expectClosed(client_events[0], handle));
+}
+
+test "engine keep-alive survives a short idle timeout" {
+    var pair: Pair = .{};
+    try pair.init(.{ .idle_timeout_ms = 300, .keep_alive_ms = 50 }, .{ .idle_timeout_ms = 300, .keep_alive_ms = 50 });
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    var round: usize = 0;
+    while (round < 12) : (round += 1) {
+        sleepMs(50);
+        pair.advance(50);
+        try pair.pump();
+    }
+    var storage: [8]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
+    try std.testing.expect(pair.client.peerId(handles.client) != null);
+}
+
+test "engine reports idle timeout without keep-alive" {
+    var pair: Pair = .{};
+    try pair.init(.{ .idle_timeout_ms = 200, .keep_alive_ms = 60_000 }, .{ .idle_timeout_ms = 200, .keep_alive_ms = 60_000 });
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+
+    sleepMs(350);
+    pair.advance(350);
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    try std.testing.expectEqual(engine_mod.CloseReason.idle_timeout, try expectClosed(client_events[0], handles.client));
+}
+
+test "engine drops new handshakes when the server table is full" {
+    var pair: Pair = .{};
+    try pair.init(.{ .connections_max = 4, .handshaking_max = 4, .handshake_timeout_ms = 100 }, .{ .connections_max = 1, .handshaking_max = 1 });
+    defer pair.deinit();
+    _ = try connectPair(&pair);
+
+    const second = try pair.dial();
+    try pair.pump();
+    try std.testing.expect(pair.server.counters.dropped_full > 0);
+    pair.advance(100);
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    try std.testing.expectEqual(engine_mod.CloseReason.handshake_timeout, try expectClosed(client_events[0], second));
+    try std.testing.expectError(error.TableFull, pair.server.dial(server_address, client_address, pair.client_ctx.local_peer_id, pair.now, pair.nextEntropy()));
+}
+
+test "engine answers unsupported versions and drops unroutable packets" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+
+    var initial = [_]u8{0} ** constants.client_initial_min;
+    initial[0] = 0xc3;
+    initial[1] = 0xba;
+    initial[2] = 0xba;
+    initial[3] = 0xba;
+    initial[4] = 0xba;
+    initial[5] = 0x08;
+    @memset(initial[6..14], 0xaa);
+    initial[14] = 0x04;
+    @memset(initial[15..19], 0xbb);
+    initial[19] = 0x00;
+    var response: [constants.datagram_size_max]u8 = undefined;
+    const outcome = pair.server.receive(&initial, client_address, server_address, pair.now, pair.nextEntropy(), &response);
+    switch (outcome) {
+        .version_negotiation => |bytes| try std.testing.expect(bytes.len > 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.version_negotiations);
+
+    var short = [_]u8{0x40} ++ [_]u8{0xcc} ** constants.local_cid_length ++ [_]u8{0} ** 20;
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(&short, client_address, server_address, pair.now, pair.nextEntropy(), &response));
+    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_unroutable);
+
+    var tiny = [_]u8{ 0xc3, 0, 0, 0, 1, 0x08 } ++ [_]u8{0xaa} ** 8 ++ [_]u8{0x04} ++ [_]u8{0xbb} ** 4 ++ [_]u8{0x00};
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(&tiny, client_address, server_address, pair.now, pair.nextEntropy(), &response));
+    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_short_initial);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
 }
