@@ -37,6 +37,7 @@ pub const Error = error{
     ReservedResult,
     InvalidCompressed,
     BufferTooSmall,
+    Truncated,
 };
 
 pub const Bounds = struct {

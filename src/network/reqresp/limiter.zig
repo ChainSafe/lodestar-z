@@ -31,7 +31,11 @@ pub const Limiter = struct {
     peers: u16,
     quotas: Quotas,
 
-    pub fn init(allocator: std.mem.Allocator, peers: u16, quotas: ?Quotas) std.mem.Allocator.Error!Limiter {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        peers: u16,
+        quotas: ?Quotas,
+    ) std.mem.Allocator.Error!Limiter {
         assert(peers > 0);
         assert(peers <= constants.slots_ceiling);
         const table = quotas orelse defaultQuotas();
