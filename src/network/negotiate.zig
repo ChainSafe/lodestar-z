@@ -21,10 +21,12 @@ pub const Error = error{ NegotiationTableFull, InvalidLimits } || multistream.Er
 
 pub const Failure = enum { timeout, malformed, stream_closed, transport, overflow, exhausted };
 
+pub const Ready = struct { protocol_index: u8, leftover: []const u8, fin: bool };
+
 pub const Outcome = struct {
     stream: StreamHandle,
     result: union(enum) {
-        ready: struct { protocol_index: u8, leftover: []const u8 },
+        ready: Ready,
         rejected,
         failed: Failure,
     },
@@ -43,6 +45,7 @@ const Entry = struct {
     started_ms: u64 = 0,
     role: Role = undefined,
     selected: ?u8 = null,
+    fin_seen: bool = false,
     outbox: stream_io.Outbox = .{},
     out_buffer: [outbox_capacity]u8 = undefined,
     inbox: stream_io.Inbox(inbox_capacity) = .{},
@@ -92,6 +95,7 @@ pub const Negotiator = struct {
         entry.started_ms = now.mono_ms;
         entry.role = .{ .dialer = dialer };
         entry.selected = null;
+        entry.fin_seen = false;
         entry.inbox = .{};
         entry.outbox = .{};
         entry.outbox.queue(hello, false);
@@ -113,6 +117,7 @@ pub const Negotiator = struct {
         entry.started_ms = now.mono_ms;
         entry.role = .{ .listener = multistream.Listener.init(supported) };
         entry.selected = null;
+        entry.fin_seen = false;
         entry.inbox = .{};
         entry.outbox = .{};
         entry.state = .negotiating;
@@ -160,6 +165,7 @@ pub const Negotiator = struct {
         const read = entry.inbox.fill(engine, entry.stream) catch |err|
             return failStream(engine, entry, err);
         if (read.len == 0 and !read.fin) return null;
+        if (read.fin) entry.fin_seen = true;
         switch (entry.role) {
             .dialer => |*dialer| {
                 const outcome = dialer.feed(entry.inbox.slice()) catch
@@ -202,6 +208,7 @@ fn ready(entry: *const Entry, index: u8) Outcome {
     return .{ .stream = entry.stream, .result = .{ .ready = .{
         .protocol_index = index,
         .leftover = entry.inbox.slice(),
+        .fin = entry.fin_seen,
     } } };
 }
 

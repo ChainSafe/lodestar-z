@@ -6,6 +6,7 @@ const protocol = @import("protocol.zig");
 const reqresp = @import("reqresp.zig");
 const harness = @import("reqresp_test.zig");
 const engine_mod = @import("../quic/engine.zig");
+const multistream = @import("../wire/multistream.zig");
 const negotiate = @import("../negotiate.zig");
 
 const Event = reqresp.Event;
@@ -501,7 +502,7 @@ test "reqresp answers a malformed request with an invalid request error" {
         for (outcomes[0..listened]) |outcome| switch (outcome.result) {
             .ready => |accepted| _ = try setup.server.accept(
                 outcome.stream,
-                accepted.protocol_index,
+                accepted,
                 setup.requestSink(),
                 setup.pair.now,
             ),
@@ -535,4 +536,120 @@ test "reqresp answers a malformed request with an invalid request error" {
     try std.testing.expect(decoder.isDone());
     try std.testing.expectEqual(@as(u8, 1), decoder.result());
     try std.testing.expectEqualStrings("invalid request", decoder.payload());
+}
+
+const RawReply = fn (*ReqRespPair, engine_mod.StreamHandle) anyerror!void;
+
+fn pumpRawServer(setup: *ReqRespPair, comptime reply: RawReply) !usize {
+    try setup.pair.pump();
+    const now = setup.pair.now;
+    var storage: [16]engine_mod.Event = undefined;
+    for (setup.pair.events(&setup.pair.server, &storage)) |event| switch (event) {
+        .stream_opened => |stream| try setup.server_neg.acceptInbound(stream, &protocol.ids, now),
+        else => {},
+    };
+    var leftover: usize = 0;
+    var outcomes: [8]negotiate.Outcome = undefined;
+    const dialed = setup.client_neg.pump(&setup.pair.client, now, &outcomes);
+    for (outcomes[0..dialed]) |outcome| {
+        if (outcome.result == .ready) leftover += outcome.result.ready.leftover.len;
+        try std.testing.expect(setup.client.negotiated(outcome));
+    }
+    const listened = setup.server_neg.pump(&setup.pair.server, now, &outcomes);
+    for (outcomes[0..listened]) |outcome| switch (outcome.result) {
+        .ready => try reply(setup, outcome.stream),
+        else => return error.TestUnexpectedResult,
+    };
+    setup.client_count = setup.client.pump(&setup.pair.client, now, &setup.client_events);
+    try setup.pair.pump();
+    return leftover;
+}
+
+fn replyMetadataEarly(setup: *ReqRespPair, stream: engine_mod.StreamHandle) !void {
+    var out: [256]u8 = undefined;
+    const metadata = [_]u8{5} ** ct.altair.MetaDataV2.fixed_size;
+    const chunk = try codec.encodeChunk(0, null, &metadata, &out);
+    try std.testing.expectEqual(chunk.len, try setup.pair.server.write(stream, chunk, true));
+}
+
+fn expectSingleChunk(setup: *ReqRespPair, comptime reply: RawReply, expected: []const u8) !usize {
+    var leftover: usize = 0;
+    var done = false;
+    var rounds: usize = 0;
+    while (rounds < 20 and !done) : (rounds += 1) {
+        leftover += try pumpRawServer(setup, reply);
+        for (setup.clientEvents()) |event| switch (event) {
+            .chunk => |chunk| {
+                try std.testing.expectEqualSlices(u8, expected, chunk.bytes);
+                try std.testing.expect(setup.client.consume(chunk.request));
+            },
+            .done => |finished| {
+                try std.testing.expectEqual(@as(u32, 1), finished.chunks);
+                done = true;
+            },
+            .failed => return error.TestUnexpectedResult,
+            else => {},
+        };
+    }
+    try std.testing.expect(done);
+    return leftover;
+}
+
+test "reqresp decodes response bytes that arrive with the multistream echo" {
+    var setup: ReqRespPair = .{};
+    try setup.init(.{}, .{});
+    defer setup.deinit();
+
+    var sink: [ct.altair.MetaDataV2.fixed_size]u8 = undefined;
+    _ = try setup.client.request(
+        &setup.pair.client,
+        &setup.client_neg,
+        setup.handles.client,
+        .metadata_v2,
+        "",
+        &sink,
+        .{},
+        setup.pair.now,
+    );
+    const expected = [_]u8{5} ** ct.altair.MetaDataV2.fixed_size;
+    const leftover = try expectSingleChunk(&setup, replyMetadataEarly, &expected);
+    try std.testing.expect(leftover > 0);
+}
+
+test "reqresp serves a request whose body and fin arrive with the proposal" {
+    var setup: ReqRespPair = .{};
+    try setup.init(.{}, .{});
+    defer setup.deinit();
+
+    const stream = try setup.pair.client.openStream(setup.handles.client);
+    const dialer = try multistream.Dialer.init(Protocol.status_v1.id());
+    var message: [512]u8 = undefined;
+    const hello = try dialer.initialWrite(&message);
+    const request_ssz = statusBytes(9);
+    const encoded = try codec.encodeRequest(&request_ssz, message[hello.len..]);
+    const total = hello.len + encoded.len;
+    const written = try setup.pair.client.write(stream, message[0..total], true);
+    try std.testing.expectEqual(total, written);
+
+    const reply = statusBytes(3);
+    var served = false;
+    var rounds: usize = 0;
+    while (rounds < 20 and !served) : (rounds += 1) {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| switch (event) {
+            .request => |incoming| {
+                try std.testing.expectEqual(Protocol.status_v1, incoming.protocol);
+                try std.testing.expectEqualSlices(u8, &request_ssz, incoming.bytes);
+                try setup.server.respond(incoming.request, &reply, null, setup.pair.now);
+            },
+            .chunk_sent => |sent| try std.testing.expect(setup.server.finish(sent.request)),
+            .served => |finished| {
+                try std.testing.expectEqual(@as(u32, 1), finished.chunks);
+                served = true;
+            },
+            .failed => return error.TestUnexpectedResult,
+            else => {},
+        };
+    }
+    try std.testing.expect(served);
 }
