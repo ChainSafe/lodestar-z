@@ -191,6 +191,7 @@ pub const ReqResp = struct {
     arena: []u8,
     limiter: limiter_mod.Limiter,
     over_limit: [over_limit_queue_max]OverLimit = undefined,
+    over_limit_head: u8 = 0,
     over_limit_len: u8 = 0,
     last_now_ms: u64 = 0,
     counters: Counters = .{},
@@ -479,8 +480,9 @@ pub const ReqResp = struct {
         self.last_now_ms = now.mono_ms;
         var count: usize = 0;
         while (self.over_limit_len > 0 and count < events.len) {
+            const item = self.over_limit[self.over_limit_head];
+            self.over_limit_head = @intCast((self.over_limit_head + 1) % over_limit_queue_max);
             self.over_limit_len -= 1;
-            const item = self.over_limit[self.over_limit_len];
             events[count] = .{ .over_limit = .{ .peer = item.peer, .protocol = item.protocol } };
             count += 1;
         }
@@ -918,7 +920,8 @@ pub const ReqResp = struct {
             self.counters.over_limit_dropped += 1;
             return;
         }
-        self.over_limit[self.over_limit_len] = item;
+        const tail = (self.over_limit_head + self.over_limit_len) % over_limit_queue_max;
+        self.over_limit[tail] = item;
         self.over_limit_len += 1;
     }
 
