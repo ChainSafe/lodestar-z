@@ -42,6 +42,12 @@ pub const EpochShuffling = struct {
         std.mem.copyForwards(ValidatorIndex, shuffling, active_indices);
         try unshuffleList(shuffling, seed[0..], preset.SHUFFLE_ROUND_COUNT);
         const committees = try buildCommitteesFromShuffling(allocator, shuffling);
+        var committees_cleanup = true;
+        errdefer if (committees_cleanup) {
+            for (committees) |slot_committees| {
+                allocator.free(slot_committees);
+            }
+        };
 
         const epoch_shuffling_ptr = try allocator.create(EpochShuffling);
         errdefer allocator.destroy(epoch_shuffling_ptr);
@@ -53,6 +59,7 @@ pub const EpochShuffling = struct {
             .committees = committees,
             .committees_per_slot = computeCommitteeCount(active_indices.len),
         };
+        committees_cleanup = false;
 
         return epoch_shuffling_ptr;
     }
@@ -74,6 +81,13 @@ pub const EpochShuffling = struct {
         const committee_count = committees_per_slot * preset.SLOTS_PER_EPOCH;
 
         var epoch_committees: [preset.SLOTS_PER_EPOCH]SlotCommittees = undefined;
+        var slot_count: usize = 0;
+        errdefer {
+            while (slot_count > 0) {
+                slot_count -= 1;
+                allocator.free(epoch_committees[slot_count]);
+            }
+        }
         for (0..preset.SLOTS_PER_EPOCH) |slot| {
             const slot_committees = try allocator.alloc(Committee, committees_per_slot);
             for (0..committees_per_slot) |committee_index| {
@@ -83,6 +97,7 @@ pub const EpochShuffling = struct {
                 slot_committees[committee_index] = shuffling[start_offset..end_offset];
             }
             epoch_committees[slot] = slot_committees;
+            slot_count += 1;
         }
 
         return epoch_committees;
@@ -138,6 +153,52 @@ fn computeCommitteeCount(active_validator_count: usize) usize {
 test computeCommitteeCount {
     const committee_count = computeCommitteeCount(2_000_000);
     try std.testing.expectEqual(64, committee_count);
+}
+
+test "buildCommitteesFromShuffling should free partially built committee slices on OutOfMemory" {
+    const allocator = std.testing.allocator;
+    const active_indices = try allocator.alloc(ValidatorIndex, 256);
+    defer allocator.free(active_indices);
+    for (0..256) |index| {
+        active_indices[index] = @intCast(index);
+    }
+
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 1 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        EpochShuffling.buildCommitteesFromShuffling(failing.allocator(), active_indices),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "EpochShuffling init should cleanup committee slices on OutOfMemory during final allocation" {
+    const allocator = std.testing.allocator;
+    const committees_per_slot = computeCommitteeCount(256);
+    const active_indices = try allocator.alloc(ValidatorIndex, 256);
+    defer allocator.free(active_indices);
+    for (0..256) |index| {
+        active_indices[index] = @intCast(index);
+    }
+
+    // One allocation for the shuffled array, then one per slot, then epoch struct allocation.
+    const fail_index = 1 + preset.SLOTS_PER_EPOCH * committees_per_slot;
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = fail_index },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        EpochShuffling.init(
+            failing.allocator(),
+            [_]u8{0} ** 32,
+            0,
+            active_indices,
+        ),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
 /// Calculate the decision root for a given epoch.
