@@ -27,7 +27,8 @@ pub fn isMergeTransitionComplete(comptime fork: ForkSeq, state: *BeaconState(for
     if (comptime fork.lt(.bellatrix)) {
         return false;
     }
-    if (comptime fork.gte(.capella)) {
+    // Gloas (ePBS): merge is always complete, no latestExecutionPayloadHeader in state
+    if (comptime fork.gte(.gloas)) {
         return true;
     }
     const block_hash = state.latestExecutionPayloadHeaderBlockHash() catch return false;
