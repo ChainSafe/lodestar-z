@@ -564,15 +564,15 @@ pub const EpochCache = struct {
         const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
         std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
 
-        const next_shuffling = try computeEpochShuffling(
+        const next_shuffling_rc = try initEpochShufflingRc(
             self.allocator,
             state,
             next_shuffling_active_indices,
             epoch_after_upcoming,
         );
-        errdefer next_shuffling.deinit();
+        errdefer next_shuffling_rc.unref();
 
-        const next_shuffling_rc = try EpochShufflingRc.init(self.allocator, next_shuffling);
+        const next_decision_root = try calculateShufflingDecisionRoot(state, epoch_after_upcoming);
 
         self.previous_shuffling.unref();
         self.previous_shuffling = self.current_shuffling;
@@ -582,7 +582,7 @@ pub const EpochCache = struct {
         self.current_decision_root = self.next_decision_root;
 
         self.next_shuffling = next_shuffling_rc;
-        self.next_decision_root = try calculateShufflingDecisionRoot(state, epoch_after_upcoming);
+        self.next_decision_root = next_decision_root;
 
         self.churn_limit = getChurnLimit(self.config, self.current_shuffling.get().active_indices.len);
         self.activation_churn_limit = getActivationChurnLimit(self.config, self.config.forkSeq(slot), self.current_shuffling.get().active_indices.len);
