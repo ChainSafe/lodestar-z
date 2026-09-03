@@ -144,3 +144,19 @@ test "processRewardsAndPenalties - sanity" {
         null,
     );
 }
+test "afterProcessEpoch should not leak when decision-root calculation fails" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    try std.testing.expectError(
+        error.SlotTooBig,
+        test_state.cached_state.epoch_cache.afterProcessEpoch(
+            test_state.cached_state.state,
+            test_state.epoch_transition_cache,
+        ),
+    );
+}
