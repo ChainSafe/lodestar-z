@@ -21,8 +21,8 @@
   trust boundary, native dependency, persistence path or format, shared mutable cache or pool,
   externally influenced native input, or supported integration. Update the normative threat model
   only when the security contract changes; otherwise update the implementation map.
-- **Test file layout:** once a file's `test` blocks reach roughly 100 lines or 8 tests, move them
-  to a sibling `<module>_test.zig` and wire it from the module itself with
+- **Test file layout:** a module holds at most one `test` block. A single inline test is fine;
+  a second one means the tests move to a sibling `<module>_test.zig`, wired from the module with
   `test { _ = @import("<module>_test.zig"); }`. Never mark a declaration `pub` only to relocate a
   test. `zig build test:tidy` enforces this.
 - **Incremental commits:** after review starts, do not force-push unless a maintainer requests it.
@@ -312,8 +312,9 @@ Zig code must make allocator and ownership boundaries explicit:
 
 Keep tests beside the code they cover without letting them crowd it out.
 
-- A handful of short inline `test` blocks is fine. Once a file's test blocks reach roughly 100
-  lines or 8 tests, move them to a sibling `<module>_test.zig`.
+- A module holds at most one `test` block. One inline test is a usage example and stays put; a
+  second one makes it a suite, and suites live in a sibling `<module>_test.zig`. A module is
+  therefore either inline (one test) or extracted (only the wiring block), never both.
 - Name the test file after its module in snake_case. `slot_math.zig` pairs with
   `slot_math_test.zig`, and `Node.zig` pairs with `node_test.zig`.
 - Wire the import from the module under test, not from the package `root.zig`:

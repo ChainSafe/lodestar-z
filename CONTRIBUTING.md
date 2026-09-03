@@ -94,9 +94,9 @@ zig build run:write_bls_spec_tests
 
 ### Test layout
 
-Tests live beside the code they cover. Small ones sit inline in the module as `test` blocks. Once a
-file's tests reach roughly 100 lines or 8 tests, move them into a sibling `<module>_test.zig` so
-the implementation stays readable, and wire it back from the module itself:
+Tests live beside the code they cover, and a module holds at most one `test` block. A single
+inline test works as a usage example. As soon as there is a second, the tests are a suite and move
+into a sibling `<module>_test.zig`, wired back from the module itself:
 
 ```zig
 // src/clock/slot_math.zig

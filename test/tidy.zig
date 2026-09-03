@@ -26,10 +26,12 @@ const max_tracked_files = 4096;
 const max_file_bytes: std.Io.Limit = .limited(8 << 20);
 const max_git_output_bytes = 4 << 20;
 
-/// A module may keep tests inline up to these limits. Past either one the tests
-/// belong in a sibling `<module>_test.zig`. Documented in AGENTS.md.
-const max_inline_test_lines = 100;
-const max_inline_test_count = 8;
+/// A module holds at most this many `test` blocks. One inline test is a usage
+/// example; a second makes it a suite, and suites live in a sibling
+/// `<module>_test.zig`. The wiring block counts, so a module is either inline
+/// (one test) or extracted (only the wiring block), never both. Documented in
+/// AGENTS.md.
+const max_test_blocks = 1;
 
 /// Files that deliberately keep their tests inline. Their tests exercise private
 /// declarations that a sibling `_test.zig` cannot reach, and widening those
@@ -52,6 +54,10 @@ const inline_test_allowlist = [_][]const u8{
     "src/state_transition/load_state.zig",
     // Private helper: ComputeShuffledIndex.
     "src/state_transition/utils/committee_indices.zig",
+    // Private helpers: computeSyncCommitteeIndices, computeSyncCommitteeMap.
+    "src/state_transition/cache/sync_committee_cache.zig",
+    // Private helpers: computeCommitteeCount, unshuffleList.
+    "src/state_transition/utils/epoch_shuffling.zig",
 };
 
 /// Test files that cover a whole module rather than one sibling module. These
@@ -150,16 +156,11 @@ const Errors = struct {
         );
     }
 
-    fn addBulkyInlineTests(
-        errors: *Errors,
-        path: []const u8,
-        line: usize,
-        lines: usize,
-        count: usize,
-    ) void {
+    fn addTooManyTestBlocks(errors: *Errors, path: []const u8, line: usize, count: usize) void {
         errors.emit(
-            "{s}:{d}: error: {d} test lines in {d} tests inline, limit is {d} lines / {d} tests\n",
-            .{ path, line, lines, count, max_inline_test_lines, max_inline_test_count },
+            "{s}:{d}: error: {d} test blocks, a module holds at most {d}; " ++
+                "move the tests to a sibling _test.zig\n",
+            .{ path, line, count, max_test_blocks },
         );
     }
 
@@ -559,7 +560,7 @@ fn tidyDeadFiles(
     }
 }
 
-/// No file keeps more tests inline than the limits allow.
+/// No module holds more than `max_test_blocks` test blocks.
 fn tidyInlineTests(files: []const File, scope: []const []const u8, errors: *Errors) void {
     for (files) |file| {
         if (!inScope(scope, file.path)) continue;
@@ -567,15 +568,8 @@ fn tidyInlineTests(files: []const File, scope: []const []const u8, errors: *Erro
         if (listContains(&inline_test_allowlist, file.path)) continue;
 
         const inline_tests = file.inline_tests;
-        if (inline_tests.lines > max_inline_test_lines or
-            inline_tests.count > max_inline_test_count)
-        {
-            errors.addBulkyInlineTests(
-                file.path,
-                inline_tests.first_line,
-                inline_tests.lines,
-                inline_tests.count,
-            );
+        if (inline_tests.count > max_test_blocks) {
+            errors.addTooManyTestBlocks(file.path, inline_tests.first_line, inline_tests.count);
         }
     }
 }
@@ -588,10 +582,8 @@ fn tidyAllowlists(files: []const File, errors: *Errors) void {
             errors.addStaleAllowlistEntry(allowed, "the file does not exist");
             continue;
         };
-        if (file.inline_tests.lines <= max_inline_test_lines and
-            file.inline_tests.count <= max_inline_test_count)
-        {
-            errors.addStaleAllowlistEntry(allowed, "it no longer exceeds the inline test limit");
+        if (file.inline_tests.count <= max_test_blocks) {
+            errors.addStaleAllowlistEntry(allowed, "it no longer exceeds the test block limit");
         }
     }
     for (unimported_file_allowlist) |allowed| {
@@ -969,27 +961,23 @@ test "rule: dead file" {
     );
 }
 
-test "rule: bulky inline tests" {
+test "rule: a second test block means the tests belong in a _test.zig" {
     var fixture: Fixture = .init();
     defer fixture.deinit();
     const errors = fixture.start();
 
-    var source: std.ArrayList(u8) = .empty;
-    defer source.deinit(testing.allocator);
-    try source.appendSlice(testing.allocator, "pub const x = 1;\n");
-    for (0..max_inline_test_count + 1) |i| {
-        const line = try std.fmt.allocPrint(testing.allocator, "test \"t{d}\" {{}}\n", .{i});
-        defer testing.allocator.free(line);
-        try source.appendSlice(testing.allocator, line);
-    }
-    const text = try source.toOwnedSliceSentinel(testing.allocator, 0);
-    defer testing.allocator.free(text);
-
-    const files = try analyzeAll(fixture.arena(), &.{.{ "src/bulky.zig", text }}, errors);
+    // One inline test is a usage example and passes. The wiring block counts
+    // too, so a usage example next to an extracted suite is also two blocks.
+    const files = try analyzeAll(fixture.arena(), &.{
+        .{ "src/example.zig", "pub const x = 1;\ntest \"usage\" {}\n" },
+        .{ "src/suite.zig", "pub const x = 1;\ntest \"a\" {}\ntest \"b\" {}\n" },
+        .{ "src/mixed.zig", "test \"usage\" {}\ntest { _ = @import(\"mixed_test.zig\"); }\n" },
+    }, errors);
     tidyInlineTests(files, &.{"src/"}, errors);
 
     try expectDiagnostics(fixture.output(),
-        \\src/bulky.zig:2: error: 9 test lines in 9 tests inline, limit is 100 lines / 8 tests
+        \\src/suite.zig:2: error: 2 test blocks, a module holds at most 1; move the tests to a sibling _test.zig
+        \\src/mixed.zig:1: error: 2 test blocks, a module holds at most 1; move the tests to a sibling _test.zig
         \\
     );
 }
