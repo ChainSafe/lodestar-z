@@ -42,23 +42,6 @@ pub const Protocol = enum(u8) {
     pub fn info(self: Protocol) Info {
         return table[@intFromEnum(self)];
     }
-
-    pub fn requestWeight(self: Protocol, request_ssz: []const u8) u32 {
-        const bounds = self.info();
-        assert(request_ssz.len >= bounds.request_min);
-        assert(request_ssz.len <= bounds.request_max);
-        const raw: u64 = switch (self) {
-            .blocks_by_range_v2, .blob_sidecars_by_range_v1 => readCount(request_ssz),
-            .blocks_by_root_v2 => request_ssz.len / 32,
-            .blob_sidecars_by_root_v1 => request_ssz.len / 40,
-            .data_column_sidecars_by_range_v1 => columnsByRangeWeight(request_ssz),
-            .data_column_sidecars_by_root_v1 => columnsByRootWeight(request_ssz),
-            else => 1,
-        };
-        const clamped: u32 = @intCast(@min(raw, bounds.chunks_max));
-        assert(clamped <= bounds.chunks_max);
-        return @max(clamped, 1);
-    }
 };
 
 pub const Info = struct {
@@ -221,40 +204,6 @@ pub fn responseMaxAll() usize {
     comptime var longest: usize = 0;
     inline for (table) |bounds| longest = @max(longest, bounds.response_max);
     return longest;
-}
-
-fn readCount(request_ssz: []const u8) u64 {
-    assert(request_ssz.len >= 16);
-    return std.mem.readInt(u64, request_ssz[8..16], .little);
-}
-
-fn columnsByRangeWeight(request_ssz: []const u8) u64 {
-    assert(request_ssz.len >= 20);
-    const count = readCount(request_ssz);
-    const columns_offset = std.mem.readInt(u32, request_ssz[16..20], .little);
-    if (columns_offset > request_ssz.len) return 0;
-    const columns: u64 = (request_ssz.len - columns_offset) / 8;
-    return std.math.mul(u64, count, columns) catch std.math.maxInt(u64);
-}
-
-fn columnsByRootWeight(request_ssz: []const u8) u64 {
-    if (request_ssz.len < 4) return 0;
-    const first_offset = std.mem.readInt(u32, request_ssz[0..4], .little);
-    if (first_offset > request_ssz.len or first_offset % 4 != 0) return 0;
-    const entries: u64 = first_offset / 4;
-    var total: u64 = 0;
-    var index: u64 = 0;
-    while (index < entries) : (index += 1) {
-        const at: usize = @intCast(index * 4);
-        const start = std.mem.readInt(u32, request_ssz[at..][0..4], .little);
-        const end = if (index + 1 < entries)
-            std.mem.readInt(u32, request_ssz[at + 4 ..][0..4], .little)
-        else
-            @as(u32, @intCast(request_ssz.len));
-        if (end < start or end > request_ssz.len or end - start < 36) return 0;
-        total += (end - start - 36) / 8;
-    }
-    return total;
 }
 
 comptime {

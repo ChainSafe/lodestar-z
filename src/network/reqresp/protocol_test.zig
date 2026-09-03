@@ -56,38 +56,3 @@ test "protocol info sizes follow the consensus types" {
     try std.testing.expectEqual(protocol.requestMaxAll(), Protocol.blob_sidecars_by_root_v1.info().request_max);
     try std.testing.expectEqual(constants.MAX_PAYLOAD_SIZE, protocol.responseMaxAll());
 }
-
-test "protocol request weights follow counts and list lengths" {
-    var by_range: [24]u8 = undefined;
-    const request = ct.phase0.BeaconBlocksByRangeRequest.Type{ .start_slot = 100, .count = 5, .step = 1 };
-    _ = ct.phase0.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &by_range);
-    try std.testing.expectEqual(@as(u32, 5), Protocol.blocks_by_range_v2.requestWeight(&by_range));
-
-    const huge = ct.phase0.BeaconBlocksByRangeRequest.Type{ .start_slot = 0, .count = 100_000, .step = 1 };
-    _ = ct.phase0.BeaconBlocksByRangeRequest.serializeIntoBytes(&huge, &by_range);
-    try std.testing.expectEqual(@as(u32, consensus.MAX_REQUEST_BLOCKS_DENEB), Protocol.blocks_by_range_v2.requestWeight(&by_range));
-
-    const roots = [_]u8{7} ** 96;
-    try std.testing.expectEqual(@as(u32, 3), Protocol.blocks_by_root_v2.requestWeight(&roots));
-    try std.testing.expectEqual(@as(u32, 1), Protocol.blocks_by_root_v2.requestWeight(roots[0..0]));
-
-    const ids = [_]u8{1} ** 80;
-    try std.testing.expectEqual(@as(u32, 2), Protocol.blob_sidecars_by_root_v1.requestWeight(&ids));
-
-    var columns_by_range: [20 + 4 * 8]u8 = undefined;
-    std.mem.writeInt(u64, columns_by_range[0..8], 9, .little);
-    std.mem.writeInt(u64, columns_by_range[8..16], 2, .little);
-    std.mem.writeInt(u32, columns_by_range[16..20], 20, .little);
-    for (0..4) |column| std.mem.writeInt(u64, columns_by_range[20 + column * 8 ..][0..8], column, .little);
-    try std.testing.expectEqual(@as(u32, 8), Protocol.data_column_sidecars_by_range_v1.requestWeight(&columns_by_range));
-
-    var columns_by_root: [8 + 2 * 36 + 3 * 8]u8 = undefined;
-    std.mem.writeInt(u32, columns_by_root[0..4], 8, .little);
-    std.mem.writeInt(u32, columns_by_root[4..8], 8 + 36 + 8, .little);
-    @memset(columns_by_root[8..], 0);
-    std.mem.writeInt(u32, columns_by_root[8 + 32 ..][0..4], 36, .little);
-    std.mem.writeInt(u32, columns_by_root[8 + 36 + 8 + 32 ..][0..4], 36, .little);
-    try std.testing.expectEqual(@as(u32, 3), Protocol.data_column_sidecars_by_root_v1.requestWeight(&columns_by_root));
-
-    try std.testing.expectEqual(@as(u32, 1), Protocol.ping_v1.requestWeight(&[_]u8{0} ** 8));
-}
