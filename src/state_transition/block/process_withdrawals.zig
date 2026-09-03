@@ -123,9 +123,7 @@ pub fn getExpectedWithdrawals(
             var validator: types.phase0.Validator.Type = undefined;
             try validators.getValue(undefined, withdrawal.validator_index, &validator);
 
-            const total_withdrawn_gop = try withdrawal_balances.getOrPut(withdrawal.validator_index);
-
-            const total_withdrawn: u64 = if (total_withdrawn_gop.found_existing) total_withdrawn_gop.value_ptr.* else 0;
+            const total_withdrawn: u64 = @intCast(withdrawal_balances.get(withdrawal.validator_index) orelse 0);
             const balance = try balances.get(withdrawal.validator_index) - total_withdrawn;
 
             if (validator.exit_epoch == c.FAR_FUTURE_EPOCH and
@@ -158,8 +156,7 @@ pub fn getExpectedWithdrawals(
         // Get next validator in turn
         const validator_index = (next_withdrawal_validator_index + n) % validators_count;
         var validator = try validators.get(validator_index);
-        const withdraw_balance_gop = try withdrawal_balances.getOrPut(validator_index);
-        const withdraw_balance: u64 = if (withdraw_balance_gop.found_existing) withdraw_balance_gop.value_ptr.* else 0;
+        const withdraw_balance: u64 = @intCast(withdrawal_balances.get(validator_index) orelse 0);
         const val_balance = try balances.get(validator_index);
         const balance = if (comptime fork.gte(.electra))
             // Deduct partially withdrawn balance already queued above
