@@ -253,6 +253,12 @@
                 .imports = .{.network},
             },
         },
+        .reqresp_peer = .{
+            .root_module = .{
+                .root_source_file = "examples/reqresp_peer.zig",
+                .imports = .{ .network, .consensus_types, .config, .constants, .fork_types, .preset },
+            },
+        },
         .download_era_files = .{
             .root_module = .{
                 .root_source_file = "scripts/download_era_files.zig",
