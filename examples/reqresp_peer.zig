@@ -9,7 +9,6 @@ const preset = @import("preset");
 const engine_mod = network.quic.engine;
 const keys = network.wire.keys;
 const multiaddr = network.wire.multiaddr;
-const negotiate = network.negotiate;
 const peer_id = network.wire.peer_id;
 const reqresp = network.reqresp;
 const Protocol = reqresp.Protocol;
@@ -151,25 +150,19 @@ const Session = struct {
     allocator: std.mem.Allocator,
     options: Options,
     engine: *engine_mod.Engine,
-    negotiator: *negotiate.Negotiator,
-    rr: *reqresp.ReqResp,
+    svc: *reqresp.Service,
     conn: engine_mod.Handle,
     sink: []u8,
-    inbound_sinks: [inbound_max][]u8,
     now: network.types.Now = .{ .mono_ms = 0, .unix_s = 0 },
     current: ?Protocol = null,
     peer_status: ?StatusV2.Type = null,
     finished: bool = false,
     request_ssz: [StatusV2.fixed_size]u8 = undefined,
     response_ssz: [StatusV2.fixed_size]u8 = undefined,
-    inbound_handles: [inbound_max]?reqresp.RequestHandle = .{null} ** inbound_max,
 
     fn send(self: *Session, which: Protocol) !void {
         const body = self.encode(which, &self.request_ssz);
-        const engine = self.engine;
-        const negotiator = self.negotiator;
-        const rr = self.rr;
-        _ = try rr.request(engine, negotiator, self.conn, which, body, self.sink, .{}, self.now);
+        _ = try self.svc.request(self.engine, self.conn, which, body, self.sink, .{}, self.now);
         self.current = which;
         std.debug.print("request {s}\n", .{which.id()});
     }
@@ -199,14 +192,13 @@ const Session = struct {
         switch (event) {
             .chunk => |chunk| {
                 try self.onChunk(chunk.bytes, chunk.fork);
-                _ = self.rr.consume(chunk.request);
+                _ = self.svc.consume(chunk.request);
             },
             .done => |done| try self.advance(done.chunks),
             .failed => |failed| try self.onFailure(failed.request, failed.reason),
             .request => |req| try self.serve(req.request, req.protocol, req.bytes),
-            .chunk_sent => |sent| _ = self.rr.finish(sent.request),
-            .served => |served| self.releaseInbound(served.request),
-            .over_limit => {},
+            .chunk_sent => |sent| _ = self.svc.finish(sent.request),
+            .served, .over_limit => {},
         }
     }
 
@@ -258,7 +250,7 @@ const Session = struct {
     }
 
     fn onFailure(self: *Session, request: RequestHandle, reason: reqresp.Failure) !void {
-        if (request.direction == .inbound) return self.releaseInbound(request);
+        if (request.direction == .inbound) return;
         const current = self.current orelse return error.RequestFailed;
         const fallback: ?Protocol = switch (current) {
             .status_v2 => .status_v1,
@@ -270,7 +262,7 @@ const Session = struct {
             return self.send(fallback.?);
         }
         if (reason == .peer_error) {
-            const message = self.rr.errorMessage(request);
+            const message = self.svc.errorMessage(request);
             const code = reason.peer_error.code;
             std.debug.print("peer error code={d} message={s}\n", .{ code, message });
         }
@@ -296,32 +288,16 @@ const Session = struct {
             .goodbye_v1 => {
                 const reason = std.mem.readInt(u64, bytes[0..8], .little);
                 std.debug.print("goodbye reason={d}\n", .{reason});
-                _ = self.rr.finish(request);
+                _ = self.svc.finish(request);
                 return;
             },
-            else => return self.rr.respondError(request, 3, "unavailable", self.now),
+            else => return self.svc.respondError(request, 3, "unavailable", self.now),
         }
         const response: []const u8 = switch (which) {
             .status_v1, .status_v2 => self.encode(which, &self.response_ssz),
             else => zeros[0..which.info().response_max],
         };
-        try self.rr.respond(request, response, null, self.now);
-    }
-
-    fn acceptInbound(self: *Session, stream: engine_mod.StreamHandle, ready: negotiate.Ready) void {
-        const free = for (self.inbound_handles, 0..) |slot, index| {
-            if (slot == null) break index;
-        } else return self.engine.closeStream(stream, 0);
-        const sink = self.inbound_sinks[free];
-        self.inbound_handles[free] = self.rr.accept(stream, ready, sink, self.now) catch {
-            return self.engine.closeStream(stream, 0);
-        };
-    }
-
-    fn releaseInbound(self: *Session, request: RequestHandle) void {
-        for (&self.inbound_handles) |*slot| {
-            if (slot.* != null and std.meta.eql(slot.*.?, request)) slot.* = null;
-        }
+        try self.svc.respond(request, response, null, self.now);
     }
 };
 
@@ -345,40 +321,29 @@ fn dial(
     const key = keys.KeyPair.generate(io);
     try node.init(allocator, io, .{ .host = &key, .bind = bind });
     defer node.deinit(io);
-    var negotiator = try negotiate.Negotiator.init(allocator, 8);
-    defer negotiator.deinit();
     var table: [forks_max]reqresp.ForkEntry = undefined;
-    var rr = try reqresp.ReqResp.init(allocator, .{
+    var svc = try reqresp.Service.init(allocator, .{ .reqresp = .{
         .forks = forkTable(options.network.config, &table),
         .inbound_max = inbound_max,
         .inbound_per_peer_max = inbound_max,
-    });
-    defer rr.deinit();
+    } });
+    defer svc.deinit();
     const sink = try allocator.alloc(u8, Protocol.blocks_by_range_v2.info().response_max);
     defer allocator.free(sink);
-    const request_max = reqresp.protocol.requestMaxAll();
-    const inbound = try allocator.alloc(u8, inbound_max * request_max);
-    defer allocator.free(inbound);
 
     var session = Session{
         .allocator = allocator,
         .options = options,
         .engine = &node.engine,
-        .negotiator = &negotiator,
-        .rr = &rr,
+        .svc = &svc,
         .conn = try node.dial(io, &target),
         .sink = sink,
-        .inbound_sinks = undefined,
         .peer_status = peer_status.*,
     };
     defer peer_status.* = session.peer_status;
-    for (&session.inbound_sinks, 0..) |*slot, index| {
-        slot.* = inbound[index * request_max ..][0..request_max];
-    }
 
     var events: [16]engine_mod.Event = undefined;
     var activity: [8]engine_mod.Handle = undefined;
-    var outcomes: [8]negotiate.Outcome = undefined;
     var rr_events: [8]reqresp.Event = undefined;
     var steps: u32 = 0;
     while (steps < steps_max and !session.finished) : (steps += 1) {
@@ -397,22 +362,9 @@ fn dial(
                 std.debug.print("closed reason={s}\n", .{@tagName(closed.reason)});
                 return error.ConnectionClosed;
             },
-            .stream_opened => |stream| {
-                negotiator.acceptInbound(stream, &reqresp.protocol.ids, result.now) catch {
-                    node.engine.closeStream(stream, 0);
-                };
-            },
-            .path_changed, .stream_closed => {},
+            else => {},
         };
-        const ready = negotiator.pump(&node.engine, result.now, &outcomes);
-        for (outcomes[0..ready]) |outcome| {
-            if (rr.negotiated(outcome)) continue;
-            switch (outcome.result) {
-                .ready => |accepted| session.acceptInbound(outcome.stream, accepted),
-                else => node.engine.closeStream(outcome.stream, 0),
-            }
-        }
-        const count = rr.pump(&node.engine, result.now, &rr_events);
+        const count = svc.process(&node.engine, events[0..result.events], result.now, &rr_events);
         for (rr_events[0..count]) |event| try session.handle(event);
     }
     if (!session.finished) return error.Timeout;
