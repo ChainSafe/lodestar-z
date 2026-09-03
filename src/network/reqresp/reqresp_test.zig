@@ -11,8 +11,8 @@ const Event = reqresp.Event;
 const Protocol = protocol.Protocol;
 const ReqResp = reqresp.ReqResp;
 
-const deneb_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xa9 };
-const fulu_digest = [4]u8{ 0x2f, 0x2f, 0x2f, 0x2f };
+pub const deneb_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xa9 };
+pub const fulu_digest = [4]u8{ 0x2f, 0x2f, 0x2f, 0x2f };
 const sink_count = 8;
 
 pub const Overrides = struct {
@@ -130,7 +130,7 @@ pub const ReqRespPair = struct {
     }
 };
 
-fn statusBytes(seed: u8) [ct.phase0.Status.fixed_size]u8 {
+pub fn statusBytes(seed: u8) [ct.phase0.Status.fixed_size]u8 {
     const status = ct.phase0.Status.Type{
         .fork_digest = deneb_digest,
         .finalized_root = [_]u8{seed} ** 32,
