@@ -556,25 +556,33 @@ pub fn VariableContainerType(comptime ST: type) type {
             try merkleize(@ptrCast(&chunks), chunk_depth, out);
         }
 
-        /// Creates a new `VariableContainerType` and clones all underlying fields in the container.
-        /// `out` is a pointer to any types that contains all fields of `Type`.
-        /// Caller owns the memory.
+        /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
         pub fn clone(
             allocator: std.mem.Allocator,
             value: *const Type,
-            out: anytype,
+            out: *Type,
         ) !void {
-            comptime {
-                const OutInfo = @typeInfo(@TypeOf(out));
-                std.debug.assert(OutInfo == .pointer);
-            }
+            return cloneInto(@This(), allocator, value, out);
+        }
 
+        /// The caller initializes `out` with `DestinationST.default_value` and deinitializes it
+        /// after success or error. Errors leave `out` safe to deinitialize.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
             inline for (fields) |field| {
                 if (comptime isFixedType(field.type)) {
                     try field.type.clone(&@field(value, field.name), &@field(out, field.name));
                 } else {
-                    @field(out, field.name) = field.type.default_value;
-                    try field.type.clone(allocator, &@field(value, field.name), &@field(out, field.name));
+                    try field.type.cloneInto(
+                        DestinationST.getFieldType(field.name),
+                        allocator,
+                        &@field(value, field.name),
+                        &@field(out, field.name),
+                    );
                 }
             }
         }
@@ -991,9 +999,9 @@ test "clone VariableContainerType" {
     try f.a.append(allocator, 42);
     try f.b.append(allocator, 42);
     defer Foo.deinit(allocator, &f);
-    var cloned_f: Foo.Type = undefined;
-    try Foo.clone(allocator, &f, &cloned_f);
+    var cloned_f = Foo.default_value;
     defer Foo.deinit(allocator, &cloned_f);
+    try Foo.clone(allocator, &f, &cloned_f);
     try std.testing.expect(&cloned_f != &f);
 
     try expectEqualRootsAlloc(Foo, allocator, f, cloned_f);
@@ -1008,10 +1016,9 @@ test "clone VariableContainerType" {
         // 1 additional field
         c: FieldC,
     });
-    var cloned_f2: Foo2.Type = undefined;
-    cloned_f2.c = FieldC.default_value;
-    try Foo.clone(allocator, &f, &cloned_f2);
+    var cloned_f2 = Foo2.default_value;
     defer Foo2.deinit(allocator, &cloned_f2);
+    try Foo.cloneInto(Foo2, allocator, &f, &cloned_f2);
     try std.testing.expectEqualSlices(u8, f.a.items, cloned_f2.a.items);
     try std.testing.expectEqualSlices(u8, f.b.items, cloned_f2.b.items);
 }
