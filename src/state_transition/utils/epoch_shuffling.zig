@@ -42,15 +42,11 @@ pub const EpochShuffling = struct {
         std.mem.copyForwards(ValidatorIndex, shuffling, active_indices);
         try unshuffleList(shuffling, seed[0..], preset.SHUFFLE_ROUND_COUNT);
         const committees = try buildCommitteesFromShuffling(allocator, shuffling);
-        var committees_cleanup = true;
-        errdefer if (committees_cleanup) {
-            for (committees) |slot_committees| {
-                allocator.free(slot_committees);
-            }
+        errdefer for (committees) |slot_committees| {
+            allocator.free(slot_committees);
         };
 
         const epoch_shuffling_ptr = try allocator.create(EpochShuffling);
-        errdefer allocator.destroy(epoch_shuffling_ptr);
         epoch_shuffling_ptr.* = EpochShuffling{
             .allocator = allocator,
             .epoch = epoch,
@@ -59,7 +55,6 @@ pub const EpochShuffling = struct {
             .committees = committees,
             .committees_per_slot = computeCommitteeCount(active_indices.len),
         };
-        committees_cleanup = false;
 
         return epoch_shuffling_ptr;
     }
@@ -81,13 +76,10 @@ pub const EpochShuffling = struct {
         const committee_count = committees_per_slot * preset.SLOTS_PER_EPOCH;
 
         var epoch_committees: [preset.SLOTS_PER_EPOCH]SlotCommittees = undefined;
-        var slot_count: usize = 0;
-        errdefer {
-            while (slot_count > 0) {
-                slot_count -= 1;
-                allocator.free(epoch_committees[slot_count]);
-            }
-        }
+        var initialized_count: usize = 0;
+        errdefer for (epoch_committees[0..initialized_count]) |slot_committees| {
+            allocator.free(slot_committees);
+        };
         for (0..preset.SLOTS_PER_EPOCH) |slot| {
             const slot_committees = try allocator.alloc(Committee, committees_per_slot);
             for (0..committees_per_slot) |committee_index| {
@@ -97,7 +89,7 @@ pub const EpochShuffling = struct {
                 slot_committees[committee_index] = shuffling[start_offset..end_offset];
             }
             epoch_committees[slot] = slot_committees;
-            slot_count += 1;
+            initialized_count += 1;
         }
 
         return epoch_committees;
