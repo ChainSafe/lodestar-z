@@ -3,12 +3,14 @@ pub const constants = @import("constants.zig");
 pub const limiter = @import("limiter.zig");
 pub const protocol = @import("protocol.zig");
 pub const reqresp = @import("reqresp.zig");
+pub const service = @import("service.zig");
 
 pub const Protocol = protocol.Protocol;
 pub const Info = protocol.Info;
 pub const Limiter = limiter.Limiter;
 pub const Quota = limiter.Quota;
 pub const ReqResp = reqresp.ReqResp;
+pub const Service = service.Service;
 pub const Options = reqresp.Options;
 pub const RequestOptions = reqresp.RequestOptions;
 pub const RequestHandle = reqresp.RequestHandle;
@@ -23,7 +25,9 @@ test {
     _ = limiter;
     _ = protocol;
     _ = reqresp;
+    _ = service;
     _ = @import("codec_test.zig");
+    _ = @import("service_test.zig");
     _ = @import("limiter_test.zig");
     _ = @import("protocol_test.zig");
     _ = @import("reqresp_test.zig");
