@@ -12,22 +12,9 @@ const negotiate = @import("../negotiate.zig");
 const Event = reqresp.Event;
 const Protocol = protocol.Protocol;
 const ReqRespPair = harness.ReqRespPair;
-
-const deneb_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xa9 };
-const fulu_digest = [4]u8{ 0x2f, 0x2f, 0x2f, 0x2f };
-
-fn statusBytes(seed: u8) [ct.phase0.Status.fixed_size]u8 {
-    const status = ct.phase0.Status.Type{
-        .fork_digest = deneb_digest,
-        .finalized_root = [_]u8{seed} ** 32,
-        .finalized_epoch = seed,
-        .head_root = [_]u8{seed +% 1} ** 32,
-        .head_slot = @as(u64, seed) * 32,
-    };
-    var bytes: [ct.phase0.Status.fixed_size]u8 = undefined;
-    _ = ct.phase0.Status.serializeIntoBytes(&status, &bytes);
-    return bytes;
-}
+const deneb_digest = harness.deneb_digest;
+const fulu_digest = harness.fulu_digest;
+const statusBytes = harness.statusBytes;
 
 fn requestStatus(setup: *ReqRespPair, sink: []u8) !reqresp.RequestHandle {
     const request_ssz = statusBytes(5);
