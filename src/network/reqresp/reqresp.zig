@@ -312,15 +312,16 @@ pub const ReqResp = struct {
             const index: u16 = @intCast(position);
             switch (outcome.result) {
                 .ready => |ready| {
-                    if (ready.leftover.len > 0) {
-                        self.fail(slot, index, .{ .invalid_response = error.TooManyBytes }, null);
-                    } else {
-                        slot.state = .sending_request;
-                        slot.progress_ms = self.last_now_ms;
-                        slot.writer = codec.ChunkWriter.initRequest(slot.request_ssz);
-                        slot.writing = slot.protocol.info().request_max > 0;
-                        if (!slot.writing) slot.outbox.queue("", true);
-                    }
+                    assert(ready.leftover.len <= slot.read_buffer.len);
+                    @memcpy(slot.read_buffer[0..ready.leftover.len], ready.leftover);
+                    slot.buffered_start = 0;
+                    slot.buffered_end = ready.leftover.len;
+                    slot.fin_seen = ready.fin;
+                    slot.state = .sending_request;
+                    slot.progress_ms = self.last_now_ms;
+                    slot.writer = codec.ChunkWriter.initRequest(slot.request_ssz);
+                    slot.writing = slot.protocol.info().request_max > 0;
+                    if (!slot.writing) slot.outbox.queue("", true);
                 },
                 .rejected => self.fail(slot, index, .negotiation_rejected, null),
                 .failed => |failure| {
@@ -335,12 +336,12 @@ pub const ReqResp = struct {
     pub fn accept(
         self: *ReqResp,
         stream: StreamHandle,
-        protocol_index: u8,
+        ready: negotiate.Ready,
         request_sink: []u8,
         now: Now,
     ) AcceptError!RequestHandle {
-        if (protocol_index >= Protocol.count) return error.UnknownProtocol;
-        const which: Protocol = @enumFromInt(protocol_index);
+        if (ready.protocol_index >= Protocol.count) return error.UnknownProtocol;
+        const which: Protocol = @enumFromInt(ready.protocol_index);
         const bounds = which.info();
         if (request_sink.len < bounds.request_max) return error.SinkTooSmall;
         if (self.inboundCount(stream.conn, null) >= self.options.inbound_per_peer_max) {
@@ -364,7 +365,11 @@ pub const ReqResp = struct {
             .sink = request_sink,
             .scratch = slot.scratch,
             .read_buffer = slot.read_buffer,
+            .buffered_end = ready.leftover.len,
+            .fin_seen = ready.fin,
         };
+        assert(ready.leftover.len <= slot.read_buffer.len);
+        @memcpy(slot.read_buffer[0..ready.leftover.len], ready.leftover);
         if (bounds.request_max > 0) {
             slot.decoder = codec.Decoder.initRequest(
                 .{ .min = bounds.request_min, .max = bounds.request_max },
@@ -642,43 +647,51 @@ pub const ReqResp = struct {
     fn readRequest(self: *ReqResp, engine: *Engine, slot: *Slot, index: u16, now: Now) void {
         var reads: u32 = 0;
         while (reads < reads_per_pump_max) : (reads += 1) {
-            const read = engine.read(slot.stream, slot.read_buffer) catch |err| {
-                self.failStream(slot, index, err, engine);
-                return;
-            };
-            if (read.reset_code != null) {
-                self.fail(slot, index, .stream_closed, engine);
-                return;
+            var bytes: []const u8 = slot.read_buffer[slot.buffered_start..slot.buffered_end];
+            var fin = slot.fin_seen;
+            if (bytes.len == 0 and !fin) {
+                const read = engine.read(slot.stream, slot.read_buffer) catch |err| {
+                    self.failStream(slot, index, err, engine);
+                    return;
+                };
+                if (read.reset_code != null) {
+                    self.fail(slot, index, .stream_closed, engine);
+                    return;
+                }
+                if (read.len == 0 and !read.fin) return;
+                bytes = slot.read_buffer[0..read.len];
+                fin = read.fin;
             }
-            if (read.len == 0 and !read.fin) return;
+            slot.buffered_start = 0;
+            slot.buffered_end = 0;
             slot.progress_ms = now.mono_ms;
-            if (read.len > 0) {
+            if (bytes.len > 0) {
                 if (!slot.decoding or slot.decoder.isDone()) {
                     self.rejectRequest(slot, now);
                     return;
                 }
-                const progress = slot.decoder.feed(slot.read_buffer[0..read.len]) catch {
+                const progress = slot.decoder.feed(bytes) catch {
                     self.rejectRequest(slot, now);
                     return;
                 };
-                if (progress.consumed < read.len) {
+                if (progress.consumed < bytes.len) {
                     self.rejectRequest(slot, now);
                     return;
                 }
             }
-            if (read.fin) {
+            if (fin) {
                 slot.fin_seen = true;
                 const finished = !slot.decoding or slot.decoder.isDone();
                 if (!finished) {
                     self.rejectRequest(slot, now);
                     return;
                 }
-                const bytes: []const u8 = if (slot.decoding) slot.decoder.payload() else &.{};
+                const payload: []const u8 = if (slot.decoding) slot.decoder.payload() else &.{};
                 slot.pending_event = .{ .request = .{
                     .request = slot.handle(index),
                     .peer = slot.conn,
                     .protocol = slot.protocol,
-                    .bytes = bytes,
+                    .bytes = payload,
                 } };
                 slot.after_event = .serving;
                 return;

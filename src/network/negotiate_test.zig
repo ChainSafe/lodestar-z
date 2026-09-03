@@ -141,10 +141,11 @@ test "negotiator delivers payload bytes that arrive with the proposal as leftove
     const prefix = try dialer.initialWrite(&hello);
     @memcpy(hello[prefix.len..][0..5], "ping!");
     const message = hello[0 .. prefix.len + 5];
-    try std.testing.expectEqual(message.len, try setup.pair.client.write(stream, message, false));
+    try std.testing.expectEqual(message.len, try setup.pair.client.write(stream, message, true));
     const outcomes = try setup.run(8);
     const selected = outcomes.listener orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("ping!", selected.result.ready.leftover);
+    try std.testing.expect(selected.result.ready.fin);
 }
 
 test "negotiator refuses to track more negotiations than its table holds" {

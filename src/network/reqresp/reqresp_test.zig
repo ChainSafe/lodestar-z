@@ -112,8 +112,7 @@ pub const ReqRespPair = struct {
         const listened = self.server_neg.pump(&self.pair.server, now, &outcomes);
         for (outcomes[0..listened]) |outcome| switch (outcome.result) {
             .ready => |ready| {
-                try std.testing.expectEqual(@as(usize, 0), ready.leftover.len);
-                _ = try self.server.accept(outcome.stream, ready.protocol_index, self.requestSink(), now);
+                _ = try self.server.accept(outcome.stream, ready, self.requestSink(), now);
             },
             else => return error.TestUnexpectedResult,
         };
