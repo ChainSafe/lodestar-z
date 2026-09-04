@@ -144,3 +144,28 @@ test "processRewardsAndPenalties - sanity" {
         null,
     );
 }
+
+test "EpochCache.clone does not retain shared references when allocation fails" {
+    const allocator = std.testing.allocator;
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 200_000,
+    });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var failing_allocator = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+
+    // Leaked refs prevent test_state teardown from releasing the last shared owners.
+    try std.testing.expectError(
+        error.OutOfMemory,
+        test_state.cached_state.epoch_cache.clone(failing_allocator.allocator()),
+    );
+}
