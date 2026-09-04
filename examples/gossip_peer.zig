@@ -118,6 +118,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         .forks = &.{},
     } });
     defer service.deinit();
+    defer service.reqresp.shutdownRouted(&service.router, &node.engine);
     const conn = try node.dial(io, &target);
 
     var events: [16]engine_mod.Event = undefined;
@@ -131,7 +132,10 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     var received: u32 = 0;
     var steps: u32 = 0;
     while (steps < steps_max and received < options.blocks) : (steps += 1) {
-        const result = try node.step(io, &events, &activity, .{});
+        const now = try network.driver.currentTime(io);
+        const due = service.nextWakeup(now, request_events.len);
+        const wait_ms: u32 = @intCast(@min(network.constants.poll_interval_ms, if (due) |deadline| deadline -| now.mono_ms else network.constants.poll_interval_ms));
+        const result = try node.step(io, &events, &activity, .{ .wait_max_ms = wait_ms });
         for (events[0..result.events]) |event| switch (event) {
             .connected => |c| {
                 var text: [peer_id.text_length_max]u8 = undefined;
@@ -182,7 +186,7 @@ fn serveRequests(service: *Service, events: []const network.reqresp.Event, now: 
                 try service.reqresp.respondError(request.request, 2, "unsupported by gossip example", now);
             }
         },
-        .chunk_sent => |sent| _ = service.reqresp.finish(sent.request),
+        .chunk_sent => |sent| _ = service.reqresp.finish(sent.request, now),
         else => {},
     };
 }

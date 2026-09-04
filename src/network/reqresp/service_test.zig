@@ -55,6 +55,8 @@ const ServicePair = struct {
     }
 
     fn deinit(self: *ServicePair) void {
+        self.client.shutdown(&self.pair.client);
+        self.server.shutdown(&self.pair.server);
         std.testing.allocator.free(self.sinks);
         self.server.deinit();
         self.client.deinit();
@@ -108,13 +110,13 @@ fn roundTrip(setup: *ServicePair, seed: u8) !void {
                 try std.testing.expectEqual(Protocol.status_v1, incoming.protocol);
                 try setup.server.respond(incoming.request, &reply, null, setup.pair.now);
             },
-            .chunk_sent => |sent| try std.testing.expect(setup.server.finish(sent.request)),
+            .chunk_sent => |sent| try std.testing.expect(setup.server.finish(sent.request, setup.pair.now)),
             else => {},
         };
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &reply, chunk.bytes);
-                try std.testing.expect(setup.client.consume(chunk.request));
+                try std.testing.expect(setup.client.consume(chunk.request, setup.pair.now));
             },
             .done => done = true,
             .failed => return error.TestUnexpectedResult,
@@ -188,4 +190,21 @@ test "service fails in-flight requests when the connection closes" {
     try std.testing.expect(client_failed);
     try std.testing.expect(server_failed);
     try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
+}
+
+test "service wakeup includes earlier Router negotiation and cancels before Router service" {
+    var setup: ServicePair = .{};
+    try setup.init(null);
+    defer setup.deinit();
+    const bytes = [_]u8{0} ** 8;
+    var sink: [8]u8 = undefined;
+    const handle = try setup.client.request(&setup.pair.client, setup.handles.client, .ping_v1, &bytes, &sink, .{ .progress_timeout_ms = 60_000 }, setup.pair.now);
+    _ = setup.client.process(&setup.pair.client, &.{}, setup.pair.now, &.{});
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms + 10_000), setup.client.nextWakeup(setup.pair.now, 0));
+    try std.testing.expect(setup.client.cancel(handle));
+    _ = setup.client.process(&setup.pair.client, &.{}, setup.pair.now, &.{});
+    try std.testing.expectEqual(@as(?u64, null), setup.client.nextWakeup(setup.pair.now, 0));
+    var events: [1]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.process(&setup.pair.client, &.{}, setup.pair.now, &events));
+    try std.testing.expect(events[0].failed.reason == .cancelled);
 }

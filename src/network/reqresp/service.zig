@@ -34,9 +34,6 @@ pub const Service = struct {
     inner: ReqResp,
     sink_arena: []u8,
     sink_size: usize,
-    free_sinks: []u16,
-    free_len: usize,
-    slot_sink: []u16,
 
     pub fn init(allocator: std.mem.Allocator, options: Options) InitError!Service {
         var service = try initHandler(allocator, options.reqresp);
@@ -56,13 +53,10 @@ pub const Service = struct {
         errdefer inner.deinit();
 
         const sink_size = protocol.requestMaxAll();
-        const sink_arena = try allocator.alloc(u8, @as(usize, inbound_max) * sink_size);
+        const sink_bytes = std.math.mul(usize, inbound_max, sink_size) catch
+            return error.InvalidOptions;
+        const sink_arena = try allocator.alloc(u8, sink_bytes);
         errdefer allocator.free(sink_arena);
-        const free_sinks = try allocator.alloc(u16, inbound_max);
-        errdefer allocator.free(free_sinks);
-        const slot_sink = try allocator.alloc(u16, inbound_max);
-        errdefer allocator.free(slot_sink);
-        for (free_sinks, 0..) |*slot, index| slot.* = @intCast(index);
 
         return .{
             .allocator = allocator,
@@ -70,15 +64,10 @@ pub const Service = struct {
             .inner = inner,
             .sink_arena = sink_arena,
             .sink_size = sink_size,
-            .free_sinks = free_sinks,
-            .free_len = inbound_max,
-            .slot_sink = slot_sink,
         };
     }
 
     pub fn deinit(self: *Service) void {
-        self.allocator.free(self.slot_sink);
-        self.allocator.free(self.free_sinks);
         self.allocator.free(self.sink_arena);
         self.inner.deinit();
         if (self.router) |*router| router.deinit();
@@ -120,7 +109,7 @@ pub const Service = struct {
     ) reqresp.RequestError!RequestHandle {
         return self.inner.request(
             engine,
-            &router.negotiator,
+            router,
             conn,
             which,
             request_ssz,
@@ -150,16 +139,42 @@ pub const Service = struct {
         return self.inner.respondError(handle, code, message, now);
     }
 
-    pub fn finish(self: *Service, handle: RequestHandle) bool {
-        return self.inner.finish(handle);
+    pub fn finish(self: *Service, handle: RequestHandle, now: Now) bool {
+        return self.inner.finish(handle, now);
     }
 
-    pub fn consume(self: *Service, handle: RequestHandle) bool {
-        return self.inner.consume(handle);
+    pub fn consume(self: *Service, handle: RequestHandle, now: Now) bool {
+        return self.inner.consume(handle, now);
     }
 
     pub fn errorMessage(self: *const Service, handle: RequestHandle) []const u8 {
         return self.inner.errorMessage(handle);
+    }
+
+    pub fn nextWakeup(self: *Service, now: Now, event_capacity: usize) ?u64 {
+        return self.nextWakeupRouted(&self.router.?, now, event_capacity);
+    }
+
+    pub fn nextWakeupRouted(
+        self: *Service,
+        router: *const routing.Router,
+        now: Now,
+        event_capacity: usize,
+    ) ?u64 {
+        const request_due = self.inner.nextWakeup(now, event_capacity);
+        const negotiation_due = router.nextWakeup(now, outcomes_per_pump);
+        if (request_due) |due| return if (negotiation_due) |other| @min(due, other) else due;
+        return negotiation_due;
+    }
+
+    /// Includes the fixed sink slab; canonical Router storage is separate.
+    pub fn memoryPlan(self: *const Service) reqresp.MemoryPlan {
+        var plan = self.inner.memoryPlan();
+        plan.facade_bytes = @sizeOf(Service);
+        plan.request_sink_bytes = self.sink_arena.len;
+        plan.total_bytes = plan.facade_bytes + plan.slot_bytes + plan.io_bytes +
+            plan.limiter_bytes + plan.request_sink_bytes;
+        return plan;
     }
 
     pub fn active(self: *const Service) Active {
@@ -173,28 +188,14 @@ pub const Service = struct {
 
     pub fn acceptNegotiated(
         self: *Service,
+        engine: *Engine,
         stream: StreamHandle,
         selection: routing.Selection,
         now: Now,
     ) ?RequestHandle {
-        const which = switch (selection.protocol) {
-            .reqresp => |which| which,
-            else => return null,
-        };
-        const ready: negotiate.Ready = .{
-            .protocol_index = @intFromEnum(which),
-            .leftover = selection.leftover,
-            .fin = selection.fin,
-        };
-        if (self.free_len == 0) return null;
-        const index = self.free_sinks[self.free_len - 1];
+        const index = self.inner.availableInbound() orelse return null;
         const sink = self.sink_arena[@as(usize, index) * self.sink_size ..][0..self.sink_size];
-        const handle = self.inner.accept(stream, ready, sink, now) catch return null;
-        self.free_len -= 1;
-        assert(handle.direction == .inbound);
-        assert(handle.index < self.slot_sink.len);
-        self.slot_sink[handle.index] = index;
-        return handle;
+        return self.inner.accept(engine, stream, selection, sink, now) catch null;
     }
 
     pub fn process(
@@ -205,6 +206,7 @@ pub const Service = struct {
         out: []reqresp.Event,
     ) usize {
         const router = &self.router.?;
+        self.inner.cleanupPending(engine, router);
         router.transportEvents(engine, events, now);
         self.transportEvents(events);
         var outcomes: [outcomes_per_pump]routing.Outcome = undefined;
@@ -227,22 +229,10 @@ pub const Service = struct {
         now: Now,
     ) void {
         if (outcome.direction == .outbound) {
-            const raw: negotiate.Outcome = .{
-                .stream = outcome.stream,
-                .result = switch (outcome.result) {
-                    .ready => |selection| .{ .ready = .{
-                        .protocol_index = @intFromEnum(selection.protocol.reqresp),
-                        .leftover = selection.leftover,
-                        .fin = selection.fin,
-                    } },
-                    .rejected => .rejected,
-                    .failed => |failure| .{ .failed = failure },
-                },
-            };
-            if (!self.inner.negotiated(raw)) engine.closeStream(outcome.stream, 0);
+            if (!self.inner.negotiated(outcome, now)) engine.closeStream(outcome.stream, 0);
         } else switch (outcome.result) {
             .ready => |selection| {
-                if (self.acceptNegotiated(outcome.stream, selection, now) == null) {
+                if (self.acceptNegotiated(engine, outcome.stream, selection, now) == null) {
                     engine.closeStream(outcome.stream, 0);
                 }
             },
@@ -251,21 +241,28 @@ pub const Service = struct {
     }
 
     pub fn pump(self: *Service, engine: *Engine, now: Now, out: []reqresp.Event) usize {
-        const count = self.inner.pump(engine, now, out);
-        for (out[0..count]) |event| self.release(event);
-        return count;
+        return self.pumpRouted(&self.router.?, engine, now, out);
     }
 
-    fn release(self: *Service, event: reqresp.Event) void {
-        const handle = switch (event) {
-            .served => |served| served.request,
-            .failed => |failed| failed.request,
-            else => return,
-        };
-        if (handle.direction != .inbound) return;
-        assert(self.free_len < self.free_sinks.len);
-        assert(handle.index < self.slot_sink.len);
-        self.free_sinks[self.free_len] = self.slot_sink[handle.index];
-        self.free_len += 1;
+    pub fn pumpRouted(
+        self: *Service,
+        router: *routing.Router,
+        engine: *Engine,
+        now: Now,
+        out: []reqresp.Event,
+    ) usize {
+        return self.inner.pump(engine, router, now, out);
+    }
+
+    pub fn cancel(self: *Service, handle: RequestHandle) bool {
+        return self.inner.cancel(handle);
+    }
+
+    pub fn shutdown(self: *Service, engine: *Engine) void {
+        self.shutdownRouted(&self.router.?, engine);
+    }
+
+    pub fn shutdownRouted(self: *Service, router: *routing.Router, engine: *Engine) void {
+        self.inner.shutdown(engine, router);
     }
 };

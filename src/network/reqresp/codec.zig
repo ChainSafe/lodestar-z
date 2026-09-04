@@ -377,6 +377,7 @@ pub const ChunkWriter = struct {
         }
         const prefix = varint.encode(self.ssz.len, out[cursor..]) catch return error.BufferTooSmall;
         cursor += prefix.len;
+        if (self.ssz.len == 0) return cursor;
         if (out.len < cursor + identifier.len) return error.BufferTooSmall;
         @memcpy(out[cursor..][0..identifier.len], &identifier);
         cursor += identifier.len;

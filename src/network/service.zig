@@ -57,6 +57,11 @@ pub const Service = struct {
         );
     }
 
+    /// Reqresp and negotiation wakeups; also combine transport and gossip work at the host.
+    pub fn nextWakeup(self: *Service, now: types.Now, request_event_capacity: usize) ?u64 {
+        return self.reqresp.nextWakeupRouted(&self.router, now, request_event_capacity);
+    }
+
     pub fn process(
         self: *Service,
         engine: *engine_mod.Engine,
@@ -65,6 +70,7 @@ pub const Service = struct {
         requests: []reqresp_mod.Event,
         gossip: []gossip_mod.Event,
     ) Counts {
+        self.reqresp.inner.cleanupPending(engine, &self.router);
         self.router.transportEvents(engine, events, now);
         self.reqresp.transportEvents(events);
         self.gossipsub.transportEvents(engine, events, now);
@@ -78,7 +84,7 @@ pub const Service = struct {
             }
         }
         return .{
-            .reqresp = self.reqresp.pump(engine, now, requests),
+            .reqresp = self.reqresp.pumpRouted(&self.router, engine, now, requests),
             .gossipsub = self.gossipsub.pump(&self.router, engine, now, gossip),
         };
     }

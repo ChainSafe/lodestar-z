@@ -50,7 +50,7 @@ test "router composes simultaneous ping and meshsub on one connection" {
         for (request_events[0..client_count]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping, chunk.bytes);
-                try std.testing.expect(client.consume(chunk.request));
+                try std.testing.expect(client.consume(chunk.request, pair.now));
                 pong = true;
             },
             else => {},
@@ -66,7 +66,7 @@ test "router composes simultaneous ping and meshsub on one connection" {
                 try std.testing.expectEqual(rr.Protocol.ping_v1, incoming.protocol);
                 try requests.respond(incoming.request, &ping, null, pair.now);
             },
-            .chunk_sent => |sent| _ = requests.finish(sent.request),
+            .chunk_sent => |sent| _ = requests.finish(sent.request, pair.now),
             else => {},
         };
         for (gossip_events[0..gossip_count]) |event| switch (event) {
@@ -157,4 +157,52 @@ test "router rejects unknown protocol and preserves one-byte fragmented handoff"
     try std.testing.expectEqual(@as(usize, 1), payload.len);
     try std.testing.expectEqual(@as(u8, 42), response[0]);
     try std.testing.expect(payload.fin);
+}
+
+test "router wakeups separate negotiation work from outcome capacity" {
+    const routing = @import("router.zig");
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try support.connectPair(&pair);
+    var router = try routing.Router.init(std.testing.allocator, .{});
+    defer router.deinit();
+    const stream = try router.beginOutbound(&pair.client, handles.client, .{ .reqresp = .ping_v1 }, pair.now);
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), router.nextWakeup(pair.now, 0));
+    _ = router.pump(&pair.client, pair.now, &.{});
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms + 10_000), router.nextWakeup(pair.now, 0));
+    pair.advance(10_000);
+    _ = router.pump(&pair.client, pair.now, &.{});
+    try std.testing.expectEqual(@as(?u64, null), router.nextWakeup(pair.now, 0));
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), router.nextWakeup(pair.now, 1));
+    try std.testing.expect(!pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
+    router.cancel(&pair.client, stream);
+    try std.testing.expectEqual(@as(?u64, null), router.nextWakeup(pair.now, 1));
+}
+
+test "router ready handoff waits quietly for host outcome capacity" {
+    const routing = @import("router.zig");
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try support.connectPair(&pair);
+    var client = try routing.Router.init(std.testing.allocator, .{});
+    defer client.deinit();
+    var server = try routing.Router.init(std.testing.allocator, .{});
+    defer server.deinit();
+    _ = try client.beginOutbound(&pair.client, handles.client, .{ .reqresp = .ping_v1 }, pair.now);
+    for (0..16) |_| {
+        _ = client.pump(&pair.client, pair.now, &.{});
+        try pair.pump();
+        var events: [16]engine.Event = undefined;
+        server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
+        _ = server.pump(&pair.server, pair.now, &.{});
+        try pair.pump();
+    }
+    try std.testing.expectEqual(@as(?u64, null), client.nextWakeup(pair.now, 0));
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), client.nextWakeup(pair.now, 1));
+    var out: [1]routing.Outcome = undefined;
+    try std.testing.expectEqual(@as(usize, 1), client.pump(&pair.client, pair.now, &out));
+    try std.testing.expect(out[0].result == .ready);
+    client.cancel(&pair.client, out[0].stream);
 }

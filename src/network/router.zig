@@ -137,6 +137,10 @@ pub const Router = struct {
         };
     }
 
+    pub fn nextWakeup(self: *const Router, now: types.Now, outcome_capacity: usize) ?u64 {
+        return self.negotiator.nextWakeup(now, outcome_capacity);
+    }
+
     pub fn pump(self: *Router, engine: *engine_mod.Engine, now: types.Now, out: []Outcome) usize {
         std.debug.assert(out.len <= outcomes_per_pump);
         var raw: [outcomes_per_pump]negotiate.Outcome = undefined;
