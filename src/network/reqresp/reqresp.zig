@@ -55,7 +55,7 @@ pub const Failure = union(enum) {
     invalid_request: codec.Error,
     too_many_chunks,
     unknown_context: [constants.context_bytes_length]u8,
-    peer_error: struct { code: u8, message_len: u8 },
+    peer_error: struct { code: u8, message_len: u16 },
     connection_closed,
     stream_closed,
     transport,
@@ -157,9 +157,10 @@ const Slot = struct {
     close_after_write: bool = false,
     withheld_since_ms: ?u64 = null,
     error_message: [codec.error_message_max]u8 = undefined,
-    error_len: u8 = 0,
+    error_len: u16 = 0,
     pending_event: ?Event = null,
     after_event: State = .free,
+    close_pending: bool = false,
 
     fn handle(self: *const Slot, index: u16) RequestHandle {
         return .{ .index = index, .generation = self.generation, .direction = self.direction };
@@ -444,6 +445,7 @@ pub const ReqResp = struct {
         const bounds = slot.protocol.info();
         if (slot.chunks >= bounds.chunks_max) {
             const done = Event{ .done = .{ .request = handle, .chunks = slot.chunks } };
+            slot.close_pending = true;
             self.complete(slot, handle.index, done, null);
             return true;
         }
@@ -503,6 +505,10 @@ pub const ReqResp = struct {
         var count = start;
         for (slots, 0..) |*slot, position| {
             const index: u16 = @intCast(position);
+            if (slot.close_pending) {
+                engine.closeStream(slot.stream, types.app_error_normal);
+                slot.close_pending = false;
+            }
             if (slot.state == .reported) {
                 slot.state = .free;
                 continue;
@@ -551,14 +557,13 @@ pub const ReqResp = struct {
             slot.outbox.queue(piece, slot.writer.done());
             if (slot.writer.done()) slot.writing = false;
         }
+        const before = slot.outbox.offset;
         const flushed = slot.outbox.pump(engine, slot.stream) catch |err| {
             self.failStream(slot, index, err, engine);
             return;
         };
-        if (!slot.outbox.idle() or slot.writing) {
-            slot.progress_ms = now.mono_ms;
-            return;
-        }
+        if (slot.outbox.offset != before) slot.progress_ms = now.mono_ms;
+        if (!slot.outbox.idle() or slot.writing) return;
         assert(flushed);
         slot.state = .awaiting;
         slot.progress_ms = now.mono_ms;
@@ -615,7 +620,7 @@ pub const ReqResp = struct {
         assert(slot.decoder.isDone());
         const payload = slot.decoder.payload();
         if (slot.decoder.isError()) {
-            const message_len: u8 = @intCast(@min(payload.len, codec.error_message_max));
+            const message_len: u16 = @intCast(@min(payload.len, codec.error_message_max));
             @memcpy(slot.error_message[0..message_len], payload[0..message_len]);
             slot.error_len = message_len;
             const code = slot.decoder.result();

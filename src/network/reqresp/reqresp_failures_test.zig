@@ -640,3 +640,165 @@ test "reqresp serves a request whose body and fin arrive with the proposal" {
     }
     try std.testing.expect(served);
 }
+
+test "reqresp retires a consumed terminal stream without FIN or event space" {
+    var pair: ReqRespPair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    var request_bytes: [8]u8 = [_]u8{0} ** 8;
+    var sink: [8]u8 = undefined;
+    const h = try pair.client.request(
+        &pair.pair.client,
+        &pair.client_neg,
+        pair.handles.client,
+        .ping_v1,
+        &request_bytes,
+        &sink,
+        .{},
+        pair.pair.now,
+    );
+    var consumed = false;
+    for (0..50) |_| {
+        try pair.pumpOnce();
+        for (pair.serverEvents()) |event| switch (event) {
+            .request => |r| try pair.server.respond(r.request, &request_bytes, null, pair.pair.now),
+            else => {},
+        };
+        for (pair.clientEvents()) |event| switch (event) {
+            .chunk => |r| {
+                consumed = pair.client.consume(r.request);
+            },
+            else => {},
+        };
+        if (consumed) break;
+    }
+    try std.testing.expect(consumed);
+    const stream = pair.client.outbound[h.index].stream;
+    var out: [8]Event = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        pair.client.pump(&pair.pair.client, pair.pair.now, &.{}),
+    );
+    try std.testing.expect(
+        !pair.pair.client.slots[stream.conn.index].table.matches(stream.slot, stream.id),
+    );
+    _ = pair.client.pump(&pair.pair.client, pair.pair.now, &out);
+    _ = pair.client.pump(&pair.pair.client, pair.pair.now, &out);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.active().outbound);
+    try std.testing.expect(
+        !pair.pair.client.slots[stream.conn.index].table.matches(stream.slot, stream.id),
+    );
+}
+
+test "reqresp retains all 256 bytes of a peer error" {
+    var setup: ReqRespPair = .{};
+    try setup.init(.{}, .{});
+    defer setup.deinit();
+    const request = [_]u8{0} ** 8;
+    const message = [_]u8{'e'} ** 256;
+    var sink: [8]u8 = undefined;
+    _ = try setup.client.request(
+        &setup.pair.client,
+        &setup.client_neg,
+        setup.handles.client,
+        .ping_v1,
+        &request,
+        &sink,
+        .{},
+        setup.pair.now,
+    );
+    for (0..50) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| switch (event) {
+            .request => |r| try setup.server.respondError(r.request, 1, &message, setup.pair.now),
+            else => {},
+        };
+        for (setup.clientEvents()) |event| switch (event) {
+            .failed => |failed| {
+                try std.testing.expectEqual(@as(u16, 256), failed.reason.peer_error.message_len);
+                try std.testing.expectEqualSlices(
+                    u8,
+                    &message,
+                    setup.client.errorMessage(failed.request),
+                );
+                return;
+            },
+            else => {},
+        };
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "reqresp blocked outbound writes expire without refreshing progress" {
+    var setup: ReqRespPair = .{};
+    try setup.init(.{ .progress_timeout_ms = 2_000 }, .{});
+    defer setup.deinit();
+    _ = setup.client.pump(&setup.pair.client, setup.pair.now, &.{});
+    const request = [_]u8{0} ** 8;
+    var sink: [8]u8 = undefined;
+    const handle = try setup.client.request(
+        &setup.pair.client,
+        &setup.client_neg,
+        setup.handles.client,
+        .ping_v1,
+        &request,
+        &sink,
+        .{},
+        setup.pair.now,
+    );
+    var negotiated = false;
+    for (0..50) |_| {
+        try setup.pair.pump();
+        var storage: [16]engine_mod.Event = undefined;
+        for (setup.pair.events(&setup.pair.server, &storage)) |event| switch (event) {
+            .stream_opened => |stream| try setup.server_neg.acceptInbound(
+                stream,
+                &protocol.ids,
+                setup.pair.now,
+            ),
+            else => {},
+        };
+        var outcomes: [8]negotiate.Outcome = undefined;
+        const listened = setup.server_neg.pump(&setup.pair.server, setup.pair.now, &outcomes);
+        for (outcomes[0..listened]) |outcome| try std.testing.expect(outcome.result == .ready);
+        const dialed = setup.client_neg.pump(&setup.pair.client, setup.pair.now, &outcomes);
+        for (outcomes[0..dialed]) |outcome| {
+            try std.testing.expect(outcome.result == .ready);
+            negotiated = setup.client.negotiated(outcome);
+        }
+        if (negotiated) break;
+    }
+    try std.testing.expect(negotiated);
+    const stream = setup.client.outbound[handle.index].stream;
+    const padding = [_]u8{0} ** 65536;
+    var blocked = false;
+    for (0..1024) |_| {
+        _ = setup.pair.client.write(stream, &padding, false) catch |err| switch (err) {
+            error.WouldBlock => {
+                blocked = true;
+                break;
+            },
+            else => return err,
+        };
+    }
+    try std.testing.expect(blocked);
+    const progress_ms = setup.client.outbound[handle.index].progress_ms;
+    var events: [8]Event = undefined;
+    for (0..3) |_| {
+        setup.pair.advance(500);
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            setup.client.pump(&setup.pair.client, setup.pair.now, &events),
+        );
+        try std.testing.expectEqual(progress_ms, setup.client.outbound[handle.index].progress_ms);
+    }
+    setup.pair.advance(500);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        setup.client.pump(&setup.pair.client, setup.pair.now, &events),
+    );
+    try std.testing.expect(events[0].failed.reason == .timeout);
+    try std.testing.expect(
+        !setup.pair.client.slots[stream.conn.index].table.matches(stream.slot, stream.id),
+    );
+}
