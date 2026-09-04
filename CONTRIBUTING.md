@@ -218,11 +218,10 @@ To maintain code quality, improve collaboration, and ensure clarity in large or 
 
 If the PR contains a self-contained and complete feature or bug fix that does not require major refactoring or cross-team discussions, then:
 
-- Clearly explain the rationale and motivation behind the change in the PR description.
-- Provide relevant context, including:
-  - Problem the PR is solving.
-  - Why the approach was chosen.
-  - Any alternatives considered (if relevant).
+- Fill in the PR template. Motivation is one to three sentences, or a link to the issue.
+  Description is one sentence saying what the PR does, then bullets naming each change.
+- Keep it flat. No headings, tables, or verification sections. Reasoning beyond Motivation belongs
+  in commit messages and review comments.
 - If the PR modifies critical code paths, add references to relevant issues, benchmarks, or related discussions.
 - Ensure the PR adheres to our standard PR etiquette and commit message guidelines.
 
