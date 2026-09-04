@@ -28,15 +28,23 @@ pub const GossipPair = struct {
     server_count: usize = 0,
 
     pub fn init(self: *GossipPair) !void {
+        try self.initOpts(.{}, .{});
+    }
+
+    pub fn initOpts(
+        self: *GossipPair,
+        client_opts: gossipsub.Options,
+        server_opts: gossipsub.Options,
+    ) !void {
         try self.pair.init(.{}, .{});
         errdefer self.pair.deinit();
         self.client_neg = try negotiate.Negotiator.init(std.testing.allocator, 8);
         errdefer self.client_neg.deinit();
         self.server_neg = try negotiate.Negotiator.init(std.testing.allocator, 8);
         errdefer self.server_neg.deinit();
-        self.client = try Gossipsub.init(std.testing.allocator, .{});
+        self.client = try Gossipsub.init(std.testing.allocator, client_opts);
         errdefer self.client.deinit();
-        self.server = try Gossipsub.init(std.testing.allocator, .{});
+        self.server = try Gossipsub.init(std.testing.allocator, server_opts);
         errdefer self.server.deinit();
         const handles = try support.connectPair(&self.pair);
         self.handles = .{ .client = handles.client, .server = handles.server };
@@ -255,6 +263,46 @@ test "gossipsub prunes a peer whose messages are rejected" {
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
     const server_topic = setup.server.state.findTopic(beacon_block).?;
     try std.testing.expectEqual(@as(usize, 0), setup.server.state.mesh(server_topic).count());
+}
+
+test "gossipsub receives a message larger than the per-peer body buffer" {
+    var setup: GossipPair = .{};
+    // the server holds a tiny per-peer body buffer, so the message must be read
+    // through a claimed large-pool buffer instead
+    try setup.initOpts(.{}, .{ .body_buffer_bytes = 1024, .large_message_bytes = 64 * 1024 });
+    defer setup.deinit();
+
+    var buf: [topic_mod.topic_max_len]u8 = undefined;
+    const beacon_block = buildTopic("beacon_block", &buf);
+    try std.testing.expect(setup.client.subscribe(beacon_block));
+    try std.testing.expect(setup.server.subscribe(beacon_block));
+
+    var rounds: usize = 0;
+    while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
+    setup.pair.advance(constants_heartbeat + 100);
+    rounds = 0;
+    while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
+
+    // a poorly-compressible 8 KB payload: its compressed frame exceeds 1 KB
+    var payload: [8192]u8 = undefined;
+    for (&payload, 0..) |*byte, i| byte.* = @intCast((i * 131 + 7) & 0xff);
+    try std.testing.expect(setup.client.publish(beacon_block, &payload, setup.pair.now));
+
+    var received = false;
+    rounds = 0;
+    while (rounds < 20 and !received) : (rounds += 1) {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| switch (event) {
+            .message => |m| {
+                try std.testing.expectEqualSlices(u8, &payload, m.bytes);
+                setup.server.report(m.handle, .accept);
+                received = true;
+            },
+            else => {},
+        };
+    }
+    try std.testing.expect(received);
+    try std.testing.expectEqual(@as(u64, 0), setup.server.counters.oversized_dropped);
 }
 
 const constants_heartbeat = @import("constants.zig").heartbeat_interval_ms;

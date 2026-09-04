@@ -4,7 +4,7 @@ const protobuf = @import("protobuf.zig");
 
 const assert = std.debug.assert;
 
-pub const Error = error{ FrameTooLarge, VarintTooLong, BufferTooSmall };
+pub const Error = error{ FrameTooLarge, VarintTooLong };
 
 /// The bytes an unsigned-varint length prefix needs for a frame of `body_len`.
 pub fn prefixLen(body_len: usize) usize {
@@ -31,6 +31,7 @@ pub const Reader = struct {
     prefix_len: u8 = 0,
     declared: ?usize = null,
     filled: usize = 0,
+    discarding: bool = false,
 
     const constants_varint_max = 10;
 
@@ -38,6 +39,16 @@ pub const Reader = struct {
     /// caller can size the body buffer before feeding more.
     pub fn declaredLen(self: *const Reader) ?usize {
         return self.declared;
+    }
+
+    /// Discards the current frame's body in sync with the stream, for a frame
+    /// the caller cannot hold. The stream stays framed for the next message.
+    pub fn discard(self: *Reader) void {
+        self.discarding = true;
+    }
+
+    pub fn isDiscarding(self: *const Reader) bool {
+        return self.discarding;
     }
 
     pub fn feed(self: *Reader, input: []const u8, body: []u8) Error!Result {
@@ -61,18 +72,32 @@ pub const Reader = struct {
             if (self.declared == null) return .{ .consumed = pos, .frame = null };
         }
         const declared = self.declared.?;
-        if (declared > body.len) return error.BufferTooSmall;
         const want = declared - self.filled;
         const take = @min(want, input.len - pos);
+        if (self.discarding) {
+            self.filled += take;
+            pos += take;
+            if (self.filled == declared) self.reset();
+            return .{ .consumed = pos, .frame = null };
+        }
+        // The body buffer is too small for this frame; the caller grows it and
+        // re-feeds. The prefix is already consumed, so no bytes are lost.
+        if (declared > body.len) return .{ .consumed = pos, .frame = null };
         @memcpy(body[self.filled..][0..take], input[pos..][0..take]);
         self.filled += take;
         pos += take;
         if (self.filled == declared) {
-            self.declared = null;
-            self.prefix_len = 0;
+            self.reset();
             return .{ .consumed = pos, .frame = body[0..declared] };
         }
         return .{ .consumed = pos, .frame = null };
+    }
+
+    fn reset(self: *Reader) void {
+        self.declared = null;
+        self.prefix_len = 0;
+        self.filled = 0;
+        self.discarding = false;
     }
 };
 
@@ -121,15 +146,17 @@ test "frame reader delivers multiple frames from one buffer" {
     try std.testing.expectEqualStrings("bbb", second.frame.?);
 }
 
-test "frame reader signals a body too large for the buffer, then resumes" {
+test "frame reader asks the caller to grow the body, then resumes" {
     var out: [64]u8 = undefined;
     const framed = writeFrame(&out, "0123456789ABCDEF"); // 16-byte body
     var reader = Reader{};
     var small: [8]u8 = undefined;
-    try std.testing.expectError(error.BufferTooSmall, reader.feed(framed, &small));
+    const first = try reader.feed(framed, &small);
+    try std.testing.expect(first.frame == null); // body too small
     try std.testing.expectEqual(@as(?usize, 16), reader.declaredLen());
+    try std.testing.expectEqual(@as(usize, 1), first.consumed); // only the prefix consumed
     var big: [32]u8 = undefined;
-    const result = try reader.feed(framed[1..], &big); // skip the consumed prefix
+    const result = try reader.feed(framed[first.consumed..], &big);
     try std.testing.expectEqualStrings("0123456789ABCDEF", result.frame.?);
 }
 
