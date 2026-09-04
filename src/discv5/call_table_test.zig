@@ -69,11 +69,11 @@ test "call table owns encoded request bytes and tracks challenge nonce" {
 test "call table rejects zero and excessive configured capacities" {
     var table: CallTable = undefined;
     try std.testing.expectError(
-        CallTable.Error.InvalidCapacity,
+        CallTable.InitError.InvalidCapacity,
         table.init(std.testing.allocator, 0),
     );
     try std.testing.expectError(
-        CallTable.Error.InvalidCapacity,
+        CallTable.InitError.InvalidCapacity,
         table.init(std.testing.allocator, CallTable.capacity_max + 1),
     );
 }
@@ -130,7 +130,7 @@ test "response matching validates type ID and NODES packet count before mutation
     );
 
     const first = nodesResponse(1, 2);
-    const first_result = try accept(&table, peer, &first, 99, &.{});
+    const first_result = try accept(&table, peer, &first, 98, &.{});
     try std.testing.expectEqual(handle, first_result.matched.handle);
     try std.testing.expect(!first_result.matched.terminal);
     const inconsistent = nodesResponse(1, 3);
@@ -251,7 +251,7 @@ test "accept refuses a handle whose call ended after matching" {
     try std.testing.expect(table.cancel(handle));
     try std.testing.expectError(
         CallTable.Error.StaleHandle,
-        table.accept(matched, &response, &.{}),
+        table.accept(matched, &response, &.{}, &([_]u8{0} ** 12)),
     );
 }
 
@@ -301,7 +301,9 @@ fn accept(
     node_ids: []const types.NodeId,
 ) !CallTable.MatchResult {
     const handle = try table.match(peer, response, now_ms);
-    return table.accept(handle, response, node_ids);
+    var nonce = [_]u8{0} ** 12;
+    std.mem.writeInt(u64, nonce[0..8], now_ms, .big);
+    return table.accept(handle, response, node_ids, &nonce);
 }
 
 fn pingRequest(id: u8) message.Message {

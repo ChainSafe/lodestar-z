@@ -27,6 +27,19 @@ pub const Started = struct {
     peer: types.Endpoint,
 };
 
+pub const FinishReason = enum {
+    converged,
+    exhausted,
+    budget_exhausted,
+    cancelled,
+};
+
+pub const Statistics = struct {
+    queries_started: u16,
+    /// Saturating count of admissible records dropped at capacity, including repeated drops.
+    capacity_drops: u32,
+};
+
 const State = union(enum) {
     unqueried,
     waiting: CallTable.Handle,
@@ -50,7 +63,8 @@ candidates: *Candidates,
 candidate_count: u16,
 waiting_count: u8,
 queries_started: u16,
-finished: bool,
+capacity_drops: u32,
+finish_reason: ?FinishReason,
 
 /// Borrows `candidates` for the life of the lookup and allocates nothing.
 pub fn init(
@@ -68,7 +82,8 @@ pub fn init(
         .candidate_count = 0,
         .waiting_count = 0,
         .queries_started = 0,
-        .finished = false,
+        .capacity_drops = 0,
+        .finish_reason = null,
     };
     for (seeds) |*seed| try self.addSeed(seed);
 }
@@ -83,16 +98,23 @@ pub fn waitingCount(self: *const Lookup) usize {
 }
 
 pub fn isFinished(self: *const Lookup) bool {
-    return self.finished;
+    return self.finish_reason != null;
+}
+
+pub fn finishReason(self: *const Lookup) ?FinishReason {
+    return self.finish_reason;
+}
+
+pub fn statistics(self: *const Lookup) Statistics {
+    return .{ .queries_started = self.queries_started, .capacity_drops = self.capacity_drops };
 }
 
 pub fn ownsCall(self: *const Lookup, handle: CallTable.Handle) bool {
     return self.waitingIndex(handle) != null;
 }
 
-/// Starts at most one call, to the closest unqueried candidate that could still improve the
-/// sixteen best results. Returns null when nothing can start, and the lookup is finished once
-/// that happens with no calls waiting.
+/// Starts at most one call to the closest eligible unqueried candidate. Busy peers remain
+/// candidates for a later call, so a temporarily blocked lookup does not finish.
 pub fn startNext(
     self: *Lookup,
     core: *Engine,
@@ -101,9 +123,16 @@ pub fn startNext(
     now_ms: u64,
     entropy: *const Engine.StartEntropy,
 ) Error!?Started {
-    if (self.finished or self.waiting_count == parallelism) return null;
-    const index = self.nextCandidateIndex() orelse {
-        if (self.waiting_count == 0) self.finished = true;
+    if (self.isFinished() or self.waiting_count == parallelism) return null;
+    const index = self.nextCandidateIndex(core) orelse {
+        if (self.waiting_count == 0 and self.nextCandidateIndex(null) == null) {
+            self.finish_reason = if (self.capacity_drops > 0)
+                .budget_exhausted
+            else if (self.successBoundary() != null)
+                .converged
+            else
+                .exhausted;
+        }
         return null;
     };
     const candidate = &self.candidates[index];
@@ -174,6 +203,7 @@ pub fn onFailure(
 }
 
 pub fn cancel(self: *Lookup, core: *Engine) void {
+    if (self.isFinished()) return;
     for (self.activeCandidatesMut()) |*candidate| switch (candidate.state) {
         .waiting => |handle| {
             _ = core.cancelCall(handle);
@@ -182,7 +212,7 @@ pub fn cancel(self: *Lookup, core: *Engine) void {
         else => {},
     };
     self.waiting_count = 0;
-    self.finished = true;
+    self.finish_reason = .cancelled;
 }
 
 pub fn results(self: *const Lookup, out: []enr.Record) []enr.Record {
@@ -229,7 +259,10 @@ fn addDiscovered(
         }
         return;
     }
-    if (self.candidate_count == candidate_capacity) return;
+    if (self.candidate_count == candidate_capacity) {
+        self.capacity_drops +|= 1;
+        return;
+    }
     self.appendCandidate(.{ .node_id = record.node_id, .address = address }, record);
 }
 
@@ -247,7 +280,7 @@ fn appendCandidate(
     self.candidate_count += 1;
 }
 
-fn nextCandidateIndex(self: *const Lookup) ?usize {
+fn nextCandidateIndex(self: *const Lookup, core: ?*const Engine) ?usize {
     const boundary = self.successBoundary();
     var selected: ?usize = null;
     for (self.activeCandidates(), 0..) |*candidate, index| {
@@ -255,6 +288,9 @@ fn nextCandidateIndex(self: *const Lookup) ?usize {
         if (boundary) |node_id| {
             if (!types.xorCloser(&candidate.peer.node_id, &node_id, &self.target))
                 continue;
+        }
+        if (core) |engine| {
+            if (engine.isPeerBusy(&candidate.peer.node_id)) continue;
         }
         if (selected) |previous| {
             if (!types.xorCloser(
@@ -351,7 +387,10 @@ fn candidateNodeId(candidate: *const *const Candidate) *const types.NodeId {
 comptime {
     std.debug.assert(result_max == 16);
     std.debug.assert(candidate_capacity == 272);
-    std.debug.assert(parallelism == request_distance_count);
+    std.debug.assert(parallelism > 0);
+    std.debug.assert(parallelism <= std.math.maxInt(u8));
+    std.debug.assert(request_distance_count > 0);
+    std.debug.assert(request_distance_count < types.distance_count);
     std.debug.assert(@sizeOf(Candidate) <= 512);
     std.debug.assert(@sizeOf(Lookup) <= 128);
 }

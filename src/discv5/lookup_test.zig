@@ -102,10 +102,67 @@ test "lookup uses the call table for bounded parallel queries" {
         &sealEntropy(10),
     )) == null);
     try std.testing.expect(operation.isFinished());
+    try std.testing.expectEqual(Lookup.FinishReason.exhausted, operation.finishReason().?);
+    try std.testing.expectEqual(@as(u16, 4), operation.statistics().queries_started);
+    try std.testing.expectEqual(@as(u32, 0), operation.statistics().capacity_drops);
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
 
     var results: [Lookup.result_max]enr.Record = undefined;
     try std.testing.expectEqual(@as(usize, 3), operation.results(&results).len);
+}
+
+test "lookup skips the busy closest peer and retries it after release" {
+    var core = try initEngine();
+    defer core.deinit(std.testing.allocator);
+    const seeds = [_]RoutingTable.Entry{ fakeEntry(1), fakeEntry(2), fakeEntry(3) };
+    for (&seeds) |*seed| installSession(&core, seed.peer, 0x55);
+    var packet_buffer: [1_280]u8 = undefined;
+    const request = message.Message{ .ping = .{
+        .request_id = try message.RequestId.init(&.{1}),
+        .enr_sequence = 1,
+    } };
+    const unrelated = try core.startCall(
+        &packet_buffer,
+        seeds[0].peer,
+        &seeds[0].record,
+        &request,
+        1,
+        &sealEntropy(1),
+    );
+    var operation: Lookup = undefined;
+    var candidates: Lookup.Candidates = undefined;
+    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds);
+    defer operation.cancel(&core);
+
+    for (2..4) |id| {
+        const started = (try operation.startNext(
+            &core,
+            &packet_buffer,
+            try message.RequestId.init(&.{@intCast(id)}),
+            2,
+            &sealEntropy(@intCast(id)),
+        )).?;
+        try std.testing.expectEqual(nodeId(@intCast(id)), started.peer.node_id);
+        try operation.onFailure(&core, started.call.handle);
+    }
+    try std.testing.expect((try operation.startNext(
+        &core,
+        &packet_buffer,
+        try message.RequestId.init(&.{4}),
+        3,
+        &sealEntropy(4),
+    )) == null);
+    try std.testing.expect(!operation.isFinished());
+    try std.testing.expect(core.cancelCall(unrelated.handle));
+    const retried = (try operation.startNext(
+        &core,
+        &packet_buffer,
+        try message.RequestId.init(&.{5}),
+        4,
+        &sealEntropy(5),
+    )).?;
+    try std.testing.expectEqual(nodeId(1), retried.peer.node_id);
+    try std.testing.expectEqual(@as(usize, 1), core.calls.count());
 }
 
 test "lookup rejects relayed private and low-port candidates" {
@@ -155,6 +212,7 @@ test "lookup rejects relayed private and low-port candidates" {
     )).?;
     try std.testing.expectEqual(nodeId(20), next.peer.node_id);
     operation.cancel(&core);
+    try std.testing.expectEqual(Lookup.FinishReason.cancelled, operation.finishReason().?);
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
 }
 
@@ -207,6 +265,7 @@ test "lookup stops after the closest sixteen successful peers" {
         &sealEntropy(20),
     )) == null);
     try std.testing.expect(operation.isFinished());
+    try std.testing.expectEqual(Lookup.FinishReason.converged, operation.finishReason().?);
     var results: [Lookup.result_max + 1]enr.Record = undefined;
     const selected = operation.results(&results);
     try std.testing.expectEqual(Lookup.result_max, selected.len);
@@ -250,7 +309,64 @@ test "empty lookup finishes without creating a call" {
         &sealEntropy(1),
     )) == null);
     try std.testing.expect(operation.isFinished());
+    try std.testing.expectEqual(Lookup.FinishReason.exhausted, operation.finishReason().?);
+    try std.testing.expectEqual(@as(u16, 0), operation.statistics().queries_started);
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
+}
+
+test "lookup reports candidate budget exhaustion after dropping a closer peer" {
+    var core = try initEngine();
+    defer core.deinit(std.testing.allocator);
+    var operation: Lookup = undefined;
+    var candidates: Lookup.Candidates = undefined;
+    const seed = budgetEntry(272);
+    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &.{seed});
+    var packet_buffer: [1_280]u8 = undefined;
+
+    for (0..272) |index| {
+        const current = budgetEntry(@intCast(272 - index));
+        installSession(&core, current.peer, 0x55);
+        const request_id = try message.RequestId.init(&.{ @intCast(index >> 8), @truncate(index) });
+        const started = (try operation.startNext(
+            &core,
+            &packet_buffer,
+            request_id,
+            index * 2,
+            &sealEntropy(@truncate(index)),
+        )).?;
+        try std.testing.expectEqual(current.peer.node_id, started.peer.node_id);
+        const next = budgetEntry(@intCast(271 - index));
+        try completeNodes(
+            &core,
+            &operation,
+            started,
+            request_id,
+            &.{ next.record, seed.record },
+            index * 2 + 1,
+        );
+    }
+    try std.testing.expect((try operation.startNext(
+        &core,
+        &packet_buffer,
+        try message.RequestId.init(&.{0xff}),
+        600,
+        &sealEntropy(1),
+    )) == null);
+    try std.testing.expectEqual(@as(usize, 272), operation.candidateCount());
+    try std.testing.expectEqual(@as(u16, 272), operation.statistics().queries_started);
+    try std.testing.expectEqual(@as(u32, 1), operation.statistics().capacity_drops);
+    try std.testing.expectEqual(Lookup.FinishReason.budget_exhausted, operation.finishReason().?);
+    var records: [16]enr.Record = undefined;
+    try std.testing.expectEqual(@as(usize, 16), operation.results(&records).len);
+    try std.testing.expectEqual(budgetEntry(1).peer.node_id, records[0].node_id);
+    try std.testing.expectEqual(@as(usize, 0), core.calls.count());
+}
+
+fn budgetEntry(id: u16) RoutingTable.Entry {
+    var entry = fakeEntry(1);
+    std.mem.writeInt(u16, entry.peer.node_id[30..32], id, .big);
+    entry.record.node_id = entry.peer.node_id;
+    return entry;
 }
 
 fn initEngine() !Engine {
@@ -289,7 +405,9 @@ fn completeNodes(
         .enrs = &raw_records,
     } };
     const handle = try core.calls.match(started.peer, &response_message, now_ms);
-    const matched = try core.calls.accept(handle, &response_message, node_ids[0..0]);
+    var nonce = [_]u8{0} ** 12;
+    std.mem.writeInt(u64, nonce[0..8], now_ms, .big);
+    const matched = try core.calls.accept(handle, &response_message, node_ids[0..0], &nonce);
     var response = Engine.AuthenticatedResponse{
         .peer = started.peer,
         .matched = matched.matched,
