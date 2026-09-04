@@ -490,7 +490,7 @@ pub const Gossipsub = struct {
                 .iwant => |iwant| self.onIwant(index, iwant),
                 .graft => |topic_str| self.onGraft(index, topic_str, now),
                 .prune => |prune| self.onPrune(index, prune, now),
-                .idontwant => {}, // lands in the next slice
+                .idontwant => |idontwant| self.onIdontwant(index, idontwant),
             }
         }
         return count;
@@ -532,6 +532,9 @@ pub const Gossipsub = struct {
         self.counters.messages_received += 1;
         self.resolvePromises(id);
         _ = self.mcache.put(id, self.state.topicString(topic), msg.data, index);
+        if (written >= constants.idontwant_size_threshold) {
+            self.broadcastIdontwant(topic, id, index);
+        }
         if (start >= events.len) return start;
         events[start] = .{ .message = .{
             .handle = id,
@@ -577,6 +580,32 @@ pub const Gossipsub = struct {
             if (self.io[index].appendMessage(cached.topic, cached.data)) {
                 served += 1;
             } else self.counters.send_dropped += 1;
+        }
+    }
+
+    /// v1.2: on the first copy of a large message, tell mesh peers not to send
+    /// their duplicate. Sent before validation, only to peers on 1.2.0.
+    fn broadcastIdontwant(self: *Gossipsub, topic: u16, id: MessageId, source: u16) void {
+        var buf: [control_frame_max]u8 = undefined;
+        var writer = protobuf.Writer.init(&buf);
+        writer.varint(protobuf.idontwantRpcSize(1, constants.message_id_length));
+        protobuf.beginIdontwantRpc(&writer, 1, constants.message_id_length);
+        protobuf.writeIdontwantId(&writer, &id);
+        const rpc = writer.written();
+        var it = self.state.mesh(topic).iterator(.{});
+        while (it.next()) |peer| {
+            const peer_index: u16 = @intCast(peer);
+            if (peer_index == source) continue;
+            if (self.state.peerVersion(peer_index) != .v1_2) continue;
+            if (!self.io[peer_index].append(rpc)) self.counters.send_dropped += 1;
+        }
+    }
+
+    fn onIdontwant(self: *Gossipsub, index: u16, idontwant: protobuf.IdList) void {
+        var it = idontwant.ids();
+        while (it.next() catch return) |id_bytes| {
+            if (id_bytes.len != constants.message_id_length) continue;
+            self.state.suppress(index, id_bytes[0..constants.message_id_length].*);
         }
     }
 

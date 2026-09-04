@@ -396,6 +396,36 @@ pub fn writeIwantId(w: *Writer, id: []const u8) void {
     w.bytesField(1, id);
 }
 
+/// Size of a whole RPC carrying one IDONTWANT for `id_count` ids.
+pub fn idontwantRpcSize(id_count: usize, id_len: usize) usize {
+    const idontwant = id_count * bytesFieldSize(1, id_len);
+    return bytesFieldSize(3, bytesFieldSize(5, idontwant));
+}
+
+pub fn beginIdontwantRpc(w: *Writer, id_count: usize, id_len: usize) void {
+    const idontwant = id_count * bytesFieldSize(1, id_len);
+    w.tag(3, wire_len);
+    w.varint(bytesFieldSize(5, idontwant));
+    w.tag(5, wire_len);
+    w.varint(idontwant);
+}
+
+pub fn writeIdontwantId(w: *Writer, id: []const u8) void {
+    w.bytesField(1, id);
+}
+
+test "protobuf round trips an idontwant control rpc" {
+    var buf: [64]u8 = undefined;
+    var w = Writer.init(&buf);
+    beginIdontwantRpc(&w, 1, 4);
+    writeIdontwantId(&w, "id09");
+    try std.testing.expectEqual(idontwantRpcSize(1, 4), w.len);
+    var reader = RpcReader.init(w.written());
+    const item = (try reader.next()).?;
+    var ids = item.idontwant.ids();
+    try std.testing.expectEqualStrings("id09", (try ids.next()).?);
+}
+
 test "protobuf round trips ihave and iwant control rpcs" {
     var buf: [256]u8 = undefined;
     var w = Writer.init(&buf);
