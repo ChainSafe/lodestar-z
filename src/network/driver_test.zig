@@ -393,6 +393,8 @@ test "driver next wakeup includes retained output with nanosecond precision" {
         now,
         [_]u8{44} ** limits.local_cid_length,
     );
+    const drained = try node.transport.step(std.testing.io, &.{}, &.{}, .{ .wait_max_ms = 0 });
+    now = drained.now;
     var bytes = [_]u8{1};
     try node.transport.driver.pending.put(handle, .{
         .bytes = &bytes,
@@ -402,4 +404,170 @@ test "driver next wakeup includes retained output with nanosecond precision" {
     try std.testing.expectEqual(@as(?u64, 1), node.transport.nextTimeoutMs(now));
     now.mono_ns = now.nanos() + 17;
     try std.testing.expectEqual(@as(?u64, 0), node.transport.nextTimeoutMs(now));
+}
+
+test "driver isolates a failing destination from a healthy ready batch owner" {
+    var node: Node = .{};
+    try node.init(16);
+    defer node.deinit();
+    node.transport.engine.limits.send_per_step_max = 2;
+    node.transport.engine.limits.work_per_step_max = 8;
+    var sink = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer sink.close(std.testing.io);
+    const healthy_address = sink.localAddress();
+    const failing_address = types.Address{ .ip6 = .{
+        .octets = [_]u8{0} ** 15 ++ [_]u8{1},
+        .port = 4001,
+    } };
+    const now = try driver_mod.currentTime(std.testing.io);
+    const healthy = try node.transport.engine.dial(
+        &healthy_address,
+        node.transport.peerId(),
+        now,
+        [_]u8{51} ** limits.local_cid_length,
+    );
+    const failing = try node.transport.engine.dial(
+        &failing_address,
+        node.transport.peerId(),
+        now,
+        [_]u8{52} ** limits.local_cid_length,
+    );
+    var payload = [_]u8{ 1, 2, 3 };
+    try node.transport.driver.pending.put(healthy, .{ .bytes = &payload, .to = healthy_address });
+    try node.transport.driver.pending.put(failing, .{ .bytes = &payload, .to = failing_address });
+    var events: [4]engine_mod.Event = undefined;
+    var activity: [4]engine_mod.Handle = undefined;
+    const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(@as(?engine_mod.Handle, healthy), node.transport.engine.driverView().sendOwner(healthy.index));
+    try std.testing.expectEqual(@as(u32, 1), result.send_failures);
+    try std.testing.expectEqual(@as(u32, 1), result.datagrams_sent);
+    try std.testing.expectEqual(@as(u32, 2), result.send_calls);
+    try std.testing.expectEqual(@as(u16, 1), node.transport.engine.registry.outbound);
+    try std.testing.expectEqual(@as(usize, 1), result.events);
+    try std.testing.expect(events[0] == .closed);
+    try std.testing.expectEqual(failing, events[0].closed.conn);
+    try std.testing.expect(events[0].closed.reason == .send_failed);
+    {
+        const received = try sink.receiveTimeout(std.testing.io, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } });
+        defer sink.release(received.handle) catch unreachable;
+        try std.testing.expectEqualSlices(u8, &payload, received.bytes);
+    }
+    try std.testing.expectError(error.Timeout, sink.receiveTimeout(std.testing.io, .{ .duration = .{ .raw = .zero, .clock = .awake } }));
+}
+
+test "driver reports receive work exhaustion without active connections" {
+    var node: Node = .{};
+    try node.init(17);
+    defer node.deinit();
+    node.transport.engine.limits.work_per_step_max = 2;
+    var source = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer source.close(std.testing.io);
+    const destination = node.transport.localAddress();
+    for (0..3) |_| try source.send(std.testing.io, &destination, &.{0});
+    var events: [4]engine_mod.Event = undefined;
+    var activity: [4]engine_mod.Handle = undefined;
+    const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(@as(u32, 2), result.datagrams_received);
+    try std.testing.expectEqual(@as(u32, 2), result.datagrams_dropped);
+    try std.testing.expectEqual(@as(u32, 2), result.work_processed);
+    try std.testing.expectEqual(@as(usize, 0), node.transport.engine.driverView().activeIndices().len);
+    try std.testing.expect(result.work_pending);
+    try std.testing.expectEqual(@as(?u64, 0), node.transport.nextTimeoutMs(result.now));
+    const drained = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(@as(u32, 1), drained.datagrams_received);
+    try std.testing.expectEqual(@as(u32, 1), drained.datagrams_dropped);
+    try std.testing.expect(!drained.work_pending);
+    try std.testing.expectEqual(@as(?u64, null), node.transport.nextTimeoutMs(drained.now));
+}
+
+test "driver finishes a quiet connection scan across small work limited turns" {
+    var node: Node = .{};
+    try node.init(18);
+    defer node.deinit();
+    node.transport.engine.limits.work_per_step_max = 2;
+    var sink = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer sink.close(std.testing.io);
+    const destination = sink.localAddress();
+    const now = try driver_mod.currentTime(std.testing.io);
+    for (0..3) |index| {
+        _ = try node.transport.engine.dial(
+            &destination,
+            node.transport.peerId(),
+            now,
+            [_]u8{@intCast(60 + index)} ** limits.local_cid_length,
+        );
+    }
+    var events: [4]engine_mod.Event = undefined;
+    var activity: [4]engine_mod.Handle = undefined;
+    var sent: u32 = 0;
+    var quiescent = false;
+    for (0..16) |_| {
+        const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+        try std.testing.expect(result.work_processed <= 2);
+        sent += result.datagrams_sent;
+        if (!result.work_pending) {
+            const timeout = node.transport.nextTimeoutMs(result.now);
+            try std.testing.expect(timeout == null or timeout.? > 0);
+            quiescent = true;
+            break;
+        }
+    }
+    try std.testing.expect(sent >= 3);
+    try std.testing.expect(quiescent);
+}
+
+fn quietConnectedNodes(client: *Node, server: *Node) !void {
+    var events: [8]engine_mod.Event = undefined;
+    var activity: [8]engine_mod.Handle = undefined;
+    for (0..128) |_| {
+        const a = try client.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
+        const b = try server.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
+        const a_timeout = client.transport.nextTimeoutMs(a.now);
+        const b_timeout = server.transport.nextTimeoutMs(b.now);
+        if (!a.work_pending and !b.work_pending and a.datagrams_sent == 0 and b.datagrams_sent == 0 and
+            (a_timeout == null or a_timeout.? > 0) and (b_timeout == null or b_timeout.? > 0)) return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "driver restarts a completed quiet scan after host writes and reads" {
+    var client: Node = .{};
+    try client.init(19);
+    defer client.deinit();
+    var server: Node = .{};
+    try server.init(20);
+    defer server.deinit();
+    const handle = try client.transport.dialPeer(std.testing.io, server.transport.localAddress(), server.transport.peerId());
+    var client_events: [8]engine_mod.Event = undefined;
+    var server_events: [8]engine_mod.Event = undefined;
+    var connected = false;
+    for (0..100) |_| {
+        const counts = try stepBoth(&client, &server, &client_events, &server_events);
+        for (client_events[0..counts.a]) |event| {
+            if (event == .connected) connected = true;
+        }
+        if (connected) break;
+    }
+    try std.testing.expect(connected);
+    const stream = try client.transport.engine.openStream(handle);
+    try quietConnectedNodes(&client, &server);
+    try std.testing.expectEqual(@as(usize, 6), try client.transport.engine.write(stream, "credit", false));
+    const write_now = try driver_mod.currentTime(std.testing.io);
+    try std.testing.expectEqual(@as(?u64, 0), client.transport.nextTimeoutMs(write_now));
+    var inbound: ?engine_mod.StreamHandle = null;
+    for (0..100) |_| {
+        const counts = try stepBoth(&client, &server, &client_events, &server_events);
+        for (server_events[0..counts.b]) |event| {
+            if (event == .stream_opened) inbound = event.stream_opened;
+        }
+        if (inbound != null) break;
+    }
+    try std.testing.expect(inbound != null);
+    try quietConnectedNodes(&client, &server);
+    var bytes: [6]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 6), (try server.transport.engine.read(inbound.?, &bytes)).len);
+    try std.testing.expectEqualStrings("credit", &bytes);
+    const read_now = try driver_mod.currentTime(std.testing.io);
+    try std.testing.expectEqual(@as(?u64, 0), server.transport.nextTimeoutMs(read_now));
+    try quietConnectedNodes(&client, &server);
 }
