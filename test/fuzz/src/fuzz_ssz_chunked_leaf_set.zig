@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const fuzz_options = @import("fuzz_options");
 const ssz = @import("ssz");
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
@@ -15,16 +16,14 @@ const fuzz_buffer_size: u32 = 64 * 1024 * 1024;
 var fuzz_buf: [fuzz_buffer_size]u8 = undefined;
 
 const Capacity: usize = 1 << 20;
-// One past chunked_leaf 0 for the u64 list (4 items per chunk) so `push`
-// crosses the CL0 -> CL1 boundary into the new-chunked_leaf path.
-const ItemCount: usize = ChunkedLeaf.K * 4 + 1;
-
 const op_size: usize = 4;
 const selector_count: u8 = 4;
+const grow_to_opcode: u8 = 'G';
 
 pub export fn zig_fuzz_init() callconv(.c) void {}
 
 pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
+    if (len > fuzz_options.max_input_len) return;
     if (len < 1 + op_size) return;
 
     var fba = std.heap.FixedBufferAllocator.init(&fuzz_buf);
@@ -48,6 +47,7 @@ fn fuzzListOps(
 ) void {
     const Element = ListT.Element.Type;
     const items_per_chunk: usize = 32 / ListT.Element.fixed_size;
+    const item_count: usize = ChunkedLeaf.K * items_per_chunk + 1;
     const K: usize = ChunkedLeaf.K;
     // +1 for the list length-mixin level above the data subtree.
     const cl_depth = ListT.chunk_depth + 1 - ChunkedLeaf.k_log2;
@@ -74,7 +74,7 @@ fn fuzzListOps(
 
     var reference = std.ArrayList(Element).empty;
     defer reference.deinit(allocator);
-    reference.ensureTotalCapacity(allocator, ItemCount) catch return;
+    reference.ensureTotalCapacity(allocator, item_count) catch return;
     for (0..initial_count) |i| reference.append(allocator, computeInitial(Element, i)) catch return;
 
     var src: ListT.Type = .empty;
@@ -82,8 +82,10 @@ fn fuzzListOps(
     src.ensureTotalCapacity(allocator, initial_count) catch return;
     for (reference.items) |v| src.append(allocator, v) catch return;
 
-    const root_id = ListT.tree.fromValue(&pool, &src) catch return;
-    var view = ListT.TreeView.init(allocator, &pool, root_id) catch return;
+    var view = ListT.TreeView.fromValue(allocator, &pool, &src) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("constructing chunked list view", err),
+    };
     defer view.deinit();
 
     // Setup complete: arm the leak check so it fires at function exit.
@@ -96,23 +98,37 @@ fn fuzzListOps(
         const arg_hi = data[i + 2];
         const val_seed = data[i + 3];
 
+        if (data[i] == grow_to_opcode) {
+            assertInvalidGrowTo(ListT, view, reference.items.len, arg_lo);
+            continue;
+        }
+
         switch (op) {
             0 => {
                 if (reference.items.len == 0) continue;
                 const idx = (@as(usize, arg_hi) << 8 | @as(usize, arg_lo)) % reference.items.len;
                 const val = elementFromSeed(Element, val_seed);
                 reference.items[idx] = val;
-                view.set(idx, val) catch return;
+                view.set(idx, val) catch |err| switch (err) {
+                    error.OutOfMemory => return,
+                    else => panicUnexpected("setting chunked list item", err),
+                };
             },
             1 => {
-                const view_root = (view.hashTreeRoot() catch return).*;
+                const view_root = (view.hashTreeRoot() catch |err| switch (err) {
+                    error.OutOfMemory => return,
+                    else => panicUnexpected("committing chunked list view", err),
+                }).*;
 
                 var ref_src: ListT.Type = .empty;
                 defer ref_src.deinit(allocator);
                 ref_src.ensureTotalCapacity(allocator, reference.items.len) catch return;
                 for (reference.items) |v| ref_src.append(allocator, v) catch return;
 
-                const ref_root_id = ListT.tree.fromValue(&pool, &ref_src) catch return;
+                const ref_root_id = ListT.tree.fromValue(&pool, &ref_src) catch |err| switch (err) {
+                    error.OutOfMemory => return,
+                    else => panicUnexpected("constructing chunked list reference root", err),
+                };
                 defer pool.unref(ref_root_id);
                 const ref_root = ref_root_id.getRoot(&pool).*;
 
@@ -126,37 +142,63 @@ fn fuzzListOps(
                     const total_chunks = (len + items_per_chunk - 1) / items_per_chunk;
                     const cl_count = (total_chunks + K - 1) / K;
                     for (0..cl_count) |cl_idx| {
-                        const cl = view.chunks.state.root.getNodeAtDepth(&pool, cl_depth, cl_idx) catch return;
+                        const cl = view.chunks.state.root.getNodeAtDepth(
+                            &pool,
+                            cl_depth,
+                            cl_idx,
+                        ) catch |err| switch (err) {
+                            error.OutOfMemory => return,
+                            else => panicUnexpected("reading chunked leaf", err),
+                        };
                         const expected: u16 = @intCast(@min(K, total_chunks - cl_idx * K));
-                        assert((cl.getChunkedLeafLen(&pool) catch return) == expected);
+                        const chunked_leaf_len = cl.getChunkedLeafLen(&pool) catch |err| switch (err) {
+                            error.OutOfMemory => return,
+                            else => panicUnexpected("reading chunked leaf length", err),
+                        };
+                        assert(chunked_leaf_len == expected);
                     }
                 }
             },
             2 => {
                 if (reference.items.len == 0) continue;
                 const idx = (@as(usize, arg_hi) << 8 | @as(usize, arg_lo)) % reference.items.len;
-                const got = view.get(idx) catch return;
+                const got = view.get(idx) catch |err| switch (err) {
+                    error.OutOfMemory => return,
+                    else => panicUnexpected("reading chunked list item", err),
+                };
                 assert(elementEql(Element, got, reference.items[idx]));
             },
             3 => {
-                if (reference.items.len >= ItemCount) continue;
+                if (reference.items.len >= item_count) continue;
                 const val = elementFromSeed(Element, val_seed);
                 reference.append(allocator, val) catch return;
-                view.push(val) catch return;
+                view.push(val) catch |err| switch (err) {
+                    error.OutOfMemory => return,
+                    else => panicUnexpected("pushing chunked list item", err),
+                };
             },
             4 => {
                 // transfer_cache=false so source's pending writes survive; the
                 // default true clears source's `changed`, which would silently
                 // drift `reference` ahead of `view`.
-                const clone = view.clone(.{ .transfer_cache = false }) catch return;
+                const clone = view.clone(.{ .transfer_cache = false }) catch |err| switch (err) {
+                    error.OutOfMemory => return,
+                    else => panicUnexpected("cloning chunked list view", err),
+                };
                 clone.deinit();
             },
             5 => {
                 if (reference.items.len == 0) continue;
                 const idx = (@as(usize, arg_hi) << 8 | @as(usize, arg_lo)) % reference.items.len;
-                const sliced = view.sliceTo(idx) catch return;
+                const sliced = view.sliceTo(idx) catch |err| switch (err) {
+                    error.OutOfMemory => return,
+                    else => panicUnexpected("slicing chunked list view", err),
+                };
                 defer sliced.deinit();
-                const sliced_root = (sliced.hashTreeRoot() catch return).*;
+                const sliced_root = (sliced.hashTreeRoot() catch |err| switch (err) {
+                    error.OutOfMemory => return,
+                    else => panicUnexpected("committing sliced chunked list", err),
+                }).*;
 
                 // sliceTo(idx) keeps elements 0..=idx; idx is in [0, len-1].
                 const expected_len = idx + 1;
@@ -165,7 +207,10 @@ fn fuzzListOps(
                 ref_src.ensureTotalCapacity(allocator, expected_len) catch return;
                 for (reference.items[0..expected_len]) |v| ref_src.append(allocator, v) catch return;
 
-                const ref_root_id = ListT.tree.fromValue(&pool, &ref_src) catch return;
+                const ref_root_id = ListT.tree.fromValue(&pool, &ref_src) catch |err| switch (err) {
+                    error.OutOfMemory => return,
+                    else => panicUnexpected("constructing sliced reference root", err),
+                };
                 defer pool.unref(ref_root_id);
 
                 assert(std.mem.eql(u8, ref_root_id.getRoot(&pool), &sliced_root));
@@ -175,13 +220,41 @@ fn fuzzListOps(
                 // running reference without a commit.
                 const buf = allocator.alloc(Element, reference.items.len) catch return;
                 defer allocator.free(buf);
-                const filled = view.getAllInto(buf) catch return;
+                const filled = view.getAllInto(buf) catch |err| switch (err) {
+                    error.OutOfMemory => return,
+                    else => panicUnexpected("reading all chunked list items", err),
+                };
                 assert(filled.len == reference.items.len);
                 for (filled, reference.items) |a, b| assert(elementEql(Element, a, b));
             },
             else => unreachable,
         }
     }
+}
+
+fn assertInvalidGrowTo(
+    comptime ListT: type,
+    view: *ListT.TreeView,
+    length: usize,
+    argument: u8,
+) void {
+    const shrink = length > 0 and argument & 1 == 0;
+    const new_length = if (shrink) length - 1 else ListT.limit + 1;
+    const expected_error = if (shrink) error.InvalidLength else error.LengthOverLimit;
+
+    view.growTo(new_length) catch |err| {
+        assert(err == expected_error);
+        const length_after = view.length() catch |length_err| {
+            panicUnexpected("reading list length after rejected growth", length_err);
+        };
+        assert(length_after == length);
+        return;
+    };
+    @panic("invalid growTo length accepted");
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }
 
 inline fn computeInitial(comptime Element: type, i: usize) Element {

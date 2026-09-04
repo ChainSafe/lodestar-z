@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const fuzz_options = @import("fuzz_options");
 const ssz = @import("ssz");
 
 const selector_count: u32 = 4;
@@ -23,8 +24,8 @@ pub export fn zig_fuzz_test(
     buf: [*]const u8,
     len: usize,
 ) callconv(.c) void {
-    // Precondition: need at least selector + 1 byte of data.
-    if (len < 2) return;
+    if (len > fuzz_options.max_input_len) return;
+    if (len < 1) return;
 
     const selector = buf[0];
     const data = buf[1..len];
@@ -42,11 +43,11 @@ fn fuzzBitVector(
     comptime BitVectorT: type,
     data: []const u8,
 ) void {
-    // Precondition: bitvector has fixed serialized size.
-    if (data.len != BitVectorT.fixed_size) return;
-
     var value: BitVectorT.Type = undefined;
-    BitVectorT.deserializeFromBytes(data, &value) catch return;
+    BitVectorT.deserializeFromBytes(data, &value) catch |err| switch (@as(anyerror, err)) {
+        error.invalidLength, error.trailingData => return,
+        else => panicUnexpected("deserializing bitvector", err),
+    };
 
     // Round-trip invariant.
     var serialized: [BitVectorT.fixed_size]u8 = undefined;
@@ -56,4 +57,8 @@ fn fuzzBitVector(
     );
     assert(written == BitVectorT.fixed_size);
     assert(std.mem.eql(u8, &serialized, data));
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }

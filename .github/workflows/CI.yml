@@ -15,6 +15,8 @@ concurrency:
 env:
   ZIG_VERSION: "0.16.0"
   NODE_VERSION: "24"
+  AFL_VERSION: "5.02c"
+  AFL_COMMIT: "011cd189801830253c66ecd3cd6919ec01b46c34"
 
 jobs:
   build-test:
@@ -382,6 +384,7 @@ jobs:
   build-fuzz:
     name: build fuzz harnesses
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: build-test
     steps:
       - name: Checkout Repository
@@ -391,25 +394,38 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
-      - name: Install AFL++ and LLVM
+      - name: Install LLVM 18 build dependencies
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y afl++ llvm
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential clang-18 llvm-18-dev
+      - name: Build and install AFL++ ${{ env.AFL_VERSION }}
+        run: |
+          AFL_SOURCE="$RUNNER_TEMP/AFLplusplus-$AFL_COMMIT"
+          AFL_PREFIX="$RUNNER_TEMP/aflplusplus-$AFL_VERSION"
+
+          git init "$AFL_SOURCE"
+          git -C "$AFL_SOURCE" remote add origin https://github.com/AFLplusplus/AFLplusplus.git
+          git -C "$AFL_SOURCE" fetch --depth=1 origin "$AFL_COMMIT"
+          git -C "$AFL_SOURCE" checkout --detach FETCH_HEAD
+          test "$(git -C "$AFL_SOURCE" rev-parse HEAD)" = "$AFL_COMMIT"
+
+          make -C "$AFL_SOURCE" -j"$(nproc)" \
+            CC=clang-18 CXX=clang++-18 LLVM_CONFIG=llvm-config-18 \
+            PREFIX="$AFL_PREFIX" all
+          make -C "$AFL_SOURCE" \
+            CC=clang-18 CXX=clang++-18 LLVM_CONFIG=llvm-config-18 \
+            PREFIX="$AFL_PREFIX" install
+
+          echo "$AFL_PREFIX/bin" >> "$GITHUB_PATH"
+          echo "AFL_PATH=$AFL_PREFIX/lib/afl" >> "$GITHUB_ENV"
       - name: Verify AFL++ and LLVM are available
         run: |
           afl-cc --version
-          if command -v llvm-config >/dev/null 2>&1; then
-            llvm-config --version
-          else
-            llvm-config-18 --version
-          fi
+          llvm-config-18 --version
       - name: Build fuzz harnesses
-        # Build in ReleaseFast so Zig 0.16's Debug `sanitize_c = .full`
-        # doesn't emit `__ubsan_handle_*` calls into blst's C objects that
-        # `afl-cc` can't resolve without `libubsan`. Fuzzers want throughput
-        # anyway; devs can still use `zig build` in Debug locally.
         run: |
-          cd test/fuzz && zig build -Doptimize=ReleaseFast
+          cd test/fuzz
+          zig build -Doptimize=ReleaseSafe
 
   bindings-test:
     name: bindings - test

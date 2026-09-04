@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const fuzz_options = @import("fuzz_options");
 const ssz = @import("ssz");
 
 const selector_count: u32 = 4;
@@ -32,8 +33,8 @@ pub export fn zig_fuzz_test(
     buf: [*]const u8,
     len: usize,
 ) callconv(.c) void {
-    // Precondition: need at least selector + 1 byte of data.
-    if (len < 2) return;
+    if (len > fuzz_options.max_input_len) return;
+    if (len < 1) return;
 
     var fixed_buffer_allocator =
         std.heap.FixedBufferAllocator.init(&fuzz_buf);
@@ -73,6 +74,8 @@ fn fuzzFixedList(
     data: []const u8,
 ) void {
     var value: ListT.Type = ListT.Type.empty;
+    defer ListT.deinit(allocator, &value);
+
     ListT.deserializeFromBytes(
         allocator,
         data,
@@ -96,6 +99,10 @@ fn fuzzFixedList(
     const written = ListT.serializeIntoBytes(&value, output);
     assert(written == serialized_size);
     assert(std.mem.eql(u8, output, data));
+
+    if (comptime ListT.Element == BoolT) {
+        assertBooleanListHash(ListT, allocator, &value);
+    }
 }
 
 fn fuzzVariableList(
@@ -103,9 +110,17 @@ fn fuzzVariableList(
     allocator: std.mem.Allocator,
     data: []const u8,
 ) void {
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const tracked_allocator = tracking.allocator();
+
     var value: ListT.Type = ListT.Type.empty;
+    defer {
+        ListT.deinit(tracked_allocator, &value);
+        assert(tracking.allocated_bytes == tracking.freed_bytes);
+    }
+
     ListT.deserializeFromBytes(
-        allocator,
+        tracked_allocator,
         data,
         &value,
     ) catch return;
@@ -123,4 +138,30 @@ fn fuzzVariableList(
     const written = ListT.serializeIntoBytes(&value, output);
     assert(written == serialized_size);
     assert(std.mem.eql(u8, output, data));
+}
+
+fn assertBooleanListHash(
+    comptime ListT: type,
+    allocator: std.mem.Allocator,
+    value: *const ListT.Type,
+) void {
+    var expected: [32]u8 = undefined;
+    ListT.hashTreeRoot(allocator, value, &expected) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("hashing boolean list", err),
+    };
+
+    var scratch = ssz.Hasher(ListT).init(allocator) catch return;
+    defer scratch.deinit(allocator);
+
+    var actual: [32]u8 = undefined;
+    ssz.Hasher(ListT).hash(&scratch, value, &actual) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("incrementally hashing boolean list", err),
+    };
+    assert(std.mem.eql(u8, &expected, &actual));
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }

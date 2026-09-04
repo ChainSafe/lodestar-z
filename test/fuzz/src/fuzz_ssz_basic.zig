@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const fuzz_options = @import("fuzz_options");
 const ssz = @import("ssz");
 
 const selector_count: u32 = 7;
@@ -26,7 +27,8 @@ pub export fn zig_fuzz_test(
     buf: [*]const u8,
     len: usize,
 ) callconv(.c) void {
-    if (len < 2) return;
+    if (len > fuzz_options.max_input_len) return;
+    if (len < 1) return;
 
     const selector = buf[0];
     const data = buf[1..len];
@@ -45,11 +47,12 @@ pub export fn zig_fuzz_test(
 
 fn fuzzBool(data: []const u8) void {
     const BoolType = ssz.BoolType();
-    // Precondition: Bool has a fixed serialized size.
-    if (data.len != BoolType.fixed_size) return;
 
     var value: BoolType.Type = undefined;
-    BoolType.deserializeFromBytes(data, &value) catch return;
+    BoolType.deserializeFromBytes(data, &value) catch |err| switch (@as(anyerror, err)) {
+        error.InvalidSize, error.invalidBoolean => return,
+        else => panicUnexpected("deserializing bool", err),
+    };
 
     // Postcondition: deserialized bool is valid.
     assert(value == true or value == false);
@@ -65,11 +68,11 @@ fn fuzzBool(data: []const u8) void {
 }
 
 fn fuzzUint(comptime UintT: type, data: []const u8) void {
-    // Precondition: uint width implies exact serialized size.
-    if (data.len != UintT.fixed_size) return;
-
     var value: UintT.Type = undefined;
-    UintT.deserializeFromBytes(data, &value) catch return;
+    UintT.deserializeFromBytes(data, &value) catch |err| switch (@as(anyerror, err)) {
+        error.InvalidSize => return,
+        else => panicUnexpected("deserializing uint", err),
+    };
 
     // Round-trip invariant.
     var serialized: [UintT.fixed_size]u8 = undefined;
@@ -79,4 +82,8 @@ fn fuzzUint(comptime UintT: type, data: []const u8) void {
     );
     assert(written == UintT.fixed_size);
     assert(std.mem.eql(u8, &serialized, data));
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }

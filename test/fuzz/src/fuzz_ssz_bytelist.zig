@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const fuzz_options = @import("fuzz_options");
 const ssz = @import("ssz");
 
 const selector_count: u32 = 3;
@@ -25,8 +26,8 @@ pub export fn zig_fuzz_test(
     buf: [*]const u8,
     len: usize,
 ) callconv(.c) void {
-    // Precondition: need at least selector + 1 byte of data.
-    if (len < 2) return;
+    if (len > fuzz_options.max_input_len) return;
+    if (len < 1) return;
 
     var fixed_buffer_allocator =
         std.heap.FixedBufferAllocator.init(&fuzz_buf);
@@ -65,7 +66,10 @@ fn fuzzByteList(
         allocator,
         data,
         &value,
-    ) catch return;
+    ) catch |err| switch (@as(anyerror, err)) {
+        error.invalidLength, error.OutOfMemory => return,
+        else => panicUnexpected("deserializing bytelist", err),
+    };
 
     // Postcondition: deserialized length within limit.
     assert(value.items.len <= ByteListT.limit);
@@ -84,4 +88,8 @@ fn fuzzByteList(
     );
     assert(written == serialized_size);
     assert(std.mem.eql(u8, output, data));
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }
