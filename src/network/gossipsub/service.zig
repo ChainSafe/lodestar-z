@@ -99,7 +99,12 @@ pub const Service = struct {
     /// side, the peer's stream our receive side. Returns whether it was claimed,
     /// so a shared router can offer the stream to the next protocol otherwise.
     pub fn acceptNegotiated(self: *Service, outcome: negotiate.Outcome) bool {
+        const ready = switch (outcome.result) {
+            .ready => |r| r,
+            else => return false,
+        };
         const index = self.inner.state.findPeer(outcome.stream.conn) orelse return false;
+        self.inner.setPeerVersion(index, gossipsub_mod.versionFor(ready.protocol_index));
         if (self.pending_out[index]) |out| {
             if (std.meta.eql(out, outcome.stream)) {
                 self.inner.setStreams(index, outcome.stream, null);

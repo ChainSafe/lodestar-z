@@ -273,9 +273,25 @@ pub const Gossipsub = struct {
     pub fn unsubscribe(self: *Gossipsub, topic_str: []const u8) bool {
         const topic = self.state.findTopic(topic_str) orelse return false;
         if (!self.state.subscribed(topic)) return true;
+        self.leaveMesh(topic, topic_str);
         self.state.setSubscribed(topic, false);
         self.announce(topic_str, false);
         return true;
+    }
+
+    /// Leaving a topic: PRUNE every mesh peer with the shorter unsubscribe
+    /// backoff, then clear the mesh so a later re-subscribe starts fresh.
+    fn leaveMesh(self: *Gossipsub, topic: u16, topic_str: []const u8) void {
+        const now_ms = self.last_now_ms;
+        const backoff_s = constants.unsubscribe_backoff_ms / 1000;
+        var it = self.state.mesh(topic).iterator(.{});
+        while (it.next()) |peer| {
+            const index: u16 = @intCast(peer);
+            self.scores.prune(index, topic, now_ms);
+            self.state.addBackoff(index, topic, now_ms +| constants.unsubscribe_backoff_ms);
+            self.queuePrune(index, topic_str, backoff_s);
+        }
+        self.state.mesh(topic).* = state_mod.PeerSet.initEmpty();
     }
 
     fn announce(self: *Gossipsub, topic_str: []const u8, subscribe_flag: bool) void {
@@ -453,8 +469,9 @@ pub const Gossipsub = struct {
     fn heartbeat(self: *Gossipsub, now: Now) void {
         for (self.io) |*peer_io| peer_io.resetHeartbeat();
         self.scores.refresh(now.mono_ms);
-        self.state.pruneBackoffs(now.mono_ms);
+        self.state.pruneBackoffs(now.mono_ms, self.backoffSlackMs());
         self.expireLargeFrames(now.mono_ms);
+        self.expireFanout(now.mono_ms);
         for (&self.state.topics, 0..) |*topic, index| {
             if (topic.active and topic.subscribed) self.maintainTopic(@intCast(index), now);
         }
@@ -492,7 +509,7 @@ pub const Gossipsub = struct {
             if (added == constants.opportunistic_graft_peers) break;
             const index: u16 = @intCast(peer);
             if (mesh.isSet(peer)) continue;
-            if (self.state.backedOff(index, topic, now.mono_ms)) continue;
+            if (self.graftBackedOff(index, topic, now.mono_ms)) continue;
             if (self.scores.score(index, now.mono_ms) <= median) continue;
             mesh.set(peer);
             self.scores.graft(index, topic, now.mono_ms);
@@ -582,7 +599,7 @@ pub const Gossipsub = struct {
                 if (need == 0) break;
                 const index: u16 = @intCast(peer);
                 if (mesh.isSet(peer)) continue;
-                if (self.state.backedOff(index, topic, now.mono_ms)) continue;
+                if (self.graftBackedOff(index, topic, now.mono_ms)) continue;
                 if (self.scores.score(index, now.mono_ms) < 0) continue;
                 mesh.set(peer);
                 self.scores.graft(index, topic, now.mono_ms);
@@ -614,8 +631,8 @@ pub const Gossipsub = struct {
         if (self.direct.isSet(peer)) return;
         self.state.mesh(topic).unset(peer);
         self.scores.prune(peer, topic, now.mono_ms);
-        self.state.addBackoff(peer, topic, now.mono_ms + constants.prune_backoff_ms);
-        self.queuePrune(peer, topic_str);
+        self.state.addBackoff(peer, topic, now.mono_ms +| constants.prune_backoff_ms);
+        self.queuePrune(peer, topic_str, constants.prune_backoff_ms / 1000);
     }
 
     fn memberLess(_: void, a: Member, b: Member) bool {
@@ -624,6 +641,16 @@ pub const Gossipsub = struct {
 
     fn belowGossip(self: *Gossipsub, index: u16, now_ms: u64) bool {
         return self.scores.score(index, now_ms) < self.options.score_params.gossip_threshold;
+    }
+
+    fn backoffSlackMs(self: *const Gossipsub) u64 {
+        return constants.backoff_slack_heartbeats * self.options.heartbeat_interval_ms;
+    }
+
+    /// Whether we should refrain from grafting a peer: backed off, plus a slack
+    /// window so we never re-graft at the exact instant the peer's backoff ends.
+    fn graftBackedOff(self: *Gossipsub, index: u16, topic: u16, now_ms: u64) bool {
+        return self.state.backedOff(index, topic, now_ms -| self.backoffSlackMs());
     }
 
     /// The host's application-specific P5 term for a peer, from its own signals.
@@ -635,6 +662,14 @@ pub const Gossipsub = struct {
     /// mesh, never pruned or graylisted, exempt from the score gates.
     pub fn markDirect(self: *Gossipsub, conn: Handle) void {
         if (self.state.findPeer(conn)) |index| self.direct.set(index);
+    }
+
+    /// Records a negotiated protocol version, keeping the lower of the two stream
+    /// directions so a v1.2 feature is only used when the peer agrees on both.
+    pub fn setPeerVersion(self: *Gossipsub, index: u16, version: Version) void {
+        if (@intFromEnum(version) < @intFromEnum(self.state.peerVersion(index))) {
+            self.state.setVersion(index, version);
+        }
     }
 
     fn readPeer(
@@ -707,6 +742,17 @@ pub const Gossipsub = struct {
             self.releaseLarge(peer_io);
             peer_io.reader.discard();
             self.counters.large_stalled += 1;
+        }
+    }
+
+    /// Drops fanout peer sets for topics not published to within the fanout TTL,
+    /// so stale fanout targets do not persist for the process lifetime.
+    fn expireFanout(self: *Gossipsub, now_ms: u64) void {
+        for (&self.state.topics) |*topic| {
+            if (!topic.active or topic.fanout.count() == 0) continue;
+            if (now_ms -| topic.fanout_last_ms > constants.fanout_ttl_ms) {
+                topic.fanout = state_mod.PeerSet.initEmpty();
+            }
         }
     }
 
@@ -927,8 +973,15 @@ pub const Gossipsub = struct {
         const topic = self.state.findTopic(topic_str) orelse return;
         if (!self.state.subscribed(topic)) return; // unknown/unsubscribed topic: ignore
         if (self.state.backedOff(index, topic, now.mono_ms)) {
-            self.scores.penalize(index, 1); // GRAFT before the backoff expired
-            self.queuePrune(index, self.state.topicString(topic));
+            self.scores.penalize(index, 1);
+            if (self.state.backoffUntil(index, topic)) |until| {
+                const remaining = until -| now.mono_ms;
+                const flood_window =
+                    constants.prune_backoff_ms -| constants.graft_flood_threshold_ms;
+                if (remaining > flood_window) self.scores.penalize(index, 1);
+            }
+            const topic_str = self.state.topicString(topic);
+            self.queuePrune(index, topic_str, constants.prune_backoff_ms / 1000);
             return;
         }
         self.state.setSubscription(topic, index, true);
@@ -973,8 +1026,7 @@ pub const Gossipsub = struct {
         if (!self.io[index].append(writer.written())) self.counters.send_dropped += 1;
     }
 
-    fn queuePrune(self: *Gossipsub, index: u16, topic_str: []const u8) void {
-        const backoff_s = constants.prune_backoff_ms / 1000;
+    fn queuePrune(self: *Gossipsub, index: u16, topic_str: []const u8, backoff_s: u64) void {
         var buf: [control_frame_max]u8 = undefined;
         var writer = protobuf.Writer.init(&buf);
         writer.varint(protobuf.pruneRpcSize(topic_str, backoff_s));

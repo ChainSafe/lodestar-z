@@ -31,6 +31,9 @@ pub const fanout_ttl_ms: u64 = 60_000;
 pub const prune_backoff_ms: u64 = 60_000;
 pub const unsubscribe_backoff_ms: u64 = 10_000;
 pub const backoff_slack_heartbeats: u64 = 2;
+/// A GRAFT arriving within this long after we PRUNE a peer is graft flooding and
+/// draws a second behavioural penalty.
+pub const graft_flood_threshold_ms: u64 = 10_000;
 pub const iwant_followup_ms: u64 = 3_000;
 pub const opportunistic_graft_ms: u64 = 60_000;
 pub const opportunistic_graft_peers: u8 = 2;
