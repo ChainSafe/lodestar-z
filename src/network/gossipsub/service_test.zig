@@ -259,3 +259,77 @@ test "gossipsub service ignores stale outcomes after connection and peer slot re
     try std.testing.expectEqual(setup.pair.client.direction(handles.client).?, peer.direction.?);
     try std.testing.expectEqual(setup.pair.client.peerAddress(handles.client).?, peer.address.?);
 }
+
+test "gossipsub service detects an idle remote stop and retries without fabricated events" {
+    var setup: ServicePair = .{};
+    try setup.init();
+    defer setup.deinit();
+    var topic_buffer: [topic_mod.topic_max_len]u8 = undefined;
+    const topic = topic_mod.build(digest, "beacon_block", &topic_buffer);
+    try std.testing.expect(setup.server.subscribe(topic));
+    for (0..16) |_| try setup.pumpOnce();
+    const client_index = setup.client.inner.state.findPeer(setup.handles.client).?;
+    const server_index = setup.server.inner.state.findPeer(setup.handles.server).?;
+    const first = setup.client.inner.state.outStream(client_index).?;
+    const remote = setup.server.inner.state.peers[server_index].in_stream.?;
+    try std.testing.expectEqual(first.id, remote.id);
+    const io = &setup.client.inner.io[client_index];
+    try std.testing.expectEqual(io.send_head, io.send_tail);
+    setup.pair.server.closeStream(remote, 0);
+    for (0..4) |_| try setup.pumpOnce();
+    try std.testing.expect(setup.client.inner.state.outStream(client_index) == null);
+    setup.pair.advance(999);
+    for (0..4) |_| try setup.pumpOnce();
+    try std.testing.expect(setup.client.inner.state.outStream(client_index) == null);
+    setup.pair.advance(1);
+    for (0..16) |_| try setup.pumpOnce();
+    const replacement = setup.client.inner.state.outStream(client_index).?;
+    try std.testing.expect(!std.meta.eql(first, replacement));
+    try std.testing.expect(setup.client.subscribe(topic));
+    var received = false;
+    for (0..16) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| {
+            if (event == .subscription_change) {
+                try std.testing.expectEqualStrings(topic, event.subscription_change.topic);
+                received = true;
+            }
+        }
+    }
+    try std.testing.expect(received);
+}
+
+test "gossipsub service preserves a remotely half-closed outbound stream without idle work hints" {
+    var setup: ServicePair = .{};
+    try setup.init();
+    defer setup.deinit();
+    var topic_buffer: [topic_mod.topic_max_len]u8 = undefined;
+    const topic = topic_mod.build(digest, "beacon_block", &topic_buffer);
+    try std.testing.expect(setup.server.subscribe(topic));
+    for (0..16) |_| try setup.pumpOnce();
+    const client_index = setup.client.inner.state.findPeer(setup.handles.client).?;
+    const server_index = setup.server.inner.state.findPeer(setup.handles.server).?;
+    const stream = setup.client.inner.state.outStream(client_index).?;
+    const remote = setup.server.inner.state.peers[server_index].in_stream.?;
+    try std.testing.expectEqual(@as(usize, 0), try setup.pair.server.write(remote, "", true));
+    for (0..16) |_| try setup.pumpOnce();
+    setup.pair.advance(1_000);
+    for (0..16) |_| try setup.pumpOnce();
+    try std.testing.expectEqual(stream, setup.client.inner.state.outStream(client_index).?);
+    _ = setup.pair.client.driverView().takeHostWork();
+    var out: [16]Event = undefined;
+    for (0..8) |_| {
+        _ = setup.client.process(&setup.pair.client, &.{}, setup.pair.now, &out);
+        try std.testing.expect(!setup.pair.client.driverView().takeHostWork());
+    }
+    try std.testing.expect(setup.client.subscribe(topic));
+    var received = false;
+    for (0..16) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| {
+            if (event == .subscription_change) received = true;
+        }
+    }
+    try std.testing.expect(received);
+    try std.testing.expectEqual(stream, setup.client.inner.state.outStream(client_index).?);
+}

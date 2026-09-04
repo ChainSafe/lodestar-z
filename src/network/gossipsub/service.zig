@@ -228,7 +228,18 @@ pub const Service = struct {
             const peer = supervisor.peer orelse continue;
             if (!self.inner.state.peerMatches(peer.index, peer.generation)) continue;
             switch (supervisor.outbound) {
-                .live => if (self.inner.state.outStream(index) == null) self.retry(index, now),
+                .live => |stream| {
+                    if (self.inner.state.outStream(index) == null) {
+                        self.retry(index, now);
+                        continue;
+                    }
+                    // Observe idle STOP_SENDING without a write or a host-work hint.
+                    _ = engine.streamCapacity(stream) catch {
+                        self.inner.resetOutbound(engine, index);
+                        self.retry(index, now);
+                        continue;
+                    };
+                },
                 .waiting => |deadline| if (now.mono_ms >= deadline) {
                     self.openOutbound(router, engine, index, now);
                     openings += 1;
