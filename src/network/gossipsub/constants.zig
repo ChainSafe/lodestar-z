@@ -66,6 +66,10 @@ pub fn seenTtlMs(slots_per_epoch: u64, seconds_per_slot: u64) u64 {
 /// gossip peers are a subset of transport connections.
 pub const peers_cap: usize = 256;
 pub const topics_cap: usize = 256;
+/// Live PRUNE backoffs tracked at once across all (peer, topic) pairs. Sized
+/// well above peers_cap so churn cannot starve it; the soonest-expiring entry
+/// is evicted when full.
+pub const backoffs_cap: usize = 1024;
 /// Message ids a single peer may suppress at once through IDONTWANT.
 pub const dont_send_cap: usize = 128;
 
