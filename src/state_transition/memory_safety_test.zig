@@ -15,6 +15,8 @@ const processRewardsAndPenalties =
     @import("epoch/process_rewards_and_penalties.zig").processRewardsAndPenalties;
 const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
+const SyncCommitteeCache = @import("cache/sync_committee_cache.zig").SyncCommitteeCache;
+const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 
 test "upgradeStateToCapella and upgradeStateToDeneb should release temporary payload headers" {
     const allocator = std.testing.allocator;
@@ -143,4 +145,15 @@ test "processRewardsAndPenalties - sanity" {
         test_state.epoch_transition_cache,
         null,
     );
+}
+
+test "initValidatorIndices - cleans up cloned indices on init failure" {
+    const indices = [_]ValidatorIndex{ 0, 1, 2 };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        SyncCommitteeCache.initValidatorIndices(failing.allocator(), &indices),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
