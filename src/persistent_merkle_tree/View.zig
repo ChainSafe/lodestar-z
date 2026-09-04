@@ -256,3 +256,7 @@ pub const Id = enum(u32) {
         }
     }
 };
+
+test {
+    _ = @import("view_test.zig");
+}
