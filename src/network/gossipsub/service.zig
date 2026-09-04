@@ -117,6 +117,7 @@ pub const Service = struct {
                 return true;
             }
         }
+        if (!self.inner.receiveHandoff(index, ready.leftover, ready.fin)) return false;
         self.inner.setStreams(index, null, outcome.stream);
         return true;
     }

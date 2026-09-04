@@ -162,3 +162,42 @@ test "negotiator refuses to track more negotiations than its table holds" {
     try std.testing.expectEqual(@as(usize, 2), setup.dialer.active());
     try std.testing.expectError(error.InvalidLimits, Negotiator.init(std.testing.allocator, 0));
 }
+
+test "negotiator falls back on the same stream to meshsub v1.1" {
+    var setup: Setup = .{};
+    try setup.init(4);
+    defer setup.deinit();
+    const stream = try setup.dialer.beginOutboundCandidates(&setup.pair.client, setup.handles.client, &.{ "/meshsub/1.2.0", "/meshsub/1.1.0" }, setup.pair.now);
+    var accepted = false;
+    for (0..16) |_| {
+        var out: [4]Outcome = undefined;
+        const count = setup.dialer.pump(&setup.pair.client, setup.pair.now, &out);
+        for (out[0..count]) |result| {
+            try std.testing.expect(result.result == .ready);
+            try std.testing.expectEqual(stream, result.stream);
+            try std.testing.expectEqualStrings("/meshsub/1.1.0", result.result.ready.protocol_id);
+            accepted = true;
+        }
+        try setup.pair.pump();
+        var events: [8]engine_mod.Event = undefined;
+        for (setup.pair.events(&setup.pair.server, &events)) |event| {
+            if (event == .stream_opened) try setup.listener.acceptInbound(event.stream_opened, &.{"/meshsub/1.1.0"}, setup.pair.now);
+        }
+        _ = setup.listener.pump(&setup.pair.server, setup.pair.now, &out);
+        try setup.pair.pump();
+    }
+    try std.testing.expect(accepted);
+}
+
+test "negotiator expires with no outcome capacity and reports later" {
+    var setup: Setup = .{};
+    try setup.init(1);
+    defer setup.deinit();
+    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
+    setup.pair.advance(negotiate.negotiate_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 0), setup.dialer.pump(&setup.pair.client, setup.pair.now, &.{}));
+    try std.testing.expectEqual(@as(usize, 0), setup.dialer.active());
+    var out: [1]Outcome = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.dialer.pump(&setup.pair.client, setup.pair.now, &out));
+    try std.testing.expectEqual(negotiate.Failure.timeout, out[0].result.failed);
+}

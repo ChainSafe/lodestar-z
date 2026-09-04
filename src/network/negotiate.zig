@@ -21,18 +21,27 @@ pub const Error = error{ NegotiationTableFull, InvalidLimits } || multistream.Er
 
 pub const Failure = enum { timeout, malformed, stream_closed, transport, overflow, exhausted };
 
-pub const Ready = struct { protocol_index: u8, leftover: []const u8, fin: bool };
+pub const Ready = struct {
+    protocol_index: u8,
+    protocol_id: []const u8 = "",
+    leftover: []const u8,
+    fin: bool,
+};
 
 pub const Outcome = struct {
     stream: StreamHandle,
-    result: union(enum) {
+    direction: types.Direction = .inbound,
+    result: Result,
+
+    pub const Result = union(enum) {
         ready: Ready,
         rejected,
         failed: Failure,
-    },
+    };
 };
 
-const State = enum { free, negotiating, reported };
+const State = enum { free, negotiating, pending, reported };
+const candidates_max = @import("wire/constants.zig").multistream_proposals_max;
 
 const Role = union(enum) {
     dialer: multistream.Dialer,
@@ -45,6 +54,10 @@ const Entry = struct {
     started_ms: u64 = 0,
     role: Role = undefined,
     selected: ?u8 = null,
+    candidates: [candidates_max][]const u8 = undefined,
+    candidates_len: u8 = 0,
+    candidate: u8 = 0,
+    pending_result: Outcome.Result = undefined,
     fin_seen: bool = false,
     outbox: stream_io.Outbox = .{},
     out_buffer: [outbox_capacity]u8 = undefined,
@@ -86,9 +99,25 @@ pub const Negotiator = struct {
         protocol: []const u8,
         now: types.Now,
     ) Error!StreamHandle {
+        return self.beginOutboundCandidates(engine, conn, &.{protocol}, now);
+    }
+
+    /// Copies the bounded offer list; protocol strings must outlive negotiation.
+    pub fn beginOutboundCandidates(
+        self: *Negotiator,
+        engine: *Engine,
+        conn: Handle,
+        protocols: []const []const u8,
+        now: types.Now,
+    ) Error!StreamHandle {
+        if (protocols.len == 0 or protocols.len > candidates_max) return error.InvalidLimits;
+        for (protocols) |protocol| _ = try multistream.Dialer.init(protocol);
         const entry = self.claim() orelse return error.NegotiationTableFull;
         assert(entry.state == .free);
-        const dialer = try multistream.Dialer.init(protocol);
+        const dialer = try multistream.Dialer.init(protocols[0]);
+        @memcpy(entry.candidates[0..protocols.len], protocols);
+        entry.candidates_len = @intCast(protocols.len);
+        entry.candidate = 0;
         const hello = try dialer.initialWrite(&entry.out_buffer);
         const stream = try engine.openStream(conn);
         entry.stream = stream;
@@ -135,15 +164,39 @@ pub const Negotiator = struct {
                 entry.state = .free;
                 continue;
             }
-            if (entry.state != .negotiating) continue;
-            if (count == outcomes.len) break;
-            const outcome = self.advance(engine, entry, now) orelse continue;
-            outcomes[count] = outcome;
+            if (entry.state == .negotiating) {
+                if (self.advance(engine, entry, now)) |outcome| {
+                    entry.pending_result = outcome.result;
+                    entry.state = .pending;
+                }
+            }
+            if (entry.state != .pending or count == outcomes.len) continue;
+            outcomes[count] = .{
+                .stream = entry.stream,
+                .direction = direction(entry),
+                .result = entry.pending_result,
+            };
             count += 1;
             entry.state = .reported;
         }
         assert(count <= outcomes.len);
         return count;
+    }
+
+    pub fn connectionClosed(self: *Negotiator, engine: *Engine, conn: Handle) void {
+        for (self.entries) |*entry| {
+            if (entry.state != .negotiating or !std.meta.eql(entry.stream.conn, conn)) continue;
+            entry.pending_result = fail(engine, entry, .stream_closed).result;
+            entry.state = .pending;
+        }
+    }
+
+    pub fn streamClosed(self: *Negotiator, engine: *Engine, stream: StreamHandle) void {
+        for (self.entries) |*entry| {
+            if (entry.state != .negotiating or !std.meta.eql(entry.stream, stream)) continue;
+            entry.pending_result = fail(engine, entry, .stream_closed).result;
+            entry.state = .pending;
+        }
     }
 
     fn claim(self: *Negotiator) ?*Entry {
@@ -164,7 +217,7 @@ pub const Negotiator = struct {
         if (entry.inbox.free() == 0) return fail(engine, entry, .overflow);
         const read = entry.inbox.fill(engine, entry.stream) catch |err|
             return failStream(engine, entry, err);
-        if (read.len == 0 and !read.fin) return null;
+        if (entry.inbox.len == 0 and !read.fin) return null;
         if (read.fin) entry.fin_seen = true;
         switch (entry.role) {
             .dialer => |*dialer| {
@@ -172,8 +225,19 @@ pub const Negotiator = struct {
                     return fail(engine, entry, .malformed);
                 entry.inbox.drop(outcome.consumed);
                 switch (outcome.status) {
-                    .accepted => return ready(entry, 0),
+                    .accepted => return ready(entry, entry.candidate),
                     .rejected => {
+                        if (!entry.fin_seen and entry.candidate + 1 < entry.candidates_len) {
+                            entry.candidate += 1;
+                            dialer.* = .{
+                                .protocol = entry.candidates[entry.candidate],
+                                .header_seen = true,
+                            };
+                            const proposal = multistream.encodeMessage(dialer.protocol, &entry.out_buffer) catch
+                                return fail(engine, entry, .malformed);
+                            entry.outbox.queue(proposal, false);
+                            return null;
+                        }
                         engine.closeStream(entry.stream, types.app_error_negotiation_failed);
                         return .{ .stream = entry.stream, .result = .rejected };
                     },
@@ -203,10 +267,21 @@ pub const Negotiator = struct {
     }
 };
 
+fn direction(entry: *const Entry) types.Direction {
+    return switch (entry.role) {
+        .dialer => .outbound,
+        .listener => .inbound,
+    };
+}
+
 fn ready(entry: *const Entry, index: u8) Outcome {
     assert(entry.outbox.idle());
     return .{ .stream = entry.stream, .result = .{ .ready = .{
         .protocol_index = index,
+        .protocol_id = switch (entry.role) {
+            .dialer => |dialer| dialer.protocol,
+            .listener => |listener| listener.supported[index],
+        },
         .leftover = entry.inbox.slice(),
         .fin = entry.fin_seen,
     } } };
@@ -226,7 +301,7 @@ fn failStream(engine: *Engine, entry: *const Entry, err: StreamError) Outcome {
 }
 
 comptime {
-    assert(@sizeOf(Entry) <= 1_024);
+    assert(@sizeOf(Entry) <= 1_536);
     assert(negotiations_max_default <= negotiations_max_ceiling);
     assert(2 * multistream.message_length_max <= outbox_capacity);
 }

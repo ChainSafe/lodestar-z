@@ -102,3 +102,43 @@ test "gossipsub service composes the mesh and delivers a message" {
     try std.testing.expect(received);
     try std.testing.expectEqual(@as(u64, 1), setup.server.counters().messages_received);
 }
+
+test "gossipsub service preserves coalesced negotiation subscription and FIN" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    var server = try Service.init(std.testing.allocator, .{});
+    defer server.deinit();
+    const handles = try support.connectPair(&pair);
+    server.peerConnected(&pair.server, handles.server, pair.now);
+    var topic_buffer: [topic_mod.topic_max_len]u8 = undefined;
+    const topic = topic_mod.build(digest, "beacon_block", &topic_buffer);
+    try std.testing.expect(server.subscribe(topic));
+    const stream = try pair.client.openStream(handles.client);
+    const multistream = @import("../wire/multistream.zig");
+    const protobuf = @import("protobuf.zig");
+    const dialer = try multistream.Dialer.init("/meshsub/1.2.0");
+    var bytes: [512]u8 = undefined;
+    const hello = try dialer.initialWrite(&bytes);
+    var writer = protobuf.Writer.init(bytes[hello.len..]);
+    writer.varint(protobuf.subscriptionSize(topic));
+    protobuf.writeSubscription(&writer, true, topic);
+    const len = hello.len + writer.len;
+    try std.testing.expectEqual(len, try pair.client.write(stream, bytes[0..len], true));
+    var received = false;
+    for (0..16) |_| {
+        try pair.pump();
+        var storage: [16]engine_mod.Event = undefined;
+        var out: [16]Event = undefined;
+        const count = server.process(&pair.server, pair.events(&pair.server, &storage), pair.now, &out);
+        for (out[0..count]) |event| switch (event) {
+            .subscription_change => |change| {
+                try std.testing.expectEqualStrings(topic, change.topic);
+                try std.testing.expect(change.subscribed);
+                received = true;
+            },
+            else => {},
+        };
+    }
+    try std.testing.expect(received);
+}
