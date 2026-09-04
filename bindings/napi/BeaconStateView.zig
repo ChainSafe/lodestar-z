@@ -26,6 +26,7 @@ pub const js_meta = js.class(.{ .properties = .{
     .slot = js.prop(.{ .get = true, .set = false }),
     .fork = js.prop(.{ .get = true, .set = false }),
     .forkName = js.prop(.{ .get = true, .set = false }),
+    .forkSeq = js.prop(.{ .get = true, .set = false }),
     .epoch = js.prop(.{ .get = true, .set = false }),
     .genesisTime = js.prop(.{ .get = true, .set = false }),
     .genesisValidatorsRoot = js.prop(.{ .get = true, .set = false }),
@@ -154,6 +155,11 @@ pub fn fork(self: *const BeaconStateView) !js_types.Fork {
 pub fn forkName(self: *const BeaconStateView) !js.String {
     const cached_state = try self.requireState();
     return js.String.from(cached_state.state.forkSeq().name());
+}
+
+pub fn forkSeq(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    return js.Number.from(@intFromEnum(cached_state.state.forkSeq()));
 }
 
 pub fn epoch(self: *const BeaconStateView) !js.Number {
