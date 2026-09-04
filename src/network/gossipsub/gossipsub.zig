@@ -726,8 +726,8 @@ pub const Gossipsub = struct {
     ) usize {
         if (msg.signed) return start; // StrictNoSign violation
         if (msg.data.len > constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE)) return start;
-        const topic = self.state.internTopic(msg.topic) orelse return start;
-        if (!self.state.subscribed(topic)) return start; // not a topic we asked for
+        const topic = self.state.findTopic(msg.topic) orelse return start;
+        if (!self.state.subscribed(topic)) return start;
         const size = snappy.raw.uncompressedLength(msg.data) catch {
             _ = self.seen.add(topic_mod.invalidMessageId(msg.data), now.mono_ms);
             return start;
@@ -841,6 +841,7 @@ pub const Gossipsub = struct {
             self.queuePrune(index, self.state.topicString(topic));
             return;
         }
+        self.state.setSubscription(topic, index, true);
         self.state.mesh(topic).set(index);
         self.scores.graft(index, topic, now.mono_ms);
     }
@@ -850,10 +851,10 @@ pub const Gossipsub = struct {
         self.state.mesh(topic).unset(index);
         self.scores.prune(index, topic, now.mono_ms);
         const backoff_ms = if (prune.backoff > 0)
-            prune.backoff * 1000
+            prune.backoff *| 1000
         else
             constants.prune_backoff_ms;
-        self.state.addBackoff(index, topic, now.mono_ms + backoff_ms);
+        self.state.addBackoff(index, topic, now.mono_ms +| backoff_ms);
     }
 
     fn onSubscription(
@@ -863,7 +864,7 @@ pub const Gossipsub = struct {
         events: []Event,
         start: usize,
     ) usize {
-        const topic = self.state.internTopic(sub.topic) orelse return start;
+        const topic = self.state.findTopic(sub.topic) orelse return start;
         self.state.setSubscription(topic, index, sub.subscribe);
         if (start >= events.len) return start;
         events[start] = .{ .subscription_change = .{

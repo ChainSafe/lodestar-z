@@ -53,7 +53,6 @@ pub fn ethereum() Params {
 
 const TopicCounters = struct {
     in_mesh: bool = false,
-    mesh_time_ms: u64 = 0,
     graft_ms: u64 = 0,
     first_deliveries: f64 = 0,
     mesh_deliveries: f64 = 0,
@@ -117,11 +116,13 @@ pub const PeerScore = struct {
     pub fn prune(self: *PeerScore, peer: u16, topic: u16, now_ms: u64) void {
         const counters = self.tc(peer, topic);
         if (!counters.in_mesh) return;
-        counters.mesh_time_ms += now_ms -| counters.graft_ms;
-        // sticky failure penalty for a mesh peer that under-delivered
         const params = self.params.topic;
-        if (counters.mesh_deliveries < params.mesh_delivery_threshold) {
-            counters.mesh_failures += params.mesh_delivery_threshold - counters.mesh_deliveries;
+        const elapsed = now_ms -| counters.graft_ms;
+        if (elapsed >= params.mesh_delivery_activation_ms and
+            counters.mesh_deliveries < params.mesh_delivery_threshold)
+        {
+            const deficit = params.mesh_delivery_threshold - counters.mesh_deliveries;
+            counters.mesh_failures += deficit * deficit;
         }
         counters.in_mesh = false;
     }
@@ -161,10 +162,7 @@ pub const PeerScore = struct {
             if (!counters.in_mesh and counters.first_deliveries == 0 and
                 counters.mesh_failures == 0 and counters.invalid == 0) continue;
             var topic_score: f64 = 0;
-            const elapsed = counters.mesh_time_ms + if (counters.in_mesh)
-                (now_ms -| counters.graft_ms)
-            else
-                0;
+            const elapsed: u64 = if (counters.in_mesh) now_ms -| counters.graft_ms else 0;
             if (counters.in_mesh) {
                 const p1 = @min(
                     @as(f64, @floatFromInt(elapsed / params.time_in_mesh_quantum_ms)),
@@ -182,11 +180,10 @@ pub const PeerScore = struct {
             }
             topic_score += params.mesh_failure_weight * counters.mesh_failures;
             topic_score += params.invalid_weight * counters.invalid * counters.invalid;
-            var weighted = params.weight * topic_score;
-            if (self.params.topic_cap > 0 and weighted > self.params.topic_cap) {
-                weighted = self.params.topic_cap;
-            }
-            total += weighted;
+            total += params.weight * topic_score;
+        }
+        if (self.params.topic_cap > 0 and total > self.params.topic_cap) {
+            total = self.params.topic_cap;
         }
         total += self.params.app_weight * self.app_score[peer];
         if (self.behaviour[peer] > self.params.behaviour_threshold) {
@@ -196,14 +193,24 @@ pub const PeerScore = struct {
         return total;
     }
 
-    /// Applies decay once per `decay_interval_ms`.
     pub fn refresh(self: *PeerScore, now_ms: u64) void {
         if (self.last_decay_ms == 0) {
             self.last_decay_ms = now_ms;
             return;
         }
-        if (now_ms -| self.last_decay_ms < self.params.decay_interval_ms) return;
-        self.last_decay_ms = now_ms;
+        var steps: u32 = 0;
+        while (now_ms -| self.last_decay_ms >= self.params.decay_interval_ms and
+            steps < max_decay_steps) : (steps += 1)
+        {
+            self.last_decay_ms += self.params.decay_interval_ms;
+            self.applyDecay();
+        }
+        if (now_ms -| self.last_decay_ms >= self.params.decay_interval_ms) {
+            self.last_decay_ms = now_ms;
+        }
+    }
+
+    fn applyDecay(self: *PeerScore) void {
         const zero = self.params.decay_to_zero;
         const tp = self.params.topic;
         for (self.topics) |*c| {
@@ -217,6 +224,8 @@ pub const PeerScore = struct {
         }
     }
 };
+
+const max_decay_steps: u32 = 64;
 
 fn decayed(value: f64, decay: f64, zero: f64) f64 {
     const next = value * decay;
