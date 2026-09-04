@@ -5,6 +5,7 @@ const protobuf = @import("protobuf.zig");
 const topic_mod = @import("topic.zig");
 const frame_mod = @import("frame.zig");
 const mcache_mod = @import("mcache.zig");
+const score_mod = @import("score.zig");
 const state_mod = @import("state.zig");
 const engine_mod = @import("../quic/engine.zig");
 const types = @import("../types.zig");
@@ -27,6 +28,8 @@ pub const Options = struct {
     /// the next pump. Full means new messages wait, applying backpressure.
     decompressed_arena_bytes: usize = 4 * 1024 * 1024,
     seen_ttl_ms: u64 = constants.seenTtlMs(32, 12),
+    score_params: score_mod.Params = .{},
+    opportunistic_graft_interval_ms: u64 = constants.opportunistic_graft_ms,
 };
 
 pub const InitError = Allocator.Error;
@@ -103,11 +106,14 @@ pub const Gossipsub = struct {
     allocator: Allocator,
     options: Options,
     state: *State,
+    scores: score_mod.PeerScore,
     seen: mcache_mod.SeenCache,
     mcache: mcache_mod.MessageCache,
     io: []PeerIo,
     io_arena: []u8,
     heartbeat_at: u64 = 0,
+    opportunistic_at: u64 = 0,
+    last_now_ms: u64 = 0,
     scratch: []u8,
     msg_scratch: []u8,
     decompressed: []u8,
@@ -133,6 +139,9 @@ pub const Gossipsub = struct {
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);
         state.* = .{};
+
+        var scores = try score_mod.PeerScore.init(allocator, options.score_params);
+        errdefer scores.deinit(allocator);
 
         var seen = try mcache_mod.SeenCache.init(
             allocator,
@@ -172,6 +181,7 @@ pub const Gossipsub = struct {
             .allocator = allocator,
             .options = options,
             .state = state,
+            .scores = scores,
             .seen = seen,
             .mcache = mcache,
             .io = io,
@@ -192,6 +202,7 @@ pub const Gossipsub = struct {
         self.allocator.free(self.io_arena);
         self.mcache.deinit(self.allocator);
         self.seen.deinit(self.allocator);
+        self.scores.deinit(self.allocator);
         self.allocator.destroy(self.state);
         self.* = undefined;
     }
@@ -229,6 +240,7 @@ pub const Gossipsub = struct {
 
     pub fn addPeer(self: *Gossipsub, conn: Handle, version: Version) ?state_mod.PeerHandle {
         const handle = self.state.addPeer(conn, version) orelse return null;
+        self.scores.resetPeer(handle.index);
         self.io[handle.index].reset();
         self.sendSubscriptions(handle.index);
         return handle;
@@ -281,7 +293,14 @@ pub const Gossipsub = struct {
     /// (minus the source and any peer that sent IDONTWANT); reject and ignore
     /// drop it, leaving it unvalidated so it is never gossiped.
     pub fn report(self: *Gossipsub, handle: MessageId, verdict: Verdict) void {
-        if (verdict != .accept) return;
+        if (verdict == .reject) {
+            const source = self.mcache.sourceOf(handle) orelse return;
+            const topic_str = self.mcache.topicOf(handle) orelse return;
+            const topic = self.state.findTopic(topic_str) orelse return;
+            self.scores.invalid(source, topic);
+            return;
+        }
+        if (verdict == .ignore) return;
         self.mcache.validate(handle);
         const source = self.mcache.sourceOf(handle);
         const cached = self.mcache.get(handle, self.msg_scratch) orelse return;
@@ -299,11 +318,13 @@ pub const Gossipsub = struct {
         data: []const u8,
         source: ?u16,
     ) void {
+        const publish_threshold = self.options.score_params.publish_threshold;
         var it = peers.iterator(.{});
         while (it.next()) |peer| {
             const index: u16 = @intCast(peer);
             if (source != null and index == source.?) continue;
             if (self.state.suppresses(index, id)) continue;
+            if (self.scores.score(index, self.last_now_ms) < publish_threshold) continue;
             if (!self.io[index].appendMessage(topic_str, data)) self.counters.send_dropped += 1;
         }
     }
@@ -328,6 +349,7 @@ pub const Gossipsub = struct {
 
     pub fn pump(self: *Gossipsub, engine: *Engine, now: Now, events: []Event) usize {
         self.decompressed_used = 0;
+        self.last_now_ms = now.mono_ms;
         var count: usize = 0;
         for (self.io, 0..) |*peer_io, index| {
             if (!self.state.peers[index].active) continue;
@@ -346,15 +368,52 @@ pub const Gossipsub = struct {
     }
 
     fn heartbeat(self: *Gossipsub, now: Now) void {
+        self.scores.refresh(now.mono_ms);
         self.state.pruneBackoffs(now.mono_ms);
         for (&self.state.topics, 0..) |*topic, index| {
             if (topic.active and topic.subscribed) self.maintainTopic(@intCast(index), now);
+        }
+        if (self.opportunistic_at == 0) {
+            self.opportunistic_at = now.mono_ms + self.options.opportunistic_graft_interval_ms;
+        } else if (now.mono_ms >= self.opportunistic_at) {
+            self.opportunistic_at = now.mono_ms + self.options.opportunistic_graft_interval_ms;
+            for (&self.state.topics, 0..) |*topic, index| {
+                if (topic.active and topic.subscribed) {
+                    self.opportunisticGraft(@intCast(index), now);
+                }
+            }
         }
         for (&self.state.topics, 0..) |*topic, index| {
             if (topic.active and topic.subscribed) self.emitGossip(@intCast(index));
         }
         self.mcache.shift();
         self.expirePromises(now.mono_ms);
+    }
+
+    /// When the mesh median score falls below the threshold, graft a couple of
+    /// above-median peers to recover from an underperforming or captured mesh.
+    fn opportunisticGraft(self: *Gossipsub, topic: u16, now: Now) void {
+        const mesh = self.state.mesh(topic);
+        if (mesh.count() < constants.mesh_d) return;
+        var members: [constants.peers_cap]Member = undefined;
+        const count = self.meshMembers(topic, now, &members);
+        std.sort.pdq(Member, members[0..count], {}, memberLess);
+        const median = members[count / 2].sc;
+        if (median >= self.options.score_params.opportunistic_graft_threshold) return;
+        const topic_str = self.state.topicString(topic);
+        var added: u8 = 0;
+        var it = self.state.subscribers(topic).iterator(.{});
+        while (it.next()) |peer| {
+            if (added == constants.opportunistic_graft_peers) break;
+            const index: u16 = @intCast(peer);
+            if (mesh.isSet(peer)) continue;
+            if (self.state.backedOff(index, topic, now.mono_ms)) continue;
+            if (self.scores.score(index, now.mono_ms) <= median) continue;
+            mesh.set(peer);
+            self.scores.graft(index, topic, now.mono_ms);
+            self.queueGraft(index, topic_str);
+            added += 1;
+        }
     }
 
     fn emitGossip(self: *Gossipsub, topic: u16) void {
@@ -368,11 +427,13 @@ pub const Gossipsub = struct {
         for (ids[0..n]) |id| protobuf.writeIhaveId(&writer, &id);
         const rpc = writer.written();
         const mesh = self.state.mesh(topic);
+        const gossip_threshold = self.options.score_params.gossip_threshold;
         var need: usize = constants.mesh_d_lazy;
         var it = self.state.subscribers(topic).iterator(.{});
         while (it.next()) |peer| {
             if (need == 0) break;
             if (mesh.isSet(peer)) continue;
+            if (self.scores.score(@intCast(peer), self.last_now_ms) < gossip_threshold) continue;
             if (self.io[peer].append(rpc)) need -= 1 else self.counters.send_dropped += 1;
         }
     }
@@ -398,43 +459,80 @@ pub const Gossipsub = struct {
         while (index < self.promise_len) {
             if (now_ms >= self.promises[index].expiry) {
                 self.counters.broken_promises += 1;
+                self.scores.penalize(self.promises[index].peer, 1); // P7 behavioural
                 self.promises[index] = self.promises[self.promise_len - 1];
                 self.promise_len -= 1;
             } else index += 1;
         }
     }
 
+    const Member = struct { peer: u16, sc: f64 };
+
     fn maintainTopic(self: *Gossipsub, topic: u16, now: Now) void {
         const topic_str = self.state.topicString(topic);
         const mesh = self.state.mesh(topic);
-        const count = mesh.count();
-        if (count < constants.mesh_d_low) {
-            var need = constants.mesh_d - count;
+
+        // Prune mesh peers whose score went negative.
+        var members: [constants.peers_cap]Member = undefined;
+        var count = self.meshMembers(topic, now, &members);
+        for (members[0..count]) |member| {
+            if (member.sc < 0) self.pruneMember(topic, topic_str, member.peer, now);
+        }
+
+        const size = mesh.count();
+        if (size < constants.mesh_d_low) {
+            var need = constants.mesh_d - size;
             var it = self.state.subscribers(topic).iterator(.{});
             while (it.next()) |peer| {
                 if (need == 0) break;
+                const index: u16 = @intCast(peer);
                 if (mesh.isSet(peer)) continue;
-                if (self.state.backedOff(@intCast(peer), topic, now.mono_ms)) continue;
+                if (self.state.backedOff(index, topic, now.mono_ms)) continue;
+                if (self.scores.score(index, now.mono_ms) < 0) continue;
                 mesh.set(peer);
-                self.queueGraft(@intCast(peer), topic_str);
+                self.scores.graft(index, topic, now.mono_ms);
+                self.queueGraft(index, topic_str);
                 need -= 1;
             }
-        } else if (count > constants.mesh_d_high) {
-            const excess = count - constants.mesh_d;
-            var victims: [constants.peers_cap]u16 = undefined;
-            var found: usize = 0;
-            var it = mesh.iterator(.{});
-            while (it.next()) |peer| {
-                if (found == excess) break;
-                victims[found] = @intCast(peer);
-                found += 1;
-            }
-            for (victims[0..found]) |peer| {
-                mesh.unset(peer);
-                self.state.addBackoff(peer, topic, now.mono_ms + constants.prune_backoff_ms);
-                self.queuePrune(peer, topic_str);
+        } else if (size > constants.mesh_d_high) {
+            count = self.meshMembers(topic, now, &members);
+            std.sort.pdq(Member, members[0..count], {}, memberLess);
+            const keep = constants.mesh_d;
+            for (members[0 .. count - keep]) |member| {
+                self.pruneMember(topic, topic_str, member.peer, now);
             }
         }
+    }
+
+    fn meshMembers(self: *Gossipsub, topic: u16, now: Now, out: []Member) usize {
+        var count: usize = 0;
+        var it = self.state.mesh(topic).iterator(.{});
+        while (it.next()) |peer| {
+            const index: u16 = @intCast(peer);
+            out[count] = .{ .peer = index, .sc = self.scores.score(index, now.mono_ms) };
+            count += 1;
+        }
+        return count;
+    }
+
+    fn pruneMember(self: *Gossipsub, topic: u16, topic_str: []const u8, peer: u16, now: Now) void {
+        self.state.mesh(topic).unset(peer);
+        self.scores.prune(peer, topic, now.mono_ms);
+        self.state.addBackoff(peer, topic, now.mono_ms + constants.prune_backoff_ms);
+        self.queuePrune(peer, topic_str);
+    }
+
+    fn memberLess(_: void, a: Member, b: Member) bool {
+        return a.sc < b.sc;
+    }
+
+    fn belowGossip(self: *Gossipsub, index: u16, now_ms: u64) bool {
+        return self.scores.score(index, now_ms) < self.options.score_params.gossip_threshold;
+    }
+
+    /// The host's application-specific P5 term for a peer, from its own signals.
+    pub fn setPeerScore(self: *Gossipsub, conn: Handle, value: f64) void {
+        if (self.state.findPeer(conn)) |index| self.scores.setAppScore(index, value);
     }
 
     fn readPeer(
@@ -478,6 +576,10 @@ pub const Gossipsub = struct {
     ) usize {
         var count = start;
         self.counters.rpcs_received += 1;
+        // graylist: drop RPCs from peers whose score is too low to trust
+        if (self.scores.score(index, now.mono_ms) < self.options.score_params.graylist_threshold) {
+            return count;
+        }
         var reader = protobuf.RpcReader.init(rpc);
         while (reader.next() catch {
             self.counters.malformed_rpcs += 1;
@@ -526,10 +628,12 @@ pub const Gossipsub = struct {
         const id = topic_mod.validMessageId(payload);
         if (!self.seen.add(id, now.mono_ms)) {
             self.counters.duplicates += 1;
+            self.scores.duplicate(index, topic);
             return start;
         }
         self.decompressed_used += written;
         self.counters.messages_received += 1;
+        self.scores.deliver(index, topic);
         self.resolvePromises(id);
         _ = self.mcache.put(id, self.state.topicString(topic), msg.data, index);
         if (written >= constants.idontwant_size_threshold) {
@@ -546,6 +650,7 @@ pub const Gossipsub = struct {
     }
 
     fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
+        if (self.belowGossip(index, now.mono_ms)) return;
         var wanted: [constants.gossip_ids_max]MessageId = undefined;
         var count: usize = 0;
         var it = ihave.ids();
@@ -569,6 +674,7 @@ pub const Gossipsub = struct {
     }
 
     fn onIwant(self: *Gossipsub, index: u16, iwant: protobuf.IdList) void {
+        if (self.belowGossip(index, self.last_now_ms)) return;
         var served: u8 = 0;
         var it = iwant.ids();
         while (it.next() catch return) |id_bytes| {
@@ -613,15 +719,18 @@ pub const Gossipsub = struct {
         const topic = self.state.findTopic(topic_str) orelse return;
         if (!self.state.subscribed(topic)) return; // unknown/unsubscribed topic: ignore
         if (self.state.backedOff(index, topic, now.mono_ms)) {
+            self.scores.penalize(index, 1); // GRAFT before the backoff expired
             self.queuePrune(index, self.state.topicString(topic));
             return;
         }
         self.state.mesh(topic).set(index);
+        self.scores.graft(index, topic, now.mono_ms);
     }
 
     fn onPrune(self: *Gossipsub, index: u16, prune: protobuf.Prune, now: Now) void {
         const topic = self.state.findTopic(prune.topic) orelse return;
         self.state.mesh(topic).unset(index);
+        self.scores.prune(index, topic, now.mono_ms);
         const backoff_ms = if (prune.backoff > 0)
             prune.backoff * 1000
         else

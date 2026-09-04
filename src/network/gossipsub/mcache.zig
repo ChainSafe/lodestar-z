@@ -1,9 +1,11 @@
 const std = @import("std");
 const constants = @import("constants.zig");
+const topic_mod = @import("topic.zig");
 
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const MessageId = [constants.message_id_length]u8;
+const topic_max = topic_mod.topic_max_len;
 
 const empty_slot: u32 = std.math.maxInt(u32);
 
@@ -144,7 +146,7 @@ pub const Cached = struct {
 pub const MessageCache = struct {
     index: Index,
     ids: []MessageId,
-    topic: []MessageId,
+    topic: []u8,
     topic_len: []u8,
     data_off: []usize,
     data_len: []usize,
@@ -167,7 +169,7 @@ pub const MessageCache = struct {
         assert(capacity > 0);
         const ids = try allocator.alloc(MessageId, capacity);
         errdefer allocator.free(ids);
-        const topic = try allocator.alloc(MessageId, capacity);
+        const topic = try allocator.alloc(u8, capacity * topic_max);
         errdefer allocator.free(topic);
         const topic_len = try allocator.alloc(u8, capacity);
         errdefer allocator.free(topic_len);
@@ -228,7 +230,7 @@ pub const MessageCache = struct {
         data: []const u8,
         source: u16,
     ) bool {
-        if (data.len > self.arena.len or topic_str.len > constants.message_id_length) return false;
+        if (data.len > self.arena.len or topic_str.len > topic_max) return false;
         if (self.contains(id)) return true;
         while (self.count == self.capacity or self.arena.len - self.data_used < data.len) {
             if (self.count == 0) return false;
@@ -236,7 +238,7 @@ pub const MessageCache = struct {
         }
         const slot = self.entry_head;
         self.ids[slot] = id;
-        @memcpy(self.topic[slot][0..topic_str.len], topic_str);
+        @memcpy(self.topic[slot * topic_max ..][0..topic_str.len], topic_str);
         self.topic_len[slot] = @intCast(topic_str.len);
         self.data_off[slot] = self.data_head;
         self.data_len[slot] = data.len;
@@ -258,7 +260,8 @@ pub const MessageCache = struct {
         const len = self.data_len[slot];
         if (len > out.len) return null;
         readRing(self.arena, self.data_off[slot], out[0..len]);
-        return .{ .topic = self.topic[slot][0..self.topic_len[slot]], .data = out[0..len] };
+        const topic_str = self.topic[slot * topic_max ..][0..self.topic_len[slot]];
+        return .{ .topic = topic_str, .data = out[0..len] };
     }
 
     /// Marks a message validated so gossip and IWANT may offer it.
@@ -269,6 +272,12 @@ pub const MessageCache = struct {
     pub fn isValidated(self: *const MessageCache, id: MessageId) bool {
         const slot = self.index.find(id) orelse return false;
         return self.validated[slot];
+    }
+
+    /// The topic of a cached message without copying its data.
+    pub fn topicOf(self: *const MessageCache, id: MessageId) ?[]const u8 {
+        const slot = self.index.find(id) orelse return null;
+        return self.topic[slot * topic_max ..][0..self.topic_len[slot]];
     }
 
     /// The peer a cached message arrived from, or null when self-published.
@@ -298,8 +307,9 @@ pub const MessageCache = struct {
         var seen: usize = 0;
         var slot = self.entry_tail;
         while (seen < self.count and written < out.len) : (seen += 1) {
+            const name = self.topic[slot * topic_max ..][0..self.topic_len[slot]];
             if (self.validated[slot] and self.window[slot] < constants.mcache_gossip and
-                std.mem.eql(u8, self.topic[slot][0..self.topic_len[slot]], topic_str))
+                std.mem.eql(u8, name, topic_str))
             {
                 out[written] = self.ids[slot];
                 written += 1;
