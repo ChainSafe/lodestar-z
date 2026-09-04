@@ -111,6 +111,7 @@ pub const Gossipsub = struct {
     mcache: mcache_mod.MessageCache,
     io: []PeerIo,
     io_arena: []u8,
+    direct: state_mod.PeerSet = state_mod.PeerSet.initEmpty(),
     heartbeat_at: u64 = 0,
     opportunistic_at: u64 = 0,
     last_now_ms: u64 = 0,
@@ -252,6 +253,7 @@ pub const Gossipsub = struct {
 
     pub fn connectionClosed(self: *Gossipsub, conn: Handle) void {
         const index = self.state.findPeer(conn) orelse return;
+        self.direct.unset(index);
         self.state.removePeer(index);
     }
 
@@ -324,7 +326,8 @@ pub const Gossipsub = struct {
             const index: u16 = @intCast(peer);
             if (source != null and index == source.?) continue;
             if (self.state.suppresses(index, id)) continue;
-            if (self.scores.score(index, self.last_now_ms) < publish_threshold) continue;
+            if (!self.direct.isSet(index) and
+                self.scores.score(index, self.last_now_ms) < publish_threshold) continue;
             if (!self.io[index].appendMessage(topic_str, data)) self.counters.send_dropped += 1;
         }
     }
@@ -472,6 +475,16 @@ pub const Gossipsub = struct {
         const topic_str = self.state.topicString(topic);
         const mesh = self.state.mesh(topic);
 
+        // Direct peers are always in a shared mesh.
+        var direct_it = self.direct.iterator(.{});
+        while (direct_it.next()) |peer| {
+            if (self.state.subscribers(topic).isSet(peer) and !mesh.isSet(peer)) {
+                mesh.set(peer);
+                self.scores.graft(@intCast(peer), topic, now.mono_ms);
+                self.queueGraft(@intCast(peer), topic_str);
+            }
+        }
+
         // Prune mesh peers whose score went negative.
         var members: [constants.peers_cap]Member = undefined;
         var count = self.meshMembers(topic, now, &members);
@@ -516,6 +529,7 @@ pub const Gossipsub = struct {
     }
 
     fn pruneMember(self: *Gossipsub, topic: u16, topic_str: []const u8, peer: u16, now: Now) void {
+        if (self.direct.isSet(peer)) return;
         self.state.mesh(topic).unset(peer);
         self.scores.prune(peer, topic, now.mono_ms);
         self.state.addBackoff(peer, topic, now.mono_ms + constants.prune_backoff_ms);
@@ -533,6 +547,12 @@ pub const Gossipsub = struct {
     /// The host's application-specific P5 term for a peer, from its own signals.
     pub fn setPeerScore(self: *Gossipsub, conn: Handle, value: f64) void {
         if (self.state.findPeer(conn)) |index| self.scores.setAppScore(index, value);
+    }
+
+    /// Marks a peer as direct (a configured trusted peer): kept in every shared
+    /// mesh, never pruned or graylisted, exempt from the score gates.
+    pub fn markDirect(self: *Gossipsub, conn: Handle) void {
+        if (self.state.findPeer(conn)) |index| self.direct.set(index);
     }
 
     fn readPeer(
@@ -576,23 +596,41 @@ pub const Gossipsub = struct {
     ) usize {
         var count = start;
         self.counters.rpcs_received += 1;
-        // graylist: drop RPCs from peers whose score is too low to trust
-        if (self.scores.score(index, now.mono_ms) < self.options.score_params.graylist_threshold) {
-            return count;
-        }
+        // graylist: drop RPCs from a peer whose score is too low to trust
+        const graylisted = !self.direct.isSet(index) and
+            self.scores.score(index, now.mono_ms) < self.options.score_params.graylist_threshold;
+        if (graylisted) return count;
+        var subs: usize = 0;
+        var msgs: usize = 0;
+        var control: usize = 0;
         var reader = protobuf.RpcReader.init(rpc);
         while (reader.next() catch {
             self.counters.malformed_rpcs += 1;
             return count;
         }) |item| {
             switch (item) {
-                .subscription => |sub| count = self.onSubscription(index, sub, events, count),
-                .message => |msg| count = self.onMessage(index, msg, now, events, count),
-                .ihave => |ihave| self.onIhave(index, ihave, now),
-                .iwant => |iwant| self.onIwant(index, iwant),
-                .graft => |topic_str| self.onGraft(index, topic_str, now),
-                .prune => |prune| self.onPrune(index, prune, now),
-                .idontwant => |idontwant| self.onIdontwant(index, idontwant),
+                .subscription => |sub| {
+                    if (subs >= constants.max_subscriptions_per_rpc) continue;
+                    subs += 1;
+                    count = self.onSubscription(index, sub, events, count);
+                },
+                .message => |msg| {
+                    if (msgs >= constants.max_publish_per_rpc) continue;
+                    msgs += 1;
+                    count = self.onMessage(index, msg, now, events, count);
+                },
+                else => {
+                    if (control >= constants.max_control_per_rpc) continue;
+                    control += 1;
+                    switch (item) {
+                        .ihave => |ihave| self.onIhave(index, ihave, now),
+                        .iwant => |iwant| self.onIwant(index, iwant),
+                        .graft => |topic_str| self.onGraft(index, topic_str, now),
+                        .prune => |prune| self.onPrune(index, prune, now),
+                        .idontwant => |idontwant| self.onIdontwant(index, idontwant),
+                        else => unreachable,
+                    }
+                },
             }
         }
         return count;
