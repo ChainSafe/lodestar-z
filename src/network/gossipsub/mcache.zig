@@ -149,6 +149,8 @@ pub const MessageCache = struct {
     data_off: []usize,
     data_len: []usize,
     window: []u8,
+    validated: []bool,
+    source: []u16,
     arena: []u8,
     capacity: usize,
     entry_head: usize = 0,
@@ -175,6 +177,10 @@ pub const MessageCache = struct {
         errdefer allocator.free(data_len);
         const window = try allocator.alloc(u8, capacity);
         errdefer allocator.free(window);
+        const validated = try allocator.alloc(bool, capacity);
+        errdefer allocator.free(validated);
+        const source = try allocator.alloc(u16, capacity);
+        errdefer allocator.free(source);
         const arena = try allocator.alloc(u8, arena_bytes);
         errdefer allocator.free(arena);
         var index = try Index.init(allocator, capacity, ids);
@@ -187,6 +193,8 @@ pub const MessageCache = struct {
             .data_off = data_off,
             .data_len = data_len,
             .window = window,
+            .validated = validated,
+            .source = source,
             .arena = arena,
             .capacity = capacity,
         };
@@ -195,6 +203,8 @@ pub const MessageCache = struct {
     pub fn deinit(self: *MessageCache, allocator: Allocator) void {
         self.index.deinit(allocator);
         allocator.free(self.arena);
+        allocator.free(self.source);
+        allocator.free(self.validated);
         allocator.free(self.window);
         allocator.free(self.data_len);
         allocator.free(self.data_off);
@@ -208,9 +218,16 @@ pub const MessageCache = struct {
         return self.index.find(id) != null;
     }
 
-    /// Stores a message in the current window. Returns false when the data does
-    /// not fit the arena even after evicting everything, leaving the cache clean.
-    pub fn put(self: *MessageCache, id: MessageId, topic_str: []const u8, data: []const u8) bool {
+    /// Stores a message in the current window, marked unvalidated and owned by
+    /// `source`. Returns false when the data does not fit the arena even after
+    /// evicting everything, leaving the cache clean.
+    pub fn put(
+        self: *MessageCache,
+        id: MessageId,
+        topic_str: []const u8,
+        data: []const u8,
+        source: u16,
+    ) bool {
         if (data.len > self.arena.len or topic_str.len > constants.message_id_length) return false;
         if (self.contains(id)) return true;
         while (self.count == self.capacity or self.arena.len - self.data_used < data.len) {
@@ -224,6 +241,8 @@ pub const MessageCache = struct {
         self.data_off[slot] = self.data_head;
         self.data_len[slot] = data.len;
         self.window[slot] = 0;
+        self.validated[slot] = false;
+        self.source[slot] = source;
         writeRing(self.arena, self.data_head, data);
         self.data_head = (self.data_head + data.len) % self.arena.len;
         self.data_used += data.len;
@@ -240,6 +259,18 @@ pub const MessageCache = struct {
         if (len > out.len) return null;
         readRing(self.arena, self.data_off[slot], out[0..len]);
         return .{ .topic = self.topic[slot][0..self.topic_len[slot]], .data = out[0..len] };
+    }
+
+    /// Marks a message validated so gossip and IWANT may offer it.
+    pub fn validate(self: *MessageCache, id: MessageId) void {
+        if (self.index.find(id)) |slot| self.validated[slot] = true;
+    }
+
+    /// The peer a cached message arrived from, or null when self-published.
+    pub fn sourceOf(self: *const MessageCache, id: MessageId) ?u16 {
+        const slot = self.index.find(id) orelse return null;
+        const value = self.source[slot];
+        return if (value == std.math.maxInt(u16)) null else value;
     }
 
     /// Advances every entry one heartbeat window and drops those that aged out.
@@ -262,7 +293,7 @@ pub const MessageCache = struct {
         var seen: usize = 0;
         var slot = self.entry_tail;
         while (seen < self.count and written < out.len) : (seen += 1) {
-            if (self.window[slot] < constants.mcache_gossip and
+            if (self.validated[slot] and self.window[slot] < constants.mcache_gossip and
                 std.mem.eql(u8, self.topic[slot][0..self.topic_len[slot]], topic_str))
             {
                 out[written] = self.ids[slot];
@@ -319,13 +350,16 @@ test "message cache stores, answers get, gossips windows, and ages out" {
     var cache = try MessageCache.init(std.testing.allocator, 8, 1024);
     defer cache.deinit(std.testing.allocator);
     const id1 = [_]u8{1} ** 20;
-    try std.testing.expect(cache.put(id1, "topic_a", "hello world"));
+    try std.testing.expect(cache.put(id1, "topic_a", "hello world", 0));
     var out: [64]u8 = undefined;
     const got = cache.get(id1, &out).?;
     try std.testing.expectEqualStrings("topic_a", got.topic);
     try std.testing.expectEqualStrings("hello world", got.data);
 
     var gossip_ids: [8]MessageId = undefined;
+    // unvalidated messages are not gossiped
+    try std.testing.expectEqual(@as(usize, 0), cache.gossip("topic_a", &gossip_ids));
+    cache.validate(id1);
     try std.testing.expectEqual(@as(usize, 1), cache.gossip("topic_a", &gossip_ids));
     try std.testing.expectEqual(@as(usize, 0), cache.gossip("topic_b", &gossip_ids));
 
@@ -347,7 +381,7 @@ test "message cache evicts oldest and wraps data around the arena" {
     var n: u8 = 0;
     while (n < 6) : (n += 1) {
         const id = [_]u8{n} ** 20;
-        try std.testing.expect(cache.put(id, "t", "0123456789"));
+        try std.testing.expect(cache.put(id, "t", "0123456789", 0));
     }
     // only the most recent messages survive the ring
     const last = cache.get([_]u8{5} ** 20, &out).?;

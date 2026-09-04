@@ -177,4 +177,42 @@ test "gossipsub forms a mesh through the heartbeat" {
     try std.testing.expectEqual(@as(usize, 1), setup.server.state.mesh(server_topic).count());
 }
 
+test "gossipsub delivers a published message to a mesh peer" {
+    var setup: GossipPair = .{};
+    try setup.init();
+    defer setup.deinit();
+
+    var buf: [topic_mod.topic_max_len]u8 = undefined;
+    const beacon_block = buildTopic("beacon_block", &buf);
+    try std.testing.expect(setup.client.subscribe(beacon_block));
+    try std.testing.expect(setup.server.subscribe(beacon_block));
+
+    var rounds: usize = 0;
+    while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
+    setup.pair.advance(constants_heartbeat + 100);
+    rounds = 0;
+    while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
+
+    const payload = "a signed beacon block payload for the mesh";
+    try std.testing.expect(setup.client.publish(beacon_block, payload, setup.pair.now));
+
+    var received = false;
+    rounds = 0;
+    while (rounds < 20 and !received) : (rounds += 1) {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| switch (event) {
+            .message => |m| {
+                try std.testing.expectEqualStrings(beacon_block, m.topic);
+                try std.testing.expectEqualStrings(payload, m.bytes);
+                setup.server.report(m.handle, .accept);
+                received = true;
+            },
+            else => {},
+        };
+    }
+    try std.testing.expect(received);
+    try std.testing.expectEqual(@as(u64, 1), setup.server.counters.messages_received);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.counters.messages_published);
+}
+
 const constants_heartbeat = @import("constants.zig").heartbeat_interval_ms;
