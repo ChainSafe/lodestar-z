@@ -147,52 +147,6 @@ test computeCommitteeCount {
     try std.testing.expectEqual(64, committee_count);
 }
 
-test "buildCommitteesFromShuffling should free partially built committee slices on OutOfMemory" {
-    const allocator = std.testing.allocator;
-    const active_indices = try allocator.alloc(ValidatorIndex, 256);
-    defer allocator.free(active_indices);
-    for (0..256) |index| {
-        active_indices[index] = @intCast(index);
-    }
-
-    var failing = std.testing.FailingAllocator.init(
-        allocator,
-        .{ .fail_index = 1 },
-    );
-    try std.testing.expectError(
-        error.OutOfMemory,
-        EpochShuffling.buildCommitteesFromShuffling(failing.allocator(), active_indices),
-    );
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-}
-
-test "EpochShuffling init should cleanup committee slices on OutOfMemory during final allocation" {
-    const allocator = std.testing.allocator;
-    const committees_per_slot = computeCommitteeCount(256);
-    const active_indices = try allocator.alloc(ValidatorIndex, 256);
-    defer allocator.free(active_indices);
-    for (0..256) |index| {
-        active_indices[index] = @intCast(index);
-    }
-
-    // One allocation for the shuffled array, then one per slot, then epoch struct allocation.
-    const fail_index = 1 + preset.SLOTS_PER_EPOCH * committees_per_slot;
-    var failing = std.testing.FailingAllocator.init(
-        allocator,
-        .{ .fail_index = fail_index },
-    );
-    try std.testing.expectError(
-        error.OutOfMemory,
-        EpochShuffling.init(
-            failing.allocator(),
-            [_]u8{0} ** 32,
-            0,
-            active_indices,
-        ),
-    );
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-}
-
 /// Calculate the decision root for a given epoch.
 pub fn calculateDecisionRoot(state: *AnyBeaconState, epoch: Epoch) ![32]u8 {
     const pivot_slot = computeStartSlotAtEpoch(epoch -| 1) -| 1;

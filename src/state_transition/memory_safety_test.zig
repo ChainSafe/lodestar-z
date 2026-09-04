@@ -3,11 +3,13 @@ const config = @import("config");
 const ct = @import("consensus_types");
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const active_preset = @import("preset").active_preset;
+const preset = @import("preset").preset;
 const ssz = @import("ssz");
 const Node = @import("persistent_merkle_tree").Node;
 const TestCachedBeaconState = @import("test_utils/root.zig").TestCachedBeaconState;
 const getConfig = @import("test_utils/generate_state.zig").getConfig;
 const EpochCache = @import("cache/epoch_cache.zig").EpochCache;
+const EpochShuffling = @import("utils/epoch_shuffling.zig").EpochShuffling;
 const PubkeyCache = @import("cache/pubkey_cache.zig").PubkeyCache;
 const deserializeContainerOverrideFieldsWithRanges =
     @import("ssz_container.zig").deserializeContainerOverrideFieldsWithRanges;
@@ -15,6 +17,56 @@ const processRewardsAndPenalties =
     @import("epoch/process_rewards_and_penalties.zig").processRewardsAndPenalties;
 const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
+
+test "EpochShuffling.init should free completed committees when a later slot allocation fails" {
+    const allocator = std.testing.allocator;
+    const active_indices = try allocator.alloc(ct.primitive.ValidatorIndex.Type, 256);
+    defer allocator.free(active_indices);
+    for (active_indices, 0..) |*index, i| {
+        index.* = @intCast(i);
+    }
+
+    // The shuffling and first slot allocations succeed; the second slot allocation fails.
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 2 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        EpochShuffling.init(
+            failing.allocator(),
+            [_]u8{0} ** 32,
+            0,
+            active_indices,
+        ),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "EpochShuffling.init should free committees when the final allocation fails" {
+    const allocator = std.testing.allocator;
+    const active_indices = try allocator.alloc(ct.primitive.ValidatorIndex.Type, 256);
+    defer allocator.free(active_indices);
+    for (active_indices, 0..) |*index, i| {
+        index.* = @intCast(i);
+    }
+
+    // One shuffling allocation and one allocation per slot precede the final struct allocation.
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 1 + preset.SLOTS_PER_EPOCH },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        EpochShuffling.init(
+            failing.allocator(),
+            [_]u8{0} ** 32,
+            0,
+            active_indices,
+        ),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
 
 test "upgradeStateToCapella and upgradeStateToDeneb should release temporary payload headers" {
     const allocator = std.testing.allocator;
