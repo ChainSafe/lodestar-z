@@ -27,6 +27,13 @@ pub const Options = struct {
     /// Decompressed bytes surfaced in one pump; the host consumes them before
     /// the next pump. Full means new messages wait, applying backpressure.
     decompressed_arena_bytes: usize = 4 * 1024 * 1024,
+    /// Per-peer cap on bytes decompressed in one pump. Bounds the CPU a peer can
+    /// force by flooding duplicates, which must be decompressed to compute their
+    /// id before the seen-cache can drop them.
+    decompress_per_peer_bytes: usize = 4 * 1024 * 1024,
+    /// A large inbound frame that never completes is dropped after this long, so
+    /// stalled peers cannot pin the large-body pool.
+    large_frame_timeout_ms: u64 = 10_000,
     body_buffer_bytes: usize = constants.body_buffer_len,
     /// A pool of large body buffers claimed while receiving a frame that does
     /// not fit the per-peer buffer (blocks and data columns).
@@ -78,11 +85,14 @@ const PeerIo = struct {
     reader: frame_mod.Reader = .{},
     body: []u8,
     large_slot: ?u8 = null,
+    large_since_ms: u64 = 0,
+    decompressed_pump: usize = 0,
 
     fn reset(self: *PeerIo) void {
         self.send_head = 0;
         self.send_tail = 0;
         self.reader = .{};
+        self.decompressed_pump = 0;
     }
 
     fn pending(self: *const PeerIo) []const u8 {
@@ -151,7 +161,9 @@ pub const Gossipsub = struct {
         send_dropped: u64 = 0,
         malformed_rpcs: u64 = 0,
         arena_full: u64 = 0,
+        decompress_throttled: u64 = 0,
         oversized_dropped: u64 = 0,
+        large_stalled: u64 = 0,
         iwant_sent: u64 = 0,
         broken_promises: u64 = 0,
     };
@@ -311,7 +323,7 @@ pub const Gossipsub = struct {
         const data = self.msg_scratch[0..clen];
         const id = topic_mod.validMessageId(ssz);
         _ = self.seen.add(id, now.mono_ms);
-        _ = self.mcache.put(id, topic_str, data, std.math.maxInt(u16));
+        _ = self.mcache.put(id, topic_str, data, std.math.maxInt(u16), 0);
         self.mcache.validate(id);
         const peers = if (self.state.subscribed(topic))
             self.state.mesh(topic)
@@ -326,21 +338,48 @@ pub const Gossipsub = struct {
     /// (minus the source and any peer that sent IDONTWANT); reject and ignore
     /// drop it, leaving it unvalidated so it is never gossiped.
     pub fn report(self: *Gossipsub, handle: MessageId, verdict: Verdict) void {
-        if (verdict == .reject) {
-            const source = self.mcache.sourceOf(handle) orelse return;
-            const topic_str = self.mcache.topicOf(handle) orelse return;
-            const topic = self.state.findTopic(topic_str) orelse return;
-            self.scores.invalid(source, topic);
+        if (verdict == .ignore) {
+            self.mcache.setStatus(handle, .ignored);
             return;
         }
-        if (verdict == .ignore) return;
-        self.mcache.validate(handle);
+        if (verdict == .reject) {
+            self.mcache.setStatus(handle, .invalid);
+            const topic_str = self.mcache.topicOf(handle) orelse return;
+            const topic = self.state.findTopic(topic_str) orelse return;
+            self.creditSource(handle, topic, false);
+            return;
+        }
+        self.mcache.setStatus(handle, .valid);
         const source = self.mcache.sourceOf(handle);
         const cached = self.mcache.get(handle, self.msg_scratch) orelse return;
         const topic = self.state.findTopic(cached.topic) orelse return;
         if (!self.state.subscribed(topic)) return;
+        self.creditSource(handle, topic, true);
+        self.creditDuplicates(handle, topic, source);
         self.deliver(self.state.mesh(topic), cached.topic, handle, cached.data, source);
         self.counters.messages_forwarded += 1;
+    }
+
+    /// Applies the first-delivery reward (accept) or invalid penalty (reject) to
+    /// the message's original sender, skipping a slot whose peer has since been
+    /// replaced so the score never lands on an innocent reconnecting peer.
+    fn creditSource(self: *Gossipsub, handle: MessageId, topic: u16, accept: bool) void {
+        const source = self.mcache.sourceOf(handle) orelse return;
+        const generation = self.mcache.sourceGen(handle) orelse return;
+        if (!self.state.peerMatches(source, generation)) return;
+        if (accept) self.scores.deliver(source, topic) else self.scores.invalid(source, topic);
+    }
+
+    /// On accept, rewards mesh-delivery to the peers that sent a duplicate before
+    /// the message was validated (deduped per peer by the message cache).
+    fn creditDuplicates(self: *Gossipsub, handle: MessageId, topic: u16, source: ?u16) void {
+        const peers = self.mcache.dupPeers(handle) orelse return;
+        var it = peers.iterator(.{});
+        while (it.next()) |peer| {
+            const index: u16 = @intCast(peer);
+            if (source != null and index == source.?) continue;
+            self.scores.duplicate(index, topic);
+        }
     }
 
     fn deliver(
@@ -596,6 +635,7 @@ pub const Gossipsub = struct {
         start: usize,
     ) usize {
         var count = start;
+        peer_io.decompressed_pump = 0;
         const stream = self.state.peers[index].in_stream orelse return count;
         var reads: u32 = 0;
         while (reads < constants.reads_per_pump_max) : (reads += 1) {
@@ -738,6 +778,12 @@ pub const Gossipsub = struct {
             self.counters.arena_full += 1;
             return start;
         }
+        const io = &self.io[index];
+        if (io.decompressed_pump +| size > self.options.decompress_per_peer_bytes) {
+            self.counters.decompress_throttled += 1;
+            return start;
+        }
+        io.decompressed_pump += size;
         const written = snappy.raw.uncompress(msg.data, room[0..size]) catch {
             _ = self.seen.add(topic_mod.invalidMessageId(msg.data), now.mono_ms);
             return start;
@@ -746,14 +792,18 @@ pub const Gossipsub = struct {
         const id = topic_mod.validMessageId(payload);
         if (!self.seen.add(id, now.mono_ms)) {
             self.counters.duplicates += 1;
-            self.scores.duplicate(index, topic);
+            switch (self.mcache.recordDuplicate(id, index)) {
+                .valid => self.scores.duplicate(index, topic),
+                .invalid => self.scores.invalid(index, topic),
+                else => {},
+            }
             return start;
         }
         self.decompressed_used += written;
         self.counters.messages_received += 1;
-        self.scores.deliver(index, topic);
         self.resolvePromises(id);
-        _ = self.mcache.put(id, self.state.topicString(topic), msg.data, index);
+        const gen = self.state.peerGeneration(index);
+        _ = self.mcache.put(id, self.state.topicString(topic), msg.data, index, gen);
         if (written >= constants.idontwant_size_threshold) {
             self.broadcastIdontwant(topic, id, index);
         }

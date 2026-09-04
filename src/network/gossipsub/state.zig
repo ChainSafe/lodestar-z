@@ -113,6 +113,20 @@ pub const State = struct {
         return self.peers[index].version;
     }
 
+    pub fn setVersion(self: *State, index: u16, version: Version) void {
+        assert(self.peers[index].active);
+        self.peers[index].version = version;
+    }
+
+    pub fn peerGeneration(self: *const State, index: u16) u32 {
+        return self.peers[index].generation;
+    }
+
+    /// Whether `index` still holds the same peer as when `generation` was taken.
+    pub fn peerMatches(self: *const State, index: u16, generation: u32) bool {
+        return self.peers[index].active and self.peers[index].generation == generation;
+    }
+
     pub fn setStreams(self: *State, index: u16, out: ?StreamHandle, in: ?StreamHandle) void {
         assert(self.peers[index].active);
         if (out) |stream| self.peers[index].out_stream = stream;
