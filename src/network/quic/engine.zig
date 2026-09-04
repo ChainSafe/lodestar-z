@@ -58,6 +58,16 @@ pub const DriverView = struct {
         self.engine.tick(now);
     }
 
+    pub fn hostWorkPending(self: DriverView) bool {
+        return self.engine.host_work_pending;
+    }
+
+    pub fn takeHostWork(self: DriverView) bool {
+        const pending = self.engine.host_work_pending;
+        self.engine.host_work_pending = false;
+        return pending;
+    }
+
     pub fn slotCount(self: DriverView) u16 {
         const engine = self.engine;
         assert(engine.registry.slots.len > 0);
@@ -170,6 +180,7 @@ pub const Engine = struct {
     stream_window: u64,
     outbound_max: u16,
     counters: Counters = .{},
+    host_work_pending: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, options: Options) Error!Engine {
         const wanted = options.limits;
@@ -273,6 +284,7 @@ pub const Engine = struct {
         if (self.registry.dialing >= self.limits.dialing_max) return error.DialLimit;
         if (self.registry.outbound >= self.outbound_max) return error.DialLimit;
         const index = self.registry.claim() orelse return error.TableFull;
+        self.host_work_pending = true;
         assert(index < self.registry.slots.len);
         const slot = &self.registry.slots[index];
         slot.open(&self.tls, &self.config, .{
@@ -303,6 +315,7 @@ pub const Engine = struct {
         assert(slot.conn != null);
         assert(slot.close_reason == null);
         slot.close(.host, code);
+        self.host_work_pending = true;
         return true;
     }
 
@@ -327,6 +340,7 @@ pub const Engine = struct {
         assert(self.registry.active_len > 0);
         self.registry.removeRoutesFor(conn.index);
         self.registry.retire(conn.index);
+        self.host_work_pending = true;
         return true;
     }
 
@@ -371,6 +385,7 @@ pub const Engine = struct {
 
     pub fn openStream(self: *Engine, conn: Handle) StreamError!StreamHandle {
         const slot = try self.liveSlot(conn);
+        self.host_work_pending = true;
         const opened = slot.openStream() catch |err| return self.streamError(err);
         assert(opened.index < limits.streams_per_connection);
         assert(slot.table.matches(opened.index, opened.id));
@@ -384,6 +399,7 @@ pub const Engine = struct {
             return self.streamError(err);
         assert(result.len <= buf.len);
         if (result.len > 0) assert(result.reset_code == null);
+        if (result.len > 0 or result.fin or result.reset_code != null) self.host_work_pending = true;
         return result;
     }
 
@@ -395,6 +411,7 @@ pub const Engine = struct {
     ) StreamError!usize {
         const target = try self.liveStream(stream);
         assert(target.slot.table.matches(target.index, target.id));
+        self.host_work_pending = true;
         const written = target.slot.write(target.index, target.id, bytes, fin) catch |err|
             return self.streamError(err);
         assert(written <= bytes.len);
@@ -415,6 +432,7 @@ pub const Engine = struct {
         assert(target.index < limits.streams_per_connection);
         assert(target.slot.conn != null);
         target.slot.shutdown(target.index, target.id, dir, code);
+        self.host_work_pending = true;
     }
 
     pub fn closeStream(self: *Engine, stream: StreamHandle, code: u64) void {
@@ -422,6 +440,7 @@ pub const Engine = struct {
         assert(target.index < limits.streams_per_connection);
         assert(target.slot.conn != null);
         target.slot.closeStream(target.index, target.id, code);
+        self.host_work_pending = true;
     }
 
     pub const ReadableIterator = stream_iter.StreamIterator(.readable);

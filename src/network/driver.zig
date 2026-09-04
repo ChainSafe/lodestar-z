@@ -53,6 +53,8 @@ pub const Driver = struct {
     pending: schedule.Queue = undefined,
     cursor: schedule.Cursor = .{},
     immediate_work: bool = false,
+    idle_connections: usize = 0,
+    scan_connections: usize = 0,
     batch: engine_mod.SendBatch = .{},
     batch_len: u8 = 0,
     output: [constants.datagram_size_max]u8 = undefined,
@@ -69,7 +71,7 @@ pub const Driver = struct {
     pub fn nextTimeoutMs(self: *const Driver, engine: *Engine, now: engine_mod.Now) ?u64 {
         if (self.immediate_work) return 0;
         const view = engine.driverView();
-        if (view.activityPending()) return 0;
+        if (view.hostWorkPending() or view.activityPending()) return 0;
         var next = view.nextTimeoutMs(now);
         if (self.pending.nextDeadline()) |deadline| {
             const remaining = schedule.remainingMs(deadline, now.nanos());
@@ -119,6 +121,12 @@ pub const Driver = struct {
         errdefer _ = self.flush(io, engine, udp, &result);
         const view = engine.driverView();
         view.releaseReported();
+        const active_count = view.activeIndices().len;
+        const host_work = view.takeHostWork();
+        if (host_work or self.scan_connections != active_count or self.idle_connections >= active_count) {
+            self.idle_connections = 0;
+        }
+        self.scan_connections = active_count;
         for (self.pending.entries, 0..) |*entry, index| {
             if (entry.handle) |owner| {
                 const current = view.sendOwner(owner.index);
@@ -143,11 +151,14 @@ pub const Driver = struct {
                 .dropped => continue,
                 .datagram => |datagram| datagram,
             };
+            defer udp.release(admitted.handle) catch unreachable;
             result.now = try currentTime(io);
             result.datagrams_received += 1;
-            defer udp.release(admitted.handle) catch unreachable;
             switch (view.receive(admitted.bytes, &admitted.from, result.now, &self.pool, &self.output)) {
-                .accepted => result.datagrams_accepted += 1,
+                .accepted => {
+                    result.datagrams_accepted += 1;
+                    self.idle_connections = 0;
+                },
                 .version_negotiation => |bytes| {
                     if (turn.canSend()) {
                         turn.recordSend();
@@ -158,10 +169,13 @@ pub const Driver = struct {
                 .dropped => result.datagrams_dropped += 1,
             }
         }
+        const receive_work_exhausted = turn.work == turn.work_max;
         result.now = try currentTime(io);
         try self.service(io, engine, udp, &turn, &result, &visits, turn.work_max);
         _ = self.flush(io, engine, udp, &result);
-        if (received_count == engine.limits.receive_per_step_max) self.immediate_work = true;
+        if (receive_work_exhausted or received_count == engine.limits.receive_per_step_max) {
+            self.immediate_work = true;
+        }
         result.events = engine.pollEvents(events);
         result.events_pending = engine.eventsPending();
         result.activity = view.takeActivity(activity);
@@ -188,16 +202,19 @@ pub const Driver = struct {
     ) StepError!void {
         const active = engine.driverView().activeIndices();
         if (active.len == 0) return;
-        var idle: usize = 0;
-        while (turn.canSend() and turn.work < work_stop and idle < active.len) {
+        if (self.scan_connections != active.len) {
+            self.scan_connections = active.len;
+            self.idle_connections = 0;
+        }
+        while (turn.canSend() and turn.work < work_stop and self.idle_connections < active.len) {
             assert(turn.takeWork());
             const index = self.cursor.next(active).?;
             const progressed = try self.serviceConnection(io, engine, udp, index, visits.* < active.len, turn, result);
             visits.* += 1;
-            idle = if (progressed) 0 else idle + 1;
+            self.idle_connections = if (progressed) 0 else self.idle_connections + 1;
         }
-        if (idle < active.len and (!turn.canSend() or turn.work == work_stop)) self.immediate_work = true;
-        if (idle == active.len) self.immediate_work = false;
+        if (self.idle_connections < active.len and (!turn.canSend() or turn.work == work_stop)) self.immediate_work = true;
+        if (self.idle_connections == active.len) self.immediate_work = false;
     }
 
     fn serviceConnection(
@@ -228,6 +245,10 @@ pub const Driver = struct {
         }
         const ready = self.pending.ready(index, result.now.nanos()) orelse return generated;
         assert(turn.canSend());
+        // The socket reports only batch-level failure, so a batch must have one owner.
+        if (self.batch_len > 0 and !std.meta.eql(self.batch.owners[0], owner)) {
+            _ = self.flush(io, engine, udp, result);
+        }
         const at = self.batch_len;
         @memcpy(self.batch.buffers[at][0..ready.bytes.len], ready.bytes);
         self.batch.sent[at] = ready;
@@ -244,11 +265,12 @@ pub const Driver = struct {
         const count = self.batch_len;
         if (count == 0) return null;
         defer self.batch_len = 0;
+        const owner = self.batch.owners[0];
+        for (self.batch.owners[1..count]) |other| assert(std.meta.eql(owner, other));
         result.send_calls += 1;
         sendMany(io, udp, self.batch.sent[0..count]) catch |err| {
-            for (self.batch.owners[0..count]) |owner| {
-                if (engine.driverView().sendOwner(owner.index)) |current| {
-                    if (!std.meta.eql(current, owner)) continue;
+            if (engine.driverView().sendOwner(owner.index)) |current| {
+                if (std.meta.eql(current, owner)) {
                     engine.driverView().failSend(owner.index);
                     self.pending.remove(owner.index);
                     result.send_failures += 1;
