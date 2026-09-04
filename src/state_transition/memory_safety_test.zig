@@ -144,7 +144,8 @@ test "processRewardsAndPenalties - sanity" {
         null,
     );
 }
-test "afterProcessEpoch should not leak when decision-root calculation fails" {
+
+test "afterProcessEpoch should preserve shuffling state when decision-root calculation fails" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
@@ -152,11 +153,28 @@ test "afterProcessEpoch should not leak when decision-root calculation fails" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
+    const epoch_cache = test_state.cached_state.epoch_cache;
+    const previous_shuffling = epoch_cache.previous_shuffling;
+    const current_shuffling = epoch_cache.current_shuffling;
+    const next_shuffling = epoch_cache.next_shuffling;
+    const previous_decision_root = epoch_cache.previous_decision_root;
+    const current_decision_root = epoch_cache.current_decision_root;
+    const next_decision_root = epoch_cache.next_decision_root;
+
+    // The replacement shuffling is built before decision-root lookup fails.
     try std.testing.expectError(
         error.SlotTooBig,
-        test_state.cached_state.epoch_cache.afterProcessEpoch(
+        epoch_cache.afterProcessEpoch(
             test_state.cached_state.state,
             test_state.epoch_transition_cache,
         ),
     );
+
+    // The failed update must leave every shuffling owner paired with its original decision root.
+    try std.testing.expectEqual(previous_shuffling, epoch_cache.previous_shuffling);
+    try std.testing.expectEqual(current_shuffling, epoch_cache.current_shuffling);
+    try std.testing.expectEqual(next_shuffling, epoch_cache.next_shuffling);
+    try std.testing.expectEqual(previous_decision_root, epoch_cache.previous_decision_root);
+    try std.testing.expectEqual(current_decision_root, epoch_cache.current_decision_root);
+    try std.testing.expectEqual(next_decision_root, epoch_cache.next_decision_root);
 }
