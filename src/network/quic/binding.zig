@@ -2,6 +2,10 @@ const std = @import("std");
 const limits = @import("limits.zig");
 const types = @import("../types.zig");
 
+// The pinned quiche FFI exports zero timestamps on macOS, iOS, and Windows.
+// Linux uses CLOCK_MONOTONIC, the same clock as std.Io.Clock.awake.
+pub const native_pacing_supported = @import("builtin").os.tag == .linux;
+
 pub const c = @import("quiche_zig:quiche");
 
 pub const Error = error{
@@ -85,7 +89,7 @@ pub const Config = struct {
         c.quiche_config_set_disable_dcid_reuse(ptr, false);
         c.quiche_config_set_cc_algorithm(ptr, c.QUICHE_CC_CUBIC);
         c.quiche_config_enable_hystart(ptr, true);
-        c.quiche_config_enable_pacing(ptr, true);
+        c.quiche_config_enable_pacing(ptr, native_pacing_supported);
         c.quiche_config_set_initial_congestion_window_packets(
             ptr,
             limits.initial_congestion_window_packets,
@@ -254,4 +258,12 @@ pub fn headerInfo(datagram: []const u8) Error!HeaderInfo {
         .dcid = Cid.fromSlice(dcid[0..dcid_len]),
         .token_len = token_len,
     };
+}
+
+pub fn transmitDeadline(info: *const c.quiche_send_info) u64 {
+    if (!native_pacing_supported) return 0;
+    std.debug.assert(info.at.tv_sec >= 0);
+    std.debug.assert(info.at.tv_nsec >= 0 and info.at.tv_nsec < std.time.ns_per_s);
+    const seconds: u64 = @intCast(info.at.tv_sec);
+    return seconds *| std.time.ns_per_s +| @as(u64, @intCast(info.at.tv_nsec));
 }

@@ -53,7 +53,8 @@ pub const Transport = struct {
         }
         errdefer if (target.keylog) |file| file.close(io);
         var context = try tls.Context.init(options.host, now.unix_s, serial);
-        errdefer context.deinit();
+        var context_owned = true;
+        errdefer if (context_owned) context.deinit();
         target.udp = try udp_mod.Udp.bind(io, options.bind);
         errdefer target.udp.close(io);
         var engine_limits = options.limits;
@@ -64,12 +65,15 @@ pub const Transport = struct {
             .local = target.udp.localAddress(),
             .seed = std.mem.readInt(u64, &seed_bytes, .little),
         });
-        target.driver = driver_mod.Driver.init();
+        context_owned = false;
+        errdefer target.engine.deinit();
+        target.driver = try driver_mod.Driver.init(allocator, options.limits.connections_max);
         assert(target.engine.registry.slots.len == options.limits.connections_max);
         assert(target.keylog != null or options.keylog_path == null);
     }
 
     pub fn deinit(self: *Transport, io: std.Io) void {
+        self.driver.deinit(self.engine.allocator);
         self.engine.deinit();
         self.udp.close(io);
         if (self.keylog) |file| file.close(io);
@@ -89,6 +93,10 @@ pub const Transport = struct {
     pub fn localMultiaddr(self: *const Transport) multiaddr.Multiaddr {
         assert(self.engine.registry.slots.len > 0);
         return .{ .address = self.udp.localAddress(), .peer = self.engine.tls.local_peer_id };
+    }
+
+    pub fn memoryPlan(self: *const Transport) @import("quic/api.zig").MemoryPlan {
+        return self.engine.memoryPlan();
     }
 
     pub fn nextTimeoutMs(self: *const Transport, now: types.Now) ?u64 {

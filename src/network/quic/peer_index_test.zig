@@ -48,3 +48,15 @@ test "peer index hashes identity bytes beyond the structured prefix" {
     try std.testing.expect(peer_index.keyOf(42, &a) != peer_index.keyOf(42, &b));
     try std.testing.expect(peer_index.keyOf(42, &a) != peer_index.keyOf(43, &a));
 }
+
+test "peer index spreads structured identities across the full hash space" {
+    const wire_peer_id = @import("../wire/peer_id.zig");
+    var id = wire_peer_id.PeerId{ .bytes = [_]u8{0} ** wire_peer_id.length };
+    @memcpy(id.bytes[0..7], &[_]u8{ 0, 37, 8, 2, 18, 33, 2 });
+    var buckets = std.StaticBitSet(1024).initEmpty();
+    for (0..1024) |identity| {
+        std.mem.writeInt(u16, id.bytes[wire_peer_id.length - 2 ..], @intCast(identity), .big);
+        buckets.set(@intCast(peer_index.keyOf(42, &id) & 1023));
+    }
+    try std.testing.expect(buckets.count() > 600);
+}

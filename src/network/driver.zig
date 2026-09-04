@@ -1,6 +1,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const engine_mod = @import("quic/engine.zig");
+const schedule = @import("quic/schedule.zig");
 const limits = @import("quic/limits.zig");
 const peer_id = @import("wire/peer_id.zig");
 const types = @import("types.zig");
@@ -22,8 +23,6 @@ pub const StepOptions = struct {
     wait_max_ms: u32 = constants.poll_interval_ms,
 };
 
-const drain_rounds_max: u32 = @divExact(limits.send_burst_max, constants.send_batch_max);
-
 const Received = union(enum) {
     datagram: udp_mod.Datagram,
     dropped,
@@ -44,29 +43,38 @@ pub const StepResult = struct {
     events_pending: bool = false,
     activity: usize = 0,
     activity_pending: bool = false,
-};
-
-pub const Drained = struct {
-    sent: u32 = 0,
-    calls: u32 = 0,
-    failure: ?StepError = null,
+    work_processed: u32 = 0,
+    work_pending: bool = false,
+    scheduled_datagrams: usize = 0,
 };
 
 pub const Driver = struct {
     pool: engine_mod.EntropyPool = .{},
+    pending: schedule.Queue = undefined,
+    cursor: schedule.Cursor = .{},
+    immediate_work: bool = false,
     batch: engine_mod.SendBatch = .{},
+    batch_len: u8 = 0,
     output: [constants.datagram_size_max]u8 = undefined,
 
-    pub fn init() Driver {
-        return .{};
+    pub fn init(allocator: std.mem.Allocator, connections: u16) std.mem.Allocator.Error!Driver {
+        return .{ .pending = try schedule.Queue.init(allocator, connections) };
+    }
+
+    pub fn deinit(self: *Driver, allocator: std.mem.Allocator) void {
+        self.pending.deinit(allocator);
+        self.* = undefined;
     }
 
     pub fn nextTimeoutMs(self: *const Driver, engine: *Engine, now: engine_mod.Now) ?u64 {
-        _ = self;
+        if (self.immediate_work) return 0;
         const view = engine.driverView();
-        assert(view.slotCount() > 0);
-        const next = view.nextTimeoutMs(now);
-        if (view.activeIndices().len == 0) assert(next == null);
+        if (view.activityPending()) return 0;
+        var next = view.nextTimeoutMs(now);
+        if (self.pending.nextDeadline()) |deadline| {
+            const remaining = schedule.remainingMs(deadline, now.nanos());
+            next = @min(next orelse remaining, remaining);
+        }
         return next;
     }
 
@@ -80,12 +88,20 @@ pub const Driver = struct {
     ) DialError!engine_mod.Handle {
         const now = try currentTime(io);
         const handle = try engine.dial(&peer, expected, now, try entropy(io));
-        assert(handle.index < engine.driverView().slotCount());
-        if (self.drain(io, engine, udp, handle.index, now).failure) |err| {
-            engine.driverView().failSend(handle.index);
-            assert(engine.abandon(handle));
-            return err;
+        errdefer {
+            self.pending.remove(handle.index);
+            _ = engine.abandon(handle);
         }
+        var result = StepResult{ .now = now };
+        errdefer _ = self.flush(io, engine, udp, &result);
+        var turn = schedule.Turn.init(engine.limits.send_per_step_max, engine.limits.work_per_step_max);
+        while (turn.canSend() and turn.takeWork()) {
+            if (!try self.serviceConnection(io, engine, udp, handle.index, false, &turn, &result)) break;
+            if (self.flush(io, engine, udp, &result)) |err| return err;
+            if (self.pending.owner(handle.index) != null) break;
+        }
+        if (self.flush(io, engine, udp, &result)) |err| return err;
+        self.immediate_work = !turn.canSend() or turn.work == turn.work_max;
         return handle;
     }
 
@@ -98,54 +114,150 @@ pub const Driver = struct {
         activity: []engine_mod.Handle,
         options: StepOptions,
     ) StepError!StepResult {
+        assert(self.batch_len == 0);
         var result = StepResult{ .now = try currentTime(io) };
-        var batch: u32 = 0;
-        while (batch < constants.receive_batch_max) : (batch += 1) {
+        errdefer _ = self.flush(io, engine, udp, &result);
+        const view = engine.driverView();
+        view.releaseReported();
+        for (self.pending.entries, 0..) |*entry, index| {
+            if (entry.handle) |owner| {
+                const current = view.sendOwner(owner.index);
+                if (current == null or !std.meta.eql(current.?, owner)) self.pending.remove(@intCast(index));
+            }
+        }
+        self.immediate_work = false;
+        var turn = schedule.Turn.init(engine.limits.send_per_step_max, engine.limits.work_per_step_max);
+        var visits: u32 = 0;
+        try self.service(io, engine, udp, &turn, &result, &visits, turn.work_max / 2);
+        _ = self.flush(io, engine, udp, &result);
+        var received_count: u32 = 0;
+        while (received_count < engine.limits.receive_per_step_max and turn.work < turn.work_max) : (received_count += 1) {
             if (!self.pool.fresh) self.pool.fill(try entropy(io));
-            const wait_ms: ?u32 = if (batch == 0) options.wait_max_ms else null;
+            result.now = try currentTime(io);
+            const wait_ms: ?u32 = if (received_count == 0) options.wait_max_ms else null;
             const received = try self.receiveDatagram(io, engine, udp, &result, wait_ms);
+            if (received == .timeout) break;
+            assert(turn.takeWork());
             const admitted = switch (received) {
-                .timeout => break,
+                .timeout => unreachable,
                 .dropped => continue,
                 .datagram => |datagram| datagram,
             };
+            result.now = try currentTime(io);
             result.datagrams_received += 1;
             defer udp.release(admitted.handle) catch unreachable;
-            switch (engine.driverView().receive(
-                admitted.bytes,
-                &admitted.from,
-                result.now,
-                &self.pool,
-                &self.output,
-            )) {
+            switch (view.receive(admitted.bytes, &admitted.from, result.now, &self.pool, &self.output)) {
                 .accepted => result.datagrams_accepted += 1,
                 .version_negotiation => |bytes| {
-                    send(io, udp, &admitted.from, bytes) catch {};
-                    result.version_negotiations += 1;
+                    if (turn.canSend()) {
+                        turn.recordSend();
+                        send(io, udp, &admitted.from, bytes) catch {};
+                        result.version_negotiations += 1;
+                    }
                 },
                 .dropped => result.datagrams_dropped += 1,
             }
         }
         result.now = try currentTime(io);
-        const view = engine.driverView();
-        view.tick(result.now);
-        for (view.activeIndices()) |index| {
-            const drained = self.drain(io, engine, udp, index, result.now);
-            result.datagrams_sent += drained.sent;
-            result.send_calls += drained.calls;
-            if (drained.failure != null) {
-                result.send_failures += 1;
-                view.failSend(index);
-            }
-        }
-        view.releaseReported();
+        try self.service(io, engine, udp, &turn, &result, &visits, turn.work_max);
+        _ = self.flush(io, engine, udp, &result);
+        if (received_count == engine.limits.receive_per_step_max) self.immediate_work = true;
         result.events = engine.pollEvents(events);
         result.events_pending = engine.eventsPending();
         result.activity = view.takeActivity(activity);
         result.activity_pending = view.activityPending();
+        result.work_processed = turn.work;
+        result.work_pending = self.immediate_work;
+        result.scheduled_datagrams = self.pending.count;
         assert(result.events <= events.len);
         assert(result.activity <= activity.len);
+        assert(turn.work <= engine.limits.work_per_step_max);
+        assert(turn.sent <= engine.limits.send_per_step_max);
         return result;
+    }
+
+    fn service(
+        self: *Driver,
+        io: std.Io,
+        engine: *Engine,
+        udp: *Udp,
+        turn: *schedule.Turn,
+        result: *StepResult,
+        visits: *u32,
+        work_stop: u32,
+    ) StepError!void {
+        const active = engine.driverView().activeIndices();
+        if (active.len == 0) return;
+        var idle: usize = 0;
+        while (turn.canSend() and turn.work < work_stop and idle < active.len) {
+            assert(turn.takeWork());
+            const index = self.cursor.next(active).?;
+            const progressed = try self.serviceConnection(io, engine, udp, index, visits.* < active.len, turn, result);
+            visits.* += 1;
+            idle = if (progressed) 0 else idle + 1;
+        }
+        if (idle < active.len and (!turn.canSend() or turn.work == work_stop)) self.immediate_work = true;
+        if (idle == active.len) self.immediate_work = false;
+    }
+
+    fn serviceConnection(
+        self: *Driver,
+        io: std.Io,
+        engine: *Engine,
+        udp: *Udp,
+        index: u16,
+        tick: bool,
+        turn: *schedule.Turn,
+        result: *StepResult,
+    ) StepError!bool {
+        const view = engine.driverView();
+        if (tick) view.tickOne(index, result.now);
+        const owner = view.sendOwner(index) orelse {
+            self.pending.remove(index);
+            return false;
+        };
+        if (self.pending.owner(index)) |stored| {
+            if (!std.meta.eql(stored, owner)) self.pending.remove(index);
+        }
+        var generated = false;
+        if (self.pending.owner(index) == null) {
+            const sent = view.sendOne(index, result.now, &self.output) orelse return false;
+            self.pending.put(owner, sent) catch unreachable;
+            generated = true;
+            result.now = try currentTime(io);
+        }
+        const ready = self.pending.ready(index, result.now.nanos()) orelse return generated;
+        assert(turn.canSend());
+        const at = self.batch_len;
+        @memcpy(self.batch.buffers[at][0..ready.bytes.len], ready.bytes);
+        self.batch.sent[at] = ready;
+        self.batch.sent[at].bytes = self.batch.buffers[at][0..ready.bytes.len];
+        self.batch.owners[at] = owner;
+        self.batch_len += 1;
+        self.pending.remove(index);
+        turn.recordSend();
+        if (self.batch_len == constants.send_batch_max) _ = self.flush(io, engine, udp, result);
+        return true;
+    }
+
+    fn flush(self: *Driver, io: std.Io, engine: *Engine, udp: *Udp, result: *StepResult) ?StepError {
+        const count = self.batch_len;
+        if (count == 0) return null;
+        defer self.batch_len = 0;
+        result.send_calls += 1;
+        sendMany(io, udp, self.batch.sent[0..count]) catch |err| {
+            for (self.batch.owners[0..count]) |owner| {
+                if (engine.driverView().sendOwner(owner.index)) |current| {
+                    if (!std.meta.eql(current, owner)) continue;
+                    engine.driverView().failSend(owner.index);
+                    self.pending.remove(owner.index);
+                    result.send_failures += 1;
+                }
+            }
+            return err;
+        };
+        result.datagrams_sent += count;
+        return null;
     }
 
     fn receiveDatagram(
@@ -156,9 +268,7 @@ pub const Driver = struct {
         result: *StepResult,
         wait_ms: ?u32,
     ) StepError!Received {
-        _ = self;
-        const view = engine.driverView();
-        const timeout = receiveTimeout(wait_ms, view.nextTimeoutMs(result.now));
+        const timeout = receiveTimeout(wait_ms, self.nextTimeoutMs(engine, result.now));
         const datagram = udp.receiveTimeout(io, timeout) catch |err| switch (err) {
             error.Timeout => return .timeout,
             error.DatagramTooLarge,
@@ -173,33 +283,6 @@ pub const Driver = struct {
             else => return err,
         };
         return .{ .datagram = datagram };
-    }
-
-    fn drain(
-        self: *Driver,
-        io: std.Io,
-        engine: *Engine,
-        udp: *Udp,
-        index: u16,
-        now: engine_mod.Now,
-    ) Drained {
-        const view = engine.driverView();
-        var result = Drained{};
-        var rounds: u32 = 0;
-        while (rounds < drain_rounds_max) : (rounds += 1) {
-            const count = view.sendBatch(index, now, &self.batch);
-            if (count == 0) break;
-            sendMany(io, udp, self.batch.sent[0..count]) catch |err| {
-                result.failure = err;
-                return result;
-            };
-            result.sent += count;
-            result.calls += 1;
-            if (count < constants.send_batch_max) break;
-        }
-        assert(result.sent <= limits.send_burst_max);
-        assert(result.calls <= drain_rounds_max);
-        return result;
     }
 };
 
@@ -241,10 +324,10 @@ fn mapSendError(err: udp_mod.SendError) StepError {
 }
 
 pub fn currentTime(io: std.Io) error{ClockOutOfRange}!engine_mod.Now {
-    const mono = std.Io.Clock.awake.now(io).toMilliseconds();
+    const mono = std.Io.Clock.awake.now(io).nanoseconds;
     const wall = std.Io.Clock.real.now(io).toSeconds();
-    if (mono < 0 or wall < 0) return error.ClockOutOfRange;
-    return .{ .mono_ms = @intCast(mono), .unix_s = wall };
+    if (mono < 0 or mono > std.math.maxInt(u64) or wall < 0) return error.ClockOutOfRange;
+    return .{ .mono_ms = @intCast(@divTrunc(mono, std.time.ns_per_ms)), .mono_ns = @intCast(mono), .unix_s = wall };
 }
 
 fn entropy(io: std.Io) std.Io.RandomSecureError![limits.local_cid_length]u8 {
@@ -254,7 +337,6 @@ fn entropy(io: std.Io) std.Io.RandomSecureError![limits.local_cid_length]u8 {
 }
 
 comptime {
-    assert(drain_rounds_max > 0);
     assert(@sizeOf(Driver) <= 32 * 1_024);
 }
 
