@@ -225,8 +225,8 @@ test "reqresp completes a status round trip over the loopback pair" {
     try std.testing.expectEqual(@as(u64, 1), setup.server.counters.requests_served);
     try std.testing.expectEqual(@as(u64, 1), setup.client.counters.chunks_received);
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u16, 0), setup.client.active().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.registry.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.registry.active().inbound);
 }
 
 test "reqresp completes ping and metadata round trips" {
@@ -391,5 +391,5 @@ test "reqresp rejects undersized sinks and stale handles" {
     try std.testing.expect(!setup.client.consume(stale));
     try std.testing.expect(!setup.server.finish(.{ .index = 0, .generation = 99, .direction = .inbound }));
     try std.testing.expectEqual(@as(usize, 0), setup.client.errorMessage(stale).len);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.registry.active().outbound);
 }

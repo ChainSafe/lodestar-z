@@ -12,8 +12,8 @@ pub const Entry = struct {
     used: bool = false,
 };
 
-pub fn keyOf(id: *const peer_id.PeerId) u64 {
-    return std.mem.readInt(u64, id.bytes[0..8], .big);
+pub fn keyOf(seed: u64, id: *const peer_id.PeerId) u64 {
+    return std.hash.Wyhash.hash(seed, &id.bytes);
 }
 
 pub const Candidates = struct {

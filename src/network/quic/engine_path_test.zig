@@ -114,7 +114,7 @@ test "engine survives an undecryptable packet routed to a live slot" {
     defer pair.deinit();
     const handles = try connectPair(&pair);
 
-    const scid = pair.client.slots[handles.client.index].scid;
+    const scid = pair.client.registry.slots[handles.client.index].scid;
     var garbage: [1 + limits.local_cid_length + 32]u8 = undefined;
     garbage[0] = 0x40;
     @memcpy(garbage[1..][0..limits.local_cid_length], scid.slice());
@@ -161,7 +161,7 @@ test "engine routes a replayed client Initial to the existing connection" {
         .accepted => |handle| try std.testing.expectEqual(handles.server, handle),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
     try std.testing.expectEqual(@as(usize, 1), pair.server.driverView().activeIndices().len);
 }
 

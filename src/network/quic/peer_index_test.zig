@@ -40,10 +40,11 @@ test "peer index keeps every entry under one key reachable across removals" {
     try std.testing.expectEqual(@as(usize, 4), collect(&index, 0xabcd, &found));
 }
 
-test "peer index keys use the first eight bytes of a peer id" {
+test "peer index hashes identity bytes beyond the structured prefix" {
     const wire_peer_id = @import("../wire/peer_id.zig");
-    var bytes: [wire_peer_id.length]u8 = undefined;
-    for (&bytes, 0..) |*byte, position| byte.* = @truncate(position + 1);
-    const id = wire_peer_id.PeerId{ .bytes = bytes };
-    try std.testing.expectEqual(@as(u64, 0x0102030405060708), peer_index.keyOf(&id));
+    var a = wire_peer_id.PeerId{ .bytes = [_]u8{7} ** wire_peer_id.length };
+    var b = a;
+    b.bytes[wire_peer_id.length - 1] = 8;
+    try std.testing.expect(peer_index.keyOf(42, &a) != peer_index.keyOf(42, &b));
+    try std.testing.expect(peer_index.keyOf(42, &a) != peer_index.keyOf(43, &a));
 }

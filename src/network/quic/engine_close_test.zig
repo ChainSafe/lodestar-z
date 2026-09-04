@@ -88,7 +88,7 @@ test "engine reports a host close on both sides" {
     try std.testing.expect(server_reason.peer_closed.app);
     try std.testing.expectEqual(@as(u64, 42), server_reason.peer_closed.code);
     try std.testing.expectError(error.StaleHandle, pair.client.openStream(handles.client));
-    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
 }
 
 test "engine closes on peer id mismatch" {
@@ -119,7 +119,7 @@ test "engine closes on peer id mismatch" {
     const server_handle = try expectConnected(server_events[0], .inbound, &pair.client_ctx);
     const reason = try expectClosed(server_events[1], server_handle, .inbound, &pair.client_ctx);
     try std.testing.expectEqual(@as(u64, 1), reason.peer_closed.code);
-    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
 }
 
 test "engine closes on handshake timeout when the server never answers" {
@@ -140,7 +140,7 @@ test "engine closes on handshake timeout when the server never answers" {
         engine_mod.CloseReason.handshake_timeout,
         try expectClosed(client_events[0], handle, .outbound, null),
     );
-    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
 }
 
 test "engine rejects a forged certificate with tls_failed" {
@@ -233,10 +233,10 @@ test "engine reclaims slots across many connection lifetimes" {
     _ = pair.events(&pair.server, &storage);
     try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().activeIndices().len);
     try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
-    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
-    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
-    for (pair.client.slots) |*slot| try std.testing.expect(slot.conn == null);
-    for (pair.server.slots) |*slot| try std.testing.expect(slot.conn == null);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
+    for (pair.client.registry.slots) |*slot| try std.testing.expect(slot.conn == null);
+    for (pair.server.registry.slots) |*slot| try std.testing.expect(slot.conn == null);
 }
 
 test "engine abandon frees a closed slot whose event was never reported" {
