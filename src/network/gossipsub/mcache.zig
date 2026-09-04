@@ -140,6 +140,17 @@ pub const Cached = struct {
     data: []const u8,
 };
 
+/// Per-message validation state, mirroring rust-libp2p's DeliveryStatus. A
+/// message starts `unknown` (received, awaiting the host verdict) and resolves
+/// to one of the others, which decides how later duplicate senders are scored.
+pub const Status = enum { unknown, valid, invalid, ignored };
+
+/// The set of peers that sent a duplicate of a message before it resolved.
+const DupSet = std.StaticBitSet(constants.peers_cap);
+
+/// Outcome of recording a duplicate sender, driving the score credit/penalty.
+pub const DupOutcome = enum { no_record, already, unknown, valid, invalid, ignored };
+
 /// Retains full messages for `mcache_len` heartbeat windows so the engine can
 /// answer IWANT, and reports the ids to gossip about. Message data lives in one
 /// byte ring; entries and data both evict oldest-first, in FIFO order.
@@ -151,8 +162,10 @@ pub const MessageCache = struct {
     data_off: []usize,
     data_len: []usize,
     window: []u8,
-    validated: []bool,
+    status: []Status,
     source: []u16,
+    source_gen: []u32,
+    dup: []DupSet,
     arena: []u8,
     capacity: usize,
     entry_head: usize = 0,
@@ -179,10 +192,14 @@ pub const MessageCache = struct {
         errdefer allocator.free(data_len);
         const window = try allocator.alloc(u8, capacity);
         errdefer allocator.free(window);
-        const validated = try allocator.alloc(bool, capacity);
-        errdefer allocator.free(validated);
+        const status = try allocator.alloc(Status, capacity);
+        errdefer allocator.free(status);
         const source = try allocator.alloc(u16, capacity);
         errdefer allocator.free(source);
+        const source_gen = try allocator.alloc(u32, capacity);
+        errdefer allocator.free(source_gen);
+        const dup = try allocator.alloc(DupSet, capacity);
+        errdefer allocator.free(dup);
         const arena = try allocator.alloc(u8, arena_bytes);
         errdefer allocator.free(arena);
         var index = try Index.init(allocator, capacity, ids);
@@ -195,8 +212,10 @@ pub const MessageCache = struct {
             .data_off = data_off,
             .data_len = data_len,
             .window = window,
-            .validated = validated,
+            .status = status,
             .source = source,
+            .source_gen = source_gen,
+            .dup = dup,
             .arena = arena,
             .capacity = capacity,
         };
@@ -205,8 +224,10 @@ pub const MessageCache = struct {
     pub fn deinit(self: *MessageCache, allocator: Allocator) void {
         self.index.deinit(allocator);
         allocator.free(self.arena);
+        allocator.free(self.dup);
+        allocator.free(self.source_gen);
         allocator.free(self.source);
-        allocator.free(self.validated);
+        allocator.free(self.status);
         allocator.free(self.window);
         allocator.free(self.data_len);
         allocator.free(self.data_off);
@@ -229,6 +250,7 @@ pub const MessageCache = struct {
         topic_str: []const u8,
         data: []const u8,
         source: u16,
+        source_gen: u32,
     ) bool {
         if (data.len > self.arena.len or topic_str.len > topic_max) return false;
         if (self.contains(id)) return true;
@@ -243,8 +265,10 @@ pub const MessageCache = struct {
         self.data_off[slot] = self.data_head;
         self.data_len[slot] = data.len;
         self.window[slot] = 0;
-        self.validated[slot] = false;
+        self.status[slot] = .unknown;
         self.source[slot] = source;
+        self.source_gen[slot] = source_gen;
+        self.dup[slot] = DupSet.initEmpty();
         writeRing(self.arena, self.data_head, data);
         self.data_head = (self.data_head + data.len) % self.arena.len;
         self.data_used += data.len;
@@ -266,12 +290,48 @@ pub const MessageCache = struct {
 
     /// Marks a message validated so gossip and IWANT may offer it.
     pub fn validate(self: *MessageCache, id: MessageId) void {
-        if (self.index.find(id)) |slot| self.validated[slot] = true;
+        self.setStatus(id, .valid);
+    }
+
+    pub fn setStatus(self: *MessageCache, id: MessageId, status: Status) void {
+        if (self.index.find(id)) |slot| self.status[slot] = status;
+    }
+
+    pub fn statusOf(self: *const MessageCache, id: MessageId) ?Status {
+        const slot = self.index.find(id) orelse return null;
+        return self.status[slot];
     }
 
     pub fn isValidated(self: *const MessageCache, id: MessageId) bool {
         const slot = self.index.find(id) orelse return false;
-        return self.validated[slot];
+        return self.status[slot] == .valid;
+    }
+
+    /// Records `peer` as a duplicate sender of `id` (deduped per peer), returning
+    /// what the caller should do based on the message's current status.
+    pub fn recordDuplicate(self: *MessageCache, id: MessageId, peer: u16) DupOutcome {
+        const slot = self.index.find(id) orelse return .no_record;
+        if (self.dup[slot].isSet(peer)) return .already;
+        self.dup[slot].set(peer);
+        return switch (self.status[slot]) {
+            .unknown => .unknown,
+            .valid => .valid,
+            .invalid => .invalid,
+            .ignored => .ignored,
+        };
+    }
+
+    /// The peers that sent a duplicate of `id` before it resolved.
+    pub fn dupPeers(self: *const MessageCache, id: MessageId) ?*const DupSet {
+        const slot = self.index.find(id) orelse return null;
+        return &self.dup[slot];
+    }
+
+    /// The generation of the peer slot `id` arrived from, so the caller can
+    /// detect the original sender disconnecting and its slot being reused.
+    pub fn sourceGen(self: *const MessageCache, id: MessageId) ?u32 {
+        const slot = self.index.find(id) orelse return null;
+        return self.source_gen[slot];
     }
 
     /// The topic of a cached message without copying its data.
@@ -308,7 +368,7 @@ pub const MessageCache = struct {
         var slot = self.entry_tail;
         while (seen < self.count and written < out.len) : (seen += 1) {
             const name = self.topic[slot * topic_max ..][0..self.topic_len[slot]];
-            if (self.validated[slot] and self.window[slot] < constants.mcache_gossip and
+            if (self.status[slot] == .valid and self.window[slot] < constants.mcache_gossip and
                 std.mem.eql(u8, name, topic_str))
             {
                 out[written] = self.ids[slot];
@@ -365,7 +425,7 @@ test "message cache stores, answers get, gossips windows, and ages out" {
     var cache = try MessageCache.init(std.testing.allocator, 8, 1024);
     defer cache.deinit(std.testing.allocator);
     const id1 = [_]u8{1} ** 20;
-    try std.testing.expect(cache.put(id1, "topic_a", "hello world", 0));
+    try std.testing.expect(cache.put(id1, "topic_a", "hello world", 0, 0));
     var out: [64]u8 = undefined;
     const got = cache.get(id1, &out).?;
     try std.testing.expectEqualStrings("topic_a", got.topic);
@@ -396,7 +456,7 @@ test "message cache evicts oldest and wraps data around the arena" {
     var n: u8 = 0;
     while (n < 6) : (n += 1) {
         const id = [_]u8{n} ** 20;
-        try std.testing.expect(cache.put(id, "t", "0123456789", 0));
+        try std.testing.expect(cache.put(id, "t", "0123456789", 0, 0));
     }
     // only the most recent messages survive the ring
     const last = cache.get([_]u8{5} ** 20, &out).?;

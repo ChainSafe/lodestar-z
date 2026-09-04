@@ -132,7 +132,7 @@ pub const PeerScore = struct {
     pub fn deliver(self: *PeerScore, peer: u16, topic: u16) void {
         const counters = self.tc(peer, topic);
         counters.first_deliveries += 1;
-        counters.mesh_deliveries += 1;
+        if (counters.in_mesh) counters.mesh_deliveries += 1;
     }
 
     /// A duplicate from a mesh peer still counts toward its mesh delivery rate.
