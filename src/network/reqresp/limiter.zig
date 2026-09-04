@@ -13,6 +13,7 @@ pub const Quota = struct {
 pub const Bucket = struct {
     tokens: u32 = 0,
     refilled_ms: u64 = 0,
+    credit: u64 = 0,
 };
 
 pub const Quotas = [Protocol.count]Quota;
@@ -26,90 +27,134 @@ pub fn defaultQuotas() Quotas {
     return out;
 }
 
+const Handle = @import("../quic/api.zig").Handle;
+pub const InitError = error{ InvalidOptions, InvalidQuota } || std.mem.Allocator.Error;
+
 pub const Limiter = struct {
     buckets: []Bucket,
+    generations: []?u32,
     peers: u16,
     quotas: Quotas,
+    global_quotas: Quotas,
+    global: [Protocol.count]Bucket,
 
-    pub fn init(
+    pub fn init(allocator: std.mem.Allocator, peers: u16, quotas: ?Quotas) InitError!Limiter {
+        return initWithGlobal(allocator, peers, quotas, null);
+    }
+
+    pub fn initWithGlobal(
         allocator: std.mem.Allocator,
         peers: u16,
         quotas: ?Quotas,
-    ) std.mem.Allocator.Error!Limiter {
-        assert(peers > 0);
-        assert(peers <= constants.slots_ceiling);
+        global_quotas: ?Quotas,
+    ) InitError!Limiter {
+        if (peers == 0 or peers > constants.slots_ceiling) return error.InvalidOptions;
         const table = quotas orelse defaultQuotas();
-        for (table) |quota| {
-            assert(quota.tokens > 0);
-            assert(quota.period_ms > 0);
-        }
+        const aggregate = global_quotas orelse table;
+        try validate(table);
+        try validate(aggregate);
         const buckets = try allocator.alloc(Bucket, @as(usize, peers) * Protocol.count);
-        for (buckets, 0..) |*bucket, index| {
-            bucket.* = .{ .tokens = table[index % Protocol.count].tokens, .refilled_ms = 0 };
+        errdefer allocator.free(buckets);
+        const generations = try allocator.alloc(?u32, peers);
+        @memset(generations, null);
+        var global: [Protocol.count]Bucket = undefined;
+        for (&global, aggregate) |*bucket, quota| bucket.* = .{ .tokens = quota.tokens };
+        @memset(buckets, .{});
+        return .{
+            .buckets = buckets,
+            .generations = generations,
+            .peers = peers,
+            .quotas = table,
+            .global_quotas = aggregate,
+            .global = global,
+        };
+    }
+
+    pub fn validate(quotas: Quotas) error{InvalidQuota}!void {
+        for (quotas) |quota| {
+            if (quota.tokens == 0 or quota.period_ms == 0) return error.InvalidQuota;
         }
-        return .{ .buckets = buckets, .peers = peers, .quotas = table };
     }
 
     pub fn deinit(self: *Limiter, allocator: std.mem.Allocator) void {
-        assert(self.buckets.len == @as(usize, self.peers) * Protocol.count);
+        allocator.free(self.generations);
         allocator.free(self.buckets);
         self.* = undefined;
     }
 
-    pub fn take(self: *Limiter, peer: u16, which: Protocol, cost: u32, now_ms: u64) bool {
-        assert(peer < self.peers);
+    /// Bind only on admission after validating the handle against the attached Engine.
+    pub fn bind(self: *Limiter, peer: Handle, now_ms: u64) void {
+        assert(peer.index < self.peers);
+        if (self.matches(peer)) return;
+        self.generations[peer.index] = peer.generation;
+        const base = @as(usize, peer.index) * Protocol.count;
+        for (self.buckets[base..][0..Protocol.count], self.quotas) |*bucket, quota| {
+            bucket.* = .{ .tokens = quota.tokens, .refilled_ms = now_ms };
+        }
+    }
+
+    pub fn matches(self: *const Limiter, peer: Handle) bool {
+        return peer.index < self.peers and self.generations[peer.index] == peer.generation;
+    }
+
+    pub fn take(self: *Limiter, peer: Handle, which: Protocol, cost: u32, now_ms: u64) bool {
         assert(cost > 0);
-        const bucket = self.bucketFor(peer, which);
-        const quota = self.quotas[@intFromEnum(which)];
-        refill(bucket, quota, now_ms);
-        if (cost > bucket.tokens) return false;
+        if (!self.matches(peer)) return false;
+        const bucket = self.bucketFor(peer.index, which);
+        const index = @intFromEnum(which);
+        refill(bucket, self.quotas[index], now_ms);
+        refill(&self.global[index], self.global_quotas[index], now_ms);
+        if (cost > bucket.tokens or cost > self.global[index].tokens) return false;
         bucket.tokens -= cost;
-        assert(bucket.tokens <= quota.tokens);
+        self.global[index].tokens -= cost;
         return true;
     }
 
-    pub fn available(self: *Limiter, peer: u16, which: Protocol, now_ms: u64) u32 {
-        assert(peer < self.peers);
-        const bucket = self.bucketFor(peer, which);
+    pub fn peerAvailable(self: *Limiter, peer: Handle, which: Protocol, now_ms: u64) u32 {
+        if (!self.matches(peer)) return 0;
+        const bucket = self.bucketFor(peer.index, which);
         refill(bucket, self.quotas[@intFromEnum(which)], now_ms);
-        assert(bucket.tokens <= self.quotas[@intFromEnum(which)].tokens);
         return bucket.tokens;
     }
 
-    pub fn reset(self: *Limiter, peer: u16, now_ms: u64) void {
-        assert(peer < self.peers);
-        const base = @as(usize, peer) * Protocol.count;
-        for (self.buckets[base..][0..Protocol.count], 0..) |*bucket, index| {
-            bucket.* = .{ .tokens = self.quotas[index].tokens, .refilled_ms = now_ms };
-        }
-        assert(self.buckets[base].tokens == self.quotas[0].tokens);
+    pub fn nextToken(self: *Limiter, peer: Handle, which: Protocol, now_ms: u64) ?u64 {
+        if (!self.matches(peer)) return null;
+        const bucket = self.bucketFor(peer.index, which);
+        const index = @intFromEnum(which);
+        refill(bucket, self.quotas[index], now_ms);
+        refill(&self.global[index], self.global_quotas[index], now_ms);
+        return now_ms +| @max(
+            waitMs(bucket, self.quotas[index]),
+            waitMs(&self.global[index], self.global_quotas[index]),
+        );
     }
 
     fn bucketFor(self: *Limiter, peer: u16, which: Protocol) *Bucket {
-        const index = @as(usize, peer) * Protocol.count + @intFromEnum(which);
-        assert(index < self.buckets.len);
-        return &self.buckets[index];
+        return &self.buckets[@as(usize, peer) * Protocol.count + @intFromEnum(which)];
     }
 };
+
+fn waitMs(bucket: *const Bucket, quota: Quota) u64 {
+    if (bucket.tokens > 0) return 0;
+    const needed = @as(u128, quota.period_ms) - bucket.credit;
+    return @intCast((needed + quota.tokens - 1) / quota.tokens);
+}
 
 fn refill(bucket: *Bucket, quota: Quota, now_ms: u64) void {
     assert(bucket.tokens <= quota.tokens);
     if (now_ms <= bucket.refilled_ms) return;
     const elapsed = now_ms - bucket.refilled_ms;
-    const granted = std.math.mulWide(u64, elapsed, quota.tokens) / quota.period_ms;
-    if (granted == 0) return;
+    const credit = std.math.mulWide(u64, elapsed, quota.tokens) + bucket.credit;
+    const granted = credit / quota.period_ms;
+    bucket.refilled_ms = now_ms;
     const room = quota.tokens - bucket.tokens;
     if (granted >= room) {
         bucket.tokens = quota.tokens;
-        bucket.refilled_ms = now_ms;
+        bucket.credit = 0;
     } else {
         bucket.tokens += @intCast(granted);
-        bucket.refilled_ms += @intCast(granted * quota.period_ms / quota.tokens);
+        bucket.credit = @intCast(credit % quota.period_ms);
     }
     assert(bucket.tokens <= quota.tokens);
     assert(bucket.refilled_ms <= now_ms);
-}
-
-comptime {
-    assert(Protocol.count > 0);
 }

@@ -158,7 +158,7 @@ const Session = struct {
     peer_status: ?StatusV2.Type = null,
     finished: bool = false,
     request_ssz: [StatusV2.fixed_size]u8 = undefined,
-    response_ssz: [StatusV2.fixed_size]u8 = undefined,
+    response_ssz: [inbound_max][StatusV2.fixed_size]u8 = undefined,
 
     fn send(self: *Session, which: Protocol) !void {
         const body = self.encode(which, &self.request_ssz);
@@ -192,12 +192,12 @@ const Session = struct {
         switch (event) {
             .chunk => |chunk| {
                 try self.onChunk(chunk.bytes, chunk.fork);
-                _ = self.svc.consume(chunk.request);
+                _ = self.svc.consume(chunk.request, self.now);
             },
             .done => |done| try self.advance(done.chunks),
             .failed => |failed| try self.onFailure(failed.request, failed.reason),
             .request => |req| try self.serve(req.request, req.protocol, req.bytes),
-            .chunk_sent => |sent| _ = self.svc.finish(sent.request),
+            .chunk_sent => |sent| _ = self.svc.finish(sent.request, self.now),
             .served, .over_limit => {},
         }
     }
@@ -288,13 +288,13 @@ const Session = struct {
             .goodbye_v1 => {
                 const reason = std.mem.readInt(u64, bytes[0..8], .little);
                 std.debug.print("goodbye reason={d}\n", .{reason});
-                _ = self.svc.finish(request);
+                _ = self.svc.finish(request, self.now);
                 return;
             },
             else => return self.svc.respondError(request, 3, "unavailable", self.now),
         }
         const response: []const u8 = switch (which) {
-            .status_v1, .status_v2 => self.encode(which, &self.response_ssz),
+            .status_v1, .status_v2 => self.encode(which, &self.response_ssz[request.index]),
             else => zeros[0..which.info().response_max],
         };
         try self.svc.respond(request, response, null, self.now);
@@ -328,6 +328,7 @@ fn dial(
         .inbound_per_peer_max = inbound_max,
     } });
     defer svc.deinit();
+    defer svc.shutdown(&node.engine);
     const sink = try allocator.alloc(u8, Protocol.blocks_by_range_v2.info().response_max);
     defer allocator.free(sink);
 
@@ -347,7 +348,10 @@ fn dial(
     var rr_events: [8]reqresp.Event = undefined;
     var steps: u32 = 0;
     while (steps < steps_max and !session.finished) : (steps += 1) {
-        const result = try node.step(io, &events, &activity, .{});
+        const now = try network.driver.currentTime(io);
+        const due = svc.nextWakeup(now, rr_events.len);
+        const wait_ms: u32 = @intCast(@min(network.constants.poll_interval_ms, if (due) |deadline| deadline -| now.mono_ms else network.constants.poll_interval_ms));
+        const result = try node.step(io, &events, &activity, .{ .wait_max_ms = wait_ms });
         session.now = result.now;
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| {

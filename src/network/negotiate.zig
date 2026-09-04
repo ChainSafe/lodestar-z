@@ -54,6 +54,7 @@ const Entry = struct {
     started_ms: u64 = 0,
     role: Role = undefined,
     selected: ?u8 = null,
+    needs_service: bool = false,
     candidates: [candidates_max][]const u8 = undefined,
     candidates_len: u8 = 0,
     candidate: u8 = 0,
@@ -129,6 +130,7 @@ pub const Negotiator = struct {
         entry.outbox = .{};
         entry.outbox.queue(hello, false);
         entry.state = .negotiating;
+        entry.needs_service = true;
         assert(entry.outbox.bytes.len == hello.len);
         return stream;
     }
@@ -150,6 +152,25 @@ pub const Negotiator = struct {
         entry.inbox = .{};
         entry.outbox = .{};
         entry.state = .negotiating;
+        entry.needs_service = true;
+    }
+
+    /// Output pressure alone is ready only when the host supplies outcome capacity.
+    pub fn nextWakeup(self: *const Negotiator, now: types.Now, outcome_capacity: usize) ?u64 {
+        var deadline: ?u64 = null;
+        for (self.entries) |*entry| switch (entry.state) {
+            .free => {},
+            .reported => return now.mono_ms,
+            .pending => if (outcome_capacity > 0) {
+                return now.mono_ms;
+            },
+            .negotiating => {
+                if (entry.needs_service) return now.mono_ms;
+                const due = @max(now.mono_ms, entry.started_ms +| self.timeout_ms);
+                deadline = if (deadline) |prior| @min(prior, due) else due;
+            },
+        };
+        return deadline;
     }
 
     pub fn pump(
@@ -165,6 +186,7 @@ pub const Negotiator = struct {
                 continue;
             }
             if (entry.state == .negotiating) {
+                entry.needs_service = false;
                 if (self.advance(engine, entry, now)) |outcome| {
                     entry.pending_result = outcome.result;
                     entry.state = .pending;
@@ -254,11 +276,15 @@ pub const Negotiator = struct {
                 const outcome = listener.feed(entry.inbox.slice(), &entry.out_buffer) catch
                     return fail(engine, entry, .malformed);
                 entry.inbox.drop(outcome.consumed);
-                if (outcome.write.len > 0) entry.outbox.queue(outcome.write, false);
+                if (outcome.write.len > 0) {
+                    entry.outbox.queue(outcome.write, false);
+                    entry.needs_service = true;
+                }
                 switch (outcome.status) {
                     .selected => |index| {
                         assert(index < std.math.maxInt(u8));
                         entry.selected = @intCast(index);
+                        entry.needs_service = false;
                         const replied = entry.outbox.pump(engine, entry.stream) catch |err|
                             return failStream(engine, entry, err);
                         return if (replied) ready(entry, entry.selected.?) else null;
@@ -283,6 +309,7 @@ fn proposeNext(engine: *Engine, entry: *Entry, dialer: *multistream.Dialer) ?Out
     const proposal = multistream.encodeMessage(dialer.protocol, &entry.out_buffer) catch
         return fail(engine, entry, .malformed);
     entry.outbox.queue(proposal, false);
+    entry.needs_service = true;
     return null;
 }
 

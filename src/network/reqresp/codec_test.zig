@@ -239,3 +239,21 @@ test "codec bounds errors separately from successful ping payloads" {
     decoder = Decoder.initResponse(.{ .min = 8, .max = 8 }, false, &sink, &scratch);
     try std.testing.expectError(error.LengthOutOfBounds, decoder.feed(&.{ 0, 9 }));
 }
+
+test "codec empty SSZ leaves no trailing Snappy identifier" {
+    var encoded: [codec.frame_scratch_max]u8 = undefined;
+    var scratch: [codec.frame_scratch_max]u8 = undefined;
+    var sink: [32]u8 = undefined;
+    const request = try codec.encodeRequest("", &encoded);
+    var decoder = Decoder.initRequest(.{ .min = 0, .max = 32 }, &sink, &scratch);
+    const progress = try decoder.feed(request);
+    try std.testing.expect(progress.done);
+    try std.testing.expectEqual(request.len, progress.consumed);
+    try std.testing.expectEqualSlices(u8, &.{0}, request);
+    const response = try codec.encodeChunk(1, null, "", &encoded);
+    decoder = Decoder.initResponse(.{ .min = 8, .max = 8 }, false, &sink, &scratch);
+    const error_progress = try decoder.feed(response);
+    try std.testing.expect(error_progress.done);
+    try std.testing.expectEqual(response.len, error_progress.consumed);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 0 }, response);
+}

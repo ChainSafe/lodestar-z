@@ -4,7 +4,7 @@ const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
 const reqresp = @import("reqresp.zig");
 const engine_mod = @import("../quic/engine.zig");
-const negotiate = @import("../negotiate.zig");
+const negotiate = @import("../router.zig");
 const support = @import("../test_support.zig");
 
 const Event = reqresp.Event;
@@ -20,14 +20,16 @@ pub const Overrides = struct {
     inbound_max: u16 = 8,
     inbound_per_peer_max: u8 = 8,
     progress_timeout_ms: u64 = 10_000,
+    host_timeout_ms: u64 = 60_000,
+    quota_timeout_ms: u64 = 60_000,
     quotas: ?@import("limiter.zig").Quotas = null,
     forks: ?[]const reqresp.ForkEntry = null,
 };
 
 pub const ReqRespPair = struct {
     pair: support.Pair = .{},
-    client_neg: negotiate.Negotiator = undefined,
-    server_neg: negotiate.Negotiator = undefined,
+    client_neg: negotiate.Router = undefined,
+    server_neg: negotiate.Router = undefined,
     client: ReqResp = undefined,
     server: ReqResp = undefined,
     handles: struct { client: engine_mod.Handle, server: engine_mod.Handle } = undefined,
@@ -46,9 +48,9 @@ pub const ReqRespPair = struct {
     pub fn init(self: *ReqRespPair, client: Overrides, server: Overrides) !void {
         try self.pair.init(.{}, .{});
         errdefer self.pair.deinit();
-        self.client_neg = try negotiate.Negotiator.init(std.testing.allocator, 16);
+        self.client_neg = try negotiate.Router.init(std.testing.allocator, .{ .negotiations_max = 16, .meshsub = false });
         errdefer self.client_neg.deinit();
-        self.server_neg = try negotiate.Negotiator.init(std.testing.allocator, 16);
+        self.server_neg = try negotiate.Router.init(std.testing.allocator, .{ .negotiations_max = 16, .meshsub = false });
         errdefer self.server_neg.deinit();
         self.client = try ReqResp.init(std.testing.allocator, options(client, &self.forks));
         errdefer self.client.deinit();
@@ -72,10 +74,14 @@ pub const ReqRespPair = struct {
             .progress_timeout_ms = overrides.progress_timeout_ms,
             .forks = overrides.forks orelse forks,
             .quotas = overrides.quotas,
+            .host_timeout_ms = overrides.host_timeout_ms,
+            .quota_timeout_ms = overrides.quota_timeout_ms,
         };
     }
 
     pub fn deinit(self: *ReqRespPair) void {
+        self.client.shutdown(&self.pair.client, &self.client_neg);
+        self.server.shutdown(&self.pair.server, &self.server_neg);
         std.testing.allocator.free(self.sinks);
         self.server.deinit();
         self.client.deinit();
@@ -94,9 +100,11 @@ pub const ReqRespPair = struct {
     pub fn pumpOnce(self: *ReqRespPair) !void {
         try self.pair.pump();
         const now = self.pair.now;
+        self.client.cleanupPending(&self.pair.client, &self.client_neg);
+        self.server.cleanupPending(&self.pair.server, &self.server_neg);
         var storage: [16]engine_mod.Event = undefined;
         for (self.pair.events(&self.pair.server, &storage)) |event| switch (event) {
-            .stream_opened => |stream| try self.server_neg.acceptInbound(stream, &protocol.ids, now),
+            .stream_opened => |stream| try self.server_neg.negotiator.acceptInbound(stream, &protocol.ids, now),
             .closed => |closed| self.server.connectionClosed(closed.conn),
             else => {},
         };
@@ -107,17 +115,17 @@ pub const ReqRespPair = struct {
         var outcomes: [8]negotiate.Outcome = undefined;
         const dialed = self.client_neg.pump(&self.pair.client, now, &outcomes);
         for (outcomes[0..dialed]) |outcome| {
-            if (!self.client.negotiated(outcome)) self.unclaimed += 1;
+            if (!self.client.negotiated(outcome, now)) self.unclaimed += 1;
         }
         const listened = self.server_neg.pump(&self.pair.server, now, &outcomes);
         for (outcomes[0..listened]) |outcome| switch (outcome.result) {
             .ready => |ready| {
-                _ = try self.server.accept(outcome.stream, ready, self.requestSink(), now);
+                _ = try self.server.accept(&self.pair.server, outcome.stream, ready, self.requestSink(), now);
             },
             else => return error.TestUnexpectedResult,
         };
-        self.client_count = self.client.pump(&self.pair.client, now, &self.client_events);
-        self.server_count = self.server.pump(&self.pair.server, now, &self.server_events);
+        self.client_count = self.client.pump(&self.pair.client, &self.client_neg, now, &self.client_events);
+        self.server_count = self.server.pump(&self.pair.server, &self.server_neg, now, &self.server_events);
         try self.pair.pump();
     }
 
@@ -156,7 +164,7 @@ fn serveSingle(setup: *ReqRespPair, reply: []const u8, fork: ?@import("config").
         .request => |incoming| {
             exchange.request_seen = true;
             try setup.server.respond(incoming.request, reply, fork, setup.pair.now);
-            try std.testing.expect(setup.server.finish(incoming.request));
+            try std.testing.expect(setup.server.finish(incoming.request, setup.pair.now));
         },
         .served => exchange.served = true,
         .failed => |failure| exchange.failed = failure.reason,
@@ -169,7 +177,7 @@ fn drainClient(setup: *ReqRespPair, expected: []const u8, exchange: *Exchange) !
         .chunk => |chunk| {
             try std.testing.expectEqualSlices(u8, expected, chunk.bytes);
             exchange.chunks += 1;
-            try std.testing.expect(setup.client.consume(chunk.request));
+            try std.testing.expect(setup.client.consume(chunk.request, setup.pair.now));
         },
         .done => |finished| {
             exchange.done = true;
@@ -257,13 +265,13 @@ test "reqresp completes ping and metadata round trips" {
                 .ping_v1 => {
                     try std.testing.expectEqualSlices(u8, &ping_request, incoming.bytes);
                     try setup.server.respond(incoming.request, &ping_reply, null, setup.pair.now);
-                    try std.testing.expect(setup.server.finish(incoming.request));
+                    try std.testing.expect(setup.server.finish(incoming.request, setup.pair.now));
                     pings.request_seen = true;
                 },
                 .metadata_v2 => {
                     try std.testing.expectEqual(@as(usize, 0), incoming.bytes.len);
                     try setup.server.respond(incoming.request, &metadata_reply, null, setup.pair.now);
-                    try std.testing.expect(setup.server.finish(incoming.request));
+                    try std.testing.expect(setup.server.finish(incoming.request, setup.pair.now));
                     metadatas.request_seen = true;
                 },
                 else => return error.TestUnexpectedResult,
@@ -279,7 +287,7 @@ test "reqresp completes ping and metadata round trips" {
                     try std.testing.expectEqualSlices(u8, &metadata_reply, chunk.bytes);
                     metadatas.chunks += 1;
                 }
-                try std.testing.expect(setup.client.consume(chunk.request));
+                try std.testing.expect(setup.client.consume(chunk.request, setup.pair.now));
             },
             .done => |finished| {
                 if (finished.chunks == 1 and pings.chunks == 1 and !pings.done) pings.done = true else metadatas.done = true;
@@ -330,7 +338,7 @@ test "reqresp streams blocks by range chunks with fork context" {
                 if (sent < 3) {
                     try setup.server.respond(served_handle.?, &blocks[sent], .deneb, setup.pair.now);
                 } else {
-                    try std.testing.expect(setup.server.finish(served_handle.?));
+                    try std.testing.expect(setup.server.finish(served_handle.?, setup.pair.now));
                 }
             },
             .served => |finished| {
@@ -345,7 +353,7 @@ test "reqresp streams blocks by range chunks with fork context" {
                 try std.testing.expectEqual(@as(?@import("config").ForkSeq, .deneb), chunk.fork);
                 try std.testing.expectEqualSlices(u8, &blocks[received], chunk.bytes);
                 received += 1;
-                try std.testing.expect(setup.client.consume(chunk.request));
+                try std.testing.expect(setup.client.consume(chunk.request, setup.pair.now));
             },
             .done => |finished| {
                 try std.testing.expectEqual(@as(u32, 3), finished.chunks);
@@ -388,8 +396,8 @@ test "reqresp rejects undersized sinks and stale handles" {
         setup.pair.now,
     ));
     const stale = reqresp.RequestHandle{ .index = 0, .generation = 99, .direction = .outbound };
-    try std.testing.expect(!setup.client.consume(stale));
-    try std.testing.expect(!setup.server.finish(.{ .index = 0, .generation = 99, .direction = .inbound }));
+    try std.testing.expect(!setup.client.consume(stale, setup.pair.now));
+    try std.testing.expect(!setup.server.finish(.{ .index = 0, .generation = 99, .direction = .inbound }, setup.pair.now));
     try std.testing.expectEqual(@as(usize, 0), setup.client.errorMessage(stale).len);
     try std.testing.expectEqual(@as(u16, 0), setup.client.active().outbound);
 }
