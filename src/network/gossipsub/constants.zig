@@ -69,6 +69,14 @@ pub const topics_cap: usize = 256;
 /// Message ids a single peer may suppress at once through IDONTWANT.
 pub const dont_send_cap: usize = 128;
 
+/// Per-peer I/O buffer sizes. The send buffer batches control and small
+/// messages; the body buffer accumulates one inbound frame in the common case,
+/// and a larger frame is streamed through a claimed pool buffer instead.
+pub const send_buffer_len: usize = 32 * 1024;
+pub const body_buffer_len: usize = 64 * 1024;
+pub const read_scratch_len: usize = 16 * 1024;
+pub const reads_per_pump_max: u32 = 8;
+
 comptime {
     std.debug.assert(mesh_d_low <= mesh_d);
     std.debug.assert(mesh_d <= mesh_d_high);
