@@ -9,7 +9,7 @@ pub const wire_len: u3 = 2;
 pub const wire_i64: u3 = 1;
 pub const wire_i32: u3 = 5;
 
-pub const Tag = struct { field: u32, wire: u3 };
+pub const Tag = struct { field: u64, wire: u3 };
 
 /// A bounds-checked reader over one protobuf message's bytes.
 pub const Reader = struct {
@@ -41,7 +41,7 @@ pub const Reader = struct {
 
     pub fn tag(self: *Reader) Error!Tag {
         const raw = try self.varint();
-        return .{ .field = @intCast(raw >> 3), .wire = @intCast(raw & 0x7) };
+        return .{ .field = raw >> 3, .wire = @intCast(raw & 0x7) };
     }
 
     pub fn lenDelimited(self: *Reader) Error![]const u8 {
@@ -151,8 +151,12 @@ pub const SubOpts = struct {
         while (!reader.atEnd()) {
             const t = try reader.tag();
             switch (t.field) {
-                1 => out.subscribe = (try reader.varint()) != 0,
-                2 => out.topic = try reader.lenDelimited(),
+                1 => if (t.wire == wire_varint) {
+                    out.subscribe = (try reader.varint()) != 0;
+                } else try reader.skip(t.wire),
+                2 => if (t.wire == wire_len) {
+                    out.topic = try reader.lenDelimited();
+                } else try reader.skip(t.wire),
                 else => try reader.skip(t.wire),
             }
         }
@@ -172,8 +176,12 @@ pub const Message = struct {
         while (!reader.atEnd()) {
             const t = try reader.tag();
             switch (t.field) {
-                2 => out.data = try reader.lenDelimited(),
-                4 => out.topic = try reader.lenDelimited(),
+                2 => if (t.wire == wire_len) {
+                    out.data = try reader.lenDelimited();
+                } else try reader.skip(t.wire),
+                4 => if (t.wire == wire_len) {
+                    out.topic = try reader.lenDelimited();
+                } else try reader.skip(t.wire),
                 1, 3, 5, 6 => {
                     out.signed = true;
                     try reader.skip(t.wire);
@@ -205,7 +213,10 @@ fn topicOf(data: []const u8, field: u32) Error![]const u8 {
     var topic: []const u8 = &.{};
     while (!reader.atEnd()) {
         const t = try reader.tag();
-        if (t.field == field) topic = try reader.lenDelimited() else try reader.skip(t.wire);
+        if (t.field == field and t.wire == wire_len)
+            topic = try reader.lenDelimited()
+        else
+            try reader.skip(t.wire);
     }
     return topic;
 }
@@ -237,8 +248,12 @@ pub const Prune = struct {
         while (!reader.atEnd()) {
             const t = try reader.tag();
             switch (t.field) {
-                1 => out.topic = try reader.lenDelimited(),
-                3 => out.backoff = try reader.varint(),
+                1 => if (t.wire == wire_len) {
+                    out.topic = try reader.lenDelimited();
+                } else try reader.skip(t.wire),
+                3 => if (t.wire == wire_varint) {
+                    out.backoff = try reader.varint();
+                } else try reader.skip(t.wire),
                 else => try reader.skip(t.wire),
             }
         }
@@ -275,6 +290,10 @@ pub const RpcReader = struct {
                     continue;
                 }
                 const t = try control.tag();
+                if (t.wire != wire_len) {
+                    try control.skip(t.wire);
+                    continue;
+                }
                 const body = try control.lenDelimited();
                 switch (t.field) {
                     1 => return .{ .ihave = .{ .topic = try topicOf(body, 1), .body = body } },
@@ -287,6 +306,10 @@ pub const RpcReader = struct {
             }
             if (self.top.atEnd()) return null;
             const t = try self.top.tag();
+            if (t.wire != wire_len) {
+                try self.top.skip(t.wire);
+                continue;
+            }
             const body = try self.top.lenDelimited();
             switch (t.field) {
                 1 => return .{ .subscription = try SubOpts.decode(body) },
@@ -559,4 +582,24 @@ test "protobuf varintLen matches the encoded width" {
         var r = Reader.init(w.written());
         try std.testing.expectEqual(value, try r.varint());
     }
+}
+
+test "protobuf tolerates a field number above u32 without overflow" {
+    // tag varint 0x800000000 => field 2^32, wire 0; a u32 field would panic here.
+    var r = Reader.init(&[_]u8{ 0x80, 0x80, 0x80, 0x80, 0x80, 0x01 });
+    const t = try r.tag();
+    try std.testing.expect(t.field > std.math.maxInt(u32));
+    try std.testing.expectEqual(@as(u3, 0), t.wire);
+}
+
+test "protobuf skips a field carrying an unexpected wire type" {
+    var buf: [64]u8 = undefined;
+    var w = Writer.init(&buf);
+    w.varintField(1, 12_345); // field 1 as a varint: not a valid subscription
+    writeSubscription(&w, true, "topic_a");
+    var reader = RpcReader.init(w.written());
+    const sub = (try reader.next()).?;
+    try std.testing.expect(sub.subscription.subscribe);
+    try std.testing.expectEqualStrings("topic_a", sub.subscription.topic);
+    try std.testing.expect((try reader.next()) == null);
 }
