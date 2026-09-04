@@ -887,3 +887,121 @@ test "FillWithContentsIterator matches fillWithContents" {
     const empty_root_iter = try empty_it.finish();
     try std.testing.expectEqual(@as(Node.Id, @enumFromInt(depth)), empty_root_iter);
 }
+
+test "getRoot hashes both spine directions at the maximum supported depth" {
+    const hashing = @import("hashing");
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |left_spine| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        var pool = try Node.Pool.init(.{
+            .page_allocator = failing.allocator(),
+            .allocator = failing.allocator(),
+            .pool_size = max_depth + 1,
+        });
+        defer pool.deinit();
+
+        var expected = [_]u8{0x12} ** 32;
+        var root = try pool.createLeaf(&expected);
+        defer pool.unref(root);
+        for (0..max_depth) |depth| {
+            const zero: Node.Id = @enumFromInt(depth);
+            const child_root = expected;
+            const zero_root = hashing.getZeroHash(@intCast(depth));
+            if (left_spine) {
+                root = try pool.createBranch(root, zero);
+                hashing.hashOne(&expected, &child_root, zero_root);
+            } else {
+                root = try pool.createBranch(zero, root);
+                hashing.hashOne(&expected, zero_root, &child_root);
+            }
+        }
+
+        failing.fail_index = failing.alloc_index;
+        failing.resize_fail_index = failing.resize_index;
+        try std.testing.expectEqualSlices(u8, &expected, root.getRoot(&pool));
+        try std.testing.expect(root.isBranchComputed(&pool));
+        try std.testing.expectEqualSlices(u8, &expected, root.getRoot(&pool));
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+}
+
+test "getRoot preserves shared branches and mixed cached payload roots" {
+    const hashing = @import("hashing");
+    const Payload = struct {
+        calls: *usize,
+        root: [32]u8,
+
+        pub fn init(allocator: std.mem.Allocator, value: *const @This()) !*const @This() {
+            const ptr = try allocator.create(@This());
+            ptr.* = value.*;
+            return ptr;
+        }
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            allocator.destroy(self);
+        }
+
+        pub fn getRoot(self: *const @This(), out: *[32]u8) void {
+            self.calls.* += 1;
+            out.* = self.root;
+        }
+
+        pub fn toTree(self: *const @This(), pool: *Node.Pool) !Node.Id {
+            return pool.createLeaf(&self.root);
+        }
+    };
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var pool = try Node.Pool.init(.{
+        .page_allocator = failing.allocator(),
+        .allocator = failing.allocator(),
+        .pool_size = 16,
+    });
+    defer pool.deinit();
+
+    var chunks: [ChunkedLeaf.K][32]u8 align(64) = undefined;
+    for (&chunks, 0..) |*chunk, index| chunk.* = @splat(@as(u8, @intCast(index)));
+    const chunked = try pool.createChunkedLeaf(&chunks, ChunkedLeaf.K);
+    var chunked_root: [32]u8 = undefined;
+    try hashing.merkleize(@ptrCast(&chunks), ChunkedLeaf.k_log2, &chunked_root);
+
+    var calls: usize = 0;
+    const payload = Payload{ .calls = &calls, .root = @splat(0x34) };
+    const opaque_node = try pool.createContainerStruct(Payload, &payload);
+    const leaf_value: [32]u8 = @splat(0xff);
+    const leaf = try pool.createLeaf(&leaf_value);
+    const zero: Node.Id = @enumFromInt(0);
+    const shared = try pool.createBranch(chunked, opaque_node);
+    const left = try pool.createBranch(shared, leaf);
+    const right = try pool.createBranch(shared, zero);
+    var root = try pool.createBranch(left, right);
+    defer pool.unref(root);
+
+    var shared_root: [32]u8 = undefined;
+    var left_root: [32]u8 = undefined;
+    var right_root: [32]u8 = undefined;
+    var expected: [32]u8 = undefined;
+    hashing.hashOne(&shared_root, &chunked_root, &payload.root);
+    hashing.hashOne(&left_root, &shared_root, &leaf_value);
+    hashing.hashOne(&right_root, &shared_root, hashing.getZeroHash(0));
+    hashing.hashOne(&expected, &left_root, &right_root);
+
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try std.testing.expectEqualSlices(u8, &expected, root.getRoot(&pool));
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    for ([_]Node.Id{ root, left, right, shared }) |branch| {
+        try std.testing.expect(branch.isBranchComputed(&pool));
+    }
+    try std.testing.expectEqualSlices(u8, &leaf_value, leaf.getRoot(&pool));
+    try std.testing.expectEqualSlices(u8, &chunked_root, chunked.getRoot(&pool));
+    try std.testing.expectEqualSlices(u8, &payload.root, opaque_node.getRoot(&pool));
+
+    const previous_root = expected;
+    root = try pool.createBranch(root, shared);
+    hashing.hashOne(&expected, &previous_root, &shared_root);
+    try std.testing.expectEqualSlices(u8, &expected, root.getRoot(&pool));
+    try std.testing.expectEqualSlices(u8, &expected, root.getRoot(&pool));
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    try std.testing.expect(!failing.has_induced_failure);
+}
