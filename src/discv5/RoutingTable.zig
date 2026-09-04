@@ -115,6 +115,44 @@ pub fn get(self: *const RoutingTable, node_id: *const types.NodeId) ?Entry {
     return self.bucketEntries(index)[position];
 }
 
+pub fn maintenanceTarget(
+    self: *const RoutingTable,
+    cursor: *usize,
+    now_ms: u64,
+    stale_after_ms: u64,
+) ?Entry {
+    std.debug.assert(cursor.* < table_capacity);
+    for (0..table_capacity) |_| {
+        const offset = cursor.*;
+        cursor.* = (offset + 1) % table_capacity;
+        const index = offset / bucket_size;
+        if (offset % bucket_size >= self.counts[index]) continue;
+        const entry = self.entries[offset];
+        if (now_ms -| entry.last_verified_ms < stale_after_ms) continue;
+        if (self.pending[index]) |candidate| {
+            if (std.mem.eql(u8, &candidate.replace_id, &entry.peer.node_id)) continue;
+        }
+        return entry;
+    }
+    return null;
+}
+
+/// A failed probe cannot remove a peer authenticated after the probe began.
+pub fn forgetPeerIfStale(
+    self: *RoutingTable,
+    node_id: *const types.NodeId,
+    verified_at_ms: u64,
+) bool {
+    const index = bucketIndex(types.logDistance(&self.local_id, node_id));
+    const position = self.findInBucket(index, node_id) orelse return false;
+    if (self.bucketEntries(index)[position].last_verified_ms != verified_at_ms) return false;
+    if (self.pending[index]) |candidate| {
+        if (std.mem.eql(u8, &candidate.replace_id, node_id)) return false;
+    }
+    self.removeAt(index, position);
+    return true;
+}
+
 /// Admits or refreshes a directly authenticated peer. When the bucket is full, the record
 /// becomes its one pending candidate and the result names the incumbent to revalidate.
 pub fn upsertVerified(

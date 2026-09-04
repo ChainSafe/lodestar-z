@@ -100,9 +100,34 @@ jobs:
         run: |
           zig build test:beacon_node
 
+      - name: Run DiscV5 tests
+        run: |
+          zig build test:discv5
+          zig build test:discv5 -Doptimize=ReleaseSafe
+
       - name: Build benchmarks
         run: |
           zig build build-exe:bench_hashing build-exe:bench_merkle_gindex build-exe:bench_merkle_node build-exe:bench_ssz_attestation build-exe:bench_ssz_block build-exe:bench_ssz_state build-exe:bench_process_block build-exe:bench_process_epoch build-exe:bench_fork_choice_update_head build-exe:bench_fork_choice_compute_deltas build-exe:bench_fork_choice_on_attestation
+
+  discv5-interop:
+    name: DiscV5 geth interoperability
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Build DiscV5 interoperability helper
+        run: zig build build-exe:discv5_interop -Doptimize=ReleaseSafe
+      - name: Test against pinned geth
+        working-directory: test/int/discv5
+        env:
+          GOTOOLCHAIN: auto
+          DISCV5_INTEROP_BIN: ${{ github.workspace }}/zig-out/bin/discv5_interop
+        run: go test -mod=readonly -count=1 -timeout=60s -v .
 
   build-test-slow:
     name: slow tests

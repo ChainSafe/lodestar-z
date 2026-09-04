@@ -68,6 +68,7 @@ pub const Endpoint = struct {
 /// The reason a datagram was not acted on. Every arm is caused by the peer, never by the local
 /// node.
 pub const RejectReason = enum {
+    oversized_datagram,
     malformed_packet,
     malformed_message,
     invalid_record,
@@ -77,6 +78,7 @@ pub const RejectReason = enum {
     request_too_large,
     unsolicited_response,
     invalid_response,
+    duplicate_response,
 };
 
 /// Keeps `out[0..length]` ordered by XOR distance to `target`, dropping the farthest when full.

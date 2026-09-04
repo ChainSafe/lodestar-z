@@ -28,15 +28,15 @@ test "session table keeps key direction and bounded nonces" {
 test "session table rejects zero and excessive configured capacities" {
     var table: SessionStore = undefined;
     try std.testing.expectError(
-        SessionStore.Error.InvalidCapacity,
+        SessionStore.InitError.InvalidCapacity,
         table.init(std.testing.allocator, 0, 1),
     );
     try std.testing.expectError(
-        SessionStore.Error.InvalidCapacity,
+        SessionStore.InitError.InvalidCapacity,
         table.init(std.testing.allocator, SessionStore.session_capacity_max + 1, 1),
     );
     try std.testing.expectError(
-        SessionStore.Error.InvalidCapacity,
+        SessionStore.InitError.InvalidCapacity,
         table.init(std.testing.allocator, 1, SessionStore.challenge_capacity_max + 1),
     );
 }
@@ -81,7 +81,7 @@ test "challenge churn preserves established sessions" {
     try std.testing.expect(table.getChallenge(fakeEndpoint(4, 9_004)) != null);
 }
 
-test "install consumes a challenge and expiration removes pending challenges" {
+test "install preserves a challenge until explicit consumption" {
     var table: SessionStore = undefined;
     try table.init(std.testing.allocator, 2, 2);
     defer table.deinit(std.testing.allocator);
@@ -96,6 +96,8 @@ test "install consumes a challenge and expiration removes pending challenges" {
     const key = [_]u8{0x11} ** 16;
     const active = SessionStore.Session{ .read_key = key, .write_key = key };
     table.install(peer, &active, 20);
+    try std.testing.expectEqual(@as(usize, 1), table.challengeCount());
+    table.removeChallenge(peer);
     try std.testing.expectEqual(@as(usize, 0), table.challengeCount());
 
     try std.testing.expect(table.putChallenge(fakeEndpoint(2, 9_002), &challenge, null, 30));
@@ -118,4 +120,63 @@ test "idle session expiration is independent from challenges" {
     try std.testing.expectEqual(@as(usize, 1), table.expireSessions(20, 10));
     try std.testing.expectEqual(@as(usize, 0), table.sessionCount());
     try std.testing.expectEqual(@as(usize, 1), table.challengeCount());
+}
+
+test "reinstalling the same key cannot reset the outbound nonce counter" {
+    var table: SessionStore = undefined;
+    try table.init(std.testing.allocator, 1, 1);
+    defer table.deinit(std.testing.allocator);
+    const peer = fakeEndpoint(1, 9_001);
+    const active = SessionStore.Session{
+        .read_key = [_]u8{0x11} ** 16,
+        .write_key = [_]u8{0x22} ** 16,
+    };
+    table.install(peer, &active, 1);
+    const tail = [_]u8{0x33} ** 8;
+    _ = (try table.outbound(peer, &tail, 2)).?;
+    table.install(peer, &active, 3);
+    const outbound = (try table.outbound(peer, &tail, 4)).?;
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 2 }, outbound.nonce[0..4]);
+}
+
+test "session transitions retain only the previous distinct read key" {
+    var table: SessionStore = undefined;
+    try table.init(std.testing.allocator, 1, 1);
+    defer table.deinit(std.testing.allocator);
+    const peer = fakeEndpoint(1, 9_001);
+    const first = SessionStore.Session{ .read_key = [_]u8{0x11} ** 16, .write_key = [_]u8{0x21} ** 16 };
+    const second = SessionStore.Session{ .read_key = [_]u8{0x12} ** 16, .write_key = [_]u8{0x22} ** 16 };
+    const third = SessionStore.Session{ .read_key = [_]u8{0x13} ** 16, .write_key = [_]u8{0x23} ** 16 };
+    table.install(peer, &first, 1);
+    try std.testing.expect(table.alternateReadKey(peer) == null);
+    table.install(peer, &second, 2);
+    try std.testing.expectEqual(first.read_key, table.alternateReadKey(peer).?);
+    table.install(peer, &second, 3);
+    try std.testing.expectEqual(first.read_key, table.alternateReadKey(peer).?);
+    table.install(peer, &third, 4);
+    try std.testing.expectEqual(third.read_key, table.readKey(peer).?);
+    try std.testing.expectEqual(second.read_key, table.alternateReadKey(peer).?);
+    try std.testing.expectEqual(@as(usize, 1), table.expireSessions(14, 10));
+    try std.testing.expect(table.readKey(peer) == null);
+    try std.testing.expect(table.alternateReadKey(peer) == null);
+    table.install(peer, &first, 15);
+    try std.testing.expect(table.alternateReadKey(peer) == null);
+}
+
+test "next deadline chooses pending work and saturates at the clock limit" {
+    var table: SessionStore = undefined;
+    try table.init(std.testing.allocator, 1, 1);
+    defer table.deinit(std.testing.allocator);
+    const peer = fakeEndpoint(1, 9_001);
+    const active = SessionStore.Session{ .read_key = [_]u8{0x11} ** 16, .write_key = [_]u8{0x22} ** 16 };
+    table.install(peer, &active, 40);
+    try std.testing.expect(table.putChallenge(fakeEndpoint(2, 9_002), &([_]u8{0x55} ** 63), null, 10));
+    try std.testing.expectEqual(@as(?u64, 30), table.nextDeadlineMs(20, 100));
+    try std.testing.expectEqual(@as(usize, 1), table.expireChallenges(30, 20));
+    try std.testing.expectEqual(@as(?u64, 140), table.nextDeadlineMs(20, 100));
+    const last = std.math.maxInt(u64);
+    try std.testing.expect(table.touch(peer, last - 5));
+    try std.testing.expectEqual(@as(?u64, last), table.nextDeadlineMs(20, 100));
+    try std.testing.expectEqual(@as(usize, 1), table.expireSessions(last, 100));
+    try std.testing.expect(table.nextDeadlineMs(20, 100) == null);
 }

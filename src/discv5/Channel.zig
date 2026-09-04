@@ -13,10 +13,12 @@ const packet = @import("wire/packet.zig");
 
 pub const Error = crypto.Error || enr.Error || packet.Error || SessionStore.Error || error{
     InvalidLocalRecord,
-    InvalidTimeout,
     MissingSession,
     RequestTooLargeForHandshake,
+    StaleLocalRecord,
 };
+
+pub const InitError = SessionStore.InitError || error{ InvalidLocalRecord, InvalidTimeout };
 
 const IdentityError = enr.Error || error{
     InvalidRemoteRecord,
@@ -58,6 +60,7 @@ pub const Sealed = struct {
 
 pub const Authenticated = struct {
     peer: types.Endpoint,
+    nonce: [constants.nonce_size]u8,
     plaintext: []const u8,
     record: ?enr.Record,
 };
@@ -122,12 +125,12 @@ pub fn init(
     local_key: crypto.KeyPair,
     local_record: enr.Record,
     config: Config,
-) Error!void {
+) InitError!void {
     const public_key = crypto.compressedPublicKey(&local_key);
     if (!std.mem.eql(u8, &public_key, &local_record.public_key))
-        return Error.InvalidLocalRecord;
+        return InitError.InvalidLocalRecord;
     if (config.challenge_timeout_ms == 0 or config.session_idle_timeout_ms == 0)
-        return Error.InvalidTimeout;
+        return InitError.InvalidTimeout;
     try self.sessions.init(allocator, config.session_capacity, config.challenge_capacity);
     self.local_key = local_key;
     self.local_record = local_record;
@@ -142,6 +145,15 @@ pub fn deinit(self: *Channel, allocator: std.mem.Allocator) void {
 
 pub fn hasSession(self: *const Channel, peer: types.Endpoint) bool {
     return self.sessions.hasSession(peer);
+}
+
+pub fn updateLocalRecord(self: *Channel, record: *const enr.Record) Error!void {
+    if (record.length > record.bytes.len) return Error.InvalidLocalRecord;
+    const verified = enr.Record.init(record.slice()) catch return Error.InvalidLocalRecord;
+    const public_key = crypto.compressedPublicKey(&self.local_key);
+    if (!std.mem.eql(u8, &public_key, &verified.public_key)) return Error.InvalidLocalRecord;
+    if (verified.sequence <= self.local_record.sequence) return Error.StaleLocalRecord;
+    self.local_record = verified;
 }
 
 /// Returns the largest request `seal` can send to `peer` right now. With a session that is the
@@ -316,6 +328,13 @@ pub fn expire(self: *Channel, now_ms: u64) Expired {
     };
 }
 
+pub fn nextDeadlineMs(self: *const Channel) ?u64 {
+    return self.sessions.nextDeadlineMs(
+        self.config.challenge_timeout_ms,
+        self.config.session_idle_timeout_ms,
+    );
+}
+
 fn receiveOrdinary(
     self: *Channel,
     decoded: *const packet.Packet,
@@ -329,13 +348,27 @@ fn receiveOrdinary(
         decoded,
         &read_key,
         &scratch.packet_decrypt,
-    ) catch |err| switch (err) {
-        packet.Error.DecryptionFailed => return unauthenticated(decoded, peer),
+    ) catch |err| retry: switch (err) {
+        packet.Error.DecryptionFailed => {
+            var alternate_key = self.sessions.alternateReadKey(peer) orelse
+                return unauthenticated(decoded, peer);
+            defer std.crypto.secureZero(u8, &alternate_key);
+            break :retry packet.decrypt(decoded, &alternate_key, &scratch.packet_decrypt) catch |alternate_err|
+                return switch (alternate_err) {
+                    packet.Error.DecryptionFailed => unauthenticated(decoded, peer),
+                    else => rejected(.malformed_packet),
+                };
+        },
         else => return rejected(.malformed_packet),
     };
     const touched = self.sessions.touch(peer, now_ms);
     std.debug.assert(touched);
-    return .{ .authenticated = .{ .peer = peer, .plaintext = plaintext, .record = null } };
+    return .{ .authenticated = .{
+        .peer = peer,
+        .nonce = decoded.static_header.nonce,
+        .plaintext = plaintext,
+        .record = null,
+    } };
 }
 
 fn receiveHandshake(
@@ -376,8 +409,10 @@ fn receiveHandshake(
     };
     defer std.crypto.secureZero(u8, std.mem.asBytes(&active));
     self.sessions.install(peer, &active, now_ms);
+    self.sessions.removeChallenge(peer);
     return .{ .authenticated = .{
         .peer = peer,
+        .nonce = decoded.static_header.nonce,
         .plaintext = plaintext,
         .record = identity.update,
     } };

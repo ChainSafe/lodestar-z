@@ -435,3 +435,49 @@ test "relay policy does not cross special address scopes" {
     try std.testing.expect(!RoutingTable.relayAllowed(private, private6));
     try std.testing.expect(!RoutingTable.relayAllowed(public6, multicast6));
 }
+
+test "routing maintenance selects quiet peers fairly and protects recent traffic from eviction" {
+    var table: RoutingTable = undefined;
+    try table.init(std.testing.allocator, [_]u8{0} ** 32);
+    defer table.deinit(std.testing.allocator);
+    const first_id = nodeAtDistance(256, 1);
+    const second_id = nodeAtDistance(255, 2);
+    const first_address = address4(203, 1, 1, 1, 9_001);
+    const second_address = address4(203, 2, 1, 1, 9_002);
+    const first_record = fakeRecord(first_id, first_address, 1);
+    const second_record = fakeRecord(second_id, second_address, 1);
+    const first_peer = types.Endpoint{ .node_id = first_id, .address = first_address };
+    const second_peer = types.Endpoint{ .node_id = second_id, .address = second_address };
+    _ = try table.upsertVerified(&first_peer, &first_record, 0);
+    _ = try table.upsertVerified(&second_peer, &second_record, 0);
+    var cursor: usize = 0;
+    try std.testing.expect(table.maintenanceTarget(&cursor, 99, 100) == null);
+    const first = table.maintenanceTarget(&cursor, 100, 100).?;
+    const second = table.maintenanceTarget(&cursor, 100, 100).?;
+    try std.testing.expect(!std.mem.eql(u8, &first.peer.node_id, &second.peer.node_id));
+    _ = try table.upsertVerified(&first.peer, &first.record, 101);
+    try std.testing.expect(!table.forgetPeerIfStale(&first.peer.node_id, 0));
+    try std.testing.expect(table.forgetPeerIfStale(&second.peer.node_id, 0));
+    try std.testing.expectEqual(@as(usize, 1), table.count());
+    try std.testing.expect(!table.forgetPeerIfStale(&second.peer.node_id, 0));
+}
+
+test "routing periodic maintenance leaves pending replacements to revalidation" {
+    var table: RoutingTable = undefined;
+    try table.init(std.testing.allocator, [_]u8{0} ** 32);
+    defer table.deinit(std.testing.allocator);
+    for (0..RoutingTable.bucket_size + 1) |index| {
+        const node_id = nodeAtDistance(256, @intCast(index + 1));
+        const address = address4(10, @intCast(index + 1), 0, 1, @intCast(9_000 + index));
+        const remote_record = fakeRecord(node_id, address, 1);
+        const peer = types.Endpoint{ .node_id = node_id, .address = address };
+        _ = try table.upsertVerified(&peer, &remote_record, 0);
+    }
+    const incumbent = table.revalidationTarget().?;
+    var cursor: usize = 0;
+    const periodic = table.maintenanceTarget(&cursor, 100, 100).?;
+    try std.testing.expect(!std.mem.eql(u8, &incumbent.peer.node_id, &periodic.peer.node_id));
+    try std.testing.expect(!table.forgetPeerIfStale(&incumbent.peer.node_id, 0));
+    try std.testing.expectEqual(@as(usize, 1), table.pendingCount());
+    try std.testing.expectEqual(RoutingTable.bucket_size, table.count());
+}

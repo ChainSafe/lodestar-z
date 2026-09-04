@@ -36,6 +36,7 @@ test "cold packet is challenged and the handshake delivers the sender record" {
     );
     try std.testing.expect(inbound == .authenticated);
     try std.testing.expectEqualSlices(u8, plaintext, inbound.authenticated.plaintext);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 1, 0x31, 0x31, 0x31, 0x31, 0x31, 0x31, 0x31, 0x31 }, &inbound.authenticated.nonce);
     try std.testing.expectEqual(pair.record_a.node_id, inbound.authenticated.record.?.node_id);
     try std.testing.expect(pair.node_a.hasSession(pair.peerB()));
     try std.testing.expect(pair.node_b.hasSession(pair.peerA()));
@@ -51,6 +52,7 @@ test "cold packet is challenged and the handshake delivers the sender record" {
     );
     try std.testing.expect(answered == .authenticated);
     try std.testing.expectEqualSlices(u8, "pong", answered.authenticated.plaintext);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 1, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42 }, &answered.authenticated.nonce);
     try std.testing.expect(answered.authenticated.record == null);
 }
 
@@ -225,13 +227,13 @@ test "channel rejects a foreign local record and zero timeouts" {
     const record_b = try enr.Record.create(&key_b, 1, loopback(2, 9_002));
     var invalid: Channel = undefined;
     try std.testing.expectError(
-        Channel.Error.InvalidLocalRecord,
+        Channel.InitError.InvalidLocalRecord,
         invalid.init(std.testing.allocator, key_a, record_b, channelConfig()),
     );
     var config = channelConfig();
     config.session_idle_timeout_ms = 0;
     try std.testing.expectError(
-        Channel.Error.InvalidTimeout,
+        Channel.InitError.InvalidTimeout,
         invalid.init(std.testing.allocator, key_b, record_b, config),
     );
 }
@@ -343,3 +345,46 @@ const Pair = struct {
         return handshake.packet_length;
     }
 };
+
+test "channel exposes the next challenge or idle session deadline" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    try std.testing.expect(pair.node_b.nextDeadlineMs() == null);
+    _ = try pair.challenge("ping", null, 1);
+    try std.testing.expectEqual(@as(?u64, 101), pair.node_b.nextDeadlineMs());
+    _ = pair.node_b.expire(101);
+    try std.testing.expect(pair.node_b.nextDeadlineMs() == null);
+    const length = try pair.challengeAndHandshake("ping", null, 200);
+    _ = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 200, &pair.scratch);
+    try std.testing.expectEqual(@as(?u64, 1_200), pair.node_b.nextDeadlineMs());
+    _ = try pair.node_b.sealEstablished(&pair.b_to_a, pair.peerA(), "pong", &sealEntropy(0x50), 300);
+    try std.testing.expectEqual(@as(?u64, 1_300), pair.node_b.nextDeadlineMs());
+    try std.testing.expectEqual(@as(usize, 0), pair.node_b.expire(1_299).sessions);
+    try std.testing.expectEqual(@as(usize, 1), pair.node_b.expire(1_300).sessions);
+    try std.testing.expect(pair.node_b.nextDeadlineMs() == null);
+}
+
+test "local record updates require a newer valid signature from the local key" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    const updated = try enr.Record.create(&try keyPair(0x11), 2, loopback(3, 9_003));
+    try pair.node_a.updateLocalRecord(&updated);
+    try std.testing.expectEqualSlices(u8, updated.slice(), pair.node_a.local_record.slice());
+    try std.testing.expectError(Channel.Error.StaleLocalRecord, pair.node_a.updateLocalRecord(&pair.record_a));
+    try std.testing.expectError(Channel.Error.StaleLocalRecord, pair.node_a.updateLocalRecord(&updated));
+    try std.testing.expectError(Channel.Error.InvalidLocalRecord, pair.node_a.updateLocalRecord(&pair.record_b));
+    var corrupted = try enr.Record.create(&try keyPair(0x11), 3, pair.address_a);
+    corrupted.bytes[10] ^= 1;
+    try std.testing.expectError(Channel.Error.InvalidLocalRecord, pair.node_a.updateLocalRecord(&corrupted));
+    corrupted.length = constants.enr_size_max + 1;
+    try std.testing.expectError(Channel.Error.InvalidLocalRecord, pair.node_a.updateLocalRecord(&corrupted));
+    try std.testing.expectEqualSlices(u8, updated.slice(), pair.node_a.local_record.slice());
+
+    const length = try pair.challengeAndHandshake("ping", pair.identityA(), 1);
+    const inbound = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 2, &pair.scratch);
+    try std.testing.expect(inbound == .authenticated);
+    try std.testing.expectEqual(@as(u64, 2), inbound.authenticated.record.?.sequence);
+    try std.testing.expectEqual(updated.endpoint(), inbound.authenticated.record.?.endpoint());
+}

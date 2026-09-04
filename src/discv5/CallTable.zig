@@ -11,11 +11,13 @@ const CallTable = @This();
 
 pub const capacity_max: usize = 256;
 
-pub const Error = std.mem.Allocator.Error || message.Error || error{
+pub const InitError = std.mem.Allocator.Error || error{InvalidCapacity};
+
+pub const Error = message.Error || error{
     CallExpired,
     GenerationExhausted,
     HandshakeAttempted,
-    InvalidCapacity,
+    DuplicateResponse,
     InvalidNodeCount,
     InvalidRequest,
     InvalidResponseCount,
@@ -72,6 +74,7 @@ const NodesState = struct {
     accepted: u8 = 0,
     total: u8 = 0,
     received: u8 = 0,
+    nonces: [types.findnode_response_packets_max][constants.nonce_size]u8 = undefined,
 };
 
 const Expected = union(enum) {
@@ -102,8 +105,8 @@ pub fn init(
     self: *CallTable,
     allocator: std.mem.Allocator,
     capacity: usize,
-) Error!void {
-    if (capacity == 0 or capacity > capacity_max) return Error.InvalidCapacity;
+) InitError!void {
+    if (capacity == 0 or capacity > capacity_max) return InitError.InvalidCapacity;
 
     const entries = try allocator.alloc(?Entry, capacity);
     errdefer allocator.free(entries);
@@ -176,6 +179,24 @@ pub fn endpoint(self: *const CallTable, handle: Handle) ?types.Endpoint {
     return entry.peer;
 }
 
+pub fn isPeerBusy(self: *const CallTable, node_id: *const types.NodeId) bool {
+    return self.findNode(node_id) != null;
+}
+
+pub fn callOwner(self: *const CallTable, handle: Handle) ?Owner {
+    const entry = self.get(handle) orelse return null;
+    return entry.owner;
+}
+
+pub fn nextDeadlineMs(self: *const CallTable) ?u64 {
+    var next: ?u64 = null;
+    for (self.entries) |slot| {
+        const entry = slot orelse continue;
+        next = @min(next orelse entry.deadline_ms, entry.deadline_ms);
+    }
+    return next;
+}
+
 /// Records the nonce the packet carried. A WHOAREYOU is matched back to its call by that nonce.
 pub fn markSent(
     self: *CallTable,
@@ -235,6 +256,7 @@ pub fn accept(
     handle: Handle,
     response: *const message.Message,
     node_ids: []const types.NodeId,
+    nonce: *const [constants.nonce_size]u8,
 ) Error!MatchResult {
     const entry = self.getMut(handle) orelse return Error.StaleHandle;
     if (!expectsResponse(entry.expected, response)) return Error.UnexpectedResponse;
@@ -246,9 +268,22 @@ pub fn accept(
             handle,
             .{ .talk_response = talk },
         ),
-        .nodes => |nodes| try self.acceptNodes(index, handle, nodes, node_ids),
+        .nodes => |nodes| try self.acceptNodes(index, handle, nodes, node_ids, nonce),
         else => unreachable,
     };
+}
+
+pub fn checkResponseNonce(
+    self: *const CallTable,
+    handle: Handle,
+    nonce: *const [constants.nonce_size]u8,
+) Error!void {
+    const entry = self.get(handle) orelse return Error.StaleHandle;
+    if (entry.expected != .nodes) return;
+    const state = &entry.expected.nodes;
+    for (state.nonces[0..state.received]) |*seen| {
+        if (std.mem.eql(u8, seen, nonce)) return Error.DuplicateResponse;
+    }
 }
 
 pub fn cancel(self: *CallTable, handle: Handle) bool {
@@ -296,10 +331,12 @@ fn acceptNodes(
     handle: Handle,
     nodes: message.Nodes,
     node_ids: []const types.NodeId,
+    nonce: *const [constants.nonce_size]u8,
 ) Error!MatchResult {
     if (node_ids.len != nodes.enrs.len or node_ids.len > types.findnode_result_max)
         return Error.InvalidNodeCount;
     const state = &self.entries[index].?.expected.nodes;
+    try self.checkResponseNonce(handle, nonce);
     try validateNodesHeader(state, nodes.total);
     const total: u8 = @intCast(nodes.total);
 
@@ -315,6 +352,7 @@ fn acceptNodes(
     }
 
     state.total = total;
+    state.nonces[state.received] = nonce.*;
     state.received += 1;
     const terminal = state.received == total or
         state.accepted == types.findnode_result_max;
@@ -458,6 +496,6 @@ fn clearEntry(entry: *?Entry) void {
 }
 
 comptime {
-    std.debug.assert(@sizeOf(Entry) <= 2_048);
+    std.debug.assert(@sizeOf(Entry) <= 2_304);
     std.debug.assert(@sizeOf(CallTable) <= 48);
 }

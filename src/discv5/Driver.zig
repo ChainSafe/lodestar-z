@@ -45,6 +45,7 @@ pub const StepResult = struct {
     datagram: DatagramResult = .timeout,
     calls_expired: usize = 0,
     progress: Progress = .{},
+    failure: ?Error = null,
 };
 
 /// A clock reading and fresh entropy for one outbound packet.
@@ -147,17 +148,40 @@ pub fn step(
     io: std.Io,
     expired_calls: []CallTable.Expired,
 ) Error!StepResult {
+    return self.stepUntil(io, expired_calls, std.math.maxInt(u64));
+}
+
+/// Preserves events and expiries alongside local faults. The host must consume progress before
+/// handling `failure`. `wake_ms` can shorten the wait for host-owned maintenance or shutdown.
+pub fn stepUntil(
+    self: *Driver,
+    io: std.Io,
+    expired_calls: []CallTable.Expired,
+    wake_ms: u64,
+) Error!StepResult {
     if (expired_calls.len == 0) return error.MissingExpiryStorage;
     var result = StepResult{};
-    try self.advance(io, expired_calls, &result);
-    try self.maintain(io, &result);
-
-    const datagram = try self.receiveDatagram(io);
-    defer if (datagram) |admitted| self.udp.release(admitted.handle) catch unreachable;
-    try self.advance(io, expired_calls, &result);
-    if (datagram) |admitted| try self.processDatagram(io, admitted, &result);
-    try self.maintain(io, &result);
+    self.runStep(io, expired_calls, wake_ms, &result) catch |err| {
+        result.failure = err;
+    };
     return result;
+}
+
+fn runStep(
+    self: *Driver,
+    io: std.Io,
+    expired_calls: []CallTable.Expired,
+    wake_ms: u64,
+    result: *StepResult,
+) Error!void {
+    try self.advance(io, expired_calls, result);
+    try self.maintain(io, result);
+
+    const datagram = try self.receiveDatagram(io, wake_ms, result);
+    defer if (datagram) |admitted| self.udp.release(admitted.handle) catch unreachable;
+    try self.advance(io, expired_calls, result);
+    if (datagram) |admitted| try self.processDatagram(io, admitted, result);
+    try self.maintain(io, result);
 }
 
 fn advance(
@@ -180,13 +204,19 @@ fn maintain(self: *Driver, io: std.Io, result: *StepResult) Error!void {
     result.progress.maintenance_started = try self.startMaintenance(io, result.now_ms);
 }
 
-fn receiveDatagram(self: *Driver, io: std.Io) Error!?Udp.Datagram {
+fn receiveDatagram(self: *Driver, io: std.Io, wake_ms: u64, result: *StepResult) Error!?Udp.Datagram {
+    const deadline_ms = @min(wake_ms, self.core.nextDeadlineMs() orelse wake_ms);
+    const wait_ms = @min(self.config.poll_interval_ms, deadline_ms -| result.now_ms);
     const timeout = std.Io.Timeout{ .duration = .{
-        .raw = .fromMilliseconds(self.config.poll_interval_ms),
+        .raw = .fromMilliseconds(wait_ms),
         .clock = .awake,
     } };
     return self.udp.receiveTimeout(io, timeout) catch |err| switch (err) {
         error.Timeout => null,
+        error.DatagramTooLarge => blk: {
+            result.datagram = .{ .rejected = .oversized_datagram };
+            break :blk null;
+        },
         else => err,
     };
 }
@@ -213,6 +243,7 @@ fn processDatagram(
         },
     };
     result.datagram = .accepted;
+    result.event = accepted.event;
     if (accepted.packet_length > 0) {
         try self.transmit(io, datagram.from, self.output[0..accepted.packet_length]);
     }

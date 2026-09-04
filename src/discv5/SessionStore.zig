@@ -11,10 +11,8 @@ pub const session_capacity_max: usize = 2_048;
 pub const challenge_capacity_max: usize = 256;
 pub const first_nonce_counter: u32 = 1;
 
-pub const Error = std.mem.Allocator.Error || error{
-    InvalidCapacity,
-    NonceExhausted,
-};
+pub const InitError = std.mem.Allocator.Error || error{InvalidCapacity};
+pub const Error = error{NonceExhausted};
 
 pub const Session = struct {
     read_key: [16]u8,
@@ -42,6 +40,7 @@ pub const Challenge = struct {
 
 const SessionEntry = struct {
     value: Session,
+    alternate_read_key: ?[16]u8 = null,
     last_used_ms: u64,
 };
 
@@ -61,11 +60,11 @@ pub fn init(
     allocator: std.mem.Allocator,
     session_capacity: usize,
     challenge_capacity: usize,
-) Error!void {
+) InitError!void {
     if (session_capacity == 0 or session_capacity > session_capacity_max)
-        return Error.InvalidCapacity;
+        return InitError.InvalidCapacity;
     if (challenge_capacity == 0 or challenge_capacity > challenge_capacity_max)
-        return Error.InvalidCapacity;
+        return InitError.InvalidCapacity;
 
     var sessions: SessionMap = .empty;
     try sessions.ensureTotalCapacity(allocator, @intCast(session_capacity));
@@ -97,6 +96,11 @@ pub fn readKey(self: *const SessionStore, peer: types.Endpoint) ?[16]u8 {
     return stored.value.read_key;
 }
 
+pub fn alternateReadKey(self: *const SessionStore, peer: types.Endpoint) ?[16]u8 {
+    const stored = self.sessions.get(peer) orelse return null;
+    return stored.alternate_read_key;
+}
+
 pub fn touch(self: *SessionStore, peer: types.Endpoint, now_ms: u64) bool {
     const stored = self.sessions.getPtr(peer) orelse return false;
     stored.last_used_ms = now_ms;
@@ -124,7 +128,8 @@ pub fn outbound(
     return .{ .write_key = stored.value.write_key, .nonce = nonce };
 }
 
-/// Replaces any existing session for `peer` and consumes its pending challenge.
+/// Retains the preceding read key until replacement or session expiry. Crossed handshakes may
+/// select different write generations at each endpoint, so receiving never promotes old keys.
 pub fn install(
     self: *SessionStore,
     peer: types.Endpoint,
@@ -132,8 +137,18 @@ pub fn install(
     now_ms: u64,
 ) void {
     if (self.sessions.getPtr(peer)) |stored| {
-        clearSession(stored);
-        stored.* = .{ .value = active.*, .last_used_ms = now_ms };
+        const counter = if (std.mem.eql(u8, &stored.value.write_key, &active.write_key))
+            @max(stored.value.nonce_counter, active.nonce_counter)
+        else
+            active.nonce_counter;
+        if (!std.mem.eql(u8, &stored.value.read_key, &active.read_key)) {
+            if (stored.alternate_read_key) |*key| std.crypto.secureZero(u8, key);
+            stored.alternate_read_key = stored.value.read_key;
+        }
+        std.crypto.secureZero(u8, std.mem.asBytes(&stored.value));
+        stored.value = active.*;
+        stored.value.nonce_counter = counter;
+        stored.last_used_ms = now_ms;
     } else {
         if (self.sessions.count() == self.session_capacity) self.evictOldestSession();
         self.sessions.putAssumeCapacityNoClobber(peer, .{
@@ -141,7 +156,6 @@ pub fn install(
             .last_used_ms = now_ms,
         });
     }
-    self.removeChallenge(peer);
 }
 
 /// Stores a challenge for `peer` unless one is already pending. When the cache is full, the
@@ -190,6 +204,25 @@ pub fn expireSessions(self: *SessionStore, now_ms: u64, timeout_ms: u64) usize {
     return expired;
 }
 
+pub fn nextDeadlineMs(
+    self: *const SessionStore,
+    challenge_timeout_ms: u64,
+    session_idle_timeout_ms: u64,
+) ?u64 {
+    var next: ?u64 = null;
+    for (self.challenges) |slot| {
+        const stored = slot orelse continue;
+        const deadline = stored.value.sent_at_ms +| challenge_timeout_ms;
+        next = @min(next orelse deadline, deadline);
+    }
+    var iterator = self.sessions.valueIterator();
+    while (iterator.next()) |entry| {
+        const deadline = entry.last_used_ms +| session_idle_timeout_ms;
+        next = @min(next orelse deadline, deadline);
+    }
+    return next;
+}
+
 pub fn sessionCount(self: *const SessionStore) usize {
     return self.sessions.count();
 }
@@ -219,7 +252,7 @@ fn challengeIndexForInsert(self: *const SessionStore) usize {
     return oldest;
 }
 
-fn removeChallenge(self: *SessionStore, peer: types.Endpoint) void {
+pub fn removeChallenge(self: *SessionStore, peer: types.Endpoint) void {
     const index = self.findChallenge(peer) orelse return;
     self.challenges[index] = null;
 }
@@ -245,12 +278,13 @@ pub fn makeNonce(counter: u32, random_tail: *const [8]u8) [constants.nonce_size]
 }
 
 fn expiredAt(start_ms: u64, now_ms: u64, timeout_ms: u64) bool {
-    if (now_ms < start_ms) return false;
-    return now_ms - start_ms >= timeout_ms;
+    return now_ms >= start_ms +| timeout_ms;
 }
 
 fn clearSession(entry: *SessionEntry) void {
     std.crypto.secureZero(u8, std.mem.asBytes(&entry.value));
+    if (entry.alternate_read_key) |*key| std.crypto.secureZero(u8, key);
+    entry.alternate_read_key = null;
 }
 
 comptime {

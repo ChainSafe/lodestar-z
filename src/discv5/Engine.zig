@@ -13,13 +13,16 @@ const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 
 pub const Error = CallTable.Error || Channel.Error || RoutingTable.Error ||
-    RoutingTable.InitError || ResponsePlan.Error || error{
+    ResponsePlan.Error || error{
     ApplicationResponseRequired,
     ClockOverflow,
     MissingCall,
     SessionRequired,
     UnexpectedChallenge,
+    InvalidTimeout,
 };
+
+pub const InitError = Channel.InitError || CallTable.InitError || RoutingTable.InitError || error{InvalidTimeout};
 
 pub const StartEntropy = Channel.SealEntropy;
 
@@ -70,6 +73,13 @@ pub const Event = union(enum) {
     none,
     request: AuthenticatedRequest,
     response: AuthenticatedResponse,
+    failed: Failed,
+};
+
+pub const Failed = struct {
+    handle: CallTable.Handle,
+    peer: types.Endpoint,
+    reason: Error,
 };
 
 pub const Accepted = struct {
@@ -116,7 +126,7 @@ pub fn init(
     allocator: std.mem.Allocator,
     local_key: crypto.KeyPair,
     local_record: enr.Record,
-) Error!void {
+) InitError!void {
     return self.initWithConfig(allocator, local_key, local_record, .{});
 }
 
@@ -126,8 +136,8 @@ pub fn initWithConfig(
     local_key: crypto.KeyPair,
     local_record: enr.Record,
     config: Config,
-) Error!void {
-    if (config.request_timeout_ms == 0) return Error.InvalidTimeout;
+) InitError!void {
+    if (config.request_timeout_ms == 0) return InitError.InvalidTimeout;
     try self.channel.init(allocator, local_key, local_record, .{
         .session_capacity = config.session_capacity,
         .challenge_capacity = config.challenge_capacity,
@@ -154,6 +164,37 @@ pub fn localRecord(self: *const Engine) *const enr.Record {
 
 pub fn peerCount(self: *const Engine) usize {
     return self.routing.count();
+}
+
+pub fn isPeerBusy(self: *const Engine, node_id: *const types.NodeId) bool {
+    return self.calls.isPeerBusy(node_id);
+}
+
+pub fn nextDeadlineMs(self: *const Engine) ?u64 {
+    const calls = self.calls.nextDeadlineMs();
+    const channel = self.channel.nextDeadlineMs();
+    return if (calls) |value| @min(value, channel orelse value) else channel;
+}
+
+pub fn updateLocalRecord(self: *Engine, record: *const enr.Record) Error!void {
+    try self.channel.updateLocalRecord(record);
+}
+
+pub fn maintenanceTarget(
+    self: *const Engine,
+    cursor: *usize,
+    now_ms: u64,
+    stale_after_ms: u64,
+) ?RoutingTable.Entry {
+    return self.routing.maintenanceTarget(cursor, now_ms, stale_after_ms);
+}
+
+pub fn peerRecord(self: *const Engine, node_id: *const types.NodeId) ?RoutingTable.Entry {
+    return self.routing.get(node_id);
+}
+
+pub fn forgetPeerIfStale(self: *Engine, node_id: *const types.NodeId, verified_at_ms: u64) bool {
+    return self.routing.forgetPeerIfStale(node_id, verified_at_ms);
 }
 
 /// Encodes, seals, and registers one request. The packet in `out` is the caller's to send, and
@@ -439,6 +480,7 @@ fn receiveAuthenticated(
         authenticated.record,
         now_ms,
         scratch,
+        &authenticated.nonce,
     );
     self.routeAuthenticated(authenticated.peer, authenticated.record, now_ms);
     return .{ .accepted = .{ .event = event } };
@@ -477,11 +519,28 @@ fn recoverCall(
         &whoareyou.request_nonce,
         args.now_ms,
     )) orelse return Error.UnexpectedChallenge;
-    errdefer {
+    const peer = self.calls.endpoint(handle) orelse unreachable;
+    const owner = self.calls.callOwner(handle) orelse unreachable;
+    const packet_length = self.recoverAcceptedCall(out, handle, peer, whoareyou, args) catch |err| {
         const cancelled = self.calls.cancel(handle);
         std.debug.assert(cancelled);
-    }
-    const peer = self.calls.endpoint(handle) orelse return Error.MissingCall;
+        return .{ .accepted = .{ .event = if (owner == .caller) .{ .failed = .{
+            .handle = handle,
+            .peer = peer,
+            .reason = err,
+        } } else .none } };
+    };
+    return .{ .accepted = .{ .packet_length = packet_length } };
+}
+
+fn recoverAcceptedCall(
+    self: *Engine,
+    out: []u8,
+    handle: CallTable.Handle,
+    peer: types.Endpoint,
+    whoareyou: Channel.Whoareyou,
+    args: ReceiveArgs,
+) Error!u16 {
     const remote_public_key = self.calls.remotePublicKey(handle) orelse
         return Error.MissingCall;
     const plaintext = self.calls.requestBytes(handle) orelse return Error.MissingCall;
@@ -502,7 +561,7 @@ fn recoverCall(
         .entropy = &args.entropy.handshake,
         .now_ms = args.now_ms,
     });
-    return .{ .accepted = .{ .packet_length = sealed.packet_length } };
+    return sealed.packet_length;
 }
 
 fn dispatch(
@@ -512,6 +571,7 @@ fn dispatch(
     record: ?enr.Record,
     now_ms: u64,
     scratch: *Scratch,
+    nonce: *const [constants.nonce_size]u8,
 ) Error!Event {
     return switch (decoded) {
         .ping => |ping| requestEvent(peer, .{ .ping = ping }, record),
@@ -523,6 +583,7 @@ fn dispatch(
             record,
             now_ms,
             scratch,
+            nonce,
         ),
     };
 }
@@ -534,8 +595,10 @@ fn dispatchResponse(
     record: ?enr.Record,
     now_ms: u64,
     scratch: *Scratch,
+    nonce: *const [constants.nonce_size]u8,
 ) Error!Event {
     const handle = try self.calls.match(peer, &decoded, now_ms);
+    try self.calls.checkResponseNonce(handle, nonce);
     const parsed_records = switch (decoded) {
         .nodes => |nodes| try validateNodeRecords(nodes.enrs, scratch),
         else => &.{},
@@ -544,6 +607,7 @@ fn dispatchResponse(
         handle,
         &decoded,
         scratch.node_ids[0..parsed_records.len],
+        nonce,
     );
     if (match_result.owner == .routing_revalidation) {
         std.debug.assert(match_result.matched.terminal);
@@ -571,7 +635,7 @@ fn dispatchResponse(
     } };
 }
 
-// Any authenticated packet counts as liveness for a peer already in routing.
+// Successfully dispatched authenticated packets count as liveness for peers already in routing.
 fn routeAuthenticated(
     self: *Engine,
     peer: types.Endpoint,
@@ -608,6 +672,7 @@ fn rejectReason(err: Error) ?types.RejectReason {
         Error.UnexpectedResponse,
         => .unsolicited_response,
         Error.InvalidResponseCount, Error.InvalidNodeCount => .invalid_response,
+        Error.DuplicateResponse => .duplicate_response,
         else => null,
     };
 }
@@ -705,6 +770,6 @@ test "unsolicited NODES fails before record validation" {
     var scratch: Scratch = .{};
     try std.testing.expectError(
         CallTable.Error.UnknownCall,
-        core.dispatchResponse(peer, response, null, 0, &scratch),
+        core.dispatchResponse(peer, response, null, 0, &scratch, &([_]u8{0} ** constants.nonce_size)),
     );
 }

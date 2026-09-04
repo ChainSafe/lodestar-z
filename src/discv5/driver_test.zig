@@ -67,9 +67,16 @@ test "driver replaces a routing incumbent when revalidation expires" {
     defer pair.deinit();
     try pair.fillBucket();
 
+    var output: [1_280]u8 = undefined;
+    _ = (try pair.node_a.startRevalidation(
+        &output,
+        try message.RequestId.init(&.{0x42}),
+        0,
+        &test_support.sealEntropy(10),
+    )).?;
     var expired: [4]CallTable.Expired = undefined;
     const result = try pair.driver_a.step(std.testing.io, &expired);
-    try std.testing.expect(result.progress.maintenance_started);
+    try std.testing.expect(!result.progress.maintenance_started);
     try std.testing.expectEqual(@as(usize, 0), result.calls_expired);
     try std.testing.expectEqual(@as(usize, 1), result.progress.maintenance_expired);
     try std.testing.expectEqual(@as(usize, 0), pair.node_a.routing.pendingCount());
@@ -202,6 +209,7 @@ test "driver returns call expiries when rejecting a malformed datagram" {
 
     var expired: [4]CallTable.Expired = undefined;
     const result = try pair.driver_a.step(std.testing.io, &expired);
+    try std.testing.expectEqual(@as(?Driver.Error, null), result.failure);
     try std.testing.expect(result.datagram == .rejected);
     try std.testing.expectEqual(types.RejectReason.malformed_packet, result.datagram.rejected);
     try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
@@ -224,11 +232,13 @@ test "driver completes a caller-owned lookup across multiple peers" {
         seeds,
     );
 
+    var cursor: lookup_driver.Cursor = .{};
     var expired: [4]CallTable.Expired = undefined;
     const first = try lookup_driver.step(
         &network.driver_a,
         std.testing.io,
         &.{&operation},
+        &cursor,
         &expired,
     );
     try std.testing.expectEqual(@as(u16, 1), first.progress.started);
@@ -240,6 +250,7 @@ test "driver completes a caller-owned lookup across multiple peers" {
         &network.driver_a,
         std.testing.io,
         &.{&operation},
+        &cursor,
         &expired,
     );
     try std.testing.expectEqual(@as(u16, 1), second.progress.responses);
@@ -252,6 +263,7 @@ test "driver completes a caller-owned lookup across multiple peers" {
         &network.driver_a,
         std.testing.io,
         &.{&operation},
+        &cursor,
         &expired,
     );
     try std.testing.expectEqual(@as(u16, 1), completed.progress.responses);
@@ -275,12 +287,16 @@ test "lookup expiry is consumed without hiding an unrelated call expiry" {
         .request_id = try message.RequestId.init(&.{0x24}),
         .enr_sequence = network.record_a.sequence,
     } };
-    const caller_handle = try network.driver_a.startCall(
-        std.testing.io,
+    var output: [1_280]u8 = undefined;
+    const caller = try network.node_a.startCall(
+        &output,
         endpoint(&network.record_c),
         &network.record_c,
         &request,
+        0,
+        &test_support.sealEntropy(10),
     );
+    const caller_handle = caller.handle;
     var seed_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
     const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
     var operation: Lookup = undefined;
@@ -292,14 +308,25 @@ test "lookup expiry is consumed without hiding an unrelated call expiry" {
         seeds,
     );
 
+    defer operation.cancel(&network.node_a);
+    _ = (try operation.startNext(
+        &network.node_a,
+        &output,
+        try message.RequestId.init(&.{0x25}),
+        0,
+        &test_support.sealEntropy(20),
+    )).?;
+
+    var cursor: lookup_driver.Cursor = .{};
     var expired: [4]CallTable.Expired = undefined;
     const result = try lookup_driver.step(
         &network.driver_a,
         std.testing.io,
         &.{&operation},
+        &cursor,
         &expired,
     );
-    try std.testing.expectEqual(@as(u16, 1), result.progress.started);
+    try std.testing.expectEqual(@as(u16, 0), result.progress.started);
     try std.testing.expectEqual(@as(u16, 1), result.progress.failures);
     try std.testing.expectEqual(@as(usize, 1), result.driver.calls_expired);
     try std.testing.expectEqual(caller_handle, expired[0].handle);
@@ -322,6 +349,7 @@ test "lookup step preserves an unrelated response event" {
         &network.record_c,
         &request,
     );
+    var cursor: lookup_driver.Cursor = .{};
     var expired: [4]CallTable.Expired = undefined;
     const answered = try network.driver_c.step(std.testing.io, &expired);
     try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
@@ -342,6 +370,7 @@ test "lookup step preserves an unrelated response event" {
         &network.driver_a,
         std.testing.io,
         &.{&operation},
+        &cursor,
         &expired,
     );
     try std.testing.expectEqual(@as(u16, 1), result.progress.started);
@@ -390,6 +419,7 @@ test "two caller-owned lookups share one driver" {
     );
     defer operation_c.cancel(&network.node_a);
 
+    var cursor: lookup_driver.Cursor = .{};
     var expired: [4]CallTable.Expired = undefined;
     var responses_b: usize = 0;
     var responses_c: usize = 0;
@@ -399,6 +429,7 @@ test "two caller-owned lookups share one driver" {
             &network.driver_a,
             std.testing.io,
             &.{ &operation_b, &operation_c },
+            &cursor,
             &expired,
         );
         try std.testing.expect(result.driver.event != .response or result.consumed != null);
@@ -606,3 +637,112 @@ fn variantNodeId(base: types.NodeId, salt: u8) types.NodeId {
     result[31] ^= salt;
     return result;
 }
+
+test "driver reports truncation alongside already produced expiries" {
+    var pair: Pair = undefined;
+    try pair.init(1_000, true);
+    defer pair.deinit();
+    const request = message.Message{ .ping = .{
+        .request_id = try message.RequestId.init(&.{0x45}),
+        .enr_sequence = pair.record_a.sequence,
+    } };
+    var output: [1_280]u8 = undefined;
+    const started = try pair.node_a.startCall(
+        &output,
+        endpoint(&pair.record_b),
+        &pair.record_b,
+        &request,
+        0,
+        &test_support.sealEntropy(0x33),
+    );
+    const destination = pair.udp_a.socket.address;
+    const oversized = [_]u8{0xff} ** 1_281;
+    try pair.udp_b.socket.send(std.testing.io, &destination, &oversized);
+    var expired: [4]CallTable.Expired = undefined;
+    const result = try pair.driver_a.step(std.testing.io, &expired);
+    try std.testing.expectEqual(@as(?Driver.Error, null), result.failure);
+    try std.testing.expect(result.datagram == .rejected);
+    try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
+    try std.testing.expectEqual(started.handle, expired[0].handle);
+    const next = try pair.driver_a.step(std.testing.io, &expired);
+    try std.testing.expectEqual(@as(usize, 0), next.calls_expired);
+}
+
+test "driver preserves expiry delivery when the host cannot receive" {
+    var pair: Pair = undefined;
+    try pair.init(100, true);
+    defer pair.deinit();
+    const request = message.Message{ .ping = .{
+        .request_id = try message.RequestId.init(&.{0x46}),
+        .enr_sequence = pair.record_a.sequence,
+    } };
+    var output: [1_280]u8 = undefined;
+    const started = try pair.node_a.startCall(
+        &output,
+        endpoint(&pair.record_b),
+        &pair.record_b,
+        &request,
+        0,
+        &test_support.sealEntropy(0x33),
+    );
+    var host = PollFailure{ .now_ms = 100 };
+    var expired: [4]CallTable.Expired = undefined;
+    const result = try pair.driver_a.step(host.io(), &expired);
+    try std.testing.expectEqual(error.ConcurrencyUnavailable, result.failure.?);
+    try std.testing.expectEqual(@as(usize, 1), result.calls_expired);
+    try std.testing.expectEqual(started.handle, expired[0].handle);
+    const next = try pair.driver_a.step(host.io(), &expired);
+    try std.testing.expectEqual(@as(usize, 0), next.calls_expired);
+}
+
+test "driver polls no later than a pending call deadline" {
+    var pair: Pair = undefined;
+    try pair.init(105, true);
+    defer pair.deinit();
+    const request = message.Message{ .ping = .{
+        .request_id = try message.RequestId.init(&.{0x47}),
+        .enr_sequence = pair.record_a.sequence,
+    } };
+    var output: [1_280]u8 = undefined;
+    _ = try pair.node_a.startCall(
+        &output,
+        endpoint(&pair.record_b),
+        &pair.record_b,
+        &request,
+        0,
+        &test_support.sealEntropy(0x33),
+    );
+    var host = PollFailure{ .now_ms = 100 };
+    var expired: [4]CallTable.Expired = undefined;
+    const result = try pair.driver_a.step(host.io(), &expired);
+    try std.testing.expectEqual(error.ConcurrencyUnavailable, result.failure.?);
+    try std.testing.expectEqual(@as(i96, 5), host.poll_ms.?);
+    _ = try pair.driver_a.stepUntil(host.io(), &expired, 102);
+    try std.testing.expectEqual(@as(i96, 2), host.poll_ms.?);
+}
+
+const PollFailure = struct {
+    now_ms: u64,
+    poll_ms: ?i96 = null,
+
+    fn io(self: *PollFailure) std.Io {
+        const vtable = comptime blk: {
+            var value = std.Io.failing.vtable.*;
+            value.now = now;
+            value.batchAwaitConcurrent = receive;
+            break :blk value;
+        };
+        return .{ .userdata = self, .vtable = &vtable };
+    }
+
+    fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        const self: *PollFailure = @ptrCast(@alignCast(context.?));
+        return .{ .nanoseconds = @as(i96, self.now_ms) * std.time.ns_per_ms };
+    }
+
+    fn receive(context: ?*anyopaque, _: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+        const self: *PollFailure = @ptrCast(@alignCast(context.?));
+        self.poll_ms = timeout.duration.raw.toMilliseconds();
+        return error.ConcurrencyUnavailable;
+    }
+};

@@ -17,28 +17,49 @@ pub const Progress = struct {
     failures: u16 = 0,
 };
 
+pub const Cursor = struct {
+    next: usize = 0,
+};
+
 pub const StepResult = struct {
     driver: Driver.StepResult = .{},
     /// The index into `operations` of the lookup that consumed `driver.event`, if any.
     consumed: ?u16 = null,
     progress: Progress = .{},
+    failure: ?Error = null,
 };
 
-/// Borrows `operations` for this call only. Pass every lookup that still has waiting calls.
+/// Borrows `operations` for this call only. Pass every lookup that still has waiting calls and
+/// retain the cursor across steps to rotate priority when calls contend for limited capacity.
 pub fn step(
     transport: *Driver,
     io: std.Io,
     operations: []const *Lookup,
+    cursor: *Cursor,
     expired_calls: []CallTable.Expired,
 ) Error!StepResult {
     if (expired_calls.len == 0) return error.MissingExpiryStorage;
     if (operations.len > operations_max) return error.TooManyLookups;
     var result = StepResult{};
-    try refill(transport, io, operations, &result);
-    result.driver = try transport.step(io, expired_calls);
-    try consumeExpiries(transport, operations, expired_calls, &result);
-    try consumeEvent(transport, operations, &result);
-    try refill(transport, io, operations, &result);
+    const first = if (operations.len == 0) 0 else cursor.next % operations.len;
+    cursor.next = if (operations.len == 0) 0 else (first + 1) % operations.len;
+    refill(transport, io, operations, first, &result) catch |err| {
+        result.failure = err;
+    };
+    result.driver = transport.step(io, expired_calls) catch |err| {
+        result.failure = result.failure orelse err;
+        return result;
+    };
+    consumeExpiries(transport, operations, expired_calls, &result);
+    consumeEvent(transport, operations, &result) catch |err| {
+        result.failure = result.failure orelse err;
+    };
+    result.failure = result.failure orelse result.driver.failure;
+    if (result.failure == null) {
+        refill(transport, io, operations, first, &result) catch |err| {
+            result.failure = err;
+        };
+    }
     return result;
 }
 
@@ -46,17 +67,22 @@ fn refill(
     transport: *Driver,
     io: std.Io,
     operations: []const *Lookup,
+    first: usize,
     result: *StepResult,
 ) Error!void {
-    // Each round starts one call per lookup, so no lookup starves another.
     for (0..Lookup.parallelism) |_| {
         var progressed = false;
-        for (operations) |operation| {
+        for (0..operations.len) |offset| {
+            const operation = operations[(first + offset) % operations.len];
             if (operation.isFinished() or operation.waitingCount() == Lookup.parallelism) continue;
-            const started = startCall(transport, io, operation) catch |err| switch (err) {
+            const started = startCall(
+                transport,
+                io,
+                operation,
+                &result.progress,
+            ) catch |err| switch (err) {
                 CallTable.Error.PeerBusy, CallTable.Error.TableFull => continue,
                 error.DestinationUnreachable => {
-                    result.progress.failures += 1;
                     progressed = true;
                     continue;
                 },
@@ -70,7 +96,12 @@ fn refill(
     }
 }
 
-fn startCall(transport: *Driver, io: std.Io, operation: *Lookup) Error!bool {
+fn startCall(
+    transport: *Driver,
+    io: std.Io,
+    operation: *Lookup,
+    progress: *Progress,
+) Error!bool {
     var context = try Driver.sendContext(io);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&context.entropy));
     const request_id = try Driver.requestId(io);
@@ -84,6 +115,7 @@ fn startCall(transport: *Driver, io: std.Io, operation: *Lookup) Error!bool {
     ) orelse return false;
     transport.transmit(io, started.peer.address, out[0..started.call.packet_length]) catch |err| {
         operation.onFailure(transport.core, started.call.handle) catch unreachable;
+        progress.failures += 1;
         return err;
     };
     return true;
@@ -94,11 +126,11 @@ fn consumeExpiries(
     operations: []const *Lookup,
     expired_calls: []CallTable.Expired,
     result: *StepResult,
-) Lookup.Error!void {
+) void {
     var retained: usize = 0;
     for (expired_calls[0..result.driver.calls_expired]) |item| {
         if (owner(operations, item.handle)) |index| {
-            try operations[index].onFailure(transport.core, item.handle);
+            operations[index].onFailure(transport.core, item.handle) catch unreachable;
             result.progress.failures += 1;
             continue;
         }
@@ -113,14 +145,21 @@ fn consumeEvent(
     operations: []const *Lookup,
     result: *StepResult,
 ) Lookup.Error!void {
-    const response = switch (result.driver.event) {
-        .response => |response| response,
+    switch (result.driver.event) {
+        .response => |response| {
+            const index = owner(operations, response.matched.handle) orelse return;
+            try operations[index].onResponse(transport.core, &response, result.driver.now_ms);
+            result.consumed = @intCast(index);
+            result.progress.responses += 1;
+        },
+        .failed => |failed| {
+            const index = owner(operations, failed.handle) orelse return;
+            try operations[index].onFailure(transport.core, failed.handle);
+            result.consumed = @intCast(index);
+            result.progress.failures += 1;
+        },
         else => return,
-    };
-    const index = owner(operations, response.matched.handle) orelse return;
-    try operations[index].onResponse(transport.core, &response, result.driver.now_ms);
-    result.consumed = @intCast(index);
-    result.progress.responses += 1;
+    }
 }
 
 fn owner(operations: []const *Lookup, handle: CallTable.Handle) ?usize {

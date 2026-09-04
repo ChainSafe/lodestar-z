@@ -402,7 +402,7 @@ test "engine rejects a local record owned by another key" {
     const record_b = try enr.Record.create(&key_b, 1, loopback(2, 9_002));
     var invalid: TestEngine = undefined;
     try std.testing.expectError(
-        Engine.Error.InvalidLocalRecord,
+        Engine.InitError.InvalidLocalRecord,
         invalid.init(std.testing.allocator, key_a, record_b),
     );
 }
@@ -465,4 +465,114 @@ test "engine configuration rejects zero retention windows" {
         Engine.Error.InvalidTimeout,
         node.initWithConfig(std.testing.allocator, key, local_record, config),
     );
+}
+
+test "stale session recovery delivers the failed call handle" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    test_support.installSession(&pair.node_a, pair.peerB(), 0x55);
+    const payload = [_]u8{0xaa} ** 1_100;
+    const request = message.Message{ .talk_request = .{
+        .request_id = try message.RequestId.init(&.{1}),
+        .protocol = &.{1},
+        .request = &payload,
+    } };
+    const started = try pair.node_a.startCall(
+        &pair.a_to_b,
+        pair.peerB(),
+        &pair.record_b,
+        &request,
+        1,
+        &sealEntropy(10),
+    );
+    const challenge = try pair.node_b.receive(
+        &pair.b_to_a,
+        pair.a_to_b[0..started.packet_length],
+        pair.address_a,
+        receiveArgs(2, 20),
+        &pair.scratch_b,
+    );
+    const result = try pair.node_a.receive(
+        &pair.a_to_b,
+        pair.b_to_a[0..challenge.accepted.packet_length],
+        pair.address_b,
+        receiveArgs(3, 30),
+        &pair.scratch_a,
+    );
+    try std.testing.expect(result == .accepted);
+    try std.testing.expect(result.accepted.event == .failed);
+    try std.testing.expectEqual(started.handle, result.accepted.event.failed.handle);
+    try std.testing.expectEqual(error.RequestTooLargeForHandshake, result.accepted.event.failed.reason);
+    var expired: [4]CallTable.Expired = undefined;
+    try std.testing.expectEqual(@as(usize, 0), pair.node_a.tick(200, &expired).calls);
+    try std.testing.expect(!pair.node_a.cancelCall(started.handle));
+}
+
+test "duplicate NODES datagrams do not complete a fragmented response" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    test_support.installSession(&pair.node_a, pair.peerB(), 0x55);
+    test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
+    const request = message.Message{ .find_node = .{
+        .request_id = try message.RequestId.init(&.{1}),
+        .distances = &.{0},
+    } };
+    const started = try pair.node_a.startCall(
+        &pair.a_to_b,
+        pair.peerB(),
+        &pair.record_b,
+        &request,
+        1,
+        &sealEntropy(10),
+    );
+    const raw_records = [_][]const u8{pair.record_b.slice()};
+    const response = message.Message{ .nodes = .{
+        .request_id = request.find_node.request_id,
+        .total = 2,
+        .enrs = &raw_records,
+    } };
+    const length = try pair.node_b.sendResponse(
+        &pair.b_to_a,
+        pair.peerA(),
+        &response,
+        2,
+        &sealEntropy(20),
+    );
+    const first = try pair.node_a.receive(
+        &pair.a_to_b,
+        pair.b_to_a[0..length],
+        pair.address_b,
+        receiveArgs(3, 30),
+        &pair.scratch_a,
+    );
+    try std.testing.expect(!first.accepted.event.response.matched.terminal);
+    const duplicate = try pair.node_a.receive(
+        &pair.a_to_b,
+        pair.b_to_a[0..length],
+        pair.address_b,
+        receiveArgs(4, 40),
+        &pair.scratch_a,
+    );
+    try std.testing.expectEqual(types.RejectReason.duplicate_response, duplicate.rejected);
+    try std.testing.expectEqual(@as(usize, 1), pair.node_a.calls.count());
+    const last_length = try pair.node_b.sendResponse(
+        &pair.b_to_a,
+        pair.peerA(),
+        &response,
+        5,
+        &sealEntropy(50),
+    );
+    const last = try pair.node_a.receive(
+        &pair.a_to_b,
+        pair.b_to_a[0..last_length],
+        pair.address_b,
+        receiveArgs(6, 60),
+        &pair.scratch_a,
+    );
+    try std.testing.expectEqual(started.handle, last.accepted.event.response.matched.handle);
+    try std.testing.expect(last.accepted.event.response.matched.terminal);
+    try std.testing.expectEqual(@as(usize, 0), last.accepted.event.response.node_records.len);
+    try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
 }
