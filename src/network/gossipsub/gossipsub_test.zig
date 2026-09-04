@@ -342,3 +342,113 @@ test "gossipsub receives a message larger than the per-peer body buffer" {
 }
 
 const constants_heartbeat = @import("constants.zig").heartbeat_interval_ms;
+
+fn expectControlFloodBounded(control_tag: u8) !void {
+    var setup: GossipPair = .{};
+    try setup.init();
+    defer setup.deinit();
+    for (0..20) |_| try setup.pumpOnce();
+    const peer = setup.server.state.findPeer(setup.handles.server).?;
+    const before = setup.server.counters.rpcs_received;
+    var rpc: [8195]u8 = undefined;
+    var writer = @import("protobuf.zig").Writer.init(&rpc);
+    writer.bytes(&.{ 0x1a, 0x80, 0x40 });
+    for (0..4096) |_| writer.bytes(&.{ control_tag, 0 });
+    var framed: [8197]u8 = undefined;
+    const wire = @import("frame.zig").writeFrame(&framed, writer.written());
+    for (0..17) |_| {
+        try std.testing.expectEqual(
+            wire.len,
+            try setup.pair.client.write(setup.client_send, wire, false),
+        );
+        for (0..4) |_| try setup.pumpOnce();
+    }
+    try std.testing.expectEqual(before + 17, setup.server.counters.rpcs_received);
+    const count = if (control_tag == 0x0a)
+        setup.server.io[peer].ihave_recv
+    else
+        setup.server.io[peer].idontwant_recv;
+    try std.testing.expectEqual(@as(u16, 10), count);
+}
+
+test "gossipsub bounds more than 65535 IHAVE controls per heartbeat" {
+    try expectControlFloodBounded(0x0a);
+}
+
+test "gossipsub bounds more than 65535 IDONTWANT controls per heartbeat" {
+    try expectControlFloodBounded(0x2a);
+}
+
+fn idFromHex(hex: []const u8) gossipsub.MessageId {
+    var id: gossipsub.MessageId = undefined;
+    _ = std.fmt.hexToBytes(&id, hex) catch unreachable;
+    return id;
+}
+
+test "gossipsub uses configured message IDs on publish and wire receive" {
+    const vectors = [_]struct {
+        policy: topic_mod.MessageIdPolicy,
+        valid: []const u8,
+        invalid: []const u8,
+        invalid_body: []const u8,
+    }{
+        .{
+            .policy = .{},
+            .valid = "a9fe6ab574e2aac2f18a37d95a6250a6e0f5b583",
+            .invalid = "a28c11a9057a41e968c2c3eead4b4c9fdd39c0d0",
+            .invalid_body = "c2f970d6f12a642a5df7488e0cef9d76062b0b12",
+        },
+        .{
+            .policy = .{ .phase0_digest = .{ 1, 2, 3, 4 } },
+            .valid = "79d62a59d0e47597aeb73cb85ba034c3f67f90e8",
+            .invalid = "a0960f8d63bfe4fce6c26ae9e33f8f2d2729239a",
+            .invalid_body = "785b35d50e5df9eee4bb06e5b102b1088d149500",
+        },
+    };
+    for (vectors) |vector| {
+        var setup: GossipPair = .{};
+        try setup.initOpts(
+            .{ .message_id_policy = vector.policy },
+            .{ .message_id_policy = vector.policy },
+        );
+        defer setup.deinit();
+        const topic = "/eth2/01020304/beacon_block/ssz_snappy";
+        try std.testing.expect(setup.client.subscribe(topic));
+        try std.testing.expect(setup.server.subscribe(topic));
+        for (0..20) |_| try setup.pumpOnce();
+        setup.pair.advance(constants_heartbeat + 100);
+        for (0..10) |_| try setup.pumpOnce();
+        try setup.client.publish(topic, "hello", setup.pair.now);
+        const valid = idFromHex(vector.valid);
+        try std.testing.expect(setup.client.seen.contains(valid));
+        var received = false;
+        for (0..20) |_| {
+            try setup.pumpOnce();
+            for (setup.serverEvents()) |event| switch (event) {
+                .message => |message| {
+                    try std.testing.expectEqual(valid, message.handle);
+                    received = true;
+                },
+                else => {},
+            };
+            if (received) break;
+        }
+        try std.testing.expect(received);
+        const protobuf = @import("protobuf.zig");
+        const malformed = [_][]const u8{ &.{0xff}, &.{ 5, 0 } };
+        const invalid_ids = [_][]const u8{ vector.invalid, vector.invalid_body };
+        for (malformed, invalid_ids) |data, expected| {
+            var rpc: [128]u8 = undefined;
+            var writer = protobuf.Writer.init(&rpc);
+            protobuf.writeMessage(&writer, data, topic);
+            var framed: [130]u8 = undefined;
+            const wire = @import("frame.zig").writeFrame(&framed, writer.written());
+            try std.testing.expectEqual(
+                wire.len,
+                try setup.pair.client.write(setup.client_send, wire, false),
+            );
+            for (0..4) |_| try setup.pumpOnce();
+            try std.testing.expect(setup.server.seen.contains(idFromHex(expected)));
+        }
+    }
+}
