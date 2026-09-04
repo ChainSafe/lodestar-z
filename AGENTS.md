@@ -353,6 +353,42 @@ Create branches from `main`. Use Conventional Commit messages:
 Keep commits focused. After review begins, add incremental commits rather than rewriting history
 unless a maintainer asks otherwise.
 
+### Titles and descriptions
+
+Title: conventional-commit prefix, then an imperative subject of about four words, lowercase, no
+period. `refactor: extract tests to _test.zig`.
+
+Description: use the Lodestar template and keep it flat.
+
+```markdown
+**Motivation**
+
+Resolves #N, or one to three sentences.
+
+**Description**
+
+One sentence saying what this does.
+
+- Change, named by identifier
+  - detail
+
+TODO:
+- follow-up, if any
+
+**AI Assistance Disclosure**
+
+One line.
+```
+
+- Length tracks the diff. A one-line fix needs a sentence or nothing; a large refactor gets more
+  bullets, not sections.
+- Bullets name concrete changes by identifier in backticks.
+- No `##` headings, tables, or screenshots of text.
+- No paragraphs explaining why the approach is right and no verification section. Reasoning goes
+  in commit messages; CI is the verification.
+- Do not list example files to illustrate a point.
+- Code blocks only for a before/after interface or real output.
+
 ### AI assistance disclosure
 
 Disclose AI assistance in the PR description, following Lodestar's convention. State whether the
