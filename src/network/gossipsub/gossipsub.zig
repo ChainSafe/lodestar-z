@@ -27,6 +27,11 @@ pub const Options = struct {
     /// Decompressed bytes surfaced in one pump; the host consumes them before
     /// the next pump. Full means new messages wait, applying backpressure.
     decompressed_arena_bytes: usize = 4 * 1024 * 1024,
+    body_buffer_bytes: usize = constants.body_buffer_len,
+    /// A pool of large body buffers claimed while receiving a frame that does
+    /// not fit the per-peer buffer (blocks and data columns).
+    large_message_bytes: usize = 2 * 1024 * 1024,
+    large_pool_count: usize = 8,
     seen_ttl_ms: u64 = constants.seenTtlMs(32, 12),
     score_params: score_mod.Params = .{},
     opportunistic_graft_interval_ms: u64 = constants.opportunistic_graft_ms,
@@ -61,6 +66,7 @@ const PeerIo = struct {
     send_tail: usize = 0,
     reader: frame_mod.Reader = .{},
     body: []u8,
+    large_slot: ?u8 = null,
 
     fn reset(self: *PeerIo) void {
         self.send_head = 0;
@@ -111,6 +117,8 @@ pub const Gossipsub = struct {
     mcache: mcache_mod.MessageCache,
     io: []PeerIo,
     io_arena: []u8,
+    large_pool: []u8,
+    large_used: []bool,
     direct: state_mod.PeerSet = state_mod.PeerSet.initEmpty(),
     heartbeat_at: u64 = 0,
     opportunistic_at: u64 = 0,
@@ -132,6 +140,7 @@ pub const Gossipsub = struct {
         send_dropped: u64 = 0,
         malformed_rpcs: u64 = 0,
         arena_full: u64 = 0,
+        oversized_dropped: u64 = 0,
         iwant_sent: u64 = 0,
         broken_promises: u64 = 0,
     };
@@ -157,7 +166,7 @@ pub const Gossipsub = struct {
         );
         errdefer mcache.deinit(allocator);
 
-        const per_peer = constants.send_buffer_len + constants.body_buffer_len;
+        const per_peer = constants.send_buffer_len + options.body_buffer_bytes;
         const io_arena = try allocator.alloc(u8, constants.peers_cap * per_peer);
         errdefer allocator.free(io_arena);
         const io = try allocator.alloc(PeerIo, constants.peers_cap);
@@ -166,7 +175,7 @@ pub const Gossipsub = struct {
             const base = index * per_peer;
             slot.* = .{
                 .send = io_arena[base..][0..constants.send_buffer_len],
-                .body = io_arena[base + constants.send_buffer_len ..][0..constants.body_buffer_len],
+                .body = io_arena[base + constants.send_buffer_len ..][0..options.body_buffer_bytes],
             };
         }
         const scratch = try allocator.alloc(u8, constants.read_scratch_len);
@@ -177,6 +186,12 @@ pub const Gossipsub = struct {
         errdefer allocator.free(decompressed);
         const promises = try allocator.alloc(Promise, constants.promises_cap);
         errdefer allocator.free(promises);
+        const pool_bytes = options.large_pool_count * options.large_message_bytes;
+        const large_pool = try allocator.alloc(u8, pool_bytes);
+        errdefer allocator.free(large_pool);
+        const large_used = try allocator.alloc(bool, options.large_pool_count);
+        errdefer allocator.free(large_used);
+        @memset(large_used, false);
 
         return .{
             .allocator = allocator,
@@ -187,6 +202,8 @@ pub const Gossipsub = struct {
             .mcache = mcache,
             .io = io,
             .io_arena = io_arena,
+            .large_pool = large_pool,
+            .large_used = large_used,
             .scratch = scratch,
             .msg_scratch = msg_scratch,
             .decompressed = decompressed,
@@ -195,6 +212,8 @@ pub const Gossipsub = struct {
     }
 
     pub fn deinit(self: *Gossipsub) void {
+        self.allocator.free(self.large_used);
+        self.allocator.free(self.large_pool);
         self.allocator.free(self.promises);
         self.allocator.free(self.decompressed);
         self.allocator.free(self.msg_scratch);
@@ -253,6 +272,7 @@ pub const Gossipsub = struct {
 
     pub fn connectionClosed(self: *Gossipsub, conn: Handle) void {
         const index = self.state.findPeer(conn) orelse return;
+        self.releaseLarge(&self.io[index]);
         self.direct.unset(index);
         self.state.removePeer(index);
     }
@@ -572,18 +592,67 @@ pub const Gossipsub = struct {
             if (read.len == 0 and !read.fin) return count;
             var chunk = self.scratch[0..read.len];
             while (chunk.len > 0) {
-                const result = peer_io.reader.feed(chunk, peer_io.body) catch {
+                const body = self.frameBody(peer_io);
+                const result = peer_io.reader.feed(chunk, body) catch {
                     self.counters.malformed_rpcs += 1;
+                    self.releaseLarge(peer_io);
                     peer_io.reader = .{};
                     return count;
                 };
                 chunk = chunk[result.consumed..];
-                if (result.frame) |rpc| count = self.processRpc(index, rpc, now, events, count);
+                if (result.frame) |rpc| {
+                    count = self.processRpc(index, rpc, now, events, count);
+                    self.releaseLarge(peer_io);
+                }
                 if (result.consumed == 0) break;
             }
             if (read.fin) return count;
         }
         return count;
+    }
+
+    /// Picks the buffer to accumulate the current inbound frame into: the small
+    /// per-peer buffer normally, a claimed pool buffer for a larger frame, and
+    /// switches the reader to discard mode for a frame too large to hold.
+    fn frameBody(self: *Gossipsub, peer_io: *PeerIo) []u8 {
+        if (peer_io.reader.isDiscarding()) return peer_io.body;
+        if (peer_io.large_slot) |slot| return self.largeBuffer(slot);
+        const declared = peer_io.reader.declaredLen() orelse return peer_io.body;
+        if (declared <= peer_io.body.len) return peer_io.body;
+        if (declared > self.options.large_message_bytes) {
+            peer_io.reader.discard();
+            self.counters.oversized_dropped += 1;
+            return peer_io.body;
+        }
+        if (self.claimLarge()) |slot| {
+            peer_io.large_slot = slot;
+            return self.largeBuffer(slot);
+        }
+        peer_io.reader.discard();
+        self.counters.oversized_dropped += 1;
+        return peer_io.body;
+    }
+
+    fn largeBuffer(self: *Gossipsub, slot: u8) []u8 {
+        const base = @as(usize, slot) * self.options.large_message_bytes;
+        return self.large_pool[base..][0..self.options.large_message_bytes];
+    }
+
+    fn claimLarge(self: *Gossipsub) ?u8 {
+        for (self.large_used, 0..) |used, slot| {
+            if (!used) {
+                self.large_used[slot] = true;
+                return @intCast(slot);
+            }
+        }
+        return null;
+    }
+
+    fn releaseLarge(self: *Gossipsub, peer_io: *PeerIo) void {
+        if (peer_io.large_slot) |slot| {
+            self.large_used[slot] = false;
+            peer_io.large_slot = null;
+        }
     }
 
     fn processRpc(
