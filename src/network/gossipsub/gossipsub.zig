@@ -87,6 +87,8 @@ const PeerIo = struct {
     send_head: usize = 0,
     send_tail: usize = 0,
     reader: frame_mod.Reader = .{},
+    handoff: @import("../stream_io.zig").Inbox(@import("../negotiate.zig").inbox_capacity) = .{},
+    fin_seen: bool = false,
     body: []u8,
     large_slot: ?u8 = null,
     large_since_ms: u64 = 0,
@@ -99,6 +101,8 @@ const PeerIo = struct {
         self.send_head = 0;
         self.send_tail = 0;
         self.reader = .{};
+        self.handoff = .{};
+        self.fin_seen = false;
         self.decompressed_pump = 0;
         self.resetHeartbeat();
     }
@@ -329,6 +333,12 @@ pub const Gossipsub = struct {
 
     pub fn setStreams(self: *Gossipsub, index: u16, out: ?StreamHandle, in: ?StreamHandle) void {
         self.state.setStreams(index, out, in);
+    }
+
+    pub fn receiveHandoff(self: *Gossipsub, index: u16, bytes: []const u8, fin: bool) bool {
+        self.io[index].handoff.append(bytes) catch return false;
+        self.io[index].fin_seen = fin;
+        return true;
     }
 
     pub fn connectionClosed(self: *Gossipsub, conn: Handle) void {
@@ -708,7 +718,12 @@ pub const Gossipsub = struct {
         const stream = self.state.peers[index].in_stream orelse return count;
         var reads: u32 = 0;
         while (reads < constants.reads_per_pump_max) : (reads += 1) {
-            const read = engine.read(stream, self.scratch) catch return count;
+            const read: types.Read = if (peer_io.handoff.len > 0 or peer_io.fin_seen) blk: {
+                const len = peer_io.handoff.len;
+                @memcpy(self.scratch[0..len], peer_io.handoff.slice());
+                peer_io.handoff.drop(len);
+                break :blk .{ .len = len, .fin = peer_io.fin_seen };
+            } else engine.read(stream, self.scratch) catch return count;
             if (read.len == 0 and !read.fin) return count;
             var chunk = self.scratch[0..read.len];
             while (chunk.len > 0) {
@@ -726,7 +741,13 @@ pub const Gossipsub = struct {
                 }
                 if (result.consumed == 0) break;
             }
-            if (read.fin) return count;
+            if (read.fin) {
+                self.releaseLarge(peer_io);
+                peer_io.reader = .{};
+                peer_io.fin_seen = false;
+                self.state.peers[index].in_stream = null;
+                return count;
+            }
         }
         return count;
     }
