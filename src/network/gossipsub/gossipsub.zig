@@ -87,12 +87,22 @@ const PeerIo = struct {
     large_slot: ?u8 = null,
     large_since_ms: u64 = 0,
     decompressed_pump: usize = 0,
+    ihave_recv: u16 = 0,
+    iwant_ids_sent: u16 = 0,
+    idontwant_recv: u16 = 0,
 
     fn reset(self: *PeerIo) void {
         self.send_head = 0;
         self.send_tail = 0;
         self.reader = .{};
         self.decompressed_pump = 0;
+        self.resetHeartbeat();
+    }
+
+    fn resetHeartbeat(self: *PeerIo) void {
+        self.ihave_recv = 0;
+        self.iwant_ids_sent = 0;
+        self.idontwant_recv = 0;
     }
 
     fn pending(self: *const PeerIo) []const u8 {
@@ -441,8 +451,10 @@ pub const Gossipsub = struct {
     }
 
     fn heartbeat(self: *Gossipsub, now: Now) void {
+        for (self.io) |*peer_io| peer_io.resetHeartbeat();
         self.scores.refresh(now.mono_ms);
         self.state.pruneBackoffs(now.mono_ms);
+        self.expireLargeFrames(now.mono_ms);
         for (&self.state.topics, 0..) |*topic, index| {
             if (topic.active and topic.subscribed) self.maintainTopic(@intCast(index), now);
         }
@@ -643,7 +655,7 @@ pub const Gossipsub = struct {
             if (read.len == 0 and !read.fin) return count;
             var chunk = self.scratch[0..read.len];
             while (chunk.len > 0) {
-                const body = self.frameBody(peer_io);
+                const body = self.frameBody(peer_io, now.mono_ms);
                 const result = peer_io.reader.feed(chunk, body) catch {
                     self.counters.malformed_rpcs += 1;
                     self.releaseLarge(peer_io);
@@ -665,7 +677,7 @@ pub const Gossipsub = struct {
     /// Picks the buffer to accumulate the current inbound frame into: the small
     /// per-peer buffer normally, a claimed pool buffer for a larger frame, and
     /// switches the reader to discard mode for a frame too large to hold.
-    fn frameBody(self: *Gossipsub, peer_io: *PeerIo) []u8 {
+    fn frameBody(self: *Gossipsub, peer_io: *PeerIo, now_ms: u64) []u8 {
         if (peer_io.reader.isDiscarding()) return peer_io.body;
         if (peer_io.large_slot) |slot| return self.largeBuffer(slot);
         const declared = peer_io.reader.declaredLen() orelse return peer_io.body;
@@ -677,11 +689,25 @@ pub const Gossipsub = struct {
         }
         if (self.claimLarge()) |slot| {
             peer_io.large_slot = slot;
+            peer_io.large_since_ms = now_ms;
             return self.largeBuffer(slot);
         }
         peer_io.reader.discard();
         self.counters.oversized_dropped += 1;
         return peer_io.body;
+    }
+
+    /// Drops a large inbound frame that has been accumulating past the timeout
+    /// without completing, freeing its pool slot; the reader discards the rest of
+    /// the frame in sync so a stalled peer cannot pin the shared pool.
+    fn expireLargeFrames(self: *Gossipsub, now_ms: u64) void {
+        for (self.io) |*peer_io| {
+            if (peer_io.large_slot == null) continue;
+            if (now_ms -| peer_io.large_since_ms < self.options.large_frame_timeout_ms) continue;
+            self.releaseLarge(peer_io);
+            peer_io.reader.discard();
+            self.counters.large_stalled += 1;
+        }
     }
 
     fn largeBuffer(self: *Gossipsub, slot: u8) []u8 {
@@ -819,11 +845,16 @@ pub const Gossipsub = struct {
 
     fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
         if (self.belowGossip(index, now.mono_ms)) return;
+        const io = &self.io[index];
+        io.ihave_recv += 1;
+        if (io.ihave_recv > constants.max_ihave_per_heartbeat) return;
+        const id_budget = constants.max_ihave_ids_per_heartbeat -| @as(usize, io.iwant_ids_sent);
+        if (id_budget == 0) return;
         var wanted: [constants.gossip_ids_max]MessageId = undefined;
         var count: usize = 0;
         var it = ihave.ids();
         while (it.next() catch return) |id_bytes| {
-            if (count == wanted.len) break;
+            if (count == wanted.len or count >= id_budget) break;
             if (id_bytes.len != constants.message_id_length) continue;
             const id: MessageId = id_bytes[0..constants.message_id_length].*;
             if (self.seen.contains(id)) continue;
@@ -832,28 +863,31 @@ pub const Gossipsub = struct {
             self.addPromise(id, index, now.mono_ms + constants.iwant_followup_ms);
         }
         if (count == 0) return;
+        io.iwant_ids_sent += @intCast(count);
         var writer = protobuf.Writer.init(self.msg_scratch);
         writer.varint(protobuf.iwantRpcSize(count, constants.message_id_length));
         protobuf.beginIwantRpc(&writer, count, constants.message_id_length);
         for (wanted[0..count]) |id| protobuf.writeIwantId(&writer, &id);
-        if (self.io[index].append(writer.written())) {
+        if (io.append(writer.written())) {
             self.counters.iwant_sent += 1;
         } else self.counters.send_dropped += 1;
     }
 
     fn onIwant(self: *Gossipsub, index: u16, iwant: protobuf.IdList) void {
         if (self.belowGossip(index, self.last_now_ms)) return;
-        var served: u8 = 0;
+        var examined: usize = 0;
         var it = iwant.ids();
         while (it.next() catch return) |id_bytes| {
-            if (served >= constants.gossip_retransmission) break;
+            if (examined >= constants.max_iwant_ids_per_rpc) break;
+            examined += 1;
             if (id_bytes.len != constants.message_id_length) continue;
             const id: MessageId = id_bytes[0..constants.message_id_length].*;
-            if (!self.mcache.isValidated(id)) continue;
+            if (self.state.suppresses(index, id)) continue;
+            if (!self.mcache.iwantAllowed(id, index, constants.gossip_retransmission)) continue;
             const cached = self.mcache.get(id, self.msg_scratch) orelse continue;
-            if (self.io[index].appendMessage(cached.topic, cached.data)) {
-                served += 1;
-            } else self.counters.send_dropped += 1;
+            if (!self.io[index].appendMessage(cached.topic, cached.data)) {
+                self.counters.send_dropped += 1;
+            }
         }
     }
 
@@ -876,8 +910,14 @@ pub const Gossipsub = struct {
     }
 
     fn onIdontwant(self: *Gossipsub, index: u16, idontwant: protobuf.IdList) void {
+        const io = &self.io[index];
+        io.idontwant_recv += 1;
+        if (io.idontwant_recv > constants.max_idontwant_per_heartbeat) return;
+        var examined: usize = 0;
         var it = idontwant.ids();
         while (it.next() catch return) |id_bytes| {
+            if (examined >= constants.dont_send_cap) break;
+            examined += 1;
             if (id_bytes.len != constants.message_id_length) continue;
             self.state.suppress(index, id_bytes[0..constants.message_id_length].*);
         }

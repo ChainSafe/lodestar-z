@@ -151,6 +151,15 @@ const DupSet = std.StaticBitSet(constants.peers_cap);
 /// Outcome of recording a duplicate sender, driving the score credit/penalty.
 pub const DupOutcome = enum { no_record, already, unknown, valid, invalid, ignored };
 
+/// Per-message IWANT retransmission counts, one small table per cached message.
+/// A message is served to a given peer at most `gossip_retransmission` times.
+const iwant_peers_per_msg = 16;
+const IwantTable = struct {
+    peers: [iwant_peers_per_msg]u16 = undefined,
+    counts: [iwant_peers_per_msg]u8 = undefined,
+    len: u8 = 0,
+};
+
 /// Retains full messages for `mcache_len` heartbeat windows so the engine can
 /// answer IWANT, and reports the ids to gossip about. Message data lives in one
 /// byte ring; entries and data both evict oldest-first, in FIFO order.
@@ -166,6 +175,7 @@ pub const MessageCache = struct {
     source: []u16,
     source_gen: []u32,
     dup: []DupSet,
+    iwant: []IwantTable,
     arena: []u8,
     capacity: usize,
     entry_head: usize = 0,
@@ -200,6 +210,8 @@ pub const MessageCache = struct {
         errdefer allocator.free(source_gen);
         const dup = try allocator.alloc(DupSet, capacity);
         errdefer allocator.free(dup);
+        const iwant = try allocator.alloc(IwantTable, capacity);
+        errdefer allocator.free(iwant);
         const arena = try allocator.alloc(u8, arena_bytes);
         errdefer allocator.free(arena);
         var index = try Index.init(allocator, capacity, ids);
@@ -216,6 +228,7 @@ pub const MessageCache = struct {
             .source = source,
             .source_gen = source_gen,
             .dup = dup,
+            .iwant = iwant,
             .arena = arena,
             .capacity = capacity,
         };
@@ -224,6 +237,7 @@ pub const MessageCache = struct {
     pub fn deinit(self: *MessageCache, allocator: Allocator) void {
         self.index.deinit(allocator);
         allocator.free(self.arena);
+        allocator.free(self.iwant);
         allocator.free(self.dup);
         allocator.free(self.source_gen);
         allocator.free(self.source);
@@ -269,6 +283,7 @@ pub const MessageCache = struct {
         self.source[slot] = source;
         self.source_gen[slot] = source_gen;
         self.dup[slot] = DupSet.initEmpty();
+        self.iwant[slot] = .{};
         writeRing(self.arena, self.data_head, data);
         self.data_head = (self.data_head + data.len) % self.arena.len;
         self.data_used += data.len;
@@ -332,6 +347,26 @@ pub const MessageCache = struct {
     pub fn sourceGen(self: *const MessageCache, id: MessageId) ?u32 {
         const slot = self.index.find(id) orelse return null;
         return self.source_gen[slot];
+    }
+
+    /// Whether an IWANT for `id` from `peer` should be answered: the message must
+    /// be cached and validated, and served to that peer at most `max` times.
+    pub fn iwantAllowed(self: *MessageCache, id: MessageId, peer: u16, max: u8) bool {
+        const slot = self.index.find(id) orelse return false;
+        if (self.status[slot] != .valid) return false;
+        const table = &self.iwant[slot];
+        for (table.peers[0..table.len], 0..) |tracked, i| {
+            if (tracked == peer) {
+                if (table.counts[i] >= max) return false;
+                table.counts[i] += 1;
+                return true;
+            }
+        }
+        if (table.len == table.peers.len) return false;
+        table.peers[table.len] = peer;
+        table.counts[table.len] = 1;
+        table.len += 1;
+        return true;
     }
 
     /// The topic of a cached message without copying its data.

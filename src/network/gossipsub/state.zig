@@ -71,7 +71,7 @@ const Backoff = struct {
 pub const State = struct {
     peers: [constants.peers_cap]Peer = [_]Peer{.{}} ** constants.peers_cap,
     topics: [constants.topics_cap]Topic = [_]Topic{.{}} ** constants.topics_cap,
-    backoffs: [constants.peers_cap]Backoff = undefined,
+    backoffs: [constants.backoffs_cap]Backoff = undefined,
     backoff_len: usize = 0,
 
     // Peers ------------------------------------------------------------------
@@ -227,9 +227,19 @@ pub const State = struct {
                 return;
             }
         }
-        if (self.backoff_len == self.backoffs.len) return;
-        self.backoffs[self.backoff_len] = .{ .peer = peer, .topic = topic, .until_ms = until_ms };
-        self.backoff_len += 1;
+        const fresh: Backoff = .{ .peer = peer, .topic = topic, .until_ms = until_ms };
+        if (self.backoff_len < self.backoffs.len) {
+            self.backoffs[self.backoff_len] = fresh;
+            self.backoff_len += 1;
+            return;
+        }
+        // Full: replace the soonest-to-expire entry so the newest backoff is kept
+        // and no single peer can deny backoff tracking to the others.
+        var min: usize = 0;
+        for (self.backoffs[0..self.backoff_len], 0..) |entry, i| {
+            if (entry.until_ms < self.backoffs[min].until_ms) min = i;
+        }
+        if (until_ms > self.backoffs[min].until_ms) self.backoffs[min] = fresh;
     }
 
     pub fn backedOff(self: *const State, peer: u16, topic: u16, now_ms: u64) bool {
