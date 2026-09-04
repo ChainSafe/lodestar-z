@@ -7,6 +7,10 @@ pub const udp = @import("udp.zig");
 pub const driver = @import("driver.zig");
 pub const transport = @import("transport.zig");
 pub const negotiate = @import("negotiate.zig");
+pub const router = @import("router.zig");
+pub const service = @import("service.zig");
+pub const Router = router.Router;
+pub const Service = service.Service;
 pub const stream_io = @import("stream_io.zig");
 pub const reqresp = @import("reqresp/root.zig");
 pub const gossipsub = @import("gossipsub/root.zig");
@@ -47,4 +51,5 @@ test {
     _ = @import("driver_test.zig");
     _ = @import("transport_test.zig");
     _ = @import("negotiate_test.zig");
+    _ = @import("router_test.zig");
 }

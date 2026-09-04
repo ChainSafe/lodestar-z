@@ -22,6 +22,10 @@ const Peer = struct {
     generation: u32 = 0,
     conn: Handle = undefined,
     version: Version = .v1_0,
+    inbound_version: Version = .v1_0,
+    peer_id: ?@import("../wire/peer_id.zig").PeerId = null,
+    address: ?@import("../types.zig").Address = null,
+    direction: ?@import("../types.zig").Direction = null,
     out_stream: ?StreamHandle = null,
     in_stream: ?StreamHandle = null,
     dont_send: [constants.dont_send_cap]MessageId = undefined,
@@ -86,6 +90,19 @@ pub const State = struct {
             .version = version,
         };
         return .{ .index = @intCast(index), .generation = peer.generation };
+    }
+
+    pub fn setMetadata(
+        self: *State,
+        peer: PeerHandle,
+        identity: @import("../wire/peer_id.zig").PeerId,
+        address: @import("../types.zig").Address,
+        direction: @import("../types.zig").Direction,
+    ) void {
+        assert(self.peerMatches(peer.index, peer.generation));
+        self.peers[peer.index].peer_id = identity;
+        self.peers[peer.index].address = address;
+        self.peers[peer.index].direction = direction;
     }
 
     pub fn removePeer(self: *State, index: u16) void {

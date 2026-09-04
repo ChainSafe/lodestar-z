@@ -1,6 +1,8 @@
 const std = @import("std");
 const engine_mod = @import("../quic/engine.zig");
 const negotiate = @import("../negotiate.zig");
+const routing = @import("../router.zig");
+const state_mod = @import("state.zig");
 const types = @import("../types.zig");
 const gossipsub_mod = @import("gossipsub.zig");
 const constants = @import("constants.zig");
@@ -15,47 +17,69 @@ const Gossipsub = gossipsub_mod.Gossipsub;
 const Event = gossipsub_mod.Event;
 const MessageId = gossipsub_mod.MessageId;
 const Verdict = gossipsub_mod.Verdict;
-const meshsub_ids = gossipsub_mod.meshsub_ids;
 
 pub const outcomes_per_pump: usize = 16;
 
 pub const Options = struct {
     gossipsub: gossipsub_mod.Options = .{},
     negotiations_max: u16 = 512,
+    versions: []const state_mod.Version = &.{ .v1_2, .v1_1, .v1_0 },
 };
 
 pub const InitError = negotiate.Error || gossipsub_mod.InitError;
 
-/// Composes the multistream negotiator with the gossipsub engine over the
-/// persistent per-peer meshsub streams, so a host pumps transport events
-/// straight to gossip events. The negotiator lives here today; the shared
-/// router of sub-project 4 hoists it up and calls `acceptNegotiated`.
+pub const retry_min_ms: u64 = 1_000;
+pub const retry_max_ms: u64 = 30_000;
+pub const openings_per_pump: usize = 16;
+
+const Outbound = union(enum) {
+    waiting: u64,
+    negotiating: StreamHandle,
+    live: StreamHandle,
+};
+
+const Supervisor = struct {
+    peer: ?state_mod.PeerHandle = null,
+    outbound: Outbound = .{ .waiting = 0 },
+    failures: u8 = 0,
+};
+
 pub const Service = struct {
     allocator: Allocator,
-    negotiator: negotiate.Negotiator,
+    router: ?routing.Router,
     inner: Gossipsub,
-    pending_out: []?StreamHandle,
+    streams: []Supervisor,
+    open_cursor: usize = 0,
 
     pub fn init(allocator: Allocator, options: Options) InitError!Service {
-        var negotiator = try negotiate.Negotiator.init(allocator, options.negotiations_max);
-        errdefer negotiator.deinit();
-        var inner = try Gossipsub.init(allocator, options.gossipsub);
+        var service = try initHandler(allocator, options.gossipsub);
+        errdefer service.deinit();
+        service.router = try routing.Router.init(allocator, .{
+            .negotiations_max = options.negotiations_max,
+            .reqresp = false,
+            .meshsub_versions = options.versions,
+        });
+        return service;
+    }
+
+    pub fn initHandler(allocator: Allocator, options: gossipsub_mod.Options) InitError!Service {
+        var inner = try Gossipsub.init(allocator, options);
         errdefer inner.deinit();
-        const pending_out = try allocator.alloc(?StreamHandle, constants.peers_cap);
-        errdefer allocator.free(pending_out);
-        @memset(pending_out, null);
+        const streams = try allocator.alloc(Supervisor, constants.peers_cap);
+        errdefer allocator.free(streams);
+        @memset(streams, .{});
         return .{
             .allocator = allocator,
-            .negotiator = negotiator,
+            .router = null,
             .inner = inner,
-            .pending_out = pending_out,
+            .streams = streams,
         };
     }
 
     pub fn deinit(self: *Service) void {
-        self.allocator.free(self.pending_out);
+        self.allocator.free(self.streams);
         self.inner.deinit();
-        self.negotiator.deinit();
+        if (self.router) |*router| router.deinit();
         self.* = undefined;
     }
 
@@ -92,34 +116,85 @@ pub const Service = struct {
         return self.inner.counters;
     }
 
-    /// Registers a newly connected peer and opens our outbound meshsub stream.
     pub fn peerConnected(self: *Service, engine: *Engine, conn: Handle, now: Now) void {
-        const handle = self.inner.addPeer(conn, .v1_2) orelse return;
-        const neg = &self.negotiator;
-        const stream = neg.beginOutbound(engine, conn, meshsub_ids[0], now) catch return;
-        self.pending_out[handle.index] = stream;
+        if (self.inner.state.findPeer(conn) != null) return;
+        const identity = engine.peerId(conn) orelse return;
+        const address = engine.peerAddress(conn) orelse return;
+        const direction = engine.direction(conn) orelse return;
+        const peer = self.inner.addPeer(conn, .v1_2) orelse return;
+        self.inner.state.setMetadata(peer, identity, address, direction);
+        self.streams[peer.index] = .{ .peer = peer, .outbound = .{ .waiting = now.mono_ms } };
     }
 
-    /// Routes one ready meshsub stream: our own outbound stream becomes the send
-    /// side, the peer's stream our receive side. Returns whether it was claimed,
-    /// so a shared router can offer the stream to the next protocol otherwise.
-    pub fn acceptNegotiated(self: *Service, outcome: negotiate.Outcome) bool {
-        const ready = switch (outcome.result) {
-            .ready => |r| r,
-            else => return false,
+    pub fn transportEvents(
+        self: *Service,
+        engine: *Engine,
+        events: []const TransportEvent,
+        now: Now,
+    ) void {
+        for (events) |event| switch (event) {
+            .connected => |connected| self.peerConnected(engine, connected.conn, now),
+            .stream_closed => |closed| self.streamClosed(engine, closed.stream, now),
+            .closed => |closed| {
+                const index = self.inner.state.findPeer(closed.conn) orelse continue;
+                self.streams[index] = .{};
+                self.inner.connectionClosed(closed.conn);
+            },
+            else => {},
         };
-        const index = self.inner.state.findPeer(outcome.stream.conn) orelse return false;
-        self.inner.setPeerVersion(index, gossipsub_mod.versionFor(ready.protocol_index));
-        if (self.pending_out[index]) |out| {
-            if (std.meta.eql(out, outcome.stream)) {
-                self.inner.setStreams(index, outcome.stream, null);
-                self.pending_out[index] = null;
-                return true;
+    }
+
+    pub fn negotiationResult(
+        self: *Service,
+        engine: *Engine,
+        outcome: routing.Outcome,
+        now: Now,
+    ) void {
+        const index = self.inner.state.findPeer(outcome.stream.conn) orelse {
+            engine.closeStream(outcome.stream, 0);
+            return;
+        };
+        const supervisor = &self.streams[index];
+        const peer = supervisor.peer orelse return;
+        if (!self.inner.state.peerMatches(peer.index, peer.generation)) return;
+        if (outcome.direction == .outbound) {
+            const pending = switch (supervisor.outbound) {
+                .negotiating => |stream| stream,
+                else => return,
+            };
+            if (!std.meta.eql(pending, outcome.stream)) return;
+            switch (outcome.result) {
+                .ready => |selection| {
+                    if (selection.leftover.len != 0) {
+                        engine.closeStream(outcome.stream, 0);
+                        self.retry(index, now);
+                        return;
+                    }
+                    self.inner.replaceOutbound(
+                        engine,
+                        index,
+                        outcome.stream,
+                        selection.protocol.meshsub,
+                    );
+                    supervisor.outbound = .{ .live = outcome.stream };
+                    supervisor.failures = 0;
+                },
+                else => self.retry(index, now),
             }
+        } else switch (outcome.result) {
+            .ready => |selection| {
+                self.inner.replaceInbound(
+                    engine,
+                    index,
+                    outcome.stream,
+                    selection.protocol.meshsub,
+                );
+                if (!self.inner.receiveHandoff(index, selection.leftover, selection.fin)) {
+                    self.inner.resetInbound(engine, index);
+                }
+            },
+            else => {},
         }
-        if (!self.inner.receiveHandoff(index, ready.leftover, ready.fin)) return false;
-        self.inner.setStreams(index, null, outcome.stream);
-        return true;
     }
 
     pub fn process(
@@ -129,24 +204,76 @@ pub const Service = struct {
         now: Now,
         out: []Event,
     ) usize {
-        for (events) |event| switch (event) {
-            .connected => |connected| self.peerConnected(engine, connected.conn, now),
-            .stream_opened => |stream| self.listen(engine, stream, now),
-            .closed => |closed| self.inner.connectionClosed(closed.conn),
-            else => {},
-        };
-        var outcomes: [outcomes_per_pump]negotiate.Outcome = undefined;
-        const ready = self.negotiator.pump(engine, now, &outcomes);
-        for (outcomes[0..ready]) |outcome| switch (outcome.result) {
-            .ready => if (!self.acceptNegotiated(outcome)) engine.closeStream(outcome.stream, 0),
-            else => {},
-        };
+        const router = &self.router.?;
+        router.transportEvents(engine, events, now);
+        self.transportEvents(engine, events, now);
+        var outcomes: [outcomes_per_pump]routing.Outcome = undefined;
+        const count = router.pump(engine, now, &outcomes);
+        for (outcomes[0..count]) |outcome| self.negotiationResult(engine, outcome, now);
+        return self.pump(router, engine, now, out);
+    }
+
+    pub fn pump(
+        self: *Service,
+        router: *routing.Router,
+        engine: *Engine,
+        now: Now,
+        out: []Event,
+    ) usize {
+        var openings: usize = 0;
+        for (0..self.streams.len) |_| {
+            const index: u16 = @intCast(self.open_cursor);
+            self.open_cursor = (self.open_cursor + 1) % self.streams.len;
+            const supervisor = &self.streams[index];
+            const peer = supervisor.peer orelse continue;
+            if (!self.inner.state.peerMatches(peer.index, peer.generation)) continue;
+            switch (supervisor.outbound) {
+                .live => if (self.inner.state.outStream(index) == null) self.retry(index, now),
+                .waiting => |deadline| if (now.mono_ms >= deadline) {
+                    self.openOutbound(router, engine, index, now);
+                    openings += 1;
+                    if (openings == openings_per_pump) break;
+                },
+                .negotiating => {},
+            }
+        }
         return self.inner.pump(engine, now, out);
     }
 
-    fn listen(self: *Service, engine: *Engine, stream: StreamHandle, now: Now) void {
-        self.negotiator.acceptInbound(stream, &meshsub_ids, now) catch {
-            engine.closeStream(stream, 0);
+    fn openOutbound(
+        self: *Service,
+        router: *routing.Router,
+        engine: *Engine,
+        index: u16,
+        now: Now,
+    ) void {
+        const conn = self.inner.state.peers[index].conn;
+        const stream = router.beginMeshsub(engine, conn, now) catch {
+            self.retry(index, now);
+            return;
         };
+        self.streams[index].outbound = .{ .negotiating = stream };
+    }
+
+    fn retry(self: *Service, index: u16, now: Now) void {
+        const supervisor = &self.streams[index];
+        const delay = @min(retry_max_ms, retry_min_ms << @as(u6, @intCast(supervisor.failures)));
+        supervisor.failures = @min(supervisor.failures + 1, 5);
+        supervisor.outbound = .{ .waiting = now.mono_ms +| delay };
+    }
+
+    fn streamClosed(self: *Service, engine: *Engine, stream: StreamHandle, now: Now) void {
+        const index = self.inner.state.findPeer(stream.conn) orelse return;
+        const supervisor = &self.streams[index];
+        switch (supervisor.outbound) {
+            .live => |live| if (std.meta.eql(live, stream)) {
+                self.inner.resetOutbound(engine, index);
+                self.retry(index, now);
+            },
+            .negotiating => |pending| if (std.meta.eql(pending, stream)) self.retry(index, now),
+            .waiting => {},
+        }
+        // Read-side FIN can be reported with buffered payload. The framing owner
+        // drains it before resetting; a reset is observed by its next read.
     }
 };

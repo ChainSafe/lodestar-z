@@ -175,7 +175,7 @@ test "negotiator falls back on the same stream to meshsub v1.1" {
         for (out[0..count]) |result| {
             try std.testing.expect(result.result == .ready);
             try std.testing.expectEqual(stream, result.stream);
-            try std.testing.expectEqualStrings("/meshsub/1.1.0", result.result.ready.protocol_id);
+            try std.testing.expectEqualStrings("/meshsub/1.1.0", result.protocol_id);
             accepted = true;
         }
         try setup.pair.pump();
@@ -200,4 +200,70 @@ test "negotiator expires with no outcome capacity and reports later" {
     var out: [1]Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.dialer.pump(&setup.pair.client, setup.pair.now, &out));
     try std.testing.expectEqual(negotiate.Failure.timeout, out[0].result.failed);
+}
+
+test "negotiator connection teardown invalidates an undelivered ready outcome" {
+    var setup: Setup = .{};
+    try setup.init(1);
+    defer setup.deinit();
+    const stream = try setup.pair.client.openStream(setup.handles.client);
+    const dialer = try multistream.Dialer.init(ping);
+    var bytes: [256]u8 = undefined;
+    const hello = try dialer.initialWrite(&bytes);
+    _ = try setup.pair.client.write(stream, hello, false);
+    for (0..8) |_| {
+        try setup.pair.pump();
+        try setup.acceptOpened();
+        _ = setup.listener.pump(&setup.pair.server, setup.pair.now, &.{});
+    }
+    try std.testing.expectEqual(@as(usize, 0), setup.listener.active());
+    setup.listener.connectionClosed(&setup.pair.server, setup.handles.server);
+    var outcomes: [1]Outcome = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.listener.pump(&setup.pair.server, setup.pair.now, &outcomes));
+    try std.testing.expect(outcomes[0].result == .failed);
+    try std.testing.expectEqual(negotiate.Failure.stream_closed, outcomes[0].result.failed);
+}
+
+test "negotiator cancellation releases pending outcomes and checks full stream identity" {
+    var setup: Setup = .{};
+    try setup.init(1);
+    defer setup.deinit();
+    const stream = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
+    setup.pair.advance(negotiate.negotiate_timeout_ms);
+    _ = setup.dialer.pump(&setup.pair.client, setup.pair.now, &.{});
+    var stale = stream;
+    stale.conn.generation +%= 1;
+    setup.dialer.cancel(&setup.pair.client, stale);
+    try std.testing.expectError(error.NegotiationTableFull, setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now));
+    setup.dialer.cancel(&setup.pair.client, stream);
+    var outcomes: [1]Outcome = undefined;
+    try std.testing.expectEqual(@as(usize, 0), setup.dialer.pump(&setup.pair.client, setup.pair.now, &outcomes));
+    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
+}
+
+test "negotiator preserves coalesced acceptance payload and FIN for the dialer" {
+    var setup: Setup = .{};
+    try setup.init(1);
+    defer setup.deinit();
+    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
+    var outcomes: [1]Outcome = undefined;
+    _ = setup.dialer.pump(&setup.pair.client, setup.pair.now, &outcomes);
+    try setup.pair.pump();
+    var events: [8]engine_mod.Event = undefined;
+    var inbound: ?engine_mod.StreamHandle = null;
+    for (setup.pair.events(&setup.pair.server, &events)) |event| {
+        if (event == .stream_opened) inbound = event.stream_opened;
+    }
+    var buffer: [256]u8 = undefined;
+    _ = try setup.pair.server.read(inbound.?, &buffer);
+    const header = try multistream.encodeMessage(multistream.header, &buffer);
+    const accepted = try multistream.encodeMessage(ping, buffer[header.len..]);
+    const offset = header.len + accepted.len;
+    @memcpy(buffer[offset..][0..4], "pong");
+    try std.testing.expectEqual(offset + 4, try setup.pair.server.write(inbound.?, buffer[0 .. offset + 4], true));
+    try setup.pair.pump();
+    try std.testing.expectEqual(@as(usize, 1), setup.dialer.pump(&setup.pair.client, setup.pair.now, &outcomes));
+    try std.testing.expectEqualStrings("pong", outcomes[0].result.ready.leftover);
+    try std.testing.expect(outcomes[0].result.ready.fin);
+    try std.testing.expectEqual(@import("types.zig").Direction.outbound, outcomes[0].direction);
 }
