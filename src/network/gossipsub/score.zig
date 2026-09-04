@@ -43,6 +43,14 @@ pub const Params = struct {
     topic: TopicParams = .{},
 };
 
+/// The Ethereum-tuned baseline: the thresholds follow Lighthouse's shipped
+/// values, and the default per-topic params are a sane starting point a host
+/// refines from the expected per-topic message rates (as Lighthouse derives
+/// them in gossipsub_scoring_parameters.rs).
+pub fn ethereum() Params {
+    return .{};
+}
+
 const TopicCounters = struct {
     in_mesh: bool = false,
     mesh_time_ms: u64 = 0,
