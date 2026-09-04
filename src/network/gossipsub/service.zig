@@ -67,7 +67,12 @@ pub const Service = struct {
         return self.inner.unsubscribe(topic);
     }
 
-    pub fn publish(self: *Service, topic: []const u8, ssz: []const u8, now: Now) bool {
+    pub fn publish(
+        self: *Service,
+        topic: []const u8,
+        ssz: []const u8,
+        now: Now,
+    ) Gossipsub.PublishError!void {
         return self.inner.publish(topic, ssz, now);
     }
 
