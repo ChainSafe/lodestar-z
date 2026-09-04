@@ -6,10 +6,14 @@ pub const state = @import("state.zig");
 pub const frame = @import("frame.zig");
 pub const score = @import("score.zig");
 pub const gossipsub = @import("gossipsub.zig");
+pub const service = @import("service.zig");
 
 pub const Gossipsub = gossipsub.Gossipsub;
 pub const Options = gossipsub.Options;
 pub const Event = gossipsub.Event;
+pub const Service = service.Service;
+pub const MessageId = gossipsub.MessageId;
+pub const Verdict = gossipsub.Verdict;
 
 test {
     _ = constants;
@@ -20,5 +24,7 @@ test {
     _ = frame;
     _ = score;
     _ = gossipsub;
+    _ = service;
     _ = @import("gossipsub_test.zig");
+    _ = @import("service_test.zig");
 }

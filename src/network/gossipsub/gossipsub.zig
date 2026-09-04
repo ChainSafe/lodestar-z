@@ -39,6 +39,17 @@ pub const Options = struct {
 
 pub const InitError = Allocator.Error;
 
+/// Advertised protocol ids, newest first; the negotiator settles the version.
+pub const meshsub_ids = [_][]const u8{ "/meshsub/1.2.0", "/meshsub/1.1.0", "/meshsub/1.0.0" };
+
+pub fn versionFor(protocol_index: u8) Version {
+    return switch (protocol_index) {
+        0 => .v1_2,
+        1 => .v1_1,
+        else => .v1_0,
+    };
+}
+
 pub const MessageId = topic_mod.MessageId;
 
 pub const Verdict = enum { accept, reject, ignore };
