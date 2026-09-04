@@ -324,6 +324,59 @@ pub fn writeMessage(w: *Writer, data: []const u8, topic: []const u8) void {
     w.bytesField(4, topic);
 }
 
+/// Writes a whole RPC carrying one GRAFT control message for `topic`.
+pub fn graftRpcSize(topic: []const u8) usize {
+    const graft = bytesFieldSize(1, topic.len);
+    return bytesFieldSize(3, bytesFieldSize(3, graft));
+}
+
+pub fn writeGraftRpc(w: *Writer, topic: []const u8) void {
+    const graft = bytesFieldSize(1, topic.len);
+    const control = bytesFieldSize(3, graft);
+    w.tag(3, wire_len);
+    w.varint(control);
+    w.tag(3, wire_len);
+    w.varint(graft);
+    w.bytesField(1, topic);
+}
+
+/// Writes a whole RPC carrying one PRUNE control message with a backoff in
+/// seconds (Ethereum sends no peer-exchange records).
+pub fn pruneRpcSize(topic: []const u8, backoff_s: u64) usize {
+    const prune = bytesFieldSize(1, topic.len) + varintFieldSize(3, backoff_s);
+    return bytesFieldSize(3, bytesFieldSize(4, prune));
+}
+
+pub fn writePruneRpc(w: *Writer, topic: []const u8, backoff_s: u64) void {
+    const prune = bytesFieldSize(1, topic.len) + varintFieldSize(3, backoff_s);
+    const control = bytesFieldSize(4, prune);
+    w.tag(3, wire_len);
+    w.varint(control);
+    w.tag(4, wire_len);
+    w.varint(prune);
+    w.bytesField(1, topic);
+    w.varintField(3, backoff_s);
+}
+
+test "protobuf round trips graft and prune control rpcs" {
+    var buf: [128]u8 = undefined;
+    var w = Writer.init(&buf);
+    writeGraftRpc(&w, "topic_a");
+    try std.testing.expectEqual(graftRpcSize("topic_a"), w.len);
+    var reader = RpcReader.init(w.written());
+    const graft = (try reader.next()).?;
+    try std.testing.expectEqualStrings("topic_a", graft.graft);
+    try std.testing.expect((try reader.next()) == null);
+
+    w = Writer.init(&buf);
+    writePruneRpc(&w, "topic_b", 60);
+    try std.testing.expectEqual(pruneRpcSize("topic_b", 60), w.len);
+    reader = RpcReader.init(w.written());
+    const prune = (try reader.next()).?;
+    try std.testing.expectEqualStrings("topic_b", prune.prune.topic);
+    try std.testing.expectEqual(@as(u64, 60), prune.prune.backoff);
+}
+
 test "protobuf round trips an RPC with subscriptions, messages, and control" {
     var buf: [512]u8 = undefined;
     var w = Writer.init(&buf);
