@@ -266,6 +266,11 @@ pub const MessageCache = struct {
         if (self.index.find(id)) |slot| self.validated[slot] = true;
     }
 
+    pub fn isValidated(self: *const MessageCache, id: MessageId) bool {
+        const slot = self.index.find(id) orelse return false;
+        return self.validated[slot];
+    }
+
     /// The peer a cached message arrived from, or null when self-published.
     pub fn sourceOf(self: *const MessageCache, id: MessageId) ?u16 {
         const slot = self.index.find(id) orelse return null;
