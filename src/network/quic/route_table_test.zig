@@ -87,3 +87,29 @@ test "route table lookups depend on the seed but not on insertion order" {
         try std.testing.expectEqual(@as(?u16, value), reseeded.find(&cidFor(value)));
     }
 }
+
+test "route table repairs clusters longer than the probe limit" {
+    var table = try RouteTable.init(std.testing.allocator, 128, 42);
+    defer table.deinit(std.testing.allocator);
+    var cids: [66]Cid = undefined;
+    var found: usize = 0;
+    for (0..1_000_000) |nonce| {
+        if (found == cids.len) break;
+        var raw: [16]u8 = [_]u8{0} ** 16;
+        std.mem.writeInt(u64, raw[0..8], @intCast(nonce), .little);
+        const cid = Cid.fromSlice(&raw);
+        const desired: usize = if (found < 64) 0 else found - 63;
+        const bucket = std.hash.Wyhash.hash(table.seed, cid.slice()) & (table.capacity() - 1);
+        if (bucket != desired) continue;
+        cids[found] = cid;
+        try table.insert(&cids[found], @intCast(found));
+        found += 1;
+    }
+    try std.testing.expectEqual(cids.len, found);
+    try std.testing.expectEqual(@as(?u16, 65), table.find(&cids[65]));
+    table.remove(&cids[0], 0);
+    for (cids[1..], 1..) |cid, index| {
+        try std.testing.expectEqual(@as(?u16, @intCast(index)), table.find(&cid));
+    }
+    try std.testing.expectEqual(@as(usize, 65), table.count);
+}

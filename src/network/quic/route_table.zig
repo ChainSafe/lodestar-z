@@ -123,7 +123,7 @@ pub const RouteTable = struct {
         self.count -= 1;
         var cursor = (at + 1) & mask;
         var moved: usize = 0;
-        while (moved < probe_max) : (moved += 1) {
+        while (moved < self.entries.len) : (moved += 1) {
             const entry = self.entries[cursor];
             if (!entry.used) return;
             self.entries[cursor] = .{};
@@ -131,6 +131,7 @@ pub const RouteTable = struct {
             self.reinsert(&entry);
             cursor = (cursor + 1) & mask;
         }
+        unreachable;
     }
 
     fn reinsert(self: *RouteTable, entry: *const Entry) void {
