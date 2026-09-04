@@ -140,6 +140,9 @@
         .time = .{
             .root_source_file = "src/time.zig",
         },
+        .logger = .{
+            .root_source_file = "src/logger.zig",
+        },
         .bounded_array = .{
             .root_source_file = "src/bounded_array.zig",
         },
@@ -368,6 +371,7 @@
                     .fork_types,
                     .state_transition,
                     .hex,
+                    .logger,
                     "zapi:zapi",
                 },
             },
@@ -380,6 +384,7 @@
         // Per-module unit tests (mirror the old auto-generated `test:<module>` steps).
         .constants = .{ .root_module = .constants },
         .hex = .{ .root_module = .hex },
+        .logger = .{ .root_module = .logger },
         .bounded_array = .{ .root_module = .bounded_array },
         .cpu_count = .{ .root_module = .cpu_count },
         .hashing = .{ .root_module = .hashing },
