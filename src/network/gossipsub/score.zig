@@ -38,7 +38,6 @@ pub const Params = struct {
     gossip_threshold: f64 = -4000.0,
     publish_threshold: f64 = -8000.0,
     graylist_threshold: f64 = -16000.0,
-    accept_px_threshold: f64 = 100.0,
     opportunistic_graft_threshold: f64 = 5.0,
     topic: TopicParams = .{},
 };
@@ -131,14 +130,18 @@ pub const PeerScore = struct {
     /// and counts toward the mesh delivery rate.
     pub fn deliver(self: *PeerScore, peer: u16, topic: u16) void {
         const counters = self.tc(peer, topic);
-        counters.first_deliveries += 1;
-        if (counters.in_mesh) counters.mesh_deliveries += 1;
+        const params = self.params.topic;
+        counters.first_deliveries = @min(counters.first_deliveries + 1, params.first_delivery_cap);
+        if (counters.in_mesh) {
+            counters.mesh_deliveries = @min(counters.mesh_deliveries + 1, params.mesh_delivery_cap);
+        }
     }
 
     /// A duplicate from a mesh peer still counts toward its mesh delivery rate.
     pub fn duplicate(self: *PeerScore, peer: u16, topic: u16) void {
         const counters = self.tc(peer, topic);
-        if (counters.in_mesh) counters.mesh_deliveries += 1;
+        const cap = self.params.topic.mesh_delivery_cap;
+        if (counters.in_mesh) counters.mesh_deliveries = @min(counters.mesh_deliveries + 1, cap);
     }
 
     pub fn invalid(self: *PeerScore, peer: u16, topic: u16) void {

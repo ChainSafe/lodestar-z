@@ -202,7 +202,7 @@ test "gossipsub delivers a published message to a mesh peer" {
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
 
     const payload = "a signed beacon block payload for the mesh";
-    try std.testing.expect(setup.client.publish(beacon_block, payload, setup.pair.now));
+    try setup.client.publish(beacon_block, payload, setup.pair.now);
 
     var received = false;
     rounds = 0;
@@ -240,7 +240,7 @@ test "gossipsub prunes a peer whose messages are rejected" {
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
 
     // the client publishes, the server rejects it as invalid
-    try std.testing.expect(setup.client.publish(beacon_block, "an invalid block", setup.pair.now));
+    try setup.client.publish(beacon_block, "an invalid block", setup.pair.now);
     rounds = 0;
     var rejected = false;
     while (rounds < 20 and !rejected) : (rounds += 1) {
@@ -286,7 +286,7 @@ test "gossipsub receives a message larger than the per-peer body buffer" {
     // a poorly-compressible 8 KB payload: its compressed frame exceeds 1 KB
     var payload: [8192]u8 = undefined;
     for (&payload, 0..) |*byte, i| byte.* = @intCast((i * 131 + 7) & 0xff);
-    try std.testing.expect(setup.client.publish(beacon_block, &payload, setup.pair.now));
+    try setup.client.publish(beacon_block, &payload, setup.pair.now);
 
     var received = false;
     rounds = 0;

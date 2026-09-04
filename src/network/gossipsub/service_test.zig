@@ -84,7 +84,7 @@ test "gossipsub service composes the mesh and delivers a message" {
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
 
     const payload = "a block delivered through the gossipsub service";
-    try std.testing.expect(setup.client.publish(beacon_block, payload, setup.pair.now));
+    try setup.client.publish(beacon_block, payload, setup.pair.now);
 
     var received = false;
     rounds = 0;

@@ -42,6 +42,9 @@ pub const Options = struct {
     seen_ttl_ms: u64 = constants.seenTtlMs(32, 12),
     score_params: score_mod.Params = .{},
     opportunistic_graft_interval_ms: u64 = constants.opportunistic_graft_ms,
+    /// Seed for the mesh-pruning randomness that keeps an oversubscribed mesh
+    /// eclipse-resistant. A host should pass an unpredictable per-node value.
+    random_seed: u64 = 0x9e3779b97f4a7c15,
 };
 
 pub const InitError = Allocator.Error;
@@ -109,11 +112,20 @@ const PeerIo = struct {
         return self.send[self.send_tail..self.send_head];
     }
 
-    fn append(self: *PeerIo, bytes: []const u8) bool {
-        if (self.send_head == self.send_tail) {
-            self.send_head = 0;
-            self.send_tail = 0;
+    /// Slides any unsent bytes to the front so the free tail is contiguous; a
+    /// partial flush no longer strands free space and drops appends.
+    fn compact(self: *PeerIo) void {
+        if (self.send_tail == 0) return;
+        const pending_len = self.send_head - self.send_tail;
+        if (pending_len != 0) {
+            std.mem.copyForwards(u8, self.send[0..pending_len], self.pending());
         }
+        self.send_head = pending_len;
+        self.send_tail = 0;
+    }
+
+    fn append(self: *PeerIo, bytes: []const u8) bool {
+        self.compact();
         if (self.send_head + bytes.len > self.send.len) return false;
         @memcpy(self.send[self.send_head..][0..bytes.len], bytes);
         self.send_head += bytes.len;
@@ -124,10 +136,7 @@ const PeerIo = struct {
     /// avoiding an intermediate copy of the message data. Fails when the frame
     /// does not fit (a large message the send path streams instead).
     fn appendMessage(self: *PeerIo, topic_str: []const u8, data: []const u8) bool {
-        if (self.send_head == self.send_tail) {
-            self.send_head = 0;
-            self.send_tail = 0;
-        }
+        self.compact();
         const body_size = protobuf.messageSize(data, topic_str);
         const total = protobuf.varintLen(body_size) + body_size;
         if (self.send_head + total > self.send.len) return false;
@@ -160,6 +169,7 @@ pub const Gossipsub = struct {
     decompressed_used: usize = 0,
     promises: []Promise,
     promise_len: usize = 0,
+    rng: std.Random.DefaultPrng,
     counters: Counters = .{},
 
     pub const Counters = struct {
@@ -241,6 +251,7 @@ pub const Gossipsub = struct {
             .msg_scratch = msg_scratch,
             .decompressed = decompressed,
             .promises = promises,
+            .rng = std.Random.DefaultPrng.init(options.random_seed),
         };
     }
 
@@ -340,12 +351,19 @@ pub const Gossipsub = struct {
 
     // Publish and forward ----------------------------------------------------
 
+    pub const PublishError = error{ PayloadTooLarge, UnknownTopic, CompressFailed };
+
     /// Originates a message on `topic_str`. Compresses the SSZ, caches it, and
     /// sends it to the topic mesh (or fanout when unsubscribed).
-    pub fn publish(self: *Gossipsub, topic_str: []const u8, ssz: []const u8, now: Now) bool {
-        if (ssz.len > constants.MAX_PAYLOAD_SIZE) return false;
-        const topic = self.state.internTopic(topic_str) orelse return false;
-        const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return false;
+    pub fn publish(
+        self: *Gossipsub,
+        topic_str: []const u8,
+        ssz: []const u8,
+        now: Now,
+    ) PublishError!void {
+        if (ssz.len > constants.MAX_PAYLOAD_SIZE) return error.PayloadTooLarge;
+        const topic = self.state.internTopic(topic_str) orelse return error.UnknownTopic;
+        const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return error.CompressFailed;
         const data = self.msg_scratch[0..clen];
         const id = topic_mod.validMessageId(ssz);
         _ = self.seen.add(id, now.mono_ms);
@@ -357,7 +375,6 @@ pub const Gossipsub = struct {
             self.fillFanout(topic, now);
         self.deliver(peers, topic_str, id, data, null);
         self.counters.messages_published += 1;
-        return true;
     }
 
     /// Closes out a message the host validated. Accept forwards it to the mesh
@@ -561,7 +578,7 @@ pub const Gossipsub = struct {
         while (index < self.promise_len) {
             if (now_ms >= self.promises[index].expiry) {
                 self.counters.broken_promises += 1;
-                self.scores.penalize(self.promises[index].peer, 1); // P7 behavioural
+                self.scores.penalize(self.promises[index].peer, 1);
                 self.promises[index] = self.promises[self.promise_len - 1];
                 self.promise_len -= 1;
             } else index += 1;
@@ -574,7 +591,6 @@ pub const Gossipsub = struct {
         const topic_str = self.state.topicString(topic);
         const mesh = self.state.mesh(topic);
 
-        // Direct peers are always in a shared mesh.
         var direct_it = self.direct.iterator(.{});
         while (direct_it.next()) |peer| {
             if (self.state.subscribers(topic).isSet(peer) and !mesh.isSet(peer)) {
@@ -584,7 +600,6 @@ pub const Gossipsub = struct {
             }
         }
 
-        // Prune mesh peers whose score went negative.
         var members: [constants.peers_cap]Member = undefined;
         var count = self.meshMembers(topic, now, &members);
         for (members[0..count]) |member| {
@@ -608,9 +623,11 @@ pub const Gossipsub = struct {
             }
         } else if (size > constants.mesh_d_high) {
             count = self.meshMembers(topic, now, &members);
-            std.sort.pdq(Member, members[0..count], {}, memberLess);
-            const keep = constants.mesh_d;
-            for (members[0 .. count - keep]) |member| {
+            std.sort.pdq(Member, members[0..count], {}, memberGreater);
+            if (count > constants.mesh_d_score) {
+                self.rng.random().shuffle(Member, members[constants.mesh_d_score..count]);
+            }
+            for (members[constants.mesh_d..count]) |member| {
                 self.pruneMember(topic, topic_str, member.peer, now);
             }
         }
@@ -637,6 +654,10 @@ pub const Gossipsub = struct {
 
     fn memberLess(_: void, a: Member, b: Member) bool {
         return a.sc < b.sc;
+    }
+
+    fn memberGreater(_: void, a: Member, b: Member) bool {
+        return a.sc > b.sc;
     }
 
     fn belowGossip(self: *Gossipsub, index: u16, now_ms: u64) bool {
@@ -788,7 +809,6 @@ pub const Gossipsub = struct {
     ) usize {
         var count = start;
         self.counters.rpcs_received += 1;
-        // graylist: drop RPCs from a peer whose score is too low to trust
         const graylisted = !self.direct.isSet(index) and
             self.scores.score(index, now.mono_ms) < self.options.score_params.graylist_threshold;
         if (graylisted) return count;
@@ -836,7 +856,7 @@ pub const Gossipsub = struct {
         events: []Event,
         start: usize,
     ) usize {
-        if (msg.signed) return start; // StrictNoSign violation
+        if (msg.signed) return start;
         if (msg.data.len > constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE)) return start;
         const topic = self.state.findTopic(msg.topic) orelse return start;
         if (!self.state.subscribed(topic)) return start;
@@ -971,7 +991,7 @@ pub const Gossipsub = struct {
 
     fn onGraft(self: *Gossipsub, index: u16, topic_str: []const u8, now: Now) void {
         const topic = self.state.findTopic(topic_str) orelse return;
-        if (!self.state.subscribed(topic)) return; // unknown/unsubscribed topic: ignore
+        if (!self.state.subscribed(topic)) return;
         if (self.state.backedOff(index, topic, now.mono_ms)) {
             self.scores.penalize(index, 1);
             if (self.state.backoffUntil(index, topic)) |until| {
@@ -980,7 +1000,6 @@ pub const Gossipsub = struct {
                     constants.prune_backoff_ms -| constants.graft_flood_threshold_ms;
                 if (remaining > flood_window) self.scores.penalize(index, 1);
             }
-            const topic_str = self.state.topicString(topic);
             self.queuePrune(index, topic_str, constants.prune_backoff_ms / 1000);
             return;
         }
