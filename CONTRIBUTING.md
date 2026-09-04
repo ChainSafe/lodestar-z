@@ -202,36 +202,6 @@ For example:
 - refactor(bindings): use owned typed arrays for BLS outputs
 - chore: remove merge transition code
 
-**Pull Request Description**
-
-Use the template below and keep it flat: one sentence saying what the PR does, then bullets naming
-each change. Length should track the diff. A small fix needs a line; a large refactor gets more
-bullets, not more sections.
-
-```markdown
-**Motivation**
-
-Resolves #N, or one to three sentences.
-
-**Description**
-
-One sentence saying what this does.
-
-- Change, named by identifier
-  - detail
-
-TODO:
-- follow-up, if any
-
-**AI Assistance Disclosure**
-
-One line.
-```
-
-Leave out headings, tables, verification sections, and explanations of why the approach is right.
-Reasoning belongs in commit messages and review comments. Code blocks are for a before/after of an
-interface or real output, not for explaining a concept.
-
 **Pull Request Etiquette**
 
 - Pull requests should remain as drafts when they are not ready for review by maintainers.
