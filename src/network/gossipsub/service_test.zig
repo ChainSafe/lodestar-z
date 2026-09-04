@@ -142,3 +142,120 @@ test "gossipsub service preserves coalesced negotiation subscription and FIN" {
     }
     try std.testing.expect(received);
 }
+
+test "gossipsub service retries a closed outbound stream after bounded backoff" {
+    var setup: ServicePair = .{};
+    try setup.init();
+    defer setup.deinit();
+    for (0..16) |_| try setup.pumpOnce();
+    const index = setup.client.inner.state.findPeer(setup.handles.client).?;
+    const first = setup.client.inner.state.outStream(index).?;
+    setup.pair.client.closeStream(first, 0);
+    var out: [16]Event = undefined;
+    _ = setup.client.process(&setup.pair.client, &.{.{ .stream_closed = .{ .stream = first, .reset_code = 0 } }}, setup.pair.now, &out);
+    for (0..4) |_| try setup.pumpOnce();
+    try std.testing.expect(setup.client.inner.state.outStream(index) == null);
+    setup.pair.advance(1_000);
+    for (0..16) |_| try setup.pumpOnce();
+    const replacement = setup.client.inner.state.outStream(index) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!std.meta.eql(first, replacement));
+}
+
+fn propose(pair: *support.Pair, conn: engine_mod.Handle, version: []const u8, payload: []const u8) !engine_mod.StreamHandle {
+    const stream = try pair.client.openStream(conn);
+    const dialer = try @import("../wire/multistream.zig").Dialer.init(version);
+    var bytes: [512]u8 = undefined;
+    const hello = try dialer.initialWrite(&bytes);
+    @memcpy(bytes[hello.len..][0..payload.len], payload);
+    const len = hello.len + payload.len;
+    try std.testing.expectEqual(len, try pair.client.write(stream, bytes[0..len], false));
+    return stream;
+}
+
+test "gossipsub replacement resets a partial frame and keeps directional versions" {
+    var setup: ServicePair = .{};
+    try setup.init();
+    defer setup.deinit();
+    var topic_buf: [topic_mod.topic_max_len]u8 = undefined;
+    const topic = topic_mod.build(digest, "beacon_block", &topic_buf);
+    try std.testing.expect(setup.server.subscribe(topic));
+    for (0..16) |_| try setup.pumpOnce();
+    const index = setup.server.inner.state.findPeer(setup.handles.server).?;
+    const first = try propose(&setup.pair, setup.handles.client, "/meshsub/1.1.0", &.{ 0x80, 0x01, 0x08 });
+    for (0..8) |_| try setup.pumpOnce();
+    try std.testing.expectEqual(@as(?usize, 128), setup.server.inner.io[index].reader.declaredLen());
+    try std.testing.expectEqual(@import("state.zig").Version.v1_2, setup.server.inner.state.peerVersion(index));
+    try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.server.inner.state.peers[index].inbound_version);
+    var bytes: [160]u8 = undefined;
+    const protobuf = @import("protobuf.zig");
+    var writer = protobuf.Writer.init(&bytes);
+    writer.varint(protobuf.subscriptionSize(topic));
+    protobuf.writeSubscription(&writer, true, topic);
+    _ = try propose(&setup.pair, setup.handles.client, "/meshsub/1.2.0", writer.written());
+    var received = false;
+    for (0..16) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| {
+            if (event == .subscription_change) received = true;
+        }
+    }
+    try std.testing.expect(received);
+    try std.testing.expectEqual(@as(?usize, null), setup.server.inner.io[index].reader.declaredLen());
+    try std.testing.expectError(error.StreamStopped, setup.pair.client.write(first, "x", false));
+}
+
+test "gossipsub service negotiates with a v1.1-only peer" {
+    var setup: ServicePair = .{};
+    try setup.init();
+    defer setup.deinit();
+    setup.server.deinit();
+    setup.server = try Service.init(std.testing.allocator, .{ .versions = &.{.v1_1} });
+    setup.server.peerConnected(&setup.pair.server, setup.handles.server, setup.pair.now);
+    for (0..24) |_| try setup.pumpOnce();
+    const client_index = setup.client.inner.state.findPeer(setup.handles.client).?;
+    const server_index = setup.server.inner.state.findPeer(setup.handles.server).?;
+    try std.testing.expect(setup.client.inner.state.outStream(client_index) != null);
+    try std.testing.expect(setup.server.inner.state.outStream(server_index) != null);
+    try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.client.inner.state.peerVersion(client_index));
+    try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.server.inner.state.peerVersion(server_index));
+}
+
+test "gossipsub service ignores stale outcomes after connection and peer slot reuse" {
+    var setup: ServicePair = .{};
+    try setup.init();
+    defer setup.deinit();
+    for (0..16) |_| try setup.pumpOnce();
+    const old_conn = setup.handles.client;
+    const old_index = setup.client.inner.state.findPeer(old_conn).?;
+    const old_generation = setup.client.inner.state.peerGeneration(old_index);
+    const old_stream = setup.client.inner.state.outStream(old_index).?;
+    try std.testing.expect(setup.pair.client.close(old_conn, 0));
+    for (0..16) |_| try setup.pumpOnce();
+    setup.pair.advance(30_000);
+    for (0..4) |_| try setup.pumpOnce();
+    const handles = try support.connectPair(&setup.pair);
+    setup.handles = .{ .client = handles.client, .server = handles.server };
+    setup.client.peerConnected(&setup.pair.client, handles.client, setup.pair.now);
+    setup.server.peerConnected(&setup.pair.server, handles.server, setup.pair.now);
+    for (0..16) |_| try setup.pumpOnce();
+    const index = setup.client.inner.state.findPeer(handles.client).?;
+    try std.testing.expectEqual(old_index, index);
+    try std.testing.expect(setup.client.inner.state.peerGeneration(index) != old_generation);
+    try std.testing.expectEqual(old_conn.index, handles.client.index);
+    try std.testing.expect(old_conn.generation != handles.client.generation);
+    const live = setup.client.inner.state.outStream(index).?;
+    setup.client.negotiationResult(&setup.pair.client, .{
+        .stream = old_stream,
+        .direction = .outbound,
+        .owner = .meshsub,
+        .result = .{ .ready = .{ .protocol = .{ .meshsub = .v1_1 }, .leftover = "", .fin = false } },
+    }, setup.pair.now);
+    var out: [16]Event = undefined;
+    _ = setup.client.process(&setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now, &out);
+    try std.testing.expectEqual(live, setup.client.inner.state.outStream(index).?);
+    try std.testing.expectEqual(@import("state.zig").Version.v1_2, setup.client.inner.state.peerVersion(index));
+    const peer = setup.client.inner.state.peers[index];
+    try std.testing.expectEqual(setup.pair.client.peerId(handles.client).?, peer.peer_id.?);
+    try std.testing.expectEqual(setup.pair.client.direction(handles.client).?, peer.direction.?);
+    try std.testing.expectEqual(setup.pair.client.peerAddress(handles.client).?, peer.address.?);
+}

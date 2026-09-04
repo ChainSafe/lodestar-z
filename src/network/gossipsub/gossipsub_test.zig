@@ -2,21 +2,18 @@ const std = @import("std");
 const gossipsub = @import("gossipsub.zig");
 const topic_mod = @import("topic.zig");
 const engine_mod = @import("../quic/engine.zig");
-const negotiate = @import("../negotiate.zig");
+const routing = @import("../router.zig");
 const support = @import("../test_support.zig");
 
 const Event = gossipsub.Event;
 const Gossipsub = gossipsub.Gossipsub;
 
-const meshsub_1_2 = "/meshsub/1.2.0";
-pub const meshsub_ids = [_][]const u8{ "/meshsub/1.2.0", "/meshsub/1.1.0", "/meshsub/1.0.0" };
-
 const digest = topic_mod.ForkDigest{ 0x6a, 0x95, 0xa1, 0xa9 };
 
 pub const GossipPair = struct {
     pair: support.Pair = .{},
-    client_neg: negotiate.Negotiator = undefined,
-    server_neg: negotiate.Negotiator = undefined,
+    client_neg: routing.Router = undefined,
+    server_neg: routing.Router = undefined,
     client: Gossipsub = undefined,
     server: Gossipsub = undefined,
     handles: struct { client: engine_mod.Handle, server: engine_mod.Handle } = undefined,
@@ -38,9 +35,9 @@ pub const GossipPair = struct {
     ) !void {
         try self.pair.init(.{}, .{});
         errdefer self.pair.deinit();
-        self.client_neg = try negotiate.Negotiator.init(std.testing.allocator, 8);
+        self.client_neg = try routing.Router.init(std.testing.allocator, .{ .negotiations_max = 8, .reqresp = false });
         errdefer self.client_neg.deinit();
-        self.server_neg = try negotiate.Negotiator.init(std.testing.allocator, 8);
+        self.server_neg = try routing.Router.init(std.testing.allocator, .{ .negotiations_max = 8, .reqresp = false });
         errdefer self.server_neg.deinit();
         self.client = try Gossipsub.init(std.testing.allocator, client_opts);
         errdefer self.client.deinit();
@@ -53,13 +50,13 @@ pub const GossipPair = struct {
         self.client_send = try self.client_neg.beginOutbound(
             &self.pair.client,
             handles.client,
-            meshsub_1_2,
+            .{ .meshsub = .v1_2 },
             self.pair.now,
         );
         self.server_send = try self.server_neg.beginOutbound(
             &self.pair.server,
             handles.server,
-            meshsub_1_2,
+            .{ .meshsub = .v1_2 },
             self.pair.now,
         );
     }
@@ -75,8 +72,8 @@ pub const GossipPair = struct {
     pub fn pumpOnce(self: *GossipPair) !void {
         try self.pair.pump();
         const now = self.pair.now;
-        try self.drive(&self.client, &self.client_neg, &self.pair.client, self.client_send);
-        try self.drive(&self.server, &self.server_neg, &self.pair.server, self.server_send);
+        try self.drive(&self.client, &self.client_neg, &self.pair.client);
+        try self.drive(&self.server, &self.server_neg, &self.pair.server);
         self.client_count = self.client.pump(&self.pair.client, now, &self.client_events);
         self.server_count = self.server.pump(&self.pair.server, now, &self.server_events);
         try self.pair.pump();
@@ -85,26 +82,27 @@ pub const GossipPair = struct {
     fn drive(
         self: *GossipPair,
         gs: *Gossipsub,
-        neg: *negotiate.Negotiator,
+        neg: *routing.Router,
         engine: *engine_mod.Engine,
-        send: engine_mod.StreamHandle,
     ) !void {
         const now = self.pair.now;
         var storage: [8]engine_mod.Event = undefined;
-        for (self.pair.events(engine, &storage)) |event| switch (event) {
-            .stream_opened => |stream| try neg.acceptInbound(stream, &meshsub_ids, now),
+        const events = self.pair.events(engine, &storage);
+        neg.transportEvents(engine, events, now);
+        for (events) |event| switch (event) {
             .closed => |closed| gs.connectionClosed(closed.conn),
             else => {},
         };
-        var outcomes: [8]negotiate.Outcome = undefined;
+        var outcomes: [8]routing.Outcome = undefined;
         const ready = neg.pump(engine, now, &outcomes);
         for (outcomes[0..ready]) |outcome| switch (outcome.result) {
-            .ready => {
+            .ready => |selection| {
                 const index = gs.state.findPeer(outcome.stream.conn) orelse continue;
-                if (std.meta.eql(outcome.stream, send)) {
-                    gs.setStreams(index, outcome.stream, null);
+                if (outcome.direction == .outbound) {
+                    gs.replaceOutbound(engine, index, outcome.stream, selection.protocol.meshsub);
                 } else {
-                    gs.setStreams(index, null, outcome.stream);
+                    gs.replaceInbound(engine, index, outcome.stream, selection.protocol.meshsub);
+                    try std.testing.expect(gs.receiveHandoff(index, selection.leftover, selection.fin));
                 }
             },
             else => {},

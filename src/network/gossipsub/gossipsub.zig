@@ -51,15 +51,7 @@ pub const Options = struct {
 pub const InitError = Allocator.Error;
 
 /// Advertised protocol ids, newest first; the negotiator settles the version.
-pub const meshsub_ids = [_][]const u8{ "/meshsub/1.2.0", "/meshsub/1.1.0", "/meshsub/1.0.0" };
-
-pub fn versionFor(protocol_index: u8) Version {
-    return switch (protocol_index) {
-        0 => .v1_2,
-        1 => .v1_1,
-        else => .v1_0,
-    };
-}
+pub const meshsub_ids = @import("../router.zig").meshsub_ids;
 
 pub const MessageId = topic_mod.MessageId;
 
@@ -335,6 +327,54 @@ pub const Gossipsub = struct {
         self.state.setStreams(index, out, in);
     }
 
+    pub fn resetInbound(self: *Gossipsub, engine: *Engine, index: u16) void {
+        if (self.state.peers[index].in_stream) |stream| engine.closeStream(stream, 0);
+        self.state.peers[index].in_stream = null;
+        const io = &self.io[index];
+        self.releaseLarge(io);
+        io.reader = .{};
+        io.handoff = .{};
+        io.fin_seen = false;
+    }
+
+    pub fn resetOutbound(self: *Gossipsub, engine: *Engine, index: u16) void {
+        if (self.state.peers[index].out_stream) |stream| engine.closeStream(stream, 0);
+        self.state.peers[index].out_stream = null;
+        self.io[index].send_head = 0;
+        self.io[index].send_tail = 0;
+    }
+
+    pub fn replaceInbound(
+        self: *Gossipsub,
+        engine: *Engine,
+        index: u16,
+        stream: StreamHandle,
+        version: Version,
+    ) void {
+        if (self.state.peers[index].in_stream) |prior| {
+            if (std.meta.eql(prior, stream)) return;
+        }
+        self.resetInbound(engine, index);
+        self.state.peers[index].inbound_version = version;
+        self.state.peers[index].in_stream = stream;
+    }
+
+    pub fn replaceOutbound(
+        self: *Gossipsub,
+        engine: *Engine,
+        index: u16,
+        stream: StreamHandle,
+        version: Version,
+    ) void {
+        if (self.state.peers[index].out_stream) |prior| {
+            if (std.meta.eql(prior, stream)) return;
+        }
+        self.resetOutbound(engine, index);
+        self.state.setVersion(index, version);
+        self.state.peers[index].out_stream = stream;
+        self.sendSubscriptions(index);
+    }
+
     pub fn receiveHandoff(self: *Gossipsub, index: u16, bytes: []const u8, fin: bool) bool {
         self.io[index].handoff.append(bytes) catch return false;
         self.io[index].fin_seen = fin;
@@ -344,6 +384,7 @@ pub const Gossipsub = struct {
     pub fn connectionClosed(self: *Gossipsub, conn: Handle) void {
         const index = self.state.findPeer(conn) orelse return;
         self.releaseLarge(&self.io[index]);
+        self.io[index].reset();
         self.direct.unset(index);
         self.state.removePeer(index);
     }
@@ -696,14 +737,6 @@ pub const Gossipsub = struct {
         if (self.state.findPeer(conn)) |index| self.direct.set(index);
     }
 
-    /// Records a negotiated protocol version, keeping the lower of the two stream
-    /// directions so a v1.2 feature is only used when the peer agrees on both.
-    pub fn setPeerVersion(self: *Gossipsub, index: u16, version: Version) void {
-        if (@intFromEnum(version) < @intFromEnum(self.state.peerVersion(index))) {
-            self.state.setVersion(index, version);
-        }
-    }
-
     fn readPeer(
         self: *Gossipsub,
         engine: *Engine,
@@ -723,15 +756,17 @@ pub const Gossipsub = struct {
                 @memcpy(self.scratch[0..len], peer_io.handoff.slice());
                 peer_io.handoff.drop(len);
                 break :blk .{ .len = len, .fin = peer_io.fin_seen };
-            } else engine.read(stream, self.scratch) catch return count;
+            } else engine.read(stream, self.scratch) catch |err| {
+                if (err != error.WouldBlock) self.resetInbound(engine, index);
+                return count;
+            };
             if (read.len == 0 and !read.fin) return count;
             var chunk = self.scratch[0..read.len];
             while (chunk.len > 0) {
                 const body = self.frameBody(peer_io, now.mono_ms);
                 const result = peer_io.reader.feed(chunk, body) catch {
                     self.counters.malformed_rpcs += 1;
-                    self.releaseLarge(peer_io);
-                    peer_io.reader = .{};
+                    self.resetInbound(engine, index);
                     return count;
                 };
                 chunk = chunk[result.consumed..];
@@ -742,10 +777,7 @@ pub const Gossipsub = struct {
                 if (result.consumed == 0) break;
             }
             if (read.fin) {
-                self.releaseLarge(peer_io);
-                peer_io.reader = .{};
-                peer_io.fin_seen = false;
-                self.state.peers[index].in_stream = null;
+                self.resetInbound(engine, index);
                 return count;
             }
         }
@@ -1088,7 +1120,10 @@ pub const Gossipsub = struct {
     fn flush(self: *Gossipsub, engine: *Engine, index: usize, peer_io: *PeerIo) void {
         const stream = self.state.peers[index].out_stream orelse return;
         while (peer_io.send_tail < peer_io.send_head) {
-            const written = engine.write(stream, peer_io.pending(), false) catch return;
+            const written = engine.write(stream, peer_io.pending(), false) catch |err| {
+                if (err != error.WouldBlock) self.resetOutbound(engine, @intCast(index));
+                return;
+            };
             if (written == 0) return;
             peer_io.send_tail += written;
         }

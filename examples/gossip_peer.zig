@@ -10,11 +10,12 @@ const keys = network.wire.keys;
 const multiaddr = network.wire.multiaddr;
 const peer_id = network.wire.peer_id;
 const gossipsub = network.gossipsub;
-const Service = gossipsub.Service;
+const Service = network.Service;
 const BeaconConfig = config.BeaconConfig;
 const AnyBlock = fork_types.AnySignedBeaconBlock;
 
 const steps_max = 200_000;
+const ping_sequence = [_]u8{ 1, 0, 0, 0, 0, 0, 0, 0 };
 const slots_per_epoch = preset.preset.SLOTS_PER_EPOCH;
 
 const Network = struct {
@@ -110,13 +111,19 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     try node.init(allocator, io, .{ .host = &key, .bind = bind });
     defer node.deinit(io);
 
-    var service = try Service.init(allocator, .{});
+    var service = try Service.init(allocator, .{ .reqresp = .{
+        .outbound_max = 4,
+        .inbound_max = 4,
+        .inbound_per_peer_max = 4,
+        .forks = &.{},
+    } });
     defer service.deinit();
     const conn = try node.dial(io, &target);
 
     var events: [16]engine_mod.Event = undefined;
     var activity: [8]engine_mod.Handle = undefined;
     var gossip_events: [16]gossipsub.Event = undefined;
+    var request_events: [16]network.reqresp.Event = undefined;
     var subscribed = false;
     var topic_buf: [gossipsub.topic.topic_max_len]u8 = undefined;
     var beacon_block: []const u8 = &.{};
@@ -142,17 +149,18 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             else => {},
         };
         if (!subscribed and beacon_block.len > 0) {
-            _ = service.subscribe(beacon_block);
+            _ = service.gossipsub.subscribe(beacon_block);
             subscribed = true;
         }
         const transport_events = events[0..result.events];
-        const count = service.process(&node.engine, transport_events, result.now, &gossip_events);
-        for (gossip_events[0..count]) |event| switch (event) {
+        const counts = service.process(&node.engine, transport_events, result.now, &request_events, &gossip_events);
+        try serveRequests(&service, request_events[0..counts.reqresp], result.now);
+        for (gossip_events[0..counts.gossipsub]) |event| switch (event) {
             .message => |m| {
                 printBlock(allocator, m.bytes, fork) catch |err| {
                     std.debug.print("decode failed: {s}\n", .{@errorName(err)});
                 };
-                service.report(m.handle, .ignore);
+                service.gossipsub.report(m.handle, .ignore);
                 received += 1;
             },
             .subscription_change => |change| {
@@ -163,4 +171,18 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     if (received == 0) return error.NoBlock;
     _ = node.engine.close(conn, 0);
     _ = try node.step(io, &events, &activity, .{});
+}
+
+fn serveRequests(service: *Service, events: []const network.reqresp.Event, now: network.Now) !void {
+    for (events) |event| switch (event) {
+        .request => |request| {
+            if (request.protocol == .ping_v1) {
+                try service.reqresp.respond(request.request, &ping_sequence, null, now);
+            } else {
+                try service.reqresp.respondError(request.request, 2, "unsupported by gossip example", now);
+            }
+        },
+        .chunk_sent => |sent| _ = service.reqresp.finish(sent.request),
+        else => {},
+    };
 }

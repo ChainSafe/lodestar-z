@@ -1,0 +1,160 @@
+const std = @import("std");
+const support = @import("test_support.zig");
+const engine = @import("quic/engine.zig");
+const rr = @import("reqresp/root.zig");
+const gs = @import("gossipsub/root.zig");
+const topic_mod = @import("gossipsub/topic.zig");
+const multistream = @import("wire/multistream.zig");
+const protobuf = @import("gossipsub/protobuf.zig");
+
+const rr_options: rr.service.Options = .{ .reqresp = .{
+    .outbound_max = 4,
+    .inbound_max = 4,
+    .inbound_per_peer_max = 4,
+    .forks = &.{},
+} };
+
+test "router composes simultaneous ping and meshsub on one connection" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    var client = try rr.Service.init(std.testing.allocator, rr_options);
+    defer client.deinit();
+    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .reqresp = rr_options.reqresp });
+    defer server.deinit();
+    const requests = &server.reqresp;
+    const gossip = &server.gossipsub;
+    const handles = try support.connectPair(&pair);
+    gossip.peerConnected(&pair.server, handles.server, pair.now);
+    var topic_buf: [topic_mod.topic_max_len]u8 = undefined;
+    const topic = topic_mod.build(.{ 1, 2, 3, 4 }, "beacon_block", &topic_buf);
+    try std.testing.expect(gossip.subscribe(topic));
+    const ping = [_]u8{ 42, 0, 0, 0, 0, 0, 0, 0 };
+    var response: [8]u8 = undefined;
+    _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &response, .{}, pair.now);
+    const stream = try pair.client.openStream(handles.client);
+    const dialer = try multistream.Dialer.init("/meshsub/1.2.0");
+    var bytes: [512]u8 = undefined;
+    const hello = try dialer.initialWrite(&bytes);
+    var writer = protobuf.Writer.init(bytes[hello.len..]);
+    writer.varint(protobuf.subscriptionSize(topic));
+    protobuf.writeSubscription(&writer, true, topic);
+    const len = hello.len + writer.len;
+    try std.testing.expectEqual(len, try pair.client.write(stream, bytes[0..len], true));
+    var subscription = false;
+    var pong = false;
+    for (0..32) |_| {
+        var transport_events: [16]engine.Event = undefined;
+        var request_events: [16]rr.Event = undefined;
+        const client_count = client.process(&pair.client, pair.events(&pair.client, &transport_events), pair.now, &request_events);
+        for (request_events[0..client_count]) |event| switch (event) {
+            .chunk => |chunk| {
+                try std.testing.expectEqualSlices(u8, &ping, chunk.bytes);
+                try std.testing.expect(client.consume(chunk.request));
+                pong = true;
+            },
+            else => {},
+        };
+        try pair.pump();
+        const events = pair.events(&pair.server, &transport_events);
+        var gossip_events: [16]gs.Event = undefined;
+        const counts = server.process(&pair.server, events, pair.now, &request_events, &gossip_events);
+        const request_count = counts.reqresp;
+        const gossip_count = counts.gossipsub;
+        for (request_events[0..request_count]) |event| switch (event) {
+            .request => |incoming| {
+                try std.testing.expectEqual(rr.Protocol.ping_v1, incoming.protocol);
+                try requests.respond(incoming.request, &ping, null, pair.now);
+            },
+            .chunk_sent => |sent| _ = requests.finish(sent.request),
+            else => {},
+        };
+        for (gossip_events[0..gossip_count]) |event| switch (event) {
+            .subscription_change => |change| {
+                try std.testing.expectEqualStrings(topic, change.topic);
+                subscription = true;
+            },
+            else => {},
+        };
+        try pair.pump();
+    }
+    try std.testing.expect(pong);
+    try std.testing.expect(subscription);
+}
+
+test "router selects typed outbound protocol independently of offer indexes" {
+    const routing = @import("router.zig");
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try support.connectPair(&pair);
+    var client = try routing.Router.init(std.testing.allocator, .{});
+    defer client.deinit();
+    var server = try routing.Router.init(std.testing.allocator, .{});
+    defer server.deinit();
+    const stream = try client.beginOutbound(&pair.client, handles.client, .{ .reqresp = .ping_v1 }, pair.now);
+    var accepted = false;
+    for (0..16) |_| {
+        var out: [16]routing.Outcome = undefined;
+        const count = client.pump(&pair.client, pair.now, &out);
+        for (out[0..count]) |outcome| {
+            try std.testing.expectEqual(stream, outcome.stream);
+            try std.testing.expectEqual(@import("types.zig").Direction.outbound, outcome.direction);
+            try std.testing.expectEqual(routing.Kind.reqresp, outcome.owner.?);
+            try std.testing.expectEqual(rr.Protocol.ping_v1, outcome.result.ready.protocol.reqresp);
+            accepted = true;
+        }
+        try pair.pump();
+        var events: [16]engine.Event = undefined;
+        server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
+        _ = server.pump(&pair.server, pair.now, &out);
+        try pair.pump();
+    }
+    try std.testing.expect(accepted);
+}
+
+test "router rejects unknown protocol and preserves one-byte fragmented handoff" {
+    const routing = @import("router.zig");
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try support.connectPair(&pair);
+    var router = try routing.Router.init(std.testing.allocator, .{});
+    defer router.deinit();
+    const stream = try pair.client.openStream(handles.client);
+    var hello: [256]u8 = undefined;
+    const header = try multistream.encodeMessage(multistream.header, &hello);
+    const missing = try multistream.encodeMessage("/unknown/1.0.0", hello[header.len..]);
+    const ping = try multistream.encodeMessage(rr.Protocol.ping_v1.id(), hello[header.len + missing.len ..]);
+    const length = header.len + missing.len + ping.len;
+    hello[length] = 42;
+    var accepted = false;
+    var inbound: engine.StreamHandle = undefined;
+    for (hello[0 .. length + 1], 0..) |_, index| {
+        try std.testing.expectEqual(@as(usize, 1), try pair.client.write(stream, hello[index..][0..1], index == length));
+        try pair.pump();
+        var events: [16]engine.Event = undefined;
+        router.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
+        var out: [16]routing.Outcome = undefined;
+        const count = router.pump(&pair.server, pair.now, &out);
+        for (out[0..count]) |outcome| {
+            try std.testing.expectEqual(rr.Protocol.ping_v1, outcome.result.ready.protocol.reqresp);
+            accepted = true;
+            inbound = outcome.stream;
+        }
+        try pair.pump();
+    }
+    try std.testing.expect(accepted);
+    var response: [256]u8 = undefined;
+    const read = try pair.client.read(stream, &response);
+    const got_header = (try multistream.decodeMessage(response[0..read.len])).?;
+    try std.testing.expectEqualStrings(multistream.header, got_header.token);
+    const rejected = (try multistream.decodeMessage(response[got_header.consumed..read.len])).?;
+    try std.testing.expectEqualStrings("na", rejected.token);
+    const selected = (try multistream.decodeMessage(response[got_header.consumed + rejected.consumed .. read.len])).?;
+    try std.testing.expectEqualStrings(rr.Protocol.ping_v1.id(), selected.token);
+    const payload = try pair.server.read(inbound, &response);
+    try std.testing.expectEqual(@as(usize, 1), payload.len);
+    try std.testing.expectEqual(@as(u8, 42), response[0]);
+    try std.testing.expect(payload.fin);
+}
