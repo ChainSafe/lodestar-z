@@ -48,6 +48,10 @@ pub const Event = union(enum) {
 const sub_frame_max = 16 + topic_mod.topic_max_len;
 const control_frame_max = 32 + topic_mod.topic_max_len;
 
+/// An outstanding IWANT: we requested `id` from `peer` after its IHAVE and
+/// expect delivery before `expiry`, else the peer takes a behavioural penalty.
+const Promise = struct { id: MessageId, peer: u16, expiry: u64 };
+
 const PeerIo = struct {
     send: []u8,
     send_head: usize = 0,
@@ -108,6 +112,8 @@ pub const Gossipsub = struct {
     msg_scratch: []u8,
     decompressed: []u8,
     decompressed_used: usize = 0,
+    promises: []Promise,
+    promise_len: usize = 0,
     counters: Counters = .{},
 
     pub const Counters = struct {
@@ -119,6 +125,8 @@ pub const Gossipsub = struct {
         send_dropped: u64 = 0,
         malformed_rpcs: u64 = 0,
         arena_full: u64 = 0,
+        iwant_sent: u64 = 0,
+        broken_promises: u64 = 0,
     };
 
     pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
@@ -157,6 +165,8 @@ pub const Gossipsub = struct {
         errdefer allocator.free(msg_scratch);
         const decompressed = try allocator.alloc(u8, options.decompressed_arena_bytes);
         errdefer allocator.free(decompressed);
+        const promises = try allocator.alloc(Promise, constants.promises_cap);
+        errdefer allocator.free(promises);
 
         return .{
             .allocator = allocator,
@@ -169,10 +179,12 @@ pub const Gossipsub = struct {
             .scratch = scratch,
             .msg_scratch = msg_scratch,
             .decompressed = decompressed,
+            .promises = promises,
         };
     }
 
     pub fn deinit(self: *Gossipsub) void {
+        self.allocator.free(self.promises);
         self.allocator.free(self.decompressed);
         self.allocator.free(self.msg_scratch);
         self.allocator.free(self.scratch);
@@ -338,7 +350,58 @@ pub const Gossipsub = struct {
         for (&self.state.topics, 0..) |*topic, index| {
             if (topic.active and topic.subscribed) self.maintainTopic(@intCast(index), now);
         }
+        for (&self.state.topics, 0..) |*topic, index| {
+            if (topic.active and topic.subscribed) self.emitGossip(@intCast(index));
+        }
         self.mcache.shift();
+        self.expirePromises(now.mono_ms);
+    }
+
+    fn emitGossip(self: *Gossipsub, topic: u16) void {
+        const topic_str = self.state.topicString(topic);
+        var ids: [constants.gossip_ids_max]MessageId = undefined;
+        const n = self.mcache.gossip(topic_str, &ids);
+        if (n == 0) return;
+        var writer = protobuf.Writer.init(self.msg_scratch);
+        writer.varint(protobuf.ihaveRpcSize(topic_str, n, constants.message_id_length));
+        protobuf.beginIhaveRpc(&writer, topic_str, n, constants.message_id_length);
+        for (ids[0..n]) |id| protobuf.writeIhaveId(&writer, &id);
+        const rpc = writer.written();
+        const mesh = self.state.mesh(topic);
+        var need: usize = constants.mesh_d_lazy;
+        var it = self.state.subscribers(topic).iterator(.{});
+        while (it.next()) |peer| {
+            if (need == 0) break;
+            if (mesh.isSet(peer)) continue;
+            if (self.io[peer].append(rpc)) need -= 1 else self.counters.send_dropped += 1;
+        }
+    }
+
+    fn addPromise(self: *Gossipsub, id: MessageId, peer: u16, expiry: u64) void {
+        if (self.promise_len == self.promises.len) return;
+        self.promises[self.promise_len] = .{ .id = id, .peer = peer, .expiry = expiry };
+        self.promise_len += 1;
+    }
+
+    fn resolvePromises(self: *Gossipsub, id: MessageId) void {
+        var index: usize = 0;
+        while (index < self.promise_len) {
+            if (std.mem.eql(u8, &self.promises[index].id, &id)) {
+                self.promises[index] = self.promises[self.promise_len - 1];
+                self.promise_len -= 1;
+            } else index += 1;
+        }
+    }
+
+    fn expirePromises(self: *Gossipsub, now_ms: u64) void {
+        var index: usize = 0;
+        while (index < self.promise_len) {
+            if (now_ms >= self.promises[index].expiry) {
+                self.counters.broken_promises += 1;
+                self.promises[index] = self.promises[self.promise_len - 1];
+                self.promise_len -= 1;
+            } else index += 1;
+        }
     }
 
     fn maintainTopic(self: *Gossipsub, topic: u16, now: Now) void {
@@ -423,9 +486,11 @@ pub const Gossipsub = struct {
             switch (item) {
                 .subscription => |sub| count = self.onSubscription(index, sub, events, count),
                 .message => |msg| count = self.onMessage(index, msg, now, events, count),
+                .ihave => |ihave| self.onIhave(index, ihave, now),
+                .iwant => |iwant| self.onIwant(index, iwant),
                 .graft => |topic_str| self.onGraft(index, topic_str, now),
                 .prune => |prune| self.onPrune(index, prune, now),
-                else => {}, // gossip control lands in later slices
+                .idontwant => {}, // lands in the next slice
             }
         }
         return count;
@@ -465,6 +530,7 @@ pub const Gossipsub = struct {
         }
         self.decompressed_used += written;
         self.counters.messages_received += 1;
+        self.resolvePromises(id);
         _ = self.mcache.put(id, self.state.topicString(topic), msg.data, index);
         if (start >= events.len) return start;
         events[start] = .{ .message = .{
@@ -474,6 +540,44 @@ pub const Gossipsub = struct {
             .bytes = payload,
         } };
         return start + 1;
+    }
+
+    fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
+        var wanted: [constants.gossip_ids_max]MessageId = undefined;
+        var count: usize = 0;
+        var it = ihave.ids();
+        while (it.next() catch return) |id_bytes| {
+            if (count == wanted.len) break;
+            if (id_bytes.len != constants.message_id_length) continue;
+            const id: MessageId = id_bytes[0..constants.message_id_length].*;
+            if (self.seen.contains(id)) continue;
+            wanted[count] = id;
+            count += 1;
+            self.addPromise(id, index, now.mono_ms + constants.iwant_followup_ms);
+        }
+        if (count == 0) return;
+        var writer = protobuf.Writer.init(self.msg_scratch);
+        writer.varint(protobuf.iwantRpcSize(count, constants.message_id_length));
+        protobuf.beginIwantRpc(&writer, count, constants.message_id_length);
+        for (wanted[0..count]) |id| protobuf.writeIwantId(&writer, &id);
+        if (self.io[index].append(writer.written())) {
+            self.counters.iwant_sent += 1;
+        } else self.counters.send_dropped += 1;
+    }
+
+    fn onIwant(self: *Gossipsub, index: u16, iwant: protobuf.IdList) void {
+        var served: u8 = 0;
+        var it = iwant.ids();
+        while (it.next() catch return) |id_bytes| {
+            if (served >= constants.gossip_retransmission) break;
+            if (id_bytes.len != constants.message_id_length) continue;
+            const id: MessageId = id_bytes[0..constants.message_id_length].*;
+            if (!self.mcache.isValidated(id)) continue;
+            const cached = self.mcache.get(id, self.msg_scratch) orelse continue;
+            if (self.io[index].appendMessage(cached.topic, cached.data)) {
+                served += 1;
+            } else self.counters.send_dropped += 1;
+        }
     }
 
     fn onGraft(self: *Gossipsub, index: u16, topic_str: []const u8, now: Now) void {

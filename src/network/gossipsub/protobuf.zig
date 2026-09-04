@@ -358,6 +358,68 @@ pub fn writePruneRpc(w: *Writer, topic: []const u8, backoff_s: u64) void {
     w.varintField(3, backoff_s);
 }
 
+/// Size of a whole RPC carrying one IHAVE for `topic` and `id_count` ids.
+pub fn ihaveRpcSize(topic: []const u8, id_count: usize, id_len: usize) usize {
+    const ihave = bytesFieldSize(1, topic.len) + id_count * bytesFieldSize(2, id_len);
+    return bytesFieldSize(3, bytesFieldSize(1, ihave));
+}
+
+/// Begins an IHAVE RPC; the caller appends each id with `writeIhaveId` in order.
+pub fn beginIhaveRpc(w: *Writer, topic: []const u8, id_count: usize, id_len: usize) void {
+    const ihave = bytesFieldSize(1, topic.len) + id_count * bytesFieldSize(2, id_len);
+    w.tag(3, wire_len);
+    w.varint(bytesFieldSize(1, ihave));
+    w.tag(1, wire_len);
+    w.varint(ihave);
+    w.bytesField(1, topic);
+}
+
+pub fn writeIhaveId(w: *Writer, id: []const u8) void {
+    w.bytesField(2, id);
+}
+
+/// Size of a whole RPC carrying one IWANT for `id_count` ids.
+pub fn iwantRpcSize(id_count: usize, id_len: usize) usize {
+    const iwant = id_count * bytesFieldSize(1, id_len);
+    return bytesFieldSize(3, bytesFieldSize(2, iwant));
+}
+
+pub fn beginIwantRpc(w: *Writer, id_count: usize, id_len: usize) void {
+    const iwant = id_count * bytesFieldSize(1, id_len);
+    w.tag(3, wire_len);
+    w.varint(bytesFieldSize(2, iwant));
+    w.tag(2, wire_len);
+    w.varint(iwant);
+}
+
+pub fn writeIwantId(w: *Writer, id: []const u8) void {
+    w.bytesField(1, id);
+}
+
+test "protobuf round trips ihave and iwant control rpcs" {
+    var buf: [256]u8 = undefined;
+    var w = Writer.init(&buf);
+    beginIhaveRpc(&w, "t", 2, 4);
+    writeIhaveId(&w, "id01");
+    writeIhaveId(&w, "id02");
+    try std.testing.expectEqual(ihaveRpcSize("t", 2, 4), w.len);
+    var reader = RpcReader.init(w.written());
+    const ihave = (try reader.next()).?;
+    try std.testing.expectEqualStrings("t", ihave.ihave.topic);
+    var ids = ihave.ihave.ids();
+    try std.testing.expectEqualStrings("id01", (try ids.next()).?);
+    try std.testing.expectEqualStrings("id02", (try ids.next()).?);
+
+    w = Writer.init(&buf);
+    beginIwantRpc(&w, 1, 4);
+    writeIwantId(&w, "id03");
+    try std.testing.expectEqual(iwantRpcSize(1, 4), w.len);
+    reader = RpcReader.init(w.written());
+    const iwant = (try reader.next()).?;
+    var wids = iwant.iwant.ids();
+    try std.testing.expectEqualStrings("id03", (try wids.next()).?);
+}
+
 test "protobuf round trips graft and prune control rpcs" {
     var buf: [128]u8 = undefined;
     var w = Writer.init(&buf);

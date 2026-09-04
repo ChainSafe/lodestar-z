@@ -77,6 +77,11 @@ pub const body_buffer_len: usize = 64 * 1024;
 pub const read_scratch_len: usize = 16 * 1024;
 pub const reads_per_pump_max: u32 = 8;
 
+/// Outstanding IWANT promises tracked at once, and the ids carried in one
+/// emitted IHAVE or requested in one IWANT.
+pub const promises_cap: usize = 8_192;
+pub const gossip_ids_max: usize = 128;
+
 comptime {
     std.debug.assert(mesh_d_low <= mesh_d);
     std.debug.assert(mesh_d <= mesh_d_high);
