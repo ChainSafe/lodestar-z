@@ -61,6 +61,14 @@ pub fn seenTtlMs(slots_per_epoch: u64, seconds_per_slot: u64) u64 {
     return seconds_per_slot * 1000 * slots_per_epoch * seen_ttl_epochs;
 }
 
+/// Comptime table capacities. A Fulu node speaks at most ~206 topics (64
+/// attestation subnets, 128 data-column subnets, and the global topics), and
+/// gossip peers are a subset of transport connections.
+pub const peers_cap: usize = 256;
+pub const topics_cap: usize = 256;
+/// Message ids a single peer may suppress at once through IDONTWANT.
+pub const dont_send_cap: usize = 128;
+
 comptime {
     std.debug.assert(mesh_d_low <= mesh_d);
     std.debug.assert(mesh_d <= mesh_d_high);
