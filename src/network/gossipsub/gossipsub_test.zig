@@ -215,4 +215,46 @@ test "gossipsub delivers a published message to a mesh peer" {
     try std.testing.expectEqual(@as(u64, 1), setup.client.counters.messages_published);
 }
 
+test "gossipsub prunes a peer whose messages are rejected" {
+    var setup: GossipPair = .{};
+    try setup.init();
+    defer setup.deinit();
+
+    var buf: [topic_mod.topic_max_len]u8 = undefined;
+    const beacon_block = buildTopic("beacon_block", &buf);
+    try std.testing.expect(setup.client.subscribe(beacon_block));
+    try std.testing.expect(setup.server.subscribe(beacon_block));
+
+    var rounds: usize = 0;
+    while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
+    setup.pair.advance(constants_heartbeat + 100);
+    rounds = 0;
+    while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
+
+    // the client publishes, the server rejects it as invalid
+    try std.testing.expect(setup.client.publish(beacon_block, "an invalid block", setup.pair.now));
+    rounds = 0;
+    var rejected = false;
+    while (rounds < 20 and !rejected) : (rounds += 1) {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| switch (event) {
+            .message => |m| {
+                setup.server.report(m.handle, .reject);
+                rejected = true;
+            },
+            else => {},
+        };
+    }
+    try std.testing.expect(rejected);
+
+    // the server's score for the client is now negative and the heartbeat prunes it
+    const client_index = setup.server.state.findPeer(setup.handles.server).?;
+    try std.testing.expect(setup.server.scores.score(client_index, setup.pair.now.mono_ms) < 0);
+    setup.pair.advance(constants_heartbeat + 100);
+    rounds = 0;
+    while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
+    const server_topic = setup.server.state.findTopic(beacon_block).?;
+    try std.testing.expectEqual(@as(usize, 0), setup.server.state.mesh(server_topic).count());
+}
+
 const constants_heartbeat = @import("constants.zig").heartbeat_interval_ms;
