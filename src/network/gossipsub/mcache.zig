@@ -498,3 +498,41 @@ test "message cache evicts oldest and wraps data around the arena" {
     try std.testing.expectEqualStrings("0123456789", last.data);
     try std.testing.expect(!cache.contains([_]u8{0} ** 20));
 }
+
+test "message cache resolves delivery status and dedupes duplicate senders" {
+    var cache = try MessageCache.init(std.testing.allocator, 8, 1024);
+    defer cache.deinit(std.testing.allocator);
+    const id = [_]u8{9} ** 20;
+    try std.testing.expect(cache.put(id, "t", "block", 3, 7));
+    try std.testing.expectEqual(Status.unknown, cache.statusOf(id).?);
+    try std.testing.expectEqual(@as(?u16, 3), cache.sourceOf(id));
+    try std.testing.expectEqual(@as(?u32, 7), cache.sourceGen(id));
+
+    // an unresolved message records duplicate senders, deduped per peer
+    try std.testing.expectEqual(DupOutcome.unknown, cache.recordDuplicate(id, 5));
+    try std.testing.expectEqual(DupOutcome.already, cache.recordDuplicate(id, 5));
+    try std.testing.expect(cache.dupPeers(id).?.isSet(5));
+
+    // once resolved invalid, later duplicates report invalid for penalty
+    cache.setStatus(id, .invalid);
+    try std.testing.expectEqual(DupOutcome.invalid, cache.recordDuplicate(id, 6));
+    try std.testing.expectEqual(DupOutcome.no_record, cache.recordDuplicate([_]u8{0} ** 20, 6));
+}
+
+test "message cache serves iwant at most gossip_retransmission times per peer" {
+    var cache = try MessageCache.init(std.testing.allocator, 8, 1024);
+    defer cache.deinit(std.testing.allocator);
+    const id = [_]u8{4} ** 20;
+    try std.testing.expect(cache.put(id, "t", "block", 3, 0));
+
+    // unvalidated messages are never served
+    try std.testing.expect(!cache.iwantAllowed(id, 1, 3));
+    cache.validate(id);
+
+    // one peer is served up to the cap, then refused; another peer is independent
+    try std.testing.expect(cache.iwantAllowed(id, 1, 3));
+    try std.testing.expect(cache.iwantAllowed(id, 1, 3));
+    try std.testing.expect(cache.iwantAllowed(id, 1, 3));
+    try std.testing.expect(!cache.iwantAllowed(id, 1, 3));
+    try std.testing.expect(cache.iwantAllowed(id, 2, 3));
+}
