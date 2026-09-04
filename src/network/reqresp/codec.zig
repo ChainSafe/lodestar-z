@@ -60,6 +60,7 @@ pub const Decoder = struct {
     expect_context: bool,
     sink: []u8,
     scratch: []u8,
+    error_sink: [error_message_max]u8 = undefined,
     result_byte: u8 = 0,
     context_bytes: [constants.context_bytes_length]u8 = undefined,
     header: [constants.varint_length_max]u8 = undefined,
@@ -124,7 +125,7 @@ pub const Decoder = struct {
     pub fn payload(self: *const Decoder) []const u8 {
         assert(self.phase == .done);
         assert(self.written == self.length);
-        return self.sink[0..self.length];
+        return if (self.isError()) self.error_sink[0..self.length] else self.sink[0..self.length];
     }
 
     pub fn feed(self: *Decoder, bytes: []const u8) Error!Progress {
@@ -268,7 +269,8 @@ pub const Decoder = struct {
             const body = self.scratch[0..self.frame_length];
             const expected = std.mem.readInt(u32, body[0..checksum_length], .little);
             const data = body[checksum_length..];
-            const room = self.sink[self.written..self.length];
+            const sink = if (self.isError()) &self.error_sink else self.sink;
+            const room = sink[self.written..self.length];
             var produced: usize = 0;
             if (self.frame_type == frame_type_uncompressed) {
                 if (data.len > room.len) return error.TooManyBytes;

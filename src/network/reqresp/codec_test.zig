@@ -216,3 +216,26 @@ test "codec frame size constants and header bound hold" {
     var out: [16]u8 = undefined;
     try std.testing.expectError(error.BufferTooSmall, codec.encodeRequest(&[_]u8{1} ** 8, &out));
 }
+
+test "codec decodes errors without touching the small success sink" {
+    for ([_]usize{ 0, 15, 256 }) |length| {
+        const message = [_]u8{'e'} ** 256;
+        var sink = [_]u8{0xa5} ** 8;
+        var scratch: [codec.frame_scratch_max]u8 = undefined;
+        var wire: [512]u8 = undefined;
+        const encoded = try codec.encodeChunk(1, null, message[0..length], &wire);
+        var decoder = Decoder.initResponse(.{ .min = 8, .max = 8 }, false, &sink, &scratch);
+        const payload = try decodeAll(&decoder, encoded, 1);
+        try std.testing.expectEqualSlices(u8, message[0..length], payload);
+        try std.testing.expect(std.mem.allEqual(u8, &sink, 0xa5));
+    }
+}
+
+test "codec bounds errors separately from successful ping payloads" {
+    var sink: [8]u8 = undefined;
+    var scratch: [codec.frame_scratch_max]u8 = undefined;
+    var decoder = Decoder.initResponse(.{ .min = 8, .max = 8 }, false, &sink, &scratch);
+    try std.testing.expectError(error.LengthOutOfBounds, decoder.feed(&.{ 1, 0x81, 0x02 }));
+    decoder = Decoder.initResponse(.{ .min = 8, .max = 8 }, false, &sink, &scratch);
+    try std.testing.expectError(error.LengthOutOfBounds, decoder.feed(&.{ 0, 9 }));
+}
