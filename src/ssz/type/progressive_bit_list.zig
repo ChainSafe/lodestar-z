@@ -12,11 +12,11 @@ const Node = @import("persistent_merkle_tree").Node;
 const progressive = @import("progressive.zig");
 
 pub const ProgressiveBitList = struct {
-    data: std.ArrayListUnmanaged(u8),
+    data: std.ArrayList(u8),
     bit_len: usize,
 
     pub const empty: @This() = .{
-        .data = std.ArrayListUnmanaged(u8).empty,
+        .data = std.ArrayList(u8).empty,
         .bit_len = 0,
     };
 
@@ -27,7 +27,7 @@ pub const ProgressiveBitList = struct {
     pub fn fromBitLen(allocator: std.mem.Allocator, bit_len: usize) !@This() {
         const byte_len = std.math.divCeil(usize, bit_len, 8) catch unreachable;
 
-        var data = try std.ArrayListUnmanaged(u8).initCapacity(allocator, byte_len);
+        var data = try std.ArrayList(u8).initCapacity(allocator, byte_len);
         data.expandToCapacity();
         @memset(data.items, 0);
         return @This(){
