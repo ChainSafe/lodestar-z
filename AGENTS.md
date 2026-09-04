@@ -363,7 +363,7 @@ Description: use the Lodestar template and keep it flat.
 ```markdown
 **Motivation**
 
-Resolves #N, or one to three sentences.
+The problem, at whatever length it needs. Quote the error or log, link the issue or discussion.
 
 **Description**
 
@@ -380,14 +380,19 @@ TODO:
 One line.
 ```
 
-- Length tracks the diff. A one-line fix needs a sentence or nothing; a large refactor gets more
+- Motivation is never empty. It states the problem at whatever length the problem needs, and
+  links the issue, review comment, or discussion it came from.
+- Quote the evidence: the error, the log, the command output, in a code block. Long output goes in
+  a `<details>` block.
+- Description length tracks the diff. A one-line fix gets a sentence; a large refactor gets more
   bullets, not sections.
 - Bullets name concrete changes by identifier in backticks.
 - No `##` headings, tables, or screenshots of text.
-- Rationale goes in Motivation, in one to three sentences. Do not argue the approach elsewhere in
-  the description, and do not add a verification section; CI is the verification.
+- Rationale goes in Motivation. Do not argue the approach in Description, and do not add a
+  verification section; CI is the verification.
 - Do not list example files to illustrate a point.
-- Code blocks only for a before/after interface or real output.
+- Code blocks are for real output or a before/after of an interface, never for explaining a
+  concept.
 
 ### AI assistance disclosure
 

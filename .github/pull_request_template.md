@@ -1,6 +1,6 @@
 **Motivation**
 
-<!-- Why does this PR exist? One to three sentences, or just: Resolves #N -->
+<!-- The problem this solves, at whatever length it needs. Quote the error or log, link the issue or discussion. Never leave this empty. -->
 
 **Description**
 
