@@ -190,6 +190,54 @@ test "computeDescriptor - should convert gindices to a descriptor" {
     try testing.expectEqualSlices(u8, &expected, descriptor);
 }
 
+test "computeDescriptor preserves path order and redundant targets" {
+    const Case = struct { indices: []const Gindex.Uint, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .indices = &.{}, .expected = &.{} },
+        .{ .indices = &.{1}, .expected = &.{0x80} },
+        .{ .indices = &.{2}, .expected = &.{0x60} },
+        .{ .indices = &.{4}, .expected = &.{0x38} },
+        .{ .indices = &.{ 5, 4, 4 }, .expected = &.{0x38} },
+        .{ .indices = &.{ 4, 6 }, .expected = &.{0x36} },
+        .{ .indices = &.{ 2, 4 }, .expected = &.{0x38} },
+        .{ .indices = &.{ 43, 42, 11 }, .expected = &.{ 0x25, 0xe0 } },
+    };
+    for (cases) |case| {
+        var indices: [3]Gindex = undefined;
+        for (case.indices, 0..) |index, i| indices[i] = Gindex.fromUint(index);
+        const descriptor = try proof.computeDescriptor(testing.allocator, indices[0..case.indices.len]);
+        defer testing.allocator.free(descriptor);
+
+        try testing.expectEqualSlices(u8, case.expected, descriptor);
+    }
+    try testing.expectError(error.InvalidGindex, proof.computeDescriptor(testing.allocator, &.{Gindex.fromUint(0)}));
+}
+
+test "computeDescriptor supports the deepest leftmost path" {
+    const depth = @bitSizeOf(Gindex.Uint) - 1;
+    const descriptor = try proof.computeDescriptor(testing.allocator, &.{
+        Gindex.fromUint(@as(Gindex.Uint, 1) << depth),
+    });
+    defer testing.allocator.free(descriptor);
+
+    var expected: [(depth * 2 + 1 + 7) / 8]u8 = @splat(0);
+    for (depth..depth * 2 + 1) |bit| expected[bit / 8] |= @as(u8, 0x80) >> @intCast(bit % 8);
+    try testing.expectEqualSlices(u8, &expected, descriptor);
+}
+
+test "computeDescriptor cleans up every allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, computeDescriptorWithAllocator, .{});
+}
+
+fn computeDescriptorWithAllocator(allocator: std.mem.Allocator) !void {
+    const descriptor = try proof.computeDescriptor(allocator, &.{
+        Gindex.fromUint(43), Gindex.fromUint(42), Gindex.fromUint(11),
+    });
+    defer allocator.free(descriptor);
+
+    try testing.expectEqualSlices(u8, &.{ 0x25, 0xe0 }, descriptor);
+}
+
 test "compact multiproof - should roundtrip node -> proof -> node" {
     const build_depth: usize = 5;
     const pool_capacity: u32 = @intCast((@as(usize, 1) << (build_depth + 1)) * 2);
