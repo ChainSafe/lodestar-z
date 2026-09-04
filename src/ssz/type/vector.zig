@@ -175,6 +175,9 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
                 if (data.len != fixed_size) {
                     return error.InvalidSize;
                 }
+                if (comptime Element.kind == .bool) {
+                    try serialized.validate(data);
+                }
 
                 if (comptime use_chunked_leaf) {
                     var it = Node.FillWithContentsIterator.initWithOffset(pool, chunked_leaf_depth, ChunkedLeaf.k_log2);

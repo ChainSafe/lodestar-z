@@ -293,6 +293,9 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                 if (len > limit) {
                     return error.gtLimit;
                 }
+                if (comptime Element.kind == .bool) {
+                    try serialized.validate(data);
+                }
 
                 const chunk_count = if (comptime isBasicType(Element))
                     (Element.fixed_size * len + 31) / 32
