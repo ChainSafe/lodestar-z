@@ -259,6 +259,12 @@
                 .imports = .{ .network, .consensus_types, .config, .constants, .fork_types, .preset },
             },
         },
+        .gossip_peer = .{
+            .root_module = .{
+                .root_source_file = "examples/gossip_peer.zig",
+                .imports = .{ .network, .consensus_types, .config, .fork_types, .preset },
+            },
+        },
         .download_era_files = .{
             .root_module = .{
                 .root_source_file = "scripts/download_era_files.zig",
