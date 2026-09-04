@@ -265,6 +265,42 @@ test "gossipsub prunes a peer whose messages are rejected" {
     try std.testing.expectEqual(@as(usize, 0), setup.server.state.mesh(server_topic).count());
 }
 
+test "gossipsub credits first delivery only after the host accepts" {
+    var setup: GossipPair = .{};
+    try setup.init();
+    defer setup.deinit();
+
+    var buf: [topic_mod.topic_max_len]u8 = undefined;
+    const beacon_block = buildTopic("beacon_block", &buf);
+    try std.testing.expect(setup.client.subscribe(beacon_block));
+    try std.testing.expect(setup.server.subscribe(beacon_block));
+
+    var rounds: usize = 0;
+    while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
+    setup.pair.advance(constants_heartbeat + 100);
+    rounds = 0;
+    while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
+
+    try setup.client.publish(beacon_block, "a beacon block payload", setup.pair.now);
+    var handle: ?gossipsub.MessageId = null;
+    rounds = 0;
+    while (rounds < 20 and handle == null) : (rounds += 1) {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| switch (event) {
+            .message => |m| handle = m.handle,
+            else => {},
+        };
+    }
+    try std.testing.expect(handle != null);
+
+    // receiving the message must not credit the sender; only the host's accept does
+    const client_index = setup.server.state.findPeer(setup.handles.server).?;
+    const before = setup.server.scores.score(client_index, setup.pair.now.mono_ms);
+    setup.server.report(handle.?, .accept);
+    const after = setup.server.scores.score(client_index, setup.pair.now.mono_ms);
+    try std.testing.expect(after > before);
+}
+
 test "gossipsub receives a message larger than the per-peer body buffer" {
     var setup: GossipPair = .{};
     // the server holds a tiny per-peer body buffer, so the message must be read
