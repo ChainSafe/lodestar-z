@@ -154,3 +154,27 @@ test "gossipsub peers exchange subscriptions over the mesh streams" {
     const server_topic = setup.server.state.findTopic(beacon_block).?;
     try std.testing.expect(setup.server.state.subscribers(server_topic).count() == 1);
 }
+
+test "gossipsub forms a mesh through the heartbeat" {
+    var setup: GossipPair = .{};
+    try setup.init();
+    defer setup.deinit();
+
+    var buf: [topic_mod.topic_max_len]u8 = undefined;
+    const beacon_block = buildTopic("beacon_block", &buf);
+    try std.testing.expect(setup.client.subscribe(beacon_block));
+    try std.testing.expect(setup.server.subscribe(beacon_block));
+
+    var rounds: usize = 0;
+    while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
+    setup.pair.advance(constants_heartbeat + 100);
+    rounds = 0;
+    while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
+
+    const client_topic = setup.client.state.findTopic(beacon_block).?;
+    const server_topic = setup.server.state.findTopic(beacon_block).?;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.state.mesh(client_topic).count());
+    try std.testing.expectEqual(@as(usize, 1), setup.server.state.mesh(server_topic).count());
+}
+
+const constants_heartbeat = @import("constants.zig").heartbeat_interval_ms;

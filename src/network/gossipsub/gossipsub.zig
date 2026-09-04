@@ -3,6 +3,7 @@ const constants = @import("constants.zig");
 const protobuf = @import("protobuf.zig");
 const topic_mod = @import("topic.zig");
 const frame_mod = @import("frame.zig");
+const mcache_mod = @import("mcache.zig");
 const state_mod = @import("state.zig");
 const engine_mod = @import("../quic/engine.zig");
 const types = @import("../types.zig");
@@ -35,6 +36,7 @@ pub const Event = union(enum) {
 /// Per-peer stream I/O: a linear send buffer that batches outgoing RPCs and the
 /// resumable framing state for the inbound stream.
 const sub_frame_max = 16 + topic_mod.topic_max_len;
+const control_frame_max = 32 + topic_mod.topic_max_len;
 
 const PeerIo = struct {
     send: []u8,
@@ -69,6 +71,8 @@ pub const Gossipsub = struct {
     allocator: Allocator,
     options: Options,
     state: *State,
+    seen: mcache_mod.SeenCache,
+    mcache: mcache_mod.MessageCache,
     io: []PeerIo,
     io_arena: []u8,
     heartbeat_at: u64 = 0,
@@ -87,6 +91,19 @@ pub const Gossipsub = struct {
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);
         state.* = .{};
+
+        var seen = try mcache_mod.SeenCache.init(
+            allocator,
+            options.seen_capacity,
+            options.seen_ttl_ms,
+        );
+        errdefer seen.deinit(allocator);
+        var mcache = try mcache_mod.MessageCache.init(
+            allocator,
+            options.mcache_capacity,
+            options.mcache_arena_bytes,
+        );
+        errdefer mcache.deinit(allocator);
 
         const per_peer = constants.send_buffer_len + constants.body_buffer_len;
         const io_arena = try allocator.alloc(u8, constants.peers_cap * per_peer);
@@ -107,6 +124,8 @@ pub const Gossipsub = struct {
             .allocator = allocator,
             .options = options,
             .state = state,
+            .seen = seen,
+            .mcache = mcache,
             .io = io,
             .io_arena = io_arena,
             .scratch = scratch,
@@ -117,6 +136,8 @@ pub const Gossipsub = struct {
         self.allocator.free(self.scratch);
         self.allocator.free(self.io);
         self.allocator.free(self.io_arena);
+        self.mcache.deinit(self.allocator);
+        self.seen.deinit(self.allocator);
         self.allocator.destroy(self.state);
         self.* = undefined;
     }
@@ -186,13 +207,59 @@ pub const Gossipsub = struct {
         var count: usize = 0;
         for (self.io, 0..) |*peer_io, index| {
             if (!self.state.peers[index].active) continue;
-            count = self.readPeer(engine, @intCast(index), peer_io, events, count);
-            self.flush(engine, index, peer_io);
+            count = self.readPeer(engine, @intCast(index), peer_io, now, events, count);
         }
         if (self.heartbeat_at == 0) {
             self.heartbeat_at = now.mono_ms + self.options.heartbeat_interval_ms;
+        } else if (now.mono_ms >= self.heartbeat_at) {
+            self.heartbeat(now);
+            self.heartbeat_at = now.mono_ms + self.options.heartbeat_interval_ms;
+        }
+        for (self.io, 0..) |*peer_io, index| {
+            if (self.state.peers[index].active) self.flush(engine, index, peer_io);
         }
         return count;
+    }
+
+    fn heartbeat(self: *Gossipsub, now: Now) void {
+        self.state.pruneBackoffs(now.mono_ms);
+        for (&self.state.topics, 0..) |*topic, index| {
+            if (topic.active and topic.subscribed) self.maintainTopic(@intCast(index), now);
+        }
+        self.mcache.shift();
+    }
+
+    fn maintainTopic(self: *Gossipsub, topic: u16, now: Now) void {
+        const topic_str = self.state.topicString(topic);
+        const mesh = self.state.mesh(topic);
+        const count = mesh.count();
+        if (count < constants.mesh_d_low) {
+            var need = constants.mesh_d - count;
+            var it = self.state.subscribers(topic).iterator(.{});
+            while (it.next()) |peer| {
+                if (need == 0) break;
+                if (mesh.isSet(peer)) continue;
+                if (self.state.backedOff(@intCast(peer), topic, now.mono_ms)) continue;
+                mesh.set(peer);
+                self.queueGraft(@intCast(peer), topic_str);
+                need -= 1;
+            }
+        } else if (count > constants.mesh_d_high) {
+            const excess = count - constants.mesh_d;
+            var victims: [constants.peers_cap]u16 = undefined;
+            var found: usize = 0;
+            var it = mesh.iterator(.{});
+            while (it.next()) |peer| {
+                if (found == excess) break;
+                victims[found] = @intCast(peer);
+                found += 1;
+            }
+            for (victims[0..found]) |peer| {
+                mesh.unset(peer);
+                self.state.addBackoff(peer, topic, now.mono_ms + constants.prune_backoff_ms);
+                self.queuePrune(peer, topic_str);
+            }
+        }
     }
 
     fn readPeer(
@@ -200,6 +267,7 @@ pub const Gossipsub = struct {
         engine: *Engine,
         index: u16,
         peer_io: *PeerIo,
+        now: Now,
         events: []Event,
         start: usize,
     ) usize {
@@ -217,7 +285,7 @@ pub const Gossipsub = struct {
                     return count;
                 };
                 chunk = chunk[result.consumed..];
-                if (result.frame) |rpc| count = self.processRpc(index, rpc, events, count);
+                if (result.frame) |rpc| count = self.processRpc(index, rpc, now, events, count);
                 if (result.consumed == 0) break;
             }
             if (read.fin) return count;
@@ -229,6 +297,7 @@ pub const Gossipsub = struct {
         self: *Gossipsub,
         index: u16,
         rpc: []const u8,
+        now: Now,
         events: []Event,
         start: usize,
     ) usize {
@@ -241,10 +310,32 @@ pub const Gossipsub = struct {
         }) |item| {
             switch (item) {
                 .subscription => |sub| count = self.onSubscription(index, sub, events, count),
-                else => {}, // messages and control land in later slices
+                .graft => |topic_str| self.onGraft(index, topic_str, now),
+                .prune => |prune| self.onPrune(index, prune, now),
+                else => {}, // messages and gossip land in later slices
             }
         }
         return count;
+    }
+
+    fn onGraft(self: *Gossipsub, index: u16, topic_str: []const u8, now: Now) void {
+        const topic = self.state.findTopic(topic_str) orelse return;
+        if (!self.state.subscribed(topic)) return; // unknown/unsubscribed topic: ignore
+        if (self.state.backedOff(index, topic, now.mono_ms)) {
+            self.queuePrune(index, self.state.topicString(topic));
+            return;
+        }
+        self.state.mesh(topic).set(index);
+    }
+
+    fn onPrune(self: *Gossipsub, index: u16, prune: protobuf.Prune, now: Now) void {
+        const topic = self.state.findTopic(prune.topic) orelse return;
+        self.state.mesh(topic).unset(index);
+        const backoff_ms = if (prune.backoff > 0)
+            prune.backoff * 1000
+        else
+            constants.prune_backoff_ms;
+        self.state.addBackoff(index, topic, now.mono_ms + backoff_ms);
     }
 
     fn onSubscription(
@@ -263,6 +354,23 @@ pub const Gossipsub = struct {
             .subscribed = sub.subscribe,
         } };
         return start + 1;
+    }
+
+    fn queueGraft(self: *Gossipsub, index: u16, topic_str: []const u8) void {
+        var buf: [control_frame_max]u8 = undefined;
+        var writer = protobuf.Writer.init(&buf);
+        writer.varint(protobuf.graftRpcSize(topic_str));
+        protobuf.writeGraftRpc(&writer, topic_str);
+        if (!self.io[index].append(writer.written())) self.counters.send_dropped += 1;
+    }
+
+    fn queuePrune(self: *Gossipsub, index: u16, topic_str: []const u8) void {
+        const backoff_s = constants.prune_backoff_ms / 1000;
+        var buf: [control_frame_max]u8 = undefined;
+        var writer = protobuf.Writer.init(&buf);
+        writer.varint(protobuf.pruneRpcSize(topic_str, backoff_s));
+        protobuf.writePruneRpc(&writer, topic_str, backoff_s);
+        if (!self.io[index].append(writer.written())) self.counters.send_dropped += 1;
     }
 
     fn flush(self: *Gossipsub, engine: *Engine, index: usize, peer_io: *PeerIo) void {
