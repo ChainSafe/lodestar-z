@@ -65,10 +65,8 @@ pub const Slot = struct {
     last_send_ms: u64 = 0,
     close_reason: ?types.CloseReason = null,
     pending_close: ?types.PendingClose = null,
-    pending_close_armed: bool = false,
     connected_pending: bool = false,
-    closed_pending: bool = false,
-    closed_reported: bool = false,
+    close_event: enum { none, pending, reported } = .none,
     path_changed_pending: ?types.Address = null,
     table: StreamTable = .{},
 
@@ -93,10 +91,8 @@ pub const Slot = struct {
         self.last_send_ms = params.now.mono_ms;
         self.close_reason = null;
         self.pending_close = null;
-        self.pending_close_armed = false;
         self.connected_pending = false;
-        self.closed_pending = false;
-        self.closed_reported = false;
+        self.close_event = .none;
         self.path_changed_pending = null;
         self.table = StreamTable.init(params.direction);
 

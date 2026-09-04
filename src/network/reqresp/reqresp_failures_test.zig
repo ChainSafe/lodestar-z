@@ -92,8 +92,8 @@ test "reqresp fails a request whose peer stops making progress" {
     try std.testing.expect(server_failure.? == .timeout or server_failure.? == .stream_closed);
     try std.testing.expectEqual(@as(u64, 1), setup.client.counters.timeouts);
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u16, 0), setup.client.active().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.registry.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.registry.active().inbound);
 }
 
 test "reqresp delivers error chunks with the peer's code and message" {
@@ -188,7 +188,7 @@ test "reqresp finishes after the last allowed chunk without waiting for the peer
         };
     }
     try std.testing.expect(done);
-    try std.testing.expectEqual(@as(u16, 1), setup.server.active().inbound);
+    try std.testing.expectEqual(@as(u16, 1), setup.server.registry.active().inbound);
 }
 
 test "reqresp fails a response whose context bytes name an unknown fork" {
@@ -673,20 +673,20 @@ test "reqresp retires a consumed terminal stream without FIN or event space" {
         if (consumed) break;
     }
     try std.testing.expect(consumed);
-    const stream = pair.client.outbound[h.index].stream;
+    const stream = pair.client.registry.outbound[h.index].stream;
     var out: [8]Event = undefined;
     try std.testing.expectEqual(
         @as(usize, 0),
         pair.client.pump(&pair.pair.client, pair.pair.now, &.{}),
     );
     try std.testing.expect(
-        !pair.pair.client.slots[stream.conn.index].table.matches(stream.slot, stream.id),
+        !pair.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id),
     );
     _ = pair.client.pump(&pair.pair.client, pair.pair.now, &out);
     _ = pair.client.pump(&pair.pair.client, pair.pair.now, &out);
-    try std.testing.expectEqual(@as(u16, 0), pair.client.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.active().outbound);
     try std.testing.expect(
-        !pair.pair.client.slots[stream.conn.index].table.matches(stream.slot, stream.id),
+        !pair.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id),
     );
 }
 
@@ -769,7 +769,7 @@ test "reqresp blocked outbound writes expire without refreshing progress" {
         if (negotiated) break;
     }
     try std.testing.expect(negotiated);
-    const stream = setup.client.outbound[handle.index].stream;
+    const stream = setup.client.registry.outbound[handle.index].stream;
     const padding = [_]u8{0} ** 65536;
     var blocked = false;
     for (0..1024) |_| {
@@ -782,7 +782,7 @@ test "reqresp blocked outbound writes expire without refreshing progress" {
         };
     }
     try std.testing.expect(blocked);
-    const progress_ms = setup.client.outbound[handle.index].progress_ms;
+    const progress_ms = setup.client.registry.outbound[handle.index].progress_ms;
     var events: [8]Event = undefined;
     for (0..3) |_| {
         setup.pair.advance(500);
@@ -790,7 +790,7 @@ test "reqresp blocked outbound writes expire without refreshing progress" {
             @as(usize, 0),
             setup.client.pump(&setup.pair.client, setup.pair.now, &events),
         );
-        try std.testing.expectEqual(progress_ms, setup.client.outbound[handle.index].progress_ms);
+        try std.testing.expectEqual(progress_ms, setup.client.registry.outbound[handle.index].progress_ms);
     }
     setup.pair.advance(500);
     try std.testing.expectEqual(
@@ -799,6 +799,6 @@ test "reqresp blocked outbound writes expire without refreshing progress" {
     );
     try std.testing.expect(events[0].failed.reason == .timeout);
     try std.testing.expect(
-        !setup.pair.client.slots[stream.conn.index].table.matches(stream.slot, stream.id),
+        !setup.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id),
     );
 }

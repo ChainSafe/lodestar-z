@@ -32,7 +32,7 @@ test "engine consults the admission predicate before opening an inbound slot" {
     try pair.pump();
     try std.testing.expect(pair.server.counters.dropped_rejected >= 1);
     try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
-    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
 
     blocked = 0;
     _ = try pair.dial();
@@ -91,25 +91,25 @@ test "engine bounds concurrent dials and outbound connections" {
     _ = try pair.dial();
     _ = try pair.dial();
     try std.testing.expectError(error.DialLimit, pair.dial());
-    try std.testing.expectEqual(@as(u16, 2), pair.client.dialing);
-    try std.testing.expectEqual(@as(u16, 2), pair.client.outbound);
+    try std.testing.expectEqual(@as(u16, 2), pair.client.registry.dialing);
+    try std.testing.expectEqual(@as(u16, 2), pair.client.registry.outbound);
 
     try pair.pump();
-    try std.testing.expectEqual(@as(u16, 0), pair.client.dialing);
-    try std.testing.expectEqual(@as(u16, 2), pair.client.outbound);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.dialing);
+    try std.testing.expectEqual(@as(u16, 2), pair.client.registry.outbound);
     const third = try pair.dial();
     try std.testing.expectError(error.DialLimit, pair.dial());
     try pair.pump();
-    try std.testing.expectEqual(@as(u16, 3), pair.client.outbound);
+    try std.testing.expectEqual(@as(u16, 3), pair.client.registry.outbound);
 
     _ = pair.client.close(third, 0);
     try pair.pump();
     var storage: [16]engine_mod.Event = undefined;
     _ = pair.events(&pair.client, &storage);
-    try std.testing.expectEqual(@as(u16, 2), pair.client.outbound);
+    try std.testing.expectEqual(@as(u16, 2), pair.client.registry.outbound);
     _ = try pair.dial();
-    try std.testing.expectEqual(@as(u16, 3), pair.client.outbound);
-    try std.testing.expectEqual(@as(u16, 1), pair.client.dialing);
+    try std.testing.expectEqual(@as(u16, 3), pair.client.registry.outbound);
+    try std.testing.expectEqual(@as(u16, 1), pair.client.registry.dialing);
 }
 
 test "engine drops new handshakes when the server table is full" {
@@ -169,7 +169,7 @@ test "engine caps inbound handshakes per source address" {
 
     try std.testing.expectEqual(limits.handshaking_per_source_max, admitted);
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_source_limit);
-    try std.testing.expectEqual(limits.handshaking_per_source_max, pair.server.handshaking);
+    try std.testing.expectEqual(limits.handshaking_per_source_max, pair.server.registry.handshaking);
 
     const elsewhere = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 4_001 } };
     const other = try dialInitial(&pair, &packet);
@@ -184,7 +184,7 @@ test "engine caps inbound handshakes per source address" {
         .accepted => {},
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(limits.handshaking_per_source_max + 1, pair.server.handshaking);
+    try std.testing.expectEqual(limits.handshaking_per_source_max + 1, pair.server.registry.handshaking);
 }
 
 test "engine drops an inbound Initial when the entropy pool is stale" {
@@ -209,7 +209,7 @@ test "engine drops an inbound Initial when the entropy pool is stale" {
         ),
     );
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_no_entropy);
-    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
 
     try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
 }
@@ -291,5 +291,43 @@ test "engine answers unsupported versions and drops unroutable packets" {
         &response,
     ));
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_short_initial);
-    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
+}
+
+test "engine wakeup includes host handshake deadline before native timeout" {
+    var pair: Pair = .{};
+    try pair.init(.{ .handshake_timeout_ms = 1 }, .{});
+    defer pair.deinit();
+    _ = try pair.dial();
+    const deadline = pair.client.driverView().nextTimeoutMs(pair.now);
+    try std.testing.expect(deadline != null);
+    try std.testing.expect(deadline.? <= 1);
+}
+
+test "engine rejects zero requested receive window budget" {
+    var pair: Pair = .{};
+    if (pair.init(.{ .receive_budget_bytes = 0 }, .{})) |_| {
+        pair.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.InvalidLimits, err);
+}
+
+test "engine retains a live routed stream across unrelated slot churn" {
+    var pair: Pair = .{};
+    try pair.init(.{ .connections_max = 4, .handshaking_max = 4 }, .{});
+    defer pair.deinit();
+    const handles = try connectPair(&pair);
+    for (0..256) |_| {
+        const transient = try pair.dial();
+        try std.testing.expect(pair.client.abandon(transient));
+    }
+    const stream = try pair.client.openStream(handles.client);
+    try std.testing.expectEqual(@as(usize, 4), try pair.client.write(stream, "live", false));
+    try pair.pump();
+    var events: [8]Event = undefined;
+    const inbound = try support.expectStreamOpened(pair.events(&pair.server, &events)[0], handles.server);
+    var bytes: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), (try pair.server.read(inbound, &bytes)).len);
+    try std.testing.expectEqualStrings("live", &bytes);
+    try std.testing.expectEqual(handles.client, pair.client.findByPeerId(&pair.server_ctx.local_peer_id).?);
 }

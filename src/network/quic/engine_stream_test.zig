@@ -117,7 +117,7 @@ test "engine server can open a stream toward the client" {
 
 fn activePeerStreams(engine: *const Engine, handle: engine_mod.Handle) usize {
     var count: usize = 0;
-    const peer_half = engine.slots[handle.index].table.entries[limits.streams_per_connection / 2 ..];
+    const peer_half = engine.registry.slots[handle.index].table.entries[limits.streams_per_connection / 2 ..];
     for (peer_half) |*entry| {
         if (entry.claimed) count += 1;
     }

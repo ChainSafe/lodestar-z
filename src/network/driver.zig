@@ -61,11 +61,11 @@ pub const Driver = struct {
         return .{};
     }
 
-    pub fn nextTimeoutMs(self: *const Driver, engine: *Engine) ?u64 {
+    pub fn nextTimeoutMs(self: *const Driver, engine: *Engine, now: engine_mod.Now) ?u64 {
         _ = self;
         const view = engine.driverView();
         assert(view.slotCount() > 0);
-        const next = view.nextTimeoutMs();
+        const next = view.nextTimeoutMs(now);
         if (view.activeIndices().len == 0) assert(next == null);
         return next;
     }
@@ -158,14 +158,7 @@ pub const Driver = struct {
     ) StepError!Received {
         _ = self;
         const view = engine.driverView();
-        const timeout: std.Io.Timeout = if (wait_ms) |bound| blk: {
-            var wait: u64 = bound;
-            if (view.nextTimeoutMs()) |earliest| wait = @min(wait, earliest);
-            break :blk .{ .duration = .{
-                .raw = .fromMilliseconds(@intCast(@max(wait, 1))),
-                .clock = .awake,
-            } };
-        } else .{ .duration = .{ .raw = .zero, .clock = .awake } };
+        const timeout = receiveTimeout(wait_ms, view.nextTimeoutMs(result.now));
         const datagram = udp.receiveTimeout(io, timeout) catch |err| switch (err) {
             error.Timeout => return .timeout,
             error.DatagramTooLarge,
@@ -210,6 +203,17 @@ pub const Driver = struct {
     }
 };
 
+fn receiveTimeout(wait_ms: ?u32, earliest_ms: ?u64) std.Io.Timeout {
+    return if (wait_ms) |bound| blk: {
+        var wait: u64 = bound;
+        if (earliest_ms) |earliest| wait = @min(wait, earliest);
+        break :blk .{ .duration = .{
+            .raw = .fromMilliseconds(@intCast(wait)),
+            .clock = .awake,
+        } };
+    } else .{ .duration = .{ .raw = .zero, .clock = .awake } };
+}
+
 fn sendMany(io: std.Io, udp: *const Udp, batch: []const types.Sent) StepError!void {
     return udp.sendMany(io, batch) catch |err| mapSendError(err);
 }
@@ -252,4 +256,10 @@ fn entropy(io: std.Io) std.Io.RandomSecureError![limits.local_cid_length]u8 {
 comptime {
     assert(drain_rounds_max > 0);
     assert(@sizeOf(Driver) <= 32 * 1_024);
+}
+
+test "driver zero wait remains an actual nonblocking timeout" {
+    const timeout = receiveTimeout(0, null);
+    try std.testing.expectEqual(@as(i96, 0), timeout.duration.raw.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 0), receiveTimeout(5, 0).duration.raw.nanoseconds);
 }

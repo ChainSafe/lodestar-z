@@ -35,8 +35,8 @@ test "engine handshake connects both sides with verified peer ids" {
 
     try std.testing.expect(pair.client.peerId(client_handle).?.eql(&pair.server_ctx.local_peer_id));
     try std.testing.expect(pair.server.peerId(server_handle).?.eql(&pair.client_ctx.local_peer_id));
-    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
-    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
 }
 
@@ -46,16 +46,16 @@ test "engine counts only inbound handshakes against the permit bound" {
     defer pair.deinit();
 
     _ = try pair.dial();
-    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
-    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
 
     try std.testing.expect(try pair.transfer(&pair.client, &pair.server, client_address, false));
-    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
-    try std.testing.expectEqual(@as(u16, 1), pair.server.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
+    try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
 
     try pair.pump();
-    try std.testing.expectEqual(@as(u16, 0), pair.client.handshaking);
-    try std.testing.expectEqual(@as(u16, 0), pair.server.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
 }
 
 test "engine finds a connection by peer id until its slot is released" {
@@ -165,11 +165,11 @@ test "engine captures TLS key material per connection only when keylog is enable
     try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "CLIENT_TRAFFIC_SECRET_0") != null);
     try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "SERVER_TRAFFIC_SECRET_0") != null);
     try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().takeKeylog(handles.client.index, &lines));
-    try std.testing.expectEqual(@as(u16, 0), pair.client.slots[handles.client.index].handshake.keylog_dropped);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.slots[handles.client.index].handshake.keylog_dropped);
 
-    try std.testing.expectEqual(@as(usize, 0), pair.server.keylog_arena.len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.registry.keylog_arena.len);
     try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().takeKeylog(handles.server.index, &lines));
-    try std.testing.expect(pair.server.slots[handles.server.index].handshake.keylog_dropped > 0);
+    try std.testing.expect(pair.server.registry.slots[handles.server.index].handshake.keylog_dropped > 0);
 }
 
 test "handshake state drops key lines that do not fit and counts them" {

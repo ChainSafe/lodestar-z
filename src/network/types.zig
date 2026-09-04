@@ -26,7 +26,7 @@ pub const Sent = struct {
     to: Address,
 };
 
-pub const PendingClose = struct { reason: CloseReason, code: u64 };
+pub const PendingClose = struct { reason: CloseReason, code: u64, stage: enum { waiting, armed } = .waiting };
 
 pub const Read = struct {
     len: usize,

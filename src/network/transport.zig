@@ -65,7 +65,7 @@ pub const Transport = struct {
             .seed = std.mem.readInt(u64, &seed_bytes, .little),
         });
         target.driver = driver_mod.Driver.init();
-        assert(target.engine.slots.len == options.limits.connections_max);
+        assert(target.engine.registry.slots.len == options.limits.connections_max);
         assert(target.keylog != null or options.keylog_path == null);
     }
 
@@ -77,23 +77,23 @@ pub const Transport = struct {
     }
 
     pub fn peerId(self: *const Transport) peer_id.PeerId {
-        assert(self.engine.slots.len > 0);
+        assert(self.engine.registry.slots.len > 0);
         return self.engine.tls.local_peer_id;
     }
 
     pub fn localAddress(self: *const Transport) types.Address {
-        assert(self.engine.slots.len > 0);
+        assert(self.engine.registry.slots.len > 0);
         return self.udp.localAddress();
     }
 
     pub fn localMultiaddr(self: *const Transport) multiaddr.Multiaddr {
-        assert(self.engine.slots.len > 0);
+        assert(self.engine.registry.slots.len > 0);
         return .{ .address = self.udp.localAddress(), .peer = self.engine.tls.local_peer_id };
     }
 
-    pub fn nextTimeoutMs(self: *const Transport) ?u64 {
-        assert(self.engine.slots.len > 0);
-        return self.driver.nextTimeoutMs(@constCast(&self.engine));
+    pub fn nextTimeoutMs(self: *const Transport, now: types.Now) ?u64 {
+        assert(self.engine.registry.slots.len > 0);
+        return self.driver.nextTimeoutMs(@constCast(&self.engine), now);
     }
 
     pub fn dial(
@@ -111,7 +111,7 @@ pub const Transport = struct {
         address: types.Address,
         expected: peer_id.PeerId,
     ) DialError!engine_mod.Handle {
-        assert(self.engine.slots.len > 0);
+        assert(self.engine.registry.slots.len > 0);
         return self.driver.dial(io, &self.engine, &self.udp, address, expected);
     }
 
@@ -122,7 +122,7 @@ pub const Transport = struct {
         activity: []engine_mod.Handle,
         options: driver_mod.StepOptions,
     ) StepError!driver_mod.StepResult {
-        assert(self.engine.slots.len > 0);
+        assert(self.engine.registry.slots.len > 0);
         const result = try self.driver.step(io, &self.engine, &self.udp, events, activity, options);
         try self.drainKeylog(io);
         return result;

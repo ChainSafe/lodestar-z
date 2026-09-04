@@ -43,7 +43,7 @@ test "driver bounds an idle step by the requested wait" {
     try std.testing.expectEqual(@as(usize, 0), result.events);
     try std.testing.expectEqual(@as(usize, 0), result.activity);
     try std.testing.expect(!result.activity_pending);
-    try std.testing.expect(node.transport.nextTimeoutMs() == null);
+    try std.testing.expect(node.transport.nextTimeoutMs(result.now) == null);
 
     const floored = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(u32, 0), floored.datagrams_received);
@@ -191,7 +191,7 @@ test "driver surfaces a send failure to an unreachable destination" {
         },
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(@as(u16, 0), node.transport.engine.outbound);
+    try std.testing.expectEqual(@as(u16, 0), node.transport.engine.registry.outbound);
 
     try std.testing.expectError(
         error.DestinationUnreachable,
