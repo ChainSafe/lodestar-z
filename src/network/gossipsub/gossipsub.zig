@@ -20,6 +20,7 @@ const State = state_mod.State;
 const Version = state_mod.Version;
 
 pub const Options = struct {
+    message_id_policy: topic_mod.MessageIdPolicy = .{},
     heartbeat_interval_ms: u64 = constants.heartbeat_interval_ms,
     seen_capacity: usize = 65_536,
     mcache_capacity: usize = 8_192,
@@ -365,7 +366,7 @@ pub const Gossipsub = struct {
         const topic = self.state.internTopic(topic_str) orelse return error.UnknownTopic;
         const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return error.CompressFailed;
         const data = self.msg_scratch[0..clen];
-        const id = topic_mod.validMessageId(ssz);
+        const id = topic_mod.validMessageId(topic_str, ssz, self.options.message_id_policy);
         _ = self.seen.add(id, now.mono_ms);
         _ = self.mcache.put(id, topic_str, data, std.math.maxInt(u16), 0);
         self.mcache.validate(id);
@@ -861,7 +862,12 @@ pub const Gossipsub = struct {
         const topic = self.state.findTopic(msg.topic) orelse return start;
         if (!self.state.subscribed(topic)) return start;
         const size = snappy.raw.uncompressedLength(msg.data) catch {
-            _ = self.seen.add(topic_mod.invalidMessageId(msg.data), now.mono_ms);
+            const id = topic_mod.invalidMessageId(
+                msg.topic,
+                msg.data,
+                self.options.message_id_policy,
+            );
+            _ = self.seen.add(id, now.mono_ms);
             return start;
         };
         if (size > constants.MAX_PAYLOAD_SIZE) return start;
@@ -877,11 +883,16 @@ pub const Gossipsub = struct {
         }
         io.decompressed_pump += size;
         const written = snappy.raw.uncompress(msg.data, room[0..size]) catch {
-            _ = self.seen.add(topic_mod.invalidMessageId(msg.data), now.mono_ms);
+            const id = topic_mod.invalidMessageId(
+                msg.topic,
+                msg.data,
+                self.options.message_id_policy,
+            );
+            _ = self.seen.add(id, now.mono_ms);
             return start;
         };
         const payload = room[0..written];
-        const id = topic_mod.validMessageId(payload);
+        const id = topic_mod.validMessageId(msg.topic, payload, self.options.message_id_policy);
         if (!self.seen.add(id, now.mono_ms)) {
             self.counters.duplicates += 1;
             switch (self.mcache.recordDuplicate(id, index)) {
@@ -912,8 +923,8 @@ pub const Gossipsub = struct {
     fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
         if (self.belowGossip(index, now.mono_ms)) return;
         const io = &self.io[index];
+        if (io.ihave_recv >= constants.max_ihave_per_heartbeat) return;
         io.ihave_recv += 1;
-        if (io.ihave_recv > constants.max_ihave_per_heartbeat) return;
         const id_budget = constants.max_ihave_ids_per_heartbeat -| @as(usize, io.iwant_ids_sent);
         if (id_budget == 0) return;
         var wanted: [constants.gossip_ids_max]MessageId = undefined;
@@ -977,8 +988,8 @@ pub const Gossipsub = struct {
 
     fn onIdontwant(self: *Gossipsub, index: u16, idontwant: protobuf.IdList) void {
         const io = &self.io[index];
+        if (io.idontwant_recv >= constants.max_idontwant_per_heartbeat) return;
         io.idontwant_recv += 1;
-        if (io.idontwant_recv > constants.max_idontwant_per_heartbeat) return;
         var examined: usize = 0;
         var it = idontwant.ids();
         while (it.next() catch return) |id_bytes| {
