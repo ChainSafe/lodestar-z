@@ -4,7 +4,7 @@
 
 **Description**
 
-<!-- One sentence saying what this does, then bullets naming each change. Keep it flat: no headings, tables, or explanations of why. -->
+<!-- One sentence saying what this does, then bullets naming each change. Keep it flat: no headings or tables. The why belongs in Motivation above. -->
 
 Closes #issue_number
 

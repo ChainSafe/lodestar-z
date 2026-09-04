@@ -384,8 +384,8 @@ One line.
   bullets, not sections.
 - Bullets name concrete changes by identifier in backticks.
 - No `##` headings, tables, or screenshots of text.
-- No paragraphs explaining why the approach is right and no verification section. Reasoning goes
-  in commit messages; CI is the verification.
+- Rationale goes in Motivation, in one to three sentences. Do not argue the approach elsewhere in
+  the description, and do not add a verification section; CI is the verification.
 - Do not list example files to illustrate a point.
 - Code blocks only for a before/after interface or real output.
 
