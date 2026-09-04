@@ -208,7 +208,7 @@ test "iterator nextValue should deinit current value on conversion OOM" {
 
 test "VariableList deserializeFromBytes should free offsets on malformed later offset" {
     const ListType = VariableListType(ByteListType(8), 4);
-    // Offset 8 declares two elements, so decoding allocates the offsets array.
+    // Offset 8 declares two elements, so decoding allocates the output list.
     // Offset 4 then moves backward, triggering offsetNotIncreasing after allocation.
     const serialized = [_]u8{ 8, 0, 0, 0, 4, 0, 0, 0 };
     var tracking = std.testing.FailingAllocator.init(std.testing.allocator, .{});
@@ -221,7 +221,7 @@ test "VariableList deserializeFromBytes should free offsets on malformed later o
         error.offsetNotIncreasing,
         ListType.deserializeFromBytes(allocator, &serialized, &out),
     );
-    // The temporary offsets must not leak after malformed input is rejected.
+    // The partially initialized output must not leak after malformed input is rejected.
     try std.testing.expectEqual(tracking.allocated_bytes, tracking.freed_bytes);
 }
 
@@ -1145,17 +1145,6 @@ test "progressive fixed list byte deserialization preserves out on malformed inp
         List.deserializeFromBytes(std.testing.allocator, &.{ 1, 2 }, &out),
     );
     try std.testing.expectEqualSlices(bool, &.{ false, false }, out.items);
-}
-
-test "progressive list malformed offsets do not leak scratch allocation" {
-    const Items = FixedProgressiveListType(UintType(8));
-    const List = @import("type/progressive_list.zig").VariableProgressiveListType(Items);
-    const malformed = [_]u8{ 8, 0, 0, 0, 7, 0, 0, 0 };
-
-    try std.testing.expectError(
-        error.offsetNotIncreasing,
-        List.readVariableOffsets(std.testing.allocator, &malformed),
-    );
 }
 
 test "progressive list tree.toValue preserves out on malformed tree" {

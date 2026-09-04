@@ -3,7 +3,7 @@ const TypeKind = @import("type_kind.zig").TypeKind;
 const isBasicType = @import("type_kind.zig").isBasicType;
 const isFixedType = @import("type_kind.zig").isFixedType;
 const canMemcpySsz = @import("type_kind.zig").canMemcpySsz;
-const OffsetIterator = @import("offsets.zig").OffsetIterator;
+const VariableElementIterator = @import("variable_element_iterator.zig").VariableElementIterator;
 const merkleize = @import("hashing").merkleize;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
@@ -761,83 +761,51 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         }
 
         pub fn deserializeFromBytes(allocator: std.mem.Allocator, data: []const u8, out: *Type) !void {
-            const offsets = try readVariableOffsets(allocator, data);
-            defer allocator.free(offsets);
-
-            const len = offsets.len - 1;
+            var elements = try VariableElementIterator(Self).init(data);
+            const len = elements.len;
 
             try out.resize(allocator, len);
             @memset(out.items[0..len], Element.default_value);
-            for (0..len) |i| {
-                try Element.deserializeFromBytes(
-                    allocator,
-                    data[offsets[i]..offsets[i + 1]],
-                    &out.items[i],
-                );
+            errdefer {
+                Self.deinit(allocator, out);
+                out.* = default_value;
             }
-        }
 
-        pub fn readVariableOffsets(allocator: std.mem.Allocator, data: []const u8) ![]u32 {
-            var iterator = OffsetIterator(Self).init(data);
-            const first_offset = if (data.len == 0) 0 else try iterator.next();
-            const len = first_offset / 4;
-
-            const offsets = try allocator.alloc(u32, len + 1);
-            errdefer allocator.free(offsets);
-
-            offsets[0] = first_offset;
-            while (iterator.pos < len) {
-                offsets[iterator.pos] = try iterator.next();
+            var i: usize = 0;
+            while (try elements.next()) |element_bytes| : (i += 1) {
+                try Element.deserializeFromBytes(allocator, element_bytes, &out.items[i]);
             }
-            offsets[len] = @intCast(data.len);
-
-            return offsets;
+            std.debug.assert(i == len);
         }
 
         pub const serialized = struct {
             pub fn validate(data: []const u8) !void {
-                var iterator = OffsetIterator(Self).init(data);
-                if (data.len == 0) return;
-                const first_offset = try iterator.next();
-                const len = first_offset / 4;
-
-                var curr_offset = first_offset;
-                var prev_offset = first_offset;
-                while (iterator.pos < len) {
-                    prev_offset = curr_offset;
-                    curr_offset = try iterator.next();
-
-                    try Element.serialized.validate(data[prev_offset..curr_offset]);
+                var elements = try VariableElementIterator(Self).init(data);
+                while (try elements.next()) |element_bytes| {
+                    try Element.serialized.validate(element_bytes);
                 }
-                try Element.serialized.validate(data[curr_offset..data.len]);
             }
 
             pub fn length(data: []const u8) !usize {
-                if (data.len == 0) {
-                    return 0;
-                }
-                var iterator = OffsetIterator(Self).init(data);
-                return try iterator.firstOffset() / 4;
+                const elements = try VariableElementIterator(Self).init(data);
+                return elements.len;
             }
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
-                const len = try length(data);
+                var elements = try VariableElementIterator(Self).init(data);
+                const len = elements.len;
                 const chunk_count = len;
 
                 const chunks = try allocator.alloc([32]u8, (chunk_count + 1) / 2 * 2);
                 defer allocator.free(chunks);
                 @memset(chunks, [_]u8{0} ** 32);
 
-                const offsets = try readVariableOffsets(allocator, data);
-                defer allocator.free(offsets);
-
-                for (0..len) |i| {
-                    try Element.serialized.hashTreeRoot(
-                        allocator,
-                        data[offsets[i]..offsets[i + 1]],
-                        &chunks[i],
-                    );
+                var i: usize = 0;
+                while (try elements.next()) |element_bytes| : (i += 1) {
+                    try Element.serialized.hashTreeRoot(allocator, element_bytes, &chunks[i]);
                 }
+                std.debug.assert(i == len);
+
                 try merkleize(@ptrCast(chunks), chunk_depth, out);
                 mixInLength(len, out);
             }
@@ -876,16 +844,10 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
             }
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
-                var iterator = OffsetIterator(Self).init(data);
-                const first_offset = if (data.len == 0) 0 else try iterator.next();
-                const len = first_offset / 4;
+                var elements = try VariableElementIterator(Self).init(data);
+                const len = elements.len;
 
-                if (len > limit) {
-                    return error.gtLimit;
-                }
-
-                const chunk_count = len;
-                if (chunk_count == 0) {
+                if (len == 0) {
                     return try pool.createBranch(
                         @enumFromInt(chunk_depth),
                         @enumFromInt(0),
@@ -895,15 +857,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                 var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
                 errdefer it.deinit();
 
-                var offset = first_offset;
-                for (0..len - 1) |_| {
-                    const next_offset = try iterator.next();
-                    const elem_bytes = data[offset..next_offset];
-                    offset = next_offset;
-                    try it.append(try Element.tree.deserializeFromBytes(pool, elem_bytes));
-                }
-                {
-                    const elem_bytes = data[offset..data.len];
+                while (try elements.next()) |elem_bytes| {
                     try it.append(try Element.tree.deserializeFromBytes(pool, elem_bytes));
                 }
 
