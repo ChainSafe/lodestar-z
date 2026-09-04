@@ -397,6 +397,12 @@
         .clock = .{ .root_module = .clock },
         .beacon_node = .{ .root_module = .beacon_node },
 
+        .tidy = .{
+            .root_module = .{
+                .root_source_file = "test/tidy.zig",
+            },
+        },
+
         .int = .{
             .root_module = .{
                 .root_source_file = "test/int/era/root.zig",
