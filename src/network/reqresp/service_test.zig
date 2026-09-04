@@ -130,8 +130,8 @@ test "service round trips a status request through the collapsed host loop" {
     defer setup.deinit();
 
     try roundTrip(&setup, 5);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.registry.active().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.registry.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
 }
 
 test "service reclaims inbound sinks across more requests than it has slots" {
@@ -144,7 +144,7 @@ test "service reclaims inbound sinks across more requests than it has slots" {
     var seed: u8 = 0;
     while (seed < 12) : (seed += 1) try roundTrip(&setup, seed);
     try std.testing.expectEqual(@as(u64, 12), setup.server.counters().requests_served);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.registry.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
 }
 
 test "service fails in-flight requests when the connection closes" {
@@ -187,5 +187,5 @@ test "service fails in-flight requests when the connection closes" {
     }
     try std.testing.expect(client_failed);
     try std.testing.expect(server_failed);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.registry.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
 }

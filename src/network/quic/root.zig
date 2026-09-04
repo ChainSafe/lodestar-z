@@ -16,6 +16,7 @@ test {
     _ = @import("stream_table_test.zig");
     _ = @import("route_table_test.zig");
     _ = @import("peer_index_test.zig");
+    _ = @import("schedule_test.zig");
     _ = @import("engine_handshake_test.zig");
     _ = @import("engine_stream_test.zig");
     _ = @import("engine_close_test.zig");

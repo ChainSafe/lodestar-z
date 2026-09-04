@@ -171,7 +171,7 @@ pub const Slot = struct {
         self.last_send_ms = now_ms;
         const destination = binding.SockAddr.fromStorage(&info.to, info.to_len);
         const to = if (destination) |addr| addr.toAddress() orelse self.peer else self.peer;
-        return .{ .bytes = out[0..length], .to = to };
+        return .{ .bytes = out[0..length], .to = to, .transmit_at_ns = binding.transmitDeadline(&info) };
     }
 
     pub fn drainPathEvents(self: *Slot) ?types.Address {

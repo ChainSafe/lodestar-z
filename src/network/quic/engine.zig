@@ -4,8 +4,6 @@ const binding = @import("binding.zig");
 const connection = @import("connection.zig");
 const constants = @import("../constants.zig");
 const limits = @import("limits.zig");
-const peer_index = @import("peer_index.zig");
-const route_table = @import("route_table.zig");
 const stream_iter = @import("stream_iter.zig");
 const peer_id = @import("../wire/peer_id.zig");
 const tls = @import("../tls/context.zig");
@@ -69,6 +67,21 @@ pub const DriverView = struct {
 
     pub fn nextTimeoutMs(self: DriverView, now: Now) ?u64 {
         return self.engine.nextTimeoutMs(now);
+    }
+
+    pub fn sendOne(self: DriverView, index: u16, now: Now, out: []u8) ?Sent {
+        return self.engine.send(index, now, out);
+    }
+
+    pub fn sendOwner(self: DriverView, index: u16) ?Handle {
+        if (index >= self.engine.registry.slots.len) return null;
+        const slot = &self.engine.registry.slots[index];
+        if (slot.state == .free or slot.state == .closed) return null;
+        return .{ .index = index, .generation = slot.generation };
+    }
+
+    pub fn tickOne(self: DriverView, index: u16, now: Now) void {
+        self.engine.tickOne(index, now);
     }
 
     pub fn sendBatch(self: DriverView, index: u16, now: Now, batch: *SendBatch) u8 {
@@ -167,6 +180,10 @@ pub const Engine = struct {
         }
         if (wanted.handshaking_per_source_max == 0) return error.InvalidLimits;
         if (wanted.receive_budget_bytes == 0) return error.InvalidLimits;
+        if (wanted.send_per_step_max == 0 or wanted.send_per_step_max > limits.send_burst_max) return error.InvalidLimits;
+        if (wanted.receive_per_step_max == 0 or wanted.receive_per_step_max > constants.receive_batch_max) return error.InvalidLimits;
+        if (wanted.work_per_step_max < 2 or wanted.work_per_step_max > limits.work_per_step_max) return error.InvalidLimits;
+        if (wanted.idle_timeout_ms > limits.timeout_ms_max or wanted.handshake_timeout_ms > limits.timeout_ms_max or wanted.keep_alive_ms > limits.timeout_ms_max) return error.InvalidLimits;
         if (wanted.idle_timeout_ms == 0) return error.InvalidLimits;
         if (wanted.handshake_timeout_ms == 0) return error.InvalidLimits;
         if (wanted.keep_alive_ms == 0) return error.InvalidLimits;
@@ -218,6 +235,20 @@ pub const Engine = struct {
         return .{ .engine = self };
     }
 
+    pub fn memoryPlan(self: *const Engine) api.MemoryPlan {
+        const count = self.limits.connections_max;
+        return .{
+            .requested_receive_window_bytes = self.limits.receive_budget_bytes,
+            .receive_window_bytes = self.connection_window * count,
+            .connection_window_bytes = self.connection_window,
+            .stream_window_bytes = self.stream_window,
+            .scheduled_datagrams = count,
+            .scheduled_payload_bytes = @as(u64, count) * constants.datagram_size_max,
+            .scheduled_storage_bytes = @as(u64, count) * @sizeOf(@import("schedule.zig").Entry),
+            .native_pacing_supported = binding.native_pacing_supported,
+        };
+    }
+
     pub fn connectionWindow(self: *const Engine) u64 {
         assert(self.connection_window >= limits.connection_window_min);
         assert(self.connection_window <= limits.connection_window_max);
@@ -257,8 +288,7 @@ pub const Engine = struct {
             return error.OpenFailed;
         };
         self.registry.addRoute(&slot.scid, index) catch {
-            slot.release();
-            self.registry.unclaim(index);
+            self.registry.retire(index);
             return error.TableFull;
         };
         self.registry.dialing += 1;
@@ -336,15 +366,7 @@ pub const Engine = struct {
     }
 
     pub fn findByPeerId(self: *const Engine, id: *const peer_id.PeerId) ?Handle {
-        assert(self.registry.peers.entries.len >= 2 * self.registry.slots.len);
-        assert(self.registry.active_len <= self.registry.active.len);
-        var candidates = self.registry.peers.candidates(peer_index.keyOf(self.registry.seed, id));
-        while (candidates.next()) |entry| {
-            if (self.peerEntryMatches(entry, id)) {
-                return .{ .index = entry.index, .generation = entry.generation };
-            }
-        }
-        return null;
+        return self.registry.findPeer(id);
     }
 
     pub fn openStream(self: *Engine, conn: Handle) StreamError!StreamHandle {
@@ -533,14 +555,12 @@ pub const Engine = struct {
             return drop(&self.counters.recv_errors);
         };
         self.registry.addRoute(&slot.scid, index) catch {
-            slot.release();
-            self.registry.unclaim(index);
+            self.registry.retire(index);
             return drop(&self.counters.dropped_full);
         };
         self.registry.addRoute(&header.dcid, index) catch {
             self.registry.removeRoutesFor(index);
-            slot.release();
-            self.registry.unclaim(index);
+            self.registry.retire(index);
             return drop(&self.counters.dropped_full);
         };
         self.registry.handshaking += 1;
@@ -569,38 +589,38 @@ pub const Engine = struct {
     }
 
     fn tick(self: *Engine, now: Now) void {
-        assert(self.registry.active_len <= self.registry.active.len);
-        assert(self.registry.handshaking <= self.limits.handshaking_max);
-        for (self.registry.active[0..self.registry.active_len]) |index| {
-            const slot = &self.registry.slots[index];
-            assert(slot.state != .free);
-            if (slot.state == .closed) continue;
-            const expired = if (slot.timeoutMs()) |remaining| remaining == 0 else false;
-            slot.onTimeout();
-            if (expired) self.registry.activity[index] = true;
-            if (slot.state == .handshaking and slot.close_reason == null and
-                now.mono_ms -| slot.created_ms >= self.limits.handshake_timeout_ms)
-            {
-                slot.close(.handshake_timeout, types.app_error_handshake_timeout);
-            }
-            if (slot.state == .established and slot.close_reason == null and
-                now.mono_ms -| slot.last_send_ms >= self.limits.keep_alive_ms and
-                slot.keepAlive())
-            {
-                slot.last_send_ms = now.mono_ms;
-                self.registry.activity[index] = true;
-            }
-            if (slot.pending_close) |pending| {
-                if (pending.stage == .armed) {
-                    slot.pending_close = null;
-                    slot.close(pending.reason, pending.code);
-                } else {
-                    slot.pending_close.?.stage = .armed;
-                }
-            }
-            self.refresh(index);
-            self.observePath(index);
+        for (self.registry.active[0..self.registry.active_len]) |index| self.tickOne(index, now);
+    }
+
+    fn tickOne(self: *Engine, index: u16, now: Now) void {
+        const slot = &self.registry.slots[index];
+        assert(slot.state != .free);
+        if (slot.state == .closed) return;
+        const expired = if (slot.timeoutMs()) |remaining| remaining == 0 else false;
+        slot.onTimeout();
+        if (expired) self.registry.activity[index] = true;
+        if (slot.state == .handshaking and slot.close_reason == null and
+            now.mono_ms -| slot.created_ms >= self.limits.handshake_timeout_ms)
+        {
+            slot.close(.handshake_timeout, types.app_error_handshake_timeout);
         }
+        if (slot.state == .established and slot.close_reason == null and
+            now.mono_ms -| slot.last_send_ms >= self.limits.keep_alive_ms and
+            slot.keepAlive())
+        {
+            slot.last_send_ms = now.mono_ms;
+            self.registry.activity[index] = true;
+        }
+        if (slot.pending_close) |pending| {
+            if (pending.stage == .armed) {
+                slot.pending_close = null;
+                slot.close(pending.reason, pending.code);
+            } else {
+                slot.pending_close.?.stage = .armed;
+            }
+        }
+        self.refresh(index);
+        self.observePath(index);
     }
 
     fn nextTimeoutMs(self: *const Engine, now: Now) ?u64 {
@@ -771,13 +791,7 @@ pub const Engine = struct {
                 self.registry.dialing -= 1;
             }
             if (slot.handshake.peer_id) |id| {
-                slot.peer_id = id;
-                self.registry.peers.insert(.{
-                    .key = peer_index.keyOf(self.registry.seed, &id),
-                    .index = index,
-                    .generation = slot.generation,
-                    .used = true,
-                });
+                self.registry.indexPeer(index, id);
                 if (slot.expected_peer_id != null and !slot.expected_peer_id.?.eql(&id)) {
                     slot.deferClose(.peer_id_mismatch, types.app_error_peer_id_mismatch);
                 } else {
@@ -843,19 +857,6 @@ pub const Engine = struct {
         }
         assert(count <= self.registry.handshaking);
         return count;
-    }
-
-    fn peerEntryMatches(
-        self: *const Engine,
-        entry: peer_index.Entry,
-        id: *const peer_id.PeerId,
-    ) bool {
-        assert(entry.used);
-        if (entry.index >= self.registry.slots.len) return false;
-        const slot = &self.registry.slots[entry.index];
-        if (slot.generation != entry.generation or slot.state == .free) return false;
-        const stored = slot.peer_id orelse return false;
-        return stored.eql(id);
     }
 };
 

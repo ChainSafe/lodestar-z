@@ -67,6 +67,9 @@ pub const Limits = struct {
     idle_timeout_ms: u64 = limits.idle_timeout_ms,
     handshake_timeout_ms: u64 = limits.handshake_timeout_ms,
     keep_alive_ms: u64 = limits.keep_alive_ms,
+    send_per_step_max: u16 = 256,
+    receive_per_step_max: u16 = constants.receive_batch_max,
+    work_per_step_max: u16 = 1024,
     keylog: bool = false,
     admit: ?*const fn (context: ?*anyopaque, from: *const Address) bool = null,
     admit_context: ?*anyopaque = null,
@@ -90,6 +93,7 @@ pub const Counters = struct {
 pub const SendBatch = struct {
     buffers: [constants.send_batch_max][constants.datagram_size_max]u8 = undefined,
     sent: [constants.send_batch_max]Sent = undefined,
+    owners: [constants.send_batch_max]Handle = undefined,
 };
 
 pub const ReceiveOutcome = union(enum) {
@@ -112,4 +116,19 @@ pub const EntropyPool = struct {
         self.fresh = false;
         return self.bytes;
     }
+};
+
+/// Flow-control windows and host-owned queues, excluding native QUIC/TLS overhead.
+pub const MemoryPlan = struct {
+    requested_receive_window_bytes: u64,
+    receive_window_bytes: u64,
+    connection_window_bytes: u64,
+    stream_window_bytes: u64,
+    scheduled_datagrams: u16,
+    scheduled_payload_bytes: u64,
+    scheduled_storage_bytes: u64,
+    ready_batch_datagrams: u8 = constants.send_batch_max,
+    ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
+    udp_receive_storage_bytes: u64 = @sizeOf(@import("../udp.zig").Udp),
+    native_pacing_supported: bool,
 };

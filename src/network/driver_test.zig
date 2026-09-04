@@ -288,3 +288,118 @@ test "driver completes a libp2p ping over loopback sockets" {
     }
     try std.testing.expect(closed);
 }
+
+test "driver retains a future datagram and drops stale owner generations" {
+    var node: Node = .{};
+    try node.init(12);
+    defer node.deinit();
+    const now = try driver_mod.currentTime(std.testing.io);
+    const handle = try node.transport.engine.dial(
+        &support.server_address,
+        node.transport.peerId(),
+        now,
+        [_]u8{17} ** limits.local_cid_length,
+    );
+    var bytes = [_]u8{ 1, 2, 3 };
+    const future = now.nanos() + 60 * std.time.ns_per_s;
+    try node.transport.driver.pending.put(handle, .{
+        .bytes = &bytes,
+        .to = support.server_address,
+        .transmit_at_ns = future,
+    });
+    var events: [4]engine_mod.Event = undefined;
+    var activity: [4]engine_mod.Handle = undefined;
+    for (0..3) |_| {
+        const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+        try std.testing.expectEqual(@as(u32, 0), result.datagrams_sent);
+        try std.testing.expectEqual(@as(usize, 1), node.transport.driver.pending.count);
+        try std.testing.expectEqualSlices(u8, &bytes, node.transport.driver.pending.ready(handle.index, future).?.bytes);
+    }
+    try std.testing.expect(node.transport.engine.abandon(handle));
+    const replacement = try node.transport.engine.dial(
+        &support.server_address,
+        node.transport.peerId(),
+        now,
+        [_]u8{18} ** limits.local_cid_length,
+    );
+    try std.testing.expectEqual(handle.index, replacement.index);
+    try std.testing.expect(handle.generation != replacement.generation);
+    _ = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    if (node.transport.driver.pending.owner(handle.index)) |owner| {
+        try std.testing.expectEqual(replacement, owner);
+    }
+}
+
+test "driver serves busy connections fairly under one aggregate send allowance" {
+    var node: Node = .{};
+    try node.init(13);
+    defer node.deinit();
+    node.transport.engine.limits.send_per_step_max = 1;
+    node.transport.engine.limits.work_per_step_max = 4;
+    const loopback = net.IpAddress{ .ip4 = .loopback(0) };
+    var sink = try udp_mod.Udp.bind(std.testing.io, loopback);
+    defer sink.close(std.testing.io);
+    const destination = sink.localAddress();
+    const now = try driver_mod.currentTime(std.testing.io);
+    for (0..3) |index| {
+        const handle = try node.transport.engine.dial(
+            &destination,
+            node.transport.peerId(),
+            now,
+            [_]u8{@intCast(30 + index)} ** limits.local_cid_length,
+        );
+        var bytes = [_]u8{@intCast(index + 1)};
+        try node.transport.driver.pending.put(handle, .{ .bytes = &bytes, .to = destination, .transmit_at_ns = now.nanos() });
+    }
+    var events: [8]engine_mod.Event = undefined;
+    var activity: [8]engine_mod.Handle = undefined;
+    for (0..3) |index| {
+        const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+        try std.testing.expectEqual(@as(u32, 1), result.datagrams_sent);
+        try std.testing.expect(result.work_processed <= 4);
+        try std.testing.expect(result.work_pending);
+        try std.testing.expectEqual(@as(?u64, 0), node.transport.nextTimeoutMs(result.now));
+        const datagram = try sink.receiveTimeout(std.testing.io, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } });
+        defer sink.release(datagram.handle) catch unreachable;
+        try std.testing.expectEqualSlices(u8, &.{@intCast(index + 1)}, datagram.bytes);
+    }
+    try std.testing.expectEqual(@as(usize, 0), node.transport.driver.pending.count);
+}
+
+fn allocateTransport(allocator: std.mem.Allocator) !void {
+    const keys = @import("wire/keys.zig");
+    const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{14}));
+    var transport: @import("transport.zig").Transport = .{};
+    try transport.init(allocator, std.testing.io, .{
+        .host = &host,
+        .bind = .{ .ip4 = .loopback(0) },
+        .limits = .{ .connections_max = 4, .handshaking_max = 4 },
+    });
+    defer transport.deinit(std.testing.io);
+}
+
+test "driver startup allocation failure releases transferred engine and TLS ownership" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocateTransport, .{});
+}
+
+test "driver next wakeup includes retained output with nanosecond precision" {
+    var node: Node = .{};
+    try node.init(15);
+    defer node.deinit();
+    var now = try driver_mod.currentTime(std.testing.io);
+    const handle = try node.transport.engine.dial(
+        &support.server_address,
+        node.transport.peerId(),
+        now,
+        [_]u8{44} ** limits.local_cid_length,
+    );
+    var bytes = [_]u8{1};
+    try node.transport.driver.pending.put(handle, .{
+        .bytes = &bytes,
+        .to = support.server_address,
+        .transmit_at_ns = now.nanos() + 17,
+    });
+    try std.testing.expectEqual(@as(?u64, 1), node.transport.nextTimeoutMs(now));
+    now.mono_ns = now.nanos() + 17;
+    try std.testing.expectEqual(@as(?u64, 0), node.transport.nextTimeoutMs(now));
+}

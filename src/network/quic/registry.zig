@@ -1,5 +1,7 @@
 const std = @import("std");
 const binding = @import("binding.zig");
+const api = @import("api.zig");
+const peer_id = @import("../wire/peer_id.zig");
 const connection = @import("connection.zig");
 const peer_index = @import("peer_index.zig");
 const route_table = @import("route_table.zig");
@@ -96,6 +98,7 @@ pub const Registry = struct {
         if (self.active_len == self.active.len) return null;
         const index = self.active[self.active_len];
         assert(self.slots[index].state == .free);
+        assert(self.route_keys[index].len == 0);
         self.active_len += 1;
         self.activity[index] = false;
         return index;
@@ -132,6 +135,31 @@ pub const Registry = struct {
         assert(self.keylog_arena.len == tls.keylog_capacity * self.slots.len);
         const start = tls.keylog_capacity * @as(usize, index);
         return self.keylog_arena[start..][0..tls.keylog_capacity];
+    }
+
+    pub fn indexPeer(self: *Registry, index: u16, id: peer_id.PeerId) void {
+        const slot = &self.slots[index];
+        assert(slot.state == .established);
+        assert(slot.peer_id == null);
+        slot.peer_id = id;
+        self.peers.insert(.{
+            .key = peer_index.keyOf(self.seed, &id),
+            .index = index,
+            .generation = slot.generation,
+            .used = true,
+        });
+    }
+
+    pub fn findPeer(self: *const Registry, id: *const peer_id.PeerId) ?api.Handle {
+        var candidates = self.peers.candidates(peer_index.keyOf(self.seed, id));
+        while (candidates.next()) |entry| {
+            assert(entry.index < self.slots.len);
+            const slot = &self.slots[entry.index];
+            if (slot.generation != entry.generation or slot.state == .free) continue;
+            const stored = slot.peer_id orelse continue;
+            if (stored.eql(id)) return .{ .index = entry.index, .generation = entry.generation };
+        }
+        return null;
     }
 
     pub fn findRoute(self: *const Registry, cid: *const binding.Cid) ?u16 {

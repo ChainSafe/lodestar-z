@@ -8,6 +8,11 @@ pub const ShutdownDirection = enum { read, write };
 pub const Now = struct {
     mono_ms: u64,
     unix_s: i64,
+    mono_ns: ?u64 = null,
+
+    pub fn nanos(self: Now) u64 {
+        return self.mono_ns orelse self.mono_ms *| 1_000_000;
+    }
 };
 
 pub const CloseReason = union(enum) {
@@ -24,6 +29,7 @@ pub const CloseReason = union(enum) {
 pub const Sent = struct {
     bytes: []u8,
     to: Address,
+    transmit_at_ns: u64 = 0,
 };
 
 pub const PendingClose = struct { reason: CloseReason, code: u64, stage: enum { waiting, armed } = .waiting };
