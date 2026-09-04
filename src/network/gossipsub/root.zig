@@ -4,6 +4,7 @@ pub const topic = @import("topic.zig");
 pub const mcache = @import("mcache.zig");
 pub const state = @import("state.zig");
 pub const frame = @import("frame.zig");
+pub const score = @import("score.zig");
 pub const gossipsub = @import("gossipsub.zig");
 
 pub const Gossipsub = gossipsub.Gossipsub;
@@ -17,6 +18,7 @@ test {
     _ = mcache;
     _ = state;
     _ = frame;
+    _ = score;
     _ = gossipsub;
     _ = @import("gossipsub_test.zig");
 }
