@@ -1,4 +1,5 @@
 const std = @import("std");
+const snappy = @import("snappy");
 const constants = @import("constants.zig");
 const protobuf = @import("protobuf.zig");
 const topic_mod = @import("topic.zig");
@@ -22,14 +23,23 @@ pub const Options = struct {
     seen_capacity: usize = 65_536,
     mcache_capacity: usize = 8_192,
     mcache_arena_bytes: usize = 8 * 1024 * 1024,
+    /// Decompressed bytes surfaced in one pump; the host consumes them before
+    /// the next pump. Full means new messages wait, applying backpressure.
+    decompressed_arena_bytes: usize = 4 * 1024 * 1024,
     seen_ttl_ms: u64 = constants.seenTtlMs(32, 12),
 };
 
 pub const InitError = Allocator.Error;
 
+pub const MessageId = topic_mod.MessageId;
+
+pub const Verdict = enum { accept, reject, ignore };
+
 pub const Event = union(enum) {
-    /// A new message the host must validate and then close out with `report`.
-    message: struct { peer: Handle, topic: []const u8, bytes: []const u8 },
+    /// A new message the host must validate and then close out with
+    /// `report(handle, verdict)`. `bytes` is the decompressed payload, valid
+    /// until the next pump; the host copies what it needs.
+    message: struct { handle: MessageId, peer: Handle, topic: []const u8, bytes: []const u8 },
     subscription_change: struct { peer: Handle, topic: []const u8, subscribed: bool },
 };
 
@@ -65,6 +75,24 @@ const PeerIo = struct {
         self.send_head += bytes.len;
         return true;
     }
+
+    /// Frames a publish RPC directly into the free tail of the send buffer,
+    /// avoiding an intermediate copy of the message data. Fails when the frame
+    /// does not fit (a large message the send path streams instead).
+    fn appendMessage(self: *PeerIo, topic_str: []const u8, data: []const u8) bool {
+        if (self.send_head == self.send_tail) {
+            self.send_head = 0;
+            self.send_tail = 0;
+        }
+        const body_size = protobuf.messageSize(data, topic_str);
+        const total = protobuf.varintLen(body_size) + body_size;
+        if (self.send_head + total > self.send.len) return false;
+        var writer = protobuf.Writer.init(self.send[self.send_head..]);
+        writer.varint(body_size);
+        protobuf.writeMessage(&writer, data, topic_str);
+        self.send_head += writer.len;
+        return true;
+    }
 };
 
 pub const Gossipsub = struct {
@@ -77,14 +105,20 @@ pub const Gossipsub = struct {
     io_arena: []u8,
     heartbeat_at: u64 = 0,
     scratch: []u8,
+    msg_scratch: []u8,
+    decompressed: []u8,
+    decompressed_used: usize = 0,
     counters: Counters = .{},
 
     pub const Counters = struct {
         messages_received: u64 = 0,
         messages_published: u64 = 0,
+        messages_forwarded: u64 = 0,
+        duplicates: u64 = 0,
         rpcs_received: u64 = 0,
         send_dropped: u64 = 0,
         malformed_rpcs: u64 = 0,
+        arena_full: u64 = 0,
     };
 
     pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
@@ -119,6 +153,10 @@ pub const Gossipsub = struct {
         }
         const scratch = try allocator.alloc(u8, constants.read_scratch_len);
         errdefer allocator.free(scratch);
+        const msg_scratch = try allocator.alloc(u8, constants.GOSSIP_MAX_SIZE);
+        errdefer allocator.free(msg_scratch);
+        const decompressed = try allocator.alloc(u8, options.decompressed_arena_bytes);
+        errdefer allocator.free(decompressed);
 
         return .{
             .allocator = allocator,
@@ -129,10 +167,14 @@ pub const Gossipsub = struct {
             .io = io,
             .io_arena = io_arena,
             .scratch = scratch,
+            .msg_scratch = msg_scratch,
+            .decompressed = decompressed,
         };
     }
 
     pub fn deinit(self: *Gossipsub) void {
+        self.allocator.free(self.decompressed);
+        self.allocator.free(self.msg_scratch);
         self.allocator.free(self.scratch);
         self.allocator.free(self.io);
         self.allocator.free(self.io_arena);
@@ -201,9 +243,79 @@ pub const Gossipsub = struct {
         }
     }
 
+    // Publish and forward ----------------------------------------------------
+
+    /// Originates a message on `topic_str`. Compresses the SSZ, caches it, and
+    /// sends it to the topic mesh (or fanout when unsubscribed).
+    pub fn publish(self: *Gossipsub, topic_str: []const u8, ssz: []const u8, now: Now) bool {
+        if (ssz.len > constants.MAX_PAYLOAD_SIZE) return false;
+        const topic = self.state.internTopic(topic_str) orelse return false;
+        const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return false;
+        const data = self.msg_scratch[0..clen];
+        const id = topic_mod.validMessageId(ssz);
+        _ = self.seen.add(id, now.mono_ms);
+        _ = self.mcache.put(id, topic_str, data, std.math.maxInt(u16));
+        self.mcache.validate(id);
+        const peers = if (self.state.subscribed(topic))
+            self.state.mesh(topic)
+        else
+            self.fillFanout(topic, now);
+        self.deliver(peers, topic_str, id, data, null);
+        self.counters.messages_published += 1;
+        return true;
+    }
+
+    /// Closes out a message the host validated. Accept forwards it to the mesh
+    /// (minus the source and any peer that sent IDONTWANT); reject and ignore
+    /// drop it, leaving it unvalidated so it is never gossiped.
+    pub fn report(self: *Gossipsub, handle: MessageId, verdict: Verdict) void {
+        if (verdict != .accept) return;
+        self.mcache.validate(handle);
+        const source = self.mcache.sourceOf(handle);
+        const cached = self.mcache.get(handle, self.msg_scratch) orelse return;
+        const topic = self.state.findTopic(cached.topic) orelse return;
+        if (!self.state.subscribed(topic)) return;
+        self.deliver(self.state.mesh(topic), cached.topic, handle, cached.data, source);
+        self.counters.messages_forwarded += 1;
+    }
+
+    fn deliver(
+        self: *Gossipsub,
+        peers: *state_mod.PeerSet,
+        topic_str: []const u8,
+        id: MessageId,
+        data: []const u8,
+        source: ?u16,
+    ) void {
+        var it = peers.iterator(.{});
+        while (it.next()) |peer| {
+            const index: u16 = @intCast(peer);
+            if (source != null and index == source.?) continue;
+            if (self.state.suppresses(index, id)) continue;
+            if (!self.io[index].appendMessage(topic_str, data)) self.counters.send_dropped += 1;
+        }
+    }
+
+    fn fillFanout(self: *Gossipsub, topic: u16, now: Now) *state_mod.PeerSet {
+        const fanout = self.state.fanout(topic);
+        self.state.topics[topic].fanout_last_ms = now.mono_ms;
+        if (fanout.count() < constants.mesh_d) {
+            var need = constants.mesh_d - fanout.count();
+            var it = self.state.subscribers(topic).iterator(.{});
+            while (it.next()) |peer| {
+                if (need == 0) break;
+                if (fanout.isSet(peer)) continue;
+                fanout.set(peer);
+                need -= 1;
+            }
+        }
+        return fanout;
+    }
+
     // Pump -------------------------------------------------------------------
 
     pub fn pump(self: *Gossipsub, engine: *Engine, now: Now, events: []Event) usize {
+        self.decompressed_used = 0;
         var count: usize = 0;
         for (self.io, 0..) |*peer_io, index| {
             if (!self.state.peers[index].active) continue;
@@ -310,12 +422,58 @@ pub const Gossipsub = struct {
         }) |item| {
             switch (item) {
                 .subscription => |sub| count = self.onSubscription(index, sub, events, count),
+                .message => |msg| count = self.onMessage(index, msg, now, events, count),
                 .graft => |topic_str| self.onGraft(index, topic_str, now),
                 .prune => |prune| self.onPrune(index, prune, now),
-                else => {}, // messages and gossip land in later slices
+                else => {}, // gossip control lands in later slices
             }
         }
         return count;
+    }
+
+    fn onMessage(
+        self: *Gossipsub,
+        index: u16,
+        msg: protobuf.Message,
+        now: Now,
+        events: []Event,
+        start: usize,
+    ) usize {
+        if (msg.signed) return start; // StrictNoSign violation
+        if (msg.data.len > constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE)) return start;
+        const topic = self.state.internTopic(msg.topic) orelse return start;
+        if (!self.state.subscribed(topic)) return start; // not a topic we asked for
+        const size = snappy.raw.uncompressedLength(msg.data) catch {
+            _ = self.seen.add(topic_mod.invalidMessageId(msg.data), now.mono_ms);
+            return start;
+        };
+        if (size > constants.MAX_PAYLOAD_SIZE) return start;
+        const room = self.decompressed[self.decompressed_used..];
+        if (size > room.len) {
+            self.counters.arena_full += 1;
+            return start;
+        }
+        const written = snappy.raw.uncompress(msg.data, room[0..size]) catch {
+            _ = self.seen.add(topic_mod.invalidMessageId(msg.data), now.mono_ms);
+            return start;
+        };
+        const payload = room[0..written];
+        const id = topic_mod.validMessageId(payload);
+        if (!self.seen.add(id, now.mono_ms)) {
+            self.counters.duplicates += 1;
+            return start;
+        }
+        self.decompressed_used += written;
+        self.counters.messages_received += 1;
+        _ = self.mcache.put(id, self.state.topicString(topic), msg.data, index);
+        if (start >= events.len) return start;
+        events[start] = .{ .message = .{
+            .handle = id,
+            .peer = self.state.peers[index].conn,
+            .topic = self.state.topicString(topic),
+            .bytes = payload,
+        } };
+        return start + 1;
     }
 
     fn onGraft(self: *Gossipsub, index: u16, topic_str: []const u8, now: Now) void {

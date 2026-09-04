@@ -7,7 +7,7 @@ const assert = std.debug.assert;
 const Handle = engine_mod.Handle;
 const StreamHandle = engine_mod.StreamHandle;
 const MessageId = [constants.message_id_length]u8;
-const PeerSet = std.StaticBitSet(constants.peers_cap);
+pub const PeerSet = std.StaticBitSet(constants.peers_cap);
 
 pub const Version = enum(u8) { v1_0, v1_1, v1_2 };
 
