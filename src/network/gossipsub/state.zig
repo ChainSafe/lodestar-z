@@ -249,10 +249,20 @@ pub const State = struct {
         return false;
     }
 
-    pub fn pruneBackoffs(self: *State, now_ms: u64) void {
+    /// The expiry of a (peer, topic) backoff, if one is tracked.
+    pub fn backoffUntil(self: *const State, peer: u16, topic: u16) ?u64 {
+        for (self.backoffs[0..self.backoff_len]) |entry| {
+            if (entry.peer == peer and entry.topic == topic) return entry.until_ms;
+        }
+        return null;
+    }
+
+    /// Drops backoffs that have expired, keeping each `slack_ms` past its expiry
+    /// so a grafting decision that adds slack still sees the entry.
+    pub fn pruneBackoffs(self: *State, now_ms: u64, slack_ms: u64) void {
         var index: usize = 0;
         while (index < self.backoff_len) {
-            if (now_ms >= self.backoffs[index].until_ms) {
+            if (now_ms >= self.backoffs[index].until_ms +| slack_ms) {
                 self.backoffs[index] = self.backoffs[self.backoff_len - 1];
                 self.backoff_len -= 1;
             } else index += 1;
@@ -311,6 +321,6 @@ test "state suppresses ids per peer and tracks backoff" {
     state.addBackoff(peer.index, 0, 1_000);
     try std.testing.expect(state.backedOff(peer.index, 0, 500));
     try std.testing.expect(!state.backedOff(peer.index, 0, 1_000));
-    state.pruneBackoffs(1_000);
+    state.pruneBackoffs(1_000, 0);
     try std.testing.expect(!state.backedOff(peer.index, 0, 500));
 }
