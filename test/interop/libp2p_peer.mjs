@@ -3,8 +3,10 @@ import {createInterface} from "node:readline";
 import {quic} from "@chainsafe/libp2p-quic";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {StrictNoSign, gossipsub} from "@libp2p/gossipsub";
+import {RPC} from "@libp2p/gossipsub/message";
 import {identify} from "@libp2p/identify";
 import {multiaddr} from "@multiformats/multiaddr";
+import {encode} from "it-length-prefixed";
 import {createLibp2p} from "libp2p";
 import {compressSync, uncompressSync} from "snappy";
 import {
@@ -156,6 +158,18 @@ async function request(address, large) {
   return {...summary(decoded.bytes), context: decoded.context};
 }
 
+async function rawPublish(address, seed, size) {
+  const signal = AbortSignal.timeout(30000);
+  const stream = await node.dialProtocol(multiaddr(loopback(address)), protocols, {signal});
+  const data = payload(size, seed);
+  const bytes = encode
+    .single(RPC.encode({messages: [{data: compressSync(data), topic: TOPIC}]}), {maxDataLength: RPC_MAX})
+    .subarray();
+  await sendFragments(stream, bytes, signal);
+  await stream.close({signal});
+  return summary(data);
+}
+
 async function execute(command) {
   switch (command.op) {
     case "listen":
@@ -181,6 +195,8 @@ async function execute(command) {
     }
     case "request":
       return request(command.address, command.large === true);
+    case "rawPublish":
+      return rawPublish(command.address, command.seed ?? 0x6d2b79f5, command.size ?? MAX);
     case "snapshot":
       return {
         connections: node.getConnections().length,

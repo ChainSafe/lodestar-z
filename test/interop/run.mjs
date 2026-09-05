@@ -249,6 +249,17 @@ async function exercise(version, binary) {
         30000
       );
     }
+    if (version === "v12") {
+      const raw = await js.command("rawPublish", {address: zigListen.address, seed: 0x6d2b7a03, size: MAX}, 30000);
+      await waitFor(() => zig.events.some((event) => event.event === "message" && event.sha256 === raw.sha256), 30000);
+      const published = await zig.command("publish", {seed: 0x6d2b7a04, size: MAX, topic: TOPIC}, 30000);
+      assert(published.queued > 0, "Zig exact gossip had no mesh recipient");
+      const reverse = summary(payload(MAX, 0x6d2b7a04));
+      await waitFor(
+        () => js.events.some((event) => event.event === "message" && event.sha256 === reverse.sha256),
+        30000
+      );
+    }
     await assert.rejects(zig.command("publish", {size: MAX + 1}), /MessageTooLarge/);
     await assert.rejects(js.command("publish", {size: MAX + 1}), /false|assert/i);
     if (version === "v12") {
