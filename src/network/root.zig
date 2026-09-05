@@ -1,3 +1,4 @@
+pub const peers = @import("peers/root.zig");
 pub const constants = @import("constants.zig");
 pub const types = @import("types.zig");
 pub const wire = @import("wire/root.zig");
@@ -34,6 +35,7 @@ pub const Multiaddr = wire.multiaddr.Multiaddr;
 pub const KeyPair = wire.keys.KeyPair;
 
 test {
+    _ = peers;
     _ = constants;
     _ = types;
     _ = wire;
