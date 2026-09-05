@@ -120,10 +120,12 @@ pub const Peers = struct {
         row.connection = null;
         row.disconnected_at = now;
         row.retain_until = now +| self.retention_ms;
+        row.negative = negative;
+        // Topic reclamation cannot reuse a generation while its backoff is live.
         for (self.backoffs[@as(usize, ref.index) * constants.topics_cap ..][0..constants.topics_cap]) |entry| {
             row.retain_until = @max(row.retain_until, entry.until);
+            if (entry.topic_generation != 0 and now < entry.until) row.negative = true;
         }
-        row.negative = negative;
     }
 
     pub fn retain(self: *Peers, ref: Ref) void {
@@ -252,4 +254,39 @@ test "gossip policy identity generation exhaustion cannot revive stale reference
     try std.testing.expectEqual(first.index, next.index);
     try std.testing.expectEqual(first.generation + 1, next.generation);
     try std.testing.expect(!peers.matches(first));
+}
+
+test "gossip policy review I1 live backoff prevents immediate inbound eviction" {
+    var peers = try Peers.init(std.testing.allocator, 100_000);
+    defer peers.deinit(std.testing.allocator);
+    var metadata: Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
+    const connection: Handle = .{ .index = 0, .generation = 1 };
+    for (0..capacity - outbound_reserve) |i| {
+        std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
+        const ref = peers.admit(connection, &metadata, i).admitted.peer;
+        if (i == 0) peers.addBackoff(ref, 0, 1, 0, 60_000);
+        peers.disconnect(ref, i, i != 0);
+    }
+    const original: Ref = .{ .index = 0, .generation = peers.rows[0].generation };
+    metadata.identity.bytes[2] = 1;
+    try std.testing.expectEqual(Admission.capacity, peers.admit(connection, &metadata, 1000));
+    try std.testing.expect(peers.backedOff(original, 0, 1, 1000));
+    metadata.identity = peers.rows[0].identity;
+    const resumed = peers.admit(connection, &metadata, 1000).admitted;
+    try std.testing.expect(!resumed.fresh);
+    try std.testing.expectEqual(original, resumed.peer);
+    try std.testing.expect(peers.backedOff(original, 0, 1, 1000));
+    peers.disconnect(resumed.peer, 1000, false);
+    metadata.direction = .outbound;
+    metadata.identity.bytes[2] = 1;
+    for (0..outbound_reserve) |i| {
+        std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
+        const ref = peers.admit(connection, &metadata, 1001 + i).admitted.peer;
+        peers.disconnect(ref, 1001 + i, true);
+    }
+    metadata.identity.bytes[2] = 2;
+    const fallback = peers.admit(connection, &metadata, 1100).admitted;
+    try std.testing.expect(fallback.penalty_evicted);
+    try std.testing.expect(fallback.peer.index != 0);
+    try std.testing.expect(peers.backedOff(original, 0, 1, 1100));
 }

@@ -716,7 +716,8 @@ pub const Gossipsub = struct {
             self.topics_remaining -= 1;
             const topic = &self.state.topics[index];
             if (!topic.active) continue;
-            const context = self.meshContext(now.mono_ms);
+            var context = self.meshContext(now.mono_ms);
+            context.use_snapshot = true;
             if (!topic.subscribed and topic.fanout.count() > 0) _ = self.mesh_policy.fanout(&context, index, false);
             self.maintainTopic(index, now);
             if (self.opportunistic_pending) self.opportunisticGraft(index, now);
@@ -1619,4 +1620,53 @@ test "gossip policy subscription retry preserves its first pressure deadline" {
     g.last_now_ms = 1;
     g.sendSubscriptions(peer.index);
     try std.testing.expectEqual(@as(?u64, 0), g.io.peers[peer.index].subscription_since);
+}
+
+test "gossip policy review I4 heartbeat fanout and advertisements share one snapshot" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 17, .topics_per_pump = 1 });
+    defer g.deinit();
+    const first_name = "/eth2/01020304/beacon_block/ssz_snappy";
+    const second_name = "/eth2/01020304/beacon_aggregate_and_proof/ssz_snappy";
+    const first = g.internTopic(first_name).?;
+    const second = g.internTopic(second_name).?;
+    for (0..9) |i| {
+        const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+        g.state.setSubscription(first, peer.index, true);
+        g.state.setSubscription(second, peer.index, true);
+    }
+    const start: Now = .{ .mono_ms = 1, .unix_s = 0 };
+    _ = try g.publish(first_name, "first", start);
+    _ = try g.publish(second_name, "second", start);
+    g.heartbeat(start);
+    g.maintainTopics(start);
+    try std.testing.expectEqual(@as(usize, 1), g.topic_cursor);
+    const retained = g.state.fanout(second).findFirstSet().?;
+    var advertised: u16 = 0;
+    for (0..9) |i| if (!g.state.fanout(second).isSet(i)) {
+        advertised = @intCast(i);
+    };
+    try std.testing.expect(g.scores.setAppScore(g.logical(@intCast(retained)).index, -10_000));
+    try std.testing.expect(g.scores.setAppScore(g.logical(advertised).index, -10_000));
+    for (g.io.peers) |*io| io.resetTx(&g.store);
+    g.last_now_ms = 2;
+    g.maintainTopics(.{ .mono_ms = 2, .unix_s = 0 });
+    try std.testing.expect(g.state.fanout(second).isSet(retained));
+    try std.testing.expectEqual(@as(usize, 8), g.state.fanout(second).count());
+    try std.testing.expectEqual(@as(usize, 1), g.io.peers[advertised].control.count);
+    try std.testing.expectEqual(@as(usize, 0), g.io.peers[retained].control.count);
+    g.maintainTopics(.{ .mono_ms = 3, .unix_s = 0 });
+    try std.testing.expectEqual(@as(usize, 0), g.topics_remaining);
+    for (g.io.peers) |*io| io.resetTx(&g.store);
+    g.last_now_ms = 701;
+    g.heartbeat(.{ .mono_ms = 701, .unix_s = 0 });
+    g.maintainTopics(.{ .mono_ms = 701, .unix_s = 0 });
+    g.maintainTopics(.{ .mono_ms = 702, .unix_s = 0 });
+    try std.testing.expect(!g.state.fanout(second).isSet(retained));
+    try std.testing.expectEqual(@as(usize, 7), g.state.fanout(second).count());
+    try std.testing.expectEqual(@as(usize, 0), g.io.peers[advertised].control.count);
+    try std.testing.expectEqual(@as(usize, 0), g.io.peers[retained].control.count);
+    const live = g.state.fanout(second).findFirstSet().?;
+    try std.testing.expect(g.scores.setAppScore(g.logical(@intCast(live)).index, -10_000));
+    _ = try g.publish(second_name, "live publish", .{ .mono_ms = 703, .unix_s = 0 });
+    try std.testing.expect(!g.state.fanout(second).isSet(live));
 }
