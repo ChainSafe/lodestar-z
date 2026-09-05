@@ -2,10 +2,16 @@ const std = @import("std");
 const ssz = @import("ssz");
 const napi = @import("zapi:zapi").napi;
 const constants = @import("constants");
+const ct = @import("consensus_types");
 
 pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Type) !napi.Value {
     switch (ST.kind) {
         .uint => {
+            if (@bitSizeOf(ST.Type) > 64) {
+                var words: [@divExact(@bitSizeOf(ST.Type), 64)]u64 = undefined;
+                inline for (0..words.len) |i| words[i] = @truncate(value.* >> (64 * i));
+                return env.createBigintWords(0, &words);
+            }
             if (ST.Type == u64 and value.* == constants.FAR_FUTURE_EPOCH) {
                 return try (try env.getGlobal()).getNamedProperty("Infinity");
             }
@@ -63,7 +69,18 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
             const obj = try env.createObject();
             inline for (ST.fields) |field| {
                 const field_value = &@field(value, field.name);
-                const napi_field_value = try sszValueToNapiValue(env, field.type, field_value);
+                const napi_field_value = if (comptime std.mem.eql(u8, field.name, "blob_gas_used") or
+                    std.mem.eql(u8, field.name, "excess_blob_gas") or
+                    std.mem.eql(u8, field.name, "deposit_requests_start_index") or
+                    std.mem.eql(u8, field.name, "deposit_balance_to_consume") or
+                    std.mem.eql(u8, field.name, "exit_balance_to_consume") or
+                    std.mem.eql(u8, field.name, "consolidation_balance_to_consume") or
+                    (std.mem.eql(u8, field.name, "amount") and
+                        (ST == ct.capella.Withdrawal or ST == ct.electra.PendingPartialWithdrawal or
+                            ST == ct.electra.WithdrawalRequest)))
+                    try env.createBigintUint64(field_value.*)
+                else
+                    try sszValueToNapiValue(env, field.type, field_value);
                 try obj.setNamedProperty(snakeToCamel(field.name), napi_field_value);
             }
             return obj;

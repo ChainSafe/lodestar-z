@@ -5,7 +5,7 @@ const m = @import("metrics");
 const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
 
 /// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
-pub var state_transition = m.initializeNoop(Metrics);
+pub threadlocal var state_transition = m.initializeNoop(Metrics);
 
 pub const StateCloneSource = enum {
     state_transition,
@@ -99,6 +99,7 @@ const Metrics = struct {
         self.pre_state_validators_nodes_populated_miss.deinit();
         self.pre_state_validators_nodes_populated_hit.deinit();
         self.proposer_rewards.deinit();
+        self.* = m.initializeNoop(Metrics);
     }
 };
 

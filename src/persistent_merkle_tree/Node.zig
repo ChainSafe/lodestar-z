@@ -265,6 +265,7 @@ pub const Pool = struct {
     allocator: Allocator,
     nodes: std.MultiArrayList(Node).Slice,
     next_free_node: Id,
+    nodes_in_use: usize,
     // Reused scratch for chunked_leaf root recompute: single-threaded, and chunked_leaf is a leaf
     // of getRoot's recursion, so at most one computeRoot uses it at a time.
     chunked_leaf_scratch: [ChunkedLeaf.K / 2][32]u8 align(64),
@@ -290,6 +291,7 @@ pub const Pool = struct {
             .allocator = opts.allocator,
             .nodes = undefined,
             .next_free_node = @enumFromInt(max_depth),
+            .nodes_in_use = max_depth,
             .chunked_leaf_scratch = undefined,
         };
 
@@ -347,12 +349,8 @@ pub const Pool = struct {
     }
 
     /// Returns the number of nodes currently in use (not free).
-    pub fn getNodesInUse(self: *Pool) usize {
-        var count: usize = 0;
-        for (self.nodes.items(.state)) |s| {
-            if (!s.isFree()) count += 1;
-        }
-        return count;
+    pub fn getNodesInUse(self: *const Pool) usize {
+        return self.nodes_in_use;
     }
 
     /// Pop the next free slot from the free list. Caller must initialise
@@ -364,6 +362,7 @@ pub const Pool = struct {
         const state_col = self.nodes.items(.state);
         std.debug.assert(state_col[idx].isFree());
         self.next_free_node = state_col[idx].nextFree();
+        self.nodes_in_use += 1;
         return n;
     }
 
@@ -567,6 +566,7 @@ pub const Pool = struct {
                 for (out[0..i]) |node_id| {
                     states[@intFromEnum(node_id)] = State.initFree(self.next_free_node);
                     self.next_free_node = node_id;
+                    self.nodes_in_use -= 1;
                 }
                 return error.PoolExhausted;
             }
@@ -720,6 +720,7 @@ pub const Pool = struct {
             // in `state` (the State.initFree representation).
             states[@intFromEnum(id)] = State.initFree(self.next_free_node);
             self.next_free_node = id;
+            self.nodes_in_use -= 1;
         }
     }
 };
@@ -1550,6 +1551,7 @@ fn restoreChildrenAndFreeParents(
         // Child refs are restored, so return only the parent slot.
         parent_state.* = State.initFree(pool.next_free_node);
         pool.next_free_node = parent;
+        pool.nodes_in_use -= 1;
     }
 }
 

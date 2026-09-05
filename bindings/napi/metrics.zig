@@ -9,13 +9,27 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
-var initialized: bool = false;
+threadlocal var historical: ?bool = null;
 
-/// JS: metrics.init() → void
-pub fn init() !void {
-    if (initialized) return;
-    try state_transition.metrics.init(allocator, js.io(), .{});
-    initialized = true;
+/// JS: metrics.init({historical?: boolean}) → void
+pub fn init(options: ?js.Value) !void {
+    var use_historical_prefix = false;
+    if (options) |value| {
+        const raw = value.toValue();
+        if (try raw.hasNamedProperty("historical")) {
+            use_historical_prefix = try (try raw.getNamedProperty("historical")).getValueBool();
+        }
+    }
+    if (historical) |previous| {
+        if (previous != use_historical_prefix) return error.MetricsAlreadyInitialized;
+        return;
+    }
+    if (use_historical_prefix) {
+        try state_transition.metrics.init(allocator, js.io(), .{ .prefix = "lodestar_historical_state_" });
+    } else {
+        try state_transition.metrics.init(allocator, js.io(), .{});
+    }
+    historical = use_historical_prefix;
 }
 
 /// JS: metrics.scrapeMetrics() → string
@@ -28,7 +42,7 @@ pub fn scrapeMetrics() !js.String {
 }
 
 pub fn deinit() void {
-    if (!initialized) return;
+    if (historical == null) return;
     state_transition.metrics.state_transition.deinit();
-    initialized = false;
+    historical = null;
 }
