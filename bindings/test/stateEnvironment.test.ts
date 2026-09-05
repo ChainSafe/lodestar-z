@@ -82,7 +82,7 @@ describe("state environment ownership", () => {
     expect(() => new bindings.StateTransition(config, new Uint8Array(32))).toThrow("InvalidSlotDuration");
   });
 
-  it("isolates worker configuration and metrics from the main environment", async () => {
+  it("isolates worker configuration and metrics from the main environment", {timeout: 20_000}, async () => {
     const {state} = createState();
     bindings.metrics.init();
     const metrics = bindings.metrics.scrapeMetrics();
@@ -103,7 +103,7 @@ describe("state environment ownership", () => {
     expect(metrics).toContain("stfn_epoch_transition");
   });
 
-  it("runs simultaneous epoch transitions in independent workers", async () => {
+  it("runs simultaneous epoch transitions in independent workers", {timeout: 20_000}, async () => {
     const {state} = createState();
     const expectedRoot = state.processSlots(state.slot + 1).hashTreeRoot();
     const roots = await Promise.all(

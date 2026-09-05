@@ -18,8 +18,6 @@ var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
 fn init(old_ref_count: u32) !void {
-    try pool.state.init();
-    errdefer pool.state.deinit();
     try config.state.init();
     errdefer config.state.deinit();
 

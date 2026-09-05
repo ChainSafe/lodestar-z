@@ -58,7 +58,7 @@ fn poolSizeFromEnvironment() !u32 {
 const State = struct {
     pool_rc: ?*PoolRc = null,
 
-    pub fn init(self: *State) !void {
+    fn init(self: *State) !void {
         if (self.pool_rc != null) return;
 
         const pool_size = try poolSizeFromEnvironment();
@@ -81,13 +81,8 @@ const State = struct {
         }
     }
 
-    pub fn pool(self: *State) *Node.Pool {
-        std.debug.assert(self.pool_rc != null);
-        return &self.pool_rc.?.instance.pool;
-    }
-
-    pub fn poolRc(self: *State) *PoolRc {
-        std.debug.assert(self.pool_rc != null);
+    pub fn poolRc(self: *State) !*PoolRc {
+        try self.init();
         return self.pool_rc.?;
     }
 };

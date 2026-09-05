@@ -137,15 +137,16 @@ fn stateBytesFork(beacon_config: *const c.BeaconConfig, bytes: []const u8) !c.Fo
 // -------------------------
 pub fn createFromBytes(bytes: js.Uint8Array, setup: ?*const StateTransition) !BeaconStateView {
     const config_rc = if (setup) |value| value.config_rc else config.state.current orelse return error.ConfigNotInitialized;
-    const owner = &pool.state.poolRc().instance;
+    const byte_slice = try bytes.toSlice();
+    const fork_seq = try stateBytesFork(&config_rc.instance.config, byte_slice);
+    const pool_rc = try pool.state.poolRc();
+    const owner = &pool_rc.instance;
     const allocator = owner.memory.allocator();
     defer owner.reportMemory();
     const state = try allocator.create(AnyBeaconState);
     errdefer allocator.destroy(state);
 
-    const byte_slice = try bytes.toSlice();
-    const fork_seq = try stateBytesFork(&config_rc.instance.config, byte_slice);
-    state.* = try AnyBeaconState.deserialize(allocator, pool.state.pool(), fork_seq, byte_slice);
+    state.* = try AnyBeaconState.deserialize(allocator, &owner.pool, fork_seq, byte_slice);
     errdefer state.deinit();
 
     const cached_state = try allocator.create(CachedBeaconState);
@@ -156,7 +157,7 @@ pub fn createFromBytes(bytes: js.Uint8Array, setup: ?*const StateTransition) !Be
 
     return .{
         .cached_state = cached_state,
-        .pool_rc = pool.state.poolRc().ref(),
+        .pool_rc = pool_rc.ref(),
         .config_rc = config_rc.ref(),
     };
 }
@@ -1090,7 +1091,7 @@ pub fn createMultiProof(self: *const BeaconStateView, descriptor: js.Uint8Array)
 
     var proof = persistent_merkle_tree.proof.createProof(
         allocator,
-        pool.state.pool(),
+        cached_state.state.nodePool(),
         root_node,
         proof_input,
     ) catch {
