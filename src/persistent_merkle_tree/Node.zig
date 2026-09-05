@@ -736,49 +736,82 @@ pub const Id = enum(u32) {
         return noChildKind(node_id, kind);
     }
 
-    /// Returns the root hash, computing any lazy branch nodes on demand.
+    /// Returns the root hash, computing lazy branches with bounded, allocation-free traversal.
+    /// Branch paths must be acyclic and contain at most `max_depth` branches.
+    /// Opaque container callbacks retain their own hashing behavior.
     pub fn getRoot(node_id: Id, pool: *Pool) *const [32]u8 {
         const idx = @intFromEnum(node_id);
-        const states = pool.nodes.items(.state);
+        const kind = pool.nodes.items(.state)[idx].kind();
         const roots = pool.nodes.items(.root);
-        const kind = states[idx].kind();
-
         switch (kind) {
             .zero, .leaf => return &roots[idx],
             .free => @panic("getRoot called on .free slot — use-after-free"),
-            .branch => {
-                if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
-                    return &roots[idx];
-                }
-                const c = pool.nodes.items(.payload)[idx];
-                const left_root = unpackLeft(c).getRoot(pool);
-                const right_root = unpackRight(c).getRoot(pool);
-                var hash: [32]u8 = undefined;
-                hashOne(&hash, left_root, right_root);
-                roots[idx] = hash;
-                return &roots[idx];
-            },
-            .chunked_leaf => {
-                if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
-                    return &roots[idx];
-                }
-                const storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
-                var hash: [32]u8 = undefined;
-                storage.computeRoot(&pool.chunked_leaf_scratch, &hash);
-                roots[idx] = hash;
-                return &roots[idx];
-            },
-            .container_struct => {
-                if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
-                    return &roots[idx];
-                }
-                const ref_ptr = containerStructRef(pool.nodes.items(.payload), idx);
-                var hash: [32]u8 = undefined;
-                ref_ptr.get_root(ref_ptr.ptr, &hash);
-                roots[idx] = hash;
-                return &roots[idx];
-            },
+            .branch, .chunked_leaf, .container_struct => {},
         }
+        if (std.mem.eql(u8, &roots[idx], &lazy_sentinel)) computeRoot(node_id, pool);
+        return &roots[idx];
+    }
+
+    fn computeRoot(node_id: Id, pool: *Pool) void {
+        const Frame = struct { node: Id, right_visited: bool };
+        var stack: [max_depth]Frame = undefined;
+        var depth: usize = 0;
+        var current = node_id;
+        const states = pool.nodes.items(.state);
+        const roots = pool.nodes.items(.root);
+        const payloads = pool.nodes.items(.payload);
+
+        // Each uncached branch contributes at most two child visits, including shared subtrees.
+        var remaining_visits = 2 * @as(u64, pool.nodes.len) + 1;
+        while (remaining_visits > 0) : (remaining_visits -= 1) {
+            const idx = @intFromEnum(current);
+            switch (states[idx].kind()) {
+                .zero, .leaf => {},
+                .free => @panic("getRoot called on .free slot — use-after-free"),
+                .branch => {
+                    if (std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
+                        if (depth == max_depth) @panic("getRoot branch path exceeds max_depth");
+                        stack[depth] = .{ .node = current, .right_visited = false };
+                        depth += 1;
+                        current = unpackLeft(payloads[idx]);
+                        continue;
+                    }
+                },
+                .chunked_leaf => {
+                    if (std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
+                        const storage = chunkedLeafPtr(payloads, idx);
+                        var hash: [32]u8 = undefined;
+                        storage.computeRoot(&pool.chunked_leaf_scratch, &hash);
+                        roots[idx] = hash;
+                    }
+                },
+                .container_struct => {
+                    if (std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
+                        const ref_ptr = containerStructRef(payloads, idx);
+                        var hash: [32]u8 = undefined;
+                        ref_ptr.get_root(ref_ptr.ptr, &hash);
+                        roots[idx] = hash;
+                    }
+                },
+            }
+
+            while (depth > 0) {
+                const frame = &stack[depth - 1];
+                const parent_idx = @intFromEnum(frame.node);
+                const children = payloads[parent_idx];
+                if (!frame.right_visited) {
+                    frame.right_visited = true;
+                    current = unpackRight(children);
+                    break;
+                }
+                var hash: [32]u8 = undefined;
+                hashOne(&hash, &roots[@intFromEnum(unpackLeft(children))], &roots[@intFromEnum(unpackRight(children))]);
+                roots[parent_idx] = hash;
+                depth -= 1;
+            }
+            if (depth == 0) return;
+        }
+        @panic("getRoot exceeded the pool traversal bound");
     }
 
     pub fn getLeft(node_id: Id, pool: *Pool) Error!Id {
