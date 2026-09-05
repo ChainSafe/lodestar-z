@@ -1,3 +1,5 @@
+pub const control = @import("control.zig");
+pub const Control = control.Control;
 pub const dial_queue = @import("dial_queue.zig");
 pub const DialQueue = dial_queue.DialQueue;
 pub const types = @import("types.zig");
@@ -20,7 +22,5 @@ test {
     _ = @import("catalog_test.zig");
     _ = @import("reputation_test.zig");
     _ = @import("control_wire_test.zig");
-}
-test {
     _ = @import("dial_queue_test.zig");
 }

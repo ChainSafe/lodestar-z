@@ -1,3 +1,5 @@
+pub const core = @import("core.zig");
+pub const Core = core.Core;
 pub const peers = @import("peers/root.zig");
 pub const constants = @import("constants.zig");
 pub const types = @import("types.zig");
@@ -54,4 +56,10 @@ test {
     _ = @import("transport_test.zig");
     _ = @import("negotiate_test.zig");
     _ = @import("router_test.zig");
+}
+test {
+    _ = @import("core_test.zig");
+}
+test {
+    _ = @import("core_control_test.zig");
 }

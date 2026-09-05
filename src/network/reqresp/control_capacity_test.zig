@@ -342,6 +342,13 @@ test "reqresp control capacity validates headroom and cleans every allocation pr
         error.InvalidOptions,
         rr.ReqResp.init(std.testing.allocator, options),
     );
+    options = reservedOptions();
+    options.inbound_application_per_peer_max = 3;
+    try std.testing.expectError(error.InvalidOptions, rr.ReqResp.init(std.testing.allocator, options));
+    options.inbound_max = 16;
+    options.inbound_per_peer_max = 2;
+    try std.testing.expectError(error.InvalidOptions, rr.ReqResp.init(std.testing.allocator, options));
+    options = reservedOptions();
     options.outbound_max = 64;
     options.outbound_per_peer_max = 61;
     try std.testing.expectError(

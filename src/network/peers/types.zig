@@ -61,6 +61,7 @@ pub const Snapshot = struct {
     direction: Direction,
     endpoint: Address,
     relevant: bool,
+    disconnect_reason: ?DisconnectReason = null,
     status: ?Status,
     metadata: ?Metadata,
     status_at_ms: u64,

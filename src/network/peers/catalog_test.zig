@@ -229,3 +229,14 @@ test "peer catalog memory plan equals actual allocation reservation" {
     c.deinit(a.allocator());
     try std.testing.expectEqual(a.allocated_bytes, a.freed_bytes);
 }
+
+test "peer catalog accepts native generation zero and still rejects another full handle" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    const zero: Handle = .{ .index = 0, .generation = 0 };
+    const ref = admit(&c, &remote, zero, .outbound, 0).admitted.peer;
+    try std.testing.expect(ref.generation != 0);
+    try std.testing.expect(c.updateStatus(ref, zero, &.{}, 0));
+    try std.testing.expect(!c.disconnect(ref, .{ .index = 0, .generation = 1 }, .host, 0));
+    try std.testing.expect(c.disconnect(ref, zero, .host, 0));
+}

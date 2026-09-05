@@ -32,7 +32,8 @@ test "peer dial queue copies candidates rotates addresses and ignores stale leas
     try std.testing.expectEqual(@as(u16, 4321), out[0].address.port());
     try std.testing.expect(!q.dialFailed(first.token, due));
     try std.testing.expect(q.dialStarted(out[0].token, .{ .index = 2, .generation = 7 }));
-    try std.testing.expect(q.dialFailed(out[0].token, due));
+    try std.testing.expect(!q.dialFailed(out[0].token, due));
+    try std.testing.expect(q.dialClosed(.{ .index = 2, .generation = 7 }, due));
 }
 
 test "peer dial queue bounded pressure generation exhaustion and zero output do not spin" {
@@ -58,7 +59,7 @@ test "peer dial queue bounded pressure generation exhaustion and zero output do 
     try std.testing.expect(q.isDirect(&first));
     q.removeDirect(&first);
     try std.testing.expect(!q.isDirect(&first));
-    q.remove(&first);
+    try std.testing.expect(q.remove(&first));
     q.rows[token.index].generation = std.math.maxInt(u64);
     try std.testing.expectError(error.Capacity, q.enqueue(&third, &.{address}, false, 0));
 }
@@ -80,4 +81,31 @@ test "peer dial queue exponential retry remains bounded through repeated failure
         try std.testing.expect(due - now >= 1_000 and due - now <= 60_000);
         now = due;
     }
+}
+
+test "peer dial queue polling and failure without native owner preserve started handles" {
+    var q = try mod.DialQueue.init(
+        a,
+        .{ .capacity = 1, .concurrent_max = 1, .engine_dialing_max = 1, .seed = 4 },
+    );
+    defer q.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    try q.enqueue(&peer, &.{address}, false, 0);
+    var out: [1]mod.DialIntent = undefined;
+    _ = q.poll(0, &out);
+    const token = out[0].token;
+    const conn: t.Handle = .{ .index = 0, .generation = 0 };
+    try std.testing.expect(q.dialStarted(token, conn));
+    try std.testing.expect(!q.dialFailed(token, 1));
+    try std.testing.expectEqual(@as(usize, 0), q.poll(10_000, &out));
+    try std.testing.expectEqualDeep(conn, q.rows[0].conn.?);
+    try std.testing.expect(q.rows[0].attempt);
+    try std.testing.expect(!q.remove(&peer));
+    q.connection(&peer, true, 10_000);
+    try std.testing.expectEqualDeep(conn, q.rows[0].conn.?);
+    q.accepted(&peer, .{ .index = 1, .generation = 0 }, 10_000);
+    try std.testing.expectEqualDeep(conn, q.rows[0].conn.?);
+    try std.testing.expect(q.rows[0].connected);
+    try std.testing.expectEqual(@as(?u64, 10_000), q.nextWakeup(10_000, 0));
+    try std.testing.expect(q.dialClosed(conn, 10_000));
 }

@@ -98,14 +98,17 @@ pub const DialQueue = struct {
             row.direct = false;
         };
     }
-    pub fn remove(self: *DialQueue, peer: *const t.PeerId) void {
+    pub fn remove(self: *DialQueue, peer: *const t.PeerId) bool {
         for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
+            if (row.attempt) return false;
             row.occupied = false;
-            row.attempt = false;
+            return true;
         };
+        return false;
     }
     pub fn connection(self: *DialQueue, peer: *const t.PeerId, connected: bool, now_ms: u64) void {
         for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
+            if (row.conn != null) return;
             row.attempt = false;
             row.conn = null;
             row.connected = connected;
@@ -113,6 +116,44 @@ pub const DialQueue = struct {
             if (connected) row.failures = 0;
         };
     }
+    pub fn accepted(
+        self: *DialQueue,
+        peer: *const t.PeerId,
+        conn: t.Handle,
+        now_ms: u64,
+    ) void {
+        for (self.rows) |*row| {
+            if (!row.occupied or !row.peer.eql(peer)) continue;
+            if (row.conn) |attempt| {
+                if (!std.meta.eql(attempt, conn)) {
+                    row.connected = true;
+                    return;
+                }
+            }
+            row.conn = null;
+            self.connection(peer, true, now_ms);
+            return;
+        }
+    }
+
+    /// The caller supplies an observed canonical transport close, including its full generation.
+    pub fn dialClosed(self: *DialQueue, conn: t.Handle, now_ms: u64) bool {
+        for (self.rows) |*row| {
+            if (!row.occupied or !row.attempt or !std.meta.eql(row.conn, conn)) continue;
+            self.failed(row, now_ms);
+            return true;
+        }
+        return false;
+    }
+
+    fn closeAttempt(engine: *@import("../quic/engine.zig").Engine, conn: t.Handle) void {
+        if (engine.peerId(conn) != null) {
+            _ = engine.close(conn, 0);
+        } else {
+            _ = engine.abandon(conn);
+        }
+    }
+
     pub fn syncConnection(
         self: *DialQueue,
         peer: *const t.PeerId,
@@ -142,8 +183,10 @@ pub const DialQueue = struct {
         row.conn = conn;
         return true;
     }
+    /// Reports failure before dialStarted. Started owners retire through dialClosed or expire.
     pub fn dialFailed(self: *DialQueue, token: Token, now_ms: u64) bool {
         const row = self.rowFor(token) orelse return false;
+        if (row.conn != null) return false;
         self.failed(row, now_ms);
         return true;
     }
@@ -162,12 +205,14 @@ pub const DialQueue = struct {
         now_ms: u64,
     ) void {
         for (self.rows) |*row| if (row.occupied and row.attempt and now_ms >= row.deadline_ms) {
-            if (engine) |owner| if (row.conn) |conn| {
-                _ = owner.abandon(conn);
-            };
+            if (row.conn) |conn| {
+                const owner = engine orelse continue;
+                closeAttempt(owner, conn);
+            }
             self.failed(row, now_ms);
         };
     }
+    /// Started expiry requires expire(engine, now); polling alone preserves the native owner.
     pub fn poll(self: *DialQueue, now_ms: u64, out: []DialIntent) usize {
         self.expire(null, now_ms);
         var active: usize = 0;
@@ -202,7 +247,7 @@ pub const DialQueue = struct {
         };
         var due: ?u64 = null;
         for (self.rows) |row| {
-            if (!row.occupied or row.connected) continue;
+            if (!row.occupied or (row.connected and !row.attempt)) continue;
             if (!row.attempt and (output_capacity == 0 or active >= self.options.concurrent_max or
                 row.generation == std.math.maxInt(u64))) continue;
             const next = @max(now_ms, row.deadline_ms);
@@ -213,7 +258,7 @@ pub const DialQueue = struct {
     pub fn shutdown(self: *DialQueue, engine: *@import("../quic/engine.zig").Engine) void {
         for (self.rows) |*row| {
             if (row.attempt) if (row.conn) |conn| {
-                _ = engine.abandon(conn);
+                closeAttempt(engine, conn);
             };
             row.occupied = false;
             row.attempt = false;

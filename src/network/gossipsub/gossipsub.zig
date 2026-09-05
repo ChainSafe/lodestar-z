@@ -886,6 +886,16 @@ pub const Gossipsub = struct {
         return self.scores.setAppScore(self.logical(index).index, value);
     }
 
+    pub fn scoreSnapshot(self: *Gossipsub, conn: Handle, now: Now) ?f64 {
+        const index = self.state.findPeer(conn) orelse return null;
+        return self.peerScore(index, now.mono_ms);
+    }
+
+    pub fn unmarkDirect(self: *Gossipsub, identity: *const @import("../wire/peer_id.zig").PeerId) void {
+        const peer = self.peers.find(identity) orelse return;
+        self.peers.rows[peer.index].direct = false;
+    }
+
     /// Direct peers receive subscribed publications outside mesh and fanout score gates.
     pub fn markDirect(self: *Gossipsub, conn: Handle) void {
         const index = self.state.findPeer(conn) orelse return;
