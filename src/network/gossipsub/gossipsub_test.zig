@@ -27,7 +27,11 @@ pub const GossipPair = struct {
     server_event_capacity: usize = 16,
 
     pub fn init(self: *GossipPair) !void {
-        try self.initOpts(.{}, .{});
+        try self.initOpts(.{
+            .random_seed = 1,
+        }, .{
+            .random_seed = 1,
+        });
     }
 
     pub fn initOpts(
@@ -47,8 +51,8 @@ pub const GossipPair = struct {
         errdefer self.server.deinit();
         const handles = try support.connectPair(&self.pair);
         self.handles = .{ .client = handles.client, .server = handles.server };
-        _ = self.client.addPeer(handles.client, .v1_2).?;
-        _ = self.server.addPeer(handles.server, .v1_2).?;
+        _ = @import("test_support.zig").addPeer(&self.client, handles.client, .v1_2).?;
+        _ = @import("test_support.zig").addPeer(&self.server, handles.server, .v1_2).?;
         self.client_send = try self.client_neg.beginOutbound(
             &self.pair.client,
             handles.client,
@@ -312,7 +316,9 @@ test "gossipsub receives a message larger than the per-peer body buffer" {
     var setup: GossipPair = .{};
     // the server holds a tiny per-peer body buffer, so the message must be read
     // through a claimed large-pool buffer instead
-    try setup.initOpts(.{}, .{ .body_buffer_bytes = 1024 });
+    try setup.initOpts(.{
+        .random_seed = 1,
+    }, .{ .random_seed = 1, .body_buffer_bytes = 1024 });
     defer setup.deinit();
 
     var buf: [topic_mod.topic_max_len]u8 = undefined;
@@ -352,7 +358,9 @@ const constants_heartbeat = @import("constants.zig").heartbeat_interval_ms;
 
 fn expectControlFloodBounded(control_tag: u8) !void {
     var setup: GossipPair = .{};
-    try setup.initOpts(.{}, .{ .items_per_peer = 4096, .items_per_pump = 8192 });
+    try setup.initOpts(.{
+        .random_seed = 1,
+    }, .{ .random_seed = 1, .items_per_peer = 4096, .items_per_pump = 8192 });
     defer setup.deinit();
     for (0..20) |_| try setup.pumpOnce();
     const peer = setup.server.state.findPeer(setup.handles.server).?;
@@ -415,8 +423,8 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
     for (vectors) |vector| {
         var setup: GossipPair = .{};
         try setup.initOpts(
-            .{ .message_id_policy = vector.policy },
-            .{ .message_id_policy = vector.policy },
+            .{ .random_seed = 1, .message_id_policy = vector.policy },
+            .{ .random_seed = 1, .message_id_policy = vector.policy },
         );
         defer setup.deinit();
         const topic = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -461,9 +469,11 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
 }
 
 test "gossipsub queues incompressible 64 KiB publish" {
-    var g = try Gossipsub.init(std.testing.allocator, .{});
+    var g = try Gossipsub.init(std.testing.allocator, .{
+        .random_seed = 1,
+    });
     defer g.deinit();
-    const peer = g.addPeer(.{ .index = 0, .generation = 1 }, .v1_2).?;
+    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(topic));
     g.state.mesh(g.state.findTopic(topic).?).set(peer.index);
@@ -502,7 +512,9 @@ fn publishAdmissionA(setup: *GossipPair) !struct { count: usize, handle: ?gossip
 
 test "gossipsub readmission reuses tombstones across repeated Seen eviction" {
     var setup: GossipPair = .{};
-    try setup.initOpts(.{}, .{ .seen_capacity = 1, .validation_capacity = 4, .mcache_capacity = 1 });
+    try setup.initOpts(.{
+        .random_seed = 1,
+    }, .{ .random_seed = 1, .seen_capacity = 1, .validation_capacity = 4, .mcache_capacity = 1 });
     defer setup.deinit();
     try connectMesh(&setup);
     const first = try publishAdmissionA(&setup);
@@ -654,7 +666,7 @@ test "gossipsub holds multiple messages and unread RPCs under zero event pressur
 test "gossipsub subscription cursors synchronize all topics through small critical queues" {
     const topic_capacity = @import("constants.zig").topics_cap;
     var setup: GossipPair = .{};
-    try setup.initOpts(.{ .critical_bytes = 256, .control_bytes = 64 }, .{ .critical_bytes = 256, .control_bytes = 64 });
+    try setup.initOpts(.{ .random_seed = 1, .critical_bytes = 256, .control_bytes = 64 }, .{ .random_seed = 1, .critical_bytes = 256, .control_bytes = 64 });
     defer setup.deinit();
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     for (0..topic_capacity) |i| {
@@ -696,11 +708,13 @@ test "gossipsub subscription cursors synchronize all topics through small critic
 
 test "gossipsub activity behind partial peer cursor remains ready and generation checked" {
     var setup: GossipPair = .{};
-    try setup.initOpts(.{}, .{ .peers_per_pump = 1 });
+    try setup.initOpts(.{
+        .random_seed = 1,
+    }, .{ .random_seed = 1, .peers_per_pump = 1 });
     defer setup.deinit();
     try connectMesh(&setup);
     const real_peer = setup.server.state.findPeer(setup.handles.server).?;
-    const extra = setup.server.addPeer(.{ .index = 77, .generation = 9 }, .v1_2).?;
+    const extra = @import("test_support.zig").addPeer(&setup.server, .{ .index = 77, .generation = 9 }, .v1_2).?;
     setup.server.peer_cursor = extra.index;
     const pb = @import("protobuf.zig");
     var compressed: [64]u8 = undefined;
@@ -733,7 +747,7 @@ test "gossipsub activity behind partial peer cursor remains ready and generation
 
 test "gossipsub frame and TX absolute residence survive steady byte progress" {
     var setup: GossipPair = .{};
-    try setup.initOpts(.{ .output_per_peer = 1, .tx_timeout_ms = 500 }, .{ .body_buffer_bytes = 64, .large_frame_timeout_ms = 150, .pressure_timeout_ms = 500 });
+    try setup.initOpts(.{ .random_seed = 1, .output_per_peer = 1, .tx_timeout_ms = 500 }, .{ .random_seed = 1, .body_buffer_bytes = 64, .large_frame_timeout_ms = 150, .pressure_timeout_ms = 500 });
     defer setup.deinit();
     for (0..16) |_| try setup.pumpOnce();
     const server_peer = setup.server.state.findPeer(setup.handles.server).?;
@@ -769,7 +783,9 @@ test "gossipsub frame and TX absolute residence survive steady byte progress" {
 test "gossipsub pinned payload pressure resumes held large frame after host report" {
     const constants = @import("constants.zig");
     var setup: GossipPair = .{};
-    try setup.initOpts(.{}, .{ .mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + 4096, .large_pool_count = 1 });
+    try setup.initOpts(.{
+        .random_seed = 1,
+    }, .{ .random_seed = 1, .mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + 4096, .large_pool_count = 1 });
     defer setup.deinit();
     try connectMesh(&setup);
     const payload = try std.testing.allocator.alloc(u8, constants.MAX_PAYLOAD_SIZE);
@@ -814,7 +830,9 @@ test "gossipsub pinned payload pressure resumes held large frame after host repo
 
 test "gossipsub native write credit behind cursor resumes and blocked writes quiesce" {
     var setup: GossipPair = .{};
-    try setup.initOpts(.{ .peers_per_pump = 1 }, .{});
+    try setup.initOpts(.{ .random_seed = 1, .peers_per_pump = 1 }, .{
+        .random_seed = 1,
+    });
     defer setup.deinit();
     try connectMesh(&setup);
     const index = setup.client.state.findPeer(setup.handles.client).?;
@@ -837,7 +855,7 @@ test "gossipsub native write credit behind cursor resumes and blocked writes qui
     try std.testing.expect(!io.tx_ready);
     try std.testing.expect(setup.client.nextWakeup(setup.pair.now, 16).? > setup.pair.now.mono_ms);
     const before = io.data[io.data_head].page.remaining;
-    const extra = setup.client.addPeer(.{ .index = 77, .generation = 1 }, .v1_2).?;
+    const extra = @import("test_support.zig").addPeer(&setup.client, .{ .index = 77, .generation = 1 }, .v1_2).?;
     setup.client.peer_cursor = extra.index;
     setup.server.connectionActivity(setup.handles.server);
     for (0..32) |_| {
@@ -858,7 +876,9 @@ test "gossipsub native write credit behind cursor resumes and blocked writes qui
 
 test "gossipsub healthy continuous frame turnover does not expire a nonempty queue" {
     var setup: GossipPair = .{};
-    try setup.initOpts(.{ .calls_per_peer = 3, .tx_timeout_ms = 500 }, .{});
+    try setup.initOpts(.{ .random_seed = 1, .calls_per_peer = 3, .tx_timeout_ms = 500 }, .{
+        .random_seed = 1,
+    });
     defer setup.deinit();
     try connectMesh(&setup);
     const index = setup.client.state.findPeer(setup.handles.client).?;
@@ -884,11 +904,13 @@ test "gossipsub healthy continuous frame turnover does not expire a nonempty que
 
 test "gossipsub temporary frame pool pressure preserves prefix unread bytes and resumes" {
     var setup: GossipPair = .{};
-    try setup.initOpts(.{}, .{ .large_pool_count = 1, .body_buffer_bytes = 1024 });
+    try setup.initOpts(.{
+        .random_seed = 1,
+    }, .{ .random_seed = 1, .large_pool_count = 1, .body_buffer_bytes = 1024 });
     defer setup.deinit();
     try connectMesh(&setup);
     const owner_conn: engine_mod.Handle = .{ .index = 77, .generation = 1 };
-    const owner = setup.server.addPeer(owner_conn, .v1_2).?;
+    const owner = @import("test_support.zig").addPeer(&setup.server, owner_conn, .v1_2).?;
     setup.server.large_used[0] = true;
     setup.server.io.peers[owner.index].large_slot = 0;
     var payload: [65536]u8 = undefined;

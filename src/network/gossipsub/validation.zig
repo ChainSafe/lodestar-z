@@ -1,10 +1,14 @@
 const std = @import("std");
 const storage = @import("message_store.zig");
 const topic_mod = @import("topic.zig");
+const constants = @import("constants.zig");
+const protobuf = @import("protobuf.zig");
+const snappy = @import("snappy");
 const assert = std.debug.assert;
 
 pub const Handle = struct { index: u32, generation: u64 };
-pub const PeerRef = struct { index: u16, generation: u32 };
+const Peers = @import("peers.zig").Peers;
+pub const PeerRef = @import("peers.zig").Ref;
 pub const Verdict = enum { accept, reject, ignore };
 pub const Outcome = union(enum) { applied: Verdict, already_resolved, expired, stale_handle };
 pub const duplicates_max = 16;
@@ -20,8 +24,42 @@ pub const Entry = struct {
     id: topic_mod.MessageId = undefined,
     source: PeerRef = undefined,
     topic: u16 = 0,
+    admitted_ms: u64 = 0,
+    source_eligible: bool = false,
+    topic_generation: u64 = 0,
+    pinned: bool = false,
     duplicates: [duplicates_max]Duplicate = undefined,
     duplicate_len: u8 = 0,
+};
+
+pub const MessageEvent = struct {
+    handle: Handle,
+    id: topic_mod.MessageId,
+    peer: @import("../quic/engine.zig").Handle,
+    topic: []const u8,
+    bytes: []const u8,
+};
+pub const Context = struct {
+    state: *@import("state.zig").State,
+    peers: *Peers,
+    scores: *@import("score.zig").PeerScore,
+    store: *storage.Store,
+    history: *@import("mcache.zig").History,
+    seen: *@import("mcache.zig").SeenCache,
+    options: *const @import("options.zig").Options,
+};
+pub const Workspace = struct {
+    arena: []u8,
+    used: *usize,
+    peer_work: *usize,
+    work: *usize,
+    large_used: *bool,
+    event_available: bool,
+};
+pub const Received = union(enum) { ignored, duplicate: topic_mod.MessageId, admitted: MessageEvent, blocked: enum { events, storage, work } };
+pub const Report = struct {
+    outcome: Outcome,
+    forward: ?struct { message: storage.Handle, source: PeerRef, topic: u16 } = null,
 };
 
 pub const Validation = struct {
@@ -29,6 +67,71 @@ pub const Validation = struct {
     cursor: usize = 0,
     timeout_ms: u64,
     tombstone_ms: u64,
+
+    pub fn receive(self: *Validation, context: *const Context, workspace: *const Workspace, peer: u16, msg: protobuf.Message, now: u64) Received {
+        if (msg.signed or msg.data.len > constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE)) return .ignored;
+        const topic = context.state.findTopic(msg.topic) orelse return .ignored;
+        if (!context.state.subscribed(topic)) return .ignored;
+        const size = snappy.raw.uncompressedLength(msg.data) catch {
+            if (!charge(context.options, workspace, msg.data.len, 0)) return .{ .blocked = .work };
+            _ = context.seen.add(topic_mod.invalidMessageId(msg.topic, msg.data, context.options.message_id_policy), now);
+            return .ignored;
+        };
+        if (size > constants.MAX_PAYLOAD_SIZE) return .ignored;
+        if (!workspace.event_available or size + msg.topic.len > workspace.arena.len - workspace.used.*) return .{ .blocked = .events };
+        if (!self.available()) return .{ .blocked = .storage };
+        if (!charge(context.options, workspace, msg.data.len, size)) return .{ .blocked = .work };
+        const room = workspace.arena[workspace.used.*..];
+        const written = snappy.raw.uncompress(msg.data, room[0..size]) catch {
+            _ = context.seen.add(topic_mod.invalidMessageId(msg.topic, msg.data, context.options.message_id_policy), now);
+            return .ignored;
+        };
+        const id = topic_mod.validMessageId(msg.topic, room[0..written], context.options.message_id_policy);
+        const pending = self.find(id, now);
+        if ((pending != null and pending.?.state == .pending) or context.seen.contains(id, now)) {
+            if (pending) |entry| recordDuplicate(context, entry, peer, topic, now);
+            return .{ .duplicate = id };
+        }
+        return self.commit(context, workspace, peer, topic, msg, id, written, now);
+    }
+
+    fn commit(self: *Validation, context: *const Context, workspace: *const Workspace, peer: u16, topic: u16, msg: protobuf.Message, id: topic_mod.MessageId, written: usize, now: u64) Received {
+        const message = context.history.admitPayload(context.store, id, msg.topic, msg.data) orelse return .{ .blocked = .storage };
+        const handle = self.admit(context.store, context.peers, message, context.state.peers[peer].logical, topic, now);
+        self.entries[handle.index].source_eligible = context.state.mesh(topic).isSet(peer);
+        self.entries[handle.index].topic_generation = context.state.topics[topic].generation;
+        context.store.seal(message);
+        const room = workspace.arena[workspace.used.*..];
+        @memcpy(room[written..][0..msg.topic.len], msg.topic);
+        workspace.used.* += written + msg.topic.len;
+        _ = context.seen.add(id, now);
+        return .{ .admitted = .{ .handle = handle, .id = id, .peer = context.state.peers[peer].conn, .topic = room[written..][0..msg.topic.len], .bytes = room[0..written] } };
+    }
+
+    pub fn report(self: *Validation, context: *const Context, handle: Handle, verdict: Verdict, now: u64) Report {
+        if (self.inspect(context.store, context.peers, handle, now)) |outcome| return .{ .outcome = outcome };
+        const entry = &self.entries[handle.index];
+        assert(context.state.topics[entry.topic].generation == entry.topic_generation);
+        var result: Report = .{ .outcome = .{ .applied = verdict } };
+        if (verdict == .accept) {
+            context.history.put(context.store, entry.message);
+            if (context.state.subscribed(entry.topic)) result.forward = .{ .message = entry.message, .source = entry.source, .topic = entry.topic };
+        }
+        if (verdict != .ignore) {
+            assert(context.peers.matches(entry.source));
+            if (verdict == .accept) context.scores.deliverEligible(entry.source.index, entry.topic, entry.source_eligible) else context.scores.invalid(entry.source.index, entry.topic);
+            for (entry.duplicates[0..entry.duplicate_len]) |d| {
+                assert(context.peers.matches(d.peer));
+                if (verdict == .reject) context.scores.invalid(d.peer.index, entry.topic) else if (d.eligible) context.scores.creditMesh(d.peer.index, entry.topic);
+            }
+        }
+        if (verdict == .reject) {
+            context.peers.rows[entry.source.index].negative = true;
+            for (entry.duplicates[0..entry.duplicate_len]) |d| context.peers.rows[d.peer.index].negative = true;
+        }
+        self.finish(context.store, context.peers, handle, verdict, now);
+        return result;
+    }
 
     pub fn init(a: std.mem.Allocator, capacity: usize, timeout_ms: u64, tombstone_ms: u64) !Validation {
         if (capacity == 0 or capacity > 8192 or timeout_ms == 0 or tombstone_ms == 0) return error.InvalidLimits;
@@ -44,7 +147,7 @@ pub const Validation = struct {
         for (self.entries) |e| if (e.state != .pending and e.generation != std.math.maxInt(u64)) return true;
         return false;
     }
-    pub fn admit(self: *Validation, store: *storage.Store, message: storage.Handle, source: PeerRef, topic: u16, now: u64) Handle {
+    pub fn admit(self: *Validation, store: *storage.Store, peers: *Peers, message: storage.Handle, source: PeerRef, topic: u16, now: u64) Handle {
         assert(self.available());
         const id = store.get(message).?.id;
         for (self.entries, 0..) |*e, index| {
@@ -63,6 +166,8 @@ pub const Validation = struct {
             self.cursor = (index + 1) % self.entries.len;
             const e = &self.entries[index];
             if (e.state == .pending or e.generation == std.math.maxInt(u64)) continue;
+            releaseAttribution(e, peers);
+            peers.retain(source);
             e.* = .{
                 .generation = e.generation + 1,
                 .state = .pending,
@@ -70,6 +175,8 @@ pub const Validation = struct {
                 .message = message,
                 .id = id,
                 .source = source,
+                .admitted_ms = now,
+                .pinned = true,
                 .topic = topic,
             };
             store.retainValidation(message);
@@ -85,19 +192,21 @@ pub const Validation = struct {
         }
         return null;
     }
-    pub fn duplicate(e: *Entry, peer: PeerRef, eligible: bool) bool {
+    pub fn duplicate(e: *Entry, peers: *Peers, peer: PeerRef, eligible: bool) bool {
+        if (!e.pinned) return false;
         if (std.meta.eql(e.source, peer)) return false;
         for (e.duplicates[0..e.duplicate_len]) |d| if (std.meta.eql(d.peer, peer)) return false;
         if (e.duplicate_len == duplicates_max) return false;
+        peers.retain(peer);
         e.duplicates[e.duplicate_len] = .{ .peer = peer, .eligible = eligible };
         e.duplicate_len += 1;
         return true;
     }
-    pub fn inspect(self: *Validation, store: *storage.Store, h: Handle, now: u64) ?Outcome {
+    pub fn inspect(self: *Validation, store: *storage.Store, peers: *Peers, h: Handle, now: u64) ?Outcome {
         if (h.index >= self.entries.len) return .stale_handle;
         const e = &self.entries[h.index];
         if (e.generation != h.generation or e.state == .free) return .stale_handle;
-        self.expireEntry(store, e, now);
+        self.expireEntry(store, peers, e, now);
         return switch (e.state) {
             .pending => null,
             .resolved => if (now < e.tombstone_until) .already_resolved else .stale_handle,
@@ -105,7 +214,8 @@ pub const Validation = struct {
             .free => .stale_handle,
         };
     }
-    pub fn finish(self: *Validation, store: *storage.Store, h: Handle, verdict: Verdict, now: u64) void {
+    pub fn finish(self: *Validation, store: *storage.Store, peers: *Peers, h: Handle, verdict: Verdict, now: u64) void {
+        _ = peers;
         const e = &self.entries[h.index];
         assert(e.state == .pending and e.generation == h.generation and now < e.deadline);
         e.state = .resolved;
@@ -113,11 +223,16 @@ pub const Validation = struct {
         e.tombstone_until = now +| self.tombstone_ms;
         store.releaseValidation(e.message);
     }
-    pub fn expire(self: *Validation, store: *storage.Store, now: u64) void {
-        for (self.entries) |*e| self.expireEntry(store, e, now);
+    pub fn expire(self: *Validation, store: *storage.Store, peers: *Peers, now: u64) void {
+        for (self.entries) |*e| self.expireEntry(store, peers, e, now);
     }
-    fn expireEntry(self: *Validation, store: *storage.Store, e: *Entry, now: u64) void {
-        if (e.state != .pending or now < e.deadline) return;
+    fn expireEntry(self: *Validation, store: *storage.Store, peers: *Peers, e: *Entry, now: u64) void {
+        if (e.state != .pending) {
+            if (now >= e.tombstone_until) releaseAttribution(e, peers);
+            return;
+        }
+        if (now < e.deadline) return;
+        releaseAttribution(e, peers);
         e.state = .expired;
         e.tombstone_until = e.deadline +| self.tombstone_ms;
         store.releaseValidation(e.message);
@@ -131,27 +246,65 @@ pub const Validation = struct {
     }
 };
 
+fn recordDuplicate(context: *const Context, entry: *Entry, peer: u16, topic: u16, now: u64) void {
+    const ref = context.state.peers[peer].logical;
+    const eligible = context.state.mesh(topic).isSet(peer) and now -| entry.admitted_ms <= context.scores.topic_params[topic].mesh_delivery_window_ms;
+    if (!Validation.duplicate(entry, context.peers, ref, eligible) or entry.state != .resolved) return;
+    if (entry.verdict == .reject) {
+        context.scores.invalid(ref.index, topic);
+        context.peers.rows[ref.index].negative = true;
+    } else if (entry.verdict == .accept and eligible) context.scores.creditMesh(ref.index, topic);
+}
+
+fn charge(options: *const @import("options.zig").Options, workspace: *const Workspace, compressed: usize, decoded: usize) bool {
+    const cost = compressed * 2 + decoded * 2;
+    if (cost <= workspace.work.* and cost <= options.decompress_per_peer_bytes -| workspace.peer_work.*) {
+        workspace.work.* -= cost;
+        workspace.peer_work.* += cost;
+        return true;
+    }
+    if (!workspace.large_used.* and cost > @min(options.work_per_pump, options.decompress_per_peer_bytes)) {
+        workspace.large_used.* = true;
+        return true;
+    }
+    return false;
+}
+
+fn releaseAttribution(e: *Entry, peers: *Peers) void {
+    if (!e.pinned) return;
+    peers.release(e.source);
+    for (e.duplicates[0..e.duplicate_len]) |d| peers.release(d.peer);
+    e.pinned = false;
+}
+
 test "gossip validation expires without pump and resolves exactly once" {
+    var peers = try Peers.init(std.testing.allocator, 100);
+    defer peers.deinit(std.testing.allocator);
+    peers.rows[0] = .{ .occupied = true, .generation = 1 };
     var store = try storage.Store.init(std.testing.allocator, 2, 8192);
     defer store.deinit(std.testing.allocator);
     var v = try Validation.init(std.testing.allocator, 1, 10, 20);
     defer v.deinit(std.testing.allocator);
     const m = store.put([_]u8{1} ** 20, "t", "body").?;
-    const h = v.admit(&store, m, .{ .index = 0, .generation = 1 }, 0, 100);
+    const h = v.admit(&store, &peers, m, .{ .index = 0, .generation = 1 }, 0, 100);
     store.seal(m);
-    try std.testing.expect(v.inspect(&store, h, 109) == null);
-    try std.testing.expectEqual(Outcome.expired, v.inspect(&store, h, 110).?);
+    try std.testing.expect(v.inspect(&store, &peers, h, 109) == null);
+    try std.testing.expectEqual(Outcome.expired, v.inspect(&store, &peers, h, 110).?);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
-    try std.testing.expectEqual(Outcome.stale_handle, v.inspect(&store, h, 130).?);
+    try std.testing.expectEqual(Outcome.stale_handle, v.inspect(&store, &peers, h, 130).?);
     const m2 = store.put([_]u8{2} ** 20, "t", "body").?;
-    const h2 = v.admit(&store, m2, .{ .index = 0, .generation = 2 }, 0, 130);
+    peers.rows[0].generation = 2;
+    const h2 = v.admit(&store, &peers, m2, .{ .index = 0, .generation = 2 }, 0, 130);
     store.seal(m2);
-    try std.testing.expectEqual(Outcome.stale_handle, v.inspect(&store, h, 130).?);
-    v.finish(&store, h2, .ignore, 131);
-    try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, h2, 132).?);
+    try std.testing.expectEqual(Outcome.stale_handle, v.inspect(&store, &peers, h, 130).?);
+    v.finish(&store, &peers, h2, .ignore, 131);
+    try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, &peers, h2, 132).?);
 }
 
 test "gossip validation readmission skips exhausted generation without hiding pending ID" {
+    var peers = try Peers.init(std.testing.allocator, 100);
+    defer peers.deinit(std.testing.allocator);
+    peers.rows[0] = .{ .occupied = true, .generation = 1 };
     var store = try storage.Store.init(std.testing.allocator, 2, 8192);
     defer store.deinit(std.testing.allocator);
     var v = try Validation.init(std.testing.allocator, 2, 10, 20);
@@ -160,21 +313,21 @@ test "gossip validation readmission skips exhausted generation without hiding pe
     const id = [_]u8{1} ** 20;
     const source: PeerRef = .{ .index = 0, .generation = 1 };
     const first = store.put(id, "t", "body").?;
-    const old = v.admit(&store, first, source, 0, 100);
+    const old = v.admit(&store, &peers, first, source, 0, 100);
     store.seal(first);
-    v.finish(&store, old, .ignore, 101);
+    v.finish(&store, &peers, old, .ignore, 101);
     const second = store.put(id, "t", "body").?;
-    const current = v.admit(&store, second, source, 0, 102);
+    const current = v.admit(&store, &peers, second, source, 0, 102);
     store.seal(second);
     try std.testing.expectEqual(std.math.maxInt(u64), old.generation);
     try std.testing.expectEqual(@as(u64, 1), current.generation);
     try std.testing.expect(old.index != current.index);
     try std.testing.expectEqual(&v.entries[current.index], v.find(id, 103).?);
-    try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, old, 103).?);
+    try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, &peers, old, 103).?);
     try std.testing.expectEqual(@as(usize, 1), store.used_entries);
-    v.finish(&store, current, .reject, 104);
+    v.finish(&store, &peers, current, .reject, 104);
     try std.testing.expectEqual(Verdict.reject, v.find(id, 105).?.verdict);
-    try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, old, 105).?);
+    try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, &peers, old, 105).?);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
     try std.testing.expectEqual(store.next.len, store.free_pages);
 }

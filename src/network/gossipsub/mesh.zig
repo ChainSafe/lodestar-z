@@ -1,0 +1,426 @@
+const std = @import("std");
+const c = @import("constants.zig");
+const state_mod = @import("state.zig");
+const peers_mod = @import("peers.zig");
+const score_mod = @import("score.zig");
+const io_mod = @import("peer_io.zig");
+const protobuf = @import("protobuf.zig");
+const topic_mod = @import("topic.zig");
+const assert = std.debug.assert;
+const Set = state_mod.PeerSet;
+const Snapshot = struct { generation: u64 = 0, score: f64 = 0 };
+pub const Context = struct {
+    state: *state_mod.State,
+    peers: *peers_mod.Peers,
+    scores: *score_mod.PeerScore,
+    io: []io_mod.PeerIo,
+    now: u64,
+    heartbeat_ms: u64,
+    pressure_ms: u64,
+    use_snapshot: bool = false,
+};
+
+pub const Mesh = struct {
+    rng: std.Random.DefaultPrng,
+    snapshot: [c.peers_cap]Snapshot = [_]Snapshot{.{}} ** c.peers_cap,
+    pending_prunes: [c.topics_cap]Set = [_]Set{.initEmpty()} ** c.topics_cap,
+    pending_count: [c.peers_cap]u16 = [_]u16{0} ** c.peers_cap,
+    pending_since: [c.peers_cap]?u64 = [_]?u64{null} ** c.peers_cap,
+    retire: Set = .initEmpty(),
+    outbound_deficits: u64 = 0,
+
+    pub fn init(seed: u64) Mesh {
+        return .{ .rng = std.Random.DefaultPrng.init(seed) };
+    }
+
+    pub fn takeSnapshot(self: *Mesh, context: *const Context) void {
+        for (&context.state.peers, 0..) |*peer, index| {
+            self.snapshot[index] = if (peer.active) .{
+                .generation = peer.generation,
+                .score = context.scores.score(peer.logical.index, context.now),
+            } else .{};
+        }
+    }
+
+    fn score(self: *const Mesh, context: *const Context, peer: u16) f64 {
+        if (!context.use_snapshot) return context.scores.score(context.state.peers[peer].logical.index, context.now);
+        if (self.snapshot[peer].generation != context.state.peerGeneration(peer)) return -score_mod.counter_max;
+        return self.snapshot[peer].score;
+    }
+
+    fn eligible(self: *const Mesh, context: *const Context, topic: u16, peer: u16, threshold: f64) bool {
+        const row = &context.state.peers[peer];
+        if (!row.active or context.peers.rows[row.logical.index].direct or self.retire.isSet(peer)) return false;
+        return context.state.subscribers(topic).isSet(peer) and self.score(context, peer) >= threshold;
+    }
+
+    fn graftEligible(self: *const Mesh, context: *const Context, topic: u16, peer: u16) bool {
+        if (!self.eligible(context, topic, peer, 0) or self.pending_prunes[topic].isSet(peer)) return false;
+        return !context.peers.backedOff(context.state.peers[peer].logical, topic, context.state.topics[topic].generation, context.now -| (c.backoff_slack_heartbeats * context.heartbeat_ms));
+    }
+
+    fn outbound(context: *const Context, peer: u16) bool {
+        return context.peers.rows[context.state.peers[peer].logical.index].direction == .outbound;
+    }
+
+    fn outboundCount(context: *const Context, members: *const Set) usize {
+        var count: usize = 0;
+        var it = members.iterator(.{});
+        while (it.next()) |peer| if (outbound(context, @intCast(peer))) {
+            count += 1;
+        };
+        return count;
+    }
+
+    pub fn maintain(self: *Mesh, context: *const Context, topic: u16) void {
+        self.flushPrunes(context, topic);
+        const members = context.state.mesh(topic);
+        var it = members.iterator(.{});
+        while (it.next()) |index| {
+            const peer: u16 = @intCast(index);
+            if (!self.eligible(context, topic, peer, 0)) self.prune(context, topic, peer, c.prune_backoff_ms);
+        }
+        if (!context.state.subscribed(topic)) return;
+        var candidate_peers: [c.peers_cap]u16 = undefined;
+        const n = self.candidates(context, topic, &candidate_peers, true, 0);
+        self.rng.random().shuffle(u16, candidate_peers[0..n]);
+        var out = outboundCount(context, members);
+        for (candidate_peers[0..n]) |peer| {
+            if (out >= c.mesh_d_out) break;
+            if (outbound(context, peer) and self.graft(context, topic, peer)) out += 1;
+        }
+        if (out < c.mesh_d_out) self.outbound_deficits += 1;
+        if (members.count() < c.mesh_d_low) {
+            for (candidate_peers[0..n]) |peer| {
+                if (members.count() >= c.mesh_d) break;
+                _ = self.graft(context, topic, peer);
+            }
+        }
+        if (members.count() > c.mesh_d_high) self.trim(context, topic);
+    }
+
+    fn candidates(self: *Mesh, context: *const Context, topic: u16, out: *[c.peers_cap]u16, graft_only: bool, threshold: f64) usize {
+        var count: usize = 0;
+        for (0..c.peers_cap) |index| {
+            const peer: u16 = @intCast(index);
+            if (context.state.mesh(topic).isSet(peer)) continue;
+            if (!self.eligible(context, topic, peer, threshold)) continue;
+            if (graft_only and !self.graftEligible(context, topic, peer)) continue;
+            out[count] = peer;
+            count += 1;
+        }
+        return count;
+    }
+
+    fn graft(self: *Mesh, context: *const Context, topic: u16, peer: u16) bool {
+        const members = context.state.mesh(topic);
+        if (members.isSet(peer) or !self.graftEligible(context, topic, peer)) return false;
+        if (!queue(context, topic, peer, null)) return false;
+        members.set(peer);
+        context.scores.graft(context.state.peers[peer].logical.index, topic, context.now);
+        return true;
+    }
+
+    pub fn prune(self: *Mesh, context: *const Context, topic: u16, peer: u16, backoff_ms: u64) void {
+        if (context.state.mesh(topic).isSet(peer)) {
+            context.state.mesh(topic).unset(peer);
+            context.scores.prune(context.state.peers[peer].logical.index, topic, context.now);
+        }
+        const row = &context.state.peers[peer];
+        if (!row.active) return;
+        context.peers.addBackoff(row.logical, topic, context.state.topics[topic].generation, context.now, backoff_ms);
+        if (queue(context, topic, peer, backoff_ms / 1000)) {
+            self.clearPending(topic, peer);
+        } else {
+            if (!self.pending_prunes[topic].isSet(peer)) self.pending_count[peer] += 1;
+            self.pending_prunes[topic].set(peer);
+            if (self.pending_since[peer] == null) self.pending_since[peer] = context.now;
+        }
+    }
+
+    fn flushPrunes(self: *Mesh, context: *const Context, topic: u16) void {
+        var it = self.pending_prunes[topic].iterator(.{});
+        while (it.next()) |index| {
+            const peer: u16 = @intCast(index);
+            if (!context.state.peers[peer].active) {
+                self.clearPending(topic, peer);
+                continue;
+            }
+            const entry = context.peers.backoff(context.state.peers[peer].logical, topic);
+            if (queue(context, topic, peer, (entry.until -| context.now +| 999) / 1000)) {
+                self.clearPending(topic, peer);
+            } else if (context.now -| self.pending_since[peer].? >= context.pressure_ms) self.retire.set(peer);
+        }
+    }
+
+    fn clearPending(self: *Mesh, topic: u16, peer: u16) void {
+        if (!self.pending_prunes[topic].isSet(peer)) return;
+        self.pending_prunes[topic].unset(peer);
+        assert(self.pending_count[peer] > 0);
+        self.pending_count[peer] -= 1;
+        if (self.pending_count[peer] == 0) self.pending_since[peer] = null;
+    }
+
+    pub fn expireActions(self: *Mesh, now: u64, timeout: u64) void {
+        for (self.pending_since, 0..) |since, peer| {
+            if (since) |started| if (now -| started >= timeout) {
+                self.retire.set(peer);
+            };
+        }
+    }
+
+    pub fn forget(self: *Mesh, peer: u16) void {
+        self.retire.unset(peer);
+        for (&self.pending_prunes) |*set| set.unset(peer);
+        self.pending_since[peer] = null;
+        self.pending_count[peer] = 0;
+        self.snapshot[peer] = .{};
+    }
+
+    pub fn onGraft(self: *Mesh, context: *const Context, topic: u16, peer: u16) void {
+        const row = &context.state.peers[peer];
+        const backoff = context.peers.backoff(row.logical, topic);
+        const blocked = backoff.topic_generation == context.state.topics[topic].generation and context.now < backoff.until;
+        if (blocked) {
+            context.scores.penalize(row.logical.index, 1);
+            if (context.now -| backoff.pruned_at < c.graft_flood_threshold_ms) context.scores.penalize(row.logical.index, 1);
+        }
+        if (!context.state.subscribed(topic) or context.peers.rows[row.logical.index].direct or blocked or
+            context.scores.score(row.logical.index, context.now) < 0 or
+            (!context.state.mesh(topic).isSet(peer) and context.state.mesh(topic).count() >= c.mesh_d_high and !outbound(context, peer)))
+        {
+            self.prune(context, topic, peer, c.prune_backoff_ms);
+            return;
+        }
+        if (context.state.mesh(topic).isSet(peer)) return;
+        context.state.setSubscription(topic, peer, true);
+        context.state.mesh(topic).set(peer);
+        context.scores.graft(row.logical.index, topic, context.now);
+    }
+
+    pub fn onPrune(self: *Mesh, context: *const Context, topic: u16, peer: u16, backoff_ms: u64) void {
+        _ = self;
+        context.state.mesh(topic).unset(peer);
+        context.scores.prune(context.state.peers[peer].logical.index, topic, context.now);
+        context.peers.addBackoff(context.state.peers[peer].logical, topic, context.state.topics[topic].generation, context.now, backoff_ms);
+    }
+
+    fn trim(self: *Mesh, context: *const Context, topic: u16) void {
+        var ordered: [c.peers_cap]u16 = undefined;
+        var count: usize = 0;
+        var it = context.state.mesh(topic).iterator(.{});
+        while (it.next()) |peer| {
+            ordered[count] = @intCast(peer);
+            count += 1;
+        }
+        self.sort(context, ordered[0..count]);
+        self.rng.random().shuffle(u16, ordered[c.mesh_d_score..count]);
+        var survivors: Set = .initEmpty();
+        for (ordered[0..c.mesh_d_score]) |peer| survivors.set(peer);
+        var out = outboundCount(context, &survivors);
+        for (ordered[c.mesh_d_score..count]) |peer| {
+            if (out >= c.mesh_d_out) break;
+            if (outbound(context, peer)) {
+                survivors.set(peer);
+                out += 1;
+            }
+        }
+        for (ordered[c.mesh_d_score..count]) |peer| {
+            if (survivors.count() >= c.mesh_d) break;
+            survivors.set(peer);
+        }
+        for (ordered[0..count]) |peer| if (!survivors.isSet(peer)) self.prune(context, topic, peer, c.prune_backoff_ms);
+        assert(context.state.mesh(topic).count() == c.mesh_d);
+    }
+
+    fn sort(self: *const Mesh, context: *const Context, members: []u16) void {
+        assert(members.len <= c.peers_cap);
+        for (members, 0..) |peer, i| {
+            var j = i;
+            for (0..i) |_| {
+                if (self.score(context, members[j - 1]) >= self.score(context, peer)) break;
+                members[j] = members[j - 1];
+                j -= 1;
+                if (j == 0) break;
+            }
+            members[j] = peer;
+        }
+    }
+
+    pub fn opportunistic(self: *Mesh, context: *const Context, topic: u16) void {
+        const members = context.state.mesh(topic);
+        if (members.count() < c.mesh_d) return;
+        var ordered: [c.peers_cap]u16 = undefined;
+        var n: usize = 0;
+        var it = members.iterator(.{});
+        while (it.next()) |peer| {
+            ordered[n] = @intCast(peer);
+            n += 1;
+        }
+        self.sort(context, ordered[0..n]);
+        const median = self.score(context, ordered[n / 2]);
+        if (median >= context.scores.params.opportunistic_graft_threshold) return;
+        n = self.candidates(context, topic, &ordered, true, 0);
+        self.rng.random().shuffle(u16, ordered[0..n]);
+        var added: usize = 0;
+        for (ordered[0..n]) |peer| {
+            if (added == c.opportunistic_graft_peers) break;
+            if (self.score(context, peer) > median and self.graft(context, topic, peer)) added += 1;
+        }
+    }
+
+    pub fn fanout(self: *Mesh, context: *const Context, topic: u16, publishing: bool) *Set {
+        const row = &context.state.topics[topic];
+        if (!publishing and context.now -| row.fanout_last_ms >= c.fanout_ttl_ms) {
+            row.fanout = .initEmpty();
+            return &row.fanout;
+        }
+        if (publishing) row.fanout_last_ms = context.now;
+        var it = row.fanout.iterator(.{});
+        while (it.next()) |peer| if (!self.eligible(context, topic, @intCast(peer), context.scores.params.publish_threshold)) {
+            row.fanout.unset(peer);
+        };
+        var candidates_buf: [c.peers_cap]u16 = undefined;
+        const n = self.candidates(context, topic, &candidates_buf, false, context.scores.params.publish_threshold);
+        self.rng.random().shuffle(u16, candidates_buf[0..n]);
+        for (candidates_buf[0..n]) |peer| {
+            if (row.fanout.count() >= c.mesh_d) break;
+            row.fanout.set(peer);
+        }
+        return &row.fanout;
+    }
+
+    pub fn gossipRecipients(self: *Mesh, context: *const Context, topic: u16, factor: f64) Set {
+        assert(std.math.isFinite(factor) and factor >= 0 and factor <= 1);
+        var candidates_buf: [c.peers_cap]u16 = undefined;
+        const count = self.candidates(context, topic, &candidates_buf, false, context.scores.params.gossip_threshold);
+        var n: usize = 0;
+        for (candidates_buf[0..count]) |peer| {
+            if (context.state.fanout(topic).isSet(peer)) continue;
+            candidates_buf[n] = peer;
+            n += 1;
+        }
+        self.rng.random().shuffle(u16, candidates_buf[0..n]);
+        const wanted = @min(n, @max(c.mesh_d_lazy, @as(usize, @intFromFloat(@ceil(factor * @as(f64, @floatFromInt(n)))))));
+        var result: Set = .initEmpty();
+        for (candidates_buf[0..wanted]) |peer| result.set(peer);
+        return result;
+    }
+};
+
+fn queue(context: *const Context, topic: u16, peer: u16, prune_s: ?u64) bool {
+    var bytes: [32 + topic_mod.topic_max_len]u8 = undefined;
+    var writer = protobuf.Writer.init(&bytes);
+    const name = context.state.topicString(topic);
+    if (prune_s) |seconds| {
+        writer.varint(protobuf.pruneRpcSize(name, seconds));
+        protobuf.writePruneRpc(&writer, name, seconds);
+    } else {
+        writer.varint(protobuf.graftRpcSize(name));
+        protobuf.writeGraftRpc(&writer, name);
+    }
+    return context.io[peer].appendControl(writer.written(), true, context.now) != null;
+}
+
+const Fixture = struct {
+    g: @import("gossipsub.zig").Gossipsub,
+    topic: u16,
+
+    fn init(count: usize) !Fixture {
+        var g = try @import("gossipsub.zig").Gossipsub.init(std.testing.allocator, .{ .random_seed = 17 });
+        errdefer g.deinit();
+        const name = "/eth2/01020304/beacon_block/ssz_snappy";
+        assert(g.subscribe(name));
+        const topic = g.state.findTopic(name).?;
+        for (0..count) |index| {
+            const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(index), .generation = 1 }, .v1_2).?;
+            g.state.setSubscription(topic, peer.index, true);
+        }
+        return .{ .g = g, .topic = topic };
+    }
+    fn context(self: *Fixture, now: u64) Context {
+        return .{ .state = self.g.state, .peers = &self.g.peers, .scores = &self.g.scores, .io = self.g.io.peers, .now = now, .heartbeat_ms = 700, .pressure_ms = 30_000, .use_snapshot = true };
+    }
+};
+
+test "gossip policy mesh trimming preserves highest scores and outbound quota" {
+    var f = try Fixture.init(16);
+    defer f.g.deinit();
+    for (0..16) |peer| {
+        f.g.state.mesh(f.topic).set(peer);
+        f.g.scores.graft(@intCast(peer), f.topic, 1);
+        if (peer < 4) try std.testing.expect(f.g.scores.setAppScore(@intCast(peer), 100));
+    }
+    f.g.peers.rows[f.g.state.peers[14].logical.index].direction = .outbound;
+    f.g.peers.rows[f.g.state.peers[15].logical.index].direction = .outbound;
+    const context = f.context(2);
+    f.g.mesh_policy.takeSnapshot(&context);
+    f.g.mesh_policy.maintain(&context, f.topic);
+    try std.testing.expectEqual(@as(usize, c.mesh_d), f.g.state.mesh(f.topic).count());
+    for (0..4) |peer| try std.testing.expect(f.g.state.mesh(f.topic).isSet(peer));
+    try std.testing.expect(f.g.state.mesh(f.topic).isSet(14));
+    try std.testing.expect(f.g.state.mesh(f.topic).isSet(15));
+}
+
+test "gossip policy outbound repair applies inside mesh degree limits" {
+    var f = try Fixture.init(10);
+    defer f.g.deinit();
+    for (0..8) |peer| f.g.state.mesh(f.topic).set(peer);
+    f.g.peers.rows[f.g.state.peers[8].logical.index].direction = .outbound;
+    f.g.peers.rows[f.g.state.peers[9].logical.index].direction = .outbound;
+    const context = f.context(2);
+    f.g.mesh_policy.takeSnapshot(&context);
+    f.g.mesh_policy.maintain(&context, f.topic);
+    try std.testing.expectEqual(@as(usize, 10), f.g.state.mesh(f.topic).count());
+    try std.testing.expect(f.g.state.mesh(f.topic).isSet(8));
+    try std.testing.expect(f.g.state.mesh(f.topic).isSet(9));
+}
+
+test "gossip policy mesh queue pressure preserves required action ownership" {
+    var f = try Fixture.init(1);
+    defer f.g.deinit();
+    const context = f.context(2);
+    const bytes = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 0);
+    try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, 1) != null);
+    f.g.mesh_policy.takeSnapshot(&context);
+    f.g.mesh_policy.maintain(&context, f.topic);
+    try std.testing.expectEqual(@as(usize, 0), f.g.state.mesh(f.topic).count());
+    f.g.io.peers[0].resetTx(&f.g.store);
+    f.g.mesh_policy.maintain(&context, f.topic);
+    try std.testing.expectEqual(@as(usize, 1), f.g.state.mesh(f.topic).count());
+    f.g.io.peers[0].resetTx(&f.g.store);
+    try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, 2) != null);
+    try std.testing.expect(f.g.scores.setAppScore(0, -1));
+    f.g.mesh_policy.takeSnapshot(&context);
+    f.g.mesh_policy.maintain(&context, f.topic);
+    try std.testing.expectEqual(@as(usize, 0), f.g.state.mesh(f.topic).count());
+    try std.testing.expect(f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
+    f.g.mesh_policy.expireActions(30_002, 30_000);
+    try std.testing.expect(f.g.mesh_policy.retire.isSet(0));
+}
+
+test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
+    var f = try Fixture.init(64);
+    defer f.g.deinit();
+    f.g.markDirect(f.g.state.peers[0].conn);
+    try std.testing.expect(f.g.scores.setAppScore(1, -10_000));
+    var context = f.context(2);
+    f.g.mesh_policy.takeSnapshot(&context);
+    const recipients = f.g.mesh_policy.gossipRecipients(&context, f.topic, 0.5);
+    try std.testing.expectEqual(@as(usize, 31), recipients.count());
+    try std.testing.expect(!recipients.isSet(0) and !recipients.isSet(1));
+    var high_selected = false;
+    for (32..64) |peer| if (recipients.isSet(peer)) {
+        high_selected = true;
+    };
+    try std.testing.expect(high_selected);
+    f.g.state.setSubscribed(f.topic, false);
+    const fanout = f.g.mesh_policy.fanout(&context, f.topic, true);
+    try std.testing.expectEqual(@as(usize, c.mesh_d), fanout.count());
+    try std.testing.expect(!fanout.isSet(0) and !fanout.isSet(1));
+    context.now += c.fanout_ttl_ms;
+    _ = f.g.mesh_policy.fanout(&context, f.topic, false);
+    try std.testing.expectEqual(@as(usize, 0), fanout.count());
+}

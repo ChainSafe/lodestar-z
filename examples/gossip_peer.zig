@@ -111,7 +111,9 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     try node.init(allocator, io, .{ .host = &key, .bind = bind });
     defer node.deinit(io);
 
-    var service = try Service.init(allocator, .{ .reqresp = .{
+    var gossip_seed: [8]u8 = undefined;
+    try io.randomSecure(&gossip_seed);
+    var service = try Service.init(allocator, .{ .gossipsub = .{ .random_seed = std.mem.readInt(u64, &gossip_seed, .little) }, .reqresp = .{
         .outbound_max = 4,
         .inbound_max = 4,
         .inbound_per_peer_max = 4,

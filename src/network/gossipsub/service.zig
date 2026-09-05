@@ -88,6 +88,10 @@ pub const Service = struct {
         return self.inner.subscribe(topic);
     }
 
+    pub fn configureTopic(self: *Service, topic: []const u8, params: @import("score.zig").TopicParams) error{ InvalidLimits, TopicCapacity }!void {
+        return self.inner.configureTopic(topic, params);
+    }
+
     pub fn unsubscribe(self: *Service, topic: []const u8) bool {
         return self.inner.unsubscribe(topic);
     }
@@ -105,8 +109,8 @@ pub const Service = struct {
         return self.inner.report(handle, verdict, now);
     }
 
-    pub fn setPeerScore(self: *Service, conn: Handle, value: f64) void {
-        self.inner.setPeerScore(conn, value);
+    pub fn setPeerScore(self: *Service, conn: Handle, value: f64) bool {
+        return self.inner.setPeerScore(conn, value);
     }
 
     pub fn markDirect(self: *Service, conn: Handle) void {
@@ -117,14 +121,29 @@ pub const Service = struct {
         return self.inner.counters;
     }
 
-    pub fn peerConnected(self: *Service, engine: *Engine, conn: Handle, now: Now) void {
-        if (self.inner.state.findPeer(conn) != null) return;
-        const identity = engine.peerId(conn) orelse return;
-        const address = engine.peerAddress(conn) orelse return;
-        const direction = engine.direction(conn) orelse return;
-        const peer = self.inner.addPeer(conn, .v1_2) orelse return;
-        self.inner.state.setMetadata(peer, identity, address, direction);
+    pub const Admission = enum { admitted, duplicate, capacity, unauthenticated };
+
+    /// Hosts inspect this after each connected event and service pump. Refused or locally retired
+    /// gossip relationships retain reqresp access.
+    /// Retry peerConnected with the same live handle after capacity returns or its duplicate closes.
+    /// Hosts schedule retries at most once per second per connection, bounded by transport capacity.
+    pub fn admitted(self: *Service, conn: Handle) bool {
+        return self.inner.state.findPeer(conn) != null;
+    }
+
+    pub fn peerConnected(self: *Service, engine: *Engine, conn: Handle, now: Now) Admission {
+        if (self.inner.state.findPeer(conn) != null) return .admitted;
+        const identity = engine.peerId(conn) orelse return .unauthenticated;
+        const address = engine.peerAddress(conn) orelse return .unauthenticated;
+        const direction = engine.direction(conn) orelse return .unauthenticated;
+        const result = self.inner.addPeer(conn, .v1_2, &.{ .identity = identity, .address = address, .direction = direction }, now);
+        const peer = switch (result) {
+            .admitted => |peer| peer,
+            .duplicate => return .duplicate,
+            .capacity => return .capacity,
+        };
         self.streams[peer.index] = .{ .peer = peer, .outbound = .{ .waiting = now.mono_ms } };
+        return .admitted;
     }
 
     pub fn transportEvents(
@@ -133,8 +152,12 @@ pub const Service = struct {
         events: []const TransportEvent,
         now: Now,
     ) void {
+        self.inner.last_now_ms = @max(self.inner.last_now_ms, now.mono_ms);
         for (events) |event| switch (event) {
-            .connected => |connected| self.peerConnected(engine, connected.conn, now),
+            .connected => |connected| {
+                _ = self.peerConnected(engine, connected.conn, now);
+            },
+            .path_changed => |changed| self.inner.peers.migrate(changed.conn, changed.peer),
             .stream_closed => |closed| self.streamClosed(engine, closed.stream, now),
             .closed => |closed| {
                 const index = self.inner.state.findPeer(closed.conn) orelse continue;

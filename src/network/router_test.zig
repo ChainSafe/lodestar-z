@@ -20,12 +20,12 @@ test "router composes simultaneous ping and meshsub on one connection" {
     defer pair.deinit();
     var client = try rr.Service.init(std.testing.allocator, rr_options);
     defer client.deinit();
-    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .reqresp = rr_options.reqresp });
+    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = rr_options.reqresp });
     defer server.deinit();
     const requests = &server.reqresp;
     const gossip = &server.gossipsub;
     const handles = try support.connectPair(&pair);
-    gossip.peerConnected(&pair.server, handles.server, pair.now);
+    _ = gossip.peerConnected(&pair.server, handles.server, pair.now);
     var topic_buf: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(.{ 1, 2, 3, 4 }, "beacon_block", &topic_buf);
     try std.testing.expect(gossip.subscribe(topic));
@@ -214,7 +214,7 @@ test "router composed service retains native activity behind a partial reqresp s
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
-    var client = try @import("service.zig").Service.init(std.testing.allocator, .{ .reqresp = .{
+    var client = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = .{
         .forks = &.{},
         .outbound_max = 1,
         .inbound_max = 1,
@@ -260,4 +260,58 @@ test "router composed service retains native activity behind a partial reqresp s
     const counts = client.process(&pair.client, &.{}, &.{}, pair.now, &requests, &gossip);
     try std.testing.expectEqual(@as(usize, 1), counts.reqresp);
     try std.testing.expectEqualSlices(u8, &ping, requests[0].chunk.bytes);
+}
+
+test "router gossip capacity refusal preserves reqresp and explicit host retry" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    var client = try rr.Service.init(std.testing.allocator, rr_options);
+    defer client.deinit();
+    defer client.shutdown(&pair.client);
+    var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = rr_options.reqresp });
+    defer server.deinit();
+    defer server.reqresp.shutdownRouted(&server.router, &pair.server);
+    const handles = try support.connectPair(&pair);
+    const peers = @import("gossipsub/peers.zig");
+    for (0..peers.capacity - peers.outbound_reserve) |i| {
+        var metadata: peers.Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** @import("wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
+        std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
+        const ref = server.gossipsub.inner.peers.admit(.{ .index = 0, .generation = 1 }, &metadata, pair.now.mono_ms).admitted.peer;
+        server.gossipsub.inner.scores.penalize(ref.index, 20);
+        server.gossipsub.inner.peers.disconnect(ref, pair.now.mono_ms, true);
+    }
+    try std.testing.expectEqual(gs.service.Service.Admission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
+    try std.testing.expect(!server.gossipsub.admitted(handles.server));
+    const ping = [_]u8{7} ** 8;
+    var sink: [8]u8 = undefined;
+    _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
+    var pong = false;
+    for (0..64) |_| {
+        var transport: [16]engine.Event = undefined;
+        var requests: [16]rr.Event = undefined;
+        var gossip: [16]gs.Event = undefined;
+        var activity: [128]engine.Handle = undefined;
+        try pair.pump();
+        const active_client = pair.client.driverView().takeActivity(&activity);
+        const count = client.process(&pair.client, pair.events(&pair.client, &transport), activity[0..active_client], pair.now, &requests);
+        for (requests[0..count]) |event| if (event == .chunk) {
+            try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
+            try std.testing.expect(client.consume(event.chunk.request, pair.now));
+            pong = true;
+        };
+        const active_server = pair.server.driverView().takeActivity(&activity);
+        const counts = server.process(&pair.server, pair.events(&pair.server, &transport), activity[0..active_server], pair.now, &requests, &gossip);
+        for (requests[0..counts.reqresp]) |event| switch (event) {
+            .request => |request| try server.reqresp.respond(request.request, &ping, null, pair.now),
+            .chunk_sent => |sent| _ = server.reqresp.finish(sent.request, pair.now),
+            else => {},
+        };
+        if (pong) break;
+    }
+    try std.testing.expect(pong);
+    try std.testing.expect(!server.gossipsub.admitted(handles.server));
+    server.gossipsub.inner.peers.rows[0].retain_until = pair.now.mono_ms;
+    try std.testing.expectEqual(gs.service.Service.Admission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
+    try std.testing.expect(server.gossipsub.admitted(handles.server));
 }

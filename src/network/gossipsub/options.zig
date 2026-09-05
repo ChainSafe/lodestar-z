@@ -44,15 +44,19 @@ pub const Options = struct {
     /// not fit the per-peer buffer (blocks and data columns).
     large_message_bytes: usize = constants.GOSSIP_MAX_SIZE,
     large_pool_count: usize = 2,
-    seen_ttl_ms: u64 = constants.seenTtlMs(32, 12),
+    seen_ttl_ms: u64 = constants.seenTtlMs(@import("preset").preset.SLOTS_PER_EPOCH, 12),
+    gossip_factor: f64 = 0.25,
+    retained_score_ms: u64 = 100 * @import("preset").preset.SLOTS_PER_EPOCH * 12_000,
+    ip_allowlist: []const @import("peers.zig").Ip = &.{},
     score_params: score_mod.Params = .{},
     opportunistic_graft_interval_ms: u64 = constants.opportunistic_graft_ms,
-    /// Seed for the mesh-pruning randomness that keeps an oversubscribed mesh
-    /// eclipse-resistant. A host should pass an unpredictable per-node value.
-    random_seed: u64 = 0x9e3779b97f4a7c15,
+    /// Required independent host entropy. Initialization rejects null; tests seed explicitly.
+    random_seed: ?u64 = null,
 };
 
 pub fn validate(o: *const Options) error{InvalidLimits}!void {
+    if (o.random_seed == null or o.ip_allowlist.len > 32 or o.retained_score_ms == 0 or o.retained_score_ms > 86_400_000) return error.InvalidLimits;
+    if (!@import("std").math.isFinite(o.gossip_factor) or o.gossip_factor < 0 or o.gossip_factor > 1) return error.InvalidLimits;
     const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
     try range(o.validation_capacity, 1, 8192);
     try range(o.seen_capacity, 1, 1_048_576);
@@ -81,4 +85,18 @@ pub fn validate(o: *const Options) error{InvalidLimits}!void {
 
 fn range(value: usize, min: usize, max: usize) error{InvalidLimits}!void {
     if (value < min or value > max) return error.InvalidLimits;
+}
+
+test "gossip policy default epoch timers follow the selected preset and require entropy" {
+    const std = @import("std");
+    try std.testing.expectError(error.InvalidLimits, validate(&.{}));
+    const o: Options = .{ .random_seed = 1 };
+    try validate(&o);
+    const expected: u64 = switch (@import("preset").active_preset) {
+        .mainnet => 768_000,
+        .minimal => 192_000,
+        .gnosis => 384_000,
+    };
+    try std.testing.expectEqual(expected, o.seen_ttl_ms);
+    try std.testing.expectEqual(expected * 50, o.retained_score_ms);
 }

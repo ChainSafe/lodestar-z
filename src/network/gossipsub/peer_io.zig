@@ -153,6 +153,8 @@ pub const Pool = struct {
 };
 
 pub const PeerIo = struct {
+    calls_pump: usize = 0,
+    write_first: bool = false,
     control: ControlQueue,
     critical: ControlQueue,
     data: [data_capacity]DataTx = undefined,
@@ -181,6 +183,7 @@ pub const PeerIo = struct {
     rx_ready: bool = true,
     tx_ready: bool = true,
     blocked: enum { none, events, storage } = .none,
+    subscription_since: ?u64 = null,
     subscription_dirty: std.StaticBitSet(constants.topics_cap) = .initEmpty(),
     subscription_cursor: usize = 0,
     decompressed_pump: usize = 0,

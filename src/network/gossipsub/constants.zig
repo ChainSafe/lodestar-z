@@ -64,15 +64,9 @@ pub fn seenTtlMs(slots_per_epoch: u64, seconds_per_slot: u64) u64 {
     return seconds_per_slot * 1000 * slots_per_epoch * seen_ttl_epochs;
 }
 
-/// Comptime table capacities. A Fulu node speaks at most ~206 topics (64
-/// attestation subnets, 128 data-column subnets, and the global topics), and
-/// gossip peers are a subset of transport connections.
+/// Fixed connected-peer capacity and room for two full supported fork topic sets.
 pub const peers_cap: usize = 256;
-pub const topics_cap: usize = 256;
-/// Live PRUNE backoffs tracked at once across all (peer, topic) pairs. Sized
-/// well above peers_cap so churn cannot starve it; the soonest-expiring entry
-/// is evicted when full.
-pub const backoffs_cap: usize = 1024;
+pub const topics_cap: usize = 512;
 /// Message ids a single peer may suppress at once through IDONTWANT.
 pub const dont_send_cap: usize = 128;
 
