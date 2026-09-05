@@ -17,6 +17,7 @@ pub const MessageId = gossipsub.MessageId;
 pub const ValidationHandle = gossipsub.ValidationHandle;
 pub const ReportOutcome = gossipsub.ReportOutcome;
 pub const Verdict = gossipsub.Verdict;
+pub const ResourceSnapshot = gossipsub.ResourceSnapshot;
 
 test {
     _ = @import("mesh.zig");

@@ -432,6 +432,11 @@ jobs:
         # anyway; devs can still use `zig build` in Debug locally.
         run: |
           cd test/fuzz && zig build -Doptimize=ReleaseFast
+      - name: Replay and smoke bounded network parsers with safety checks
+        run: |
+          cd test/fuzz
+          zig build build-network_reqresp build-network_gossip -Doptimize=ReleaseSafe
+          ./smoke-network.sh
 
   bindings-test:
     name: bindings - test

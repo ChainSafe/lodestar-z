@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
     const Fuzzer = struct {
         name: []const u8,
         extra_libs: []const *std.Build.Step.Compile = &.{},
+        extra_args: []const []const u8 = &.{},
 
         /// Returns the corpus directory path for this fuzzer.
         /// Change the suffix to switch between -cmin and -initial.
@@ -82,6 +83,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "bls_aggregate_sig", .extra_libs = &.{dep_blst.artifact("blst")} },
         .{ .name = "discv5_wire" },
         .{ .name = "network_wire" },
+        .{ .name = "network_reqresp", .extra_libs = &.{dep_snappy.artifact("snappy")}, .extra_args = &.{ "-lc++", "-lc++abi", "-lunwind" } },
+        .{ .name = "network_gossip" },
     };
 
     inline for (fuzzers) |fuzzer| {
@@ -109,6 +112,7 @@ pub fn build(b: *std.Build) void {
             lodestar_z.module("persistent_merkle_tree"),
         );
         lib_mod.addImport("network_wire", lodestar_z.module("network_wire"));
+        lib_mod.addImport("network", lodestar_z.module("network"));
 
         const lib = b.addLibrary(.{
             .name = fuzzer.name,
@@ -117,7 +121,7 @@ pub fn build(b: *std.Build) void {
         lib.root_module.stack_check = false;
         lib.root_module.fuzz = true;
 
-        const exe = afl.addInstrumentedExe(b, lib, fuzzer.extra_libs);
+        const exe = afl.addInstrumentedExe(b, lib, fuzzer.extra_libs, fuzzer.extra_args);
         const mkdir = b.addSystemCommand(&.{
             "mkdir", "-p",
         });
@@ -138,5 +142,10 @@ pub fn build(b: *std.Build) void {
             b.fmt("fuzz-{s}", .{fuzzer.name}),
         );
         b.getInstallStep().dependOn(&install.step);
+        const build_step = b.step(
+            b.fmt("build-{s}", .{fuzzer.name}),
+            b.fmt("Build {s} AFL harness", .{fuzzer.name}),
+        );
+        build_step.dependOn(&install.step);
     }
 }

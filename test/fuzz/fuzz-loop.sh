@@ -10,7 +10,7 @@ LOGS_DIR="${FUZZ_DIR}/logs"
 SSZ_TARGETS=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists ssz_chunked_leaf_set)
 BLS_TARGETS=(bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig)
 DISCV5_TARGETS=(discv5_wire)
-NETWORK_TARGETS=(network_wire)
+NETWORK_TARGETS=(network_wire network_reqresp network_gossip)
 ALL_TARGETS=("${SSZ_TARGETS[@]}" "${BLS_TARGETS[@]}" "${DISCV5_TARGETS[@]}" "${NETWORK_TARGETS[@]}")
 
 usage() {
