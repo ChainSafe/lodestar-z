@@ -115,7 +115,7 @@ async function createPeer() {
   node.services.pubsub.addEventListener("message", (event) => {
     if (messages.length < eventMax) {
       const value = {
-        messageId: Buffer.from(event.detail.msgId).toString("hex"),
+        messageId: idFor({data: event.detail.data, topic: event.detail.topic}).toString("hex"),
         topic: event.detail.topic,
         ...summary(event.detail.data),
       };
