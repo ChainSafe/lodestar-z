@@ -484,6 +484,64 @@ fn connectMesh(setup: *GossipPair) !void {
     for (0..20) |_| try setup.pumpOnce();
 }
 
+fn publishAdmissionA(setup: *GossipPair) !struct { count: usize, handle: ?gossipsub.ValidationHandle } {
+    const queued = try setup.client.publish(test_topic, "A", setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 1), queued.queued);
+    var count: usize = 0;
+    var handle: ?gossipsub.ValidationHandle = null;
+    for (0..20) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .message) {
+            try std.testing.expectEqualStrings("A", event.message.bytes);
+            count += 1;
+            handle = event.message.handle;
+        };
+    }
+    return .{ .count = count, .handle = handle };
+}
+
+test "gossipsub readmission reuses tombstones across repeated Seen eviction" {
+    var setup: GossipPair = .{};
+    try setup.initOpts(.{}, .{ .seen_capacity = 1, .validation_capacity = 4, .mcache_capacity = 1 });
+    defer setup.deinit();
+    try connectMesh(&setup);
+    const first = try publishAdmissionA(&setup);
+    try std.testing.expectEqual(@as(usize, 1), first.count);
+    const old = first.handle.?;
+    try std.testing.expectEqual(gossipsub.ReportOutcome{ .applied = .ignore }, setup.server.report(old, .ignore, setup.pair.now));
+    try std.testing.expectEqual(@as(usize, 0), setup.server.store.used_entries);
+    _ = try setup.server.publish(test_topic, "B", setup.pair.now);
+    const second = try publishAdmissionA(&setup);
+    try std.testing.expectEqual(@as(usize, 1), second.count);
+    const current = second.handle.?;
+    const retained = setup.server.validation.entries[current.index].message;
+    const id = topic_mod.validMessageId(test_topic, "A", .{});
+    for (0..8) |i| {
+        const payload = [_]u8{@as(u8, @intCast(i)) + 'C'};
+        _ = try setup.server.publish(test_topic, &payload, setup.pair.now);
+        try std.testing.expect(!setup.server.seen.contains(id, setup.pair.now.mono_ms));
+        const duplicate = try publishAdmissionA(&setup);
+        try std.testing.expectEqual(@as(usize, 0), duplicate.count);
+        var pending: usize = 0;
+        for (setup.server.validation.entries) |entry| {
+            if (entry.state == .pending and std.mem.eql(u8, &entry.id, &id)) pending += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), pending);
+        try std.testing.expectEqual(@as(usize, 2), setup.server.store.used_entries);
+        try std.testing.expect(setup.server.store.get(retained).?.validation);
+    }
+    try std.testing.expectEqual(old.index, current.index);
+    try std.testing.expectEqual(old.generation + 1, current.generation);
+    try std.testing.expectEqual(gossipsub.ReportOutcome.stale_handle, setup.server.report(old, .accept, setup.pair.now));
+    try std.testing.expectEqual(gossipsub.ReportOutcome{ .applied = .ignore }, setup.server.report(current, .ignore, setup.pair.now));
+    try std.testing.expectEqual(gossipsub.ReportOutcome.already_resolved, setup.server.report(current, .accept, setup.pair.now));
+    try std.testing.expect(setup.server.store.get(retained) == null);
+    try std.testing.expectEqual(@as(usize, 1), setup.server.store.used_entries);
+    for (0..@import("constants.zig").mcache_len) |_| setup.server.mcache.shift(&setup.server.store);
+    try std.testing.expectEqual(@as(usize, 0), setup.server.store.used_entries);
+    try std.testing.expectEqual(setup.server.store.next.len, setup.server.store.free_pages);
+}
+
 test "gossipsub legal maximum and above two MiB publish use actual resumable IO" {
     const sizes = [_]usize{ 65536, 2 * 1024 * 1024 + 1, @import("constants.zig").MAX_PAYLOAD_SIZE };
     for (sizes) |size| {
