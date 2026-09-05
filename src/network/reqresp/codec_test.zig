@@ -121,7 +121,7 @@ test "codec streams a chunk through the writer identically to the one-shot encod
     const expected = try codec.encodeChunk(0, [4]u8{ 1, 2, 3, 4 }, payload, whole);
 
     var writer = codec.ChunkWriter.initChunk(0, [4]u8{ 1, 2, 3, 4 }, payload);
-    var piece_buffer: [codec.frame_header_length + codec.frame_body_max]u8 = undefined;
+    var piece_buffer: [codec.frame_scratch_max]u8 = undefined;
     const streamed = try allocator.alloc(u8, expected.len);
     defer allocator.free(streamed);
     var cursor: usize = 0;

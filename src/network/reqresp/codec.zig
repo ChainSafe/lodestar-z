@@ -13,7 +13,7 @@ pub const checksum_length: usize = 4;
 pub const frame_compressed_max: usize =
     constants.maxEncodedLength(constants.frame_uncompressed_max);
 pub const frame_body_max: usize = checksum_length + frame_compressed_max;
-pub const frame_scratch_max: usize = frame_body_max;
+pub const frame_scratch_max: usize = frame_header_length + frame_body_max;
 pub const error_message_max: usize = consensus.MAX_ERROR_MESSAGE_LENGTH;
 pub const header_max: usize = 1 + constants.context_bytes_length + constants.varint_length_max +
     identifier.len;
