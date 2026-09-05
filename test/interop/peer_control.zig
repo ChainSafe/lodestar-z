@@ -34,7 +34,7 @@ pub fn run(peer: *@import("network_peer.zig").Peer) !void {
     var used: usize = 0;
     var commands: usize = 0;
     var last_id: u32 = 0;
-    for (0..500_000) |_| {
+    for (0..10_000_000) |_| {
         if (peer.quit) return;
         var fd = [_]PollFd{.{ .fd = 0, .events = 1, .revents = 0 }};
         if (poll(&fd, 1, 0) < 0) return error.PollFailed;

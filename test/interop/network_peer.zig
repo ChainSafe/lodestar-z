@@ -28,7 +28,7 @@ pub const Peer = struct {
     quit: bool = false,
 
     pub fn pump(self: *Peer) !void {
-        if (self.steps >= 500_000) return error.StepBound;
+        if (self.steps >= 10_000_000) return error.StepBound;
         self.steps += 1;
         var events: [32]Engine.Event = undefined;
         var activity: [4]Engine.Handle = undefined;
@@ -47,7 +47,8 @@ pub const Peer = struct {
                 if (self.conn) |conn| if (std.meta.eql(conn, c.conn)) {
                     self.conn = null;
                 };
-                try control.emit(self.allocator, .{ .event = "closed" });
+                const slot = &self.transport.engine.registry.slots[c.conn.index];
+                try control.emit(self.allocator, .{ .event = "closed", .reason = @tagName(c.reason), .tls = if (slot.handshake.failure) |failure| @errorName(failure) else null });
             },
             else => {},
         };
@@ -176,9 +177,11 @@ pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .{};
     defer std.debug.assert(gpa.deinit() == .ok);
     const a = gpa.allocator();
+    var quotas = network.reqresp.limiter.defaultQuotas();
+    quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
     const peer = try a.create(Peer);
     defer a.destroy(peer);
-    peer.* = .{ .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .reqresp = .{ .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .forks = &.{.{ .digest = .{ 1, 0, 0, 0 }, .fork = .altair }}, .progress_timeout_ms = 5000 }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
+    peer.* = .{ .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .reqresp = .{ .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .forks = &.{.{ .digest = .{ 1, 0, 0, 0 }, .fork = .altair }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
     defer peer.service.deinit();
     peer.sink = try a.alloc(u8, max_payload);
     defer a.free(peer.sink);

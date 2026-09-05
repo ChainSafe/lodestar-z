@@ -86,6 +86,35 @@ test "engine finds a connection by peer id until its slot is released" {
     try std.testing.expect(pair.server.findByPeerId(&client_id) == null);
 }
 
+test "engine reconnects with the same TLS contexts" {
+    var pair: Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+
+    const first = try connectPair(&pair);
+    try std.testing.expect(pair.client.close(first.client, 0));
+    try pair.pump();
+
+    var storage: [8]Event = undefined;
+    for (0..2) |_| {
+        _ = pair.events(&pair.client, &storage);
+        _ = pair.events(&pair.server, &storage);
+    }
+    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
+
+    const second = try pair.dial();
+    try pair.pump();
+    const client_events = pair.events(&pair.client, &storage);
+    try std.testing.expectEqual(@as(usize, 1), client_events.len);
+    const client = try expectConnected(client_events[0], .outbound, &pair.server_ctx);
+    try std.testing.expectEqual(second, client);
+
+    const server_events = pair.events(&pair.server, &storage);
+    try std.testing.expectEqual(@as(usize, 1), server_events.len);
+    _ = try expectConnected(server_events[0], .inbound, &pair.client_ctx);
+}
+
 test "engine reports connection metadata through handles" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});

@@ -136,7 +136,16 @@ async function createPeer() {
 async function request(address, large) {
   const signal = AbortSignal.timeout(large ? 30000 : 10000);
   const stream = await node.dialProtocol(multiaddr(loopback(address)), large ? BLOCKS : PING, {signal});
-  const result = readPayload(chunks(stream), true, large);
+  let received = 0;
+  async function* observed() {
+    for await (const part of chunks(stream)) {
+      received += part.length;
+      yield part;
+    }
+  }
+  const result = readPayload(observed(), true, large).catch((error) => {
+    throw Error(`${error.message}; received=${received}`);
+  });
   const bytes = large
     ? Buffer.from([0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
     : Buffer.from([1, 0, 0, 0, 0, 0, 0, 0]);
@@ -153,8 +162,14 @@ async function execute(command) {
       return {address: loopback(node.getMultiaddrs()[0].toString()), protocols};
     case "dial":
       loopback(command.address);
-      await node.dial(multiaddr(command.address), {signal: AbortSignal.timeout(10000)});
-      return {connections: node.getConnections().length};
+      {
+        const connection = await node.dial(multiaddr(command.address), {signal: AbortSignal.timeout(10000)});
+        return {
+          connections: node.getConnections().length,
+          remotePeer: connection.remotePeer.toString(),
+          status: connection.status,
+        };
+      }
     case "subscribe":
       node.services.pubsub.subscribe(command.topic ?? TOPIC);
       return {subscribers: node.services.pubsub.getSubscribers(command.topic ?? TOPIC).length};
