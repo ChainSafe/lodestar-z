@@ -164,9 +164,45 @@ fn writeGenericFields(writer: *rlp.Writer, sequence: u64, fields: []const Field)
         switch (field_value.value) {
             .bytes => |value| try writer.writeBytes(value),
             .uint => |value| try writer.writeUint(value),
-            .raw => |value| try writer.writeRawItem(value),
+            .raw => |value| {
+                try validateRawItem(value);
+                try writer.writeRawItem(value);
+            },
         }
     }
+}
+
+// A byte bounds each entered item and each list exit. End offsets retain nesting without
+// recursion; all offsets fit because a complete ENR has at most 300 bytes.
+fn validateRawItem(encoded: []const u8) Error!void {
+    if (encoded.len == 0 or encoded.len > constants.enr_size_max) return Error.InvalidRecord;
+    var outer = rlp.Reader.init(encoded);
+    _ = outer.readRawItem() catch return Error.InvalidRecord;
+    if (!outer.atEnd()) return Error.InvalidRecord;
+    var ends: [constants.enr_size_max]u16 = undefined;
+    ends[0] = @intCast(encoded.len);
+    var depth: usize = 1;
+    var position: usize = 0;
+    for (0..2 * constants.enr_size_max + 1) |_| {
+        if (depth == 0) return;
+        const end = ends[depth - 1];
+        std.debug.assert(position <= end);
+        if (position == end) {
+            depth -= 1;
+            continue;
+        }
+        var reader = rlp.Reader.init(encoded[position..end]);
+        const item = reader.readRawItem() catch return Error.InvalidRecord;
+        position += item.len;
+        if (item[0] < 0xc0) continue;
+        var list_reader = rlp.Reader.init(item);
+        const children = list_reader.readList() catch return Error.InvalidRecord;
+        if (depth == ends.len) return Error.InvalidRecord;
+        ends[depth] = @intCast(position);
+        depth += 1;
+        position -= children.data.len;
+    }
+    return Error.InvalidRecord;
 }
 
 fn writeFields(
@@ -228,6 +264,7 @@ fn parse(data: []const u8) Error!Parsed {
     while (!list.atEnd() and fields < field_pairs_max) : (fields += 1) {
         const key = list.readBytes() catch return Error.InvalidRecord;
         const value = list.readRawItem() catch return Error.InvalidRecord;
+        try validateRawItem(value);
         if (previous_key) |previous| {
             if (std.mem.order(u8, previous, key) != .lt) return Error.InvalidRecord;
         }

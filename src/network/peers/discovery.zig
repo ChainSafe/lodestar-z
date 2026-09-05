@@ -52,7 +52,7 @@ const Storage = struct {
     background: d.Lookup.Candidates,
     bootstrap: [d.Maintenance.bootstrap_max]d.identity.enr.Record,
     expiries: [d.CallTable.capacity_max]d.CallTable.Expired,
-    records: [d.Lookup.result_max]d.identity.enr.Record,
+    records: [d.Lookup.result_max]d.Lookup.Confirmed,
 };
 
 pub const Discovery = struct {
@@ -145,8 +145,8 @@ pub const Discovery = struct {
         }
         self.consumeEvent(progress, out, &result);
         if (self.lookup_active and self.lookup.isFinished()) {
-            for (self.lookup.results(&self.storage.records)) |*record| {
-                self.publish(record, record.endpoint() orelse continue, progress.now_ms, out, &result);
+            for (self.lookup.confirmedResults(&self.storage.records)) |*confirmed| {
+                self.publish(&confirmed.record, confirmed.peer.address, progress.now_ms, out, &result);
             }
             self.lookup_active = false;
             self.query_due_ms = progress.now_ms +| self.options.query_interval_ms;
