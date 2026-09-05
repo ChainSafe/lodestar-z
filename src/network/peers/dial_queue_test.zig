@@ -109,3 +109,21 @@ test "peer dial queue polling and failure without native owner preserve started 
     try std.testing.expectEqual(@as(?u64, 10_000), q.nextWakeup(10_000, 0));
     try std.testing.expect(q.dialClosed(conn, 10_000));
 }
+
+test "peer dial queue review cooldown cannot extend a lost acknowledgement lease" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .engine_dialing_max = 1, .seed = 5 });
+    defer q.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    try q.enqueue(&peer, &.{address}, false, 0);
+    var out: [1]mod.DialIntent = undefined;
+    _ = q.poll(0, &out);
+    const expired = out[0].token;
+    q.deferPeer(&peer, 1_800_000);
+    try std.testing.expectEqual(@as(?u64, 10_000), q.nextWakeup(0, 0));
+    q.expire(null, 10_000);
+    try std.testing.expect(!q.dialFailed(expired, 10_000));
+    try std.testing.expect(!q.dialStarted(expired, .{ .index = 0, .generation = 0 }));
+    try std.testing.expectEqual(@as(?u64, 1_800_000), q.nextWakeup(10_000, 1));
+    try std.testing.expectEqual(@as(usize, 0), q.poll(1_799_999, &out));
+    try std.testing.expectEqual(@as(usize, 1), q.poll(1_800_000, &out));
+}

@@ -19,7 +19,8 @@ const Row = struct {
     connected: bool = false,
     attempt: bool = false,
     conn: ?t.Handle = null,
-    deadline_ms: u64 = 0,
+    eligible_at_ms: u64 = 0,
+    lease_expires_at_ms: u64 = 0,
     failures: u8 = 0,
 };
 pub const DialQueue = struct {
@@ -84,7 +85,7 @@ pub const DialQueue = struct {
             .generation = row.generation,
             .peer = peer.*,
             .direct = direct,
-            .deadline_ms = now_ms,
+            .eligible_at_ms = now_ms,
             .address_count = @intCast(addresses.len),
         };
         @memcpy(row.addresses[0..addresses.len], addresses);
@@ -112,7 +113,7 @@ pub const DialQueue = struct {
             row.attempt = false;
             row.conn = null;
             row.connected = connected;
-            row.deadline_ms = now_ms +| 1_000;
+            row.eligible_at_ms = @max(row.eligible_at_ms, now_ms +| 1_000);
             if (connected) row.failures = 0;
         };
     }
@@ -166,9 +167,9 @@ pub const DialQueue = struct {
             return;
         }
     }
-    pub fn deferPeer(self: *DialQueue, peer: *const t.PeerId, deadline_ms: u64) void {
+    pub fn deferPeer(self: *DialQueue, peer: *const t.PeerId, eligible_at_ms: u64) void {
         for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
-            row.deadline_ms = @max(row.deadline_ms, deadline_ms);
+            row.eligible_at_ms = @max(row.eligible_at_ms, eligible_at_ms);
         };
     }
     fn rowFor(self: *DialQueue, token: Token) ?*Row {
@@ -196,7 +197,7 @@ pub const DialQueue = struct {
         row.failures = @min(row.failures +| 1, 7);
         const base: u64 = @min(@as(u64, 1_000) << @intCast(row.failures - 1), 60_000);
         const jitter = self.random.random().int(u16) % 1_001;
-        row.deadline_ms = now_ms +| @min(base + jitter, 60_000);
+        row.eligible_at_ms = @max(row.eligible_at_ms, now_ms +| @min(base + jitter, 60_000));
         row.address_index = (row.address_index + 1) % row.address_count;
     }
     pub fn expire(
@@ -204,7 +205,9 @@ pub const DialQueue = struct {
         engine: ?*@import("../quic/engine.zig").Engine,
         now_ms: u64,
     ) void {
-        for (self.rows) |*row| if (row.occupied and row.attempt and now_ms >= row.deadline_ms) {
+        for (self.rows) |*row| if (row.occupied and row.attempt and
+            now_ms >= row.lease_expires_at_ms)
+        {
             if (row.conn) |conn| {
                 const owner = engine orelse continue;
                 closeAttempt(owner, conn);
@@ -225,11 +228,11 @@ pub const DialQueue = struct {
             const index = self.cursor;
             self.cursor = (index + 1) % self.rows.len;
             const row = &self.rows[index];
-            if (!row.occupied or row.connected or row.attempt or now_ms < row.deadline_ms or
+            if (!row.occupied or row.connected or row.attempt or now_ms < row.eligible_at_ms or
                 row.generation == std.math.maxInt(u64)) continue;
             row.generation += 1;
             row.attempt = true;
-            row.deadline_ms = now_ms +| 10_000;
+            row.lease_expires_at_ms = now_ms +| 10_000;
             out[count] = .{
                 .token = .{ .index = @intCast(index), .generation = row.generation },
                 .peer = row.peer,
@@ -250,7 +253,8 @@ pub const DialQueue = struct {
             if (!row.occupied or (row.connected and !row.attempt)) continue;
             if (!row.attempt and (output_capacity == 0 or active >= self.options.concurrent_max or
                 row.generation == std.math.maxInt(u64))) continue;
-            const next = @max(now_ms, row.deadline_ms);
+            const deadline = if (row.attempt) row.lease_expires_at_ms else row.eligible_at_ms;
+            const next = @max(now_ms, deadline);
             due = @min(due orelse next, next);
         }
         return due;
