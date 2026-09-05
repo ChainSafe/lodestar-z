@@ -195,6 +195,19 @@ pub const Control = struct {
             std.meta.eql(op.peer, peer) and std.meta.eql(op.conn, conn)) return true;
         return false;
     }
+    fn goodbyeReason(reason: t.DisconnectReason) u64 {
+        return switch (reason) {
+            .host, .shutdown, .duplicate, .capacity, .remote_goodbye, .count_pruning => 1,
+            .incompatible_fork, .future_head, .finalized_mismatch, .missing_availability => 2,
+            .transport_closed,
+            .invalid_status,
+            .invalid_metadata,
+            .health_timeout,
+            .reputation,
+            .banned,
+            => 3,
+        };
+    }
     fn start(
         self: *Control,
         service: *Service,
@@ -216,7 +229,10 @@ pub const Control = struct {
                     std.mem.writeInt(
                         u64,
                         op.bytes[0..8],
-                        if (protocol == .ping_v1) local.metadata.seq_number else 1,
+                        if (protocol == .ping_v1)
+                            local.metadata.seq_number
+                        else
+                            goodbyeReason(row.closing.?.reason),
                         .little,
                     );
                     break :blk 8;
@@ -446,12 +462,12 @@ pub const Control = struct {
                 _ = service.reqresp.cancel(event.request);
                 return;
             },
-            .goodbye_v1 => {
+            .goodbye_v1 => blk: {
                 _ = catalog.remoteGoodbye(peer, event.peer, now.mono_ms, 60_000);
                 _ = self.disconnect(catalog, peer, event.peer, .remote_goodbye, now);
                 self.schedules[peer.index].closing.?.sent = true;
-                _ = service.reqresp.finish(event.request, now);
-                return;
+                std.mem.writeInt(u64, response.bytes[0..8], 1, .little);
+                break :blk 8;
             },
             else => unreachable,
         };

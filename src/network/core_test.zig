@@ -720,3 +720,70 @@ test "core native dial expiry closes authenticated attempt before connected even
         try std.testing.expectEqual(@as(u16, 0), setup.pair.client.registry.active_len);
     }
 }
+
+test "core review native competing attempt expires during selected peer ban cooldown" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    try setup.client.connect(&setup.pair.server_ctx.local_peer_id, &.{support.server_address}, setup.pair.now);
+    var intents: [1]managed.DialIntent = undefined;
+    _ = setup.client.dialIntents(&setup.pair.client, setup.pair.now, &intents);
+    const token = intents[0].token;
+    const attempt = try setup.pair.dial();
+    try std.testing.expect(setup.client.dialStarted(token, attempt));
+    _ = try setup.pair.server.dial(&support.client_address, setup.pair.client_ctx.local_peer_id, setup.pair.now, setup.pair.nextEntropy());
+    try setup.pair.pump();
+    try std.testing.expect(setup.pair.client.peerId(attempt) != null);
+    var transport: [32]Engine.Event = undefined;
+    const events = setup.pair.events(&setup.pair.client, &transport);
+    var selected: ?Engine.Event = null;
+    for (events) |event| if (event == .connected and event.connected.direction == .inbound) {
+        selected = event;
+    };
+    try std.testing.expect(selected != null);
+    // Deliver the inbound authentication first, retaining the competing connected event at the host.
+    _ = setup.client.process(&setup.pair.client, &.{selected.?}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    try std.testing.expect(!std.meta.eql(attempt, snapshots[0].connection.?));
+    try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.reportPeer(snapshots[0].peer, .fatal, setup.pair.now).?);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    setup.pair.advance(10_000);
+    _ = setup.client.dialIntents(&setup.pair.client, setup.pair.now, &intents);
+    for (0..8) |_| try setup.step(0);
+    try std.testing.expect(setup.pair.client.registry.slots[attempt.index].conn == null);
+    try std.testing.expect(!setup.client.dialStarted(token, attempt));
+    try std.testing.expect(!setup.client.dialFailed(token, setup.pair.now));
+    try std.testing.expectEqual(@as(u16, 0), setup.pair.client.registry.outbound);
+    try std.testing.expect(setup.client.dial_queue.nextWakeup(setup.pair.now.mono_ms, 1).? >
+        setup.pair.now.mono_ms);
+}
+
+test "core review early native close preserves selected reason and counts it once" {
+    for ([_]?t.DisconnectReason{ .host, .reputation, .banned, .incompatible_fork, null }) |reason| {
+        var setup: Setup = .{};
+        try setup.init(&.{});
+        defer setup.deinit();
+        for (0..50) |_| try setup.step(1);
+        var snapshots: [4]t.Snapshot = undefined;
+        _ = setup.server.snapshots(&snapshots);
+        const remote_conn = snapshots[0].connection.?;
+        _ = setup.client.snapshots(&snapshots);
+        if (reason) |typed| {
+            try std.testing.expect(setup.client.disconnect(snapshots[0].peer, typed, setup.pair.now));
+            for (0..8) |_| try setup.step(0);
+        }
+        try std.testing.expect(setup.pair.server.close(remote_conn, 0));
+        for (0..8) |_| try setup.step(0);
+        var output: [1]t.Event = undefined;
+        try std.testing.expectEqual(@as(usize, 1), setup.client.catalog.pollEvents(&output));
+        const expected = reason orelse .transport_closed;
+        try std.testing.expectEqual(expected, output[0].closed.reason);
+        try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.closed[@intFromEnum(expected)]);
+        setup.pair.advance(2_000);
+        for (0..8) |_| try setup.step(0);
+        var total: u64 = 0;
+        for (setup.client.control.counters.closed) |count| total += count;
+        try std.testing.expectEqual(@as(u64, 1), total);
+    }
+}

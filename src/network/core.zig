@@ -227,8 +227,15 @@ pub const Core = struct {
                 _ = self.dial_queue.dialClosed(closed.conn, now.mono_ms);
                 if (self.control.peerFor(closed.conn)) |peer| {
                     const snapshot = self.catalog.get(peer).?;
-                    self.control.cancelConnection(&self.service, engine, peer, closed.conn);
-                    _ = self.catalog.disconnect(peer, closed.conn, .transport_closed, now.mono_ms);
+                    self.control.close(
+                        &self.service,
+                        &self.catalog,
+                        engine,
+                        peer,
+                        closed.conn,
+                        snapshot.disconnect_reason orelse .transport_closed,
+                        now,
+                    );
                     self.dial_queue.connection(&snapshot.identity, false, now.mono_ms);
                 }
             },

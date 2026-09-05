@@ -50,6 +50,8 @@ test "core control native Fulu serves older schemas but old Status cannot establ
         defer setup.client.shutdown(&setup.pair.client, setup.pair.now);
         var chunks: usize = 0;
         var terminal = false;
+        var goodbye_writer = false;
+        const goodbye_reply: [8]u8 = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
         for (0..50) |_| {
             try setup.pair.pump();
             var transport: [32]Engine.Event = undefined;
@@ -57,6 +59,14 @@ test "core control native Fulu serves older schemas but old Status cannot establ
                 &setup.pair.server,
                 &transport,
             ), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+            if (protocol == .goodbye_v1) {
+                for (setup.server.control.responses) |response| if (response.request) |inbound| {
+                    const owner = setup.server.service.reqresp.inner.inboundSlot(inbound).?;
+                    if (owner.protocol != .goodbye_v1 or !owner.io.writing) continue;
+                    try std.testing.expectEqualSlices(u8, &goodbye_reply, response.bytes[0..8]);
+                    goodbye_writer = true;
+                };
+            }
             var output: [1]rr.Event = undefined;
             const counts = setup.client.service.processPartitioned(&setup.pair.client, setup.pair.events(
                 &setup.pair.client,
@@ -67,20 +77,27 @@ test "core control native Fulu serves older schemas but old Status cannot establ
                 .chunk => |chunk| {
                     try std.testing.expectEqualDeep(request, chunk.request);
                     try std.testing.expectEqual(protocol.info().response_min, chunk.bytes.len);
+                    if (protocol == .goodbye_v1) {
+                        try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, chunk.bytes[0..8], .little));
+                    }
                     try std.testing.expect(setup.client.consume(request, setup.pair.now));
                     chunks += 1;
                 },
                 .done => terminal = true,
                 .request => |incoming| {
                     try std.testing.expectEqual(rr.Protocol.goodbye_v1, incoming.protocol);
-                    _ = setup.client.finish(incoming.request, setup.pair.now);
+                    try setup.client.respond(incoming.request, &goodbye_reply, null, setup.pair.now);
+                },
+                .chunk_sent => |sent| {
+                    try std.testing.expect(setup.client.finish(sent.request, setup.pair.now));
                 },
                 .served => {},
                 else => return error.UnexpectedControlResult,
             }
         }
         try std.testing.expect(terminal);
-        try std.testing.expectEqual(@as(usize, if (protocol == .goodbye_v1) 0 else 1), chunks);
+        try std.testing.expectEqual(@as(usize, 1), chunks);
+        if (protocol == .goodbye_v1) try std.testing.expect(goodbye_writer);
         if (protocol == .status_v1 or protocol == .goodbye_v1) {
             setup.pair.advance(2_001);
             _ = setup.server.process(
@@ -359,4 +376,36 @@ test "core native immutable Status writer survives local update" {
     for (0..40) |_| try setup.step(0);
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expectEqual(@as(u64, 80), snapshots[0].status.?.head_slot);
+}
+
+test "core control native Goodbye maps shutdown incompatibility and fault wire reasons" {
+    const cases = [_]struct { reason: t.DisconnectReason, wire_reason: u64 }{
+        .{ .reason = .shutdown, .wire_reason = 1 },
+        .{ .reason = .incompatible_fork, .wire_reason = 2 },
+        .{ .reason = .invalid_metadata, .wire_reason = 3 },
+    };
+    for (cases) |case| {
+        var setup: Setup = .{};
+        try setup.init(&.{});
+        defer setup.deinit();
+        for (0..50) |_| try setup.step(0);
+        var snapshots: [4]t.Snapshot = undefined;
+        _ = setup.client.snapshots(&snapshots);
+        try std.testing.expect(setup.client.disconnect(snapshots[0].peer, case.reason, setup.pair.now));
+        var received = false;
+        for (0..40) |_| {
+            try setup.pair.pump();
+            var transport: [32]Engine.Event = undefined;
+            _ = setup.client.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+            var control: [1]rr.Event = undefined;
+            const counts = setup.server.service.processPartitioned(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), &.{}, setup.pair.now, &.{}, &control, &.{});
+            if (counts.control == 0) continue;
+            try std.testing.expectEqual(rr.Protocol.goodbye_v1, control[0].request.protocol);
+            try std.testing.expectEqual(@as(usize, 8), control[0].request.bytes.len);
+            try std.testing.expectEqual(case.wire_reason, std.mem.readInt(u64, control[0].request.bytes[0..8], .little));
+            received = true;
+            break;
+        }
+        try std.testing.expect(received);
+    }
 }
