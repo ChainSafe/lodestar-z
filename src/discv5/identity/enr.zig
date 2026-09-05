@@ -16,6 +16,12 @@ pub const Error = rlp.Error || crypto.Error || error{
     UnsupportedScheme,
 };
 
+pub const Field = struct {
+    key: []const u8,
+    value: Value,
+    pub const Value = union(enum) { bytes: []const u8, uint: u64, raw: []const u8 };
+};
+
 pub const Record = struct {
     bytes: [constants.enr_size_max]u8,
     length: u16,
@@ -51,6 +57,49 @@ pub const Record = struct {
         try writeFields(&record_writer, sequence, endpoint_value, &public_key);
         record_writer.finishList(record);
         return Record.init(record_writer.bytes());
+    }
+
+    /// Borrows a complete sorted field list, including id and secp256k1, for this call.
+    pub fn createFields(key_pair: *const crypto.KeyPair, sequence: u64, fields: []const Field) Error!Record {
+        if (fields.len > field_pairs_max) return Error.TooManyFields;
+        var content_buffer: [constants.enr_size_max]u8 = undefined;
+        var content_writer = rlp.Writer.init(&content_buffer);
+        const content = try content_writer.beginList();
+        try writeGenericFields(&content_writer, sequence, fields);
+        content_writer.finishList(content);
+        var digest: [32]u8 = undefined;
+        Keccak256.hash(content_writer.bytes(), &digest, .{});
+        const signature = try crypto.sign(&digest, key_pair);
+        var buffer: [constants.enr_size_max]u8 = undefined;
+        var writer = rlp.Writer.init(&buffer);
+        const outer = try writer.beginList();
+        try writer.writeBytes(&signature);
+        try writeGenericFields(&writer, sequence, fields);
+        writer.finishList(outer);
+        return Record.init(writer.bytes());
+    }
+
+    /// Returns one encoded RLP value borrowed until this record is mutated or released.
+    pub fn field(self: *const Record, key: []const u8) Error!?[]const u8 {
+        var outer = rlp.Reader.init(self.slice());
+        var list = try outer.readList();
+        _ = try list.readBytes();
+        _ = try list.readUint();
+        for (0..field_pairs_max) |_| {
+            if (list.atEnd()) return null;
+            const name = try list.readBytes();
+            const value = try list.readRawItem();
+            switch (std.mem.order(u8, name, key)) {
+                .eq => return value,
+                .gt => return null,
+                .lt => {},
+            }
+        }
+        return Error.TooManyFields;
+    }
+
+    pub fn fieldBytes(self: *const Record, key: []const u8) Error!?[]const u8 {
+        return try decodeFieldBytes((try self.field(key)) orelse return null);
     }
 
     /// Parses and verifies a signed record. Keys must be unique and sorted, and the signature
@@ -102,6 +151,23 @@ pub const Record = struct {
         return null;
     }
 };
+
+fn writeGenericFields(writer: *rlp.Writer, sequence: u64, fields: []const Field) Error!void {
+    try writer.writeUint(sequence);
+    var previous: ?[]const u8 = null;
+    for (fields) |field_value| {
+        if (previous) |key| {
+            if (std.mem.order(u8, key, field_value.key) != .lt) return Error.InvalidRecord;
+        }
+        previous = field_value.key;
+        try writer.writeBytes(field_value.key);
+        switch (field_value.value) {
+            .bytes => |value| try writer.writeBytes(value),
+            .uint => |value| try writer.writeUint(value),
+            .raw => |value| try writer.writeRawItem(value),
+        }
+    }
+}
 
 fn writeFields(
     writer: *rlp.Writer,

@@ -206,3 +206,31 @@ fn hexBytes(comptime length: usize, comptime encoded: []const u8) [length]u8 {
     _ = std.fmt.hexToBytes(&result, encoded) catch unreachable;
     return result;
 }
+
+test "ENR generic fields preserve signed extensions and exact record boundary" {
+    const key = try crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{1}));
+    const public_key = crypto.compressedPublicKey(&key);
+    const fields = [_]enr.Field{
+        .{ .key = "id", .value = .{ .bytes = "v4" } },
+        .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
+        .{ .key = "x", .value = .{ .raw = &.{0xc0} } },
+    };
+    const record = try enr.Record.createFields(&key, 7, &fields);
+    try std.testing.expectEqualSlices(u8, &.{0xc0}, (try record.field("x")).?);
+    try std.testing.expect((try record.field("missing")) == null);
+    var changed = record;
+    changed.bytes[changed.length - 1] = 0x80;
+    try std.testing.expectError(error.InvalidSignature, enr.Record.init(changed.slice()));
+    const other = try crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{2}));
+    try std.testing.expectError(error.InvalidSignature, enr.Record.createFields(&other, 7, &fields));
+
+    var padding: [200]u8 = @splat(1);
+    var padded = fields;
+    padded[2].value = .{ .bytes = padding[0..177] };
+    const full = try enr.Record.createFields(&key, 7, &padded);
+    try std.testing.expectEqual(@as(usize, 300), full.slice().len);
+    padded[2].value = .{ .bytes = padding[0..178] };
+    try std.testing.expectError(error.BufferTooSmall, enr.Record.createFields(&key, 7, &padded));
+    try std.testing.expectError(error.InvalidRecord, enr.Record.createFields(&key, 7, &.{ fields[1], fields[0] }));
+    try std.testing.expectError(error.InvalidRecord, enr.Record.createFields(&key, 7, &.{ fields[0], fields[0], fields[1] }));
+}
