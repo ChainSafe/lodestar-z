@@ -1,3 +1,6 @@
+pub const discovery = @import("discovery.zig");
+pub const Discovery = discovery.Discovery;
+pub const enr = @import("enr.zig");
 pub const control = @import("control.zig");
 pub const Control = control.Control;
 pub const dial_queue = @import("dial_queue.zig");
@@ -18,6 +21,8 @@ pub const Snapshot = types.Snapshot;
 pub const Event = types.Event;
 pub const Options = types.Options;
 test {
+    _ = @import("discovery_test.zig");
+    _ = @import("enr_test.zig");
     _ = @import("types_test.zig");
     _ = @import("catalog_test.zig");
     _ = @import("reputation_test.zig");
