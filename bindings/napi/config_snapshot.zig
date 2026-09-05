@@ -47,21 +47,15 @@ pub fn create(object: js.Value, genesis_root: js.Uint8Array) !*SnapshotRc {
         object_value,
     );
     if (chain_config.PRESET_BASE != active_preset) return error.PresetMismatch;
-    if (try (try object_value.getNamedProperty("SECONDS_PER_SLOT")).typeof() == .undefined) {
-        if (chain_config.SLOT_DURATION_MS == 0 or chain_config.SLOT_DURATION_MS % 1000 != 0) {
-            return error.InvalidSlotDuration;
-        }
-        chain_config.SECONDS_PER_SLOT = @divExact(chain_config.SLOT_DURATION_MS, 1000);
-    } else if (try (try object_value.getNamedProperty("SLOT_DURATION_MS")).typeof() == .undefined) {
+    if (try (try object_value.getNamedProperty("SLOT_DURATION_MS")).typeof() == .undefined) {
         chain_config.SLOT_DURATION_MS = std.math.mul(u64, chain_config.SECONDS_PER_SLOT, 1000) catch {
             return error.InvalidSlotDuration;
         };
     }
-    if (chain_config.SECONDS_PER_SLOT == 0 or chain_config.SLOT_DURATION_MS % 1000 != 0 or
-        chain_config.SECONDS_PER_SLOT != chain_config.SLOT_DURATION_MS / 1000)
-    {
+    if (chain_config.SLOT_DURATION_MS == 0 or chain_config.SLOT_DURATION_MS % 1000 != 0) {
         return error.InvalidSlotDuration;
     }
+    chain_config.SECONDS_PER_SLOT = @divExact(chain_config.SLOT_DURATION_MS, 1000);
     snapshot.instance.config = BeaconConfig.init(chain_config, root_slice[0..32].*);
     return snapshot;
 }

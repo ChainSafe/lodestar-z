@@ -54,49 +54,55 @@ describe("serialized state transition", () => {
     expect(native.getExpectedWithdrawals().expectedWithdrawals[0].amount).toBe(1_000_000_000n);
   });
 
-  it.each([false, true])("transitions isBlinded=%s with a non-default slot duration", (isBlinded) => {
-    const chainConfig = {...stfConfig, SECONDS_PER_SLOT: undefined, SLOT_DURATION_MS: 6000};
-    const value = createStfState();
-    value.latestExecutionPayloadHeader.blockHash.fill(1);
-    const native = new bindings.StateTransition(chainConfig, new Uint8Array(32)).createFromBytes(
-      ssz.fulu.BeaconState.serialize(value)
-    );
-    const slot = native.slot + 1;
-    const advanced = native.processSlots(slot);
-    const block = ssz.fulu.SignedBeaconBlock.defaultValue();
-    block.message.slot = slot;
-    block.message.proposerIndex = advanced.getBeaconProposer(slot);
-    block.message.parentRoot = ssz.phase0.BeaconBlockHeader.hashTreeRoot(advanced.latestBlockHeader);
-    block.message.body.executionPayload.parentHash.fill(1);
-    block.message.body.executionPayload.blockHash.fill(2);
-    block.message.body.executionPayload.timestamp = slot * 6;
-    const payload = block.message.body.executionPayload;
-    const blinded = {
-      ...block,
-      message: {
-        ...block.message,
-        body: {
-          ...block.message.body,
-          executionPayloadHeader: {
-            ...payload,
-            transactionsRoot: ssz.bellatrix.Transactions.hashTreeRoot(payload.transactions),
-            withdrawalsRoot: ssz.capella.Withdrawals.hashTreeRoot(payload.withdrawals),
+  describe.each([
+    {SECONDS_PER_SLOT: undefined, SLOT_DURATION_MS: 6000, name: "milliseconds only"},
+    {SECONDS_PER_SLOT: 12, SLOT_DURATION_MS: 6000, name: "milliseconds with stale legacy seconds"},
+    {SECONDS_PER_SLOT: 6, SLOT_DURATION_MS: undefined, name: "legacy seconds only"},
+  ])("$name", ({SECONDS_PER_SLOT, SLOT_DURATION_MS}) => {
+    it.each([false, true])("transitions isBlinded=%s with a non-default slot duration", (isBlinded) => {
+      const chainConfig = {...stfConfig, SECONDS_PER_SLOT, SLOT_DURATION_MS};
+      const value = createStfState();
+      value.latestExecutionPayloadHeader.blockHash.fill(1);
+      const native = new bindings.StateTransition(chainConfig, new Uint8Array(32)).createFromBytes(
+        ssz.fulu.BeaconState.serialize(value)
+      );
+      const slot = native.slot + 1;
+      const advanced = native.processSlots(slot);
+      const block = ssz.fulu.SignedBeaconBlock.defaultValue();
+      block.message.slot = slot;
+      block.message.proposerIndex = advanced.getBeaconProposer(slot);
+      block.message.parentRoot = ssz.phase0.BeaconBlockHeader.hashTreeRoot(advanced.latestBlockHeader);
+      block.message.body.executionPayload.parentHash.fill(1);
+      block.message.body.executionPayload.blockHash.fill(2);
+      block.message.body.executionPayload.timestamp = slot * 6;
+      const payload = block.message.body.executionPayload;
+      const blinded = {
+        ...block,
+        message: {
+          ...block.message,
+          body: {
+            ...block.message.body,
+            executionPayloadHeader: {
+              ...payload,
+              transactionsRoot: ssz.bellatrix.Transactions.hashTreeRoot(payload.transactions),
+              withdrawalsRoot: ssz.capella.Withdrawals.hashTreeRoot(payload.withdrawals),
+            },
           },
         },
-      },
-    };
-    const bytes = isBlinded
-      ? ssz.fulu.SignedBlindedBeaconBlock.serialize(blinded)
-      : ssz.fulu.SignedBeaconBlock.serialize(block);
-    const post = native.stateTransition(bytes, isBlinded, {
-      dataAvailabilityStatus: "Available",
-      executionPayloadStatus: "valid",
-      verifyProposer: false,
-      verifySignatures: false,
-      verifyStateRoot: false,
+      };
+      const bytes = isBlinded
+        ? ssz.fulu.SignedBlindedBeaconBlock.serialize(blinded)
+        : ssz.fulu.SignedBeaconBlock.serialize(block);
+      const post = native.stateTransition(bytes, isBlinded, {
+        dataAvailabilityStatus: "Available",
+        executionPayloadStatus: "valid",
+        verifyProposer: false,
+        verifySignatures: false,
+        verifyStateRoot: false,
+      });
+      expect(post.slot).toBe(slot);
+      expect(post.latestExecutionPayloadHeader.timestamp).toBe(slot * 6);
+      expect(native.slot).toBe(value.slot);
     });
-    expect(post.slot).toBe(slot);
-    expect(post.latestExecutionPayloadHeader.timestamp).toBe(slot * 6);
-    expect(native.slot).toBe(value.slot);
   });
 });

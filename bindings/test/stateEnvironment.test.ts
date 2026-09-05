@@ -78,7 +78,7 @@ describe("state environment ownership", () => {
   });
 
   it.each([0, 6001])("rejects unrepresentable slot duration %s", (duration) => {
-    const config = {...stfConfig, SECONDS_PER_SLOT: undefined, SLOT_DURATION_MS: duration};
+    const config = {...stfConfig, SECONDS_PER_SLOT: 12, SLOT_DURATION_MS: duration};
     expect(() => new bindings.StateTransition(config, new Uint8Array(32))).toThrow("InvalidSlotDuration");
   });
 
