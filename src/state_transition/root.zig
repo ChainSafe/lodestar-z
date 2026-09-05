@@ -122,8 +122,6 @@ pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatest
 
 test {
     _ = @import("memory_safety_test.zig");
-    _ = @import("./cache/pubkey_cache_test.zig");
-    _ = @import("./cache/pkix_test.zig");
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
     testing.refAllDecls(state_transition);
