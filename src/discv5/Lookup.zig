@@ -53,6 +53,11 @@ pub const Candidate = struct {
     state: State,
 };
 
+pub const Confirmed = struct {
+    peer: types.Endpoint,
+    record: enr.Record,
+};
+
 pub const Candidates = [candidate_capacity]Candidate;
 
 const Lookup = @This();
@@ -232,6 +237,24 @@ pub fn results(self: *const Lookup, out: []enr.Record) []enr.Record {
     return bounded[0..length];
 }
 
+/// Copies directly authenticated responders together with the exact endpoint used by the call.
+pub fn confirmedResults(self: *const Lookup, out: []Confirmed) []Confirmed {
+    const bounded = out[0..@min(out.len, result_max)];
+    var length: usize = 0;
+    for (self.activeCandidates()) |*candidate| {
+        if (candidate.state != .succeeded) continue;
+        length = types.insertClosest(
+            Confirmed,
+            confirmedNodeId,
+            bounded,
+            length,
+            .{ .peer = candidate.peer, .record = candidate.record },
+            &self.target,
+        );
+    }
+    return bounded[0..length];
+}
+
 fn addSeed(self: *Lookup, seed: *const RoutingTable.Entry) Error!void {
     if (!std.mem.eql(u8, &seed.peer.node_id, &seed.record.node_id))
         return Error.InvalidSeed;
@@ -374,6 +397,10 @@ pub fn requestDistances(
     }
     std.debug.assert(count == result.len);
     return result;
+}
+
+fn confirmedNodeId(result: *const Confirmed) *const types.NodeId {
+    return &result.peer.node_id;
 }
 
 fn recordNodeId(record: *const enr.Record) *const types.NodeId {

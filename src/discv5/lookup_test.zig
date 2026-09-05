@@ -435,3 +435,44 @@ fn nodeId(id: u8) types.NodeId {
     node_id[31] = id;
     return node_id;
 }
+
+test "lookup confirmed result retains global IPv6 provenance over private IPv4 record preference" {
+    var core = try initEngine();
+    defer core.deinit(std.testing.allocator);
+    const key = try crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{2}));
+    const public_key = crypto.compressedPublicKey(&key);
+    const ip4: [4]u8 = .{ 10, 0, 0, 1 };
+    const ip6: [16]u8 = .{ 0x26, 0x06, 0x47, 0x00 } ++ .{0} ** 11 ++ .{1};
+    const record = try enr.Record.createFields(&key, 1, &.{
+        .{ .key = "id", .value = .{ .bytes = "v4" } },
+        .{ .key = "ip", .value = .{ .bytes = &ip4 } },
+        .{ .key = "ip6", .value = .{ .bytes = &ip6 } },
+        .{ .key = "quic", .value = .{ .uint = 9001 } },
+        .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
+        .{ .key = "udp", .value = .{ .uint = 9000 } },
+        .{ .key = "udp6", .value = .{ .uint = 9000 } },
+    });
+    const source = types.Endpoint{ .node_id = record.node_id, .address = .{ .ip6 = .{ .octets = ip6, .port = 9000 } } };
+    const target = address4(10, 0, 0, 1, 9001);
+    _ = try core.confirmPeer(&source, &record, 0);
+    installSession(&core, source, 0x55);
+    var candidates: Lookup.Candidates = undefined;
+    var operation: Lookup = undefined;
+    try operation.init(&candidates, core.localRecord().node_id, record.node_id, &.{core.peerRecord(&record.node_id).?});
+    defer operation.cancel(&core);
+    var output: [1280]u8 = undefined;
+    const request_id = try message.RequestId.init(&.{1});
+    const started = (try operation.startNext(&core, &output, request_id, 1, &sealEntropy(1))).?;
+    try std.testing.expectEqualDeep(source, started.peer);
+    try completeNodes(&core, &operation, started, request_id, &.{}, 2);
+    try std.testing.expect((try operation.startNext(&core, &output, try message.RequestId.init(&.{2}), 3, &sealEntropy(2))) == null);
+    try std.testing.expect(operation.isFinished());
+    var results: [Lookup.result_max]Lookup.Confirmed = undefined;
+    const confirmed = operation.confirmedResults(&results);
+    try std.testing.expectEqual(@as(usize, 1), confirmed.len);
+    try std.testing.expectEqualDeep(source, confirmed[0].peer);
+    try std.testing.expectEqualSlices(u8, record.slice(), confirmed[0].record.slice());
+    try std.testing.expect(!RoutingTable.relayAllowed(confirmed[0].peer.address, target));
+    try std.testing.expect(RoutingTable.relayAllowed(confirmed[0].record.endpoint().?, target));
+    try std.testing.expectEqual(@as(usize, 0), core.calls.count());
+}

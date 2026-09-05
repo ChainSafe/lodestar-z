@@ -11,13 +11,24 @@ const Node = struct {
     driver: d.Driver,
 
     fn init(self: *Node, scalar: u8, quic: ?u16) !void {
-        self.udp = try d.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+        return self.initAddress(scalar, quic, .{ .ip4 = .loopback(0) }, null);
+    }
+    fn initAddress(self: *Node, scalar: u8, quic: ?u16, bind_address: std.Io.net.IpAddress, alternate_ip4: ?[4]u8) !void {
+        self.udp = try d.Udp.bind(std.testing.io, bind_address);
         errdefer self.udp.close(std.testing.io);
         const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{scalar}));
         const local = adapter.LocalAdvertisement{
             .fork = .{ .digest = context.digest, .next_version = @splat(0), .next_epoch = std.math.maxInt(u64) },
-            .ip4 = .{ 127, 0, 0, 1 },
-            .udp = self.udp.localAddress().port(),
+            .ip4 = switch (self.udp.localAddress()) {
+                .ip4 => |value| value.octets,
+                .ip6 => alternate_ip4,
+            },
+            .ip6 = switch (self.udp.localAddress()) {
+                .ip4 => null,
+                .ip6 => |value| value.octets,
+            },
+            .udp = if (self.udp.localAddress() == .ip4) self.udp.localAddress().port() else if (alternate_ip4 != null) @as(u16, 9000) else null,
+            .udp6 = if (self.udp.localAddress() == .ip6) self.udp.localAddress().port() else null,
             .quic = quic,
         };
         const record = try adapter.build(&key, 1, &local, &context);
@@ -365,4 +376,55 @@ test "peer discovery initialization rollback and coalesced demand retain query d
     invalid.custody_groups = 0;
     try std.testing.expectError(error.InvalidForkContext, controller.updateFork(&invalid));
     try controller.updateFork(&context);
+}
+
+test "peer discovery foreground retains authenticated IPv6 source over alternate signed IPv4" {
+    for ([_][4]u8{ .{ 10, 0, 0, 1 }, .{ 127, 0, 0, 1 } }) |alternate| {
+        var a: Node = undefined;
+        try a.initAddress(1, null, .{ .ip6 = .loopback(0) }, null);
+        defer a.deinit();
+        var b: Node = undefined;
+        try b.initAddress(2, 9001, .{ .ip6 = .loopback(0) }, alternate);
+        defer b.deinit();
+        _ = try b.driver.startCall(std.testing.io, .{ .node_id = a.engine.localRecord().node_id, .address = a.udp.localAddress() }, a.engine.localRecord(), &.{ .ping = .{ .request_id = try d.wire.message.RequestId.init(&.{1}), .enr_sequence = 1 } });
+        var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
+        var authenticated = false;
+        for (0..30) |_| {
+            const now = try d.Driver.monotonicMilliseconds(std.testing.io);
+            const incoming = try a.driver.stepUntil(std.testing.io, &expiries, now);
+            if (incoming.failure) |err| return err;
+            const response = try b.driver.stepUntil(std.testing.io, &expiries, now);
+            if (response.failure) |err| return err;
+            if (response.event == .response) {
+                authenticated = true;
+                break;
+            }
+        }
+        try std.testing.expect(authenticated);
+        const entry = a.engine.peerRecord(&b.engine.localRecord().node_id).?;
+        try std.testing.expectEqualDeep(b.udp.localAddress(), entry.peer.address);
+        try std.testing.expect(entry.record.endpoint().? == .ip4);
+        const now = try d.Driver.monotonicMilliseconds(std.testing.io);
+        var controller = try discovery.Discovery.init(std.testing.allocator, &a.driver, &context, &.{}, now, .{});
+        defer controller.deinit();
+        try controller.request(.{ .general = true }, now);
+        var output: [1]adapter.Candidate = undefined;
+        var completed = false;
+        for (0..30) |_| {
+            const tick = try d.Driver.monotonicMilliseconds(std.testing.io);
+            const result = try controller.step(std.testing.io, tick, tick, &output);
+            if (result.failure) |err| return err;
+            try std.testing.expectEqual(@as(usize, 0), result.candidates);
+            if (result.rejected > 0) {
+                completed = true;
+                break;
+            }
+            const remote = try b.driver.stepUntil(std.testing.io, &expiries, tick);
+            if (remote.failure) |err| return err;
+        }
+        try std.testing.expect(completed);
+        try std.testing.expect(!controller.lookup_active);
+        controller.cancel();
+        try std.testing.expectEqual(@as(usize, 0), a.engine.calls.count());
+    }
 }
