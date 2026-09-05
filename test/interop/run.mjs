@@ -3,7 +3,7 @@ import {spawn} from "node:child_process";
 import {access, stat} from "node:fs/promises";
 import {relative, resolve} from "node:path";
 import {setTimeout as delay} from "node:timers/promises";
-import {MAX, TOPIC} from "./codec.mjs";
+import {MAX, TOPIC, payload, summary} from "./codec.mjs";
 
 const root = resolve(new URL("../..", import.meta.url).pathname);
 const lineMax = 65536;
@@ -230,6 +230,24 @@ async function exercise(version, binary) {
       }, 10000);
     } catch {
       throw Error(`zig to js gossip timeout ${JSON.stringify({jsAfterPublish, zigAfterPublish})}`);
+    }
+    for (const [size, seed] of [
+      [32 * 1024 + 1, 0x6d2b7a01],
+      [2 * 1024 * 1024 + 1, 0x6d2b7a02],
+    ]) {
+      const expected = summary(payload(size, seed));
+      await js.command("publish", {seed, size, topic: TOPIC});
+      await waitFor(
+        () => zig.events.some((event) => event.event === "message" && event.sha256 === expected.sha256),
+        30000
+      );
+      const published = await zig.command("publish", {seed: seed + 2, size, topic: TOPIC});
+      assert(published.queued > 0, `Zig ${size} gossip had no mesh recipient`);
+      const reverse = summary(payload(size, seed + 2));
+      await waitFor(
+        () => js.events.some((event) => event.event === "message" && event.sha256 === reverse.sha256),
+        30000
+      );
     }
     await assert.rejects(zig.command("publish", {size: MAX + 1}), /MessageTooLarge/);
     await assert.rejects(js.command("publish", {size: MAX + 1}), /false|assert/i);
