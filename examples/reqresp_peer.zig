@@ -321,6 +321,10 @@ fn dial(
     const key = keys.KeyPair.generate(io);
     try node.init(allocator, io, .{ .host = &key, .bind = bind });
     defer node.deinit(io);
+
+    const sink = try allocator.alloc(u8, Protocol.blocks_by_range_v2.info().response_max);
+    defer allocator.free(sink);
+
     var table: [forks_max]reqresp.ForkEntry = undefined;
     var svc = try reqresp.Service.init(allocator, .{ .reqresp = .{
         .forks = forkTable(options.network.config, &table),
@@ -329,8 +333,6 @@ fn dial(
     } });
     defer svc.deinit();
     defer svc.shutdown(&node.engine);
-    const sink = try allocator.alloc(u8, Protocol.blocks_by_range_v2.info().response_max);
-    defer allocator.free(sink);
 
     var session = Session{
         .allocator = allocator,
