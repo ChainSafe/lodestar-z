@@ -79,3 +79,7 @@ comptime {
         .cleanup = cleanup,
     });
 }
+
+test {
+    _ = @import("tracked_allocator.zig");
+}
