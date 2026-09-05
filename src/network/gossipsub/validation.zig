@@ -15,6 +15,7 @@ pub const Entry = struct {
     deadline: u64 = 0,
     tombstone_until: u64 = 0,
     verdict: Verdict = .ignore,
+    superseded: bool = false,
     message: storage.Handle = undefined,
     id: topic_mod.MessageId = undefined,
     source: PeerRef = undefined,
@@ -45,6 +46,18 @@ pub const Validation = struct {
     }
     pub fn admit(self: *Validation, store: *storage.Store, message: storage.Handle, source: PeerRef, topic: u16, now: u64) Handle {
         assert(self.available());
+        const id = store.get(message).?.id;
+        for (self.entries, 0..) |*e, index| {
+            if (e.state == .free or e.superseded or !std.mem.eql(u8, &e.id, &id)) continue;
+            assert(e.state != .pending);
+            if (e.generation == std.math.maxInt(u64)) {
+                // Preserve the old handle outcome without letting it own the replacement's ID lookup.
+                e.superseded = true;
+                continue;
+            }
+            self.cursor = index;
+            break;
+        }
         for (0..self.entries.len) |_| {
             const index = self.cursor;
             self.cursor = (index + 1) % self.entries.len;
@@ -55,7 +68,7 @@ pub const Validation = struct {
                 .state = .pending,
                 .deadline = now +| self.timeout_ms,
                 .message = message,
-                .id = store.get(message).?.id,
+                .id = id,
                 .source = source,
                 .topic = topic,
             };
@@ -66,7 +79,7 @@ pub const Validation = struct {
     }
     pub fn find(self: *Validation, id: topic_mod.MessageId, now: u64) ?*Entry {
         for (self.entries) |*e| {
-            if (e.state == .free) continue;
+            if (e.state == .free or e.superseded) continue;
             if (e.state != .pending and now >= e.tombstone_until) continue;
             if (std.mem.eql(u8, &e.id, &id)) return e;
         }
@@ -136,4 +149,32 @@ test "gossip validation expires without pump and resolves exactly once" {
     try std.testing.expectEqual(Outcome.stale_handle, v.inspect(&store, h, 130).?);
     v.finish(&store, h2, .ignore, 131);
     try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, h2, 132).?);
+}
+
+test "gossip validation readmission skips exhausted generation without hiding pending ID" {
+    var store = try storage.Store.init(std.testing.allocator, 2, 8192);
+    defer store.deinit(std.testing.allocator);
+    var v = try Validation.init(std.testing.allocator, 2, 10, 20);
+    defer v.deinit(std.testing.allocator);
+    v.entries[0].generation = std.math.maxInt(u64) - 1;
+    const id = [_]u8{1} ** 20;
+    const source: PeerRef = .{ .index = 0, .generation = 1 };
+    const first = store.put(id, "t", "body").?;
+    const old = v.admit(&store, first, source, 0, 100);
+    store.seal(first);
+    v.finish(&store, old, .ignore, 101);
+    const second = store.put(id, "t", "body").?;
+    const current = v.admit(&store, second, source, 0, 102);
+    store.seal(second);
+    try std.testing.expectEqual(std.math.maxInt(u64), old.generation);
+    try std.testing.expectEqual(@as(u64, 1), current.generation);
+    try std.testing.expect(old.index != current.index);
+    try std.testing.expectEqual(&v.entries[current.index], v.find(id, 103).?);
+    try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, old, 103).?);
+    try std.testing.expectEqual(@as(usize, 1), store.used_entries);
+    v.finish(&store, current, .reject, 104);
+    try std.testing.expectEqual(Verdict.reject, v.find(id, 105).?.verdict);
+    try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, old, 105).?);
+    try std.testing.expectEqual(@as(usize, 0), store.used_entries);
+    try std.testing.expectEqual(store.next.len, store.free_pages);
 }
