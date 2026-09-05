@@ -156,10 +156,13 @@ pub const Mesh = struct {
                 continue;
             }
             const logical = context.state.peers[peer].logical;
-            const remaining_ms = context.peers.backoff(logical, topic).until -| context.now;
+            const entry = context.peers.backoff(logical, topic);
+            const remaining_ms = entry.until -| context.now;
             const backoff_ms = if (remaining_ms == 0) c.prune_backoff_ms else remaining_ms;
-            if (queue(context, topic, peer, (backoff_ms +| 999) / 1000)) {
+            const seconds = backoff_ms / 1000 + @intFromBool(backoff_ms % 1000 != 0);
+            if (queue(context, topic, peer, seconds)) {
                 if (remaining_ms == 0) context.peers.addBackoff(logical, topic, context.state.topics[topic].generation, context.now, backoff_ms);
+                entry.until = @max(entry.until, context.now +| (seconds *| 1000));
                 self.clearPending(topic, peer);
             } else if (context.now -| self.pending_since[peer].? >= context.pressure_ms) self.retire.set(peer);
         }
@@ -506,7 +509,7 @@ test "gossip policy delayed PRUNE preserves the effective remote backoff" {
         try std.testing.expect(!f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
         const expired = queued_at >= 1_001;
         const seconds: u64 = if (expired) c.prune_backoff_ms / 1000 else 1;
-        const local_until: u64 = if (expired) queued_at + c.prune_backoff_ms else 1_001;
+        const local_until = queued_at + seconds * 1000;
         try std.testing.expectEqual(local_until, f.g.peers.backoff(logical, f.topic).until);
         var expected: [32 + topic_mod.topic_max_len]u8 = undefined;
         var writer = protobuf.Writer.init(&expected);
@@ -557,4 +560,47 @@ test "gossip policy review I3 shuffle budget holds at empty singleton and capaci
     var ordered = [_]u16{ 0, 1, 2, 3, 4, 5, 6, 7 };
     mesh.shuffle(&ordered);
     try std.testing.expectEqualSlices(u16, &.{ 6, 7, 2, 0, 5, 1, 3, 4 }, &ordered);
+}
+
+fn maintainFastHeartbeat(g: *@import("gossipsub.zig").Gossipsub, topic: u16, now: u64) void {
+    g.mesh_policy.maintain(&.{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .io = g.io.peers, .now = now, .heartbeat_ms = 1, .pressure_ms = g.options.pressure_timeout_ms }, topic);
+}
+
+test "gossip policy final review positive remainder respects rounded remote PRUNE deadline" {
+    var g = try @import("gossipsub.zig").Gossipsub.init(std.testing.allocator, .{ .random_seed = 17, .heartbeat_interval_ms = 1 });
+    defer g.deinit();
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    const topic = g.state.findTopic(name).?;
+    const peer = g.addPeer(.{ .index = 0, .generation = 1 }, .v1_2, &.{ .identity = .{ .bytes = [_]u8{1} ** 39 }, .address = .unspecified, .direction = .inbound }, .{ .mono_ms = 1, .unix_s = 0 }).admitted.index;
+    g.state.setSubscription(topic, peer, true);
+    const logical = g.state.peers[peer].logical;
+    const full = try std.testing.allocator.alloc(u8, g.options.critical_bytes);
+    defer std.testing.allocator.free(full);
+    @memset(full, 0);
+    try std.testing.expect(g.io.peers[peer].appendControl(full, true, 1) != null);
+    g.mesh_policy.prune(&.{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .io = g.io.peers, .now = 1, .heartbeat_ms = 1, .pressure_ms = g.options.pressure_timeout_ms }, topic, peer, 1000);
+    maintainFastHeartbeat(&g, topic, 1000);
+    try std.testing.expect(g.mesh_policy.pending_prunes[topic].isSet(peer));
+    try std.testing.expectEqual(@as(u64, 1001), g.peers.backoff(logical, topic).until);
+    try std.testing.expectEqual(@as(?u64, 1), g.mesh_policy.pending_since[peer]);
+    try std.testing.expectEqual(@as(u64, 1), g.peers.backoff(logical, topic).pruned_at);
+    g.io.peers[peer].resetTx(&g.store);
+    maintainFastHeartbeat(&g, topic, 1000);
+    try std.testing.expect(!g.mesh_policy.pending_prunes[topic].isSet(peer));
+    var expected: [128]u8 = undefined;
+    var writer = protobuf.Writer.init(&expected);
+    writer.varint(protobuf.pruneRpcSize(name, 1));
+    protobuf.writePruneRpc(&writer, name, 1);
+    const sent = g.io.peers[peer].segment(&g.store);
+    try std.testing.expectEqualSlices(u8, writer.written(), sent);
+    _ = g.io.peers[peer].advance(&g.store, sent.len);
+    maintainFastHeartbeat(&g, topic, 1003);
+    try std.testing.expect(!g.state.mesh(topic).isSet(peer));
+    try std.testing.expectEqual(@as(u64, 2000), g.peers.backoff(logical, topic).until);
+    try std.testing.expectEqual(@as(u64, 1), g.peers.backoff(logical, topic).pruned_at);
+    maintainFastHeartbeat(&g, topic, 2001);
+    try std.testing.expect(!g.state.mesh(topic).isSet(peer));
+    maintainFastHeartbeat(&g, topic, 2002);
+    try std.testing.expect(g.state.mesh(topic).isSet(peer));
 }
