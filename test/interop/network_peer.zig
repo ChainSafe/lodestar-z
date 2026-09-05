@@ -25,6 +25,7 @@ pub const Peer = struct {
     response_seed: u32 = 0x6d2b79f5,
     response_size: usize = max_payload,
     outbound: bool = false,
+    paused: bool = false,
     quit: bool = false,
 
     pub fn pump(self: *Peer) !void {
@@ -133,6 +134,8 @@ pub const Peer = struct {
             const capacity = c.capacity orelse return error.MissingCapacity;
             if (capacity > 16) return error.CapacityBound;
             self.event_capacity = capacity;
+        } else if (std.mem.eql(u8, c.op, "pause")) {
+            self.paused = c.paused orelse return error.MissingPause;
         } else if (std.mem.eql(u8, c.op, "advance")) {
             const ms = c.ms orelse return error.MissingTime;
             if (ms > 120_000 or self.clock_offset + ms > 2_000_000) return error.ClockBound;

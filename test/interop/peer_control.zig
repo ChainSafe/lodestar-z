@@ -12,6 +12,7 @@ pub const Command = struct {
     size: ?usize = null,
     seed: ?u32 = null,
     large: ?bool = null,
+    paused: ?bool = null,
     capacity: ?usize = null,
     ms: ?u64 = null,
     turns: ?usize = null,
@@ -37,7 +38,7 @@ pub fn run(peer: *@import("network_peer.zig").Peer) !void {
     for (0..10_000_000) |_| {
         if (peer.quit) return;
         var fd = [_]PollFd{.{ .fd = 0, .events = 1, .revents = 0 }};
-        if (poll(&fd, 1, 0) < 0) return error.PollFailed;
+        if (poll(&fd, 1, if (peer.paused) 1 else 0) < 0) return error.PollFailed;
         if (fd[0].revents != 0) {
             var input: [4096]u8 = undefined;
             const count = read(0, &input, input.len);
@@ -59,7 +60,7 @@ pub fn run(peer: *@import("network_peer.zig").Peer) !void {
                 peer.command(parsed.value) catch |err| try emit(peer.allocator, .{ .id = last_id, .ok = false, .err = @errorName(err) });
             }
         }
-        try peer.pump();
+        if (!peer.paused) try peer.pump();
     }
     return error.StepBound;
 }

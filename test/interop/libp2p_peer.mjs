@@ -19,10 +19,12 @@ import {
   loopback,
   messageId,
   payload,
+  prefix,
   readPayload,
   sendFragments,
   summary,
 } from "./codec.mjs";
+import {RawGossip} from "./raw_gossip.mjs";
 
 const lineMax = 65536;
 const commandMax = 1024;
@@ -31,6 +33,11 @@ const eventMax = 1024;
 const version = process.argv[2] === "v11" ? "v11" : "v12";
 const protocols = version === "v11" ? ["/meshsub/1.1.0"] : ["/meshsub/1.2.0", "/meshsub/1.1.0"];
 const phase0 = new Set([TOPIC]);
+const rawMode = process.argv[3] === "raw-gossip";
+let rawGossip;
+let partialStream;
+let partialTerminal = null;
+let partialBytes = 0;
 const messages = [];
 let node;
 let commands = 0;
@@ -82,49 +89,55 @@ async function createPeer() {
     addresses: {listen: ["/ip4/127.0.0.1/udp/0/quic-v1"]},
     connectionGater: {denyDialMultiaddr: async (address) => !address.toString().startsWith("/ip4/127.0.0.1/")},
     privateKey: privateKeyFromRaw(secret),
-    services: {
-      identify: identify(),
-      pubsub: (components) => {
-        const service = gossipsub({
-          D: 8,
-          // biome-ignore lint/style/useNamingConvention: js-libp2p publishes this option spelling.
-          Dhi: 12,
-          // biome-ignore lint/style/useNamingConvention: js-libp2p publishes this option spelling.
-          Dlazy: 6,
-          // biome-ignore lint/style/useNamingConvention: js-libp2p publishes this option spelling.
-          Dlo: 6,
-          dataTransform: {
-            inboundTransform: (_topic, data) => uncompressSync(data),
-            outboundTransform: (_topic, data) => compressSync(data),
+    services: rawMode
+      ? {}
+      : {
+          identify: identify(),
+          pubsub: (components) => {
+            const service = gossipsub({
+              D: 8,
+              // biome-ignore lint/style/useNamingConvention: js-libp2p publishes this option spelling.
+              Dhi: 12,
+              // biome-ignore lint/style/useNamingConvention: js-libp2p publishes this option spelling.
+              Dlazy: 6,
+              // biome-ignore lint/style/useNamingConvention: js-libp2p publishes this option spelling.
+              Dlo: 6,
+              dataTransform: {
+                inboundTransform: (_topic, data) => uncompressSync(data),
+                outboundTransform: (_topic, data) => compressSync(data),
+              },
+              floodPublish: false,
+              globalSignaturePolicy: StrictNoSign,
+              heartbeatInterval: 700,
+              maxInboundDataLength: RPC_MAX,
+              maxOutboundBufferSize: RPC_MAX + 10,
+              mcacheGossip: 3,
+              mcacheLength: 6,
+              msgIdFn: idFor,
+            })(components);
+            service.protocols = [...protocols];
+            return service;
           },
-          floodPublish: false,
-          globalSignaturePolicy: StrictNoSign,
-          heartbeatInterval: 700,
-          maxInboundDataLength: RPC_MAX,
-          maxOutboundBufferSize: RPC_MAX + 10,
-          mcacheGossip: 3,
-          mcacheLength: 6,
-          msgIdFn: idFor,
-        })(components);
-        service.protocols = [...protocols];
-        return service;
-      },
-    },
+        },
     start: false,
     transports: [quic()],
   });
   await node.handle([PING, BLOCKS], respond, {maxInboundStreams: 8});
-  node.services.pubsub.addEventListener("message", (event) => {
-    if (messages.length < eventMax) {
-      const value = {
-        messageId: idFor({data: event.detail.data, topic: event.detail.topic}).toString("hex"),
-        topic: event.detail.topic,
-        ...summary(event.detail.data),
-      };
-      messages.push(value);
-      emit({event: "message", ...value});
-    }
-  });
+  if (rawMode) {
+    rawGossip = new RawGossip(node, protocols, emit);
+    await node.handle(protocols, (stream) => rawGossip.incoming(stream), {maxInboundStreams: 1});
+  } else
+    node.services.pubsub.addEventListener("message", (event) => {
+      if (messages.length < eventMax) {
+        const value = {
+          messageId: idFor({data: event.detail.data, topic: event.detail.topic}).toString("hex"),
+          topic: event.detail.topic,
+          ...summary(event.detail.data),
+        };
+        messages.push(value);
+        emit({event: "message", ...value});
+      }
+    });
   await node.start();
   assert.deepEqual(
     node
@@ -172,6 +185,51 @@ async function rawPublish(address, seed, size) {
 
 async function execute(command) {
   switch (command.op) {
+    case "rawOpen":
+      assert(rawMode);
+      return rawGossip.open(command.address);
+    case "rawRpc":
+      assert(rawMode);
+      return rawGossip.command(command);
+    case "partialStart": {
+      assert(!partialStream, "one partial request maximum");
+      partialStream = await node.dialProtocol(multiaddr(loopback(command.address)), PING, {
+        signal: AbortSignal.timeout(10000),
+      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => {
+        controller.abort();
+        partialStream.abort(Error("partial observation timeout"));
+      }, 10000);
+      const observe = async () => {
+        try {
+          for await (const part of chunks(partialStream)) partialBytes += part.length;
+          partialTerminal = "eof";
+        } catch {
+          partialTerminal = controller.signal.aborted ? "deadline" : "reset";
+        } finally {
+          clearTimeout(timer);
+          partialStream.abort(Error("partial observation finished"));
+        }
+      };
+      void observe();
+      await sendFragments(partialStream, encodePayload(Buffer.alloc(8)).subarray(0, 2), AbortSignal.timeout(10000));
+      return {open: true};
+    }
+    case "partialStatus":
+      return {bytes: partialBytes, terminal: partialTerminal};
+    case "malformedRequest": {
+      const signal = AbortSignal.timeout(10000);
+      const stream = await node.dialProtocol(multiaddr(loopback(command.address)), BLOCKS, {signal});
+      const source = chunks(stream);
+      const response = readPayload(source, true);
+      await sendFragments(stream, prefix(MAX + 1), signal);
+      await stream.close({signal});
+      const decoded = await response;
+      const end = await source.next();
+      assert(end.done, "invalid-request trailing bytes");
+      return {fin: end.done, result: decoded.result, ...summary(decoded.bytes)};
+    }
     case "listen":
       return {address: loopback(node.getMultiaddrs()[0].toString()), protocols};
     case "dial":
@@ -190,7 +248,7 @@ async function execute(command) {
     case "publish": {
       const size = command.size ?? 65537;
       assert(Number.isInteger(size) && size >= 0 && size <= MAX);
-      node.services.pubsub.publish(command.topic ?? TOPIC, payload(size, command.seed ?? 0x6d2b79f5));
+      await node.services.pubsub.publish(command.topic ?? TOPIC, payload(size, command.seed ?? 0x6d2b79f5));
       return {size};
     }
     case "request":
@@ -202,7 +260,7 @@ async function execute(command) {
         connections: node.getConnections().length,
         messages: messages.length,
         protocols,
-        subscribers: node.services.pubsub.getSubscribers(command.topic ?? TOPIC).length,
+        subscribers: rawMode ? 0 : node.services.pubsub.getSubscribers(command.topic ?? TOPIC).length,
       };
     case "disconnect":
       await Promise.allSettled(node.getConnections().map((connection) => connection.close()));
