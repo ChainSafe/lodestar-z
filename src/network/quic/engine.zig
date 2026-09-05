@@ -139,11 +139,15 @@ pub const DriverView = struct {
         const engine = self.engine;
         assert(engine.registry.activity.len == engine.registry.slots.len);
         assert(engine.registry.active_len <= engine.registry.active.len);
+        assert(engine.activity_cursor < engine.registry.slots.len);
         var count: usize = 0;
-        for (engine.registry.active[0..engine.registry.active_len]) |index| {
-            if (!engine.registry.activity[index]) continue;
+        for (0..engine.registry.slots.len) |_| {
             if (count == out.len) break;
-            out[count] = .{ .index = index, .generation = engine.registry.slots[index].generation };
+            const index = engine.activity_cursor;
+            engine.activity_cursor = @intCast((@as(usize, index) + 1) % engine.registry.slots.len);
+            const slot = &engine.registry.slots[index];
+            if (slot.state == .free or !engine.registry.activity[index]) continue;
+            out[count] = .{ .index = index, .generation = slot.generation };
             engine.registry.activity[index] = false;
             count += 1;
         }
@@ -181,6 +185,9 @@ pub const Engine = struct {
     outbound_max: u16,
     counters: Counters = .{},
     host_work_pending: bool = false,
+    // Physical slot positions preserve continuation through active-list swap removal.
+    event_cursor: u16 = 0,
+    activity_cursor: u16 = 0,
 
     pub fn init(allocator: std.mem.Allocator, options: Options) Error!Engine {
         const wanted = options.limits;
@@ -462,10 +469,15 @@ pub const Engine = struct {
 
     pub fn pollEvents(self: *Engine, events: []Event) usize {
         assert(self.registry.active_len <= self.registry.active.len);
+        assert(self.event_cursor < self.registry.slots.len);
         var count: usize = 0;
-        for (self.registry.active[0..self.registry.active_len]) |index| {
+        for (0..self.registry.slots.len) |_| {
+            if (count == events.len) return count;
+            const index = self.event_cursor;
+            self.event_cursor = @intCast((@as(usize, index) + 1) % self.registry.slots.len);
             assert(index < self.registry.slots.len);
             const slot = &self.registry.slots[index];
+            if (slot.state == .free) continue;
             const conn = Handle{ .index = index, .generation = slot.generation };
             if (slot.connected_pending) {
                 if (count == events.len) return count;
@@ -887,9 +899,12 @@ fn pollStreamEvents(
 ) usize {
     assert(slot.table.pending > 0);
     assert(start <= events.len);
+    assert(slot.table.event_cursor < limits.streams_per_connection);
     var count = start;
-    for (0..limits.streams_per_connection) |position| {
-        const index: u8 = @intCast(position);
+    for (0..limits.streams_per_connection) |_| {
+        if (count == events.len) return count;
+        const index = slot.table.event_cursor;
+        slot.table.event_cursor = @intCast((@as(u16, index) + 1) % limits.streams_per_connection);
         const entry = &slot.table.entries[index];
         if (entry.opened_pending) {
             if (count == events.len) return count;

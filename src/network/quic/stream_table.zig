@@ -30,6 +30,7 @@ pub const StreamTable = struct {
     entries: [limits.streams_per_connection]Entry = [_]Entry{.{}} ** limits.streams_per_connection,
     pending: u16 = 0,
     next_local_id: u64 = 0,
+    event_cursor: u8 = 0,
 
     pub fn init(direction: types.Direction) StreamTable {
         const first: u64 = if (direction == .outbound) 0 else 1;
