@@ -48,6 +48,7 @@ pub const Server = struct {
     stream: StreamHandle = undefined,
     protocol: Protocol = .status_v1,
     progress_ms: u64 = 0,
+    needs_service: bool = false,
     timeout_ms: u64 = 0,
     chunks: u32 = 0,
     io: RequestIO = .{},
@@ -59,8 +60,19 @@ pub const Server = struct {
     close_pending: bool = false,
     close_code: u64 = types.app_error_normal,
 
+    pub fn delivered(self: *Server, event: Event, now: Now) void {
+        _ = event;
+        if (self.terminal != null) return;
+        self.state = self.after_event;
+        if (self.state == .finishing) {
+            self.progress_ms = now.mono_ms;
+            self.needs_service = true;
+        }
+    }
+
     pub fn clear(self: *Server) void {
         self.io.clear();
+        self.needs_service = false;
         self.pending_ssz = &.{};
         self.pending_context = null;
         self.withheld_since_ms = null;
@@ -170,7 +182,7 @@ pub const Server = struct {
                 return;
             }
         }
-        owner.deferred_work = true;
+        slot.needs_service = true;
     }
 
     pub fn rejectRequest(owner: *ReqResp, slot: *Server, now: Now) void {
@@ -207,7 +219,7 @@ pub const Server = struct {
         slot.close_after_write = close_after;
         slot.progress_ms = now.mono_ms;
         if (owner.limiter.take(slot.conn, slot.protocol, 1, now.mono_ms)) {
-            Server.beginWrite(owner, slot);
+            Server.beginWrite(slot);
         } else {
             slot.state = .withheld;
             slot.withheld_since_ms = now.mono_ms;
@@ -215,8 +227,8 @@ pub const Server = struct {
         }
     }
 
-    pub fn beginWrite(owner: *ReqResp, slot: *Server) void {
-        owner.deferred_work = true;
+    pub fn beginWrite(slot: *Server) void {
+        slot.needs_service = true;
         slot.io.writer = codec.ChunkWriter.initChunk(
             slot.pending_result,
             slot.pending_context,
@@ -233,7 +245,7 @@ pub const Server = struct {
         owner.counters.withheld_ms_total += now.mono_ms -| since;
         slot.withheld_since_ms = null;
         slot.progress_ms = now.mono_ms;
-        Server.beginWrite(owner, slot);
+        Server.beginWrite(slot);
     }
 
     pub fn writeChunk(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: Now) void {
@@ -247,7 +259,7 @@ pub const Server = struct {
         };
         if (flushed.progressed) slot.progress_ms = now.mono_ms;
         if (!flushed.done) {
-            if (slot.io.outbox.idle()) owner.deferred_work = true;
+            if (slot.io.outbox.idle()) slot.needs_service = true;
             return;
         }
         if (slot.pending_result == constants.result_success) {
@@ -259,7 +271,7 @@ pub const Server = struct {
         if (slot.close_after_write) {
             slot.io.outbox.queue("", true);
             slot.state = .finishing;
-            owner.deferred_work = true;
+            slot.needs_service = true;
             slot.progress_ms = now.mono_ms;
             return;
         }
@@ -350,7 +362,7 @@ pub const Server = struct {
             slot.io.decoding = true;
         }
         owner.limiter.bind(stream.conn, now.mono_ms);
-        owner.deferred_work = true;
+        slot.needs_service = true;
         assert(slot.active());
         return slot.handle(index);
     }
@@ -398,7 +410,7 @@ pub const Server = struct {
             .serving, .chunk_sent => {
                 if (!slot.io.outbox.idle()) return false;
                 slot.io.outbox.queue("", true);
-                owner.deferred_work = true;
+                slot.needs_service = true;
                 if (slot.pending_event != null) {
                     slot.after_event = .finishing;
                 } else {

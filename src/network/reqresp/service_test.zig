@@ -73,10 +73,13 @@ const ServicePair = struct {
         const now = self.pair.now;
         var server_storage: [16]engine_mod.Event = undefined;
         const server_ev = self.pair.events(&self.pair.server, &server_storage);
-        self.server_count = self.server.process(&self.pair.server, server_ev, now, &self.server_events);
+        var activity: [128]engine_mod.Handle = undefined;
+        const server_active = self.pair.server.driverView().takeActivity(&activity);
+        self.server_count = self.server.process(&self.pair.server, server_ev, activity[0..server_active], now, &self.server_events);
         var client_storage: [16]engine_mod.Event = undefined;
         const client_ev = self.pair.events(&self.pair.client, &client_storage);
-        self.client_count = self.client.process(&self.pair.client, client_ev, now, &self.client_events);
+        const client_active = self.pair.client.driverView().takeActivity(&activity);
+        self.client_count = self.client.process(&self.pair.client, client_ev, activity[0..client_active], now, &self.client_events);
         try self.pair.pump();
     }
 
@@ -199,12 +202,54 @@ test "service wakeup includes earlier Router negotiation and cancels before Rout
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
     const handle = try setup.client.request(&setup.pair.client, setup.handles.client, .ping_v1, &bytes, &sink, .{ .progress_timeout_ms = 60_000 }, setup.pair.now);
-    _ = setup.client.process(&setup.pair.client, &.{}, setup.pair.now, &.{});
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &.{});
     try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms + 10_000), setup.client.nextWakeup(setup.pair.now, 0));
     try std.testing.expect(setup.client.cancel(handle));
-    _ = setup.client.process(&setup.pair.client, &.{}, setup.pair.now, &.{});
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &.{});
     try std.testing.expectEqual(@as(?u64, null), setup.client.nextWakeup(setup.pair.now, 0));
     var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.client.process(&setup.pair.client, &.{}, setup.pair.now, &events));
+    try std.testing.expectEqual(@as(usize, 1), setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &events));
     try std.testing.expect(events[0].failed.reason == .cancelled);
+}
+
+test "service preserves drained native activity across a partial request sweep" {
+    var setup: ServicePair = .{};
+    try setup.init(null);
+    defer setup.deinit();
+    const bytes = [_]u8{9} ** 8;
+    var sink: [8]u8 = undefined;
+    _ = try setup.client.request(&setup.pair.client, setup.handles.client, .ping_v1, &bytes, &sink, .{}, setup.pair.now);
+    var incoming: ?reqresp.RequestHandle = null;
+    for (0..30) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .request) {
+            incoming = event.request.request;
+        };
+        if (incoming != null) break;
+    }
+    try std.testing.expect(incoming != null);
+    const stream = setup.server.inner.inbound[incoming.?.index].stream;
+    setup.client.inner.options.work_per_pump_max = 1;
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &.{});
+    const codec = @import("codec.zig");
+    var wire: [codec.frame_scratch_max]u8 = undefined;
+    const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
+    try std.testing.expectEqual(encoded.len, try setup.pair.server.write(stream, encoded, false));
+    try setup.pair.pump();
+    var activity: [128]engine_mod.Handle = undefined;
+    const active = setup.pair.client.driverView().takeActivity(&activity);
+    try std.testing.expect(active > 0);
+    var events: [1]Event = undefined;
+    _ = setup.client.process(&setup.pair.client, &.{}, activity[0..active], setup.pair.now, &events);
+    var received = false;
+    for (0..10) |_| {
+        try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.client.nextWakeup(setup.pair.now, 1));
+        const count = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &events);
+        if (count == 1) {
+            try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
+            received = true;
+            break;
+        }
+    }
+    try std.testing.expect(received);
 }

@@ -46,6 +46,7 @@ pub const Client = struct {
     stream: StreamHandle = undefined,
     protocol: Protocol = .status_v1,
     progress_ms: u64 = 0,
+    needs_service: bool = false,
     timeout_ms: u64 = 0,
     chunks: u32 = 0,
     io: RequestIO = .{},
@@ -57,8 +58,15 @@ pub const Client = struct {
     close_pending: bool = false,
     close_code: u64 = types.app_error_normal,
 
+    pub fn delivered(self: *Client, event: Event, now: Now) void {
+        _ = now;
+        if (event == .chunk) self.chunk_held = true;
+        if (self.terminal == null) self.state = self.after_event;
+    }
+
     pub fn clear(self: *Client) void {
         self.io.clear();
+        self.needs_service = false;
         self.request_ssz = &.{};
     }
 
@@ -110,7 +118,7 @@ pub const Client = struct {
         };
         if (flushed.progressed) slot.progress_ms = now.mono_ms;
         if (!flushed.done) {
-            if (slot.io.outbox.idle()) owner.deferred_work = true;
+            if (slot.io.outbox.idle()) slot.needs_service = true;
             return;
         }
         slot.request_ssz = &.{};
@@ -119,7 +127,7 @@ pub const Client = struct {
         slot.progress_ms = now.mono_ms;
         Client.resetResponseDecoder(owner, slot);
         if (slot.io.buffered_start < slot.io.buffered_end or slot.io.fin_seen) {
-            owner.deferred_work = true;
+            slot.needs_service = true;
         }
     }
 
@@ -166,7 +174,7 @@ pub const Client = struct {
                 return;
             }
         }
-        owner.deferred_work = true;
+        slot.needs_service = true;
     }
 
     pub fn completeChunk(
@@ -292,7 +300,7 @@ pub const Client = struct {
                     slot.io.buffered_end = ready.leftover.len;
                     slot.io.fin_seen = ready.fin;
                     slot.state = .sending_request;
-                    owner.deferred_work = true;
+                    slot.needs_service = true;
                     slot.progress_ms = now.mono_ms;
                     slot.io.writer = codec.ChunkWriter.initRequest(slot.request_ssz);
                     slot.io.writing = slot.protocol.info().request_max > 0;
@@ -322,7 +330,7 @@ pub const Client = struct {
             return true;
         }
         slot.state = .reading;
-        owner.deferred_work = true;
+        slot.needs_service = true;
         slot.progress_ms = now.mono_ms;
         Client.resetResponseDecoder(owner, slot);
         return true;
