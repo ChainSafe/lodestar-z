@@ -182,7 +182,7 @@ async function reclaim(zig, deadline) {
   await waitFor(async () => quiescent(await zig.command("snapshot")), Math.max(1, deadline - Date.now()));
 }
 
-async function exercise(version, binary) {
+async function exercise(version, binary, zigDials = false) {
   const zig = new Child("zig", binary, []);
   const js = new Child("js", process.execPath, ["--max-old-space-size=256", "test/interop/libp2p_peer.mjs", version]);
   try {
@@ -194,8 +194,13 @@ async function exercise(version, binary) {
     ]);
     assertIds(zigIds);
     assertIds(jsIds);
-    await js.command("dial", {address: zigListen.address});
-    await waitFor(async () => (await zig.command("snapshot")).connections === 1);
+    if (zigDials) {
+      await zig.command("dial", {address: jsListen.address});
+      await waitFor(async () => (await js.command("snapshot")).connections === 1);
+    } else {
+      await js.command("dial", {address: zigListen.address});
+      await waitFor(async () => (await zig.command("snapshot")).connections === 1);
+    }
     const jsPing = await js.command("request", {address: zigListen.address});
     assert.deepEqual({length: jsPing.length}, {length: 8});
     await zig.command("request");
@@ -318,5 +323,6 @@ async function exercise(version, binary) {
 
 const binary = await verifyExecutable(process.argv[2] ?? "zig-out/bin/network_interop_peer");
 const v12 = await exercise("v12", binary);
+await exercise("v12", binary, true);
 const v11 = await exercise("v11", binary);
 console.log(JSON.stringify({ok: true, v11: v11.jsPing, v12: v12.jsPing}));
