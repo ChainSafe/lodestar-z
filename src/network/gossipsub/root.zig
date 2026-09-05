@@ -19,6 +19,7 @@ pub const ReportOutcome = gossipsub.ReportOutcome;
 pub const Verdict = gossipsub.Verdict;
 
 test {
+    _ = @import("peers.zig");
     _ = @import("message_store.zig");
     _ = @import("validation.zig");
     _ = @import("peer_io.zig");

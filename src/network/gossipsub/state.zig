@@ -11,45 +11,47 @@ pub const PeerSet = std.StaticBitSet(constants.peers_cap);
 
 pub const Version = enum(u8) { v1_0, v1_1, v1_2 };
 
-pub const PeerHandle = struct { index: u16, generation: u32 };
+pub const PeerHandle = struct { index: u16, generation: u64 };
 
 /// One gossip peer, keyed by its transport connection. Its subscriptions and
 /// mesh membership live in the topic table as per-topic peer sets; the peer row
 /// holds the connection, protocol version, the two directional streams, and the
 /// bounded set of message ids the peer has asked us not to send.
 const Peer = struct {
+    logical: @import("peers.zig").Ref = undefined,
     active: bool = false,
-    generation: u32 = 0,
+    generation: u64 = 0,
     conn: Handle = undefined,
     version: Version = .v1_0,
     inbound_version: Version = .v1_0,
-    peer_id: ?@import("../wire/peer_id.zig").PeerId = null,
-    address: ?@import("../types.zig").Address = null,
-    direction: ?@import("../types.zig").Direction = null,
     out_stream: ?StreamHandle = null,
     in_stream: ?StreamHandle = null,
     dont_send: [constants.dont_send_cap]MessageId = undefined,
+    dont_send_until: [constants.dont_send_cap]u64 = undefined,
     dont_send_head: u8 = 0,
     dont_send_len: u8 = 0,
 
-    fn suppresses(self: *const Peer, id: MessageId) bool {
+    fn suppresses(self: *const Peer, id: MessageId, now: u64) bool {
         for (0..self.dont_send_len) |offset| {
             const at = (@as(usize, self.dont_send_head) + constants.dont_send_cap - 1 - offset) %
                 constants.dont_send_cap;
-            if (std.mem.eql(u8, &self.dont_send[at], &id)) return true;
+            if (now < self.dont_send_until[at] and std.mem.eql(u8, &self.dont_send[at], &id)) return true;
         }
         return false;
     }
 
-    fn suppress(self: *Peer, id: MessageId) void {
-        if (self.suppresses(id)) return;
+    fn suppress(self: *Peer, id: MessageId, now: u64, ttl: u64) void {
+        if (self.suppresses(id, now)) return;
         self.dont_send[self.dont_send_head] = id;
+        self.dont_send_until[self.dont_send_head] = now +| ttl;
         self.dont_send_head = @intCast((self.dont_send_head + 1) % constants.dont_send_cap);
         if (self.dont_send_len < constants.dont_send_cap) self.dont_send_len += 1;
     }
 };
 
 const Topic = struct {
+    retire_after_ms: ?u64 = null,
+    generation: u64 = 0,
     active: bool = false,
     subscribed: bool = false,
     name: [topic_mod.name_max_len]u8 = undefined,
@@ -66,17 +68,9 @@ const Topic = struct {
     }
 };
 
-const Backoff = struct {
-    peer: u16,
-    topic: u16,
-    until_ms: u64,
-};
-
 pub const State = struct {
     peers: [constants.peers_cap]Peer = [_]Peer{.{}} ** constants.peers_cap,
     topics: [constants.topics_cap]Topic = [_]Topic{.{}} ** constants.topics_cap,
-    backoffs: [constants.backoffs_cap]Backoff = undefined,
-    backoff_len: usize = 0,
 
     // Peers ------------------------------------------------------------------
 
@@ -85,24 +79,11 @@ pub const State = struct {
         const peer = &self.peers[index];
         peer.* = .{
             .active = true,
-            .generation = peer.generation +% 1,
+            .generation = peer.generation + 1,
             .conn = conn,
             .version = version,
         };
         return .{ .index = @intCast(index), .generation = peer.generation };
-    }
-
-    pub fn setMetadata(
-        self: *State,
-        peer: PeerHandle,
-        identity: @import("../wire/peer_id.zig").PeerId,
-        address: @import("../types.zig").Address,
-        direction: @import("../types.zig").Direction,
-    ) void {
-        assert(self.peerMatches(peer.index, peer.generation));
-        self.peers[peer.index].peer_id = identity;
-        self.peers[peer.index].address = address;
-        self.peers[peer.index].direction = direction;
     }
 
     pub fn removePeer(self: *State, index: u16) void {
@@ -114,7 +95,6 @@ pub const State = struct {
             topic.mesh.unset(index);
             topic.fanout.unset(index);
         }
-        self.dropBackoffs(index);
         self.peers[index].active = false;
     }
 
@@ -135,12 +115,12 @@ pub const State = struct {
         self.peers[index].version = version;
     }
 
-    pub fn peerGeneration(self: *const State, index: u16) u32 {
+    pub fn peerGeneration(self: *const State, index: u16) u64 {
         return self.peers[index].generation;
     }
 
     /// Whether `index` still holds the same peer as when `generation` was taken.
-    pub fn peerMatches(self: *const State, index: u16, generation: u32) bool {
+    pub fn peerMatches(self: *const State, index: u16, generation: u64) bool {
         return self.peers[index].active and self.peers[index].generation == generation;
     }
 
@@ -154,18 +134,18 @@ pub const State = struct {
         return self.peers[index].out_stream;
     }
 
-    pub fn suppress(self: *State, index: u16, id: MessageId) void {
+    pub fn suppress(self: *State, index: u16, id: MessageId, now: u64, ttl: u64) void {
         assert(self.peers[index].active);
-        self.peers[index].suppress(id);
+        self.peers[index].suppress(id, now, ttl);
     }
 
-    pub fn suppresses(self: *const State, index: u16, id: MessageId) bool {
-        return self.peers[index].active and self.peers[index].suppresses(id);
+    pub fn suppresses(self: *const State, index: u16, id: MessageId, now: u64) bool {
+        return self.peers[index].active and self.peers[index].suppresses(id, now);
     }
 
     fn freePeer(self: *State) ?usize {
         for (&self.peers, 0..) |*peer, index| {
-            if (!peer.active) return index;
+            if (!peer.active and peer.generation != std.math.maxInt(u64)) return index;
         }
         return null;
     }
@@ -178,7 +158,7 @@ pub const State = struct {
         if (self.findTopic(topic_str)) |index| return index;
         const index = self.freeTopic() orelse return null;
         const topic = &self.topics[index];
-        topic.* = .{ .active = true };
+        topic.* = .{ .active = true, .generation = topic.generation + 1 };
         @memcpy(topic.name[0..parsed.name.len], parsed.name);
         topic.name_len = @intCast(parsed.name.len);
         @memcpy(topic.string[0..topic_str.len], topic_str);
@@ -230,70 +210,9 @@ pub const State = struct {
 
     fn freeTopic(self: *State) ?usize {
         for (&self.topics, 0..) |*topic, index| {
-            if (!topic.active) return index;
+            if (!topic.active and topic.generation != std.math.maxInt(u64)) return index;
         }
         return null;
-    }
-
-    // Backoff ----------------------------------------------------------------
-
-    pub fn addBackoff(self: *State, peer: u16, topic: u16, until_ms: u64) void {
-        for (self.backoffs[0..self.backoff_len]) |*entry| {
-            if (entry.peer == peer and entry.topic == topic) {
-                entry.until_ms = @max(entry.until_ms, until_ms);
-                return;
-            }
-        }
-        const fresh: Backoff = .{ .peer = peer, .topic = topic, .until_ms = until_ms };
-        if (self.backoff_len < self.backoffs.len) {
-            self.backoffs[self.backoff_len] = fresh;
-            self.backoff_len += 1;
-            return;
-        }
-        // Full: replace the soonest-to-expire entry so the newest backoff is kept
-        // and no single peer can deny backoff tracking to the others.
-        var min: usize = 0;
-        for (self.backoffs[0..self.backoff_len], 0..) |entry, i| {
-            if (entry.until_ms < self.backoffs[min].until_ms) min = i;
-        }
-        if (until_ms > self.backoffs[min].until_ms) self.backoffs[min] = fresh;
-    }
-
-    pub fn backedOff(self: *const State, peer: u16, topic: u16, now_ms: u64) bool {
-        for (self.backoffs[0..self.backoff_len]) |entry| {
-            if (entry.peer == peer and entry.topic == topic) return now_ms < entry.until_ms;
-        }
-        return false;
-    }
-
-    /// The expiry of a (peer, topic) backoff, if one is tracked.
-    pub fn backoffUntil(self: *const State, peer: u16, topic: u16) ?u64 {
-        for (self.backoffs[0..self.backoff_len]) |entry| {
-            if (entry.peer == peer and entry.topic == topic) return entry.until_ms;
-        }
-        return null;
-    }
-
-    /// Drops backoffs that have expired, keeping each `slack_ms` past its expiry
-    /// so a grafting decision that adds slack still sees the entry.
-    pub fn pruneBackoffs(self: *State, now_ms: u64, slack_ms: u64) void {
-        var index: usize = 0;
-        while (index < self.backoff_len) {
-            if (now_ms >= self.backoffs[index].until_ms +| slack_ms) {
-                self.backoffs[index] = self.backoffs[self.backoff_len - 1];
-                self.backoff_len -= 1;
-            } else index += 1;
-        }
-    }
-
-    fn dropBackoffs(self: *State, peer: u16) void {
-        var index: usize = 0;
-        while (index < self.backoff_len) {
-            if (self.backoffs[index].peer == peer) {
-                self.backoffs[index] = self.backoffs[self.backoff_len - 1];
-                self.backoff_len -= 1;
-            } else index += 1;
-        }
     }
 };
 
@@ -325,19 +244,48 @@ test "state tracks peers, topics, subscriptions, and mesh membership" {
     try std.testing.expectEqual(@as(?u16, null), state.findPeer(conn));
 }
 
-test "state suppresses ids per peer and tracks backoff" {
+test "state suppresses ids per peer until monotonic expiry" {
     var state = try std.testing.allocator.create(State);
     defer std.testing.allocator.destroy(state);
     state.* = .{};
     const peer = state.addPeer(.{ .index = 1, .generation = 1 }, .v1_2).?;
     const id = [_]u8{7} ** 20;
-    try std.testing.expect(!state.suppresses(peer.index, id));
-    state.suppress(peer.index, id);
-    try std.testing.expect(state.suppresses(peer.index, id));
+    try std.testing.expect(!state.suppresses(peer.index, id, 0));
+    state.suppress(peer.index, id, 0, 10);
+    try std.testing.expect(!state.suppresses(peer.index, id, 10));
+    try std.testing.expect(state.suppresses(peer.index, id, 0));
+}
 
-    state.addBackoff(peer.index, 0, 1_000);
-    try std.testing.expect(state.backedOff(peer.index, 0, 500));
-    try std.testing.expect(!state.backedOff(peer.index, 0, 1_000));
-    state.pruneBackoffs(1_000, 0);
-    try std.testing.expect(!state.backedOff(peer.index, 0, 500));
+test "gossip policy topic capacity supports two full fork subnet sets" {
+    const names = @import("topics.zig");
+    var gossip = try @import("gossipsub.zig").Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer gossip.deinit();
+    const state = gossip.state;
+    var name: [topic_mod.name_max_len]u8 = undefined;
+    var buffer: [topic_mod.topic_max_len]u8 = undefined;
+    for (0..3) |fork| {
+        if (fork == 2) {
+            for (&state.topics, 0..) |*topic, index| {
+                if (topic.active and std.mem.startsWith(u8, state.topicString(@intCast(index)), "/eth2/00000000/")) {
+                    try std.testing.expect(gossip.unsubscribe(state.topicString(@intCast(index))));
+                }
+            }
+        }
+        const digest: topic_mod.ForkDigest = .{ @intCast(fork), 0, 0, 0 };
+        for (0..names.attestation_subnet_count) |subnet| {
+            try std.testing.expect(gossip.subscribe(topic_mod.build(digest, names.attestationSubnet(subnet, &name), &buffer)));
+        }
+        for (0..128) |subnet| {
+            try std.testing.expect(gossip.subscribe(topic_mod.build(digest, names.dataColumnSubnet(subnet, &name), &buffer)));
+        }
+        for (0..names.sync_committee_subnet_count) |subnet| {
+            try std.testing.expect(gossip.subscribe(topic_mod.build(digest, names.syncCommitteeSubnet(subnet, &name), &buffer)));
+        }
+        for ([_][]const u8{ names.beacon_block, names.beacon_aggregate_and_proof, names.voluntary_exit, names.proposer_slashing, names.attester_slashing, names.bls_to_execution_change, names.sync_committee_contribution_and_proof, names.light_client_finality_update, names.light_client_optimistic_update }) |n| {
+            try std.testing.expect(gossip.subscribe(topic_mod.build(digest, n, &buffer)));
+        }
+    }
+    try std.testing.expect(state.findTopic("/eth2/00000000/beacon_block/ssz_snappy") == null);
+    try std.testing.expect(state.findTopic("/eth2/01000000/beacon_block/ssz_snappy") != null);
+    try std.testing.expect(state.findTopic("/eth2/02000000/beacon_block/ssz_snappy") != null);
 }

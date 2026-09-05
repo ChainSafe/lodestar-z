@@ -160,9 +160,8 @@ pub const HistoryEntry = struct {
     prev: u32 = empty_slot,
     message: storage.Handle = undefined,
     window: u8 = 0,
-    peers: [16]PeerRef = undefined,
-    counts: [16]u8 = undefined,
-    len: u8 = 0,
+    generations: [@import("peers.zig").capacity]u64 = [_]u64{0} ** @import("peers.zig").capacity,
+    counts: [@import("peers.zig").capacity]u8 = [_]u8{0} ** @import("peers.zig").capacity,
 };
 pub const History = struct {
     entries: []HistoryEntry,
@@ -189,6 +188,13 @@ pub const History = struct {
         a.free(self.entries);
         self.* = undefined;
     }
+    pub fn admitPayload(self: *History, store: *storage.Store, id: MessageId, name: []const u8, bytes: []const u8) ?storage.Handle {
+        for (0..self.entries.len) |_| {
+            if (store.canReserve(bytes.len)) break;
+            if (!self.evictOldest(store)) return null;
+        }
+        return store.put(id, name, bytes);
+    }
     pub fn put(self: *History, store: *storage.Store, h: storage.Handle) void {
         const message = store.get(h).?;
         if (message.history) return;
@@ -213,18 +219,17 @@ pub const History = struct {
         return e;
     }
     pub fn iwantAllowed(e: *const HistoryEntry, peer: PeerRef, max: u8) bool {
-        for (e.peers[0..e.len], 0..) |p, i| if (std.meta.eql(p, peer)) return e.counts[i] < max;
-        return e.len < e.peers.len;
+        assert(peer.index < e.counts.len and peer.generation != 0);
+        return e.generations[peer.index] != peer.generation or e.counts[peer.index] < max;
     }
     pub fn sent(e: *HistoryEntry, peer: PeerRef) void {
-        for (e.peers[0..e.len], 0..) |p, i| if (std.meta.eql(p, peer)) {
-            e.counts[i] += 1;
-            return;
-        };
-        assert(e.len < e.peers.len);
-        e.peers[e.len] = peer;
-        e.counts[e.len] = 1;
-        e.len += 1;
+        assert(peer.index < e.counts.len and peer.generation != 0);
+        if (e.generations[peer.index] != peer.generation) {
+            e.generations[peer.index] = peer.generation;
+            e.counts[peer.index] = 0;
+        }
+        assert(e.counts[peer.index] < 255);
+        e.counts[peer.index] += 1;
     }
     pub fn evictOldest(self: *History, store: *storage.Store) bool {
         if (self.count == 0) return false;
@@ -340,4 +345,15 @@ test "gossip ID index repairs a full admitted collision cluster" {
     index.remove(ids[0]);
     for (1..ids.len) |i| try std.testing.expectEqual(@as(?u32, @intCast(i)), index.find(ids[i]));
     try std.testing.expect(index.find(ids[0]) == null);
+}
+
+test "gossip policy recovery permits more than sixteen distinct recipients" {
+    var entry: HistoryEntry = .{};
+    for (0..32) |i| {
+        const peer: PeerRef = .{ .index = @intCast(i), .generation = 1 };
+        try std.testing.expect(History.iwantAllowed(&entry, peer, 3));
+        for (0..3) |_| History.sent(&entry, peer);
+        try std.testing.expect(!History.iwantAllowed(&entry, peer, 3));
+    }
+    try std.testing.expect(History.iwantAllowed(&entry, .{ .index = 0, .generation = 2 }, 3));
 }
