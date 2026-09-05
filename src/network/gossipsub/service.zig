@@ -15,7 +15,7 @@ const TransportEvent = engine_mod.Event;
 const Now = types.Now;
 const Gossipsub = gossipsub_mod.Gossipsub;
 const Event = gossipsub_mod.Event;
-const MessageId = gossipsub_mod.MessageId;
+const ValidationHandle = gossipsub_mod.ValidationHandle;
 const Verdict = gossipsub_mod.Verdict;
 
 pub const outcomes_per_pump: usize = 16;
@@ -42,6 +42,7 @@ const Supervisor = struct {
     peer: ?state_mod.PeerHandle = null,
     outbound: Outbound = .{ .waiting = 0 },
     failures: u8 = 0,
+    needs_service: bool = false,
 };
 
 pub const Service = struct {
@@ -96,12 +97,12 @@ pub const Service = struct {
         topic: []const u8,
         ssz: []const u8,
         now: Now,
-    ) Gossipsub.PublishError!void {
+    ) Gossipsub.PublishError!Gossipsub.PublishOutcome {
         return self.inner.publish(topic, ssz, now);
     }
 
-    pub fn report(self: *Service, handle: MessageId, verdict: Verdict) void {
-        self.inner.report(handle, verdict);
+    pub fn report(self: *Service, handle: ValidationHandle, verdict: Verdict, now: Now) gossipsub_mod.ReportOutcome {
+        return self.inner.report(handle, verdict, now);
     }
 
     pub fn setPeerScore(self: *Service, conn: Handle, value: f64) void {
@@ -201,9 +202,12 @@ pub const Service = struct {
         self: *Service,
         engine: *Engine,
         events: []const TransportEvent,
+        activity: []const Handle,
         now: Now,
         out: []Event,
     ) usize {
+        std.debug.assert(activity.len <= engine.limits.connections_max);
+        for (activity) |conn| self.connectionActivity(conn);
         const router = &self.router.?;
         router.transportEvents(engine, events, now);
         self.transportEvents(engine, events, now);
@@ -211,6 +215,37 @@ pub const Service = struct {
         const count = router.pump(engine, now, &outcomes);
         for (outcomes[0..count]) |outcome| self.negotiationResult(engine, outcome, now);
         return self.pump(router, engine, now, out);
+    }
+
+    pub fn connectionActivity(self: *Service, conn: Handle) void {
+        self.inner.connectionActivity(conn);
+        const index = self.inner.state.findPeer(conn) orelse return;
+        self.streams[index].needs_service = true;
+    }
+
+    pub fn nextWakeup(self: *Service, now: Now, event_capacity: usize) ?u64 {
+        var next = self.nextWakeupHandler(now, event_capacity);
+        if (self.router) |*router| if (router.nextWakeup(now, outcomes_per_pump)) |d| {
+            next = @min(next orelse d, d);
+        };
+        return next;
+    }
+
+    pub fn nextWakeupHandler(self: *const Service, now: Now, event_capacity: usize) ?u64 {
+        var next = self.inner.nextWakeup(now, event_capacity);
+        for (self.streams) |supervisor| {
+            const peer = supervisor.peer orelse continue;
+            if (!self.inner.state.peerMatches(peer.index, peer.generation)) continue;
+            if (supervisor.needs_service) return now.mono_ms;
+            switch (supervisor.outbound) {
+                .waiting => |deadline| next = @min(next orelse deadline, @max(now.mono_ms, deadline)),
+                .live => if (self.inner.state.outStream(peer.index) == null) {
+                    next = now.mono_ms;
+                },
+                .negotiating => {},
+            }
+        }
+        return next;
     }
 
     pub fn pump(
@@ -221,12 +256,16 @@ pub const Service = struct {
         out: []Event,
     ) usize {
         var openings: usize = 0;
+        var examined: usize = 0;
         for (0..self.streams.len) |_| {
+            if (examined == 32) break;
             const index: u16 = @intCast(self.open_cursor);
             self.open_cursor = (self.open_cursor + 1) % self.streams.len;
             const supervisor = &self.streams[index];
             const peer = supervisor.peer orelse continue;
             if (!self.inner.state.peerMatches(peer.index, peer.generation)) continue;
+            supervisor.needs_service = false;
+            examined += 1;
             switch (supervisor.outbound) {
                 .live => |stream| {
                     if (self.inner.state.outStream(index) == null) {

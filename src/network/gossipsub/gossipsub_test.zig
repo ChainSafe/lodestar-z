@@ -23,6 +23,8 @@ pub const GossipPair = struct {
     client_count: usize = 0,
     server_events: [16]Event = undefined,
     server_count: usize = 0,
+    client_event_capacity: usize = 16,
+    server_event_capacity: usize = 16,
 
     pub fn init(self: *GossipPair) !void {
         try self.initOpts(.{}, .{});
@@ -74,8 +76,12 @@ pub const GossipPair = struct {
         const now = self.pair.now;
         try self.drive(&self.client, &self.client_neg, &self.pair.client);
         try self.drive(&self.server, &self.server_neg, &self.pair.server);
-        self.client_count = self.client.pump(&self.pair.client, now, &self.client_events);
-        self.server_count = self.server.pump(&self.pair.server, now, &self.server_events);
+        self.client_count = 0;
+        self.server_count = 0;
+        if (self.client.nextWakeup(now, self.client_event_capacity).? <= now.mono_ms)
+            self.client_count = self.client.pump(&self.pair.client, now, self.client_events[0..self.client_event_capacity]);
+        if (self.server.nextWakeup(now, self.server_event_capacity).? <= now.mono_ms)
+            self.server_count = self.server.pump(&self.pair.server, now, self.server_events[0..self.server_event_capacity]);
         try self.pair.pump();
     }
 
@@ -87,6 +93,9 @@ pub const GossipPair = struct {
     ) !void {
         const now = self.pair.now;
         var storage: [8]engine_mod.Event = undefined;
+        var activity: [128]engine_mod.Handle = undefined;
+        const active = engine.driverView().takeActivity(&activity);
+        for (activity[0..active]) |conn| gs.connectionActivity(conn);
         const events = self.pair.events(engine, &storage);
         neg.transportEvents(engine, events, now);
         for (events) |event| switch (event) {
@@ -200,7 +209,7 @@ test "gossipsub delivers a published message to a mesh peer" {
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
 
     const payload = "a signed beacon block payload for the mesh";
-    try setup.client.publish(beacon_block, payload, setup.pair.now);
+    _ = try setup.client.publish(beacon_block, payload, setup.pair.now);
 
     var received = false;
     rounds = 0;
@@ -210,7 +219,7 @@ test "gossipsub delivers a published message to a mesh peer" {
             .message => |m| {
                 try std.testing.expectEqualStrings(beacon_block, m.topic);
                 try std.testing.expectEqualStrings(payload, m.bytes);
-                setup.server.report(m.handle, .accept);
+                _ = setup.server.report(m.handle, .accept, setup.pair.now);
                 received = true;
             },
             else => {},
@@ -238,14 +247,14 @@ test "gossipsub prunes a peer whose messages are rejected" {
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
 
     // the client publishes, the server rejects it as invalid
-    try setup.client.publish(beacon_block, "an invalid block", setup.pair.now);
+    _ = try setup.client.publish(beacon_block, "an invalid block", setup.pair.now);
     rounds = 0;
     var rejected = false;
     while (rounds < 20 and !rejected) : (rounds += 1) {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| switch (event) {
             .message => |m| {
-                setup.server.report(m.handle, .reject);
+                _ = setup.server.report(m.handle, .reject, setup.pair.now);
                 rejected = true;
             },
             else => {},
@@ -279,8 +288,8 @@ test "gossipsub credits first delivery only after the host accepts" {
     rounds = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
 
-    try setup.client.publish(beacon_block, "a beacon block payload", setup.pair.now);
-    var handle: ?gossipsub.MessageId = null;
+    _ = try setup.client.publish(beacon_block, "a beacon block payload", setup.pair.now);
+    var handle: ?gossipsub.ValidationHandle = null;
     rounds = 0;
     while (rounds < 20 and handle == null) : (rounds += 1) {
         try setup.pumpOnce();
@@ -294,7 +303,7 @@ test "gossipsub credits first delivery only after the host accepts" {
     // receiving the message must not credit the sender; only the host's accept does
     const client_index = setup.server.state.findPeer(setup.handles.server).?;
     const before = setup.server.scores.score(client_index, setup.pair.now.mono_ms);
-    setup.server.report(handle.?, .accept);
+    _ = setup.server.report(handle.?, .accept, setup.pair.now);
     const after = setup.server.scores.score(client_index, setup.pair.now.mono_ms);
     try std.testing.expect(after > before);
 }
@@ -303,7 +312,7 @@ test "gossipsub receives a message larger than the per-peer body buffer" {
     var setup: GossipPair = .{};
     // the server holds a tiny per-peer body buffer, so the message must be read
     // through a claimed large-pool buffer instead
-    try setup.initOpts(.{}, .{ .body_buffer_bytes = 1024, .large_message_bytes = 64 * 1024 });
+    try setup.initOpts(.{}, .{ .body_buffer_bytes = 1024 });
     defer setup.deinit();
 
     var buf: [topic_mod.topic_max_len]u8 = undefined;
@@ -320,7 +329,7 @@ test "gossipsub receives a message larger than the per-peer body buffer" {
     // a poorly-compressible 8 KB payload: its compressed frame exceeds 1 KB
     var payload: [8192]u8 = undefined;
     for (&payload, 0..) |*byte, i| byte.* = @intCast((i * 131 + 7) & 0xff);
-    try setup.client.publish(beacon_block, &payload, setup.pair.now);
+    _ = try setup.client.publish(beacon_block, &payload, setup.pair.now);
 
     var received = false;
     rounds = 0;
@@ -329,7 +338,7 @@ test "gossipsub receives a message larger than the per-peer body buffer" {
         for (setup.serverEvents()) |event| switch (event) {
             .message => |m| {
                 try std.testing.expectEqualSlices(u8, &payload, m.bytes);
-                setup.server.report(m.handle, .accept);
+                _ = setup.server.report(m.handle, .accept, setup.pair.now);
                 received = true;
             },
             else => {},
@@ -343,7 +352,7 @@ const constants_heartbeat = @import("constants.zig").heartbeat_interval_ms;
 
 fn expectControlFloodBounded(control_tag: u8) !void {
     var setup: GossipPair = .{};
-    try setup.init();
+    try setup.initOpts(.{}, .{ .items_per_peer = 4096, .items_per_pump = 8192 });
     defer setup.deinit();
     for (0..20) |_| try setup.pumpOnce();
     const peer = setup.server.state.findPeer(setup.handles.server).?;
@@ -363,9 +372,9 @@ fn expectControlFloodBounded(control_tag: u8) !void {
     }
     try std.testing.expectEqual(before + 17, setup.server.counters.rpcs_received);
     const count = if (control_tag == 0x0a)
-        setup.server.io[peer].ihave_recv
+        setup.server.io.peers[peer].ihave_recv
     else
-        setup.server.io[peer].idontwant_recv;
+        setup.server.io.peers[peer].idontwant_recv;
     try std.testing.expectEqual(@as(u16, 10), count);
 }
 
@@ -416,15 +425,15 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
         for (0..20) |_| try setup.pumpOnce();
         setup.pair.advance(constants_heartbeat + 100);
         for (0..10) |_| try setup.pumpOnce();
-        try setup.client.publish(topic, "hello", setup.pair.now);
+        _ = try setup.client.publish(topic, "hello", setup.pair.now);
         const valid = idFromHex(vector.valid);
-        try std.testing.expect(setup.client.seen.contains(valid));
+        try std.testing.expect(setup.client.seen.contains(valid, setup.pair.now.mono_ms));
         var received = false;
         for (0..20) |_| {
             try setup.pumpOnce();
             for (setup.serverEvents()) |event| switch (event) {
                 .message => |message| {
-                    try std.testing.expectEqual(valid, message.handle);
+                    try std.testing.expectEqual(valid, message.id);
                     received = true;
                 },
                 else => {},
@@ -446,7 +455,408 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
                 try setup.pair.client.write(setup.client_send, wire, false),
             );
             for (0..4) |_| try setup.pumpOnce();
-            try std.testing.expect(setup.server.seen.contains(idFromHex(expected)));
+            try std.testing.expect(setup.server.seen.contains(idFromHex(expected), setup.pair.now.mono_ms));
         }
     }
+}
+
+test "gossipsub queues incompressible 64 KiB publish" {
+    var g = try Gossipsub.init(std.testing.allocator, .{});
+    defer g.deinit();
+    const peer = g.addPeer(.{ .index = 0, .generation = 1 }, .v1_2).?;
+    const topic = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(topic));
+    g.state.mesh(g.state.findTopic(topic).?).set(peer.index);
+    var payload: [65536]u8 = undefined;
+    var rng = std.Random.DefaultPrng.init(42);
+    rng.random().bytes(&payload);
+    _ = try g.publish(topic, &payload, .{ .mono_ms = 1, .unix_s = 1 });
+    try std.testing.expectEqual(@as(u64, 0), g.counters.send_dropped);
+}
+
+const test_topic = "/eth2/01020304/beacon_block/ssz_snappy";
+
+fn connectMesh(setup: *GossipPair) !void {
+    try std.testing.expect(setup.client.subscribe(test_topic));
+    try std.testing.expect(setup.server.subscribe(test_topic));
+    for (0..20) |_| try setup.pumpOnce();
+    setup.pair.advance(constants_heartbeat + 1);
+    for (0..20) |_| try setup.pumpOnce();
+}
+
+test "gossipsub legal maximum and above two MiB publish use actual resumable IO" {
+    const sizes = [_]usize{ 65536, 2 * 1024 * 1024 + 1, @import("constants.zig").MAX_PAYLOAD_SIZE };
+    for (sizes) |size| {
+        var setup: GossipPair = .{};
+        try setup.init();
+        defer setup.deinit();
+        try connectMesh(&setup);
+        const payload = try std.testing.allocator.alloc(u8, size);
+        defer std.testing.allocator.free(payload);
+        var rng = std.Random.DefaultPrng.init(42);
+        rng.random().bytes(payload);
+        const outcome = try setup.client.publish(test_topic, payload, setup.pair.now);
+        try std.testing.expectEqual(@as(u16, 1), outcome.queued);
+        try std.testing.expectEqual(@as(u16, 0), outcome.pressured);
+        var received = false;
+        for (0..2000) |_| {
+            try setup.pumpOnce();
+            for (setup.serverEvents()) |event| if (event == .message) {
+                try std.testing.expectEqualSlices(u8, payload, event.message.bytes);
+                try std.testing.expectEqual(gossipsub.ReportOutcome{ .applied = .accept }, setup.server.report(event.message.handle, .accept, setup.pair.now));
+                received = true;
+            };
+            if (received) break;
+        }
+        try std.testing.expect(received);
+        try std.testing.expectEqual(@as(u64, 0), setup.client.counters.send_dropped);
+        try std.testing.expectEqual(@as(u64, 0), setup.server.counters.oversized_dropped);
+        for (setup.server.large_used) |used| try std.testing.expect(!used);
+    }
+}
+
+test "gossipsub legal maximum IWANT response uses actual IO without mesh publish" {
+    var setup: GossipPair = .{};
+    try setup.init();
+    defer setup.deinit();
+    try std.testing.expect(setup.server.subscribe(test_topic));
+    try std.testing.expect(setup.client.subscribe(test_topic));
+    for (0..20) |_| try setup.pumpOnce();
+    const payload = try std.testing.allocator.alloc(u8, @import("constants.zig").MAX_PAYLOAD_SIZE);
+    defer std.testing.allocator.free(payload);
+    var rng = std.Random.DefaultPrng.init(73);
+    rng.random().bytes(payload);
+    const result = try setup.client.publish(test_topic, payload, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 0), result.queued);
+    const id = topic_mod.validMessageId(test_topic, payload, .{});
+    const pb = @import("protobuf.zig");
+    var buf: [64]u8 = undefined;
+    var w = pb.Writer.init(&buf);
+    w.varint(pb.iwantRpcSize(1, 20));
+    pb.beginIwantRpc(&w, 1, 20);
+    pb.writeIwantId(&w, &id);
+    try std.testing.expectEqual(w.len, try setup.pair.server.write(setup.server_send, w.written(), false));
+    var received = false;
+    for (0..2000) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .message) {
+            try std.testing.expectEqualSlices(u8, payload, event.message.bytes);
+            received = true;
+        };
+        if (received) break;
+    }
+    try std.testing.expect(received);
+    const cached = setup.client.mcache.get(&setup.client.store, id).?;
+    try std.testing.expectEqual(@as(u8, 1), cached.counts[0]);
+}
+
+test "gossipsub holds multiple messages and unread RPCs under zero event pressure" {
+    var setup: GossipPair = .{};
+    try setup.init();
+    defer setup.deinit();
+    try connectMesh(&setup);
+    setup.server_event_capacity = 0;
+    const pb = @import("protobuf.zig");
+    const snappy = @import("snappy");
+    var compressed: [128]u8 = undefined;
+    const n = try snappy.raw.compress("first", &compressed);
+    var body: [512]u8 = undefined;
+    var w = pb.Writer.init(&body);
+    pb.writeMessage(&w, compressed[0..n], test_topic);
+    const n2 = try snappy.raw.compress("second", &compressed);
+    pb.writeMessage(&w, compressed[0..n2], test_topic);
+    var framed: [1024]u8 = undefined;
+    const frame = @import("frame.zig").writeFrame(&framed, w.written());
+    const n3 = try snappy.raw.compress("third", &compressed);
+    w = pb.Writer.init(&body);
+    pb.writeMessage(&w, compressed[0..n3], test_topic);
+    const frame2 = @import("frame.zig").writeFrame(framed[frame.len..], w.written());
+    try std.testing.expectEqual(frame.len + frame2.len, try setup.pair.client.write(setup.client_send, framed[0 .. frame.len + frame2.len], false));
+    for (0..8) |_| try setup.pumpOnce();
+    try std.testing.expectEqual(@as(u64, 0), setup.server.counters.messages_received);
+    try std.testing.expect(setup.server.nextWakeup(setup.pair.now, 0).? > setup.pair.now.mono_ms);
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.server.nextWakeup(setup.pair.now, 1));
+    setup.server_event_capacity = 1;
+    const expected = [_][]const u8{ "first", "second", "third" };
+    var received: usize = 0;
+    for (0..20) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .message) {
+            try std.testing.expect(received < expected.len);
+            try std.testing.expectEqualStrings(expected[received], event.message.bytes);
+            received += 1;
+        };
+        if (received == expected.len) break;
+    }
+    try std.testing.expectEqual(expected.len, received);
+    for (0..8) |_| try setup.pumpOnce();
+    try std.testing.expect(setup.server.nextWakeup(setup.pair.now, 1).? > setup.pair.now.mono_ms);
+}
+
+test "gossipsub subscription cursors synchronize all topics through small critical queues" {
+    const topic_capacity = @import("constants.zig").topics_cap;
+    var setup: GossipPair = .{};
+    try setup.initOpts(.{ .critical_bytes = 256, .control_bytes = 64 }, .{ .critical_bytes = 256, .control_bytes = 64 });
+    defer setup.deinit();
+    var buf: [topic_mod.topic_max_len]u8 = undefined;
+    for (0..topic_capacity) |i| {
+        const topic = try std.fmt.bufPrint(&buf, "/eth2/01020304/topic_{d}/ssz_snappy", .{i});
+        try std.testing.expect(setup.client.subscribe(topic));
+        try std.testing.expect(setup.server.subscribe(topic));
+    }
+    var received: usize = 0;
+    for (0..128) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .subscription_change) {
+            const expected = try std.fmt.bufPrint(&buf, "/eth2/01020304/topic_{d}/ssz_snappy", .{received});
+            try std.testing.expectEqualStrings(expected, event.subscription_change.topic);
+            received += 1;
+        };
+        if (received == topic_capacity) break;
+    }
+    try std.testing.expectEqual(@as(usize, topic_capacity), received);
+    const peer = setup.client.state.findPeer(setup.handles.client).?;
+    setup.client.resetOutbound(&setup.pair.client, peer);
+    setup.client_send = try setup.client_neg.beginOutbound(&setup.pair.client, setup.handles.client, .{ .meshsub = .v1_2 }, setup.pair.now);
+    received = 0;
+    var seen = std.StaticBitSet(topic_capacity).initEmpty();
+    for (0..128) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .subscription_change) {
+            const parsed = topic_mod.parse(event.subscription_change.topic).?;
+            const number = try std.fmt.parseInt(usize, parsed.name[6..], 10);
+            try std.testing.expect(number < topic_capacity and !seen.isSet(number));
+            seen.set(number);
+            received += 1;
+        };
+        if (received == topic_capacity) break;
+    }
+    try std.testing.expectEqual(@as(usize, topic_capacity), received);
+    for (0..8) |_| try setup.pumpOnce();
+    try std.testing.expect(setup.client.nextWakeup(setup.pair.now, 16).? > setup.pair.now.mono_ms);
+}
+
+test "gossipsub activity behind partial peer cursor remains ready and generation checked" {
+    var setup: GossipPair = .{};
+    try setup.initOpts(.{}, .{ .peers_per_pump = 1 });
+    defer setup.deinit();
+    try connectMesh(&setup);
+    const real_peer = setup.server.state.findPeer(setup.handles.server).?;
+    const extra = setup.server.addPeer(.{ .index = 77, .generation = 9 }, .v1_2).?;
+    setup.server.peer_cursor = extra.index;
+    const pb = @import("protobuf.zig");
+    var compressed: [64]u8 = undefined;
+    const n = try @import("snappy").raw.compress("arrived behind cursor", &compressed);
+    var body: [256]u8 = undefined;
+    var w = pb.Writer.init(&body);
+    pb.writeMessage(&w, compressed[0..n], test_topic);
+    var frame: [258]u8 = undefined;
+    const wire = @import("frame.zig").writeFrame(&frame, w.written());
+    try std.testing.expectEqual(wire.len, try setup.pair.client.write(setup.client_send, wire, false));
+    try setup.pair.pump();
+    var activity: [128]engine_mod.Handle = undefined;
+    const active = setup.pair.server.driverView().takeActivity(&activity);
+    try std.testing.expect(active > 0);
+    for (activity[0..active]) |conn| setup.server.connectionActivity(conn);
+    var events: [1]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 0), setup.server.pump(&setup.pair.server, setup.pair.now, &events));
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.server.nextWakeup(setup.pair.now, 1));
+    try std.testing.expectEqual(@as(usize, 1), setup.server.pump(&setup.pair.server, setup.pair.now, &events));
+    try std.testing.expectEqualStrings("arrived behind cursor", events[0].message.bytes);
+    for (0..8) |_| {
+        if (setup.server.nextWakeup(setup.pair.now, 1).? > setup.pair.now.mono_ms) break;
+        _ = setup.server.pump(&setup.pair.server, setup.pair.now, &events);
+    }
+    try std.testing.expect(!setup.server.io.peers[real_peer].rx_ready);
+    setup.server.connectionActivity(.{ .index = setup.handles.server.index, .generation = setup.handles.server.generation + 1 });
+    try std.testing.expect(!setup.server.io.peers[real_peer].rx_ready);
+    try std.testing.expect(setup.server.nextWakeup(setup.pair.now, 1).? > setup.pair.now.mono_ms);
+}
+
+test "gossipsub frame and TX absolute residence survive steady byte progress" {
+    var setup: GossipPair = .{};
+    try setup.initOpts(.{ .output_per_peer = 1, .tx_timeout_ms = 500 }, .{ .body_buffer_bytes = 64, .large_frame_timeout_ms = 150, .pressure_timeout_ms = 500 });
+    defer setup.deinit();
+    for (0..16) |_| try setup.pumpOnce();
+    const server_peer = setup.server.state.findPeer(setup.handles.server).?;
+    const client_peer = setup.client.state.findPeer(setup.handles.client).?;
+    var prefix: [8]u8 = undefined;
+    var w = @import("protobuf.zig").Writer.init(&prefix);
+    w.varint(65536);
+    w.bytes("x");
+    try std.testing.expectEqual(w.len, try setup.pair.client.write(setup.client_send, w.written(), false));
+    for (0..4) |_| try setup.pumpOnce();
+    try std.testing.expect(setup.server.io.peers[server_peer].large_slot != null);
+    try std.testing.expect(setup.client.subscribe(test_topic));
+    setup.client.state.mesh(setup.client.state.findTopic(test_topic).?).set(client_peer);
+    _ = try setup.client.publish(test_topic, "held transmit payload", setup.pair.now);
+    for (0..4) |_| try setup.pumpOnce();
+    const began = setup.pair.now.mono_ms;
+    for (0..4) |_| {
+        setup.pair.advance(100);
+        try std.testing.expectEqual(@as(usize, 1), try setup.pair.client.write(setup.client_send, "x", false));
+        try setup.pumpOnce();
+        try std.testing.expect(setup.server.io.peers[server_peer].large_slot != null);
+        try std.testing.expect(setup.server.io.peers[server_peer].progress_ms > began);
+    }
+    setup.pair.advance(100);
+    try setup.pumpOnce();
+    try std.testing.expectEqual(@as(u64, 1), setup.server.counters.large_stalled);
+    try std.testing.expect(setup.server.io.peers[server_peer].large_slot == null);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.counters.tx_stalled);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.io.peers[client_peer].data_count);
+    for (setup.client.store.entries) |e| if (e.active) try std.testing.expectEqual(@as(u32, 0), e.tx);
+}
+
+test "gossipsub pinned payload pressure resumes held large frame after host report" {
+    const constants = @import("constants.zig");
+    var setup: GossipPair = .{};
+    try setup.initOpts(.{}, .{ .mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + 4096, .large_pool_count = 1 });
+    defer setup.deinit();
+    try connectMesh(&setup);
+    const payload = try std.testing.allocator.alloc(u8, constants.MAX_PAYLOAD_SIZE);
+    defer std.testing.allocator.free(payload);
+    var rng = std.Random.DefaultPrng.init(97);
+    rng.random().bytes(payload);
+    _ = try setup.client.publish(test_topic, payload, setup.pair.now);
+    var handle: ?gossipsub.ValidationHandle = null;
+    for (0..2000) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .message) {
+            handle = event.message.handle;
+        };
+        if (handle != null) break;
+    }
+    try std.testing.expect(handle != null);
+    _ = try setup.client.publish(test_topic, payload[0 .. 3 * 1024 * 1024], setup.pair.now);
+    const peer = setup.server.state.findPeer(setup.handles.server).?;
+    for (0..2000) |_| {
+        try setup.pumpOnce();
+        if (setup.server.io.peers[peer].blocked == .storage) break;
+    }
+    try std.testing.expectEqual(.storage, setup.server.io.peers[peer].blocked);
+    try std.testing.expect(setup.server.io.peers[peer].large_slot != null);
+    try std.testing.expect(setup.server.nextWakeup(setup.pair.now, 16).? > setup.pair.now.mono_ms);
+    try std.testing.expectEqual(@as(u64, 1), setup.server.counters.messages_received);
+    _ = setup.server.report(handle.?, .ignore, setup.pair.now);
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.server.nextWakeup(setup.pair.now, 16));
+    var received = false;
+    for (0..20) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .message) {
+            try std.testing.expectEqualSlices(u8, payload[0 .. 3 * 1024 * 1024], event.message.bytes);
+            received = true;
+        };
+        if (received) break;
+    }
+    try std.testing.expect(received);
+    try std.testing.expect(setup.server.io.peers[peer].large_slot == null);
+    try std.testing.expectEqual(@as(u64, 0), setup.server.counters.local_pressure_resets);
+}
+
+test "gossipsub native write credit behind cursor resumes and blocked writes quiesce" {
+    var setup: GossipPair = .{};
+    try setup.initOpts(.{ .peers_per_pump = 1 }, .{});
+    defer setup.deinit();
+    try connectMesh(&setup);
+    const index = setup.client.state.findPeer(setup.handles.client).?;
+    const payload = try std.testing.allocator.alloc(u8, @import("constants.zig").MAX_PAYLOAD_SIZE);
+    defer std.testing.allocator.free(payload);
+    var rng = std.Random.DefaultPrng.init(112);
+    rng.random().bytes(payload);
+    _ = try setup.client.publish(test_topic, payload, setup.pair.now);
+    var activity: [128]engine_mod.Handle = undefined;
+    var events: [16]Event = undefined;
+    for (0..512) |_| {
+        const active = setup.pair.client.driverView().takeActivity(&activity);
+        for (activity[0..active]) |conn| setup.client.connectionActivity(conn);
+        if (setup.client.nextWakeup(setup.pair.now, 16).? > setup.pair.now.mono_ms) break;
+        _ = setup.client.pump(&setup.pair.client, setup.pair.now, &events);
+        try setup.pair.pump();
+    }
+    const io = &setup.client.io.peers[index];
+    try std.testing.expect(io.data_count > 0);
+    try std.testing.expect(!io.tx_ready);
+    try std.testing.expect(setup.client.nextWakeup(setup.pair.now, 16).? > setup.pair.now.mono_ms);
+    const before = io.data[io.data_head].page.remaining;
+    const extra = setup.client.addPeer(.{ .index = 77, .generation = 1 }, .v1_2).?;
+    setup.client.peer_cursor = extra.index;
+    setup.server.connectionActivity(setup.handles.server);
+    for (0..32) |_| {
+        _ = setup.server.pump(&setup.pair.server, setup.pair.now, &events);
+        try setup.pair.pump();
+    }
+    const active = setup.pair.client.driverView().takeActivity(&activity);
+    try std.testing.expect(active > 0);
+    for (activity[0..active]) |conn| setup.client.connectionActivity(conn);
+    _ = setup.client.pump(&setup.pair.client, setup.pair.now, &events);
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.client.nextWakeup(setup.pair.now, 16));
+    _ = setup.client.pump(&setup.pair.client, setup.pair.now, &events);
+    try std.testing.expect(io.data[io.data_head].page.remaining < before);
+    setup.client.connectionClosed(setup.handles.client);
+    try std.testing.expectEqual(@as(usize, 0), io.data_count);
+    for (setup.client.store.entries) |entry| if (entry.active) try std.testing.expectEqual(@as(u32, 0), entry.tx);
+}
+
+test "gossipsub healthy continuous frame turnover does not expire a nonempty queue" {
+    var setup: GossipPair = .{};
+    try setup.initOpts(.{ .calls_per_peer = 3, .tx_timeout_ms = 500 }, .{});
+    defer setup.deinit();
+    try connectMesh(&setup);
+    const index = setup.client.state.findPeer(setup.handles.client).?;
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, 0, .little);
+    _ = try setup.client.publish(test_topic, &bytes, setup.pair.now);
+    std.mem.writeInt(u64, &bytes, 1, .little);
+    _ = try setup.client.publish(test_topic, &bytes, setup.pair.now);
+    const began = setup.pair.now.mono_ms;
+    for (2..34) |i| {
+        try setup.pumpOnce();
+        try std.testing.expect(setup.client.io.peers[index].pending());
+        try std.testing.expect(setup.client.io.peers[index].data_count > 0);
+        setup.pair.advance(25);
+        std.mem.writeInt(u64, &bytes, i, .little);
+        const result = try setup.client.publish(test_topic, &bytes, setup.pair.now);
+        try std.testing.expectEqual(@as(u16, 1), result.queued);
+    }
+    try std.testing.expect(setup.pair.now.mono_ms - began > 500);
+    try std.testing.expectEqual(@as(u64, 0), setup.client.counters.tx_stalled);
+    try std.testing.expect(setup.client.state.outStream(index) != null);
+}
+
+test "gossipsub temporary frame pool pressure preserves prefix unread bytes and resumes" {
+    var setup: GossipPair = .{};
+    try setup.initOpts(.{}, .{ .large_pool_count = 1, .body_buffer_bytes = 1024 });
+    defer setup.deinit();
+    try connectMesh(&setup);
+    const owner_conn: engine_mod.Handle = .{ .index = 77, .generation = 1 };
+    const owner = setup.server.addPeer(owner_conn, .v1_2).?;
+    setup.server.large_used[0] = true;
+    setup.server.io.peers[owner.index].large_slot = 0;
+    var payload: [65536]u8 = undefined;
+    var rng = std.Random.DefaultPrng.init(113);
+    rng.random().bytes(&payload);
+    _ = try setup.client.publish(test_topic, &payload, setup.pair.now);
+    const peer = setup.server.state.findPeer(setup.handles.server).?;
+    for (0..64) |_| {
+        try setup.pumpOnce();
+        if (setup.server.io.peers[peer].blocked == .storage) break;
+    }
+    try std.testing.expectEqual(.storage, setup.server.io.peers[peer].blocked);
+    try std.testing.expect(setup.server.io.peers[peer].reader.declaredLen() != null);
+    try std.testing.expectEqual(@as(u64, 0), setup.server.counters.messages_received);
+    try std.testing.expect(setup.server.nextWakeup(setup.pair.now, 16).? > setup.pair.now.mono_ms);
+    setup.server.connectionClosed(owner_conn);
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.server.nextWakeup(setup.pair.now, 16));
+    var received = false;
+    for (0..64) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .message) {
+            try std.testing.expectEqualSlices(u8, &payload, event.message.bytes);
+            received = true;
+        };
+        if (received) break;
+    }
+    try std.testing.expect(received);
+    try std.testing.expect(!setup.server.large_used[0]);
 }

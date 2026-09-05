@@ -14,9 +14,14 @@ pub const Options = gossipsub.Options;
 pub const Event = gossipsub.Event;
 pub const Service = service.Service;
 pub const MessageId = gossipsub.MessageId;
+pub const ValidationHandle = gossipsub.ValidationHandle;
+pub const ReportOutcome = gossipsub.ReportOutcome;
 pub const Verdict = gossipsub.Verdict;
 
 test {
+    _ = @import("message_store.zig");
+    _ = @import("validation.zig");
+    _ = @import("peer_io.zig");
     _ = constants;
     _ = protobuf;
     _ = topic;

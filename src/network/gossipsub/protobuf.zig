@@ -2,7 +2,7 @@ const std = @import("std");
 
 const assert = std.debug.assert;
 
-pub const Error = error{ Truncated, Overflow, BadWireType };
+pub const Error = error{ Truncated, Overflow, BadWireType, FieldLimit };
 
 pub const wire_varint: u3 = 0;
 pub const wire_len: u3 = 2;
@@ -15,6 +15,7 @@ pub const Tag = struct { field: u64, wire: u3 };
 pub const Reader = struct {
     data: []const u8,
     pos: usize = 0,
+    fields: usize = 0,
 
     pub fn init(data: []const u8) Reader {
         return .{ .data = data };
@@ -40,6 +41,8 @@ pub const Reader = struct {
     }
 
     pub fn tag(self: *Reader) Error!Tag {
+        if (self.fields == 8192) return error.FieldLimit;
+        self.fields += 1;
         const raw = try self.varint();
         return .{ .field = raw >> 3, .wire = @intCast(raw & 0x7) };
     }
@@ -282,42 +285,62 @@ pub const RpcReader = struct {
         return .{ .top = Reader.init(data) };
     }
 
+    pub const Step = union(enum) { item: Item, skipped, end, deferred };
+
+    pub fn step(self: *RpcReader, fields: *usize) Error!Step {
+        if (fields.* == 0) return .deferred;
+        const nested = self.control != null;
+        var reader = if (self.control) |control| control else self.top;
+        if (reader.atEnd()) {
+            if (nested) {
+                self.control = null;
+                return .skipped;
+            }
+            return .end;
+        }
+        // Top/control cursors resume after every field; nested schema readers enforce their own cap.
+        reader.fields = 0;
+        const t = try reader.tag();
+        const body = if (t.wire == wire_len) try reader.lenDelimited() else blk: {
+            try reader.skip(t.wire);
+            break :blk null;
+        };
+        const known = if (nested) t.field >= 1 and t.field <= 5 else t.field == 1 or t.field == 2;
+        const cost = 1 + if (known and body != null) @as(usize, @min(body.?.len, 8192)) * 2 else @as(usize, 0);
+        if (cost > fields.*) return .deferred;
+        fields.* -= cost;
+        if (nested) self.control = reader else self.top = reader;
+        const bytes = body orelse return .skipped;
+        if (nested) return switch (t.field) {
+            1 => .{ .item = .{ .ihave = .{ .topic = try topicOf(bytes, 1), .body = bytes } } },
+            2 => .{ .item = .{ .iwant = .{ .body = bytes } } },
+            3 => .{ .item = .{ .graft = try topicOf(bytes, 1) } },
+            4 => .{ .item = .{ .prune = try Prune.decode(bytes) } },
+            5 => .{ .item = .{ .idontwant = .{ .body = bytes } } },
+            else => .skipped,
+        };
+        return switch (t.field) {
+            1 => .{ .item = .{ .subscription = try SubOpts.decode(bytes) } },
+            2 => .{ .item = .{ .message = try Message.decode(bytes) } },
+            3 => blk: {
+                self.control = Reader.init(bytes);
+                break :blk .skipped;
+            },
+            else => .skipped,
+        };
+    }
+
     pub fn next(self: *RpcReader) Error!?Item {
-        while (true) {
-            if (self.control) |*control| {
-                if (control.atEnd()) {
-                    self.control = null;
-                    continue;
-                }
-                const t = try control.tag();
-                if (t.wire != wire_len) {
-                    try control.skip(t.wire);
-                    continue;
-                }
-                const body = try control.lenDelimited();
-                switch (t.field) {
-                    1 => return .{ .ihave = .{ .topic = try topicOf(body, 1), .body = body } },
-                    2 => return .{ .iwant = .{ .body = body } },
-                    3 => return .{ .graft = try topicOf(body, 1) },
-                    4 => return .{ .prune = try Prune.decode(body) },
-                    5 => return .{ .idontwant = .{ .body = body } },
-                    else => continue,
-                }
-            }
-            if (self.top.atEnd()) return null;
-            const t = try self.top.tag();
-            if (t.wire != wire_len) {
-                try self.top.skip(t.wire);
-                continue;
-            }
-            const body = try self.top.lenDelimited();
-            switch (t.field) {
-                1 => return .{ .subscription = try SubOpts.decode(body) },
-                2 => return .{ .message = try Message.decode(body) },
-                3 => self.control = Reader.init(body),
-                else => {},
+        var budget: usize = std.math.maxInt(usize);
+        for (0..self.top.data.len + 2) |_| {
+            switch (try self.step(&budget)) {
+                .item => |item| return item,
+                .end => return null,
+                .skipped => {},
+                .deferred => unreachable,
             }
         }
+        return error.FieldLimit;
     }
 };
 
@@ -602,4 +625,34 @@ test "protobuf skips a field carrying an unexpected wire type" {
     try std.testing.expect(sub.subscription.subscribe);
     try std.testing.expectEqualStrings("topic_a", sub.subscription.topic);
     try std.testing.expect((try reader.next()) == null);
+}
+
+test "gossip protobuf steps unknown fields under explicit scan credit" {
+    var bytes: [8192]u8 = undefined;
+    for (0..4096) |i| @memcpy(bytes[i * 2 ..][0..2], &[_]u8{ 0x38, 0 });
+    var rpc = RpcReader.init(&bytes);
+    for (0..4096) |_| {
+        var fields: usize = 1;
+        try std.testing.expectEqual(RpcReader.Step.skipped, try rpc.step(&fields));
+        try std.testing.expectEqual(@as(usize, 0), fields);
+        try std.testing.expectEqual(RpcReader.Step.deferred, try rpc.step(&fields));
+    }
+    var fields: usize = 1;
+    try std.testing.expectEqual(RpcReader.Step.end, try rpc.step(&fields));
+}
+
+test "gossip protobuf rejects excessive nested field visits and preserves deferred cursor" {
+    var bytes: [16386]u8 = undefined;
+    for (0..8193) |i| @memcpy(bytes[i * 2 ..][0..2], &[_]u8{ 0x38, 0 });
+    try std.testing.expectError(error.FieldLimit, Message.decode(&bytes));
+    var encoded: [256]u8 = undefined;
+    var w = Writer.init(&encoded);
+    writeMessage(&w, "data", "topic");
+    var rpc = RpcReader.init(w.written());
+    var fields: usize = 1;
+    try std.testing.expectEqual(RpcReader.Step.deferred, try rpc.step(&fields));
+    try std.testing.expectEqual(@as(usize, 0), rpc.top.pos);
+    fields = 16385;
+    const result = try rpc.step(&fields);
+    try std.testing.expectEqualStrings("data", result.item.message.data);
 }
