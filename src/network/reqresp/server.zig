@@ -330,7 +330,7 @@ pub const Server = struct {
         if (owner.inboundCount(stream.conn, null) >= owner.options.inbound_per_peer_max) {
             return error.PeerSlotsExhausted;
         }
-        const index = owner.claim(owner.inbound) orelse return error.SlotsExhausted;
+        const index = owner.availableInboundFor(which) orelse return error.SlotsExhausted;
         const slot = &owner.inbound[index];
         if (owner.inboundCount(stream.conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
             owner.pushOverLimit(.{ .peer = stream.conn, .protocol = which });

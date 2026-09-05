@@ -11,6 +11,7 @@ pub const Options = struct {
     gossipsub: gossip_mod.Options = .{},
 };
 pub const Counts = struct { reqresp: usize, gossipsub: usize };
+pub const PartitionedCounts = struct { application: usize, control: usize, gossipsub: usize };
 pub const InitError = reqresp_mod.service.InitError || gossip_mod.service.InitError;
 
 pub const Service = struct {
@@ -58,8 +59,33 @@ pub const Service = struct {
     }
 
     /// Combine protocol deadlines and independent host output capacities with the transport wakeup.
-    pub fn nextWakeup(self: *Service, now: types.Now, request_event_capacity: usize, gossip_event_capacity: usize) ?u64 {
-        const request_due = self.reqresp.nextWakeupRouted(&self.router, now, request_event_capacity);
+    pub fn nextWakeup(
+        self: *Service,
+        now: types.Now,
+        request_event_capacity: usize,
+        gossip_event_capacity: usize,
+    ) ?u64 {
+        return self.nextWakeupPartitioned(
+            now,
+            request_event_capacity,
+            request_event_capacity,
+            gossip_event_capacity,
+        );
+    }
+
+    pub fn nextWakeupPartitioned(
+        self: *Service,
+        now: types.Now,
+        application_capacity: usize,
+        control_capacity: usize,
+        gossip_event_capacity: usize,
+    ) ?u64 {
+        const request_due = self.reqresp.nextWakeupPartitionedRouted(
+            &self.router,
+            now,
+            application_capacity,
+            control_capacity,
+        );
         const gossip = self.gossipsub.nextWakeupHandler(now, gossip_event_capacity);
         if (request_due) |r| return @min(r, gossip orelse r);
         return gossip;
@@ -77,6 +103,45 @@ pub const Service = struct {
         requests: []reqresp_mod.Event,
         gossip: []gossip_mod.Event,
     ) Counts {
+        self.prepare(engine, events, activity, now);
+        return .{
+            .reqresp = self.reqresp.pumpRouted(&self.router, engine, now, requests),
+            .gossipsub = self.gossipsub.pump(&self.router, engine, now, gossip),
+        };
+    }
+
+    pub fn processPartitioned(
+        self: *Service,
+        engine: *engine_mod.Engine,
+        events: []const engine_mod.Event,
+        activity: []const engine_mod.Handle,
+        now: types.Now,
+        application: []reqresp_mod.Event,
+        control: []reqresp_mod.Event,
+        gossip: []gossip_mod.Event,
+    ) PartitionedCounts {
+        self.prepare(engine, events, activity, now);
+        const counts = self.reqresp.pumpPartitionedRouted(
+            &self.router,
+            engine,
+            now,
+            application,
+            control,
+        );
+        return .{
+            .application = counts.application,
+            .control = counts.control,
+            .gossipsub = self.gossipsub.pump(&self.router, engine, now, gossip),
+        };
+    }
+
+    fn prepare(
+        self: *Service,
+        engine: *engine_mod.Engine,
+        events: []const engine_mod.Event,
+        activity: []const engine_mod.Handle,
+        now: types.Now,
+    ) void {
         std.debug.assert(activity.len <= engine.limits.connections_max);
         for (activity) |conn| {
             self.reqresp.inner.connectionActivity(conn);
@@ -95,9 +160,5 @@ pub const Service = struct {
                 .meshsub => self.gossipsub.negotiationResult(engine, outcome, now),
             }
         }
-        return .{
-            .reqresp = self.reqresp.pumpRouted(&self.router, engine, now, requests),
-            .gossipsub = self.gossipsub.pump(&self.router, engine, now, gossip),
-        };
     }
 };

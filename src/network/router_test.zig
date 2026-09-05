@@ -61,8 +61,17 @@ test "router composes simultaneous ping and meshsub on one connection" {
         const events = pair.events(&pair.server, &transport_events);
         var gossip_events: [16]gs.Event = undefined;
         const server_active = pair.server.driverView().takeActivity(&activity);
-        const counts = server.process(&pair.server, events, activity[0..server_active], pair.now, &request_events, &gossip_events);
-        const request_count = counts.reqresp;
+        const counts = server.processPartitioned(
+            &pair.server,
+            events,
+            activity[0..server_active],
+            pair.now,
+            &.{},
+            &request_events,
+            &gossip_events,
+        );
+        try std.testing.expectEqual(0, counts.application);
+        const request_count = counts.control;
         const gossip_count = counts.gossipsub;
         for (request_events[0..request_count]) |event| switch (event) {
             .request => |incoming| {

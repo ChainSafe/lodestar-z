@@ -15,6 +15,7 @@ pub const Options = reqresp.Options;
 pub const RequestOptions = reqresp.RequestOptions;
 pub const RequestHandle = reqresp.RequestHandle;
 pub const Event = reqresp.Event;
+pub const PartitionedCounts = reqresp.PartitionedCounts;
 pub const Failure = reqresp.Failure;
 pub const ForkEntry = reqresp.ForkEntry;
 pub const Counters = reqresp.Counters;
@@ -26,6 +27,8 @@ test {
     _ = protocol;
     _ = reqresp;
     _ = service;
+    _ = @import("control_capacity_test.zig");
+    _ = @import("control_partition_test.zig");
     _ = @import("codec_test.zig");
     _ = @import("service_test.zig");
     _ = @import("limiter_test.zig");
