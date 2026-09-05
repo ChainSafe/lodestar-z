@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "discv5_wire" },
         .{ .name = "network_wire" },
         .{ .name = "network_reqresp", .extra_libs = &.{dep_snappy.artifact("snappy")}, .extra_args = &.{ "-lc++", "-lc++abi", "-lunwind" } },
-        .{ .name = "network_gossip" },
+        .{ .name = "network_gossip", .extra_libs = &.{dep_snappy.artifact("snappy")}, .extra_args = &.{ "-lc++", "-lc++abi", "-lunwind" } },
     };
 
     inline for (fuzzers) |fuzzer| {
