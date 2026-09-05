@@ -137,4 +137,3 @@ pub fn VariableElementIterator(comptime ST: type) type {
         }
     };
 }
-

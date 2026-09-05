@@ -27,7 +27,6 @@ const VariableProgressiveList = struct {
     pub const Element = VariableElement;
 };
 
-
 test "iterates validated variable elements" {
     const data = [_]u8{
         8,  0, 0, 0,
