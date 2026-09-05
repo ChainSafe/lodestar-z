@@ -121,6 +121,10 @@ pub const Service = struct {
         return self.inner.counters;
     }
 
+    pub fn resourceSnapshot(self: *const Service) gossipsub_mod.ResourceSnapshot {
+        return self.inner.resourceSnapshot();
+    }
+
     pub const Admission = enum { admitted, duplicate, capacity, unauthenticated };
 
     /// Hosts inspect this after each connected event and service pump. Refused or locally retired

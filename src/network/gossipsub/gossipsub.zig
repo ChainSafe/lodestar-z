@@ -82,6 +82,22 @@ pub const MemoryPlan = struct {
     total_bytes: usize,
 };
 
+/// Live occupancy for bounded host supervision and deterministic test baselines.
+/// This scans fixed startup capacities: peers, validation entries, and store entries.
+pub const ResourceSnapshot = struct {
+    admitted_peers: usize,
+    remote_subscriptions: usize,
+    mesh_members: usize,
+    queued_descriptors: usize,
+    queued_bytes: usize,
+    held_frames: usize,
+    held_tx_retains: usize,
+    store_entries: usize,
+    store_pages: usize,
+    pending_validations: usize,
+    promises: usize,
+};
+
 pub const Gossipsub = struct {
     allocator: Allocator,
     options: Options,
@@ -530,6 +546,40 @@ pub const Gossipsub = struct {
             .metadata_bytes = metadata,
             .total_bytes = self.store.bytes.len + self.large_pool.len + self.decompressed.len + self.msg_scratch.len + self.io.arena.len + metadata,
         };
+    }
+
+    pub fn resourceSnapshot(self: *const Gossipsub) ResourceSnapshot {
+        var result: ResourceSnapshot = .{
+            .admitted_peers = 0,
+            .remote_subscriptions = 0,
+            .mesh_members = 0,
+            .queued_descriptors = 0,
+            .queued_bytes = 0,
+            .held_frames = 0,
+            .held_tx_retains = 0,
+            .store_entries = self.store.used_entries,
+            .store_pages = self.store.next.len - self.store.free_pages,
+            .pending_validations = 0,
+            .promises = self.promise_len,
+        };
+        for (self.state.peers, self.io.peers) |peer, io| {
+            if (peer.active) result.admitted_peers += 1;
+            result.queued_descriptors += io.data_count;
+            result.queued_bytes += io.data_bytes;
+            if (io.reader.declaredLen() != null or io.rpc != null) result.held_frames += 1;
+        }
+        for (self.state.topics) |topic| {
+            if (!topic.active) continue;
+            for (0..constants.peers_cap) |peer| {
+                if (topic.subscribers.isSet(peer)) result.remote_subscriptions += 1;
+                if (topic.mesh.isSet(peer)) result.mesh_members += 1;
+            }
+        }
+        for (self.store.entries) |entry| result.held_tx_retains += entry.tx;
+        for (self.validation.entries) |entry| {
+            if (entry.state == .pending) result.pending_validations += 1;
+        }
+        return result;
     }
 
     pub fn connectionActivity(self: *Gossipsub, conn: Handle) void {
@@ -1669,4 +1719,14 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     try std.testing.expect(g.scores.setAppScore(g.logical(@intCast(live)).index, -10_000));
     _ = try g.publish(second_name, "live publish", .{ .mono_ms = 703, .unix_s = 0 });
     try std.testing.expect(!g.state.fanout(second).isSet(live));
+}
+
+test "gossipsub resource snapshot starts empty" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const snapshot = g.resourceSnapshot();
+    try std.testing.expectEqual(@as(usize, 0), snapshot.admitted_peers);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.queued_descriptors);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.store_entries);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.pending_validations);
 }

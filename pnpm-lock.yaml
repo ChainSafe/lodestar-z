@@ -21,12 +21,21 @@ importers:
       '@chainsafe/biomejs-config':
         specifier: ^1.0.0
         version: 1.0.0(@biomejs/biome@2.3.11)
+      '@chainsafe/fast-crc32c':
+        specifier: 4.2.0
+        version: 4.2.0
       '@chainsafe/libp2p-quic':
         specifier: 2.1.3
         version: 2.1.3
       '@libp2p/crypto':
         specifier: 5.1.23
         version: 5.1.23
+      '@libp2p/gossipsub':
+        specifier: 17.1.1
+        version: 17.1.1
+      '@libp2p/identify':
+        specifier: 4.1.14
+        version: 4.1.14
       '@libp2p/ping':
         specifier: 3.1.13
         version: 3.1.13
@@ -43,14 +52,20 @@ importers:
         specifier: ^1.39.1
         version: 1.39.1
       '@multiformats/multiaddr':
-        specifier: ^13.0.3
+        specifier: 13.0.3
         version: 13.0.3
       '@types/node':
         specifier: ^25.0.9
         version: 25.0.9
+      it-length-prefixed:
+        specifier: 11.0.1
+        version: 11.0.1
       libp2p:
         specifier: 3.3.10
         version: 3.3.10
+      snappy:
+        specifier: 7.3.3
+        version: 7.3.3
       tsx:
         specifier: ^4.20.6
         version: 4.23.11
@@ -808,6 +823,13 @@ packages:
   '@libp2p/crypto@5.1.23':
     resolution: {integrity: sha512-u6XVMD1YpUJgjS5MAayrxlzi+hQcj3FHY0wS6/M/T93ntyCW13BmmRzFb2ESamk65PEuSCAChmQeSzRV2sh2rQ==}
 
+  '@libp2p/gossipsub@17.1.1':
+    resolution: {integrity: sha512-SkQlCMbwltlGxaIcYKKycv43rYWhYftRMFOFTHSgGpECY4rZI5C6qteH8c/QgH9UVSjx+NdKRnaxQe9b5Z+Kzg==}
+    engines: {npm: '>=8.7.0'}
+
+  '@libp2p/identify@4.1.14':
+    resolution: {integrity: sha512-c7oU0DSKzkMNsanruOQc4Zy6mSf3fq8/W+4E/I936HiHZc/LIbUuCWaxbgmQexdfKqECH1qH4q9IwaCUWmjPMQ==}
+
   '@libp2p/interface-internal@3.1.13':
     resolution: {integrity: sha512-+vjQzpQl+0uoWCyNwV5NDnv1RAK9LDeWGeMbx/Fl2ZWrndtuFUPa9LxwqHXrTly6YOhgUatSzVqZBWnrQ1PxGg==}
 
@@ -1517,6 +1539,10 @@ packages:
   delayed-stream@1.0.0:
     resolution: {integrity: sha512-ZySD7Nf91aLB0RxL4KGrKHBXl7Eds1DAmEdcoVawXnLD7SDhpNgtuII2aAkg7a7QS41jxPSZ17p4VdGnMHk3MQ==}
     engines: {node: '>=0.4.0'}
+
+  denque@2.1.0:
+    resolution: {integrity: sha512-HVQE3AAb/pxF8fQAoiqpvg9i3evqug3hoiwakOyZAwJm+6vZehbkYXZ0l4JxS+I3QxM97v5aaRNhj8v5oBhekw==}
+    engines: {node: '>=0.10'}
 
   deprecation@2.3.1:
     resolution: {integrity: sha512-xmHIy4F3scKVwMsQ4WnVaS8bHOx0DmVwRywosKhaILI0ywMDWPtBSku2HNxRvF7jtwDRsoEwYQSfbxj8b7RlJQ==}
@@ -2926,6 +2952,40 @@ snapshots:
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
 
+  '@libp2p/gossipsub@17.1.1':
+    dependencies:
+      '@libp2p/crypto': 5.1.23
+      '@libp2p/interface': 3.3.0
+      '@libp2p/interface-internal': 3.1.13
+      '@libp2p/peer-id': 6.0.15
+      '@libp2p/utils': 7.4.1
+      '@multiformats/multiaddr': 13.0.3
+      denque: 2.1.0
+      it-length-prefixed: 11.0.1
+      it-pipe: 3.0.1
+      it-pushable: 3.2.3
+      multiformats: 14.0.5
+      protons-runtime: 7.0.0
+      uint8arraylist: 3.0.2
+      uint8arrays: 6.1.1
+
+  '@libp2p/identify@4.1.14':
+    dependencies:
+      '@libp2p/crypto': 5.1.23
+      '@libp2p/interface': 3.3.0
+      '@libp2p/interface-internal': 3.1.13
+      '@libp2p/peer-id': 6.0.15
+      '@libp2p/peer-record': 9.0.16
+      '@libp2p/utils': 7.4.1
+      '@multiformats/multiaddr': 13.0.3
+      '@multiformats/multiaddr-matcher': 3.0.2
+      it-drain: 3.0.10
+      it-parallel: 3.0.13
+      main-event: 1.0.1
+      protons-runtime: 7.0.0
+      uint8arraylist: 3.0.2
+      uint8arrays: 6.1.1
+
   '@libp2p/interface-internal@3.1.13':
     dependencies:
       '@libp2p/interface': 3.3.0
@@ -3711,6 +3771,8 @@ snapshots:
       unlimited-timeout: 0.1.0
 
   delayed-stream@1.0.0: {}
+
+  denque@2.1.0: {}
 
   deprecation@2.3.1: {}
 
