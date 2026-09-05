@@ -37,6 +37,11 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
                 .skipped => continue,
                 .end, .deferred => break,
             };
+            switch (item) {
+                .ihave => |value| consumeIds(value.ids(), &steps_left, &fields_left),
+                .iwant, .idontwant => |value| consumeIds(value.ids(), &steps_left, &fields_left),
+                else => {},
+            }
             if (item != .message) continue;
             const message = item.message;
             const header = gossip.admission.inspect(&message);
@@ -48,5 +53,19 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
             if (admitted == .valid) std.debug.assert(admitted.valid.bytes.len == header.payload);
             std.mem.doNotOptimizeAway(admitted);
         }
+    }
+}
+
+fn consumeIds(value: gossip.protobuf.IdIterator, steps_left: *usize, fields_left: *usize) void {
+    var ids = value;
+    const field_bound = @min(ids.reader.data.len, 8192);
+    if (field_bound > fields_left.*) return;
+    fields_left.* -= field_bound;
+    for (0..4096) |_| {
+        if (steps_left.* == 0) return;
+        steps_left.* -= 1;
+        const id = ids.next() catch return;
+        if (id == null) return;
+        std.mem.doNotOptimizeAway(id.?);
     }
 }

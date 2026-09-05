@@ -59,7 +59,8 @@ pub fn build(b: *std.Build) void {
         /// Returns the corpus directory path for this fuzzer.
         /// Change the suffix to switch between -cmin and -initial.
         fn corpus(self: @This(), bb: *std.Build) []const u8 {
-            return bb.fmt("corpus/{s}-cmin", .{self.name});
+            const suffix = if (std.mem.eql(u8, self.name, "network_reqresp") or std.mem.eql(u8, self.name, "network_gossip")) "initial" else "cmin";
+            return bb.fmt("corpus/{s}-{s}", .{ self.name, suffix });
         }
 
         fn source(self: @This(), bb: *std.Build) []const u8 {

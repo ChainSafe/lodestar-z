@@ -140,7 +140,7 @@ jobs:
         run: |
           cargo --version
           cmake --version
-          node --test test/interop/codec.test.mjs
+          node --test test/interop/*.test.mjs
           pnpm test:network-interop
 
   discv5-interop:
@@ -443,10 +443,18 @@ jobs:
       - name: Install AFL++ and LLVM
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y afl++ llvm
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y afl++ llvm libc++-18-dev libc++abi-18-dev libunwind-18-dev
+      - name: Configure reliable local core dumps for AFL
+        run: |
+          sudo sysctl -w kernel.core_pattern=core
+          test "$(cat /proc/sys/kernel/core_pattern)" = core
       - name: Verify AFL++ and LLVM are available
         run: |
           afl-cc --version
+          for name in libc++.so libc++abi.so libunwind.so; do
+            linker_input=$(clang++ -print-file-name="$name")
+            test "$linker_input" != "$name" && test -e "$linker_input"
+          done
           if command -v llvm-config >/dev/null 2>&1; then
             llvm-config --version
           else
