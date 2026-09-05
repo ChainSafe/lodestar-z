@@ -155,8 +155,11 @@ pub const Mesh = struct {
                 self.clearPending(topic, peer);
                 continue;
             }
-            const entry = context.peers.backoff(context.state.peers[peer].logical, topic);
-            if (queue(context, topic, peer, (entry.until -| context.now +| 999) / 1000)) {
+            const logical = context.state.peers[peer].logical;
+            const remaining_ms = context.peers.backoff(logical, topic).until -| context.now;
+            const backoff_ms = if (remaining_ms == 0) c.prune_backoff_ms else remaining_ms;
+            if (queue(context, topic, peer, (backoff_ms +| 999) / 1000)) {
+                if (remaining_ms == 0) context.peers.addBackoff(logical, topic, context.state.topics[topic].generation, context.now, backoff_ms);
                 self.clearPending(topic, peer);
             } else if (context.now -| self.pending_since[peer].? >= context.pressure_ms) self.retire.set(peer);
         }
@@ -465,8 +468,8 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     try std.testing.expectEqual(@as(?u64, null), f.g.mesh_policy.pending_since[0]);
     var expected: [32 + topic_mod.topic_max_len]u8 = undefined;
     var writer = protobuf.Writer.init(&expected);
-    writer.varint(protobuf.pruneRpcSize(name, 0));
-    protobuf.writePruneRpc(&writer, name, 0);
+    writer.varint(protobuf.pruneRpcSize(name, c.prune_backoff_ms / 1000));
+    protobuf.writePruneRpc(&writer, name, c.prune_backoff_ms / 1000);
     const sent = f.g.io.peers[0].segment(&f.g.store);
     try std.testing.expectEqualSlices(u8, writer.written(), sent);
     _ = f.g.io.peers[0].advance(&f.g.store, sent.len);
@@ -480,6 +483,46 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     f.g.mesh_policy.retire.set(0);
     f.g.mesh_policy.onGraft(&context, f.topic, 0);
     try std.testing.expect(!f.g.state.mesh(f.topic).isSet(0));
+}
+
+test "gossip policy delayed PRUNE preserves the effective remote backoff" {
+    for ([_]u64{ 501, 2_001 }) |queued_at| {
+        var f = try Fixture.init(1);
+        defer f.g.deinit();
+        var context = f.context(1);
+        const logical = f.g.state.peers[0].logical;
+        const bytes = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
+        defer std.testing.allocator.free(bytes);
+        @memset(bytes, 0);
+        try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, 1) != null);
+        f.g.mesh_policy.prune(&context, f.topic, 0, 1_000);
+        context.now = queued_at;
+        f.g.mesh_policy.takeSnapshot(&context);
+        f.g.mesh_policy.maintain(&context, f.topic);
+        try std.testing.expect(f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
+        try std.testing.expectEqual(@as(u64, 1_001), f.g.peers.backoff(logical, f.topic).until);
+        f.g.io.peers[0].resetTx(&f.g.store);
+        f.g.mesh_policy.maintain(&context, f.topic);
+        try std.testing.expect(!f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
+        const expired = queued_at >= 1_001;
+        const seconds: u64 = if (expired) c.prune_backoff_ms / 1000 else 1;
+        const local_until: u64 = if (expired) queued_at + c.prune_backoff_ms else 1_001;
+        try std.testing.expectEqual(local_until, f.g.peers.backoff(logical, f.topic).until);
+        var expected: [32 + topic_mod.topic_max_len]u8 = undefined;
+        var writer = protobuf.Writer.init(&expected);
+        const name = f.g.state.topicString(f.topic);
+        writer.varint(protobuf.pruneRpcSize(name, seconds));
+        protobuf.writePruneRpc(&writer, name, seconds);
+        const sent = f.g.io.peers[0].segment(&f.g.store);
+        try std.testing.expectEqualSlices(u8, writer.written(), sent);
+        _ = f.g.io.peers[0].advance(&f.g.store, sent.len);
+        context.now = queued_at + seconds * 1000 - 1;
+        f.g.mesh_policy.maintain(&context, f.topic);
+        try std.testing.expect(!f.g.state.mesh(f.topic).isSet(0));
+        context.now = local_until + c.backoff_slack_heartbeats * context.heartbeat_ms;
+        f.g.mesh_policy.maintain(&context, f.topic);
+        try std.testing.expect(f.g.state.mesh(f.topic).isSet(0));
+    }
 }
 
 test "gossip policy review I3 bounded shuffle consumes one draw per swap" {
