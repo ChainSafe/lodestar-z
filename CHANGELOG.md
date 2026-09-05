@@ -1,5 +1,60 @@
 # Changelog
 
+## [1.1.0](https://github.com/ChainSafe/lodestar-z/compare/v1.0.0...v1.1.0) (2026-09-05)
+
+
+### Features
+
+* **napi:** expose forkSeq on BeaconStateView binding ([#635](https://github.com/ChainSafe/lodestar-z/issues/635)) ([213a732](https://github.com/ChainSafe/lodestar-z/commit/213a732db5f68476a0ffefc556d9aac5307c3617))
+* **shuffle:** add ./shuffle subpath export ([#612](https://github.com/ChainSafe/lodestar-z/issues/612)) ([c9655c4](https://github.com/ChainSafe/lodestar-z/commit/c9655c41176a0f657384f0ada9342be51d76ee74))
+* **shuffle:** add PTC sampling ([#563](https://github.com/ChainSafe/lodestar-z/issues/563)) ([ab56ddf](https://github.com/ChainSafe/lodestar-z/commit/ab56ddfb2f50d3a97aae23e82e4ede0df279a9f0))
+* **ssz:** add Progressive List, Progressive BitList, ProgressiveContainer, CompatibleUnion  ([#99](https://github.com/ChainSafe/lodestar-z/issues/99)) ([1e43f5e](https://github.com/ChainSafe/lodestar-z/commit/1e43f5e9336b574ffeab870c54e2ee0ef797f365))
+
+
+### Bug Fixes
+
+* **bench:** stabilize committee benchmark inputs ([#606](https://github.com/ChainSafe/lodestar-z/issues/606)) ([5b2c3b1](https://github.com/ChainSafe/lodestar-z/commit/5b2c3b13dd4326c2fe0b64dd9ba7f93d634d933b))
+* **pmt:** reclaim grouped intermediate roots ([#599](https://github.com/ChainSafe/lodestar-z/issues/599)) ([f7e9a8b](https://github.com/ChainSafe/lodestar-z/commit/f7e9a8bd97f4a50e556953b7e987a0626020f046))
+* **pmt:** reclaim partial compact proof nodes ([#609](https://github.com/ChainSafe/lodestar-z/issues/609)) ([c99eff3](https://github.com/ChainSafe/lodestar-z/commit/c99eff343d4fa6acd04c25616440597038158f52))
+* **pmt:** reject empty compact proof leaves ([#610](https://github.com/ChainSafe/lodestar-z/issues/610)) ([5bc9297](https://github.com/ChainSafe/lodestar-z/commit/5bc9297feaa30a88c69f506c6f7d7c438e06edc2))
+* reject withdrawal count mismatches ([#619](https://github.com/ChainSafe/lodestar-z/issues/619)) ([3add44d](https://github.com/ChainSafe/lodestar-z/commit/3add44d371cda2b929049895da810e3c3e2aa0be))
+* split tests in variable element iterator ([#650](https://github.com/ChainSafe/lodestar-z/issues/650)) ([747b321](https://github.com/ChainSafe/lodestar-z/commit/747b321cd138357a75a6f15f7e713403ecc51886))
+* **ssz:** clean up partially decoded blocks ([#596](https://github.com/ChainSafe/lodestar-z/issues/596)) ([e77358e](https://github.com/ChainSafe/lodestar-z/commit/e77358e7f67fdfc9a3ed12550b732a59b9b79d95))
+* **ssz:** clean up partially initialized tree view values ([#579](https://github.com/ChainSafe/lodestar-z/issues/579)) ([5de24e2](https://github.com/ChainSafe/lodestar-z/commit/5de24e2f1999f987111b8559493450ee81ef35d8))
+* **ssz:** clean up recursive hasher initialization ([#592](https://github.com/ChainSafe/lodestar-z/issues/592)) ([ffa29f8](https://github.com/ChainSafe/lodestar-z/commit/ffa29f82fbe4e746d7a632487601e19aef0199ce))
+* **ssz:** free variable list offsets on decode errors ([#595](https://github.com/ChainSafe/lodestar-z/issues/595)) ([32e1d14](https://github.com/ChainSafe/lodestar-z/commit/32e1d141d3599ca2678a7540e20b1f5cd50ffe65))
+* **ssz:** hash boolean lists as basic lists ([#602](https://github.com/ChainSafe/lodestar-z/issues/602)) ([e2b9598](https://github.com/ChainSafe/lodestar-z/commit/e2b959824820651ad8bbeefccc6da175f585de6c))
+* **ssz:** instantiate variable vector tree views ([#600](https://github.com/ChainSafe/lodestar-z/issues/600)) ([5f7beaf](https://github.com/ChainSafe/lodestar-z/commit/5f7beaf8a2042dd461830a5412e91deb0291a32e))
+* **ssz:** make container commits failure-atomic ([#567](https://github.com/ChainSafe/lodestar-z/issues/567)) ([cbfadb9](https://github.com/ChainSafe/lodestar-z/commit/cbfadb9640751e8f7533be6e709962ab92f033a4))
+* **ssz:** make tree view publication atomic ([#574](https://github.com/ChainSafe/lodestar-z/issues/574)) ([9c98cb2](https://github.com/ChainSafe/lodestar-z/commit/9c98cb2e1b2dc0979e0d7830ec3cac32499c9941))
+* **ssz:** reclaim partial byte and bit vector trees ([#594](https://github.com/ChainSafe/lodestar-z/issues/594)) ([f4c81d0](https://github.com/ChainSafe/lodestar-z/commit/f4c81d0465852791eebb05e041f0501060d8e9d4))
+* **ssz:** reject invalid list growth lengths ([#604](https://github.com/ChainSafe/lodestar-z/issues/604)) ([0fa8e7c](https://github.com/ChainSafe/lodestar-z/commit/0fa8e7c9452f4cedb6de11b177c771bf1644a42c))
+* **ssz:** reject overflowing bit list indexes ([#603](https://github.com/ChainSafe/lodestar-z/issues/603)) ([7d3ba65](https://github.com/ChainSafe/lodestar-z/commit/7d3ba656bb9b80284f3df3e45ebfe6328052b73f))
+* **ssz:** validate bit list length before hashing ([#608](https://github.com/ChainSafe/lodestar-z/issues/608)) ([a038e86](https://github.com/ChainSafe/lodestar-z/commit/a038e86e3c9b5d902b8d1a0a6a5b2e92d07da8eb))
+* **state_transition:** reuse shared shuffled index cache ([#638](https://github.com/ChainSafe/lodestar-z/issues/638)) ([807bae3](https://github.com/ChainSafe/lodestar-z/commit/807bae379eb01e7b009ae955e939c9acf0e4b98b))
+* **state-transition:** clean up upgraded payload headers ([#597](https://github.com/ChainSafe/lodestar-z/issues/597)) ([e47028d](https://github.com/ChainSafe/lodestar-z/commit/e47028dd3b44de972790d015d2b3dd2569996660))
+* **stf:** allocate epoch cache clone before refs ([#639](https://github.com/ChainSafe/lodestar-z/issues/639)) ([9076673](https://github.com/ChainSafe/lodestar-z/commit/90766733cd8721e35150a331ba1cd8686fecfcde))
+* **stf:** fix epochshuffling slot committee slice leaks ([#636](https://github.com/ChainSafe/lodestar-z/issues/636)) ([c61367d](https://github.com/ChainSafe/lodestar-z/commit/c61367d897aa156af74e46d60b894281d7900efc))
+* **stf:** justify exact two-thirds participation ([#623](https://github.com/ChainSafe/lodestar-z/issues/623)) ([7e4e322](https://github.com/ChainSafe/lodestar-z/commit/7e4e322c978c1c1504b3e004694f8d8ca083ae38))
+* **stf:** keep expected withdrawals query read-only ([#620](https://github.com/ChainSafe/lodestar-z/issues/620)) ([e646cf0](https://github.com/ChainSafe/lodestar-z/commit/e646cf0349bb8c49bab118abbdce67016bf7988a))
+* **stf:** safe pending withdrawal map reads with get ([#630](https://github.com/ChainSafe/lodestar-z/issues/630)) ([4f29bbb](https://github.com/ChainSafe/lodestar-z/commit/4f29bbbc95b5d89f409e167116b5bdd530ffc18f))
+* **stf:** treat Capella as post-merge ([#624](https://github.com/ChainSafe/lodestar-z/issues/624)) ([057310e](https://github.com/ChainSafe/lodestar-z/commit/057310e17688c62557196072cc8bf1128415eba0))
+
+
+### Code Refactoring
+
+* extract tests to _test.zig, add tidy lint ([#625](https://github.com/ChainSafe/lodestar-z/issues/625)) ([bb485bb](https://github.com/ChainSafe/lodestar-z/commit/bb485bbc02714bb0e53ade32302952c75a50a794))
+* **pmt:** make node pool non-growable ([#617](https://github.com/ChainSafe/lodestar-z/issues/617)) ([9827bf2](https://github.com/ChainSafe/lodestar-z/commit/9827bf2bb52fcaf5660aeb35c92d64fc9fe8023b))
+* **pubkeys:** drop deserialized lookup wrappers ([#584](https://github.com/ChainSafe/lodestar-z/issues/584)) ([8ec2897](https://github.com/ChainSafe/lodestar-z/commit/8ec28977146f02a1b075740d4d99a7e1a5993c37))
+* **shuffle:** drop JS signature comments and fix balance param name ([#577](https://github.com/ChainSafe/lodestar-z/issues/577)) ([be598b1](https://github.com/ChainSafe/lodestar-z/commit/be598b1165a9e35892d9aa0eb024ef27d12ef07b))
+* **ssz:** rewrite offset iteration for variable element iteration ([#598](https://github.com/ChainSafe/lodestar-z/issues/598)) ([af63364](https://github.com/ChainSafe/lodestar-z/commit/af63364e1c3cf968508a32dfd2a68f33d38e8ac4))
+
+
+### Miscellaneous Chores
+
+* **docs:** document bls/pk cache trust assumptions ([#585](https://github.com/ChainSafe/lodestar-z/issues/585)) ([66ecb23](https://github.com/ChainSafe/lodestar-z/commit/66ecb2315943f7a0ea2d1a718575be415a4328ae))
+* **docs:** readme housekeeping + add contributing doc ([#560](https://github.com/ChainSafe/lodestar-z/issues/560)) ([f780208](https://github.com/ChainSafe/lodestar-z/commit/f7802080467fb2bde6f63a3a1d55d525d775b328))
+
 ## [1.0.0](https://github.com/ChainSafe/lodestar-z/compare/v0.1.2...v1.0.0) (2026-08-19)
 
 
