@@ -132,8 +132,8 @@ const ReusedEpochTransitionCache = struct {
     }
 };
 
-var _reused_cache: ?*ReusedEpochTransitionCache = null;
-var _reused_lock: std.Io.Mutex = std.Io.Mutex.init;
+threadlocal var _reused_cache: ?*ReusedEpochTransitionCache = null;
+threadlocal var _reused_lock: std.Io.Mutex = std.Io.Mutex.init;
 
 fn getReusedEpochTransitionCache(allocator: Allocator, io: std.Io, validator_count: usize) !*ReusedEpochTransitionCache {
     try _reused_lock.lock(io);

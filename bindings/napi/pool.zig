@@ -55,4 +55,4 @@ const State = struct {
     }
 };
 
-pub var state: State = .{};
+pub threadlocal var state: State = .{};

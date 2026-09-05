@@ -45,8 +45,8 @@ interface ExecutionPayloadHeader {
   blockHash: Uint8Array;
   transactionsRoot: Uint8Array;
   withdrawalsRoot?: Uint8Array; // capella+
-  blobGasUsed?: number; // deneb+
-  excessBlobGas?: number; // deneb+
+  blobGasUsed?: bigint; // deneb+
+  excessBlobGas?: bigint; // deneb+
 }
 
 /*
@@ -56,6 +56,7 @@ interface ExecutionPayloadHeader {
  */
 interface BeaconBlockLike {
   body: {
+    randaoReveal: Uint8Array;
     executionPayload?: {
       parentHash: Uint8Array;
       feeRecipient: Uint8Array;
@@ -196,7 +197,7 @@ export type VoluntaryExitValidity =
   | "invalid_signature";
 
 export declare class BeaconStateView {
-  static createFromBytes(bytes: Uint8Array): BeaconStateView;
+  static createFromBytes(bytes: Uint8Array, setup?: StateTransition): BeaconStateView;
 
   slot: number;
   fork: Fork;
@@ -259,8 +260,8 @@ export declare class BeaconStateView {
   getPreviousShuffling(): EpochShuffling;
   getCurrentShuffling(): EpochShuffling;
   getNextShuffling(): EpochShuffling;
-  getBeaconCommittee(): number[];
-  getBeaconCommitteeCountPerSlot(): number;
+  getBeaconCommittee(slot: number, index: number): number[];
+  getBeaconCommitteeCountPerSlot(epoch: number): number;
   previousDecisionRoot: string;
   currentDecisionRoot: string;
   nextDecisionRoot: string;
@@ -381,6 +382,11 @@ export declare class BeaconStateView {
   stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
+export declare class StateTransition {
+  constructor(chainConfig: object, genesisValidatorsRoot: Uint8Array);
+  createFromBytes(bytes: Uint8Array): BeaconStateView;
+}
+
 declare const bindings: {
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
@@ -389,10 +395,11 @@ declare const bindings: {
     deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
-    init: () => void;
+    init: (options?: {historical?: boolean}) => void;
     scrapeMetrics: () => string;
   };
   BeaconStateView: typeof BeaconStateView;
+  StateTransition: typeof StateTransition;
 };
 
 export default bindings;

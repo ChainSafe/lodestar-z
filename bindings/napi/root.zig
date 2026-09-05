@@ -6,6 +6,7 @@ pub const shuffle = @import("./shuffle.zig");
 pub const config = @import("./config.zig");
 pub const metrics = @import("./metrics.zig");
 pub const stateTransition = @import("./stateTransition.zig");
+pub const StateTransition = @import("./state_transition_context.zig");
 pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const blsVerifier = @import("./bls_verifier.zig");
@@ -17,6 +18,11 @@ var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
 fn init(old_ref_count: u32) !void {
+    try pool.state.init();
+    errdefer pool.state.deinit();
+    try config.state.init();
+    errdefer config.state.deinit();
+
     if (old_ref_count == 0) {
         // First environment — initialize shared state in your threadpool init.
         var cpu_count: u64 = options.thread_count;
@@ -32,16 +38,11 @@ fn init(old_ref_count: u32) !void {
         try blst.state.init(@intCast(n_workers));
         errdefer blst.state.deinit();
 
-        try pool.state.init();
-        errdefer pool.state.deinit();
-
         try pubkeys.state.init(js.env());
 
         // All remaining initialization must stay infallible because the earlier errdefers no
         // longer cover every initialized global.
         errdefer comptime unreachable;
-
-        config.state.init();
     }
 }
 
@@ -59,13 +60,15 @@ fn detectCpuCount() !usize {
 }
 
 fn cleanup(new_ref_count: u32) void {
+    stateTransition.deinitReusedEpochTransitionCache();
+    metrics.deinit();
+    config.state.deinit();
+    pool.state.deinit();
+
     if (new_ref_count == 0) {
         // Last environment — tear down shared state.
         blst.state.deinit();
-        config.state.deinit();
         pubkeys.state.deinit();
-        pool.state.deinit();
-        metrics.deinit();
     }
 }
 
