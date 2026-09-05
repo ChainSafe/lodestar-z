@@ -257,3 +257,38 @@ test "codec empty SSZ leaves no trailing Snappy identifier" {
     try std.testing.expectEqual(response.len, error_progress.consumed);
     try std.testing.expectEqualSlices(u8, &.{ 1, 0 }, response);
 }
+
+test "codec independent response enumerates context prefix and both frame splits" {
+    // The independent JS CRC32C/Snappy codec encoded two 65-byte frames and a 130-byte declaration.
+    const wire = @embedFile("testdata/independent-two-frames.bin");
+    var expected: [130]u8 = undefined;
+    for (&expected, 0..) |*byte, i| byte.* = @intCast(i);
+    for ([_]bool{ true, false }) |response| {
+        const input = if (response) wire else wire[5..];
+        for (0..input.len + 1) |split| {
+            var sink: [130]u8 = undefined;
+            var scratch: [codec.frame_scratch_max]u8 = undefined;
+            var decoder = if (response) Decoder.initResponse(.{ .min = 130, .max = 130 }, true, &sink, &scratch) else Decoder.initRequest(.{ .min = 130, .max = 130 }, &sink, &scratch);
+            var consumed: usize = 0;
+            for ([_][]const u8{ input[0..split], input[split..] }) |fragment| {
+                var cursor: usize = 0;
+                for (0..wire.len + 1) |_| {
+                    if (cursor == fragment.len) break;
+                    const result = try decoder.feed(fragment[cursor..]);
+                    try std.testing.expect(result.consumed > 0);
+                    cursor += result.consumed;
+                }
+                try std.testing.expectEqual(fragment.len, cursor);
+                consumed += cursor;
+            }
+            try std.testing.expectEqual(input.len, consumed);
+            try std.testing.expect(decoder.isDone());
+            try std.testing.expectEqualSlices(u8, &expected, decoder.payload());
+            if (response) {
+                try std.testing.expectEqual([4]u8{ 1, 0, 0, 0 }, decoder.context().?);
+                try std.testing.expectEqual(@as(u8, 0), decoder.result());
+            }
+            try std.testing.expectEqual(@as(usize, 0), (try decoder.feed(&.{})).consumed);
+        }
+    }
+}
