@@ -3,6 +3,7 @@
 const std = @import("std");
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
+const BoolType = @import("bool.zig").BoolType;
 const UintType = @import("uint.zig").UintType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
@@ -10,6 +11,56 @@ const VariableContainerType = @import("container.zig").VariableContainerType;
 const TypeTestCase = @import("test_utils.zig").TypeTestCase;
 const FixedListType = @import("list.zig").FixedListType;
 const VariableListType = @import("list.zig").VariableListType;
+
+test "FixedListType - canonical boolean tree deserialization" {
+    const allocator = std.testing.allocator;
+    const byte_count = @as(usize, pmt.ChunkedLeaf.K) * 32 + 1;
+
+    inline for (.{ false, true }) |chunked_leaf| {
+        const List = FixedListType(BoolType(), byte_count, .{ .chunked_leaf = chunked_leaf });
+        var pool = try Node.Pool.init(.{
+            .page_allocator = allocator,
+            .allocator = allocator,
+            .pool_size = 1024,
+        });
+        defer pool.deinit();
+
+        var data: [byte_count]u8 = undefined;
+        for (&data, 0..) |*byte, i| byte.* = @intCast(i % 2);
+
+        const node = try List.tree.deserializeFromBytes(&pool, &data);
+        defer pool.unref(node);
+        const root = node.getRoot(&pool).*;
+
+        var value = List.default_value;
+        defer List.deinit(allocator, &value);
+        try List.tree.toValue(allocator, node, &pool, &value);
+        try std.testing.expectEqual(byte_count, value.items.len);
+        for (value.items, 0..) |item, i| try std.testing.expectEqual(i % 2 == 1, item);
+
+        var serialized: [byte_count]u8 = undefined;
+        const written = try List.tree.serializeIntoBytes(node, &pool, &serialized);
+        try std.testing.expectEqual(byte_count, written);
+        try std.testing.expectEqualSlices(u8, &data, &serialized);
+
+        const nodes_in_use = pool.getNodesInUse();
+        const next_free_node = pool.next_free_node;
+        for ([_]usize{ 0, 31, 32, byte_count - 2, byte_count - 1 }) |index| {
+            const original = data[index];
+            defer data[index] = original;
+            for ([_]u8{ 2, 0xff }) |invalid| {
+                data[index] = invalid;
+                try std.testing.expectError(
+                    error.invalidBoolean,
+                    List.tree.deserializeFromBytes(&pool, &data),
+                );
+                try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+                try std.testing.expectEqual(next_free_node, pool.next_free_node);
+                try std.testing.expectEqualSlices(u8, &root, node.getRoot(&pool));
+            }
+        }
+    }
+}
 
 const testCases = [_]TypeTestCase{
     .{ .id = "empty", .serializedHex = "0x", .json = "[]", .rootHex = "0x52e2647abc3d0c9d3be0387f3f0d925422c7a4e98cf4489066f0f43281a899f3" },
