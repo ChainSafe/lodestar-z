@@ -46,7 +46,9 @@ test "router composes simultaneous ping and meshsub on one connection" {
     for (0..32) |_| {
         var transport_events: [16]engine.Event = undefined;
         var request_events: [16]rr.Event = undefined;
-        const client_count = client.process(&pair.client, pair.events(&pair.client, &transport_events), pair.now, &request_events);
+        var activity: [128]engine.Handle = undefined;
+        const client_active = pair.client.driverView().takeActivity(&activity);
+        const client_count = client.process(&pair.client, pair.events(&pair.client, &transport_events), activity[0..client_active], pair.now, &request_events);
         for (request_events[0..client_count]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping, chunk.bytes);
@@ -58,7 +60,8 @@ test "router composes simultaneous ping and meshsub on one connection" {
         try pair.pump();
         const events = pair.events(&pair.server, &transport_events);
         var gossip_events: [16]gs.Event = undefined;
-        const counts = server.process(&pair.server, events, pair.now, &request_events, &gossip_events);
+        const server_active = pair.server.driverView().takeActivity(&activity);
+        const counts = server.process(&pair.server, events, activity[0..server_active], pair.now, &request_events, &gossip_events);
         const request_count = counts.reqresp;
         const gossip_count = counts.gossipsub;
         for (request_events[0..request_count]) |event| switch (event) {
@@ -205,4 +208,56 @@ test "router ready handoff waits quietly for host outcome capacity" {
     try std.testing.expectEqual(@as(usize, 1), client.pump(&pair.client, pair.now, &out));
     try std.testing.expect(out[0].result == .ready);
     client.cancel(&pair.client, out[0].stream);
+}
+
+test "router composed service retains native activity behind a partial reqresp sweep" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    var client = try @import("service.zig").Service.init(std.testing.allocator, .{ .reqresp = .{
+        .forks = &.{},
+        .outbound_max = 1,
+        .inbound_max = 1,
+        .work_per_pump_max = 1,
+    } });
+    defer client.deinit();
+    defer client.reqresp.shutdownRouted(&client.router, &pair.client);
+    var server = try rr.Service.init(std.testing.allocator, rr_options);
+    defer server.deinit();
+    defer server.shutdown(&pair.server);
+    const handles = try support.connectPair(&pair);
+    const ping = [_]u8{3} ** 8;
+    var sink: [8]u8 = undefined;
+    _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &sink, .{}, pair.now);
+    var incoming: ?rr.RequestHandle = null;
+    var transport: [16]engine.Event = undefined;
+    var activity: [128]engine.Handle = undefined;
+    var requests: [8]rr.Event = undefined;
+    var gossip: [8]gs.Event = undefined;
+    for (0..64) |_| {
+        try pair.pump();
+        const active = pair.client.driverView().takeActivity(&activity);
+        _ = client.process(&pair.client, pair.events(&pair.client, &transport), activity[0..active], pair.now, &requests, &gossip);
+        const server_active = pair.server.driverView().takeActivity(&activity);
+        const count = server.process(&pair.server, pair.events(&pair.server, &transport), activity[0..server_active], pair.now, &requests);
+        for (requests[0..count]) |event| if (event == .request) {
+            incoming = event.request.request;
+        };
+        if (incoming != null and client.nextWakeup(pair.now, 1) != pair.now.mono_ms) break;
+    }
+    try std.testing.expect(incoming != null);
+    try std.testing.expect(client.nextWakeup(pair.now, 1).? > pair.now.mono_ms);
+    _ = client.process(&pair.client, &.{}, &.{}, pair.now, &requests, &gossip);
+    var wire: [rr.codec.frame_scratch_max]u8 = undefined;
+    const encoded = try rr.codec.encodeChunk(0, null, &ping, &wire);
+    const stream = server.inner.inbound[incoming.?.index].stream;
+    try std.testing.expectEqual(encoded.len, try pair.server.write(stream, encoded, false));
+    try pair.pump();
+    const active = pair.client.driverView().takeActivity(&activity);
+    try std.testing.expect(active > 0);
+    _ = client.process(&pair.client, &.{}, activity[0..active], pair.now, &requests, &gossip);
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), client.nextWakeup(pair.now, 1));
+    const counts = client.process(&pair.client, &.{}, &.{}, pair.now, &requests, &gossip);
+    try std.testing.expectEqual(@as(usize, 1), counts.reqresp);
+    try std.testing.expectEqualSlices(u8, &ping, requests[0].chunk.bytes);
 }

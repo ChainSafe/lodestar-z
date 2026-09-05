@@ -124,6 +124,11 @@ pub const ReqRespPair = struct {
             },
             else => return error.TestUnexpectedResult,
         };
+        var activity: [128]engine_mod.Handle = undefined;
+        const client_active = self.pair.client.driverView().takeActivity(&activity);
+        for (activity[0..client_active]) |conn| self.client.connectionActivity(conn);
+        const server_active = self.pair.server.driverView().takeActivity(&activity);
+        for (activity[0..server_active]) |conn| self.server.connectionActivity(conn);
         self.client_count = self.client.pump(&self.pair.client, &self.client_neg, now, &self.client_events);
         self.server_count = self.server.pump(&self.pair.server, &self.server_neg, now, &self.server_events);
         try self.pair.pump();

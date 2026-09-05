@@ -198,14 +198,20 @@ pub const Service = struct {
         return self.inner.accept(engine, stream, selection, sink, now) catch null;
     }
 
+    /// Forward Driver activity separately from lifecycle events.
+    /// The activity batch must not exceed the Engine connection capacity.
+    /// Handles retain full transport generations, including connections without a gossip owner.
     pub fn process(
         self: *Service,
         engine: *Engine,
         events: []const TransportEvent,
+        activity: []const Handle,
         now: Now,
         out: []reqresp.Event,
     ) usize {
         const router = &self.router.?;
+        assert(activity.len <= engine.limits.connections_max);
+        for (activity) |conn| self.inner.connectionActivity(conn);
         self.inner.cleanupPending(engine, router);
         router.transportEvents(engine, events, now);
         self.transportEvents(events);

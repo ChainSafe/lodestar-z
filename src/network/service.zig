@@ -62,14 +62,20 @@ pub const Service = struct {
         return self.reqresp.nextWakeupRouted(&self.router, now, request_event_capacity);
     }
 
+    /// Forward Driver activity separately from lifecycle events.
+    /// The activity batch must not exceed the Engine connection capacity.
+    /// Handles retain full transport generations, including connections without a gossip owner.
     pub fn process(
         self: *Service,
         engine: *engine_mod.Engine,
         events: []const engine_mod.Event,
+        activity: []const engine_mod.Handle,
         now: types.Now,
         requests: []reqresp_mod.Event,
         gossip: []gossip_mod.Event,
     ) Counts {
+        std.debug.assert(activity.len <= engine.limits.connections_max);
+        for (activity) |conn| self.reqresp.inner.connectionActivity(conn);
         self.reqresp.inner.cleanupPending(engine, &self.router);
         self.router.transportEvents(engine, events, now);
         self.reqresp.transportEvents(events);

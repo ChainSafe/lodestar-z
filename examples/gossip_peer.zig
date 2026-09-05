@@ -157,7 +157,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             subscribed = true;
         }
         const transport_events = events[0..result.events];
-        const counts = service.process(&node.engine, transport_events, result.now, &request_events, &gossip_events);
+        const counts = service.process(&node.engine, transport_events, activity[0..result.activity], result.now, &request_events, &gossip_events);
         try serveRequests(&service, request_events[0..counts.reqresp], result.now);
         for (gossip_events[0..counts.gossipsub]) |event| switch (event) {
             .message => |m| {

@@ -38,6 +38,7 @@ pub const Options = struct {
     progress_timeout_ms: u64 = constants.progress_timeout_ms_default,
     forks: []const ForkEntry,
     quotas: ?limiter_mod.Quotas = null,
+    /// Defaults reserve one inbound-capacity control wave; bulk quotas stay per protocol.
     global_quotas: ?limiter_mod.Quotas = null,
     host_timeout_ms: u64 = 60_000,
     quota_timeout_ms: u64 = 60_000,
@@ -160,7 +161,6 @@ pub const ReqResp = struct {
     fork_count: u8 = 0,
     work_cursor: usize = 0,
     event_cursor: usize = 0,
-    deferred_work: bool = false,
     scan_remaining: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
@@ -175,9 +175,20 @@ pub const ReqResp = struct {
         if (options.progress_timeout_ms == 0 or options.host_timeout_ms == 0 or
             options.quota_timeout_ms == 0 or options.work_per_pump_max == 0 or
             options.work_per_pump_max > 2 * constants.slots_ceiling) return error.InvalidOptions;
-        try limiter_mod.Limiter.validate(options.quotas orelse limiter_mod.defaultQuotas());
-        try limiter_mod.Limiter.validate(options.global_quotas orelse
-            options.quotas orelse limiter_mod.defaultQuotas());
+        const peer_quotas = options.quotas orelse limiter_mod.defaultQuotas();
+        var global_quotas = options.global_quotas orelse peer_quotas;
+        if (options.global_quotas == null) {
+            const controls = [_]Protocol{
+                .status_v1,   .status_v2,   .ping_v1,    .metadata_v1,
+                .metadata_v2, .metadata_v3, .goodbye_v1,
+            };
+            for (controls) |which| {
+                const quota = &global_quotas[@intFromEnum(which)];
+                quota.tokens = @max(quota.tokens, options.inbound_max);
+            }
+        }
+        try limiter_mod.Limiter.validate(peer_quotas);
+        try limiter_mod.Limiter.validate(global_quotas);
         if (options.forks.len > 64) return error.InvalidOptions;
 
         const outbound = try allocator.alloc(Client, options.outbound_max);
@@ -198,13 +209,15 @@ pub const ReqResp = struct {
         var buckets = try limiter_mod.Limiter.initWithGlobal(
             allocator,
             options.peers,
-            options.quotas,
-            options.global_quotas,
+            peer_quotas,
+            global_quotas,
         );
         errdefer buckets.deinit(allocator);
 
         var resolved_options = options;
         resolved_options.forks = &.{};
+        resolved_options.quotas = peer_quotas;
+        resolved_options.global_quotas = global_quotas;
         var result: ReqResp = .{
             .allocator = allocator,
             .options = resolved_options,
@@ -329,6 +342,20 @@ pub const ReqResp = struct {
         return slot.error_message[0..slot.error_len];
     }
 
+    /// Forward each full-generation handle drained from Driver activity before querying wakeups.
+    pub fn connectionActivity(self: *ReqResp, conn: Handle) void {
+        for (self.outbound) |*slot| {
+            if (slot.active() and slot.terminal == null and std.meta.eql(slot.conn, conn)) {
+                slot.needs_service = true;
+            }
+        }
+        for (self.inbound) |*slot| {
+            if (slot.active() and slot.terminal == null and std.meta.eql(slot.conn, conn)) {
+                slot.needs_service = true;
+            }
+        }
+    }
+
     pub fn connectionClosed(self: *ReqResp, conn: Handle) void {
         for (self.outbound, 0..) |*slot, position| {
             if (!slot.active() or !std.meta.eql(slot.conn, conn)) continue;
@@ -357,12 +384,12 @@ pub const ReqResp = struct {
     /// Monotonic milliseconds; zero capacity suppresses event-only wakeups.
     /// Router negotiation and transport deadlines remain separate.
     pub fn nextWakeup(self: *ReqResp, now: Now, event_capacity: usize) ?u64 {
-        if (self.deferred_work or (self.over_limit_len > 0 and event_capacity > 0)) {
+        if (self.scan_remaining > 0 or (self.over_limit_len > 0 and event_capacity > 0)) {
             return now.mono_ms;
         }
         var due: ?u64 = null;
         for (self.outbound) |*slot| {
-            if (slot.close_pending or slot.state == .reported or
+            if (slot.needs_service or slot.close_pending or slot.state == .reported or
                 (event_capacity > 0 and (slot.pending_event != null or slot.terminal != null)))
             {
                 return now.mono_ms;
@@ -370,7 +397,7 @@ pub const ReqResp = struct {
             if (slot.deadline(self)) |deadline| due = earlier(due, deadline);
         }
         for (self.inbound) |*slot| {
-            if (slot.close_pending or slot.state == .reported or
+            if (slot.needs_service or slot.close_pending or slot.state == .reported or
                 (event_capacity > 0 and (slot.pending_event != null or slot.terminal != null)))
             {
                 return now.mono_ms;
@@ -443,35 +470,35 @@ pub const ReqResp = struct {
         if (self.scan_remaining == 0) self.scan_remaining = total;
         const steps = @min(self.scan_remaining, self.options.work_per_pump_max);
         self.scan_remaining -= steps;
-        self.deferred_work = false;
         for (0..steps) |_| {
             const position = self.work_cursor;
             self.work_cursor = (position + 1) % total;
             if (position < self.outbound.len) {
                 const slot = &self.outbound[position];
+                slot.needs_service = false;
                 if (slot.active()) slot.advance(self, engine, @intCast(position), now);
             } else {
                 const index = position - self.outbound.len;
                 const slot = &self.inbound[index];
+                slot.needs_service = false;
                 if (slot.active()) slot.advance(self, engine, @intCast(index), now);
             }
         }
         // Cleanup also covers terminal transitions made during this turn.
         self.cleanup(engine, router, self.outbound, false);
         self.cleanup(engine, router, self.inbound, false);
-        if (self.scan_remaining > 0) self.deferred_work = true;
         var count: usize = 0;
         for (0..total + 1) |_| {
             if (count == events.len) break;
             const position = self.event_cursor;
             self.event_cursor = (position + 1) % (total + 1);
             if (position < self.outbound.len) {
-                if (deliver(&self.outbound[position])) |event| {
+                if (deliver(&self.outbound[position], now)) |event| {
                     events[count] = event;
                     count += 1;
                 }
             } else if (position < total) {
-                if (deliver(&self.inbound[position - self.outbound.len])) |event| {
+                if (deliver(&self.inbound[position - self.outbound.len], now)) |event| {
                     events[count] = event;
                     count += 1;
                 }
@@ -515,13 +542,10 @@ pub const ReqResp = struct {
         }
     }
 
-    fn deliver(slot: anytype) ?Event {
+    fn deliver(slot: anytype, now: Now) ?Event {
         if (slot.pending_event) |event| {
             slot.pending_event = null;
-            if (comptime @TypeOf(slot.*) == Client) {
-                if (event == .chunk) slot.chunk_held = true;
-            }
-            if (slot.terminal == null) slot.state = slot.after_event;
+            slot.delivered(event, now);
             return event;
         }
         if (slot.terminal) |event| {

@@ -368,7 +368,7 @@ fn dial(
             },
             else => {},
         };
-        const count = svc.process(&node.engine, events[0..result.events], result.now, &rr_events);
+        const count = svc.process(&node.engine, events[0..result.events], activity[0..result.activity], result.now, &rr_events);
         for (rr_events[0..count]) |event| try session.handle(event);
     }
     if (!session.finished) return error.Timeout;
