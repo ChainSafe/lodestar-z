@@ -20,6 +20,7 @@ test {
     _ = @import("engine_handshake_test.zig");
     _ = @import("engine_stream_test.zig");
     _ = @import("engine_close_test.zig");
+    _ = @import("engine_notifications_test.zig");
     _ = @import("engine_admission_test.zig");
     _ = @import("engine_path_test.zig");
 }
