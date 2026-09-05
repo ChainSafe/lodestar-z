@@ -228,12 +228,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             }
 
             pub fn serializedSize(node: Node.Id, pool: *Node.Pool) !usize {
-                const allocator = pool.allocator;
-                var value = Self.default_value;
-                defer Self.deinit(allocator, &value);
-
-                try toValue(allocator, node, pool, &value);
-                return Self.serializedSize(&value);
+                return std.math.mul(usize, try length(node, pool), Element.fixed_size);
             }
 
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
@@ -569,33 +564,6 @@ pub fn VariableProgressiveListType(comptime ST: type) type {
     };
 }
 
-const UintType = @import("uint.zig").UintType;
-const BoolType = @import("bool.zig").BoolType;
-
-test "ListType - sanity" {
-    const allocator = std.testing.allocator;
-
-    const Bytes = FixedProgressiveListType(UintType(8));
-
-    var b: Bytes.Type = Bytes.default_value;
-    defer b.deinit(allocator);
-    try b.append(allocator, 5);
-
-    const b_buf = try allocator.alloc(u8, Bytes.serializedSize(&b));
-    defer allocator.free(b_buf);
-
-    _ = Bytes.serializeIntoBytes(&b, b_buf);
-    try Bytes.deserializeFromBytes(allocator, b_buf, &b);
-
-    const BytesBytes = VariableProgressiveListType(Bytes);
-    var b2: BytesBytes.Type = BytesBytes.default_value;
-    defer b2.deinit(allocator);
-    const b_elem: Bytes.Type = Bytes.default_value;
-    try b2.append(allocator, b_elem);
-
-    const b2_buf = try allocator.alloc(u8, BytesBytes.serializedSize(&b2));
-    defer allocator.free(b2_buf);
-
-    _ = BytesBytes.serializeIntoBytes(&b2, b2_buf);
-    try BytesBytes.deserializeFromBytes(allocator, b2_buf, &b2);
+test {
+    _ = @import("progressive_list_test.zig");
 }
