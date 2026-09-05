@@ -50,6 +50,7 @@ const Role = union(enum) {
 
 const Entry = struct {
     state: State = .free,
+    control: bool = false,
     stream: StreamHandle = undefined,
     started_ms: u64 = 0,
     role: Role = undefined,
@@ -65,18 +66,34 @@ const Entry = struct {
     inbox: stream_io.Inbox(inbox_capacity) = .{},
 };
 
+pub const Options = struct {
+    negotiations_max: u16 = negotiations_max_default,
+    outbound_control_reserved: u16 = 0,
+};
+
 pub const Negotiator = struct {
     allocator: std.mem.Allocator,
     entries: []Entry,
     timeout_ms: u64 = negotiate_timeout_ms,
+    outbound_control_reserved: u16 = 0,
 
     pub fn init(allocator: std.mem.Allocator, negotiations_max: u16) Error!Negotiator {
+        return initWithOptions(allocator, .{ .negotiations_max = negotiations_max });
+    }
+
+    pub fn initWithOptions(allocator: std.mem.Allocator, options: Options) Error!Negotiator {
+        const negotiations_max = options.negotiations_max;
+        if (options.outbound_control_reserved > negotiations_max) return error.InvalidLimits;
         if (negotiations_max == 0 or negotiations_max > negotiations_max_ceiling) {
             return error.InvalidLimits;
         }
         const entries = try allocator.alloc(Entry, negotiations_max);
         @memset(entries, .{});
-        return .{ .allocator = allocator, .entries = entries };
+        return .{
+            .allocator = allocator,
+            .entries = entries,
+            .outbound_control_reserved = options.outbound_control_reserved,
+        };
     }
 
     pub fn deinit(self: *Negotiator) void {
@@ -103,6 +120,17 @@ pub const Negotiator = struct {
         return self.beginOutboundCandidates(engine, conn, &.{protocol}, now);
     }
 
+    pub fn beginOutboundControl(
+        self: *Negotiator,
+        engine: *Engine,
+        conn: Handle,
+        protocol: @import("reqresp/protocol.zig").Protocol,
+        now: types.Now,
+    ) Error!StreamHandle {
+        if (!protocol.isControl()) return error.InvalidLimits;
+        return self.beginCandidates(engine, conn, &.{protocol.id()}, now, true);
+    }
+
     /// Copies the bounded offer list; protocol strings must outlive negotiation.
     pub fn beginOutboundCandidates(
         self: *Negotiator,
@@ -111,9 +139,20 @@ pub const Negotiator = struct {
         protocols: []const []const u8,
         now: types.Now,
     ) Error!StreamHandle {
+        return self.beginCandidates(engine, conn, protocols, now, false);
+    }
+
+    fn beginCandidates(
+        self: *Negotiator,
+        engine: *Engine,
+        conn: Handle,
+        protocols: []const []const u8,
+        now: types.Now,
+        control: bool,
+    ) Error!StreamHandle {
         if (protocols.len == 0 or protocols.len > candidates_max) return error.InvalidLimits;
         for (protocols) |protocol| _ = try multistream.Dialer.init(protocol);
-        const entry = self.claim() orelse return error.NegotiationTableFull;
+        const entry = self.claim(control) orelse return error.NegotiationTableFull;
         assert(entry.state == .free);
         const dialer = try multistream.Dialer.init(protocols[0]);
         @memcpy(entry.candidates[0..protocols.len], protocols);
@@ -121,6 +160,7 @@ pub const Negotiator = struct {
         entry.candidate = 0;
         const hello = try dialer.initialWrite(&entry.out_buffer);
         const stream = try engine.openStream(conn);
+        entry.control = control;
         entry.stream = stream;
         entry.started_ms = now.mono_ms;
         entry.role = .{ .dialer = dialer };
@@ -142,10 +182,11 @@ pub const Negotiator = struct {
         now: types.Now,
     ) Error!void {
         assert(supported.len > 0);
-        const entry = self.claim() orelse return error.NegotiationTableFull;
+        const entry = self.claim(false) orelse return error.NegotiationTableFull;
         assert(entry.state == .free);
         entry.stream = stream;
         entry.started_ms = now.mono_ms;
+        entry.control = false;
         entry.role = .{ .listener = multistream.Listener.init(supported) };
         entry.selected = null;
         entry.fin_seen = false;
@@ -235,7 +276,14 @@ pub const Negotiator = struct {
         engine.closeStream(stream, types.app_error_negotiation_failed);
     }
 
-    fn claim(self: *Negotiator) ?*Entry {
+    fn claim(self: *Negotiator, control: bool) ?*Entry {
+        if (!control and self.outbound_control_reserved > 0) {
+            var ordinary: usize = 0;
+            for (self.entries) |*entry| {
+                if (entry.state != .free and !entry.control) ordinary += 1;
+            }
+            if (ordinary >= self.entries.len - self.outbound_control_reserved) return null;
+        }
         for (self.entries) |*entry| {
             if (entry.state == .free) return entry;
         }

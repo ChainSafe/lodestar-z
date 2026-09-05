@@ -22,6 +22,7 @@ pub const outcomes_per_pump: usize = 16;
 pub const Options = struct {
     reqresp: reqresp.Options,
     negotiations_max: ?u16 = null,
+    outbound_control_reserved: u16 = 0,
 };
 
 pub const InitError = negotiate.Error || reqresp.InitError;
@@ -43,6 +44,7 @@ pub const Service = struct {
             .negotiations_max = options.negotiations_max orelse
                 @intCast(@min(default_neg, std.math.maxInt(u16))),
             .meshsub = false,
+            .outbound_control_reserved = options.outbound_control_reserved,
         });
         return service;
     }
@@ -161,7 +163,35 @@ pub const Service = struct {
         now: Now,
         event_capacity: usize,
     ) ?u64 {
-        const request_due = self.inner.nextWakeup(now, event_capacity);
+        return self.nextWakeupPartitionedRouted(router, now, event_capacity, event_capacity);
+    }
+
+    pub fn nextWakeupPartitioned(
+        self: *Service,
+        now: Now,
+        application_capacity: usize,
+        control_capacity: usize,
+    ) ?u64 {
+        return self.nextWakeupPartitionedRouted(
+            &self.router.?,
+            now,
+            application_capacity,
+            control_capacity,
+        );
+    }
+
+    pub fn nextWakeupPartitionedRouted(
+        self: *Service,
+        router: *const routing.Router,
+        now: Now,
+        application_capacity: usize,
+        control_capacity: usize,
+    ) ?u64 {
+        const request_due = self.inner.nextWakeupPartitioned(
+            now,
+            application_capacity,
+            control_capacity,
+        );
         const negotiation_due = router.nextWakeup(now, outcomes_per_pump);
         if (request_due) |due| return if (negotiation_due) |other| @min(due, other) else due;
         return negotiation_due;
@@ -193,7 +223,11 @@ pub const Service = struct {
         selection: routing.Selection,
         now: Now,
     ) ?RequestHandle {
-        const index = self.inner.availableInbound() orelse return null;
+        const which = switch (selection.protocol) {
+            .reqresp => |which| which,
+            else => return null,
+        };
+        const index = self.inner.availableInboundFor(which) orelse return null;
         const sink = self.sink_arena[@as(usize, index) * self.sink_size ..][0..self.sink_size];
         return self.inner.accept(engine, stream, selection, sink, now) catch null;
     }
@@ -209,6 +243,30 @@ pub const Service = struct {
         now: Now,
         out: []reqresp.Event,
     ) usize {
+        self.prepare(engine, events, activity, now);
+        return self.pump(engine, now, out);
+    }
+
+    pub fn processPartitioned(
+        self: *Service,
+        engine: *Engine,
+        events: []const TransportEvent,
+        activity: []const Handle,
+        now: Now,
+        application: []reqresp.Event,
+        control: []reqresp.Event,
+    ) reqresp.PartitionedCounts {
+        self.prepare(engine, events, activity, now);
+        return self.pumpPartitionedRouted(&self.router.?, engine, now, application, control);
+    }
+
+    fn prepare(
+        self: *Service,
+        engine: *Engine,
+        events: []const TransportEvent,
+        activity: []const Handle,
+        now: Now,
+    ) void {
         const router = &self.router.?;
         assert(activity.len <= engine.limits.connections_max);
         for (activity) |conn| self.inner.connectionActivity(conn);
@@ -218,7 +276,6 @@ pub const Service = struct {
         var outcomes: [outcomes_per_pump]routing.Outcome = undefined;
         const count = router.pump(engine, now, &outcomes);
         for (outcomes[0..count]) |outcome| self.negotiationResult(engine, outcome, now);
-        return self.pump(engine, now, out);
     }
 
     pub fn transportEvents(self: *Service, events: []const TransportEvent) void {
@@ -258,6 +315,17 @@ pub const Service = struct {
         out: []reqresp.Event,
     ) usize {
         return self.inner.pump(engine, router, now, out);
+    }
+
+    pub fn pumpPartitionedRouted(
+        self: *Service,
+        router: *routing.Router,
+        engine: *Engine,
+        now: Now,
+        application: []reqresp.Event,
+        control: []reqresp.Event,
+    ) reqresp.PartitionedCounts {
+        return self.inner.pumpPartitioned(engine, router, now, application, control);
     }
 
     pub fn cancel(self: *Service, handle: RequestHandle) bool {

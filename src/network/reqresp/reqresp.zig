@@ -24,6 +24,8 @@ pub const read_buffer_length: usize = 16 * 1024;
 pub const reads_per_pump_max: u32 = 8;
 pub const over_limit_queue_max: usize = 8;
 pub const scratch_length: usize = codec.frame_scratch_max;
+/// Two maintenance and two gossip streams remain outside the application allowance.
+pub const outbound_stream_headroom: u8 = 4;
 
 pub const ForkEntry = struct {
     digest: [constants.context_bytes_length]u8,
@@ -34,6 +36,10 @@ pub const Options = struct {
     peers: u16 = limits.connections_max_default,
     outbound_max: u16 = constants.outbound_max_default,
     inbound_max: u16 = constants.inbound_max_default,
+    outbound_control_reserved: u16 = 0,
+    inbound_control_reserved: u16 = 0,
+    /// Zero preserves raw admission without an aggregate application limit.
+    outbound_per_peer_max: u8 = 0,
     inbound_per_peer_max: u8 = constants.inbound_per_peer_max_default,
     progress_timeout_ms: u64 = constants.progress_timeout_ms_default,
     forks: []const ForkEntry,
@@ -82,6 +88,8 @@ pub const Event = union(enum) {
     served: struct { request: RequestHandle, chunks: u32 },
     over_limit: struct { peer: Handle, protocol: Protocol },
 };
+
+pub const PartitionedCounts = struct { application: usize, control: usize };
 
 pub const InitError = limiter_mod.InitError;
 
@@ -161,6 +169,8 @@ pub const ReqResp = struct {
     fork_count: u8 = 0,
     work_cursor: usize = 0,
     event_cursor: usize = 0,
+    application_event_cursor: usize = 0,
+    control_event_cursor: usize = 0,
     scan_remaining: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
@@ -170,6 +180,11 @@ pub const ReqResp = struct {
         if (options.inbound_max == 0 or options.inbound_max > constants.slots_ceiling) {
             return error.InvalidOptions;
         }
+        if (options.outbound_control_reserved > options.outbound_max or
+            options.inbound_control_reserved > options.inbound_max) return error.InvalidOptions;
+        const application_max = options.outbound_max - options.outbound_control_reserved;
+        if (options.outbound_per_peer_max > limits.peer_streams_bidi - outbound_stream_headroom or
+            options.outbound_per_peer_max > application_max) return error.InvalidOptions;
         if (options.inbound_per_peer_max == 0 or options.peers == 0) return error.InvalidOptions;
         if (options.peers > constants.slots_ceiling) return error.InvalidOptions;
         if (options.progress_timeout_ms == 0 or options.host_timeout_ms == 0 or
@@ -384,21 +399,44 @@ pub const ReqResp = struct {
     /// Monotonic milliseconds; zero capacity suppresses event-only wakeups.
     /// Router negotiation and transport deadlines remain separate.
     pub fn nextWakeup(self: *ReqResp, now: Now, event_capacity: usize) ?u64 {
-        if (self.scan_remaining > 0 or (self.over_limit_len > 0 and event_capacity > 0)) {
-            return now.mono_ms;
+        return self.nextWakeupPartitioned(now, event_capacity, event_capacity);
+    }
+
+    pub fn nextWakeupPartitioned(
+        self: *ReqResp,
+        now: Now,
+        application_capacity: usize,
+        control_capacity: usize,
+    ) ?u64 {
+        if (self.scan_remaining > 0) return now.mono_ms;
+        for (0..self.over_limit_len) |offset| {
+            const item = self.over_limit[(self.over_limit_head + offset) % over_limit_queue_max];
+            const capacity = if (item.protocol.isControl())
+                control_capacity
+            else
+                application_capacity;
+            if (capacity > 0) return now.mono_ms;
         }
         var due: ?u64 = null;
         for (self.outbound) |*slot| {
+            const capacity = if (slot.protocol.isControl())
+                control_capacity
+            else
+                application_capacity;
             if (slot.needs_service or slot.close_pending or slot.state == .reported or
-                (event_capacity > 0 and (slot.pending_event != null or slot.terminal != null)))
+                (capacity > 0 and (slot.pending_event != null or slot.terminal != null)))
             {
                 return now.mono_ms;
             }
             if (slot.deadline(self)) |deadline| due = earlier(due, deadline);
         }
         for (self.inbound) |*slot| {
+            const capacity = if (slot.protocol.isControl())
+                control_capacity
+            else
+                application_capacity;
             if (slot.needs_service or slot.close_pending or slot.state == .reported or
-                (event_capacity > 0 and (slot.pending_event != null or slot.terminal != null)))
+                (capacity > 0 and (slot.pending_event != null or slot.terminal != null)))
             {
                 return now.mono_ms;
             }
@@ -423,6 +461,25 @@ pub const ReqResp = struct {
 
     pub fn availableInbound(self: *ReqResp) ?u16 {
         return self.claim(self.inbound);
+    }
+
+    pub fn availableInboundFor(self: *ReqResp, which: Protocol) ?u16 {
+        return self.claimProtocol(self.inbound, which, self.options.inbound_control_reserved);
+    }
+
+    pub fn availableOutboundFor(self: *ReqResp, which: Protocol) ?u16 {
+        return self.claimProtocol(self.outbound, which, self.options.outbound_control_reserved);
+    }
+
+    fn claimProtocol(self: *ReqResp, slots: anytype, which: Protocol, reserved: u16) ?u16 {
+        if (!which.isControl() and reserved > 0) {
+            var ordinary: usize = 0;
+            for (slots) |*slot| {
+                if (slot.state != .free and !slot.protocol.isControl()) ordinary += 1;
+            }
+            if (ordinary >= slots.len - reserved) return null;
+        }
+        return self.claim(slots);
     }
 
     /// Latches one terminal result. Call cleanupPending before the next Router pump.
@@ -462,6 +519,26 @@ pub const ReqResp = struct {
         now: Now,
         events: []Event,
     ) usize {
+        self.advance(engine, router, now);
+        return self.drain(now, events, null, &self.event_cursor);
+    }
+
+    pub fn pumpPartitioned(
+        self: *ReqResp,
+        engine: *Engine,
+        router: *routing.Router,
+        now: Now,
+        application: []Event,
+        control: []Event,
+    ) PartitionedCounts {
+        self.advance(engine, router, now);
+        return .{
+            .application = self.drain(now, application, false, &self.application_event_cursor),
+            .control = self.drain(now, control, true, &self.control_event_cursor),
+        };
+    }
+
+    fn advance(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now) void {
         assert(now.mono_ms >= self.last_now_ms or self.last_now_ms == 0);
         self.last_now_ms = now.mono_ms;
         self.cleanup(engine, router, self.outbound, true);
@@ -487,33 +564,51 @@ pub const ReqResp = struct {
         // Cleanup also covers terminal transitions made during this turn.
         self.cleanup(engine, router, self.outbound, false);
         self.cleanup(engine, router, self.inbound, false);
+    }
+
+    fn drain(self: *ReqResp, now: Now, events: []Event, control: ?bool, cursor: *usize) usize {
+        const total = self.outbound.len + self.inbound.len;
         var count: usize = 0;
         for (0..total + 1) |_| {
             if (count == events.len) break;
-            const position = self.event_cursor;
-            self.event_cursor = (position + 1) % (total + 1);
-            if (position < self.outbound.len) {
-                if (deliver(&self.outbound[position], now)) |event| {
-                    events[count] = event;
-                    count += 1;
-                }
-            } else if (position < total) {
-                if (deliver(&self.inbound[position - self.outbound.len], now)) |event| {
-                    events[count] = event;
-                    count += 1;
-                }
-            } else if (self.over_limit_len > 0) {
-                const item = self.over_limit[self.over_limit_head];
-                self.over_limit_head = @intCast((self.over_limit_head + 1) % over_limit_queue_max);
-                self.over_limit_len -= 1;
-                events[count] = .{ .over_limit = .{
-                    .peer = item.peer,
-                    .protocol = item.protocol,
-                } };
+            const position = cursor.*;
+            cursor.* = (position + 1) % (total + 1);
+            const event = if (position < self.outbound.len)
+                deliverMatching(&self.outbound[position], now, control)
+            else if (position < total)
+                deliverMatching(&self.inbound[position - self.outbound.len], now, control)
+            else
+                self.takeOverLimit(control);
+            if (event) |ready| {
+                events[count] = ready;
                 count += 1;
             }
         }
         return count;
+    }
+
+    fn deliverMatching(slot: anytype, now: Now, control: ?bool) ?Event {
+        if (control) |wanted| if (slot.protocol.isControl() != wanted) return null;
+        return deliver(slot, now);
+    }
+
+    fn takeOverLimit(self: *ReqResp, control: ?bool) ?Event {
+        for (0..self.over_limit_len) |offset| {
+            const index = (self.over_limit_head + offset) % over_limit_queue_max;
+            const item = self.over_limit[index];
+            if (control) |wanted| if (item.protocol.isControl() != wanted) continue;
+            if (offset == 0) {
+                self.over_limit_head = @intCast((self.over_limit_head + 1) % over_limit_queue_max);
+            } else {
+                for (offset..self.over_limit_len - 1) |next| {
+                    self.over_limit[(self.over_limit_head + next) % over_limit_queue_max] =
+                        self.over_limit[(self.over_limit_head + next + 1) % over_limit_queue_max];
+                }
+            }
+            self.over_limit_len -= 1;
+            return .{ .over_limit = .{ .peer = item.peer, .protocol = item.protocol } };
+        }
+        return null;
     }
 
     fn cleanup(
@@ -647,6 +742,15 @@ pub const ReqResp = struct {
             if (!slot.active() or slot.protocol != which) continue;
             if (!std.meta.eql(slot.conn, conn)) continue;
             count +|= 1;
+        }
+        return count;
+    }
+
+    pub fn outboundApplicationCount(self: *const ReqResp, conn: Handle) u16 {
+        var count: u16 = 0;
+        for (self.outbound) |*slot| {
+            if (slot.state == .free or slot.protocol.isControl()) continue;
+            if (std.meta.eql(slot.conn, conn)) count += 1;
         }
         return count;
     }

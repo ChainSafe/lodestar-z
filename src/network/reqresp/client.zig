@@ -252,7 +252,10 @@ pub const Client = struct {
         if (owner.outboundCount(conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
             return error.TooManyRequests;
         }
-        const index = owner.claim(owner.outbound) orelse return error.SlotsExhausted;
+        if (!which.isControl() and owner.options.outbound_per_peer_max > 0 and
+            owner.outboundApplicationCount(conn) >= owner.options.outbound_per_peer_max)
+            return error.TooManyRequests;
+        const index = owner.availableOutboundFor(which) orelse return error.SlotsExhausted;
         const slot = &owner.outbound[index];
         const stream = router.beginOutbound(engine, conn, .{ .reqresp = which }, now) catch |err| {
             owner.outbound[index].state = .free;

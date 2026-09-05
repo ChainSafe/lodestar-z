@@ -41,6 +41,7 @@ pub const Outcome = struct {
 
 pub const Options = struct {
     negotiations_max: u16 = negotiate.negotiations_max_default,
+    outbound_control_reserved: u16 = 0,
     reqresp: bool = true,
     meshsub: bool = true,
     meshsub_versions: []const Version = &.{ .v1_2, .v1_1, .v1_0 },
@@ -63,7 +64,10 @@ pub const Router = struct {
                 if (version == prior) return error.InvalidLimits;
             }
         }
-        var negotiator = try negotiate.Negotiator.init(allocator, options.negotiations_max);
+        var negotiator = try negotiate.Negotiator.initWithOptions(allocator, .{
+            .negotiations_max = options.negotiations_max,
+            .outbound_control_reserved = options.outbound_control_reserved,
+        });
         errdefer negotiator.deinit();
         const reqresp_count: usize = if (options.reqresp) reqresp.Protocol.count else 0;
         const meshsub_count = if (options.meshsub) options.meshsub_versions.len else 0;
@@ -100,6 +104,9 @@ pub const Router = struct {
         protocol: Protocol,
         now: types.Now,
     ) negotiate.Error!engine_mod.StreamHandle {
+        if (protocol == .reqresp and protocol.reqresp.isControl()) {
+            return self.negotiator.beginOutboundControl(engine, conn, protocol.reqresp, now);
+        }
         return self.negotiator.beginOutbound(engine, conn, protocol.id(), now);
     }
 

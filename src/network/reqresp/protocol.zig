@@ -39,6 +39,13 @@ pub const Protocol = enum(u8) {
         return null;
     }
 
+    pub fn isControl(self: Protocol) bool {
+        return switch (self) {
+            .status_v1, .status_v2, .goodbye_v1, .ping_v1, .metadata_v1, .metadata_v2, .metadata_v3 => true,
+            .blocks_by_range_v2, .blocks_by_root_v2, .blob_sidecars_by_range_v1, .blob_sidecars_by_root_v1, .data_column_sidecars_by_range_v1, .data_column_sidecars_by_root_v1 => false,
+        };
+    }
+
     pub fn info(self: Protocol) Info {
         return table[@intFromEnum(self)];
     }
