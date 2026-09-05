@@ -629,10 +629,14 @@ pub fn nextSyncCommittee(self: *const BeaconStateView) !js_types.SyncCommittee {
     return js_types.wrap(js_types.SyncCommittee, try sszValueToNapiValue(env, ct.altair.SyncCommittee, &result));
 }
 
-pub fn currentSyncCommitteeIndexed(self: *const BeaconStateView) !js_types.IndexedSyncCommitteeWithMap {
-    const env = js.env();
+pub fn currentSyncCommitteeIndexed(self: *const BeaconStateView) !js_types.IndexedSyncCommittee {
     const cached_state = try self.requireState();
     const sync_committee_cache = cached_state.epoch_cache.current_sync_committee_indexed.get();
+    return indexedSyncCommitteeToNapiValue(&sync_committee_cache);
+}
+
+fn indexedSyncCommitteeToNapiValue(sync_committee_cache: *const st.SyncCommitteeCache) !js_types.IndexedSyncCommittee {
+    const env = js.env();
     const validator_indices = sync_committee_cache.getValidatorIndices();
     const validator_index_map = sync_committee_cache.getValidatorIndexMap();
 
@@ -662,7 +666,7 @@ pub fn currentSyncCommitteeIndexed(self: *const BeaconStateView) !js_types.Index
             env,
             u32,
             positions.items,
-            .{ .typed_array = .uint32 },
+            .{},
         );
 
         _ = try env.callFunction(set_fn, map, .{ key_value_napi, positions_napi });
@@ -679,9 +683,7 @@ pub fn syncProposerReward(self: *const BeaconStateView) !js.Number {
 }
 
 /// Get the indexed sync committee at a given epoch.
-/// Returns: object with validatorIndices (Uint32Array)
 pub fn getIndexedSyncCommitteeAtEpoch(self: *const BeaconStateView, epoch_arg: js.Number) !js_types.IndexedSyncCommittee {
-    const env = js.env();
     const cached_state = try self.requireState();
     const epoch_value: u64 = try unsignedInteger(epoch_arg);
 
@@ -689,17 +691,11 @@ pub fn getIndexedSyncCommitteeAtEpoch(self: *const BeaconStateView, epoch_arg: j
         return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for requested epoch");
     };
 
-    const obj = try env.createObject();
-    try obj.setNamedProperty(
-        "validatorIndices",
-        try numberSliceToNapiValue(env, u64, sync_committee.getValidatorIndices(), .{ .typed_array = .uint32 }),
-    );
-    return .{ .val = obj };
+    return indexedSyncCommitteeToNapiValue(&sync_committee);
 }
 
 /// Get the indexed sync committee for a given slot (uses slot+1 offset for duty lookups).
 pub fn getIndexedSyncCommittee(self: *const BeaconStateView, slot_arg: js.Number) !js_types.IndexedSyncCommittee {
-    const env = js.env();
     const cached_state = try self.requireState();
     const slot_value: u64 = try unsignedInteger(slot_arg);
 
@@ -707,12 +703,7 @@ pub fn getIndexedSyncCommittee(self: *const BeaconStateView, slot_arg: js.Number
         return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for requested slot");
     };
 
-    const obj = try env.createObject();
-    try obj.setNamedProperty(
-        "validatorIndices",
-        try numberSliceToNapiValue(env, u64, sync_committee.getValidatorIndices(), .{ .typed_array = .uint32 }),
-    );
-    return .{ .val = obj };
+    return indexedSyncCommitteeToNapiValue(&sync_committee);
 }
 
 pub fn effectiveBalanceIncrements(self: *const BeaconStateView) !js.Uint16Array {
