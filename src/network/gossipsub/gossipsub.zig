@@ -1730,3 +1730,71 @@ test "gossipsub resource snapshot starts empty" {
     try std.testing.expectEqual(@as(usize, 0), snapshot.store_entries);
     try std.testing.expectEqual(@as(usize, 0), snapshot.pending_validations);
 }
+
+test "gossip independent RPC enumerates every receive split through admission" {
+    // RPC 17.1.1, it-length-prefixed 11.0.1 and Snappy 7.3.3 encoded this two-message fixture.
+    const wire = @embedFile("testdata/independent-two.rpc");
+    const name = "/eth2/01000000/beacon_block/ssz_snappy";
+    try std.testing.expect(wire[0] & 0x80 != 0);
+    var g = try Gossipsub.init(std.testing.allocator, .{
+        .random_seed = 1,
+        .mcache_capacity = 2,
+        .validation_capacity = 2,
+        .seen_capacity = 2,
+        .seen_ttl_ms = 1,
+        .validation_tombstone_ms = 1,
+        .body_buffer_bytes = 512,
+        .large_pool_count = 1,
+    });
+    defer g.deinit();
+    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    try std.testing.expect(g.subscribe(name));
+    var expected: [2][64]u8 = undefined;
+    for (0..64) |i| {
+        expected[0][i] = @intCast(i);
+        expected[1][i] = @intCast(255 - i);
+    }
+    for (0..wire.len + 1) |split| {
+        const now: Now = .{ .mono_ms = 1 + split * 10, .unix_s = 1 };
+        g.last_now_ms = now.mono_ms;
+        g.validation.expire(&g.store, &g.peers, now.mono_ms);
+        g.decompressed_used = 0;
+        g.budget = .{ .items = 128, .fields = 131072, .work = 1024 * 1024 };
+        const io = &g.io.peers[peer.index];
+        io.resetRx();
+        io.fields_pump = 0;
+        io.decompressed_pump = 0;
+        var events: [2]Event = undefined;
+        var count: usize = 0;
+        var consumed: usize = 0;
+        var items: usize = 128;
+        for ([_][]const u8{ wire[0..split], wire[split..] }) |fragment| {
+            try std.testing.expect(g.receiveHandoff(peer.index, fragment, false));
+            for (0..wire.len + 1) |_| {
+                if (io.unread_start == io.unread_end) break;
+                const result = try io.feedUnread(io.body, io.unread_end - io.unread_start, now.mono_ms);
+                try std.testing.expect(result.consumed > 0);
+                consumed += result.consumed;
+                if (result.complete) {
+                    try std.testing.expect(try g.processRpc(peer.index, now, &events, &count, &items));
+                    try std.testing.expect(try g.processRpc(peer.index, now, &events, &count, &items));
+                    io.rpc = null;
+                    io.frame_since = null;
+                }
+            }
+        }
+        try std.testing.expectEqual(wire.len, consumed);
+        try std.testing.expectEqual(@as(usize, 2), count);
+        for (events, 0..) |event, i| {
+            try std.testing.expectEqualSlices(u8, &expected[i], event.message.bytes);
+            try std.testing.expect(g.report(event.message.handle, .ignore, now) == .applied);
+        }
+        try std.testing.expect(io.rpc == null and io.item == null and io.reader.declaredLen() == null);
+        try std.testing.expectEqual(io.unread_end, io.unread_start);
+        const snapshot = g.resourceSnapshot();
+        try std.testing.expectEqual(@as(usize, 0), snapshot.pending_validations);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.store_entries);
+        try std.testing.expectEqual(@as(usize, 0), snapshot.store_pages);
+        try std.testing.expectEqual(@as(u64, 0), g.counters.duplicates);
+    }
+}
