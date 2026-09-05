@@ -1,3 +1,4 @@
+pub const admission = @import("admission.zig");
 pub const constants = @import("constants.zig");
 pub const protobuf = @import("protobuf.zig");
 pub const topic = @import("topic.zig");
@@ -20,6 +21,7 @@ pub const Verdict = gossipsub.Verdict;
 pub const ResourceSnapshot = gossipsub.ResourceSnapshot;
 
 test {
+    _ = admission;
     _ = @import("mesh.zig");
     _ = @import("peers.zig");
     _ = @import("message_store.zig");

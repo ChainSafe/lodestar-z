@@ -1,9 +1,8 @@
 const std = @import("std");
 const storage = @import("message_store.zig");
 const topic_mod = @import("topic.zig");
-const constants = @import("constants.zig");
 const protobuf = @import("protobuf.zig");
-const snappy = @import("snappy");
+const admission = @import("admission.zig");
 const assert = std.debug.assert;
 
 pub const Handle = struct { index: u32, generation: u64 };
@@ -69,24 +68,27 @@ pub const Validation = struct {
     tombstone_ms: u64,
 
     pub fn receive(self: *Validation, context: *const Context, workspace: *const Workspace, peer: u16, msg: protobuf.Message, now: u64) Received {
-        if (msg.signed or msg.data.len > constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE)) return .ignored;
+        const header = admission.inspect(&msg);
+        if (header == .rejected) return .ignored;
         const topic = context.state.findTopic(msg.topic) orelse return .ignored;
         if (!context.state.subscribed(topic)) return .ignored;
-        const size = snappy.raw.uncompressedLength(msg.data) catch {
+        if (header == .invalid) {
             if (!charge(context.options, workspace, msg.data.len, 0)) return .{ .blocked = .work };
             _ = context.seen.add(topic_mod.invalidMessageId(msg.topic, msg.data, context.options.message_id_policy), now);
             return .ignored;
-        };
-        if (size > constants.MAX_PAYLOAD_SIZE) return .ignored;
+        }
+        const size = header.payload;
         if (!workspace.event_available or size + msg.topic.len > workspace.arena.len - workspace.used.*) return .{ .blocked = .events };
         if (!self.available()) return .{ .blocked = .storage };
         if (!charge(context.options, workspace, msg.data.len, size)) return .{ .blocked = .work };
         const room = workspace.arena[workspace.used.*..];
-        const written = snappy.raw.uncompress(msg.data, room[0..size]) catch {
-            _ = context.seen.add(topic_mod.invalidMessageId(msg.topic, msg.data, context.options.message_id_policy), now);
+        const decoded = admission.decode(&msg, room[0..size], context.options.message_id_policy);
+        if (decoded == .invalid) {
+            _ = context.seen.add(decoded.invalid, now);
             return .ignored;
-        };
-        const id = topic_mod.validMessageId(msg.topic, room[0..written], context.options.message_id_policy);
+        }
+        const written = decoded.valid.bytes.len;
+        const id = decoded.valid.id;
         const pending = self.find(id, now);
         if ((pending != null and pending.?.state == .pending) or context.seen.contains(id, now)) {
             if (pending) |entry| recordDuplicate(context, entry, peer, topic, now);

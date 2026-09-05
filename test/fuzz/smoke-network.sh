@@ -19,6 +19,16 @@ for target in "${TARGETS[@]}"; do
     done
     test "$found" -eq 1
     rm -rf "/tmp/lodestar-z-afl-${target}"
-    AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 afl-fuzz -i "$corpus" -o "/tmp/lodestar-z-afl-${target}" -V 3 -- "$bin" >/dev/null 2>&1
-    test ! -e "/tmp/lodestar-z-afl-${target}/default/crashes/id:000000"
+    log="/tmp/lodestar-z-afl-${target}.log"
+    if ! AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 afl-fuzz -i "$corpus" -o "/tmp/lodestar-z-afl-${target}" -V 3 -- "$bin" >"$log" 2>&1; then
+        cat "$log" >&2
+        exit 1
+    fi
+    for finding in /tmp/lodestar-z-afl-${target}/default/{crashes,hangs}/id:*; do
+        if test -f "$finding"; then
+            echo "Unexpected AFL finding: $finding" >&2
+            exit 1
+        fi
+    done
+    echo "$target: seeds replayed; three-second AFL smoke passed"
 done
