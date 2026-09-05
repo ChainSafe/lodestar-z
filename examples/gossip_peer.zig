@@ -133,7 +133,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     var steps: u32 = 0;
     while (steps < steps_max and received < options.blocks) : (steps += 1) {
         const now = try network.driver.currentTime(io);
-        const due = service.nextWakeup(now, request_events.len);
+        const due = service.nextWakeup(now, request_events.len, gossip_events.len);
         const wait_ms: u32 = @intCast(@min(network.constants.poll_interval_ms, if (due) |deadline| deadline -| now.mono_ms else network.constants.poll_interval_ms));
         const result = try node.step(io, &events, &activity, .{ .wait_max_ms = wait_ms });
         for (events[0..result.events]) |event| switch (event) {
@@ -164,7 +164,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 printBlock(allocator, m.bytes, fork) catch |err| {
                     std.debug.print("decode failed: {s}\n", .{@errorName(err)});
                 };
-                service.gossipsub.report(m.handle, .ignore);
+                _ = service.gossipsub.report(m.handle, .ignore, result.now);
                 received += 1;
             },
             .subscription_change => |change| {

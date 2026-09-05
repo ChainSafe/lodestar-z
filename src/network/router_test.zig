@@ -243,10 +243,10 @@ test "router composed service retains native activity behind a partial reqresp s
         for (requests[0..count]) |event| if (event == .request) {
             incoming = event.request.request;
         };
-        if (incoming != null and client.nextWakeup(pair.now, 1) != pair.now.mono_ms) break;
+        if (incoming != null and client.nextWakeup(pair.now, 1, gossip.len) != pair.now.mono_ms) break;
     }
     try std.testing.expect(incoming != null);
-    try std.testing.expect(client.nextWakeup(pair.now, 1).? > pair.now.mono_ms);
+    try std.testing.expect(client.nextWakeup(pair.now, 1, gossip.len).? > pair.now.mono_ms);
     _ = client.process(&pair.client, &.{}, &.{}, pair.now, &requests, &gossip);
     var wire: [rr.codec.frame_scratch_max]u8 = undefined;
     const encoded = try rr.codec.encodeChunk(0, null, &ping, &wire);
@@ -256,7 +256,7 @@ test "router composed service retains native activity behind a partial reqresp s
     const active = pair.client.driverView().takeActivity(&activity);
     try std.testing.expect(active > 0);
     _ = client.process(&pair.client, &.{}, activity[0..active], pair.now, &requests, &gossip);
-    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), client.nextWakeup(pair.now, 1));
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), client.nextWakeup(pair.now, 1, gossip.len));
     const counts = client.process(&pair.client, &.{}, &.{}, pair.now, &requests, &gossip);
     try std.testing.expectEqual(@as(usize, 1), counts.reqresp);
     try std.testing.expectEqualSlices(u8, &ping, requests[0].chunk.bytes);

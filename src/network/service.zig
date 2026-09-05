@@ -57,9 +57,12 @@ pub const Service = struct {
         );
     }
 
-    /// Reqresp and negotiation wakeups; also combine transport and gossip work at the host.
-    pub fn nextWakeup(self: *Service, now: types.Now, request_event_capacity: usize) ?u64 {
-        return self.reqresp.nextWakeupRouted(&self.router, now, request_event_capacity);
+    /// Combine protocol deadlines and independent host output capacities with the transport wakeup.
+    pub fn nextWakeup(self: *Service, now: types.Now, request_event_capacity: usize, gossip_event_capacity: usize) ?u64 {
+        const request_due = self.reqresp.nextWakeupRouted(&self.router, now, request_event_capacity);
+        const gossip = self.gossipsub.nextWakeupHandler(now, gossip_event_capacity);
+        if (request_due) |r| return @min(r, gossip orelse r);
+        return gossip;
     }
 
     /// Forward Driver activity separately from lifecycle events.
@@ -75,7 +78,10 @@ pub const Service = struct {
         gossip: []gossip_mod.Event,
     ) Counts {
         std.debug.assert(activity.len <= engine.limits.connections_max);
-        for (activity) |conn| self.reqresp.inner.connectionActivity(conn);
+        for (activity) |conn| {
+            self.reqresp.inner.connectionActivity(conn);
+            self.gossipsub.connectionActivity(conn);
+        }
         self.reqresp.inner.cleanupPending(engine, &self.router);
         self.router.transportEvents(engine, events, now);
         self.reqresp.transportEvents(events);

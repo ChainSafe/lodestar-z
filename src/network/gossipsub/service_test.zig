@@ -44,18 +44,23 @@ const ServicePair = struct {
         try self.pair.pump();
         const now = self.pair.now;
         var storage: [16]engine_mod.Event = undefined;
+        var activity: [128]engine_mod.Handle = undefined;
+        const server_active = self.pair.server.driverView().takeActivity(&activity);
         const server_ev = self.pair.events(&self.pair.server, &storage);
         self.server_count = self.server.process(
             &self.pair.server,
             server_ev,
+            activity[0..server_active],
             now,
             &self.server_events,
         );
         var storage2: [16]engine_mod.Event = undefined;
+        const client_active = self.pair.client.driverView().takeActivity(&activity);
         const client_ev = self.pair.events(&self.pair.client, &storage2);
         self.client_count = self.client.process(
             &self.pair.client,
             client_ev,
+            activity[0..client_active],
             now,
             &self.client_events,
         );
@@ -84,7 +89,7 @@ test "gossipsub service composes the mesh and delivers a message" {
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
 
     const payload = "a block delivered through the gossipsub service";
-    try setup.client.publish(beacon_block, payload, setup.pair.now);
+    _ = try setup.client.publish(beacon_block, payload, setup.pair.now);
 
     var received = false;
     rounds = 0;
@@ -93,7 +98,7 @@ test "gossipsub service composes the mesh and delivers a message" {
         for (setup.serverEvents()) |event| switch (event) {
             .message => |m| {
                 try std.testing.expectEqualStrings(payload, m.bytes);
-                setup.server.report(m.handle, .accept);
+                _ = setup.server.report(m.handle, .accept, setup.pair.now);
                 received = true;
             },
             else => {},
@@ -130,7 +135,7 @@ test "gossipsub service preserves coalesced negotiation subscription and FIN" {
         try pair.pump();
         var storage: [16]engine_mod.Event = undefined;
         var out: [16]Event = undefined;
-        const count = server.process(&pair.server, pair.events(&pair.server, &storage), pair.now, &out);
+        const count = server.process(&pair.server, pair.events(&pair.server, &storage), &.{}, pair.now, &out);
         for (out[0..count]) |event| switch (event) {
             .subscription_change => |change| {
                 try std.testing.expectEqualStrings(topic, change.topic);
@@ -152,7 +157,7 @@ test "gossipsub service retries a closed outbound stream after bounded backoff" 
     const first = setup.client.inner.state.outStream(index).?;
     setup.pair.client.closeStream(first, 0);
     var out: [16]Event = undefined;
-    _ = setup.client.process(&setup.pair.client, &.{.{ .stream_closed = .{ .stream = first, .reset_code = 0 } }}, setup.pair.now, &out);
+    _ = setup.client.process(&setup.pair.client, &.{.{ .stream_closed = .{ .stream = first, .reset_code = 0 } }}, &.{}, setup.pair.now, &out);
     for (0..4) |_| try setup.pumpOnce();
     try std.testing.expect(setup.client.inner.state.outStream(index) == null);
     setup.pair.advance(1_000);
@@ -183,7 +188,7 @@ test "gossipsub replacement resets a partial frame and keeps directional version
     const index = setup.server.inner.state.findPeer(setup.handles.server).?;
     const first = try propose(&setup.pair, setup.handles.client, "/meshsub/1.1.0", &.{ 0x80, 0x01, 0x08 });
     for (0..8) |_| try setup.pumpOnce();
-    try std.testing.expectEqual(@as(?usize, 128), setup.server.inner.io[index].reader.declaredLen());
+    try std.testing.expectEqual(@as(?usize, 128), setup.server.inner.io.peers[index].reader.declaredLen());
     try std.testing.expectEqual(@import("state.zig").Version.v1_2, setup.server.inner.state.peerVersion(index));
     try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.server.inner.state.peers[index].inbound_version);
     var bytes: [160]u8 = undefined;
@@ -200,7 +205,7 @@ test "gossipsub replacement resets a partial frame and keeps directional version
         }
     }
     try std.testing.expect(received);
-    try std.testing.expectEqual(@as(?usize, null), setup.server.inner.io[index].reader.declaredLen());
+    try std.testing.expectEqual(@as(?usize, null), setup.server.inner.io.peers[index].reader.declaredLen());
     try std.testing.expectError(error.StreamStopped, setup.pair.client.write(first, "x", false));
 }
 
@@ -251,7 +256,7 @@ test "gossipsub service ignores stale outcomes after connection and peer slot re
         .result = .{ .ready = .{ .protocol = .{ .meshsub = .v1_1 }, .leftover = "", .fin = false } },
     }, setup.pair.now);
     var out: [16]Event = undefined;
-    _ = setup.client.process(&setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now, &out);
+    _ = setup.client.process(&setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, &.{}, setup.pair.now, &out);
     try std.testing.expectEqual(live, setup.client.inner.state.outStream(index).?);
     try std.testing.expectEqual(@import("state.zig").Version.v1_2, setup.client.inner.state.peerVersion(index));
     const peer = setup.client.inner.state.peers[index];
@@ -273,8 +278,8 @@ test "gossipsub service detects an idle remote stop and retries without fabricat
     const first = setup.client.inner.state.outStream(client_index).?;
     const remote = setup.server.inner.state.peers[server_index].in_stream.?;
     try std.testing.expectEqual(first.id, remote.id);
-    const io = &setup.client.inner.io[client_index];
-    try std.testing.expectEqual(io.send_head, io.send_tail);
+    const io = &setup.client.inner.io.peers[client_index];
+    try std.testing.expect(!io.pending());
     setup.pair.server.closeStream(remote, 0);
     for (0..4) |_| try setup.pumpOnce();
     try std.testing.expect(setup.client.inner.state.outStream(client_index) == null);
@@ -319,7 +324,7 @@ test "gossipsub service preserves a remotely half-closed outbound stream without
     _ = setup.pair.client.driverView().takeHostWork();
     var out: [16]Event = undefined;
     for (0..8) |_| {
-        _ = setup.client.process(&setup.pair.client, &.{}, setup.pair.now, &out);
+        _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &out);
         try std.testing.expect(!setup.pair.client.driverView().takeHostWork());
     }
     try std.testing.expect(setup.client.subscribe(topic));

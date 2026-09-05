@@ -1,16 +1,14 @@
 const std = @import("std");
 const constants = @import("constants.zig");
-const topic_mod = @import("topic.zig");
 
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const MessageId = [constants.message_id_length]u8;
-const topic_max = topic_mod.topic_max_len;
 
 const empty_slot: u32 = std.math.maxInt(u32);
 
 fn hashId(id: MessageId) usize {
-    // Message ids are already SHA-256 truncations, so the low bytes are uniform.
+    // Stored IDs are computed SHA-256 truncations. Remote query IDs still use bounded probing.
     return std.mem.readInt(u64, id[0..8], .little);
 }
 
@@ -34,35 +32,54 @@ const Index = struct {
 
     fn find(self: *const Index, id: MessageId) ?u32 {
         var pos = hashId(id) & self.mask;
-        while (self.slots[pos] != empty_slot) : (pos = (pos + 1) & self.mask) {
+        for (0..self.slots.len) |_| {
+            if (self.slots[pos] == empty_slot) return null;
             if (std.mem.eql(u8, &self.ids[self.slots[pos]], &id)) return self.slots[pos];
+            pos = (pos + 1) & self.mask;
         }
-        return null;
+        unreachable;
     }
 
     fn insert(self: *Index, id: MessageId, entry: u32) void {
+        assert(entry < self.ids.len);
         var pos = hashId(id) & self.mask;
-        while (self.slots[pos] != empty_slot) : (pos = (pos + 1) & self.mask) {}
-        self.slots[pos] = entry;
+        for (0..self.slots.len) |_| {
+            if (self.slots[pos] == empty_slot) {
+                self.slots[pos] = entry;
+                return;
+            }
+            pos = (pos + 1) & self.mask;
+        }
+        unreachable;
     }
 
     fn remove(self: *Index, id: MessageId) void {
         var pos = hashId(id) & self.mask;
-        while (self.slots[pos] != empty_slot) : (pos = (pos + 1) & self.mask) {
-            if (std.mem.eql(u8, &self.ids[self.slots[pos]], &id)) break;
-        } else return;
-        // Backward-shift deletion keeps the probe chains intact.
+        var found = false;
+        for (0..self.slots.len) |_| {
+            if (self.slots[pos] == empty_slot) return;
+            if (std.mem.eql(u8, &self.ids[self.slots[pos]], &id)) {
+                found = true;
+                break;
+            }
+            pos = (pos + 1) & self.mask;
+        }
+        assert(found);
         var hole = pos;
         pos = (pos + 1) & self.mask;
-        while (self.slots[pos] != empty_slot) : (pos = (pos + 1) & self.mask) {
+        for (0..self.slots.len) |_| {
+            if (self.slots[pos] == empty_slot) {
+                self.slots[hole] = empty_slot;
+                return;
+            }
             const home = hashId(self.ids[self.slots[pos]]) & self.mask;
-            const shift = (pos -% home) & self.mask >= (pos -% hole) & self.mask;
-            if (shift) {
+            if ((pos -% home) & self.mask >= (pos -% hole) & self.mask) {
                 self.slots[hole] = self.slots[pos];
                 hole = pos;
             }
+            pos = (pos + 1) & self.mask;
         }
-        self.slots[hole] = empty_slot;
+        unreachable;
     }
 };
 
@@ -103,14 +120,15 @@ pub const SeenCache = struct {
         self.* = undefined;
     }
 
-    pub fn contains(self: *const SeenCache, id: MessageId) bool {
-        return self.index.find(id) != null;
+    pub fn contains(self: *const SeenCache, id: MessageId, now_ms: u64) bool {
+        const slot = self.index.find(id) orelse return false;
+        return now_ms -| self.added_ms[slot] < self.ttl_ms;
     }
 
     /// Records `id` as seen and returns true when it was not already present.
     pub fn add(self: *SeenCache, id: MessageId, now_ms: u64) bool {
-        if (self.contains(id)) return false;
         self.pruneExpired(now_ms);
+        if (self.contains(id, now_ms)) return false;
         if (self.count == self.capacity) self.evictOldest();
         const slot = self.head;
         self.ids[slot] = id;
@@ -135,306 +153,120 @@ pub const SeenCache = struct {
     }
 };
 
-pub const Cached = struct {
-    topic: []const u8,
-    data: []const u8,
-};
-
-/// Per-message validation state, mirroring rust-libp2p's DeliveryStatus. A
-/// message starts `unknown` (received, awaiting the host verdict) and resolves
-/// to one of the others, which decides how later duplicate senders are scored.
-pub const Status = enum { unknown, valid, invalid, ignored };
-
-/// The set of peers that sent a duplicate of a message before it resolved.
-const DupSet = std.StaticBitSet(constants.peers_cap);
-
-/// Outcome of recording a duplicate sender, driving the score credit/penalty.
-pub const DupOutcome = enum { no_record, already, unknown, valid, invalid, ignored };
-
-/// Per-message IWANT retransmission counts, one small table per cached message.
-/// A message is served to a given peer at most `gossip_retransmission` times.
-const iwant_peers_per_msg = 16;
-const IwantTable = struct {
-    peers: [iwant_peers_per_msg]u16 = undefined,
-    counts: [iwant_peers_per_msg]u8 = undefined,
+const storage = @import("message_store.zig");
+const PeerRef = @import("validation.zig").PeerRef;
+pub const HistoryEntry = struct {
+    next: u32 = empty_slot,
+    prev: u32 = empty_slot,
+    message: storage.Handle = undefined,
+    window: u8 = 0,
+    peers: [16]PeerRef = undefined,
+    counts: [16]u8 = undefined,
     len: u8 = 0,
 };
-
-/// Retains full messages for `mcache_len` heartbeat windows so the engine can
-/// answer IWANT, and reports the ids to gossip about. Message data lives in one
-/// byte ring; entries and data both evict oldest-first, in FIFO order.
-pub const MessageCache = struct {
-    index: Index,
+pub const History = struct {
+    entries: []HistoryEntry,
     ids: []MessageId,
-    topic: []u8,
-    topic_len: []u8,
-    data_off: []usize,
-    data_len: []usize,
-    window: []u8,
-    status: []Status,
-    source: []u16,
-    source_gen: []u32,
-    dup: []DupSet,
-    iwant: []IwantTable,
-    arena: []u8,
-    capacity: usize,
-    entry_head: usize = 0,
-    entry_tail: usize = 0,
+    index: Index,
+    head: u32 = empty_slot,
+    tail: u32 = empty_slot,
+    free: u32 = 0,
     count: usize = 0,
-    data_head: usize = 0,
-    data_used: usize = 0,
 
-    pub fn init(
-        allocator: Allocator,
-        capacity: usize,
-        arena_bytes: usize,
-    ) Allocator.Error!MessageCache {
-        assert(capacity > 0);
-        const ids = try allocator.alloc(MessageId, capacity);
-        errdefer allocator.free(ids);
-        const topic = try allocator.alloc(u8, capacity * topic_max);
-        errdefer allocator.free(topic);
-        const topic_len = try allocator.alloc(u8, capacity);
-        errdefer allocator.free(topic_len);
-        const data_off = try allocator.alloc(usize, capacity);
-        errdefer allocator.free(data_off);
-        const data_len = try allocator.alloc(usize, capacity);
-        errdefer allocator.free(data_len);
-        const window = try allocator.alloc(u8, capacity);
-        errdefer allocator.free(window);
-        const status = try allocator.alloc(Status, capacity);
-        errdefer allocator.free(status);
-        const source = try allocator.alloc(u16, capacity);
-        errdefer allocator.free(source);
-        const source_gen = try allocator.alloc(u32, capacity);
-        errdefer allocator.free(source_gen);
-        const dup = try allocator.alloc(DupSet, capacity);
-        errdefer allocator.free(dup);
-        const iwant = try allocator.alloc(IwantTable, capacity);
-        errdefer allocator.free(iwant);
-        const arena = try allocator.alloc(u8, arena_bytes);
-        errdefer allocator.free(arena);
-        var index = try Index.init(allocator, capacity, ids);
-        errdefer index.deinit(allocator);
-        return .{
-            .index = index,
-            .ids = ids,
-            .topic = topic,
-            .topic_len = topic_len,
-            .data_off = data_off,
-            .data_len = data_len,
-            .window = window,
-            .status = status,
-            .source = source,
-            .source_gen = source_gen,
-            .dup = dup,
-            .iwant = iwant,
-            .arena = arena,
-            .capacity = capacity,
-        };
+    pub fn init(a: Allocator, capacity: usize) !History {
+        if (capacity == 0 or capacity > 65536) return error.InvalidLimits;
+        const entries = try a.alloc(HistoryEntry, capacity);
+        errdefer a.free(entries);
+        const ids = try a.alloc(MessageId, capacity);
+        errdefer a.free(ids);
+        const index = try Index.init(a, capacity, ids);
+        for (entries, 0..) |*e, i| e.* = .{ .next = if (i + 1 == capacity) empty_slot else @intCast(i + 1) };
+        return .{ .entries = entries, .ids = ids, .index = index };
     }
-
-    pub fn deinit(self: *MessageCache, allocator: Allocator) void {
-        self.index.deinit(allocator);
-        allocator.free(self.arena);
-        allocator.free(self.iwant);
-        allocator.free(self.dup);
-        allocator.free(self.source_gen);
-        allocator.free(self.source);
-        allocator.free(self.status);
-        allocator.free(self.window);
-        allocator.free(self.data_len);
-        allocator.free(self.data_off);
-        allocator.free(self.topic_len);
-        allocator.free(self.topic);
-        allocator.free(self.ids);
+    pub fn deinit(self: *History, a: Allocator) void {
+        self.index.deinit(a);
+        a.free(self.ids);
+        a.free(self.entries);
         self.* = undefined;
     }
-
-    pub fn contains(self: *const MessageCache, id: MessageId) bool {
-        return self.index.find(id) != null;
-    }
-
-    /// Stores a message in the current window, marked unvalidated and owned by
-    /// `source`. Returns false when the data does not fit the arena even after
-    /// evicting everything, leaving the cache clean.
-    pub fn put(
-        self: *MessageCache,
-        id: MessageId,
-        topic_str: []const u8,
-        data: []const u8,
-        source: u16,
-        source_gen: u32,
-    ) bool {
-        if (data.len > self.arena.len or topic_str.len > topic_max) return false;
-        if (self.contains(id)) return true;
-        while (self.count == self.capacity or self.arena.len - self.data_used < data.len) {
-            if (self.count == 0) return false;
-            self.evictOldest();
-        }
-        const slot = self.entry_head;
+    pub fn put(self: *History, store: *storage.Store, h: storage.Handle) void {
+        const message = store.get(h).?;
+        if (message.history) return;
+        const id = message.id;
+        if (self.index.find(id)) |old| self.remove(store, old);
+        if (self.count == self.entries.len) _ = self.evictOldest(store);
+        const slot = self.free;
+        assert(slot != empty_slot);
+        self.free = self.entries[slot].next;
+        self.entries[slot] = .{ .message = h, .prev = self.tail };
+        if (self.tail != empty_slot) self.entries[self.tail].next = slot else self.head = slot;
+        self.tail = slot;
         self.ids[slot] = id;
-        @memcpy(self.topic[slot * topic_max ..][0..topic_str.len], topic_str);
-        self.topic_len[slot] = @intCast(topic_str.len);
-        self.data_off[slot] = self.data_head;
-        self.data_len[slot] = data.len;
-        self.window[slot] = 0;
-        self.status[slot] = .unknown;
-        self.source[slot] = source;
-        self.source_gen[slot] = source_gen;
-        self.dup[slot] = DupSet.initEmpty();
-        self.iwant[slot] = .{};
-        writeRing(self.arena, self.data_head, data);
-        self.data_head = (self.data_head + data.len) % self.arena.len;
-        self.data_used += data.len;
-        self.index.insert(id, @intCast(slot));
-        self.entry_head = (self.entry_head + 1) % self.capacity;
+        self.index.insert(id, slot);
         self.count += 1;
-        return true;
+        store.retainHistory(h);
     }
-
-    /// Copies a cached message into `out` when present and it fits.
-    pub fn get(self: *const MessageCache, id: MessageId, out: []u8) ?Cached {
+    pub fn get(self: *History, store: *const storage.Store, id: MessageId) ?*HistoryEntry {
         const slot = self.index.find(id) orelse return null;
-        const len = self.data_len[slot];
-        if (len > out.len) return null;
-        readRing(self.arena, self.data_off[slot], out[0..len]);
-        const topic_str = self.topic[slot * topic_max ..][0..self.topic_len[slot]];
-        return .{ .topic = topic_str, .data = out[0..len] };
+        const e = &self.entries[slot];
+        assert(store.get(e.message) != null);
+        return e;
     }
-
-    /// Marks a message validated so gossip and IWANT may offer it.
-    pub fn validate(self: *MessageCache, id: MessageId) void {
-        self.setStatus(id, .valid);
+    pub fn iwantAllowed(e: *const HistoryEntry, peer: PeerRef, max: u8) bool {
+        for (e.peers[0..e.len], 0..) |p, i| if (std.meta.eql(p, peer)) return e.counts[i] < max;
+        return e.len < e.peers.len;
     }
-
-    pub fn setStatus(self: *MessageCache, id: MessageId, status: Status) void {
-        if (self.index.find(id)) |slot| self.status[slot] = status;
-    }
-
-    pub fn statusOf(self: *const MessageCache, id: MessageId) ?Status {
-        const slot = self.index.find(id) orelse return null;
-        return self.status[slot];
-    }
-
-    pub fn isValidated(self: *const MessageCache, id: MessageId) bool {
-        const slot = self.index.find(id) orelse return false;
-        return self.status[slot] == .valid;
-    }
-
-    /// Records `peer` as a duplicate sender of `id` (deduped per peer), returning
-    /// what the caller should do based on the message's current status.
-    pub fn recordDuplicate(self: *MessageCache, id: MessageId, peer: u16) DupOutcome {
-        const slot = self.index.find(id) orelse return .no_record;
-        if (self.dup[slot].isSet(peer)) return .already;
-        self.dup[slot].set(peer);
-        return switch (self.status[slot]) {
-            .unknown => .unknown,
-            .valid => .valid,
-            .invalid => .invalid,
-            .ignored => .ignored,
+    pub fn sent(e: *HistoryEntry, peer: PeerRef) void {
+        for (e.peers[0..e.len], 0..) |p, i| if (std.meta.eql(p, peer)) {
+            e.counts[i] += 1;
+            return;
         };
+        assert(e.len < e.peers.len);
+        e.peers[e.len] = peer;
+        e.counts[e.len] = 1;
+        e.len += 1;
     }
-
-    /// The peers that sent a duplicate of `id` before it resolved.
-    pub fn dupPeers(self: *const MessageCache, id: MessageId) ?*const DupSet {
-        const slot = self.index.find(id) orelse return null;
-        return &self.dup[slot];
-    }
-
-    /// The generation of the peer slot `id` arrived from, so the caller can
-    /// detect the original sender disconnecting and its slot being reused.
-    pub fn sourceGen(self: *const MessageCache, id: MessageId) ?u32 {
-        const slot = self.index.find(id) orelse return null;
-        return self.source_gen[slot];
-    }
-
-    /// Whether an IWANT for `id` from `peer` should be answered: the message must
-    /// be cached and validated, and served to that peer at most `max` times.
-    pub fn iwantAllowed(self: *MessageCache, id: MessageId, peer: u16, max: u8) bool {
-        const slot = self.index.find(id) orelse return false;
-        if (self.status[slot] != .valid) return false;
-        const table = &self.iwant[slot];
-        for (table.peers[0..table.len], 0..) |tracked, i| {
-            if (tracked == peer) {
-                if (table.counts[i] >= max) return false;
-                table.counts[i] += 1;
-                return true;
-            }
-        }
-        if (table.len == table.peers.len) return false;
-        table.peers[table.len] = peer;
-        table.counts[table.len] = 1;
-        table.len += 1;
+    pub fn evictOldest(self: *History, store: *storage.Store) bool {
+        if (self.count == 0) return false;
+        self.remove(store, self.head);
         return true;
     }
-
-    /// The topic of a cached message without copying its data.
-    pub fn topicOf(self: *const MessageCache, id: MessageId) ?[]const u8 {
-        const slot = self.index.find(id) orelse return null;
-        return self.topic[slot * topic_max ..][0..self.topic_len[slot]];
-    }
-
-    /// The peer a cached message arrived from, or null when self-published.
-    pub fn sourceOf(self: *const MessageCache, id: MessageId) ?u16 {
-        const slot = self.index.find(id) orelse return null;
-        const value = self.source[slot];
-        return if (value == std.math.maxInt(u16)) null else value;
-    }
-
-    /// Advances every entry one heartbeat window and drops those that aged out.
-    pub fn shift(self: *MessageCache) void {
-        var seen: usize = 0;
-        var slot = self.entry_tail;
-        while (seen < self.count) : (seen += 1) {
-            if (self.window[slot] < 255) self.window[slot] += 1;
-            slot = (slot + 1) % self.capacity;
-        }
-        while (self.count > 0 and self.window[self.entry_tail] >= constants.mcache_len) {
-            self.evictOldest();
-        }
-    }
-
-    /// Writes the ids in the gossip windows for `topic_str` into `out`, returning
-    /// the count written.
-    pub fn gossip(self: *const MessageCache, topic_str: []const u8, out: []MessageId) usize {
-        var written: usize = 0;
-        var seen: usize = 0;
-        var slot = self.entry_tail;
-        while (seen < self.count and written < out.len) : (seen += 1) {
-            const name = self.topic[slot * topic_max ..][0..self.topic_len[slot]];
-            if (self.status[slot] == .valid and self.window[slot] < constants.mcache_gossip and
-                std.mem.eql(u8, name, topic_str))
-            {
-                out[written] = self.ids[slot];
-                written += 1;
-            }
-            slot = (slot + 1) % self.capacity;
-        }
-        return written;
-    }
-
-    fn evictOldest(self: *MessageCache) void {
-        assert(self.count > 0);
-        const slot = self.entry_tail;
+    fn remove(self: *History, store: *storage.Store, slot: u32) void {
+        const e = &self.entries[slot];
+        if (e.prev != empty_slot) self.entries[e.prev].next = e.next else self.head = e.next;
+        if (e.next != empty_slot) self.entries[e.next].prev = e.prev else self.tail = e.prev;
         self.index.remove(self.ids[slot]);
-        self.data_used -= self.data_len[slot];
-        self.entry_tail = (self.entry_tail + 1) % self.capacity;
+        store.releaseHistory(e.message);
+        e.next = self.free;
+        self.free = slot;
         self.count -= 1;
     }
+    pub fn shift(self: *History, store: *storage.Store) void {
+        var slot = self.head;
+        for (0..self.count) |_| {
+            self.entries[slot].window +|= 1;
+            slot = self.entries[slot].next;
+        }
+        for (0..self.entries.len) |_| {
+            if (self.count == 0 or self.entries[self.head].window < constants.mcache_len) break;
+            _ = self.evictOldest(store);
+        }
+    }
+    pub fn gossip(self: *const History, store: *const storage.Store, name: []const u8, out: []MessageId) usize {
+        var count: usize = 0;
+        var slot = self.head;
+        for (0..self.count) |_| {
+            if (count == out.len) break;
+            const e = &self.entries[slot];
+            slot = e.next;
+            const m = store.get(e.message).?;
+            if (e.window >= constants.mcache_gossip or !std.mem.eql(u8, name, m.topicString())) continue;
+            out[count] = m.id;
+            count += 1;
+        }
+        return count;
+    }
 };
-
-fn writeRing(arena: []u8, at: usize, data: []const u8) void {
-    const first = @min(data.len, arena.len - at);
-    @memcpy(arena[at..][0..first], data[0..first]);
-    if (first < data.len) @memcpy(arena[0 .. data.len - first], data[first..]);
-}
-
-fn readRing(arena: []const u8, at: usize, out: []u8) void {
-    const first = @min(out.len, arena.len - at);
-    @memcpy(out[0..first], arena[at..][0..first]);
-    if (first < out.len) @memcpy(out[first..], arena[0 .. out.len - first]);
-}
 
 test "seen cache dedupes, evicts oldest when full, and expires by ttl" {
     var cache = try SeenCache.init(std.testing.allocator, 4, 1_000);
@@ -443,96 +275,69 @@ test "seen cache dedupes, evicts oldest when full, and expires by ttl" {
     const b = [_]u8{2} ** 20;
     try std.testing.expect(cache.add(a, 0));
     try std.testing.expect(!cache.add(a, 0));
-    try std.testing.expect(cache.contains(a));
+    try std.testing.expect(cache.contains(a, 400));
     try std.testing.expect(cache.add(b, 100));
     // fill past capacity: a evicts
     try std.testing.expect(cache.add([_]u8{3} ** 20, 200));
     try std.testing.expect(cache.add([_]u8{4} ** 20, 300));
     try std.testing.expect(cache.add([_]u8{5} ** 20, 400));
-    try std.testing.expect(!cache.contains(a));
-    try std.testing.expect(cache.contains(b));
+    try std.testing.expect(!cache.contains(a, 400));
+    try std.testing.expect(cache.contains(b, 400));
     // ttl expiry from the tail
     try std.testing.expect(cache.add([_]u8{6} ** 20, 1_500));
-    try std.testing.expect(!cache.contains(b));
+    try std.testing.expect(!cache.contains(b, 400));
 }
 
-test "message cache stores, answers get, gossips windows, and ages out" {
-    var cache = try MessageCache.init(std.testing.allocator, 8, 1024);
+test "gossip seen TTL applies to duplicate only traffic" {
+    var cache = try SeenCache.init(std.testing.allocator, 4, 10);
     defer cache.deinit(std.testing.allocator);
-    const id1 = [_]u8{1} ** 20;
-    try std.testing.expect(cache.put(id1, "topic_a", "hello world", 0, 0));
-    var out: [64]u8 = undefined;
-    const got = cache.get(id1, &out).?;
-    try std.testing.expectEqualStrings("topic_a", got.topic);
-    try std.testing.expectEqualStrings("hello world", got.data);
-
-    var gossip_ids: [8]MessageId = undefined;
-    // unvalidated messages are not gossiped
-    try std.testing.expectEqual(@as(usize, 0), cache.gossip("topic_a", &gossip_ids));
-    cache.validate(id1);
-    try std.testing.expectEqual(@as(usize, 1), cache.gossip("topic_a", &gossip_ids));
-    try std.testing.expectEqual(@as(usize, 0), cache.gossip("topic_b", &gossip_ids));
-
-    // after mcache_gossip shifts it leaves the gossip window, after mcache_len it is dropped
-    var i: usize = 0;
-    while (i < constants.mcache_gossip) : (i += 1) cache.shift();
-    try std.testing.expectEqual(@as(usize, 0), cache.gossip("topic_a", &gossip_ids));
-    try std.testing.expect(cache.contains(id1));
-    while (i < constants.mcache_len) : (i += 1) cache.shift();
-    try std.testing.expect(!cache.contains(id1));
-    try std.testing.expect(cache.get(id1, &out) == null);
+    const id = [_]u8{1} ** 20;
+    try std.testing.expect(cache.add(id, 1));
+    try std.testing.expect(!cache.add(id, 10));
+    try std.testing.expect(!cache.contains(id, 11));
+    try std.testing.expect(cache.add(id, 11));
 }
 
-test "message cache evicts oldest and wraps data around the arena" {
-    var cache = try MessageCache.init(std.testing.allocator, 8, 32);
-    defer cache.deinit(std.testing.allocator);
-    var out: [64]u8 = undefined;
-    // fill the 32-byte arena with 10-byte messages; the third eviction wraps
-    var n: u8 = 0;
-    while (n < 6) : (n += 1) {
-        const id = [_]u8{n} ** 20;
-        try std.testing.expect(cache.put(id, "t", "0123456789", 0, 0));
+test "gossip history indexed replacement keeps FIFO age and independent TX retention" {
+    var store = try storage.Store.init(std.testing.allocator, 4, 16384);
+    defer store.deinit(std.testing.allocator);
+    var history = try History.init(std.testing.allocator, 2);
+    defer history.deinit(std.testing.allocator);
+    const a = [_]u8{1} ** 20;
+    const b = [_]u8{2} ** 20;
+    const first = store.put(a, "a", "old").?;
+    history.put(&store, first);
+    store.seal(first);
+    store.retainTx(first);
+    const second = store.put(b, "b", "other").?;
+    history.put(&store, second);
+    store.seal(second);
+    history.shift(&store);
+    const replacement = store.put(a, "a", "new").?;
+    history.put(&store, replacement);
+    store.seal(replacement);
+    try std.testing.expectEqual(@as(usize, 2), history.count);
+    try std.testing.expectEqual(replacement, history.get(&store, a).?.message);
+    try std.testing.expect(!store.get(first).?.history);
+    for (0..constants.mcache_len - 1) |_| history.shift(&store);
+    try std.testing.expect(history.get(&store, b) == null);
+    try std.testing.expect(history.get(&store, a) != null);
+    history.shift(&store);
+    try std.testing.expectEqual(@as(usize, 0), history.count);
+    store.releaseTx(first);
+    try std.testing.expectEqual(@as(usize, 0), store.used_entries);
+}
+
+test "gossip ID index repairs a full admitted collision cluster" {
+    var ids: [64]MessageId = undefined;
+    var index = try Index.init(std.testing.allocator, ids.len, &ids);
+    defer index.deinit(std.testing.allocator);
+    for (&ids, 0..) |*id, i| {
+        id.* = [_]u8{0} ** 20;
+        id[19] = @intCast(i);
+        index.insert(id.*, @intCast(i));
     }
-    // only the most recent messages survive the ring
-    const last = cache.get([_]u8{5} ** 20, &out).?;
-    try std.testing.expectEqualStrings("0123456789", last.data);
-    try std.testing.expect(!cache.contains([_]u8{0} ** 20));
-}
-
-test "message cache resolves delivery status and dedupes duplicate senders" {
-    var cache = try MessageCache.init(std.testing.allocator, 8, 1024);
-    defer cache.deinit(std.testing.allocator);
-    const id = [_]u8{9} ** 20;
-    try std.testing.expect(cache.put(id, "t", "block", 3, 7));
-    try std.testing.expectEqual(Status.unknown, cache.statusOf(id).?);
-    try std.testing.expectEqual(@as(?u16, 3), cache.sourceOf(id));
-    try std.testing.expectEqual(@as(?u32, 7), cache.sourceGen(id));
-
-    // an unresolved message records duplicate senders, deduped per peer
-    try std.testing.expectEqual(DupOutcome.unknown, cache.recordDuplicate(id, 5));
-    try std.testing.expectEqual(DupOutcome.already, cache.recordDuplicate(id, 5));
-    try std.testing.expect(cache.dupPeers(id).?.isSet(5));
-
-    // once resolved invalid, later duplicates report invalid for penalty
-    cache.setStatus(id, .invalid);
-    try std.testing.expectEqual(DupOutcome.invalid, cache.recordDuplicate(id, 6));
-    try std.testing.expectEqual(DupOutcome.no_record, cache.recordDuplicate([_]u8{0} ** 20, 6));
-}
-
-test "message cache serves iwant at most gossip_retransmission times per peer" {
-    var cache = try MessageCache.init(std.testing.allocator, 8, 1024);
-    defer cache.deinit(std.testing.allocator);
-    const id = [_]u8{4} ** 20;
-    try std.testing.expect(cache.put(id, "t", "block", 3, 0));
-
-    // unvalidated messages are never served
-    try std.testing.expect(!cache.iwantAllowed(id, 1, 3));
-    cache.validate(id);
-
-    // one peer is served up to the cap, then refused; another peer is independent
-    try std.testing.expect(cache.iwantAllowed(id, 1, 3));
-    try std.testing.expect(cache.iwantAllowed(id, 1, 3));
-    try std.testing.expect(cache.iwantAllowed(id, 1, 3));
-    try std.testing.expect(!cache.iwantAllowed(id, 1, 3));
-    try std.testing.expect(cache.iwantAllowed(id, 2, 3));
+    index.remove(ids[0]);
+    for (1..ids.len) |i| try std.testing.expectEqual(@as(?u32, @intCast(i)), index.find(ids[i]));
+    try std.testing.expect(index.find(ids[0]) == null);
 }
