@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import {createInterface} from "node:readline";
 import {quic} from "@chainsafe/libp2p-quic";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {StrictNoSign, gossipsub} from "@libp2p/gossipsub";
@@ -9,6 +8,7 @@ import {multiaddr} from "@multiformats/multiaddr";
 import {encode} from "it-length-prefixed";
 import {createLibp2p} from "libp2p";
 import {compressSync, uncompressSync} from "snappy";
+import {boundedLines} from "./bounded_lines.mjs";
 import {
   BLOCKS,
   MAX,
@@ -20,6 +20,7 @@ import {
   messageId,
   payload,
   prefix,
+  rangeRequest,
   readPayload,
   sendFragments,
   summary,
@@ -38,6 +39,11 @@ let rawGossip;
 let partialStream;
 let partialTerminal = null;
 let partialBytes = 0;
+let holdFin = false;
+let heldResponse = null;
+let heldTimer;
+let holdExpired = false;
+let finishCalls = 0;
 const messages = [];
 let node;
 let commands = 0;
@@ -74,12 +80,23 @@ async function* chunks(stream) {
 
 async function respond(stream) {
   const request = await readPayload(chunks(stream));
-  const isPing = request.bytes.length === 8;
-  assert(isPing || request.bytes.length === 24, "request shape");
+  const isPing = stream.protocol === PING;
+  assert(isPing || stream.protocol === BLOCKS, "request protocol");
+  assert.deepEqual(request.bytes, isPing ? Buffer.from([1, 0, 0, 0, 0, 0, 0, 0]) : rangeRequest());
   const response = isPing ? Buffer.from([1, 0, 0, 0, 0, 0, 0, 0]) : payload(MAX, 0x6d2b79f5);
   const header = isPing ? Buffer.from([0]) : Buffer.from([0, 1, 0, 0, 0]);
   await sendFragments(stream, Buffer.concat([header, encodePayload(response, false)]), AbortSignal.timeout(30000));
-  await stream.close({signal: AbortSignal.timeout(30000)});
+  if (holdFin) {
+    assert(heldResponse === null, "held response bound");
+    heldResponse = stream;
+    heldTimer = setTimeout(() => {
+      holdExpired = true;
+      stream.abort(Error("response FIN hold expired"));
+    }, 10000);
+  } else {
+    finishCalls++;
+    await stream.close({signal: AbortSignal.timeout(30000)});
+  }
 }
 
 async function createPeer() {
@@ -148,7 +165,7 @@ async function createPeer() {
   );
 }
 
-async function request(address, large) {
+async function request(address, large, retire) {
   const signal = AbortSignal.timeout(large ? 30000 : 10000);
   const stream = await node.dialProtocol(multiaddr(loopback(address)), large ? BLOCKS : PING, {signal});
   let received = 0;
@@ -161,14 +178,13 @@ async function request(address, large) {
   const result = readPayload(observed(), true, large).catch((error) => {
     throw Error(`${error.message}; received=${received}`);
   });
-  const bytes = large
-    ? Buffer.from([0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-    : Buffer.from([1, 0, 0, 0, 0, 0, 0, 0]);
+  const bytes = large ? rangeRequest() : Buffer.from([1, 0, 0, 0, 0, 0, 0, 0]);
   await sendFragments(stream, encodePayload(bytes, false), signal);
   await stream.close({signal});
   const decoded = await result;
   assert.equal(decoded.result, 0);
-  return {...summary(decoded.bytes), context: decoded.context};
+  if (retire) stream.abort(Error("configured final chunk consumed"));
+  return {...summary(decoded.bytes), context: decoded.context, retired: retire ? stream.status !== "open" : undefined};
 }
 
 async function rawPublish(address, seed, size) {
@@ -185,6 +201,18 @@ async function rawPublish(address, seed, size) {
 
 async function execute(command) {
   switch (command.op) {
+    case "holdFin":
+      holdFin = true;
+      holdExpired = false;
+      return {held: true};
+    case "releaseFin":
+      assert(heldResponse && !holdExpired, "response hold expired or absent");
+      clearTimeout(heldTimer);
+      finishCalls++;
+      if (heldResponse.status === "open") await heldResponse.close({signal: AbortSignal.timeout(1000)});
+      heldResponse = null;
+      holdFin = false;
+      return {released: true};
     case "rawOpen":
       assert(rawMode);
       return rawGossip.open(command.address);
@@ -252,14 +280,23 @@ async function execute(command) {
       return {size};
     }
     case "request":
-      return request(command.address, command.large === true);
+      return request(command.address, command.large === true, command.retire === true);
     case "rawPublish":
       return rawPublish(command.address, command.seed ?? 0x6d2b79f5, command.size ?? MAX);
     case "snapshot":
       return {
         connections: node.getConnections().length,
+        finishCalls,
+        heldFin: heldResponse !== null && !holdExpired,
         messages: messages.length,
         protocols,
+        reqrespOutbound: node
+          .getConnections()
+          .flatMap((connection) => connection.streams)
+          .filter(
+            (stream) =>
+              stream.direction === "outbound" && stream.status === "open" && [PING, BLOCKS].includes(stream.protocol)
+          ).length,
         subscribers: rawMode ? 0 : node.services.pubsub.getSubscribers(command.topic ?? TOPIC).length,
       };
     case "disconnect":
@@ -279,6 +316,7 @@ async function execute(command) {
         ).toString("hex"),
       };
     case "shutdown":
+      clearTimeout(heldTimer);
       await node.stop();
       return {shutdown: true};
     default:
@@ -287,20 +325,22 @@ async function execute(command) {
 }
 
 await createPeer();
-const input = createInterface({crlfDelay: Infinity, input: process.stdin});
-for await (const line of input) {
-  if (line.length > lineMax || ++commands > commandMax) break;
-  let command;
-  try {
-    command = validCommand(JSON.parse(line));
-    assert(++active <= pendingMax, "pending bound");
-    const result = await execute(command);
-    emit({id: command.id, ok: true, ...result});
-    active -= 1;
-    if (command.op === "shutdown") break;
-  } catch (error) {
-    active = Math.max(0, active - 1);
-    emit({error: error instanceof Error ? error.message : "invalid command", id: command?.id ?? 0, ok: false});
+try {
+  for await (const line of boundedLines(process.stdin, lineMax)) {
+    if (line.length > lineMax || ++commands > commandMax) break;
+    let command;
+    try {
+      command = validCommand(JSON.parse(line));
+      assert(++active <= pendingMax, "pending bound");
+      const result = await execute(command);
+      emit({id: command.id, ok: true, ...result});
+      active -= 1;
+      if (command.op === "shutdown") break;
+    } catch (error) {
+      active = Math.max(0, active - 1);
+      emit({error: error instanceof Error ? error.message : "invalid command", id: command?.id ?? 0, ok: false});
+    }
   }
+} finally {
+  if (node?.status === "started") await node.stop();
 }
-if (node?.status === "started") await node.stop();

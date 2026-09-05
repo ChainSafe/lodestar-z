@@ -230,6 +230,8 @@ async function exercise(version, binary, zigDials = false) {
       await js.command("dial", {address: zigListen.address});
       await waitFor(async () => (await zig.command("snapshot")).connections === 1);
     }
+    let previousConnection = await zig.command("snapshot");
+    assert.equal(previousConnection.connectionDirection, zigDials ? "outbound" : "inbound");
     const jsPing = await js.command("request", {address: zigListen.address});
     assert.deepEqual({length: jsPing.length, sha256: jsPing.sha256}, summary(Buffer.from([1, 0, 0, 0, 0, 0, 0, 0])));
     await zig.command("request");
@@ -237,9 +239,11 @@ async function exercise(version, binary, zigDials = false) {
     const zigPing = zig.events.find((event) => event.event === "chunk" && event.length === 8);
     assert.equal(zigPing.sha256, jsPing.sha256);
     if (version === "v12") {
+      const zigFinBefore = (await zig.command("snapshot")).finishCalls;
+      await zig.command("holdFin", {paused: true});
       let jsLarge;
       try {
-        jsLarge = await js.command("request", {address: zigListen.address, large: true}, 30000);
+        jsLarge = await js.command("request", {address: zigListen.address, large: true, retire: true}, 30000);
       } catch (error) {
         throw Error(
           `js large request ${String(error)} ${JSON.stringify({jsEvents: js.events.slice(-8), zigEvents: zig.events.slice(-8), zigStderr: zig.stderr})}`
@@ -247,13 +251,25 @@ async function exercise(version, binary, zigDials = false) {
       }
       assert.deepEqual({length: jsLarge.length, sha256: jsLarge.sha256}, summary(payload(MAX)));
       assert.equal(jsLarge.context, "01000000");
+      assert.equal(jsLarge.retired, true);
+      await waitFor(async () => (await zig.command("snapshot")).heldFin, 2000);
+      assert.equal((await zig.command("snapshot")).finishCalls, zigFinBefore);
+      assert.equal((await js.command("snapshot")).reqrespOutbound, 0);
+      await zig.command("releaseFin");
+      const jsFinBefore = (await js.command("snapshot")).finishCalls;
+      await js.command("holdFin");
       await zig.command("request", {large: true}, 30000);
       await waitFor(() => zig.events.some((event) => event.event === "chunk" && event.length === MAX), 30000);
       const large = zig.events.find((event) => event.event === "chunk" && event.length === MAX);
       assert.equal(large.sha256, jsLarge.sha256);
       assert.equal(large.context, "01000000");
-      await waitFor(() => zig.events.filter((event) => event.event === "done").length === 2);
+      await waitFor(() => zig.events.filter((event) => event.event === "done").length === 2, 2000);
+      await waitFor(async () => (await zig.command("snapshot")).reqrespOutbound === 0, 2000);
+      assert.equal((await js.command("snapshot")).heldFin, true);
+      assert.equal((await js.command("snapshot")).finishCalls, jsFinBefore);
+      await js.command("releaseFin");
     }
+    if (process.argv[3] === "--fin-only") return {earlyRetirement: true};
     await Promise.all([zig.command("subscribe", {topic: TOPIC}), js.command("subscribe", {topic: TOPIC})]);
     await js.command("publish", {seed: 0x6d2b79f5, size: 65537, topic: TOPIC});
     await delivered(zig, 65537, 0x6d2b79f5);
@@ -307,8 +323,10 @@ async function exercise(version, binary, zigDials = false) {
           Math.max(1, reconnectDeadline - Date.now())
         );
         await reclaim(zig, reconnectDeadline);
-        const redial = await js.command("dial", {address: zigListen.address});
-        assert.equal(redial.connections, 1, `reconnect ${cycle} did not retain JS connection`);
+        const redial = zigDials
+          ? await zig.command("dial", {address: jsListen.address})
+          : await js.command("dial", {address: zigListen.address});
+        await waitFor(async () => (await js.command("snapshot")).connections === 1);
         try {
           await waitFor(
             async () => (await zig.command("snapshot")).connections === 1,
@@ -319,6 +337,13 @@ async function exercise(version, binary, zigDials = false) {
             `reconnect ${cycle} ${String(error)} ${JSON.stringify({js: await js.command("snapshot"), redial, zig: await zig.command("snapshot"), zigEvents: zig.events.slice(-12)})}`
           );
         }
+        const currentConnection = await zig.command("snapshot");
+        assert.equal(currentConnection.connectionDirection, zigDials ? "outbound" : "inbound");
+        assert.notDeepEqual(
+          [currentConnection.connectionIndex, currentConnection.connectionGeneration],
+          [previousConnection.connectionIndex, previousConnection.connectionGeneration]
+        );
+        previousConnection = currentConnection;
         let ping;
         try {
           ping = await js.command("request", {address: zigListen.address});
@@ -358,12 +383,21 @@ async function exercise(version, binary, zigDials = false) {
 }
 
 const binary = await verifyExecutable(process.argv[2] ?? "zig-out/bin/network_interop_peer");
-const raw = await exerciseRaw(Child, waitFor, binary);
-if (process.argv[3] === "--raw-only") {
-  console.log(JSON.stringify({ok: true, raw}));
-} else {
-  const v12 = await exercise("v12", binary);
+if (process.argv[3] === "--fin-only") {
+  await exercise("v12", binary);
+  console.log(JSON.stringify({earlyRetirement: true, ok: true}));
+} else if (process.argv[3] === "--ownership-only") {
   await exercise("v12", binary, true);
-  const v11 = await exercise("v11", binary);
-  console.log(JSON.stringify({ok: true, raw, v11: v11.jsPing, v12: v12.jsPing}));
+  console.log(JSON.stringify({ok: true, ownership: true}));
+} else {
+  const raw = await exerciseRaw(Child, waitFor, binary);
+  if (process.argv[3] === "--raw-only") {
+    console.log(JSON.stringify({ok: true, raw}));
+  } else {
+    const v12 = await exercise("v12", binary);
+    await exercise("v12", binary, true);
+    const v11 = await exercise("v11", binary);
+    await exercise("v11", binary, true);
+    console.log(JSON.stringify({ok: true, raw, v11: v11.jsPing, v12: v12.jsPing}));
+  }
 }

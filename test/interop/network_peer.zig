@@ -26,6 +26,10 @@ pub const Peer = struct {
     response_size: usize = max_payload,
     outbound: bool = false,
     paused: bool = false,
+    hold_fin: bool = false,
+    held_finish: ?network.reqresp.RequestHandle = null,
+    held_since: ?u64 = null,
+    finish_calls: usize = 0,
     quit: bool = false,
 
     pub fn pump(self: *Peer) !void {
@@ -38,6 +42,7 @@ pub const Peer = struct {
         const result = try self.transport.step(self.io, &events, &activity, .{ .wait_max_ms = 1 });
         self.now = result.now;
         self.now.mono_ms += self.clock_offset;
+        if (self.held_since) |since| if (self.now.mono_ms -| since >= 10_000) return error.FinHoldTimeout;
         for (events[0..result.events]) |event| switch (event) {
             .connected => |c| {
                 self.conn = c.conn;
@@ -69,6 +74,8 @@ pub const Peer = struct {
     fn requestEvent(self: *Peer, event: network.reqresp.Event) !void {
         switch (event) {
             .request => |r| {
+                if (r.protocol != .ping_v1 and r.protocol != .blocks_by_range_v2) return error.UnexpectedProtocol;
+                if (!std.mem.eql(u8, r.bytes, if (r.protocol == .ping_v1) &ping else &range)) return error.InvalidRequestBytes;
                 try control.emit(self.allocator, .{ .event = "request", .protocol = r.protocol.id(), .length = r.bytes.len, .sha256 = hash(r.bytes) });
                 if (r.protocol == .ping_v1) {
                     try self.service.reqresp.respond(r.request, &ping, null, self.now);
@@ -90,7 +97,13 @@ pub const Peer = struct {
                 try control.emit(self.allocator, .{ .event = "failed", .reason = @tagName(f.reason) });
             },
             .chunk_sent => |c| {
-                std.debug.assert(self.service.reqresp.finish(c.request, self.now));
+                if (self.hold_fin) {
+                    self.held_finish = c.request;
+                    self.held_since = self.now.mono_ms;
+                } else {
+                    self.finish_calls += 1;
+                    std.debug.assert(self.service.reqresp.finish(c.request, self.now));
+                }
             },
             else => {},
         }
@@ -130,7 +143,16 @@ pub const Peer = struct {
     }
 
     fn schedule(self: *Peer, c: control.Command) !void {
-        if (std.mem.eql(u8, c.op, "setEventCapacity")) {
+        if (std.mem.eql(u8, c.op, "holdFin")) {
+            self.hold_fin = true;
+        } else if (std.mem.eql(u8, c.op, "releaseFin")) {
+            const request = self.held_finish orelse return error.NoHeldFin;
+            self.finish_calls += 1;
+            _ = self.service.reqresp.finish(request, self.now);
+            self.held_finish = null;
+            self.held_since = null;
+            self.hold_fin = false;
+        } else if (std.mem.eql(u8, c.op, "setEventCapacity")) {
             const capacity = c.capacity orelse return error.MissingCapacity;
             if (capacity > 16) return error.CapacityBound;
             self.event_capacity = capacity;
