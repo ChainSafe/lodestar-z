@@ -4,6 +4,7 @@ import {access, stat} from "node:fs/promises";
 import {relative, resolve} from "node:path";
 import {setTimeout as delay} from "node:timers/promises";
 import {MAX, TOPIC, payload, summary} from "./codec.mjs";
+import {exerciseRaw} from "./raw_cases.mjs";
 
 const root = resolve(new URL("../..", import.meta.url).pathname);
 const lineMax = 65536;
@@ -322,7 +323,12 @@ async function exercise(version, binary, zigDials = false) {
 }
 
 const binary = await verifyExecutable(process.argv[2] ?? "zig-out/bin/network_interop_peer");
-const v12 = await exercise("v12", binary);
-await exercise("v12", binary, true);
-const v11 = await exercise("v11", binary);
-console.log(JSON.stringify({ok: true, v11: v11.jsPing, v12: v12.jsPing}));
+const raw = await exerciseRaw(Child, waitFor, binary);
+if (process.argv[3] === "--raw-only") {
+  console.log(JSON.stringify({ok: true, raw}));
+} else {
+  const v12 = await exercise("v12", binary);
+  await exercise("v12", binary, true);
+  const v11 = await exercise("v11", binary);
+  console.log(JSON.stringify({ok: true, v11: v11.jsPing, v12: v12.jsPing}));
+}
