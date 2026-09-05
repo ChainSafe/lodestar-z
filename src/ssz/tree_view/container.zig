@@ -255,16 +255,17 @@ pub fn ContainerTreeView(comptime ST: type) type {
                     return child_value;
                 }
             } else {
-                self.changed.set(field_index);
-
                 const existing_ptr = self.child_data[field_index];
                 if (existing_ptr) |child_view_ptr| {
+                    self.changed.set(field_index);
                     return child_view_ptr;
                 } else {
                     const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
+                    const child_view = try ChildST.TreeView.init(self.allocator, self.pool, node);
                     self.original_nodes[field_index] = node;
-                    self.child_data[field_index] = try ChildST.TreeView.init(self.allocator, self.pool, node);
-                    return self.child_data[field_index].?;
+                    self.child_data[field_index] = child_view;
+                    self.changed.set(field_index);
+                    return child_view;
                 }
             }
         }

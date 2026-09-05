@@ -21,6 +21,43 @@ const Checkpoint = FixedContainerType(struct {
     root: ByteVectorType(32),
 });
 
+test "ContainerTreeView failed child get preserves commit and retry" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 32,
+    });
+    defer pool.deinit();
+
+    const Child = FixedContainerType(struct { value: UintType(64) });
+    const Parent = FixedContainerType(struct { child: Child });
+    const value: Parent.Type = .{ .child = .{ .value = 7 } };
+    const root = try Parent.tree.fromValue(&pool, &value);
+    var view = try Parent.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    const nodes_before = pool.getNodesInUse();
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.get("child"));
+    try std.testing.expect(failing.has_induced_failure);
+    failing.fail_index = std.math.maxInt(usize);
+
+    try view.commit();
+    try std.testing.expectEqual(root, view.getRoot());
+    try std.testing.expectEqual(nodes_before, pool.getNodesInUse());
+
+    const child = try view.get("child");
+    try std.testing.expectEqual(@as(u64, 7), try child.get("value"));
+    try child.set("value", 9);
+    try view.commit();
+
+    var actual: Parent.Type = undefined;
+    try Parent.tree.toValue(view.getRoot(), &pool, &actual);
+    try std.testing.expectEqual(@as(u64, 9), actual.child.value);
+}
+
 test "StructContainerTreeView - basic get/set/commit/root" {
     const allocator = std.testing.allocator;
     const StructValidator = StructContainerType(struct {
