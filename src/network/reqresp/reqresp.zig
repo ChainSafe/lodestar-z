@@ -41,6 +41,8 @@ pub const Options = struct {
     /// Zero preserves raw admission without an aggregate application limit.
     outbound_per_peer_max: u8 = 0,
     inbound_per_peer_max: u8 = constants.inbound_per_peer_max_default,
+    /// Zero disables the cap; retained application owners count until canonical recycling.
+    inbound_application_per_peer_max: u8 = 0,
     progress_timeout_ms: u64 = constants.progress_timeout_ms_default,
     forks: []const ForkEntry,
     quotas: ?limiter_mod.Quotas = null,
@@ -186,6 +188,9 @@ pub const ReqResp = struct {
         if (options.outbound_per_peer_max > limits.peer_streams_bidi - outbound_stream_headroom or
             options.outbound_per_peer_max > application_max) return error.InvalidOptions;
         if (options.inbound_per_peer_max == 0 or options.peers == 0) return error.InvalidOptions;
+        if (options.inbound_application_per_peer_max > options.inbound_per_peer_max or
+            options.inbound_application_per_peer_max > options.inbound_max - options.inbound_control_reserved)
+            return error.InvalidOptions;
         if (options.peers > constants.slots_ceiling) return error.InvalidOptions;
         if (options.progress_timeout_ms == 0 or options.host_timeout_ms == 0 or
             options.quota_timeout_ms == 0 or options.work_per_pump_max == 0 or
@@ -749,6 +754,15 @@ pub const ReqResp = struct {
     pub fn outboundApplicationCount(self: *const ReqResp, conn: Handle) u16 {
         var count: u16 = 0;
         for (self.outbound) |*slot| {
+            if (slot.state == .free or slot.protocol.isControl()) continue;
+            if (std.meta.eql(slot.conn, conn)) count += 1;
+        }
+        return count;
+    }
+
+    pub fn inboundApplicationCount(self: *const ReqResp, conn: Handle) u16 {
+        var count: u16 = 0;
+        for (self.inbound) |*slot| {
             if (slot.state == .free or slot.protocol.isControl()) continue;
             if (std.meta.eql(slot.conn, conn)) count += 1;
         }

@@ -276,6 +276,14 @@ pub const Negotiator = struct {
         engine.closeStream(stream, types.app_error_negotiation_failed);
     }
 
+    pub fn shutdown(self: *Negotiator, engine: *Engine) void {
+        for (self.entries) |*entry| {
+            if (entry.state == .free) continue;
+            engine.closeStream(entry.stream, types.app_error_negotiation_failed);
+            entry.state = .free;
+        }
+    }
+
     fn claim(self: *Negotiator, control: bool) ?*Entry {
         if (!control and self.outbound_control_reserved > 0) {
             var ordinary: usize = 0;

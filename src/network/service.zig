@@ -6,6 +6,7 @@ const reqresp_mod = @import("reqresp/root.zig");
 const gossip_mod = @import("gossipsub/root.zig");
 
 pub const Options = struct {
+    automatic_gossip_admission: bool = true,
     router: routing.Options = .{},
     reqresp: reqresp_mod.reqresp.Options,
     gossipsub: gossip_mod.Options = .{},
@@ -15,6 +16,7 @@ pub const PartitionedCounts = struct { application: usize, control: usize, gossi
 pub const InitError = reqresp_mod.service.InitError || gossip_mod.service.InitError;
 
 pub const Service = struct {
+    automatic_gossip_admission: bool,
     router: routing.Router,
     reqresp: reqresp_mod.Service,
     gossipsub: gossip_mod.Service,
@@ -26,7 +28,12 @@ pub const Service = struct {
         var reqresp = try reqresp_mod.Service.initHandler(allocator, options.reqresp);
         errdefer reqresp.deinit();
         const gossipsub = try gossip_mod.Service.initHandler(allocator, options.gossipsub);
-        return .{ .router = router, .reqresp = reqresp, .gossipsub = gossipsub };
+        return .{
+            .router = router,
+            .reqresp = reqresp,
+            .gossipsub = gossipsub,
+            .automatic_gossip_admission = options.automatic_gossip_admission,
+        };
     }
 
     pub fn deinit(self: *Service) void {
@@ -150,7 +157,10 @@ pub const Service = struct {
         self.reqresp.inner.cleanupPending(engine, &self.router);
         self.router.transportEvents(engine, events, now);
         self.reqresp.transportEvents(events);
-        self.gossipsub.transportEvents(engine, events, now);
+        for (events) |event| {
+            if (!self.automatic_gossip_admission and event == .connected) continue;
+            self.gossipsub.transportEvents(engine, &.{event}, now);
+        }
         var outcomes: [routing.outcomes_per_pump]routing.Outcome = undefined;
         const count = self.router.pump(engine, now, &outcomes);
         for (outcomes[0..count]) |outcome| {

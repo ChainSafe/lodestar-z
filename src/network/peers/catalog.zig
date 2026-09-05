@@ -7,6 +7,7 @@ pub const Row = struct {
     occupied: bool = false,
     identity: t.PeerId = undefined,
     connection: ?t.Handle = null,
+    closing_reason: ?t.DisconnectReason = null,
     direction: t.Direction = .inbound,
     endpoint: t.Address = .unspecified,
     status: ?t.Status = null,
@@ -76,6 +77,7 @@ pub const Catalog = struct {
             .direction = row.direction,
             .endpoint = row.endpoint,
             .relevant = row.connection != null and row.status != null,
+            .disconnect_reason = row.closing_reason,
             .status = row.status,
             .metadata = row.metadata,
             .status_at_ms = row.status_at_ms,
@@ -107,7 +109,6 @@ pub const Catalog = struct {
         conn: t.Handle,
         options: *const t.AdmissionOptions,
     ) t.Admission {
-        std.debug.assert(conn.generation != 0);
         if (identity.eql(local)) return .duplicate;
         if (self.find(identity)) |ref| {
             const row = self.rowFor(ref).?;
@@ -154,6 +155,7 @@ pub const Catalog = struct {
 
     fn connect(row: *Row, conn: t.Handle, options: *const t.AdmissionOptions) void {
         row.connection = conn;
+        row.closing_reason = null;
         row.direction = options.direction;
         row.endpoint = options.endpoint;
         row.connected_at_ms = options.now_ms;
@@ -162,6 +164,19 @@ pub const Catalog = struct {
         row.status_at_ms = 0;
         row.metadata_at_ms = 0;
         row.pending_update = row.published;
+    }
+
+    pub fn relevantCount(self: *const Catalog) u16 {
+        var count: u16 = 0;
+        for (self.rows) |row| if (row.connection != null and row.status != null) {
+            count += 1;
+        };
+        return count;
+    }
+
+    pub fn eventsPending(self: *const Catalog) bool {
+        for (self.rows) |row| if (row.pending_close != null or row.pending_update) return true;
+        return false;
     }
 
     pub fn connectedCount(self: *const Catalog) u16 {
@@ -189,6 +204,20 @@ pub const Catalog = struct {
         return true;
     }
 
+    pub fn markUnavailable(
+        self: *Catalog,
+        ref: t.PeerRef,
+        conn: t.Handle,
+        reason: t.DisconnectReason,
+    ) bool {
+        const row = self.connectedRow(ref, conn) orelse return false;
+        if (row.closing_reason != null) return true;
+        row.closing_reason = reason;
+        row.status = null;
+        row.pending_update = row.published;
+        return true;
+    }
+
     /// Only a decoded Status accepted by the relevance check may establish relevance.
     pub fn updateStatus(
         self: *Catalog,
@@ -198,6 +227,7 @@ pub const Catalog = struct {
         now_ms: u64,
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
+        if (row.closing_reason != null) return false;
         row.status = status.*;
         row.status_at_ms = now_ms;
         row.pending_update = true;
@@ -212,6 +242,7 @@ pub const Catalog = struct {
         now_ms: u64,
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
+        if (row.closing_reason != null) return false;
         if (row.metadata) |current| if (metadata.seq_number < current.seq_number) return false;
         row.metadata = metadata.*;
         row.metadata_at_ms = now_ms;
