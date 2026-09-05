@@ -137,3 +137,7 @@ pub fn VariableElementIterator(comptime ST: type) type {
         }
     };
 }
+
+test {
+    _ = @import("variable_element_iterator_test.zig");
+}
