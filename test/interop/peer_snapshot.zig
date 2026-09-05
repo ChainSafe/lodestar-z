@@ -6,11 +6,34 @@ pub fn emit(peer: *Peer, id: u32) !void {
     const reqresp = peer.service.reqresp.active();
     const gossip = peer.service.gossipsub.resourceSnapshot();
     const transport = peer.transport.engine.counters;
+    var streams: usize = 0;
+    for (peer.transport.engine.driverView().activeIndices()) |index| {
+        for (peer.transport.engine.registry.slots[index].table.entries) |entry| {
+            if (entry.claimed) streams += 1;
+        }
+    }
+    var negotiations: usize = 0;
+    for (peer.service.router.negotiator.entries) |entry| {
+        if (entry.state != .free) negotiations += 1;
+    }
+    var inbound_version: ?[]const u8 = null;
+    var outbound_version: ?[]const u8 = null;
+    for (peer.service.gossipsub.inner.state.peers) |entry| {
+        if (!entry.active) continue;
+        if (entry.in_stream != null) inbound_version = @tagName(entry.inbound_version);
+        if (entry.out_stream != null) outbound_version = @tagName(entry.version);
+    }
     try control.emit(peer.allocator, .{
         .id = id,
         .ok = true,
         .connections = peer.transport.engine.driverView().activeIndices().len,
         .accepted = transport.accepted,
+        .streams = streams,
+        .negotiations = negotiations,
+        .inboundVersion = inbound_version,
+        .outboundVersion = outbound_version,
+        .rpcsReceived = peer.service.gossipsub.inner.counters.rpcs_received,
+        .duplicates = peer.service.gossipsub.inner.counters.duplicates,
         .steps = peer.steps,
         .connectionGeneration = if (peer.conn) |conn| @as(?u32, conn.generation) else null,
         .malformedRpcs = peer.service.gossipsub.inner.counters.malformed_rpcs,
@@ -42,6 +65,7 @@ pub fn ids(a: @import("std").mem.Allocator, id: u32) !void {
     try control.emit(a, .{
         .id = id,
         .ok = true,
+        .phase0Other = @import("std").fmt.bytesToHex(network.gossipsub.topic.validMessageId(other, "hello", phase0), .lower),
         .phase0 = @import("std").fmt.bytesToHex(network.gossipsub.topic.validMessageId(topic, "hello", phase0), .lower),
         .altair = @import("std").fmt.bytesToHex(network.gossipsub.topic.validMessageId(topic, "hello", .{}), .lower),
         .invalid = @import("std").fmt.bytesToHex(network.gossipsub.topic.invalidMessageId(topic, &.{0xff}, .{}), .lower),

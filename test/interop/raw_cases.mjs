@@ -122,7 +122,10 @@ export async function exerciseRaw(Child, waitFor, binary) {
       [first, second]
     );
     await zig.command("pump", {turns: 8});
-    assert.equal((await zig.command("snapshot")).emitted, before.emitted + 2);
+    const resumed = await zig.command("snapshot");
+    assert.equal(resumed.emitted, before.emitted + 2);
+    assert.equal(resumed.rpcsReceived, before.rpcsReceived + 1);
+    assert.equal(resumed.duplicates, before.duplicates);
     await zig.command("pause", {paused: false});
     await cleanStore();
 

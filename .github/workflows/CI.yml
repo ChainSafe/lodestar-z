@@ -116,6 +116,33 @@ jobs:
         run: |
           zig build build-exe:bench_hashing build-exe:bench_merkle_gindex build-exe:bench_merkle_node build-exe:bench_ssz_attestation build-exe:bench_ssz_block build-exe:bench_ssz_state build-exe:bench_process_block build-exe:bench_process_epoch build-exe:bench_fork_choice_update_head build-exe:bench_fork_choice_compute_deltas build-exe:bench_fork_choice_on_attestation
 
+  network-interop:
+    name: Independent network interoperability
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install pinned independent peers
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Check codecs and run bounded loopback scenarios
+        run: |
+          cargo --version
+          cmake --version
+          node --test test/interop/codec.test.mjs
+          pnpm test:network-interop
+
   discv5-interop:
     name: DiscV5 geth interoperability
     runs-on: ubuntu-latest

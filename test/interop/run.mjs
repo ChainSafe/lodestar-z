@@ -11,7 +11,8 @@ const lineMax = 65536;
 const linesMax = 1024;
 const stderrMax = 16 * 1024 * 1024;
 const pendingMax = 32;
-const suiteSignal = AbortSignal.timeout(180000);
+const suiteController = new AbortController();
+const suiteSignal = AbortSignal.any([suiteController.signal, AbortSignal.timeout(180000)]);
 const children = new Set();
 
 suiteSignal.addEventListener("abort", () => {
@@ -34,9 +35,24 @@ class Child {
     this.child = spawn(program, args, {cwd: root, stdio: ["pipe", "pipe", "pipe"]});
     this.child.stdout.setEncoding("utf8");
     this.child.stderr.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk) => this.output(chunk));
+    this.child.stdout.on("data", (chunk) => {
+      try {
+        this.output(chunk);
+      } catch (error) {
+        this.abort(error);
+        suiteController.abort(error);
+      }
+    });
     this.child.stderr.on("data", (chunk) => {
       this.stderr = `${this.stderr}${chunk}`.slice(-stderrMax);
+    });
+    this.completion = new Promise((resolveExit) => {
+      this.child.once("exit", resolveExit);
+      this.child.once("error", (error) => {
+        this.abort(error);
+        suiteController.abort(error);
+        resolveExit();
+      });
     });
     this.child.on("exit", (code, signal) => {
       this.exited = true;
@@ -118,16 +134,14 @@ class Child {
 
   async stop() {
     if (this.exited) return;
-    await Promise.race([
-      this.command("shutdown", {}, 2000).catch(() => {}),
-      delay(2000, undefined, {signal: suiteSignal}).catch(() => {}),
-    ]);
-    if (!this.exited) this.child.kill("SIGTERM");
-    await Promise.race([
-      new Promise((resolveExit) => this.child.once("exit", resolveExit)),
-      delay(1000, undefined, {signal: suiteSignal}).catch(() => {}),
-    ]);
+    void this.command("shutdown", {}, 2000).catch(() => {});
+    await Promise.race([this.completion, delay(2000)]);
+    if (!this.exited) {
+      this.child.kill("SIGTERM");
+      await Promise.race([this.completion, delay(1000)]);
+    }
     if (!this.exited) this.child.kill("SIGKILL");
+    await this.completion;
   }
 }
 
@@ -151,6 +165,7 @@ async function verifyExecutable(path) {
 
 function assertIds(ids) {
   assert.equal(ids.phase0, "79d62a59d0e47597aeb73cb85ba034c3f67f90e8");
+  assert.equal(ids.phase0Other, ids.phase0);
   assert.equal(ids.altair, "e79e947290cd1ce340628caac5541294e6702329");
   assert.equal(ids.invalid, "a4836ac28360e4a1514db96802f612887409b735");
   assert.equal(ids.other, "ece38723d0a2c13e368a1f88a9eb881f68145a30");
@@ -159,6 +174,8 @@ function assertIds(ids) {
 function quiescent(snapshot) {
   return (
     snapshot.connections === 0 &&
+    snapshot.streams === 0 &&
+    snapshot.negotiations === 0 &&
     snapshot.gossipPeers === 0 &&
     snapshot.gossipDescriptors === 0 &&
     snapshot.gossipQueuedBytes === 0 &&
@@ -186,6 +203,17 @@ async function reclaim(zig, deadline) {
 async function exercise(version, binary, zigDials = false) {
   const zig = new Child("zig", binary, []);
   const js = new Child("js", process.execPath, ["--max-old-space-size=256", "test/interop/libp2p_peer.mjs", version]);
+  const expectedMessages = [];
+  async function delivered(child, size, seed) {
+    const expected = summary(payload(size, seed));
+    expectedMessages.push({child, expected});
+    await waitFor(
+      () => child.events.filter((event) => event.event === "message" && event.sha256 === expected.sha256).length === 1,
+      30000
+    );
+    const message = child.events.find((event) => event.event === "message" && event.sha256 === expected.sha256);
+    assert.equal(message.length, size);
+  }
   try {
     const [zigListen, jsListen, zigIds, jsIds] = await Promise.all([
       zig.command("listen"),
@@ -203,9 +231,11 @@ async function exercise(version, binary, zigDials = false) {
       await waitFor(async () => (await zig.command("snapshot")).connections === 1);
     }
     const jsPing = await js.command("request", {address: zigListen.address});
-    assert.deepEqual({length: jsPing.length}, {length: 8});
+    assert.deepEqual({length: jsPing.length, sha256: jsPing.sha256}, summary(Buffer.from([1, 0, 0, 0, 0, 0, 0, 0])));
     await zig.command("request");
     await waitFor(() => zig.events.some((event) => event.event === "chunk" && event.length === 8));
+    const zigPing = zig.events.find((event) => event.event === "chunk" && event.length === 8);
+    assert.equal(zigPing.sha256, jsPing.sha256);
     if (version === "v12") {
       let jsLarge;
       try {
@@ -215,15 +245,25 @@ async function exercise(version, binary, zigDials = false) {
           `js large request ${String(error)} ${JSON.stringify({jsEvents: js.events.slice(-8), zigEvents: zig.events.slice(-8), zigStderr: zig.stderr})}`
         );
       }
-      assert.equal(jsLarge.length, MAX);
+      assert.deepEqual({length: jsLarge.length, sha256: jsLarge.sha256}, summary(payload(MAX)));
+      assert.equal(jsLarge.context, "01000000");
       await zig.command("request", {large: true}, 30000);
       await waitFor(() => zig.events.some((event) => event.event === "chunk" && event.length === MAX), 30000);
+      const large = zig.events.find((event) => event.event === "chunk" && event.length === MAX);
+      assert.equal(large.sha256, jsLarge.sha256);
+      assert.equal(large.context, "01000000");
+      await waitFor(() => zig.events.filter((event) => event.event === "done").length === 2);
     }
     await Promise.all([zig.command("subscribe", {topic: TOPIC}), js.command("subscribe", {topic: TOPIC})]);
     await js.command("publish", {seed: 0x6d2b79f5, size: 65537, topic: TOPIC});
-    await waitFor(() => zig.events.some((event) => event.event === "message" && event.length === 65537), 10000);
+    await delivered(zig, 65537, 0x6d2b79f5);
     await waitFor(async () => (await zig.command("snapshot")).remoteSubscriptions > 0);
     await waitFor(async () => (await zig.command("snapshot")).meshMembers > 0);
+    const selected = await zig.command("snapshot");
+    assert.equal(selected.connections, 1);
+    assert.equal(selected.inboundVersion, version === "v11" ? "v1_1" : "v1_2");
+    assert.equal(selected.outboundVersion, version === "v11" ? "v1_1" : "v1_2");
+    assert.equal(new Set(zig.events.filter((event) => event.event === "connected").map((event) => event.peer)).size, 1);
     const zigPublish = await zig.command("publish", {seed: 0x6d2b79f7, size: 65537, topic: TOPIC});
     assert(zigPublish.queued > 0, "Zig publish had no mesh recipient");
     let zigAfterPublish;
@@ -237,34 +277,23 @@ async function exercise(version, binary, zigDials = false) {
     } catch {
       throw Error(`zig to js gossip timeout ${JSON.stringify({jsAfterPublish, zigAfterPublish})}`);
     }
+    await delivered(js, 65537, 0x6d2b79f7);
     for (const [size, seed] of [
       [32 * 1024 + 1, 0x6d2b7a01],
       [2 * 1024 * 1024 + 1, 0x6d2b7a02],
     ]) {
-      const expected = summary(payload(size, seed));
       await js.command("publish", {seed, size, topic: TOPIC});
-      await waitFor(
-        () => zig.events.some((event) => event.event === "message" && event.sha256 === expected.sha256),
-        30000
-      );
+      await delivered(zig, size, seed);
       const published = await zig.command("publish", {seed: seed + 2, size, topic: TOPIC});
       assert(published.queued > 0, `Zig ${size} gossip had no mesh recipient`);
-      const reverse = summary(payload(size, seed + 2));
-      await waitFor(
-        () => js.events.some((event) => event.event === "message" && event.sha256 === reverse.sha256),
-        30000
-      );
+      await delivered(js, size, seed + 2);
     }
     if (version === "v12") {
-      const raw = await js.command("rawPublish", {address: zigListen.address, seed: 0x6d2b7a03, size: MAX}, 30000);
-      await waitFor(() => zig.events.some((event) => event.event === "message" && event.sha256 === raw.sha256), 30000);
+      await js.command("rawPublish", {address: zigListen.address, seed: 0x6d2b7a03, size: MAX}, 30000);
+      await delivered(zig, MAX, 0x6d2b7a03);
       const published = await zig.command("publish", {seed: 0x6d2b7a04, size: MAX, topic: TOPIC}, 30000);
       assert(published.queued > 0, "Zig exact gossip had no mesh recipient");
-      const reverse = summary(payload(MAX, 0x6d2b7a04));
-      await waitFor(
-        () => js.events.some((event) => event.event === "message" && event.sha256 === reverse.sha256),
-        30000
-      );
+      await delivered(js, MAX, 0x6d2b7a04);
     }
     await assert.rejects(zig.command("publish", {size: MAX + 1}), /MessageTooLarge/);
     await assert.rejects(js.command("publish", {size: MAX + 1}), /false|assert/i);
@@ -316,6 +345,12 @@ async function exercise(version, binary, zigDials = false) {
       await js.command("disconnect");
       await reclaim(zig, reconnectDeadline);
     }
+    for (const {child, expected} of expectedMessages) {
+      assert.equal(
+        child.events.filter((event) => event.event === "message" && event.sha256 === expected.sha256).length,
+        1
+      );
+    }
     return {jsListen, jsPing, zigListen};
   } finally {
     await Promise.allSettled([zig.stop(), js.stop()]);
@@ -330,5 +365,5 @@ if (process.argv[3] === "--raw-only") {
   const v12 = await exercise("v12", binary);
   await exercise("v12", binary, true);
   const v11 = await exercise("v11", binary);
-  console.log(JSON.stringify({ok: true, v11: v11.jsPing, v12: v12.jsPing}));
+  console.log(JSON.stringify({ok: true, raw, v11: v11.jsPing, v12: v12.jsPing}));
 }
