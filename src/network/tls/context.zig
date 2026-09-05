@@ -80,6 +80,7 @@ pub const Context = struct {
         }
         if (c.SSL_CTX_use_certificate(ssl_ctx, certificate.x509) != 1) return error.OpenSslFailed;
         if (c.SSL_CTX_use_PrivateKey(ssl_ctx, certificate.key) != 1) return error.OpenSslFailed;
+        _ = c.SSL_CTX_set_options(ssl_ctx, c.SSL_OP_NO_TICKET);
         if (c.SSL_CTX_set_alpn_protos(ssl_ctx, &alpn_protos, alpn_protos.len) != 0) {
             return error.OpenSslFailed;
         }

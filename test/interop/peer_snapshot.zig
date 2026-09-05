@@ -5,10 +5,16 @@ const Peer = @import("network_peer.zig").Peer;
 pub fn emit(peer: *Peer, id: u32) !void {
     const reqresp = peer.service.reqresp.active();
     const gossip = peer.service.gossipsub.resourceSnapshot();
+    const transport = peer.transport.engine.counters;
     try control.emit(peer.allocator, .{
         .id = id,
         .ok = true,
         .connections = peer.transport.engine.driverView().activeIndices().len,
+        .accepted = transport.accepted,
+        .droppedUnroutable = transport.dropped_unroutable,
+        .droppedFull = transport.dropped_full,
+        .droppedNoEntropy = transport.dropped_no_entropy,
+        .recvErrors = transport.recv_errors,
         .gossipPeers = gossip.admitted_peers,
         .remoteSubscriptions = gossip.remote_subscriptions,
         .meshMembers = gossip.mesh_members,

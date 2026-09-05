@@ -29,3 +29,10 @@ test "context can create two independent handshakes" {
     defer c.SSL_free(ssl_second);
     try std.testing.expect(context.handshakeState(ssl_first).? != context.handshakeState(ssl_second).?);
 }
+
+test "context disables TLS session tickets" {
+    const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{1}));
+    var ctx = try context.Context.init(&host, 1_700_000_000, .{ 8, 7, 6, 5, 4, 3, 2, 1 });
+    defer ctx.deinit();
+    try std.testing.expect(c.SSL_CTX_get_options(ctx.ssl_ctx) & c.SSL_OP_NO_TICKET != 0);
+}
