@@ -1309,8 +1309,14 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
 ///
 /// Arguments:
 /// - arg 0: signed block bytes (Uint8Array)
-/// - arg 1: options (optional): parse `TransitionOpts`
-pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint8Array, options: ?js.Value) !BeaconStateView {
+/// - arg 1: whether the signed block is blinded (bool)
+/// - arg 2: options (optional): parse `TransitionOpts`
+pub fn stateTransition(
+    self: *const BeaconStateView,
+    signed_block_bytes: js.Uint8Array,
+    is_blinded: js.Boolean,
+    options: ?js.Value,
+) !BeaconStateView {
     const cached_state = try self.requireState();
     const opts = try @import("./transition_opts.zig").parseOptions(options);
 
@@ -1323,7 +1329,8 @@ pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint
 
     const fork_seq = cached_state.config.forkSeqAtEpoch(block_epoch);
 
-    const signed_block = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, bytes);
+    const block_type: fork_types.BlockType = if (try is_blinded.toBool()) .blinded else .full;
+    const signed_block = try AnySignedBeaconBlock.deserialize(allocator, block_type, fork_seq, bytes);
     defer signed_block.deinit(allocator);
 
     const post_state = try st.stateTransition(allocator, js.io(), cached_state, signed_block, opts);
