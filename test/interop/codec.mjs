@@ -151,3 +151,14 @@ export function loopback(value) {
   assert(Number(value.split("/")[4]) <= 65535);
   return value;
 }
+
+export function rangeRequest() {
+  const bytes = Buffer.alloc(24);
+  const startSlot = 0n;
+  const count = 1n;
+  const step = 1n;
+  bytes.writeBigUInt64LE(startSlot, 0);
+  bytes.writeBigUInt64LE(count, 8);
+  bytes.writeBigUInt64LE(step, 16);
+  return bytes;
+}

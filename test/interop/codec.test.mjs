@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
-import {MAX, encodePayload, messageId, payload, readPayload, summary} from "./codec.mjs";
+import {MAX, encodePayload, messageId, payload, rangeRequest, readPayload, summary} from "./codec.mjs";
 
 test("independent literal IDs and fragmented SSZ-snappy", async () => {
   const topic = "/eth2/01000000/beacon_block/ssz_snappy";
@@ -24,4 +24,8 @@ test("independent literal IDs and fragmented SSZ-snappy", async () => {
       assert.deepEqual(summary((await readPayload(fragments())).bytes), summary(input));
     }
   }
+});
+
+test("blocks by range encodes the named uint64 request fields", () => {
+  assert.equal(rangeRequest().toString("hex"), "000000000000000001000000000000000100000000000000");
 });
