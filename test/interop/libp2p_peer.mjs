@@ -271,6 +271,12 @@ async function execute(command) {
         invalid: messageId(TOPIC, Buffer.from([255]), false).toString("hex"),
         other: messageId(TOPIC.replace("beacon_block", "voluntary_exit"), Buffer.from("hello")).toString("hex"),
         phase0: messageId(TOPIC, Buffer.from("hello"), true, true).toString("hex"),
+        phase0Other: messageId(
+          TOPIC.replace("beacon_block", "voluntary_exit"),
+          Buffer.from("hello"),
+          true,
+          true
+        ).toString("hex"),
       };
     case "shutdown":
       await node.stop();
