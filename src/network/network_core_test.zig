@@ -538,7 +538,6 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
         const measured = ledger.bytes;
         try std.testing.expectEqual(measured, node.memoryPlan().allocated_bytes);
         try std.testing.expect(measured <= node.reservations.byte_limit.?);
-        std.debug.print("profile={s} requested={} allocations={} budget={} core={} transport={} scratch={}\n", .{ @tagName(profile), measured, ledger.allocation_calls, node.reservations.byte_limit.?, node.memoryPlan().core_bytes, node.memoryPlan().transport_bytes, node.memoryPlan().scratch_bytes });
         node.deinit(std.testing.io);
         try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
         opts.configuration.byte_limit = measured - 1;
