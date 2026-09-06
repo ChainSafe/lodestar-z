@@ -1,3 +1,7 @@
+pub const policy = @import("policy.zig");
+pub const Demand = types.Demand;
+pub const Coverage = types.Coverage;
+pub const custody = @import("custody.zig");
 pub const discovery = @import("discovery.zig");
 pub const Discovery = discovery.Discovery;
 pub const enr = @import("enr.zig");
@@ -21,6 +25,8 @@ pub const Snapshot = types.Snapshot;
 pub const Event = types.Event;
 pub const Options = types.Options;
 test {
+    _ = custody;
+    _ = policy;
     _ = @import("discovery_test.zig");
     _ = @import("enr_test.zig");
     _ = @import("types_test.zig");

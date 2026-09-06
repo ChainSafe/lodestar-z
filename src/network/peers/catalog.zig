@@ -1,8 +1,11 @@
 const std = @import("std");
 const t = @import("types.zig");
+const custody = @import("custody.zig");
 const reputation = @import("reputation.zig");
 
 pub const Row = struct {
+    custody_work: ?custody.Derivation = null,
+    custody_context: ?t.ForkContext = null,
     generation: u64 = 0,
     occupied: bool = false,
     identity: t.PeerId = undefined,
@@ -26,6 +29,7 @@ pub const Catalog = struct {
     rows: []Row,
     options: t.Options,
     event_cursor: usize = 0,
+    custody_cursor: usize = 0,
 
     pub fn init(a: std.mem.Allocator, options: t.Options) !Catalog {
         try options.validate();
@@ -48,6 +52,42 @@ pub const Catalog = struct {
         };
     }
 
+    pub fn advanceCustody(self: *Catalog, context: *const t.ForkContext, now_ms: u64, freshness_ms: u64, budget: *u16) bool {
+        var pending = false;
+        for (0..self.rows.len) |_| {
+            const row = &self.rows[self.custody_cursor];
+            self.custody_cursor = (self.custody_cursor + 1) % self.rows.len;
+            if (!row.occupied or row.connection == null or row.closing_reason != null) continue;
+            const metadata = row.metadata orelse continue;
+            const count = metadata.custody_group_count orelse {
+                row.custody_work = null;
+                continue;
+            };
+            const compatible = if (row.status) |status| std.mem.eql(u8, &status.fork_digest, &context.digest) else false;
+            if (count == 0 or count > context.custody_groups or !compatible) {
+                row.custody_work = null;
+                continue;
+            }
+            if (!std.meta.eql(row.custody_context, context.*) or (if (row.custody_work) |work| work.requested != count else true)) {
+                row.custody_work = null;
+                row.custody_context = context.*;
+                const node_id = custody.nodeId(&row.identity) catch continue;
+                row.custody_work = custody.Derivation.init(&node_id, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count) catch continue;
+            }
+            if (now_ms >= row.metadata_at_ms +| freshness_ms) continue;
+            const work = &row.custody_work.?;
+            const before = work.hashes;
+            const result = work.step(@min(custody.hashes_per_row, budget.*)) catch {
+                budget.* -= work.hashes - before;
+                continue;
+            };
+            budget.* -= work.hashes - before;
+            pending = pending or result == null;
+        }
+        // A rotating work start prevents a large configured catalog from monopolizing the budget.
+        self.custody_cursor = (self.custody_cursor + 1) % self.rows.len;
+        return pending;
+    }
     pub fn find(self: *const Catalog, identity: *const t.PeerId) ?t.PeerRef {
         for (self.rows, 0..) |*row, index| {
             if (row.occupied and row.identity.eql(identity))
@@ -82,6 +122,7 @@ pub const Catalog = struct {
             .metadata = row.metadata,
             .status_at_ms = row.status_at_ms,
             .metadata_at_ms = row.metadata_at_ms,
+            .custody_groups = if (row.custody_work) |work| if (!work.exhausted and work.groups.count() == work.requested) work.groups else null else null,
             .connected_at_ms = row.connected_at_ms,
             .direct = row.direct,
             .score = row.reputation.score,
@@ -154,6 +195,8 @@ pub const Catalog = struct {
     }
 
     fn connect(row: *Row, conn: t.Handle, options: *const t.AdmissionOptions) void {
+        row.custody_work = null;
+        row.custody_context = null;
         row.connection = conn;
         row.closing_reason = null;
         row.direction = options.direction;
@@ -244,6 +287,7 @@ pub const Catalog = struct {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return false;
         if (row.metadata) |current| if (metadata.seq_number < current.seq_number) return false;
+        if (row.metadata == null or row.metadata.?.custody_group_count != metadata.custody_group_count) row.custody_work = null;
         row.metadata = metadata.*;
         row.metadata_at_ms = now_ms;
         if (row.published or row.status != null) row.pending_update = true;

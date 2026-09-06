@@ -66,6 +66,7 @@ pub const Snapshot = struct {
     metadata: ?Metadata,
     status_at_ms: u64,
     metadata_at_ms: u64,
+    custody_groups: ?@import("custody.zig").Groups = null,
     connected_at_ms: u64,
     direct: bool,
     score: f64,
@@ -111,4 +112,25 @@ pub const MemoryPlan = struct {
     allocated_bytes: usize,
     rows: u16,
     notification_slots: u16,
+};
+
+pub const Coverage = struct {
+    attnets: u64 = 0,
+    syncnets: u4 = 0,
+    custody: @import("custody.zig").Groups = .initEmpty(),
+};
+pub const Demand = struct {
+    coverage: Coverage = .{},
+    attestation_target: u16 = 1,
+    sync_target: u16 = 1,
+    custody_target: u16 = 1,
+    expires_at_slot: u64 = 0,
+
+    pub fn validate(self: *const Demand, context: *const ForkContext, max_peers: u16) !void {
+        try context.validate();
+        if (self.attestation_target == 0 or self.sync_target == 0 or self.custody_target == 0 or
+            self.attestation_target > max_peers or self.sync_target > max_peers or
+            self.custody_target > max_peers) return error.InvalidDemand;
+        for (context.custody_groups..128) |index| if (self.coverage.custody.isSet(index)) return error.InvalidDemand;
+    }
 };

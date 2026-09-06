@@ -787,3 +787,188 @@ test "core review early native close preserves selected reason and counts it onc
         try std.testing.expectEqual(@as(u64, 1), total);
     }
 }
+
+test "core coverage demand copies expires at host slot and keeps general discovery independent" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    var demand: t.Demand = .{ .coverage = .{ .syncnets = 1 }, .expires_at_slot = 101 };
+    try setup.client.setDemand(&demand);
+    demand.coverage.syncnets = 2;
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(@as(u8, 1), setup.client.discoveryNeed().syncnets);
+    try std.testing.expect(setup.client.discoveryNeed().general);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 101, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(@as(u8, 0), setup.client.discoveryNeed().syncnets);
+    try std.testing.expect(setup.client.discoveryNeed().general);
+    const due = setup.client.nextWakeup(setup.pair.now, 0, 0, 0, 0);
+    try std.testing.expect(due == null or due.? > setup.pair.now.mono_ms);
+}
+
+test "core coverage authenticated custody differs from gossip delivery and invalidates fork groups" {
+    var setup: Setup = .{};
+    var local: t.LocalState = .{ .fork = .{ .fork = .fulu }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .syncnets = 1, .custody_group_count = 128 } };
+    try setup.init(&local);
+    defer setup.deinit();
+    var demand: t.Demand = .{ .coverage = .{ .syncnets = 1 }, .expires_at_slot = 200 };
+    demand.coverage.custody.set(0);
+    try setup.client.setDemand(&demand);
+    for (0..60) |_| try setup.step(0);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().custody);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const connection = snapshots[0].connection.?;
+    const index = setup.client.service.gossipsub.inner.state.findPeer(connection).?;
+    setup.client.service.gossipsub.inner.resetOutbound(&setup.pair.client, index);
+    try std.testing.expect(!setup.client.service.gossipsub.deliveryAvailable(connection));
+    setup.client.service.gossipsub.streams[index].outbound = .{ .waiting = setup.pair.now.mono_ms +| 30_000 };
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().custody);
+    local.fork.custody_groups = 64;
+    local.metadata.custody_group_count = 64;
+    try setup.client.updateFork(&local, setup.pair.now);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().custody);
+    _ = setup.client.snapshots(&snapshots);
+    try std.testing.expect(snapshots[0].custody_groups == null);
+}
+
+test "core coverage physical closing capacity blocks new leased intents" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..50) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    try std.testing.expect(setup.client.disconnect(snapshots[0].peer, .host, setup.pair.now));
+    for (0..2) |_| _ = try setup.pair.client.dial(&support.server_address, setup.pair.server_ctx.local_peer_id, setup.pair.now, setup.pair.nextEntropy());
+    try std.testing.expectEqual(@as(u16, 3), setup.pair.client.registry.active_len);
+    var secret: [32]u8 = @splat(0);
+    secret[31] = 17;
+    const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
+    const peer = t.PeerId.fromPublicKey(&key);
+    try setup.client.connect(&peer, &.{support.server_address}, setup.pair.now);
+    var out: [2]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 0), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &out));
+    try std.testing.expectEqual(@as(u16, 0), setup.client.dial_queue.attempts().total);
+}
+
+test "core coverage direct candidate dials at soft target and respects physical hard capacity" {
+    var setup: Setup = .{};
+    var opts = options();
+    opts.peers.target_peers = 1;
+    opts.peers.min_outbound = 0;
+    try setup.initOwnersWithOptions(&.{}, opts);
+    defer setup.deinit();
+    _ = try setup.pair.dial();
+    for (0..50) |_| try setup.step(0);
+    var secret: [32]u8 = @splat(0);
+    secret[31] = 17;
+    const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
+    const peer = t.PeerId.fromPublicKey(&key);
+    try setup.client.addDirectPeer(&peer, &.{support.server_address}, setup.pair.now);
+    var out: [1]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &out));
+    try std.testing.expect(out[0].peer.eql(&peer));
+}
+
+fn candidateFor(peer: *const t.PeerId, count: ?u64) !@import("peers/enr.zig").Candidate {
+    return .{ .peer = peer.*, .node_id = try @import("peers/custody.zig").nodeId(peer), .sequence = 1, .addresses = .{ support.server_address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = null, .custody_group_count = count };
+}
+
+test "core coverage automatic retention renews only at authenticated Status success" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    var candidate = try candidateFor(&setup.pair.server_ctx.local_peer_id, null);
+    try setup.client.discovered(&candidate, setup.pair.now);
+    _ = try setup.pair.dial();
+    for (0..50) |_| try setup.step(0);
+    const horizon = setup.client.dial_queue.rows[0].history_until_ms;
+    setup.pair.advance(1000);
+    for (0..10) |_| try setup.step(0);
+    try std.testing.expectEqual(horizon, setup.client.dial_queue.rows[0].history_until_ms);
+    candidate.sequence = 2;
+    try setup.client.discovered(&candidate, setup.pair.now);
+    setup.pair.advance(21_000);
+    for (0..50) |_| try setup.step(0);
+    try std.testing.expectEqual(horizon, setup.client.dial_queue.rows[0].history_until_ms);
+    setup.client.reStatusPeers(setup.pair.now);
+    for (0..50) |_| try setup.step(0);
+    try std.testing.expect(setup.client.dial_queue.rows[0].history_until_ms > horizon);
+}
+
+test "core coverage bounded custody work resumes without output and stale metadata cannot satisfy demand" {
+    var setup: Setup = .{};
+    const local: t.LocalState = .{ .fork = .{ .fork = .fulu }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 127, .syncnets = 1 } };
+    try setup.init(&local);
+    defer setup.deinit();
+    var demand: t.Demand = .{ .coverage = .{ .syncnets = 1 }, .expires_at_slot = 200 };
+    demand.coverage.custody.set(0);
+    try setup.client.setDemand(&demand);
+    for (0..50) |_| try setup.step(0);
+    var initial: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&initial);
+    try std.testing.expect(setup.client.catalog.updateMetadata(initial[0].peer, initial[0].connection.?, &.{ .seq_number = 10, .custody_group_count = 1 }, setup.pair.now.mono_ms));
+    try std.testing.expect(setup.client.catalog.updateMetadata(initial[0].peer, initial[0].connection.?, &.{ .seq_number = 11, .custody_group_count = 127, .syncnets = 1 }, setup.pair.now.mono_ms));
+    for (0..4) |i| {
+        var secret: [32]u8 = @splat(0);
+        secret[31] = @intCast(i + 20);
+        const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
+        const peer = t.PeerId.fromPublicKey(&key);
+        const candidate = try candidateFor(&peer, 127);
+        try setup.client.discovered(&candidate, setup.pair.now);
+    }
+    var saw_pending = false;
+    for (0..80) |_| {
+        const before = setup.client.counters.custody_hashes;
+        try setup.step(0);
+        try std.testing.expect(setup.client.counters.custody_hashes - before <= 256);
+        if (setup.client.custody_pending) {
+            saw_pending = true;
+            try std.testing.expect(setup.client.nextWakeup(setup.pair.now, 0, 0, 0, 0).? <= setup.pair.now.mono_ms +| 1);
+        }
+    }
+    try std.testing.expect(saw_pending);
+    try std.testing.expect(!setup.client.custody_pending);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    try std.testing.expectEqual(@as(usize, 127), snapshots[0].custody_groups.?.count());
+    setup.pair.advance(60_000);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().custody);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
+}
+
+test "core coverage outbound deficit uses hard room or retires inbound before replacement" {
+    for ([_]u16{ 1, 2 }) |maximum| {
+        var setup: Setup = .{};
+        var opts = options();
+        opts.peers.max_peers = maximum;
+        opts.peers.target_peers = 1;
+        opts.peers.min_outbound = 1;
+        try setup.initOwnersWithOptions(&.{}, opts);
+        defer setup.deinit();
+        _ = try setup.pair.dial();
+        for (0..60) |_| try setup.step(0);
+        if (maximum == 1) {
+            try std.testing.expect(setup.server.counters.policy_disconnects > 0);
+            setup.pair.advance(2000);
+            for (0..8) |_| try setup.step(0);
+            try std.testing.expectEqual(@as(u16, 0), setup.pair.server.registry.active_len);
+        } else try std.testing.expectEqual(@as(u16, 1), setup.server.connectedPeerCount());
+        var secret: [32]u8 = @splat(0);
+        secret[31] = 17;
+        const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
+        const peer = t.PeerId.fromPublicKey(&key);
+        const candidate = try candidateFor(&peer, null);
+        try setup.server.discovered(&candidate, setup.pair.now);
+        var out: [1]managed.DialIntent = undefined;
+        try std.testing.expectEqual(@as(usize, 1), setup.server.dialIntents(&setup.pair.server, setup.pair.now, &out));
+        try std.testing.expect(out[0].peer.eql(&peer));
+    }
+}

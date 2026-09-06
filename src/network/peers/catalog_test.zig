@@ -240,3 +240,46 @@ test "peer catalog accepts native generation zero and still rejects another full
     try std.testing.expect(!c.disconnect(ref, .{ .index = 0, .generation = 1 }, .host, 0));
     try std.testing.expect(c.disconnect(ref, zero, .host, 0));
 }
+
+test "peer catalog custody binds authenticated generations and preserves unchanged freshness work" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
+    const fork: t.ForkContext = .{ .fork = .fulu, .custody_groups = 128 };
+    try std.testing.expect(c.updateStatus(ref, first, &.{ .earliest_available_slot = 0 }, 0));
+    const metadata: t.Metadata = .{ .custody_group_count = 127 };
+    try std.testing.expect(c.updateMetadata(ref, first, &metadata, 0));
+    var budget: u16 = 64;
+    try std.testing.expect(c.advanceCustody(&fork, 0, 60_000, &budget));
+    try std.testing.expectEqual(@as(u16, 0), budget);
+    try std.testing.expect(c.get(ref).?.custody_groups == null);
+    for (0..63) |i| {
+        try std.testing.expect(c.updateMetadata(ref, first, &metadata, i + 1));
+        budget = 64;
+        _ = c.advanceCustody(&fork, i + 1, 60_000, &budget);
+    }
+    try std.testing.expectEqual(@as(usize, 127), c.get(ref).?.custody_groups.?.count());
+    budget = 64;
+    _ = c.advanceCustody(&fork, 64, 60_000, &budget);
+    try std.testing.expectEqual(@as(u16, 64), budget);
+    const changed: t.ForkContext = .{ .fork = .fulu, .custody_groups = 64 };
+    _ = c.advanceCustody(&changed, 64, 60_000, &budget);
+    try std.testing.expect(c.get(ref).?.custody_groups == null);
+    const result = admit(&c, &remote, replacement, .outbound, 64).admitted;
+    try std.testing.expectEqual(ref, result.peer);
+    try std.testing.expect(c.get(ref).?.custody_groups == null);
+    try std.testing.expect(!c.updateMetadata(ref, first, &metadata, 65));
+}
+
+test "peer catalog changed custody metadata immediately invalidates copied groups" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
+    try std.testing.expect(c.updateStatus(ref, first, &.{}, 0));
+    try std.testing.expect(c.updateMetadata(ref, first, &.{ .custody_group_count = 128 }, 0));
+    var budget: u16 = 0;
+    _ = c.advanceCustody(&.{}, 0, 60_000, &budget);
+    try std.testing.expectEqual(@as(usize, 128), c.get(ref).?.custody_groups.?.count());
+    try std.testing.expect(c.updateMetadata(ref, first, &.{ .seq_number = 1, .custody_group_count = 1 }, 1));
+    try std.testing.expect(c.get(ref).?.custody_groups == null);
+}
