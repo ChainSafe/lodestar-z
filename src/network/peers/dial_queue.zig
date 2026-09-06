@@ -68,7 +68,8 @@ pub const DialQueue = struct {
         attempts: usize = 0,
         connected: usize = 0,
         automatic: usize = 0,
-        custody_pending: usize = 0,
+        /// Retained unfinished derivations, including expired hints; excludes exhausted work.
+        custody_incomplete: usize = 0,
     };
 
     pub fn resourceSnapshot(self: *const DialQueue) Resources {
@@ -79,7 +80,9 @@ pub const DialQueue = struct {
             if (row.attempt) result.attempts += 1;
             if (row.connected) result.connected += 1;
             if (row.automatic) result.automatic += 1;
-            if (row.custody_work != null) result.custody_pending += 1;
+            if (row.custody_work) |*work| {
+                if (!work.exhausted and work.groups.count() < work.requested) result.custody_incomplete += 1;
+            }
         }
         return result;
     }

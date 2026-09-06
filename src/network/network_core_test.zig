@@ -774,6 +774,7 @@ test "managed runtime topic policy copies values and rejects atomically" {
     const initial = node.diagnostics();
     try std.testing.expectEqual(@as(usize, 4), initial.transport_resources.capacity);
     try std.testing.expectEqual(@as(usize, 0), initial.transport_resources.active);
+    try std.testing.expectEqual(@as(usize, 0), initial.core.dialing.custody_incomplete);
     const revision_before_read = node.core.service.gossipsub.inner.scores.revision;
     try std.testing.expectEqualDeep(initial, node.diagnostics());
     try std.testing.expectEqual(revision_before_read, node.core.service.gossipsub.inner.scores.revision);
