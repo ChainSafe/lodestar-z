@@ -34,7 +34,7 @@ pub const Mesh = struct {
     }
 
     pub fn takeSnapshot(self: *Mesh, context: *const Context) void {
-        for (&context.state.peers, 0..) |*peer, index| {
+        for (context.state.peers, 0..) |*peer, index| {
             self.snapshot[index] = if (peer.active) .{
                 .generation = peer.generation,
                 .score = context.scores.score(peer.logical.index, context.now),
@@ -110,7 +110,7 @@ pub const Mesh = struct {
 
     fn candidates(self: *Mesh, context: *const Context, topic: u16, out: *[c.peers_cap]u16, graft_only: bool, threshold: f64) usize {
         var count: usize = 0;
-        for (0..c.peers_cap) |index| {
+        for (0..context.state.peers.len) |index| {
             const peer: u16 = @intCast(index);
             if (context.state.mesh(topic).isSet(peer)) continue;
             if (!self.eligible(context, topic, peer, threshold)) continue;

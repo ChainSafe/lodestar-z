@@ -522,3 +522,47 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
     try std.testing.expect(replacement.diagnostics().dial_started > 0);
     replacement.shutdown(now);
 }
+
+test "managed profiles measure reservations and unwind byte exhaustion" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{21}));
+    inline for (.{ @import("configuration.zig").Profile.small, .beacon_node }) |profile| {
+        var ledger: @import("reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+        var opts: runtime.ManagedOptions = .{
+            .host = &key,
+            .bind = .{ .ip4 = .loopback(0) },
+            .local = .{},
+            .configuration = .{ .profile = profile, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} },
+        };
+        var node: runtime.NetworkCore = undefined;
+        try node.initManaged(ledger.allocator(), std.testing.io, opts);
+        const measured = ledger.bytes;
+        try std.testing.expectEqual(measured, node.memoryPlan().allocated_bytes);
+        try std.testing.expect(measured <= node.reservations.byte_limit.?);
+        std.debug.print("profile={s} requested={} allocations={} budget={} core={} transport={} scratch={}\n", .{ @tagName(profile), measured, ledger.allocation_calls, node.reservations.byte_limit.?, node.memoryPlan().core_bytes, node.memoryPlan().transport_bytes, node.memoryPlan().scratch_bytes });
+        node.deinit(std.testing.io);
+        try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
+        opts.configuration.byte_limit = measured - 1;
+        try std.testing.expectError(error.OutOfMemory, node.initManaged(ledger.allocator(), std.testing.io, opts));
+        try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
+        opts.configuration.byte_limit = measured;
+        try node.initManaged(ledger.allocator(), std.testing.io, opts);
+        node.deinit(std.testing.io);
+        try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
+    }
+}
+
+test "managed small profile cleans every failed allocation prefix" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, profileAllocationFailures, .{});
+}
+
+fn profileAllocationFailures(a: std.mem.Allocator) !void {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
+    var node: runtime.NetworkCore = undefined;
+    try node.initManaged(a, std.testing.io, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .local = .{},
+        .configuration = .{ .profile = .small, .seed = 1, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} },
+    });
+    node.deinit(std.testing.io);
+}

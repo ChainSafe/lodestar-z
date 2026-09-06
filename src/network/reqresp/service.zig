@@ -55,8 +55,9 @@ pub const Service = struct {
         errdefer inner.deinit();
 
         const sink_size = protocol.requestMaxAll();
-        const sink_bytes = std.math.mul(usize, inbound_max, sink_size) catch
-            return error.InvalidOptions;
+        const bulk_bytes = std.math.mul(usize, inbound_max - options.inbound_control_reserved, sink_size) catch return error.InvalidOptions;
+        const control_bytes = std.math.mul(usize, options.inbound_control_reserved, protocol.requestMaxControl()) catch return error.InvalidOptions;
+        const sink_bytes = std.math.add(usize, bulk_bytes, control_bytes) catch return error.InvalidOptions;
         const sink_arena = try allocator.alloc(u8, sink_bytes);
         errdefer allocator.free(sink_arena);
 
@@ -228,8 +229,17 @@ pub const Service = struct {
             else => return null,
         };
         const index = self.inner.availableInboundFor(which) orelse return null;
-        const sink = self.sink_arena[@as(usize, index) * self.sink_size ..][0..self.sink_size];
+        const sink = self.inboundSink(index);
         return self.inner.accept(engine, stream, selection, sink, now) catch null;
+    }
+
+    pub fn inboundSink(self: *Service, index: u16) []u8 {
+        std.debug.assert(index < self.inner.inbound.len);
+        const reserved = self.inner.options.inbound_control_reserved;
+        const control_size = protocol.requestMaxControl();
+        const offset = if (index < reserved) @as(usize, index) * control_size else @as(usize, reserved) * control_size + @as(usize, index - reserved) * self.sink_size;
+        const size = if (index < reserved) control_size else self.sink_size;
+        return self.sink_arena[offset..][0..size];
     }
 
     /// Forward Driver activity separately from lifecycle events.
@@ -340,3 +350,21 @@ pub const Service = struct {
         self.inner.shutdown(engine, router);
     }
 };
+
+test "reqresp typed reserved sinks keep full control waves and exclude bulk" {
+    var service = try Service.initHandler(std.testing.allocator, .{ .forks = &.{}, .inbound_max = 4, .inbound_control_reserved = 2, .inbound_per_peer_max = 4 });
+    defer service.deinit();
+    try std.testing.expectEqual(2 * protocol.requestMaxAll() + 2 * protocol.requestMaxControl(), service.sink_arena.len);
+    try std.testing.expectEqual(@as(?u16, 2), service.inner.availableInboundFor(.blocks_by_range_v2));
+    for (0..4) |i| {
+        const index = service.inner.availableInboundFor(.ping_v1).?;
+        try std.testing.expectEqual(@as(u16, @intCast(i)), index);
+        service.inner.inbound[index].state = .receiving_request;
+        service.inner.inbound[index].protocol = .ping_v1;
+    }
+    try std.testing.expectEqual(@as(?u16, null), service.inner.availableInboundFor(.ping_v1));
+    service.inner.inbound[0].state = .free;
+    try std.testing.expectEqual(@as(?u16, null), service.inner.availableInboundFor(.blocks_by_range_v2));
+    try std.testing.expectEqual(@as(?u16, 0), service.inner.availableInboundFor(.ping_v1));
+    for (service.inner.inbound) |*slot| slot.state = .free;
+}

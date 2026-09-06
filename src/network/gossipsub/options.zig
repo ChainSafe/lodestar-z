@@ -4,6 +4,9 @@ const score_mod = @import("score.zig");
 const storage = @import("message_store.zig");
 
 pub const Options = struct {
+    connected_capacity: u16 = constants.peers_cap,
+    retained_capacity: u16 = @import("peers.zig").capacity,
+    retained_outbound_reserve: u16 = @import("peers.zig").outbound_reserve,
     message_id_policy: topic_mod.MessageIdPolicy = .{},
     heartbeat_interval_ms: u64 = constants.heartbeat_interval_ms,
     seen_capacity: usize = 65_536,
@@ -57,6 +60,9 @@ pub const Options = struct {
 pub fn validate(o: *const Options) error{InvalidLimits}!void {
     if (o.random_seed == null or o.ip_allowlist.len > 32 or o.retained_score_ms == 0 or o.retained_score_ms > 86_400_000) return error.InvalidLimits;
     if (!@import("std").math.isFinite(o.gossip_factor) or o.gossip_factor < 0 or o.gossip_factor > 1) return error.InvalidLimits;
+    try range(o.connected_capacity, 1, constants.peers_cap);
+    try range(o.retained_capacity, o.connected_capacity, @import("peers.zig").capacity);
+    try range(o.retained_outbound_reserve, 1, o.retained_capacity - 1);
     const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
     try range(o.validation_capacity, 1, 8192);
     try range(o.seen_capacity, 1, 1_048_576);

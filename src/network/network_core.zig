@@ -39,6 +39,15 @@ pub const Options = struct {
     local: t.LocalState,
     schedule: ForkSchedule,
     discovery: ?DiscoveryOptions = null,
+    byte_limit: ?usize = null,
+};
+pub const ManagedOptions = struct {
+    host: *const @import("wire/keys.zig").KeyPair,
+    bind: std.Io.net.IpAddress,
+    configuration: @import("configuration.zig").Request,
+    local: t.LocalState,
+    schedule: ForkSchedule = .{},
+    discovery: ?DiscoveryOptions = null,
 };
 pub const Outputs = struct {
     peers: []t.Event = &.{},
@@ -124,17 +133,13 @@ pub const NetworkCore = struct {
     initialized: bool = false,
 
     pub fn init(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, options: Options) !void {
-        try options.core.peers.validate();
-        if (options.core.peers.engine_capacity != options.transport.limits.connections_max or
-            options.core.dial.engine_dialing_max != options.transport.limits.dialing_max or
-            options.core.dial.concurrent_max > options.transport.limits.dialing_max)
-            return error.InvalidOptions;
+        try @import("configuration.zig").validate(options.transport.limits, options.core);
         var local: t.LocalState = undefined;
         try peers.control_wire.copyLocal(&local, &options.local);
         try validateSchedule(&local, options.schedule);
         try validateForkTable(options.core.service.reqresp.forks, &local.fork);
         self.initialized = false;
-        self.reservations = .{ .backing = backing };
+        self.reservations = .{ .backing = backing, .byte_limit = options.byte_limit };
         errdefer std.debug.assert(self.reservations.bytes == 0);
         const allocator = self.reservations.allocator();
         self.allocator = allocator;
@@ -166,6 +171,18 @@ pub const NetworkCore = struct {
         self.memory.allocated_bytes = self.reservations.bytes;
         std.debug.assert(self.memory.allocated_bytes == self.memory.transport_bytes + self.memory.core_bytes + self.memory.scratch_bytes + self.memory.discovery_bytes);
         self.initialized = true;
+    }
+
+    pub fn initManaged(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, options: ManagedOptions) !void {
+        const resolved = try @import("configuration.zig").resolve(options.configuration);
+        try self.init(backing, io, .{
+            .transport = .{ .host = options.host, .bind = options.bind, .limits = resolved.limits },
+            .core = resolved.core,
+            .local = options.local,
+            .schedule = options.schedule,
+            .discovery = options.discovery,
+            .byte_limit = resolved.byte_limit,
+        });
     }
 
     pub fn deinit(self: *NetworkCore, io: std.Io) void {

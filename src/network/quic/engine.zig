@@ -189,8 +189,7 @@ pub const Engine = struct {
     event_cursor: u16 = 0,
     activity_cursor: u16 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, options: Options) Error!Engine {
-        const wanted = options.limits;
+    pub fn validateLimits(wanted: Limits) Error!u16 {
         if (wanted.connections_max == 0) return error.InvalidLimits;
         if (wanted.connections_max > limits.connections_max_ceiling) return error.InvalidLimits;
         if (wanted.handshaking_max == 0 or wanted.handshaking_max > wanted.connections_max) {
@@ -209,6 +208,13 @@ pub const Engine = struct {
         const outbound_max = wanted.outbound_max orelse
             @max(1, wanted.connections_max - wanted.connections_max / 4);
         if (outbound_max == 0 or outbound_max > wanted.connections_max) return error.InvalidLimits;
+
+        return outbound_max;
+    }
+
+    pub fn init(allocator: std.mem.Allocator, options: Options) Error!Engine {
+        const wanted = options.limits;
+        const outbound_max = try validateLimits(wanted);
 
         const connection_window = std.math.clamp(
             wanted.receive_budget_bytes / wanted.connections_max,

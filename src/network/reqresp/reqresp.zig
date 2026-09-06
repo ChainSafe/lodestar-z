@@ -469,7 +469,9 @@ pub const ReqResp = struct {
     }
 
     pub fn availableInboundFor(self: *ReqResp, which: Protocol) ?u16 {
-        return self.claimProtocol(self.inbound, which, self.options.inbound_control_reserved);
+        const start: usize = if (which.isControl()) 0 else self.options.inbound_control_reserved;
+        const offset = self.claim(self.inbound[start..]) orelse return null;
+        return @intCast(start + offset);
     }
 
     pub fn availableOutboundFor(self: *ReqResp, which: Protocol) ?u16 {

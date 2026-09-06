@@ -66,3 +66,12 @@ test {
     _ = @import("core_control_test.zig");
     _ = @import("network_core_test.zig");
 }
+
+test {
+    _ = @import("reservations.zig");
+}
+
+pub const configuration = @import("configuration.zig");
+test {
+    _ = configuration;
+}

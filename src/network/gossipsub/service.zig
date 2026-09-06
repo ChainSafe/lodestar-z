@@ -66,7 +66,7 @@ pub const Service = struct {
     pub fn initHandler(allocator: Allocator, options: gossipsub_mod.Options) InitError!Service {
         var inner = try Gossipsub.init(allocator, options);
         errdefer inner.deinit();
-        const streams = try allocator.alloc(Supervisor, constants.peers_cap);
+        const streams = try allocator.alloc(Supervisor, options.connected_capacity);
         errdefer allocator.free(streams);
         @memset(streams, .{});
         return .{

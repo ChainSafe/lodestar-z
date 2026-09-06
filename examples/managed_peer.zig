@@ -29,13 +29,10 @@ pub fn main(init: std.process.Init) !void {
     };
     var seed: [8]u8 = undefined;
     try init.io.randomSecure(&seed);
-    var core: network.core.Options = .{ .dial = .{ .seed = std.mem.readInt(u64, &seed, .little) } };
-    core.peers.engine_capacity = (network.quic.engine.Limits{}).connections_max;
-    core.service.reqresp.forks = &.{.{ .digest = local.fork.digest, .fork = local.fork.fork }};
-    core.service.gossipsub.random_seed = core.dial.seed;
-    try node.init(a, init.io, .{
-        .transport = .{ .host = &key, .bind = .{ .ip4 = .loopback(0) } },
-        .core = core,
+    try node.initManaged(a, init.io, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .configuration = .{ .seed = std.mem.readInt(u64, &seed, .little), .forks = &.{.{ .digest = local.fork.digest, .fork = local.fork.fork }} },
         .local = local,
         .schedule = .{ .fulu_scheduled = true },
         .discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .bootstrap = bootstrap[0..count] },
