@@ -5,6 +5,55 @@ const wire = @import("peers/control_wire.zig");
 const rr = @import("reqresp/root.zig");
 const Engine = @import("quic/engine.zig");
 
+test "core native stalled fork transition only wakes for eligible work" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const peer = snapshots[0].peer;
+    const conn = snapshots[0].connection.?;
+    try std.testing.expect(snapshots[0].relevant);
+    try std.testing.expect(setup.client.service.gossipsub.admitted(conn));
+    const gossip_due = setup.client.control.schedules[peer.index].gossip_retry_ms;
+    try std.testing.expect(gossip_due > setup.pair.now.mono_ms);
+    try std.testing.expectEqual(gossip_due, setup.client.control.nextWakeup(setup.pair.now).?);
+    const updated: t.LocalState = .{
+        .fork = .{ .fork = .fulu, .digest = @splat(1) },
+        .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
+        .metadata = .{ .seq_number = 1, .custody_group_count = 1 },
+    };
+    try setup.client.updateFork(&updated, setup.pair.now);
+    setup.pair.advance(1500);
+    for (0..8) |_| {
+        _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    }
+    try std.testing.expect(!setup.client.catalog.get(peer).?.relevant);
+    try std.testing.expect(gossip_due < setup.pair.now.mono_ms);
+    try std.testing.expect(setup.client.service.gossipsub.admitted(conn));
+    var active: usize = 0;
+    for (setup.client.control.operations) |op| if (op.request != null and !op.cancelled) {
+        active += 1;
+    };
+    try std.testing.expect(active > 0);
+    const service_due = setup.client.service.nextWakeupPartitioned(setup.pair.now, 0, 32, 0).?;
+    try std.testing.expect(service_due > setup.pair.now.mono_ms);
+    try std.testing.expect(setup.client.control.nextWakeup(setup.pair.now).? > setup.pair.now.mono_ms);
+    const core_due = setup.client.nextWakeup(setup.pair.now, 0, 0, 0, 0).?;
+    try std.testing.expect(core_due > setup.pair.now.mono_ms and core_due <= service_due);
+    try setup.server.updateFork(&updated, setup.pair.now);
+    for (0..80) |_| try setup.step(0);
+    try std.testing.expect(setup.client.catalog.get(peer).?.relevant);
+    const resumed = setup.client.control.schedules[peer.index].gossip_retry_ms;
+    try std.testing.expectEqual(setup.pair.now.mono_ms + 1_000, resumed);
+    try std.testing.expectEqual(resumed, setup.client.control.nextWakeup(setup.pair.now).?);
+    setup.pair.advance(1_000);
+    try std.testing.expectEqual(setup.pair.now.mono_ms, setup.client.control.nextWakeup(setup.pair.now).?);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(setup.pair.now.mono_ms + 1_000, setup.client.control.schedules[peer.index].gossip_retry_ms);
+}
+
 test "core native host fork transition cancels old maintenance without reviving closing peers" {
     var setup: Setup = .{};
     try setup.init(&.{});
