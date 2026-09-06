@@ -76,6 +76,16 @@ pub const Core = struct {
     pub const Counters = struct { rejected: u64 = 0, displaced: u64 = 0, policy_disconnects: u64 = 0, custody_hashes: u64 = 0 };
     pub const PeerCounts = struct { connected: u16, relevant: u16, outbound_relevant: u16 };
 
+    pub fn validateOptions(options: Options) !void {
+        try options.peers.validate();
+        if (options.metadata_freshness_ms == 0 or options.metadata_freshness_ms > 86_400_000) return error.InvalidOptions;
+        if (options.service.reqresp.peers < options.peers.engine_capacity)
+            return error.InvalidOptions;
+        try control_mod.Control.validateOptions(options.control);
+        try dial_mod.DialQueue.validateOptions(options.dial);
+        try service_mod.Service.validateOptions(options.service);
+    }
+
     pub fn init(
         a: std.mem.Allocator,
         identity: *const t.PeerId,
@@ -84,10 +94,7 @@ pub const Core = struct {
     ) !Core {
         var copied: t.LocalState = undefined;
         try peers.control_wire.copyLocal(&copied, local);
-        try options.peers.validate();
-        if (options.metadata_freshness_ms == 0 or options.metadata_freshness_ms > 86_400_000) return error.InvalidOptions;
-        if (options.service.reqresp.peers < options.peers.engine_capacity)
-            return error.InvalidOptions;
+        try validateOptions(options);
         var catalog = try peers.Catalog.init(a, options.peers);
         errdefer catalog.deinit(a);
         var control = try control_mod.Control.init(

@@ -565,3 +565,42 @@ fn profileAllocationFailures(a: std.mem.Allocator) !void {
     });
     node.deinit(std.testing.io);
 }
+
+test "managed invalid complete sections reject before allocation" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
+    const forks: []const @import("reqresp/reqresp.zig").ForkEntry = &.{.{ .digest = @splat(0), .fork = .phase0 }};
+    const base = try @import("configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = forks });
+    inline for (.{ error.InvalidOptions, error.InvalidOptions, error.InvalidQuota, error.InvalidOptions, error.InvalidLimits, error.InvalidLimits, error.InvalidLimits, error.InvalidOptions }, 0..) |expected, section| {
+        var request: @import("configuration.zig").Request = .{ .profile = .small, .seed = 1, .forks = forks };
+        switch (section) {
+            0 => {
+                var requests = base.core.service.reqresp;
+                requests.work_per_pump_max = 0;
+                request.reqresp = requests;
+            },
+            1 => request.control = .{ .ping_inbound_ms = 0 },
+            2 => {
+                var requests = base.core.service.reqresp;
+                var quotas = @import("reqresp/limiter.zig").defaultQuotas();
+                quotas[0].period_ms = 0;
+                requests.global_quotas = quotas;
+                request.reqresp = requests;
+            },
+            3 => request.dial = .{ .seed = 1, .concurrent_max = 0 },
+            4 => request.router = .{ .meshsub = false },
+            5 => {
+                var gossip_options = base.core.service.gossipsub;
+                gossip_options.score_params.decay_interval_ms = 0;
+                request.gossip = gossip_options;
+            },
+            6 => request.limits = .{ .handshaking_max = 0 },
+            7 => request.peers = .{ .capacity = 0 },
+            else => unreachable,
+        }
+        var ledger: @import("reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+        var node: runtime.NetworkCore = undefined;
+        try std.testing.expectError(expected, node.initManaged(ledger.allocator(), std.testing.io, .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .local = .{}, .configuration = request }));
+        try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
+        try std.testing.expectEqual(@as(usize, 0), ledger.allocation_calls);
+    }
+}

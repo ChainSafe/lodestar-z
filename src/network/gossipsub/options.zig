@@ -58,6 +58,7 @@ pub const Options = struct {
 };
 
 pub fn validate(o: *const Options) error{InvalidLimits}!void {
+    try score_mod.validateParams(o.score_params);
     if (o.random_seed == null or o.ip_allowlist.len > 32 or o.retained_score_ms == 0 or o.retained_score_ms > 86_400_000) return error.InvalidLimits;
     if (!@import("std").math.isFinite(o.gossip_factor) or o.gossip_factor < 0 or o.gossip_factor > 1) return error.InvalidLimits;
     try range(o.connected_capacity, 1, constants.peers_cap);
