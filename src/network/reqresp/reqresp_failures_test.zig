@@ -334,9 +334,16 @@ test "reqresp withholds chunks while the peer's bucket is empty" {
     try std.testing.expectEqual(@as(u64, 1), setup.server.counters.withheld_chunks);
 
     const waiting = setup.server.resourceSnapshot();
+    setup.server.options.work_per_pump_max = 1;
+    _ = setup.server.pump(&setup.pair.server, &setup.server_neg, setup.pair.now, &.{});
+    const eligible = setup.server.limiter.nextToken(setup.handles.server, .ping_v1, setup.pair.now.mono_ms);
+    try std.testing.expect(eligible.? > setup.pair.now.mono_ms);
+    try std.testing.expectEqual(eligible, setup.server.nextWakeup(setup.pair.now, 1));
     try std.testing.expectEqual(@as(usize, 1), waiting.withheld_chunks);
     try std.testing.expect(waiting.oldest_withheld_age_ms != null);
     setup.pair.advance(3_000);
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.server.nextWakeup(setup.pair.now, 1));
+    setup.server.options.work_per_pump_max = 32;
     rounds = 0;
     while (rounds < 20 and completed < 2) : (rounds += 1) {
         try setup.pumpOnce();
@@ -917,7 +924,9 @@ test "reqresp cancellation removes Router ownership before output delivery" {
     var sink: [8]u8 = undefined;
     const handle = try setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .ping_v1, &bytes, &sink, .{}, setup.pair.now);
     const stream = setup.client.outbound[handle.index].stream;
+    setup.client.options.work_per_pump_max = 1;
     try std.testing.expect(setup.client.cancel(handle));
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.client.nextWakeup(setup.pair.now, 0));
     try std.testing.expect(!setup.client.cancel(handle));
     try std.testing.expectEqual(@as(usize, 1), setup.client.resourceSnapshot().outbound_occupied);
     try std.testing.expectEqual(@as(usize, 1), setup.client.resourceSnapshot().pending_terminals);
@@ -1271,6 +1280,17 @@ test "reqresp host response retains write work behind a partial cursor" {
         }
     }
     try std.testing.expect(sent);
+    try std.testing.expect(setup.server.finish(incoming, setup.pair.now));
+    var done = false;
+    for (0..4) |_| {
+        try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.server.nextWakeup(setup.pair.now, 1));
+        if (setup.server.pump(&setup.pair.server, &setup.server_neg, setup.pair.now, &events) == 1) {
+            try std.testing.expect(events[0] == .served);
+            done = true;
+            break;
+        }
+    }
+    try std.testing.expect(done);
 }
 
 test "reqresp native bytes arriving behind cursor remain ready after activity drain" {
@@ -1383,4 +1403,84 @@ test "reqresp activity checks generation and quiets after a bounded tiny sweep" 
         _ = setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &.{});
     }
     try std.testing.expectEqual(deadline, setup.client.nextWakeup(setup.pair.now, 0));
+}
+
+test "reqresp partial beacon scans preserve host waits and elapsed deadlines" {
+    var setup: ReqRespPair = .{};
+    try setup.init(.{}, .{ .outbound_max = 64, .inbound_max = 64, .host_timeout_ms = 2000 });
+    defer setup.deinit();
+    for (0..8) |_| {
+        _ = setup.server.pump(&setup.pair.server, &setup.server_neg, setup.pair.now, &.{});
+        try std.testing.expectEqual(@as(?u64, null), setup.server.nextWakeup(setup.pair.now, 0));
+    }
+    const bytes = [_]u8{0} ** 8;
+    var sink: [8]u8 = undefined;
+    _ = try setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .ping_v1, &bytes, &sink, .{}, setup.pair.now);
+    try waitForRequest(&setup);
+    const incoming = setup.serverEvents()[0].request.request;
+    const due = setup.server.inbound[incoming.index].progress_ms + 2000;
+    for (0..4) |_| {
+        _ = setup.server.pump(&setup.pair.server, &setup.server_neg, setup.pair.now, &.{});
+        try std.testing.expectEqual(@as(?u64, due), setup.server.nextWakeup(setup.pair.now, 1));
+    }
+    setup.pair.advance(2000);
+    var events: [1]Event = undefined;
+    var failed = false;
+    for (0..4) |_| {
+        try std.testing.expect(setup.server.nextWakeup(setup.pair.now, 1).? <= setup.pair.now.mono_ms);
+        if (setup.server.pump(&setup.pair.server, &setup.server_neg, setup.pair.now, &events) == 1) {
+            try std.testing.expect(events[0].failed.reason == .host_timeout);
+            failed = true;
+            break;
+        }
+    }
+    try std.testing.expect(failed);
+    _ = setup.server.pump(&setup.pair.server, &setup.server_neg, setup.pair.now, &.{});
+    try std.testing.expectEqual(@as(?u64, null), setup.server.nextWakeup(setup.pair.now, 1));
+}
+
+test "reqresp request write preserves already readable native response" {
+    var setup: ReqRespPair = .{};
+    try setup.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
+    defer setup.deinit();
+    const bytes = [_]u8{7} ** 8;
+    var sink: [8]u8 = undefined;
+    const handle = try setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .ping_v1, &bytes, &sink, .{}, setup.pair.now);
+    var server_stream: ?engine_mod.StreamHandle = null;
+    for (0..10) |_| {
+        try setup.pair.pump();
+        var native_events: [16]engine_mod.Event = undefined;
+        for (setup.pair.events(&setup.pair.server, &native_events)) |event| switch (event) {
+            .stream_opened => |stream| try setup.server_neg.negotiator.acceptInbound(stream, &protocol.ids, setup.pair.now),
+            else => {},
+        };
+        var outcomes: [8]negotiate.Outcome = undefined;
+        const client_count = setup.client_neg.pump(&setup.pair.client, setup.pair.now, &outcomes);
+        for (outcomes[0..client_count]) |outcome| try std.testing.expect(setup.client.negotiated(outcome, setup.pair.now));
+        const server_count = setup.server_neg.pump(&setup.pair.server, setup.pair.now, &outcomes);
+        for (outcomes[0..server_count]) |outcome| switch (outcome.result) {
+            .ready => server_stream = outcome.stream,
+            else => return error.TestUnexpectedResult,
+        };
+        if (server_stream != null and setup.client.outbound[handle.index].state == .sending_request) break;
+    }
+    try std.testing.expect(server_stream != null);
+    try std.testing.expectEqual(.sending_request, setup.client.outbound[handle.index].state);
+    var wire: [codec.frame_scratch_max]u8 = undefined;
+    const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
+    try std.testing.expectEqual(encoded.len, try setup.pair.server.write(server_stream.?, encoded, false));
+    try setup.pair.pump();
+    var activity: [128]engine_mod.Handle = undefined;
+    const count = setup.pair.client.driverView().takeActivity(&activity);
+    try std.testing.expect(count > 0);
+    for (activity[0..count]) |conn| setup.client.connectionActivity(conn);
+    for (0..4) |_| {
+        _ = setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &.{});
+        if (setup.client.outbound[handle.index].state == .awaiting) break;
+    }
+    try std.testing.expectEqual(.awaiting, setup.client.outbound[handle.index].state);
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.client.nextWakeup(setup.pair.now, 1));
+    var events: [1]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events));
+    try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
 }

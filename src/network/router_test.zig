@@ -256,7 +256,11 @@ test "router composed service retains native activity behind a partial reqresp s
     }
     try std.testing.expect(incoming != null);
     try std.testing.expect(client.nextWakeup(pair.now, 1, gossip.len).? > pair.now.mono_ms);
-    _ = client.process(&pair.client, &.{}, &.{}, pair.now, &requests, &gossip);
+    for (0..2) |_| {
+        if (client.reqresp.inner.work_cursor == 1) break;
+        _ = client.process(&pair.client, &.{}, &.{}, pair.now, &requests, &gossip);
+    }
+    try std.testing.expectEqual(@as(usize, 1), client.reqresp.inner.work_cursor);
     var wire: [rr.codec.frame_scratch_max]u8 = undefined;
     const encoded = try rr.codec.encodeChunk(0, null, &ping, &wire);
     const stream = server.handler.inner.inbound[incoming.?.index].stream;

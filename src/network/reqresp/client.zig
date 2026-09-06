@@ -126,9 +126,8 @@ pub const Client = struct {
         slot.state = .awaiting;
         slot.progress_ms = now.mono_ms;
         Client.resetResponseDecoder(owner, slot);
-        if (slot.io.buffered_start < slot.io.buffered_end or slot.io.fin_seen) {
-            slot.needs_service = true;
-        }
+        // Native response bytes may already be readable after this turn consumed activity.
+        slot.needs_service = true;
     }
 
     pub fn readResponse(
