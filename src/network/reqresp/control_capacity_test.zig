@@ -284,13 +284,13 @@ test "reqresp control capacity raw and service inbound admission select the same
         .leftover = &.{},
         .fin = false,
     };
-    const first = server.acceptNegotiated(
+    const first = server.handler.acceptNegotiated(
         &pair.server,
         try inboundStream(&pair, handles.client),
         ordinary,
         pair.now,
     ).?;
-    const second = server.acceptNegotiated(
+    const second = server.handler.acceptNegotiated(
         &pair.server,
         try inboundStream(&pair, handles.client),
         ordinary,
@@ -301,15 +301,15 @@ test "reqresp control capacity raw and service inbound admission select the same
     defer pair.server.closeStream(blocked, 0);
     try std.testing.expectEqual(
         null,
-        server.acceptNegotiated(&pair.server, blocked, ordinary, pair.now),
+        server.handler.acceptNegotiated(&pair.server, blocked, ordinary, pair.now),
     );
     const raw_sink = try std.testing.allocator.alloc(u8, protocol.requestMaxAll());
     defer std.testing.allocator.free(raw_sink);
     try std.testing.expectError(
         error.SlotsExhausted,
-        server.inner.accept(&pair.server, blocked, ordinary, raw_sink, pair.now),
+        server.handler.inner.accept(&pair.server, blocked, ordinary, raw_sink, pair.now),
     );
-    const status = server.acceptNegotiated(
+    const status = server.handler.acceptNegotiated(
         &pair.server,
         try inboundStream(&pair, handles.client),
         .{ .protocol = .{ .reqresp = .status_v1 }, .leftover = &.{}, .fin = false },
@@ -317,8 +317,8 @@ test "reqresp control capacity raw and service inbound admission select the same
     ).?;
     try std.testing.expect(status.index != first.index and status.index != second.index);
     try std.testing.expectEqual(
-        server.inboundSink(status.index).ptr,
-        server.inner.inbound[status.index].io.sink.ptr,
+        server.handler.inboundSink(status.index).ptr,
+        server.handler.inner.inbound[status.index].io.sink.ptr,
     );
 }
 
@@ -532,7 +532,7 @@ test "reqresp control capacity retains peer and global response quotas" {
         );
         for (output[0..received.control]) |event| if (event == .chunk) {
             try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
-            try std.testing.expect(client.consume(event.chunk.request, pair.now));
+            try std.testing.expect(client.handler.consume(event.chunk.request, pair.now));
             chunks_received += 1;
         };
         const server_active = pair.server.driverView().takeActivity(&activity);
@@ -546,19 +546,19 @@ test "reqresp control capacity retains peer and global response quotas" {
         );
         for (output[0..incoming.control]) |event| switch (event) {
             .request => |request| {
-                try server.respond(request.request, &ping, null, pair.now);
+                try server.handler.respond(request.request, &ping, null, pair.now);
                 requests_received += 1;
             },
-            .chunk_sent => |sent| _ = server.finish(sent.request, pair.now),
+            .chunk_sent => |sent| _ = server.handler.finish(sent.request, pair.now),
             else => {},
         };
     }
     try std.testing.expectEqual(2, requests_received);
     try std.testing.expectEqual(1, chunks_received);
-    try std.testing.expectEqual(1, server.counters().withheld_chunks);
+    try std.testing.expectEqual(1, server.handler.counters().withheld_chunks);
     try std.testing.expectEqual(
         pair.now.mono_ms + 5_000,
-        server.inner.nextWakeupPartitioned(pair.now, 0, 0),
+        server.handler.inner.nextWakeupPartitioned(pair.now, 0, 0),
     );
 }
 
@@ -571,7 +571,7 @@ fn allocationFailures(allocator: std.mem.Allocator) !void {
         .outbound_control_reserved = 2,
     });
     defer service.deinit();
-    const plan = service.memoryPlan();
+    const plan = service.handler.memoryPlan();
     try std.testing.expectEqual(plan.facade_bytes + plan.slot_bytes + plan.io_bytes +
         plan.limiter_bytes + plan.request_sink_bytes, plan.total_bytes);
 }
@@ -588,19 +588,19 @@ test "reqresp reserved physical sinks admit full native control wave and recycle
     defer server.shutdown(&pair.server);
     var wave: [4]rr.RequestHandle = undefined;
     for ([_]protocol.Protocol{ .status_v1, .ping_v1, .metadata_v3, .goodbye_v1 }, 0..) |which, i| {
-        wave[i] = server.acceptNegotiated(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = which }, .leftover = &.{}, .fin = false }, pair.now).?;
+        wave[i] = server.handler.acceptNegotiated(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = which }, .leftover = &.{}, .fin = false }, pair.now).?;
         try std.testing.expectEqual(@as(u16, @intCast(i)), wave[i].index);
-        try std.testing.expectEqual(server.inboundSink(wave[i].index).ptr, server.inner.inbound[wave[i].index].io.sink.ptr);
-        try std.testing.expect(server.inboundSink(wave[i].index).len >= which.info().request_max);
+        try std.testing.expectEqual(server.handler.inboundSink(wave[i].index).ptr, server.handler.inner.inbound[wave[i].index].io.sink.ptr);
+        try std.testing.expect(server.handler.inboundSink(wave[i].index).len >= which.info().request_max);
     }
-    try std.testing.expect(server.cancel(wave[0]));
+    try std.testing.expect(server.handler.cancel(wave[0]));
     var events: [4]rr.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), server.pump(&pair.server, pair.now, &events));
     try std.testing.expectEqual(wave[0], events[0].failed.request);
     try std.testing.expectEqual(@as(usize, 0), server.pump(&pair.server, pair.now, &events));
-    try std.testing.expect(server.inner.inboundSlot(wave[0]) == null);
-    try std.testing.expectEqual(@as(?u16, null), server.inner.availableInboundFor(.blocks_by_range_v2));
-    const replacement = server.acceptNegotiated(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = .status_v1 }, .leftover = &.{}, .fin = false }, pair.now).?;
+    try std.testing.expect(server.handler.inner.inboundSlot(wave[0]) == null);
+    try std.testing.expectEqual(@as(?u16, null), server.handler.inner.availableInboundFor(.blocks_by_range_v2));
+    const replacement = server.handler.acceptNegotiated(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = .status_v1 }, .leftover = &.{}, .fin = false }, pair.now).?;
     try std.testing.expectEqual(wave[0].index, replacement.index);
     try std.testing.expectEqual(wave[0].generation + 1, replacement.generation);
 }

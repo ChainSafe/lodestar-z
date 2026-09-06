@@ -581,7 +581,7 @@ test "gossipsub legal maximum and above two MiB publish use actual resumable IO"
         try std.testing.expect(received);
         try std.testing.expectEqual(@as(u64, 0), setup.client.counters.send_dropped);
         try std.testing.expectEqual(@as(u64, 0), setup.server.counters.oversized_dropped);
-        for (setup.server.large_used) |used| try std.testing.expect(!used);
+        try std.testing.expectEqual(setup.server.receive_pool.slots.len, setup.server.receive_pool.available());
     }
 }
 
@@ -911,8 +911,7 @@ test "gossipsub temporary frame pool pressure preserves prefix unread bytes and 
     try connectMesh(&setup);
     const owner_conn: engine_mod.Handle = .{ .index = 77, .generation = 1 };
     const owner = @import("test_support.zig").addPeer(&setup.server, owner_conn, .v1_2).?;
-    setup.server.large_used[0] = true;
-    setup.server.io.peers[owner.index].large_slot = 0;
+    setup.server.io.peers[owner.index].large_slot = setup.server.receive_pool.claim().?;
     var payload: [65536]u8 = undefined;
     var rng = std.Random.DefaultPrng.init(113);
     rng.random().bytes(&payload);
@@ -938,5 +937,5 @@ test "gossipsub temporary frame pool pressure preserves prefix unread bytes and 
         if (received) break;
     }
     try std.testing.expect(received);
-    try std.testing.expect(!setup.server.large_used[0]);
+    try std.testing.expectEqual(@as(usize, 1), setup.server.receive_pool.available());
 }

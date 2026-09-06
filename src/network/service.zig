@@ -18,8 +18,8 @@ pub const InitError = reqresp_mod.service.InitError || gossip_mod.service.InitEr
 pub const Service = struct {
     automatic_gossip_admission: bool,
     router: routing.Router,
-    reqresp: reqresp_mod.Service,
-    gossipsub: gossip_mod.Service,
+    reqresp: reqresp_mod.Handler,
+    gossipsub: gossip_mod.Handler,
 
     pub fn validateOptions(options: Options) InitError!void {
         if (!options.router.reqresp or !options.router.meshsub) return error.InvalidLimits;
@@ -32,9 +32,9 @@ pub const Service = struct {
         try validateOptions(options);
         var router = try routing.Router.init(allocator, options.router);
         errdefer router.deinit();
-        var reqresp = try reqresp_mod.Service.initHandler(allocator, options.reqresp);
+        var reqresp = try reqresp_mod.Handler.init(allocator, options.reqresp);
         errdefer reqresp.deinit();
-        const gossipsub = try gossip_mod.Service.initHandler(allocator, options.gossipsub);
+        const gossipsub = try gossip_mod.Handler.init(allocator, options.gossipsub);
         return .{
             .router = router,
             .reqresp = reqresp,
@@ -60,7 +60,7 @@ pub const Service = struct {
         options: reqresp_mod.reqresp.RequestOptions,
         now: types.Now,
     ) reqresp_mod.reqresp.RequestError!reqresp_mod.RequestHandle {
-        return self.reqresp.requestRouted(
+        return self.reqresp.request(
             &self.router,
             engine,
             conn,
@@ -94,13 +94,13 @@ pub const Service = struct {
         control_capacity: usize,
         gossip_event_capacity: usize,
     ) ?u64 {
-        const request_due = self.reqresp.nextWakeupPartitionedRouted(
+        const request_due = self.reqresp.nextWakeupPartitioned(
             &self.router,
             now,
             application_capacity,
             control_capacity,
         );
-        const gossip = self.gossipsub.nextWakeupHandler(now, gossip_event_capacity);
+        const gossip = self.gossipsub.nextWakeup(now, gossip_event_capacity);
         if (request_due) |r| return @min(r, gossip orelse r);
         return gossip;
     }
@@ -119,7 +119,7 @@ pub const Service = struct {
     ) Counts {
         self.prepare(engine, events, activity, now);
         return .{
-            .reqresp = self.reqresp.pumpRouted(&self.router, engine, now, requests),
+            .reqresp = self.reqresp.pump(&self.router, engine, now, requests),
             .gossipsub = self.gossipsub.pump(&self.router, engine, now, gossip),
         };
     }
@@ -135,7 +135,7 @@ pub const Service = struct {
         gossip: []gossip_mod.Event,
     ) PartitionedCounts {
         self.prepare(engine, events, activity, now);
-        const counts = self.reqresp.pumpPartitionedRouted(
+        const counts = self.reqresp.pumpPartitioned(
             &self.router,
             engine,
             now,

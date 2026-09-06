@@ -52,7 +52,7 @@ test "router composes simultaneous ping and meshsub on one connection" {
         for (request_events[0..client_count]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping, chunk.bytes);
-                try std.testing.expect(client.consume(chunk.request, pair.now));
+                try std.testing.expect(client.handler.consume(chunk.request, pair.now));
                 pong = true;
             },
             else => {},
@@ -230,7 +230,7 @@ test "router composed service retains native activity behind a partial reqresp s
         .work_per_pump_max = 1,
     } });
     defer client.deinit();
-    defer client.reqresp.shutdownRouted(&client.router, &pair.client);
+    defer client.reqresp.shutdown(&client.router, &pair.client);
     var server = try rr.Service.init(std.testing.allocator, rr_options);
     defer server.deinit();
     defer server.shutdown(&pair.server);
@@ -259,7 +259,7 @@ test "router composed service retains native activity behind a partial reqresp s
     _ = client.process(&pair.client, &.{}, &.{}, pair.now, &requests, &gossip);
     var wire: [rr.codec.frame_scratch_max]u8 = undefined;
     const encoded = try rr.codec.encodeChunk(0, null, &ping, &wire);
-    const stream = server.inner.inbound[incoming.?.index].stream;
+    const stream = server.handler.inner.inbound[incoming.?.index].stream;
     try std.testing.expectEqual(encoded.len, try pair.server.write(stream, encoded, false));
     try pair.pump();
     const active = pair.client.driverView().takeActivity(&activity);
@@ -280,7 +280,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     defer client.shutdown(&pair.client);
     var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = rr_options.reqresp });
     defer server.deinit();
-    defer server.reqresp.shutdownRouted(&server.router, &pair.server);
+    defer server.reqresp.shutdown(&server.router, &pair.server);
     const handles = try support.connectPair(&pair);
     const peers = @import("gossipsub/peers.zig");
     for (0..peers.capacity - peers.outbound_reserve) |i| {
@@ -290,7 +290,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
         server.gossipsub.inner.scores.penalize(ref.index, 20);
         server.gossipsub.inner.peers.disconnect(ref, pair.now.mono_ms, true);
     }
-    try std.testing.expectEqual(gs.service.Service.Admission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
+    try std.testing.expectEqual(gs.Handler.Admission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
     try std.testing.expect(!server.gossipsub.admitted(handles.server));
     const ping = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
@@ -306,7 +306,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
         const count = client.process(&pair.client, pair.events(&pair.client, &transport), activity[0..active_client], pair.now, &requests);
         for (requests[0..count]) |event| if (event == .chunk) {
             try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
-            try std.testing.expect(client.consume(event.chunk.request, pair.now));
+            try std.testing.expect(client.handler.consume(event.chunk.request, pair.now));
             pong = true;
         };
         const active_server = pair.server.driverView().takeActivity(&activity);
@@ -321,6 +321,16 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     try std.testing.expect(pong);
     try std.testing.expect(!server.gossipsub.admitted(handles.server));
     server.gossipsub.inner.peers.rows[0].retain_until = pair.now.mono_ms;
-    try std.testing.expectEqual(gs.service.Service.Admission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
+    try std.testing.expectEqual(gs.Handler.Admission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
     try std.testing.expect(server.gossipsub.admitted(handles.server));
+}
+
+test "protocol compositions expose no standalone processing on shared handlers" {
+    const Shared = @import("service.zig").Service;
+    const RequestHandler = @FieldType(Shared, "reqresp");
+    const GossipHandler = @FieldType(Shared, "gossipsub");
+    try std.testing.expect(!@hasField(RequestHandler, "router"));
+    try std.testing.expect(!@hasField(GossipHandler, "router"));
+    try std.testing.expect(!@hasDecl(RequestHandler, "process"));
+    try std.testing.expect(!@hasDecl(GossipHandler, "process"));
 }

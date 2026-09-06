@@ -173,7 +173,7 @@ test "reqresp partitioned service retains request and chunk bytes through contro
         for (output[0..received.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping_bytes, chunk.bytes);
-                try std.testing.expect(client.consume(chunk.request, pair.now));
+                try std.testing.expect(client.handler.consume(chunk.request, pair.now));
                 got_pong = true;
             },
             .failed => return error.TestUnexpectedResult,
@@ -191,9 +191,9 @@ test "reqresp partitioned service retains request and chunk bytes through contro
         for (output[0..incoming.control]) |event| switch (event) {
             .request => |request| {
                 try std.testing.expectEqual(protocol.Protocol.ping_v1, request.protocol);
-                try server.respond(request.request, &ping_bytes, null, pair.now);
+                try server.handler.respond(request.request, &ping_bytes, null, pair.now);
             },
-            .chunk_sent => |sent| _ = server.finish(sent.request, pair.now),
+            .chunk_sent => |sent| _ = server.handler.finish(sent.request, pair.now),
             .failed => return error.TestUnexpectedResult,
             else => {},
         };
@@ -201,8 +201,7 @@ test "reqresp partitioned service retains request and chunk bytes through contro
     try std.testing.expect(got_pong);
     try std.testing.expectEqual(
         1,
-        server.pumpPartitionedRouted(
-            &server.router.?,
+        server.pumpPartitioned(
             &pair.server,
             pair.now,
             &output,
@@ -212,7 +211,7 @@ test "reqresp partitioned service retains request and chunk bytes through contro
     const request = output[0].request;
     try std.testing.expectEqualSlices(u8, &root, request.bytes);
     const block = [_]u8{0x5a} ** @import("consensus_types").phase0.SignedBeaconBlock.min_size;
-    try server.respond(request.request, &block, .deneb, pair.now);
+    try server.handler.respond(request.request, &block, .deneb, pair.now);
     for (0..16) |_| {
         try pair.pump();
         const client_active = pair.client.driverView().takeActivity(&activity);
@@ -233,25 +232,24 @@ test "reqresp partitioned service retains request and chunk bytes through contro
             &output,
         );
         for (output[0..count]) |event| {
-            if (event == .chunk_sent) _ = server.finish(event.chunk_sent.request, pair.now);
+            if (event == .chunk_sent) _ = server.handler.finish(event.chunk_sent.request, pair.now);
         }
     }
-    try std.testing.expect(client.inner.outbound[app.index].pending_event != null);
+    try std.testing.expect(client.handler.inner.outbound[app.index].pending_event != null);
     try std.testing.expectEqualSlices(u8, &block, sink[0..block.len]);
     try std.testing.expectEqual(
         pair.now.mono_ms + 60_000,
-        client.inner.nextWakeupPartitioned(pair.now, 0, 1),
+        client.handler.inner.nextWakeupPartitioned(pair.now, 0, 1),
     );
     try std.testing.expectEqual(
         pair.now.mono_ms,
-        client.inner.nextWakeupPartitioned(pair.now, 1, 0),
+        client.handler.inner.nextWakeupPartitioned(pair.now, 1, 0),
     );
-    try std.testing.expect(client.cancel(app));
-    _ = client.pumpPartitionedRouted(&client.router.?, &pair.client, pair.now, &.{}, &.{});
+    try std.testing.expect(client.handler.cancel(app));
+    _ = client.pumpPartitioned(&pair.client, pair.now, &.{}, &.{});
     try std.testing.expectEqual(
         1,
-        client.pumpPartitionedRouted(
-            &client.router.?,
+        client.pumpPartitioned(
             &pair.client,
             pair.now,
             &output,
@@ -262,8 +260,7 @@ test "reqresp partitioned service retains request and chunk bytes through contro
     try std.testing.expectEqual(app, output[0].chunk.request);
     try std.testing.expectEqual(
         1,
-        client.pumpPartitionedRouted(
-            &client.router.?,
+        client.pumpPartitioned(
             &pair.client,
             pair.now,
             &output,

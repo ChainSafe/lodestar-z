@@ -1,3 +1,5 @@
+pub const recovery = @import("recovery.zig");
+pub const receive_pool = @import("receive_pool.zig");
 pub const admission = @import("admission.zig");
 pub const constants = @import("constants.zig");
 pub const protobuf = @import("protobuf.zig");
@@ -8,6 +10,8 @@ pub const state = @import("state.zig");
 pub const frame = @import("frame.zig");
 pub const score = @import("score.zig");
 pub const gossipsub = @import("gossipsub.zig");
+pub const handler = @import("handler.zig");
+pub const Handler = handler.Handler;
 pub const service = @import("service.zig");
 
 pub const Gossipsub = gossipsub.Gossipsub;
@@ -22,6 +26,8 @@ pub const ResourceSnapshot = gossipsub.ResourceSnapshot;
 
 test {
     _ = admission;
+    _ = recovery;
+    _ = receive_pool;
     _ = @import("mesh.zig");
     _ = @import("peers.zig");
     _ = @import("message_store.zig");
@@ -37,6 +43,7 @@ test {
     _ = score;
     _ = gossipsub;
     _ = service;
+    _ = handler;
     _ = @import("gossipsub_test.zig");
     _ = @import("service_test.zig");
 }

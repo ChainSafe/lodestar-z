@@ -619,7 +619,7 @@ pub const Core = struct {
     pub fn shutdown(self: *Core, engine: *engine_mod.Engine, now: Now) void {
         if (self.stopped) return;
         self.stopped = true;
-        self.service.reqresp.shutdownRouted(&self.service.router, engine);
+        self.service.reqresp.shutdown(&self.service.router, engine);
         self.service.router.negotiator.shutdown(engine);
         const count = self.catalog.snapshots(self.snapshot_scratch);
         for (self.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {

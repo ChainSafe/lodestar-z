@@ -456,7 +456,7 @@ test "core native gossip refusal retries selected connection once a second witho
     _ = setup.pair.events(&setup.pair.server, &transport);
     setup.client.service.gossipsub.inner.connectionClosed(selected.connection.?);
     try std.testing.expectEqual(
-        gossip.service.Service.Admission.admitted,
+        gossip.Handler.Admission.admitted,
         setup.client.service.gossipsub.peerConnected(&setup.pair.client, other, setup.pair.now),
     );
     setup.pair.advance(1_000);
