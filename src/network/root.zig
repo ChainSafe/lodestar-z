@@ -1,5 +1,7 @@
 pub const core = @import("core.zig");
 pub const Core = core.Core;
+pub const network_core = @import("network_core.zig");
+pub const NetworkCore = network_core.NetworkCore;
 pub const peers = @import("peers/root.zig");
 pub const constants = @import("constants.zig");
 pub const types = @import("types.zig");
@@ -62,4 +64,5 @@ test {
 }
 test {
     _ = @import("core_control_test.zig");
+    _ = @import("network_core_test.zig");
 }

@@ -142,6 +142,7 @@ jobs:
           cmake --version
           node --test test/interop/*.test.mjs
           pnpm test:network-interop
+          pnpm test:network-managed-interop
 
   discv5-interop:
     name: DiscV5 geth interoperability
@@ -470,7 +471,7 @@ jobs:
       - name: Replay and smoke bounded network parsers with safety checks
         run: |
           cd test/fuzz
-          zig build build-network_reqresp build-network_gossip -Doptimize=ReleaseSafe
+          zig build build-network_reqresp build-network_gossip build-network_managed -Doptimize=ReleaseSafe
           ./smoke-network.sh
 
   bindings-test:

@@ -265,6 +265,18 @@
                 .imports = .{.network},
             },
         },
+        .managed_peer = .{
+            .root_module = .{
+                .root_source_file = "examples/managed_peer.zig",
+                .imports = .{ .network, .discv5 },
+            },
+        },
+        .managed_interop_peer = .{
+            .root_module = .{
+                .root_source_file = "test/interop/managed_peer.zig",
+                .imports = .{.network},
+            },
+        },
         .gossip_peer = .{
             .root_module = .{
                 .root_source_file = "examples/gossip_peer.zig",

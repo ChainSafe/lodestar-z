@@ -30,7 +30,7 @@ pub fn emit(a: std.mem.Allocator, value: anytype) !void {
     }
     if (write(1, "\n", 1) != 1) return error.OutputClosed;
 }
-pub fn run(peer: *@import("network_peer.zig").Peer) !void {
+pub fn run(peer: anytype) !void {
     var line: [65536]u8 = undefined;
     var used: usize = 0;
     var commands: usize = 0;
