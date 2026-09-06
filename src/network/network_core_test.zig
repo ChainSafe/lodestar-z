@@ -803,3 +803,24 @@ test "managed runtime topic policy copies values and rejects atomically" {
     try std.testing.expectEqual(full_revision, owner.scores.revision);
     try std.testing.expectEqual(calls, node.reservations.allocation_calls);
 }
+
+test "managed beacon idle scans do not manufacture immediate deadlines" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
+    var node: runtime.NetworkCore = undefined;
+    try node.initManaged(std.testing.allocator, std.testing.io, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .local = .{},
+        .configuration = .{ .profile = .beacon_node, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} },
+    });
+    defer node.deinit(std.testing.io);
+    const now = try @import("driver.zig").currentTime(std.testing.io);
+    const calls = node.reservations.allocation_calls;
+    for (0..8) |_| {
+        const result = node.step(std.testing.io, now, 100, .{}, 0);
+        try std.testing.expect(result.failure == null);
+        try std.testing.expectEqual(@as(?u64, null), node.core.service.reqresp.inner.nextWakeup(now, 0));
+        try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
+    }
+    try std.testing.expectEqual(calls, node.reservations.allocation_calls);
+}

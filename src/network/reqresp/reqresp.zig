@@ -460,7 +460,6 @@ pub const ReqResp = struct {
         application_capacity: usize,
         control_capacity: usize,
     ) ?u64 {
-        if (self.scan_remaining > 0) return now.mono_ms;
         for (0..self.over_limit_len) |offset| {
             const item = self.over_limit[(self.over_limit_head + offset) % over_limit_queue_max];
             const capacity = if (item.protocol.isControl())
