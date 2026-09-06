@@ -1,4 +1,7 @@
 const std = @import("std");
+const custody = @import("custody.zig");
+const policy = @import("policy.zig");
+const enr = @import("enr.zig");
 const t = @import("types.zig");
 pub const Token = struct { index: u16, generation: u64 };
 pub const DialIntent = struct { token: Token, peer: t.PeerId, address: t.Address };
@@ -8,7 +11,26 @@ pub const Options = struct {
     engine_dialing_max: u16 = 16,
     seed: u64,
 };
+pub const history_retention_ms: u64 = 600_000;
+pub const hint_freshness_ms: u64 = 300_000;
+const Hints = struct {
+    node_id: [32]u8,
+    sequence: u64,
+    fork: enr.ForkId,
+    next_fork_digest: ?[4]u8,
+    attnets: ?[8]u8,
+    syncnets: ?u8,
+    custody_group_count: ?u64,
+};
 const Row = struct {
+    automatic: bool = false,
+    selected: bool = true,
+    priority: u16 = 0,
+    hints: ?Hints = null,
+    hints_at_ms: u64 = 0,
+    history_until_ms: u64 = 0,
+    custody_work: ?custody.Derivation = null,
+    custody_context: ?t.ForkContext = null,
     occupied: bool = false,
     generation: u64 = 0,
     peer: t.PeerId = undefined,
@@ -27,6 +49,7 @@ pub const DialQueue = struct {
     rows: []Row,
     options: Options,
     cursor: usize = 0,
+    custody_cursor: usize = 0,
     random: std.Random.DefaultPrng,
 
     pub fn init(a: std.mem.Allocator, options: Options) !DialQueue {
@@ -62,6 +85,11 @@ pub const DialQueue = struct {
         var free: ?*Row = null;
         for (self.rows) |*row| {
             if (row.occupied and row.peer.eql(peer)) {
+                if (row.automatic) {
+                    row.address_count = 0;
+                    row.address_index = 0;
+                    row.automatic = false;
+                }
                 for (addresses) |address| {
                     var found = false;
                     for (row.addresses[0..row.address_count]) |known| {
@@ -89,6 +117,145 @@ pub const DialQueue = struct {
             .address_count = @intCast(addresses.len),
         };
         @memcpy(row.addresses[0..addresses.len], addresses);
+    }
+    /// Consumes copied Discovery.step output, whose QUIC scope was checked against the
+    /// authenticated discovery source. Bare enr.decode output does not satisfy this precondition.
+    pub fn enqueueDiscovered(self: *DialQueue, candidate: *const enr.Candidate, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) !void {
+        try context.validate();
+        if (candidate.address_count == 0 or candidate.address_count > 2 or
+            !std.mem.eql(u8, &candidate.fork.digest, &context.digest)) return error.InvalidCandidate;
+        if (candidate.syncnets) |bits| if (bits & 0xf0 != 0) return error.InvalidCandidate;
+        if (candidate.custody_group_count) |count| if (count == 0 or count > context.custody_groups) return error.InvalidCandidate;
+        for (candidate.addresses[0..candidate.address_count]) |address| if (address.port() == 0) return error.InvalidCandidate;
+        const node_id = custody.nodeId(&candidate.peer) catch return error.InvalidCandidate;
+        if (!std.mem.eql(u8, &node_id, &candidate.node_id)) return error.InvalidCandidate;
+        const hints: Hints = .{ .node_id = node_id, .sequence = candidate.sequence, .fork = candidate.fork, .next_fork_digest = candidate.next_fork_digest, .attnets = candidate.attnets, .syncnets = candidate.syncnets, .custody_group_count = candidate.custody_group_count };
+        var incoming: Row = .{ .occupied = true, .automatic = true, .peer = candidate.peer, .eligible_at_ms = now_ms, .history_until_ms = now_ms +| history_retention_ms, .hints = hints, .hints_at_ms = now_ms };
+        copyAddresses(&incoming, candidate);
+        resetCustody(&incoming, context);
+        const incoming_utility = policy.utility(&coverage(&incoming, context, now_ms), wanted);
+        var free: ?*Row = null;
+        var victim: ?*Row = null;
+        var victim_utility: u16 = std.math.maxInt(u16);
+        for (self.rows) |*row| {
+            if (row.occupied and row.peer.eql(&candidate.peer)) {
+                if (row.hints) |previous| {
+                    if (candidate.sequence < previous.sequence) return error.StaleRecord;
+                    if (candidate.sequence == previous.sequence) {
+                        if (!std.meta.eql(previous, hints)) return error.StaleRecord;
+                        if (row.automatic) {
+                            if (row.address_count != incoming.address_count) return error.StaleRecord;
+                            for (row.addresses[0..row.address_count], incoming.addresses[0..incoming.address_count]) |known, address| if (!known.eql(address)) return error.StaleRecord;
+                        }
+                        row.hints_at_ms = now_ms;
+                        return;
+                    }
+                }
+                row.hints = hints;
+                row.hints_at_ms = now_ms;
+                if (row.automatic) copyAddresses(row, candidate);
+                resetCustody(row, context);
+                return;
+            }
+            if (row.generation == std.math.maxInt(u64)) continue;
+            if (!row.occupied) {
+                if (free == null) free = row;
+                continue;
+            }
+            if (!row.automatic or row.direct or row.connected or row.attempt or row.conn != null or now_ms < row.eligible_at_ms) continue;
+            if (row.failures != 0 and now_ms < row.history_until_ms) continue;
+            const usefulness = policy.utility(&coverage(row, context, now_ms), wanted);
+            if (incoming_utility < usefulness or (incoming_utility == usefulness and now_ms < row.history_until_ms)) continue;
+            if (victim == null or usefulness < victim_utility or (usefulness == victim_utility and row.history_until_ms < victim.?.history_until_ms)) {
+                victim = row;
+                victim_utility = usefulness;
+            }
+        }
+        const row = free orelse victim orelse return error.Capacity;
+        incoming.generation = row.generation;
+        row.* = incoming;
+    }
+    fn copyAddresses(row: *Row, candidate: *const enr.Candidate) void {
+        row.address_count = 0;
+        row.address_index = 0;
+        for (candidate.addresses[0..candidate.address_count]) |address| {
+            if (row.address_count != 0 and row.addresses[0].eql(address)) continue;
+            row.addresses[row.address_count] = address;
+            row.address_count += 1;
+        }
+    }
+    fn resetCustody(row: *Row, context: *const t.ForkContext) void {
+        const hints = row.hints orelse return;
+        const count = hints.custody_group_count orelse {
+            row.custody_work = null;
+            return;
+        };
+        if (!std.mem.eql(u8, &hints.fork.digest, &context.digest) or count == 0 or count > context.custody_groups) {
+            row.custody_work = null;
+            return;
+        }
+        if (std.meta.eql(row.custody_context, context.*)) if (row.custody_work) |work| if (work.requested == count) return;
+        row.custody_context = context.*;
+        row.custody_work = custody.Derivation.init(&hints.node_id, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count) catch null;
+    }
+    fn coverage(row: *const Row, context: *const t.ForkContext, now_ms: u64) t.Coverage {
+        const hints = row.hints orelse return .{};
+        if (now_ms >= row.hints_at_ms +| hint_freshness_ms or !std.mem.eql(u8, &hints.fork.digest, &context.digest)) return .{};
+        var result: t.Coverage = .{ .attnets = if (hints.attnets) |bits| std.mem.readInt(u64, &bits, .little) else 0, .syncnets = @intCast(hints.syncnets orelse 0) };
+        if (std.meta.eql(row.custody_context, context.*)) if (row.custody_work) |work| {
+            if (!work.exhausted and work.groups.count() == work.requested) result.custody = work.groups;
+        };
+        return result;
+    }
+    pub fn advanceCustody(self: *DialQueue, context: *const t.ForkContext, now_ms: u64, budget: *u16) bool {
+        var pending = false;
+        for (0..self.rows.len) |_| {
+            const row = &self.rows[self.custody_cursor];
+            self.custody_cursor = (self.custody_cursor + 1) % self.rows.len;
+            if (!row.occupied) continue;
+            resetCustody(row, context);
+            if (now_ms >= row.hints_at_ms +| hint_freshness_ms) continue;
+            const work = if (row.custody_work) |*value| value else continue;
+            const before = work.hashes;
+            const result = work.step(@min(custody.hashes_per_row, budget.*)) catch {
+                budget.* -= work.hashes - before;
+                continue;
+            };
+            budget.* -= work.hashes - before;
+            pending = pending or result == null;
+        }
+        self.custody_cursor = (self.custody_cursor + 1) % self.rows.len;
+        return pending;
+    }
+    pub fn configureSelection(self: *DialQueue, wanted: *const t.Coverage, general: bool, context: *const t.ForkContext, now_ms: u64) void {
+        for (self.rows) |*row| {
+            if (!row.occupied) continue;
+            row.priority = policy.utility(&coverage(row, context, now_ms), wanted);
+            const compatible = if (row.hints) |hints| std.mem.eql(u8, &hints.fork.digest, &context.digest) else false;
+            row.selected = !row.automatic or (compatible and (general or row.priority > 0));
+        }
+    }
+    /// Only selected relevant authenticated success renews automatic history retention.
+    pub fn relevant(self: *DialQueue, peer: *const t.PeerId, now_ms: u64) void {
+        for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
+            row.history_until_ms = @max(row.history_until_ms, now_ms +| history_retention_ms);
+        };
+    }
+    pub fn hostDemand(self: *const DialQueue) u16 {
+        var count: u16 = 0;
+        for (self.rows) |row| if (row.occupied and !row.automatic and !row.connected) {
+            count += 1;
+        };
+        return count;
+    }
+    pub const Attempts = struct { total: u16 = 0, unstarted: u16 = 0 };
+    pub fn attempts(self: *const DialQueue) Attempts {
+        var result: Attempts = .{};
+        for (self.rows) |row| if (row.occupied and row.attempt) {
+            result.total += 1;
+            if (row.conn == null) result.unstarted += 1;
+        };
+        return result;
     }
     pub fn isDirect(self: *const DialQueue, peer: *const t.PeerId) bool {
         for (self.rows) |row| if (row.occupied and row.peer.eql(peer)) return row.direct;
@@ -191,6 +358,13 @@ pub const DialQueue = struct {
         self.failed(row, now_ms);
         return true;
     }
+    pub fn dialDeferred(self: *DialQueue, token: Token, now_ms: u64) bool {
+        const row = self.rowFor(token) orelse return false;
+        if (row.conn != null) return false;
+        row.attempt = false;
+        row.eligible_at_ms = @max(row.eligible_at_ms, now_ms +| 1000);
+        return true;
+    }
     fn failed(self: *DialQueue, row: *Row, now_ms: u64) void {
         row.attempt = false;
         row.conn = null;
@@ -223,13 +397,18 @@ pub const DialQueue = struct {
             active += 1;
         };
         var count: usize = 0;
-        for (0..self.rows.len) |_| {
+        for (0..self.options.concurrent_max) |_| {
             if (count == out.len or active >= self.options.concurrent_max) break;
-            const index = self.cursor;
+            var best: ?usize = null;
+            for (0..self.rows.len) |offset| {
+                const index = (self.cursor + offset) % self.rows.len;
+                const row = &self.rows[index];
+                if (!row.occupied or !row.selected or row.connected or row.attempt or now_ms < row.eligible_at_ms or row.generation == std.math.maxInt(u64)) continue;
+                if (best == null or row.direct and !self.rows[best.?].direct or (row.direct == self.rows[best.?].direct and row.priority > self.rows[best.?].priority)) best = index;
+            }
+            const index = best orelse break;
             self.cursor = (index + 1) % self.rows.len;
             const row = &self.rows[index];
-            if (!row.occupied or row.connected or row.attempt or now_ms < row.eligible_at_ms or
-                row.generation == std.math.maxInt(u64)) continue;
             row.generation += 1;
             row.attempt = true;
             row.lease_expires_at_ms = now_ms +| 10_000;
@@ -251,7 +430,7 @@ pub const DialQueue = struct {
         var due: ?u64 = null;
         for (self.rows) |row| {
             if (!row.occupied or (row.connected and !row.attempt)) continue;
-            if (!row.attempt and (output_capacity == 0 or active >= self.options.concurrent_max or
+            if (!row.attempt and (!row.selected or output_capacity == 0 or active >= self.options.concurrent_max or
                 row.generation == std.math.maxInt(u64))) continue;
             const deadline = if (row.attempt) row.lease_expires_at_ms else row.eligible_at_ms;
             const next = @max(now_ms, deadline);

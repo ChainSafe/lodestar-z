@@ -127,3 +127,133 @@ test "peer dial queue review cooldown cannot extend a lost acknowledgement lease
     try std.testing.expectEqual(@as(usize, 0), q.poll(1_799_999, &out));
     try std.testing.expectEqual(@as(usize, 1), q.poll(1_800_000, &out));
 }
+
+fn discovered(tag: u8, sync: u8) !@import("enr.zig").Candidate {
+    var secret: [32]u8 = @splat(0);
+    secret[31] = tag;
+    const pair = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&secret);
+    const key = pair.publicKey();
+    const peer = t.PeerId.fromPublicKey(&key);
+    return .{ .peer = peer, .node_id = try @import("custody.zig").nodeId(&peer), .sequence = 1, .addresses = .{ address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = sync, .custody_group_count = null };
+}
+
+test "peer dial discovered refresh replaces addresses preserves lease history and manual authority" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    var candidate = try discovered(1, 0);
+    try q.enqueueDiscovered(&candidate, &.{}, &.{}, 0);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    const token = out[0].token;
+    try std.testing.expect(q.dialFailed(token, 1));
+    const due = q.nextWakeup(1, 1).?;
+    candidate.sequence = 2;
+    candidate.addresses[0] = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 2222 } };
+    try q.enqueueDiscovered(&candidate, &.{}, &.{}, 2);
+    try std.testing.expectEqual(due, q.nextWakeup(2, 1).?);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(due, &out));
+    try std.testing.expectEqual(@as(u16, 2222), out[0].address.port());
+    const live = out[0].token;
+    candidate.sequence = 3;
+    candidate.addresses[0] = address;
+    try q.enqueueDiscovered(&candidate, &.{}, &.{}, due);
+    try std.testing.expect(q.dialStarted(live, .{ .index = 1, .generation = 44 }));
+    candidate.sequence = 2;
+    try std.testing.expectError(error.StaleRecord, q.enqueueDiscovered(&candidate, &.{}, &.{}, due));
+    candidate.sequence = 4;
+    candidate.syncnets = 16;
+    try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&candidate, &.{}, &.{}, due));
+    try std.testing.expect(q.dialClosed(.{ .index = 1, .generation = 44 }, due));
+    const peer = (try discovered(2, 0)).peer;
+    try q.enqueue(&peer, &.{address}, true, 0);
+    candidate = try discovered(2, 1);
+    candidate.addresses[0] = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 3 }, .port = 3333 } };
+    try q.enqueueDiscovered(&candidate, &.{}, &.{}, 0);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    try std.testing.expectEqual(@as(u16, 1234), out[0].address.port());
+}
+
+test "peer dial scarce pressure reclaims fixed expired automatic history despite rapid failures" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 2, .seed = 4 });
+    defer q.deinit(a);
+    const wanted: t.Coverage = .{ .syncnets = 1 };
+    var first_candidate = try discovered(1, 0);
+    var second_candidate = try discovered(2, 0);
+    const scarce = try discovered(3, 1);
+    try q.enqueueDiscovered(&first_candidate, &.{}, &wanted, 0);
+    try q.enqueueDiscovered(&second_candidate, &.{}, &wanted, 0);
+    var out: [2]mod.DialIntent = undefined;
+    var now: u64 = 0;
+    for (0..12) |_| {
+        const count = q.poll(now, &out);
+        try std.testing.expectEqual(@as(usize, 2), count);
+        for (out[0..count]) |intent| try std.testing.expect(q.dialFailed(intent.token, now));
+        first_candidate.sequence += 1;
+        second_candidate.sequence += 1;
+        try q.enqueueDiscovered(&first_candidate, &.{}, &wanted, now);
+        try q.enqueueDiscovered(&second_candidate, &.{}, &wanted, now);
+        try std.testing.expectError(error.Capacity, q.enqueueDiscovered(&scarce, &.{}, &wanted, now));
+        now += 60_000;
+    }
+    try q.enqueueDiscovered(&scarce, &.{}, &wanted, now);
+    q.configureSelection(&wanted, false, &.{}, now);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(now, &out));
+    try std.testing.expect(out[0].peer.eql(&scarce.peer));
+}
+
+test "peer dial scarce untried candidate resists general flood and fork change" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const wanted: t.Coverage = .{ .syncnets = 1 };
+    const first_candidate = try discovered(1, 0);
+    const second_candidate = try discovered(2, 0);
+    const scarce = try discovered(3, 1);
+    try q.enqueueDiscovered(&first_candidate, &.{}, &wanted, 0);
+    try q.enqueueDiscovered(&second_candidate, &.{}, &wanted, 0);
+    try q.enqueueDiscovered(&scarce, &.{}, &wanted, 0);
+    for (4..16) |i| {
+        const general = try discovered(@intCast(i), 0);
+        q.enqueueDiscovered(&general, &.{}, &wanted, 0) catch |err| try std.testing.expectEqual(error.Capacity, err);
+    }
+    q.configureSelection(&wanted, false, &.{ .digest = @splat(1) }, 0);
+    try std.testing.expectEqual(@as(?u64, null), q.nextWakeup(0, 1));
+    q.configureSelection(&wanted, false, &.{}, 0);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    try std.testing.expect(out[0].peer.eql(&scarce.peer));
+}
+
+test "peer dial local admission deferral preserves retry history and endpoint" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    const alternate: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 2222 } };
+    try q.enqueue(&peer, &.{ address, alternate }, false, 0);
+    var out: [1]mod.DialIntent = undefined;
+    _ = q.poll(0, &out);
+    try std.testing.expect(q.dialDeferred(out[0].token, 0));
+    try std.testing.expectEqual(@as(u8, 0), q.rows[0].failures);
+    try std.testing.expectEqual(@as(?u64, 1000), q.nextWakeup(0, 1));
+    _ = q.poll(1000, &out);
+    try std.testing.expect(out[0].address.eql(address));
+    try std.testing.expect(q.dialStarted(out[0].token, .{ .index = 1, .generation = 2 }));
+    try std.testing.expect(!q.dialDeferred(out[0].token, 1000));
+    try std.testing.expect(q.dialClosed(.{ .index = 1, .generation = 2 }, 1000));
+}
+
+test "peer dial confirmed equal ENR refresh renews provisional hint freshness without history" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const candidate = try discovered(1, 1);
+    const wanted: t.Coverage = .{ .syncnets = 1 };
+    try q.enqueueDiscovered(&candidate, &.{}, &wanted, 0);
+    q.configureSelection(&wanted, false, &.{}, 300_000);
+    try std.testing.expectEqual(@as(?u64, null), q.nextWakeup(300_000, 1));
+    try q.enqueueDiscovered(&candidate, &.{}, &wanted, 300_000);
+    q.configureSelection(&wanted, false, &.{}, 300_000);
+    try std.testing.expectEqual(@as(?u64, 300_000), q.nextWakeup(300_000, 1));
+    try std.testing.expectEqual(@as(u64, 600_000), q.rows[0].history_until_ms);
+    var conflicting = candidate;
+    conflicting.syncnets = 2;
+    try std.testing.expectError(error.StaleRecord, q.enqueueDiscovered(&conflicting, &.{}, &wanted, 300_001));
+}

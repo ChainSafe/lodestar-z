@@ -4,6 +4,8 @@ const t = @import("peers/types.zig");
 const peers = @import("peers/root.zig");
 const control_mod = @import("peers/control.zig");
 const dial_mod = @import("peers/dial_queue.zig");
+const policy = peers.policy;
+const custody = peers.custody;
 const engine_mod = @import("quic/engine.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
@@ -23,6 +25,7 @@ pub const Options = struct {
     },
     control: control_mod.Options = .{},
     dial: dial_mod.Options,
+    metadata_freshness_ms: u64 = 60_000,
 };
 pub const DialIntent = dial_mod.DialIntent;
 pub const DialToken = dial_mod.Token;
@@ -35,6 +38,18 @@ pub const MemoryPlan = struct {
     dial_bytes: usize,
     service_bytes: usize,
     scratch_bytes: usize,
+    policy_bytes: usize,
+};
+pub const DiscoveryNeed = struct {
+    general: bool = false,
+    attnets: [8]u8 = @splat(0),
+    syncnets: u8 = 0,
+    custody: bool = false,
+
+    /// Query lifetime is a host/runtime monotonic scheduling decision, independent of slot expiry.
+    pub fn query(self: DiscoveryNeed, expires_ms: u64) peers.discovery.Demand {
+        return .{ .general = self.general, .attnets = self.attnets, .syncnets = self.syncnets, .custody = self.custody, .expires_ms = expires_ms };
+    }
 };
 pub const Core = struct {
     allocator: std.mem.Allocator,
@@ -45,10 +60,20 @@ pub const Core = struct {
     local_identity: t.PeerId,
     local: t.LocalState,
     snapshot_scratch: []t.Snapshot,
+    policy_scratch: []policy.Input,
+    selection: policy.Result = .{},
+    demand: t.Demand = .{},
+    current_slot: u64 = 0,
+    policy_dirty: bool = true,
+    custody_pending: bool = false,
+    metadata_deadline: ?u64 = null,
+    native_dial_room: u16 = 0,
+    metadata_freshness_ms: u64,
+    policy_seed: u64,
     stopped: bool = false,
     counters: Counters = .{},
 
-    pub const Counters = struct { rejected: u64 = 0, displaced: u64 = 0 };
+    pub const Counters = struct { rejected: u64 = 0, displaced: u64 = 0, policy_disconnects: u64 = 0, custody_hashes: u64 = 0 };
     pub const PeerCounts = struct { connected: u16, relevant: u16, outbound_relevant: u16 };
 
     pub fn init(
@@ -60,6 +85,7 @@ pub const Core = struct {
         var copied: t.LocalState = undefined;
         try peers.control_wire.copyLocal(&copied, local);
         try options.peers.validate();
+        if (options.metadata_freshness_ms == 0 or options.metadata_freshness_ms > 86_400_000) return error.InvalidOptions;
         if (options.service.reqresp.peers < options.peers.engine_capacity)
             return error.InvalidOptions;
         var catalog = try peers.Catalog.init(a, options.peers);
@@ -75,6 +101,8 @@ pub const Core = struct {
         errdefer dial_queue.deinit(a);
         const scratch = try a.alloc(t.Snapshot, options.peers.capacity);
         errdefer a.free(scratch);
+        const policy_scratch = try a.alloc(policy.Input, options.peers.max_peers);
+        errdefer a.free(policy_scratch);
         var service_options = options.service;
         service_options.automatic_gossip_admission = false;
         const service = try service_mod.Service.init(a, service_options);
@@ -87,11 +115,15 @@ pub const Core = struct {
             .local_identity = identity.*,
             .local = copied,
             .snapshot_scratch = scratch,
+            .policy_scratch = policy_scratch,
+            .metadata_freshness_ms = options.metadata_freshness_ms,
+            .policy_seed = options.dial.seed,
         };
     }
     /// Call shutdown with the borrowed Engine before releasing an active Core.
     pub fn deinit(self: *Core) void {
         self.service.deinit();
+        self.allocator.free(self.policy_scratch);
         self.allocator.free(self.snapshot_scratch);
         self.dial_queue.deinit(self.allocator);
         self.control.deinit(self.allocator);
@@ -112,14 +144,16 @@ pub const Core = struct {
             self.service.router.supported.len * @sizeOf([]const u8) +
             self.service.router.negotiator.entries.len * @sizeOf(negotiation);
         const scratch = self.snapshot_scratch.len * @sizeOf(t.Snapshot);
+        const policy_bytes = self.policy_scratch.len * @sizeOf(policy.Input);
         return .{
             .inline_bytes = @sizeOf(Core),
-            .allocated_bytes = catalog + control + dial + service_bytes + scratch,
+            .allocated_bytes = catalog + control + dial + service_bytes + scratch + policy_bytes,
             .catalog_bytes = catalog,
             .control_bytes = control,
             .dial_bytes = dial,
             .service_bytes = service_bytes,
             .scratch_bytes = scratch,
+            .policy_bytes = policy_bytes,
         };
     }
     /// Public protocol borrows retain their Service lifetime until the next process call.
@@ -142,6 +176,8 @@ pub const Core = struct {
             .application = 0,
             .gossipsub = 0,
         };
+        self.current_slot = slot;
+        if (slot >= self.demand.expires_at_slot) self.demand = .{};
         self.catalog.refresh(now.mono_ms);
         self.dial_queue.expire(engine, now.mono_ms);
         for (events) |event| self.transportEvent(engine, event, now);
@@ -165,6 +201,13 @@ pub const Core = struct {
             controls[0..counts.control],
         );
         self.control.maintain(&self.service, &self.catalog, engine, &self.local, now);
+        var connected_budget: u16 = custody.hashes_per_turn / 2;
+        var candidate_budget: u16 = custody.hashes_per_turn / 2;
+        const connected_pending = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &connected_budget);
+        const candidate_pending = self.dial_queue.advanceCustody(&self.local.fork, now.mono_ms, &candidate_budget);
+        self.custody_pending = connected_pending or candidate_pending;
+        self.counters.custody_hashes +|= custody.hashes_per_turn - connected_budget - candidate_budget;
+        self.refreshSelection(engine, now);
         self.refreshCandidates(now);
         return .{
             .peers = self.catalog.pollEvents(peer_events),
@@ -250,6 +293,7 @@ pub const Core = struct {
                 snapshot.connection != null,
                 now.mono_ms,
             );
+            if (snapshot.relevant) self.dial_queue.relevant(&snapshot.identity, snapshot.status_at_ms);
             if (snapshot.ban_until_ms > now.mono_ms or snapshot.score <= -50 or
                 snapshot.goodbye_until_ms > now.mono_ms)
             {
@@ -279,7 +323,10 @@ pub const Core = struct {
         for ([_]?u64{
             self.control.nextWakeup(now),
             self.catalog.nextDeadline(now.mono_ms),
-            self.dial_queue.nextWakeup(now.mono_ms, dial_capacity),
+            self.dial_queue.nextWakeup(now.mono_ms, @min(dial_capacity, self.dialRoom())),
+            if (self.policy_dirty) now.mono_ms else null,
+            if (self.custody_pending) now.mono_ms +| 1 else null,
+            self.metadata_deadline,
             self.peerWakeup(now, peer_capacity),
         }) |next| {
             if (next) |value| due = @min(due orelse value, value);
@@ -291,18 +338,96 @@ pub const Core = struct {
         if (self.catalog.eventsPending()) return now.mono_ms;
         return null;
     }
+    pub fn setDemand(self: *Core, demand: *const t.Demand) !void {
+        if (self.stopped) return error.Stopped;
+        try demand.validate(&self.local.fork, self.catalog.options.max_peers);
+        self.demand = demand.*;
+        self.policy_dirty = true;
+    }
+    pub fn coverageDeficits(self: *const Core) policy.Deficits {
+        return self.selection.deficits;
+    }
+    /// Current need after process. The host must schedule the next slot turn for demand expiry.
+    pub fn discoveryNeed(self: *const Core) DiscoveryNeed {
+        if (self.stopped) return .{};
+        var result: DiscoveryNeed = .{ .general = self.selection.dial_budget > 0 and (self.catalog.relevantCount() < self.catalog.options.target_peers or self.selection.deficits.outbound > 0) };
+        if (self.current_slot < self.demand.expires_at_slot and self.selection.dial_budget > 0) {
+            std.mem.writeInt(u64, &result.attnets, self.selection.deficits.missing.attnets, .little);
+            result.syncnets = self.selection.deficits.missing.syncnets;
+            result.custody = self.selection.deficits.custody > 0;
+        }
+        return result;
+    }
+    /// Requires Discovery.step output or equivalent authenticated-source scope authorization.
+    pub fn discovered(self: *Core, candidate: *const peers.enr.Candidate, now: Now) !void {
+        if (self.stopped) return error.Stopped;
+        if (candidate.peer.eql(&self.local_identity)) return error.SelfDial;
+        self.refreshCandidates(now);
+        try self.dial_queue.enqueueDiscovered(candidate, &self.local.fork, &self.selection.deficits.missing, now.mono_ms);
+        self.refreshCandidates(now);
+        self.policy_dirty = true;
+    }
+    fn refreshSelection(self: *Core, engine: *engine_mod.Engine, now: Now) void {
+        self.metadata_deadline = null;
+        const count = self.catalog.snapshots(self.snapshot_scratch);
+        var input_count: usize = 0;
+        for (self.snapshot_scratch[0..count]) |*snapshot| {
+            const conn = snapshot.connection orelse continue;
+            if (snapshot.disconnect_reason != null) continue;
+            std.debug.assert(input_count < self.policy_scratch.len);
+            const input = &self.policy_scratch[input_count];
+            input_count += 1;
+            input.* = .{ .peer = snapshot.peer, .direct = snapshot.direct, .outbound = snapshot.direction == .outbound, .relevant = snapshot.relevant, .score = snapshot.score + (self.gossipScore(snapshot.peer, now) orelse 0) };
+            if (snapshot.ban_until_ms > now.mono_ms or snapshot.score <= -50) input.reject = .banned;
+            if (snapshot.status) |status| {
+                if (!std.mem.eql(u8, &status.fork_digest, &self.local.fork.digest)) input.reject = .incompatible_fork;
+                if (self.local.fork.fork.gte(.fulu) and status.earliest_available_slot == null) input.reject = .missing_availability;
+            }
+            if (!snapshot.relevant or input.reject != null) continue;
+            const metadata = snapshot.metadata orelse continue;
+            peers.control_wire.validateMetadata(&metadata, self.local.fork) catch continue;
+            const deadline = snapshot.metadata_at_ms +| self.metadata_freshness_ms;
+            if (now.mono_ms >= deadline) continue;
+            self.metadata_deadline = @min(self.metadata_deadline orelse deadline, deadline);
+            if (self.service.gossipsub.deliveryAvailable(conn)) {
+                input.coverage.attnets = std.mem.readInt(u64, &metadata.attnets, .little);
+                input.coverage.syncnets = @intCast(metadata.syncnets);
+            }
+            input.coverage.custody = snapshot.custody_groups orelse .initEmpty();
+        }
+        self.selection = policy.select(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed);
+        for (self.policy_scratch[0..input_count], 0..) |input, i| if (self.selection.reasons[i]) |reason| {
+            if (self.disconnect(input.peer, reason, now)) self.counters.policy_disconnects +|= 1;
+        };
+        self.selection.dial_budget = @min(self.catalog.options.max_peers -| self.selection.retained_count, @max(self.selection.dial_budget, self.dial_queue.hostDemand()));
+        const ceiling = @min(self.catalog.options.max_peers, engine.limits.connections_max);
+        self.native_dial_room = ceiling -| engine.registry.active_len;
+        self.dial_queue.configureSelection(&self.selection.deficits.missing, self.selection.retained_count < self.catalog.options.target_peers or self.selection.deficits.outbound > 0, &self.local.fork, now.mono_ms);
+        self.policy_dirty = false;
+    }
+    fn dialRoom(self: *const Core) u16 {
+        const attempts = self.dial_queue.attempts();
+        return @min(self.native_dial_room -| attempts.unstarted, self.selection.dial_budget -| attempts.total);
+    }
     pub fn updateStatus(self: *Core, status: *const t.Status) !void {
         var local = self.local;
         local.status = status.*;
         try peers.control_wire.copyLocal(&self.local, &local);
+        self.policy_dirty = true;
     }
     pub fn updateMetadata(self: *Core, metadata: *const t.Metadata) !void {
         var local = self.local;
         local.metadata = metadata.*;
         try peers.control_wire.copyLocal(&self.local, &local);
+        self.policy_dirty = true;
     }
     pub fn updateFork(self: *Core, local: *const t.LocalState, now: Now) !void {
         try peers.control_wire.copyLocal(&self.local, local);
+        for (self.local.fork.custody_groups..128) |index| self.demand.coverage.custody.unset(index);
+        var budget: u16 = 0;
+        _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
+        _ = self.dial_queue.advanceCustody(&self.local.fork, now.mono_ms, &budget);
+        self.policy_dirty = true;
         self.reStatusPeers(now);
     }
     pub fn reStatusPeers(self: *Core, now: Now) void {
@@ -315,6 +440,7 @@ pub const Core = struct {
         now: Now,
     ) ?t.ReputationDecision {
         const decision = self.catalog.report(peer, action, now.mono_ms) orelse return null;
+        self.policy_dirty = true;
         if (decision != .none) _ = self.disconnect(
             peer,
             if (decision == .ban) .banned else .reputation,
@@ -331,6 +457,7 @@ pub const Core = struct {
         if (self.stopped) return error.Stopped;
         if (identity.eql(&self.local_identity)) return error.SelfDial;
         try self.dial_queue.enqueue(identity, addresses, false, now.mono_ms);
+        self.policy_dirty = true;
     }
     pub fn addDirectPeer(
         self: *Core,
@@ -341,10 +468,12 @@ pub const Core = struct {
         if (self.stopped) return error.Stopped;
         if (identity.eql(&self.local_identity)) return error.SelfDial;
         try self.dial_queue.enqueue(identity, addresses, true, now.mono_ms);
+        self.policy_dirty = true;
         if (self.catalog.find(identity)) |peer| _ = self.catalog.setDirect(peer, true);
     }
     pub fn removeDirectPeer(self: *Core, identity: *const t.PeerId) void {
         self.dial_queue.removeDirect(identity);
+        self.policy_dirty = true;
         self.service.gossipsub.inner.unmarkDirect(identity);
         if (self.catalog.find(identity)) |peer| _ = self.catalog.setDirect(peer, false);
     }
@@ -368,10 +497,14 @@ pub const Core = struct {
         self.dial_queue.expire(engine, now.mono_ms);
         self.catalog.refresh(now.mono_ms);
         self.refreshCandidates(now);
-        return self.dial_queue.poll(now.mono_ms, out);
+        self.refreshSelection(engine, now);
+        return self.dial_queue.poll(now.mono_ms, out[0..@min(out.len, self.dialRoom())]);
     }
     pub fn dialStarted(self: *Core, token: dial_mod.Token, conn: t.Handle) bool {
         return self.dial_queue.dialStarted(token, conn);
+    }
+    pub fn dialDeferred(self: *Core, token: dial_mod.Token, now: Now) bool {
+        return self.dial_queue.dialDeferred(token, now.mono_ms);
     }
     pub fn dialFailed(self: *Core, token: dial_mod.Token, now: Now) bool {
         return self.dial_queue.dialFailed(token, now.mono_ms);

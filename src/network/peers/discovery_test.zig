@@ -257,13 +257,14 @@ fn handoff(candidate: *const adapter.Candidate) !void {
     var core = try core_mod.Core.init(std.testing.allocator, &pair.client_ctx.local_peer_id, &.{ .fork = context, .status = .{ .fork_digest = context.digest } }, @import("../core_test.zig").options());
     defer core.deinit();
     defer core.shutdown(&pair.client, pair.now);
-    try core.connect(&candidate.peer, candidate.addresses[0..candidate.address_count], pair.now);
+    try core.discovered(candidate, pair.now);
+    try std.testing.expectEqual(candidate.sequence, core.dial_queue.rows[0].hints.?.sequence);
     var intents: [2]dial.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), core.dialIntents(&pair.client, pair.now, &intents));
     try std.testing.expect(intents[0].peer.eql(&candidate.peer));
     try std.testing.expectEqual(@as(u16, 9002), intents[0].address.port());
     try std.testing.expect(core.dialFailed(intents[0].token, pair.now));
-    try core.connect(&candidate.peer, candidate.addresses[0..candidate.address_count], pair.now);
+    try core.discovered(candidate, pair.now);
     try std.testing.expectEqual(@as(usize, 0), core.dialIntents(&pair.client, pair.now, &intents));
     for (3..6) |scalar| {
         const key = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{@as(u8, @intCast(scalar))}));
@@ -272,7 +273,7 @@ fn handoff(candidate: *const adapter.Candidate) !void {
     }
     const key = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{6}));
     try std.testing.expectError(error.Capacity, core.connect(&types.PeerId.fromPublicKey(&key.publicKey()), candidate.addresses[0..candidate.address_count], pair.now));
-    try core.connect(&candidate.peer, candidate.addresses[0..candidate.address_count], pair.now);
+    try core.discovered(candidate, pair.now);
     const count = core.dialIntents(&pair.client, pair.now, &intents);
     try std.testing.expectEqual(@as(usize, 2), count);
     for (intents[0..count]) |intent| try std.testing.expect(!intent.peer.eql(&candidate.peer));
