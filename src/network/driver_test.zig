@@ -571,3 +571,117 @@ test "driver restarts a completed quiet scan after host writes and reads" {
     try std.testing.expectEqual(@as(?u64, 0), server.transport.nextTimeoutMs(read_now));
     try quietConnectedNodes(&client, &server);
 }
+
+test "driver progress failure retains real send receive work and exactly one lifecycle batch" {
+    var node: Node = .{};
+    try node.init(36);
+    defer node.deinit();
+    var sink = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer sink.close(std.testing.io);
+    const destination = sink.localAddress();
+    const now = try driver_mod.currentTime(std.testing.io);
+    _ = try node.transport.engine.dial(&destination, node.transport.peerId(), now, @splat(36));
+    const failed = try node.transport.engine.dial(&destination, node.transport.peerId(), now, @splat(37));
+    node.transport.engine.driverView().failSend(failed.index);
+    try sink.socket.send(std.testing.io, &node.transport.udp.socket.address, "invalid");
+    var vtable = std.testing.io.vtable.*;
+    vtable.batchAwaitConcurrent = ProgressFault.receive;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    ProgressFault.calls = 0;
+    var events: [4]engine_mod.Event = undefined;
+    var activity: [4]engine_mod.Handle = undefined;
+    const result = node.transport.stepProgress(io, &events, &activity, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(error.Canceled, result.failure.?);
+    try std.testing.expectEqual(@as(u32, 1), result.progress.datagrams_received);
+    try std.testing.expect(result.progress.datagrams_sent > 0);
+    try std.testing.expect(result.progress.work_processed > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.progress.events);
+    try std.testing.expectEqual(failed, events[0].closed.conn);
+    try std.testing.expect(node.transport.udp.admitted == null);
+    try std.testing.expectEqual(@as(u8, 0), node.transport.driver.batch_len);
+    const next = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(@as(usize, 0), next.events);
+}
+
+test "driver legacy failure leaves lifecycle events for later delivery" {
+    var node: Node = .{};
+    try node.init(38);
+    defer node.deinit();
+    const now = try driver_mod.currentTime(std.testing.io);
+    const failed = try node.transport.engine.dial(&support.server_address, node.transport.peerId(), now, @splat(38));
+    node.transport.engine.driverView().failSend(failed.index);
+    var vtable = std.testing.io.vtable.*;
+    vtable.batchAwaitConcurrent = ProgressFault.receive;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    ProgressFault.calls = 1;
+    var events: [4]engine_mod.Event = undefined;
+    var activity: [4]engine_mod.Handle = undefined;
+    try std.testing.expectError(error.Canceled, node.transport.step(io, &events, &activity, .{ .wait_max_ms = 0 }));
+    try std.testing.expect(node.transport.engine.eventsPending());
+    const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(@as(usize, 1), result.events);
+    try std.testing.expectEqual(failed, events[0].closed.conn);
+    const repeated = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(@as(usize, 0), repeated.events);
+}
+
+test "driver progress early clock failure does not begin or publish a turn" {
+    var node: Node = .{};
+    try node.init(39);
+    defer node.deinit();
+    const now = try driver_mod.currentTime(std.testing.io);
+    const failed = try node.transport.engine.dial(&support.server_address, node.transport.peerId(), now, @splat(39));
+    node.transport.engine.driverView().failSend(failed.index);
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = ProgressFault.clock;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var events: [4]engine_mod.Event = undefined;
+    const result = node.transport.stepProgress(io, &events, &.{}, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
+    try std.testing.expectEqual(@as(u64, 0), result.progress.now.mono_ms);
+    try std.testing.expectEqual(@as(usize, 0), result.progress.events);
+    try std.testing.expectEqual(@as(u32, 0), result.progress.work_processed);
+    try std.testing.expect(node.transport.engine.eventsPending());
+    const next = node.transport.stepProgress(std.testing.io, &events, &.{}, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(@as(usize, 1), next.progress.events);
+    try std.testing.expectEqual(failed, events[0].closed.conn);
+}
+
+const ProgressFault = struct {
+    threadlocal var calls: u8 = 0;
+    fn receive(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+        calls += 1;
+        if (calls == 2) return error.Canceled;
+        return std.testing.io.vtable.batchAwaitConcurrent(userdata, batch, timeout);
+    }
+    fn clock(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        return .{ .nanoseconds = -1 };
+    }
+};
+
+test "driver progress counts admitted datagram when the following clock read fails" {
+    var node: Node = .{};
+    try node.init(40);
+    defer node.deinit();
+    try node.transport.udp.socket.send(std.testing.io, &node.transport.udp.socket.address, "invalid");
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = AdmissionClockFault.clock;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    AdmissionClockFault.udp = &node.transport.udp;
+    defer AdmissionClockFault.udp = null;
+    const result = node.transport.stepProgress(io, &.{}, &.{}, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
+    try std.testing.expectEqual(@as(u32, 1), result.progress.datagrams_received);
+    try std.testing.expectEqual(@as(u32, 1), result.progress.work_processed);
+    try std.testing.expectEqual(@as(u32, 0), result.progress.datagrams_dropped);
+    try std.testing.expect(result.progress.now.mono_ms > 0);
+    try std.testing.expect(node.transport.udp.admitted == null);
+}
+
+const AdmissionClockFault = struct {
+    threadlocal var udp: ?*const udp_mod.Udp = null;
+    fn clock(userdata: ?*anyopaque, value: std.Io.Clock) std.Io.Timestamp {
+        if (udp.?.admitted != null) return .{ .nanoseconds = -1 };
+        return std.testing.io.vtable.now(userdata, value);
+    }
+};
