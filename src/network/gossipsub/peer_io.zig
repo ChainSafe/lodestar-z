@@ -127,9 +127,9 @@ pub const Pool = struct {
 
     pub fn init(a: std.mem.Allocator, options: *const @import("options.zig").Options) !Pool {
         const per_peer = options.control_bytes + options.critical_bytes + options.body_buffer_bytes + constants.read_scratch_len;
-        const arena = try a.alloc(u8, constants.peers_cap * per_peer);
+        const arena = try a.alloc(u8, @as(usize, options.connected_capacity) * per_peer);
         errdefer a.free(arena);
-        const peers = try a.alloc(PeerIo, constants.peers_cap);
+        const peers = try a.alloc(PeerIo, options.connected_capacity);
         errdefer a.free(peers);
         for (peers, 0..) |*peer, i| {
             const base = i * per_peer;

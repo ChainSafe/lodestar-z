@@ -67,15 +67,20 @@ pub const PeerScore = struct {
     ip_count: [peer_capacity]u16 = [_]u16{0} ** peer_capacity,
 
     pub fn init(allocator: Allocator, params: Params) (Allocator.Error || error{InvalidLimits})!PeerScore {
+        return initCapacity(allocator, params, peer_capacity);
+    }
+
+    pub fn initCapacity(allocator: Allocator, params: Params, count: u16) (Allocator.Error || error{InvalidLimits})!PeerScore {
+        if (count == 0 or count > peer_capacity) return error.InvalidLimits;
         try validateParams(params);
-        const cells = peer_capacity * constants.topics_cap;
+        const cells = @as(usize, count) * constants.topics_cap;
         const topics = try allocator.alloc(TopicCounters, cells);
         errdefer allocator.free(topics);
         @memset(topics, .{});
-        const app_score = try allocator.alloc(f64, peer_capacity);
+        const app_score = try allocator.alloc(f64, count);
         errdefer allocator.free(app_score);
         @memset(app_score, 0);
-        const behaviour = try allocator.alloc(f64, peer_capacity);
+        const behaviour = try allocator.alloc(f64, count);
         errdefer allocator.free(behaviour);
         @memset(behaviour, 0);
         return .{
@@ -223,7 +228,7 @@ pub const PeerScore = struct {
     }
 
     pub fn resetTopic(self: *PeerScore, topic: u16) void {
-        for (0..peer_capacity) |peer| {
+        for (0..self.app_score.len) |peer| {
             const counters = self.tc(@intCast(peer), topic);
             assert(!counters.in_mesh);
             counters.* = .{};
@@ -231,7 +236,7 @@ pub const PeerScore = struct {
     }
 
     pub fn retainsTopic(self: *PeerScore, topic: u16) bool {
-        for (0..peer_capacity) |peer| {
+        for (0..self.app_score.len) |peer| {
             const counters = self.tc(@intCast(peer), topic);
             if (counters.in_mesh or counters.first_deliveries != 0 or counters.mesh_deliveries != 0 or
                 counters.mesh_failures != 0 or counters.invalid != 0) return true;
@@ -247,7 +252,7 @@ pub const PeerScore = struct {
     }
 
     pub fn setConnected(self: *PeerScore, peer: u16, connected: bool, now_ms: u64) void {
-        assert(peer < peer_capacity);
+        assert(peer < self.app_score.len);
         self.refreshPeer(peer, now_ms);
         self.dirty[peer] = true;
         self.connected[peer] = connected;
@@ -255,7 +260,7 @@ pub const PeerScore = struct {
     }
 
     pub fn refresh(self: *PeerScore, now_ms: u64) void {
-        for (0..peer_capacity) |peer| self.refreshPeer(@intCast(peer), now_ms);
+        for (0..self.app_score.len) |peer| self.refreshPeer(@intCast(peer), now_ms);
     }
 
     fn refreshPeer(self: *PeerScore, peer: u16, now_ms: u64) void {

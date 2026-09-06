@@ -38,15 +38,21 @@ pub const Peers = struct {
     rows: []Row,
     backoffs: []Backoff,
     retention_ms: u64,
+    reserved: u16,
 
     pub fn init(a: std.mem.Allocator, retention_ms: u64) !Peers {
+        return initCapacity(a, retention_ms, capacity, outbound_reserve);
+    }
+
+    pub fn initCapacity(a: std.mem.Allocator, retention_ms: u64, count: u16, reserved: u16) !Peers {
+        if (count == 0 or count > capacity or reserved >= count) return error.InvalidLimits;
         assert(retention_ms > 0);
-        const rows = try a.alloc(Row, capacity);
+        const rows = try a.alloc(Row, count);
         errdefer a.free(rows);
         @memset(rows, .{});
-        const backoffs = try a.alloc(Backoff, capacity * constants.topics_cap);
+        const backoffs = try a.alloc(Backoff, @as(usize, count) * constants.topics_cap);
         @memset(backoffs, .{});
-        return .{ .rows = rows, .backoffs = backoffs, .retention_ms = retention_ms };
+        return .{ .rows = rows, .backoffs = backoffs, .retention_ms = retention_ms, .reserved = reserved };
     }
 
     pub fn deinit(self: *Peers, a: std.mem.Allocator) void {
@@ -102,7 +108,7 @@ pub const Peers = struct {
     fn reclaimable(self: *const Peers, direction: types.Direction, now: u64) ?usize {
         var reusable: ?usize = null;
         var negative: ?usize = null;
-        const limit: usize = if (direction == .outbound) capacity else capacity - outbound_reserve;
+        const limit: usize = if (direction == .outbound) self.rows.len else self.rows.len - self.reserved;
         for (self.rows[0..limit], 0..) |row, i| {
             if (row.connection != null or row.pins != 0 or row.generation == std.math.maxInt(u64)) continue;
             if (!row.occupied or now >= row.retain_until) return i;

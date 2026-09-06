@@ -153,12 +153,13 @@ pub const Gossipsub = struct {
         try @import("options.zig").validate(&options);
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);
-        state.* = .{};
+        state.* = try State.init(allocator, options.connected_capacity);
+        errdefer state.deinit(allocator);
 
-        var peers = try peers_mod.Peers.init(allocator, options.retained_score_ms);
+        var peers = try peers_mod.Peers.initCapacity(allocator, options.retained_score_ms, options.retained_capacity, options.retained_outbound_reserve);
         errdefer peers.deinit(allocator);
 
-        var scores = try score_mod.PeerScore.init(allocator, options.score_params);
+        var scores = try score_mod.PeerScore.initCapacity(allocator, options.score_params, options.retained_capacity);
         errdefer scores.deinit(allocator);
         @memset(&scores.connected, false);
 
@@ -168,7 +169,7 @@ pub const Gossipsub = struct {
             options.seen_ttl_ms,
         );
         errdefer seen.deinit(allocator);
-        var mcache = try mcache_mod.History.init(allocator, options.mcache_capacity);
+        var mcache = try mcache_mod.History.initCapacity(allocator, options.mcache_capacity, options.retained_capacity);
         errdefer mcache.deinit(allocator);
         var store = try storage.Store.init(allocator, options.mcache_capacity + options.validation_capacity, options.mcache_arena_bytes);
         errdefer store.deinit(allocator);
@@ -226,6 +227,7 @@ pub const Gossipsub = struct {
         self.seen.deinit(self.allocator);
         self.scores.deinit(self.allocator);
         self.peers.deinit(self.allocator);
+        self.state.deinit(self.allocator);
         self.allocator.destroy(self.state);
         self.* = undefined;
     }
@@ -258,7 +260,7 @@ pub const Gossipsub = struct {
             if (self.last_now_ms >= deadline) self.scores.resetTopic(topic);
         }
         if (self.scores.retainsTopic(topic)) return;
-        for (0..peers_mod.capacity) |peer| {
+        for (0..self.peers.rows.len) |peer| {
             const backoff = self.peers.backoffs[peer * constants.topics_cap + topic];
             if (backoff.topic_generation == row.generation and self.last_now_ms < backoff.until) return;
         }
@@ -490,7 +492,7 @@ pub const Gossipsub = struct {
         var result: PublishOutcome = .{};
         var recipients = peers.*;
         const topic = self.state.findTopic(self.store.get(h).?.topicString()).?;
-        for (&self.state.peers, 0..) |*row, peer| {
+        for (self.state.peers, 0..) |*row, peer| {
             if (row.active and self.peers.rows[row.logical.index].direct and self.state.subscribers(topic).isSet(peer)) recipients.set(peer);
         }
         var it = recipients.iterator(.{});
@@ -522,10 +524,10 @@ pub const Gossipsub = struct {
     // Pump -------------------------------------------------------------------
 
     pub fn memoryPlan(self: *const Gossipsub) MemoryPlan {
-        const metadata = @sizeOf(Gossipsub) + @sizeOf(State) + self.peers.rows.len * @sizeOf(peers_mod.Row) + self.peers.backoffs.len * @sizeOf(peers_mod.Backoff) + self.io.peers.len * @sizeOf(PeerIo) +
+        const metadata = @sizeOf(Gossipsub) + @sizeOf(State) + self.state.peers.len * @sizeOf(@TypeOf(self.state.peers[0])) + self.peers.rows.len * @sizeOf(peers_mod.Row) + self.peers.backoffs.len * @sizeOf(peers_mod.Backoff) + self.io.peers.len * @sizeOf(PeerIo) +
             self.store.entries.len * @sizeOf(storage.Entry) + self.store.next.len * @sizeOf(u32) +
             self.validation.entries.len * @sizeOf(validation_mod.Entry) + self.mcache.entries.len * @sizeOf(mcache_mod.HistoryEntry) +
-            self.mcache.ids.len * @sizeOf(MessageId) + self.mcache.index.slots.len * @sizeOf(u32) +
+            self.mcache.counts.len + self.mcache.generations.len * @sizeOf(u64) + self.mcache.ids.len * @sizeOf(MessageId) + self.mcache.index.slots.len * @sizeOf(u32) +
             self.promises.len * @sizeOf(Promise) + self.large_used.len * @sizeOf(bool) +
             self.seen.ids.len * (@sizeOf(MessageId) + @sizeOf(u64)) + self.seen.index.slots.len * @sizeOf(u32) +
             self.scores.topics.len * @sizeOf(@TypeOf(self.scores.topics[0])) + self.scores.app_score.len * @sizeOf(f64) + self.scores.behaviour.len * @sizeOf(f64);
@@ -536,7 +538,7 @@ pub const Gossipsub = struct {
             .validation_capacity = self.validation.entries.len,
             .duplicate_attributions_per_validation = validation_mod.duplicates_max,
             .data_descriptors_per_peer = peer_io_mod.data_capacity,
-            .data_descriptors_total = constants.peers_cap * peer_io_mod.data_capacity,
+            .data_descriptors_total = self.io.peers.len * peer_io_mod.data_capacity,
             .legal_atomic_work_bytes = 2 * constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + 2 * constants.MAX_PAYLOAD_SIZE,
             .page_bytes = storage.page_bytes,
             .rounding_per_message_max = storage.page_bytes - 1,
@@ -571,7 +573,7 @@ pub const Gossipsub = struct {
         }
         for (self.state.topics) |topic| {
             if (!topic.active) continue;
-            for (0..constants.peers_cap) |peer| {
+            for (0..self.state.peers.len) |peer| {
                 if (topic.subscribers.isSet(peer)) result.remote_subscriptions += 1;
                 if (topic.mesh.isSet(peer)) result.mesh_members += 1;
             }
@@ -1388,7 +1390,8 @@ fn testStartup(a: Allocator) !void {
 
 test "gossipsub legal maximum host acceptance forwards retained pages through actual IO" {
     var setup: @import("gossipsub_test.zig").GossipPair = .{};
-    try setup.init();
+    const small = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
+    try setup.initOpts(small.core.service.gossipsub, small.core.service.gossipsub);
     defer setup.deinit();
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(setup.client.subscribe(topic));
@@ -1401,6 +1404,7 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
     defer std.testing.allocator.free(payload);
     var rng = std.Random.DefaultPrng.init(91);
     rng.random().bytes(payload);
+    _ = setup.server.pump(&setup.pair.server, setup.pair.now, &.{});
     const len = try snappy.raw.compress(payload, setup.server.msg_scratch);
     setup.server.budget = .{ .work = setup.server.options.work_per_pump };
     var events: [1]Event = undefined;
@@ -1852,4 +1856,18 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     try std.testing.expect(g.logical(third.index).generation > logical_peer.generation);
     for (0..4) |_| g.onIwant(third.index, iwant);
     try std.testing.expectEqual(@as(usize, 3), g.io.peers[third.index].data_count);
+}
+
+test "gossip resolved capacities allocate owner rows and reject stale ceiling handles" {
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    try std.testing.expectEqual(@as(usize, 2), g.state.peers.len);
+    try std.testing.expectEqual(@as(usize, 2), g.io.peers.len);
+    try std.testing.expectEqual(@as(usize, 4), g.peers.rows.len);
+    try std.testing.expectEqual(@as(usize, 4), g.scores.app_score.len);
+    try std.testing.expect(!g.state.peerMatches(2, 0));
+    try std.testing.expect(!g.peers.matches(.{ .index = 4, .generation = 0 }));
+    try std.testing.expectEqual(ledger.bytes, g.memoryPlan().total_bytes - @sizeOf(Gossipsub));
+    g.deinit();
+    try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
 }

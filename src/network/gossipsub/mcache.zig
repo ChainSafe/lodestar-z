@@ -160,10 +160,11 @@ pub const HistoryEntry = struct {
     prev: u32 = empty_slot,
     message: storage.Handle = undefined,
     window: u8 = 0,
-    counts: [@import("peers.zig").capacity]u8 = [_]u8{0} ** @import("peers.zig").capacity,
+    counts: []u8,
 };
 pub const History = struct {
-    generations: [@import("peers.zig").capacity]u64 = @splat(0),
+    generations: []u64,
+    counts: []u8,
     entries: []HistoryEntry,
     ids: []MessageId,
     index: Index,
@@ -173,16 +174,28 @@ pub const History = struct {
     count: usize = 0,
 
     pub fn init(a: Allocator, capacity: usize) !History {
+        return initCapacity(a, capacity, @import("peers.zig").capacity);
+    }
+    pub fn initCapacity(a: Allocator, capacity: usize, retained: u16) !History {
+        if (retained == 0 or retained > @import("peers.zig").capacity) return error.InvalidLimits;
         if (capacity == 0 or capacity > 65536) return error.InvalidLimits;
         const entries = try a.alloc(HistoryEntry, capacity);
         errdefer a.free(entries);
         const ids = try a.alloc(MessageId, capacity);
         errdefer a.free(ids);
+        const generations = try a.alloc(u64, retained);
+        errdefer a.free(generations);
+        @memset(generations, 0);
+        const counts = try a.alloc(u8, capacity * retained);
+        errdefer a.free(counts);
+        @memset(counts, 0);
         const index = try Index.init(a, capacity, ids);
-        for (entries, 0..) |*e, i| e.* = .{ .next = if (i + 1 == capacity) empty_slot else @intCast(i + 1) };
-        return .{ .entries = entries, .ids = ids, .index = index };
+        for (entries, 0..) |*e, i| e.* = .{ .next = if (i + 1 == capacity) empty_slot else @intCast(i + 1), .counts = counts[i * retained ..][0..retained] };
+        return .{ .entries = entries, .ids = ids, .index = index, .generations = generations, .counts = counts };
     }
     pub fn deinit(self: *History, a: Allocator) void {
+        a.free(self.counts);
+        a.free(self.generations);
         self.index.deinit(a);
         a.free(self.ids);
         a.free(self.entries);
@@ -204,7 +217,9 @@ pub const History = struct {
         const slot = self.free;
         assert(slot != empty_slot);
         self.free = self.entries[slot].next;
-        self.entries[slot] = .{ .message = h, .prev = self.tail };
+        const counts = self.entries[slot].counts;
+        @memset(counts, 0);
+        self.entries[slot] = .{ .message = h, .prev = self.tail, .counts = counts };
         if (self.tail != empty_slot) self.entries[self.tail].next = slot else self.head = slot;
         self.tail = slot;
         self.ids[slot] = id;
@@ -226,11 +241,11 @@ pub const History = struct {
         self.generations[peer.index] = peer.generation;
     }
     pub fn iwantAllowed(self: *const History, e: *const HistoryEntry, peer: PeerRef, max: u8) bool {
-        assert(peer.index < self.generations.len and peer.generation != 0);
+        if (peer.index >= self.generations.len or peer.generation == 0) return false;
         return self.generations[peer.index] == peer.generation and e.counts[peer.index] < max;
     }
     pub fn sent(self: *const History, e: *HistoryEntry, peer: PeerRef) void {
-        assert(peer.index < self.generations.len and peer.generation != 0);
+        if (peer.index >= self.generations.len or peer.generation == 0) return;
         if (self.generations[peer.index] != peer.generation) return;
         assert(e.counts[peer.index] < 255);
         e.counts[peer.index] += 1;
@@ -431,4 +446,14 @@ test "gossip history canonical identity replacement clears only its bounded peer
         history.sent(entry, peer);
         try std.testing.expect(!history.iwantAllowed(entry, replacement, 3));
     }
+}
+
+test "history resolved retained capacity bounds counters and stale peers" {
+    var history = try History.initCapacity(std.testing.allocator, 2, 4);
+    defer history.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), history.generations.len);
+    try std.testing.expectEqual(@as(usize, 8), history.counts.len);
+    try std.testing.expectEqual(@as(usize, 4), history.entries[0].counts.len);
+    try std.testing.expect(!history.iwantAllowed(&history.entries[0], .{ .index = 4, .generation = 1 }, 3));
+    history.sent(&history.entries[0], .{ .index = 4, .generation = 1 });
 }

@@ -56,6 +56,11 @@ fn turn(node: *network.NetworkCore, io: std.Io, outputs: network.network_core.Ou
 }
 
 pub fn main(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len > 2) return error.InvalidProfile;
+    const selected = if (args.len == 2) args[1] else "baseline";
+    const profile: ?network.configuration.Profile = if (std.mem.eql(u8, selected, "baseline")) null else if (std.mem.eql(u8, selected, "small")) .small else if (std.mem.eql(u8, selected, "beacon_node")) .beacon_node else return error.InvalidProfile;
+    std.debug.print("profile={s} baseline=task1_raw_configuration\n", .{selected});
     const io = init.io;
     const allocator = init.gpa;
     const sinks = try allocator.alloc(u8, 4 * sink_size);
@@ -64,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
     const key_b = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{12}));
     const a = try allocator.create(network.NetworkCore);
     defer allocator.destroy(a);
-    try a.init(allocator, io, options(&key_a));
+    try initialize(a, allocator, io, &key_a, profile);
     defer a.deinit(io);
     std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.memoryPlan().allocated_bytes, a.memoryPlan().inline_bytes, a.core.service.gossipsub.inner.memoryPlan().total_bytes, a.reservations.allocation_calls });
     const allocations_a = a.reservations.allocation_calls;
@@ -79,12 +84,18 @@ pub fn main(init: std.process.Init) !void {
     samples.print("idle");
     const b = try allocator.create(network.NetworkCore);
     defer allocator.destroy(b);
-    try b.init(allocator, io, options(&key_b));
+    try initialize(b, allocator, io, &key_b, profile);
     defer b.deinit(io);
     const allocations_b = b.reservations.allocation_calls;
     const peer = try connectPair(a, b, io);
     try pressure(a, b, sinks, io, peer);
     std.debug.print("turn_allocation_calls_a={} turn_allocation_calls_b={} process_rss=external_time_maximum_resident_set_kbytes\n", .{ a.reservations.allocation_calls - allocations_a, b.reservations.allocation_calls - allocations_b });
+}
+
+fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, profile: ?network.configuration.Profile) !void {
+    if (profile) |selected| {
+        try node.initManaged(a, io, .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .local = .{}, .configuration = .{ .profile = selected, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} } });
+    } else try node.init(a, io, options(key));
 }
 
 fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io) !t.PeerRef {

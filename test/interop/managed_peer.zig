@@ -109,21 +109,17 @@ pub fn main(init: std.process.Init) !void {
         local.status.finalized_root[i] = @intCast(i);
         local.status.head_root[i] = @intCast(255 - i);
     }
-    var core_options: network.core.Options = .{ .dial = .{ .seed = 17, .capacity = 4, .concurrent_max = 2, .engine_dialing_max = 2 } };
-    core_options.peers = .{ .capacity = 4, .outbound_reserve = 1, .target_peers = 1, .max_peers = 3, .min_outbound = 0, .engine_capacity = 4 };
-    core_options.service.reqresp.peers = 4;
-    core_options.service.reqresp.forks = &.{.{ .digest = local.fork.digest, .fork = fork }};
-    core_options.service.gossipsub.random_seed = 123;
-    core_options.control.inbound_status_grace_ms = 20;
-    core_options.control.ping_inbound_ms = 1_000;
-    core_options.control.ping_outbound_ms = 1_000;
-    try peer.node.init(a, init.io, .{
-        .transport = .{ .host = &key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{
-            .connections_max = 4,
-            .handshaking_max = 4,
-            .dialing_max = 2,
-        } },
-        .core = core_options,
+    try peer.node.initManaged(a, init.io, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .configuration = .{
+            .profile = .small,
+            .seed = 17,
+            .forks = &.{.{ .digest = local.fork.digest, .fork = fork }},
+            .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2 },
+            .peers = .{ .capacity = 4, .outbound_reserve = 1, .target_peers = 1, .max_peers = 3, .min_outbound = 0, .engine_capacity = 4 },
+            .control = .{ .inbound_status_grace_ms = 20, .ping_inbound_ms = 1_000, .ping_outbound_ms = 1_000 },
+        },
         .local = local,
         .schedule = .{ .fulu_scheduled = fork.gte(.fulu) },
     });

@@ -69,8 +69,19 @@ const Topic = struct {
 };
 
 pub const State = struct {
-    peers: [constants.peers_cap]Peer = [_]Peer{.{}} ** constants.peers_cap,
+    peers: []Peer,
     topics: [constants.topics_cap]Topic = [_]Topic{.{}} ** constants.topics_cap,
+
+    pub fn init(a: std.mem.Allocator, capacity: u16) !State {
+        if (capacity == 0 or capacity > constants.peers_cap) return error.InvalidLimits;
+        const rows = try a.alloc(Peer, capacity);
+        @memset(rows, .{});
+        return .{ .peers = rows };
+    }
+
+    pub fn deinit(self: *State, a: std.mem.Allocator) void {
+        a.free(self.peers);
+    }
 
     // Peers ------------------------------------------------------------------
 
@@ -87,7 +98,7 @@ pub const State = struct {
     }
 
     pub fn removePeer(self: *State, index: u16) void {
-        assert(index < constants.peers_cap);
+        assert(index < self.peers.len);
         if (!self.peers[index].active) return;
         for (&self.topics) |*topic| {
             if (!topic.active) continue;
@@ -99,7 +110,7 @@ pub const State = struct {
     }
 
     pub fn findPeer(self: *State, conn: Handle) ?u16 {
-        for (&self.peers, 0..) |*peer, index| {
+        for (self.peers, 0..) |*peer, index| {
             if (peer.active and std.meta.eql(peer.conn, conn)) return @intCast(index);
         }
         return null;
@@ -121,7 +132,7 @@ pub const State = struct {
 
     /// Whether `index` still holds the same peer as when `generation` was taken.
     pub fn peerMatches(self: *const State, index: u16, generation: u64) bool {
-        return self.peers[index].active and self.peers[index].generation == generation;
+        return index < self.peers.len and self.peers[index].active and self.peers[index].generation == generation;
     }
 
     pub fn setStreams(self: *State, index: u16, out: ?StreamHandle, in: ?StreamHandle) void {
@@ -144,7 +155,7 @@ pub const State = struct {
     }
 
     fn freePeer(self: *State) ?usize {
-        for (&self.peers, 0..) |*peer, index| {
+        for (self.peers, 0..) |*peer, index| {
             if (!peer.active and peer.generation != std.math.maxInt(u64)) return index;
         }
         return null;
@@ -219,7 +230,8 @@ pub const State = struct {
 test "state tracks peers, topics, subscriptions, and mesh membership" {
     var state = try std.testing.allocator.create(State);
     defer std.testing.allocator.destroy(state);
-    state.* = .{};
+    state.* = try State.init(std.testing.allocator, constants.peers_cap);
+    defer state.deinit(std.testing.allocator);
     const conn = Handle{ .index = 3, .generation = 1 };
     const peer = state.addPeer(conn, .v1_2).?;
     try std.testing.expectEqual(@as(?u16, peer.index), state.findPeer(conn));
@@ -247,7 +259,8 @@ test "state tracks peers, topics, subscriptions, and mesh membership" {
 test "state suppresses ids per peer until monotonic expiry" {
     var state = try std.testing.allocator.create(State);
     defer std.testing.allocator.destroy(state);
-    state.* = .{};
+    state.* = try State.init(std.testing.allocator, constants.peers_cap);
+    defer state.deinit(std.testing.allocator);
     const peer = state.addPeer(.{ .index = 1, .generation = 1 }, .v1_2).?;
     const id = [_]u8{7} ** 20;
     try std.testing.expect(!state.suppresses(peer.index, id, 0));
