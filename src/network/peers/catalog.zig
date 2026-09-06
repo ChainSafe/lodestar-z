@@ -261,6 +261,15 @@ pub const Catalog = struct {
         return true;
     }
 
+    pub fn invalidateStatus(self: *Catalog, ref: t.PeerRef, conn: t.Handle) bool {
+        const row = self.connectedRow(ref, conn) orelse return false;
+        if (row.closing_reason != null) return false;
+        row.status = null;
+        row.custody_work = null;
+        row.pending_update = row.published;
+        return true;
+    }
+
     /// Only a decoded Status accepted by the relevance check may establish relevance.
     pub fn updateStatus(
         self: *Catalog,

@@ -347,6 +347,9 @@ pub const Core = struct {
     pub fn coverageDeficits(self: *const Core) policy.Deficits {
         return self.selection.deficits;
     }
+    pub fn candidateHints(self: *const Core, identity: *const t.PeerId, now: Now) ?dial_mod.Hints {
+        return self.dial_queue.candidateHints(identity, now.mono_ms);
+    }
     /// Current need after process. The host must schedule the next slot turn for demand expiry.
     pub fn discoveryNeed(self: *const Core) DiscoveryNeed {
         if (self.stopped) return .{};
@@ -422,7 +425,12 @@ pub const Core = struct {
         self.policy_dirty = true;
     }
     pub fn updateFork(self: *Core, local: *const t.LocalState, now: Now) !void {
-        try peers.control_wire.copyLocal(&self.local, local);
+        var copied: t.LocalState = undefined;
+        try peers.control_wire.copyLocal(&copied, local);
+        if (!std.meta.eql(self.local.fork, copied.fork)) {
+            self.control.forkUpdated(&self.service, &self.catalog, self.local.fork, now);
+        }
+        self.local = copied;
         for (self.local.fork.custody_groups..128) |index| self.demand.coverage.custody.unset(index);
         var budget: u16 = 0;
         _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);

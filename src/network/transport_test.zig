@@ -124,9 +124,56 @@ test "transport appends TLS key material to the configured keylog file" {
     }
     try std.testing.expect(connected);
     try std.testing.expect(dialer.keylog != null);
+    _ = try dialer.step(std.testing.io, &dialer_events, &activity, .{ .wait_max_ms = 0 });
     const written = try tmp.dir.statFile(std.testing.io, "keys.log", .{});
     try std.testing.expect(written.size > 0);
     try std.testing.expectEqual(written.size, dialer.keylog_offset);
+}
+
+fn failKeylog(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) std.Io.File.WritePositionalError!usize {
+    return error.NoSpaceLeft;
+}
+
+test "transport keylog failure preserves legacy and progress lifecycle delivery" {
+    for ([_]bool{ false, true }) |preserve_progress| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [80]u8 = undefined;
+        const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{29}));
+        var node: Transport = .{};
+        try node.init(std.testing.allocator, std.testing.io, .{
+            .host = &key,
+            .bind = .{ .ip4 = .loopback(0) },
+            .keylog_path = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}/keys.log", .{&tmp.sub_path}),
+        });
+        defer node.deinit(std.testing.io);
+        var remote: Transport = .{};
+        try initTransport(&remote, 30);
+        defer remote.deinit(std.testing.io);
+        const now = try driver_mod.currentTime(std.testing.io);
+        const handle = try node.engine.dial(&remote.localAddress(), remote.peerId(), now, @splat(1));
+        try std.testing.expect(node.engine.close(handle, 0));
+        try std.testing.expect(node.engine.registry.slots[handle.index].handshake.appendKeylog("test material"));
+        var vtable = std.testing.io.vtable.*;
+        vtable.fileWritePositional = failKeylog;
+        const failed_io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+        var events: [8]engine_mod.Event = undefined;
+        var activity: [128]engine_mod.Handle = undefined;
+        if (preserve_progress) {
+            const result = node.stepProgress(failed_io, &events, &activity, .{ .wait_max_ms = 0 });
+            try std.testing.expectEqual(error.KeylogWriteFailed, result.failure.?);
+            try std.testing.expectEqual(@as(usize, 1), result.progress.events);
+            try std.testing.expect(events[0] == .closed);
+        } else {
+            try std.testing.expectError(error.KeylogWriteFailed, node.step(failed_io, &events, &activity, .{ .wait_max_ms = 0 }));
+            const next = try node.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+            try std.testing.expectEqual(@as(usize, 1), next.events);
+            try std.testing.expect(events[0] == .closed);
+        }
+        const next = try node.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+        try std.testing.expectEqual(@as(usize, 0), next.events);
+        try std.testing.expectEqual(@as(u16, 0), node.engine.registry.active_len);
+    }
 }
 
 test "transport socket refuses a batch that carries an oversized datagram" {

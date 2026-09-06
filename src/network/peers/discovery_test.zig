@@ -5,6 +5,44 @@ const discovery = @import("discovery.zig");
 const types = @import("types.zig");
 const context = types.ForkContext{ .digest = .{ 1, 2, 3, 4 } };
 
+test "peer discovery clears an active foreground walk at demand expiry and can restart" {
+    var a: Node = undefined;
+    try a.init(61, 9061);
+    defer a.deinit();
+    var b: Node = undefined;
+    try b.init(62, 9062);
+    defer b.deinit();
+    const now = try d.Driver.monotonicMilliseconds(std.testing.io);
+    var controller = try discovery.Discovery.init(std.testing.allocator, &a.driver, &context, &.{b.engine.localRecord().*}, now, .{});
+    defer controller.deinit();
+    try controller.request(.{ .general = true }, now);
+    var candidates: [16]adapter.Candidate = undefined;
+    var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
+    for (0..100) |_| {
+        const tick = try d.Driver.monotonicMilliseconds(std.testing.io);
+        const result = try controller.step(std.testing.io, tick, tick, &candidates);
+        _ = try b.driver.stepUntil(std.testing.io, &expiries, tick);
+        if (result.candidates > 0) break;
+    }
+    try std.testing.expect(a.engine.peerCount() > 0);
+    controller.deinit();
+    controller = try discovery.Discovery.init(std.testing.allocator, &a.driver, &context, &.{}, now, .{});
+    for ([_]bool{ false, true }) |replace_demand| {
+        const tick = now + if (replace_demand) @as(u64, 4000) else @as(u64, 2000);
+        try controller.request(.{ .attnets = .{1} ++ .{0} ** 7, .expires_ms = tick + 1 }, tick);
+        _ = try controller.step(std.testing.io, tick, now, &candidates);
+        try std.testing.expect(controller.lookup_active and controller.lookup.waitingCount() > 0);
+        const waiting = controller.lookup.waitingCount();
+        const count = a.engine.calls.count();
+        const background = controller.maintenance.pending;
+        if (replace_demand) try controller.request(.{}, tick + 1) else _ = try controller.step(std.testing.io, tick + 1, now, &candidates);
+        try std.testing.expect(!controller.lookup_active);
+        try std.testing.expect(a.engine.calls.count() <= count - waiting);
+        try std.testing.expectEqualDeep(background, controller.maintenance.pending);
+        try std.testing.expect(!controller.stopped);
+    }
+}
+
 const Node = struct {
     udp: d.Udp,
     engine: d.Engine,
