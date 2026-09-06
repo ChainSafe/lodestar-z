@@ -201,6 +201,8 @@ pub const Control = struct {
             row.transition_until_ms = now.mono_ms +| self.options.progress_timeout_ms;
             row.status_due_ms = now.mono_ms;
             row.retry_ms = 0;
+            // Gossip admission resumes in maintain only after fresh Status restores relevance.
+            row.gossip_retry_ms = 0;
             row.metadata_pending = true;
             for (self.operations) |*op| if (op.request) |request| {
                 if (!std.meta.eql(op.peer, peer) or !std.meta.eql(op.conn, row.conn)) continue;
