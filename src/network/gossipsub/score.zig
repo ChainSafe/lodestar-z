@@ -133,7 +133,7 @@ pub const PeerScore = struct {
         if (!counters.in_mesh) return;
         const params = self.topic_params[topic];
         const elapsed = now_ms -| counters.graft_ms;
-        if (elapsed >= params.mesh_delivery_activation_ms and
+        if (elapsed > params.mesh_delivery_activation_ms and
             counters.mesh_deliveries < params.mesh_delivery_threshold)
         {
             const deficit = params.mesh_delivery_threshold - counters.mesh_deliveries;
@@ -212,19 +212,24 @@ pub const PeerScore = struct {
                 );
                 topic_score += params.time_in_mesh_weight * p1;
                 if (params.weight != 0 and params.time_in_mesh_weight != 0 and p1 < params.time_in_mesh_cap) {
-                    const next = counters.graft_ms +| ((elapsed / params.time_in_mesh_quantum_ms +| 1) *| params.time_in_mesh_quantum_ms);
-                    if (next > now_ms) next_change = @min(next_change orelse next, next);
+                    const remaining = params.time_in_mesh_quantum_ms - elapsed % params.time_in_mesh_quantum_ms;
+                    const start = @max(now_ms, counters.graft_ms);
+                    if (remaining <= std.math.maxInt(u64) - start) {
+                        const next = start + remaining;
+                        next_change = @min(next_change orelse next, next);
+                    }
                 }
                 if (params.weight != 0 and params.mesh_delivery_weight != 0 and
-                    counters.mesh_deliveries < params.mesh_delivery_threshold and elapsed < params.mesh_delivery_activation_ms)
+                    counters.mesh_deliveries < params.mesh_delivery_threshold and elapsed <= params.mesh_delivery_activation_ms and
+                    params.mesh_delivery_activation_ms < std.math.maxInt(u64) - counters.graft_ms)
                 {
-                    const next = counters.graft_ms +| params.mesh_delivery_activation_ms;
-                    if (next > now_ms) next_change = @min(next_change orelse next, next);
+                    const next = counters.graft_ms + params.mesh_delivery_activation_ms + 1;
+                    next_change = @min(next_change orelse next, next);
                 }
             }
             topic_score += params.first_delivery_weight *
                 @min(counters.first_deliveries, params.first_delivery_cap);
-            if (counters.in_mesh and elapsed >= params.mesh_delivery_activation_ms and
+            if (counters.in_mesh and elapsed > params.mesh_delivery_activation_ms and
                 counters.mesh_deliveries < params.mesh_delivery_threshold)
             {
                 const deficit = params.mesh_delivery_threshold - counters.mesh_deliveries;
@@ -537,7 +542,7 @@ test "score cache preserves exact boundaries without repeated calculations" {
     try std.testing.expectEqual(@as(f64, 2), score.score(0, 15));
     try std.testing.expectEqual(@as(f64, 2), score.score(0, 16));
     try std.testing.expectEqual(@as(f64, 4), score.score(0, 29));
-    try std.testing.expectEqual(@as(f64, -8), score.score(0, 30));
+    try std.testing.expectEqual(@as(f64, 4), score.score(0, 30));
     try std.testing.expectEqual(@as(f64, -8), score.score(0, 31));
     try std.testing.expectEqual(@as(f64, -7), score.score(0, 35));
     const calculations = score.calculations;
@@ -603,10 +608,10 @@ test "score cache reports earliest active topic quantum activation and cap" {
     _ = score.score(0, 14);
     try std.testing.expectEqual(@as(?u64, 15), score.nextChange(0));
     _ = score.score(0, 15);
-    try std.testing.expectEqual(@as(?u64, 18), score.nextChange(0));
-    _ = score.score(0, 18);
-    try std.testing.expectEqual(@as(?u64, 22), score.nextChange(0));
-    _ = score.score(0, 22);
+    try std.testing.expectEqual(@as(?u64, 19), score.nextChange(0));
+    _ = score.score(0, 19);
+    try std.testing.expectEqual(@as(?u64, 23), score.nextChange(0));
+    _ = score.score(0, 23);
     try std.testing.expectEqual(@as(?u64, 25), score.nextChange(0));
     _ = score.score(0, 25);
     try std.testing.expectEqual(@as(?u64, null), score.nextChange(0));
@@ -625,4 +630,65 @@ test "score empty background decay does not fabricate mutations" {
     score.refresh(score.params.decay_interval_ms);
     try std.testing.expectEqual(revision, score.revision);
     try std.testing.expect(!score.dirty[0]);
+}
+
+test "score activation is strictly after the window for P3" {
+    var score = try PeerScore.initCapacity(std.testing.allocator, .{ .topic = .{ .time_in_mesh_weight = 0, .mesh_delivery_activation_ms = 10, .mesh_delivery_threshold = 2, .mesh_delivery_weight = -3, .mesh_failure_weight = -1 } }, 3);
+    defer score.deinit(std.testing.allocator);
+    score.graft(0, 0, 5);
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, 14));
+    try std.testing.expectEqual(@as(?u64, 16), score.nextChange(0));
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, 15));
+    try std.testing.expectEqual(@as(u64, 1), score.calculations);
+    try std.testing.expectEqual(@as(f64, -12), score.score(0, 16));
+    try std.testing.expectEqual(@as(u64, 2), score.calculations);
+    try std.testing.expectEqual(@as(?u64, null), score.nextChange(0));
+}
+
+test "score activation is strictly after the window for P3b pruning" {
+    var score = try PeerScore.initCapacity(std.testing.allocator, .{ .topic = .{ .time_in_mesh_weight = 0, .mesh_delivery_activation_ms = 10, .mesh_delivery_threshold = 2, .mesh_delivery_weight = -3, .mesh_failure_weight = -1 } }, 3);
+    defer score.deinit(std.testing.allocator);
+    for ([_]u64{ 14, 15, 16 }, 0..) |now, i| {
+        const peer: u16 = @intCast(i);
+        score.graft(peer, 0, 5);
+        score.prune(peer, 0, now);
+        try std.testing.expectEqual(@as(f64, if (now > 15) -4 else 0), score.score(peer, now));
+    }
+}
+
+test "score activation zero window still waits for the first elapsed tick" {
+    var score = try PeerScore.initCapacity(std.testing.allocator, .{ .topic = .{ .time_in_mesh_weight = 0, .mesh_delivery_activation_ms = 0 } }, 1);
+    defer score.deinit(std.testing.allocator);
+    score.graft(0, 0, 5);
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, 5));
+    try std.testing.expectEqual(@as(?u64, 6), score.nextChange(0));
+    try std.testing.expectEqual(@as(f64, -25), score.score(0, 6));
+}
+
+test "score activation and quantum deadlines never invent an overflowing instant" {
+    var score = try PeerScore.initCapacity(std.testing.allocator, .{ .topic = .{ .time_in_mesh_weight = 0, .mesh_delivery_activation_ms = 10 } }, 1);
+    defer score.deinit(std.testing.allocator);
+    const maximum = std.math.maxInt(u64);
+    score.graft(0, 0, maximum - 10);
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, maximum - 1));
+    try std.testing.expectEqual(@as(?u64, null), score.nextChange(0));
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, maximum));
+    score.prune(0, 0, maximum);
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, maximum));
+
+    score.resetPeer(0);
+    score.graft(0, 0, maximum - 11);
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, maximum - 1));
+    try std.testing.expectEqual(@as(?u64, maximum), score.nextChange(0));
+    try std.testing.expectEqual(@as(f64, -25), score.score(0, maximum));
+    try std.testing.expectEqual(@as(?u64, null), score.nextChange(0));
+    score.prune(0, 0, maximum);
+    try std.testing.expectEqual(@as(f64, -25), score.score(0, maximum));
+
+    score.resetPeer(0);
+    try score.configureTopic(0, .{ .time_in_mesh_quantum_ms = 10, .mesh_delivery_weight = 0 });
+    score.graft(0, 0, maximum - 9);
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, maximum - 1));
+    try std.testing.expectEqual(@as(?u64, null), score.nextChange(0));
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, maximum));
 }
