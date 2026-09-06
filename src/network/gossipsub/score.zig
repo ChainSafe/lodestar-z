@@ -53,6 +53,9 @@ const TopicCounters = struct {
 };
 
 pub const PeerScore = struct {
+    revision: u64 = 0,
+    calculations: u64 = 0,
+    topic_visits: u64 = 0,
     params: Params,
     topics: []TopicCounters,
     app_score: []f64,
@@ -61,6 +64,7 @@ pub const PeerScore = struct {
     connected: [peer_capacity]bool = [_]bool{true} ** peer_capacity,
     last_decay_ms: [peer_capacity]?u64 = [_]?u64{null} ** peer_capacity,
     dirty: [peer_capacity]bool = [_]bool{true} ** peer_capacity,
+    cached_until: [peer_capacity]?u64 = [_]?u64{null} ** peer_capacity,
     cached_at: [peer_capacity]?u64 = [_]?u64{null} ** peer_capacity,
     cached: [peer_capacity]f64 = [_]f64{0} ** peer_capacity,
     cached_ip: [peer_capacity]u16 = [_]u16{0} ** peer_capacity,
@@ -102,12 +106,14 @@ pub const PeerScore = struct {
     fn tc(self: *PeerScore, peer: u16, topic: u16) *TopicCounters {
         const index = @as(usize, peer) * constants.topics_cap + topic;
         assert(index < self.topics.len);
+        self.revision +|= 1;
         self.dirty[peer] = true;
         return &self.topics[index];
     }
 
     /// Clears every counter for a peer whose slot is being reused.
     pub fn resetPeer(self: *PeerScore, peer: u16) void {
+        self.revision +|= 1;
         self.dirty[peer] = true;
         const base = @as(usize, peer) * constants.topics_cap;
         @memset(self.topics[base..][0..constants.topics_cap], .{});
@@ -168,19 +174,28 @@ pub const PeerScore = struct {
 
     pub fn penalize(self: *PeerScore, peer: u16, amount: f64) void {
         assert(safeMagnitude(amount) and amount >= 0);
+        self.revision +|= 1;
         self.dirty[peer] = true;
         self.behaviour[peer] = @min(counter_max, self.behaviour[peer] + amount);
     }
 
     pub fn setAppScore(self: *PeerScore, peer: u16, value: f64) bool {
         if (!safeMagnitude(value)) return false;
+        if (self.app_score[peer] == value) return true;
+        self.revision +|= 1;
         self.dirty[peer] = true;
         self.app_score[peer] = value;
         return true;
     }
 
     pub fn score(self: *PeerScore, peer: u16, now_ms: u64) f64 {
-        if (!self.dirty[peer] and self.cached_at[peer] == now_ms and self.cached_ip[peer] == self.ip_count[peer]) return self.cached[peer];
+        assert(peer < self.app_score.len);
+        if (!self.dirty[peer] and self.cached_at[peer] != null and now_ms >= self.cached_at[peer].? and
+            (self.cached_until[peer] == null or now_ms < self.cached_until[peer].?) and
+            self.cached_ip[peer] == self.ip_count[peer]) return self.cached[peer];
+        self.calculations +|= 1;
+        self.topic_visits +|= constants.topics_cap;
+        var next_change: ?u64 = null;
         var total: f64 = 0;
         var topic: usize = 0;
         while (topic < constants.topics_cap) : (topic += 1) {
@@ -196,6 +211,16 @@ pub const PeerScore = struct {
                     params.time_in_mesh_cap,
                 );
                 topic_score += params.time_in_mesh_weight * p1;
+                if (params.weight != 0 and params.time_in_mesh_weight != 0 and p1 < params.time_in_mesh_cap) {
+                    const next = counters.graft_ms +| ((elapsed / params.time_in_mesh_quantum_ms +| 1) *| params.time_in_mesh_quantum_ms);
+                    if (next > now_ms) next_change = @min(next_change orelse next, next);
+                }
+                if (params.weight != 0 and params.mesh_delivery_weight != 0 and
+                    counters.mesh_deliveries < params.mesh_delivery_threshold and elapsed < params.mesh_delivery_activation_ms)
+                {
+                    const next = counters.graft_ms +| params.mesh_delivery_activation_ms;
+                    if (next > now_ms) next_change = @min(next_change orelse next, next);
+                }
             }
             topic_score += params.first_delivery_weight *
                 @min(counters.first_deliveries, params.first_delivery_cap);
@@ -222,9 +247,17 @@ pub const PeerScore = struct {
         assert(std.math.isFinite(total));
         self.dirty[peer] = false;
         self.cached_at[peer] = now_ms;
+        self.cached_until[peer] = next_change;
         self.cached_ip[peer] = self.ip_count[peer];
         self.cached[peer] = total;
         return total;
+    }
+
+    /// Valid after score(peer, now). Background refresh invalidates on counter decay;
+    /// reads never advance decay or change the heartbeat's fixed score snapshot.
+    pub fn nextChange(self: *const PeerScore, peer: u16) ?u64 {
+        assert(peer < self.app_score.len and !self.dirty[peer]);
+        return self.cached_until[peer];
     }
 
     pub fn resetTopic(self: *PeerScore, topic: u16) void {
@@ -235,9 +268,10 @@ pub const PeerScore = struct {
         }
     }
 
-    pub fn retainsTopic(self: *PeerScore, topic: u16) bool {
+    pub fn retainsTopic(self: *const PeerScore, topic: u16) bool {
+        assert(topic < constants.topics_cap);
         for (0..self.app_score.len) |peer| {
-            const counters = self.tc(@intCast(peer), topic);
+            const counters = &self.topics[peer * constants.topics_cap + topic];
             if (counters.in_mesh or counters.first_deliveries != 0 or counters.mesh_deliveries != 0 or
                 counters.mesh_failures != 0 or counters.invalid != 0) return true;
         }
@@ -247,6 +281,8 @@ pub const PeerScore = struct {
     pub fn configureTopic(self: *PeerScore, topic: u16, params: TopicParams) error{InvalidLimits}!void {
         assert(topic < constants.topics_cap);
         try validateTopic(params);
+        if (std.meta.eql(self.topic_params[topic], params)) return;
+        self.revision +|= 1;
         self.topic_params[topic] = params;
         @memset(&self.dirty, true);
     }
@@ -254,6 +290,7 @@ pub const PeerScore = struct {
     pub fn setConnected(self: *PeerScore, peer: u16, connected: bool, now_ms: u64) void {
         assert(peer < self.app_score.len);
         self.refreshPeer(peer, now_ms);
+        self.revision +|= 1;
         self.dirty[peer] = true;
         self.connected[peer] = connected;
         self.last_decay_ms[peer] = now_ms;
@@ -278,14 +315,21 @@ pub const PeerScore = struct {
     fn decayPeer(self: *PeerScore, peer: u16, steps: u64) void {
         const zero = self.params.decay_to_zero;
         for (0..constants.topics_cap) |topic| {
-            const c = self.tc(peer, @intCast(topic));
+            const c = &self.topics[@as(usize, peer) * constants.topics_cap + topic];
+            if (c.first_deliveries == 0 and c.mesh_deliveries == 0 and c.mesh_failures == 0 and c.invalid == 0) continue;
+            self.revision +|= 1;
+            self.dirty[peer] = true;
             const tp = self.topic_params[topic];
             c.first_deliveries = decayed(c.first_deliveries, tp.first_delivery_decay, steps, zero);
             c.mesh_deliveries = decayed(c.mesh_deliveries, tp.mesh_delivery_decay, steps, zero);
             c.mesh_failures = decayed(c.mesh_failures, tp.mesh_failure_decay, steps, zero);
             c.invalid = decayed(c.invalid, tp.invalid_decay, steps, zero);
         }
-        self.behaviour[peer] = decayed(self.behaviour[peer], self.params.behaviour_decay, steps, zero);
+        if (self.behaviour[peer] != 0) {
+            self.revision +|= 1;
+            self.dirty[peer] = true;
+            self.behaviour[peer] = decayed(self.behaviour[peer], self.params.behaviour_decay, steps, zero);
+        }
     }
 };
 
@@ -481,4 +525,104 @@ test "gossip policy host scores and saturated penalties stay finite" {
     score.penalize(0, counter_max);
     try std.testing.expectEqual(counter_max, score.behaviour[0]);
     try std.testing.expect(std.math.isFinite(score.score(0, 1)));
+}
+
+test "score cache preserves exact boundaries without repeated calculations" {
+    var score = try PeerScore.initCapacity(std.testing.allocator, .{ .decay_interval_ms = 10, .topic = .{ .time_in_mesh_weight = 2, .time_in_mesh_cap = 2.5, .time_in_mesh_quantum_ms = 10, .mesh_delivery_activation_ms = 25, .mesh_delivery_threshold = 2, .mesh_delivery_weight = -3 } }, 2);
+    defer score.deinit(std.testing.allocator);
+    score.graft(0, 0, 5);
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, 5));
+    try std.testing.expectEqual(@as(f64, 0), score.score(0, 14));
+    try std.testing.expectEqual(@as(u64, 1), score.calculations);
+    try std.testing.expectEqual(@as(f64, 2), score.score(0, 15));
+    try std.testing.expectEqual(@as(f64, 2), score.score(0, 16));
+    try std.testing.expectEqual(@as(f64, 4), score.score(0, 29));
+    try std.testing.expectEqual(@as(f64, -8), score.score(0, 30));
+    try std.testing.expectEqual(@as(f64, -8), score.score(0, 31));
+    try std.testing.expectEqual(@as(f64, -7), score.score(0, 35));
+    const calculations = score.calculations;
+    try std.testing.expectEqual(@as(f64, -7), score.score(0, 1000));
+    try std.testing.expectEqual(calculations, score.calculations);
+    // A caller using an earlier clock must still get the exact earlier P1/P3.
+    try std.testing.expectEqual(@as(f64, 2), score.score(0, 15));
+}
+
+test "score read only topic inspection preserves cache validity" {
+    var score = try PeerScore.initCapacity(std.testing.allocator, .{}, 2);
+    defer score.deinit(std.testing.allocator);
+    _ = score.score(0, 0);
+    try std.testing.expect(!score.retainsTopic(0));
+    try std.testing.expect(!score.dirty[0]);
+    _ = score.score(0, 0);
+    try std.testing.expectEqual(@as(u64, 1), score.calculations);
+}
+
+test "score cache mutation IP topic and heartbeat decay boundaries remain exact" {
+    var score = try PeerScore.initCapacity(std.testing.allocator, .{ .ip_colocation_weight = -5, .decay_interval_ms = 10, .topic = .{ .first_delivery_decay = 0.5 } }, 2);
+    defer score.deinit(std.testing.allocator);
+    score.deliver(0, 0);
+    score.refresh(0);
+    try std.testing.expectEqual(@as(f64, 1), score.score(0, 0));
+    try std.testing.expectEqual(@as(?u64, null), score.nextChange(0));
+    score.refresh(9);
+    try std.testing.expectEqual(@as(f64, 1), score.score(0, 9));
+    try std.testing.expectEqual(@as(u64, 1), score.calculations);
+    // Wall time alone does not move the background decay schedule.
+    try std.testing.expectEqual(@as(f64, 1), score.score(0, 10));
+    try std.testing.expectEqual(@as(u64, 1), score.calculations);
+    score.refresh(10);
+    try std.testing.expectEqual(@as(f64, 0.5), score.score(0, 10));
+    try std.testing.expectEqual(@as(u64, 2), score.calculations);
+    score.refresh(11);
+    try std.testing.expectEqual(@as(f64, 0.5), score.score(0, 11));
+    try std.testing.expectEqual(@as(u64, 2), score.calculations);
+    score.ip_count[0] = 5;
+    try std.testing.expectEqual(@as(f64, -19.5), score.score(0, 11));
+    try std.testing.expect(score.setAppScore(0, 7));
+    try std.testing.expectEqual(@as(f64, -12.5), score.score(0, 11));
+    score.deliver(0, 0);
+    try std.testing.expectEqual(@as(f64, -11.5), score.score(0, 11));
+    try score.configureTopic(0, .{ .first_delivery_weight = 2, .first_delivery_decay = 0.5 });
+    try std.testing.expectEqual(@as(f64, -10), score.score(0, 11));
+    score.setConnected(0, false, 11);
+    score.refresh(1000);
+    try std.testing.expectEqual(@as(f64, -10), score.score(0, 1000));
+    const frozen = score.calculations;
+    score.refresh(2000);
+    try std.testing.expectEqual(@as(f64, -10), score.score(0, 2000));
+    try std.testing.expectEqual(frozen, score.calculations);
+}
+
+test "score cache reports earliest active topic quantum activation and cap" {
+    var score = try PeerScore.initCapacity(std.testing.allocator, .{}, 1);
+    defer score.deinit(std.testing.allocator);
+    try score.configureTopic(0, .{ .time_in_mesh_quantum_ms = 10, .time_in_mesh_cap = 1.5, .mesh_delivery_activation_ms = 17 });
+    try score.configureTopic(1, .{ .time_in_mesh_weight = 0, .mesh_delivery_activation_ms = 13 });
+    score.graft(0, 0, 5);
+    score.graft(0, 1, 5);
+    _ = score.score(0, 14);
+    try std.testing.expectEqual(@as(?u64, 15), score.nextChange(0));
+    _ = score.score(0, 15);
+    try std.testing.expectEqual(@as(?u64, 18), score.nextChange(0));
+    _ = score.score(0, 18);
+    try std.testing.expectEqual(@as(?u64, 22), score.nextChange(0));
+    _ = score.score(0, 22);
+    try std.testing.expectEqual(@as(?u64, 25), score.nextChange(0));
+    _ = score.score(0, 25);
+    try std.testing.expectEqual(@as(?u64, null), score.nextChange(0));
+    score.revision = std.math.maxInt(u64);
+    score.invalid(0, 0);
+    try std.testing.expectEqual(std.math.maxInt(u64), score.revision);
+    try std.testing.expect(score.dirty[0]);
+}
+
+test "score empty background decay does not fabricate mutations" {
+    var score = try PeerScore.initCapacity(std.testing.allocator, .{}, 1);
+    defer score.deinit(std.testing.allocator);
+    score.refresh(0);
+    _ = score.score(0, 0);
+    const revision = score.revision;
+    score.refresh(score.params.decay_interval_ms);
+    try std.testing.expectEqual(revision, score.revision);
+    try std.testing.expect(!score.dirty[0]);
 }

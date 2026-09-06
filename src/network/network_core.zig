@@ -244,7 +244,7 @@ pub const NetworkCore = struct {
     pub fn setDemand(self: *NetworkCore, demand: *const t.Demand) !void {
         try self.core.setDemand(demand);
     }
-    pub fn coverageDeficits(self: *const NetworkCore) peers.policy.Deficits {
+    pub fn coverageDeficits(self: *NetworkCore) peers.policy.Deficits {
         return self.core.coverageDeficits();
     }
     pub fn peerCounts(self: *NetworkCore) core_mod.Core.PeerCounts {
@@ -388,10 +388,9 @@ pub const NetworkCore = struct {
                 for (candidates[0..result.discovery.candidates]) |*candidate| {
                     self.counters.discovered +|= 1;
                     if (!futureCompatible(candidate, self.schedule)) self.counters.future_fork_mismatches +|= 1;
-                    self.core.discovered(candidate, tick) catch {
-                        self.counters.candidates_refused +|= 1;
-                    };
                 }
+                const intake = self.core.discoveredBatch(candidates[0..result.discovery.candidates], tick);
+                self.counters.candidates_refused +|= intake.refused;
                 if (result.discovery.failure) |err| {
                     self.counters.discovery_failures +|= 1;
                     result.failure = result.failure orelse err;

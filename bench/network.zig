@@ -82,6 +82,7 @@ pub fn main(init: std.process.Init) !void {
         try samples.record(i, timestamp(io) - start, result, immediate);
     }
     samples.print("idle");
+    printReconciliation(a, "idle");
     const b = try allocator.create(network.NetworkCore);
     defer allocator.destroy(b);
     try initialize(b, allocator, io, &key_b, profile);
@@ -89,6 +90,7 @@ pub fn main(init: std.process.Init) !void {
     const allocations_b = b.reservations.allocation_calls;
     const peer = try connectPair(a, b, io);
     try pressure(a, b, sinks, io, peer);
+    printReconciliation(a, "connected_cumulative");
     std.debug.print("turn_allocation_calls_a={} turn_allocation_calls_b={} process_rss=external_time_maximum_resident_set_kbytes\n", .{ a.reservations.allocation_calls - allocations_a, b.reservations.allocation_calls - allocations_b });
 }
 
@@ -209,4 +211,10 @@ fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected:
     }
     if (received != expected or terminals != expected) return error.RequestsDidNotDrain;
     std.debug.print("drained_application_requests={} terminal_results={}\n", .{ received, terminals });
+}
+
+fn printReconciliation(node: *network.NetworkCore, name: []const u8) void {
+    const c = node.core.counters;
+    const score = &node.core.service.gossipsub.inner.scores;
+    std.debug.print("case={s} selections={} selection_rows={} candidate_syncs={} candidate_rows={} candidate_lookup_rows={} availability_rows={} candidate_selections={} score_calculations={} score_topic_visits={}\n", .{ name, c.selections, c.selection_rows, c.candidate_syncs, c.candidate_rows, c.candidate_lookup_rows, c.availability_rows, c.candidate_selections, score.calculations, score.topic_visits });
 }

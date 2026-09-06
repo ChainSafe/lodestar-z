@@ -112,7 +112,7 @@ pub const Handler = struct {
         return self.inner.state.findPeer(conn) != null;
     }
 
-    pub fn deliveryAvailable(self: *Handler, conn: Handle) bool {
+    pub fn deliveryAvailable(self: *const Handler, conn: Handle) bool {
         const index = self.inner.state.findPeer(conn) orelse return false;
         return switch (self.streams[index].outbound) {
             .live => |stream| std.meta.eql(self.inner.state.outStream(index), stream),

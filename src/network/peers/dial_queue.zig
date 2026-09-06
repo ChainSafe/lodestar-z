@@ -56,6 +56,8 @@ const Row = struct {
 pub const DialQueue = struct {
     rows: []Row,
     options: Options,
+    selection_dirty: bool = true,
+    selection_deadline: ?u64 = null,
     cursor: usize = 0,
     custody_cursor: usize = 0,
     random: std.Random.DefaultPrng,
@@ -94,6 +96,7 @@ pub const DialQueue = struct {
     ) !void {
         if (addresses.len == 0 or addresses.len > 2) return error.InvalidAddress;
         for (addresses) |address| if (address.port() == 0) return error.InvalidAddress;
+        self.selection_dirty = true;
         var free: ?*Row = null;
         for (self.rows) |*row| {
             if (row.occupied and row.peer.eql(peer)) {
@@ -144,6 +147,7 @@ pub const DialQueue = struct {
         copyAddresses(&incoming, candidate);
         resetCustody(&incoming, context);
         const incoming_utility = policy.utility(&coverage(&incoming, context, now_ms), wanted);
+        self.selection_dirty = true;
         var free: ?*Row = null;
         var victim: ?*Row = null;
         var victim_utility: u16 = std.math.maxInt(u16);
@@ -232,18 +236,23 @@ pub const DialQueue = struct {
                 continue;
             };
             budget.* -= work.hashes - before;
+            if (work.hashes != before and result != null) self.selection_dirty = true;
             pending = pending or result == null;
         }
         self.custody_cursor = (self.custody_cursor + 1) % self.rows.len;
         return pending;
     }
     pub fn configureSelection(self: *DialQueue, wanted: *const t.Coverage, general: bool, context: *const t.ForkContext, now_ms: u64) void {
+        self.selection_deadline = null;
         for (self.rows) |*row| {
             if (!row.occupied) continue;
+            const deadline = row.hints_at_ms +| hint_freshness_ms;
+            if (row.hints != null and now_ms < deadline) self.selection_deadline = @min(self.selection_deadline orelse deadline, deadline);
             row.priority = policy.utility(&coverage(row, context, now_ms), wanted);
             const compatible = if (row.hints) |hints| hints.validFor(context) else false;
             row.selected = !row.automatic or (compatible and (general or row.priority > 0));
         }
+        self.selection_dirty = false;
     }
     pub fn candidateHints(self: *const DialQueue, peer: *const t.PeerId, now_ms: u64) ?Hints {
         for (self.rows) |row| {

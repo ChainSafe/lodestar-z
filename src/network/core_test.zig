@@ -824,6 +824,7 @@ test "core coverage authenticated custody differs from gossip delivery and inval
     const index = setup.client.service.gossipsub.inner.state.findPeer(connection).?;
     setup.client.service.gossipsub.inner.resetOutbound(&setup.pair.client, index);
     try std.testing.expect(!setup.client.service.gossipsub.deliveryAvailable(connection));
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     setup.client.service.gossipsub.streams[index].outbound = .{ .waiting = setup.pair.now.mono_ms +| 30_000 };
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
@@ -994,5 +995,165 @@ test "core coverage review same-digest group update disables cached automatic ca
     candidate.custody_group_count = 64;
     try setup.client.discovered(&candidate, setup.pair.now);
     try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &out));
+    try std.testing.expect(out[0].peer.eql(&candidate.peer));
+}
+
+test "core reconciliation idle and candidate batch work" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    for (0..8) |_| {
+        try setup.step(0);
+        _ = setup.client.dialIntents(&setup.pair.client, setup.pair.now, &.{});
+    }
+    const c = setup.client.counters;
+    const candidate = try candidateFor(&setup.pair.server_ctx.local_peer_id, null);
+    for (0..4) |_| try setup.client.discovered(&candidate, setup.pair.now);
+    var out: [1]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &out));
+    const after = setup.client.counters;
+    try std.testing.expectEqual(@as(u64, 1), c.selections);
+    try std.testing.expectEqual(@as(u64, 1), c.candidate_syncs);
+    try std.testing.expectEqual(@as(u64, 0), after.selections - c.selections);
+    try std.testing.expect(after.candidate_syncs - c.candidate_syncs <= 1);
+}
+
+test "core reconciliation raw mutators deadlines and read getters invalidate once" {
+    var setup: Setup = .{};
+    const local: t.LocalState = .{ .fork = .{ .fork = .altair }, .metadata = .{ .syncnets = 1 } };
+    try setup.init(&local);
+    defer setup.deinit();
+    const demand: t.Demand = .{ .coverage = .{ .syncnets = 1 }, .expires_at_slot = 200 };
+    try setup.client.setDemand(&demand);
+    for (0..60) |_| try setup.step(0);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const peer = snapshots[0].peer;
+    const conn = snapshots[0].connection.?;
+    const before = setup.client.counters.selections;
+    for (0..8) |_| {
+        setup.pair.advance(1);
+        setup.client.reconcile(setup.pair.now);
+        _ = setup.client.coverageDeficits();
+    }
+    try std.testing.expectEqual(before, setup.client.counters.selections);
+    try std.testing.expect(setup.client.catalog.updateMetadata(peer, conn, &.{ .seq_number = 10, .syncnets = 0 }, setup.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(before + 1, setup.client.counters.selections);
+    try std.testing.expect(setup.client.catalog.updateMetadata(peer, conn, &.{ .seq_number = 11, .syncnets = 1 }, setup.pair.now.mono_ms));
+    setup.client.reconcile(setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
+    const deadline = setup.client.metadata_deadline.?;
+    var clock = setup.pair.now;
+    clock.mono_ms = deadline - 1;
+    setup.client.reconcile(clock);
+    const fresh = setup.client.counters.selections;
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
+    clock.mono_ms = deadline;
+    setup.client.reconcile(clock);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(fresh + 1, setup.client.counters.selections);
+    clock.mono_ms += 1;
+    setup.client.reconcile(clock);
+    try std.testing.expectEqual(fresh + 1, setup.client.counters.selections);
+
+    try std.testing.expect(setup.client.service.gossipsub.inner.setPeerScore(conn, -10));
+    setup.client.reconcile(clock);
+    try std.testing.expectEqual(fresh + 2, setup.client.counters.selections);
+    try std.testing.expect(setup.client.service.gossipsub.inner.setPeerScore(conn, -10));
+    setup.client.reconcile(clock);
+    try std.testing.expectEqual(fresh + 2, setup.client.counters.selections);
+    _ = setup.client.reportPeer(peer, .high_tolerance, clock);
+    setup.client.reconcile(clock);
+    const penalized = setup.client.counters.selections;
+    const health = setup.client.catalog.get(peer).?.score;
+    clock.mono_ms += 100;
+    setup.client.reconcile(clock);
+    try std.testing.expect(setup.client.catalog.get(peer).?.score > health);
+    try std.testing.expectEqual(penalized, setup.client.counters.selections);
+
+    try setup.client.addDirectPeer(&snapshots[0].identity, &.{support.server_address}, clock);
+    _ = setup.client.coverageDeficits();
+    try std.testing.expectEqual(penalized + 1, setup.client.counters.selections);
+    setup.client.removeDirectPeer(&snapshots[0].identity);
+    _ = setup.client.coverageDeficits();
+    try std.testing.expectEqual(penalized + 2, setup.client.counters.selections);
+    try setup.client.setDemand(&.{});
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(penalized + 3, setup.client.counters.selections);
+    try setup.client.setDemand(&.{});
+    _ = setup.client.coverageDeficits();
+    try std.testing.expectEqual(penalized + 3, setup.client.counters.selections);
+    try std.testing.expect(setup.client.disconnect(peer, .host, clock));
+    setup.client.reconcile(clock);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.selection.retained_count);
+}
+
+test "core reconciliation batch counts refusal and fresh native room independently" {
+    var setup: Setup = .{};
+    var opts = options();
+    opts.peers.max_peers = 1;
+    opts.peers.target_peers = 1;
+    opts.peers.min_outbound = 0;
+    try setup.initOwnersWithOptions(&.{}, opts);
+    defer setup.deinit();
+    setup.client.reconcile(setup.pair.now);
+    const baseline = setup.client.counters;
+    const candidate = try candidateFor(&setup.pair.server_ctx.local_peer_id, null);
+    const self_candidate = try candidateFor(&setup.pair.client_ctx.local_peer_id, null);
+    var invalid = candidate;
+    invalid.address_count = 0;
+    const result = setup.client.discoveredBatch(&.{ candidate, self_candidate, invalid, candidate }, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 2), result.accepted);
+    try std.testing.expectEqual(@as(u16, 2), result.refused);
+    const conn = try setup.pair.dial();
+    var out: [1]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 0), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &out));
+    try std.testing.expect(setup.pair.client.abandon(conn));
+    try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &out));
+    try std.testing.expectEqual(baseline.selections, setup.client.counters.selections);
+    try std.testing.expectEqual(baseline.candidate_selections + 1, setup.client.counters.candidate_selections);
+    try std.testing.expectEqual(baseline.candidate_syncs, setup.client.counters.candidate_syncs);
+}
+
+test "core reconciliation exhausted revisions stay invalidated" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    setup.client.catalog.revision = std.math.maxInt(u64);
+    setup.client.reconcile(setup.pair.now);
+    const before = setup.client.counters.selections;
+    setup.client.reconcile(setup.pair.now);
+    try std.testing.expectEqual(before + 1, setup.client.counters.selections);
+}
+
+test "core reconciliation ban expiry still defers until strict score recovery" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..50) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const peer = snapshots[0].peer;
+    const conn = snapshots[0].connection.?;
+    try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.reportPeer(peer, .fatal, setup.pair.now).?);
+    setup.client.control.close(&setup.client.service, &setup.client.catalog, &setup.pair.client, peer, conn, .banned, setup.pair.now);
+    const candidate = try candidateFor(&snapshots[0].identity, null);
+    try setup.client.discovered(&candidate, setup.pair.now);
+    var out: [1]managed.DialIntent = undefined;
+    const ban = setup.client.catalog.get(peer).?.ban_until_ms;
+    var clock = setup.pair.now;
+    clock.mono_ms = ban - 1;
+    try std.testing.expectEqual(@as(usize, 0), setup.client.dialIntents(&setup.pair.client, clock, &out));
+    clock.mono_ms = ban;
+    try std.testing.expectEqual(@as(usize, 0), setup.client.dialIntents(&setup.pair.client, clock, &out));
+    const recovery = setup.client.reconciliation_deadline.?;
+    try std.testing.expect(recovery > ban);
+    clock.mono_ms = recovery - 1;
+    try std.testing.expectEqual(@as(usize, 0), setup.client.dialIntents(&setup.pair.client, clock, &out));
+    clock.mono_ms = recovery;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, clock, &out));
+    try std.testing.expect(setup.client.catalog.get(peer).?.score > -50);
     try std.testing.expect(out[0].peer.eql(&candidate.peer));
 }
