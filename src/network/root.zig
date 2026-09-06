@@ -54,6 +54,7 @@ test {
     _ = gossipsub;
     _ = @import("types_test.zig");
     _ = @import("udp_test.zig");
+    _ = @import("wait_test.zig");
     _ = @import("driver_test.zig");
     _ = @import("transport_test.zig");
     _ = @import("negotiate_test.zig");

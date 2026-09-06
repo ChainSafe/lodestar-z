@@ -6,6 +6,7 @@ const d = @import("discv5");
 
 fn options(key: *const keys.KeyPair) runtime.Options {
     var result: runtime.Options = .{
+        .wait_mode = if (runtime.wait.supported) .native_poll else .portable,
         .transport = .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{
             .connections_max = 4,
             .handshaking_max = 4,
@@ -603,4 +604,163 @@ test "managed invalid complete sections reject before allocation" {
         try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
         try std.testing.expectEqual(@as(usize, 0), ledger.allocation_calls);
     }
+}
+
+test "managed runtime native readiness wakes for either delayed protocol socket" {
+    if (!runtime.wait.supported) return error.SkipZigTest;
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{31}));
+    var opts = options(&key);
+    opts.wait_mode = .native_poll;
+    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const sender = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer sender.close(std.testing.io);
+    for (0..2) |source| {
+        for (0..2) |_| {
+            const settled = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 0);
+            try std.testing.expect(settled.failure == null);
+        }
+        const target = if (source == 0) node.transport.udp.socket else node.discovery.?.udp.socket;
+        const generation = if (source == 0) node.transport.udp.next_generation else node.discovery.?.udp.next_generation;
+        const task = try std.Thread.spawn(.{}, delayedRuntimeDatagram, .{ sender, target.address });
+        defer task.join();
+        const result = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 100);
+        try std.testing.expect(result.failure == null);
+        try std.testing.expectEqual(generation + 1, if (source == 0) node.transport.udp.next_generation else node.discovery.?.udp.next_generation);
+        try std.testing.expect(node.transport.udp.admitted == null and node.discovery.?.udp.admitted == null);
+    }
+}
+
+fn delayedRuntimeDatagram(sender: std.Io.net.Socket, address: std.Io.net.IpAddress) void {
+    std.testing.io.sleep(.fromMilliseconds(10), .awake) catch unreachable;
+    sender.send(std.testing.io, &address, "invalid") catch unreachable;
+}
+
+test "managed runtime native host wake validates rollback detaches and preserves bytes" {
+    if (!runtime.wait.supported) return error.SkipZigTest;
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
+    var opts = options(&key);
+    opts.wait_mode = .native_poll;
+    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const host = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer host.close(std.testing.io);
+    try node.setHostWake(host.handle);
+    try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(-1));
+    try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(node.transport.udp.socket.handle));
+    try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(node.discovery.?.udp.socket.handle));
+    _ = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 0);
+    const sender = try std.Thread.spawn(.{}, delayedRuntimeDatagram, .{ host, host.address });
+    defer sender.join();
+    const result = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 100);
+    try std.testing.expect(result.failure == null and result.readiness.host);
+    const repeated = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 0);
+    try std.testing.expect(repeated.readiness.host);
+    try std.testing.expectEqual(@as(u32, 0), repeated.readiness.timeout_ms);
+    try node.setHostWake(null);
+    const detached = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 0);
+    try std.testing.expect(!detached.readiness.host);
+    try node.setHostWake(host.handle);
+    node.shutdown(node.last_now);
+    const stopped = node.step(std.testing.io, node.last_now, 0, .{}, 100);
+    try std.testing.expect(!stopped.readiness.host);
+    try std.testing.expectEqual(@as(u32, 0), stopped.readiness.timeout_ms);
+    try std.testing.expectError(error.Stopped, node.setHostWake(host.handle));
+    var buffer: [8]u8 = undefined;
+    const message = try host.receiveTimeout(std.testing.io, &buffer, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(0) } });
+    try std.testing.expectEqualStrings("invalid", message.data);
+}
+
+test "managed runtime portable fallback rejects enabled host source" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{33}));
+    var node: runtime.NetworkCore = undefined;
+    var opts = options(&key);
+    opts.wait_mode = .portable;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    try std.testing.expectError(error.UnsupportedWait, node.setHostWake(1));
+    try node.setHostWake(null);
+    const result = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 0);
+    try std.testing.expect(result.failure == null);
+    try std.testing.expectEqual(@as(u64, 0), node.diagnostics().readiness_calls);
+}
+
+test "managed runtime native wait source failure retains completed protocol progress" {
+    if (!runtime.wait.supported) return error.SkipZigTest;
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{34}));
+    var opts = options(&key);
+    opts.wait_mode = .native_poll;
+    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    var pipe: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe));
+    defer _ = std.c.close(pipe[0]);
+    try node.setHostWake(pipe[0]);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.close(pipe[1]));
+    try node.transport.udp.socket.send(std.testing.io, &node.transport.udp.socket.address, "invalid");
+    try node.transport.udp.socket.send(std.testing.io, &node.discovery.?.udp.socket.address, "invalid");
+    const allocations = node.reservations.allocation_calls;
+    const result = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 100);
+    try std.testing.expectEqual(error.WaitSourceClosed, result.failure.?);
+    try std.testing.expect(result.readiness.quic and result.readiness.discovery);
+    try std.testing.expectEqual(@as(u32, 1), result.transport.datagrams_received);
+    try std.testing.expectEqual(@as(u64, 2), node.discovery.?.udp.next_generation);
+    try std.testing.expect(node.transport.udp.admitted == null and node.discovery.?.udp.admitted == null);
+    try std.testing.expectEqual(allocations, node.reservations.allocation_calls);
+    try node.setHostWake(null);
+    const clean = node.step(std.testing.io, node.last_now, 0, .{}, 0);
+    try std.testing.expect(clean.failure == null);
+    try std.testing.expectEqual(@as(u64, 1), node.diagnostics().readiness_failures);
+}
+
+test "managed runtime native wait honors pacing native timers and pending lifecycle work" {
+    if (!runtime.wait.supported) return error.SkipZigTest;
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{35}));
+    var opts = options(&key);
+    opts.wait_mode = .native_poll;
+    opts.transport.limits.handshake_timeout_ms = 80;
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const remote = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
+    defer remote.close(std.testing.io);
+    const destination = @import("udp.zig").fromNetwork(remote.address);
+    const now = try @import("driver.zig").currentTime(std.testing.io);
+    const handle = try node.transport.engine.dial(&destination, node.peerId(), now, @splat(17));
+    const first = node.step(std.testing.io, now, 0, .{}, 100);
+    try std.testing.expect(first.failure == null);
+    try std.testing.expectEqual(@as(u32, 0), first.readiness.timeout_ms);
+    try std.testing.expect(first.transport.datagrams_sent > 0);
+    const current = node.last_now;
+    var paced_bytes = "paced".*;
+    try node.transport.driver.pending.put(handle, .{
+        .bytes = &paced_bytes,
+        .to = destination,
+        .transmit_at_ns = current.nanos() + 10 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(current.mono_ms + 10, node.nextWakeup(current, .{}).?);
+    const paced = node.step(std.testing.io, current, 0, .{}, 100);
+    try std.testing.expect(paced.failure == null);
+    try std.testing.expectEqual(@as(u32, 10), paced.readiness.timeout_ms);
+    const remaining = (now.mono_ms + 80) -| node.last_now.mono_ms;
+    try std.testing.expect(node.nextWakeup(node.last_now, .{}).? <= node.last_now.mono_ms + remaining);
+    const timer = node.step(std.testing.io, node.last_now, 0, .{}, 100);
+    try std.testing.expect(timer.failure == null);
+    try std.testing.expect(timer.readiness.timeout_ms <= remaining);
+    const failed = try node.transport.engine.dial(&destination, node.peerId(), node.last_now, @splat(18));
+    node.transport.engine.driverView().failSend(failed.index);
+    _ = node.transport.engine.driverView().takeHostWork();
+    try std.testing.expect(node.transport.engine.eventsPending());
+    const lifecycle = node.step(std.testing.io, node.last_now, 0, .{}, 100);
+    try std.testing.expect(lifecycle.failure == null);
+    try std.testing.expectEqual(@as(u32, 0), lifecycle.readiness.timeout_ms);
+    try std.testing.expect(lifecycle.transport.events > 0);
+    const repeated = node.step(std.testing.io, node.last_now, 0, .{}, 0);
+    try std.testing.expectEqual(@as(usize, 0), repeated.transport.events);
 }

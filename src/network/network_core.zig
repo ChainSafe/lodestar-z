@@ -9,6 +9,7 @@ const peers = @import("peers/root.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
+pub const wait = @import("wait.zig");
 
 pub const poll_wait_max_ms: u32 = 5;
 pub const ForkSchedule = struct {
@@ -40,8 +41,10 @@ pub const Options = struct {
     schedule: ForkSchedule,
     discovery: ?DiscoveryOptions = null,
     byte_limit: ?usize = null,
+    wait_mode: wait.Mode = .portable,
 };
 pub const ManagedOptions = struct {
+    wait_mode: wait.Mode = .portable,
     host: *const @import("wire/keys.zig").KeyPair,
     bind: std.Io.net.IpAddress,
     configuration: @import("configuration.zig").Request,
@@ -54,10 +57,11 @@ pub const Outputs = struct {
     application: []rr.Event = &.{},
     gossipsub: []gossip.Event = &.{},
 };
-pub const OperationalError = transport_mod.StepError || transport_mod.DialError || peers.discovery.Error;
+pub const OperationalError = transport_mod.StepError || transport_mod.DialError || peers.discovery.Error || wait.Error;
 pub const Result = struct {
     counts: core_mod.Counts = .{ .peers = 0, .application = 0, .gossipsub = 0 },
     transport: driver.StepResult,
+    readiness: wait.Result = .{},
     discovery: peers.discovery.Result = .{},
     failure: ?OperationalError = null,
     dial_started: u8 = 0,
@@ -77,6 +81,10 @@ pub const Diagnostics = struct {
     dial_deferred: u64 = 0,
     transport_failures: u64 = 0,
     discovery_failures: u64 = 0,
+    readiness_calls: u64 = 0,
+    readiness_nonzero_waits: u64 = 0,
+    readiness_interruptions: u64 = 0,
+    readiness_failures: u64 = 0,
 };
 pub const MemoryPlan = struct {
     inline_bytes: usize = @sizeOf(NetworkCore),
@@ -131,8 +139,11 @@ pub const NetworkCore = struct {
     counters: Diagnostics = .{},
     last_now: Now,
     initialized: bool = false,
+    wait_mode: wait.Mode,
+    host_wake: ?i32 = null,
 
     pub fn init(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, options: Options) !void {
+        if (options.wait_mode == .native_poll and !wait.supported) return error.UnsupportedWait;
         try @import("configuration.zig").validate(options.transport.limits, options.core);
         var local: t.LocalState = undefined;
         try peers.control_wire.copyLocal(&local, &options.local);
@@ -145,6 +156,8 @@ pub const NetworkCore = struct {
         self.allocator = allocator;
         self.schedule = options.schedule;
         self.counters = .{};
+        self.wait_mode = options.wait_mode;
+        self.host_wake = null;
         self.discovery = null;
         self.last_now = try driver.currentTime(io);
         try self.transport.init(allocator, io, options.transport);
@@ -182,6 +195,7 @@ pub const NetworkCore = struct {
             .schedule = options.schedule,
             .discovery = options.discovery,
             .byte_limit = resolved.byte_limit,
+            .wait_mode = options.wait_mode,
         });
     }
 
@@ -200,6 +214,7 @@ pub const NetworkCore = struct {
         self.initialized = false;
     }
     pub fn shutdown(self: *NetworkCore, now: Now) void {
+        self.host_wake = null;
         self.last_now = now;
         self.core.shutdown(&self.transport.engine, now);
         if (self.discovery) |owned| owned.coordinator.cancel();
@@ -355,6 +370,21 @@ pub const NetworkCore = struct {
         return true;
     }
 
+    /// Borrows a readable OS descriptor. The host drains it after a returned
+    /// readiness.host indication and detaches before closing or reusing it.
+    /// Shutdown/deinit detach without draining or closing caller storage.
+    pub fn setHostWake(self: *NetworkCore, descriptor: ?i32) error{ UnsupportedWait, InvalidWakeSource, Stopped }!void {
+        if (descriptor) |fd| {
+            if (self.core.stopped) return error.Stopped;
+            if (self.wait_mode != .native_poll or !wait.supported) return error.UnsupportedWait;
+            if (comptime wait.supported) {
+                if (fd < 0 or fd == self.transport.udp.socket.handle or
+                    (self.discovery != null and fd == self.discovery.?.udp.socket.handle)) return error.InvalidWakeSource;
+            }
+        }
+        self.host_wake = descriptor;
+    }
+
     pub fn nextWakeup(self: *NetworkCore, now: Now, outputs: Outputs) ?u64 {
         var due = self.core.nextWakeup(now, outputs.peers.len, outputs.application.len, outputs.gossipsub.len, 4);
         if (self.transport.nextTimeoutMs(now)) |relative| due = earlier(due, now.mono_ms +| relative);
@@ -370,10 +400,25 @@ pub const NetworkCore = struct {
         self.last_now = now;
         var result: Result = .{ .transport = .{ .now = now } };
         const due = self.nextWakeup(now, outputs);
-        const wait: u32 = @intCast(@min(max_wait_ms, poll_wait_max_ms, (due orelse std.math.maxInt(u64)) -| now.mono_ms));
-        const progress = self.transport.stepProgress(io, self.native_events, self.activity, .{ .wait_max_ms = wait });
+        const bounded_wait: u32 = if (self.core.stopped) 0 else @intCast(@min(max_wait_ms, (due orelse std.math.maxInt(u64)) -| now.mono_ms));
+        var receive_wait = @min(bounded_wait, poll_wait_max_ms);
+        if (self.wait_mode == .native_poll) {
+            if (comptime wait.supported) {
+                result.readiness = wait.poll(io, .{
+                    .quic = self.transport.udp.socket.handle,
+                    .discovery = if (self.discovery) |owned| owned.udp.socket.handle else null,
+                    .host = self.host_wake,
+                }, bounded_wait);
+            } else result.readiness.failure = error.UnsupportedWait;
+            receive_wait = 0;
+            self.counters.readiness_calls +|= 1;
+            self.counters.readiness_nonzero_waits +|= @intFromBool(result.readiness.timeout_ms > 0);
+            self.counters.readiness_interruptions +|= @intFromBool(result.readiness.interrupted);
+            self.counters.readiness_failures +|= @intFromBool(result.readiness.failure != null);
+        }
+        const progress = self.transport.stepProgress(io, self.native_events, self.activity, .{ .wait_max_ms = receive_wait });
         result.transport = progress.progress;
-        result.failure = progress.failure;
+        result.failure = result.readiness.failure orelse progress.failure;
         if (progress.failure != null) self.counters.transport_failures +|= 1;
         const tick: Now = if (progress.progress.now.mono_ms >= now.mono_ms) progress.progress.now else now;
         self.last_now = tick;

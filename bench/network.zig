@@ -29,6 +29,7 @@ const Samples = struct {
 
 fn options(key: *const network.KeyPair) network.network_core.Options {
     return .{
+        .wait_mode = .native_poll,
         .transport = .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 } },
         .core = .{
             .peers = .{ .capacity = 4, .outbound_reserve = 1, .max_peers = 3, .target_peers = 2, .min_outbound = 1, .engine_capacity = 4 },
@@ -59,6 +60,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len > 2) return error.InvalidProfile;
     const selected = if (args.len == 2) args[1] else "baseline";
+    if (std.mem.eql(u8, selected, "idle_wait")) return idleWait(init);
     const profile: ?network.configuration.Profile = if (std.mem.eql(u8, selected, "baseline")) null else if (std.mem.eql(u8, selected, "small")) .small else if (std.mem.eql(u8, selected, "beacon_node")) .beacon_node else return error.InvalidProfile;
     std.debug.print("profile={s} baseline=task1_raw_configuration\n", .{selected});
     const io = init.io;
@@ -96,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, profile: ?network.configuration.Profile) !void {
     if (profile) |selected| {
-        try node.initManaged(a, io, .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .local = .{}, .configuration = .{ .profile = selected, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} } });
+        try node.initManaged(a, io, .{ .wait_mode = .native_poll, .host = key, .bind = .{ .ip4 = .loopback(0) }, .local = .{}, .configuration = .{ .profile = selected, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} } });
     } else try node.init(a, io, options(key));
 }
 
@@ -217,4 +219,40 @@ fn printReconciliation(node: *network.NetworkCore, name: []const u8) void {
     const c = node.core.counters;
     const score = &node.core.service.gossipsub.inner.scores;
     std.debug.print("case={s} selections={} selection_rows={} candidate_syncs={} candidate_rows={} candidate_lookup_rows={} availability_rows={} candidate_selections={} score_calculations={} score_topic_visits={}\n", .{ name, c.selections, c.selection_rows, c.candidate_syncs, c.candidate_rows, c.candidate_lookup_rows, c.availability_rows, c.candidate_selections, score.calculations, score.topic_visits });
+}
+
+fn idleWait(init: std.process.Init) !void {
+    const io = init.io;
+    const key = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{11}));
+    const node = try init.gpa.create(network.NetworkCore);
+    defer init.gpa.destroy(node);
+    try initialize(node, init.gpa, io, &key, .small);
+    defer node.deinit(io);
+    const calls = node.reservations.allocation_calls;
+    const start = timestamp(io);
+    var count: u32 = 0;
+    var positive_waits: u32 = 0;
+    var immediate: u32 = 0;
+    var work: u64 = 0;
+    var elapsed_turns: u64 = 0;
+    for (0..10000) |_| {
+        const before = timestamp(io);
+        if (before - start >= 1_000_000_000) break;
+        const now = try network.driver.currentTime(io);
+        const due = node.nextWakeup(now, .{});
+        const ready = if (due) |value| value <= now.mono_ms else false;
+        immediate += @intFromBool(ready);
+        positive_waits += @intFromBool(!ready);
+        const remaining_ms: u32 = @intCast((1_000_000_000 - (before - start) + 999_999) / 1_000_000);
+        const result = node.step(io, now, 0, .{}, @min(100, remaining_ms));
+        if (result.failure) |err| return err;
+        elapsed_turns += timestamp(io) - before;
+        count += 1;
+        work += result.transport.work_processed;
+    }
+    const elapsed = timestamp(io) - start;
+    const readiness = node.diagnostics();
+    std.debug.print("readiness_calls={} nonzero_readiness_waits={} readiness_failures={}\n", .{ readiness.readiness_calls, readiness.readiness_nonzero_waits, readiness.readiness_failures });
+    if (elapsed < 1_000_000_000) return error.TurnLimit;
+    std.debug.print("case=idle_wait profile=small requested_duration_ms=1000 host_wait_ms=100 elapsed_ns={} turns={} positive_wait_turns={} immediate_deadlines={} turn_elapsed_ns={} native_work={} turn_allocation_calls={}\n", .{ elapsed, count, positive_waits, immediate, elapsed_turns, work, node.reservations.allocation_calls - calls });
 }

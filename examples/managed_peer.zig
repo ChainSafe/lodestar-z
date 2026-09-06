@@ -30,6 +30,7 @@ pub fn main(init: std.process.Init) !void {
     var seed: [8]u8 = undefined;
     try init.io.randomSecure(&seed);
     try node.initManaged(a, init.io, .{
+        .wait_mode = .native_poll,
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .configuration = .{ .seed = std.mem.readInt(u64, &seed, .little), .forks = &.{.{ .digest = local.fork.digest, .fork = local.fork.fork }} },
