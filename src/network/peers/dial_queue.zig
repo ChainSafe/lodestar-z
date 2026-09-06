@@ -21,6 +21,14 @@ const Hints = struct {
     attnets: ?[8]u8,
     syncnets: ?u8,
     custody_group_count: ?u64,
+
+    fn validFor(self: *const Hints, context: *const t.ForkContext) bool {
+        context.validate() catch return false;
+        if (!std.mem.eql(u8, &self.fork.digest, &context.digest)) return false;
+        if (self.syncnets) |bits| if (bits & 0xf0 != 0) return false;
+        if (self.custody_group_count) |count| if (count == 0 or count > context.custody_groups) return false;
+        return true;
+    }
 };
 const Row = struct {
     automatic: bool = false,
@@ -122,14 +130,12 @@ pub const DialQueue = struct {
     /// authenticated discovery source. Bare enr.decode output does not satisfy this precondition.
     pub fn enqueueDiscovered(self: *DialQueue, candidate: *const enr.Candidate, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) !void {
         try context.validate();
-        if (candidate.address_count == 0 or candidate.address_count > 2 or
-            !std.mem.eql(u8, &candidate.fork.digest, &context.digest)) return error.InvalidCandidate;
-        if (candidate.syncnets) |bits| if (bits & 0xf0 != 0) return error.InvalidCandidate;
-        if (candidate.custody_group_count) |count| if (count == 0 or count > context.custody_groups) return error.InvalidCandidate;
+        if (candidate.address_count == 0 or candidate.address_count > 2) return error.InvalidCandidate;
+        const hints: Hints = .{ .node_id = candidate.node_id, .sequence = candidate.sequence, .fork = candidate.fork, .next_fork_digest = candidate.next_fork_digest, .attnets = candidate.attnets, .syncnets = candidate.syncnets, .custody_group_count = candidate.custody_group_count };
+        if (!hints.validFor(context)) return error.InvalidCandidate;
         for (candidate.addresses[0..candidate.address_count]) |address| if (address.port() == 0) return error.InvalidCandidate;
         const node_id = custody.nodeId(&candidate.peer) catch return error.InvalidCandidate;
         if (!std.mem.eql(u8, &node_id, &candidate.node_id)) return error.InvalidCandidate;
-        const hints: Hints = .{ .node_id = node_id, .sequence = candidate.sequence, .fork = candidate.fork, .next_fork_digest = candidate.next_fork_digest, .attnets = candidate.attnets, .syncnets = candidate.syncnets, .custody_group_count = candidate.custody_group_count };
         var incoming: Row = .{ .occupied = true, .automatic = true, .peer = candidate.peer, .eligible_at_ms = now_ms, .history_until_ms = now_ms +| history_retention_ms, .hints = hints, .hints_at_ms = now_ms };
         copyAddresses(&incoming, candidate);
         resetCustody(&incoming, context);
@@ -186,21 +192,21 @@ pub const DialQueue = struct {
     }
     fn resetCustody(row: *Row, context: *const t.ForkContext) void {
         const hints = row.hints orelse return;
+        if (!hints.validFor(context)) {
+            row.custody_work = null;
+            return;
+        }
         const count = hints.custody_group_count orelse {
             row.custody_work = null;
             return;
         };
-        if (!std.mem.eql(u8, &hints.fork.digest, &context.digest) or count == 0 or count > context.custody_groups) {
-            row.custody_work = null;
-            return;
-        }
         if (std.meta.eql(row.custody_context, context.*)) if (row.custody_work) |work| if (work.requested == count) return;
         row.custody_context = context.*;
         row.custody_work = custody.Derivation.init(&hints.node_id, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count) catch null;
     }
     fn coverage(row: *const Row, context: *const t.ForkContext, now_ms: u64) t.Coverage {
         const hints = row.hints orelse return .{};
-        if (now_ms >= row.hints_at_ms +| hint_freshness_ms or !std.mem.eql(u8, &hints.fork.digest, &context.digest)) return .{};
+        if (now_ms >= row.hints_at_ms +| hint_freshness_ms or !hints.validFor(context)) return .{};
         var result: t.Coverage = .{ .attnets = if (hints.attnets) |bits| std.mem.readInt(u64, &bits, .little) else 0, .syncnets = @intCast(hints.syncnets orelse 0) };
         if (std.meta.eql(row.custody_context, context.*)) if (row.custody_work) |work| {
             if (!work.exhausted and work.groups.count() == work.requested) result.custody = work.groups;
@@ -231,7 +237,7 @@ pub const DialQueue = struct {
         for (self.rows) |*row| {
             if (!row.occupied) continue;
             row.priority = policy.utility(&coverage(row, context, now_ms), wanted);
-            const compatible = if (row.hints) |hints| std.mem.eql(u8, &hints.fork.digest, &context.digest) else false;
+            const compatible = if (row.hints) |hints| hints.validFor(context) else false;
             row.selected = !row.automatic or (compatible and (general or row.priority > 0));
         }
     }

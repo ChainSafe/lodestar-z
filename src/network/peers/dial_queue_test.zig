@@ -257,3 +257,121 @@ test "peer dial confirmed equal ENR refresh renews provisional hint freshness wi
     conflicting.syncnets = 2;
     try std.testing.expectError(error.StaleRecord, q.enqueueDiscovered(&conflicting, &.{}, &wanted, 300_001));
 }
+
+test "peer dial review group shrink invalidates all hints while preserving owners and authority" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    var candidate = try discovered(1, 1);
+    candidate.attnets = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
+    candidate.custody_group_count = 128;
+    var wanted: t.Coverage = .{ .attnets = 1, .syncnets = 1 };
+    wanted.custody.set(0);
+    try q.enqueueDiscovered(&candidate, &.{}, &wanted, 0);
+    q.configureSelection(&wanted, false, &.{}, 0);
+    try std.testing.expectEqual(@as(u16, 3), q.rows[0].priority);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    try std.testing.expect(q.dialFailed(out[0].token, 1));
+    const eligible = q.rows[0].eligible_at_ms;
+    const horizon = q.rows[0].history_until_ms;
+    const failures = q.rows[0].failures;
+    const context: t.ForkContext = .{ .custody_groups = 64 };
+    var budget: u16 = 0;
+    try std.testing.expect(!q.advanceCustody(&context, eligible, &budget));
+    q.configureSelection(&wanted, false, &context, eligible);
+    try std.testing.expectEqual(@as(u16, 0), q.rows[0].priority);
+    try std.testing.expectEqual(@as(usize, 0), q.poll(eligible, &out));
+    q.configureSelection(&wanted, true, &context, eligible);
+    try std.testing.expectEqual(@as(usize, 0), q.poll(eligible, &out));
+    try std.testing.expectEqual(@as(?u64, null), q.nextWakeup(eligible, 1));
+    try std.testing.expectEqual(eligible, q.rows[0].eligible_at_ms);
+    try std.testing.expectEqual(horizon, q.rows[0].history_until_ms);
+    try std.testing.expectEqual(failures, q.rows[0].failures);
+    try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&candidate, &context, &wanted, eligible));
+    candidate.sequence = 2;
+    candidate.custody_group_count = 64;
+    try q.enqueueDiscovered(&candidate, &context, &wanted, eligible);
+    q.configureSelection(&wanted, false, &context, eligible);
+    try std.testing.expectEqual(@as(u16, 3), q.rows[0].priority);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(eligible, &out));
+    const token = out[0].token;
+    const conn: t.Handle = .{ .index = 2, .generation = 99 };
+    try std.testing.expect(q.dialStarted(token, conn));
+    const lease = q.rows[0].lease_expires_at_ms;
+    const smaller: t.ForkContext = .{ .custody_groups = 32 };
+    _ = q.advanceCustody(&smaller, eligible, &budget);
+    q.configureSelection(&wanted, true, &smaller, eligible);
+    try std.testing.expectEqual(conn, q.rows[0].conn.?);
+    try std.testing.expectEqual(lease, q.nextWakeup(eligible, 1).?);
+    try std.testing.expectEqual(failures, q.rows[0].failures);
+    try std.testing.expectEqual(horizon, q.rows[0].history_until_ms);
+    const manual: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 9 }, .port = 9999 } };
+    try q.enqueue(&candidate.peer, &.{manual}, true, eligible);
+    q.configureSelection(&wanted, true, &smaller, eligible);
+    try std.testing.expectEqual(@as(u16, 0), q.rows[0].priority);
+    try std.testing.expect(q.isDirect(&candidate.peer));
+    try std.testing.expectEqual(conn, q.rows[0].conn.?);
+    try std.testing.expectEqual(@as(usize, 0), q.poll(eligible, &out));
+    try std.testing.expect(q.dialClosed(conn, eligible));
+    const next = q.nextWakeup(eligible, 1).?;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(next, &out));
+    try std.testing.expect(out[0].address.eql(manual));
+}
+
+test "peer dial review pressure utility excludes every invalid cached hint" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    var old = try discovered(1, 1);
+    old.attnets = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
+    old.custody_group_count = 128;
+    const wanted: t.Coverage = .{ .attnets = 1, .syncnets = 1 };
+    try q.enqueueDiscovered(&old, &.{}, &wanted, 0);
+    const replacement_candidate = try discovered(2, 1);
+    try q.enqueueDiscovered(&replacement_candidate, &.{ .custody_groups = 64 }, &wanted, 1);
+    try std.testing.expect(q.rows[0].peer.eql(&replacement_candidate.peer));
+}
+
+test "peer dial review custody-only full table recovers at fixed horizon with bounded work" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const first_candidate = try discovered(1, 0);
+    const second_candidate = try discovered(2, 0);
+    var scarce = try discovered(3, 0);
+    scarce.custody_group_count = 127;
+    var wanted: t.Coverage = .{};
+    wanted.custody.setRangeValue(.{ .start = 0, .end = 128 }, true);
+    try q.enqueueDiscovered(&first_candidate, &.{}, &wanted, 0);
+    try q.enqueueDiscovered(&second_candidate, &.{}, &wanted, 0);
+    const reservation = q.memoryPlan().allocated_bytes;
+    for (0..10) |i| {
+        const now = i * 60_000;
+        try q.enqueueDiscovered(&first_candidate, &.{}, &wanted, now);
+        try q.enqueueDiscovered(&second_candidate, &.{}, &wanted, now);
+        try std.testing.expectError(error.Capacity, q.enqueueDiscovered(&scarce, &.{}, &wanted, now));
+        for (q.rows) |row| try std.testing.expect(row.custody_work == null);
+    }
+    try std.testing.expectError(error.Capacity, q.enqueueDiscovered(&scarce, &.{}, &wanted, 599_999));
+    try q.enqueueDiscovered(&scarce, &.{}, &wanted, 600_000);
+    try std.testing.expect(q.rows[0].peer.eql(&scarce.peer));
+    try std.testing.expectEqual(@as(u16, 0), q.rows[0].custody_work.?.hashes);
+    q.configureSelection(&wanted, false, &.{}, 600_000);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 0), q.poll(600_000, &out));
+    var pending = true;
+    for (0..64) |_| {
+        var budget: u16 = 128;
+        const before = q.rows[0].custody_work.?.hashes;
+        pending = q.advanceCustody(&.{}, 600_000, &budget);
+        const used = q.rows[0].custody_work.?.hashes - before;
+        try std.testing.expect(used <= 64);
+        try std.testing.expectEqual(@as(u16, 128) - used, budget);
+        if (!pending) break;
+    }
+    try std.testing.expect(!pending);
+    try std.testing.expect(q.rows[0].custody_work.?.hashes <= 4096);
+    q.configureSelection(&wanted, false, &.{}, 600_000);
+    try std.testing.expectEqual(@as(u16, 127), q.rows[0].priority);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(600_000, &out));
+    try std.testing.expect(out[0].peer.eql(&scarce.peer));
+    try std.testing.expectEqual(reservation, q.memoryPlan().allocated_bytes);
+}
