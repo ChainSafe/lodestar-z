@@ -92,24 +92,11 @@ pub fn resolve(request: Request) !Resolved {
 
 pub fn validate(limits: engine.Limits, options: core.Options) !void {
     _ = try engine.Engine.validateLimits(limits);
-    try options.peers.validate();
-    const r = options.service.reqresp;
+    try core.Core.validateOptions(options);
     if (options.peers.engine_capacity != limits.connections_max or
         options.dial.engine_dialing_max != limits.dialing_max or options.dial.concurrent_max > limits.dialing_max or
-        r.peers < limits.connections_max or options.dial.concurrent_max == 0 or options.dial.concurrent_max > 4 or options.dial.capacity < options.dial.concurrent_max or
-        options.control.operations_max == 0 or options.control.operations_max > 1024 or
-        r.peers == 0 or r.peers > @import("reqresp/constants.zig").slots_ceiling or r.inbound_per_peer_max == 0 or
-        r.outbound_per_peer_max > @import("quic/limits.zig").peer_streams_bidi - rr.outbound_stream_headroom or r.inbound_application_per_peer_max > r.inbound_per_peer_max or
-        options.dial.capacity == 0 or options.dial.capacity > 4096 or
-        options.service.router.negotiations_max == 0 or options.service.router.negotiations_max > @import("negotiate.zig").negotiations_max_ceiling or
-        r.inbound_max == 0 or r.outbound_max == 0 or r.inbound_max > @import("reqresp/constants.zig").slots_ceiling or r.outbound_max > @import("reqresp/constants.zig").slots_ceiling or
-        r.inbound_control_reserved > r.inbound_max or r.outbound_control_reserved > r.outbound_max or
-        options.service.router.outbound_control_reserved < r.outbound_control_reserved or
-        options.service.router.outbound_control_reserved > options.service.router.negotiations_max or
-        r.inbound_application_per_peer_max > r.inbound_max - r.inbound_control_reserved or
-        r.outbound_per_peer_max > r.outbound_max - r.outbound_control_reserved)
+        options.service.router.outbound_control_reserved < options.service.reqresp.outbound_control_reserved)
         return error.InvalidOptions;
-    try gossip.validate(&options.service.gossipsub);
 }
 
 test "managed configuration resolves shared capacities and rejects explicit conflicts" {
@@ -144,4 +131,23 @@ test "managed configuration rejects inconsistent capacity sections before owners
     var limits = resolved.limits;
     limits.dialing_max += 1;
     try std.testing.expectError(error.InvalidOptions, validate(limits, resolved.core));
+}
+
+test "managed configuration rejects zero request work from complete section" {
+    const base = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
+    var requests = base.core.service.reqresp;
+    requests.work_per_pump_max = 0;
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = requests }));
+}
+
+test "managed configuration rejects zero control timer from complete section" {
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .control = .{ .ping_inbound_ms = 0 } }));
+}
+
+test "managed configuration validates complete router and score sections" {
+    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .router = .{ .meshsub = false, .outbound_control_reserved = 2 } }));
+    const base = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
+    var options = base.core.service.gossipsub;
+    options.score_params.decay_interval_ms = 0;
+    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .gossip = options }));
 }

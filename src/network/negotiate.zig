@@ -81,12 +81,17 @@ pub const Negotiator = struct {
         return initWithOptions(allocator, .{ .negotiations_max = negotiations_max });
     }
 
-    pub fn initWithOptions(allocator: std.mem.Allocator, options: Options) Error!Negotiator {
+    pub fn validateOptions(options: Options) Error!void {
         const negotiations_max = options.negotiations_max;
         if (options.outbound_control_reserved > negotiations_max) return error.InvalidLimits;
         if (negotiations_max == 0 or negotiations_max > negotiations_max_ceiling) {
             return error.InvalidLimits;
         }
+    }
+
+    pub fn initWithOptions(allocator: std.mem.Allocator, options: Options) Error!Negotiator {
+        try validateOptions(options);
+        const negotiations_max = options.negotiations_max;
         const entries = try allocator.alloc(Entry, negotiations_max);
         @memset(entries, .{});
         return .{

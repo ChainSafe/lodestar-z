@@ -54,7 +54,7 @@ pub const Router = struct {
     meshsub_candidates: [3][]const u8 = undefined,
     meshsub_count: u8 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, options: Options) negotiate.Error!Router {
+    pub fn validateOptions(options: Options) negotiate.Error!void {
         if (!options.reqresp and !options.meshsub) return error.InvalidLimits;
         if (options.meshsub_versions.len == 0 or options.meshsub_versions.len > 3) {
             return error.InvalidLimits;
@@ -64,6 +64,11 @@ pub const Router = struct {
                 if (version == prior) return error.InvalidLimits;
             }
         }
+        try negotiate.Negotiator.validateOptions(.{ .negotiations_max = options.negotiations_max, .outbound_control_reserved = options.outbound_control_reserved });
+    }
+
+    pub fn init(allocator: std.mem.Allocator, options: Options) negotiate.Error!Router {
+        try validateOptions(options);
         var negotiator = try negotiate.Negotiator.initWithOptions(allocator, .{
             .negotiations_max = options.negotiations_max,
             .outbound_control_reserved = options.outbound_control_reserved,

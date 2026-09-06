@@ -60,10 +60,14 @@ pub const DialQueue = struct {
     custody_cursor: usize = 0,
     random: std.Random.DefaultPrng,
 
-    pub fn init(a: std.mem.Allocator, options: Options) !DialQueue {
+    pub fn validateOptions(options: Options) error{InvalidOptions}!void {
         if (options.capacity == 0 or options.capacity > 4096 or options.concurrent_max == 0 or
             options.concurrent_max > 4 or options.concurrent_max > options.engine_dialing_max or
             options.concurrent_max > options.capacity) return error.InvalidOptions;
+    }
+
+    pub fn init(a: std.mem.Allocator, options: Options) !DialQueue {
+        try validateOptions(options);
         const rows = try a.alloc(Row, options.capacity);
         @memset(rows, .{});
         return .{ .rows = rows, .options = options, .random = .init(options.seed) };

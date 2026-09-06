@@ -175,7 +175,7 @@ pub const ReqResp = struct {
     control_event_cursor: usize = 0,
     scan_remaining: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
+    pub fn validateOptions(options: Options) InitError!struct { peer: limiter_mod.Quotas, global: limiter_mod.Quotas } {
         if (options.outbound_max == 0 or options.outbound_max > constants.slots_ceiling) {
             return error.InvalidOptions;
         }
@@ -211,6 +211,12 @@ pub const ReqResp = struct {
         try limiter_mod.Limiter.validate(global_quotas);
         if (options.forks.len > 64) return error.InvalidOptions;
 
+        return .{ .peer = peer_quotas, .global = global_quotas };
+    }
+
+    pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
+        const quotas = try validateOptions(options);
+
         const outbound = try allocator.alloc(Client, options.outbound_max);
         errdefer allocator.free(outbound);
         @memset(outbound, .{});
@@ -229,15 +235,15 @@ pub const ReqResp = struct {
         var buckets = try limiter_mod.Limiter.initWithGlobal(
             allocator,
             options.peers,
-            peer_quotas,
-            global_quotas,
+            quotas.peer,
+            quotas.global,
         );
         errdefer buckets.deinit(allocator);
 
         var resolved_options = options;
         resolved_options.forks = &.{};
-        resolved_options.quotas = peer_quotas;
-        resolved_options.global_quotas = global_quotas;
+        resolved_options.quotas = quotas.peer;
+        resolved_options.global_quotas = quotas.global;
         var result: ReqResp = .{
             .allocator = allocator,
             .options = resolved_options,

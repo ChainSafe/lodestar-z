@@ -60,12 +60,7 @@ pub const Control = struct {
         closed: [@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
     };
 
-    pub fn init(
-        a: std.mem.Allocator,
-        options: Options,
-        peer_capacity: u16,
-        inbound_capacity: u16,
-    ) !Control {
+    pub fn validateOptions(options: Options) error{InvalidOptions}!void {
         if (options.operations_max == 0 or options.operations_max > 1024)
             return error.InvalidOptions;
         const timers = [_]u64{
@@ -77,6 +72,15 @@ pub const Control = struct {
             options.local_retry_ms,
         };
         for (timers) |timer| if (timer == 0 or timer > 86_400_000) return error.InvalidOptions;
+    }
+
+    pub fn init(
+        a: std.mem.Allocator,
+        options: Options,
+        peer_capacity: u16,
+        inbound_capacity: u16,
+    ) !Control {
+        try validateOptions(options);
         const operations = try a.alloc(Operation, options.operations_max);
         errdefer a.free(operations);
         const responses = try a.alloc(Response, inbound_capacity);

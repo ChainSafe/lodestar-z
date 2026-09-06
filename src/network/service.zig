@@ -21,8 +21,15 @@ pub const Service = struct {
     reqresp: reqresp_mod.Service,
     gossipsub: gossip_mod.Service,
 
-    pub fn init(allocator: std.mem.Allocator, options: Options) InitError!Service {
+    pub fn validateOptions(options: Options) InitError!void {
         if (!options.router.reqresp or !options.router.meshsub) return error.InvalidLimits;
+        try routing.Router.validateOptions(options.router);
+        _ = try reqresp_mod.ReqResp.validateOptions(options.reqresp);
+        try @import("gossipsub/options.zig").validate(&options.gossipsub);
+    }
+
+    pub fn init(allocator: std.mem.Allocator, options: Options) InitError!Service {
+        try validateOptions(options);
         var router = try routing.Router.init(allocator, options.router);
         errdefer router.deinit();
         var reqresp = try reqresp_mod.Service.initHandler(allocator, options.reqresp);
