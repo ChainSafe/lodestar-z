@@ -972,3 +972,27 @@ test "core coverage outbound deficit uses hard room or retires inbound before re
         try std.testing.expect(out[0].peer.eql(&peer));
     }
 }
+
+test "core coverage review same-digest group update disables cached automatic candidate" {
+    var setup: Setup = .{};
+    var local: t.LocalState = .{ .fork = .{ .fork = .fulu }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 128 } };
+    try setup.initOwners(&local);
+    defer setup.deinit();
+    var candidate = try candidateFor(&setup.pair.server_ctx.local_peer_id, 128);
+    candidate.syncnets = 1;
+    try setup.client.setDemand(&.{ .coverage = .{ .syncnets = 1 }, .expires_at_slot = 200 });
+    try setup.client.discovered(&candidate, setup.pair.now);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    local.fork.custody_groups = 64;
+    local.metadata.custody_group_count = 64;
+    try setup.client.updateFork(&local, setup.pair.now);
+    var out: [1]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 0), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &out));
+    try std.testing.expectEqual(@as(u16, 0), setup.client.dial_queue.rows[0].priority);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.dial_queue.rows[0].hints.?.sequence);
+    candidate.sequence = 2;
+    candidate.custody_group_count = 64;
+    try setup.client.discovered(&candidate, setup.pair.now);
+    try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &out));
+    try std.testing.expect(out[0].peer.eql(&candidate.peer));
+}
