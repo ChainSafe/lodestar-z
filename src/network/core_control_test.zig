@@ -18,7 +18,7 @@ test "core native stalled fork transition only wakes for eligible work" {
     try std.testing.expect(setup.client.service.gossipsub.admitted(conn));
     const gossip_due = setup.client.control.schedules[peer.index].gossip_retry_ms;
     try std.testing.expect(gossip_due > setup.pair.now.mono_ms);
-    try std.testing.expectEqual(gossip_due, setup.client.control.nextWakeup(setup.pair.now).?);
+    try std.testing.expectEqual(gossip_due, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
     const updated: t.LocalState = .{
         .fork = .{ .fork = .fulu, .digest = @splat(1) },
         .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
@@ -39,7 +39,7 @@ test "core native stalled fork transition only wakes for eligible work" {
     try std.testing.expect(active > 0);
     const service_due = setup.client.service.nextWakeupPartitioned(setup.pair.now, 0, 32, 0).?;
     try std.testing.expect(service_due > setup.pair.now.mono_ms);
-    try std.testing.expect(setup.client.control.nextWakeup(setup.pair.now).? > setup.pair.now.mono_ms);
+    try std.testing.expect(setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now) == null);
     const core_due = setup.client.nextWakeup(setup.pair.now, 0, 0, 0, 0).?;
     try std.testing.expect(core_due > setup.pair.now.mono_ms and core_due <= service_due);
     try setup.server.updateFork(&updated, setup.pair.now);
@@ -47,9 +47,9 @@ test "core native stalled fork transition only wakes for eligible work" {
     try std.testing.expect(setup.client.catalog.get(peer).?.relevant);
     const resumed = setup.client.control.schedules[peer.index].gossip_retry_ms;
     try std.testing.expectEqual(setup.pair.now.mono_ms + 1_000, resumed);
-    try std.testing.expectEqual(resumed, setup.client.control.nextWakeup(setup.pair.now).?);
+    try std.testing.expectEqual(resumed, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
     setup.pair.advance(1_000);
-    try std.testing.expectEqual(setup.pair.now.mono_ms, setup.client.control.nextWakeup(setup.pair.now).?);
+    try std.testing.expectEqual(setup.pair.now.mono_ms, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     try std.testing.expectEqual(setup.pair.now.mono_ms + 1_000, setup.client.control.schedules[peer.index].gossip_retry_ms);
 }
@@ -568,4 +568,95 @@ test "core control native Goodbye maps shutdown incompatibility and fault wire r
         }
         try std.testing.expect(received);
     }
+}
+
+test "core control irrelevant metadata cannot create an ineligible wakeup" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const peer = snapshots[0].peer;
+    const conn = snapshots[0].connection.?;
+    try std.testing.expect(setup.client.catalog.invalidateStatus(peer, conn));
+    const row = &setup.client.control.schedules[peer.index];
+    row.metadata_pending = true;
+    row.gossip_retry_ms = 0;
+    row.status_due_ms = setup.pair.now.mono_ms + 100;
+    row.ping_due_ms = setup.pair.now.mono_ms + 200;
+    const started = setup.client.control.counters.started;
+    setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+    try std.testing.expectEqual(started, setup.client.control.counters.started);
+    try std.testing.expectEqual(setup.pair.now.mono_ms + 100, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
+    setup.pair.advance(100);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(started + 1, setup.client.control.counters.started);
+}
+
+test "core control initial gossip admission wakes alongside active request" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const peer = snapshots[0].peer;
+    const row = &setup.client.control.schedules[peer.index];
+    setup.client.reStatusPeers(setup.pair.now);
+    setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+    const started = setup.client.control.counters.started;
+    row.gossip_retry_ms = 0;
+    try std.testing.expectEqual(setup.pair.now.mono_ms, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
+    setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+    try std.testing.expectEqual(setup.pair.now.mono_ms + 1000, row.gossip_retry_ms);
+    try std.testing.expectEqual(started, setup.client.control.counters.started);
+    try std.testing.expect(setup.client.disconnect(peer, .host, setup.pair.now));
+    const deadline = row.closing.?.deadline_ms;
+    try std.testing.expectEqual(deadline, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
+    setup.pair.advance(2000);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expect(setup.client.catalog.get(peer).?.connection == null);
+}
+
+test "core control cancelled canonical requests retain buffers through local retry" {
+    var setup: Setup = .{};
+    var opts = @import("core_test.zig").options();
+    opts.control.operations_max = 1;
+    try setup.initOwnersWithOptions(&.{}, opts);
+    defer setup.deinit();
+    _ = try setup.pair.dial();
+    for (0..80) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const peer = snapshots[0].peer;
+    setup.client.reStatusPeers(setup.pair.now);
+    setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+    const op = &setup.client.control.operations[0];
+    const request = op.request.?;
+    const bytes = op.bytes;
+    const updated: t.LocalState = .{
+        .fork = .{ .fork = .fulu, .digest = @splat(1) },
+        .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
+        .metadata = .{ .custody_group_count = 1 },
+    };
+    try setup.client.updateFork(&updated, setup.pair.now);
+    try std.testing.expect(op.cancelled);
+    const started = setup.client.control.counters.started;
+    const deferred = setup.client.control.counters.deferred;
+    setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+    try std.testing.expectEqual(request, op.request.?);
+    try std.testing.expectEqualSlices(u8, bytes[0..84], op.bytes[0..84]);
+    try std.testing.expectEqual(started, setup.client.control.counters.started);
+    try std.testing.expectEqual(deferred + 1, setup.client.control.counters.deferred);
+    try std.testing.expectEqual(setup.pair.now.mono_ms + 1000, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
+    const grace = setup.client.control.schedules[peer.index].transition_until_ms;
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expect(op.request == null);
+    setup.pair.advance(1000);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expect(op.request != null);
+    try std.testing.expect(!std.meta.eql(request, op.request.?));
+    try std.testing.expect(!op.cancelled);
+    try std.testing.expectEqual(grace, setup.client.control.schedules[peer.index].transition_until_ms);
 }

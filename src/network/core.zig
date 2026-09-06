@@ -400,7 +400,7 @@ pub const Core = struct {
             gossip_capacity,
         );
         for ([_]?u64{
-            self.control.nextWakeup(now),
+            self.control.nextWakeup(&self.catalog, now),
             self.dial_queue.nextWakeup(now.mono_ms, @min(dial_capacity, self.dialRoom())),
             if (self.policyChanged() or self.dial_queue.selection_dirty) now.mono_ms else null,
             self.reconciliation_deadline,

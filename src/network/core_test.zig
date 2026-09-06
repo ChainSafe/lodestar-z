@@ -436,7 +436,7 @@ test "core native local control capacity defers with future wakeup and no peer p
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expectEqual(@as(f64, 0), snapshots[0].score);
     try std.testing.expect(snapshots[0].relevant);
-    const control_due = setup.client.control.nextWakeup(setup.pair.now).?;
+    const control_due = setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?;
     try std.testing.expect(control_due > setup.pair.now.mono_ms);
     setup.client.shutdown(&setup.pair.client, setup.pair.now);
 }

@@ -110,6 +110,7 @@ pub fn main(init: std.process.Init) !void {
         local.status.head_root[i] = @intCast(255 - i);
     }
     try peer.node.initManaged(a, init.io, .{
+        .wait_mode = .native_poll,
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
         .configuration = .{

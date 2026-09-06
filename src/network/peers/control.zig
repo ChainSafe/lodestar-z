@@ -215,7 +215,7 @@ pub const Control = struct {
             };
         };
     }
-    fn active(self: *Control, peer: t.PeerRef, conn: t.Handle) bool {
+    fn active(self: *const Control, peer: t.PeerRef, conn: t.Handle) bool {
         for (self.operations) |op| if (op.request != null and !op.cancelled and
             std.meta.eql(op.peer, peer) and std.meta.eql(op.conn, conn)) return true;
         return false;
@@ -300,38 +300,30 @@ pub const Control = struct {
             const row = &self.schedules[index];
             const peer = row.peer orelse continue;
             const snapshot = catalog.get(peer) orelse continue;
-            if (row.closing) |*closing| {
-                if (now.mono_ms >= closing.deadline_ms) {
-                    self.close(service, catalog, engine, peer, row.conn, closing.reason, now);
-                    continue;
-                }
-                if (!closing.sent and now.mono_ms >= row.retry_ms and !self.active(
-                    peer,
-                    row.conn,
-                )) {
-                    closing.sent = self.start(service, engine, row, .goodbye_v1, local, now);
-                    row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
-                }
+            if (!std.meta.eql(snapshot.connection, row.conn)) continue;
+            const decision = decide(row, snapshot.relevant, self.active(peer, row.conn), now.mono_ms);
+            if (decision.close) {
+                self.close(service, catalog, engine, peer, row.conn, row.closing.?.reason, now);
                 continue;
             }
-            if (snapshot.relevant and now.mono_ms >= row.gossip_retry_ms) {
+            if (decision.gossip) {
                 const admission = service.gossipsub.peerConnected(engine, row.conn, now);
                 if (admission != .admitted) self.counters.gossip_refused +|= 1;
                 if (snapshot.direct) service.gossipsub.markDirect(row.conn);
                 row.gossip_retry_ms = now.mono_ms +| 1_000;
             }
-            if (now.mono_ms < row.retry_ms or self.active(peer, row.conn)) continue;
-            const status_due = now.mono_ms >= row.status_due_ms;
-            const protocol: rr.Protocol = if (!snapshot.relevant and status_due)
-                wire.statusProtocol(local.fork)
-            else if (snapshot.relevant and row.metadata_pending)
-                wire.metadataProtocol(local.fork)
-            else if (now.mono_ms >= row.ping_due_ms)
-                .ping_v1
-            else if (status_due)
-                wire.statusProtocol(local.fork)
-            else
+            const action = decision.request orelse continue;
+            const protocol: rr.Protocol = switch (action) {
+                .status => wire.statusProtocol(local.fork),
+                .metadata => wire.metadataProtocol(local.fork),
+                .ping => .ping_v1,
+                .goodbye => .goodbye_v1,
+            };
+            if (action == .goodbye) {
+                row.closing.?.sent = self.start(service, engine, row, protocol, local, now);
+                row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
                 continue;
+            }
             if (self.start(service, engine, row, protocol, local, now)) {
                 row.retry_ms = 0;
             } else {
@@ -628,28 +620,61 @@ pub const Control = struct {
             else => unreachable,
         }
     }
-    pub fn nextWakeup(self: *Control, now: Now) ?u64 {
+    pub fn nextWakeup(self: *const Control, catalog: *const Catalog, now: Now) ?u64 {
         var due: ?u64 = null;
-        for (self.schedules) |row| {
+        for (self.schedules) |*row| {
             const peer = row.peer orelse continue;
-            var next: u64 = undefined;
-            if (row.closing) |closing| {
-                next = closing.deadline_ms;
-                if (!closing.sent and !self.active(peer, row.conn)) next = @min(next, row.retry_ms);
-            } else {
-                next = row.gossip_retry_ms;
-                if (next == 0) next = std.math.maxInt(u64);
-                if (!self.active(peer, row.conn)) {
-                    const request_due = if (row.metadata_pending) 0 else @min(
-                        row.status_due_ms,
-                        row.ping_due_ms,
-                    );
-                    next = @min(next, @max(request_due, row.retry_ms));
-                }
-            }
-            next = @max(now.mono_ms, next);
-            due = @min(due orelse next, next);
+            const snapshot = catalog.get(peer) orelse continue;
+            if (!std.meta.eql(snapshot.connection, row.conn)) continue;
+            const decision = decide(row, snapshot.relevant, self.active(peer, row.conn), now.mono_ms);
+            if (decision.deadline_ms) |next| due = @min(due orelse next, next);
         }
         return due;
     }
 };
+
+const Decision = struct {
+    request: ?enum { status, metadata, ping, goodbye } = null,
+    gossip: bool = false,
+    close: bool = false,
+    deadline_ms: ?u64 = null,
+
+    fn wake(self: *Decision, deadline: u64, now: u64) void {
+        const bounded = @max(deadline, now);
+        self.deadline_ms = @min(self.deadline_ms orelse bounded, bounded);
+    }
+};
+
+fn decide(row: *const Schedule, relevant: bool, active_request: bool, now: u64) Decision {
+    var decision: Decision = .{};
+    if (row.closing) |closing| {
+        decision.wake(closing.deadline_ms, now);
+        if (now >= closing.deadline_ms) {
+            decision.close = true;
+        } else if (!closing.sent and !active_request) {
+            decision.wake(row.retry_ms, now);
+            if (now >= row.retry_ms) decision.request = .goodbye;
+        }
+        return decision;
+    }
+    if (relevant) {
+        decision.wake(row.gossip_retry_ms, now);
+        decision.gossip = now >= row.gossip_retry_ms;
+    }
+    if (active_request) return decision;
+    const request_due = if (relevant and row.metadata_pending) 0 else @min(row.status_due_ms, row.ping_due_ms);
+    decision.wake(@max(request_due, row.retry_ms), now);
+    if (now < row.retry_ms) return decision;
+    const status_due = now >= row.status_due_ms;
+    decision.request = if (!relevant and status_due)
+        .status
+    else if (relevant and row.metadata_pending)
+        .metadata
+    else if (now >= row.ping_due_ms)
+        .ping
+    else if (status_due)
+        .status
+    else
+        null;
+    return decision;
+}
