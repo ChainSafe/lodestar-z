@@ -165,15 +165,18 @@ pub const State = struct {
 
     pub fn internTopic(self: *State, topic_str: []const u8) ?u16 {
         if (topic_str.len > topic_mod.topic_max_len) return null;
-        const parsed = topic_mod.parse(topic_str) orelse return null;
-        if (self.findTopic(topic_str)) |index| return index;
+        var copied_bytes: [topic_mod.topic_max_len]u8 = undefined;
+        const copied = copied_bytes[0..topic_str.len];
+        @memcpy(copied, topic_str);
+        const parsed = topic_mod.parse(copied) orelse return null;
+        if (self.findTopic(copied)) |index| return index;
         const index = self.freeTopic() orelse return null;
         const topic = &self.topics[index];
         topic.* = .{ .active = true, .generation = topic.generation + 1 };
         @memcpy(topic.name[0..parsed.name.len], parsed.name);
         topic.name_len = @intCast(parsed.name.len);
-        @memcpy(topic.string[0..topic_str.len], topic_str);
-        topic.string_len = @intCast(topic_str.len);
+        @memcpy(topic.string[0..copied.len], copied);
+        topic.string_len = @intCast(copied.len);
         return @intCast(index);
     }
 
@@ -301,4 +304,24 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
     try std.testing.expect(state.findTopic("/eth2/00000000/beacon_block/ssz_snappy") == null);
     try std.testing.expect(state.findTopic("/eth2/01000000/beacon_block/ssz_snappy") != null);
     try std.testing.expect(state.findTopic("/eth2/02000000/beacon_block/ssz_snappy") != null);
+}
+
+test "gossip state intern snapshots an aliased retiring topic string" {
+    var state = try State.init(std.testing.allocator, 1);
+    defer state.deinit(std.testing.allocator);
+    const oversized = [_]u8{'x'} ** (topic_mod.topic_max_len + 1);
+    try std.testing.expectEqual(@as(?u16, null), state.internTopic(&oversized));
+    try std.testing.expectEqual(@as(?u16, null), state.internTopic("invalid"));
+    const original = "/eth2/00000000/a/ssz_snappy/b/ssz_snappy";
+    const shorter = "/eth2/00000000/a/ssz_snappy";
+    try std.testing.expectEqual(@as(?u16, 0), state.internTopic(original));
+    const input = state.topicString(0)[0..shorter.len];
+    state.topics[0].active = false;
+    try std.testing.expectEqual(@as(?u16, 0), state.internTopic(input));
+    try std.testing.expectEqualStrings(shorter, state.topicString(0));
+    try std.testing.expectEqual(@as(u64, 2), state.topics[0].generation);
+    const maximum = "/eth2/00000000/sync_committee_contribution_and_proof/ssz_snappy";
+    try std.testing.expectEqual(topic_mod.topic_max_len, maximum.len);
+    try std.testing.expectEqual(@as(?u16, 1), state.internTopic(maximum));
+    try std.testing.expectEqualStrings(maximum, state.topicString(1));
 }
