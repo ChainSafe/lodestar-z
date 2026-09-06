@@ -2045,3 +2045,26 @@ test "gossip topic configuration snapshots aliased policy before reclamation" {
         try std.testing.expectEqual(calls, ledger.allocation_calls);
     }
 }
+
+test "gossip topic configuration snapshots aliased text under full capacity" {
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    defer g.deinit();
+    const calls = ledger.allocation_calls;
+    const original = "/eth2/00000000/a/ssz_snappy/b/ssz_snappy";
+    const shorter = "/eth2/00000000/a/ssz_snappy";
+    try std.testing.expect(g.subscribe(original));
+    var name: [topic_mod.topic_max_len]u8 = undefined;
+    for (1..constants.topics_cap) |index| {
+        const text = try std.fmt.bufPrint(&name, "/eth2/{x:0>8}/custom/ssz_snappy", .{index});
+        try std.testing.expect(g.subscribe(text));
+    }
+    const input = g.state.topicString(0)[0..shorter.len];
+    try std.testing.expect(g.unsubscribe(g.state.topicString(0)));
+    const generation = g.state.topics[0].generation;
+    try g.configureTopic(input, &.{ .weight = 2 });
+    try std.testing.expectEqualStrings(shorter, g.state.topicString(0));
+    try std.testing.expectEqual(generation + 1, g.state.topics[0].generation);
+    try std.testing.expectEqual(@as(f64, 2), g.scores.topic_params[0].weight);
+    try std.testing.expectEqual(calls, ledger.allocation_calls);
+}
