@@ -199,6 +199,11 @@ export type VoluntaryExitValidity =
 export declare class BeaconStateView {
   static createFromBytes(bytes: Uint8Array, setup?: StateTransition): BeaconStateView;
 
+  /**
+   * Idempotently release this view. Subsequent state access throws InvalidState.
+   * An already-running native call retains its resources until that call returns.
+   */
+  release(): void;
   slot: number;
   fork: Fork;
   forkName: ForkName;
