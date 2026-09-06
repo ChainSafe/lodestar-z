@@ -32,6 +32,9 @@ const Response = struct {
     bytes: [wire.status_size_max]u8 = undefined,
 };
 const Schedule = struct {
+    previous_digest: [4]u8 = @splat(0),
+    previous_protocol: rr.Protocol = .status_v1,
+    transition_until_ms: u64 = 0,
     peer: ?t.PeerRef = null,
     conn: t.Handle = undefined,
     status_due_ms: u64 = 0,
@@ -188,6 +191,22 @@ pub const Control = struct {
     pub fn reStatusPeers(self: *Control, now: Now) void {
         for (self.schedules) |*row| if (row.peer != null) {
             row.status_due_ms = now.mono_ms;
+        };
+    }
+    pub fn forkUpdated(self: *Control, service: *Service, catalog: *Catalog, previous: t.ForkContext, now: Now) void {
+        for (self.schedules) |*row| if (row.peer) |peer| {
+            if (row.closing != null or !catalog.invalidateStatus(peer, row.conn)) continue;
+            row.previous_digest = previous.digest;
+            row.previous_protocol = wire.statusProtocol(previous);
+            row.transition_until_ms = now.mono_ms +| self.options.progress_timeout_ms;
+            row.status_due_ms = now.mono_ms;
+            row.retry_ms = 0;
+            row.metadata_pending = true;
+            for (self.operations) |*op| if (op.request) |request| {
+                if (!std.meta.eql(op.peer, peer) or !std.meta.eql(op.conn, row.conn)) continue;
+                op.cancelled = true;
+                _ = service.reqresp.cancel(request);
+            };
         };
     }
     fn active(self: *Control, peer: t.PeerRef, conn: t.Handle) bool {
@@ -351,6 +370,7 @@ pub const Control = struct {
         local: *const t.LocalState,
         now: Now,
         slot: u64,
+        inbound: bool,
     ) void {
         const row = self.schedule(peer, conn) orelse return;
         if (row.closing != null) return;
@@ -358,6 +378,10 @@ pub const Control = struct {
             _ = self.disconnect(catalog, peer, conn, .invalid_status, now);
             return;
         };
+        // A request already in flight when the host advanced forks cannot establish new
+        // relevance. A bounded grace permits its old-context bytes without penalizing it.
+        if (inbound and now.mono_ms < row.transition_until_ms and protocol == row.previous_protocol and
+            std.mem.eql(u8, &status.fork_digest, &row.previous_digest)) return;
         if (wire.relevance(local, &status, slot)) |reason| {
             _ = self.disconnect(catalog, peer, conn, reason, now);
             return;
@@ -432,6 +456,7 @@ pub const Control = struct {
                     local,
                     now,
                     slot,
+                    true,
                 );
                 break :blk wire.encodeStatus(event.protocol, &local.status, &response.bytes) catch {
                     _ = service.reqresp.cancel(event.request);
@@ -548,6 +573,7 @@ pub const Control = struct {
                 local,
                 now,
                 slot,
+                false,
             ),
             .ping_v1 => {
                 if (bytes.len == 8) self.sequence(

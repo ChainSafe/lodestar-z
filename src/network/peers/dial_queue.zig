@@ -13,7 +13,7 @@ pub const Options = struct {
 };
 pub const history_retention_ms: u64 = 600_000;
 pub const hint_freshness_ms: u64 = 300_000;
-const Hints = struct {
+pub const Hints = struct {
     node_id: [32]u8,
     sequence: u64,
     fork: enr.ForkId,
@@ -240,6 +240,13 @@ pub const DialQueue = struct {
             const compatible = if (row.hints) |hints| hints.validFor(context) else false;
             row.selected = !row.automatic or (compatible and (general or row.priority > 0));
         }
+    }
+    pub fn candidateHints(self: *const DialQueue, peer: *const t.PeerId, now_ms: u64) ?Hints {
+        for (self.rows) |row| {
+            if (!row.occupied or !row.peer.eql(peer) or now_ms >= row.hints_at_ms +| hint_freshness_ms) continue;
+            return row.hints;
+        }
+        return null;
     }
     /// Only selected relevant authenticated success renews automatic history retention.
     pub fn relevant(self: *DialQueue, peer: *const t.PeerId, now_ms: u64) void {

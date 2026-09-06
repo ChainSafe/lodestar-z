@@ -5,6 +5,117 @@ const wire = @import("peers/control_wire.zig");
 const rr = @import("reqresp/root.zig");
 const Engine = @import("quic/engine.zig");
 
+test "core native host fork transition cancels old maintenance without reviving closing peers" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..50) |_| try setup.step(1);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const before = snapshots[0];
+    setup.client.reStatusPeers(setup.pair.now);
+    setup.server.reStatusPeers(setup.pair.now);
+    try setup.step(0);
+    var old_operations: usize = 0;
+    for (setup.client.control.operations) |op| if (op.request != null) {
+        old_operations += 1;
+    };
+    try std.testing.expect(old_operations > 0);
+    const updated: t.LocalState = .{
+        .fork = .{ .fork = .fulu, .digest = @splat(1) },
+        .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
+        .metadata = .{ .seq_number = 1, .custody_group_count = 1 },
+    };
+    try setup.client.updateFork(&updated, setup.pair.now);
+    try setup.server.updateFork(&updated, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.connectedPeerCount());
+    const invalidated = setup.client.catalog.get(before.peer).?;
+    try std.testing.expectEqualDeep(before.connection, invalidated.connection);
+    try std.testing.expect(invalidated.status == null and invalidated.disconnect_reason == null);
+    for (setup.client.control.operations) |op| if (op.request != null) {
+        try std.testing.expect(op.cancelled);
+    };
+    for (0..80) |_| try setup.step(1);
+    const confirmed = setup.client.catalog.get(before.peer).?;
+    try std.testing.expect(confirmed.relevant);
+    try std.testing.expectEqualDeep(before.connection, confirmed.connection);
+    try std.testing.expectEqual(@as(u64, 0), confirmed.status.?.earliest_available_slot.?);
+    try std.testing.expectEqual(@as(u64, 1), confirmed.metadata.?.seq_number);
+    try std.testing.expect(setup.client.disconnect(before.peer, .host, setup.pair.now));
+    const deadline = setup.client.control.schedules[before.peer.index].closing.?.deadline_ms;
+    var next = updated;
+    next.fork.digest = @splat(2);
+    next.status.fork_digest = @splat(2);
+    try setup.client.updateFork(&next, setup.pair.now);
+    try std.testing.expectEqual(t.DisconnectReason.host, setup.client.catalog.get(before.peer).?.disconnect_reason.?);
+    try std.testing.expectEqual(deadline, setup.client.control.schedules[before.peer.index].closing.?.deadline_ms);
+}
+
+test "core native previous fork request grace does not refresh relevance and expires" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..50) |_| try setup.step(1);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.server.snapshots(&snapshots);
+    const peer = snapshots[0].peer;
+    const updated: t.LocalState = .{
+        .fork = .{ .fork = .fulu, .digest = @splat(1) },
+        .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
+        .metadata = .{ .seq_number = 1, .custody_group_count = 1 },
+    };
+    try setup.client.updateFork(&updated, setup.pair.now);
+    try setup.server.updateFork(&updated, setup.pair.now);
+    for (0..80) |_| try setup.step(1);
+    const before = setup.server.catalog.get(peer).?;
+    const deadline = setup.server.control.schedules[peer.index].transition_until_ms;
+    setup.pair.advance(100);
+    try previousStatus(&setup);
+    const after = setup.server.catalog.get(peer).?;
+    try std.testing.expectEqualDeep(before.status, after.status);
+    try std.testing.expectEqual(before.status_at_ms, after.status_at_ms);
+    try std.testing.expectEqual(before.metadata_at_ms, after.metadata_at_ms);
+    try std.testing.expect(after.relevant and after.disconnect_reason == null);
+    try std.testing.expectEqual(deadline, setup.server.control.schedules[peer.index].transition_until_ms);
+    setup.pair.advance(10_001);
+    try previousStatus(&setup);
+    try std.testing.expectEqual(t.DisconnectReason.incompatible_fork, setup.server.catalog.get(peer).?.disconnect_reason.?);
+}
+
+fn previousStatus(setup: *Setup) !void {
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    var bytes: [84]u8 = @splat(0);
+    var sink: [84]u8 = undefined;
+    const handle = try setup.client.service.request(&setup.pair.client, snapshots[0].connection.?, .status_v1, &bytes, &sink, .{}, setup.pair.now);
+    var done = false;
+    for (0..80) |_| {
+        try setup.pair.pump();
+        var events: [32]Engine.Event = undefined;
+        _ = setup.server.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &events), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+        var out: [1]rr.Event = undefined;
+        const count = setup.client.service.processPartitioned(&setup.pair.client, setup.pair.events(&setup.pair.client, &events), &.{}, setup.pair.now, &.{}, &out, &.{});
+        for (out[0..count.control]) |event| switch (event) {
+            .chunk => |chunk| {
+                try std.testing.expectEqualDeep(handle, chunk.request);
+                try std.testing.expect(setup.client.consume(handle, setup.pair.now));
+            },
+            .done => {
+                done = true;
+            },
+            .request => |request| {
+                try setup.client.respond(request.request, &.{ 1, 0, 0, 0, 0, 0, 0, 0 }, null, setup.pair.now);
+            },
+            .chunk_sent => |sent| {
+                _ = setup.client.finish(sent.request, setup.pair.now);
+            },
+            else => {},
+        };
+        if (done) break;
+    }
+    try std.testing.expect(done);
+}
+
 test "core control native Fulu serves older schemas but old Status cannot establish relevance" {
     const local: t.LocalState = .{
         .fork = .{ .fork = .fulu },

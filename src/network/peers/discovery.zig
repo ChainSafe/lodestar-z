@@ -97,6 +97,7 @@ pub const Discovery = struct {
         if (self.stopped) return error.Stopped;
         if (demand.syncnets & 0xf0 != 0 or demand.expires_ms < now_ms) return error.InvalidDemand;
         self.demand = demand;
+        self.expireForeground(now_ms);
     }
 
     pub fn updateFork(self: *Discovery, context: *const types.ForkContext) Error!void {
@@ -164,6 +165,7 @@ pub const Discovery = struct {
     }
 
     fn refill(self: *Discovery, io: std.Io, now_ms: u64, result: *Result) Error!void {
+        self.expireForeground(now_ms);
         if (now_ms < self.resource_retry_ms) return;
         if (!self.lookup_active and self.demand.active(now_ms) and now_ms >= self.query_due_ms) {
             self.query_due_ms = now_ms +| self.options.query_interval_ms;
@@ -184,6 +186,12 @@ pub const Discovery = struct {
             try self.start(io, now_ms, false, result);
             if (before == result.started) break;
         }
+    }
+
+    fn expireForeground(self: *Discovery, now_ms: u64) void {
+        if (!self.lookup_active or self.demand.active(now_ms)) return;
+        self.lookup.cancel(self.driver.core);
+        self.lookup_active = false;
     }
 
     fn start(self: *Discovery, io: std.Io, now_ms: u64, background: bool, result: *Result) Error!void {

@@ -24,6 +24,10 @@ pub const InitError = tls.Error || engine_mod.Error || std.Io.net.IpAddress.Bind
 pub const DialError = driver_mod.DialError || error{MissingPeerId};
 
 pub const StepError = driver_mod.StepError || error{KeylogWriteFailed};
+pub const ProgressResult = struct {
+    progress: driver_mod.StepResult,
+    failure: ?StepError = null,
+};
 
 pub const Transport = struct {
     engine: engine_mod.Engine = undefined,
@@ -131,9 +135,23 @@ pub const Transport = struct {
         options: driver_mod.StepOptions,
     ) StepError!driver_mod.StepResult {
         assert(self.engine.registry.slots.len > 0);
-        const result = try self.driver.step(io, &self.engine, &self.udp, events, activity, options);
+        // Legacy error-union callers cannot receive progress alongside a logging error.
         try self.drainKeylog(io);
-        return result;
+        return self.driver.step(io, &self.engine, &self.udp, events, activity, options);
+    }
+
+    /// Keeps already extracted native notifications when optional key logging fails.
+    pub fn stepProgress(
+        self: *Transport,
+        io: std.Io,
+        events: []engine_mod.Event,
+        activity: []engine_mod.Handle,
+        options: driver_mod.StepOptions,
+    ) ProgressResult {
+        const result = self.driver.step(io, &self.engine, &self.udp, events, activity, options) catch |err|
+            return .{ .progress = .{ .now = .{ .mono_ms = 0, .unix_s = 0 } }, .failure = err };
+        self.drainKeylog(io) catch |err| return .{ .progress = result, .failure = err };
+        return .{ .progress = result };
     }
 
     fn drainKeylog(self: *Transport, io: std.Io) error{KeylogWriteFailed}!void {
