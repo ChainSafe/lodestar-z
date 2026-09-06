@@ -62,6 +62,28 @@ pub const DialQueue = struct {
     custody_cursor: usize = 0,
     random: std.Random.DefaultPrng,
 
+    pub const Resources = struct {
+        capacity: usize = 0,
+        occupied: usize = 0,
+        attempts: usize = 0,
+        connected: usize = 0,
+        automatic: usize = 0,
+        custody_pending: usize = 0,
+    };
+
+    pub fn resourceSnapshot(self: *const DialQueue) Resources {
+        var result: Resources = .{ .capacity = self.rows.len };
+        for (self.rows) |*row| {
+            if (!row.occupied) continue;
+            result.occupied += 1;
+            if (row.attempt) result.attempts += 1;
+            if (row.connected) result.connected += 1;
+            if (row.automatic) result.automatic += 1;
+            if (row.custody_work != null) result.custody_pending += 1;
+        }
+        return result;
+    }
+
     pub fn validateOptions(options: Options) error{InvalidOptions}!void {
         if (options.capacity == 0 or options.capacity > 4096 or options.concurrent_max == 0 or
             options.concurrent_max > 4 or options.concurrent_max > options.engine_dialing_max or

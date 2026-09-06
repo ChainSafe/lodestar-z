@@ -333,6 +333,9 @@ test "reqresp withholds chunks while the peer's bucket is empty" {
     try std.testing.expectEqual(@as(u32, 1), completed);
     try std.testing.expectEqual(@as(u64, 1), setup.server.counters.withheld_chunks);
 
+    const waiting = setup.server.resourceSnapshot();
+    try std.testing.expectEqual(@as(usize, 1), waiting.withheld_chunks);
+    try std.testing.expect(waiting.oldest_withheld_age_ms != null);
     setup.pair.advance(3_000);
     rounds = 0;
     while (rounds < 20 and completed < 2) : (rounds += 1) {
@@ -346,6 +349,9 @@ test "reqresp withholds chunks while the peer's bucket is empty" {
     }
     try std.testing.expectEqual(@as(u32, 2), completed);
     try std.testing.expect(setup.server.counters.withheld_ms_total >= 3_000);
+    try std.testing.expectEqual(@as(usize, 0), setup.server.resourceSnapshot().withheld_chunks);
+    try std.testing.expectEqual(@as(?u64, null), setup.server.resourceSnapshot().oldest_withheld_age_ms);
+    try std.testing.expectEqual(@as(usize, 1), waiting.withheld_chunks);
 }
 
 test "reqresp holds the next chunk until the host consumes the previous one" {
@@ -913,6 +919,8 @@ test "reqresp cancellation removes Router ownership before output delivery" {
     const stream = setup.client.outbound[handle.index].stream;
     try std.testing.expect(setup.client.cancel(handle));
     try std.testing.expect(!setup.client.cancel(handle));
+    try std.testing.expectEqual(@as(usize, 1), setup.client.resourceSnapshot().outbound_occupied);
+    try std.testing.expectEqual(@as(usize, 1), setup.client.resourceSnapshot().pending_terminals);
     _ = setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &.{});
     try std.testing.expect(!setup.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
     var outcomes: [8]negotiate.Outcome = undefined;
@@ -923,6 +931,8 @@ test "reqresp cancellation removes Router ownership before output delivery" {
     try std.testing.expect(!setup.client.cancel(handle));
     try std.testing.expectEqual(@as(usize, 0), setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events));
     try std.testing.expectEqual(@as(u64, 1), setup.client.counters.failures);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.resourceSnapshot().outbound_occupied);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.resourceSnapshot().pending_terminals);
 }
 
 test "reqresp caller cardinality rejects invalid bounds before opening a stream" {

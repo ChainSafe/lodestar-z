@@ -73,7 +73,7 @@ pub const FutureForkHint = struct {
     next_digest: ?[4]u8,
     compatible: bool,
 };
-pub const Diagnostics = struct {
+pub const Counters = struct {
     discovered: u64 = 0,
     candidates_refused: u64 = 0,
     future_fork_mismatches: u64 = 0,
@@ -85,6 +85,12 @@ pub const Diagnostics = struct {
     readiness_nonzero_waits: u64 = 0,
     readiness_interruptions: u64 = 0,
     readiness_failures: u64 = 0,
+};
+pub const Diagnostics = struct {
+    runtime: Counters,
+    transport: engine.Counters,
+    transport_resources: engine.Engine.Resources,
+    core: core_mod.Core.Diagnostics,
 };
 pub const MemoryPlan = struct {
     inline_bytes: usize = @sizeOf(NetworkCore),
@@ -136,7 +142,7 @@ pub const NetworkCore = struct {
     native_events: []engine.Event,
     activity: []engine.Handle,
     schedule: ForkSchedule,
-    counters: Diagnostics = .{},
+    counters: Counters = .{},
     last_now: Now,
     initialized: bool = false,
     wait_mode: wait.Mode,
@@ -249,8 +255,9 @@ pub const NetworkCore = struct {
         const hints = self.core.candidateHints(identity, now) orelse return null;
         return .{ .record_sequence = hints.sequence, .fork = hints.fork, .next_digest = hints.next_fork_digest, .compatible = compatibleHint(hints.fork, hints.next_fork_digest, self.schedule) };
     }
+    /// Copied bounded observations. Does not advance time, policy, scores or event borrows.
     pub fn diagnostics(self: *const NetworkCore) Diagnostics {
-        return self.counters;
+        return .{ .runtime = self.counters, .transport = self.transport.engine.counters, .transport_resources = self.transport.engine.resourceSnapshot(), .core = self.core.diagnostics() };
     }
     pub fn memoryPlan(self: *const NetworkCore) MemoryPlan {
         std.debug.assert(self.reservations.bytes == self.memory.allocated_bytes);
@@ -316,6 +323,11 @@ pub const NetworkCore = struct {
     pub fn errorMessage(self: *const NetworkCore, request: rr.RequestHandle) []const u8 {
         return self.core.errorMessage(request);
     }
+    /// Copies topic bytes and scalar policy without publishing or invalidating event borrows.
+    pub fn configureTopic(self: *NetworkCore, topic: []const u8, params: *const gossip.score.TopicParams) (gossip.Gossipsub.ConfigureTopicError || error{Stopped})!void {
+        try self.core.configureTopic(topic, params);
+    }
+
     pub fn publishGossip(self: *NetworkCore, topic: []const u8, bytes: []const u8, now: Now) !gossip.Gossipsub.PublishOutcome {
         return self.core.publishGossip(topic, bytes, now);
     }

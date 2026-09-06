@@ -67,7 +67,7 @@ pub const Handler = struct {
         return self.inner.subscribe(topic);
     }
 
-    pub fn configureTopic(self: *Handler, topic: []const u8, params: @import("score.zig").TopicParams) error{ InvalidLimits, TopicCapacity }!void {
+    pub fn configureTopic(self: *Handler, topic: []const u8, params: *const @import("score.zig").TopicParams) Gossipsub.ConfigureTopicError!void {
         return self.inner.configureTopic(topic, params);
     }
 

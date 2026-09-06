@@ -113,7 +113,7 @@ test "managed runtime signed bootstrap reaches relevant peer with zero and one o
     try std.testing.expect(ready);
     try std.testing.expectEqual(@as(u16, 1), a.connectedPeerCount());
     try std.testing.expectEqual(@as(u16, 1), b.connectedPeerCount());
-    try std.testing.expect(a.diagnostics().discovered > 0);
+    try std.testing.expect(a.diagnostics().runtime.discovered > 0);
     const hint_now = try @import("driver.zig").currentTime(std.testing.io);
     try std.testing.expect(a.futureForkHint(&b.peerId(), hint_now).?.compatible);
     const local = a.localState();
@@ -520,7 +520,7 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
     }
     try std.testing.expectEqual(@as(u16, 1), a.connectedPeerCount());
     try std.testing.expectEqual(@as(u16, 1), replacement.connectedPeerCount());
-    try std.testing.expect(replacement.diagnostics().dial_started > 0);
+    try std.testing.expect(replacement.diagnostics().runtime.dial_started > 0);
     replacement.shutdown(now);
 }
 
@@ -686,7 +686,7 @@ test "managed runtime portable fallback rejects enabled host source" {
     try node.setHostWake(null);
     const result = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 0);
     try std.testing.expect(result.failure == null);
-    try std.testing.expectEqual(@as(u64, 0), node.diagnostics().readiness_calls);
+    try std.testing.expectEqual(@as(u64, 0), node.diagnostics().runtime.readiness_calls);
 }
 
 test "managed runtime native wait source failure retains completed protocol progress" {
@@ -716,7 +716,7 @@ test "managed runtime native wait source failure retains completed protocol prog
     try node.setHostWake(null);
     const clean = node.step(std.testing.io, node.last_now, 0, .{}, 0);
     try std.testing.expect(clean.failure == null);
-    try std.testing.expectEqual(@as(u64, 1), node.diagnostics().readiness_failures);
+    try std.testing.expectEqual(@as(u64, 1), node.diagnostics().runtime.readiness_failures);
 }
 
 test "managed runtime native wait honors pacing native timers and pending lifecycle work" {
@@ -763,4 +763,43 @@ test "managed runtime native wait honors pacing native timers and pending lifecy
     try std.testing.expect(lifecycle.transport.events > 0);
     const repeated = node.step(std.testing.io, node.last_now, 0, .{}, 0);
     try std.testing.expectEqual(@as(usize, 0), repeated.transport.events);
+}
+
+test "managed runtime topic policy copies values and rejects atomically" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, options(&key));
+    defer node.deinit(std.testing.io);
+    const calls = node.reservations.allocation_calls;
+    const initial = node.diagnostics();
+    try std.testing.expectEqual(@as(usize, 4), initial.transport_resources.capacity);
+    try std.testing.expectEqual(@as(usize, 0), initial.transport_resources.active);
+    const revision_before_read = node.core.service.gossipsub.inner.scores.revision;
+    try std.testing.expectEqualDeep(initial, node.diagnostics());
+    try std.testing.expectEqual(revision_before_read, node.core.service.gossipsub.inner.scores.revision);
+    var params: @import("gossipsub/score.zig").TopicParams = .{ .weight = 2 };
+    var text = "/eth2/ABCDEF00/custom/name/ssz_snappy".*;
+    try node.configureTopic(&text, &params);
+    params.weight = 3;
+    text[6] = '0';
+    const owner = &node.core.service.gossipsub.inner;
+    try std.testing.expectEqual(@as(f64, 2), owner.scores.topic_params[0].weight);
+    try std.testing.expectEqualStrings("/eth2/ABCDEF00/custom/name/ssz_snappy", owner.state.topicString(0));
+    const revision = owner.scores.revision;
+    try std.testing.expectError(error.InvalidLimits, node.configureTopic(&text, &.{ .weight = std.math.nan(f64) }));
+    try std.testing.expectError(error.InvalidTopic, node.configureTopic("bad", &.{}));
+    try std.testing.expectEqual(revision, owner.scores.revision);
+    try std.testing.expectEqual(@as(u64, 1), owner.state.topics[0].generation);
+    for (0..@import("gossipsub/constants.zig").topics_cap) |index| {
+        var name: [@import("gossipsub/topic.zig").topic_max_len]u8 = undefined;
+        const topic = try std.fmt.bufPrint(&name, "/eth2/{x:0>8}/custom/ssz_snappy", .{index});
+        try std.testing.expect(node.subscribe(topic));
+    }
+    const full_revision = owner.scores.revision;
+    try std.testing.expectError(error.TopicCapacity, node.configureTopic("/eth2/ffffffff/custom/ssz_snappy", &.{}));
+    try std.testing.expectEqual(full_revision, owner.scores.revision);
+    node.shutdown(node.last_now);
+    try std.testing.expectError(error.Stopped, node.configureTopic("bad", &.{}));
+    try std.testing.expectEqual(full_revision, owner.scores.revision);
+    try std.testing.expectEqual(calls, node.reservations.allocation_calls);
 }

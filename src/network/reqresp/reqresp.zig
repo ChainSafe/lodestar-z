@@ -175,6 +175,47 @@ pub const ReqResp = struct {
     control_event_cursor: usize = 0,
     scan_remaining: usize = 0,
 
+    pub const Resources = struct {
+        outbound_capacity: usize = 0,
+        inbound_capacity: usize = 0,
+        outbound_control_reserved: usize = 0,
+        inbound_control_reserved: usize = 0,
+        outbound_occupied: usize = 0,
+        inbound_occupied: usize = 0,
+        pending_events: usize = 0,
+        pending_terminals: usize = 0,
+        held_chunks: usize = 0,
+        withheld_chunks: usize = 0,
+        oldest_withheld_age_ms: ?u64 = null,
+        over_limit_backlog: usize = 0,
+    };
+
+    pub fn resourceSnapshot(self: *const ReqResp) Resources {
+        var result: Resources = .{
+            .outbound_capacity = self.outbound.len,
+            .inbound_capacity = self.inbound.len,
+            .outbound_control_reserved = self.options.outbound_control_reserved,
+            .inbound_control_reserved = self.options.inbound_control_reserved,
+            .over_limit_backlog = self.over_limit_len,
+        };
+        for (self.outbound) |*slot| {
+            if (slot.state != .free) result.outbound_occupied += 1;
+            if (slot.pending_event != null) result.pending_events += 1;
+            if (slot.terminal != null) result.pending_terminals += 1;
+            if (slot.chunk_held) result.held_chunks += 1;
+        }
+        for (self.inbound) |*slot| {
+            if (slot.state != .free) result.inbound_occupied += 1;
+            if (slot.pending_event != null) result.pending_events += 1;
+            if (slot.terminal != null) result.pending_terminals += 1;
+            if (slot.withheld_since_ms) |since| {
+                result.withheld_chunks += 1;
+                result.oldest_withheld_age_ms = @max(result.oldest_withheld_age_ms orelse 0, self.last_now_ms -| since);
+            }
+        }
+        return result;
+    }
+
     pub fn validateOptions(options: Options) InitError!struct { peer: limiter_mod.Quotas, global: limiter_mod.Quotas } {
         if (options.outbound_max == 0 or options.outbound_max > constants.slots_ceiling) {
             return error.InvalidOptions;

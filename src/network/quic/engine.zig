@@ -189,6 +189,18 @@ pub const Engine = struct {
     event_cursor: u16 = 0,
     activity_cursor: u16 = 0,
 
+    pub const Resources = struct {
+        capacity: usize,
+        active: usize,
+        handshaking: usize,
+        dialing: usize,
+        outbound: usize,
+    };
+
+    pub fn resourceSnapshot(self: *const Engine) Resources {
+        return .{ .capacity = self.registry.slots.len, .active = self.registry.active_len, .handshaking = self.registry.handshaking, .dialing = self.registry.dialing, .outbound = self.registry.outbound };
+    }
+
     pub fn validateLimits(wanted: Limits) Error!u16 {
         if (wanted.connections_max == 0) return error.InvalidLimits;
         if (wanted.connections_max > limits.connections_max_ceiling) return error.InvalidLimits;

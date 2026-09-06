@@ -60,6 +60,30 @@ pub const Control = struct {
         closed: [@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
     };
 
+    pub const Resources = struct {
+        operation_capacity: usize = 0,
+        response_capacity: usize = 0,
+        operations: usize = 0,
+        responses: usize = 0,
+        cancelled_operations: usize = 0,
+        closing: usize = 0,
+    };
+
+    pub fn resourceSnapshot(self: *const Control) Resources {
+        var snapshot: Resources = .{ .operation_capacity = self.operations.len, .response_capacity = self.responses.len };
+        for (self.operations) |*op| if (op.request != null) {
+            snapshot.operations += 1;
+            if (op.cancelled) snapshot.cancelled_operations += 1;
+        };
+        for (self.responses) |*op| if (op.request != null) {
+            snapshot.responses += 1;
+        };
+        for (self.schedules) |*row| if (row.peer != null and row.closing != null) {
+            snapshot.closing += 1;
+        };
+        return snapshot;
+    }
+
     pub fn validateOptions(options: Options) error{InvalidOptions}!void {
         if (options.operations_max == 0 or options.operations_max > 1024)
             return error.InvalidOptions;
