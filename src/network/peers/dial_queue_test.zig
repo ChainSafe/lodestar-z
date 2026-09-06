@@ -3,6 +3,77 @@ const mod = @import("dial_queue.zig");
 const t = @import("types.zig");
 const a = std.testing.allocator;
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 1234 } };
+
+test "peer dial custody diagnostics count unfinished derivations without mutating retained coverage" {
+    const custody = @import("custody.zig");
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = a };
+    var q = try mod.DialQueue.init(ledger.allocator(), .{ .capacity = 4, .seed = 4 });
+    defer q.deinit(ledger.allocator());
+    var wanted: t.Coverage = .{};
+    wanted.custody.setRangeValue(.{ .start = 0, .end = 128 }, true);
+    for ([_]u16{ 2, 1, 128, 2 }, 0..) |count, index| {
+        var candidate = try discovered(@intCast(index + 1), 0);
+        candidate.custody_group_count = count;
+        try q.enqueueDiscovered(&candidate, &.{}, &wanted, 0);
+    }
+    try std.testing.expect((try q.rows[1].custody_work.?.step(1)) != null);
+    try std.testing.expectEqual(@as(u16, 0), q.rows[2].custody_work.?.hashes);
+    try std.testing.expectEqual(@as(usize, 128), q.rows[2].custody_work.?.groups.count());
+    q.rows[3].custody_work.?.hashes = custody.hashes_max;
+    try std.testing.expectError(error.WorkLimit, q.rows[3].custody_work.?.step(1));
+    q.configureSelection(&wanted, false, &.{}, 0);
+    for ([_]u16{ 0, 1, 128, 0 }, q.rows) |priority, row| {
+        try std.testing.expectEqual(priority, row.priority);
+    }
+
+    const works = [4]custody.Derivation{
+        q.rows[0].custody_work.?, q.rows[1].custody_work.?,
+        q.rows[2].custody_work.?, q.rows[3].custody_work.?,
+    };
+    const cursor = q.cursor;
+    const custody_cursor = q.custody_cursor;
+    const random = q.random;
+    const calls = ledger.allocation_calls;
+    const bytes = ledger.bytes;
+    const snapshot = q.resourceSnapshot();
+    try std.testing.expectEqual(@as(usize, 1), snapshot.custody_incomplete);
+    for (0..4) |_| {
+        try std.testing.expectEqualDeep(snapshot, q.resourceSnapshot());
+        for (works, q.rows, [_]u16{ 0, 1, 128, 0 }) |work, row, priority| {
+            try std.testing.expectEqualDeep(work, row.custody_work.?);
+            try std.testing.expectEqual(priority, row.priority);
+            try std.testing.expectEqual(priority > 0, row.selected);
+        }
+        try std.testing.expectEqual(cursor, q.cursor);
+        try std.testing.expectEqual(custody_cursor, q.custody_cursor);
+        try std.testing.expectEqualDeep(random, q.random);
+        try std.testing.expect(!q.selection_dirty);
+        try std.testing.expectEqual(@as(?u64, mod.hint_freshness_ms), q.selection_deadline);
+        try std.testing.expectEqual(calls, ledger.allocation_calls);
+        try std.testing.expectEqual(bytes, ledger.bytes);
+    }
+}
+
+test "peer dial custody diagnostics retain expired unfinished work without claiming eligibility" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    var candidate = try discovered(1, 0);
+    candidate.custody_group_count = 1;
+    try q.enqueueDiscovered(&candidate, &.{}, &.{}, 0);
+    const work = q.rows[0].custody_work.?;
+    var budget: u16 = 64;
+    try std.testing.expect(!q.advanceCustody(&.{}, mod.hint_freshness_ms, &budget));
+    try std.testing.expectEqual(@as(u16, 64), budget);
+    try std.testing.expectEqual(@as(usize, 1), q.resourceSnapshot().custody_incomplete);
+    try std.testing.expectEqualDeep(work, q.rows[0].custody_work.?);
+
+    try q.enqueueDiscovered(&candidate, &.{}, &.{}, mod.hint_freshness_ms);
+    try std.testing.expect(!q.advanceCustody(&.{}, mod.hint_freshness_ms, &budget));
+    try std.testing.expectEqual(@as(u16, 63), budget);
+    try std.testing.expectEqual(@as(usize, 0), q.resourceSnapshot().custody_incomplete);
+    try std.testing.expectEqual(@as(usize, 1), q.rows[0].custody_work.?.groups.count());
+}
+
 test "peer dial queue copies candidates rotates addresses and ignores stale leased tokens" {
     var q = try mod.DialQueue.init(
         a,
