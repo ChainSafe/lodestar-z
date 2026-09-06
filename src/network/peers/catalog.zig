@@ -28,6 +28,7 @@ pub const Row = struct {
 pub const Catalog = struct {
     rows: []Row,
     options: t.Options,
+    revision: u64 = 0,
     event_cursor: usize = 0,
     custody_cursor: usize = 0,
 
@@ -60,15 +61,18 @@ pub const Catalog = struct {
             if (!row.occupied or row.connection == null or row.closing_reason != null) continue;
             const metadata = row.metadata orelse continue;
             const count = metadata.custody_group_count orelse {
+                if (row.custody_work != null) self.revision +|= 1;
                 row.custody_work = null;
                 continue;
             };
             const compatible = if (row.status) |status| std.mem.eql(u8, &status.fork_digest, &context.digest) else false;
             if (count == 0 or count > context.custody_groups or !compatible) {
+                if (row.custody_work != null) self.revision +|= 1;
                 row.custody_work = null;
                 continue;
             }
             if (!std.meta.eql(row.custody_context, context.*) or (if (row.custody_work) |work| work.requested != count else true)) {
+                self.revision +|= 1;
                 row.custody_work = null;
                 row.custody_context = context.*;
                 const node_id = custody.nodeId(&row.identity) catch continue;
@@ -82,6 +86,7 @@ pub const Catalog = struct {
                 continue;
             };
             budget.* -= work.hashes - before;
+            if (work.hashes != before and result != null) self.revision +|= 1;
             pending = pending or result == null;
         }
         // A rotating work start prevents a large configured catalog from monopolizing the budget.
@@ -171,6 +176,7 @@ pub const Catalog = struct {
             } else if (self.connectedCount() >= self.options.max_peers) return .capacity;
             row.reputation = current_reputation;
             connect(row, conn, options);
+            self.revision +|= 1;
             return .{ .admitted = .{ .peer = ref, .displaced = displaced, .fresh = false } };
         }
         if (self.connectedCount() >= self.options.max_peers) return .capacity;
@@ -186,6 +192,7 @@ pub const Catalog = struct {
             if (row.occupied and current_reputation.retained(options.now_ms)) continue;
             row.* = .{ .occupied = true, .generation = row.generation + 1, .identity = identity.* };
             connect(row, conn, options);
+            self.revision +|= 1;
             return .{ .admitted = .{
                 .peer = .{ .index = @intCast(index), .generation = row.generation },
                 .fresh = true,
@@ -238,6 +245,7 @@ pub const Catalog = struct {
         now_ms: u64,
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
+        self.revision +|= 1;
         row.connection = null;
         row.status = null;
         row.metadata = null;
@@ -255,6 +263,7 @@ pub const Catalog = struct {
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return true;
+        self.revision +|= 1;
         row.closing_reason = reason;
         row.status = null;
         row.pending_update = row.published;
@@ -264,6 +273,8 @@ pub const Catalog = struct {
     pub fn invalidateStatus(self: *Catalog, ref: t.PeerRef, conn: t.Handle) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return false;
+        if (row.status == null and row.custody_work == null) return true;
+        self.revision +|= 1;
         row.status = null;
         row.custody_work = null;
         row.pending_update = row.published;
@@ -280,6 +291,7 @@ pub const Catalog = struct {
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return false;
+        self.revision +|= 1;
         row.status = status.*;
         row.status_at_ms = now_ms;
         row.pending_update = true;
@@ -297,6 +309,7 @@ pub const Catalog = struct {
         if (row.closing_reason != null) return false;
         if (row.metadata) |current| if (metadata.seq_number < current.seq_number) return false;
         if (row.metadata == null or row.metadata.?.custody_group_count != metadata.custody_group_count) row.custody_work = null;
+        self.revision +|= 1;
         row.metadata = metadata.*;
         row.metadata_at_ms = now_ms;
         if (row.published or row.status != null) row.pending_update = true;
@@ -305,6 +318,7 @@ pub const Catalog = struct {
 
     pub fn setDirect(self: *Catalog, ref: t.PeerRef, direct: bool) bool {
         const row = self.rowFor(ref) orelse return false;
+        if (row.direct != direct) self.revision +|= 1;
         row.direct = direct;
         return true;
     }
@@ -316,6 +330,7 @@ pub const Catalog = struct {
         now_ms: u64,
     ) ?t.ReputationDecision {
         const row = self.rowFor(ref) orelse return null;
+        self.revision +|= 1;
         return row.reputation.apply(action, now_ms);
     }
 
@@ -327,13 +342,17 @@ pub const Catalog = struct {
         duration_ms: u64,
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
+        self.revision +|= 1;
         row.reputation.remoteGoodbye(now_ms, duration_ms);
         return true;
     }
 
     pub fn refresh(self: *Catalog, now_ms: u64) void {
         for (self.rows) |*row| {
-            if (row.occupied) row.reputation.decay(now_ms);
+            if (!row.occupied) continue;
+            const banned = row.reputation.score <= -50;
+            row.reputation.decay(now_ms);
+            if (banned != (row.reputation.score <= -50)) self.revision +|= 1;
         }
     }
 

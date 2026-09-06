@@ -283,3 +283,42 @@ test "peer catalog changed custody metadata immediately invalidates copied group
     try std.testing.expect(c.updateMetadata(ref, first, &.{ .seq_number = 1, .custody_group_count = 1 }, 1));
     try std.testing.expect(c.get(ref).?.custody_groups == null);
 }
+
+test "peer catalog revisions follow canonical generation replacement and reject stale mutations" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
+    const admitted_revision = c.revision;
+    _ = admit(&c, &remote, replacement, .outbound, 1).admitted;
+    try std.testing.expectEqual(admitted_revision + 1, c.revision);
+    try std.testing.expect(!c.updateMetadata(ref, first, &.{}, 1));
+    try std.testing.expect(!c.disconnect(ref, first, .host, 1));
+    try std.testing.expectEqual(admitted_revision + 1, c.revision);
+    try std.testing.expect(c.disconnect(ref, replacement, .host, 2));
+    var events: [1]t.Event = undefined;
+    _ = c.pollEvents(&events);
+    const closed_revision = c.revision;
+    const reused = admit(&c, &third, first, .outbound, 3).admitted.peer;
+    try std.testing.expectEqual(ref.index, reused.index);
+    try std.testing.expect(reused.generation > ref.generation);
+    try std.testing.expectEqual(closed_revision + 1, c.revision);
+    try std.testing.expect(!c.setDirect(ref, true));
+    try std.testing.expectEqual(closed_revision + 1, c.revision);
+    c.revision = std.math.maxInt(u64);
+    try std.testing.expect(c.setDirect(reused, true));
+    try std.testing.expectEqual(std.math.maxInt(u64), c.revision);
+}
+
+test "peer catalog zero hash custody completion invalidates prior policy observation" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .outbound, 0).admitted.peer;
+    try std.testing.expect(c.updateStatus(ref, first, &.{ .earliest_available_slot = 0 }, 0));
+    try std.testing.expect(c.updateMetadata(ref, first, &.{ .custody_group_count = 128 }, 0));
+    const observed = c.revision;
+    try std.testing.expect(c.get(ref).?.custody_groups == null);
+    var budget: u16 = 0;
+    try std.testing.expect(!c.advanceCustody(&.{ .fork = .fulu }, 0, 60_000, &budget));
+    try std.testing.expectEqual(@as(usize, 128), c.get(ref).?.custody_groups.?.count());
+    try std.testing.expect(c.revision > observed);
+}

@@ -60,3 +60,48 @@ test "peer policy finite ranking expiry and infeasible demanded coverage" {
     demand.coverage.custody.set(64);
     try std.testing.expectError(error.InvalidDemand, demand.validate(&.{ .custody_groups = 64 }, 4));
 }
+
+test "peer policy retained set stays stable across health changes after actual pruning" {
+    const demand: t.Demand = .{ .coverage = .{ .attnets = 1, .syncnets = 1 } };
+    const original = [_]p.Input{
+        .{ .coverage = .{ .attnets = 1 }, .score = -10 },
+        .{ .coverage = .{ .syncnets = 1 }, .score = -9 },
+        .{ .outbound = true, .score = -8 },
+        .{ .score = -7 },
+    };
+    var configured = options;
+    configured.target_peers = 1;
+    const first = p.select(&original, &demand, configured, 7);
+    try equal(@as(u16, 3), first.retained_count);
+    try expect(first.retained_count > configured.target_peers);
+    try equal(@as(u16, 0), first.deficits.outbound);
+    try expect(first.reasons[3] != null);
+    var retained: [4]p.Input = undefined;
+    var count: usize = 0;
+    for (original, 0..) |input, index| if (first.retained.isSet(index)) {
+        retained[count] = input;
+        count += 1;
+    };
+    for (0..8) |permutation| {
+        for (retained[0..count], 0..) |*input, index| input.score = if (permutation & (@as(usize, 1) << @intCast(index)) != 0) -1e6 else 1e6;
+        const next = p.select(retained[0..count], &demand, configured, 7);
+        try equal(first.retained_count, next.retained_count);
+        try equal(first.deficits, next.deficits);
+        for (next.reasons[0..count]) |reason| try expect(reason == null);
+    }
+
+    configured.target_peers = configured.max_peers;
+    const inbound = [_]p.Input{ .{ .score = -10 }, .{ .score = -9 }, .{ .score = -8 }, .{ .score = -7 } };
+    const replacement = p.select(&inbound, &.{}, configured, 7);
+    try equal(@as(u16, 3), replacement.retained_count);
+    count = 0;
+    for (inbound, 0..) |input, index| if (replacement.retained.isSet(index)) {
+        retained[count] = input;
+        retained[count].score = -input.score;
+        count += 1;
+    };
+    const stable = p.select(retained[0..count], &.{}, configured, 7);
+    try equal(replacement.retained_count, stable.retained_count);
+    try equal(replacement.deficits, stable.deficits);
+    try equal(@as(u16, 1), stable.dial_budget);
+}
