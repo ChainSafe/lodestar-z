@@ -306,10 +306,11 @@ pub const Gossipsub = struct {
 
     /// Copies scalar parameters and topic bytes without ending the current event borrow window.
     pub fn configureTopic(self: *Gossipsub, name: []const u8, params: *const score_mod.TopicParams) ConfigureTopicError!void {
-        try score_mod.validateTopic(params.*);
+        const copied = params.*;
+        try score_mod.validateTopic(copied);
         if (name.len > topic_mod.topic_max_len or topic_mod.parse(name) == null) return error.InvalidTopic;
         const topic = self.internTopic(name) orelse return error.TopicCapacity;
-        self.scores.configureTopic(topic, params.*) catch unreachable;
+        self.scores.configureTopic(topic, copied) catch unreachable;
     }
 
     pub fn unsubscribe(self: *Gossipsub, topic_str: []const u8) bool {
@@ -2013,4 +2014,34 @@ test "gossip topic retirement clears expired scores while backoff remains" {
     try std.testing.expect(g.state.topics[0].active);
     try std.testing.expectEqual(generation, g.state.topics[0].generation);
     try std.testing.expectEqual(g.last_now_ms + 100, g.peers.backoffs[0].until);
+}
+
+test "gossip topic configuration snapshots aliased policy before reclamation" {
+    for (0..2) |source| {
+        var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+        var g = try Gossipsub.init(ledger.allocator(), .{
+            .random_seed = 1,
+            .connected_capacity = 2,
+            .retained_capacity = 4,
+            .retained_outbound_reserve = 1,
+        });
+        defer g.deinit();
+        const calls = ledger.allocation_calls;
+        var name: [topic_mod.topic_max_len]u8 = undefined;
+        for (0..constants.topics_cap) |index| {
+            const text = try std.fmt.bufPrint(&name, "/eth2/{x:0>8}/custom/ssz_snappy", .{index});
+            try std.testing.expect(g.subscribe(text));
+        }
+        try g.configureTopic(g.state.topicString(@intCast(source)), &.{ .weight = 2 });
+        const expected = g.scores.topic_params[source];
+        try std.testing.expect(g.unsubscribe(g.state.topicString(0)));
+        try std.testing.expect(g.unsubscribe(g.state.topicString(1)));
+        const generation = g.state.topics[0].generation;
+        const replacement = "/eth2/ffffffff/custom/ssz_snappy";
+        try g.configureTopic(replacement, &g.scores.topic_params[source]);
+        try std.testing.expectEqual(@as(?u16, 0), g.state.findTopic(replacement));
+        try std.testing.expectEqual(generation + 1, g.state.topics[0].generation);
+        try std.testing.expectEqualDeep(expected, g.scores.topic_params[0]);
+        try std.testing.expectEqual(calls, ledger.allocation_calls);
+    }
 }
