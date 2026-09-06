@@ -43,6 +43,7 @@
     "prepare-minimal": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=minimal",
     "lint": "biome check",
     "test:network-interop": "zig build build-exe:network_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/run.mjs zig-out/bin/network_interop_peer",
+    "test:network-managed-interop": "zig build build-exe:managed_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/managed_run.mjs",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts",
     "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --config .benchrc.yaml --defaultBranch main"
   },

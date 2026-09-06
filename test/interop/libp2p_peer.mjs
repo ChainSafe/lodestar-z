@@ -25,6 +25,8 @@ import {
   sendFragments,
   summary,
 } from "./codec.mjs";
+import {ManagedControl} from "./managed_control.mjs";
+import {controlProtocols} from "./managed_wire.mjs";
 import {RawGossip} from "./raw_gossip.mjs";
 
 const lineMax = 65536;
@@ -35,6 +37,7 @@ const version = process.argv[2] === "v11" ? "v11" : "v12";
 const protocols = version === "v11" ? ["/meshsub/1.1.0"] : ["/meshsub/1.2.0", "/meshsub/1.1.0"];
 const phase0 = new Set([TOPIC]);
 const rawMode = process.argv[3] === "raw-gossip";
+const managed = process.argv[3] === "managed" ? new ManagedControl() : null;
 let rawGossip;
 let partialStream;
 let partialTerminal = null;
@@ -139,7 +142,8 @@ async function createPeer() {
     start: false,
     transports: [quic()],
   });
-  await node.handle([PING, BLOCKS], respond, {maxInboundStreams: 8});
+  await node.handle(managed ? [BLOCKS] : [PING, BLOCKS], respond, {maxInboundStreams: 8});
+  if (managed) await node.handle(controlProtocols, (stream) => managed.respond(stream), {maxInboundStreams: 8});
   if (rawMode) {
     rawGossip = new RawGossip(node, protocols, emit);
     await node.handle(protocols, (stream) => rawGossip.incoming(stream), {maxInboundStreams: 1});
@@ -201,6 +205,16 @@ async function rawPublish(address, seed, size) {
 
 async function execute(command) {
   switch (command.op) {
+    case "control":
+      assert(managed);
+      return managed.request(node, command.address, command.protocol);
+    case "bumpSequence":
+      assert(managed);
+      managed.sequence++;
+      return {sequence: managed.sequence.toString()};
+    case "managedSnapshot":
+      assert(managed);
+      return {counts: managed.counts, failures: managed.failures, priorFin: managed.priorFin};
     case "holdFin":
       holdFin = true;
       holdExpired = false;
