@@ -336,6 +336,12 @@
                 .imports = .{.spec_test_options},
             },
         },
+        .bench_network = .{
+            .root_module = .{
+                .root_source_file = "bench/network.zig",
+                .imports = .{.network},
+            },
+        },
         .bench_ssz_attestation = .{
             .root_module = .{
                 .root_source_file = "bench/ssz/attestation.zig",

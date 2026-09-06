@@ -322,6 +322,7 @@ pub const Gossipsub = struct {
         }
         if (admitted.admitted.penalty_evicted) self.counters.retained_penalty_evictions += 1;
         const ref = admitted.admitted.peer;
+        self.mcache.bindPeer(ref);
         self.state.peers[handle.index].logical = ref;
         if (admitted.admitted.fresh) self.scores.resetPeer(ref.index);
         self.scores.setConnected(ref.index, true, now.mono_ms);
@@ -1146,9 +1147,9 @@ pub const Gossipsub = struct {
             if (self.state.suppresses(index, id, self.last_now_ms)) continue;
             const cached = self.mcache.get(&self.store, id) orelse continue;
             const peer = self.logical(index);
-            if (!mcache_mod.History.iwantAllowed(cached, peer, constants.gossip_retransmission)) continue;
+            if (!self.mcache.iwantAllowed(cached, peer, constants.gossip_retransmission)) continue;
             if (self.io.peers[index].queueData(&self.store, cached.message, self.options.tx_peer_bytes, self.last_now_ms) == .queued) {
-                mcache_mod.History.sent(cached, peer);
+                self.mcache.sent(cached, peer);
             } else self.counters.send_dropped += 1;
         }
     }
@@ -1807,4 +1808,48 @@ test "gossip independent RPC enumerates every receive split through admission" {
         try std.testing.expectEqual(@as(usize, 0), snapshot.store_pages);
         try std.testing.expectEqual(@as(u64, 0), g.counters.duplicates);
     }
+}
+
+test "gossipsub history queue refusal and authenticated reconnect preserve retransmission counts" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .mcache_capacity = 2 });
+    defer g.deinit();
+    const metadata: peers_mod.Metadata = .{
+        .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length },
+        .address = .unspecified,
+        .direction = .inbound,
+    };
+    const now: Now = .{ .mono_ms = 1, .unix_s = 0 };
+    const first = g.addPeer(.{ .index = 0, .generation = 1 }, .v1_2, &metadata, now).admitted;
+    const logical_peer = g.logical(first.index);
+    const id: MessageId = @splat(9);
+    const message = g.store.put(id, "t", "payload").?;
+    g.mcache.put(&g.store, message);
+    g.store.seal(message);
+    var bytes: [64]u8 = undefined;
+    var writer = protobuf.Writer.init(&bytes);
+    protobuf.beginIwantRpc(&writer, 1, id.len);
+    protobuf.writeIwantId(&writer, &id);
+    var reader = protobuf.RpcReader.init(writer.written());
+    const iwant = (try reader.next()).?.iwant;
+    for (0..peer_io_mod.data_capacity) |_| {
+        try std.testing.expectEqual(peer_io_mod.QueueResult.queued, g.io.peers[first.index].queueData(&g.store, message, g.options.tx_peer_bytes, 1));
+    }
+    g.onIwant(first.index, iwant);
+    try std.testing.expectEqual(@as(u8, 0), g.mcache.get(&g.store, id).?.counts[logical_peer.index]);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.send_dropped);
+    g.io.peers[first.index].resetTx(&g.store);
+    for (0..4) |_| g.onIwant(first.index, iwant);
+    try std.testing.expectEqual(@as(usize, 3), g.io.peers[first.index].data_count);
+    g.connectionClosed(.{ .index = 0, .generation = 1 });
+    const second = g.addPeer(.{ .index = 0, .generation = 2 }, .v1_2, &metadata, now).admitted;
+    try std.testing.expectEqual(logical_peer, g.logical(second.index));
+    g.onIwant(second.index, iwant);
+    try std.testing.expectEqual(@as(usize, 0), g.io.peers[second.index].data_count);
+    g.connectionClosed(.{ .index = 0, .generation = 2 });
+    const expired: Now = .{ .mono_ms = g.peers.retention_ms + 2, .unix_s = 0 };
+    const third = g.addPeer(.{ .index = 0, .generation = 3 }, .v1_2, &metadata, expired).admitted;
+    try std.testing.expectEqual(logical_peer.index, g.logical(third.index).index);
+    try std.testing.expect(g.logical(third.index).generation > logical_peer.generation);
+    for (0..4) |_| g.onIwant(third.index, iwant);
+    try std.testing.expectEqual(@as(usize, 3), g.io.peers[third.index].data_count);
 }
