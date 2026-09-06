@@ -19,6 +19,8 @@ pub const ControlQueue = struct {
     read_at: usize = 0,
     write_at: usize = 0,
     used: usize = 0,
+    bytes_high_water: usize = 0,
+    frames_high_water: usize = 0,
 
     pub fn append(self: *ControlQueue, bytes: []const u8, token: u64, now_ms: u64) QueueResult {
         if (self.count == control_frames or bytes.len > self.bytes.len - self.used) return .full;
@@ -32,6 +34,8 @@ pub const ControlQueue = struct {
         self.enqueued_ms[slot] = now_ms;
         self.count += 1;
         self.used += bytes.len;
+        self.bytes_high_water = @max(self.bytes_high_water, self.used);
+        self.frames_high_water = @max(self.frames_high_water, self.count);
         self.write_at = (self.write_at + bytes.len) % self.bytes.len;
         return .queued;
     }
@@ -51,7 +55,7 @@ pub const ControlQueue = struct {
         return token;
     }
     pub fn reset(self: *ControlQueue) void {
-        self.* = .{ .bytes = self.bytes };
+        self.* = .{ .bytes = self.bytes, .bytes_high_water = self.bytes_high_water, .frames_high_water = self.frames_high_water };
     }
 };
 
@@ -161,6 +165,8 @@ pub const PeerIo = struct {
     data_head: usize = 0,
     data_count: usize = 0,
     data_bytes: usize = 0,
+    data_bytes_high_water: usize = 0,
+    data_descriptors_high_water: usize = 0,
     active: enum { none, critical, control, data } = .none,
     control_burst: u8 = 0,
     sequence: u64 = 0,
@@ -233,6 +239,8 @@ pub const PeerIo = struct {
         self.data[(self.data_head + self.data_count) % data_capacity] = DataTx.init(store, h, now_ms);
         self.data_count += 1;
         self.data_bytes += e.len;
+        self.data_bytes_high_water = @max(self.data_bytes_high_water, self.data_bytes);
+        self.data_descriptors_high_water = @max(self.data_descriptors_high_water, self.data_count);
         store.retainTx(h);
         self.tx_ready = true;
         return .queued;
@@ -389,6 +397,8 @@ test "gossip critical capacity and data queue pressure are independent and relea
     store.seal(h);
     for (0..data_capacity) |_| try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, 8192, 0));
     try std.testing.expectEqual(QueueResult.full, io.queueData(&store, h, 8192, 0));
+    try std.testing.expectEqual(@as(usize, 16), io.data_bytes_high_water);
+    try std.testing.expectEqual(@as(usize, 16), io.data_descriptors_high_water);
     try std.testing.expect(io.append("12345678", 0));
     try std.testing.expect(!io.append("x", 0));
     try std.testing.expect(io.appendControl("critical", true, 0) != null);
@@ -396,4 +406,18 @@ test "gossip critical capacity and data queue pressure are independent and relea
     io.resetTx(&store);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
     try std.testing.expectEqual(@as(usize, 1), store.free_pages);
+}
+
+test "gossip control high water survives partial write refusal and reset" {
+    var bytes: [4]u8 = undefined;
+    var queue: ControlQueue = .{ .bytes = &bytes };
+    try std.testing.expectEqual(QueueResult.queued, queue.append("abc", 1, 7));
+    try std.testing.expectEqual(QueueResult.full, queue.append("ab", 2, 8));
+    try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);
+    try std.testing.expectEqual(@as(usize, 1), queue.frames_high_water);
+    try std.testing.expectEqual(@as(?u64, null), queue.advance(1));
+    try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);
+    queue.reset();
+    try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);
+    try std.testing.expectEqual(@as(usize, 0), queue.count);
 }

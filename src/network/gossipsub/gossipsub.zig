@@ -78,8 +78,25 @@ pub const MemoryPlan = struct {
 };
 
 /// Live occupancy for bounded host supervision and deterministic test baselines.
-/// This scans fixed startup capacities: peers, validation entries, and store entries.
+/// This scans fixed startup capacities: peers, topics, validation entries and store entries.
+/// High waters are the largest physical-row peak since init, including previous connections.
+/// Age uses last_now_ms and original queue admission until complete send or reset.
 pub const ResourceSnapshot = struct {
+    connected_capacity: usize = 0,
+    retained_capacity: usize = 0,
+    validation_capacity: usize = 0,
+    control_frames: usize = 0,
+    control_bytes: usize = 0,
+    critical_frames: usize = 0,
+    critical_bytes: usize = 0,
+    data_bytes_per_row_high_water: usize = 0,
+    data_descriptors_per_row_high_water: usize = 0,
+    control_bytes_per_row_high_water: usize = 0,
+    control_frames_per_row_high_water: usize = 0,
+    critical_bytes_per_row_high_water: usize = 0,
+    critical_frames_per_row_high_water: usize = 0,
+    oldest_tx_age_ms: ?u64 = null,
+
     admitted_peers: usize,
     remote_subscriptions: usize,
     mesh_members: usize,
@@ -232,34 +249,67 @@ pub const Gossipsub = struct {
     }
 
     fn internTopic(self: *Gossipsub, name: []const u8) ?u16 {
+        if (name.len > topic_mod.topic_max_len or topic_mod.parse(name) == null) return null;
         if (self.state.internTopic(name)) |topic| return topic;
-        for (0..constants.topics_cap) |topic| self.reclaimTopic(@intCast(topic));
-        return self.state.internTopic(name);
+        for (0..constants.topics_cap) |index| {
+            const topic: u16 = @intCast(index);
+            if (self.state.topics[topic].generation == std.math.maxInt(u64) or
+                !self.canReclaimTopic(topic)) continue;
+            for (0..constants.topics_cap) |reclaim| self.reclaimTopic(@intCast(reclaim));
+            return self.state.internTopic(name) orelse unreachable;
+        }
+        return null;
+    }
+
+    fn topicRetirementBlocked(self: *const Gossipsub, topic: u16) bool {
+        const row = &self.state.topics[topic];
+        if (!row.active or row.subscribed or row.mesh.count() > 0 or row.fanout.count() > 0) return true;
+        if (self.mesh_policy.pending_prunes[topic].count() > 0) return true;
+        for (self.validation.entries) |entry| if (entry.pinned and entry.topic == topic) return true;
+        for (self.io.peers, 0..) |*io, peer| {
+            if (self.state.peers[peer].active and io.subscription_dirty.isSet(topic)) return true;
+        }
+        return false;
+    }
+
+    fn hasTopicBackoff(self: *const Gossipsub, topic: u16) bool {
+        const row = &self.state.topics[topic];
+        for (0..self.peers.rows.len) |peer| {
+            const backoff = self.peers.backoffs[peer * constants.topics_cap + topic];
+            if (backoff.topic_generation == row.generation and self.last_now_ms < backoff.until) return true;
+        }
+        return false;
+    }
+
+    fn canReclaimTopic(self: *const Gossipsub, topic: u16) bool {
+        if (self.topicRetirementBlocked(topic)) return false;
+        const expired = if (self.state.topics[topic].retire_after_ms) |deadline|
+            self.last_now_ms >= deadline
+        else
+            false;
+        return (expired or !self.scores.retainsTopic(topic)) and !self.hasTopicBackoff(topic);
     }
 
     fn reclaimTopic(self: *Gossipsub, topic: u16) void {
+        if (self.topicRetirementBlocked(topic)) return;
         const row = &self.state.topics[topic];
-        if (!row.active or row.subscribed or row.mesh.count() > 0 or row.fanout.count() > 0) return;
-        if (self.mesh_policy.pending_prunes[topic].count() > 0) return;
-        for (self.validation.entries) |entry| if (entry.pinned and entry.topic == topic) return;
-        for (self.io.peers, 0..) |io, peer| if (self.state.peers[peer].active and io.subscription_dirty.isSet(topic)) return;
         if (row.retire_after_ms) |deadline| {
             if (self.last_now_ms >= deadline) self.scores.resetTopic(topic);
         }
-        if (self.scores.retainsTopic(topic)) return;
-        for (0..self.peers.rows.len) |peer| {
-            const backoff = self.peers.backoffs[peer * constants.topics_cap + topic];
-            if (backoff.topic_generation == row.generation and self.last_now_ms < backoff.until) return;
-        }
+        if (self.scores.retainsTopic(topic) or self.hasTopicBackoff(topic)) return;
         row.active = false;
         row.subscribers = .initEmpty();
         self.scores.configureTopic(topic, self.options.score_params.topic) catch unreachable;
     }
 
-    pub fn configureTopic(self: *Gossipsub, name: []const u8, params: score_mod.TopicParams) error{ InvalidLimits, TopicCapacity }!void {
-        try score_mod.validateTopic(params);
+    pub const ConfigureTopicError = error{ InvalidLimits, InvalidTopic, TopicCapacity };
+
+    /// Copies scalar parameters and topic bytes without ending the current event borrow window.
+    pub fn configureTopic(self: *Gossipsub, name: []const u8, params: *const score_mod.TopicParams) ConfigureTopicError!void {
+        try score_mod.validateTopic(params.*);
+        if (name.len > topic_mod.topic_max_len or topic_mod.parse(name) == null) return error.InvalidTopic;
         const topic = self.internTopic(name) orelse return error.TopicCapacity;
-        try self.scores.configureTopic(topic, params);
+        self.scores.configureTopic(topic, params.*) catch unreachable;
     }
 
     pub fn unsubscribe(self: *Gossipsub, topic_str: []const u8) bool {
@@ -540,6 +590,9 @@ pub const Gossipsub = struct {
 
     pub fn resourceSnapshot(self: *const Gossipsub) ResourceSnapshot {
         var result: ResourceSnapshot = .{
+            .connected_capacity = self.state.peers.len,
+            .retained_capacity = self.peers.rows.len,
+            .validation_capacity = self.validation.entries.len,
             .admitted_peers = 0,
             .remote_subscriptions = 0,
             .mesh_members = 0,
@@ -552,10 +605,21 @@ pub const Gossipsub = struct {
             .pending_validations = 0,
             .promises = self.recovery.len,
         };
-        for (self.state.peers, self.io.peers) |peer, io| {
+        for (self.state.peers, self.io.peers) |*peer, *io| {
             if (peer.active) result.admitted_peers += 1;
             result.queued_descriptors += io.data_count;
             result.queued_bytes += io.data_bytes;
+            result.control_frames += io.control.count;
+            result.control_bytes += io.control.used;
+            result.critical_frames += io.critical.count;
+            result.critical_bytes += io.critical.used;
+            result.data_bytes_per_row_high_water = @max(result.data_bytes_per_row_high_water, io.data_bytes_high_water);
+            result.data_descriptors_per_row_high_water = @max(result.data_descriptors_per_row_high_water, io.data_descriptors_high_water);
+            result.control_bytes_per_row_high_water = @max(result.control_bytes_per_row_high_water, io.control.bytes_high_water);
+            result.control_frames_per_row_high_water = @max(result.control_frames_per_row_high_water, io.control.frames_high_water);
+            result.critical_bytes_per_row_high_water = @max(result.critical_bytes_per_row_high_water, io.critical.bytes_high_water);
+            result.critical_frames_per_row_high_water = @max(result.critical_frames_per_row_high_water, io.critical.frames_high_water);
+            if (io.oldestTx()) |since| result.oldest_tx_age_ms = @max(result.oldest_tx_age_ms orelse 0, self.last_now_ms -| since);
             if (io.reader.declaredLen() != null or io.rpc != null) result.held_frames += 1;
         }
         for (self.state.topics) |topic| {
@@ -1553,6 +1617,12 @@ test "gossip policy topic reuse waits for attribution and preserves copied event
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "retained", 1, &events));
     const event = events[0].message;
+    const copied = g.resourceSnapshot();
+    try g.configureTopic(name, &.{ .weight = 2 });
+    try std.testing.expectEqualStrings("retained", event.bytes);
+    try std.testing.expectEqualStrings(name, event.topic);
+    try std.testing.expectEqual(@as(usize, 1), copied.pending_validations);
+    try std.testing.expectEqualDeep(copied, g.resourceSnapshot());
     try std.testing.expect(g.unsubscribe(name));
     g.connectionClosed(conn);
     g.reclaimTopic(topic);
@@ -1827,4 +1897,120 @@ test "gossip default owner memory reconciles requested allocations" {
         try std.testing.expectEqual(ledger.bytes, plan.total_bytes - @sizeOf(Gossipsub));
     }
     try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
+}
+
+test "gossip topic rejection preserves expired scores and retained obligations" {
+    var g = try Gossipsub.init(std.testing.allocator, .{
+        .random_seed = 1,
+        .connected_capacity = 2,
+        .retained_capacity = 4,
+        .retained_outbound_reserve = 1,
+    });
+    defer g.deinit();
+    var name: [topic_mod.topic_max_len]u8 = undefined;
+    for (0..constants.topics_cap) |index| {
+        const text = try std.fmt.bufPrint(&name, "/eth2/{x:0>8}/custom/ssz_snappy", .{index});
+        try std.testing.expect(g.subscribe(text));
+    }
+    const first = g.state.topicString(0);
+    try std.testing.expect(g.unsubscribe(first));
+    g.scores.invalid(0, 0);
+    g.last_now_ms = g.state.topics[0].retire_after_ms.?;
+    g.peers.backoffs[0] = .{ .topic_generation = g.state.topics[0].generation, .until = g.last_now_ms + 100 };
+    const revision = g.scores.revision;
+    const generation = g.state.topics[0].generation;
+    const score = g.scores.topics[0];
+    const old_scores = try std.testing.allocator.dupe(@TypeOf(score), g.scores.topics);
+    defer std.testing.allocator.free(old_scores);
+    const old_topics = try std.testing.allocator.dupe(@TypeOf(g.state.topics[0]), &g.state.topics);
+    defer std.testing.allocator.free(old_topics);
+    const old_backoffs = try std.testing.allocator.dupe(@TypeOf(g.peers.backoffs[0]), g.peers.backoffs);
+    defer std.testing.allocator.free(old_backoffs);
+    const old_params = g.scores.topic_params;
+    const old_dirty = g.scores.dirty;
+    try std.testing.expectError(error.TopicCapacity, g.configureTopic("/eth2/ffffffff/custom/ssz_snappy", &.{}));
+    try std.testing.expectEqualDeep(old_scores, g.scores.topics);
+    try std.testing.expectEqualDeep(old_backoffs, g.peers.backoffs);
+    try std.testing.expectEqualDeep(old_params, g.scores.topic_params);
+    try std.testing.expectEqualDeep(old_dirty, g.scores.dirty);
+    for (old_topics, &g.state.topics) |*before, *after| {
+        try std.testing.expectEqual(before.active, after.active);
+        try std.testing.expectEqual(before.generation, after.generation);
+        try std.testing.expectEqual(before.subscribed, after.subscribed);
+        try std.testing.expectEqual(before.retire_after_ms, after.retire_after_ms);
+        try std.testing.expectEqualDeep(before.subscribers, after.subscribers);
+        try std.testing.expectEqualDeep(before.mesh, after.mesh);
+        try std.testing.expectEqualDeep(before.fanout, after.fanout);
+        try std.testing.expectEqualStrings(before.string[0..before.string_len], after.string[0..after.string_len]);
+    }
+    try std.testing.expectEqual(revision, g.scores.revision);
+    try std.testing.expectEqual(generation, g.state.topics[0].generation);
+    try std.testing.expect(g.state.topics[0].active);
+    try std.testing.expectError(error.InvalidTopic, g.configureTopic("invalid", &.{}));
+    try std.testing.expectEqualDeep(score, g.scores.topics[0]);
+    try std.testing.expectEqual(revision, g.scores.revision);
+    g.last_now_ms += 100;
+    g.state.topics[0].generation = std.math.maxInt(u64);
+    try std.testing.expectError(error.TopicCapacity, g.configureTopic("/eth2/ffffffff/custom/ssz_snappy", &.{}));
+    try std.testing.expectEqualDeep(score, g.scores.topics[0]);
+    g.state.topics[0].generation = generation;
+    try g.configureTopic("/eth2/ffffffff/custom/ssz_snappy", &.{ .weight = 2 });
+    try std.testing.expectEqual(generation + 1, g.state.topics[0].generation);
+    try std.testing.expect(!g.scores.retainsTopic(0));
+    try std.testing.expectEqual(@as(f64, 2), g.scores.topic_params[0].weight);
+}
+
+test "gossip diagnostics tracks queued age and preserves peaks after owner release" {
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    defer g.deinit();
+    const calls = ledger.allocation_calls;
+    const conn: Handle = .{ .index = 0, .generation = 1 };
+    const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    const io = &g.io.peers[peer.index];
+    io.resetTx(&g.store);
+    const message = g.store.put([_]u8{1} ** 20, "t", "abc").?;
+    g.store.retainHistory(message);
+    g.store.seal(message);
+    try std.testing.expectEqual(peer_io_mod.QueueResult.queued, io.queueData(&g.store, message, 10, 7));
+    try std.testing.expect(io.appendControl("ctrl", true, 9) != null);
+    g.last_now_ms = 20;
+    const snapshot = g.resourceSnapshot();
+    try std.testing.expectEqual(@as(?u64, 13), snapshot.oldest_tx_age_ms);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.queued_bytes);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.data_bytes_per_row_high_water);
+    try std.testing.expectEqual(@as(usize, 4), snapshot.critical_bytes);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.held_tx_retains);
+    try std.testing.expectEqualDeep(snapshot, g.resourceSnapshot());
+    g.connectionClosed(conn);
+    g.store.releaseHistory(message);
+    const released = g.resourceSnapshot();
+    try std.testing.expectEqual(@as(?u64, null), released.oldest_tx_age_ms);
+    try std.testing.expectEqual(@as(usize, 0), released.queued_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.held_tx_retains);
+    try std.testing.expectEqual(@as(usize, 3), released.data_bytes_per_row_high_water);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.queued_bytes);
+    try std.testing.expectEqual(calls, ledger.allocation_calls);
+}
+
+test "gossip topic retirement clears expired scores while backoff remains" {
+    var g = try Gossipsub.init(std.testing.allocator, .{
+        .random_seed = 1,
+        .connected_capacity = 2,
+        .retained_capacity = 4,
+        .retained_outbound_reserve = 1,
+    });
+    defer g.deinit();
+    const name = "/eth2/00000000/custom/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    g.scores.invalid(0, 0);
+    try std.testing.expect(g.unsubscribe(name));
+    g.last_now_ms = g.state.topics[0].retire_after_ms.?;
+    const generation = g.state.topics[0].generation;
+    g.peers.backoffs[0] = .{ .topic_generation = generation, .until = g.last_now_ms + 100 };
+    g.reclaimTopic(0);
+    try std.testing.expect(!g.scores.retainsTopic(0));
+    try std.testing.expect(g.state.topics[0].active);
+    try std.testing.expectEqual(generation, g.state.topics[0].generation);
+    try std.testing.expectEqual(g.last_now_ms + 100, g.peers.backoffs[0].until);
 }

@@ -74,6 +74,7 @@ pub fn main(init: std.process.Init) !void {
     try initialize(a, allocator, io, &key_a, profile);
     defer a.deinit(io);
     std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.memoryPlan().allocated_bytes, a.memoryPlan().inline_bytes, a.core.service.gossipsub.inner.memoryPlan().total_bytes, a.reservations.allocation_calls });
+    std.debug.print("gossip_metadata_bytes={}\n", .{a.core.service.gossipsub.inner.memoryPlan().metadata_bytes});
     const allocations_a = a.reservations.allocation_calls;
     var samples: Samples = .{};
     for (0..turns) |i| {
@@ -185,6 +186,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     }
     if (!control_progress) return error.ControlDidNotProgress;
     std.debug.print("control_status_head_slot=42 progress=true request_count=4 caller_sink_bytes={} gossip_resources={any}\n", .{ sinks.len, b.core.service.gossipsub.inner.resourceSnapshot() });
+    std.debug.print("managed_sender_diagnostics={any}\nmanaged_receiver_diagnostics={any}\n", .{ a.diagnostics(), b.diagnostics() });
     try drain(a, b, io, requests.len);
 }
 
@@ -251,7 +253,7 @@ fn idleWait(init: std.process.Init) !void {
         work += result.transport.work_processed;
     }
     const elapsed = timestamp(io) - start;
-    const readiness = node.diagnostics();
+    const readiness = node.diagnostics().runtime;
     std.debug.print("readiness_calls={} nonzero_readiness_waits={} readiness_failures={}\n", .{ readiness.readiness_calls, readiness.readiness_nonzero_waits, readiness.readiness_failures });
     if (elapsed < 1_000_000_000) return error.TurnLimit;
     std.debug.print("case=idle_wait profile=small requested_duration_ms=1000 host_wait_ms=100 elapsed_ns={} turns={} positive_wait_turns={} immediate_deadlines={} turn_elapsed_ns={} native_work={} turn_allocation_calls={}\n", .{ elapsed, count, positive_waits, immediate, elapsed_turns, work, node.reservations.allocation_calls - calls });

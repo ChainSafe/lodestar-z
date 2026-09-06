@@ -94,6 +94,40 @@ pub const Core = struct {
     };
     pub const PeerCounts = struct { connected: u16, relevant: u16, outbound_relevant: u16 };
 
+    pub const Diagnostics = struct {
+        policy: Counters,
+        connected: u16,
+        relevant: u16,
+        control: control_mod.Control.Counters,
+        control_resources: control_mod.Control.Resources,
+        dialing: dial_mod.DialQueue.Resources,
+        reqresp: rr.Counters,
+        reqresp_resources: rr.ReqResp.Resources,
+        gossip: gossip.Gossipsub.Counters,
+        gossip_resources: gossip.ResourceSnapshot,
+        score_calculations: u64,
+        score_topic_visits: u64,
+    };
+
+    /// Returns copied observations without reconciliation, score refresh or event publication.
+    pub fn diagnostics(self: *const Core) Diagnostics {
+        const g = &self.service.gossipsub.inner;
+        return .{
+            .policy = self.counters,
+            .connected = self.catalog.connectedCount(),
+            .relevant = self.catalog.relevantCount(),
+            .control = self.control.counters,
+            .control_resources = self.control.resourceSnapshot(),
+            .dialing = self.dial_queue.resourceSnapshot(),
+            .reqresp = self.service.reqresp.inner.counters,
+            .reqresp_resources = self.service.reqresp.inner.resourceSnapshot(),
+            .gossip = g.counters,
+            .gossip_resources = g.resourceSnapshot(),
+            .score_calculations = g.scores.calculations,
+            .score_topic_visits = g.scores.topic_visits,
+        };
+    }
+
     pub fn validateOptions(options: Options) !void {
         try options.peers.validate();
         if (options.metadata_freshness_ms == 0 or options.metadata_freshness_ms > 86_400_000) return error.InvalidOptions;
@@ -692,6 +726,12 @@ pub const Core = struct {
     pub fn errorMessage(self: *const Core, request: rr.RequestHandle) []const u8 {
         return self.service.reqresp.errorMessage(request);
     }
+    /// Copies host-calculated parameters. Preserves outstanding Service event borrows.
+    pub fn configureTopic(self: *Core, topic: []const u8, params: *const gossip.score.TopicParams) (gossip.Gossipsub.ConfigureTopicError || error{Stopped})!void {
+        if (self.stopped) return error.Stopped;
+        try self.service.gossipsub.configureTopic(topic, params);
+    }
+
     pub fn publishGossip(
         self: *Core,
         topic: []const u8,
