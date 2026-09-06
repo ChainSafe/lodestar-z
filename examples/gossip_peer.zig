@@ -120,7 +120,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         .forks = &.{},
     } });
     defer service.deinit();
-    defer service.reqresp.shutdownRouted(&service.router, &node.engine);
+    defer service.reqresp.shutdown(&service.router, &node.engine);
     const conn = try node.dial(io, &target);
 
     var events: [16]engine_mod.Event = undefined;

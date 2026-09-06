@@ -1,5 +1,4 @@
 const std = @import("std");
-const config = @import("config");
 const engine_mod = @import("../quic/engine.zig");
 const negotiate = @import("../negotiate.zig");
 const routing = @import("../router.zig");
@@ -10,11 +9,9 @@ const reqresp = @import("reqresp.zig");
 const assert = std.debug.assert;
 const Engine = engine_mod.Engine;
 const Handle = engine_mod.Handle;
-const StreamHandle = engine_mod.StreamHandle;
 const TransportEvent = engine_mod.Event;
 const Now = types.Now;
 const Protocol = protocol.Protocol;
-const ReqResp = reqresp.ReqResp;
 const RequestHandle = reqresp.RequestHandle;
 
 pub const outcomes_per_pump: usize = 16;
@@ -27,53 +24,28 @@ pub const Options = struct {
 
 pub const InitError = negotiate.Error || reqresp.InitError;
 
-pub const Active = struct { outbound: u16, inbound: u16 };
+const Handler = @import("handler.zig").Handler;
 
 pub const Service = struct {
-    allocator: std.mem.Allocator,
-    router: ?routing.Router,
-    inner: ReqResp,
-    sink_arena: []u8,
-    sink_size: usize,
+    router: routing.Router,
+    handler: Handler,
 
     pub fn init(allocator: std.mem.Allocator, options: Options) InitError!Service {
-        var service = try initHandler(allocator, options.reqresp);
-        errdefer service.deinit();
+        var handler = try Handler.init(allocator, options.reqresp);
+        errdefer handler.deinit();
         const default_neg = @as(u32, options.reqresp.outbound_max) + options.reqresp.inbound_max;
-        service.router = try routing.Router.init(allocator, .{
+        const router = try routing.Router.init(allocator, .{
             .negotiations_max = options.negotiations_max orelse
                 @intCast(@min(default_neg, std.math.maxInt(u16))),
             .meshsub = false,
             .outbound_control_reserved = options.outbound_control_reserved,
         });
-        return service;
-    }
-
-    pub fn initHandler(allocator: std.mem.Allocator, options: reqresp.Options) InitError!Service {
-        const inbound_max = options.inbound_max;
-        var inner = try ReqResp.init(allocator, options);
-        errdefer inner.deinit();
-
-        const sink_size = protocol.requestMaxAll();
-        const bulk_bytes = std.math.mul(usize, inbound_max - options.inbound_control_reserved, sink_size) catch return error.InvalidOptions;
-        const control_bytes = std.math.mul(usize, options.inbound_control_reserved, protocol.requestMaxControl()) catch return error.InvalidOptions;
-        const sink_bytes = std.math.add(usize, bulk_bytes, control_bytes) catch return error.InvalidOptions;
-        const sink_arena = try allocator.alloc(u8, sink_bytes);
-        errdefer allocator.free(sink_arena);
-
-        return .{
-            .allocator = allocator,
-            .router = null,
-            .inner = inner,
-            .sink_arena = sink_arena,
-            .sink_size = sink_size,
-        };
+        return .{ .router = router, .handler = handler };
     }
 
     pub fn deinit(self: *Service) void {
-        self.allocator.free(self.sink_arena);
-        self.inner.deinit();
-        if (self.router) |*router| router.deinit();
+        self.handler.deinit();
+        self.router.deinit();
         self.* = undefined;
     }
 
@@ -87,8 +59,8 @@ pub const Service = struct {
         options: reqresp.RequestOptions,
         now: Now,
     ) reqresp.RequestError!RequestHandle {
-        return self.requestRouted(
-            &self.router.?,
+        return self.handler.request(
+            &self.router,
             engine,
             conn,
             which,
@@ -97,74 +69,10 @@ pub const Service = struct {
             options,
             now,
         );
-    }
-
-    pub fn requestRouted(
-        self: *Service,
-        router: *routing.Router,
-        engine: *Engine,
-        conn: Handle,
-        which: Protocol,
-        request_ssz: []const u8,
-        sink: []u8,
-        options: reqresp.RequestOptions,
-        now: Now,
-    ) reqresp.RequestError!RequestHandle {
-        return self.inner.request(
-            engine,
-            router,
-            conn,
-            which,
-            request_ssz,
-            sink,
-            options,
-            now,
-        );
-    }
-
-    pub fn respond(
-        self: *Service,
-        handle: RequestHandle,
-        ssz: []const u8,
-        fork: ?config.ForkSeq,
-        now: Now,
-    ) reqresp.RespondError!void {
-        return self.inner.respond(handle, ssz, fork, now);
-    }
-
-    pub fn respondError(
-        self: *Service,
-        handle: RequestHandle,
-        code: u8,
-        message: []const u8,
-        now: Now,
-    ) reqresp.RespondError!void {
-        return self.inner.respondError(handle, code, message, now);
-    }
-
-    pub fn finish(self: *Service, handle: RequestHandle, now: Now) bool {
-        return self.inner.finish(handle, now);
-    }
-
-    pub fn consume(self: *Service, handle: RequestHandle, now: Now) bool {
-        return self.inner.consume(handle, now);
-    }
-
-    pub fn errorMessage(self: *const Service, handle: RequestHandle) []const u8 {
-        return self.inner.errorMessage(handle);
     }
 
     pub fn nextWakeup(self: *Service, now: Now, event_capacity: usize) ?u64 {
-        return self.nextWakeupRouted(&self.router.?, now, event_capacity);
-    }
-
-    pub fn nextWakeupRouted(
-        self: *Service,
-        router: *const routing.Router,
-        now: Now,
-        event_capacity: usize,
-    ) ?u64 {
-        return self.nextWakeupPartitionedRouted(router, now, event_capacity, event_capacity);
+        return self.handler.nextWakeup(&self.router, now, event_capacity);
     }
 
     pub fn nextWakeupPartitioned(
@@ -173,73 +81,12 @@ pub const Service = struct {
         application_capacity: usize,
         control_capacity: usize,
     ) ?u64 {
-        return self.nextWakeupPartitionedRouted(
-            &self.router.?,
+        return self.handler.nextWakeupPartitioned(
+            &self.router,
             now,
             application_capacity,
             control_capacity,
         );
-    }
-
-    pub fn nextWakeupPartitionedRouted(
-        self: *Service,
-        router: *const routing.Router,
-        now: Now,
-        application_capacity: usize,
-        control_capacity: usize,
-    ) ?u64 {
-        const request_due = self.inner.nextWakeupPartitioned(
-            now,
-            application_capacity,
-            control_capacity,
-        );
-        const negotiation_due = router.nextWakeup(now, outcomes_per_pump);
-        if (request_due) |due| return if (negotiation_due) |other| @min(due, other) else due;
-        return negotiation_due;
-    }
-
-    /// Includes the fixed sink slab; canonical Router storage is separate.
-    pub fn memoryPlan(self: *const Service) reqresp.MemoryPlan {
-        var plan = self.inner.memoryPlan();
-        plan.facade_bytes = @sizeOf(Service);
-        plan.request_sink_bytes = self.sink_arena.len;
-        plan.total_bytes = plan.facade_bytes + plan.slot_bytes + plan.io_bytes +
-            plan.limiter_bytes + plan.request_sink_bytes;
-        return plan;
-    }
-
-    pub fn active(self: *const Service) Active {
-        const counts = self.inner.active();
-        return .{ .outbound = counts.outbound, .inbound = counts.inbound };
-    }
-
-    pub fn counters(self: *const Service) reqresp.Counters {
-        return self.inner.counters;
-    }
-
-    pub fn acceptNegotiated(
-        self: *Service,
-        engine: *Engine,
-        stream: StreamHandle,
-        selection: routing.Selection,
-        now: Now,
-    ) ?RequestHandle {
-        const which = switch (selection.protocol) {
-            .reqresp => |which| which,
-            else => return null,
-        };
-        const index = self.inner.availableInboundFor(which) orelse return null;
-        const sink = self.inboundSink(index);
-        return self.inner.accept(engine, stream, selection, sink, now) catch null;
-    }
-
-    pub fn inboundSink(self: *Service, index: u16) []u8 {
-        std.debug.assert(index < self.inner.inbound.len);
-        const reserved = self.inner.options.inbound_control_reserved;
-        const control_size = protocol.requestMaxControl();
-        const offset = if (index < reserved) @as(usize, index) * control_size else @as(usize, reserved) * control_size + @as(usize, index - reserved) * self.sink_size;
-        const size = if (index < reserved) control_size else self.sink_size;
-        return self.sink_arena[offset..][0..size];
     }
 
     /// Forward Driver activity separately from lifecycle events.
@@ -267,7 +114,7 @@ pub const Service = struct {
         control: []reqresp.Event,
     ) reqresp.PartitionedCounts {
         self.prepare(engine, events, activity, now);
-        return self.pumpPartitionedRouted(&self.router.?, engine, now, application, control);
+        return self.handler.pumpPartitioned(&self.router, engine, now, application, control);
     }
 
     fn prepare(
@@ -277,94 +124,32 @@ pub const Service = struct {
         activity: []const Handle,
         now: Now,
     ) void {
-        const router = &self.router.?;
+        const router = &self.router;
         assert(activity.len <= engine.limits.connections_max);
-        for (activity) |conn| self.inner.connectionActivity(conn);
-        self.inner.cleanupPending(engine, router);
+        for (activity) |conn| self.handler.inner.connectionActivity(conn);
+        self.handler.inner.cleanupPending(engine, router);
         router.transportEvents(engine, events, now);
-        self.transportEvents(events);
+        self.handler.transportEvents(events);
         var outcomes: [outcomes_per_pump]routing.Outcome = undefined;
         const count = router.pump(engine, now, &outcomes);
-        for (outcomes[0..count]) |outcome| self.negotiationResult(engine, outcome, now);
-    }
-
-    pub fn transportEvents(self: *Service, events: []const TransportEvent) void {
-        for (events) |event| switch (event) {
-            .closed => |closed| self.inner.connectionClosed(closed.conn),
-            else => {},
-        };
-    }
-
-    pub fn negotiationResult(
-        self: *Service,
-        engine: *Engine,
-        outcome: routing.Outcome,
-        now: Now,
-    ) void {
-        if (outcome.direction == .outbound) {
-            if (!self.inner.negotiated(outcome, now)) engine.closeStream(outcome.stream, 0);
-        } else switch (outcome.result) {
-            .ready => |selection| {
-                if (self.acceptNegotiated(engine, outcome.stream, selection, now) == null) {
-                    engine.closeStream(outcome.stream, 0);
-                }
-            },
-            else => {},
-        }
+        for (outcomes[0..count]) |outcome| self.handler.negotiationResult(engine, outcome, now);
     }
 
     pub fn pump(self: *Service, engine: *Engine, now: Now, out: []reqresp.Event) usize {
-        return self.pumpRouted(&self.router.?, engine, now, out);
+        return self.handler.pump(&self.router, engine, now, out);
     }
 
-    pub fn pumpRouted(
-        self: *Service,
-        router: *routing.Router,
-        engine: *Engine,
-        now: Now,
-        out: []reqresp.Event,
-    ) usize {
-        return self.inner.pump(engine, router, now, out);
+    pub fn shutdown(self: *Service, engine: *Engine) void {
+        self.handler.shutdown(&self.router, engine);
     }
 
-    pub fn pumpPartitionedRouted(
+    pub fn pumpPartitioned(
         self: *Service,
-        router: *routing.Router,
         engine: *Engine,
         now: Now,
         application: []reqresp.Event,
         control: []reqresp.Event,
     ) reqresp.PartitionedCounts {
-        return self.inner.pumpPartitioned(engine, router, now, application, control);
-    }
-
-    pub fn cancel(self: *Service, handle: RequestHandle) bool {
-        return self.inner.cancel(handle);
-    }
-
-    pub fn shutdown(self: *Service, engine: *Engine) void {
-        self.shutdownRouted(&self.router.?, engine);
-    }
-
-    pub fn shutdownRouted(self: *Service, router: *routing.Router, engine: *Engine) void {
-        self.inner.shutdown(engine, router);
+        return self.handler.pumpPartitioned(&self.router, engine, now, application, control);
     }
 };
-
-test "reqresp typed reserved sinks keep full control waves and exclude bulk" {
-    var service = try Service.initHandler(std.testing.allocator, .{ .forks = &.{}, .inbound_max = 4, .inbound_control_reserved = 2, .inbound_per_peer_max = 4 });
-    defer service.deinit();
-    try std.testing.expectEqual(2 * protocol.requestMaxAll() + 2 * protocol.requestMaxControl(), service.sink_arena.len);
-    try std.testing.expectEqual(@as(?u16, 2), service.inner.availableInboundFor(.blocks_by_range_v2));
-    for (0..4) |i| {
-        const index = service.inner.availableInboundFor(.ping_v1).?;
-        try std.testing.expectEqual(@as(u16, @intCast(i)), index);
-        service.inner.inbound[index].state = .receiving_request;
-        service.inner.inbound[index].protocol = .ping_v1;
-    }
-    try std.testing.expectEqual(@as(?u16, null), service.inner.availableInboundFor(.ping_v1));
-    service.inner.inbound[0].state = .free;
-    try std.testing.expectEqual(@as(?u16, null), service.inner.availableInboundFor(.blocks_by_range_v2));
-    try std.testing.expectEqual(@as(?u16, 0), service.inner.availableInboundFor(.ping_v1));
-    for (service.inner.inbound) |*slot| slot.state = .free;
-}

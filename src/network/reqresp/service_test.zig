@@ -111,15 +111,15 @@ fn roundTrip(setup: *ServicePair, seed: u8) !void {
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
                 try std.testing.expectEqual(Protocol.status_v1, incoming.protocol);
-                try setup.server.respond(incoming.request, &reply, null, setup.pair.now);
+                try setup.server.handler.respond(incoming.request, &reply, null, setup.pair.now);
             },
-            .chunk_sent => |sent| try std.testing.expect(setup.server.finish(sent.request, setup.pair.now)),
+            .chunk_sent => |sent| try std.testing.expect(setup.server.handler.finish(sent.request, setup.pair.now)),
             else => {},
         };
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &reply, chunk.bytes);
-                try std.testing.expect(setup.client.consume(chunk.request, setup.pair.now));
+                try std.testing.expect(setup.client.handler.consume(chunk.request, setup.pair.now));
             },
             .done => done = true,
             .failed => return error.TestUnexpectedResult,
@@ -135,8 +135,8 @@ test "service round trips a status request through the collapsed host loop" {
     defer setup.deinit();
 
     try roundTrip(&setup, 5);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.active().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.handler.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.handler.active().inbound);
 }
 
 test "service reclaims inbound sinks across more requests than it has slots" {
@@ -148,8 +148,8 @@ test "service reclaims inbound sinks across more requests than it has slots" {
 
     var seed: u8 = 0;
     while (seed < 12) : (seed += 1) try roundTrip(&setup, seed);
-    try std.testing.expectEqual(@as(u64, 12), setup.server.counters().requests_served);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
+    try std.testing.expectEqual(@as(u64, 12), setup.server.handler.counters().requests_served);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.handler.active().inbound);
 }
 
 test "service fails in-flight requests when the connection closes" {
@@ -192,7 +192,7 @@ test "service fails in-flight requests when the connection closes" {
     }
     try std.testing.expect(client_failed);
     try std.testing.expect(server_failed);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.handler.active().inbound);
 }
 
 test "service wakeup includes earlier Router negotiation and cancels before Router service" {
@@ -204,7 +204,7 @@ test "service wakeup includes earlier Router negotiation and cancels before Rout
     const handle = try setup.client.request(&setup.pair.client, setup.handles.client, .ping_v1, &bytes, &sink, .{ .progress_timeout_ms = 60_000 }, setup.pair.now);
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &.{});
     try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms + 10_000), setup.client.nextWakeup(setup.pair.now, 0));
-    try std.testing.expect(setup.client.cancel(handle));
+    try std.testing.expect(setup.client.handler.cancel(handle));
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &.{});
     try std.testing.expectEqual(@as(?u64, null), setup.client.nextWakeup(setup.pair.now, 0));
     var events: [1]Event = undefined;
@@ -228,8 +228,8 @@ test "service preserves drained native activity across a partial request sweep" 
         if (incoming != null) break;
     }
     try std.testing.expect(incoming != null);
-    const stream = setup.server.inner.inbound[incoming.?.index].stream;
-    setup.client.inner.options.work_per_pump_max = 1;
+    const stream = setup.server.handler.inner.inbound[incoming.?.index].stream;
+    setup.client.handler.inner.options.work_per_pump_max = 1;
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &.{});
     const codec = @import("codec.zig");
     var wire: [codec.frame_scratch_max]u8 = undefined;

@@ -192,12 +192,12 @@ const Session = struct {
         switch (event) {
             .chunk => |chunk| {
                 try self.onChunk(chunk.bytes, chunk.fork);
-                _ = self.svc.consume(chunk.request, self.now);
+                _ = self.svc.handler.consume(chunk.request, self.now);
             },
             .done => |done| try self.advance(done.chunks),
             .failed => |failed| try self.onFailure(failed.request, failed.reason),
             .request => |req| try self.serve(req.request, req.protocol, req.bytes),
-            .chunk_sent => |sent| _ = self.svc.finish(sent.request, self.now),
+            .chunk_sent => |sent| _ = self.svc.handler.finish(sent.request, self.now),
             .served, .over_limit => {},
         }
     }
@@ -262,7 +262,7 @@ const Session = struct {
             return self.send(fallback.?);
         }
         if (reason == .peer_error) {
-            const message = self.svc.errorMessage(request);
+            const message = self.svc.handler.errorMessage(request);
             const code = reason.peer_error.code;
             std.debug.print("peer error code={d} message={s}\n", .{ code, message });
         }
@@ -288,16 +288,16 @@ const Session = struct {
             .goodbye_v1 => {
                 const reason = std.mem.readInt(u64, bytes[0..8], .little);
                 std.debug.print("goodbye reason={d}\n", .{reason});
-                _ = self.svc.finish(request, self.now);
+                _ = self.svc.handler.finish(request, self.now);
                 return;
             },
-            else => return self.svc.respondError(request, 3, "unavailable", self.now),
+            else => return self.svc.handler.respondError(request, 3, "unavailable", self.now),
         }
         const response: []const u8 = switch (which) {
             .status_v1, .status_v2 => self.encode(which, &self.response_ssz[request.index]),
             else => zeros[0..which.info().response_max],
         };
-        try self.svc.respond(request, response, null, self.now);
+        try self.svc.handler.respond(request, response, null, self.now);
     }
 };
 

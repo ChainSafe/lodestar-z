@@ -215,6 +215,6 @@ pub fn main(init: std.process.Init) !void {
     const key = try network.wire.keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ .{31}));
     try peer.transport.init(a, init.io, .{ .host = &key, .bind = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2, .outbound_max = 3 } });
     defer peer.transport.deinit(init.io);
-    defer peer.service.reqresp.shutdownRouted(&peer.service.router, &peer.transport.engine);
+    defer peer.service.reqresp.shutdown(&peer.service.router, &peer.transport.engine);
     try control.run(peer);
 }

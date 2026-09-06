@@ -34,8 +34,8 @@ const ServicePair = struct {
         const handles = try support.connectPair(&self.pair);
         self.handles = .{ .client = handles.client, .server = handles.server };
         // connectPair consumed the connected events, so open the meshsub streams now
-        _ = self.client.peerConnected(&self.pair.client, handles.client, self.pair.now);
-        _ = self.server.peerConnected(&self.pair.server, handles.server, self.pair.now);
+        _ = self.client.handler.peerConnected(&self.pair.client, handles.client, self.pair.now);
+        _ = self.server.handler.peerConnected(&self.pair.server, handles.server, self.pair.now);
     }
 
     fn deinit(self: *ServicePair) void {
@@ -83,8 +83,8 @@ test "gossipsub service composes the mesh and delivers a message" {
 
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     const beacon_block = topic_mod.build(digest, "beacon_block", &buf);
-    try std.testing.expect(setup.client.subscribe(beacon_block));
-    try std.testing.expect(setup.server.subscribe(beacon_block));
+    try std.testing.expect(setup.client.handler.subscribe(beacon_block));
+    try std.testing.expect(setup.server.handler.subscribe(beacon_block));
 
     var rounds: usize = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
@@ -93,7 +93,7 @@ test "gossipsub service composes the mesh and delivers a message" {
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
 
     const payload = "a block delivered through the gossipsub service";
-    _ = try setup.client.publish(beacon_block, payload, setup.pair.now);
+    _ = try setup.client.handler.publish(beacon_block, payload, setup.pair.now);
 
     var received = false;
     rounds = 0;
@@ -102,14 +102,14 @@ test "gossipsub service composes the mesh and delivers a message" {
         for (setup.serverEvents()) |event| switch (event) {
             .message => |m| {
                 try std.testing.expectEqualStrings(payload, m.bytes);
-                _ = setup.server.report(m.handle, .accept, setup.pair.now);
+                _ = setup.server.handler.report(m.handle, .accept, setup.pair.now);
                 received = true;
             },
             else => {},
         };
     }
     try std.testing.expect(received);
-    try std.testing.expectEqual(@as(u64, 1), setup.server.counters().messages_received);
+    try std.testing.expectEqual(@as(u64, 1), setup.server.handler.counters().messages_received);
 }
 
 test "gossipsub service preserves coalesced negotiation subscription and FIN" {
@@ -121,10 +121,10 @@ test "gossipsub service preserves coalesced negotiation subscription and FIN" {
     });
     defer server.deinit();
     const handles = try support.connectPair(&pair);
-    _ = server.peerConnected(&pair.server, handles.server, pair.now);
+    _ = server.handler.peerConnected(&pair.server, handles.server, pair.now);
     var topic_buffer: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(digest, "beacon_block", &topic_buffer);
-    try std.testing.expect(server.subscribe(topic));
+    try std.testing.expect(server.handler.subscribe(topic));
     const stream = try pair.client.openStream(handles.client);
     const multistream = @import("../wire/multistream.zig");
     const protobuf = @import("protobuf.zig");
@@ -159,16 +159,16 @@ test "gossipsub service retries a closed outbound stream after bounded backoff" 
     try setup.init();
     defer setup.deinit();
     for (0..16) |_| try setup.pumpOnce();
-    const index = setup.client.inner.state.findPeer(setup.handles.client).?;
-    const first = setup.client.inner.state.outStream(index).?;
+    const index = setup.client.handler.inner.state.findPeer(setup.handles.client).?;
+    const first = setup.client.handler.inner.state.outStream(index).?;
     setup.pair.client.closeStream(first, 0);
     var out: [16]Event = undefined;
     _ = setup.client.process(&setup.pair.client, &.{.{ .stream_closed = .{ .stream = first, .reset_code = 0 } }}, &.{}, setup.pair.now, &out);
     for (0..4) |_| try setup.pumpOnce();
-    try std.testing.expect(setup.client.inner.state.outStream(index) == null);
+    try std.testing.expect(setup.client.handler.inner.state.outStream(index) == null);
     setup.pair.advance(1_000);
     for (0..16) |_| try setup.pumpOnce();
-    const replacement = setup.client.inner.state.outStream(index) orelse return error.TestUnexpectedResult;
+    const replacement = setup.client.handler.inner.state.outStream(index) orelse return error.TestUnexpectedResult;
     try std.testing.expect(!std.meta.eql(first, replacement));
 }
 
@@ -189,14 +189,14 @@ test "gossipsub replacement resets a partial frame and keeps directional version
     defer setup.deinit();
     var topic_buf: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(digest, "beacon_block", &topic_buf);
-    try std.testing.expect(setup.server.subscribe(topic));
+    try std.testing.expect(setup.server.handler.subscribe(topic));
     for (0..16) |_| try setup.pumpOnce();
-    const index = setup.server.inner.state.findPeer(setup.handles.server).?;
+    const index = setup.server.handler.inner.state.findPeer(setup.handles.server).?;
     const first = try propose(&setup.pair, setup.handles.client, "/meshsub/1.1.0", &.{ 0x80, 0x01, 0x08 });
     for (0..8) |_| try setup.pumpOnce();
-    try std.testing.expectEqual(@as(?usize, 128), setup.server.inner.io.peers[index].reader.declaredLen());
-    try std.testing.expectEqual(@import("state.zig").Version.v1_2, setup.server.inner.state.peerVersion(index));
-    try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.server.inner.state.peers[index].inbound_version);
+    try std.testing.expectEqual(@as(?usize, 128), setup.server.handler.inner.io.peers[index].reader.declaredLen());
+    try std.testing.expectEqual(@import("state.zig").Version.v1_2, setup.server.handler.inner.state.peerVersion(index));
+    try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.server.handler.inner.state.peers[index].inbound_version);
     var bytes: [160]u8 = undefined;
     const protobuf = @import("protobuf.zig");
     var writer = protobuf.Writer.init(&bytes);
@@ -211,7 +211,7 @@ test "gossipsub replacement resets a partial frame and keeps directional version
         }
     }
     try std.testing.expect(received);
-    try std.testing.expectEqual(@as(?usize, null), setup.server.inner.io.peers[index].reader.declaredLen());
+    try std.testing.expectEqual(@as(?usize, null), setup.server.handler.inner.io.peers[index].reader.declaredLen());
     try std.testing.expectError(error.StreamStopped, setup.pair.client.write(first, "x", false));
 }
 
@@ -221,14 +221,14 @@ test "gossipsub service negotiates with a v1.1-only peer" {
     defer setup.deinit();
     setup.server.deinit();
     setup.server = try Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .versions = &.{.v1_1} });
-    _ = setup.server.peerConnected(&setup.pair.server, setup.handles.server, setup.pair.now);
+    _ = setup.server.handler.peerConnected(&setup.pair.server, setup.handles.server, setup.pair.now);
     for (0..24) |_| try setup.pumpOnce();
-    const client_index = setup.client.inner.state.findPeer(setup.handles.client).?;
-    const server_index = setup.server.inner.state.findPeer(setup.handles.server).?;
-    try std.testing.expect(setup.client.inner.state.outStream(client_index) != null);
-    try std.testing.expect(setup.server.inner.state.outStream(server_index) != null);
-    try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.client.inner.state.peerVersion(client_index));
-    try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.server.inner.state.peerVersion(server_index));
+    const client_index = setup.client.handler.inner.state.findPeer(setup.handles.client).?;
+    const server_index = setup.server.handler.inner.state.findPeer(setup.handles.server).?;
+    try std.testing.expect(setup.client.handler.inner.state.outStream(client_index) != null);
+    try std.testing.expect(setup.server.handler.inner.state.outStream(server_index) != null);
+    try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.client.handler.inner.state.peerVersion(client_index));
+    try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.server.handler.inner.state.peerVersion(server_index));
 }
 
 test "gossipsub service ignores stale outcomes after connection and peer slot reuse" {
@@ -237,25 +237,25 @@ test "gossipsub service ignores stale outcomes after connection and peer slot re
     defer setup.deinit();
     for (0..16) |_| try setup.pumpOnce();
     const old_conn = setup.handles.client;
-    const old_index = setup.client.inner.state.findPeer(old_conn).?;
-    const old_generation = setup.client.inner.state.peerGeneration(old_index);
-    const old_stream = setup.client.inner.state.outStream(old_index).?;
+    const old_index = setup.client.handler.inner.state.findPeer(old_conn).?;
+    const old_generation = setup.client.handler.inner.state.peerGeneration(old_index);
+    const old_stream = setup.client.handler.inner.state.outStream(old_index).?;
     try std.testing.expect(setup.pair.client.close(old_conn, 0));
     for (0..16) |_| try setup.pumpOnce();
     setup.pair.advance(30_000);
     for (0..4) |_| try setup.pumpOnce();
     const handles = try support.connectPair(&setup.pair);
     setup.handles = .{ .client = handles.client, .server = handles.server };
-    _ = setup.client.peerConnected(&setup.pair.client, handles.client, setup.pair.now);
-    _ = setup.server.peerConnected(&setup.pair.server, handles.server, setup.pair.now);
+    _ = setup.client.handler.peerConnected(&setup.pair.client, handles.client, setup.pair.now);
+    _ = setup.server.handler.peerConnected(&setup.pair.server, handles.server, setup.pair.now);
     for (0..16) |_| try setup.pumpOnce();
-    const index = setup.client.inner.state.findPeer(handles.client).?;
+    const index = setup.client.handler.inner.state.findPeer(handles.client).?;
     try std.testing.expectEqual(old_index, index);
-    try std.testing.expect(setup.client.inner.state.peerGeneration(index) != old_generation);
+    try std.testing.expect(setup.client.handler.inner.state.peerGeneration(index) != old_generation);
     try std.testing.expectEqual(old_conn.index, handles.client.index);
     try std.testing.expect(old_conn.generation != handles.client.generation);
-    const live = setup.client.inner.state.outStream(index).?;
-    setup.client.negotiationResult(&setup.pair.client, .{
+    const live = setup.client.handler.inner.state.outStream(index).?;
+    setup.client.handler.negotiationResult(&setup.pair.client, .{
         .stream = old_stream,
         .direction = .outbound,
         .owner = .meshsub,
@@ -263,9 +263,9 @@ test "gossipsub service ignores stale outcomes after connection and peer slot re
     }, setup.pair.now);
     var out: [16]Event = undefined;
     _ = setup.client.process(&setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, &.{}, setup.pair.now, &out);
-    try std.testing.expectEqual(live, setup.client.inner.state.outStream(index).?);
-    try std.testing.expectEqual(@import("state.zig").Version.v1_2, setup.client.inner.state.peerVersion(index));
-    const peer = setup.client.inner.peers.rows[setup.client.inner.state.peers[index].logical.index];
+    try std.testing.expectEqual(live, setup.client.handler.inner.state.outStream(index).?);
+    try std.testing.expectEqual(@import("state.zig").Version.v1_2, setup.client.handler.inner.state.peerVersion(index));
+    const peer = setup.client.handler.inner.peers.rows[setup.client.handler.inner.state.peers[index].logical.index];
     try std.testing.expectEqual(setup.pair.client.peerId(handles.client).?, peer.identity);
     try std.testing.expectEqual(setup.pair.client.direction(handles.client).?, peer.direction);
     try std.testing.expectEqual(@import("peers.zig").normalize(setup.pair.client.peerAddress(handles.client).?), peer.address);
@@ -277,26 +277,26 @@ test "gossipsub service detects an idle remote stop and retries without fabricat
     defer setup.deinit();
     var topic_buffer: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(digest, "beacon_block", &topic_buffer);
-    try std.testing.expect(setup.server.subscribe(topic));
+    try std.testing.expect(setup.server.handler.subscribe(topic));
     for (0..16) |_| try setup.pumpOnce();
-    const client_index = setup.client.inner.state.findPeer(setup.handles.client).?;
-    const server_index = setup.server.inner.state.findPeer(setup.handles.server).?;
-    const first = setup.client.inner.state.outStream(client_index).?;
-    const remote = setup.server.inner.state.peers[server_index].in_stream.?;
+    const client_index = setup.client.handler.inner.state.findPeer(setup.handles.client).?;
+    const server_index = setup.server.handler.inner.state.findPeer(setup.handles.server).?;
+    const first = setup.client.handler.inner.state.outStream(client_index).?;
+    const remote = setup.server.handler.inner.state.peers[server_index].in_stream.?;
     try std.testing.expectEqual(first.id, remote.id);
-    const io = &setup.client.inner.io.peers[client_index];
+    const io = &setup.client.handler.inner.io.peers[client_index];
     try std.testing.expect(!io.pending());
     setup.pair.server.closeStream(remote, 0);
     for (0..4) |_| try setup.pumpOnce();
-    try std.testing.expect(setup.client.inner.state.outStream(client_index) == null);
+    try std.testing.expect(setup.client.handler.inner.state.outStream(client_index) == null);
     setup.pair.advance(999);
     for (0..4) |_| try setup.pumpOnce();
-    try std.testing.expect(setup.client.inner.state.outStream(client_index) == null);
+    try std.testing.expect(setup.client.handler.inner.state.outStream(client_index) == null);
     setup.pair.advance(1);
     for (0..16) |_| try setup.pumpOnce();
-    const replacement = setup.client.inner.state.outStream(client_index).?;
+    const replacement = setup.client.handler.inner.state.outStream(client_index).?;
     try std.testing.expect(!std.meta.eql(first, replacement));
-    try std.testing.expect(setup.client.subscribe(topic));
+    try std.testing.expect(setup.client.handler.subscribe(topic));
     var received = false;
     for (0..16) |_| {
         try setup.pumpOnce();
@@ -316,24 +316,24 @@ test "gossipsub service preserves a remotely half-closed outbound stream without
     defer setup.deinit();
     var topic_buffer: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(digest, "beacon_block", &topic_buffer);
-    try std.testing.expect(setup.server.subscribe(topic));
+    try std.testing.expect(setup.server.handler.subscribe(topic));
     for (0..16) |_| try setup.pumpOnce();
-    const client_index = setup.client.inner.state.findPeer(setup.handles.client).?;
-    const server_index = setup.server.inner.state.findPeer(setup.handles.server).?;
-    const stream = setup.client.inner.state.outStream(client_index).?;
-    const remote = setup.server.inner.state.peers[server_index].in_stream.?;
+    const client_index = setup.client.handler.inner.state.findPeer(setup.handles.client).?;
+    const server_index = setup.server.handler.inner.state.findPeer(setup.handles.server).?;
+    const stream = setup.client.handler.inner.state.outStream(client_index).?;
+    const remote = setup.server.handler.inner.state.peers[server_index].in_stream.?;
     try std.testing.expectEqual(@as(usize, 0), try setup.pair.server.write(remote, "", true));
     for (0..16) |_| try setup.pumpOnce();
     setup.pair.advance(1_000);
     for (0..16) |_| try setup.pumpOnce();
-    try std.testing.expectEqual(stream, setup.client.inner.state.outStream(client_index).?);
+    try std.testing.expectEqual(stream, setup.client.handler.inner.state.outStream(client_index).?);
     _ = setup.pair.client.driverView().takeHostWork();
     var out: [16]Event = undefined;
     for (0..8) |_| {
         _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &out);
         try std.testing.expect(!setup.pair.client.driverView().takeHostWork());
     }
-    try std.testing.expect(setup.client.subscribe(topic));
+    try std.testing.expect(setup.client.handler.subscribe(topic));
     var received = false;
     for (0..16) |_| {
         try setup.pumpOnce();
@@ -342,5 +342,17 @@ test "gossipsub service preserves a remotely half-closed outbound stream without
         }
     }
     try std.testing.expect(received);
-    try std.testing.expectEqual(stream, setup.client.inner.state.outStream(client_index).?);
+    try std.testing.expectEqual(stream, setup.client.handler.inner.state.outStream(client_index).?);
+}
+
+fn standaloneAllocationPrefix(allocator: std.mem.Allocator) !void {
+    const resolved = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
+    var service = try Service.init(allocator, .{ .gossipsub = resolved.core.service.gossipsub, .negotiations_max = 2 });
+    defer service.deinit();
+    try std.testing.expectEqual(@as(usize, 12), service.handler.streams.len);
+    try std.testing.expectEqual(@as(usize, 2), service.router.negotiator.entries.len);
+}
+
+test "gossipsub standalone composition cleans every initialization prefix" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, standaloneAllocationPrefix, .{});
 }

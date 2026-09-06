@@ -3,6 +3,8 @@ pub const constants = @import("constants.zig");
 pub const limiter = @import("limiter.zig");
 pub const protocol = @import("protocol.zig");
 pub const reqresp = @import("reqresp.zig");
+pub const handler = @import("handler.zig");
+pub const Handler = handler.Handler;
 pub const service = @import("service.zig");
 
 pub const Protocol = protocol.Protocol;
@@ -27,6 +29,7 @@ test {
     _ = protocol;
     _ = reqresp;
     _ = service;
+    _ = handler;
     _ = @import("control_capacity_test.zig");
     _ = @import("control_partition_test.zig");
     _ = @import("codec_test.zig");
