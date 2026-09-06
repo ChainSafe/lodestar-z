@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const bls = @import("bls");
 const fuzz_options = @import("fuzz_options");
+const oracle = @import("bls_oracle.zig");
 
 const PublicKey = bls.PublicKey;
 const AggregatePublicKey = bls.AggregatePublicKey;
@@ -15,7 +16,35 @@ pub export fn zig_fuzz_test(
     len: usize,
 ) callconv(.c) void {
     if (len > fuzz_options.max_input_len) return;
+    if (len <= oracle.generated_input_len_max) fuzzGenerated(buf[0..len]);
     fuzzAggregate(buf[0..len]);
+}
+
+fn fuzzGenerated(input: []const u8) void {
+    var seed: [oracle.generated_input_len_max]u8 = @splat(0);
+    @memcpy(seed[0..input.len], input);
+    const count = 1 + @as(usize, seed[16] % oracle.generated_key_count_max);
+    var public_keys: [oracle.generated_key_count_max]PublicKey = undefined;
+    var scalar_sum: u64 = 0;
+    for (public_keys[0..count], 0..) |*public_key, index| {
+        const offset = index * 4;
+        const scalar = @as(u64, std.mem.readInt(u32, seed[offset..][0..4], .little)) + 1;
+        scalar_sum += scalar;
+        const secret_key = oracle.secretKey(scalar);
+        public_key.* = secret_key.toPublicKey();
+    }
+    const secret_key_sum = oracle.secretKey(scalar_sum);
+    const expected = secret_key_sum.toPublicKey();
+    for ([_]bool{ false, true }) |validate| {
+        const aggregate = AggregatePublicKey.aggregate(public_keys[0..count], validate) catch
+            @panic("generated public key aggregation failed");
+        const actual = aggregate.toPublicKey();
+        assert(expected.isEqual(&actual));
+    }
+    var incremental = public_keys[0].toAggregate();
+    for (public_keys[1..count]) |*public_key| incremental.add(public_key);
+    const actual = incremental.toPublicKey();
+    assert(expected.isEqual(&actual));
 }
 
 fn fuzzAggregate(input: []const u8) void {
@@ -38,6 +67,8 @@ fn fuzzAggregate(input: []const u8) void {
             => continue,
             else => @panic("unexpected public key deserialize error"),
         };
+        const compressed = public_key.compress();
+        assert(std.mem.eql(u8, chunk, &compressed));
         public_keys[public_key_count] = public_key;
         public_key_count += 1;
     }
@@ -78,4 +109,20 @@ fn fuzzAggregate(input: []const u8) void {
     const validated_public_key = validated.toPublicKey();
     const validated_bytes = validated_public_key.serialize();
     assert(std.mem.eql(u8, &aggregate_bytes, &validated_bytes));
+}
+
+test "public key aggregate oracle covers scalar sums and raw records" {
+    for (1..oracle.generated_key_count_max + 1) |count| {
+        var input: [oracle.generated_input_len_max]u8 = @splat(255);
+        input[16] = @intCast(count - 1);
+        zig_fuzz_test(&input, input.len);
+        var encoded: [oracle.generated_key_count_max * PublicKey.COMPRESS_SIZE]u8 = undefined;
+        for (0..count) |index| {
+            const secret_key = oracle.secretKey(index + 1);
+            const public_key = secret_key.toPublicKey();
+            const offset = index * PublicKey.COMPRESS_SIZE;
+            @memcpy(encoded[offset..][0..PublicKey.COMPRESS_SIZE], &public_key.compress());
+        }
+        zig_fuzz_test(&encoded, count * PublicKey.COMPRESS_SIZE);
+    }
 }

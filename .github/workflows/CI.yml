@@ -416,6 +416,7 @@ jobs:
         run: |
           cd test/fuzz
           zig build -Doptimize=ReleaseSafe
+          zig build test-fuzz -Doptimize=ReleaseSafe
 
   bindings-test:
     name: bindings - test

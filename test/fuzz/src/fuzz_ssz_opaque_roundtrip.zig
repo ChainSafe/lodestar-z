@@ -47,7 +47,9 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
     if (len < 1) return;
 
     var fba = std.heap.FixedBufferAllocator.init(&fuzz_buf);
-    const allocator = fba.allocator();
+    var tracker = std.testing.FailingAllocator.init(fba.allocator(), .{});
+    defer assert(tracker.allocated_bytes == tracker.freed_bytes);
+    const allocator = tracker.allocator();
 
     const data = buf[1..len];
     switch (buf[0] % selector_count) {
@@ -67,24 +69,31 @@ fn fuzzListRoundtrip(comptime ListT: type, allocator: std.mem.Allocator, data: [
     }) catch return;
     defer pool.deinit();
 
-    // Pool baseline = pre-populated zero sentinels. Any tree id the round-trip
-    // fails to unref accumulates here and trips the assert at function exit.
     const baseline_in_use = pool.getNodesInUse();
-    var leak_check_armed = false;
-    defer {
-        if (leak_check_armed) {
-            assert(pool.getNodesInUse() == baseline_in_use);
-        }
-    }
+    defer assert(pool.getNodesInUse() == baseline_in_use);
 
     const node = ListT.tree.deserializeFromBytes(&pool, data) catch |err| switch (err) {
-        error.UnexpectedRemainder,
-        error.OutOfMemory,
-        => return,
+        error.UnexpectedRemainder => {
+            assert(data.len % ListT.Element.fixed_size != 0);
+            return;
+        },
+        error.gtLimit => {
+            assert(data.len / ListT.Element.fixed_size > ListT.limit);
+            return;
+        },
+        error.OutOfMemory => return,
         else => panicUnexpected("deserializing opaque list tree", err),
     };
     defer pool.unref(node);
-    leak_check_armed = true;
+    assert(data.len % ListT.Element.fixed_size == 0);
+    assert(data.len / ListT.Element.fixed_size <= ListT.limit);
+
+    var expected_root: [32]u8 = undefined;
+    ListT.serialized.hashTreeRoot(allocator, data, &expected_root) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("hashing opaque list input bytes", err),
+    };
+    assert(std.mem.eql(u8, node.getRoot(&pool), &expected_root));
 
     // tree -> bytes round-trips back to the input.
     const size = ListT.tree.serializedSize(node, &pool) catch |err| switch (err) {
@@ -108,6 +117,15 @@ fn fuzzListRoundtrip(comptime ListT: type, allocator: std.mem.Allocator, data: [
         error.OutOfMemory => return,
         else => panicUnexpected("reading opaque list tree value", err),
     };
+    assert(value.items.len == data.len / ListT.Element.fixed_size);
+    for (value.items, 0..) |item, index| {
+        const expected = std.mem.readInt(
+            ListT.Element.Type,
+            data[index * ListT.Element.fixed_size ..][0..ListT.Element.fixed_size],
+            .little,
+        );
+        assert(item == expected);
+    }
     const value_size = ListT.serializedSize(&value);
     assert(value_size == data.len);
     const value_out = allocator.alloc(u8, value_size) catch return;
@@ -134,21 +152,24 @@ fn fuzzContainerRoundtrip(allocator: std.mem.Allocator, data: []const u8) void {
     defer pool.deinit();
 
     const baseline_in_use = pool.getNodesInUse();
-    var leak_check_armed = false;
-    defer {
-        if (leak_check_armed) {
-            assert(pool.getNodesInUse() == baseline_in_use);
-        }
-    }
+    defer assert(pool.getNodesInUse() == baseline_in_use);
 
     const node = ContainerT.tree.deserializeFromBytes(&pool, data) catch |err| switch (err) {
-        error.InvalidSize,
-        error.OutOfMemory,
-        => return,
+        error.InvalidSize => {
+            assert(data.len != ContainerT.fixed_size);
+            return;
+        },
+        error.OutOfMemory => return,
         else => panicUnexpected("deserializing opaque container tree", err),
     };
     defer pool.unref(node);
-    leak_check_armed = true;
+    assert(data.len == ContainerT.fixed_size);
+
+    var expected_root: [32]u8 = undefined;
+    ContainerT.serialized.hashTreeRoot(data, &expected_root) catch |err| {
+        panicUnexpected("hashing opaque container input bytes", err);
+    };
+    assert(std.mem.eql(u8, node.getRoot(&pool), &expected_root));
 
     // tree -> bytes round-trips back to the input.
     var out: [ContainerT.fixed_size]u8 = undefined;
@@ -169,6 +190,10 @@ fn fuzzContainerRoundtrip(allocator: std.mem.Allocator, data: []const u8) void {
         error.OutOfMemory => return,
         else => panicUnexpected("reading opaque container tree value", err),
     };
+    assert(value.x == std.mem.readInt(u64, data[0..8], .little));
+    assert(value.y == std.mem.readInt(u32, data[8..12], .little));
+    assert(value.z == std.mem.readInt(u64, data[12..20], .little));
+    assert(std.mem.eql(u8, &value.blob, data[20..52]));
     var value_out: [ContainerT.fixed_size]u8 = undefined;
     const value_written = ContainerT.serializeIntoBytes(&value, &value_out);
     assert(value_written == ContainerT.fixed_size);
@@ -204,21 +229,24 @@ fn fuzzVectorRoundtrip(comptime VecT: type, allocator: std.mem.Allocator, data: 
     defer pool.deinit();
 
     const baseline_in_use = pool.getNodesInUse();
-    var leak_check_armed = false;
-    defer {
-        if (leak_check_armed) {
-            assert(pool.getNodesInUse() == baseline_in_use);
-        }
-    }
+    defer assert(pool.getNodesInUse() == baseline_in_use);
 
     const node = VecT.tree.deserializeFromBytes(&pool, data) catch |err| switch (err) {
-        error.InvalidSize,
-        error.OutOfMemory,
-        => return,
+        error.InvalidSize => {
+            assert(data.len != VecT.fixed_size);
+            return;
+        },
+        error.OutOfMemory => return,
         else => panicUnexpected("deserializing opaque vector tree", err),
     };
     defer pool.unref(node);
-    leak_check_armed = true;
+    assert(data.len == VecT.fixed_size);
+
+    var expected_root: [32]u8 = undefined;
+    VecT.serialized.hashTreeRoot(data, &expected_root) catch |err| {
+        panicUnexpected("hashing opaque vector input bytes", err);
+    };
+    assert(std.mem.eql(u8, node.getRoot(&pool), &expected_root));
 
     // tree -> bytes round-trips back to the input.
     var out: [VecT.fixed_size]u8 = undefined;
@@ -235,6 +263,14 @@ fn fuzzVectorRoundtrip(comptime VecT: type, allocator: std.mem.Allocator, data: 
         error.OutOfMemory => return,
         else => panicUnexpected("reading opaque vector tree value", err),
     };
+    for (value, 0..) |item, index| {
+        const expected = std.mem.readInt(
+            VecT.Element.Type,
+            data[index * VecT.Element.fixed_size ..][0..VecT.Element.fixed_size],
+            .little,
+        );
+        assert(item == expected);
+    }
     var value_out: [VecT.fixed_size]u8 = undefined;
     const value_written = VecT.serializeIntoBytes(&value, &value_out);
     assert(value_written == VecT.fixed_size);

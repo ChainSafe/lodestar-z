@@ -1,7 +1,8 @@
 // Input: [selector_byte][op records of 4 bytes each]
 //   selector % 4: 0/1 = u64 populated/empty, 2/3 = u32 populated/empty
-//   op % 7: 0=set, 1=commit+root check, 2=get, 3=push, 4=clone-deinit,
+//   op % 7: 0=set, 1=commit+root check, 2=get, 3=push, 4=clone isolation,
 //           5=sliceTo, 6=getAllInto
+//   'G' rejects invalid growth; 'g' grows within the bounded reference model.
 //   record layout: [op, arg_lo, arg_hi, val_seed]
 
 const std = @import("std");
@@ -19,6 +20,7 @@ const Capacity: usize = 1 << 20;
 const op_size: usize = 4;
 const selector_count: u8 = 4;
 const grow_to_opcode: u8 = 'G';
+const valid_grow_to_opcode: u8 = 'g';
 
 pub export fn zig_fuzz_init() callconv(.c) void {}
 
@@ -27,7 +29,9 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
     if (len < 1 + op_size) return;
 
     var fba = std.heap.FixedBufferAllocator.init(&fuzz_buf);
-    const allocator = fba.allocator();
+    var tracker = std.testing.FailingAllocator.init(fba.allocator(), .{});
+    defer assert(tracker.allocated_bytes == tracker.freed_bytes);
+    const allocator = tracker.allocator();
 
     const data = buf[1..len];
     switch (buf[0] % selector_count) {
@@ -59,23 +63,20 @@ fn fuzzListOps(
     }) catch return;
     defer pool.deinit();
 
-    // Pool baseline = pre-populated zero sentinels (max_depth of them).
-    // Any future regression in set/commit/push/clone that fails to unref a
-    // transient Pool slot will accumulate over the op stream and trip this
-    // assert at function exit (after view.deinit releases the tree).
     const baseline_in_use = pool.getNodesInUse();
-    var leak_check_armed = false;
-    defer {
-        if (leak_check_armed) {
-            const final_in_use = pool.getNodesInUse();
-            assert(final_in_use == baseline_in_use);
-        }
-    }
+    defer assert(pool.getNodesInUse() == baseline_in_use);
 
     var reference = std.ArrayList(Element).empty;
     defer reference.deinit(allocator);
     reference.ensureTotalCapacity(allocator, item_count) catch return;
     for (0..initial_count) |i| reference.append(allocator, computeInitial(Element, i)) catch return;
+
+    var committed: [item_count]Element = undefined;
+    var committed_len = reference.items.len;
+    @memcpy(committed[0..committed_len], reference.items);
+    const leaf_count = (item_count + K * items_per_chunk - 1) / (K * items_per_chunk);
+    var leaf_lengths: [leaf_count]u16 = @splat(0);
+    leaf_lengths[0] = @intCast((initial_count + items_per_chunk - 1) / items_per_chunk);
 
     var src: ListT.Type = .empty;
     defer src.deinit(allocator);
@@ -88,9 +89,6 @@ fn fuzzListOps(
     };
     defer view.deinit();
 
-    // Setup complete: arm the leak check so it fires at function exit.
-    leak_check_armed = true;
-
     var i: usize = 0;
     while (i + op_size <= data.len) : (i += op_size) {
         const op = data[i] % 7;
@@ -100,6 +98,18 @@ fn fuzzListOps(
 
         if (data[i] == grow_to_opcode) {
             assertInvalidGrowTo(ListT, view, reference.items.len, arg_lo);
+            continue;
+        }
+        if (data[i] == valid_grow_to_opcode) {
+            const old_length = reference.items.len;
+            const argument = @as(usize, arg_hi) << 8 | @as(usize, arg_lo);
+            const new_length = old_length + argument % (item_count - old_length + 1);
+            view.growTo(new_length) catch |err| panicUnexpected("growing chunked list", err);
+            reference.resize(allocator, new_length) catch return;
+            @memset(reference.items[old_length..], 0);
+            assertListMatches(ListT, view, &reference) catch return;
+            committed_len = reference.items.len;
+            @memcpy(committed[0..committed_len], reference.items);
             continue;
         }
 
@@ -113,6 +123,9 @@ fn fuzzListOps(
                     error.OutOfMemory => return,
                     else => panicUnexpected("setting chunked list item", err),
                 };
+                const leaf_index = idx / (K * items_per_chunk);
+                const chunk_count = (reference.items.len + items_per_chunk - 1) / items_per_chunk;
+                leaf_lengths[leaf_index] = @intCast(@min(K, chunk_count - leaf_index * K));
             },
             1 => {
                 const view_root = (view.hashTreeRoot() catch |err| switch (err) {
@@ -120,23 +133,16 @@ fn fuzzListOps(
                     else => panicUnexpected("committing chunked list view", err),
                 }).*;
 
-                var ref_src: ListT.Type = .empty;
-                defer ref_src.deinit(allocator);
-                ref_src.ensureTotalCapacity(allocator, reference.items.len) catch return;
-                for (reference.items) |v| ref_src.append(allocator, v) catch return;
-
-                const ref_root_id = ListT.tree.fromValue(&pool, &ref_src) catch |err| switch (err) {
+                var ref_root: [32]u8 = undefined;
+                ListT.hashTreeRoot(allocator, &reference, &ref_root) catch |err| switch (err) {
                     error.OutOfMemory => return,
-                    else => panicUnexpected("constructing chunked list reference root", err),
+                    else => panicUnexpected("hashing chunked list reference", err),
                 };
-                defer pool.unref(ref_root_id);
-                const ref_root = ref_root_id.getRoot(&pool).*;
-
                 assert(std.mem.eql(u8, &ref_root, &view_root));
+                committed_len = reference.items.len;
+                @memcpy(committed[0..committed_len], reference.items);
 
-                // Each ChunkedLeaf's `len` must track the list length. The
-                // root check above can't catch a stale `len` — computeRoot
-                // hashes all K chunks and ignores `len`.
+                // growTo leaves zero subtrees sparse; set/push materialize up to the logical length.
                 const len = reference.items.len;
                 if (len > 0) {
                     const total_chunks = (len + items_per_chunk - 1) / items_per_chunk;
@@ -150,12 +156,15 @@ fn fuzzListOps(
                             error.OutOfMemory => return,
                             else => panicUnexpected("reading chunked leaf", err),
                         };
-                        const expected: u16 = @intCast(@min(K, total_chunks - cl_idx * K));
+                        if (leaf_lengths[cl_idx] == 0) {
+                            assert(pool.nodes.items(.state)[@intFromEnum(cl)].kind() == .zero);
+                            continue;
+                        }
                         const chunked_leaf_len = cl.getChunkedLeafLen(&pool) catch |err| switch (err) {
                             error.OutOfMemory => return,
                             else => panicUnexpected("reading chunked leaf length", err),
                         };
-                        assert(chunked_leaf_len == expected);
+                        assert(chunked_leaf_len == leaf_lengths[cl_idx]);
                     }
                 }
             },
@@ -176,16 +185,54 @@ fn fuzzListOps(
                     error.OutOfMemory => return,
                     else => panicUnexpected("pushing chunked list item", err),
                 };
+                const leaf_index = (reference.items.len - 1) / (K * items_per_chunk);
+                const chunk_count = (reference.items.len + items_per_chunk - 1) / items_per_chunk;
+                leaf_lengths[leaf_index] = @intCast(@min(K, chunk_count - leaf_index * K));
             },
             4 => {
-                // transfer_cache=false so source's pending writes survive; the
-                // default true clears source's `changed`, which would silently
-                // drift `reference` ahead of `view`.
+                // Clones start at the last committed state; false preserves the source's pending writes.
                 const clone = view.clone(.{ .transfer_cache = false }) catch |err| switch (err) {
                     error.OutOfMemory => return,
                     else => panicUnexpected("cloning chunked list view", err),
                 };
-                clone.deinit();
+                defer clone.deinit();
+
+                var clone_reference: ListT.Type = .empty;
+                defer clone_reference.deinit(allocator);
+                clone_reference.appendSlice(allocator, committed[0..committed_len]) catch return;
+                assertListMatches(ListT, clone, &clone_reference) catch return;
+                if (clone_reference.items.len > 0) {
+                    const index = (@as(usize, arg_hi) << 8 | @as(usize, arg_lo)) % committed_len;
+                    clone_reference.items[index] ^= @as(Element, val_seed) + 1;
+                    clone.set(index, clone_reference.items[index]) catch |err| switch (err) {
+                        error.OutOfMemory => return,
+                        else => panicUnexpected("mutating cloned chunked list", err),
+                    };
+                } else {
+                    const value = @as(Element, val_seed) + 1;
+                    clone_reference.append(allocator, value) catch return;
+                    clone.push(value) catch |err| switch (err) {
+                        error.OutOfMemory => return,
+                        else => panicUnexpected("pushing cloned chunked list", err),
+                    };
+                }
+                assertListMatches(ListT, clone, &clone_reference) catch return;
+                assertListMatches(ListT, view, &reference) catch return;
+                committed_len = reference.items.len;
+                @memcpy(committed[0..committed_len], reference.items);
+
+                if (reference.items.len > 0) {
+                    const index = (@as(usize, arg_hi) << 8 | @as(usize, arg_lo)) % reference.items.len;
+                    reference.items[index] ^= (@as(Element, val_seed) + 1) << 8;
+                    view.set(index, reference.items[index]) catch |err| switch (err) {
+                        error.OutOfMemory => return,
+                        else => panicUnexpected("mutating source after clone", err),
+                    };
+                    const leaf_index = index / (K * items_per_chunk);
+                    const chunk_count = (reference.items.len + items_per_chunk - 1) / items_per_chunk;
+                    leaf_lengths[leaf_index] = @intCast(@min(K, chunk_count - leaf_index * K));
+                    assertListMatches(ListT, clone, &clone_reference) catch return;
+                }
             },
             5 => {
                 if (reference.items.len == 0) continue;
@@ -195,6 +242,8 @@ fn fuzzListOps(
                     else => panicUnexpected("slicing chunked list view", err),
                 };
                 defer sliced.deinit();
+                committed_len = reference.items.len;
+                @memcpy(committed[0..committed_len], reference.items);
                 const sliced_root = (sliced.hashTreeRoot() catch |err| switch (err) {
                     error.OutOfMemory => return,
                     else => panicUnexpected("committing sliced chunked list", err),
@@ -230,6 +279,32 @@ fn fuzzListOps(
             else => unreachable,
         }
     }
+    assertListMatches(ListT, view, &reference) catch return;
+}
+
+fn assertListMatches(
+    comptime ListT: type,
+    view: *ListT.TreeView,
+    reference: *const ListT.Type,
+) error{OutOfMemory}!void {
+    const values = try view.allocator.alloc(ListT.Element.Type, reference.items.len);
+    defer view.allocator.free(values);
+    const filled = view.getAllInto(values) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => panicUnexpected("reading chunked list oracle values", err),
+    };
+    assert(std.mem.eql(ListT.Element.Type, filled, reference.items));
+
+    var expected_root: [32]u8 = undefined;
+    ListT.hashTreeRoot(view.allocator, reference, &expected_root) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => panicUnexpected("hashing chunked list oracle values", err),
+    };
+    const actual_root = view.hashTreeRoot() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => panicUnexpected("hashing chunked list oracle view", err),
+    };
+    assert(std.mem.eql(u8, actual_root, &expected_root));
 }
 
 fn assertInvalidGrowTo(

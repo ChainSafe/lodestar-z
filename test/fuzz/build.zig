@@ -14,6 +14,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .target = target,
     });
+    // Reproducers do not link AFL's coverage runtime. Instrument a separate library for AFL.
+    const blst_fuzz_module = b.allocator.create(std.Build.Module) catch @panic("OOM");
+    blst_fuzz_module.* = dep_blst.artifact("blst").root_module.*;
+    blst_fuzz_module.fuzz = false;
+    const blst_fuzz = b.addLibrary(.{ .name = "blst-fuzz", .root_module = blst_fuzz_module });
+    blst_fuzz.sanitize_coverage_trace_pc_guard = true;
 
     const dep_snappy = b.dependency("snappy", .{
         .target = target,
@@ -159,6 +165,7 @@ pub fn build(b: *std.Build) void {
         "replay-corpus",
         "Replay committed bootstrap fuzz corpora",
     );
+    const test_step = b.step("test-fuzz", "Test fuzz target oracles and allocation failures");
 
     for (fuzzers) |fuzzer| {
         if (fuzz_target) |selected_target| {
@@ -199,7 +206,15 @@ pub fn build(b: *std.Build) void {
         lib.root_module.stack_check = false;
         lib.root_module.fuzz = true;
 
-        const exe = afl.addInstrumentedExe(b, lib, fuzzer.extra_libs);
+        const tests = b.addTest(.{ .root_module = lib_mod });
+        for (fuzzer.extra_libs) |extra_lib| tests.root_module.linkLibrary(extra_lib);
+        test_step.dependOn(&b.addRunArtifact(tests).step);
+
+        const afl_libs = if (std.mem.startsWith(u8, fuzzer.name, "bls_"))
+            &[_]*std.Build.Step.Compile{blst_fuzz}
+        else
+            fuzzer.extra_libs;
+        const exe = afl.addInstrumentedExe(b, lib, afl_libs);
         const mkdir = b.addSystemCommand(&.{
             "mkdir", "-p",
         });

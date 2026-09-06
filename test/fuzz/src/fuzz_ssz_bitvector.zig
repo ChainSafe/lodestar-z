@@ -12,6 +12,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const fuzz_options = @import("fuzz_options");
 const ssz = @import("ssz");
+const oracle = @import("ssz_oracle.zig");
 
 const selector_count: u32 = 4;
 
@@ -43,11 +44,21 @@ fn fuzzBitVector(
     comptime BitVectorT: type,
     data: []const u8,
 ) void {
+    const valid = data.len == BitVectorT.fixed_size and
+        (BitVectorT.length % 8 == 0 or data[data.len - 1] <
+            (@as(u16, 1) << @intCast(BitVectorT.length % 8)));
     var value: BitVectorT.Type = undefined;
-    BitVectorT.deserializeFromBytes(data, &value) catch |err| switch (@as(anyerror, err)) {
-        error.invalidLength, error.trailingData => return,
-        else => panicUnexpected("deserializing bitvector", err),
+    BitVectorT.deserializeFromBytes(data, &value) catch |err| {
+        assert(!valid);
+        switch (@as(anyerror, err)) {
+            error.invalidLength, error.trailingData => return,
+            else => panicUnexpected("deserializing bitvector", err),
+        }
     };
+    assert(valid);
+    for (0..BitVectorT.length) |i| {
+        assert((value.get(i) catch |err| panicUnexpected("reading bitvector", err)) == oracle.bit(data, i));
+    }
 
     // Round-trip invariant.
     var serialized: [BitVectorT.fixed_size]u8 = undefined;
@@ -57,6 +68,18 @@ fn fuzzBitVector(
     );
     assert(written == BitVectorT.fixed_size);
     assert(std.mem.eql(u8, &serialized, data));
+}
+
+test "bitvector decoder checks all padding patterns and fixed sizes" {
+    for (0..256) |byte| {
+        const input = [_]u8{ 0, @intCast(byte) };
+        zig_fuzz_test(&input, input.len);
+    }
+    var input = [_]u8{0xa5} ** 66;
+    for (1..4) |selector| {
+        input[0] = @intCast(selector);
+        for (1..input.len + 1) |len| zig_fuzz_test(&input, len);
+    }
 }
 
 fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {

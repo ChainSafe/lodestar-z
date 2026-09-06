@@ -11,6 +11,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const fuzz_options = @import("fuzz_options");
 const ssz = @import("ssz");
+const oracle = @import("ssz_oracle.zig");
 
 const selector_count: u32 = 3;
 const fuzz_buffer_size: u32 = 64 * 1024 * 1024;
@@ -31,7 +32,9 @@ pub export fn zig_fuzz_test(
 
     var fixed_buffer_allocator =
         std.heap.FixedBufferAllocator.init(&fuzz_buf);
-    const allocator = fixed_buffer_allocator.allocator();
+    var tracking = std.testing.FailingAllocator.init(fixed_buffer_allocator.allocator(), .{});
+    defer assert(tracking.allocated_bytes == tracking.freed_bytes);
+    const allocator = tracking.allocator();
 
     const selector = buf[0];
     const data = buf[1..len];
@@ -53,22 +56,25 @@ fn fuzzBitList(
     allocator: std.mem.Allocator,
     data: []const u8,
 ) void {
+    const expected_length = oracle.bitLength(data, BitListT.limit);
     var value: BitListT.Type = BitListT.Type.empty;
+    defer BitListT.deinit(allocator, &value);
     BitListT.deserializeFromBytes(
         allocator,
         data,
         &value,
-    ) catch |err| switch (@as(anyerror, err)) {
-        error.InvalidSize,
-        error.noPaddingBit,
-        error.tooLarge,
-        error.OutOfMemory,
-        => return,
-        else => panicUnexpected("deserializing bitlist", err),
+    ) catch |err| {
+        assert(expected_length == null);
+        switch (@as(anyerror, err)) {
+            error.InvalidSize, error.noPaddingBit, error.tooLarge => return,
+            else => panicUnexpected("deserializing bitlist", err),
+        }
     };
-
-    // Postcondition: bit length within declared limit.
-    assert(value.bit_len <= BitListT.limit);
+    assert(expected_length != null);
+    assert(value.bit_len == expected_length.?);
+    for (0..value.bit_len) |i| {
+        assert((value.get(i) catch |err| panicUnexpected("reading bitlist", err)) == oracle.bit(data, i));
+    }
     // Postcondition: serialized form must be non-empty
     // (sentinel bit requires at least 1 byte).
     const serialized_size = BitListT.serializedSize(&value);
@@ -78,13 +84,32 @@ fn fuzzBitList(
     const output = allocator.alloc(
         u8,
         serialized_size,
-    ) catch return;
+    ) catch |err| panicUnexpected("allocating bitlist output", err);
+    defer allocator.free(output);
     const written = BitListT.serializeIntoBytes(
         &value,
         output,
     );
     assert(written == serialized_size);
     assert(std.mem.eql(u8, output, data));
+}
+
+test "bitlist decoder checks sentinel position and capacity boundaries" {
+    var input = [_]u8{0} ** 259;
+    for (0..3) |selector| {
+        input[0] = @intCast(selector);
+        const limit: usize = switch (selector) {
+            0 => 8,
+            1 => 64,
+            else => 2048,
+        };
+        for ([_]usize{ 0, 1, limit / 8, limit / 8 + 1, limit / 8 + 2 }) |len| {
+            for (0..256) |last| {
+                if (len > 0) input[len] = @intCast(last);
+                zig_fuzz_test(&input, len + 1);
+            }
+        }
+    }
 }
 
 fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {

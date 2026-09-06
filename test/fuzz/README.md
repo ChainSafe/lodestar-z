@@ -29,6 +29,17 @@ exercise production length rejection. Selector-prefixed targets include the sele
 See `src/fuzz_*.zig` for the exact input formats and target-specific oracles. The registry injects
 each maximum input length into both the AFL++ target and its matching repro executable.
 
+SSZ decoder targets check acceptance against byte-level validity rules and inspect decoded values
+independently of serialization. Allocating SSZ targets check allocation balances after cleanup,
+including rejected inputs. Tree targets also check pool references, clone isolation, valid growth,
+proof topology, and roots against value or serialized-input hashing.
+
+BLS targets still decode raw inputs. Inputs of at most 32 bytes additionally generate valid points
+from bounded nonzero secret scalars. Aggregation is checked against the sum of those scalars;
+signature targets check the original message and reject a changed message. The generated cases
+perform more cryptographic work per execution than raw decoding. AFL builds instrument blst's C code
+for coverage; assembly remains uninstrumented. Reproducers use the regular native library.
+
 ## Prerequisites and build
 
 Use Zig 0.16.0 and AFL++ with `afl-cc` and `afl-fuzz` on `PATH`. From `test/fuzz`, build and
@@ -110,6 +121,15 @@ Replay every committed bootstrap corpus with its matching repro executable:
 zig build replay-corpus -Doptimize=ReleaseSafe
 ```
 
+Run deterministic target checks, including selected decoder allocation-failure sweeps:
+
+```sh
+zig build test-fuzz -Doptimize=ReleaseSafe
+```
+
+Both steps accept `-Dfuzz-target=<name>`. These checks do not cover every allocation failure or the
+Node.js bindings, verifier service, cache, or worker lifecycle.
+
 Replay only one committed corpus by selecting the target at build configuration:
 
 ```sh
@@ -119,5 +139,5 @@ zig build replay-corpus -Doptimize=ReleaseSafe -Dfuzz-target=ssz_basic
 ## Continuous campaigns
 
 Long-running campaigns, `afl-cmin`, result retention, and campaign reporting belong to the external
-[lodestar-fuzzer](https://github.com/ChainSafe/lodestar-fuzzer) repository. Lodestar-z CI only
-builds the `ReleaseSafe` fuzz harnesses.
+[lodestar-fuzzer](https://github.com/ChainSafe/lodestar-fuzzer) repository. Lodestar-z CI builds the
+`ReleaseSafe` fuzz harnesses and runs their deterministic tests.
