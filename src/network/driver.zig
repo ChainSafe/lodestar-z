@@ -48,6 +48,11 @@ pub const StepResult = struct {
     scheduled_datagrams: usize = 0,
 };
 
+pub const ProgressResult = struct {
+    progress: StepResult,
+    failure: ?StepError = null,
+};
+
 pub const Driver = struct {
     pool: engine_mod.EntropyPool = .{},
     pending: schedule.Queue = undefined,
@@ -116,9 +121,45 @@ pub const Driver = struct {
         activity: []engine_mod.Handle,
         options: StepOptions,
     ) StepError!StepResult {
-        assert(self.batch_len == 0);
         var result = StepResult{ .now = try currentTime(io) };
-        errdefer _ = self.flush(io, engine, udp, &result);
+        try self.run(io, engine, udp, &result, options);
+        self.publish(engine, events, activity, &result);
+        return result;
+    }
+
+    /// Publishes completed work on failure, after receive leases and sends unwind.
+    /// A failure to read the initial clock leaves the turn and pending events untouched.
+    pub fn stepProgress(
+        self: *Driver,
+        io: std.Io,
+        engine: *Engine,
+        udp: *Udp,
+        events: []engine_mod.Event,
+        activity: []engine_mod.Handle,
+        options: StepOptions,
+    ) ProgressResult {
+        var result = StepResult{ .now = currentTime(io) catch |err| return .{
+            .progress = .{ .now = .{ .mono_ms = 0, .unix_s = 0 } },
+            .failure = err,
+        } };
+        const failure: ?StepError = if (self.run(io, engine, udp, &result, options)) |_| null else |err| err;
+        self.publish(engine, events, activity, &result);
+        return .{ .progress = result, .failure = failure };
+    }
+
+    fn run(
+        self: *Driver,
+        io: std.Io,
+        engine: *Engine,
+        udp: *Udp,
+        result: *StepResult,
+        options: StepOptions,
+    ) StepError!void {
+        assert(self.batch_len == 0);
+        errdefer {
+            _ = self.flush(io, engine, udp, result);
+            self.immediate_work = true;
+        }
         const view = engine.driverView();
         view.releaseReported();
         const active_count = view.activeIndices().len;
@@ -135,15 +176,16 @@ pub const Driver = struct {
         }
         self.immediate_work = false;
         var turn = schedule.Turn.init(engine.limits.send_per_step_max, engine.limits.work_per_step_max);
+        defer result.work_processed = turn.work;
         var visits: u32 = 0;
-        try self.service(io, engine, udp, &turn, &result, &visits, turn.work_max / 2);
-        _ = self.flush(io, engine, udp, &result);
+        try self.service(io, engine, udp, &turn, result, &visits, turn.work_max / 2);
+        _ = self.flush(io, engine, udp, result);
         var received_count: u32 = 0;
         while (received_count < engine.limits.receive_per_step_max and turn.work < turn.work_max) : (received_count += 1) {
             if (!self.pool.fresh) self.pool.fill(try entropy(io));
             result.now = try currentTime(io);
             const wait_ms: ?u32 = if (received_count == 0) options.wait_max_ms else null;
-            const received = try self.receiveDatagram(io, engine, udp, &result, wait_ms);
+            const received = try self.receiveDatagram(io, engine, udp, result, wait_ms);
             if (received == .timeout) break;
             assert(turn.takeWork());
             const admitted = switch (received) {
@@ -152,8 +194,8 @@ pub const Driver = struct {
                 .datagram => |datagram| datagram,
             };
             defer udp.release(admitted.handle) catch unreachable;
-            result.now = try currentTime(io);
             result.datagrams_received += 1;
+            result.now = try currentTime(io);
             switch (view.receive(admitted.bytes, &admitted.from, result.now, &self.pool, &self.output)) {
                 .accepted => {
                     result.datagrams_accepted += 1;
@@ -171,23 +213,24 @@ pub const Driver = struct {
         }
         const receive_work_exhausted = turn.work == turn.work_max;
         result.now = try currentTime(io);
-        try self.service(io, engine, udp, &turn, &result, &visits, turn.work_max);
-        _ = self.flush(io, engine, udp, &result);
+        try self.service(io, engine, udp, &turn, result, &visits, turn.work_max);
+        _ = self.flush(io, engine, udp, result);
         if (receive_work_exhausted or received_count == engine.limits.receive_per_step_max) {
             self.immediate_work = true;
         }
+        assert(turn.work <= engine.limits.work_per_step_max);
+        assert(turn.sent <= engine.limits.send_per_step_max);
+    }
+
+    fn publish(self: *Driver, engine: *Engine, events: []engine_mod.Event, activity: []engine_mod.Handle, result: *StepResult) void {
         result.events = engine.pollEvents(events);
         result.events_pending = engine.eventsPending();
-        result.activity = view.takeActivity(activity);
-        result.activity_pending = view.activityPending();
-        result.work_processed = turn.work;
+        result.activity = engine.driverView().takeActivity(activity);
+        result.activity_pending = engine.driverView().activityPending();
         result.work_pending = self.immediate_work;
         result.scheduled_datagrams = self.pending.count;
         assert(result.events <= events.len);
         assert(result.activity <= activity.len);
-        assert(turn.work <= engine.limits.work_per_step_max);
-        assert(turn.sent <= engine.limits.send_per_step_max);
-        return result;
     }
 
     fn service(

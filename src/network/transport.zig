@@ -140,7 +140,7 @@ pub const Transport = struct {
         return self.driver.step(io, &self.engine, &self.udp, events, activity, options);
     }
 
-    /// Keeps already extracted native notifications when optional key logging fails.
+    /// Keeps completed native work/notifications on Driver or optional keylog failure.
     pub fn stepProgress(
         self: *Transport,
         io: std.Io,
@@ -148,10 +148,10 @@ pub const Transport = struct {
         activity: []engine_mod.Handle,
         options: driver_mod.StepOptions,
     ) ProgressResult {
-        const result = self.driver.step(io, &self.engine, &self.udp, events, activity, options) catch |err|
-            return .{ .progress = .{ .now = .{ .mono_ms = 0, .unix_s = 0 } }, .failure = err };
-        self.drainKeylog(io) catch |err| return .{ .progress = result, .failure = err };
-        return .{ .progress = result };
+        const result = self.driver.stepProgress(io, &self.engine, &self.udp, events, activity, options);
+        if (result.failure) |err| return .{ .progress = result.progress, .failure = err };
+        self.drainKeylog(io) catch |err| return .{ .progress = result.progress, .failure = err };
+        return .{ .progress = result.progress };
     }
 
     fn drainKeylog(self: *Transport, io: std.Io) error{KeylogWriteFailed}!void {
