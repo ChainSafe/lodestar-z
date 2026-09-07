@@ -222,6 +222,12 @@ pub const Control = struct {
         };
         return true;
     }
+    pub fn reStatusPeer(self: *Control, peer: t.PeerRef, conn: t.Handle, now: Now) bool {
+        const row = self.schedule(peer, conn) orelse return false;
+        if (row.closing != null) return false;
+        row.status_due_ms = now.mono_ms;
+        return true;
+    }
     pub fn reStatusPeers(self: *Control, now: Now) void {
         for (self.schedules) |*row| if (row.peer != null) {
             row.status_due_ms = now.mono_ms;

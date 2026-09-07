@@ -569,6 +569,10 @@ pub const Core = struct {
         self.policy_dirty = true;
         self.reStatusPeers(now);
     }
+    pub fn reStatusPeer(self: *Core, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
+        if (self.stopped) return false;
+        return self.control.reStatusPeer(peer, connection, now);
+    }
     pub fn reStatusPeers(self: *Core, now: Now) void {
         self.control.reStatusPeers(now);
     }
@@ -615,11 +619,25 @@ pub const Core = struct {
         self.policy_dirty = true;
         if (self.catalog.find(identity)) |peer| _ = self.catalog.setDirect(peer, true);
     }
-    pub fn removeDirectPeer(self: *Core, identity: *const t.PeerId) void {
-        self.dial_queue.removeDirect(identity);
+    pub fn directPeers(self: *const Core, out: []t.PeerId) error{OutputTooSmall}!usize {
+        return self.dial_queue.directPeers(out);
+    }
+    pub fn removeDirectPeer(self: *Core, identity: *const t.PeerId) bool {
+        if (!self.dial_queue.removeDirect(identity)) return false;
         self.policy_dirty = true;
         self.service.gossipsub.inner.unmarkDirect(identity);
         if (self.catalog.find(identity)) |peer| _ = self.catalog.setDirect(peer, false);
+        return true;
+    }
+    pub fn closePeer(self: *Core, engine: *engine_mod.Engine, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
+        self.reconciliation_now = now;
+        if (self.stopped) return false;
+        const snapshot = self.catalog.get(peer) orelse return false;
+        if (!std.meta.eql(snapshot.connection, connection)) return false;
+        self.control.close(&self.service, &self.catalog, engine, peer, connection, .host, now);
+        self.dial_queue.connection(&snapshot.identity, false, now.mono_ms);
+        self.policy_dirty = true;
+        return true;
     }
     pub fn disconnect(self: *Core, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
         self.reconciliation_now = now;
@@ -657,19 +675,16 @@ pub const Core = struct {
     pub fn snapshots(self: *const Core, out: []t.Snapshot) usize {
         return self.catalog.snapshots(out);
     }
-    pub fn peerCounts(self: *Core) PeerCounts {
-        const count = self.catalog.snapshots(self.snapshot_scratch);
+    pub fn peerCounts(self: *const Core) PeerCounts {
         var result: PeerCounts = .{ .connected = 0, .relevant = 0, .outbound_relevant = 0 };
-        for (self.snapshot_scratch[0..count]) |snapshot| {
-            if (snapshot.connection != null) result.connected += 1;
-            if (!snapshot.relevant) continue;
+        for (self.catalog.rows) |row| {
+            if (!row.occupied or row.connection == null) continue;
+            result.connected += 1;
+            if (row.status == null) continue;
             result.relevant += 1;
-            if (snapshot.direction == .outbound) result.outbound_relevant += 1;
+            if (row.direction == .outbound) result.outbound_relevant += 1;
         }
         return result;
-    }
-    pub fn connectedPeerCount(self: *const Core) u16 {
-        return self.catalog.relevantCount();
     }
     pub fn gossipScore(self: *Core, peer: t.PeerRef, now: Now) ?f64 {
         const snapshot = self.catalog.get(peer) orelse return null;

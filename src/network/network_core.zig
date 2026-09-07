@@ -282,7 +282,7 @@ pub const NetworkCore = struct {
     pub fn coverageDeficits(self: *NetworkCore) peers.policy.Deficits {
         return self.core.coverageDeficits();
     }
-    pub fn peerCounts(self: *NetworkCore) core_mod.Core.PeerCounts {
+    pub fn peerCounts(self: *const NetworkCore) core_mod.Core.PeerCounts {
         return self.core.peerCounts();
     }
     pub fn connect(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now) !void {
@@ -291,8 +291,17 @@ pub const NetworkCore = struct {
     pub fn addDirectPeer(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now) !void {
         try self.core.addDirectPeer(identity, addresses, now);
     }
-    pub fn removeDirectPeer(self: *NetworkCore, identity: *const t.PeerId) void {
-        self.core.removeDirectPeer(identity);
+    pub fn removeDirectPeer(self: *NetworkCore, identity: *const t.PeerId) bool {
+        return self.core.removeDirectPeer(identity);
+    }
+    pub fn directPeers(self: *const NetworkCore, out: []t.PeerId) error{OutputTooSmall}!usize {
+        return self.core.directPeers(out);
+    }
+    pub fn closePeer(self: *NetworkCore, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
+        return self.core.closePeer(&self.transport.engine, peer, connection, now);
+    }
+    pub fn reStatusPeer(self: *NetworkCore, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
+        return self.core.reStatusPeer(peer, connection, now);
     }
     pub fn disconnect(self: *NetworkCore, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
         return self.core.disconnect(peer, reason, now);
@@ -352,9 +361,6 @@ pub const NetworkCore = struct {
     }
     pub fn reportValidation(self: *NetworkCore, handle: gossip.ValidationHandle, verdict: gossip.Verdict, now: Now) gossip.ReportOutcome {
         return self.core.reportValidation(handle, verdict, now);
-    }
-    pub fn connectedPeerCount(self: *const NetworkCore) u16 {
-        return self.core.connectedPeerCount();
     }
     pub fn snapshots(self: *const NetworkCore, out: []t.Snapshot) usize {
         return self.core.snapshots(out);

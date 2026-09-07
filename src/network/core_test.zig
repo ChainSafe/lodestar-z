@@ -150,8 +150,8 @@ test "core native two owners establish relevance and fetch initial metadata with
         try setup.init(&local);
         defer setup.deinit();
         for (0..60) |_| try setup.step(0);
-        try std.testing.expectEqual(@as(u16, 1), setup.client.connectedPeerCount());
-        try std.testing.expectEqual(@as(u16, 1), setup.server.connectedPeerCount());
+        try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+        try std.testing.expectEqual(@as(u16, 1), setup.server.peerCounts().relevant);
         var snapshots: [4]t.Snapshot = undefined;
         try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
         try std.testing.expectEqualDeep(local.metadata, snapshots[0].metadata.?);
@@ -227,7 +227,7 @@ test "core native wrong fork Goodbye hard closes with zero output and shutdown r
         setup.pair.now,
     );
     for (0..40) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().relevant);
     setup.pair.advance(2_001);
     for (0..5) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u16, 0), setup.client.catalog.connectedCount());
@@ -328,7 +328,7 @@ test "core native deterministic replacement cancels old control and ignores stal
     );
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expectEqualDeep(selected, snapshots[0]);
-    try std.testing.expectEqual(@as(u16, 1), setup.client.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
 }
 
 test "core native saturated app requests retain partitioned borrows while controls progress" {
@@ -388,7 +388,7 @@ test "core native saturated app requests retain partitioned borrows while contro
     );
     setup.client.reStatusPeers(setup.pair.now);
     for (0..40) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u16, 1), setup.client.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
     var applications: [1]rr.Event = undefined;
     var delivered: usize = 0;
     for (0..16) |_| {
@@ -495,7 +495,7 @@ test "core direct removal clears both pins and gossip score reads have no feedba
         before,
         setup.client.gossipScore(snapshots[0].peer, setup.pair.now).?,
     );
-    setup.client.removeDirectPeer(&identity);
+    _ = setup.client.removeDirectPeer(&identity);
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(!snapshots[0].direct);
     const logical = setup.client.service.gossipsub.inner.peers.find(&identity).?;
@@ -616,10 +616,10 @@ test "core native Goodbye immediately removes relevance and delayed Status canno
         t.ReputationDecision.disconnect,
         setup.client.reportPeer(peer, .low_tolerance, setup.pair.now).?,
     );
-    try std.testing.expectEqual(@as(u16, 0), setup.client.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().relevant);
     try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().connected);
     for (0..20) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().relevant);
     var event: [1]t.Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.client.catalog.pollEvents(&event));
     try std.testing.expect(!event[0].updated.relevant);
@@ -961,7 +961,7 @@ test "core coverage outbound deficit uses hard room or retires inbound before re
             setup.pair.advance(2000);
             for (0..8) |_| try setup.step(0);
             try std.testing.expectEqual(@as(u16, 0), setup.pair.server.registry.active_len);
-        } else try std.testing.expectEqual(@as(u16, 1), setup.server.connectedPeerCount());
+        } else try std.testing.expectEqual(@as(u16, 1), setup.server.peerCounts().relevant);
         var secret: [32]u8 = @splat(0);
         secret[31] = 17;
         const key = (try @import("wire/keys.zig").KeyPair.fromSecretKey(&secret)).publicKey();
@@ -1076,7 +1076,7 @@ test "core reconciliation raw mutators deadlines and read getters invalidate onc
     try setup.client.addDirectPeer(&snapshots[0].identity, &.{support.server_address}, clock);
     _ = setup.client.coverageDeficits();
     try std.testing.expectEqual(penalized + 1, setup.client.counters.selections);
-    setup.client.removeDirectPeer(&snapshots[0].identity);
+    _ = setup.client.removeDirectPeer(&snapshots[0].identity);
     _ = setup.client.coverageDeficits();
     try std.testing.expectEqual(penalized + 2, setup.client.counters.selections);
     try setup.client.setDemand(&.{});
@@ -1156,4 +1156,106 @@ test "core reconciliation ban expiry still defers until strict score recovery" {
     try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, clock, &out));
     try std.testing.expect(setup.client.catalog.get(peer).?.score > -50);
     try std.testing.expect(out[0].peer.eql(&candidate.peer));
+}
+
+test "core native immediate close preserves direct membership and rejects stale generations" {
+    for ([_]usize{ 0, 1 }) |capacity| {
+        var setup: Setup = .{};
+        try setup.init(&.{});
+        defer setup.deinit();
+        for (0..60) |_| try setup.step(1);
+        var snapshots: [4]t.Snapshot = undefined;
+        _ = setup.client.snapshots(&snapshots);
+        const captured = snapshots[0];
+        try setup.client.addDirectPeer(&captured.identity, &.{support.server_address}, setup.pair.now);
+        var identities: [4]t.PeerId = undefined;
+        try std.testing.expectEqual(@as(usize, 1), try setup.client.directPeers(&identities));
+        var stale_peer = captured.peer;
+        stale_peer.generation += 1;
+        var stale_conn = captured.connection.?;
+        stale_conn.generation += 1;
+        try std.testing.expect(!setup.client.closePeer(&setup.pair.client, stale_peer, captured.connection.?, setup.pair.now));
+        try std.testing.expect(!setup.client.closePeer(&setup.pair.client, captured.peer, stale_conn, setup.pair.now));
+        try std.testing.expect(setup.client.closePeer(&setup.pair.client, captured.peer, captured.connection.?, setup.pair.now));
+        try std.testing.expect(!setup.client.closePeer(&setup.pair.client, captured.peer, captured.connection.?, setup.pair.now));
+        try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().connected);
+        try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().relevant);
+        try std.testing.expect(setup.client.catalog.get(captured.peer).?.connection == null);
+        try std.testing.expect(!setup.client.dial_queue.rows[0].connected);
+        try std.testing.expect(setup.client.policy_dirty);
+        try std.testing.expectError(error.StaleHandle, setup.pair.client.openStream(captured.connection.?));
+        const sink = try std.testing.allocator.alloc(u8, rr.Protocol.blocks_by_root_v2.info().response_max);
+        defer std.testing.allocator.free(sink);
+        try std.testing.expectError(error.StaleHandle, setup.client.sendReqRespRequest(
+            &setup.pair.client,
+            captured.connection.?,
+            .blocks_by_root_v2,
+            &.{},
+            sink,
+            .{},
+            setup.pair.now,
+        ));
+        var closed: [4]t.Event = undefined;
+        try std.testing.expectEqual(@as(usize, 1), setup.client.catalog.pollEvents(&closed));
+        try std.testing.expectEqualDeep(captured.connection.?, closed[0].closed.connection);
+        try std.testing.expectEqual(t.DisconnectReason.host, closed[0].closed.reason);
+        for (0..60) |_| try setup.step(capacity);
+        try std.testing.expectEqual(@as(usize, 0), setup.client.catalog.pollEvents(&closed));
+        try std.testing.expectEqual(@as(u16, 0), setup.server.peerCounts().connected);
+        try std.testing.expectEqual(@as(u64, 0), setup.server.control.counters.closed[@intFromEnum(t.DisconnectReason.remote_goodbye)]);
+        try std.testing.expectEqual(@as(usize, 1), try setup.client.directPeers(&identities));
+        _ = setup.server.catalog.pollEvents(&closed);
+        setup.pair.advance(1_000);
+        var intents: [1]@import("peers/dial_queue.zig").DialIntent = undefined;
+        try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &intents));
+        const replacement = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now, setup.pair.nextEntropy());
+        try std.testing.expect(setup.client.dialStarted(intents[0].token, replacement));
+        for (0..60) |_| try setup.step(1);
+        try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+        const current = setup.client.catalog.get(captured.peer).?;
+        try std.testing.expect(!std.meta.eql(captured.connection, current.connection));
+        try std.testing.expect(!setup.client.closePeer(&setup.pair.client, captured.peer, captured.connection.?, setup.pair.now));
+        try std.testing.expect(!setup.client.closePeer(&setup.pair.client, stale_peer, current.connection.?, setup.pair.now));
+        _ = setup.client.process(&setup.pair.client, &.{.{ .closed = .{
+            .conn = captured.connection.?,
+            .peer_id = captured.identity,
+            .direction = captured.direction,
+            .reason = .host,
+        } }}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+        try std.testing.expectEqualDeep(current, setup.client.catalog.get(captured.peer).?);
+        setup.client.shutdown(&setup.pair.client, setup.pair.now);
+        try std.testing.expect(!setup.client.closePeer(&setup.pair.client, current.peer, current.connection.?, setup.pair.now));
+    }
+}
+
+test "core native peer counts distinguish open relevant invalidated and closed without scratch mutation" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    try setup.step(0);
+    const owner: *const managed.Core = &setup.client;
+    try std.testing.expectEqual(@as(u16, 1), owner.peerCounts().connected);
+    try std.testing.expectEqual(@as(u16, 0), owner.peerCounts().relevant);
+    for (0..60) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const captured = snapshots[0];
+    var sentinel = captured;
+    sentinel.peer.generation += 1;
+    @memset(setup.client.snapshot_scratch, sentinel);
+    const before = setup.client.snapshot_scratch[0..4].*;
+    try std.testing.expectEqualDeep(managed.Core.PeerCounts{ .connected = 1, .relevant = 1, .outbound_relevant = 1 }, owner.peerCounts());
+    try std.testing.expectEqualDeep(before, setup.client.snapshot_scratch[0..4].*);
+    try std.testing.expect(setup.client.catalog.invalidateStatus(captured.peer, captured.connection.?));
+    try std.testing.expectEqualDeep(managed.Core.PeerCounts{ .connected = 1, .relevant = 0, .outbound_relevant = 0 }, owner.peerCounts());
+    try std.testing.expect(setup.client.closePeer(&setup.pair.client, captured.peer, captured.connection.?, setup.pair.now));
+    try std.testing.expectEqualDeep(managed.Core.PeerCounts{ .connected = 0, .relevant = 0, .outbound_relevant = 0 }, owner.peerCounts());
+    const offline: t.PeerId = .{ .bytes = @splat(9) };
+    try setup.client.addDirectPeer(&offline, &.{support.server_address}, setup.pair.now);
+    try std.testing.expect(setup.client.catalog.find(&offline) == null);
+    var direct: [1]t.PeerId = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try owner.directPeers(&direct));
+    try std.testing.expect(direct[0].eql(&offline));
+    try std.testing.expect(setup.client.removeDirectPeer(&offline));
+    try std.testing.expect(!setup.client.removeDirectPeer(&offline));
 }

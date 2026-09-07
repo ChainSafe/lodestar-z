@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !void {
         const result = node.step(init.io, now, 100, .{ .peers = &events }, 5);
         if (result.failure) |err| return err;
         for (events[0..result.counts.peers]) |event| std.debug.print("peer={s}\n", .{@tagName(event)});
-        if (node.connectedPeerCount() > 0) break;
+        if (node.peerCounts().relevant > 0) break;
     }
     std.debug.print("diagnostics={any}\n", .{node.diagnostics()});
     node.shutdown(try network.driver.currentTime(init.io));

@@ -66,7 +66,7 @@ const Peer = struct {
                 if (row.disconnect_reason) |value| reason = @tagName(value);
                 if (self.node.core.control.schedules[row.peer.index].closing) |closing| deadline = closing.deadline_ms;
             };
-            return control.emit(self.allocator, .{ .id = instruction.id, .ok = true, .connected = self.node.peerCounts().connected, .relevant = self.node.connectedPeerCount(), .generation = native_generation, .sequence = metadata_sequence, .custody = custody, .closed = self.node.isClosed(), .memory = self.node.memoryPlan().allocated_bytes, .reason = reason, .deadline = deadline, .now = self.now.mono_ms });
+            return control.emit(self.allocator, .{ .id = instruction.id, .ok = true, .connected = self.node.peerCounts().connected, .relevant = self.node.peerCounts().relevant, .generation = native_generation, .sequence = metadata_sequence, .custody = custody, .closed = self.node.isClosed(), .memory = self.node.memoryPlan().allocated_bytes, .reason = reason, .deadline = deadline, .now = self.now.mono_ms });
         } else if (std.mem.eql(u8, instruction.op, "disconnect")) {
             if (!self.node.disconnect(self.peer orelse return error.NoPeer, .host, self.now)) return error.NoPeer;
         } else if (std.mem.eql(u8, instruction.op, "shutdown")) {
