@@ -1,5 +1,4 @@
 const std = @import("std");
-const config = @import("config");
 const codec = @import("codec.zig");
 const constants = @import("constants.zig");
 const reqresp = @import("reqresp.zig");
@@ -374,7 +373,7 @@ pub const Server = struct {
         owner: *ReqResp,
         request_handle: RequestHandle,
         ssz: []const u8,
-        fork: ?config.ForkSeq,
+        context: ?reqresp.ForkEntry,
         now: Now,
     ) RespondError!void {
         const slot = try owner.servingSlot(request_handle);
@@ -382,12 +381,15 @@ pub const Server = struct {
         if (slot.chunks >= bounds.chunks_max) return error.TooManyChunks;
         if (ssz.len > bounds.response_max) return error.ChunkTooLarge;
         if (ssz.len < bounds.response_min) return error.ChunkTooSmall;
-        var context: ?[constants.context_bytes_length]u8 = null;
+        var digest: ?[constants.context_bytes_length]u8 = null;
         if (bounds.context_bytes) {
-            const which = fork orelse return error.UnknownFork;
-            context = owner.digestFor(which) orelse return error.UnknownFork;
+            const selected = context orelse return error.UnknownFork;
+            const known = owner.forkFor(selected.digest) orelse return error.UnknownFork;
+            if (known != selected.fork) return error.UnknownFork;
+            digest = selected.digest;
         }
-        Server.queueChunk(owner, slot, constants.result_success, context, ssz, false, now);
+        if (!bounds.context_bytes and context != null) return error.InvalidContext;
+        Server.queueChunk(owner, slot, constants.result_success, digest, ssz, false, now);
     }
 
     pub fn respondError(

@@ -81,7 +81,7 @@ pub const Peer = struct {
                     try self.service.reqresp.respond(r.request, &ping, null, self.now);
                 } else {
                     generate(self.response[0..self.response_size], self.response_seed);
-                    try self.service.reqresp.respond(r.request, self.response[0..self.response_size], .altair, self.now);
+                    try self.service.reqresp.respond(r.request, self.response[0..self.response_size], .{ .digest = .{ 1, 0, 0, 0 }, .fork = .altair }, self.now);
                 }
             },
             .chunk => |c| {

@@ -27,6 +27,15 @@ pub const scratch_length: usize = codec.frame_scratch_max;
 /// Two maintenance and two gossip streams remain outside the application allowance.
 pub const outbound_stream_headroom: u8 = 4;
 
+pub fn validateForkTable(table: []const ForkEntry) error{InvalidOptions}!void {
+    if (table.len > 64) return error.InvalidOptions;
+    for (table, 0..) |entry, i| {
+        for (table[0..i]) |old| {
+            if (std.mem.eql(u8, &old.digest, &entry.digest)) return error.InvalidOptions;
+        }
+    }
+}
+
 pub const ForkEntry = struct {
     digest: [constants.context_bytes_length]u8,
     fork: config.ForkSeq,
@@ -120,6 +129,7 @@ pub const AcceptError = error{
 
 pub const RespondError = error{
     InvalidError,
+    InvalidContext,
     StaleHandle,
     Busy,
     UnknownFork,
@@ -250,7 +260,7 @@ pub const ReqResp = struct {
         }
         try limiter_mod.Limiter.validate(peer_quotas);
         try limiter_mod.Limiter.validate(global_quotas);
-        if (options.forks.len > 64) return error.InvalidOptions;
+        try validateForkTable(options.forks);
 
         return .{ .peer = peer_quotas, .global = global_quotas };
     }
@@ -368,10 +378,10 @@ pub const ReqResp = struct {
         self: *ReqResp,
         handle: RequestHandle,
         ssz: []const u8,
-        fork: ?config.ForkSeq,
+        context: ?ForkEntry,
         now: Now,
     ) RespondError!void {
-        return Server.respond(self, handle, ssz, fork, now);
+        return Server.respond(self, handle, ssz, context, now);
     }
 
     /// Copies the message; the caller may release it immediately.
@@ -844,16 +854,6 @@ pub const ReqResp = struct {
     ) ?config.ForkSeq {
         for (self.forks[0..self.fork_count]) |entry| {
             if (std.mem.eql(u8, &entry.digest, &digest)) return entry.fork;
-        }
-        return null;
-    }
-
-    pub fn digestFor(
-        self: *const ReqResp,
-        fork: config.ForkSeq,
-    ) ?[constants.context_bytes_length]u8 {
-        for (self.forks[0..self.fork_count]) |entry| {
-            if (entry.fork == fork) return entry.digest;
         }
         return null;
     }

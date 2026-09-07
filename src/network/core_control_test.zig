@@ -314,7 +314,7 @@ test "core native application response borrows survive same turn hard close" {
         ), &.{}, setup.pair.now, 100, &.{}, &output, &.{});
         if (server.application == 1) switch (output[0]) {
             .request => |incoming| {
-                try setup.server.respond(incoming.request, &response, .phase0, setup.pair.now);
+                try setup.server.respond(incoming.request, &response, .{ .digest = @splat(0), .fork = .phase0 }, setup.pair.now);
             },
             .chunk_sent => |chunk| {
                 _ = setup.server.finish(chunk.request, setup.pair.now);

@@ -164,11 +164,12 @@ const Exchange = struct {
     failed: ?reqresp.Failure = null,
 };
 
-fn serveSingle(setup: *ReqRespPair, reply: []const u8, fork: ?@import("config").ForkSeq, exchange: *Exchange) !void {
+fn serveStatus(setup: *ReqRespPair, reply: []const u8, exchange: *Exchange) !void {
     for (setup.serverEvents()) |event| switch (event) {
         .request => |incoming| {
             exchange.request_seen = true;
-            try setup.server.respond(incoming.request, reply, fork, setup.pair.now);
+            try std.testing.expectError(error.InvalidContext, setup.server.respond(incoming.request, reply, .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now));
+            try setup.server.respond(incoming.request, reply, null, setup.pair.now);
             try std.testing.expect(setup.server.finish(incoming.request, setup.pair.now));
         },
         .served => exchange.served = true,
@@ -193,7 +194,7 @@ fn drainClient(setup: *ReqRespPair, expected: []const u8, exchange: *Exchange) !
     };
 }
 
-test "reqresp completes a status round trip over the loopback pair" {
+test "reqresp rejects non-null status context then completes a status round trip" {
     var setup: ReqRespPair = .{};
     try setup.init(.{}, .{});
     defer setup.deinit();
@@ -225,7 +226,7 @@ test "reqresp completes a status round trip over the loopback pair" {
             },
             else => {},
         };
-        try serveSingle(&setup, &reply_ssz, null, &exchange);
+        try serveStatus(&setup, &reply_ssz, &exchange);
         try drainClient(&setup, &reply_ssz, &exchange);
     }
     try std.testing.expect(exchange.request_seen);
@@ -336,12 +337,12 @@ test "reqresp streams blocks by range chunks with fork context" {
                 try std.testing.expectEqual(Protocol.blocks_by_range_v2, incoming.protocol);
                 try std.testing.expectEqualSlices(u8, &request_ssz, incoming.bytes);
                 served_handle = incoming.request;
-                try setup.server.respond(incoming.request, &blocks[0], .deneb, setup.pair.now);
+                try setup.server.respond(incoming.request, &blocks[0], .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now);
             },
             .chunk_sent => |progress| {
                 sent = progress.chunks;
                 if (sent < 3) {
-                    try setup.server.respond(served_handle.?, &blocks[sent], .deneb, setup.pair.now);
+                    try setup.server.respond(served_handle.?, &blocks[sent], .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now);
                 } else {
                     try std.testing.expect(setup.server.finish(served_handle.?, setup.pair.now));
                 }
