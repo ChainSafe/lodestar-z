@@ -1,6 +1,5 @@
 const std = @import("std");
 const engine_mod = @import("../quic/engine.zig");
-const negotiate = @import("../negotiate.zig");
 const routing = @import("../router.zig");
 const state_mod = @import("state.zig");
 const types = @import("../types.zig");
@@ -21,7 +20,7 @@ pub const Options = struct {
     versions: []const state_mod.Version = &.{ .v1_2, .v1_1, .v1_0 },
 };
 
-pub const InitError = negotiate.Error || gossipsub_mod.InitError;
+pub const InitError = routing.Error || gossipsub_mod.InitError;
 
 const Handler = @import("handler.zig").Handler;
 

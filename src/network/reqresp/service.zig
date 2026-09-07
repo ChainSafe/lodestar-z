@@ -1,6 +1,5 @@
 const std = @import("std");
 const engine_mod = @import("../quic/engine.zig");
-const negotiate = @import("../negotiate.zig");
 const routing = @import("../router.zig");
 const types = @import("../types.zig");
 const protocol = @import("protocol.zig");
@@ -22,7 +21,7 @@ pub const Options = struct {
     outbound_control_reserved: u16 = 0,
 };
 
-pub const InitError = negotiate.Error || reqresp.InitError;
+pub const InitError = routing.Error || reqresp.InitError;
 
 const Handler = @import("handler.zig").Handler;
 

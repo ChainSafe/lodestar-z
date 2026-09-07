@@ -13,6 +13,8 @@ const StreamError = engine_mod.StreamError;
 pub const negotiations_max_default: u16 = 256;
 pub const negotiations_max_ceiling: u16 = 4_096;
 pub const negotiate_timeout_ms: u64 = 10_000;
+/// Bounds descriptor copies below the Listener u8 index limit.
+pub const supported_max: usize = 64;
 pub const inbox_capacity: usize = 2 * multistream.message_length_max;
 pub const outbox_capacity: usize = multistream.listener_write_max;
 
@@ -57,6 +59,7 @@ const Entry = struct {
     selected: ?u8 = null,
     needs_service: bool = false,
     candidates: [candidates_max][]const u8 = undefined,
+    supported: [supported_max][]const u8 = undefined,
     candidates_len: u8 = 0,
     candidate: u8 = 0,
     pending_result: Outcome.Result = undefined,
@@ -180,19 +183,21 @@ pub const Negotiator = struct {
         return stream;
     }
 
+    /// Copies descriptors into stable storage; ID strings must be immutable and outlive negotiation.
     pub fn acceptInbound(
         self: *Negotiator,
         stream: StreamHandle,
         supported: []const []const u8,
         now: types.Now,
     ) Error!void {
-        assert(supported.len > 0);
+        if (supported.len == 0 or supported.len > supported_max) return error.InvalidLimits;
         const entry = self.claim(false) orelse return error.NegotiationTableFull;
         assert(entry.state == .free);
         entry.stream = stream;
         entry.started_ms = now.mono_ms;
         entry.control = false;
-        entry.role = .{ .listener = multistream.Listener.init(supported) };
+        @memcpy(entry.supported[0..supported.len], supported);
+        entry.role = .{ .listener = multistream.Listener.init(entry.supported[0..supported.len]) };
         entry.selected = null;
         entry.fin_seen = false;
         entry.inbox = .{};
@@ -404,7 +409,8 @@ fn failStream(engine: *Engine, entry: *const Entry, err: StreamError) Outcome {
 }
 
 comptime {
-    assert(@sizeOf(Entry) <= 1_536);
+    assert(@sizeOf(Entry) <= 2_560);
+    assert(supported_max < std.math.maxInt(u8));
     assert(negotiations_max_default <= negotiations_max_ceiling);
     assert(2 * multistream.message_length_max <= outbox_capacity);
 }

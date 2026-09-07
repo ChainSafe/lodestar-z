@@ -201,7 +201,6 @@ pub const Core = struct {
         const service_bytes = request.total_bytes - request.facade_bytes +
             gossip_plan.total_bytes - @sizeOf(gossip.Gossipsub) +
             self.service.gossipsub.streams.len * @sizeOf(gossip_stream) +
-            self.service.router.supported.len * @sizeOf([]const u8) +
             self.service.router.negotiator.entries.len * @sizeOf(negotiation);
         const scratch = self.snapshot_scratch.len * @sizeOf(t.Snapshot);
         const policy_bytes = self.policy_scratch.len * @sizeOf(policy.Input);
@@ -560,14 +559,19 @@ pub const Core = struct {
         self.policy_dirty = true;
     }
     pub fn updateFork(self: *Core, local: *const t.LocalState, now: Now) !void {
-        self.reconciliation_now = now;
         var copied: t.LocalState = undefined;
         try peers.control_wire.copyLocal(&copied, local);
-        if (!std.meta.eql(self.local.fork, copied.fork)) {
+        self.commitLocal(&copied, now);
+    }
+
+    /// The caller must validate the complete local state before committing it.
+    pub fn commitLocal(self: *Core, local: *const t.LocalState, now: Now) void {
+        self.reconciliation_now = now;
+        if (!std.meta.eql(self.local.fork, local.fork)) {
             self.control.forkUpdated(&self.service, &self.catalog, self.local.fork, now);
         }
-        self.local = copied;
-        self.service.reqresp.inner.setRequestFork(copied.fork.fork);
+        self.local = local.*;
+        self.service.reqresp.inner.setRequestFork(local.fork.fork);
         for (self.local.fork.custody_groups..128) |index| self.demand.coverage.custody.unset(index);
         var budget: u16 = 0;
         _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);

@@ -338,3 +338,178 @@ test "protocol compositions expose no standalone processing on shared handlers" 
     try std.testing.expect(!@hasDecl(RequestHandler, "process"));
     try std.testing.expect(!@hasDecl(GossipHandler, "process"));
 }
+
+test "router capabilities validate service limits and preserve configured preference" {
+    const routing = @import("router.zig");
+    const caps = @import("capabilities.zig");
+    var active: caps.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() };
+    active.receive.insert(.{ .reqresp = .ping_v1 });
+    active.request.insert(.{ .meshsub = .v1_0 });
+    active.request.insert(.{ .meshsub = .v1_2 });
+    var versions = [_]@import("gossipsub/state.zig").Version{ .v1_0, .v1_2 };
+    var router = try routing.Router.init(std.testing.allocator, .{ .capabilities = active, .meshsub_versions = &versions });
+    defer router.deinit();
+    versions[0] = .v1_1;
+    try std.testing.expectEqualDeep(active, router.capabilities());
+    try std.testing.expectEqualStrings("/meshsub/1.0.0", router.meshsub_candidates[0]);
+    try std.testing.expectEqualStrings("/meshsub/1.2.0", router.meshsub_candidates[1]);
+    try std.testing.expectEqual(1, router.supported_count);
+    try std.testing.expectEqualStrings(rr.Protocol.ping_v1.id(), router.supported[0]);
+    var invalid = active;
+    invalid.receive.insert(.{ .meshsub = .v1_1 });
+    try std.testing.expectError(error.InvalidCapabilities, router.validateCapabilities(invalid));
+    try std.testing.expectEqualDeep(active, router.capabilities());
+    try std.testing.expectError(error.InvalidCapabilities, routing.Router.init(std.testing.allocator, .{ .capabilities = active, .reqresp = false }));
+    active.receive = .initEmpty();
+    try std.testing.expectError(error.InvalidCapabilities, routing.Router.init(std.testing.allocator, .{ .capabilities = active, .meshsub = false }));
+    active.request = .initEmpty();
+    try router.validateCapabilities(active);
+    router.setCapabilities(active);
+    try std.testing.expectEqual(0, router.supported_count);
+    try std.testing.expectEqual(0, router.meshsub_count);
+    try std.testing.expect(routing.Protocol.fromId(rr.Protocol.ping_v1.id()) != null);
+}
+
+test "router capabilities disabled outbound preserves stream and request owners" {
+    const caps = @import("capabilities.zig");
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try support.connectPair(&pair);
+    var service = try @import("service.zig").Service.init(std.testing.allocator, .{
+        .reqresp = rr_options.reqresp,
+        .gossipsub = .{ .random_seed = 1 },
+        .router = .{ .capabilities = caps.Directional{ .receive = .initEmpty(), .request = .initEmpty() } },
+    });
+    defer service.deinit();
+    const before = pair.client.resourceSnapshot();
+    const requests = service.reqresp.active();
+    const negotiations = service.router.negotiator.active();
+    var sink: [8]u8 = undefined;
+    try std.testing.expectError(error.ProtocolDisabled, service.request(&pair.client, handles.client, .ping_v1, &(@as([8]u8, @splat(0))), &sink, .{}, pair.now));
+    try std.testing.expectError(error.ProtocolDisabled, service.router.beginOutbound(&pair.client, handles.client, .{ .reqresp = .status_v1 }, pair.now));
+    try std.testing.expectError(error.ProtocolDisabled, service.router.beginMeshsub(&pair.client, handles.client, pair.now));
+    try std.testing.expectEqualDeep(before, pair.client.resourceSnapshot());
+    try std.testing.expectEqualDeep(requests, service.reqresp.active());
+    try std.testing.expectEqual(negotiations, service.router.negotiator.active());
+}
+
+test "router capabilities pending inbound listener retains old offer while new listener rejects" {
+    const routing = @import("router.zig");
+    const caps = @import("capabilities.zig");
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    const handles = try support.connectPair(&pair);
+    var client = try routing.Router.init(std.testing.allocator, .{});
+    defer client.deinit();
+    var active: caps.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() };
+    active.receive.insert(.{ .reqresp = .ping_v1 });
+    var server = try routing.Router.init(std.testing.allocator, .{ .capabilities = active });
+    defer server.deinit();
+    for (0..2) |wave| {
+        _ = try client.beginOutbound(&pair.client, handles.client, .{ .reqresp = .ping_v1 }, pair.now);
+        var accepted = false;
+        var completed = false;
+        for (0..32) |_| {
+            var outcomes: [16]routing.Outcome = undefined;
+            const count = client.pump(&pair.client, pair.now, &outcomes);
+            for (outcomes[0..count]) |outcome| {
+                if (wave == 0) {
+                    try std.testing.expect(outcome.result == .ready);
+                    try std.testing.expectEqual(rr.Protocol.ping_v1, outcome.result.ready.protocol.reqresp);
+                } else try std.testing.expect(outcome.result == .rejected);
+                completed = true;
+            }
+            try pair.pump();
+            var events: [16]engine.Event = undefined;
+            server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
+            if (!accepted and server.negotiator.active() > 0) {
+                accepted = true;
+                if (wave == 0) {
+                    active.receive = .initEmpty();
+                    active.receive.insert(.{ .reqresp = .goodbye_v1 });
+                    try server.validateCapabilities(active);
+                    server.setCapabilities(active);
+                }
+            }
+            _ = server.pump(&pair.server, pair.now, &outcomes);
+            try pair.pump();
+            if (completed) break;
+        }
+        try std.testing.expect(accepted and completed);
+    }
+    active.receive = .initEmpty();
+    server.setCapabilities(active);
+    const stream = try pair.client.openStream(handles.client);
+    try std.testing.expectEqual(1, try pair.client.write(stream, &.{0}, false));
+    try pair.pump();
+    var events: [16]engine.Event = undefined;
+    server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
+    try std.testing.expectEqual(0, server.negotiator.active());
+}
+
+test "router capabilities activation preserves negotiated response context and captured ceiling" {
+    const harness = @import("reqresp/reqresp_test.zig");
+    const ct = @import("consensus_types");
+    const context: rr.ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
+    var setup: harness.ReqRespPair = .{};
+    const limits = @import("reqresp/admission_test.zig").quotas(2048, 1000);
+    const options: harness.Overrides = .{
+        .forks = &.{context},
+        .request_policy = @import("reqresp/request_policy_test.zig").fixture(),
+        .admission = .{ .identities = 2, .peer = limits, .global = limits },
+    };
+    try setup.init(options, options);
+    defer setup.deinit();
+    const sink = try std.testing.allocator.alloc(u8, rr.Protocol.blocks_by_root_v2.info().response_max);
+    defer std.testing.allocator.free(sink);
+    const bytes: [129 * 32]u8 = @splat(0);
+    const payload: [ct.phase0.SignedBeaconBlock.min_size]u8 = @splat(0);
+    const handle = try setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .blocks_by_root_v2, &bytes, sink, .{}, setup.pair.now);
+    var activated = false;
+    var done = false;
+    var served = false;
+    var chunks: u32 = 0;
+    for (0..64) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| switch (event) {
+            .request => |incoming| {
+                try setup.server.respond(incoming.request, &payload, context, setup.pair.now);
+                setup.client_neg.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
+                setup.server_neg.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
+                setup.client.setRequestFork(.fulu);
+                setup.server.setRequestFork(.fulu);
+                try std.testing.expectEqual(129, setup.client.outbound[handle.index].chunks_max);
+                const owner = &setup.server.inbound[incoming.request.index];
+                try std.testing.expectEqual(129, owner.chunks_max);
+                try std.testing.expectEqual(@import("config").ForkSeq.phase0, owner.request_fork);
+                activated = true;
+            },
+            .chunk_sent => |sent| {
+                if (sent.chunks == 1) {
+                    try setup.server.respond(sent.request, &payload, context, setup.pair.now);
+                } else try std.testing.expect(setup.server.finish(sent.request, setup.pair.now));
+            },
+            .served => served = true,
+            .failed => return error.TestUnexpectedResult,
+            else => {},
+        };
+        for (setup.clientEvents()) |event| switch (event) {
+            .chunk => |chunk| {
+                try std.testing.expect(activated);
+                try std.testing.expectEqual(@as(?@import("config").ForkSeq, .phase0), chunk.fork);
+                try std.testing.expectEqualSlices(u8, &payload, chunk.bytes);
+                chunks += 1;
+                try std.testing.expect(setup.client.consume(chunk.request, setup.pair.now));
+            },
+            .done => done = true,
+            .failed => return error.TestUnexpectedResult,
+            else => {},
+        };
+        if (done and served) break;
+    }
+    try std.testing.expect(activated and done and served);
+    try std.testing.expectEqual(2, chunks);
+    try std.testing.expectError(error.ProtocolDisabled, setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .blocks_by_root_v2, &bytes, sink, .{}, setup.pair.now));
+}

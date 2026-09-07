@@ -911,3 +911,134 @@ test "managed runtime request admission selector commits with validated local fo
     try std.testing.expectError(error.UnknownFork, node.updateLocal(&local, .{}, now));
     try std.testing.expectEqual(t.ForkSeq.fulu, node.core.service.reqresp.inner.request_fork);
 }
+
+const ActivationSnapshot = struct {
+    local: t.LocalState,
+    schedule: runtime.ForkSchedule,
+    endpoints: ?runtime.AdvertisementEndpoints,
+    capabilities: @import("capabilities.zig").Directional,
+    request_fork: t.ForkSeq,
+    record: d.identity.enr.Record,
+
+    fn capture(node: *const runtime.NetworkCore) ActivationSnapshot {
+        return .{
+            .local = node.localState(),
+            .schedule = node.schedule,
+            .endpoints = node.advertisementEndpoints(),
+            .capabilities = node.core.service.router.capabilities(),
+            .request_fork = node.core.service.reqresp.inner.request_fork,
+            .record = node.localRecord().?.*,
+        };
+    }
+
+    fn expectUnchanged(self: *const ActivationSnapshot, node: *const runtime.NetworkCore) !void {
+        try std.testing.expectEqualDeep(self.local, node.localState());
+        try std.testing.expectEqualDeep(self.schedule, node.schedule);
+        try std.testing.expectEqualDeep(self.endpoints, node.advertisementEndpoints());
+        try std.testing.expectEqualDeep(self.capabilities, node.core.service.router.capabilities());
+        try std.testing.expectEqual(self.request_fork, node.core.service.reqresp.inner.request_fork);
+        try std.testing.expectEqual(self.record.sequence, node.localRecord().?.sequence);
+        try std.testing.expectEqualSlices(u8, self.record.slice(), node.localRecord().?.slice());
+    }
+};
+
+test "managed runtime capabilities activation rolls back all owners on rejected candidates" {
+    const caps = @import("capabilities.zig");
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
+    var opts = options(&key);
+    opts.core.service.router.meshsub_versions = &.{.v1_2};
+    opts.core.service.router.capabilities = try caps.forFork(.phase0, false, &.{.v1_2});
+    opts.local.metadata.custody_group_count = 1;
+    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = std.math.maxInt(u64) };
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const before = ActivationSnapshot.capture(&node);
+    const now = node.last_now;
+    var update: runtime.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
+    update.local.status.head_slot = 10;
+    update.endpoints.?.quic = 443;
+    update.capabilities.request.insert(.{ .meshsub = .v1_0 });
+    try std.testing.expectError(error.InvalidCapabilities, node.applyLocal(&update, now));
+    try before.expectUnchanged(&node);
+    update.capabilities = try caps.forFork(.fulu, false, &.{.v1_2});
+    update.local.fork.fork = .fulu;
+    update.local.status.earliest_available_slot = 0;
+    try std.testing.expectError(error.UnknownFork, node.applyLocal(&update, now));
+    try before.expectUnchanged(&node);
+    update.local.fork.digest = .{ 1, 2, 3, 4 };
+    update.local.status.fork_digest = update.local.fork.digest;
+    try std.testing.expectError(error.SequenceExhausted, node.applyLocal(&update, now));
+    try before.expectUnchanged(&node);
+}
+
+test "managed runtime capabilities activation commits fork BPO and copied directional values" {
+    const caps = @import("capabilities.zig");
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{25}));
+    var opts = options(&key);
+    opts.local.metadata.custody_group_count = 1;
+    const quotas = @import("reqresp/admission_test.zig").quotas(2048, 1000);
+    opts.core.service.reqresp.request_policy = @import("reqresp/request_policy_test.zig").fixture();
+    opts.core.service.reqresp.admission = .{ .identities = 2, .peer = quotas, .global = quotas };
+    opts.core.service.router.capabilities = try caps.forFork(.phase0, true, &.{ .v1_2, .v1_1 });
+    opts.core.service.reqresp.forks = &.{
+        .{ .digest = @splat(0), .fork = .phase0 },
+        .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu },
+        .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu },
+    };
+    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const limiter = &node.core.service.reqresp.inner.limiter;
+    const peer: t.Handle = .{ .index = 0, .generation = 1 };
+    limiter.bind(peer, node.last_now.mono_ms);
+    try std.testing.expect(limiter.take(peer, .blocks_by_root_v2, 1, node.last_now.mono_ms));
+    const debt = limiter.global;
+    const admission = &node.core.service.reqresp.inner.admission.?;
+    const identity = node.peerId();
+    try std.testing.expectEqual(.allowed, admission.take(&identity, .blocks_by_root_v2, 1, .phase0, node.last_now.mono_ms));
+    const admitted_debt = admission.global;
+    const admitted_row = admission.rows[0];
+    const allocations = node.reservations.allocation_calls;
+    const before = ActivationSnapshot.capture(&node);
+    var update: runtime.LocalUpdate = .{ .local = before.local, .schedule = before.schedule, .endpoints = before.endpoints, .capabilities = before.capabilities };
+    update.capabilities.request = .initEmpty();
+    try std.testing.expect(try node.applyLocal(&update, node.last_now));
+    try std.testing.expectEqualDeep(before.local, node.localState());
+    try std.testing.expectEqual(before.record.sequence, node.localRecord().?.sequence);
+    try std.testing.expect(!try node.applyLocal(&update, node.last_now));
+    update.local.fork = .{ .fork = .fulu, .digest = .{ 1, 2, 3, 4 } };
+    update.local.status.fork_digest = update.local.fork.digest;
+    update.local.status.earliest_available_slot = 0;
+    update.capabilities = try caps.forFork(.fulu, false, &.{ .v1_2, .v1_1 });
+    try std.testing.expect(try node.applyLocal(&update, node.last_now));
+    try std.testing.expectEqual(t.ForkSeq.fulu, node.core.service.reqresp.inner.request_fork);
+    const active = node.core.service.router.capabilities();
+    try std.testing.expect(active.receive.contains(.{ .reqresp = .status_v2 }));
+    try std.testing.expect(!active.receive.contains(.{ .reqresp = .status_v1 }));
+    try std.testing.expect(!active.receive.contains(.{ .reqresp = .metadata_v2 }));
+    try std.testing.expect(active.receive.contains(.{ .reqresp = .metadata_v3 }));
+    try std.testing.expect(!active.receive.contains(.{ .reqresp = .light_client_bootstrap_v1 }));
+    try std.testing.expect(active.request.contains(.{ .reqresp = .light_client_bootstrap_v1 }));
+    update.local.fork.digest = .{ 5, 6, 7, 8 };
+    update.local.status.fork_digest = update.local.fork.digest;
+    try std.testing.expect(try node.applyLocal(&update, node.last_now));
+    try std.testing.expectEqualDeep(active, node.core.service.router.capabilities());
+    try std.testing.expectEqual(before.record.sequence + 2, node.localRecord().?.sequence);
+    try std.testing.expectEqual(before.local.metadata.seq_number, node.localState().metadata.seq_number);
+    try std.testing.expectEqualDeep(debt, limiter.global);
+    try std.testing.expectEqualDeep(admitted_debt, admission.global);
+    try std.testing.expectEqualDeep(admitted_row, admission.rows[0]);
+    try std.testing.expectEqual(allocations, node.reservations.allocation_calls);
+    const committed = ActivationSnapshot.capture(&node);
+    try std.testing.expect(!try node.applyLocal(&update, node.last_now));
+    update.local.metadata.attnets[0] = 1;
+    update.capabilities.receive = .initEmpty();
+    update.endpoints.?.quic = 443;
+    update.schedule.next_epoch = 5;
+    try committed.expectUnchanged(&node);
+    try std.testing.expect(try node.updateLocal(&update.local, .{}, node.last_now));
+    try std.testing.expectEqualDeep(active, node.core.service.router.capabilities());
+    try std.testing.expectEqual(before.local.metadata.seq_number + 1, node.localState().metadata.seq_number);
+}

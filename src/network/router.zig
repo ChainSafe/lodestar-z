@@ -3,6 +3,7 @@ const negotiate = @import("negotiate.zig");
 const engine_mod = @import("quic/engine.zig");
 const types = @import("types.zig");
 const reqresp = @import("reqresp/protocol.zig");
+const capability = @import("capabilities.zig");
 const Version = @import("gossipsub/state.zig").Version;
 
 pub const meshsub_ids = [_][]const u8{ "/meshsub/1.2.0", "/meshsub/1.1.0", "/meshsub/1.0.0" };
@@ -39,7 +40,10 @@ pub const Outcome = struct {
     result: union(enum) { ready: Selection, rejected, failed: negotiate.Failure },
 };
 
+pub const Error = negotiate.Error || error{ InvalidCapabilities, ProtocolDisabled };
+
 pub const Options = struct {
+    capabilities: ?capability.Directional = null,
     negotiations_max: u16 = negotiate.negotiations_max_default,
     outbound_control_reserved: u16 = 0,
     reqresp: bool = true,
@@ -48,13 +52,17 @@ pub const Options = struct {
 };
 
 pub const Router = struct {
-    allocator: std.mem.Allocator,
     negotiator: negotiate.Negotiator,
-    supported: [][]const u8,
+    supported: [capability.protocol_count][]const u8 = undefined,
+    supported_count: u8 = 0,
+    available: capability.Set,
+    active_capabilities: capability.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() },
+    meshsub_versions: [3]Version = undefined,
+    meshsub_versions_count: u8,
     meshsub_candidates: [3][]const u8 = undefined,
     meshsub_count: u8 = 0,
 
-    pub fn validateOptions(options: Options) negotiate.Error!void {
+    pub fn validateOptions(options: Options) Error!void {
         if (!options.reqresp and !options.meshsub) return error.InvalidLimits;
         if (options.meshsub_versions.len == 0 or options.meshsub_versions.len > 3) {
             return error.InvalidLimits;
@@ -64,38 +72,79 @@ pub const Router = struct {
                 if (version == prior) return error.InvalidLimits;
             }
         }
+        if (options.capabilities) |active| try validateSet(availableFor(options), active);
         try negotiate.Negotiator.validateOptions(.{ .negotiations_max = options.negotiations_max, .outbound_control_reserved = options.outbound_control_reserved });
     }
 
-    pub fn init(allocator: std.mem.Allocator, options: Options) negotiate.Error!Router {
+    pub fn init(allocator: std.mem.Allocator, options: Options) Error!Router {
         try validateOptions(options);
         var negotiator = try negotiate.Negotiator.initWithOptions(allocator, .{
             .negotiations_max = options.negotiations_max,
             .outbound_control_reserved = options.outbound_control_reserved,
         });
         errdefer negotiator.deinit();
-        const reqresp_count: usize = if (options.reqresp) reqresp.Protocol.count else 0;
-        const meshsub_count = if (options.meshsub) options.meshsub_versions.len else 0;
-        const supported = try allocator.alloc([]const u8, reqresp_count + meshsub_count);
         var router: Router = .{
-            .allocator = allocator,
             .negotiator = negotiator,
-            .supported = supported,
-            .meshsub_count = @intCast(meshsub_count),
+            .available = availableFor(options),
+            .meshsub_versions_count = @intCast(options.meshsub_versions.len),
         };
-        @memcpy(supported[0..reqresp_count], reqresp.ids[0..reqresp_count]);
-        for (options.meshsub_versions[0..meshsub_count], 0..) |version, index| {
-            const id = (Protocol{ .meshsub = version }).id();
-            supported[reqresp_count + index] = id;
-            router.meshsub_candidates[index] = id;
-        }
+        @memcpy(router.meshsub_versions[0..options.meshsub_versions.len], options.meshsub_versions);
+        router.setCapabilities(options.capabilities orelse .{ .receive = router.available, .request = router.available });
         return router;
     }
 
     pub fn deinit(self: *Router) void {
-        self.allocator.free(self.supported);
         self.negotiator.deinit();
         self.* = undefined;
+    }
+
+    fn availableFor(options: Options) capability.Set {
+        var available: capability.Set = .initEmpty();
+        if (options.reqresp) for (std.enums.values(reqresp.Protocol)) |which| {
+            available.insert(.{ .reqresp = which });
+        };
+        if (options.meshsub) for (options.meshsub_versions) |version| {
+            available.insert(.{ .meshsub = version });
+        };
+        return available;
+    }
+
+    fn validateSet(available: capability.Set, active: capability.Directional) error{InvalidCapabilities}!void {
+        if ((active.receive.bits | active.request.bits) & ~available.bits != 0) return error.InvalidCapabilities;
+    }
+
+    pub fn validateCapabilities(self: *const Router, active: capability.Directional) error{InvalidCapabilities}!void {
+        try validateSet(self.available, active);
+    }
+
+    /// Commits a validated value without allocation; existing listeners own their prior offers.
+    pub fn setCapabilities(self: *Router, active: capability.Directional) void {
+        self.validateCapabilities(active) catch unreachable;
+        self.active_capabilities = active;
+        self.supported_count = 0;
+        self.meshsub_count = 0;
+        for (std.enums.values(reqresp.Protocol)) |which| {
+            if (active.receive.contains(.{ .reqresp = which })) {
+                self.supported[self.supported_count] = which.id();
+                self.supported_count += 1;
+            }
+        }
+        for (self.meshsub_versions[0..self.meshsub_versions_count]) |version| {
+            const protocol: Protocol = .{ .meshsub = version };
+            if (active.receive.contains(protocol)) {
+                self.supported[self.supported_count] = protocol.id();
+                self.supported_count += 1;
+            }
+            if (active.request.contains(protocol)) {
+                self.meshsub_candidates[self.meshsub_count] = protocol.id();
+                self.meshsub_count += 1;
+            }
+        }
+        std.debug.assert(self.supported_count == active.receive.count());
+    }
+
+    pub fn capabilities(self: *const Router) capability.Directional {
+        return self.active_capabilities;
     }
 
     pub fn cancel(self: *Router, engine: *engine_mod.Engine, stream: engine_mod.StreamHandle) void {
@@ -108,7 +157,8 @@ pub const Router = struct {
         conn: engine_mod.Handle,
         protocol: Protocol,
         now: types.Now,
-    ) negotiate.Error!engine_mod.StreamHandle {
+    ) Error!engine_mod.StreamHandle {
+        if (!self.active_capabilities.request.contains(protocol)) return error.ProtocolDisabled;
         if (protocol == .reqresp and protocol.reqresp.isControl()) {
             return self.negotiator.beginOutboundControl(engine, conn, protocol.reqresp, now);
         }
@@ -120,7 +170,8 @@ pub const Router = struct {
         engine: *engine_mod.Engine,
         conn: engine_mod.Handle,
         now: types.Now,
-    ) negotiate.Error!engine_mod.StreamHandle {
+    ) Error!engine_mod.StreamHandle {
+        if (self.meshsub_count == 0) return error.ProtocolDisabled;
         return self.negotiator.beginOutboundCandidates(
             engine,
             conn,
@@ -137,7 +188,7 @@ pub const Router = struct {
     ) void {
         for (events) |event| switch (event) {
             .stream_opened => |stream| {
-                self.negotiator.acceptInbound(stream, self.supported, now) catch {
+                self.negotiator.acceptInbound(stream, self.supported[0..self.supported_count], now) catch {
                     engine.closeStream(stream, types.app_error_negotiation_failed);
                 };
             },
@@ -179,3 +230,7 @@ pub const Router = struct {
 };
 
 pub const outcomes_per_pump: usize = 16;
+
+comptime {
+    std.debug.assert(capability.protocol_count <= negotiate.supported_max);
+}
