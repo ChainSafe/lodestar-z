@@ -17,6 +17,44 @@ const processRewardsAndPenalties =
     @import("epoch/process_rewards_and_penalties.zig").processRewardsAndPenalties;
 const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
+const SyncCommitteeCache = @import("cache/sync_committee_cache.zig").SyncCommitteeCache;
+const SyncCommitteeCacheRc = @import("cache/sync_committee_cache.zig").SyncCommitteeCacheRc;
+
+test "setSyncCommitteesIndexed should release each cache once on allocation failure" {
+    const allocator = std.testing.allocator;
+    const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
+    const indices = [_]ValidatorIndex{ 0, 0, 2 };
+    var counting_allocator = std.testing.FailingAllocator.init(allocator, .{});
+    var cache = try SyncCommitteeCache.initValidatorIndices(counting_allocator.allocator(), &indices);
+    const cache_allocations = counting_allocator.alloc_index;
+    cache.deinit();
+
+    // Fail either RC allocation or the first allocation after the next cache transfers to its RC.
+    const failure_indices = [_]usize{ cache_allocations, cache_allocations + 1, 2 * cache_allocations + 1 };
+    for (failure_indices) |fail_index| {
+        var failing_allocator = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var epoch_cache: EpochCache = undefined;
+        epoch_cache.allocator = failing_allocator.allocator();
+        epoch_cache.current_sync_committee_indexed = try SyncCommitteeCacheRc.init(allocator, .initEmpty());
+        defer epoch_cache.current_sync_committee_indexed.unref();
+
+        epoch_cache.next_sync_committee_indexed = try SyncCommitteeCacheRc.init(allocator, .initEmpty());
+        defer epoch_cache.next_sync_committee_indexed.unref();
+
+        const old_current = epoch_cache.current_sync_committee_indexed;
+        const old_next = epoch_cache.next_sync_committee_indexed;
+        try std.testing.expectError(error.OutOfMemory, epoch_cache.setSyncCommitteesIndexed(&indices));
+        try std.testing.expect(failing_allocator.has_induced_failure);
+        try std.testing.expectEqual(old_current, epoch_cache.current_sync_committee_indexed);
+        try std.testing.expectEqual(old_next, epoch_cache.next_sync_committee_indexed);
+        try std.testing.expectEqual(failing_allocator.allocated_bytes, failing_allocator.freed_bytes);
+
+        failing_allocator.fail_index = std.math.maxInt(usize);
+        try epoch_cache.setSyncCommitteesIndexed(&indices);
+        try std.testing.expectEqualSlices(ValidatorIndex, &indices, epoch_cache.current_sync_committee_indexed.get().getValidatorIndices());
+        try std.testing.expectEqualSlices(ValidatorIndex, &indices, epoch_cache.next_sync_committee_indexed.get().getValidatorIndices());
+    }
+}
 
 test "EpochShuffling.init should free completed committees when a later slot allocation fails" {
     const allocator = std.testing.allocator;
