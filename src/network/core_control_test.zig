@@ -697,3 +697,104 @@ test "core control capabilities pre-Fulu Metadata3 serves configured custody cou
     }
     try std.testing.expect(received and done);
 }
+
+test "identify core schedules once after Status and completes without public output" {
+    var setup: Setup = .{};
+    var options = @import("core_test.zig").options();
+    options.service.identify = .{ .agent = "core-test", .inbound_max = 1, .outbound_max = 1 };
+    try setup.initOwnersWithOptions(&.{}, options);
+    defer setup.deinit();
+    _ = try setup.pair.dial();
+    for (0..100) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
+    const before = snapshots[0];
+    try std.testing.expect(before.relevant);
+    try std.testing.expectEqualStrings("core-test", before.identify.?.agent.?.slice());
+    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_started);
+    setup.client.reStatusPeers(setup.pair.now);
+    for (0..100) |_| try setup.step(0);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_started);
+    try std.testing.expectEqualDeep(before.identify, setup.client.catalog.get(before.peer).?.identify);
+}
+
+test "identify remote refusal completes generation without losing accepted Status" {
+    const caps = @import("capabilities.zig");
+    var setup: Setup = .{};
+    var options = @import("core_test.zig").options();
+    options.service.identify = .{ .agent = "core-test", .inbound_max = 1, .outbound_max = 1 };
+    try setup.initOwnersWithOptions(&.{}, options);
+    defer setup.deinit();
+    var active = setup.server.service.router.capabilities();
+    const only_identify = caps.withIdentify(.{ .receive = .initEmpty(), .request = .initEmpty() });
+    active.receive.bits &= ~only_identify.receive.bits;
+    setup.server.service.router.setCapabilities(active);
+    _ = try setup.pair.dial();
+    for (0..100) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    try std.testing.expect(snapshots[0].relevant and snapshots[0].identify == null);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_started);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_failures[@intFromEnum(@import("identify/root.zig").Failure.negotiation)]);
+    setup.client.reStatusPeers(setup.pair.now);
+    for (0..60) |_| try setup.step(0);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_started);
+    try std.testing.expect(setup.client.catalog.get(snapshots[0].peer).?.relevant);
+}
+
+test "identify replacement generation starts a fresh query and rejects stale completion" {
+    var setup: Setup = .{};
+    var options = @import("core_test.zig").options();
+    options.service.identify = .{ .agent = "first", .inbound_max = 1, .outbound_max = 1 };
+    try setup.initOwnersWithOptions(&.{}, options);
+    defer setup.deinit();
+    _ = try setup.pair.server.dial(&@import("test_support.zig").client_address, setup.pair.client_ctx.local_peer_id, setup.pair.now, setup.pair.nextEntropy());
+    for (0..100) |_| try setup.step(1);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const old = snapshots[0];
+    try std.testing.expectEqualStrings("first", old.identify.?.agent.?.slice());
+    setup.server.service.identify.?.local.?.agent = try .init("replacement");
+    _ = try setup.pair.dial();
+    for (0..100) |_| try setup.step(1);
+    _ = setup.client.snapshots(&snapshots);
+    const selected = snapshots[0];
+    try std.testing.expectEqualDeep(old.peer, selected.peer);
+    try std.testing.expect(!std.meta.eql(old.connection, selected.connection));
+    try std.testing.expectEqualStrings("replacement", selected.identify.?.agent.?.slice());
+    try std.testing.expectEqual(@as(u64, 2), setup.client.control.counters.identify_started);
+    setup.client.control.identifyResults(&setup.client.catalog, &.{.{ .peer = old.peer, .conn = old.connection.?, .outcome = .{ .success = old.identify.? } }});
+    try std.testing.expectEqualDeep(selected, setup.client.catalog.get(selected.peer).?);
+}
+
+test "identify local refusal retries after one second without resetting accepted Status" {
+    var setup: Setup = .{};
+    var options = @import("core_test.zig").options();
+    options.service.identify = .{ .agent = "core", .inbound_max = 1, .outbound_max = 1 };
+    try setup.initOwnersWithOptions(&.{}, options);
+    defer setup.deinit();
+    _ = try setup.pair.dial();
+    var snapshots: [4]t.Snapshot = undefined;
+    for (0..16) |_| {
+        try setup.step(0);
+        if (setup.client.snapshots(&snapshots) == 1) break;
+    }
+    const peer = snapshots[0].peer;
+    const conn = snapshots[0].connection.?;
+    try std.testing.expect(!snapshots[0].relevant);
+    try setup.client.service.identify.?.start(&setup.client.service.router, &setup.pair.client, .{ .index = 3, .generation = 99 }, conn, setup.pair.now);
+    try std.testing.expect(setup.client.catalog.updateStatus(peer, conn, &.{}, setup.pair.now.mono_ms));
+    setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+    const retry = setup.pair.now.mono_ms + 1000;
+    try std.testing.expectEqual(retry, setup.client.control.schedules[peer.index].identify_retry_ms);
+    try std.testing.expectEqual(@as(u64, 0), setup.client.control.counters.identify_started);
+    for (0..60) |_| try setup.step(0);
+    try std.testing.expectEqual(@as(u64, 0), setup.client.control.counters.identify_started);
+    setup.pair.now.mono_ms = retry - 1;
+    try setup.step(0);
+    try std.testing.expectEqual(@as(u64, 0), setup.client.control.counters.identify_started);
+    setup.pair.now.mono_ms = retry;
+    for (0..60) |_| try setup.step(0);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_started);
+    try std.testing.expectEqualStrings("core", setup.client.catalog.get(peer).?.identify.?.agent.?.slice());
+}

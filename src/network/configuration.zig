@@ -19,6 +19,7 @@ pub const Request = struct {
     reqresp: ?rr.Options = null,
     gossip: ?gossip.Options = null,
     router: ?router.Options = null,
+    identify: ?@import("identify/root.zig").Options = null,
     control: ?@import("peers/control.zig").Options = null,
     byte_limit: ?usize = null,
 };
@@ -67,6 +68,7 @@ pub fn resolve(request: Request) !Resolved {
             .dial = request.dial orelse .{ .capacity = if (small) 32 else 256, .concurrent_max = @min(4, limits.dialing_max), .engine_dialing_max = limits.dialing_max, .seed = request.seed },
             .control = request.control orelse .{ .operations_max = if (small) 4 else 16 },
             .service = .{
+                .identify = request.identify orelse .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 },
                 .router = request.router orelse .{ .negotiations_max = if (small) 32 else 256, .outbound_control_reserved = reserved },
                 .reqresp = request.reqresp orelse .{
                     .forks = request.forks,

@@ -4,7 +4,7 @@ const reqresp = @import("reqresp/protocol.zig");
 const ForkSeq = @import("config").ForkSeq;
 const Version = @import("gossipsub/state.zig").Version;
 
-pub const protocol_count = reqresp.Protocol.count + 3;
+pub const protocol_count = reqresp.Protocol.count + 4;
 const Bits = std.meta.Int(.unsigned, protocol_count);
 
 pub const Set = struct {
@@ -28,6 +28,7 @@ pub const Set = struct {
 
     fn bit(protocol: routing.Protocol) Bits {
         const index: std.math.Log2Int(Bits) = @intCast(switch (protocol) {
+            .identify => reqresp.Protocol.count + 3,
             .reqresp => |which| @as(u8, @intFromEnum(which)),
             .meshsub => |version| reqresp.Protocol.count + @intFromEnum(version),
         });
@@ -67,4 +68,12 @@ pub fn forFork(fork: ForkSeq, serve_light_clients: bool, meshsub_versions: []con
         if (serve_light_clients) active.receive.insert(.{ .reqresp = protocol });
     };
     return active;
+}
+
+/// Compose with forFork for full-host startup and local updates when Identify is configured.
+pub fn withIdentify(active: Directional) Directional {
+    var result = active;
+    result.receive.insert(.identify);
+    result.request.insert(.identify);
+    return result;
 }

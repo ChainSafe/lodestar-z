@@ -7,19 +7,22 @@ const capability = @import("capabilities.zig");
 const Version = @import("gossipsub/state.zig").Version;
 
 pub const meshsub_ids = [_][]const u8{ "/meshsub/1.2.0", "/meshsub/1.1.0", "/meshsub/1.0.0" };
-pub const Kind = enum { reqresp, meshsub };
+pub const Kind = enum { reqresp, meshsub, identify };
 pub const Protocol = union(Kind) {
     reqresp: reqresp.Protocol,
     meshsub: Version,
+    identify,
 
     pub fn id(self: Protocol) []const u8 {
         return switch (self) {
+            .identify => "/ipfs/id/1.0.0",
             .reqresp => |which| which.id(),
             .meshsub => |version| meshsub_ids[2 - @intFromEnum(version)],
         };
     }
 
     pub fn fromId(id_bytes: []const u8) ?Protocol {
+        if (std.mem.eql(u8, id_bytes, "/ipfs/id/1.0.0")) return .identify;
         if (reqresp.Protocol.fromId(id_bytes)) |which| return .{ .reqresp = which };
         for (meshsub_ids, 0..) |id_string, index| {
             if (std.mem.eql(u8, id_string, id_bytes)) return .{
@@ -46,6 +49,7 @@ pub const Options = struct {
     capabilities: ?capability.Directional = null,
     negotiations_max: u16 = negotiate.negotiations_max_default,
     outbound_control_reserved: u16 = 0,
+    identify: bool = false,
     reqresp: bool = true,
     meshsub: bool = true,
     meshsub_versions: []const Version = &.{ .v1_2, .v1_1, .v1_0 },
@@ -63,7 +67,7 @@ pub const Router = struct {
     meshsub_count: u8 = 0,
 
     pub fn validateOptions(options: Options) Error!void {
-        if (!options.reqresp and !options.meshsub) return error.InvalidLimits;
+        if (!options.reqresp and !options.meshsub and !options.identify) return error.InvalidLimits;
         if (options.meshsub_versions.len == 0 or options.meshsub_versions.len > 3) {
             return error.InvalidLimits;
         }
@@ -100,6 +104,7 @@ pub const Router = struct {
 
     fn availableFor(options: Options) capability.Set {
         var available: capability.Set = .initEmpty();
+        if (options.identify) available.insert(.identify);
         if (options.reqresp) for (std.enums.values(reqresp.Protocol)) |which| {
             available.insert(.{ .reqresp = which });
         };
@@ -139,6 +144,10 @@ pub const Router = struct {
                 self.meshsub_candidates[self.meshsub_count] = protocol.id();
                 self.meshsub_count += 1;
             }
+        }
+        if (active.receive.contains(.identify)) {
+            self.supported[self.supported_count] = @as(Protocol, .identify).id();
+            self.supported_count += 1;
         }
         std.debug.assert(self.supported_count == active.receive.count());
     }
