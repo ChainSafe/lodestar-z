@@ -108,18 +108,18 @@ test "managed runtime signed bootstrap reaches relevant peer with zero and one o
         if (result_a.counts.peers > 0 and events[0] == .ready) ready = true;
         const result_b = b.step(std.testing.io, now, 100, .{}, 1);
         if (result_b.failure) |err| return err;
-        if (ready and a.connectedPeerCount() == 1 and b.connectedPeerCount() == 1) break;
+        if (ready and a.peerCounts().relevant == 1 and b.peerCounts().relevant == 1) break;
     }
     try std.testing.expect(ready);
-    try std.testing.expectEqual(@as(u16, 1), a.connectedPeerCount());
-    try std.testing.expectEqual(@as(u16, 1), b.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 1), a.peerCounts().relevant);
+    try std.testing.expectEqual(@as(u16, 1), b.peerCounts().relevant);
     try std.testing.expect(a.diagnostics().runtime.discovered > 0);
     const hint_now = try @import("driver.zig").currentTime(std.testing.io);
     try std.testing.expect(a.futureForkHint(&b.peerId(), hint_now).?.compatible);
     const local = a.localState();
     _ = try a.updateLocal(&local, .{ .next_version = .{ 1, 1, 1, 1 }, .next_epoch = 123, .next_digest = .{ 1, 2, 3, 4 } }, hint_now);
     try std.testing.expect(!a.futureForkHint(&b.peerId(), hint_now).?.compatible);
-    try std.testing.expectEqual(@as(u16, 1), a.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 1), a.peerCounts().relevant);
     _ = try a.updateLocal(&local, .{}, hint_now);
     try applicationAndFork(&a, &b);
     try failureAndReplacement(&a, &b);
@@ -258,8 +258,8 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
     try std.testing.expect(got);
     try std.testing.expect(a.unsubscribe(topic));
     try std.testing.expect(b.unsubscribe(topic));
-    a.removeDirectPeer(&b.peerId());
-    b.removeDirectPeer(&a.peerId());
+    _ = a.removeDirectPeer(&b.peerId());
+    _ = b.removeDirectPeer(&a.peerId());
 }
 
 test "managed runtime every allocation prefix cleans up and memory plan counts owned storage" {
@@ -500,7 +500,7 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
     after_deadline.mono_ms = deadline;
     const result = a.step(faulty_io, after_deadline, 100, .{}, 0);
     try std.testing.expectEqual(error.Canceled, result.failure.?);
-    try std.testing.expectEqual(@as(u16, 0), a.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 0), a.peerCounts().relevant);
     try std.testing.expect(a.core.catalog.get(target.?).?.connection == null);
     for (0..100) |_| {
         _ = a.step(std.testing.io, a.last_now, 100, .{}, 0);
@@ -523,10 +523,10 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
         host_tick.mono_ms = @max(host_tick.mono_ms, a.last_now.mono_ms);
         const accepted = a.step(std.testing.io, host_tick, 100, .{}, 1);
         if (accepted.failure) |err| return err;
-        if (a.connectedPeerCount() == 1 and replacement.connectedPeerCount() == 1) break;
+        if (a.peerCounts().relevant == 1 and replacement.peerCounts().relevant == 1) break;
     }
-    try std.testing.expectEqual(@as(u16, 1), a.connectedPeerCount());
-    try std.testing.expectEqual(@as(u16, 1), replacement.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 1), a.peerCounts().relevant);
+    try std.testing.expectEqual(@as(u16, 1), replacement.peerCounts().relevant);
     try std.testing.expect(replacement.diagnostics().runtime.dial_started > 0);
     replacement.shutdown(now);
 }
@@ -1064,4 +1064,111 @@ test "identify managed advertisement follows committed endpoints and rejected up
     endpoints.quic = 0;
     try std.testing.expectError(error.InvalidAdvertisement, node.updateLocalWithEndpoints(&node.core.local, node.schedule, endpoints, now));
     try std.testing.expectEqualDeep(updated, node.core.service.identify.?.local.?);
+}
+
+test "managed runtime targeted Status serves two current schedules and immediate close is local" {
+    const key_a = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{31}));
+    const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
+    const key_c = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{33}));
+    var a: runtime.NetworkCore = undefined;
+    var b: runtime.NetworkCore = undefined;
+    var c: runtime.NetworkCore = undefined;
+    var opts = options(&key_a);
+    opts.core.service.identify = .{ .agent = "peer-operations" };
+    try a.init(std.testing.allocator, std.testing.io, opts);
+    defer a.deinit(std.testing.io);
+    opts = options(&key_b);
+    opts.core.service.identify = .{ .agent = "peer-operations" };
+    try b.init(std.testing.allocator, std.testing.io, opts);
+    defer b.deinit(std.testing.io);
+    opts = options(&key_c);
+    opts.core.service.identify = .{ .agent = "peer-operations" };
+    try c.init(std.testing.allocator, std.testing.io, opts);
+    defer c.deinit(std.testing.io);
+    const start = try @import("driver.zig").currentTime(std.testing.io);
+    try a.addDirectPeer(&b.peerId(), &.{b.transport.localAddress()}, start);
+    try a.addDirectPeer(&c.peerId(), &.{c.transport.localAddress()}, start);
+    var rows: [4]t.Snapshot = undefined;
+    var ready = false;
+    for (0..3000) |_| {
+        const now = try @import("driver.zig").currentTime(std.testing.io);
+        if (now.mono_ms - start.mono_ms > 10_000) break;
+        for ([_]*runtime.NetworkCore{ &a, &b, &c }) |node| {
+            const result = node.step(std.testing.io, now, 100, .{}, 1);
+            if (result.failure) |err| return err;
+        }
+        const count = a.snapshots(&rows);
+        if (count == 2 and a.peerCounts().relevant == 2 and rows[0].identify != null and rows[1].identify != null and
+            a.core.control.resourceSnapshot().operations == 0)
+        {
+            ready = true;
+            break;
+        }
+    }
+    try std.testing.expect(ready);
+    const calls = a.reservations.allocation_calls;
+    const selected = rows[0];
+    const other = rows[1];
+    const now = try @import("driver.zig").currentTime(std.testing.io);
+    a.core.control.schedules[other.peer.index].status_due_ms = now.mono_ms;
+    const unselected = a.core.control.schedules[other.peer.index];
+    const before = a.core.control.schedules[selected.peer.index];
+    try std.testing.expect(a.reStatusPeer(selected.peer, selected.connection.?, now));
+    var expected = before;
+    expected.status_due_ms = now.mono_ms;
+    try std.testing.expectEqualDeep(expected, a.core.control.schedules[selected.peer.index]);
+    try std.testing.expectEqualDeep(unselected, a.core.control.schedules[other.peer.index]);
+    const result = a.step(std.testing.io, now, 100, .{}, 0);
+    if (result.failure) |err| return err;
+    var status_started: usize = 0;
+    for (a.core.control.operations) |op| if (op.request != null and op.protocol == .status_v1) {
+        status_started += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), status_started);
+    try std.testing.expectEqual(before.identify_state, a.core.control.schedules[selected.peer.index].identify_state);
+    try std.testing.expect(a.closePeer(selected.peer, selected.connection.?, now));
+    try std.testing.expect(!a.reStatusPeer(selected.peer, selected.connection.?, now));
+    try std.testing.expectEqual(@as(u16, 1), a.peerCounts().connected);
+    var direct: [2]t.PeerId = undefined;
+    const owner: *const runtime.NetworkCore = &a;
+    try std.testing.expectEqual(@as(usize, 2), try owner.directPeers(&direct));
+    try std.testing.expect(a.removeDirectPeer(&selected.identity));
+    try std.testing.expect(!a.removeDirectPeer(&selected.identity));
+    try std.testing.expectEqual(@as(usize, 1), try owner.directPeers(&direct));
+    try std.testing.expectEqual(calls, a.reservations.allocation_calls);
+    try recycledPeerOperations(&a, &b, &c, &selected);
+}
+
+fn recycledPeerOperations(a: *runtime.NetworkCore, b: *runtime.NetworkCore, c: *runtime.NetworkCore, previous: *const t.Snapshot) !void {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{34}));
+    var replacement: runtime.NetworkCore = undefined;
+    try replacement.init(std.testing.allocator, std.testing.io, options(&key));
+    defer replacement.deinit(std.testing.io);
+    var events: [4]t.Event = undefined;
+    _ = a.core.catalog.pollEvents(&events);
+    const start = try @import("driver.zig").currentTime(std.testing.io);
+    try a.addDirectPeer(&replacement.peerId(), &.{replacement.transport.localAddress()}, start);
+    var current: ?t.Snapshot = null;
+    for (0..3000) |_| {
+        const now = try @import("driver.zig").currentTime(std.testing.io);
+        if (now.mono_ms - start.mono_ms > 10_000) break;
+        for ([_]*runtime.NetworkCore{ a, b, c, &replacement }) |node| {
+            const result = node.step(std.testing.io, now, 100, .{ .peers = &events }, 1);
+            if (result.failure) |err| return err;
+        }
+        const ref = a.core.catalog.find(&replacement.peerId()) orelse continue;
+        const row = a.core.catalog.get(ref).?;
+        if (!row.relevant) continue;
+        current = row;
+        break;
+    }
+    const selected = current orelse return error.ReplacementNotReady;
+    try std.testing.expectEqual(previous.peer.index, selected.peer.index);
+    try std.testing.expect(previous.peer.generation != selected.peer.generation);
+    try std.testing.expect(!a.closePeer(previous.peer, selected.connection.?, a.last_now));
+    try std.testing.expect(!a.reStatusPeer(previous.peer, selected.connection.?, a.last_now));
+    try std.testing.expect(!a.closePeer(selected.peer, previous.connection.?, a.last_now));
+    try std.testing.expect(!a.reStatusPeer(selected.peer, previous.connection.?, a.last_now));
+    try std.testing.expectEqualDeep(selected, a.core.catalog.get(selected.peer).?);
+    try std.testing.expect(a.closePeer(selected.peer, selected.connection.?, a.last_now));
 }

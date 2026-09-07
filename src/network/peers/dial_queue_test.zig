@@ -128,7 +128,7 @@ test "peer dial queue bounded pressure generation exhaustion and zero output do 
     try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
     try std.testing.expect(out[0].peer.eql(&second));
     try std.testing.expect(q.isDirect(&first));
-    q.removeDirect(&first);
+    _ = q.removeDirect(&first);
     try std.testing.expect(!q.isDirect(&first));
     try std.testing.expect(q.remove(&first));
     q.rows[token.index].generation = std.math.maxInt(u64);
@@ -445,4 +445,93 @@ test "peer dial review custody-only full table recovers at fixed horizon with bo
     try std.testing.expectEqual(@as(usize, 1), q.poll(600_000, &out));
     try std.testing.expect(out[0].peer.eql(&scarce.peer));
     try std.testing.expectEqual(reservation, q.memoryPlan().allocated_bytes);
+}
+
+test "peer direct membership enumeration is complete atomic and read only" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const first: t.PeerId = .{ .bytes = @splat(1) };
+    const second: t.PeerId = .{ .bytes = @splat(2) };
+    const addresses = [_]t.Address{ address, .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 2345 } } };
+    const sentinel: t.PeerId = .{ .bytes = @splat(9) };
+    try std.testing.expectEqual(@as(usize, 0), try q.directPeers(&.{}));
+    try std.testing.expect(!q.removeDirect(&first));
+    try q.enqueue(&first, &addresses, true, 0);
+    try q.enqueue(&first, &addresses, true, 0);
+    try q.enqueue(&second, &addresses, true, 0);
+    q.configureSelection(&.{}, true, &.{}, 0);
+    const rows = [2]@TypeOf(q.rows[0]){ q.rows[0], q.rows[1] };
+    const before = q;
+    var short = [_]t.PeerId{sentinel};
+    try std.testing.expectError(error.OutputTooSmall, q.directPeers(&short));
+    try std.testing.expectEqualDeep([_]t.PeerId{sentinel}, short);
+    var out: [2]t.PeerId = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try q.directPeers(&out));
+    try std.testing.expectEqualDeep([_]t.PeerId{ first, second }, out);
+    try std.testing.expectEqualDeep(before, q);
+    try std.testing.expectEqualDeep(rows, q.rows[0..2].*);
+    try std.testing.expect(q.removeDirect(&first));
+    try std.testing.expect(!q.removeDirect(&first));
+    try std.testing.expectEqual(@as(usize, 1), try q.directPeers(&out));
+    try std.testing.expect(out[0].eql(&second));
+    try std.testing.expect(q.removeDirect(&second));
+    try std.testing.expectEqual(@as(usize, 0), try q.directPeers(&.{}));
+}
+
+test "peer explicit address updates reject overflow and invalid input without mutation" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    const second: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 2345 } };
+    const third: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 3456 } };
+    try q.enqueue(&peer, &.{ address, second }, false, 0);
+    q.configureSelection(&.{}, true, &.{}, 0);
+    const before = q.rows[0];
+    const selection = q;
+    try std.testing.expectError(error.AddressCapacity, q.enqueue(&peer, &.{third}, true, 10));
+    try std.testing.expectEqualDeep(before, q.rows[0]);
+    try std.testing.expectEqualDeep(selection.random, q.random);
+    try std.testing.expectEqual(selection.selection_dirty, q.selection_dirty);
+    try std.testing.expectEqual(selection.selection_deadline, q.selection_deadline);
+    try std.testing.expectEqual(selection.cursor, q.cursor);
+    try std.testing.expectEqual(selection.custody_cursor, q.custody_cursor);
+    try std.testing.expectError(error.InvalidAddress, q.enqueue(&peer, &.{ third, .unspecified }, true, 10));
+    try std.testing.expectEqualDeep(before, q.rows[0]);
+    try std.testing.expectEqualDeep(selection.random, q.random);
+    try std.testing.expectEqual(selection.selection_dirty, q.selection_dirty);
+    try std.testing.expectEqual(selection.selection_deadline, q.selection_deadline);
+    try std.testing.expectEqual(selection.cursor, q.cursor);
+    try std.testing.expectEqual(selection.custody_cursor, q.custody_cursor);
+    for ([_]t.Address{ address, second }) |known| {
+        try q.enqueue(&peer, &.{known}, false, 10);
+        try std.testing.expectEqualDeep(before, q.rows[0]);
+    }
+}
+
+test "peer discovered conversion replaces addresses while retaining retry history" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const candidate = try discovered(1, 0);
+    try q.enqueueDiscovered(&candidate, &.{}, &.{}, 0);
+    q.rows[0].failures = 3;
+    q.rows[0].eligible_at_ms = 9000;
+    const explicit: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 5432 } };
+    try q.enqueue(&candidate.peer, &.{ explicit, explicit }, true, 10);
+    try std.testing.expect(!q.rows[0].automatic);
+    try std.testing.expect(q.rows[0].direct);
+    try std.testing.expectEqual(@as(u8, 1), q.rows[0].address_count);
+    try std.testing.expectEqualDeep(explicit, q.rows[0].addresses[0]);
+    try std.testing.expectEqual(@as(u8, 3), q.rows[0].failures);
+    try std.testing.expectEqual(@as(u64, 9000), q.rows[0].eligible_at_ms);
+}
+
+test "peer repeated initial address leaves room for a distinct explicit address" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    const second: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 2345 } };
+    try q.enqueue(&peer, &.{ address, address }, false, 0);
+    try q.enqueue(&peer, &.{second}, true, 1);
+    try std.testing.expectEqual(@as(u8, 2), q.rows[0].address_count);
+    try std.testing.expectEqualDeep([_]t.Address{ address, second }, q.rows[0].addresses);
 }

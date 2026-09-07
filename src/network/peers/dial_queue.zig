@@ -121,26 +121,25 @@ pub const DialQueue = struct {
     ) !void {
         if (addresses.len == 0 or addresses.len > 2) return error.InvalidAddress;
         for (addresses) |address| if (address.port() == 0) return error.InvalidAddress;
-        self.selection_dirty = true;
         var free: ?*Row = null;
         for (self.rows) |*row| {
             if (row.occupied and row.peer.eql(peer)) {
-                if (row.automatic) {
-                    row.address_count = 0;
-                    row.address_index = 0;
-                    row.automatic = false;
-                }
+                var prepared = row.addresses;
+                var count: u8 = if (row.automatic) 0 else row.address_count;
                 for (addresses) |address| {
                     var found = false;
-                    for (row.addresses[0..row.address_count]) |known| {
-                        found = found or known.eql(address);
-                    }
-                    if (!found and row.address_count < 2) {
-                        row.addresses[row.address_count] = address;
-                        row.address_count += 1;
-                    }
+                    for (prepared[0..count]) |known| found = found or known.eql(address);
+                    if (found) continue;
+                    if (count == prepared.len) return error.AddressCapacity;
+                    prepared[count] = address;
+                    count += 1;
                 }
+                row.addresses = prepared;
+                row.address_count = count;
+                if (row.automatic) row.address_index = 0;
+                row.automatic = false;
                 row.direct = row.direct or direct;
+                self.selection_dirty = true;
                 return;
             }
             if (!row.occupied and row.generation < std.math.maxInt(u64) and free == null) {
@@ -154,9 +153,13 @@ pub const DialQueue = struct {
             .peer = peer.*,
             .direct = direct,
             .eligible_at_ms = now_ms,
-            .address_count = @intCast(addresses.len),
         };
-        @memcpy(row.addresses[0..addresses.len], addresses);
+        for (addresses) |address| {
+            if (row.address_count != 0 and row.addresses[0].eql(address)) continue;
+            row.addresses[row.address_count] = address;
+            row.address_count += 1;
+        }
+        self.selection_dirty = true;
     }
     /// Consumes copied Discovery.step output, whose QUIC scope was checked against the
     /// authenticated discovery source. Bare enr.decode output does not satisfy this precondition.
@@ -312,10 +315,27 @@ pub const DialQueue = struct {
         for (self.rows) |row| if (row.occupied and row.peer.eql(peer)) return row.direct;
         return false;
     }
-    pub fn removeDirect(self: *DialQueue, peer: *const t.PeerId) void {
-        for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
-            row.direct = false;
+    pub fn directPeers(self: *const DialQueue, out: []t.PeerId) error{OutputTooSmall}!usize {
+        var count: usize = 0;
+        for (self.rows) |row| if (row.occupied and row.direct) {
+            count += 1;
         };
+        if (out.len < count) return error.OutputTooSmall;
+        var written: usize = 0;
+        for (self.rows) |row| if (row.occupied and row.direct) {
+            out[written] = row.peer;
+            written += 1;
+        };
+        std.debug.assert(written == count);
+        return written;
+    }
+    pub fn removeDirect(self: *DialQueue, peer: *const t.PeerId) bool {
+        for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
+            const removed = row.direct;
+            row.direct = false;
+            return removed;
+        };
+        return false;
     }
     pub fn remove(self: *DialQueue, peer: *const t.PeerId) bool {
         for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {

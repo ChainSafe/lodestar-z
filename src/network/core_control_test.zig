@@ -77,7 +77,7 @@ test "core native host fork transition cancels old maintenance without reviving 
     };
     try setup.client.updateFork(&updated, setup.pair.now);
     try setup.server.updateFork(&updated, setup.pair.now);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().relevant);
     const invalidated = setup.client.catalog.get(before.peer).?;
     try std.testing.expectEqualDeep(before.connection, invalidated.connection);
     try std.testing.expect(invalidated.status == null and invalidated.disconnect_reason == null);
@@ -390,7 +390,7 @@ test "core native inbound meshsub before Status never creates managed gossip rel
     try std.testing.expect(!snapshots[0].relevant);
     try std.testing.expect(!setup.server.service.gossipsub.admitted(snapshots[0].connection.?));
     try std.testing.expectEqual(@as(f64, 0), snapshots[0].score);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 0), setup.server.peerCounts().relevant);
 }
 
 test "core native shutdown cancels shared negotiations before native retirement without outputs" {
@@ -452,7 +452,7 @@ test "core native inbound application per peer cap protects control from extra r
     }
     setup.client.reStatusPeers(setup.pair.now);
     for (0..40) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u16, 1), setup.client.connectedPeerCount());
+    try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
     var count: usize = 0;
     var first: ?rr.RequestHandle = null;
     for (0..20) |_| {
@@ -797,4 +797,99 @@ test "identify local refusal retries after one second without resetting accepted
     for (0..60) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.identify_started);
     try std.testing.expectEqualStrings("core", setup.client.catalog.get(peer).?.identify.?.agent.?.slice());
+}
+
+test "core native targeted Status only schedules the full current nonclosing owner" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..60) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const selected = snapshots[0];
+    const other_peer: t.PeerRef = .{ .index = 3, .generation = 55 };
+    const other_conn: t.Handle = .{ .index = 3, .generation = 56 };
+    setup.client.control.connected(other_peer, other_conn, .inbound, setup.pair.now);
+    const other_before = setup.client.control.schedules[3];
+    const before = setup.client.control.schedules[selected.peer.index];
+    var stale_peer = selected.peer;
+    stale_peer.generation += 1;
+    var stale_conn = selected.connection.?;
+    stale_conn.generation += 1;
+    try std.testing.expect(!setup.client.reStatusPeer(stale_peer, selected.connection.?, setup.pair.now));
+    try std.testing.expect(!setup.client.reStatusPeer(selected.peer, stale_conn, setup.pair.now));
+    try std.testing.expectEqualDeep(before, setup.client.control.schedules[selected.peer.index]);
+    try std.testing.expect(setup.client.reStatusPeer(selected.peer, selected.connection.?, setup.pair.now));
+    var expected = before;
+    expected.status_due_ms = setup.pair.now.mono_ms;
+    try std.testing.expectEqualDeep(expected, setup.client.control.schedules[selected.peer.index]);
+    try std.testing.expectEqualDeep(other_before, setup.client.control.schedules[3]);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    var selected_started = false;
+    for (setup.client.control.operations) |op| {
+        if (op.request != null and op.protocol == .status_v1 and std.meta.eql(op.peer, selected.peer)) selected_started = true;
+    }
+    try std.testing.expect(selected_started);
+    try std.testing.expect(setup.client.disconnect(selected.peer, .host, setup.pair.now));
+    try std.testing.expect(!setup.client.reStatusPeer(selected.peer, selected.connection.?, setup.pair.now));
+    try std.testing.expect(setup.client.closePeer(&setup.pair.client, selected.peer, selected.connection.?, setup.pair.now));
+    try std.testing.expect(!setup.client.reStatusPeer(selected.peer, selected.connection.?, setup.pair.now));
+}
+
+test "core native application response borrows survive immediate public close" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..50) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const peer = snapshots[0].peer;
+    const size = rr.Protocol.blocks_by_root_v2.info().response_max;
+    const sink = try std.testing.allocator.alloc(u8, size);
+    defer std.testing.allocator.free(sink);
+    defer setup.client.shutdown(&setup.pair.client, setup.pair.now);
+    const request = try setup.client.sendReqRespRequest(
+        &setup.pair.client,
+        snapshots[0].connection.?,
+        .blocks_by_root_v2,
+        &.{},
+        sink,
+        .{ .expected_chunks = 1 },
+        setup.pair.now,
+    );
+    var response = [_]u8{7} ** rr.Protocol.blocks_by_root_v2.info().response_min;
+    var received = false;
+    for (0..50) |_| {
+        try setup.pair.pump();
+        var transport: [32]Engine.Event = undefined;
+        var output: [1]rr.Event = undefined;
+        const server = setup.server.process(&setup.pair.server, setup.pair.events(
+            &setup.pair.server,
+            &transport,
+        ), &.{}, setup.pair.now, 100, &.{}, &output, &.{});
+        if (server.application == 1) switch (output[0]) {
+            .request => |incoming| {
+                try setup.server.respond(incoming.request, &response, .{ .digest = @splat(0), .fork = .phase0 }, setup.pair.now);
+            },
+            .chunk_sent => |chunk| {
+                _ = setup.server.finish(chunk.request, setup.pair.now);
+            },
+            else => {},
+        };
+        const client = setup.client.process(&setup.pair.client, setup.pair.events(
+            &setup.pair.client,
+            &transport,
+        ), &.{}, setup.pair.now, 100, &.{}, &output, &.{});
+        if (client.application == 1 and output[0] == .chunk) {
+            try std.testing.expectEqualDeep(request, output[0].chunk.request);
+            try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
+            try std.testing.expect(setup.client.closePeer(&setup.pair.client, peer, snapshots[0].connection.?, setup.pair.now));
+            try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
+            try std.testing.expect(setup.client.consume(request, setup.pair.now));
+            try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
+            received = true;
+            break;
+        }
+    }
+    try std.testing.expect(received);
 }

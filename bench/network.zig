@@ -113,7 +113,7 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io) !t.
         for (rows[0..a.snapshots(&rows)]) |row| {
             if (row.relevant) peer = row.peer;
         }
-        if (peer != null and b.connectedPeerCount() == 1) break;
+        if (peer != null and b.peerCounts().relevant == 1) break;
     }
     if (peer == null) return error.ConnectionDeadline;
     try b.addDirectPeer(&a.peerId(), &.{a.localAddress()}, try network.driver.currentTime(io));
