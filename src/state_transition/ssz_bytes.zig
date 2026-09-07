@@ -56,30 +56,6 @@ pub fn getForkFromStateBytes(config: *const BeaconConfig, bytes: []const u8) !Fo
     return config.forkSeq(slot);
 }
 
-const testing = std.testing;
-
-test "state byte readers match a real serialized electra state" {
-    var state = types.electra.BeaconState.default_value;
-    state.slot = 12_345;
-    state.latest_block_header.slot = 12_344;
-
-    const bytes = try testing.allocator.alloc(u8, types.electra.BeaconState.serializedSize(&state));
-    defer testing.allocator.free(bytes);
-    _ = types.electra.BeaconState.serializeIntoBytes(&state, bytes);
-
-    try testing.expectEqual(@as(Slot, 12_345), try getStateSlotFromBytes(bytes));
-    try testing.expectEqual(@as(Slot, 12_344), try getLastProcessedSlotFromStateBytes(bytes));
-}
-
-test "state byte readers match a real serialized phase0 state" {
-    var state = types.phase0.BeaconState.default_value;
-    state.slot = 77;
-    state.latest_block_header.slot = 76;
-
-    const bytes = try testing.allocator.alloc(u8, types.phase0.BeaconState.serializedSize(&state));
-    defer testing.allocator.free(bytes);
-    _ = types.phase0.BeaconState.serializeIntoBytes(&state, bytes);
-
-    try testing.expectEqual(@as(Slot, 77), try getStateSlotFromBytes(bytes));
-    try testing.expectEqual(@as(Slot, 76), try getLastProcessedSlotFromStateBytes(bytes));
+test {
+    _ = @import("ssz_bytes_test.zig");
 }

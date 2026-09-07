@@ -18,7 +18,7 @@ pub const PathItem = struct {
 
 pub fn getPathItem(comptime ST: type, comptime path_str_item: []const u8) PathItem {
     switch (ST.kind) {
-        .uint, .bool => @compileError("Invalid path"),
+        .uint, .bool, .compatible_union => @compileError("Invalid path"),
         .vector => {
             const element_index = std.fmt.parseInt(usize, path_str_item, 10) catch @compileError("Invalid index");
             if (element_index >= ST.length) {
@@ -58,7 +58,27 @@ pub fn getPathItem(comptime ST: type, comptime path_str_item: []const u8) PathIt
                 },
             };
         },
-        .container => {
+        .progressive_list, .progressive_bit_list => {
+            if (std.mem.eql(u8, path_str_item, "length")) {
+                return .{
+                    .ST = ST,
+                    .item_type = .length,
+                };
+            }
+
+            const element_index = std.fmt.parseInt(usize, path_str_item, 10) catch @compileError("Invalid index");
+
+            return .{
+                .ST = ST,
+                .item_type = .{
+                    .child = .{
+                        .index = element_index,
+                        .ST = ST.Element,
+                    },
+                },
+            };
+        },
+        .container, .progressive_container => {
             const field_index = ST.getFieldIndex(path_str_item);
             return .{
                 .ST = ST,
@@ -174,40 +194,6 @@ pub fn getPathGindex(comptime ST: type, comptime path_str: []const u8) Gindex {
     return Gindex.concat(&gindices);
 }
 
-const types = @import("root.zig");
-
-test "PathType" {
-    const Root = types.ByteVectorType(32);
-    const Checkpoint = types.FixedContainerType(struct {
-        slot: types.UintType(64),
-        root: Root,
-    });
-
-    _ = PathType(Checkpoint, "slot");
-}
-
-test "getPathGindex" {
-    const Root = types.ByteVectorType(32);
-    const Checkpoint = types.FixedContainerType(struct {
-        epoch: types.UintType(64),
-        root: Root,
-    });
-
-    try std.testing.expectEqual(@as(Gindex.Uint, 2), @intFromEnum(getPathGindex(Checkpoint, "epoch")));
-    try std.testing.expectEqual(@as(Gindex.Uint, 3), @intFromEnum(getPathGindex(Checkpoint, "root")));
-
-    const BeaconState = types.FixedContainerType(struct {
-        slot: types.UintType(64),
-        finalized_checkpoint: Checkpoint,
-    });
-
-    try std.testing.expectEqual(@as(Gindex.Uint, 7), @intFromEnum(getPathGindex(BeaconState, "finalized_checkpoint.root")));
-
-    const Balances = types.FixedListType(types.UintType(64), 4, .{});
-    const SimpleState = types.VariableContainerType(struct {
-        slot: types.UintType(64),
-        balances: Balances,
-    });
-
-    try std.testing.expectEqual(@as(Gindex.Uint, 6), @intFromEnum(getPathGindex(SimpleState, "balances.0")));
+test {
+    _ = @import("path_test.zig");
 }

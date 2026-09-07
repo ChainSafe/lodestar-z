@@ -54,7 +54,7 @@ pub fn processAttestations(
 
 test "process attestations - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 16 * 5;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 

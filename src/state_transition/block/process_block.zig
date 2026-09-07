@@ -79,7 +79,13 @@ pub fn processBlock(
                 const payload_withdrawals_root = switch (block_type) {
                     .full => blk: {
                         const actual_withdrawals = block.body().executionPayload().inner.withdrawals;
-                        std.debug.assert(withdrawals_result.withdrawals.items.len == actual_withdrawals.items.len);
+                        if (withdrawals_result.withdrawals.items.len != actual_withdrawals.items.len) {
+                            std.log.err("withdrawal count mismatch: expected {d}, actual {d}", .{
+                                withdrawals_result.withdrawals.items.len,
+                                actual_withdrawals.items.len,
+                            });
+                            return error.WithdrawalsLengthMismatch;
+                        }
                         var root: Root = undefined;
                         try types.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);
                         break :blk root;
