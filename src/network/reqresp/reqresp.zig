@@ -80,7 +80,7 @@ pub const Failure = union(enum) {
     cancelled,
     negotiation_rejected,
     negotiation_failed: negotiate.Failure,
-    invalid_response: codec.Error,
+    invalid_response: (codec.Error || error{InvalidResponseContext}),
     invalid_request: codec.Error,
     too_many_chunks,
     unknown_context: [constants.context_bytes_length]u8,
@@ -105,6 +105,7 @@ pub const PartitionedCounts = struct { application: usize, control: usize };
 pub const InitError = limiter_mod.InitError;
 
 pub const RequestError = error{
+    InvalidRequest,
     InvalidRequestOptions,
     InvalidCapacity,
     SlotsExhausted,

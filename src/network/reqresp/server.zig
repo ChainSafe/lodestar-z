@@ -9,7 +9,8 @@ const assert = std.debug.assert;
 const Engine = engine_mod.Engine;
 const Handle = engine_mod.Handle;
 const StreamHandle = engine_mod.StreamHandle;
-const Protocol = @import("protocol.zig").Protocol;
+const protocol = @import("protocol.zig");
+const Protocol = protocol.Protocol;
 const Now = types.Now;
 const routing = @import("../router.zig");
 const RequestOptions = reqresp.RequestOptions;
@@ -50,6 +51,7 @@ pub const Server = struct {
     needs_service: bool = false,
     timeout_ms: u64 = 0,
     chunks: u32 = 0,
+    chunks_max: u32 = 1,
     io: RequestIO = .{},
     error_message: [codec.error_message_max]u8 = undefined,
     error_len: u16 = 0,
@@ -171,6 +173,10 @@ pub const Server = struct {
                     slot.io.decoder.payload()
                 else
                     &.{};
+                slot.chunks_max = protocol.requestChunkLimit(slot.protocol, payload) catch {
+                    Server.rejectRequest(owner, slot, now);
+                    return;
+                };
                 slot.pending_event = .{ .request = .{
                     .request = slot.handle(index),
                     .peer = slot.conn,
@@ -378,17 +384,19 @@ pub const Server = struct {
     ) RespondError!void {
         const slot = try owner.servingSlot(request_handle);
         const bounds = slot.protocol.info();
-        if (slot.chunks >= bounds.chunks_max) return error.TooManyChunks;
-        if (ssz.len > bounds.response_max) return error.ChunkTooLarge;
-        if (ssz.len < bounds.response_min) return error.ChunkTooSmall;
+        if (slot.chunks >= slot.chunks_max) return error.TooManyChunks;
+        var response = codec.Bounds{ .min = bounds.response_min, .max = bounds.response_max };
         var digest: ?[constants.context_bytes_length]u8 = null;
         if (bounds.context_bytes) {
             const selected = context orelse return error.UnknownFork;
             const known = owner.forkFor(selected.digest) orelse return error.UnknownFork;
             if (known != selected.fork) return error.UnknownFork;
+            response = slot.protocol.responseBounds(known) catch return error.InvalidContext;
             digest = selected.digest;
         }
         if (!bounds.context_bytes and context != null) return error.InvalidContext;
+        if (ssz.len > response.max) return error.ChunkTooLarge;
+        if (ssz.len < response.min) return error.ChunkTooSmall;
         Server.queueChunk(owner, slot, constants.result_success, digest, ssz, false, now);
     }
 

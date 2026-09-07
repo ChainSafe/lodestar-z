@@ -56,3 +56,52 @@ test "protocol info sizes follow the consensus types" {
     try std.testing.expectEqual(protocol.requestMaxAll(), Protocol.blob_sidecars_by_root_v1.info().request_max);
     try std.testing.expectEqual(constants.MAX_PAYLOAD_SIZE, protocol.responseMaxAll());
 }
+
+test "reqresp active head request bounds count before admission" {
+    var bytes = [_]u8{0} ** 40;
+    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.blocks_by_head_v1, &bytes));
+    for ([_]u64{ 1, 128, 129, std.math.maxInt(u64) }) |count| {
+        std.mem.writeInt(u64, bytes[32..40], count, .little);
+        try std.testing.expectEqual(@as(u32, @intCast(@min(count, 128))), try protocol.requestChunkLimit(.blocks_by_head_v1, &bytes));
+    }
+    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.blocks_by_head_v1, bytes[0..39]));
+    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.blocks_by_head_v1, &([_]u8{0} ** 41)));
+}
+
+test "reqresp active light client range allows an exact empty stream" {
+    var bytes = [_]u8{0} ** 16;
+    for ([_]u64{ 0, 1, 128, 129, std.math.maxInt(u64) }) |count| {
+        std.mem.writeInt(u64, bytes[8..16], count, .little);
+        try std.testing.expectEqual(@as(u32, @intCast(@min(count, 128))), try protocol.requestChunkLimit(.light_client_updates_by_range_v1, &bytes));
+    }
+    std.mem.writeInt(u64, bytes[0..8], std.math.maxInt(u64), .little);
+    std.mem.writeInt(u64, bytes[8..16], 1, .little);
+    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.light_client_updates_by_range_v1, &bytes));
+    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.light_client_updates_by_range_v1, bytes[0..15]));
+    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.light_client_updates_by_range_v1, &([_]u8{0} ** 17)));
+}
+
+test "reqresp active literal ids shapes and application partition" {
+    const cases = .{
+        .{ Protocol.blocks_by_head_v1, "/eth2/beacon_chain/req/beacon_blocks_by_head/1/ssz_snappy", 40, 128, 10_000 },
+        .{ Protocol.light_client_bootstrap_v1, "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy", 32, 5, 15_000 },
+        .{ Protocol.light_client_updates_by_range_v1, "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy", 16, 128, 10_000 },
+        .{ Protocol.light_client_finality_update_v1, "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy", 0, 2, 12_000 },
+        .{ Protocol.light_client_optimistic_update_v1, "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy", 0, 2, 12_000 },
+    };
+    inline for (cases) |case| {
+        const which = case[0];
+        try std.testing.expectEqualStrings(case[1], which.id());
+        try std.testing.expectEqual(which, Protocol.fromId(case[1]).?);
+        try std.testing.expect(!which.isControl());
+        try std.testing.expect(which.info().context_bytes);
+        try std.testing.expectEqual(@as(usize, case[2]), which.info().request_min);
+        try std.testing.expectEqual(@as(usize, case[2]), which.info().request_max);
+        try std.testing.expectEqual(@as(u32, case[3]), which.info().quota_tokens);
+        try std.testing.expectEqual(@as(u64, case[4]), which.info().quota_period_ms);
+        if (case[2] == 0) {
+            try std.testing.expectEqual(@as(u32, 1), try protocol.requestChunkLimit(which, ""));
+            try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(which, "\x00"));
+        }
+    }
+}

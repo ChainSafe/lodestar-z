@@ -52,12 +52,13 @@ pub const Progress = struct {
     done: bool,
 };
 
-const Phase = enum { result, context, varint, identifier, frame_header, frame_body, done };
+const Phase = enum { result, context, awaiting_context, varint, identifier, frame_header, frame_body, done };
 
 pub const Decoder = struct {
     phase: Phase,
     bounds: Bounds,
     expect_context: bool,
+    gate_context: bool = false,
     sink: []u8,
     scratch: []u8,
     error_sink: [error_message_max]u8 = undefined,
@@ -83,6 +84,23 @@ pub const Decoder = struct {
             .sink = sink,
             .scratch = scratch,
         };
+    }
+
+    pub fn initResponseWithContext(bounds: Bounds, sink: []u8, scratch: []u8) Decoder {
+        var decoder = initResponse(bounds, true, sink, scratch);
+        decoder.gate_context = true;
+        return decoder;
+    }
+
+    pub fn awaitingContext(self: *const Decoder) bool {
+        return self.phase == .awaiting_context;
+    }
+
+    pub fn setContextBounds(self: *Decoder, bounds: Bounds) error{LengthOutOfBounds}!void {
+        assert(self.awaitingContext());
+        if (bounds.min > bounds.max or bounds.max > self.sink.len) return error.LengthOutOfBounds;
+        self.bounds = bounds;
+        self.phase = .varint;
     }
 
     pub fn initRequest(bounds: Bounds, sink: []u8, scratch: []u8) Decoder {
@@ -118,7 +136,7 @@ pub const Decoder = struct {
     }
 
     pub fn declaredLength(self: *const Decoder) usize {
-        assert(self.phase != .result and self.phase != .context and self.phase != .varint);
+        assert(self.phase != .result and self.phase != .context and self.phase != .awaiting_context and self.phase != .varint);
         return self.length;
     }
 
@@ -132,7 +150,7 @@ pub const Decoder = struct {
         assert(self.written <= self.length or self.phase == .result or self.phase == .context or
             self.phase == .varint);
         var consumed: usize = 0;
-        while (consumed < bytes.len and self.phase != .done) {
+        while (consumed < bytes.len and self.phase != .done and !self.awaitingContext()) {
             consumed += try self.step(bytes[consumed..]);
         }
         assert(consumed <= bytes.len);
@@ -164,7 +182,7 @@ pub const Decoder = struct {
                 self.header_len += @intCast(take);
                 if (self.header_len == constants.context_bytes_length) {
                     self.header_len = 0;
-                    self.phase = .varint;
+                    self.phase = if (self.gate_context) .awaiting_context else .varint;
                 }
                 return take;
             },
@@ -220,7 +238,7 @@ pub const Decoder = struct {
                 if (self.frame_filled == self.frame_length) try self.finishFrame();
                 return take;
             },
-            .done => unreachable,
+            .awaiting_context, .done => unreachable,
         }
     }
 

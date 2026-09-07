@@ -292,3 +292,48 @@ test "codec independent response enumerates context prefix and both frame splits
         }
     }
 }
+
+test "reqresp active context gate pauses before coalesced length and frames at every header split" {
+    var sink = [_]u8{0xaa} ** 256;
+    var scratch: [codec.frame_scratch_max]u8 = undefined;
+    var encoded: [512]u8 = undefined;
+    const payload = [_]u8{0x42} ** 100;
+    const bytes = try codec.encodeChunk(0, .{ 1, 2, 3, 4 }, &payload, &encoded);
+    for (0..7) |split| {
+        var decoder = Decoder.initResponseWithContext(.{ .min = 0, .max = 256 }, &sink, &scratch);
+        const first = try decoder.feed(bytes[0..split]);
+        try std.testing.expectEqual(@min(split, 5), first.consumed);
+        var consumed = first.consumed;
+        if (!decoder.awaitingContext()) {
+            const second = try decoder.feed(bytes[consumed..]);
+            consumed += second.consumed;
+        }
+        try std.testing.expectEqual(@as(usize, 5), consumed);
+        try std.testing.expect(decoder.awaitingContext());
+        try std.testing.expectEqual(@as(usize, 0), (try decoder.feed(bytes[consumed..])).consumed);
+        try std.testing.expectError(error.LengthOutOfBounds, decoder.setContextBounds(.{ .min = 2, .max = 1 }));
+        try std.testing.expectError(error.LengthOutOfBounds, decoder.setContextBounds(.{ .min = 0, .max = 257 }));
+        try decoder.setContextBounds(.{ .min = 100, .max = 100 });
+        try std.testing.expect((try decoder.feed(bytes[consumed..])).done);
+        try std.testing.expectEqualSlices(u8, &payload, decoder.payload());
+    }
+}
+
+test "reqresp active context gate rejects invalid coalesced length without writing sink" {
+    var sink = [_]u8{0xaa} ** 256;
+    var scratch: [codec.frame_scratch_max]u8 = undefined;
+    for ([_]u8{ 99, 101 }) |length| {
+        const bytes = [_]u8{ 0, 1, 2, 3, 4, length, 0xff, 6, 0, 0 };
+        var decoder = Decoder.initResponseWithContext(.{ .min = 0, .max = 256 }, &sink, &scratch);
+        try std.testing.expectEqual(@as(usize, 5), (try decoder.feed(&bytes)).consumed);
+        try decoder.setContextBounds(.{ .min = 100, .max = 100 });
+        try std.testing.expectError(error.LengthOutOfBounds, decoder.feed(bytes[5..]));
+        try std.testing.expect(std.mem.allEqual(u8, &sink, 0xaa));
+    }
+    var encoded: [512]u8 = undefined;
+    const bytes = try codec.encodeChunk(1, null, "bad request", &encoded);
+    var decoder = Decoder.initResponseWithContext(.{ .min = 100, .max = 256 }, &sink, &scratch);
+    try std.testing.expect((try decoder.feed(bytes)).done);
+    try std.testing.expect(!decoder.awaitingContext());
+    try std.testing.expectEqualStrings("bad request", decoder.payload());
+}

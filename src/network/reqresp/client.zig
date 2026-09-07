@@ -10,7 +10,8 @@ const assert = std.debug.assert;
 const Engine = engine_mod.Engine;
 const Handle = engine_mod.Handle;
 const StreamHandle = engine_mod.StreamHandle;
-const Protocol = @import("protocol.zig").Protocol;
+const protocol = @import("protocol.zig");
+const Protocol = protocol.Protocol;
 const Now = types.Now;
 const routing = @import("../router.zig");
 const RequestOptions = reqresp.RequestOptions;
@@ -154,6 +155,21 @@ pub const Client = struct {
                     owner.fail(slot, index, .{ .invalid_response = err }, engine);
                     return;
                 };
+                if (slot.io.decoder.awaitingContext()) {
+                    const digest = slot.io.decoder.context().?;
+                    const fork = owner.forkFor(digest) orelse {
+                        owner.fail(slot, index, .{ .unknown_context = digest }, engine);
+                        return;
+                    };
+                    const bounds = slot.protocol.responseBounds(fork) catch |err| {
+                        owner.fail(slot, index, .{ .invalid_response = err }, engine);
+                        return;
+                    };
+                    slot.io.decoder.setContextBounds(bounds) catch |err| {
+                        owner.fail(slot, index, .{ .invalid_response = err }, engine);
+                        return;
+                    };
+                }
                 if (done) {
                     Client.completeChunk(owner, engine, slot, index, now);
                     return;
@@ -219,12 +235,11 @@ pub const Client = struct {
     pub fn resetResponseDecoder(owner: *ReqResp, slot: *Client) void {
         _ = owner;
         const bounds = slot.protocol.info();
-        slot.io.decoder = codec.Decoder.initResponse(
-            .{ .min = bounds.response_min, .max = bounds.response_max },
-            bounds.context_bytes,
-            slot.io.sink,
-            slot.io.scratch,
-        );
+        const response = codec.Bounds{ .min = bounds.response_min, .max = bounds.response_max };
+        slot.io.decoder = if (bounds.context_bytes)
+            codec.Decoder.initResponseWithContext(response, slot.io.sink, slot.io.scratch)
+        else
+            codec.Decoder.initResponse(response, false, slot.io.sink, slot.io.scratch);
         slot.io.decoding = true;
     }
 
@@ -243,10 +258,11 @@ pub const Client = struct {
         try owner.attach(engine);
         if (conn.index >= owner.options.peers) return error.InvalidCapacity;
         if (request_options.progress_timeout_ms == 0) return error.InvalidRequestOptions;
-        const chunks_max = request_options.expected_chunks orelse bounds.chunks_max;
-        if (chunks_max == 0 or chunks_max > bounds.chunks_max) return error.InvalidRequestOptions;
         if (request_ssz.len > bounds.request_max) return error.RequestTooLarge;
         if (request_ssz.len < bounds.request_min) return error.RequestTooSmall;
+        const request_ceiling = try protocol.requestChunkLimit(which, request_ssz);
+        const chunks_max = request_options.expected_chunks orelse request_ceiling;
+        if (chunks_max > request_ceiling) return error.InvalidRequestOptions;
         if (sink.len < bounds.response_max) return error.SinkTooSmall;
         if (owner.outboundCount(conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
             return error.TooManyRequests;

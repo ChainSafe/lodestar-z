@@ -951,7 +951,7 @@ test "reqresp caller cardinality rejects invalid bounds before opening a stream"
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
     const options = [_]reqresp.RequestOptions{
-        .{ .expected_chunks = 0 }, .{ .expected_chunks = 2 }, .{ .progress_timeout_ms = 0 },
+        .{ .expected_chunks = 2 }, .{ .progress_timeout_ms = 0 },
     };
     for (options) |invalid| {
         try std.testing.expectError(error.InvalidRequestOptions, setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .ping_v1, &bytes, &sink, invalid, setup.pair.now));
@@ -966,7 +966,7 @@ test "reqresp narrowed chunks retire without FIN and held chunks use host deadli
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
-    const reply = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_min);
+    const reply = try std.testing.allocator.alloc(u8, ct.deneb.SignedBeaconBlock.min_size);
     defer std.testing.allocator.free(reply);
     @memset(reply, 0);
     const handle = try setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .blocks_by_root_v2, "", sink, .{ .expected_chunks = 1 }, setup.pair.now);
