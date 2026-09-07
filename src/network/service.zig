@@ -5,7 +5,10 @@ const types = @import("types.zig");
 const reqresp_mod = @import("reqresp/root.zig");
 const gossip_mod = @import("gossipsub/root.zig");
 
+const identify_mod = @import("identify/root.zig");
+
 pub const Options = struct {
+    identify: ?identify_mod.Options = null,
     automatic_gossip_admission: bool = true,
     router: routing.Options = .{},
     reqresp: reqresp_mod.reqresp.Options,
@@ -13,9 +16,13 @@ pub const Options = struct {
 };
 pub const Counts = struct { reqresp: usize, gossipsub: usize };
 pub const PartitionedCounts = struct { application: usize, control: usize, gossipsub: usize };
-pub const InitError = reqresp_mod.service.InitError || gossip_mod.service.InitError;
+pub const Outputs = struct { application: []reqresp_mod.Event = &.{}, control: []reqresp_mod.Event = &.{}, gossipsub: []gossip_mod.Event = &.{}, identify: []identify_mod.Result = &.{} };
+pub const OutputCounts = struct { application: usize, control: usize, gossipsub: usize, identify: usize };
+pub const Capacities = struct { application: usize = 0, control: usize = 0, gossipsub: usize = 0, identify: usize = 0 };
+pub const InitError = reqresp_mod.service.InitError || gossip_mod.service.InitError || identify_mod.handler.InitError;
 
 pub const Service = struct {
+    identify: ?identify_mod.Handler,
     automatic_gossip_admission: bool,
     router: routing.Router,
     reqresp: reqresp_mod.Handler,
@@ -23,19 +30,27 @@ pub const Service = struct {
 
     pub fn validateOptions(options: Options) InitError!void {
         if (!options.router.reqresp or !options.router.meshsub) return error.InvalidLimits;
-        try routing.Router.validateOptions(options.router);
+        var router_options = options.router;
+        router_options.identify = options.identify != null;
+        try routing.Router.validateOptions(router_options);
+        if (options.identify) |identify| try identify_mod.Handler.validate(identify);
         _ = try reqresp_mod.ReqResp.validateOptions(options.reqresp);
         try @import("gossipsub/options.zig").validate(&options.gossipsub);
     }
 
     pub fn init(allocator: std.mem.Allocator, options: Options) InitError!Service {
         try validateOptions(options);
-        var router = try routing.Router.init(allocator, options.router);
+        var router_options = options.router;
+        router_options.identify = options.identify != null;
+        var router = try routing.Router.init(allocator, router_options);
         errdefer router.deinit();
         var reqresp = try reqresp_mod.Handler.init(allocator, options.reqresp);
         errdefer reqresp.deinit();
-        const gossipsub = try gossip_mod.Handler.init(allocator, options.gossipsub);
+        var gossipsub = try gossip_mod.Handler.init(allocator, options.gossipsub);
+        errdefer gossipsub.deinit();
+        const identify = if (options.identify) |value| try identify_mod.Handler.init(allocator, value) else null;
         return .{
+            .identify = identify,
             .router = router,
             .reqresp = reqresp,
             .gossipsub = gossipsub,
@@ -44,6 +59,7 @@ pub const Service = struct {
     }
 
     pub fn deinit(self: *Service) void {
+        if (self.identify) |*identify| identify.deinit();
         self.gossipsub.deinit();
         self.reqresp.deinit();
         self.router.deinit();
@@ -94,15 +110,23 @@ pub const Service = struct {
         control_capacity: usize,
         gossip_event_capacity: usize,
     ) ?u64 {
+        return self.nextWakeupOutputs(now, .{ .application = application_capacity, .control = control_capacity, .gossipsub = gossip_event_capacity });
+    }
+
+    pub fn nextWakeupOutputs(self: *Service, now: types.Now, capacities: Capacities) ?u64 {
         const request_due = self.reqresp.nextWakeupPartitioned(
             &self.router,
             now,
-            application_capacity,
-            control_capacity,
+            capacities.application,
+            capacities.control,
         );
-        const gossip = self.gossipsub.nextWakeup(now, gossip_event_capacity);
-        if (request_due) |r| return @min(r, gossip orelse r);
-        return gossip;
+        const gossip = self.gossipsub.nextWakeup(now, capacities.gossipsub);
+        const identify_due = if (self.identify) |*identify| identify.nextWakeup(now, capacities.identify) else null;
+        var due = request_due;
+        for ([_]?u64{ gossip, identify_due }) |next| if (next) |value| {
+            due = @min(due orelse value, value);
+        };
+        return due;
     }
 
     /// Forward Driver activity separately from lifecycle events.
@@ -118,6 +142,7 @@ pub const Service = struct {
         gossip: []gossip_mod.Event,
     ) Counts {
         self.prepare(engine, events, activity, now);
+        if (self.identify) |*identify| _ = identify.pump(&self.router, engine, now, &.{});
         return .{
             .reqresp = self.reqresp.pump(&self.router, engine, now, requests),
             .gossipsub = self.gossipsub.pump(&self.router, engine, now, gossip),
@@ -134,19 +159,14 @@ pub const Service = struct {
         control: []reqresp_mod.Event,
         gossip: []gossip_mod.Event,
     ) PartitionedCounts {
+        const counts = self.processOutputs(engine, events, activity, now, .{ .application = application, .control = control, .gossipsub = gossip });
+        return .{ .application = counts.application, .control = counts.control, .gossipsub = counts.gossipsub };
+    }
+
+    pub fn processOutputs(self: *Service, engine: *engine_mod.Engine, events: []const engine_mod.Event, activity: []const engine_mod.Handle, now: types.Now, outputs: Outputs) OutputCounts {
         self.prepare(engine, events, activity, now);
-        const counts = self.reqresp.pumpPartitioned(
-            &self.router,
-            engine,
-            now,
-            application,
-            control,
-        );
-        return .{
-            .application = counts.application,
-            .control = counts.control,
-            .gossipsub = self.gossipsub.pump(&self.router, engine, now, gossip),
-        };
+        const counts = self.reqresp.pumpPartitioned(&self.router, engine, now, outputs.application, outputs.control);
+        return .{ .application = counts.application, .control = counts.control, .gossipsub = self.gossipsub.pump(&self.router, engine, now, outputs.gossipsub), .identify = if (self.identify) |*identify| identify.pump(&self.router, engine, now, outputs.identify) else 0 };
     }
 
     fn prepare(
@@ -158,12 +178,14 @@ pub const Service = struct {
     ) void {
         std.debug.assert(activity.len <= engine.limits.connections_max);
         for (activity) |conn| {
+            if (self.identify) |*identify| identify.connectionActivity(conn);
             self.reqresp.inner.connectionActivity(conn);
             self.gossipsub.connectionActivity(conn);
         }
         self.reqresp.inner.cleanupPending(engine, &self.router);
         self.router.transportEvents(engine, events, now);
         self.reqresp.transportEvents(events);
+        if (self.identify) |*identify| identify.transportEvents(engine, events);
         for (events) |event| {
             if (!self.automatic_gossip_admission and event == .connected) continue;
             self.gossipsub.transportEvents(engine, &.{event}, now);
@@ -173,6 +195,7 @@ pub const Service = struct {
         for (outcomes[0..count]) |outcome| {
             const owner = outcome.owner orelse continue;
             switch (owner) {
+                .identify => if (self.identify) |*identify| identify.negotiationResult(&self.router, engine, outcome, now),
                 .reqresp => self.reqresp.negotiationResult(engine, outcome, now),
                 .meshsub => self.gossipsub.negotiationResult(engine, outcome, now),
             }

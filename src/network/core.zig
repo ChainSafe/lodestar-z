@@ -201,7 +201,8 @@ pub const Core = struct {
         const service_bytes = request.total_bytes - request.facade_bytes +
             gossip_plan.total_bytes - @sizeOf(gossip.Gossipsub) +
             self.service.gossipsub.streams.len * @sizeOf(gossip_stream) +
-            self.service.router.negotiator.entries.len * @sizeOf(negotiation);
+            self.service.router.negotiator.entries.len * @sizeOf(negotiation) +
+            if (self.service.identify) |*identify| identify.allocatedBytes() else @as(usize, 0);
         const scratch = self.snapshot_scratch.len * @sizeOf(t.Snapshot);
         const policy_bytes = self.policy_scratch.len * @sizeOf(policy.Input);
         return .{
@@ -244,15 +245,9 @@ pub const Core = struct {
         self.dial_queue.expire(engine, now.mono_ms);
         for (events) |event| self.transportEvent(engine, event, now);
         var controls: [32]rr.Event = undefined;
-        const counts = self.service.processPartitioned(
-            engine,
-            events,
-            activity,
-            now,
-            application,
-            &controls,
-            gossip_events,
-        );
+        var identify_results: [8]@import("identify/root.zig").Result = undefined;
+        const counts = self.service.processOutputs(engine, events, activity, now, .{ .application = application, .control = &controls, .gossipsub = gossip_events, .identify = &identify_results });
+        self.control.identifyResults(&self.catalog, identify_results[0..counts.identify]);
         self.control.events(
             &self.service,
             &self.catalog,
@@ -427,12 +422,7 @@ pub const Core = struct {
     ) ?u64 {
         if (self.stopped) return self.peerWakeup(now, peer_capacity);
         self.observeDelivery();
-        var due = self.service.nextWakeupPartitioned(
-            now,
-            application_capacity,
-            32,
-            gossip_capacity,
-        );
+        var due = self.service.nextWakeupOutputs(now, .{ .application = application_capacity, .control = 32, .gossipsub = gossip_capacity, .identify = 8 });
         for ([_]?u64{
             self.control.nextWakeup(&self.catalog, now),
             self.dial_queue.nextWakeup(now.mono_ms, @min(dial_capacity, self.dialRoom())),
@@ -765,6 +755,7 @@ pub const Core = struct {
     pub fn shutdown(self: *Core, engine: *engine_mod.Engine, now: Now) void {
         if (self.stopped) return;
         self.stopped = true;
+        if (self.service.identify) |*identify| identify.shutdown(&self.service.router, engine);
         self.service.reqresp.shutdown(&self.service.router, engine);
         self.service.router.negotiator.shutdown(engine);
         const count = self.catalog.snapshots(self.snapshot_scratch);

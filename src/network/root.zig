@@ -1,3 +1,4 @@
+pub const identify = @import("identify/root.zig");
 pub const capabilities = @import("capabilities.zig");
 pub const core = @import("core.zig");
 pub const Core = core.Core;
@@ -80,4 +81,8 @@ test {
 
 test {
     _ = @import("capabilities_test.zig");
+}
+
+test {
+    _ = identify;
 }

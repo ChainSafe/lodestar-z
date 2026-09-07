@@ -32,6 +32,9 @@ const Response = struct {
     bytes: [wire.status_size_max]u8 = undefined,
 };
 const Schedule = struct {
+    identify_enabled: bool = false,
+    identify_state: enum { pending, started, done } = .pending,
+    identify_retry_ms: u64 = 0,
     previous_digest: [4]u8 = @splat(0),
     previous_protocol: rr.Protocol = .status_v1,
     transition_until_ms: u64 = 0,
@@ -54,6 +57,9 @@ pub const Control = struct {
     counters: Counters = .{},
 
     pub const Counters = struct {
+        identify_started: u64 = 0,
+        identify_deferred: u64 = 0,
+        identify_failures: [@typeInfo(@import("../identify/root.zig").Failure).@"enum".fields.len]u64 = @splat(0),
         started: u64 = 0,
         deferred: u64 = 0,
         gossip_refused: u64 = 0,
@@ -336,6 +342,10 @@ pub const Control = struct {
                 if (snapshot.direct) service.gossipsub.markDirect(row.conn);
                 row.gossip_retry_ms = now.mono_ms +| 1_000;
             }
+            row.identify_enabled = service.identify != null;
+            if (snapshot.relevant and row.closing == null and row.identify_enabled and row.identify_state == .pending and now.mono_ms >= row.identify_retry_ms) {
+                self.startIdentify(service, engine, row, now);
+            }
             const action = decision.request orelse continue;
             const protocol: rr.Protocol = switch (action) {
                 .status => wire.statusProtocol(local.fork),
@@ -356,6 +366,29 @@ pub const Control = struct {
             }
         }
     }
+    fn startIdentify(self: *Control, service: *Service, engine: *Engine, row: *Schedule, now: Now) void {
+        service.identify.?.start(&service.router, engine, row.peer.?, row.conn, now) catch {
+            row.identify_retry_ms = now.mono_ms +| 1_000;
+            self.counters.identify_deferred +|= 1;
+            return;
+        };
+        row.identify_state = .started;
+        self.counters.identify_started +|= 1;
+    }
+
+    pub fn identifyResults(self: *Control, catalog: *Catalog, results: []const @import("../identify/root.zig").Result) void {
+        std.debug.assert(results.len <= 64);
+        for (results) |*completion| {
+            const row = self.schedule(completion.peer, completion.conn) orelse continue;
+            if (row.identify_state != .started) continue;
+            row.identify_state = .done;
+            switch (completion.outcome) {
+                .success => |*metadata| _ = catalog.updateIdentify(completion.peer, completion.conn, metadata),
+                .failed => |failure| self.counters.identify_failures[@intFromEnum(failure)] +|= 1,
+            }
+        }
+    }
+
     pub fn close(
         self: *Control,
         service: *Service,
@@ -682,6 +715,7 @@ fn decide(row: *const Schedule, relevant: bool, active_request: bool, now: u64) 
         return decision;
     }
     if (relevant) {
+        if (row.identify_enabled and row.identify_state == .pending) decision.wake(row.identify_retry_ms, now);
         decision.wake(row.gossip_retry_ms, now);
         decision.gossip = now >= row.gossip_retry_ms;
     }

@@ -1,3 +1,4 @@
+pub const protobuf = @import("protobuf.zig");
 pub const constants = @import("constants.zig");
 pub const address = @import("address.zig");
 pub const varint = @import("varint.zig");
@@ -22,4 +23,8 @@ test {
     _ = @import("peer_id_test.zig");
     _ = @import("multiaddr_test.zig");
     _ = @import("signed_key_test.zig");
+}
+
+test {
+    _ = @import("protobuf_test.zig");
 }

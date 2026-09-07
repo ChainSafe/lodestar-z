@@ -322,3 +322,25 @@ test "peer catalog zero hash custody completion invalidates prior policy observa
     try std.testing.expectEqual(@as(usize, 128), c.get(ref).?.custody_groups.?.count());
     try std.testing.expect(c.revision > observed);
 }
+
+test "identify catalog metadata copies only to current full peer and transport generation" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
+    try std.testing.expect(c.updateStatus(ref, first, &.{}, 0));
+    var events: [1]t.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&events));
+    var metadata: @import("../identify/root.zig").Metadata = .{ .agent = try .init("stock") };
+    try std.testing.expect(c.updateIdentify(ref, first, &metadata));
+    metadata.agent.?.bytes[0] = 'x';
+    try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&events));
+    try std.testing.expectEqual(.updated, std.meta.activeTag(events[0]));
+    try std.testing.expectEqualStrings("stock", events[0].updated.identify.?.agent.?.slice());
+    _ = admit(&c, &remote, replacement, .outbound, 1).admitted;
+    try std.testing.expect(c.get(ref).?.identify == null);
+    try std.testing.expect(!c.updateIdentify(ref, first, &metadata));
+    var stale = ref;
+    stale.generation += 1;
+    try std.testing.expect(!c.updateIdentify(stale, replacement, &metadata));
+    try std.testing.expect(c.updateIdentify(ref, replacement, &metadata));
+}

@@ -1042,3 +1042,26 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     try std.testing.expectEqualDeep(active, node.core.service.router.capabilities());
     try std.testing.expectEqual(before.local.metadata.seq_number + 1, node.localState().metadata.seq_number);
 }
+
+test "identify managed advertisement follows committed endpoints and rejected updates preserve it" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{24}));
+    var opts = options(&key);
+    opts.core.service.identify = .{ .agent = "managed", .addresses = &.{.{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19009 } }} };
+    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .engine = .{ .session_capacity = 8, .challenge_capacity = 8, .call_capacity = 8 } };
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const initial = node.core.service.identify.?.local.?;
+    const address = try @import("wire/multiaddr.zig").Multiaddr.decode(initial.addresses[0].bytes[0..initial.addresses[0].len]);
+    try std.testing.expectEqual(node.transport.localAddress(), address.address);
+    var endpoints = node.advertisementEndpoints().?;
+    endpoints.quic = 443;
+    const now = node.last_now;
+    try std.testing.expect(try node.updateLocalWithEndpoints(&node.core.local, node.schedule, endpoints, now));
+    const updated = node.core.service.identify.?.local.?;
+    const next = try @import("wire/multiaddr.zig").Multiaddr.decode(updated.addresses[0].bytes[0..updated.addresses[0].len]);
+    try std.testing.expectEqual(@as(u16, 443), next.address.port());
+    endpoints.quic = 0;
+    try std.testing.expectError(error.InvalidAdvertisement, node.updateLocalWithEndpoints(&node.core.local, node.schedule, endpoints, now));
+    try std.testing.expectEqualDeep(updated, node.core.service.identify.?.local.?);
+}

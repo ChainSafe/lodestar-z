@@ -4,6 +4,7 @@ const custody = @import("custody.zig");
 const reputation = @import("reputation.zig");
 
 pub const Row = struct {
+    identify: ?@import("../identify/root.zig").Metadata = null,
     custody_work: ?custody.Derivation = null,
     custody_context: ?t.ForkContext = null,
     generation: u64 = 0,
@@ -125,6 +126,7 @@ pub const Catalog = struct {
             .disconnect_reason = row.closing_reason,
             .status = row.status,
             .metadata = row.metadata,
+            .identify = row.identify,
             .status_at_ms = row.status_at_ms,
             .metadata_at_ms = row.metadata_at_ms,
             .custody_groups = if (row.custody_work) |work| if (!work.exhausted and work.groups.count() == work.requested) work.groups else null else null,
@@ -202,6 +204,7 @@ pub const Catalog = struct {
     }
 
     fn connect(row: *Row, conn: t.Handle, options: *const t.AdmissionOptions) void {
+        row.identify = null;
         row.custody_work = null;
         row.custody_context = null;
         row.connection = conn;
@@ -295,6 +298,15 @@ pub const Catalog = struct {
         row.status = status.*;
         row.status_at_ms = now_ms;
         row.pending_update = true;
+        return true;
+    }
+
+    pub fn updateIdentify(self: *Catalog, ref: t.PeerRef, conn: t.Handle, metadata: *const @import("../identify/root.zig").Metadata) bool {
+        const row = self.connectedRow(ref, conn) orelse return false;
+        if (row.closing_reason != null) return false;
+        row.identify = metadata.*;
+        self.revision +|= 1;
+        if (row.published or row.status != null) row.pending_update = true;
         return true;
     }
 

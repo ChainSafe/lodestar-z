@@ -55,6 +55,7 @@ pub const DisconnectReason = enum {
     count_pruning,
 };
 pub const Snapshot = struct {
+    identify: ?@import("../identify/root.zig").Metadata = null,
     peer: PeerRef,
     identity: PeerId,
     connection: ?Handle,

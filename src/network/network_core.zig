@@ -177,6 +177,7 @@ pub const NetworkCore = struct {
         self.memory = .{ .transport_bytes = self.reservations.bytes, .transport_windows = self.transport.memoryPlan() };
         self.core = try core_mod.Core.init(allocator, &self.transport.peerId(), &local, options.core);
         errdefer self.core.deinit();
+        if (self.core.service.identify) |*identify| identify.bind(&self.transport.engine);
         self.memory.core_bytes = self.core.memoryPlan().allocated_bytes;
         const event_capacity = @as(usize, options.transport.limits.connections_max) *
             (2 * @import("quic/limits.zig").streams_per_connection + 3);
@@ -192,6 +193,12 @@ pub const NetworkCore = struct {
             try owned.init(allocator, io, discovery_options, options.transport.host, &local, options.schedule, self.transport.localAddress(), self.last_now);
             self.discovery = owned;
         }
+        errdefer if (self.discovery) |owned| {
+            owned.deinit(allocator, io);
+            allocator.destroy(owned);
+        };
+        const identify_local = try self.prepareIdentifyLocal(self.advertisementEndpoints(), self.core.service.router.capabilities());
+        if (self.core.service.identify) |*identify| identify.local = identify_local;
         self.memory.discovery_bytes = self.reservations.bytes - before_discovery;
         self.memory.allocated_bytes = self.reservations.bytes;
         std.debug.assert(self.memory.allocated_bytes == self.memory.transport_bytes + self.memory.core_bytes + self.memory.scratch_bytes + self.memory.discovery_bytes);
@@ -367,6 +374,27 @@ pub const NetworkCore = struct {
         }, now);
     }
 
+    fn prepareIdentifyLocal(self: *const NetworkCore, endpoints: ?AdvertisementEndpoints, capabilities: @import("capabilities.zig").Directional) !?@import("identify/root.zig").Local {
+        const identify = if (self.core.service.identify) |*value| value else return null;
+        var local = identify.local.?;
+        if (endpoints) |announced| {
+            var addresses: [2]t.Address = undefined;
+            var count: usize = 0;
+            if (announced.ip4) |ip| if (announced.quic) |port| {
+                addresses[count] = .{ .ip4 = .{ .octets = ip, .port = port } };
+                count += 1;
+            };
+            if (announced.ip6) |ip| if (announced.quic6) |port| {
+                addresses[count] = .{ .ip6 = .{ .octets = ip, .port = port } };
+                count += 1;
+            };
+            try local.setAddresses(addresses[0..count]);
+        }
+        var encoded: [@import("identify/codec.zig").frame_max + 2]u8 = undefined;
+        _ = try local.encode(capabilities.receive, &encoded);
+        return local;
+    }
+
     /// Prepares every owner before ENR publication; caller sequence input is ignored.
     pub fn applyLocal(self: *NetworkCore, update: *const LocalUpdate, now: Now) !bool {
         if (self.core.stopped) return error.Stopped;
@@ -382,6 +410,7 @@ pub const NetworkCore = struct {
         try validateSchedule(&local, schedule);
         const request = &self.core.service.reqresp.inner;
         try validateForkTable(request.forks[0..request.fork_count], &local.fork);
+        const identify_local = try self.prepareIdentifyLocal(endpoints, capabilities);
         const metadata_changed = !std.meta.eql(local.metadata, self.core.local.metadata);
         if (metadata_changed) local.metadata.seq_number = try peers.enr.nextSequence(local.metadata.seq_number);
         if (std.meta.eql(local, self.core.local) and std.meta.eql(schedule, self.schedule) and std.meta.eql(endpoints, self.advertisementEndpoints()) and std.meta.eql(capabilities, self.core.service.router.capabilities())) return false;
@@ -397,6 +426,7 @@ pub const NetworkCore = struct {
             owned.coordinator.updateFork(&local.fork) catch unreachable;
         }
         // All fallible preparation precedes publication. Both consumers validate the same copy.
+        if (self.core.service.identify) |*identify| identify.local = identify_local;
         self.core.service.router.setCapabilities(capabilities);
         self.core.commitLocal(&local, now);
         self.schedule = schedule;

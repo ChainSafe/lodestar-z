@@ -7,6 +7,7 @@ const Engine = network.quic.engine;
 const max_payload = 10 * 1024 * 1024;
 const topic = "/eth2/01000000/beacon_block/ssz_snappy";
 const ping = [_]u8{ 1, 0, 0, 0, 0, 0, 0, 0 };
+const identify_status = [_]u8{1} ++ [_]u8{0} ** 91;
 const range = [_]u8{0} ** 8 ++ ping ++ ping;
 
 pub const Peer = struct {
@@ -31,6 +32,7 @@ pub const Peer = struct {
     held_since: ?u64 = null,
     finish_calls: usize = 0,
     quit: bool = false,
+    status_accepted: bool = false,
 
     pub fn pump(self: *Peer) !void {
         if (self.steps >= 10_000_000) return error.StepBound;
@@ -58,8 +60,15 @@ pub const Peer = struct {
             },
             else => {},
         };
-        const counts = self.service.process(&self.transport.engine, events[0..result.events], activity[0..result.activity], self.now, &requests, messages[0..self.event_capacity]);
-        for (requests[0..counts.reqresp]) |event| try self.requestEvent(event);
+        var controls: [16]network.reqresp.Event = undefined;
+        var identified: [4]network.identify.Result = undefined;
+        const counts = self.service.processOutputs(&self.transport.engine, events[0..result.events], activity[0..result.activity], self.now, .{ .application = &requests, .control = &controls, .gossipsub = messages[0..self.event_capacity], .identify = &identified });
+        for (requests[0..counts.application]) |event| try self.requestEvent(event);
+        for (controls[0..counts.control]) |event| try self.requestEvent(event);
+        for (identified[0..counts.identify]) |*completion| switch (completion.outcome) {
+            .success => |*metadata| try control.emit(self.allocator, .{ .event = "identified", .agent = if (metadata.agent) |*agent| agent.slice() else null, .identify = metadata.protocols.contains(.identify), .meshsub = metadata.protocols.contains(.{ .meshsub = .v1_2 }), .status2 = metadata.protocols.contains(.{ .reqresp = .status_v2 }) }),
+            .failed => |failure| try control.emit(self.allocator, .{ .event = "identifyFailed", .reason = @tagName(failure) }),
+        };
         for (messages[0..counts.gossipsub]) |event| switch (event) {
             .message => |m| {
                 self.emitted += 1;
@@ -74,6 +83,15 @@ pub const Peer = struct {
     fn requestEvent(self: *Peer, event: network.reqresp.Event) !void {
         switch (event) {
             .request => |r| {
+                if (r.protocol == .status_v2 and self.service.identify != null) {
+                    const remote = try network.peers.control_wire.decodeStatus(.status_v2, r.bytes);
+                    const local = try network.peers.control_wire.decodeStatus(.status_v2, &identify_status);
+                    if (!std.meta.eql(remote, local)) return error.InvalidStatus;
+                    try self.service.reqresp.respond(r.request, &identify_status, null, self.now);
+                    self.status_accepted = true;
+                    try control.emit(self.allocator, .{ .event = "statusAccepted", .protocol = r.protocol.id() });
+                    return;
+                }
                 if (r.protocol != .ping_v1 and r.protocol != .blocks_by_range_v2) return error.UnexpectedProtocol;
                 if (!std.mem.eql(u8, r.bytes, if (r.protocol == .ping_v1) &ping else &range)) return error.InvalidRequestBytes;
                 try control.emit(self.allocator, .{ .event = "request", .protocol = r.protocol.id(), .length = r.bytes.len, .sha256 = hash(r.bytes) });
@@ -123,6 +141,23 @@ pub const Peer = struct {
                 else => return error.NotLoopback,
             }
             self.conn = try self.transport.dial(self.io, &target);
+        } else if (std.mem.eql(u8, c.op, "identifyMode") or std.mem.eql(u8, c.op, "enableGossipRequest")) {
+            if (self.service.identify == null) return error.IdentifyDisabled;
+            var active = network.capabilities.withIdentify(try network.capabilities.forFork(.fulu, true, &.{ .v1_2, .v1_1 }));
+            if (std.mem.eql(u8, c.op, "identifyMode")) {
+                active.request = .initEmpty();
+                for (std.enums.values(network.reqresp.Protocol)) |protocol| if (active.receive.contains(.{ .reqresp = protocol })) {
+                    active.request.insert(.{ .reqresp = protocol });
+                };
+                active.request.insert(.identify);
+            }
+            try self.service.router.validateCapabilities(active);
+            self.service.router.setCapabilities(active);
+        } else if (std.mem.eql(u8, c.op, "identify")) {
+            if (!self.status_accepted) return error.StatusRequired;
+            const conn = self.conn orelse return error.NoConnection;
+            const identify = if (self.service.identify) |*value| value else return error.IdentifyDisabled;
+            try identify.start(&self.service.router, &self.transport.engine, .{ .index = 0, .generation = conn.generation }, conn, self.now);
         } else if (std.mem.eql(u8, c.op, "subscribe")) {
             if (!self.service.gossipsub.subscribe(c.topic orelse topic)) return error.SubscriptionFailed;
         } else if (std.mem.eql(u8, c.op, "publish")) {
@@ -204,9 +239,11 @@ pub fn main(init: std.process.Init) !void {
     const a = gpa.allocator();
     var quotas = network.reqresp.limiter.defaultQuotas();
     quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const identify_enabled = args.len == 2 and std.mem.eql(u8, args[1], "--identify");
     const peer = try a.create(Peer);
     defer a.destroy(peer);
-    peer.* = .{ .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .reqresp = .{ .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .forks = &.{.{ .digest = .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
+    peer.* = .{ .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = if (identify_enabled) .{ .agent = "lodestar-z-identify" } else null, .reqresp = .{ .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .forks = &.{.{ .digest = .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
     defer peer.service.deinit();
     peer.sink = try a.alloc(u8, max_payload);
     defer a.free(peer.sink);
@@ -215,6 +252,7 @@ pub fn main(init: std.process.Init) !void {
     const key = try network.wire.keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ .{31}));
     try peer.transport.init(a, init.io, .{ .host = &key, .bind = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2, .outbound_max = 3 } });
     defer peer.transport.deinit(init.io);
+    defer if (peer.service.identify) |*identify| identify.shutdown(&peer.service.router, &peer.transport.engine);
     defer peer.service.reqresp.shutdown(&peer.service.router, &peer.transport.engine);
     try control.run(peer);
 }
