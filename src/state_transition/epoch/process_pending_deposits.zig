@@ -173,7 +173,7 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "processPendingDeposits - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
+    const pool_size = 200_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 

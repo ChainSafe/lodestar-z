@@ -7,21 +7,20 @@ const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
 const ChunkedLeaf = @import("ChunkedLeaf.zig");
 
-// Allocate until the pool is full, so the next request has to grow (and fail). Returns the filler.
-fn drainPoolToFull(pool: *Node.Pool, out: *std.ArrayList(Node.Id)) !void {
+// Allocate until the fixed pool is full. Returns the filler nodes to the caller for cleanup.
+fn fillPoolToCapacity(pool: *Node.Pool, out: *std.ArrayList(Node.Id)) !void {
     while (pool.createLeafFromUint(0)) |id| {
         try out.append(std.testing.allocator, id);
     } else |err| switch (err) {
         // Match exhaustively so a new error variant breaks the build instead of ending the drain.
-        error.OutOfMemory => {},
+        error.PoolExhausted => {},
     }
 }
 
 // When append's createBranch fails, both `left` (still in self.lefts) and `carry` must be
 // reclaimed. Here they are two different nodes.
-test "FillWithContentsIterator - createBranch OOM with distinct nodes does not leak" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
-    var pool = try Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = failing.allocator(), .pool_size = 4 });
+test "FillWithContentsIterator - pool exhaustion with distinct nodes does not leak" {
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 4 });
     defer pool.deinit();
 
     const baseline = pool.getNodesInUse();
@@ -31,12 +30,11 @@ test "FillWithContentsIterator - createBranch OOM with distinct nodes does not l
 
     var drained: std.ArrayList(Node.Id) = .empty;
     defer drained.deinit(std.testing.allocator);
-    failing.fail_index = failing.alloc_index; // next allocation (growth) fails
-    try drainPoolToFull(&pool, &drained);
+    try fillPoolToCapacity(&pool, &drained);
 
     var iter = Node.FillWithContentsIterator.init(&pool, 1);
     try iter.append(a); // stored in lefts[0], no allocation
-    try std.testing.expectError(error.OutOfMemory, iter.append(b)); // createBranch(a, b) must grow
+    try std.testing.expectError(error.PoolExhausted, iter.append(b));
     iter.deinit(); // must reclaim a (lefts[0]) and b (unref'd in append)
 
     for (drained.items) |id| pool.unref(id);
@@ -45,9 +43,8 @@ test "FillWithContentsIterator - createBranch OOM with distinct nodes does not l
 
 // The all-default path pairs a node with itself (createBranch(X, X)). On failure append must not
 // unref `carry` — it's the same node as `left`, which deinit reclaims; doing both double-frees.
-test "FillWithContentsIterator - createBranch OOM with aliased node does not double-free" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
-    var pool = try Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = failing.allocator(), .pool_size = 4 });
+test "FillWithContentsIterator - pool exhaustion with aliased node does not double-free" {
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 4 });
     defer pool.deinit();
 
     const baseline = pool.getNodesInUse();
@@ -56,12 +53,11 @@ test "FillWithContentsIterator - createBranch OOM with aliased node does not dou
 
     var drained: std.ArrayList(Node.Id) = .empty;
     defer drained.deinit(std.testing.allocator);
-    failing.fail_index = failing.alloc_index; // next allocation (growth) fails
-    try drainPoolToFull(&pool, &drained);
+    try fillPoolToCapacity(&pool, &drained);
 
     var iter = Node.FillWithContentsIterator.init(&pool, 1);
     try iter.append(x); // lefts[0] = x
-    try std.testing.expectError(error.OutOfMemory, iter.append(x)); // createBranch(x, x) must grow
+    try std.testing.expectError(error.PoolExhausted, iter.append(x));
     iter.deinit(); // reclaims x exactly once (carry==left so append did not unref it)
 
     for (drained.items) |id| pool.unref(id);
@@ -180,24 +176,52 @@ test "Pool" {
     try std.testing.expectEqual(branch2_id, next_free.getState(p).nextFree().getState(p).nextFree().getState(p).nextFree().getState(p).nextFree());
 }
 
-test "Pool - automatic capacity growth beyond pre-heat" {
+test "Pool - fixed capacity exhausts, reuses slots, and keeps columns stable" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 }); // intentionally tiny
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 3 });
     defer pool.deinit();
-    const p = &pool;
 
-    var ids: [50]Node.Id = undefined;
-    for (0..50) |i| {
-        ids[i] = try pool.createLeafFromUint(@intCast(i));
-    }
+    // Keep the column addresses so the test can prove that using the fixed slots never moves them.
+    const payloads_ptr = pool.nodes.items(.payload).ptr;
+    const roots_ptr = pool.nodes.items(.root).ptr;
+    const states_ptr = pool.nodes.items(.state).ptr;
 
-    // The backing ArrayList should have grown to accommodate all 50 leaves
-    try std.testing.expect(pool.nodes.len >= max_depth + 50);
+    const first = try pool.createLeafFromUint(1);
+    const second = try pool.createLeafFromUint(2);
+    const third = try pool.createLeafFromUint(3);
+    try std.testing.expectError(error.PoolExhausted, pool.createLeafFromUint(4));
 
-    // All allocated leaves must still be live, then unref
-    for (ids) |id| {
-        try std.testing.expect(!id.getState(p).isFree());
-        pool.unref(id);
+    try std.testing.expectEqual(max_depth + 3, pool.nodes.len);
+    try std.testing.expectEqual(pool.nodes.len, pool.nodes.capacity);
+    try std.testing.expectEqual(payloads_ptr, pool.nodes.items(.payload).ptr);
+    try std.testing.expectEqual(roots_ptr, pool.nodes.items(.root).ptr);
+    try std.testing.expectEqual(states_ptr, pool.nodes.items(.state).ptr);
+    try std.testing.expectEqual(max_depth + 3, pool.getNodesInUse());
+
+    // Once the Pool is full, releasing one slot should make that exact ID available again.
+    pool.unref(second);
+    const replacement = try pool.createLeafFromUint(4);
+    try std.testing.expectEqual(second, replacement);
+    try std.testing.expectError(error.PoolExhausted, pool.createLeafFromUint(5));
+
+    pool.unref(first);
+    pool.unref(replacement);
+    pool.unref(third);
+    try std.testing.expectEqual(max_depth, pool.getNodesInUse());
+}
+
+test "Pool - invalid capacity fails before allocation" {
+    for ([_]u32{
+        Node.State.next_free_mask - max_depth + 1,
+        std.math.maxInt(u32),
+    }) |invalid_capacity| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        try std.testing.expectError(error.InvalidPoolCapacity, Node.Pool.init(.{
+            .page_allocator = failing.allocator(),
+            .allocator = std.testing.allocator,
+            .pool_size = invalid_capacity,
+        }));
+        try std.testing.expectEqual(0, failing.alloc_index);
     }
 }
 
@@ -214,17 +238,6 @@ test "All zero hashes (depth>0) point both children to the previous depth" {
         try std.testing.expectEqual(prev, try id.getLeft(p));
         try std.testing.expectEqual(prev, try id.getRight(p));
     }
-}
-
-test "Node free-list re-uses the lowest recently-freed Id first" {
-    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 2 });
-    defer pool.deinit();
-
-    const n1 = try pool.createLeafFromUint(1);
-    pool.unref(n1); // n1 is back on the freelist
-    const n2 = try pool.createLeafFromUint(2);
-    defer pool.unref(n2);
-    try std.testing.expectEqual(n1, n2); // should recycle the same Id
 }
 
 test "Navigation - invalid node access is rejected" {
@@ -245,14 +258,14 @@ test "Navigation - invalid node access is rejected" {
     try std.testing.expectError(Node.Error.InvalidNode, zero0.getRight(p));
 }
 
-test "alloc returns a set of unique nodes" {
+test "Pool.alloc returns unique nodes and restores partial allocations on exhaustion" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 });
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = max_depth });
     defer pool.deinit();
     const p = &pool;
 
     var nodes: [max_depth]Node.Id = undefined;
-    _ = try p.alloc(&nodes);
+    try p.alloc(&nodes);
     defer p.free(&nodes);
 
     var node_set = std.AutoHashMap(Node.Id, void).init(allocator);
@@ -263,11 +276,23 @@ test "alloc returns a set of unique nodes" {
     }
 
     try std.testing.expectEqual(nodes.len, node_set.count());
+
+    // Leave one slot free and request two. The failed batch must put its temporary slot back.
+    pool.unref(nodes[0]);
+    const nodes_in_use = pool.getNodesInUse();
+    var rejected: [2]Node.Id = undefined;
+    try std.testing.expectError(error.PoolExhausted, pool.alloc(&rejected));
+    try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+
+    // Reusing the same ID proves that the failed batch left the free list intact.
+    const reused = try pool.createLeafFromUint(1);
+    try std.testing.expectEqual(nodes[0], reused);
+    pool.unref(reused);
 }
 
 test "get/setNode" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 });
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4 });
     defer pool.deinit();
     const p = &pool;
 
@@ -391,11 +416,9 @@ test "setNodesAtDepth - early-iteration error frees cleanly without leaking or c
     try std.testing.expectEqual(new_leaf, try new_root.getNode(p, Gindex.fromDepth(1, 0)));
 }
 
-// A later-index OOM makes rollback double-unref the spine onto already-freed slots.
-test "setNodesAtDepth - later-iteration OOM rolls back without panicking on a freed slot" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
-
-    var pool = try Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = std.testing.allocator, .pool_size = 16 });
+// A later-index failure makes rollback double-unref the spine onto already-freed slots.
+test "setNodesAtDepth - later pool exhaustion rolls back without panicking on a freed slot" {
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 16 });
     defer pool.deinit();
 
     const p = &pool;
@@ -409,14 +432,12 @@ test "setNodesAtDepth - later-iteration OOM rolls back without panicking on a fr
     const new0 = try pool.createLeafFromUint(100);
     const new3 = try pool.createLeafFromUint(103);
 
-    // Fill to capacity, then free 2 (iteration 0's path_parents): iteration 1 then
-    // grows past capacity and hits the armed OOM. Within-capacity growth doesn't alloc.
-    failing.fail_index = failing.alloc_index;
+    // Fill to capacity, then free 2 for iteration 0's path. Iteration 1 exhausts the pool.
 
     var filler: std.ArrayList(Node.Id) = .empty;
     defer filler.deinit(std.testing.allocator);
 
-    try drainPoolToFull(&pool, &filler);
+    try fillPoolToCapacity(&pool, &filler);
     pool.unref(filler.pop().?);
     pool.unref(filler.pop().?);
 
@@ -424,9 +445,10 @@ test "setNodesAtDepth - later-iteration OOM rolls back without panicking on a fr
 
     var nodes_in = [_]Node.Id{ new0, new3 };
     const indices = [_]usize{ 0, 3 };
-    try std.testing.expectError(error.OutOfMemory, root.setNodesAtDepth(p, 2, &indices, &nodes_in));
-
-    failing.fail_index = std.math.maxInt(usize); // disarm
+    try std.testing.expectError(
+        error.PoolExhausted,
+        root.setNodesAtDepth(p, 2, &indices, &nodes_in),
+    );
 
     // Only the one already-inserted input leaf (new0) was reclaimed with the
     // torn-down spine; the original tree is intact and nothing leaked.
@@ -448,11 +470,9 @@ test "setNodesAtDepth - later-iteration OOM rolls back without panicking on a fr
     try std.testing.expectEqual(fresh, try ok_root.getNode(p, Gindex.fromDepth(1, 0)));
 }
 
-// Same later-iteration OOM rollback as above, through `setNodes` (gindex API).
-test "setNodes - later-iteration OOM rolls back without panicking on a freed slot" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
-
-    var pool = try Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = std.testing.allocator, .pool_size = 16 });
+// Same later-iteration rollback as above, through `setNodes` (gindex API).
+test "setNodes - later pool exhaustion rolls back without panicking on a freed slot" {
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 16 });
     defer pool.deinit();
 
     const p = &pool;
@@ -466,12 +486,10 @@ test "setNodes - later-iteration OOM rolls back without panicking on a freed slo
     const new3 = try pool.createLeafFromUint(103);
 
     // Same fill-to-capacity + free-2 setup as the setNodesAtDepth variant above.
-    failing.fail_index = failing.alloc_index;
-
     var filler: std.ArrayList(Node.Id) = .empty;
     defer filler.deinit(std.testing.allocator);
 
-    try drainPoolToFull(&pool, &filler);
+    try fillPoolToCapacity(&pool, &filler);
     pool.unref(filler.pop().?);
     pool.unref(filler.pop().?);
 
@@ -479,9 +497,7 @@ test "setNodes - later-iteration OOM rolls back without panicking on a freed slo
 
     var nodes_in = [_]Node.Id{ new0, new3 };
     const gindices = [_]Gindex{ Gindex.fromDepth(2, 0), Gindex.fromDepth(2, 3) };
-    try std.testing.expectError(error.OutOfMemory, root.setNodes(p, &gindices, &nodes_in));
-
-    failing.fail_index = std.math.maxInt(usize); // disarm
+    try std.testing.expectError(error.PoolExhausted, root.setNodes(p, &gindices, &nodes_in));
     try std.testing.expectEqual(in_use_before - 1, pool.getNodesInUse());
 
     for (filler.items) |id| pool.unref(id);
@@ -581,7 +597,7 @@ const test_cases = [_]TestCase{
 
 test "setNodesAtDepth, setNodes vs setNode multiple times" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10 });
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const p = &pool;
 

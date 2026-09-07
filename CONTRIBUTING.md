@@ -92,6 +92,42 @@ zig build run:write_ssz_static_spec_tests
 zig build run:write_bls_spec_tests
 ```
 
+### Test layout
+
+Tests live beside the code they cover, and a module holds at most one `test` block. A single
+inline test works as a usage example. As soon as there is a second, the tests are a suite and move
+into a sibling `<module>_test.zig`, wired back from the module itself:
+
+```zig
+// src/clock/slot_math.zig
+
+// ... implementation ...
+
+test {
+    _ = @import("slot_math_test.zig");
+}
+```
+
+```zig
+// src/clock/slot_math_test.zig
+const std = @import("std");
+const slot_math = @import("slot_math.zig");
+const slotAtMs = slot_math.slotAtMs;
+
+test "slotAtMs returns genesis slot at genesis" {
+    // ...
+}
+```
+
+A few things to keep in mind:
+
+- Name the test file after its module in snake_case. `Node.zig` pairs with `node_test.zig`.
+- Put the `test { _ = @import(...); }` block in the module under test rather than in the package
+  `root.zig`, so moving or deleting a module carries its tests along with it.
+- Do not mark a declaration `pub` just so a test can reach it from the sibling file. Tests that
+  deliberately exercise private internals belong inline; `src/cpu_count.zig` and
+  `src/state_transition/load_state.zig` are examples.
+
 If you created new unit tests, you can run them individually.
 For example, if you made a new unit test in the `ssz` package:
 
@@ -116,6 +152,15 @@ And format all files:
 ```sh
 zig fmt .
 ```
+
+`tidy` is a custom linter for repo-wide rules that a formatter cannot express, currently covering
+test layout and test discovery. CI runs it, and so should you:
+
+```sh
+zig build test:tidy
+```
+
+It takes its file list from `git ls-files`, so run it after `git add` when you add new files.
 
 If you made a change to the bindings, make sure the bindings tests pass:
 

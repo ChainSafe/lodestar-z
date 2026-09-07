@@ -265,3 +265,7 @@ pub const testing = if (builtin.is_test) struct {
     pub const payload_seed = payload_checksum_seed;
     pub const header_seed = header_checksum_seed;
 } else struct {};
+
+test {
+    _ = @import("pkix_test.zig");
+}
