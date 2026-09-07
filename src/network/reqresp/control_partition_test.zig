@@ -210,7 +210,7 @@ test "reqresp partitioned service retains request and chunk bytes through contro
     );
     const request = output[0].request;
     try std.testing.expectEqualSlices(u8, &root, request.bytes);
-    const block = [_]u8{0x5a} ** @import("consensus_types").phase0.SignedBeaconBlock.min_size;
+    const block = [_]u8{0x5a} ** @import("consensus_types").deneb.SignedBeaconBlock.min_size;
     try server.handler.respond(request.request, &block, .{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }, pair.now);
     for (0..16) |_| {
         try pair.pump();

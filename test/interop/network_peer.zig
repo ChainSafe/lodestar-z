@@ -81,7 +81,7 @@ pub const Peer = struct {
                     try self.service.reqresp.respond(r.request, &ping, null, self.now);
                 } else {
                     generate(self.response[0..self.response_size], self.response_seed);
-                    try self.service.reqresp.respond(r.request, self.response[0..self.response_size], .{ .digest = .{ 1, 0, 0, 0 }, .fork = .altair }, self.now);
+                    try self.service.reqresp.respond(r.request, self.response[0..self.response_size], .{ .digest = .{ 1, 0, 0, 0 }, .fork = .deneb }, self.now);
                 }
             },
             .chunk => |c| {
@@ -206,7 +206,7 @@ pub fn main(init: std.process.Init) !void {
     quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
     const peer = try a.create(Peer);
     defer a.destroy(peer);
-    peer.* = .{ .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .reqresp = .{ .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .forks = &.{.{ .digest = .{ 1, 0, 0, 0 }, .fork = .altair }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
+    peer.* = .{ .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .reqresp = .{ .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .forks = &.{.{ .digest = .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
     defer peer.service.deinit();
     peer.sink = try a.alloc(u8, max_payload);
     defer a.free(peer.sink);
