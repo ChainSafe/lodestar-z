@@ -56,9 +56,7 @@ pub fn getAttestationDeltas(epoch_cache: *const EpochCache, cache: *const EpochT
     const prev_epoch_head_stake_by_increment = cache.prev_epoch_unslashed_stake_head_by_increment;
 
     // sqrt first, before factoring out the increment for later usage
-    const total_balance_in_gwei_f64: f64 = @floatFromInt(total_balance_in_gwei);
-    const total_balance_in_gwei_sqrt: f64 = @sqrt(total_balance_in_gwei_f64);
-    const balance_sq_root: u64 = @intFromFloat(total_balance_in_gwei_sqrt);
+    const balance_sq_root: u64 = std.math.sqrt(total_balance_in_gwei);
     const finality_delay = cache.prev_epoch - finalized_epoch;
 
     const BASE_REWARDS_PER_EPOCH = BASE_REWARDS_PER_EPOCH_CONST;
@@ -147,4 +145,36 @@ pub fn getAttestationDeltas(epoch_cache: *const EpochCache, cache: *const EpochT
             }
         }
     }
+}
+
+test "getAttestationDeltas should use exact integer square root for Phase0 rewards and penalties" {
+    const allocator = std.testing.allocator;
+    const EffectiveBalanceIncrementsRc = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrementsRc;
+    const increments = try EffectiveBalanceIncrementsRc.init(allocator, .empty);
+    defer increments.unref();
+    try increments.instance.appendSlice(allocator, &.{ 19, 19 });
+
+    // Only the cache fields read by this Phase0 calculation are needed.
+    var epoch_cache: EpochCache = undefined;
+    epoch_cache.effective_balance_increments = increments;
+    var cache: EpochTransitionCache = undefined;
+    cache.prev_epoch = 1;
+    // This total in Gwei is 74_218_751 squared minus one, which floating-point sqrt rounds up.
+    cache.total_active_stake_by_increment = 5_508_423;
+    cache.prev_epoch_unslashed_stake_source_by_increment = cache.total_active_stake_by_increment;
+    cache.prev_epoch_unslashed_stake_target_by_increment = cache.total_active_stake_by_increment;
+    cache.prev_epoch_unslashed_stake_head_by_increment = cache.total_active_stake_by_increment;
+    cache.flags = &.{
+        FLAG_ELIGIBLE_ATTESTER | FLAG_UNSLASHED | FLAG_PREV_SOURCE_ATTESTER | FLAG_PREV_TARGET_ATTESTER | FLAG_PREV_HEAD_ATTESTER,
+        FLAG_ELIGIBLE_ATTESTER | FLAG_UNSLASHED,
+    };
+    cache.proposer_indices = &.{ 0, 0 };
+    cache.inclusion_delays = &.{ 1, 1 };
+
+    var rewards: [2]u64 = undefined;
+    var penalties: [2]u64 = undefined;
+    try getAttestationDeltas(&epoch_cache, &cache, cache.prev_epoch, &rewards, &penalties);
+
+    try std.testing.expectEqualSlices(u64, &.{ 16_384, 0 }, &rewards);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 12_288 }, &penalties);
 }
