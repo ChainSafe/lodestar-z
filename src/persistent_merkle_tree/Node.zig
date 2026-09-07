@@ -1798,3 +1798,7 @@ pub const FillWithContentsIterator = struct {
         return carry;
     }
 };
+
+test {
+    _ = @import("node_test.zig");
+}

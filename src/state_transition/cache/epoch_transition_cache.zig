@@ -11,9 +11,6 @@ const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const BeaconState = @import("fork_types").BeaconState;
 
-const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
-const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
-
 const attester_status = @import("../utils/attester_status.zig");
 const FLAG_CURR_HEAD_ATTESTER = attester_status.FLAG_CURR_HEAD_ATTESTER;
 const FLAG_CURR_SOURCE_ATTESTER = attester_status.FLAG_CURR_SOURCE_ATTESTER;
@@ -32,7 +29,6 @@ const MIN_ACTIVATION_BALANCE = preset.MIN_ACTIVATION_BALANCE;
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;
 const computeBaseRewardPerIncrement = @import("../utils/sync_committee.zig").computeBaseRewardPerIncrement;
 const processPendingAttestations = @import("../epoch/process_pending_attestations.zig").processPendingAttestations;
-const Node = @import("persistent_merkle_tree").Node;
 
 const BoolArray = std.ArrayList(bool);
 const UsizeArray = std.ArrayList(usize);
@@ -577,48 +573,6 @@ pub const EpochTransitionCache = struct {
     }
 };
 
-test "EpochTransitionCache - finalProcessEpoch" {
-    const allocator = std.testing.allocator;
-    const pool_size = 350_000;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    defer test_state.deinit();
-
-    const fulu_state = try upgradeStateToFulu(
-        allocator,
-        test_state.cached_state.config,
-        test_state.cached_state.epoch_cache,
-        try test_state.cached_state.state.tryCastToFork(.electra),
-    );
-    test_state.cached_state.state.* = .{ .fulu = fulu_state.inner };
-
-    const epoch_cache = test_state.cached_state.epoch_cache;
-    try epoch_cache.finalProcessEpoch(test_state.cached_state.state);
-}
-
-test "EpochTransitionCache.beforeProcessEpoch" {
-    const allocator = std.testing.allocator;
-    const validator_count_arr = &.{ 256, 10_000 };
-
-    inline for (validator_count_arr) |validator_count| {
-        const pool_size = 200_000;
-        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
-        defer pool.deinit();
-
-        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
-        defer test_state.deinit();
-
-        var epoch_transition_cache = try EpochTransitionCache.init(
-            allocator,
-            std.testing.io,
-            test_state.cached_state.config,
-            test_state.cached_state.epoch_cache,
-            test_state.cached_state.state,
-        );
-        defer epoch_transition_cache.deinit(allocator);
-    }
-
-    deinitReusedEpochTransitionCache(std.testing.io);
+test {
+    _ = @import("epoch_transition_cache_test.zig");
 }
