@@ -212,7 +212,7 @@ test "reqresp fails a response whose context bytes name an unknown fork" {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
-                try setup.server.respond(incoming.request, &block, .fulu, setup.pair.now);
+                try setup.server.respond(incoming.request, &block, .{ .digest = fulu_digest, .fork = .fulu }, setup.pair.now);
             },
             .chunk_sent => |progress| try std.testing.expect(setup.server.finish(progress.request, setup.pair.now)),
             else => {},
@@ -380,11 +380,11 @@ test "reqresp holds the next chunk until the host consumes the previous one" {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
-                try setup.server.respond(incoming.request, &blocks[0], .deneb, setup.pair.now);
+                try setup.server.respond(incoming.request, &blocks[0], .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now);
             },
             .chunk_sent => |progress| {
                 if (progress.chunks == 1) {
-                    try setup.server.respond(progress.request, &blocks[1], .deneb, setup.pair.now);
+                    try setup.server.respond(progress.request, &blocks[1], .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now);
                 } else {
                     try std.testing.expect(setup.server.finish(progress.request, setup.pair.now));
                 }
@@ -974,7 +974,7 @@ test "reqresp narrowed chunks retire without FIN and held chunks use host deadli
     for (0..30) |_| {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| switch (event) {
-            .request => |incoming| try setup.server.respond(incoming.request, reply, .deneb, setup.pair.now),
+            .request => |incoming| try setup.server.respond(incoming.request, reply, .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now),
             else => {},
         };
         for (setup.clientEvents()) |event| if (event == .chunk) {
@@ -1483,4 +1483,64 @@ test "reqresp request write preserves already readable native response" {
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events));
     try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
+}
+
+test "reqresp explicit BPO context validates without consuming the serving slot" {
+    const first: reqresp.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
+    const second: reqresp.ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
+    const invalid = [_]?reqresp.ForkEntry{
+        null,
+        .{ .digest = .{ 9, 9, 9, 9 }, .fork = .fulu },
+        .{ .digest = second.digest, .fork = .deneb },
+    };
+    for ([_]reqresp.ForkEntry{ first, second }) |selected| {
+        for (invalid) |context| {
+            var setup: ReqRespPair = .{};
+            try setup.init(.{ .forks = &.{selected} }, .{ .forks = &.{ first, second } });
+            defer setup.deinit();
+            const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_range_v2.info().response_max);
+            defer std.testing.allocator.free(sink);
+            var request: [24]u8 = undefined;
+            _ = try requestBlocks(&setup, &request, 1, sink);
+            const block = [_]u8{7} ** 4_000;
+            var chunks: u32 = 0;
+            var done = false;
+            for (0..80) |_| {
+                try setup.pumpOnce();
+                for (setup.serverEvents()) |event| switch (event) {
+                    .request => |incoming| {
+                        try std.testing.expectError(error.UnknownFork, setup.server.respond(incoming.request, &block, context, setup.pair.now));
+                        try setup.server.respond(incoming.request, &block, selected, setup.pair.now);
+                    },
+                    .chunk_sent => |progress| try std.testing.expect(setup.server.finish(progress.request, setup.pair.now)),
+                    .failed => return error.TestUnexpectedResult,
+                    else => {},
+                };
+                for (setup.clientEvents()) |event| switch (event) {
+                    .chunk => |chunk| {
+                        try std.testing.expectEqual(selected.fork, chunk.fork.?);
+                        try std.testing.expectEqualSlices(u8, &block, chunk.bytes);
+                        chunks += 1;
+                        try std.testing.expect(setup.client.consume(chunk.request, setup.pair.now));
+                    },
+                    .done => done = true,
+                    .failed => return error.TestUnexpectedResult,
+                    else => {},
+                };
+                if (done) break;
+            }
+            try std.testing.expect(done);
+            try std.testing.expectEqual(@as(u32, 1), chunks);
+        }
+    }
+}
+
+test "reqresp rejects duplicate digests before allocating" {
+    const first: reqresp.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    for ([_]@import("config").ForkSeq{ .fulu, .deneb }) |fork| {
+        try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(failing.allocator(), .{
+            .forks = &.{ first, .{ .digest = first.digest, .fork = fork } },
+        }));
+    }
 }

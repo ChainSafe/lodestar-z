@@ -703,10 +703,10 @@ pub const Core = struct {
         self: *Core,
         request: rr.RequestHandle,
         bytes: []const u8,
-        fork: ?@import("config").ForkSeq,
+        context: ?rr.ForkEntry,
         now: Now,
     ) !void {
-        try self.service.reqresp.respond(request, bytes, fork, now);
+        try self.service.reqresp.respond(request, bytes, context, now);
     }
     pub fn respondError(
         self: *Core,

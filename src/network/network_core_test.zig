@@ -203,7 +203,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
         const received = b.step(std.testing.io, tick, 100, .{ .application = &app }, 1);
         if (received.failure) |err| return err;
         for (app[0..received.counts.application]) |event| switch (event) {
-            .request => |value| try b.respond(value.request, &response, .fulu, tick),
+            .request => |value| try b.respond(value.request, &response, .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }, tick),
             .chunk_sent => |value| try std.testing.expect(b.finish(value.request, tick)),
             .failed => return error.ApplicationFailed,
             else => {},
@@ -824,4 +824,59 @@ test "managed beacon idle scans do not manufacture immediate deadlines" {
         try std.testing.expect(node.nextWakeup(now, .{}).? > now.mono_ms);
     }
     try std.testing.expectEqual(calls, node.reservations.allocation_calls);
+}
+
+test "managed runtime BPO same-fork digest transition updates status and advertisement" {
+    const rr = @import("reqresp/reqresp.zig");
+    const first: rr.ForkEntry = .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu };
+    const second: rr.ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
+    var node: runtime.NetworkCore = undefined;
+    try node.initManaged(std.testing.allocator, std.testing.io, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+        .configuration = .{ .profile = .small, .seed = 1, .forks = &.{ first, second } },
+        .local = .{
+            .fork = .{ .digest = first.digest, .fork = first.fork },
+            .status = .{ .fork_digest = first.digest, .earliest_available_slot = 0 },
+            .metadata = .{ .custody_group_count = 1 },
+        },
+        .discovery = .{ .bind = .{ .ip4 = .loopback(0) } },
+    });
+    defer node.deinit(std.testing.io);
+    const initial = node.localRecord().?.sequence;
+    var local = node.localState();
+    try std.testing.expectEqual(first.digest, local.status.fork_digest);
+    local.fork.digest = second.digest;
+    local.status.fork_digest = second.digest;
+    try std.testing.expect(try node.updateLocal(&local, .{}, try @import("driver.zig").currentTime(std.testing.io)));
+    try std.testing.expectEqual(second.digest, node.localState().status.fork_digest);
+    try std.testing.expectEqual(second.digest, node.localState().fork.digest);
+    try std.testing.expectEqual(second.fork, node.localState().fork.fork);
+    try std.testing.expectEqual(initial + 1, node.localRecord().?.sequence);
+    const candidate = try @import("peers/enr.zig").decode(node.localRecord().?, &local.fork);
+    try std.testing.expectEqual(second.digest, candidate.fork.digest);
+    for ([_]rr.ForkEntry{
+        .{ .digest = .{ 9, 9, 9, 9 }, .fork = .fulu },
+        .{ .digest = second.digest, .fork = .gloas },
+    }) |invalid| {
+        local.fork = .{ .digest = invalid.digest, .fork = invalid.fork };
+        local.status.fork_digest = invalid.digest;
+        try std.testing.expectError(error.UnknownFork, node.updateLocal(&local, .{}, node.last_now));
+        try std.testing.expectEqual(second.digest, node.localState().status.fork_digest);
+        try std.testing.expectEqual(second.fork, node.localState().fork.fork);
+        try std.testing.expectEqual(initial + 1, node.localRecord().?.sequence);
+    }
+}
+
+test "managed runtime BPO duplicate digest validation precedes allocation" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
+    var node: runtime.NetworkCore = undefined;
+    var opts = options(&key);
+    opts.core.service.reqresp.forks = &.{
+        .{ .digest = @splat(0), .fork = .phase0 },
+        .{ .digest = @splat(0), .fork = .fulu },
+    };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.InvalidOptions, node.init(failing.allocator(), std.testing.io, opts));
 }

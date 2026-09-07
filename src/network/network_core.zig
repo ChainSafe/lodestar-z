@@ -308,8 +308,8 @@ pub const NetworkCore = struct {
     pub fn consume(self: *NetworkCore, request: rr.RequestHandle, now: Now) bool {
         return self.core.consume(request, now);
     }
-    pub fn respond(self: *NetworkCore, request: rr.RequestHandle, bytes: []const u8, fork: ?t.ForkSeq, now: Now) !void {
-        try self.core.respond(request, bytes, fork, now);
+    pub fn respond(self: *NetworkCore, request: rr.RequestHandle, bytes: []const u8, context: ?rr.ForkEntry, now: Now) !void {
+        try self.core.respond(request, bytes, context, now);
     }
     pub fn respondError(self: *NetworkCore, request: rr.RequestHandle, code: u8, message: []const u8, now: Now) !void {
         try self.core.respondError(request, code, message, now);
@@ -477,10 +477,9 @@ fn earlier(current: ?u64, deadline: u64) u64 {
     return @min(current orelse deadline, deadline);
 }
 fn validateForkTable(table: []const rr.ForkEntry, context: *const t.ForkContext) !void {
-    if (table.len > 64) return error.InvalidOptions;
+    try rr.reqresp.validateForkTable(table);
     var found = false;
-    for (table, 0..) |entry, i| {
-        for (table[0..i]) |old| if (std.mem.eql(u8, &old.digest, &entry.digest) or old.fork == entry.fork) return error.InvalidOptions;
+    for (table) |entry| {
         if (std.mem.eql(u8, &entry.digest, &context.digest) and entry.fork == context.fork) found = true;
     }
     if (!found) return error.UnknownFork;

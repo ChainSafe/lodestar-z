@@ -1,5 +1,4 @@
 const std = @import("std");
-const config = @import("config");
 const engine_mod = @import("../quic/engine.zig");
 const routing = @import("../router.zig");
 const types = @import("../types.zig");
@@ -81,10 +80,10 @@ pub const Handler = struct {
         self: *Handler,
         handle: RequestHandle,
         ssz: []const u8,
-        fork: ?config.ForkSeq,
+        context: ?reqresp.ForkEntry,
         now: Now,
     ) reqresp.RespondError!void {
-        return self.inner.respond(handle, ssz, fork, now);
+        return self.inner.respond(handle, ssz, context, now);
     }
 
     pub fn respondError(
