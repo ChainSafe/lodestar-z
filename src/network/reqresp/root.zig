@@ -1,5 +1,7 @@
 pub const codec = @import("codec.zig");
 pub const constants = @import("constants.zig");
+pub const request_policy = @import("request_policy.zig");
+pub const admission = @import("admission.zig");
 pub const limiter = @import("limiter.zig");
 pub const response_bounds = @import("response_bounds.zig");
 pub const protocol = @import("protocol.zig");
@@ -24,6 +26,8 @@ pub const ForkEntry = reqresp.ForkEntry;
 pub const Counters = reqresp.Counters;
 
 test {
+    _ = @import("admission_test.zig");
+    _ = @import("request_policy_test.zig");
     _ = codec;
     _ = constants;
     _ = limiter;

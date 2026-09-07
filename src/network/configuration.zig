@@ -59,7 +59,7 @@ pub fn resolve(request: Request) !Resolved {
         gossip_options.decompressed_arena_bytes = c.MAX_PAYLOAD_SIZE + @import("gossipsub/topic.zig").topic_max_len;
         gossip_options.large_pool_count = 1;
     }
-    const result: Resolved = .{
+    var result: Resolved = .{
         .limits = limits,
         .byte_limit = request.byte_limit orelse if (small) 80 * 1024 * 1024 else 256 * 1024 * 1024,
         .core = .{
@@ -82,6 +82,21 @@ pub fn resolve(request: Request) !Resolved {
                 .gossipsub = request.gossip orelse gossip_options,
             },
         },
+    };
+    const requests = &result.core.service.reqresp;
+    if (requests.request_policy) |*configuration| if (requests.admission == null) {
+        const policy = try @import("reqresp/request_policy.zig").Policy.init(configuration);
+        var admission: @import("reqresp/admission.zig").Options = undefined;
+        admission.identities = peer_options.capacity;
+        for (0..@import("config").ForkSeq.count) |i| {
+            admission.peer[i] = policy.defaultQuotas(@enumFromInt(i));
+            admission.global[i] = @import("reqresp/limiter.zig").defaultQuotas();
+            for (0..@import("reqresp/protocol.zig").Protocol.count) |j| {
+                const which: @import("reqresp/protocol.zig").Protocol = @enumFromInt(j);
+                if (which.isControl()) admission.global[i][j].tokens = @max(admission.peer[i][j].tokens, requests.inbound_max);
+            }
+        }
+        requests.admission = admission;
     };
     try validate(result.limits, result.core);
     if (result.core.service.reqresp.outbound_control_reserved == 0 or result.core.service.reqresp.inbound_control_reserved == 0 or
@@ -150,4 +165,36 @@ test "managed configuration validates complete router and score sections" {
     var options = base.core.service.gossipsub;
     options.score_params.decay_interval_ms = 0;
     try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .gossip = options }));
+}
+
+test "managed runtime request admission derives retained capacity quotas and control reservation" {
+    const base = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
+    var requests = base.core.service.reqresp;
+    requests.request_policy = @import("reqresp/request_policy_test.zig").fixture();
+    const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = requests });
+    const admission = resolved.core.service.reqresp.admission.?;
+    try std.testing.expectEqual(resolved.core.peers.capacity, admission.identities);
+    const ForkSeq = @import("config").ForkSeq;
+    const Protocol = @import("reqresp/protocol.zig").Protocol;
+    try std.testing.expectEqual(@as(u32, 128), admission.peer[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.blocks_by_root_v2)].tokens);
+    try std.testing.expectEqual(@as(u32, 1024), admission.peer[@intFromEnum(ForkSeq.phase0)][@intFromEnum(Protocol.blocks_by_root_v2)].tokens);
+    try std.testing.expectEqual(@as(u32, resolved.core.service.reqresp.inbound_max), admission.global[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.ping_v1)].tokens);
+    requests.admission = admission;
+    requests.admission.?.global[0][0].tokens = 0;
+    try std.testing.expectError(error.InvalidQuota, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = requests }));
+}
+
+test "managed runtime request admission memory plan measures both retained profiles" {
+    for ([_]Profile{ .small, .beacon_node }) |profile| {
+        const base = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{} });
+        var requests = base.core.service.reqresp;
+        requests.request_policy = @import("reqresp/request_policy_test.zig").fixture();
+        const resolved = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{}, .reqresp = requests });
+        var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var handler = try @import("reqresp/handler.zig").Handler.init(allocator.allocator(), resolved.core.service.reqresp);
+        defer handler.deinit();
+        const plan = handler.memoryPlan();
+        try std.testing.expectEqual(allocator.allocated_bytes, plan.total_bytes - plan.facade_bytes);
+        std.debug.print("request admission memory {s}: retained={d} admission={d} facade={d} slots={d} io={d} output_limiter={d} sinks={d} total={d}\n", .{ @tagName(profile), resolved.core.peers.capacity, plan.admission_bytes, plan.facade_bytes, plan.slot_bytes, plan.io_bytes, plan.limiter_bytes, plan.request_sink_bytes, plan.total_bytes });
+    }
 }

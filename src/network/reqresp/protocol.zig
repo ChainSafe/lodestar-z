@@ -154,13 +154,13 @@ fn entry(comptime protocol: Protocol) Info {
         .blocks_by_range_v2 => chunked(
             ct.phase0.BeaconBlocksByRangeRequest.fixed_size,
             ct.phase0.BeaconBlocksByRangeRequest.fixed_size,
-            consensus.MAX_REQUEST_BLOCKS_DENEB,
+            consensus.MAX_REQUEST_BLOCKS,
             128,
         ),
         .blocks_by_root_v2 => chunked(
             0,
-            ct.deneb.BeaconBlockRootsDeneb.max_size,
-            consensus.MAX_REQUEST_BLOCKS_DENEB,
+            ct.phase0.BeaconBlockRoots.max_size,
+            consensus.MAX_REQUEST_BLOCKS,
             128,
         ),
         .blob_sidecars_by_range_v1 => chunked(

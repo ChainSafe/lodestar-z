@@ -24,6 +24,9 @@ pub const Overrides = struct {
     quota_timeout_ms: u64 = 60_000,
     quotas: ?@import("limiter.zig").Quotas = null,
     forks: ?[]const reqresp.ForkEntry = null,
+    request_policy: ?@import("request_policy.zig").Config = null,
+    request_fork: @import("config").ForkSeq = .phase0,
+    admission: ?@import("admission.zig").Options = null,
 };
 
 pub const ReqRespPair = struct {
@@ -43,6 +46,7 @@ pub const ReqRespPair = struct {
     client_count: usize = 0,
     server_events: [16]Event = undefined,
     server_count: usize = 0,
+    server_event_capacity: usize = 16,
     unclaimed: usize = 0,
 
     pub fn init(self: *ReqRespPair, client: Overrides, server: Overrides) !void {
@@ -74,6 +78,9 @@ pub const ReqRespPair = struct {
             .progress_timeout_ms = overrides.progress_timeout_ms,
             .forks = overrides.forks orelse forks,
             .quotas = overrides.quotas,
+            .request_policy = overrides.request_policy,
+            .request_fork = overrides.request_fork,
+            .admission = overrides.admission,
             .host_timeout_ms = overrides.host_timeout_ms,
             .quota_timeout_ms = overrides.quota_timeout_ms,
         };
@@ -130,7 +137,7 @@ pub const ReqRespPair = struct {
         const server_active = self.pair.server.driverView().takeActivity(&activity);
         for (activity[0..server_active]) |conn| self.server.connectionActivity(conn);
         self.client_count = self.client.pump(&self.pair.client, &self.client_neg, now, &self.client_events);
-        self.server_count = self.server.pump(&self.pair.server, &self.server_neg, now, &self.server_events);
+        self.server_count = self.server.pump(&self.pair.server, &self.server_neg, now, self.server_events[0..self.server_event_capacity]);
         try self.pair.pump();
     }
 

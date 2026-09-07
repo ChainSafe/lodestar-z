@@ -140,7 +140,7 @@ pub const Handler = struct {
         plan.facade_bytes = @sizeOf(Handler);
         plan.request_sink_bytes = self.sink_arena.len;
         plan.total_bytes = plan.facade_bytes + plan.slot_bytes + plan.io_bytes +
-            plan.limiter_bytes + plan.request_sink_bytes;
+            plan.limiter_bytes + plan.admission_bytes + plan.request_sink_bytes;
         return plan;
     }
 
