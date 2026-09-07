@@ -164,6 +164,7 @@ pub const Core = struct {
         errdefer a.free(policy_scratch);
         var service_options = options.service;
         service_options.automatic_gossip_admission = false;
+        service_options.reqresp.request_fork = copied.fork.fork;
         const service = try service_mod.Service.init(a, service_options);
         return .{
             .allocator = a,
@@ -566,6 +567,7 @@ pub const Core = struct {
             self.control.forkUpdated(&self.service, &self.catalog, self.local.fork, now);
         }
         self.local = copied;
+        self.service.reqresp.inner.setRequestFork(copied.fork.fork);
         for (self.local.fork.custody_groups..128) |index| self.demand.coverage.custody.unset(index);
         var budget: u16 = 0;
         _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);

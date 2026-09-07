@@ -52,6 +52,7 @@ pub const Server = struct {
     timeout_ms: u64 = 0,
     chunks: u32 = 0,
     chunks_max: u32 = 1,
+    request_fork: @import("config").ForkSeq = .phase0,
     io: RequestIO = .{},
     error_message: [codec.error_message_max]u8 = undefined,
     error_len: u16 = 0,
@@ -173,10 +174,26 @@ pub const Server = struct {
                     slot.io.decoder.payload()
                 else
                     &.{};
-                slot.chunks_max = protocol.requestChunkLimit(slot.protocol, payload) catch {
-                    Server.rejectRequest(owner, slot, now);
-                    return;
-                };
+                if (owner.policy) |*policy| {
+                    owner.counters.inspected +|= 1;
+                    const inspected = policy.inspect(slot.protocol, payload, slot.request_fork) catch {
+                        owner.counters.malformed +|= 1;
+                        _ = takeAdmission(owner, engine, slot, 1, now);
+                        Server.rejectRequest(owner, slot, now);
+                        return;
+                    };
+                    slot.chunks_max = inspected.chunks_max;
+                    if (!takeAdmission(owner, engine, slot, inspected.charged_cost, now)) {
+                        reject(owner, slot, constants.result_server_error, "rate limited", now);
+                        return;
+                    }
+                    owner.counters.admitted +|= 1;
+                } else {
+                    slot.chunks_max = protocol.requestChunkLimit(slot.protocol, payload) catch {
+                        Server.rejectRequest(owner, slot, now);
+                        return;
+                    };
+                }
                 slot.pending_event = .{ .request = .{
                     .request = slot.handle(index),
                     .peer = slot.conn,
@@ -191,15 +208,33 @@ pub const Server = struct {
     }
 
     pub fn rejectRequest(owner: *ReqResp, slot: *Server, now: Now) void {
-        const message = "invalid request";
+        reject(owner, slot, constants.result_invalid_request, "invalid request", now);
+    }
+
+    fn takeAdmission(owner: *ReqResp, engine: *Engine, slot: *Server, cost: u128, now: Now) bool {
+        const identity = engine.peerId(slot.conn) orelse return false;
+        switch (owner.admission.?.take(&identity, slot.protocol, cost, slot.request_fork, now.mono_ms)) {
+            .allowed => {
+                owner.counters.charged_work +|= cost;
+                return true;
+            },
+            .peer_quota => owner.counters.peer_refusals +|= 1,
+            .global_quota => owner.counters.aggregate_refusals +|= 1,
+            .identity_capacity => owner.counters.identity_capacity_refusals +|= 1,
+        }
+        return false;
+    }
+
+    fn reject(owner: *ReqResp, slot: *Server, code: u8, message: []const u8, now: Now) void {
+        assert(message.len <= slot.error_message.len);
         @memcpy(slot.error_message[0..message.len], message);
-        slot.error_len = message.len;
+        slot.error_len = @intCast(message.len);
         slot.io.decoding = false;
         slot.state = .serving;
         Server.queueChunk(
             owner,
             slot,
-            constants.result_invalid_request,
+            code,
             null,
             slot.error_message[0..message.len],
             true,
@@ -345,6 +380,7 @@ pub const Server = struct {
         }
         slot.* = .{
             .state = .receiving_request,
+            .request_fork = owner.request_fork,
             .generation = slot.generation + 1,
             .conn = stream.conn,
             .stream = stream,

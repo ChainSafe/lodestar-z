@@ -1544,3 +1544,59 @@ test "reqresp rejects duplicate digests before allocating" {
         }));
     }
 }
+
+test "reqresp request admission host capacity cancellation and quota error write failure retain debt" {
+    var setup: ReqRespPair = .{};
+    try setup.init(.{}, .{
+        .request_policy = @import("request_policy_test.zig").fixture(),
+        .admission = .{ .identities = 1, .peer = @import("admission_test.zig").quotas(1, 86_400_000), .global = @import("admission_test.zig").quotas(100, 86_400_000) },
+    });
+    defer setup.deinit();
+    const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
+    defer std.testing.allocator.free(sink);
+    setup.server_event_capacity = 0;
+    const outbound = try setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .blocks_by_root_v2, &.{}, sink, .{}, setup.pair.now);
+    for (0..50) |_| {
+        try setup.pumpOnce();
+        if (setup.server.counters.admitted == 1) break;
+    }
+    try std.testing.expectEqual(@as(u64, 1), setup.server.counters.admitted);
+    try std.testing.expectEqual(@as(usize, 0), setup.server_count);
+    const first = &setup.server.inbound[0];
+    const incoming = first.handle(0);
+    try std.testing.expect(first.pending_event.? == .request);
+    try std.testing.expect(setup.server.cancel(incoming));
+    try std.testing.expect(setup.client.cancel(outbound));
+    setup.server_event_capacity = 16;
+    for (0..4) |_| try setup.pumpOnce();
+    try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
+    _ = try setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .blocks_by_root_v2, &.{}, sink, .{}, setup.pair.now);
+    var refused = false;
+    for (0..50) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| try std.testing.expect(event != .request);
+        if (setup.server.counters.peer_refusals == 1) {
+            refused = true;
+            break;
+        }
+    }
+    try std.testing.expect(refused);
+    const replacement = &setup.server.inbound[0];
+    try std.testing.expect(replacement.generation > incoming.generation);
+    try std.testing.expectEqualSlices(u8, "rate limited", replacement.pending_ssz);
+    setup.pair.server.closeStream(replacement.stream, 0);
+    var failed = false;
+    for (0..20) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| {
+            try std.testing.expect(event != .request);
+            if (event == .failed) failed = true;
+        }
+        if (failed) break;
+    }
+    try std.testing.expect(failed);
+    try setup.pumpOnce();
+    try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
+    try std.testing.expectEqual(@as(u128, 1), setup.server.counters.charged_work);
+    try std.testing.expectEqual(@as(usize, 0), setup.server.resourceSnapshot().pending_events);
+}

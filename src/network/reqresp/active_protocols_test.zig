@@ -325,3 +325,216 @@ test "reqresp active light client traffic preserves control reserve and cancella
         try std.testing.expectEqual(@as(usize, 0), router.negotiator.active());
     }
 }
+
+const policy_fixture = @import("request_policy_test.zig").fixture;
+const admission_quotas = @import("admission_test.zig").quotas;
+
+fn emptyExchange(setup: *harness.ReqRespPair, which: protocol.Protocol, bytes: []const u8, allowed: bool, code: u8) !void {
+    const sink = try std.testing.allocator.alloc(u8, which.info().response_max);
+    defer std.testing.allocator.free(sink);
+    _ = try request(setup, which, bytes, sink, .{});
+    var received: u32 = 0;
+    var terminal = false;
+    var served = false;
+    for (0..100) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| switch (event) {
+            .request => |incoming| {
+                received += 1;
+                try std.testing.expect(allowed);
+                try std.testing.expect(setup.server.finish(incoming.request, setup.pair.now));
+            },
+            .served => served = true,
+            .failed => return error.TestUnexpectedResult,
+            else => {},
+        };
+        for (setup.clientEvents()) |event| switch (event) {
+            .done => |done| {
+                try std.testing.expect(allowed);
+                try std.testing.expectEqual(@as(u32, 0), done.chunks);
+                terminal = true;
+            },
+            .failed => |failed| {
+                try std.testing.expect(!allowed);
+                try std.testing.expectEqual(code, failed.reason.peer_error.code);
+                const message = if (code == 2) "rate limited" else "invalid request";
+                try std.testing.expectEqualSlices(u8, message, setup.client.errorMessage(failed.request));
+                terminal = true;
+            },
+            else => {},
+        };
+        if (terminal and served) break;
+    }
+    try std.testing.expect(terminal and served);
+    try std.testing.expectEqual(@as(u32, if (allowed) 1 else 0), received);
+    try setup.pumpOnce();
+    try std.testing.expectEqual(@as(u16, 0), setup.client.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
+}
+
+test "reqresp request admission empty success refusal malformed attempts and control independence" {
+    var setup: harness.ReqRespPair = .{};
+    try setup.init(.{}, .{
+        .request_policy = policy_fixture(),
+        .request_fork = .fulu,
+        .admission = .{ .identities = 2, .peer = admission_quotas(2, 86_400_000), .global = admission_quotas(100, 86_400_000) },
+    });
+    defer setup.deinit();
+    try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
+    try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
+    try emptyExchange(&setup, .blocks_by_root_v2, &.{}, false, 2);
+    try emptyExchange(&setup, .blocks_by_root_v2, &.{0}, false, 1);
+    var bytes = [_]u8{0} ** 24;
+    std.mem.writeInt(u64, bytes[8..16], 3, .little);
+    try emptyExchange(&setup, .blocks_by_range_v2, &bytes, false, 2);
+    std.mem.writeInt(u64, bytes[8..16], 1, .little);
+    try emptyExchange(&setup, .blocks_by_range_v2, &bytes, true, 0);
+    try emptyExchange(&setup, .ping_v1, bytes[0..8], true, 0);
+    const status = harness.statusBytes(1);
+    try emptyExchange(&setup, .status_v1, &status, true, 0);
+    try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{0}, false, 1);
+    try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, true, 0);
+    try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, false, 2);
+    std.mem.writeInt(u32, bytes[16..20], 20, .little);
+    try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], true, 0);
+    try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], true, 0);
+    try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], false, 2);
+    try std.testing.expectEqual(@as(u64, 14), setup.server.counters.inspected);
+    try std.testing.expectEqual(@as(u64, 8), setup.server.counters.admitted);
+    try std.testing.expectEqual(@as(u128, 9), setup.server.counters.charged_work);
+    try std.testing.expectEqual(@as(u64, 5), setup.server.counters.peer_refusals);
+    try std.testing.expectEqual(@as(u64, 2), setup.server.counters.malformed);
+}
+
+test "reqresp request admission outbound validation ceiling and owner fork snapshot" {
+    var setup: harness.ReqRespPair = .{};
+    const options: harness.Overrides = .{
+        .request_policy = policy_fixture(),
+        .request_fork = .phase0,
+        .admission = .{ .identities = 2, .peer = admission_quotas(2048, 1000), .global = admission_quotas(2048, 1000) },
+    };
+    try setup.init(options, options);
+    defer setup.deinit();
+    const sink = try std.testing.allocator.alloc(u8, protocol.Protocol.blocks_by_root_v2.info().response_max);
+    defer std.testing.allocator.free(sink);
+    var roots = [_]u8{0} ** (129 * 32);
+    try std.testing.expectError(error.InvalidRequest, request(&setup, .blocks_by_root_v2, roots[0..1], sink, .{}));
+    try std.testing.expectEqual(@as(u16, 0), setup.client.active().outbound);
+    try std.testing.expectError(error.InvalidRequestOptions, request(&setup, .blocks_by_root_v2, &roots, sink, .{ .expected_chunks = 130 }));
+    const handle = try request(&setup, .blocks_by_root_v2, &roots, sink, .{});
+    setup.client.setRequestFork(.fulu);
+    try std.testing.expectEqual(@as(u32, 129), setup.client.outbound[handle.index].chunks_max);
+    var accepted = false;
+    var completed = false;
+    for (0..60) |_| {
+        try setup.pumpOnce();
+        for (setup.server.inbound) |*slot| if (slot.state == .receiving_request) {
+            accepted = true;
+            try std.testing.expectEqual(config.ForkSeq.phase0, slot.request_fork);
+            setup.server.setRequestFork(.fulu);
+        };
+        for (setup.serverEvents()) |event| if (event == .request) {
+            try std.testing.expect(accepted);
+            try std.testing.expectEqual(@as(u32, 129), setup.server.inbound[event.request.request.index].chunks_max);
+            try std.testing.expect(setup.server.finish(event.request.request, setup.pair.now));
+        };
+        if (setup.clientEvents().len > 0 and setup.clientEvents()[0] == .done) {
+            completed = true;
+            break;
+        }
+    }
+    try std.testing.expect(accepted and completed);
+    try std.testing.expectError(error.InvalidRequest, request(&setup, .blocks_by_root_v2, &roots, sink, .{}));
+    try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
+}
+
+fn admissionAllocation(allocator: std.mem.Allocator) !void {
+    var owner = try reqresp.ReqResp.init(allocator, .{
+        .forks = &.{},
+        .outbound_max = 1,
+        .inbound_max = 1,
+        .request_policy = policy_fixture(),
+        .admission = .{ .identities = 2, .peer = admission_quotas(2, 1000), .global = admission_quotas(100, 1000) },
+    });
+    defer owner.deinit();
+    try std.testing.expect(owner.options.request_policy == null);
+    try std.testing.expectEqual(owner.admission.?.memoryPlan().allocated_bytes, owner.memoryPlan().admission_bytes);
+}
+
+test "reqresp request admission owner allocation failure prefixes and paired options" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, admissionAllocation, .{});
+    try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(std.testing.allocator, .{ .forks = &.{}, .request_policy = policy_fixture() }));
+    try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(std.testing.allocator, .{ .forks = &.{}, .admission = .{ .identities = 2, .peer = admission_quotas(2, 1000), .global = admission_quotas(100, 1000) } }));
+}
+
+test "reqresp request admission concurrent connections and reconnect retain full identity debt" {
+    const support = @import("../test_support.zig");
+    var setup: harness.ReqRespPair = .{};
+    try setup.init(.{}, .{
+        .request_policy = policy_fixture(),
+        .admission = .{ .identities = 2, .peer = admission_quotas(2, 86_400_000), .global = admission_quotas(100, 86_400_000) },
+    });
+    defer setup.deinit();
+    try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
+    const initial = setup.handles;
+    const second_connection = try support.connectPair(&setup.pair);
+    setup.handles = .{ .client = second_connection.client, .server = second_connection.server };
+    try std.testing.expect(!std.meta.eql(initial.server, setup.handles.server));
+    try std.testing.expect(setup.pair.server.peerId(initial.server).?.eql(&setup.pair.server.peerId(setup.handles.server).?));
+    try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
+    try emptyExchange(&setup, .blocks_by_root_v2, &.{}, false, 2);
+    try std.testing.expect(setup.pair.client.close(initial.client, 0));
+    try std.testing.expect(setup.pair.client.close(setup.handles.client, 0));
+    for (0..8) |_| try setup.pumpOnce();
+    const reconnected = try support.connectPair(&setup.pair);
+    setup.handles = .{ .client = reconnected.client, .server = reconnected.server };
+    try emptyExchange(&setup, .blocks_by_root_v2, &.{}, false, 2);
+    try std.testing.expectEqual(@as(u64, 2), setup.server.counters.admitted);
+    try std.testing.expectEqual(@as(u64, 2), setup.server.counters.peer_refusals);
+}
+
+fn changeClientIdentity(setup: *harness.ReqRespPair, seed: u8) !void {
+    const support = @import("../test_support.zig");
+    const keys = @import("../wire/keys.zig");
+    const tls = @import("../tls/context.zig");
+    const Engine = @import("../quic/engine.zig").Engine;
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{seed}));
+    const ctx = try tls.Context.init(&key, support.now_unix, @splat(seed));
+    const replacement = Engine.init(std.testing.allocator, .{
+        .tls = ctx,
+        .limits = .{},
+        .local = support.client_address,
+        .seed = seed,
+    }) catch |err| {
+        var failed_context = ctx;
+        failed_context.deinit();
+        return err;
+    };
+    setup.client.shutdown(&setup.pair.client, &setup.client_neg);
+    setup.pair.client.deinit();
+    setup.pair.client = replacement;
+    setup.pair.client_ctx = ctx;
+    const connection = try support.connectPair(&setup.pair);
+    setup.handles = .{ .client = connection.client, .server = connection.server };
+}
+
+test "reqresp request admission distinct identity peer aggregate and retained capacity decisions" {
+    for ([_]u16{ 1, 2 }) |identities| {
+        var setup: harness.ReqRespPair = .{};
+        var global = admission_quotas(100, 86_400_000);
+        for (&global) |*table| table[@intFromEnum(protocol.Protocol.blob_sidecars_by_root_v1)].tokens = 1;
+        try setup.init(.{}, .{
+            .request_policy = policy_fixture(),
+            .admission = .{ .identities = identities, .peer = admission_quotas(1, 86_400_000), .global = global },
+        });
+        defer setup.deinit();
+        try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
+        try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, true, 0);
+        try changeClientIdentity(&setup, 3);
+        try emptyExchange(&setup, .blocks_by_root_v2, &.{}, identities == 2, 2);
+        try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, false, 2);
+        try std.testing.expectEqual(@as(u64, 0), setup.server.counters.peer_refusals);
+        try std.testing.expectEqual(@as(u64, if (identities == 1) 2 else 0), setup.server.counters.identity_capacity_refusals);
+        try std.testing.expectEqual(@as(u64, if (identities == 2) 1 else 0), setup.server.counters.aggregate_refusals);
+    }
+}

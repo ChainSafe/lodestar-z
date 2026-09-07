@@ -193,7 +193,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
         _ = a.step(std.testing.io, tick, 100, .{}, 1);
         _ = b.step(std.testing.io, tick, 100, .{}, 1);
     }
-    const response = [_]u8{9} ** rr.Protocol.blocks_by_range_v2.info().response_min;
+    const response = [_]u8{9} ** @import("consensus_types").fulu.SignedBeaconBlock.min_size;
     var app: [1]rr.Event = undefined;
     var peer_events: [1]t.Event = undefined;
     var done: usize = 0;
@@ -270,6 +270,12 @@ test "managed runtime every allocation prefix cleans up and memory plan counts o
         .challenge_capacity = 8,
         .call_capacity = 8,
     } };
+    opts.core.service.reqresp.request_policy = @import("reqresp/request_policy_test.zig").fixture();
+    opts.core.service.reqresp.admission = .{
+        .identities = opts.core.peers.capacity,
+        .peer = @import("reqresp/admission_test.zig").quotas(100, 1000),
+        .global = @import("reqresp/admission_test.zig").quotas(1000, 1000),
+    };
     var allocation = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var node: runtime.NetworkCore = undefined;
     try node.init(allocation.allocator(), std.testing.io, opts);
@@ -327,6 +333,7 @@ test "managed runtime sequence exhaustion rolls back and future fork hints stay 
     desired.metadata.attnets[0] = 1;
     try std.testing.expectError(error.SequenceExhausted, node.updateLocal(&desired, .{}, now));
     try std.testing.expectEqualDeep(before, node.localState());
+    try std.testing.expectEqual(before.fork.fork, node.core.service.reqresp.inner.request_fork);
     var schedule: runtime.ForkSchedule = .{ .next_epoch = 100, .next_version = .{ 1, 2, 3, 4 } };
     try std.testing.expectError(error.SequenceExhausted, node.updateLocal(&before, schedule, now));
     try std.testing.expectEqualSlices(u8, record.slice(), node.localRecord().?.slice());
@@ -847,12 +854,14 @@ test "managed runtime BPO same-fork digest transition updates status and adverti
     const initial = node.localRecord().?.sequence;
     var local = node.localState();
     try std.testing.expectEqual(first.digest, local.status.fork_digest);
+    try std.testing.expectEqual(first.fork, node.core.service.reqresp.inner.request_fork);
     local.fork.digest = second.digest;
     local.status.fork_digest = second.digest;
     try std.testing.expect(try node.updateLocal(&local, .{}, try @import("driver.zig").currentTime(std.testing.io)));
     try std.testing.expectEqual(second.digest, node.localState().status.fork_digest);
     try std.testing.expectEqual(second.digest, node.localState().fork.digest);
     try std.testing.expectEqual(second.fork, node.localState().fork.fork);
+    try std.testing.expectEqual(second.fork, node.core.service.reqresp.inner.request_fork);
     try std.testing.expectEqual(initial + 1, node.localRecord().?.sequence);
     const candidate = try @import("peers/enr.zig").decode(node.localRecord().?, &local.fork);
     try std.testing.expectEqual(second.digest, candidate.fork.digest);
@@ -865,6 +874,7 @@ test "managed runtime BPO same-fork digest transition updates status and adverti
         try std.testing.expectError(error.UnknownFork, node.updateLocal(&local, .{}, node.last_now));
         try std.testing.expectEqual(second.digest, node.localState().status.fork_digest);
         try std.testing.expectEqual(second.fork, node.localState().fork.fork);
+        try std.testing.expectEqual(second.fork, node.core.service.reqresp.inner.request_fork);
         try std.testing.expectEqual(initial + 1, node.localRecord().?.sequence);
     }
 }
@@ -879,4 +889,25 @@ test "managed runtime BPO duplicate digest validation precedes allocation" {
     };
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.InvalidOptions, node.init(failing.allocator(), std.testing.io, opts));
+}
+
+test "managed runtime request admission selector commits with validated local fork" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
+    var opts = options(&key);
+    opts.core.service.reqresp.request_fork = .gloas;
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    try std.testing.expectEqual(t.ForkSeq.phase0, node.core.service.reqresp.inner.request_fork);
+    var local = node.localState();
+    local.fork = .{ .fork = .fulu, .digest = .{ 1, 2, 3, 4 } };
+    local.status.fork_digest = local.fork.digest;
+    local.status.earliest_available_slot = 0;
+    local.metadata.custody_group_count = 1;
+    const now = try @import("driver.zig").currentTime(std.testing.io);
+    try std.testing.expect(try node.updateLocal(&local, .{}, now));
+    try std.testing.expectEqual(t.ForkSeq.fulu, node.core.service.reqresp.inner.request_fork);
+    local.fork.fork = .gloas;
+    try std.testing.expectError(error.UnknownFork, node.updateLocal(&local, .{}, now));
+    try std.testing.expectEqual(t.ForkSeq.fulu, node.core.service.reqresp.inner.request_fork);
 }

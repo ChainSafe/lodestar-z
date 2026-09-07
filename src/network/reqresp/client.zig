@@ -260,7 +260,10 @@ pub const Client = struct {
         if (request_options.progress_timeout_ms == 0) return error.InvalidRequestOptions;
         if (request_ssz.len > bounds.request_max) return error.RequestTooLarge;
         if (request_ssz.len < bounds.request_min) return error.RequestTooSmall;
-        const request_ceiling = try protocol.requestChunkLimit(which, request_ssz);
+        const request_ceiling = if (owner.policy) |*policy|
+            (policy.inspect(which, request_ssz, owner.request_fork) catch return error.InvalidRequest).chunks_max
+        else
+            try protocol.requestChunkLimit(which, request_ssz);
         const chunks_max = request_options.expected_chunks orelse request_ceiling;
         if (chunks_max > request_ceiling) return error.InvalidRequestOptions;
         if (sink.len < bounds.response_max) return error.SinkTooSmall;

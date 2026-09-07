@@ -1,6 +1,8 @@
 const std = @import("std");
 const codec = @import("codec.zig");
 const constants = @import("constants.zig");
+const request_policy = @import("request_policy.zig");
+const admission_mod = @import("admission.zig");
 const limiter_mod = @import("limiter.zig");
 const protocol_mod = @import("protocol.zig");
 const config = @import("config");
@@ -54,6 +56,9 @@ pub const Options = struct {
     inbound_application_per_peer_max: u8 = 0,
     progress_timeout_ms: u64 = constants.progress_timeout_ms_default,
     forks: []const ForkEntry,
+    request_policy: ?request_policy.Config = null,
+    request_fork: config.ForkSeq = .phase0,
+    admission: ?admission_mod.Options = null,
     quotas: ?limiter_mod.Quotas = null,
     /// Defaults reserve one inbound-capacity control wave; bulk quotas stay per protocol.
     global_quotas: ?limiter_mod.Quotas = null,
@@ -102,7 +107,7 @@ pub const Event = union(enum) {
 
 pub const PartitionedCounts = struct { application: usize, control: usize };
 
-pub const InitError = limiter_mod.InitError;
+pub const InitError = limiter_mod.InitError || error{InvalidPolicy};
 
 pub const RequestError = error{
     InvalidRequest,
@@ -140,6 +145,13 @@ pub const RespondError = error{
 };
 
 pub const Counters = struct {
+    inspected: u64 = 0,
+    admitted: u64 = 0,
+    charged_work: u128 = 0,
+    malformed: u64 = 0,
+    peer_refusals: u64 = 0,
+    aggregate_refusals: u64 = 0,
+    identity_capacity_refusals: u64 = 0,
     requests_sent: u64 = 0,
     requests_served: u64 = 0,
     chunks_received: u64 = 0,
@@ -162,6 +174,7 @@ pub const MemoryPlan = struct {
     slot_bytes: usize,
     io_bytes: usize,
     limiter_bytes: usize,
+    admission_bytes: usize = 0,
     request_sink_bytes: usize = 0,
     total_bytes: usize,
 };
@@ -173,6 +186,9 @@ pub const ReqResp = struct {
     inbound: []Server,
     arena: []u8,
     limiter: limiter_mod.Limiter,
+    policy: ?request_policy.Policy,
+    admission: ?admission_mod.Limiter,
+    request_fork: config.ForkSeq,
     over_limit: [over_limit_queue_max]OverLimit = undefined,
     over_limit_head: u8 = 0,
     over_limit_len: u8 = 0,
@@ -228,6 +244,9 @@ pub const ReqResp = struct {
     }
 
     pub fn validateOptions(options: Options) InitError!struct { peer: limiter_mod.Quotas, global: limiter_mod.Quotas } {
+        if ((options.request_policy == null) != (options.admission == null)) return error.InvalidOptions;
+        if (options.request_policy) |*policy| _ = try request_policy.Policy.init(policy);
+        if (options.admission) |*admission| try admission_mod.Limiter.validate(admission);
         if (options.outbound_max == 0 or options.outbound_max > constants.slots_ceiling) {
             return error.InvalidOptions;
         }
@@ -268,6 +287,9 @@ pub const ReqResp = struct {
 
     pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
         const quotas = try validateOptions(options);
+        const policy = if (options.request_policy) |*value| try request_policy.Policy.init(value) else null;
+        var admission = if (options.admission) |value| try admission_mod.Limiter.init(allocator, value) else null;
+        errdefer if (admission) |*owner| owner.deinit(allocator);
 
         const outbound = try allocator.alloc(Client, options.outbound_max);
         errdefer allocator.free(outbound);
@@ -294,6 +316,7 @@ pub const ReqResp = struct {
 
         var resolved_options = options;
         resolved_options.forks = &.{};
+        resolved_options.request_policy = null;
         resolved_options.quotas = quotas.peer;
         resolved_options.global_quotas = quotas.global;
         var result: ReqResp = .{
@@ -303,6 +326,9 @@ pub const ReqResp = struct {
             .inbound = inbound,
             .arena = arena,
             .limiter = buckets,
+            .policy = policy,
+            .admission = admission,
+            .request_fork = options.request_fork,
             .fork_count = @intCast(options.forks.len),
         };
         @memcpy(result.forks[0..options.forks.len], options.forks);
@@ -311,11 +337,16 @@ pub const ReqResp = struct {
 
     /// Call shutdown first, or destroy the attached transport and Router before deinit.
     pub fn deinit(self: *ReqResp) void {
+        if (self.admission) |*owner| owner.deinit(self.allocator);
         self.limiter.deinit(self.allocator);
         self.allocator.free(self.arena);
         self.allocator.free(self.inbound);
         self.allocator.free(self.outbound);
         self.* = undefined;
+    }
+
+    pub fn setRequestFork(self: *ReqResp, fork: config.ForkSeq) void {
+        self.request_fork = fork;
     }
 
     pub fn active(self: *const ReqResp) struct { outbound: u16, inbound: u16 } {
@@ -450,12 +481,14 @@ pub const ReqResp = struct {
         const slot_bytes = self.outbound.len * @sizeOf(Client) + self.inbound.len * @sizeOf(Server);
         const limiter_bytes = self.limiter.buckets.len * @sizeOf(limiter_mod.Bucket) +
             self.limiter.generations.len * @sizeOf(?u32);
+        const admission_bytes = if (self.admission) |*owner| owner.memoryPlan().allocated_bytes else 0;
         return .{
             .facade_bytes = @sizeOf(ReqResp),
             .slot_bytes = slot_bytes,
             .io_bytes = self.arena.len,
             .limiter_bytes = limiter_bytes,
-            .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + limiter_bytes,
+            .admission_bytes = admission_bytes,
+            .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + limiter_bytes + admission_bytes,
         };
     }
 
