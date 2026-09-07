@@ -121,6 +121,7 @@ const weak_subjectivity = @import("weak_subjectivity.zig");
 pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatestWeakSubjectivityCheckpointEpoch;
 
 test {
+    _ = @import("proposer_rewards_test.zig");
     _ = @import("memory_safety_test.zig");
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
