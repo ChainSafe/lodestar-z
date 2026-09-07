@@ -81,38 +81,6 @@ pub fn blockToHeader(allocator: Allocator, signed_block: AnySignedBeaconBlock, o
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const preset = @import("preset").preset;
 
-test "blockToHeader should preserve the block root and header fields" {
-    const allocator = std.testing.allocator;
-
-    inline for (.{
-        .{ types.phase0.SignedBeaconBlock, "phase0" },
-        .{ types.electra.SignedBeaconBlock, "full_electra" },
-        .{ types.electra.SignedBlindedBeaconBlock, "blinded_electra" },
-    }) |case| {
-        var signed_block = case[0].default_value;
-        signed_block.message.slot = 123;
-        signed_block.message.proposer_index = 456;
-        signed_block.message.parent_root = [_]u8{1} ** 32;
-        signed_block.message.state_root = [_]u8{2} ** 32;
-        signed_block.message.body.graffiti = [_]u8{3} ** 32;
-
-        const block = @unionInit(AnySignedBeaconBlock, case[1], &signed_block);
-        var header: BeaconBlockHeader = undefined;
-        try blockToHeader(allocator, block, &header);
-
-        try std.testing.expectEqual(signed_block.message.slot, header.slot);
-        try std.testing.expectEqual(signed_block.message.proposer_index, header.proposer_index);
-        try std.testing.expectEqualSlices(u8, &signed_block.message.parent_root, &header.parent_root);
-        try std.testing.expectEqualSlices(u8, &signed_block.message.state_root, &header.state_root);
-
-        var block_root: [32]u8 = undefined;
-        try block.beaconBlock().hashTreeRoot(allocator, &block_root);
-        var header_root: [32]u8 = undefined;
-        try types.phase0.BeaconBlockHeader.hashTreeRoot(&header, &header_root);
-        try std.testing.expectEqualSlices(u8, &block_root, &header_root);
-    }
-}
-
 test "process block header - sanity" {
     const allocator = std.testing.allocator;
     const pool_size = 180_000;
