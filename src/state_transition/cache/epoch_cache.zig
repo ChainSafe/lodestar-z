@@ -488,7 +488,9 @@ pub const EpochCache = struct {
     }
 
     pub fn clone(self: *const EpochCache, allocator: Allocator) !*EpochCache {
-        const epoch_cache = EpochCache{
+        const epoch_cache_ptr = try allocator.create(EpochCache);
+
+        epoch_cache_ptr.* = .{
             .allocator = allocator,
             .config = self.config,
             // Common append-only structures shared with all states, no need to clone
@@ -525,10 +527,6 @@ pub const EpochCache = struct {
             .epoch = self.epoch,
         };
 
-        const epoch_cache_ptr = try allocator.create(EpochCache);
-        errdefer allocator.destroy(epoch_cache_ptr);
-
-        epoch_cache_ptr.* = epoch_cache;
         return epoch_cache_ptr;
     }
 

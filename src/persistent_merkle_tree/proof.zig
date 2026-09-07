@@ -588,3 +588,7 @@ pub fn createNodeFromCompactMultiProof(
     try pool.ref(node);
     return node;
 }
+
+test {
+    _ = @import("proof_test.zig");
+}

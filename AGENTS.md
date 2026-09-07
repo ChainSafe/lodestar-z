@@ -21,6 +21,10 @@
   trust boundary, native dependency, persistence path or format, shared mutable cache or pool,
   externally influenced native input, or supported integration. Update the normative threat model
   only when the security contract changes; otherwise update the implementation map.
+- **Test file layout:** a module holds at most one `test` block. A single inline test is fine;
+  a second one means the tests move to a sibling `<module>_test.zig`, wired from the module with
+  `test { _ = @import("<module>_test.zig"); }`. Never mark a declaration `pub` only to relocate a
+  test. `zig build test:tidy` enforces this.
 - **Incremental commits:** after review starts, do not force-push unless a maintainer requests it.
 - **Communication style:** do not use em dashes. Keep communication succinct and human-friendly.
 
@@ -89,6 +93,9 @@ zig fmt --check .
 
 # Format Zig files
 zig fmt .
+
+# Run repo-wide lint rules that `zig fmt` cannot express
+zig build test:tidy
 
 # Run all unit tests
 zig build test
@@ -301,6 +308,34 @@ Zig code must make allocator and ownership boundaries explicit:
 - Build and run binding tests for changes under `bindings/` or exported native APIs.
 - Fuzz parsers, deserializers, and cryptographic boundaries when introducing new input shapes.
 
+### Test file layout
+
+Keep tests beside the code they cover without letting them crowd it out.
+
+- A module holds at most one `test` block. One inline test is a usage example and stays put; a
+  second one makes it a suite, and suites live in a sibling `<module>_test.zig`. A module is
+  therefore either inline (one test) or extracted (only the wiring block), never both.
+- Name the test file after its module in snake_case. `slot_math.zig` pairs with
+  `slot_math_test.zig`, and `Node.zig` pairs with `node_test.zig`.
+- Wire the import from the module under test, not from the package `root.zig`:
+
+```zig
+// slot_math.zig
+test {
+    _ = @import("slot_math_test.zig");
+}
+```
+
+  Keeping the import local means the pairing survives moving or deleting the module, and no
+  package root has to be updated.
+- Move only the tests. Leave the test bodies unchanged and rebuild the prelude they relied on in
+  the new file as imports and aliases.
+- Private test helpers move with the tests they serve.
+- Do not widen a declaration to `pub` only to relocate a test. Tests that exercise private
+  internals stay inline.
+- A test file covering a whole module rather than one sibling module stays wired from the package
+  `root.zig`.
+
 ## Pull request guidelines
 
 ### Branches and commits
@@ -326,12 +361,13 @@ implementation was primarily AI-authored or whether AI was used only for codebas
 ### Pre-push checklist
 
 1. `zig fmt --check .`
-2. Run relevant tests, never run slow `zig build test` unless changes touch spec logic
-3. Relevant spec tests for consensus, SSZ, or BLS changes
-4. `pnpm lint` for binding source changes
-5. Rebuild bindings and run `pnpm test` for binding or NAPI changes
-6. Confirm no generated test source or build output was edited manually
-7. Confirm both ownership cleanup and error paths are covered
+2. `zig build test:tidy`
+3. Run relevant tests, never run slow `zig build test` unless changes touch spec logic
+4. Relevant spec tests for consensus, SSZ, or BLS changes
+5. `pnpm lint` for binding source changes
+6. Rebuild bindings and run `pnpm test` for binding or NAPI changes
+7. Confirm no generated test source or build output was edited manually
+8. Confirm both ownership cleanup and error paths are covered
 
 ## Common tasks
 
