@@ -2,7 +2,7 @@ import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import {computeEpochAtSlot} from "@lodestar/state-transition";
 import {type phase0, ssz} from "@lodestar/types";
-import {beforeAll, describe, expect, it} from "vitest";
+import {afterAll, beforeAll, describe, expect, it} from "vitest";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
 
@@ -148,6 +148,8 @@ describe("BeaconStateView", () => {
     }
     state = bindings.BeaconStateView.createFromBytes(stateBytes);
   }, 120_000); // 2 minute timeout for loading era file
+
+  afterAll(() => state?.release());
 
   describe("basic properties", () => {
     it("slot should match lodestar", () => {
@@ -308,6 +310,11 @@ describe("BeaconStateView", () => {
         ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
       );
       bellatrixView = bindings.BeaconStateView.createFromBytes(ssz.bellatrix.BeaconState.serialize(bellatrixState));
+    });
+
+    afterAll(() => {
+      phase0View?.release();
+      bellatrixView?.release();
     });
 
     it("should true on post-merge state without reading the block", () => {
@@ -487,6 +494,17 @@ describe("BeaconStateView", () => {
   });
 
   describe("serialization", () => {
+    it("release should release state and be idempotent", () => {
+      const releasable = bindings.BeaconStateView.createFromBytes(
+        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
+      );
+
+      releasable.release();
+
+      expect(() => releasable.slot).toThrow("InvalidState");
+      expect(() => releasable.release()).not.toThrow();
+    });
+
     it("serialize should produce bytes matching original", () => {
       const serialized = state.serialize();
       expect(serialized.length).toBe(stateBytes.length);
@@ -646,16 +664,22 @@ describe("BeaconStateView", () => {
     it("processSlots should advance state by 1 slot", () => {
       const originalSlot = state.slot;
       const newState = state.processSlots(originalSlot + 1);
-
-      expect(newState.slot).toBe(originalSlot + 1);
+      try {
+        expect(newState.slot).toBe(originalSlot + 1);
+      } finally {
+        newState.release();
+      }
     });
 
     it("processSlots with dontTransferCache: false should still transfer cache", () => {
       const originalSlot = state.slot;
       const newState = state.processSlots(originalSlot + 1, {dontTransferCache: false});
-
-      expect(newState.slot).toBe(originalSlot + 1);
-      expect(newState.createdWithTransferCache).toBe(true);
+      try {
+        expect(newState.slot).toBe(originalSlot + 1);
+        expect(newState.createdWithTransferCache).toBe(true);
+      } finally {
+        newState.release();
+      }
     });
   });
 

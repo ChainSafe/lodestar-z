@@ -92,6 +92,10 @@ pub fn deinit(self: *BeaconStateView) void {
     }
 }
 
+pub fn release(self: *BeaconStateView) void {
+    self.deinit();
+}
+
 fn initCachedState(
     cached_state: *CachedBeaconState,
     io: std.Io,
