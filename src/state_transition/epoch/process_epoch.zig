@@ -51,7 +51,7 @@ pub fn processEpoch(
     try observeEpochTransitionStep(.{ .step = .process_registry_updates }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
     timer = time.start(io);
-    const slashing_penalties = try processSlashings(fork, allocator, epoch_cache, state, cache, false);
+    const slashing_penalties = try processSlashings(fork, epoch_cache, state, cache, false);
     try observeEpochTransitionStep(.{ .step = .process_slashings }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
     timer = time.start(io);
@@ -62,7 +62,7 @@ pub fn processEpoch(
 
     if (comptime fork.gte(.electra)) {
         timer = time.start(io);
-        try processPendingDeposits(fork, allocator, config, epoch_cache, state, cache);
+        try processPendingDeposits(fork, allocator, io, config, epoch_cache, state, cache);
         try observeEpochTransitionStep(.{ .step = .process_pending_deposits }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
         timer = time.start(io);
@@ -109,7 +109,7 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "processEpoch - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
+    const pool_size = 200_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 

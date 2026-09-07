@@ -33,6 +33,7 @@ const SLOTS_PER_EPOCH_SQRT = std.math.sqrt(preset.SLOTS_PER_EPOCH);
 pub fn processAttestationsAltair(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
@@ -67,6 +68,7 @@ pub fn processAttestationsAltair(
         if (verify_signature) {
             const sig_set = try getAttestationWithIndicesSignatureSet(
                 allocator,
+                io,
                 config,
                 epoch_cache,
                 &attestation.data,

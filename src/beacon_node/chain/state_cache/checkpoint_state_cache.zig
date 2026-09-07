@@ -6,7 +6,7 @@ const types = @import("consensus_types");
 const state_transition = @import("state_transition");
 const BeaconConfig = @import("config").BeaconConfig;
 const time = @import("time");
-const SlotClock = @import("clock").SlotClock;
+const Clock = @import("clock").Clock;
 
 const CheckpointContext = @import("key.zig").CheckpointContext;
 const DatastoreKey = @import("key.zig").DatastoreKey;
@@ -164,7 +164,7 @@ pub const PersistentCheckpointStateCache = struct {
     max_epochs_on_disk: ?usize,
     pre_computed_checkpoint: ?Checkpoint,
     pre_computed_checkpoint_hits: ?u64,
-    slot_clock: ?*const SlotClock,
+    slot_clock: ?*Clock,
     buffer_pool: ?*BufferPool,
 
     pub const Opts = struct {
@@ -177,7 +177,7 @@ pub const PersistentCheckpointStateCache = struct {
         max_epochs_on_disk: ?usize = null,
         /// Borrowed slot clock for slot-relative timing. Null (the default) disables the persist
         /// throttle and reports the slot-relative metrics as 0.
-        slot_clock: ?*const SlotClock = null,
+        slot_clock: ?*Clock = null,
         /// Borrowed reusable serialization buffer. Null (the default) always allocates fresh.
         buffer_pool: ?*BufferPool = null,
     };
@@ -411,7 +411,7 @@ pub const PersistentCheckpointStateCache = struct {
         }
 
         const reload_start = time.start(io);
-        const new_cached = try seed.loadOtherState(self.allocator, self.config, state_bytes, seed_validators_bytes);
+        const new_cached = try seed.loadOtherState(self.allocator, io, self.config, state_bytes, seed_validators_bytes);
 
         var owned_cached: ?*CachedBeaconState = new_cached;
         errdefer if (owned_cached) |s| destroyState(s);
@@ -1145,7 +1145,7 @@ const TestHarness = struct {
 
         h.allocator = allocator;
         h.io = std.testing.io;
-        h.pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 * 64 });
+        h.pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 750_000 });
         errdefer h.pool.deinit();
 
         h.factory = try TestStateFactory.init(allocator, &h.pool);
@@ -1176,7 +1176,7 @@ const TestHarness = struct {
 
         h.allocator = allocator;
         h.io = std.testing.io;
-        h.pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 * 64 });
+        h.pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 750_000 });
         errdefer h.pool.deinit();
 
         h.factory = try TestStateFactory.init(allocator, &h.pool);

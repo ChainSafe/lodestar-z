@@ -15,6 +15,7 @@ test/spec/bls/spec_tests.zig
 flamegraph.html
 perf.data
 perf.data.old
+benchmark_data/
 
 # js
 node_modules/

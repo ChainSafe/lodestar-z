@@ -21,13 +21,22 @@ pub fn validate(self: *const Self, sig_infcheck: bool) BlstError!void {
     if (!c.blst_p2_affine_in_g2(&self.point)) return BlstError.PointNotInGroup;
 }
 
+/// Validate a serialized signature.
+///
+/// Returns the `Signature` on success, `BlstError` on failure.
+pub fn sigValidate(signature: []const u8, sig_infcheck: bool) BlstError!Self {
+    const sig = try Self.deserialize(signature);
+    try sig.validate(sig_infcheck);
+    return sig;
+}
+
 /// Verify the `Signature` against a `PublicKey` and message.
 ///
 /// Returns `BlstError` if verification fails.
 pub fn verify(
     self: *const Self,
     sig_groupcheck: bool,
-    msg: []const u8,
+    msg: *const SigningRoot,
     dst: []const u8,
     aug: ?[]const u8,
     pk: *const PublicKey,
@@ -36,7 +45,7 @@ pub fn verify(
     if (sig_groupcheck) try self.validate(false);
     if (pk_validate) try pk.validate();
 
-    if (msg.len == 0 or dst.len == 0) {
+    if (dst.len == 0) {
         return BlstError.BadEncoding;
     }
 
@@ -44,8 +53,8 @@ pub fn verify(
         @ptrCast(&pk.point),
         &self.point,
         true,
-        msg.ptr,
-        msg.len,
+        msg,
+        @sizeOf(SigningRoot),
         dst.ptr,
         dst.len,
         if (aug) |a| a.ptr else null,
@@ -62,7 +71,7 @@ pub fn aggregateVerify(
     self: *const Self,
     sig_groupcheck: bool,
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
-    msgs: []const [32]u8,
+    msgs: []const SigningRoot,
     dst: []const u8,
     pks: []const PublicKey,
     pks_validate: bool,
@@ -106,7 +115,7 @@ pub fn fastAggregateVerify(
     self: *const Self,
     sig_groupcheck: bool,
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
-    msg: *const [32]u8,
+    msg: *const SigningRoot,
     dst: []const u8,
     pks: []const PublicKey,
     pks_validate: bool,
@@ -131,7 +140,7 @@ pub fn fastAggregateVerifyPreAggregated(
     self: *const Self,
     sig_groupcheck: bool,
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
-    msg: *const [32]u8,
+    msg: *const SigningRoot,
     dst: []const u8,
     pk: *const PublicKey,
 ) BlstError!bool {
@@ -139,7 +148,7 @@ pub fn fastAggregateVerifyPreAggregated(
     return try self.aggregateVerify(
         sig_groupcheck,
         buffer,
-        @ptrCast(msg),
+        @as([*]const SigningRoot, @ptrCast(msg))[0..1],
         dst,
         pks[0..1],
         false,
@@ -210,77 +219,16 @@ pub fn isEqual(self: *const Self, other: *const Self) bool {
     return c.blst_p2_affine_is_equal(&self.point, &other.point);
 }
 
-const std = @import("std");
 const c = @import("root.zig").c;
 
 const BlstError = @import("error.zig").BlstError;
 const errorFromInt = @import("error.zig").errorFromInt;
 const PublicKey = @import("root.zig").PublicKey;
+const SigningRoot = @import("root.zig").SigningRoot;
 const AggregatePublicKey = @import("AggregatePublicKey.zig");
 const AggregateSignature = @import("AggregateSignature.zig");
 const Pairing = @import("Pairing.zig");
 
-const SecretKey = @import("SecretKey.zig");
-const DST = @import("root.zig").DST;
-
-test "test_sign_n_verify" {
-    // sample code for consumer like on Readme
-    const ikm: [32]u8 = [_]u8{
-        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
-        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
-        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
-        0x48, 0x99,
-    };
-    const sk = try SecretKey.keyGen(&ikm, null);
-    const pk = sk.toPublicKey();
-
-    const dst = DST;
-    const msg = "hello foo";
-    const sig = sk.sign(msg, dst, null);
-
-    // aug is null
-    try sig.verify(
-        true,
-        msg,
-        dst,
-        null,
-        &pk,
-        true,
-    );
-}
-
-test aggregateVerify {
-    const ikm: [32]u8 = [_]u8{
-        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
-        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
-        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
-        0x48, 0x99,
-    };
-
-    const dst = DST;
-    // aug is null
-
-    const num_sigs = 10;
-
-    var buffer: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
-
-    var msgs: [num_sigs][32]u8 = undefined;
-    var sks: [num_sigs]SecretKey = undefined;
-    var pks: [num_sigs]PublicKey = undefined;
-    var sigs: [num_sigs]@This() = undefined;
-
-    for (0..num_sigs) |i| {
-        const sk = try SecretKey.keyGen(&ikm, null);
-        const pk = sk.toPublicKey();
-        const sig = sk.sign(&msgs[i], dst, null);
-
-        sks[i] = sk;
-        pks[i] = pk;
-        sigs[i] = sig;
-    }
-
-    const agg_sig = try AggregateSignature.aggregate(&sigs, false);
-    const sig = @This().fromAggregate(&agg_sig);
-
-    try std.testing.expect(try sig.aggregateVerify(false, &buffer, &msgs, dst, &pks, false));
+test {
+    _ = @import("signature_test.zig");
 }

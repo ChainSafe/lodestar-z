@@ -17,14 +17,13 @@ const computeExitEpochAndUpdateChurn = @import("../utils/epoch.zig").computeExit
 
 pub fn processWithdrawalRequest(
     comptime fork: ForkSeq,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
     withdrawal_request: *const WithdrawalRequest,
 ) !void {
     const amount = withdrawal_request.amount;
-    // no need to use unfinalized pubkey cache from 6110 as validator won't be active anyway
-    const pubkey_to_index = epoch_cache.pubkey_to_index;
     const is_full_exit_request = amount == c.FULL_EXIT_REQUEST_AMOUNT;
 
     var pending_partial_withdrawals = try state.pendingPartialWithdrawals();
@@ -38,7 +37,7 @@ pub fn processWithdrawalRequest(
 
     // bail out if validator is not in beacon state
     // note that we don't need to check for 6110 unfinalized vals as they won't be eligible for withdraw/exit anyway
-    const validator_index = pubkey_to_index.get(withdrawal_request.validator_pubkey) orelse return;
+    const validator_index = epoch_cache.pubkey_cache.get(io, withdrawal_request.validator_pubkey) orelse return;
 
     var validators = try state.validators();
     if (validator_index >= try validators.length()) return;

@@ -16,6 +16,7 @@ const bls = @import("bls");
 const PublicKey = bls.PublicKey;
 const Signature = bls.Signature;
 const SecretKey = bls.SecretKey;
+const SigningRoot = bls.SigningRoot;
 
 const BlsOpts = struct {
     /// Decides whether the signature should be group checked.
@@ -24,13 +25,13 @@ const BlsOpts = struct {
     pk_validate: bool = false,
 };
 
-pub fn sign(sk: SecretKey, msg: []const u8) Signature {
+pub fn sign(sk: SecretKey, msg: *const SigningRoot) Signature {
     return sk.sign(msg, bls.DST, null);
 }
 
 /// Verify a signature against a message and public key.
 pub fn verify(
-    msg: []const u8,
+    msg: *const SigningRoot,
     pk: *const PublicKey,
     sig: *const Signature,
     opts: BlsOpts,
@@ -39,7 +40,7 @@ pub fn verify(
 }
 
 pub fn fastAggregateVerify(
-    msg: []const u8,
+    msg: *const SigningRoot,
     pks: []const PublicKey,
     sig: *const Signature,
     opts: BlsOpts,
@@ -48,7 +49,7 @@ pub fn fastAggregateVerify(
     return sig.fastAggregateVerify(
         opts.sig_groupcheck,
         &pairing_buf,
-        msg[0..32],
+        msg,
         bls.DST,
         pks,
         opts.pk_validate,

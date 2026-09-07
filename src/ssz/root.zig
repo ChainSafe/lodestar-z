@@ -35,6 +35,21 @@ pub const FixedContainerType = types.FixedContainerType;
 pub const StructContainerType = types.StructContainerType;
 pub const VariableContainerType = types.VariableContainerType;
 
+// Progressive container types
+pub const FixedProgressiveContainerType = types.FixedProgressiveContainerType;
+pub const VariableProgressiveContainerType = types.VariableProgressiveContainerType;
+
+// Progressive list types
+pub const FixedProgressiveListType = types.FixedProgressiveListType;
+pub const VariableProgressiveListType = types.VariableProgressiveListType;
+
+// Progressive bit list
+pub const ProgressiveBitListType = types.ProgressiveBitListType;
+pub const ProgressiveBitList = types.ProgressiveBitList;
+pub const isProgressiveBitListType = types.isProgressiveBitListType;
+
+// Compatible union
+pub const CompatibleUnionType = types.CompatibleUnionType;
 pub const getPathGindex = types.getPathGindex;
 
 const hasher = @import("hasher.zig");
@@ -51,5 +66,10 @@ pub const ListCompositeTreeView = tree_view.ListCompositeTreeView;
 pub const CloneOpts = @import("tree_view/utils/clone_opts.zig").CloneOpts;
 
 test {
+    _ = types;
+    _ = tree_view;
+    _ = hasher;
+    _ = @import("memory_safety_test.zig");
+    _ = @import("root_test.zig");
     testing.refAllDecls(@This());
 }

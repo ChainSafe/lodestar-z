@@ -50,22 +50,26 @@ pub const TreeViewState = struct {
     }
 
     pub fn getChildNode(self: *TreeViewState, gindex: Gindex) !Node.Id {
-        const gop = try self.children_nodes.getOrPut(self.allocator, gindex);
-        if (gop.found_existing) {
-            return gop.value_ptr.*;
+        if (self.children_nodes.get(gindex)) |child_node| {
+            return child_node;
         }
+
+        try self.children_nodes.ensureUnusedCapacity(self.allocator, 1);
         const child_node = try self.root.getNode(self.pool, gindex);
-        gop.value_ptr.* = child_node;
+        self.children_nodes.putAssumeCapacityNoClobber(gindex, child_node);
         return child_node;
     }
 
     pub fn setChildNode(self: *TreeViewState, gindex: Gindex, node: Node.Id) !void {
-        try self.changed.put(self.allocator, gindex, {});
-        const opt_old_node = try self.children_nodes.fetchPut(
-            self.allocator,
-            gindex,
-            node,
-        );
+        if (!self.changed.contains(gindex)) {
+            try self.changed.ensureUnusedCapacity(self.allocator, 1);
+        }
+        if (!self.children_nodes.contains(gindex)) {
+            try self.children_nodes.ensureUnusedCapacity(self.allocator, 1);
+        }
+
+        self.changed.putAssumeCapacity(gindex, {});
+        const opt_old_node = self.children_nodes.fetchPutAssumeCapacity(gindex, node);
         if (opt_old_node) |old_node| {
             if (old_node.value.getState(self.pool).refCount() == 0) {
                 self.pool.unref(old_node.value);
@@ -141,3 +145,23 @@ pub const TreeViewState = struct {
         self.changed.clearRetainingCapacity();
     }
 };
+
+test "getChildNode does not publish a cache entry when lookup fails" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 1,
+    });
+    defer pool.deinit();
+
+    const root = try pool.createLeaf(&([_]u8{0} ** 32));
+    var state: TreeViewState = undefined;
+    try state.init(allocator, &pool, root);
+    defer state.deinit();
+
+    // Failed leaf child navigation must not publish a cache entry.
+    const child_gindex = Gindex.fromDepth(1, 0);
+    try std.testing.expectError(error.InvalidNode, state.getChildNode(child_gindex));
+    try std.testing.expectEqual(@as(usize, 0), state.children_nodes.count());
+}

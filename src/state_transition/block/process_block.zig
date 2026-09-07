@@ -36,6 +36,7 @@ pub const ProcessBlockOpts = struct {
 pub fn processBlock(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
@@ -78,7 +79,13 @@ pub fn processBlock(
                 const payload_withdrawals_root = switch (block_type) {
                     .full => blk: {
                         const actual_withdrawals = block.body().executionPayload().inner.withdrawals;
-                        std.debug.assert(withdrawals_result.withdrawals.items.len == actual_withdrawals.items.len);
+                        if (withdrawals_result.withdrawals.items.len != actual_withdrawals.items.len) {
+                            std.log.err("withdrawal count mismatch: expected {d}, actual {d}", .{
+                                withdrawals_result.withdrawals.items.len,
+                                actual_withdrawals.items.len,
+                            });
+                            return error.WithdrawalsLengthMismatch;
+                        }
                         var root: Root = undefined;
                         try types.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);
                         break :blk root;
@@ -101,11 +108,11 @@ pub fn processBlock(
         }
     }
 
-    try processRandao(fork, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);
+    try processRandao(fork, io, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);
     try processEth1Data(fork, state, body.eth1Data());
-    try processOperations(fork, allocator, config, epoch_cache, state, slashings_cache, block_type, body, opts);
+    try processOperations(fork, allocator, io, config, epoch_cache, state, slashings_cache, block_type, body, opts);
     if (comptime fork.gte(.altair)) {
-        try processSyncAggregate(fork, allocator, config, epoch_cache, state, body.syncAggregate(), opts.verify_signature);
+        try processSyncAggregate(fork, allocator, io, config, epoch_cache, state, body.syncAggregate(), opts.verify_signature);
     }
 
     if (comptime fork.gte(.deneb)) {

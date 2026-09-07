@@ -12,6 +12,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub fn processRandao(
     comptime fork: ForkSeq,
+    io: std.Io,
     beacon_config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
@@ -26,6 +27,7 @@ pub fn processRandao(
     // verify RANDAO reveal
     if (verify_signature) {
         if (!try verifyRandaoSignature(
+            io,
             beacon_config,
             epoch_cache,
             randao_reveal,
@@ -60,7 +62,7 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "process randao - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
@@ -86,6 +88,7 @@ test "process randao - sanity" {
 
     try processRandao(
         .electra,
+        std.testing.io,
         test_state.cached_state.config,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),

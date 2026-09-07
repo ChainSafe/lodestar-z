@@ -4,6 +4,15 @@ const RAND_BYTES = 8;
 /// Number of random bits used for verification.
 const RAND_BITS = 8 * RAND_BYTES;
 
+/// Borrowed signature-set inputs and an owned random coefficient for batch verification.
+/// Input pointers must remain valid until verification completes.
+pub const BatchVerifyItem = struct {
+    message: *const SigningRoot,
+    public_key: *const PublicKey,
+    signature: *const Signature,
+    randomness: [32]u8,
+};
+
 /// Verify multiple aggregate signatures efficiently using random coefficients.
 ///
 /// Source: https://ethresear.ch/t/fast-verification-of-multiple-bls-signatures/5407
@@ -11,16 +20,12 @@ const RAND_BITS = 8 * RAND_BYTES;
 /// Returns true if verification succeeds, false if verification fails, `BlstError` on error.
 pub fn verifyMultipleAggregateSignatures(
     pairing_buf: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
-    n_elems: usize,
-    msgs: []const []const u8,
+    items: []const BatchVerifyItem,
     dst: []const u8,
-    pks: []const *PublicKey,
     pks_validate: bool,
-    sigs: []const *Signature,
     sigs_groupcheck: bool,
-    rands: []const [32]u8,
 ) BlstError!bool {
-    if (n_elems == 0) {
+    if (items.len == 0) {
         return BlstError.VerifyFail;
     }
 
@@ -30,15 +35,15 @@ pub fn verifyMultipleAggregateSignatures(
         dst,
     );
 
-    for (0..n_elems) |i| {
+    for (items) |*item| {
         try pairing.mulAndAggregate(
-            pks[i],
+            item.public_key,
             pks_validate,
-            sigs[i],
+            item.signature,
             sigs_groupcheck,
-            &rands[i],
+            &item.randomness,
             RAND_BITS,
-            msgs[i],
+            item.message,
         );
     }
 
@@ -52,3 +57,4 @@ const Pairing = @import("Pairing.zig");
 const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
+const SigningRoot = blst.SigningRoot;

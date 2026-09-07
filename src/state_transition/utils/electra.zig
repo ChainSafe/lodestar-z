@@ -7,10 +7,8 @@ const BeaconState = @import("fork_types").BeaconState;
 const ct = @import("consensus_types");
 
 pub const WithdrawalCredentials = ct.primitive.Root.Type;
-const BLSPubkey = ct.primitive.BLSPubkey.Type;
 const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 
-const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const hasEth1WithdrawalCredential = @import("./capella.zig").hasEth1WithdrawalCredential;
 const G2_POINT_AT_INFINITY = @import("constants").G2_POINT_AT_INFINITY;
 
@@ -70,10 +68,6 @@ pub fn queueExcessActiveBalance(
         var pending_deposits = try state.pendingDeposits();
         try pending_deposits.pushValue(&pending_deposit);
     }
-}
-
-pub fn isPubkeyKnown(comptime fork: ForkSeq, epoch_cache: *const EpochCache, state: *BeaconState(fork), pubkey: BLSPubkey) !bool {
-    return try isValidatorKnown(fork, state, epoch_cache.getValidatorIndex(&pubkey));
 }
 
 pub fn isValidatorKnown(comptime fork: ForkSeq, state: *BeaconState(fork), index: ?ValidatorIndex) !bool {

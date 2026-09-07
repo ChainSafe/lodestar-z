@@ -24,7 +24,6 @@ const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const Withdrawals = types.capella.Withdrawals.Type;
 const WithdrawalsResult = state_transition.WithdrawalsResult;
 const BlockExternalData = state_transition.BlockExternalData;
-const Index2PubkeyCache = state_transition.Index2PubkeyCache;
 const slotFromStateBytes = @import("utils.zig").slotFromStateBytes;
 const loadState = @import("utils.zig").loadState;
 const loadBlock = @import("utils.zig").loadBlock;
@@ -112,12 +111,14 @@ fn ProcessRandaoBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
     return struct {
         block: *const BeaconBlock(.full, fork),
         body: *const BeaconBlockBody(.full, fork),
+        io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = allocator;
 
             state_transition.processRandao(
                 fork,
+                self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
@@ -149,11 +150,13 @@ fn ProcessEth1DataBench(comptime fork: ForkSeq) type {
 fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
     return struct {
         body: *const BeaconBlockBody(.full, fork),
+        io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             state_transition.processOperations(
                 fork,
                 allocator,
+                self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
@@ -169,11 +172,13 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
 fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
     return struct {
         body: *const BeaconBlockBody(.full, fork),
+        io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             state_transition.processSyncAggregate(
                 fork,
                 allocator,
+                self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
@@ -187,12 +192,14 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
 fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
     return struct {
         block: *const BeaconBlock(.full, fork),
+        io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
             state_transition.processBlock(
                 fork,
                 allocator,
+                self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
@@ -211,12 +218,14 @@ fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
 fn ProcessBlockRootBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
     return struct {
         block: *const BeaconBlock(.full, fork),
+        io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
             state_transition.processBlock(
                 fork,
                 allocator,
+                self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
@@ -353,6 +362,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             const randao_start = time.start(io);
             state_transition.processRandao(
                 fork,
+                io,
                 BenchState.cloned_cached_state.config,
                 epoch_cache,
                 state,
@@ -375,6 +385,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             state_transition.processOperations(
                 fork,
                 allocator,
+                io,
                 BenchState.cloned_cached_state.config,
                 epoch_cache,
                 state,
@@ -390,6 +401,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 state_transition.processSyncAggregate(
                     fork,
                     allocator,
+                    io,
                     BenchState.cloned_cached_state.config,
                     epoch_cache,
                     state,
@@ -496,25 +508,20 @@ fn runBenchmark(
 
     const beacon_config = config.BeaconConfig.init(chain_config, (try beacon_state.?.genesisValidatorsRoot()).*);
 
-    var pubkey_index_map = state_transition.PubkeyIndexMap.init(allocator);
-    defer pubkey_index_map.deinit();
+    var pubkey_cache = try state_transition.PubkeyCache.initCapacity(
+        allocator,
+        io,
+        try std.math.add(
+            usize,
+            try beacon_state.?.validatorsCount(),
+            preset.MAX_DEPOSITS,
+        ),
+    );
+    defer pubkey_cache.deinit();
 
-    const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
-    index_pubkey_cache.* = Index2PubkeyCache.empty;
-    defer {
-        index_pubkey_cache.deinit(allocator);
-        allocator.destroy(index_pubkey_cache);
-    }
-
-    const validators = try beacon_state.?.validatorsPtrSlice(allocator);
-    defer allocator.free(validators);
-
-    try state_transition.syncPubkeys(allocator, validators, &pubkey_index_map, index_pubkey_cache);
-
-    const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, beacon_state.?, .{
+    const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, io, beacon_state.?, .{
         .config = &beacon_config,
-        .index_to_pubkey = index_pubkey_cache,
-        .pubkey_to_index = &pubkey_index_map,
+        .pubkey_cache = &pubkey_cache,
     }, .{ .skip_sync_committee_cache = !comptime fork.gte(.altair), .skip_sync_pubkeys = false });
     BenchState.init(allocator, cached_state);
     beacon_state = null;
@@ -550,22 +557,22 @@ fn runBenchmark(
         try bench.addParam("execution_payload", &ProcessExecutionPayloadBench(fork){ .body = body }, .{ .hooks = hooks });
     }
 
-    try bench.addParam("randao", &ProcessRandaoBench(fork, .{ .verify_signature = true }){ .block = block, .body = body }, .{ .hooks = hooks });
-    try bench.addParam("randao_no_sig", &ProcessRandaoBench(fork, .{ .verify_signature = false }){ .block = block, .body = body }, .{ .hooks = hooks });
+    try bench.addParam("randao", &ProcessRandaoBench(fork, .{ .verify_signature = true }){ .block = block, .body = body, .io = io }, .{ .hooks = hooks });
+    try bench.addParam("randao_no_sig", &ProcessRandaoBench(fork, .{ .verify_signature = false }){ .block = block, .body = body, .io = io }, .{ .hooks = hooks });
     try bench.addParam("eth1_data", &ProcessEth1DataBench(fork){ .body = body }, .{ .hooks = hooks });
-    try bench.addParam("operations", &ProcessOperationsBench(fork, .{ .verify_signature = true }){ .body = body }, .{ .hooks = hooks });
-    try bench.addParam("operations_no_sig", &ProcessOperationsBench(fork, .{ .verify_signature = false }){ .body = body }, .{ .hooks = hooks });
+    try bench.addParam("operations", &ProcessOperationsBench(fork, .{ .verify_signature = true }){ .body = body, .io = io }, .{ .hooks = hooks });
+    try bench.addParam("operations_no_sig", &ProcessOperationsBench(fork, .{ .verify_signature = false }){ .body = body, .io = io }, .{ .hooks = hooks });
 
     if (comptime fork.gte(.altair)) {
-        try bench.addParam("sync_aggregate", &ProcessSyncAggregateBench(fork, .{ .verify_signature = true }){ .body = body }, .{ .hooks = hooks });
-        try bench.addParam("sync_aggregate_no_sig", &ProcessSyncAggregateBench(fork, .{ .verify_signature = false }){ .body = body }, .{ .hooks = hooks });
+        try bench.addParam("sync_aggregate", &ProcessSyncAggregateBench(fork, .{ .verify_signature = true }){ .body = body, .io = io }, .{ .hooks = hooks });
+        try bench.addParam("sync_aggregate_no_sig", &ProcessSyncAggregateBench(fork, .{ .verify_signature = false }){ .body = body, .io = io }, .{ .hooks = hooks });
     }
 
-    try bench.addParam("process_block", &ProcessBlockBench(fork, .{ .verify_signature = true }){ .block = block }, .{ .hooks = hooks });
-    try bench.addParam("process_block_no_sig", &ProcessBlockBench(fork, .{ .verify_signature = false }){ .block = block }, .{ .hooks = hooks });
+    try bench.addParam("process_block", &ProcessBlockBench(fork, .{ .verify_signature = true }){ .block = block, .io = io }, .{ .hooks = hooks });
+    try bench.addParam("process_block_no_sig", &ProcessBlockBench(fork, .{ .verify_signature = false }){ .block = block, .io = io }, .{ .hooks = hooks });
 
-    try bench.addParam("process_block+root", &ProcessBlockRootBench(fork, .{ .verify_signature = true }){ .block = block }, .{ .hooks = hooks });
-    try bench.addParam("process_block+root_no_sig", &ProcessBlockRootBench(fork, .{ .verify_signature = false }){ .block = block }, .{ .hooks = hooks });
+    try bench.addParam("process_block+root", &ProcessBlockRootBench(fork, .{ .verify_signature = true }){ .block = block, .io = io }, .{ .hooks = hooks });
+    try bench.addParam("process_block+root_no_sig", &ProcessBlockRootBench(fork, .{ .verify_signature = false }){ .block = block, .io = io }, .{ .hooks = hooks });
 
     // // Segmented benchmark (step-by-step timing)
     resetSegmentStats();

@@ -217,6 +217,23 @@ test "compact multiproof - should roundtrip node -> proof -> node" {
     }
 }
 
+test "compact multiproof reconstruction should reject empty leaves" {
+    var pool = try Node.Pool.init(.{
+        .page_allocator = testing.allocator,
+        .allocator = testing.allocator,
+        .pool_size = 0,
+    });
+    defer pool.deinit();
+
+    var leaves = [_][32]u8{};
+    const descriptor = [_]u8{0b1000_0000};
+
+    try testing.expectError(
+        proof.Error.InvalidWitnessLength,
+        proof.createNodeFromCompactMultiProof(&pool, &leaves, &descriptor),
+    );
+}
+
 // Prove individual chunks inside a `.chunked_leaf` node: createSingleProof
 // must materialize the packed leaf to collect intermediate witnesses.
 test "single proof through chunked_leaf" {

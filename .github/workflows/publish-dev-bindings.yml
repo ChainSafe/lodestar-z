@@ -1,0 +1,56 @@
+name: Publish dev bindings
+
+on:
+  workflow_call:
+
+env:
+  ZIG_VERSION: "0.16.0"
+  NODE_VERSION: "24"
+
+jobs:
+  publish-dev-bindings:
+    name: publish dev bindings
+    # Keep compatibility with Lodestar's Ubuntu 22.04 runners. See the
+    # explanation in publish-bindings.yml.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+          cache: pnpm
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-22.04-${{ env.ZIG_VERSION }}
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+      - name: Set dev version
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          if [[ ! "$PACKAGE_VERSION" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+([+-].*)?$ ]]; then
+            echo "Unsupported package version: $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+
+          NEXT_VERSION="${BASH_REMATCH[1]}.$((BASH_REMATCH[2] + 1)).0"
+          VERSION="${NEXT_VERSION}-dev.${GITHUB_SHA:0:10}"
+          npm pkg set version="$VERSION"
+
+          echo "Publishing @chainsafe/lodestar-z@$VERSION"
+      - name: Build and publish to npm
+        run: |
+          pnpm zapi build-artifacts --optimize ReleaseSafe
+          pnpm zapi prepublish
+          rm -rf zig-out/lib
+          pnpm zapi publish -- --access public --ignore-scripts --provenance --tag next
