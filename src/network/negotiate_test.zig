@@ -267,3 +267,28 @@ test "negotiator preserves coalesced acceptance payload and FIN for the dialer" 
     try std.testing.expect(outcomes[0].result.ready.fin);
     try std.testing.expectEqual(@import("types.zig").Direction.outbound, outcomes[0].direction);
 }
+
+test "negotiator capabilities snapshot owns temporary descriptors in stable entries" {
+    var listener = try Negotiator.init(std.testing.allocator, 2);
+    defer listener.deinit();
+    var offered = [_][]const u8{ping};
+    try listener.acceptInbound(.{ .conn = .{ .index = 0, .generation = 1 }, .id = 0, .slot = 0 }, &offered, .{ .mono_ms = 1, .unix_s = 1 });
+    offered[0] = "/replacement/1.0.0";
+    try std.testing.expectEqualStrings(ping, listener.entries[0].role.listener.supported[0]);
+}
+
+test "negotiator capabilities offer bounds reject before claiming a slot" {
+    var listener = try Negotiator.init(std.testing.allocator, 1);
+    defer listener.deinit();
+    const stream: engine_mod.StreamHandle = .{ .conn = .{ .index = 0, .generation = 1 }, .id = 0, .slot = 0 };
+    const now: @import("types.zig").Now = .{ .mono_ms = 1, .unix_s = 1 };
+    const offered = [_][]const u8{ping} ** 65;
+    try std.testing.expectError(error.InvalidLimits, listener.acceptInbound(stream, &.{}, now));
+    try std.testing.expectError(error.InvalidLimits, listener.acceptInbound(stream, &offered, now));
+    try std.testing.expectEqual(0, listener.active());
+    try listener.acceptInbound(stream, offered[0..64], now);
+    try std.testing.expectEqual(64, listener.entries[0].role.listener.supported.len);
+    try std.testing.expectEqual(1, listener.active());
+    try std.testing.expectError(error.InvalidLimits, listener.acceptInbound(stream, &offered, now));
+    try std.testing.expectError(error.NegotiationTableFull, listener.acceptInbound(stream, &.{ping}, now));
+}

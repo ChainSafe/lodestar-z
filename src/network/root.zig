@@ -1,3 +1,4 @@
+pub const capabilities = @import("capabilities.zig");
 pub const core = @import("core.zig");
 pub const Core = core.Core;
 pub const network_core = @import("network_core.zig");
@@ -75,4 +76,8 @@ test {
 pub const configuration = @import("configuration.zig");
 test {
     _ = configuration;
+}
+
+test {
+    _ = @import("capabilities_test.zig");
 }

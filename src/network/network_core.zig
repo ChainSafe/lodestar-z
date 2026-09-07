@@ -26,6 +26,12 @@ pub const AdvertisementEndpoints = struct {
     quic: ?u16 = null,
     quic6: ?u16 = null,
 };
+pub const LocalUpdate = struct {
+    local: t.LocalState,
+    schedule: ForkSchedule,
+    endpoints: ?AdvertisementEndpoints,
+    capabilities: @import("capabilities.zig").Directional,
+};
 pub const DiscoveryOptions = struct {
     advertisement: ?AdvertisementEndpoints = null,
     bind: std.Io.net.IpAddress,
@@ -353,10 +359,24 @@ pub const NetworkCore = struct {
     }
 
     pub fn updateLocalWithEndpoints(self: *NetworkCore, desired: *const t.LocalState, schedule: ForkSchedule, endpoints: ?AdvertisementEndpoints, now: Now) !bool {
+        return self.applyLocal(&.{
+            .local = desired.*,
+            .schedule = schedule,
+            .endpoints = endpoints,
+            .capabilities = self.core.service.router.capabilities(),
+        }, now);
+    }
+
+    /// Prepares every owner before ENR publication; caller sequence input is ignored.
+    pub fn applyLocal(self: *NetworkCore, update: *const LocalUpdate, now: Now) !bool {
         if (self.core.stopped) return error.Stopped;
+        const schedule = update.schedule;
+        const endpoints = update.endpoints;
+        const capabilities = update.capabilities;
+        try self.core.service.router.validateCapabilities(capabilities);
         if ((endpoints == null) != (self.discovery == null)) return error.InvalidAdvertisement;
         if (endpoints) |value| try validateEndpoints(value);
-        var local = desired.*;
+        var local = update.local;
         local.metadata.seq_number = self.core.local.metadata.seq_number;
         try peers.control_wire.copyLocal(&local, &local);
         try validateSchedule(&local, schedule);
@@ -364,7 +384,7 @@ pub const NetworkCore = struct {
         try validateForkTable(request.forks[0..request.fork_count], &local.fork);
         const metadata_changed = !std.meta.eql(local.metadata, self.core.local.metadata);
         if (metadata_changed) local.metadata.seq_number = try peers.enr.nextSequence(local.metadata.seq_number);
-        if (std.meta.eql(local, self.core.local) and std.meta.eql(schedule, self.schedule) and std.meta.eql(endpoints, self.advertisementEndpoints())) return false;
+        if (std.meta.eql(local, self.core.local) and std.meta.eql(schedule, self.schedule) and std.meta.eql(endpoints, self.advertisementEndpoints()) and std.meta.eql(capabilities, self.core.service.router.capabilities())) return false;
         if (self.discovery) |owned| {
             const advertisement = advertisementFor(&local, schedule, endpoints.?);
             const previous = advertisementFor(&self.core.local, self.schedule, owned.endpoints);
@@ -377,7 +397,8 @@ pub const NetworkCore = struct {
             owned.coordinator.updateFork(&local.fork) catch unreachable;
         }
         // All fallible preparation precedes publication. Both consumers validate the same copy.
-        self.core.updateFork(&local, now) catch unreachable;
+        self.core.service.router.setCapabilities(capabilities);
+        self.core.commitLocal(&local, now);
         self.schedule = schedule;
         return true;
     }

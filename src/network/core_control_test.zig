@@ -660,3 +660,40 @@ test "core control cancelled canonical requests retain buffers through local ret
     try std.testing.expect(!op.cancelled);
     try std.testing.expectEqual(grace, setup.client.control.schedules[peer.index].transition_until_ms);
 }
+
+test "core control capabilities pre-Fulu Metadata3 serves configured custody count" {
+    const local: t.LocalState = .{ .metadata = .{ .custody_group_count = 1 } };
+    var setup: Setup = .{};
+    try setup.init(&local);
+    defer setup.deinit();
+    const active = try @import("capabilities.zig").forFork(.phase0, false, &.{ .v1_2, .v1_1 });
+    setup.client.service.router.setCapabilities(active);
+    setup.server.service.router.setCapabilities(active);
+    for (0..50) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    var sink: [32]u8 = undefined;
+    const request = try setup.client.service.request(&setup.pair.client, snapshots[0].connection.?, .metadata_v3, &.{}, &sink, .{}, setup.pair.now);
+    var received = false;
+    var done = false;
+    for (0..50) |_| {
+        try setup.pair.pump();
+        var events: [32]Engine.Event = undefined;
+        _ = setup.server.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &events), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+        var out: [1]rr.Event = undefined;
+        const counts = setup.client.service.processPartitioned(&setup.pair.client, setup.pair.events(&setup.pair.client, &events), &.{}, setup.pair.now, &.{}, &out, &.{});
+        for (out[0..counts.control]) |event| switch (event) {
+            .chunk => |chunk| {
+                try std.testing.expectEqualDeep(request, chunk.request);
+                const metadata = try wire.decodeMetadata(.metadata_v3, chunk.bytes, local.fork);
+                try std.testing.expectEqual(local.metadata.custody_group_count, metadata.custody_group_count);
+                try std.testing.expect(setup.client.consume(request, setup.pair.now));
+                received = true;
+            },
+            .done => done = true,
+            else => return error.TestUnexpectedResult,
+        };
+        if (done) break;
+    }
+    try std.testing.expect(received and done);
+}

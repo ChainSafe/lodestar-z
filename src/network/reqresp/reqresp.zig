@@ -110,6 +110,7 @@ pub const PartitionedCounts = struct { application: usize, control: usize };
 pub const InitError = limiter_mod.InitError || error{InvalidPolicy};
 
 pub const RequestError = error{
+    ProtocolDisabled,
     InvalidRequest,
     InvalidRequestOptions,
     InvalidCapacity,
@@ -376,6 +377,7 @@ pub const ReqResp = struct {
         request_options: RequestOptions,
         now: Now,
     ) RequestError!RequestHandle {
+        if (!router.capabilities().request.contains(.{ .reqresp = which })) return error.ProtocolDisabled;
         return Client.request(
             self,
             engine,
