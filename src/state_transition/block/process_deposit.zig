@@ -59,6 +59,7 @@ pub const DepositData = union(enum) {
 pub fn processDeposit(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
@@ -82,7 +83,7 @@ pub fn processDeposit(
 
     // deposits must be processed in order
     try state.incrementEth1DepositIndex();
-    try applyDeposit(fork, allocator, config, epoch_cache, state, &.{
+    try applyDeposit(fork, allocator, io, config, epoch_cache, state, &.{
         .phase0 = deposit.data,
     });
 }
@@ -92,6 +93,7 @@ pub fn processDeposit(
 pub fn applyDeposit(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
@@ -102,13 +104,13 @@ pub fn applyDeposit(
     const amount = deposit.amount();
     const signature = deposit.signature();
 
-    const cached_index = epoch_cache.getValidatorIndex(pubkey);
+    const cached_index = epoch_cache.pubkey_cache.get(io, pubkey.*);
     const is_new_validator = cached_index == null or cached_index.? >= try state.validatorsCount();
 
     if (comptime fork.lt(.electra)) {
         if (is_new_validator) {
             if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
-                try addValidatorToRegistry(fork, allocator, epoch_cache, state, pubkey, withdrawal_credentials, amount);
+                try addValidatorToRegistry(fork, allocator, io, epoch_cache, state, pubkey, withdrawal_credentials, amount);
             } else |_| {
                 // invalid deposit signature, ignore the deposit
                 // TODO may be a useful metric to track
@@ -130,7 +132,7 @@ pub fn applyDeposit(
         var pending_deposits = try state.pendingDeposits();
         if (is_new_validator) {
             if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
-                try addValidatorToRegistry(fork, allocator, epoch_cache, state, pubkey, withdrawal_credentials, 0);
+                try addValidatorToRegistry(fork, allocator, io, epoch_cache, state, pubkey, withdrawal_credentials, 0);
                 try pending_deposits.pushValue(&pending_deposit);
             } else |_| {
                 // invalid deposit signature, ignore the deposit
@@ -145,6 +147,7 @@ pub fn applyDeposit(
 pub fn addValidatorToRegistry(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
     pubkey: *const BLSPubkey,
@@ -168,6 +171,7 @@ pub fn addValidatorToRegistry(
         .effective_balance = effective_balance,
         .slashed = false,
     };
+
     try validators.pushValue(&validator);
 
     const validator_index = (try validators.length()) - 1;
@@ -178,8 +182,7 @@ pub fn addValidatorToRegistry(
     // - Should have equal performance since it sets a value in a flat array
     try epoch_cache.effectiveBalanceIncrementsSet(allocator, validator_index, effective_balance);
 
-    // now that there is a new validator, update the epoch context with the new pubkey
-    try epoch_cache.addPubkey(validator_index, pubkey);
+    try epoch_cache.pubkey_cache.append(io, pubkey.*, validator_index);
 
     // Only after altair:
     if (comptime fork.gte(.altair)) {

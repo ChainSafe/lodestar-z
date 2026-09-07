@@ -21,6 +21,8 @@ pub const AnyAttesterSlashing = @import("./any_attester_slashing.zig").AnyAttest
 
 const testing = @import("std").testing;
 test {
+    _ = @import("./memory_safety_test.zig");
+
     testing.refAllDecls(BeaconState(.fulu));
     testing.refAllDecls(SignedBeaconBlock(.full, .fulu));
     testing.refAllDecls(BeaconBlock(.full, .fulu));

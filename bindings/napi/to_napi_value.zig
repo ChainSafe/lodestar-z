@@ -48,7 +48,18 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
                 return arr;
             }
         },
-        .container => {
+        .progressive_list => {
+            const arr = try env.createArrayWithLength(value.items.len);
+            for (value.items, 0..) |*v, i| {
+                const napi_element = try sszValueToNapiValue(env, ST.Element, v);
+                try arr.setElement(@intCast(i), napi_element);
+            }
+            return arr;
+        },
+        .progressive_bit_list => {
+            return try bitArrayToNapiValue(env, value.data.items, value.bit_len);
+        },
+        .container, .progressive_container => {
             const obj = try env.createObject();
             inline for (ST.fields) |field| {
                 const field_value = &@field(value, field.name);
@@ -56,6 +67,24 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
                 try obj.setNamedProperty(snakeToCamel(field.name), napi_field_value);
             }
             return obj;
+        },
+        .compatible_union => {
+            const selector = ST.getSelector(value);
+            const obj = try env.createObject();
+            try obj.setNamedProperty("selector", try env.createInt64(@intCast(selector)));
+
+            inline for (ST._union_options) |option| {
+                if (selector == option.@"0") {
+                    const option_type = option.@"1";
+                    const field_name = comptime std.fmt.comptimePrint("option_{d}", .{option.@"0"});
+                    const union_value = &@field(value.*, field_name);
+                    const napi_union_value = try sszValueToNapiValue(env, option_type, union_value);
+                    try obj.setNamedProperty("value", napi_union_value);
+                    return obj;
+                }
+            }
+
+            return error.InvalidSelector;
         },
     }
 }

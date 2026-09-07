@@ -17,10 +17,11 @@ const Pairing = @import("Pairing.zig");
 const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
+const SigningRoot = blst.SigningRoot;
 const AggregatePublicKey = blst.AggregatePublicKey;
-const AggregateSignature = blst.AggregateSignature;
 const BlstError = @import("error.zig").BlstError;
-const SecretKey = @import("SecretKey.zig");
+const fast_verify = @import("fast_verify.zig");
+const BatchVerifyItem = fast_verify.BatchVerifyItem;
 const pippenger = @import("pippenger.zig");
 
 pub const PoolError = error{
@@ -121,14 +122,20 @@ pub fn init(allocator_: Allocator, io: std.Io, opts: Opts) (Allocator.Error || s
     std.debug.assert(opts.n_workers <= MAX_WORKERS);
 
     const pool = try allocator_.create(ThreadPool);
+    errdefer pool.deinit(io);
+
     pool.* = .{
         .allocator = allocator_,
-        .n_workers = opts.n_workers,
+        .n_workers = 0,
         .queue = .{},
     };
-    for (0..pool.n_workers) |i| {
+
+    for (0..opts.n_workers) |i| {
         pool.threads[i] = try std.Thread.spawn(.{}, workerLoop, .{ pool, io });
+        pool.n_workers += 1;
     }
+    std.debug.assert(pool.n_workers == opts.n_workers);
+
     return pool;
 }
 
@@ -194,10 +201,7 @@ pub fn submitAndWait(pool: *ThreadPool, io: std.Io, items: []*WorkItem) (PoolErr
 }
 
 const VerifyMultiJob = struct {
-    pks: []const *PublicKey,
-    sigs: []const *Signature,
-    msgs: []const []const u8,
-    rands: []const [32]u8,
+    items: []const BatchVerifyItem,
     dst: []const u8,
     pks_validate: bool,
     sigs_groupcheck: bool,
@@ -217,21 +221,22 @@ const VerifyMultiWorkItem = struct {
         const job = self.job;
 
         var pairing = Pairing.init(&job.result_bufs[self.worker_id].data, true, job.dst);
-        const n_elems = job.pks.len;
+        const n_elems = job.items.len;
 
         while (true) {
             const i = job.counter.fetchAdd(1, .monotonic);
             if (i >= n_elems) break;
             if (job.err_flag.load(.monotonic)) break;
 
+            const item = &job.items[i];
             pairing.mulAndAggregate(
-                job.pks[i],
+                item.public_key,
                 job.pks_validate,
-                job.sigs[i],
+                item.signature,
                 job.sigs_groupcheck,
-                &job.rands[i],
+                &item.randomness,
                 RAND_BITS,
-                job.msgs[i],
+                item.message,
             ) catch {
                 job.err_flag.store(true, .release);
                 break;
@@ -247,34 +252,35 @@ const VerifyMultiWorkItem = struct {
 /// This is the multi-threaded version of the same function in `fast_verify.zig`.
 /// Multiple callers may invoke this concurrently — each call owns its own
 /// pairing buffers and job state, workers pull from a shared queue.
+/// Returns false for invalid cryptographic inputs. Propagates pool lifecycle errors.
 pub fn verifyMultipleAggregateSignatures(
     pool: *ThreadPool,
     io: std.Io,
-    n_elems: usize,
-    msgs: []const []const u8,
+    items: []const BatchVerifyItem,
     dst: []const u8,
-    pks: []const *PublicKey,
     pks_validate: bool,
-    sigs: []const *Signature,
     sigs_groupcheck: bool,
-    rands: []const [32]u8,
-) (BlstError || PoolError || std.Io.Cancelable)!bool {
-    if (n_elems == 0 or
-        pks.len != n_elems or
-        sigs.len != n_elems or
-        msgs.len != n_elems or
-        rands.len != n_elems)
-        return BlstError.VerifyFail;
+) (PoolError || std.Io.Cancelable)!bool {
+    const n_elems = items.len;
+    if (n_elems == 0) return false;
+
+    if (n_elems <= 2 or pool.n_workers <= 1) {
+        var pairing_buf: PairingBuf = .{};
+        return fast_verify.verifyMultipleAggregateSignatures(
+            &pairing_buf.data,
+            items,
+            dst,
+            pks_validate,
+            sigs_groupcheck,
+        ) catch false;
+    }
 
     const n_active = @min(pool.n_workers, n_elems);
 
     var result_bufs: [MAX_WORKERS]PairingBuf = undefined;
 
     var job = VerifyMultiJob{
-        .pks = pks[0..n_elems],
-        .sigs = sigs[0..n_elems],
-        .msgs = msgs[0..n_elems],
-        .rands = rands[0..n_elems],
+        .items = items,
         .dst = dst,
         .pks_validate = pks_validate,
         .sigs_groupcheck = sigs_groupcheck,
@@ -297,14 +303,14 @@ pub fn verifyMultipleAggregateSignatures(
 
     try pool.submitAndWait(io, item_ptrs[0..n_active]);
 
-    if (job.err_flag.load(.acquire)) return BlstError.VerifyFail;
+    if (job.err_flag.load(.acquire)) return false;
 
-    return mergeAndVerify(&result_bufs, n_active, null);
+    return mergeAndVerify(&result_bufs, n_active, null) catch false;
 }
 
 const AggVerifyJob = struct {
     pks: []const *PublicKey,
-    msgs: []const [32]u8,
+    msgs: []const SigningRoot,
     dst: []const u8,
     pks_validate: bool,
     n_elems: usize,
@@ -359,7 +365,7 @@ pub fn aggregateVerify(
     io: std.Io,
     sig: *const Signature,
     sig_groupcheck: bool,
-    msgs: []const [32]u8,
+    msgs: []const SigningRoot,
     dst: []const u8,
     pks: []const *PublicKey,
     pks_validate: bool,
@@ -446,8 +452,7 @@ fn mergeAndVerify(
 /// - `pks` and `sigs` are paired by index.
 /// - `randomness` must contain at least `pks.len * 32` bytes;
 /// - only the first 8 bytes per 32-byte slot are read by
-///   the underlying 64-bit Pippenger, but the 32-byte stride matches the existing
-///   `AggregatePublicKey.aggregateWithRandomness` layout.
+///   the underlying 64-bit Pippenger.
 pub fn aggregateWithRandomness(
     pool: *ThreadPool,
     io: std.Io,
@@ -471,172 +476,14 @@ pub fn aggregateWithRandomness(
 
     var pk_proj: c.blst_p1 = undefined;
     try pippenger.parallelMSMG1(pool, io, pks, scalars_refs[0..pks.len], 64, &pk_proj);
-    c.blst_p1_to_affine(&pk_out.point, &pk_proj);
 
     var sig_proj: c.blst_p2 = undefined;
     try pippenger.parallelMSMG2(pool, io, sigs, scalars_refs[0..sigs.len], 64, &sig_proj);
+
+    c.blst_p1_to_affine(&pk_out.point, &pk_proj);
     c.blst_p2_to_affine(&sig_out.point, &sig_proj);
 }
 
-test "verifyMultipleAggregateSignatures multi-threaded" {
-    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 4 });
-    defer pool.deinit(std.testing.io);
-
-    const ikm: [32]u8 = .{
-        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
-        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
-        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
-        0x48, 0x99,
-    };
-
-    const num_sigs = 16;
-
-    var msgs: [num_sigs][32]u8 = undefined;
-    var msg_refs: [num_sigs][]const u8 = undefined;
-    var pks: [num_sigs]PublicKey = undefined;
-    var sigs: [num_sigs]Signature = undefined;
-    var pk_ptrs: [num_sigs]*PublicKey = undefined;
-    var sig_ptrs: [num_sigs]*Signature = undefined;
-
-    var prng = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        std.testing.io.random(std.mem.asBytes(&seed));
-        break :blk seed;
-    });
-    const rand = prng.random();
-
-    for (0..num_sigs) |i| {
-        std.Random.bytes(rand, &msgs[i]);
-        var ikm_i = ikm;
-        ikm_i[0] = @intCast(i & 0xff);
-        const sk = try SecretKey.keyGen(&ikm_i, null);
-        pks[i] = sk.toPublicKey();
-        sigs[i] = sk.sign(&msgs[i], blst.DST, null);
-        msg_refs[i] = &msgs[i];
-        pk_ptrs[i] = &pks[i];
-        sig_ptrs[i] = &sigs[i];
-    }
-
-    var rands: [num_sigs][32]u8 = undefined;
-    for (&rands) |*r| std.Random.bytes(rand, r);
-
-    const result = try pool.verifyMultipleAggregateSignatures(
-        std.testing.io,
-        num_sigs,
-        &msg_refs,
-        blst.DST,
-        &pk_ptrs,
-        true,
-        &sig_ptrs,
-        true,
-        &rands,
-    );
-
-    try std.testing.expect(result);
-}
-
-test "aggregateVerify multi-threaded" {
-    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 4 });
-    defer pool.deinit(std.testing.io);
-
-    const ikm: [32]u8 = .{
-        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
-        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
-        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
-        0x48, 0x99,
-    };
-
-    const num_sigs = 16;
-
-    var msgs: [num_sigs][32]u8 = undefined;
-    var pks: [num_sigs]PublicKey = undefined;
-    var sigs: [num_sigs]Signature = undefined;
-    var pk_ptrs: [num_sigs]*PublicKey = undefined;
-
-    var prng = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        std.testing.io.random(std.mem.asBytes(&seed));
-        break :blk seed;
-    });
-    const rand = prng.random();
-
-    for (0..num_sigs) |i| {
-        std.Random.bytes(rand, &msgs[i]);
-        var ikm_i = ikm;
-        ikm_i[0] = @intCast(i & 0xff);
-        const sk = try SecretKey.keyGen(&ikm_i, null);
-        pks[i] = sk.toPublicKey();
-        sigs[i] = sk.sign(&msgs[i], blst.DST, null);
-        pk_ptrs[i] = &pks[i];
-    }
-
-    const agg_sig = blst.AggregateSignature.aggregate(&sigs, false) catch return error.AggregationFailed;
-    const final_sig = agg_sig.toSignature();
-
-    try std.testing.expect(try pool.aggregateVerify(
-        std.testing.io,
-        &final_sig,
-        false,
-        &msgs,
-        blst.DST,
-        &pk_ptrs,
-        true,
-    ));
-}
-
-test "aggregateWithRandomness multi-threaded" {
-    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 4 });
-    defer pool.deinit(std.testing.io);
-
-    const ikm: [32]u8 = .{
-        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
-        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
-        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
-        0x48, 0x99,
-    };
-
-    const num_sigs = blst.MAX_AGGREGATE_PER_JOB;
-
-    var msg: [32]u8 = undefined;
-    var pks: [num_sigs]PublicKey = undefined;
-    var sigs: [num_sigs]Signature = undefined;
-    var pk_ptrs: [num_sigs]*const PublicKey = undefined;
-    var sig_ptrs: [num_sigs]*const Signature = undefined;
-
-    var prng = std.Random.DefaultPrng.init(blk: {
-        var seed: u64 = undefined;
-        std.testing.io.random(std.mem.asBytes(&seed));
-        break :blk seed;
-    });
-    const rand = prng.random();
-    std.Random.bytes(rand, &msg);
-
-    for (0..num_sigs) |i| {
-        var ikm_i = ikm;
-        ikm_i[0] = @intCast(i & 0xff);
-        const sk = try SecretKey.keyGen(&ikm_i, null);
-        pks[i] = sk.toPublicKey();
-        sigs[i] = sk.sign(&msg, blst.DST, null);
-        pk_ptrs[i] = &pks[i];
-        sig_ptrs[i] = &sigs[i];
-    }
-
-    var randomness: [32 * num_sigs]u8 = undefined;
-    std.Random.bytes(rand, &randomness);
-
-    var agg_pk: PublicKey = .{};
-    var agg_sig: Signature = .{};
-
-    try pool.aggregateWithRandomness(
-        std.testing.io,
-        &pk_ptrs,
-        &sig_ptrs,
-        &randomness,
-        true,
-        true,
-        &agg_pk,
-        &agg_sig,
-    );
-
-    try agg_sig.verify(true, &msg, blst.DST, null, &agg_pk, true);
+test {
+    _ = @import("thread_pool_test.zig");
 }

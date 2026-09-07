@@ -138,6 +138,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
         pub fn process(self: *Self) !void {
             const verify = self.bls_setting.verify();
             const allocator = self.pre.allocator;
+            const io = std.testing.io;
             const cached_state = self.pre.cached_state;
             const state = cached_state.state.castToFork(fork);
 
@@ -149,6 +150,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processAttestations(
                         fork,
                         allocator,
+                        io,
                         config,
                         epoch_cache,
                         state,
@@ -164,6 +166,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processAttesterSlashing(
                         fork,
                         allocator,
+                        io,
                         config,
                         epoch_cache,
                         state,
@@ -192,12 +195,12 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 .consolidation_request => {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;
-                    try state_transition.processConsolidationRequest(fork, config, epoch_cache, state, &self.op);
+                    try state_transition.processConsolidationRequest(fork, io, config, epoch_cache, state, &self.op);
                 },
                 .deposit => {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;
-                    try state_transition.processDeposit(fork, allocator, config, epoch_cache, state, &self.op);
+                    try state_transition.processDeposit(fork, allocator, io, config, epoch_cache, state, &self.op);
                 },
                 .deposit_request => {
                     try state_transition.processDepositRequest(fork, state, &self.op);
@@ -227,6 +230,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processProposerSlashing(
                         fork,
                         allocator,
+                        io,
                         config,
                         epoch_cache,
                         state,
@@ -241,6 +245,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     try state_transition.processSyncAggregate(
                         fork,
                         allocator,
+                        io,
                         config,
                         epoch_cache,
                         state,
@@ -253,6 +258,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                     const epoch_cache = cached_state.epoch_cache;
                     try state_transition.processVoluntaryExit(
                         fork,
+                        io,
                         config,
                         epoch_cache,
                         state,
@@ -263,7 +269,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 .withdrawal_request => {
                     const config = cached_state.config;
                     const epoch_cache = cached_state.epoch_cache;
-                    try state_transition.processWithdrawalRequest(fork, config, epoch_cache, state, &self.op);
+                    try state_transition.processWithdrawalRequest(fork, io, config, epoch_cache, state, &self.op);
                 },
                 .withdrawals => {
                     const epoch_cache = cached_state.epoch_cache;

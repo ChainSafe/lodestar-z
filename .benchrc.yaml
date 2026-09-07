@@ -1,0 +1,9 @@
+# @chainsafe/benchmark options
+threshold: 3
+maxMs: 60000
+minRuns: 10
+convergeFactor: 0.075
+triggerGC: false
+sort: true
+convergence: linear
+averageCalculation: clean-outliers

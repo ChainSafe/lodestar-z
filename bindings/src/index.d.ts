@@ -1,4 +1,5 @@
 // biome-ignore-all lint/style/useNamingConvention: spec-canonical fork names in `ForkName`
+
 interface BeaconBlockHeader {
   slot: number;
   proposerIndex: number;
@@ -90,6 +91,17 @@ export enum ForkName {
   electra = "electra",
   fulu = "fulu",
   gloas = "gloas",
+}
+
+export enum ForkSeq {
+  phase0 = 0,
+  altair = 1,
+  bellatrix = 2,
+  capella = 3,
+  deneb = 4,
+  electra = 5,
+  fulu = 6,
+  gloas = 7,
 }
 
 interface SyncCommittee {
@@ -189,6 +201,7 @@ export declare class BeaconStateView {
   slot: number;
   fork: Fork;
   forkName: ForkName;
+  forkSeq: ForkSeq;
   epoch: number;
   genesisTime: number;
   genesisValidatorsRoot: Uint8Array;
@@ -365,18 +378,12 @@ export declare class BeaconStateView {
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
-  stateTransition(signedBlockBytes: Uint8Array, options?: TransitionOpts): BeaconStateView;
+  stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
 declare const bindings: {
-  pool: {
-    ensureCapacity: (capacity: number) => void;
-  };
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
-  };
-  shuffle: {
-    innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
   stateTransition: {
     deinitReusedEpochTransitionCache: () => void;

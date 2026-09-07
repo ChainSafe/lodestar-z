@@ -2,19 +2,10 @@ import bindings from "./bindings.js";
 
 const native = bindings.pubkeys;
 
-/** @type {Map<number, import("./blst.js").PublicKey>} */
-const pkCache = new Map();
-
 /** @type {import("./pubkeys.d.ts").PubkeyCache} */
 export const pubkeyCache = {
   get(index) {
-    let pk = pkCache.get(index);
-    if (pk !== undefined) return pk;
-    pk = native.get(index);
-    if (pk !== undefined) {
-      pkCache.set(index, pk);
-    }
-    return pk;
+    return native.get(index);
   },
 
   getOrThrow(index) {
@@ -25,6 +16,19 @@ export const pubkeyCache = {
     return pk;
   },
 
+  getPubkeyBytes(index) {
+    return native.getPubkeyBytes(index);
+  },
+
+  getPubkeyBytesOrThrow(index) {
+     const pubkey = native.getPubkeyBytes(index);
+     if (pubkey === undefined) {
+       throw new Error(`pubkeyCache: index ${index} not found`);
+     }
+
+     return pubkey;
+   },
+
   aggregate(indices) {
     if (indices.length === 1) return pubkeyCache.getOrThrow(indices[0]);
     return native.aggregate(indices);
@@ -34,23 +38,27 @@ export const pubkeyCache = {
     return native.getIndex(pubkey);
   },
 
-  set(index, pubkey) {
-    native.set(index, pubkey);
-    // Invalidate cached JS object so next get() picks up the new native value
-    pkCache.delete(index);
+  append(index, pubkey) {
+    native.append(index, pubkey);
+  },
+
+  syncPubkeys(validators) {
+    native.syncPubkeys(validators);
   },
 
   get size() {
     return native.size();
   },
 
-  load(filepath) {
-    pkCache.clear();
-    native.load(filepath);
+  get capacity() {
+    return native.capacity();
+  },
+
+  load(filepath, maxCapacity) {
+    native.load(filepath, maxCapacity);
   },
 
   reset() {
-    pkCache.clear();
     native.reset();
   },
 

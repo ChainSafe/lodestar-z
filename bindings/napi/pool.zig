@@ -1,5 +1,4 @@
 const std = @import("std");
-const js = @import("zapi:zapi").js;
 const Node = @import("persistent_merkle_tree").Node;
 const RefCount = @import("state_transition").RefCount;
 
@@ -7,24 +6,32 @@ const RefCount = @import("state_transition").RefCount;
 /// `InitOptions` allocators.
 const allocator = std.heap.page_allocator;
 
-const default_pool_size: u32 = 0;
+const pool_size_environment_variable = "LODESTAR_Z_NODE_POOL_CAPACITY";
+// Arbitrary limit to avoid excessive memory usage.
+const default_pool_size: u32 = 10_000_000;
 
-pub const PoolRc = RefCount(Node.Pool);
+const PoolRc = RefCount(Node.Pool);
+
+fn poolSizeFromEnvironment() !u32 {
+    const raw = std.c.getenv(pool_size_environment_variable) orelse return default_pool_size;
+    const value = std.mem.span(raw);
+    return std.fmt.parseInt(u32, value, 10) catch error.InvalidPoolCapacity;
+}
 
 /// Pool is wrapped in `RefCount` so binding objects holding pool refs at
 /// process exit keep the pool alive until their JS finalizer runs. NAPI
 /// env cleanup hook fires before module-level JS holders are finalized,
 /// so an unconditional `pool.deinit()` there would free memory that
 /// `pool.unref()` calls in those finalizers still need.
-pub const State = struct {
+const State = struct {
     pool_rc: ?*PoolRc = null,
 
     pub fn init(self: *State) !void {
         if (self.pool_rc != null) return;
 
-        // Small-object lane must stay non-page: page_allocator rounds each
-        // alloc to 4 KB and blows up once the binding preheats 10M nodes.
-        var pool_value = try Node.Pool.init(.{ .allocator = std.heap.c_allocator, .pool_size = default_pool_size });
+        const pool_size = try poolSizeFromEnvironment();
+
+        var pool_value = try Node.Pool.init(.{ .allocator = std.heap.c_allocator, .pool_size = pool_size });
         errdefer pool_value.deinit();
 
         self.pool_rc = try PoolRc.init(allocator, pool_value);
@@ -49,17 +56,3 @@ pub const State = struct {
 };
 
 pub var state: State = .{};
-
-/// JS: pool.ensureCapacity(newSize)
-pub fn ensureCapacity(new_size: js.Number) !void {
-    if (state.pool_rc == null) {
-        return error.PoolNotInitialized;
-    }
-
-    const requested = new_size.assertU32();
-    const old_size = state.pool().nodes.capacity;
-    if (requested <= old_size) {
-        return;
-    }
-    try state.pool().preheat(@intCast(requested - state.pool().nodes.capacity));
-}

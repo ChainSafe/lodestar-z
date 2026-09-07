@@ -8,6 +8,7 @@ const CachedBeaconState = st.CachedBeaconState;
 const AnyBeaconState = fork_types.AnyBeaconState;
 const AnyExecutionPayloadHeader = fork_types.AnyExecutionPayloadHeader;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const BlockType = fork_types.BlockType;
 const preset = @import("preset").preset;
 const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
@@ -16,7 +17,6 @@ const pubkey = @import("./pubkeys.zig");
 const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
-const napi_io = @import("./io.zig");
 const validator_monitor = @import("./validator_monitor.zig");
 
 /// Allocator used for all BeaconStateView instances.
@@ -27,6 +27,7 @@ pub const js_meta = js.class(.{ .properties = .{
     .slot = js.prop(.{ .get = true, .set = false }),
     .fork = js.prop(.{ .get = true, .set = false }),
     .forkName = js.prop(.{ .get = true, .set = false }),
+    .forkSeq = js.prop(.{ .get = true, .set = false }),
     .epoch = js.prop(.{ .get = true, .set = false }),
     .genesisTime = js.prop(.{ .get = true, .set = false }),
     .genesisValidatorsRoot = js.prop(.{ .get = true, .set = false }),
@@ -73,7 +74,7 @@ pub const js_meta = js.class(.{ .properties = .{
 } });
 
 cached_state: ?*CachedBeaconState = null,
-pool_rc: ?*pool.PoolRc = null,
+pool_rc: @TypeOf(pool.state.pool_rc) = null,
 const BeaconStateView = @This();
 
 pub fn init() BeaconStateView {
@@ -92,6 +93,23 @@ pub fn deinit(self: *BeaconStateView) void {
     }
 }
 
+fn initCachedState(
+    cached_state: *CachedBeaconState,
+    io: std.Io,
+    state: *AnyBeaconState,
+) !void {
+    try cached_state.init(
+        allocator,
+        io,
+        state,
+        .{
+            .config = &config.state.config,
+            .pubkey_cache = &pubkey.state.cache,
+        },
+        null,
+    );
+}
+
 // -------------------------
 // Class Methods
 // -------------------------
@@ -108,16 +126,8 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     const cached_state = try allocator.create(CachedBeaconState);
     errdefer allocator.destroy(cached_state);
 
-    try cached_state.init(
-        allocator,
-        state,
-        .{
-            .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
-        },
-        null,
-    );
+    const io = js.io();
+    try initCachedState(cached_state, io, state);
 
     return .{
         .cached_state = cached_state,
@@ -146,6 +156,11 @@ pub fn fork(self: *const BeaconStateView) !js_types.Fork {
 pub fn forkName(self: *const BeaconStateView) !js.String {
     const cached_state = try self.requireState();
     return js.String.from(cached_state.state.forkSeq().name());
+}
+
+pub fn forkSeq(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    return js.Number.from(@intFromEnum(cached_state.state.forkSeq()));
 }
 
 pub fn epoch(self: *const BeaconStateView) !js.Number {
@@ -374,8 +389,8 @@ pub fn historicalSummaries(self: *const BeaconStateView) !js.Array {
     const cached_state = try self.requireState();
     var historical_summaries_view = try cached_state.state.historicalSummaries();
     var historical_summaries = ct.capella.HistoricalSummaries.default_value;
-    try historical_summaries_view.toValue(allocator, &historical_summaries);
     defer historical_summaries.deinit(allocator);
+    try historical_summaries_view.toValue(allocator, &historical_summaries);
     return js_types.wrap(js.Array, try sszValueToNapiValue(env, ct.capella.HistoricalSummaries, &historical_summaries));
 }
 
@@ -883,6 +898,7 @@ pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_value:
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.getVoluntaryExitValidity(
             f,
+            js.io(),
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state.castToFork(f),
@@ -909,6 +925,7 @@ pub fn isValidVoluntaryExit(self: *const BeaconStateView, signed_exit_value: js.
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.isValidVoluntaryExit(
             f,
+            js.io(),
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state.castToFork(f),
@@ -1045,7 +1062,7 @@ pub fn createMultiProof(self: *const BeaconStateView, descriptor: js.Uint8Array)
 pub fn computeUnrealizedCheckpoints(self: *const BeaconStateView) !js_types.UnrealizedCheckpoints {
     const env = js.env();
     const cached_state = try self.requireState();
-    const result = try st.computeUnrealizedCheckpoints(allocator, napi_io.get(), cached_state);
+    const result = try st.computeUnrealizedCheckpoints(allocator, js.io(), cached_state);
 
     const obj = try env.createObject();
     try obj.setNamedProperty(
@@ -1137,16 +1154,8 @@ pub fn loadOtherState(
         allocator.destroy(new_cached_state);
     }
 
-    try new_cached_state.init(
-        allocator,
-        new_state,
-        .{
-            .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
-        },
-        null,
-    );
+    const io = js.io();
+    try initCachedState(new_cached_state, io, new_state);
     new_cached_state_initialized = true;
 
     if (opts) |value| {
@@ -1292,10 +1301,11 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
 
     try st.processSlots(
         allocator,
-        napi_io.get(),
+        js.io(),
         post_state,
         slot_value,
         .{},
+
         validator_monitor.get(),
     );
     return .{
@@ -1309,8 +1319,14 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
 ///
 /// Arguments:
 /// - arg 0: signed block bytes (Uint8Array)
-/// - arg 1: options (optional): parse `TransitionOpts`
-pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint8Array, options: ?js.Value) !BeaconStateView {
+/// - arg 1: whether the signed block is blinded (bool)
+/// - arg 2: options (optional): parse `TransitionOpts`
+pub fn stateTransition(
+    self: *const BeaconStateView,
+    signed_block_bytes: js.Uint8Array,
+    is_blinded: js.Boolean,
+    options: ?js.Value,
+) !BeaconStateView {
     const cached_state = try self.requireState();
     const opts = try @import("./transition_opts.zig").parseOptions(options);
 
@@ -1322,13 +1338,14 @@ pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint
     const block_epoch = st.computeEpochAtSlot(block_slot);
 
     const fork_seq = cached_state.config.forkSeqAtEpoch(block_epoch);
+    const block_type: BlockType = if (try is_blinded.toBool()) .blinded else .full;
 
-    const signed_block = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, bytes);
+    const signed_block = try AnySignedBeaconBlock.deserialize(allocator, block_type, fork_seq, bytes);
     defer signed_block.deinit(allocator);
 
     const post_state = try st.stateTransition(
         allocator,
-        napi_io.get(),
+        js.io(),
         cached_state,
         signed_block,
         opts,

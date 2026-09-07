@@ -16,6 +16,7 @@ const Node = @import("persistent_merkle_tree").Node;
 pub fn processAttestations(
     comptime fork: ForkSeq,
     allocator: Allocator,
+    io: std.Io,
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
@@ -28,6 +29,7 @@ pub fn processAttestations(
         for (attestations) |attestation| {
             try processAttestationPhase0(
                 allocator,
+                io,
                 config,
                 epoch_cache,
                 state,
@@ -39,6 +41,7 @@ pub fn processAttestations(
         try processAttestationsAltair(
             fork,
             allocator,
+            io,
             config,
             epoch_cache,
             state,
@@ -51,7 +54,7 @@ pub fn processAttestations(
 
 test "process attestations - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 16 * 5;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
@@ -66,6 +69,7 @@ test "process attestations - sanity" {
         processAttestations(
             .electra,
             allocator,
+            std.testing.io,
             test_state.cached_state.config,
             test_state.cached_state.epoch_cache,
             test_state.cached_state.state.castToFork(.electra),

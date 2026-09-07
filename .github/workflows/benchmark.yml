@@ -1,0 +1,82 @@
+name: Benchmark
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: "0.16.0"
+  NODE_VERSION: "24"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  benchmark:
+    name: benchmark
+    runs-on: ubuntu-latest
+    # Skip for dependabot PRs, secrets are not made available and will fail
+    # Don't run on forks. Forks get a read-only token and cannot post the result comment
+    if: |
+      github.actor != 'dependabot[bot]' &&
+      ( github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository )
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+      - name: Build bindings
+        run: |
+          zig build build-lib:bindings -Doptimize=ReleaseSafe
+      - name: Restore era files cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: fixtures/era
+          key: era-files-${{ hashFiles('build.zig') }} # downloaded era files defined in build.zig
+      - name: Download era files
+        run: |
+          zig build run:download_era_files
+      # Benchmark history lives in the Actions cache. A pull request restores the newest
+      # entry, which the last push to main wrote, and compares against it. Only a push to
+      # main saves a new entry, so pull requests cannot pollute the baseline.
+      - name: Restore benchmark history
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: benchmark_data
+          key: benchmark-data-${{ github.sha }}
+          restore-keys: |
+            benchmark-data-
+      - name: Run benchmarks
+        run: |
+          pnpm benchmark --local
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Save benchmark history
+        if: github.event_name == 'push'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: benchmark_data
+          key: benchmark-data-${{ github.sha }}

@@ -22,12 +22,11 @@ const types = @import("consensus_types");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 const active_preset = @import("preset").active_preset;
+const preset = @import("preset").preset;
 const mainnet_chain_config = @import("config").mainnet.chain_config;
 const minimal_chain_config = @import("config").minimal.chain_config;
 const BeaconConfig = @import("config").BeaconConfig;
 const ValidatorIndex = @import("consensus_types").primitive.ValidatorIndex.Type;
-const Index2PubkeyCache = state_transition.Index2PubkeyCache;
-const PubkeyIndexMap = state_transition.PubkeyIndexMap;
 const chain_config = if (active_preset == .mainnet) mainnet_chain_config else minimal_chain_config;
 
 const MetricsHandler = struct {
@@ -101,28 +100,36 @@ pub fn main(init: std.process.Init) !void {
     errdefer allocator.destroy(state_ptr);
     state_ptr.* = try reader_state.readState(allocator, null);
     const blocks_index = reader_blocks.group_indices[0].blocks_index orelse return error.NoBlockIndex;
-    const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
-    errdefer {
-        index_pubkey_cache.deinit(allocator);
-        allocator.destroy(index_pubkey_cache);
-    }
-    index_pubkey_cache.* = Index2PubkeyCache.empty;
-    var pubkey_index_map = PubkeyIndexMap.init(allocator);
-    errdefer pubkey_index_map.deinit();
+    const max_new_validators = try std.math.mul(
+        usize,
+        blocks_index.offsets.len,
+        preset.MAX_DEPOSITS,
+    );
+    const pubkey_capacity = try std.math.add(
+        usize,
+        try state_ptr.validatorsCount(),
+        max_new_validators,
+    );
+    var pubkey_cache = try state_transition.PubkeyCache.initCapacity(
+        allocator,
+        io,
+        pubkey_capacity,
+    );
+    defer pubkey_cache.deinit();
 
     const config = try allocator.create(BeaconConfig);
-    errdefer allocator.destroy(config);
+    defer allocator.destroy(config);
     config.* = BeaconConfig.init(chain_config, (try state_ptr.genesisValidatorsRoot()).*);
 
     const immutable_data = state_transition.EpochCacheImmutableData{
         .config = config,
-        .index_to_pubkey = index_pubkey_cache,
-        .pubkey_to_index = &pubkey_index_map,
+        .pubkey_cache = &pubkey_cache,
     };
 
     std.debug.print("Creating cached beacon state\n", .{});
     var cached_state = try CachedBeaconState.createCachedBeaconState(
         allocator,
+        io,
         state_ptr,
         immutable_data,
         .{
@@ -130,6 +137,10 @@ pub fn main(init: std.process.Init) !void {
             .skip_sync_pubkeys = false,
         },
     );
+    defer {
+        cached_state.deinit();
+        allocator.destroy(cached_state);
+    }
     std.debug.print("Running state transition.\nYou may open up a local prometheus instance to check out metrics in action.\n", .{});
     for (blocks_index.start_slot + 1..blocks_index.start_slot + blocks_index.offsets.len) |slot| {
         const block = try reader_blocks.readBlock(allocator, slot) orelse continue;

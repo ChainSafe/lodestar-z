@@ -21,6 +21,21 @@ const AnyAttesterSlashings = @import("./any_attester_slashing.zig").AnyAttesterS
 const BeaconBlock = @import("./beacon_block.zig").BeaconBlock;
 const BeaconBlockBody = @import("./beacon_block.zig").BeaconBlockBody;
 
+fn deserializeSignedBlock(
+    comptime SignedBlock: type,
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) !*SignedBlock.Type {
+    const signed_block = try allocator.create(SignedBlock.Type);
+    errdefer allocator.destroy(signed_block);
+
+    signed_block.* = SignedBlock.default_value;
+    errdefer SignedBlock.deinit(allocator, signed_block);
+
+    try SignedBlock.deserializeFromBytes(allocator, bytes, signed_block);
+    return signed_block;
+}
+
 pub const AnySignedBeaconBlock = union(enum) {
     phase0: *ct.phase0.SignedBeaconBlock.Type,
     altair: *ct.altair.SignedBeaconBlock.Type,
@@ -40,101 +55,114 @@ pub const AnySignedBeaconBlock = union(enum) {
         switch (fork_seq) {
             .phase0 => {
                 if (block_type != .full) return error.InvalidBlockTypeForFork;
-                const signed_block = try allocator.create(ct.phase0.SignedBeaconBlock.Type);
-                errdefer allocator.destroy(signed_block);
-                signed_block.* = ct.phase0.SignedBeaconBlock.default_value;
-                try ct.phase0.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                const signed_block = try deserializeSignedBlock(
+                    ct.phase0.SignedBeaconBlock,
+                    allocator,
+                    bytes,
+                );
                 return .{ .phase0 = signed_block };
             },
             .altair => {
                 if (block_type != .full) return error.InvalidBlockTypeForFork;
-                const signed_block = try allocator.create(ct.altair.SignedBeaconBlock.Type);
-                errdefer allocator.destroy(signed_block);
-                signed_block.* = ct.altair.SignedBeaconBlock.default_value;
-                try ct.altair.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                const signed_block = try deserializeSignedBlock(
+                    ct.altair.SignedBeaconBlock,
+                    allocator,
+                    bytes,
+                );
                 return .{ .altair = signed_block };
             },
             .bellatrix => {
                 if (block_type == .full) {
-                    const signed_block = try allocator.create(ct.bellatrix.SignedBeaconBlock.Type);
-                    errdefer allocator.destroy(signed_block);
-                    signed_block.* = ct.bellatrix.SignedBeaconBlock.default_value;
-                    try ct.bellatrix.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                    const signed_block = try deserializeSignedBlock(
+                        ct.bellatrix.SignedBeaconBlock,
+                        allocator,
+                        bytes,
+                    );
                     return .{ .full_bellatrix = signed_block };
                 } else {
-                    const signed_block = try allocator.create(ct.bellatrix.SignedBlindedBeaconBlock.Type);
-                    errdefer allocator.destroy(signed_block);
-                    signed_block.* = ct.bellatrix.SignedBlindedBeaconBlock.default_value;
-                    try ct.bellatrix.SignedBlindedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                    const signed_block = try deserializeSignedBlock(
+                        ct.bellatrix.SignedBlindedBeaconBlock,
+                        allocator,
+                        bytes,
+                    );
                     return .{ .blinded_bellatrix = signed_block };
                 }
             },
             .capella => {
                 if (block_type == .full) {
-                    const signed_block = try allocator.create(ct.capella.SignedBeaconBlock.Type);
-                    errdefer allocator.destroy(signed_block);
-                    signed_block.* = ct.capella.SignedBeaconBlock.default_value;
-                    try ct.capella.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                    const signed_block = try deserializeSignedBlock(
+                        ct.capella.SignedBeaconBlock,
+                        allocator,
+                        bytes,
+                    );
                     return .{ .full_capella = signed_block };
                 } else {
-                    const signed_block = try allocator.create(ct.capella.SignedBlindedBeaconBlock.Type);
-                    errdefer allocator.destroy(signed_block);
-                    signed_block.* = ct.capella.SignedBlindedBeaconBlock.default_value;
-                    try ct.capella.SignedBlindedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                    const signed_block = try deserializeSignedBlock(
+                        ct.capella.SignedBlindedBeaconBlock,
+                        allocator,
+                        bytes,
+                    );
                     return .{ .blinded_capella = signed_block };
                 }
             },
             .deneb => {
                 if (block_type == .full) {
-                    const signed_block = try allocator.create(ct.deneb.SignedBeaconBlock.Type);
-                    errdefer allocator.destroy(signed_block);
-                    signed_block.* = ct.deneb.SignedBeaconBlock.default_value;
-                    try ct.deneb.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                    const signed_block = try deserializeSignedBlock(
+                        ct.deneb.SignedBeaconBlock,
+                        allocator,
+                        bytes,
+                    );
                     return .{ .full_deneb = signed_block };
                 } else {
-                    const signed_block = try allocator.create(ct.deneb.SignedBlindedBeaconBlock.Type);
-                    errdefer allocator.destroy(signed_block);
-                    signed_block.* = ct.deneb.SignedBlindedBeaconBlock.default_value;
-                    try ct.deneb.SignedBlindedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                    const signed_block = try deserializeSignedBlock(
+                        ct.deneb.SignedBlindedBeaconBlock,
+                        allocator,
+                        bytes,
+                    );
                     return .{ .blinded_deneb = signed_block };
                 }
             },
             .electra => {
                 if (block_type == .full) {
-                    const signed_block = try allocator.create(ct.electra.SignedBeaconBlock.Type);
-                    errdefer allocator.destroy(signed_block);
-                    signed_block.* = ct.electra.SignedBeaconBlock.default_value;
-                    try ct.electra.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                    const signed_block = try deserializeSignedBlock(
+                        ct.electra.SignedBeaconBlock,
+                        allocator,
+                        bytes,
+                    );
                     return .{ .full_electra = signed_block };
                 } else {
-                    const signed_block = try allocator.create(ct.electra.SignedBlindedBeaconBlock.Type);
-                    errdefer allocator.destroy(signed_block);
-                    signed_block.* = ct.electra.SignedBlindedBeaconBlock.default_value;
-                    try ct.electra.SignedBlindedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                    const signed_block = try deserializeSignedBlock(
+                        ct.electra.SignedBlindedBeaconBlock,
+                        allocator,
+                        bytes,
+                    );
                     return .{ .blinded_electra = signed_block };
                 }
             },
             .fulu => {
                 if (block_type == .full) {
-                    const signed_block = try allocator.create(ct.fulu.SignedBeaconBlock.Type);
-                    errdefer allocator.destroy(signed_block);
-                    signed_block.* = ct.fulu.SignedBeaconBlock.default_value;
-                    try ct.fulu.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                    const signed_block = try deserializeSignedBlock(
+                        ct.fulu.SignedBeaconBlock,
+                        allocator,
+                        bytes,
+                    );
                     return .{ .full_fulu = signed_block };
                 } else {
-                    const signed_block = try allocator.create(ct.fulu.SignedBlindedBeaconBlock.Type);
-                    errdefer allocator.destroy(signed_block);
-                    signed_block.* = ct.fulu.SignedBlindedBeaconBlock.default_value;
-                    try ct.fulu.SignedBlindedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                    const signed_block = try deserializeSignedBlock(
+                        ct.fulu.SignedBlindedBeaconBlock,
+                        allocator,
+                        bytes,
+                    );
                     return .{ .blinded_fulu = signed_block };
                 }
             },
             .gloas => {
                 if (block_type != .full) return error.InvalidBlockTypeForFork;
-                const signed_block = try allocator.create(ct.gloas.SignedBeaconBlock.Type);
-                errdefer allocator.destroy(signed_block);
-                signed_block.* = ct.gloas.SignedBeaconBlock.default_value;
-                try ct.gloas.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                const signed_block = try deserializeSignedBlock(
+                    ct.gloas.SignedBeaconBlock,
+                    allocator,
+                    bytes,
+                );
                 return .{ .full_gloas = signed_block };
             },
         }
