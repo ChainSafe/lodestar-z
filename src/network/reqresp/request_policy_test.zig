@@ -67,6 +67,26 @@ test "reqresp request admission policy range work and schedule boundaries" {
     try std.testing.expectEqual(@as(u32, 128), (try policy.inspect(.blocks_by_head_v1, &bytes, .fulu)).chunks_max);
 }
 
+test "reqresp request admission policy multi BPO range includes pre Deneb and excludes endpoint transition" {
+    var cfg = fixture();
+    cfg.deneb_start_slot = 10;
+    cfg.blob_schedule = &.{
+        .{ .start_slot = 10, .max_blobs = 6 },
+        .{ .start_slot = 20, .max_blobs = 9 },
+        .{ .start_slot = 30, .max_blobs = 12 },
+        .{ .start_slot = 40, .max_blobs = 15 },
+    };
+    const policy = try p.Policy.init(&cfg);
+    var bytes = [_]u8{0} ** 16;
+    put(&bytes, 0, 8);
+    put(&bytes, 8, 32);
+    const result = try policy.inspect(.blob_sidecars_by_range_v1, &bytes, .fulu);
+    try std.testing.expectEqual(@as(u128, 32), result.raw_cost);
+    try std.testing.expectEqual(@as(u128, 32), result.charged_cost);
+    try std.testing.expectEqual(@as(u32, 270), result.chunks_max);
+    try std.testing.expectEqualDeep(p.Range{ .start = 8, .count = 32, .end_exclusive = 40 }, result.range.?);
+}
+
 test "reqresp request admission policy canonical roots offsets occurrences and capacities" {
     const policy = try p.Policy.init(&fixture());
     var bytes = [_]u8{0} ** (40 * 1153);
