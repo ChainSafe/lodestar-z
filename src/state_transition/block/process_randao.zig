@@ -62,7 +62,7 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "process randao - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 

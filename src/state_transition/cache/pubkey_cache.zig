@@ -409,3 +409,7 @@ pub const PubkeyCache = struct {
         @constCast(&self.lock).unlockShared(io);
     }
 };
+
+test {
+    _ = @import("pubkey_cache_test.zig");
+}

@@ -140,7 +140,6 @@ describe("BeaconStateView", () => {
     global.gc?.();
 
     // Phase 2: Create native BeaconStateView
-    bindings.pool.ensureCapacity(10_000_000);
     try {
       bindings.pubkeys.load("./mainnet.pkix", MAINNET_PUBKEY_CACHE_LIMIT);
     } catch (_e) {
@@ -660,8 +659,23 @@ describe("BeaconStateView", () => {
     });
   });
 
-  describe("stateTransition parseOptions", () => {
+  describe("stateTransition", () => {
     const dummyBlockBytes = new Uint8Array(0);
+
+    it("deserializes a blinded block with the selected block type", () => {
+      const signedBlock = ssz.fulu.SignedBlindedBeaconBlock.defaultValue();
+      signedBlock.message.slot = state.slot + 1;
+      signedBlock.message.proposerIndex = state.getBeaconProposer(signedBlock.message.slot);
+      const signedBlockBytes = ssz.fulu.SignedBlindedBeaconBlock.serialize(signedBlock);
+
+      expect(() =>
+        state.stateTransition(signedBlockBytes, true, {
+          verifyProposer: false,
+          verifySignatures: false,
+          verifyStateRoot: false,
+        })
+      ).toThrow("BlockParentRootMismatch");
+    });
 
     it("rejects invalid opts", () => {
       const invalidOpts = [
@@ -671,13 +685,13 @@ describe("BeaconStateView", () => {
         {dataAvailabilityStatus: "available"}, // TS enum value is "Available"
       ];
       for (const opts of invalidOpts) {
-        expect(() => state.stateTransition(dummyBlockBytes, opts)).toThrow();
+        expect(() => state.stateTransition(dummyBlockBytes, false, opts)).toThrow();
       }
     });
 
     // TODO: remove once Zig models DataAvailabilityStatus.NotRequired
     it("rejects gloas-only NotRequired", () => {
-      expect(() => state.stateTransition(dummyBlockBytes, {dataAvailabilityStatus: "NotRequired"})).toThrow();
+      expect(() => state.stateTransition(dummyBlockBytes, false, {dataAvailabilityStatus: "NotRequired"})).toThrow();
     });
   });
 

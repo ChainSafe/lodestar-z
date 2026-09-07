@@ -3,53 +3,69 @@ const config = @import("config");
 const ct = @import("consensus_types");
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const active_preset = @import("preset").active_preset;
+const preset = @import("preset").preset;
 const ssz = @import("ssz");
 const Node = @import("persistent_merkle_tree").Node;
 const TestCachedBeaconState = @import("test_utils/root.zig").TestCachedBeaconState;
 const getConfig = @import("test_utils/generate_state.zig").getConfig;
-const generateElectraState = @import("test_utils/generate_state.zig").generateElectraState;
 const EpochCache = @import("cache/epoch_cache.zig").EpochCache;
+const EpochShuffling = @import("utils/epoch_shuffling.zig").EpochShuffling;
 const PubkeyCache = @import("cache/pubkey_cache.zig").PubkeyCache;
 const deserializeContainerOverrideFieldsWithRanges =
     @import("ssz_container.zig").deserializeContainerOverrideFieldsWithRanges;
 const processRewardsAndPenalties =
     @import("epoch/process_rewards_and_penalties.zig").processRewardsAndPenalties;
-const processHistoricalRootsUpdate =
-    @import("epoch/process_historical_roots_update.zig").processHistoricalRootsUpdate;
-const processHistoricalSummariesUpdate =
-    @import("epoch/process_historical_summaries_update.zig").processHistoricalSummariesUpdate;
-const processSlot = @import("slot/process_slot.zig").processSlot;
 const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
-const preset = @import("preset").preset;
-const Root = ct.primitive.Root.Type;
 
-// Extends the pool length only to its allocated capacity, so storage does not move yet.
-// Occupies every free slot, then reopens exactly `free_slot_count` slots.
-// The caller owns the returned filler nodes and must unref them and deinit the list.
-fn occupyPoolLeavingFreeSlots(
-    allocator: std.mem.Allocator,
-    pool: *Node.Pool,
-    free_slot_count: usize,
-) !std.ArrayList(Node.Id) {
-    try pool.preheat(@intCast(pool.nodes.capacity - pool.nodes.len));
-
-    var filler_nodes = try std.ArrayList(Node.Id).initCapacity(allocator, pool.nodes.len);
-    errdefer filler_nodes.deinit(allocator);
-    errdefer for (filler_nodes.items) |node| pool.unref(node);
-
-    for (0..pool.nodes.len) |_| {
-        if (@intFromEnum(pool.next_free_node) == pool.nodes.len) break;
-        filler_nodes.appendAssumeCapacity(try pool.createLeafFromUint(0));
+test "EpochShuffling.init should free completed committees when a later slot allocation fails" {
+    const allocator = std.testing.allocator;
+    const active_indices = try allocator.alloc(ct.primitive.ValidatorIndex.Type, 256);
+    defer allocator.free(active_indices);
+    for (active_indices, 0..) |*index, i| {
+        index.* = @intCast(i);
     }
-    try std.testing.expectEqual(pool.nodes.len, @intFromEnum(pool.next_free_node));
-    try std.testing.expect(filler_nodes.items.len >= free_slot_count);
 
-    // The block-roots commit consumes the reopened slots, forcing the state-roots commit to grow
-    // the pool.
-    for (0..free_slot_count) |_| pool.unref(filler_nodes.pop().?);
+    // The shuffling and first slot allocations succeed; the second slot allocation fails.
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 2 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        EpochShuffling.init(
+            failing.allocator(),
+            [_]u8{0} ** 32,
+            0,
+            active_indices,
+        ),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
 
-    return filler_nodes;
+test "EpochShuffling.init should free committees when the final allocation fails" {
+    const allocator = std.testing.allocator;
+    const active_indices = try allocator.alloc(ct.primitive.ValidatorIndex.Type, 256);
+    defer allocator.free(active_indices);
+    for (active_indices, 0..) |*index, i| {
+        index.* = @intCast(i);
+    }
+
+    // One shuffling allocation and one allocation per slot precede the final struct allocation.
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 1 + preset.SLOTS_PER_EPOCH },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        EpochShuffling.init(
+            failing.allocator(),
+            [_]u8{0} ** 32,
+            0,
+            active_indices,
+        ),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
 test "upgradeStateToCapella and upgradeStateToDeneb should release temporary payload headers" {
@@ -59,11 +75,7 @@ test "upgradeStateToCapella and upgradeStateToDeneb should release temporary pay
     else
         config.minimal.chain_config;
 
-    var pool = try Node.Pool.init(.{
-        .page_allocator = allocator,
-        .allocator = allocator,
-        .pool_size = 10_000,
-    });
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 345_000 });
     defer pool.deinit();
 
     var bellatrix_value = ct.bellatrix.BeaconState.default_value;
@@ -156,7 +168,7 @@ test "deserializeContainerOverrideFields... cleans up pool nodes on error" {
 
 test "processRewardsAndPenalties - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
+    const pool_size = 200_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
@@ -185,151 +197,27 @@ test "processRewardsAndPenalties - sanity" {
     );
 }
 
-test "historical summaries should preserve block root across pool growth" {
+test "EpochCache.clone does not retain shared references when allocation fails" {
     const allocator = std.testing.allocator;
-    const chain_config = if (active_preset == .mainnet)
-        config.mainnet.chain_config
-    else
-        config.minimal.chain_config;
 
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator });
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 200_000,
+    });
     defer pool.deinit();
 
-    const electra_chain_config = chain_config.merge(.{ .ELECTRA_FORK_EPOCH = 0 });
-    const state = try generateElectraState(allocator, &pool, electra_chain_config, 8);
-    var state_owned = true;
-    defer if (state_owned) {
-        state.deinit();
-        allocator.destroy(state);
-    };
-
-    // This slot makes next_epoch enter the historical accumulator branch.
-    const historical_slot = preset.SLOTS_PER_HISTORICAL_ROOT - 1;
-    try state.setSlot(historical_slot);
-    try state.commit();
-
-    var fork_view = try state.fork();
-    const fork_epoch = try fork_view.get("epoch");
-    var test_state = try TestCachedBeaconState.initFromState(
-        allocator,
-        &pool,
-        state,
-        .electra,
-        fork_epoch,
-    );
-    state_owned = false;
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
-    // processSlot leaves block_roots and state_roots cached and dirty.
-    try processSlot(test_state.cached_state.state);
-
-    // Leave enough slots for block_roots to commit, forcing state_roots to grow the pool.
-    var pool_filler_nodes = try occupyPoolLeavingFreeSlots(
+    var failing_allocator = std.testing.FailingAllocator.init(
         allocator,
-        &pool,
-        ct.phase0.HistoricalBlockRoots.chunk_depth,
+        .{ .fail_index = 0 },
     );
-    defer {
-        for (pool_filler_nodes.items) |node| pool.unref(node);
-        pool_filler_nodes.deinit(allocator);
-    }
 
-    // Integer address and capacity checks prove movement without dereferencing the old pointer.
-    const root_column_address_before = @intFromPtr(pool.nodes.items(.root).ptr);
-    const pool_capacity_before = pool.nodes.capacity;
-    try processHistoricalSummariesUpdate(
-        .electra,
-        test_state.cached_state.state.castToFork(.electra),
-        test_state.epoch_transition_cache,
+    // Leaked refs prevent test_state teardown from releasing the last shared owners.
+    try std.testing.expectError(
+        error.OutOfMemory,
+        test_state.cached_state.epoch_cache.clone(failing_allocator.allocator()),
     );
-    try std.testing.expect(pool.nodes.capacity > pool_capacity_before);
-    try std.testing.expect(root_column_address_before != @intFromPtr(pool.nodes.items(.root).ptr));
-
-    // Reread both roots from current storage before checking the appended summary.
-    const expected_block_summary_root = (try test_state.cached_state.state.blockRootsRoot()).*;
-    const expected_state_summary_root = (try test_state.cached_state.state.stateRootsRoot()).*;
-    var historical_summaries = try test_state.cached_state.state.historicalSummaries();
-    try std.testing.expectEqual(@as(usize, 1), try historical_summaries.length());
-
-    var actual_summary: ct.capella.HistoricalSummary.Type = undefined;
-    try historical_summaries.getValue(allocator, 0, &actual_summary);
-    try std.testing.expectEqual(expected_block_summary_root, actual_summary.block_summary_root);
-    try std.testing.expectEqual(expected_state_summary_root, actual_summary.state_summary_root);
-}
-
-test "historical roots should preserve block root across pool growth" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator });
-    defer pool.deinit();
-
-    const state = try allocator.create(AnyBeaconState);
-    state.* = AnyBeaconState.fromValue(
-        allocator,
-        &pool,
-        .phase0,
-        &ct.phase0.BeaconState.default_value,
-    ) catch |err| {
-        allocator.destroy(state);
-        return err;
-    };
-    var state_owned = true;
-    defer if (state_owned) {
-        state.deinit();
-        allocator.destroy(state);
-    };
-
-    // This slot makes next_epoch enter the historical accumulator branch.
-    const historical_slot = preset.SLOTS_PER_HISTORICAL_ROOT - 1;
-    try state.setSlot(historical_slot);
-    try state.commit();
-
-    var test_state = try TestCachedBeaconState.initFromState(
-        allocator,
-        &pool,
-        state,
-        .phase0,
-        0,
-    );
-    state_owned = false;
-    defer test_state.deinit();
-
-    // processSlot leaves block_roots and state_roots cached and dirty.
-    try processSlot(test_state.cached_state.state);
-
-    // Leave enough slots for block_roots to commit, forcing state_roots to grow the pool.
-    var pool_filler_nodes = try occupyPoolLeavingFreeSlots(
-        allocator,
-        &pool,
-        ct.phase0.HistoricalBlockRoots.chunk_depth,
-    );
-    defer {
-        for (pool_filler_nodes.items) |node| pool.unref(node);
-        pool_filler_nodes.deinit(allocator);
-    }
-
-    // Integer address and capacity checks prove movement without dereferencing the old pointer.
-    const root_column_address_before = @intFromPtr(pool.nodes.items(.root).ptr);
-    const pool_capacity_before = pool.nodes.capacity;
-    try processHistoricalRootsUpdate(
-        .phase0,
-        test_state.cached_state.state.castToFork(.phase0),
-        test_state.epoch_transition_cache,
-    );
-    try std.testing.expect(pool.nodes.capacity > pool_capacity_before);
-    try std.testing.expect(root_column_address_before != @intFromPtr(pool.nodes.items(.root).ptr));
-
-    // Reread both roots from current storage before checking the appended historical root.
-    const expected_block_roots = (try test_state.cached_state.state.blockRootsRoot()).*;
-    const expected_state_roots = (try test_state.cached_state.state.stateRootsRoot()).*;
-    var expected_historical_root: Root = undefined;
-    try ct.phase0.HistoricalBatchRoots.hashTreeRoot(&.{
-        .block_roots = expected_block_roots,
-        .state_roots = expected_state_roots,
-    }, &expected_historical_root);
-
-    var historical_roots = try test_state.cached_state.state.historicalRoots();
-    try std.testing.expectEqual(@as(usize, 1), try historical_roots.length());
-    var actual_historical_root: Root = undefined;
-    try historical_roots.getValue(allocator, 0, &actual_historical_root);
-    try std.testing.expectEqual(expected_historical_root, actual_historical_root);
 }
