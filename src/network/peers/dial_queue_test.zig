@@ -173,12 +173,14 @@ test "peer dial queue polling and failure without native owner preserve started 
     try std.testing.expect(q.rows[0].attempt);
     try std.testing.expect(!q.remove(&peer));
     q.connection(&peer, true, 10_000);
+    try std.testing.expect(q.rows[0].connected);
     try std.testing.expectEqualDeep(conn, q.rows[0].conn.?);
     q.accepted(&peer, .{ .index = 1, .generation = 0 }, 10_000);
     try std.testing.expectEqualDeep(conn, q.rows[0].conn.?);
     try std.testing.expect(q.rows[0].connected);
     try std.testing.expectEqual(@as(?u64, 10_000), q.nextWakeup(10_000, 0));
     try std.testing.expect(q.dialClosed(conn, 10_000));
+    try std.testing.expect(q.rows[0].connected);
 }
 
 test "peer dial queue review cooldown cannot extend a lost acknowledgement lease" {
@@ -534,4 +536,40 @@ test "peer repeated initial address leaves room for a distinct explicit address"
     try q.enqueue(&peer, &.{second}, true, 1);
     try std.testing.expectEqual(@as(u8, 2), q.rows[0].address_count);
     try std.testing.expectEqualDeep([_]t.Address{ address, second }, q.rows[0].addresses);
+}
+
+test "peer retained attempt does not hide canonical connection closure" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 5 });
+    defer q.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    const second: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 2345 } };
+    try q.enqueue(&peer, &.{ address, second }, true, 0);
+    var intents: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &intents));
+    const token = intents[0].token;
+    const attempt: t.Handle = .{ .index = 0, .generation = 4 };
+    try std.testing.expect(q.dialStarted(token, attempt));
+    q.accepted(&peer, .{ .index = 1, .generation = 7 }, 10);
+    try std.testing.expect(q.rows[0].connected);
+    var expected = q.rows[0];
+    expected.connected = false;
+    q.connection(&peer, false, 20);
+    try std.testing.expectEqualDeep(expected, q.rows[0]);
+    q.syncConnection(&peer, false, 20);
+    try std.testing.expectEqualDeep(expected, q.rows[0]);
+    try std.testing.expect(!q.dialStarted(token, attempt));
+    try std.testing.expect(!q.dialFailed(token, 20));
+    try std.testing.expect(q.dialClosed(attempt, 30));
+    try std.testing.expect(!q.rows[0].connected);
+    try std.testing.expect(!q.rows[0].attempt);
+    try std.testing.expect(q.rows[0].conn == null);
+    try std.testing.expect(q.rows[0].direct);
+    const due = q.nextWakeup(30, 1).?;
+    try std.testing.expect(due >= 1030 and due <= 2030);
+    try std.testing.expectEqual(@as(usize, 0), q.poll(due - 1, &intents));
+    try std.testing.expectEqual(@as(usize, 1), q.poll(due, &intents));
+    try std.testing.expectEqual(token.index, intents[0].token.index);
+    try std.testing.expectEqual(token.generation + 1, intents[0].token.generation);
+    try std.testing.expectEqualDeep(peer, intents[0].peer);
+    try std.testing.expectEqualDeep(second, intents[0].address);
 }

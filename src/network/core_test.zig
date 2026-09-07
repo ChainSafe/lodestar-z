@@ -1259,3 +1259,63 @@ test "core native peer counts distinguish open relevant invalidated and closed w
     try std.testing.expect(setup.client.removeDirectPeer(&offline));
     try std.testing.expect(!setup.client.removeDirectPeer(&offline));
 }
+
+test "core native retained attempt survives public close and reconciliation without suppressing retry" {
+    var setup: Setup = .{};
+    try setup.initOwners(&.{});
+    defer setup.deinit();
+    try setup.client.addDirectPeer(&setup.pair.server_ctx.local_peer_id, &.{support.server_address}, setup.pair.now);
+    var intents: [1]managed.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &intents));
+    const token = intents[0].token;
+    const attempt = try setup.pair.dial();
+    try std.testing.expect(setup.client.dialStarted(token, attempt));
+    _ = try setup.pair.server.dial(&support.client_address, setup.pair.client_ctx.local_peer_id, setup.pair.now, setup.pair.nextEntropy());
+    try setup.pair.pump();
+    try std.testing.expect(setup.pair.client.peerId(attempt) != null);
+    var transport: [32]Engine.Event = undefined;
+    var selected: ?Engine.Event = null;
+    for (setup.pair.events(&setup.pair.client, &transport)) |event| {
+        if (event == .connected and event.connected.direction == .inbound) selected = event;
+    }
+    try std.testing.expect(selected != null);
+    _ = setup.client.process(&setup.pair.client, &.{selected.?}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
+    const accepted = snapshots[0];
+    try std.testing.expect(!std.meta.eql(attempt, accepted.connection.?));
+    const row = &setup.client.dial_queue.rows[token.index];
+    try std.testing.expect(row.connected and row.attempt);
+    const lease = row.lease_expires_at_ms;
+    try std.testing.expect(setup.client.closePeer(&setup.pair.client, accepted.peer, accepted.connection.?, setup.pair.now));
+    const connected_after_close = row.connected;
+    try std.testing.expect(row.attempt);
+    try std.testing.expectEqualDeep(attempt, row.conn.?);
+    try std.testing.expectEqual(token.generation, row.generation);
+    try std.testing.expectEqual(lease, row.lease_expires_at_ms);
+    try std.testing.expect(setup.pair.client.registry.slots[attempt.index].close_reason == null);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(setup.client.catalog.revision, setup.client.candidates_revision);
+    const connected_after_reconcile = row.connected;
+    try std.testing.expect(row.attempt);
+    try std.testing.expectEqualDeep(attempt, row.conn.?);
+    try std.testing.expectEqual(token.generation, row.generation);
+    try std.testing.expectEqual(lease, row.lease_expires_at_ms);
+    const revision = setup.client.catalog.revision;
+    try std.testing.expect(setup.pair.client.close(attempt, 0));
+    for (0..8) |_| try setup.step(0);
+    try std.testing.expectEqual(revision, setup.client.catalog.revision);
+    try std.testing.expect(!row.attempt);
+    try std.testing.expect(row.conn == null);
+    try std.testing.expect(row.direct);
+    try std.testing.expect(setup.pair.client.registry.slots[attempt.index].conn == null);
+    const due = setup.client.dial_queue.nextWakeup(setup.pair.now.mono_ms, 1) orelse return error.MissingRetryDeadline;
+    try std.testing.expect(!connected_after_close);
+    try std.testing.expect(!connected_after_reconcile);
+    try std.testing.expect(!row.connected);
+    try std.testing.expect(due >= setup.pair.now.mono_ms + 1000 and due <= setup.pair.now.mono_ms + 2000);
+    setup.pair.advance(due - setup.pair.now.mono_ms);
+    try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &intents));
+    try std.testing.expectEqualDeep(accepted.identity, intents[0].peer);
+    try std.testing.expectEqual(token.generation + 1, intents[0].token.generation);
+}

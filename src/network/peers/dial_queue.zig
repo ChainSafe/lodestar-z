@@ -347,10 +347,10 @@ pub const DialQueue = struct {
     }
     pub fn connection(self: *DialQueue, peer: *const t.PeerId, connected: bool, now_ms: u64) void {
         for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
+            row.connected = connected;
             if (row.conn != null) return;
             row.attempt = false;
             row.conn = null;
-            row.connected = connected;
             row.eligible_at_ms = @max(row.eligible_at_ms, now_ms +| 1_000);
             if (connected) row.failures = 0;
         };
