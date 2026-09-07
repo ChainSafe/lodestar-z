@@ -117,6 +117,7 @@ pub const Diagnostics = struct {
 
 pub const Runtime = struct {
     test_scenario: if (faults.enabled) faults.Scenario else void = if (faults.enabled) .none else {},
+    test_drain_publication: if (faults.enabled) faults.DrainPublication else void = if (faults.enabled) .idle else {},
     refs: std.atomic.Value(u32) = .init(1),
     mutex: std.Io.Mutex = .init,
     config: Config = undefined,
@@ -130,6 +131,7 @@ pub const Runtime = struct {
     notify: Notify = undefined,
     notify_live: bool = true,
     notification_pending: bool = false,
+    observation_rearm: bool = false,
     env_alive: bool = true,
     disposed: bool = false,
     ready_deferred: ?napi.Deferred = null,
@@ -208,6 +210,16 @@ pub const Runtime = struct {
         result.queueHighWater = self.queue.high_water;
         result.observationsDropped = self.queue.dropped;
         return result;
+    }
+    pub fn commitDrain(self: *Runtime, count: usize, reported_more: bool) void {
+        self.lock();
+        defer self.unlock();
+        self.queue.commit(count);
+        if (!reported_more and self.queue.len > 0 and !self.stop and !self.quiescent and !self.observation_rearm) {
+            // The owner holds the only TSFN participant, including this stale-snapshot rearm.
+            self.observation_rearm = true;
+            self.signalLocked();
+        }
     }
     fn pingLocked(self: *Runtime) void {
         if (self.notification_pending or !self.notify_live or !self.env_alive) return;
@@ -378,6 +390,8 @@ pub const Runtime = struct {
                 for (0..67) |i| _ = self.queue.push(.{ .peerReady = .{ .index = @intCast(i), .generation = std.math.maxInt(u64) - i, .identity = identity.peer } });
                 self.queue.recordFailure(error.InjectedNetworkFailure);
                 self.queue.recordFailure(error.InjectedNetworkFailure);
+            } else if (self.test_scenario == .drain_publish) {
+                _ = self.queue.push(.{ .peerReady = .{ .index = 0, .generation = 1, .identity = identity.peer } });
             }
         }
         self.startup = .ready;
@@ -397,6 +411,10 @@ pub const Runtime = struct {
                 self.reason = .failed;
                 self.startup_error = error.NetworkWakeFailed;
             };
+            if (self.observation_rearm) {
+                self.observation_rearm = false;
+                if (!self.stop and self.queue.len > 0) self.pingLocked();
+            }
             const slot = self.slot;
             self.diag.currentSlot = slot;
             self.diag.clockRevision = self.revision;
@@ -408,6 +426,12 @@ pub const Runtime = struct {
             const diagnostics = self.core.diagnostics();
             self.lock();
             const was_empty = self.queue.len == 0;
+            if (comptime faults.enabled) {
+                if (self.test_drain_publication == .requested) {
+                    _ = self.queue.push(.{ .peerUpdated = .{ .index = 0, .generation = 1, .identity = self.identity.peer } });
+                    self.test_drain_publication = .published;
+                }
+            }
             for (self.outputs[0..result.counts.peers]) |event| {
                 const observation: Observation = switch (event) {
                     .ready => |p| .{ .peerReady = .{ .index = p.peer.index, .generation = p.peer.generation, .identity = p.identity } },

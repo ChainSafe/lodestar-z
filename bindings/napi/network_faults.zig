@@ -3,7 +3,8 @@ const napi = @import("zapi:zapi").napi;
 const gossip = @import("network").gossipsub;
 pub const enabled = @import("network_runtime_options").network_runtime_test_failures;
 pub const Stage = enum(u8) { none, runtime_alloc, ready_promise, close_promise, copy_error_ref, requested_ref, cancelled_ref, failed_ref, promise_holder, wake, wake_signal, notify, hook, spawn, entropy, key, enr, core, wake_attach, identity_copy, startup_copy, close_copy, drain_copy };
-pub const Scenario = enum(u8) { none, entry, key_ready, before_ready, observations, gossip };
+pub const Scenario = enum(u8) { none, entry, key_ready, before_ready, observations, gossip, drain_publish };
+pub const DrainPublication = enum { idle, requested, published };
 var selected = std.atomic.Value(Stage).init(.none);
 var scenario = std.atomic.Value(Scenario).init(.none);
 pub var reached = std.atomic.Value(Scenario).init(.none);
@@ -31,6 +32,33 @@ pub fn captureGossip(owner: *const gossip.Gossipsub) void {
         .allowlist = owner.ip_allowlist,
         .allowlist_len = owner.ip_allowlist_len,
     };
+}
+
+pub fn publishDuringDrain(runtime: *@import("network_runtime.zig").Runtime) !void {
+    if (comptime !enabled) return;
+    runtime.lock();
+    if (runtime.test_scenario != .drain_publish or runtime.test_drain_publication != .idle) {
+        runtime.unlock();
+        return;
+    }
+    runtime.test_drain_publication = .requested;
+    runtime.wake.?.signal() catch |err| {
+        runtime.unlock();
+        return err;
+    };
+    runtime.unlock();
+    for (0..500) |_| {
+        runtime.lock();
+        const published = runtime.test_drain_publication == .published;
+        const stopped = runtime.stop or runtime.quiescent;
+        runtime.unlock();
+        if (published) return;
+        if (stopped) return error.NetworkClosed;
+        var wait_fd = std.c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+        const result = std.c.poll(@ptrCast(&wait_fd), 1, 10);
+        if (result < 0 and std.c.errno(result) != .INTR) return error.NetworkWakeFailed;
+    }
+    return error.NetworkTestPublicationTimeout;
 }
 
 pub fn check(stage: Stage) !void {

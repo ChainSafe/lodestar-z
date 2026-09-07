@@ -226,6 +226,42 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     }
   });
 
+  it("notifies retained owner publication after drain snapshots no more work", async () => {
+    bindings.networkTestScenario("drain_publish");
+    let notifications = 0;
+    let runtime: ReturnType<typeof createNativeNetworkRuntime> | null = createNativeNetworkRuntime(
+      networkConfig(),
+      () => {
+        notifications++;
+      }
+    );
+    try {
+      const identity = await runtime.ready;
+      expect(notifications).toBe(1);
+      const first = runtime.drain(32);
+      expect(first).toEqual({
+        dropped: 0n,
+        events: [{peerGeneration: 1n, peerId: identity.peerId, peerIndex: 0, type: "peerReady"}],
+        more: false,
+      });
+      expect(runtime.diagnostics().queuedEvents).toBe(1);
+      for (let i = 0; i < 100 && notifications < 2; i++) await delay(10);
+      expect(notifications).toBe(2);
+      await delay(100);
+      expect(notifications).toBe(2);
+      expect(runtime.drain(32)).toEqual({
+        dropped: 0n,
+        events: [{peerGeneration: 1n, peerId: identity.peerId, peerIndex: 0, type: "peerUpdated"}],
+        more: false,
+      });
+      expect(runtime.diagnostics().queuedEvents).toBe(0);
+    } finally {
+      await runtime.close();
+      runtime = null;
+      await collected();
+    }
+  });
+
   it("keeps queued records and closes after an ordinary callback exception", () => {
     const output = execFileSync(
       process.execPath,

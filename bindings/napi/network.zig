@@ -275,9 +275,8 @@ pub fn drain(self: *@This(), limit: js.Value) !js.Value {
     runtime.lock();
     const more = runtime.queue.len > count or runtime.queue.pending_error != null;
     runtime.unlock();
+    try faults.publishDuringDrain(runtime);
     try put(object, "more", try js.env().getBoolean(more));
-    runtime.lock();
-    runtime.queue.commit(count);
-    runtime.unlock();
+    runtime.commitDrain(count, more);
     return .{ .val = object };
 }
