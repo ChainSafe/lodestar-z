@@ -9,6 +9,7 @@ pub const stateTransition = @import("./stateTransition.zig");
 pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const blsVerifier = @import("./bls_verifier.zig");
+pub const NativeNetworkRuntime = @import("./network.zig");
 pub const pubkeys = @import("./pubkeys.zig");
 
 const options = @import("bls_options");
@@ -74,5 +75,6 @@ comptime {
         .identity = @import("zapi_addon_identity"),
         .init = init,
         .cleanup = cleanup,
+        .register = @import("network_faults.zig").register,
     });
 }

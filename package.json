@@ -12,6 +12,10 @@
       "import": "./bindings/src/index.js",
       "types": "./bindings/src/index.d.ts"
     },
+    "./network": {
+      "import": "./bindings/src/network.js",
+      "types": "./bindings/src/network.d.ts"
+    },
     "./blst": {
       "import": "./bindings/src/blst.js",
       "types": "./bindings/src/blst.d.ts"
