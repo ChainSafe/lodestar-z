@@ -225,6 +225,7 @@ pub fn stateTransition(
                             config,
                             post_epoch_cache,
                             post_state.castToFork(f),
+                            &post_cached_state.proposer_rewards,
                             &post_cached_state.slashings_cache,
                             bt,
                             block.castToFork(bt, f),

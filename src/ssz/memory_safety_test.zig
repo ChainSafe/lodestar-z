@@ -167,6 +167,36 @@ test "getAllReadonlyValues should deinit completed prefix and current value on c
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
+test "VariableList clone should keep destination deinit-safe when the second child OOMs" {
+    const Bytes = ByteListType(8);
+    const ListType = VariableListType(Bytes, 2);
+
+    var source = ListType.default_value;
+    defer ListType.deinit(std.testing.allocator, &source);
+    try source.append(std.testing.allocator, Bytes.default_value);
+    try source.items[0].append(std.testing.allocator, 1);
+    try source.append(std.testing.allocator, Bytes.default_value);
+    try source.items[1].append(std.testing.allocator, 2);
+
+    var failing = DoubleFreeDetectAllocator.init(std.testing.allocator, 2);
+    defer failing.deinit();
+    const allocator = failing.allocator();
+
+    {
+        var cloned = ListType.default_value;
+        defer ListType.deinit(allocator, &cloned);
+
+        try std.testing.expectError(
+            error.OutOfMemory,
+            ListType.clone(allocator, &source, &cloned),
+        );
+    }
+
+    // The unvisited destination element must not be deinitialized as garbage.
+    try std.testing.expect(!failing.double_free);
+    try std.testing.expectEqual(@as(usize, 0), failing.live.count());
+}
+
 test "iterator nextValue should deinit current value on conversion OOM" {
     const allocator = std.testing.allocator;
     const Bytes = ByteListType(32);
@@ -208,7 +238,7 @@ test "iterator nextValue should deinit current value on conversion OOM" {
 
 test "VariableList deserializeFromBytes should free offsets on malformed later offset" {
     const ListType = VariableListType(ByteListType(8), 4);
-    // Offset 8 declares two elements, so decoding allocates the offsets array.
+    // Offset 8 declares two elements, so decoding allocates the output list.
     // Offset 4 then moves backward, triggering offsetNotIncreasing after allocation.
     const serialized = [_]u8{ 8, 0, 0, 0, 4, 0, 0, 0 };
     var tracking = std.testing.FailingAllocator.init(std.testing.allocator, .{});
@@ -221,7 +251,7 @@ test "VariableList deserializeFromBytes should free offsets on malformed later o
         error.offsetNotIncreasing,
         ListType.deserializeFromBytes(allocator, &serialized, &out),
     );
-    // The temporary offsets must not leak after malformed input is rejected.
+    // The partially initialized output must not leak after malformed input is rejected.
     try std.testing.expectEqual(tracking.allocated_bytes, tracking.freed_bytes);
 }
 
@@ -1145,17 +1175,6 @@ test "progressive fixed list byte deserialization preserves out on malformed inp
         List.deserializeFromBytes(std.testing.allocator, &.{ 1, 2 }, &out),
     );
     try std.testing.expectEqualSlices(bool, &.{ false, false }, out.items);
-}
-
-test "progressive list malformed offsets do not leak scratch allocation" {
-    const Items = FixedProgressiveListType(UintType(8));
-    const List = @import("type/progressive_list.zig").VariableProgressiveListType(Items);
-    const malformed = [_]u8{ 8, 0, 0, 0, 7, 0, 0, 0 };
-
-    try std.testing.expectError(
-        error.offsetNotIncreasing,
-        List.readVariableOffsets(std.testing.allocator, &malformed),
-    );
 }
 
 test "progressive list tree.toValue preserves out on malformed tree" {
