@@ -198,6 +198,7 @@ export type VoluntaryExitValidity =
 export declare class BeaconStateView {
   static createFromBytes(bytes: Uint8Array): BeaconStateView;
 
+  release(): void;
   slot: number;
   fork: Fork;
   forkName: ForkName;
@@ -378,7 +379,7 @@ export declare class BeaconStateView {
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
-  stateTransition(signedBlockBytes: Uint8Array, options?: TransitionOpts): BeaconStateView;
+  stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
 declare const bindings: {

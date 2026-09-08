@@ -71,7 +71,7 @@ test "clone VariableVectorType" {
     defer FooVector.deinit(allocator, &foo_vector);
     try foo_vector[0].a.append(allocator, 100);
 
-    var cloned: FooVector.Type = undefined;
+    var cloned = FooVector.default_value;
     defer FooVector.deinit(allocator, &cloned);
     try FooVector.clone(allocator, &foo_vector, &cloned);
     try std.testing.expect(&foo_vector != &cloned);
@@ -85,9 +85,9 @@ test "clone VariableVectorType" {
         b: UintType(8),
     });
     const BarVector = VariableVectorType(Bar, 4);
-    var cloned2: BarVector.Type = undefined;
+    var cloned2 = BarVector.default_value;
     defer BarVector.deinit(allocator, &cloned2);
-    try FooVector.clone(allocator, &foo_vector, &cloned2);
+    try FooVector.cloneInto(BarVector, allocator, &foo_vector, &cloned2);
     try std.testing.expect(cloned2[0].a.items.len == 1);
     try std.testing.expect(cloned2[0].a.items[0] == 100);
 }

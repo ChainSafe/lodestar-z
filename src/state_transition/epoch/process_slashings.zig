@@ -20,13 +20,11 @@ pub fn processSlashings(
 ) ![]const u64 {
     const slashing_penalties = cache.slashing_penalties;
     const empty_penalties = &[_]u64{};
+    if (cache.indices_to_slash.items.len == 0) {
+        return empty_penalties;
+    }
     if (!update_balance) {
         @memset(slashing_penalties, 0);
-    }
-
-    // Return early if there no index to slash
-    if (cache.indices_to_slash.items.len == 0) {
-        return if (update_balance) empty_penalties else slashing_penalties;
     }
     const total_balance_by_increment = cache.total_active_stake_by_increment;
     const proportional_slashing_multiplier: u64 =
@@ -38,7 +36,7 @@ pub fn processSlashings(
             PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX;
 
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements().items;
-    const adjusted_total_slashing_balance_by_increment = @min((try getTotalSlashingsByIncrement(fork, state)) * proportional_slashing_multiplier, total_balance_by_increment);
+    const adjusted_total_slashing_balance_by_increment = @min(epoch_cache.total_slashings_by_increment * proportional_slashing_multiplier, total_balance_by_increment);
     const increment = EFFECTIVE_BALANCE_INCREMENT;
 
     const penalty_per_effective_balance_increment = @divFloor((adjusted_total_slashing_balance_by_increment * increment), total_balance_by_increment);
