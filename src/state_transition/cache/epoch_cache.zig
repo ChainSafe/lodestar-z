@@ -488,7 +488,9 @@ pub const EpochCache = struct {
     }
 
     pub fn clone(self: *const EpochCache, allocator: Allocator) !*EpochCache {
-        const epoch_cache = EpochCache{
+        const epoch_cache_ptr = try allocator.create(EpochCache);
+
+        epoch_cache_ptr.* = .{
             .allocator = allocator,
             .config = self.config,
             // Common append-only structures shared with all states, no need to clone
@@ -525,10 +527,6 @@ pub const EpochCache = struct {
             .epoch = self.epoch,
         };
 
-        const epoch_cache_ptr = try allocator.create(EpochCache);
-        errdefer allocator.destroy(epoch_cache_ptr);
-
-        epoch_cache_ptr.* = epoch_cache;
         return epoch_cache_ptr;
     }
 
@@ -564,15 +562,15 @@ pub const EpochCache = struct {
         const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
         std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
 
-        const next_shuffling = try computeEpochShuffling(
+        const next_shuffling_rc = try initEpochShufflingRc(
             self.allocator,
             state,
             next_shuffling_active_indices,
             epoch_after_upcoming,
         );
-        errdefer next_shuffling.deinit();
+        errdefer next_shuffling_rc.unref();
 
-        const next_shuffling_rc = try EpochShufflingRc.init(self.allocator, next_shuffling);
+        const next_decision_root = try calculateShufflingDecisionRoot(state, epoch_after_upcoming);
 
         self.previous_shuffling.unref();
         self.previous_shuffling = self.current_shuffling;
@@ -582,7 +580,7 @@ pub const EpochCache = struct {
         self.current_decision_root = self.next_decision_root;
 
         self.next_shuffling = next_shuffling_rc;
-        self.next_decision_root = try calculateShufflingDecisionRoot(state, epoch_after_upcoming);
+        self.next_decision_root = next_decision_root;
 
         self.churn_limit = getChurnLimit(self.config, self.current_shuffling.get().active_indices.len);
         self.activation_churn_limit = getActivationChurnLimit(self.config, self.config.forkSeq(slot), self.current_shuffling.get().active_indices.len);
@@ -866,13 +864,17 @@ pub const EpochCache = struct {
     }
 
     pub fn rotateSyncCommitteeIndexed(self: *EpochCache, allocator: Allocator, next_sync_committee_indices: []const ValidatorIndex) !void {
+        var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(allocator, next_sync_committee_indices);
+        errdefer next_sync_committee_indexed.deinit();
+
+        const next_sync_committee_indexed_rc = try SyncCommitteeCacheRc.init(allocator, next_sync_committee_indexed);
+
         // unref the old instance
         self.current_sync_committee_indexed.unref();
         // this is the transfer of reference count
         // should not do an unref() then ref() here as it may trigger a deinit()
         self.current_sync_committee_indexed = self.next_sync_committee_indexed;
-        const next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(allocator, next_sync_committee_indices);
-        self.next_sync_committee_indexed = try SyncCommitteeCacheRc.init(allocator, next_sync_committee_indexed);
+        self.next_sync_committee_indexed = next_sync_committee_indexed_rc;
     }
 
     /// this is used at fork boundary from phase0 to altair
