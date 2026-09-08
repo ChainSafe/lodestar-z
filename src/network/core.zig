@@ -77,6 +77,7 @@ pub const Core = struct {
     metadata_freshness_ms: u64,
     policy_seed: u64,
     stopped: bool = false,
+    quiescing: bool = false,
     counters: Counters = .{},
 
     pub const Counters = struct {
@@ -242,7 +243,7 @@ pub const Core = struct {
             self.policy_dirty = true;
         }
         self.catalog.refresh(now.mono_ms);
-        self.dial_queue.expire(engine, now.mono_ms);
+        if (!self.quiescing) self.dial_queue.expire(engine, now.mono_ms);
         for (events) |event| self.transportEvent(engine, event, now);
         var controls: [32]rr.Event = undefined;
         var identify_results: [8]@import("identify/root.zig").Result = undefined;
@@ -258,6 +259,7 @@ pub const Core = struct {
             controls[0..counts.control],
         );
         self.control.maintain(&self.service, &self.catalog, engine, &self.local, now);
+        if (self.quiescing) return .{ .peers = self.catalog.pollEvents(peer_events), .application = counts.application, .gossipsub = counts.gossipsub };
         var connected_budget: u16 = custody.hashes_per_turn / 2;
         var candidate_budget: u16 = custody.hashes_per_turn / 2;
         const connected_pending = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &connected_budget);
@@ -280,6 +282,10 @@ pub const Core = struct {
     ) void {
         switch (event) {
             .connected => |connected| {
+                if (self.quiescing) {
+                    _ = engine.close(connected.conn, 0);
+                    return;
+                }
                 const identity = engine.peerId(connected.conn) orelse return;
                 const endpoint = engine.peerAddress(connected.conn) orelse return;
                 const direction = engine.direction(connected.conn) orelse return;
@@ -422,6 +428,13 @@ pub const Core = struct {
     ) ?u64 {
         if (self.stopped) return self.peerWakeup(now, peer_capacity);
         self.observeDelivery();
+        if (self.quiescing) {
+            var due = self.service.nextWakeupOutputs(now, .{ .application = 0, .control = 32, .gossipsub = 0, .identify = 8 });
+            for ([_]?u64{ self.control.nextWakeup(&self.catalog, now), self.peerWakeup(now, peer_capacity) }) |next| if (next) |deadline| {
+                due = @min(due orelse deadline, deadline);
+            };
+            return due;
+        }
         var due = self.service.nextWakeupOutputs(now, .{ .application = application_capacity, .control = 32, .gossipsub = gossip_capacity, .identify = 8 });
         for ([_]?u64{
             self.control.nextWakeup(&self.catalog, now),
@@ -771,6 +784,17 @@ pub const Core = struct {
         now: Now,
     ) gossip.ReportOutcome {
         return self.service.gossipsub.report(handle, verdict, now);
+    }
+    pub fn beginGracefulClose(self: *Core, now: Now) void {
+        if (self.stopped or self.quiescing) return;
+        self.quiescing = true;
+        var active = self.service.router.active_capabilities;
+        active.receive = .initEmpty();
+        self.service.router.setCapabilities(active);
+        for (self.catalog.rows, 0..) |row, index| {
+            if (!row.occupied or row.connection == null) continue;
+            _ = self.disconnect(.{ .index = @intCast(index), .generation = row.generation }, .shutdown, now);
+        }
     }
     pub fn shutdown(self: *Core, engine: *engine_mod.Engine, now: Now) void {
         if (self.stopped) return;

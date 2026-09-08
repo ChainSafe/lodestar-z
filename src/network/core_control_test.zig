@@ -893,3 +893,27 @@ test "core native application response borrows survive immediate public close" {
     }
     try std.testing.expect(received);
 }
+
+test "application graceful quiescence sends shutdown Goodbye and suppresses admission" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..50) |_| try setup.step(0);
+    setup.client.beginGracefulClose(setup.pair.now);
+    try std.testing.expect(setup.client.quiescing);
+    try std.testing.expectEqual(@as(u8, 0), setup.client.service.router.capabilities().receive.count());
+    var received = false;
+    for (0..80) |_| {
+        try setup.pair.pump();
+        var transport: [32]Engine.Event = undefined;
+        _ = setup.client.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+        var control: [1]rr.Event = undefined;
+        const counts = setup.server.service.processPartitioned(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), &.{}, setup.pair.now, &.{}, &control, &.{});
+        if (counts.control == 0) continue;
+        try std.testing.expectEqual(rr.Protocol.goodbye_v1, control[0].request.protocol);
+        try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, control[0].request.bytes[0..8], .little));
+        received = true;
+        break;
+    }
+    try std.testing.expect(received);
+}

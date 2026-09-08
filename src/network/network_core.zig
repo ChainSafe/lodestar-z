@@ -152,6 +152,7 @@ pub const NetworkCore = struct {
     core: core_mod.Core,
     discovery: ?*DiscoveryOwners,
     native_events: []engine.Event,
+    native_event_count: usize = 0,
     activity: []engine.Handle,
     local_intent_workspace: *gossip.local_intent.Workspace,
     schedule: ForkSchedule,
@@ -177,6 +178,7 @@ pub const NetworkCore = struct {
         self.counters = .{};
         self.wait_mode = options.wait_mode;
         self.host_wake = null;
+        self.native_event_count = 0;
         self.discovery = null;
         self.last_now = try driver.currentTime(io);
         try self.transport.init(allocator, io, options.transport);
@@ -378,6 +380,17 @@ pub const NetworkCore = struct {
     pub fn reportValidation(self: *NetworkCore, handle: gossip.ValidationHandle, verdict: gossip.Verdict, now: Now) gossip.ReportOutcome {
         return self.core.reportValidation(handle, verdict, now);
     }
+    /// Borrows the last step's authenticated transport events until the next step.
+    pub fn transportEvents(self: *const NetworkCore) []const engine.Event {
+        return self.native_events[0..self.native_event_count];
+    }
+    pub fn completeSnapshots(self: *const NetworkCore, out: []t.Snapshot) error{OutputTooSmall}!usize {
+        if (out.len < self.core.catalog.rows.len) return error.OutputTooSmall;
+        return self.core.snapshots(out);
+    }
+    pub fn beginGracefulClose(self: *NetworkCore, now: Now) void {
+        self.core.beginGracefulClose(now);
+    }
     pub fn snapshots(self: *const NetworkCore, out: []t.Snapshot) usize {
         return self.core.snapshots(out);
     }
@@ -525,7 +538,7 @@ pub const NetworkCore = struct {
     pub fn nextWakeup(self: *NetworkCore, now: Now, outputs: Outputs) ?u64 {
         var due = self.core.nextWakeup(now, outputs.peers.len, outputs.application.len, outputs.gossipsub.len, 4);
         if (self.transport.nextTimeoutMs(now)) |relative| due = earlier(due, now.mono_ms +| relative);
-        if (self.discovery) |owned| if (owned.coordinator.nextWakeup(now.mono_ms)) |deadline| {
+        if (!self.core.quiescing) if (self.discovery) |owned| if (owned.coordinator.nextWakeup(now.mono_ms)) |deadline| {
             due = earlier(due, deadline);
         };
         return due;
@@ -543,7 +556,7 @@ pub const NetworkCore = struct {
             if (comptime wait.supported) {
                 result.readiness = wait.poll(io, .{
                     .quic = self.transport.udp.socket.handle,
-                    .discovery = if (self.discovery) |owned| owned.udp.socket.handle else null,
+                    .discovery = if (!self.core.quiescing and self.discovery != null) self.discovery.?.udp.socket.handle else null,
                     .host = self.host_wake,
                 }, bounded_wait);
             } else result.readiness.failure = error.UnsupportedWait;
@@ -555,12 +568,13 @@ pub const NetworkCore = struct {
         }
         const progress = self.transport.stepProgress(io, self.native_events, self.activity, .{ .wait_max_ms = receive_wait });
         result.transport = progress.progress;
+        self.native_event_count = result.transport.events;
         result.failure = result.readiness.failure orelse progress.failure;
         if (progress.failure != null) self.counters.transport_failures +|= 1;
         const tick: Now = if (progress.progress.now.mono_ms >= now.mono_ms) progress.progress.now else now;
         self.last_now = tick;
         result.counts = self.core.process(&self.transport.engine, self.native_events[0..result.transport.events], self.activity[0..result.transport.activity], tick, current_slot, outputs.peers, outputs.application, outputs.gossipsub);
-        if (!self.core.stopped) {
+        if (!self.core.stopped and !self.core.quiescing) {
             // Expiry and this turn's coverage selection already ran, without a second protocol pump.
             if (self.discovery) |owned| {
                 const need = self.core.discoveryNeed();

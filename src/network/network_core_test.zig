@@ -1539,3 +1539,78 @@ test "managed runtime local intent three boundaries fit and all-column overlap r
     try std.testing.expectEqual(@as(usize, 423), count);
     try std.testing.expect(g.state.findTopic("/eth2/05060708/data_column_sidecar_127/ssz_snappy") == null);
 }
+
+test "application transport borrow authenticates while remote Status remains unavailable" {
+    const capability = @import("capabilities.zig");
+    const rr = @import("reqresp/root.zig");
+    const key_a = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{51}));
+    const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{52}));
+    var opts_b = options(&key_b);
+    var active: capability.Set = .initEmpty();
+    for (0..rr.Protocol.count) |i| {
+        const protocol: rr.Protocol = @enumFromInt(i);
+        if (protocol == .status_v1 or protocol == .status_v2) continue;
+        active.insert(.{ .reqresp = protocol });
+    }
+    opts_b.core.service.router.capabilities = .{ .receive = active, .request = active };
+    var a: runtime.NetworkCore = undefined;
+    try a.init(std.testing.allocator, std.testing.io, options(&key_a));
+    defer a.deinit(std.testing.io);
+    var b: runtime.NetworkCore = undefined;
+    try b.init(std.testing.allocator, std.testing.io, opts_b);
+    defer b.deinit(std.testing.io);
+    const now = try @import("driver.zig").currentTime(std.testing.io);
+    try a.connect(&b.peerId(), &.{b.localAddress()}, now);
+    var authenticated = false;
+    for (0..300) |_| {
+        const tick = try @import("driver.zig").currentTime(std.testing.io);
+        const result = a.step(std.testing.io, tick, 100, .{}, 1);
+        if (result.failure) |err| return err;
+        for (a.transportEvents()) |event| if (event == .connected) {
+            try std.testing.expect(event.connected.peer_id.eql(&b.peerId()));
+            authenticated = true;
+        };
+        _ = b.step(std.testing.io, tick, 100, .{}, 1);
+    }
+    try std.testing.expect(authenticated);
+    try std.testing.expectEqual(@as(u16, 1), a.peerCounts().connected);
+    try std.testing.expectEqual(@as(u16, 0), a.peerCounts().relevant);
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try a.completeSnapshots(&snapshots));
+    try std.testing.expect(snapshots[0].connection != null);
+    try std.testing.expect(snapshots[0].status == null);
+    try std.testing.expectError(error.OutputTooSmall, a.completeSnapshots(snapshots[0..1]));
+}
+
+test "application complete snapshot includes all 512 occupied disconnected rows" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
+    var opts = options(&key);
+    opts.core.peers.capacity = 512;
+    opts.core.service.gossipsub.retained_capacity = 512;
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const local = node.peerId();
+    var events: [2]t.Event = undefined;
+    for (0..512) |i| {
+        var secret: [32]u8 = @splat(0);
+        std.mem.writeInt(u32, secret[28..32], @intCast(i + 2), .big);
+        const remote_key = try keys.KeyPair.fromSecretKey(&secret);
+        const remote = @import("wire/peer_id.zig").PeerId.fromPublicKey(&remote_key.publicKey());
+        const handle: t.Handle = .{ .index = 0, .generation = @intCast(i + 1) };
+        const peer = node.core.catalog.admit(&remote, &local, handle, &.{ .direction = .outbound, .endpoint = .unspecified, .now_ms = 0 }).admitted.peer;
+        try std.testing.expectEqual(@as(u16, @intCast(i)), peer.index);
+        _ = node.core.catalog.report(peer, .fatal, 0);
+        try std.testing.expect(node.core.catalog.disconnect(peer, handle, .host, 0));
+        _ = node.core.catalog.pollEvents(&events);
+    }
+    const snapshots = try std.testing.allocator.alloc(t.Snapshot, 512);
+    defer std.testing.allocator.free(snapshots);
+    try std.testing.expectEqual(@as(usize, 512), try node.completeSnapshots(snapshots));
+    try std.testing.expectEqual(@as(u16, 0), node.peerCounts().connected);
+    for (snapshots, 0..) |row, i| {
+        try std.testing.expectEqual(@as(u16, @intCast(i)), row.peer.index);
+        try std.testing.expect(row.connection == null and row.ban_until_ms > 0);
+    }
+    try std.testing.expectError(error.OutputTooSmall, node.completeSnapshots(snapshots[0..511]));
+}

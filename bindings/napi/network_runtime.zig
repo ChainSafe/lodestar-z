@@ -3,10 +3,13 @@ const n = @import("network");
 const d = @import("discv5");
 const napi = @import("zapi:zapi").napi;
 const faults = @import("network_faults.zig");
+pub const commands = @import("network_commands.zig");
+pub const application_config = @import("network_application_config.zig");
+pub const projection = @import("network_peer_projection.zig");
 const Config = @import("network_config.zig").Config;
 const Wake = @import("network_wake.zig").Wake;
 pub const allocator = std.heap.c_allocator;
-pub const State = enum { starting, running, stopping, closed, failed };
+pub const State = enum { starting, prepared, running, stopping, closed, failed };
 pub const Reason = enum { requested, startupCancelled, failed };
 pub const Notify = napi.ThreadSafeFunction(Runtime, void);
 var instances = std.atomic.Value(u32).init(0);
@@ -96,6 +99,21 @@ pub const Identity = struct {
     enr: [d.wire.constants.enr_size_max]u8,
     enr_len: u16,
 };
+pub const ResolvedCapacities = struct {
+    peerCapacity: u16 = 0,
+    targetPeers: u16 = 0,
+    maxPeers: u16 = 0,
+    minOutbound: u16 = 0,
+    outboundReserve: u16 = 0,
+    connectionCapacity: u16 = 0,
+    handshakingCapacity: u16 = 0,
+    dialingCapacity: u16 = 0,
+    requestPeerCapacity: u16 = 0,
+    admissionIdentityCapacity: u16 = 0,
+    gossipConnectedCapacity: u16 = 0,
+    gossipRetainedCapacity: u16 = 0,
+    dialEngineCapacity: u16 = 0,
+};
 pub const Diagnostics = struct {
     state: State = .starting,
     terminal_error: ?anyerror = null,
@@ -111,8 +129,93 @@ pub const Diagnostics = struct {
     queueHighWater: u8 = 0,
     observationsDropped: u64 = 0,
     operationalFailures: u64 = 0,
+    operationCapacity: u8 = 32,
+    operationOccupied: u8 = 0,
+    operationHighWater: u8 = 0,
+    operationRefusals: u64 = 0,
+    connectCapacity: u8 = 16,
+    connectOccupied: u8 = 0,
+    connectHighWater: u8 = 0,
+    connectRefusals: u64 = 0,
+    intentCapacity: u8 = 2,
+    intentOccupied: u8 = 0,
+    intentHighWater: u8 = 0,
+    intentRefusals: u64 = 0,
+    snapshotCapacity: u8 = 2,
+    snapshotOccupied: u8 = 0,
+    snapshotHighWater: u8 = 0,
+    snapshotRefusals: u64 = 0,
+    targetListCapacity: u8 = 2,
+    targetListOccupied: u8 = 0,
+    targetListHighWater: u8 = 0,
+    targetListRefusals: u64 = 0,
+    preparingPins: u8 = 0,
+    copyingPins: u8 = 0,
+    peerLaneCapacity: u8 = 64,
+    peerLaneOccupied: u8 = 0,
+    peerLaneHighWater: u8 = 0,
+    ownerSequence: u64 = 0,
+    liveNativeRequestedBytes: usize = 0,
+    liveBridgeRequestedBytes: usize = 0,
+    operationBytes: usize = @sizeOf(commands.Table) + 32 * @sizeOf(Operation),
+    typedStoreBytes: usize = 0,
+    peerLaneBytes: usize = 0,
+    ownerShellBytes: usize = @sizeOf(Runtime),
+    ownerAllocationBytes: usize = @sizeOf(Owner),
     nativeRequestedBytes: usize = 0,
-    bridgeRequestedBytes: usize = @sizeOf(Runtime) - @sizeOf(n.NetworkCore),
+    nativeAllocationCount: usize = 0,
+    resolvedCapacities: ResolvedCapacities = .{},
+    bridgeRequestedBytes: usize = @sizeOf(Runtime) + @sizeOf(Owner) - @sizeOf(n.NetworkCore),
+};
+
+pub const Owner = struct {
+    threaded_live: bool = false,
+    core_live: bool = false,
+    config: Config = undefined,
+    core: n.NetworkCore = undefined,
+    threaded: std.Io.Threaded = undefined,
+    key: n.KeyPair = undefined,
+    records: [d.Maintenance.bootstrap_max]d.identity.enr.Record = undefined,
+    outputs: [32]n.peers.Event = undefined,
+    application: ?@import("network_application_config.zig").Config = null,
+};
+
+pub const Operation = struct {
+    input: commands.Input = undefined,
+    deferred: ?napi.Deferred = null,
+    failure: ?anyerror = null,
+    sequence: u64 = 0,
+    boolean: bool = false,
+    deadline: u64 = 0,
+    identity: Identity = undefined,
+    count: usize = 0,
+    counts: n.Core.PeerCounts = undefined,
+};
+pub const Stores = struct {
+    backing: std.mem.Allocator,
+    intents: [2]application_config.Intent = undefined,
+    snapshots: [2][]n.peers.types.Snapshot,
+    direct: [2][256]n.PeerId = undefined,
+    targets: [2][256]n.PeerId = undefined,
+    pub fn create(backing: std.mem.Allocator, capacity: usize) !*Stores {
+        try faults.check(.application_stores);
+        const self = try backing.create(Stores);
+        errdefer backing.destroy(self);
+        self.* = .{ .backing = backing, .snapshots = undefined };
+        try faults.check(.application_snapshot_0);
+        self.snapshots[0] = try backing.alloc(n.peers.types.Snapshot, capacity);
+        errdefer backing.free(self.snapshots[0]);
+        try faults.check(.application_snapshot_1);
+        self.snapshots[1] = try backing.alloc(n.peers.types.Snapshot, capacity);
+        return self;
+    }
+    pub fn destroy(self: *Stores) void {
+        for (self.snapshots) |snapshots| self.backing.free(snapshots);
+        self.backing.destroy(self);
+    }
+    pub fn bytes(capacity: usize) usize {
+        return @sizeOf(Stores) + 2 * capacity * @sizeOf(n.peers.types.Snapshot);
+    }
 };
 
 pub const Runtime = struct {
@@ -120,12 +223,18 @@ pub const Runtime = struct {
     test_drain_publication: if (faults.enabled) faults.DrainPublication else void = if (faults.enabled) .idle else {},
     refs: std.atomic.Value(u32) = .init(1),
     mutex: std.Io.Mutex = .init,
-    config: Config = undefined,
-    core: n.NetworkCore = undefined,
-    threaded: std.Io.Threaded = undefined,
-    key: n.KeyPair = undefined,
-    records: [d.Maintenance.bootstrap_max]d.identity.enr.Record = undefined,
-    outputs: [32]n.peers.Event = undefined,
+    heavy: ?*Owner = null,
+    application: bool = false,
+    active: bool = false,
+    graceful: bool = false,
+    closing_deadline: ?u64 = null,
+    stores: ?*Stores = null,
+    lane: ?*projection.Lane = null,
+    table: commands.Table = .{},
+    operations: [32]Operation = @splat(.{}),
+    peer_capacity: u16 = 0,
+    max_peers: u16 = 0,
+
     wake: ?Wake = null,
     thread: ?std.Thread = null,
     notify: Notify = undefined,
@@ -153,6 +262,26 @@ pub const Runtime = struct {
     queue: Queue = .{},
     diag: Diagnostics,
 
+    pub fn retireStoresLocked(self: *Runtime) void {
+        if (!self.quiescent or self.table.occupied != 0) return;
+        if (self.stores) |stores| {
+            stores.destroy();
+            self.stores = null;
+        }
+    }
+    pub fn destroyOwner(self: *Runtime) void {
+        if (self.heavy) |heavy| {
+            if (heavy.core_live) {
+                heavy.core.shutdown(now(heavy.threaded.io()));
+                heavy.core.deinit(heavy.threaded.io());
+            }
+            if (heavy.threaded_live) heavy.threaded.deinit();
+            heavy.config.wipe();
+            std.crypto.secureZero(u8, std.mem.asBytes(heavy));
+            allocator.destroy(heavy);
+            self.heavy = null;
+        }
+    }
     pub fn lock(self: *Runtime) void {
         std.Io.Threaded.mutexLock(&self.mutex);
     }
@@ -164,7 +293,9 @@ pub const Runtime = struct {
     }
     pub fn release(self: *Runtime) void {
         if (self.refs.fetchSub(1, .acq_rel) == 1) {
-            self.config.wipe();
+            self.destroyOwner();
+            if (self.stores) |stores| stores.destroy();
+            if (self.lane) |lane| allocator.destroy(lane);
             faults.count(&faults.runtimes, false);
             std.crypto.secureZero(u8, std.mem.asBytes(self));
             allocator.destroy(self);
@@ -179,7 +310,7 @@ pub const Runtime = struct {
         self.diag.state = .stopping;
         self.signalLocked();
     }
-    fn signalLocked(self: *Runtime) void {
+    pub fn signalLocked(self: *Runtime) void {
         if (self.wake) |*wake| signal(wake) catch {
             self.stop = true;
             self.reason = .failed;
@@ -194,6 +325,7 @@ pub const Runtime = struct {
         self.lock();
         defer self.unlock();
         if (self.stop or self.quiescent) return error.NetworkClosed;
+        if (self.application) return error.NetworkApplicationClock;
         if (slot < self.slot) return error.ClockRegression;
         if (self.revision == std.math.maxInt(u64)) return error.ClockRevisionExhausted;
         self.slot = slot;
@@ -209,6 +341,39 @@ pub const Runtime = struct {
         result.queuedEvents = self.queue.len;
         result.queueHighWater = self.queue.high_water;
         result.observationsDropped = self.queue.dropped;
+        result.operationOccupied = self.table.occupied;
+        result.operationHighWater = self.table.high_water;
+        result.operationRefusals = self.table.refusals;
+        result.connectHighWater = self.table.kind_high_water[@intFromEnum(commands.Kind.connect)];
+        result.connectRefusals = self.table.kind_refusals[@intFromEnum(commands.Kind.connect)];
+        result.intentHighWater = self.table.kind_high_water[@intFromEnum(commands.Kind.intent)];
+        result.intentRefusals = self.table.kind_refusals[@intFromEnum(commands.Kind.intent)];
+        result.snapshotHighWater = self.table.kind_high_water[@intFromEnum(commands.Kind.snapshot)];
+        result.snapshotRefusals = self.table.kind_refusals[@intFromEnum(commands.Kind.snapshot)];
+        result.targetListHighWater = self.table.kind_high_water[@intFromEnum(commands.Kind.targets)];
+        result.targetListRefusals = self.table.kind_refusals[@intFromEnum(commands.Kind.targets)];
+        result.connectOccupied = self.table.connects;
+        result.ownerSequence = self.table.sequence;
+        for (self.table.cells) |cell| {
+            result.preparingPins += @intFromBool(cell.state == .preparing);
+            result.copyingPins += @intFromBool(cell.state == .copying);
+            if (cell.state == .free) continue;
+            switch (cell.kind) {
+                .intent => result.intentOccupied += 1,
+                .snapshot => result.snapshotOccupied += 1,
+                .targets => result.targetListOccupied += 1,
+                else => {},
+            }
+        }
+        if (self.lane) |lane| {
+            result.peerLaneOccupied = lane.len;
+            result.peerLaneHighWater = lane.high_water;
+            result.peerLaneBytes = @sizeOf(projection.Lane);
+        }
+        if (self.stores != null) result.typedStoreBytes = Stores.bytes(self.peer_capacity);
+        result.liveNativeRequestedBytes = if (self.heavy != null) self.diag.nativeRequestedBytes else 0;
+        result.liveBridgeRequestedBytes = @sizeOf(Runtime) + result.peerLaneBytes + result.typedStoreBytes + if (self.heavy != null) @sizeOf(Owner) - @sizeOf(n.NetworkCore) else @as(usize, 0);
+
         return result;
     }
     pub fn commitDrain(self: *Runtime, count: usize, reported_more: bool) void {
@@ -221,7 +386,7 @@ pub const Runtime = struct {
             self.signalLocked();
         }
     }
-    fn pingLocked(self: *Runtime) void {
+    pub fn pingLocked(self: *Runtime) void {
         if (self.notification_pending or !self.notify_live or !self.env_alive) return;
         self.notification_pending = true;
         self.notify.call(undefined, .non_blocking) catch |err| switch (err) {
@@ -263,6 +428,7 @@ pub const Runtime = struct {
     pub fn forceStop(self: *Runtime, env_dying: bool) void {
         self.lock();
         self.disposed = true;
+        self.graceful = false;
         if (env_dying) self.env_alive = false;
         self.unlock();
         self.requestStop();
@@ -279,6 +445,14 @@ pub const Runtime = struct {
     pub fn cleanup(self: *Runtime) void {
         self.hook_live = false;
         self.forceStop(true);
+        for (0..32) |i| {
+            self.lock();
+            const cell = &self.table.cells[i];
+            const token: ?commands.Token = if (cell.state == .free) null else .{ .index = @intCast(i), .generation = cell.generation };
+            std.debug.assert(cell.state != .preparing and cell.state != .copying);
+            self.unlock();
+            if (token) |live| self.abortCommand(live);
+        }
         self.disposeJsReferences();
         self.release();
     }
@@ -297,6 +471,17 @@ pub const Runtime = struct {
         defer self.unlock();
         return self.stop;
     }
+    fn cancelCommandsLocked(self: *Runtime) void {
+        for (&self.table.cells, 0..) |*cell, i| {
+            switch (cell.state) {
+                .queued, .executing, .waiting => {
+                    self.operations[i].failure = self.startup_error orelse error.NetworkClosed;
+                    cell.state = .terminal;
+                },
+                else => {},
+            }
+        }
+    }
     pub fn run(self: *Runtime) void {
         self.serve() catch |err| {
             self.lock();
@@ -307,6 +492,8 @@ pub const Runtime = struct {
             self.unlock();
         };
         self.lock();
+        self.destroyOwner();
+        self.cancelCommandsLocked();
         if (self.startup == .pending) {
             self.startup = .failed;
             self.startup_error = self.startup_error orelse error.AbortError;
@@ -314,6 +501,7 @@ pub const Runtime = struct {
         if (self.wake) |*wake| wake.deinit();
         self.wake = null;
         self.quiescent = true;
+        self.retireStoresLocked();
         self.diag.state = if (self.reason == .failed) .failed else .closed;
         self.pingLocked();
         const release_notify = self.notify_live;
@@ -323,62 +511,126 @@ pub const Runtime = struct {
         faults.count(&faults.owners, false);
         self.release();
     }
-    fn serve(self: *Runtime) !void {
-        defer self.config.wipe();
-        try self.startupBarrier(.entry);
+    pub fn initializeOwner(self: *Runtime) !void {
+        if (!self.application) try self.startupBarrier(.entry);
         if (self.cancelled()) return error.AbortError;
-        self.threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
-        defer self.threaded.deinit();
-        const io = self.threaded.io();
+        self.heavy.?.threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
+        self.heavy.?.threaded_live = true;
+        const io = self.heavy.?.threaded.io();
         var seed: u64 = undefined;
         try faults.check(.entropy);
         try io.randomSecure(std.mem.asBytes(&seed));
         try faults.check(.key);
-        self.key = try n.KeyPair.fromSecretKey(&self.config.secret);
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&self.key));
-        self.config.wipe();
-        try self.startupBarrier(.key_ready);
+        self.heavy.?.key = try n.KeyPair.fromSecretKey(&self.heavy.?.config.secret);
+
+        self.heavy.?.config.wipe();
+        if (!self.application) try self.startupBarrier(.key_ready);
         if (self.cancelled()) return error.AbortError;
-        for (0..self.config.bootstrap_count) |i| {
+        for (0..self.heavy.?.config.bootstrap_count) |i| {
             try faults.check(.enr);
-            self.records[i] = try d.identity.enr.Record.init(self.config.bootstrap[i].bytes[0..self.config.bootstrap[i].len]);
+            self.heavy.?.records[i] = try d.identity.enr.Record.init(self.heavy.?.config.bootstrap[i].bytes[0..self.heavy.?.config.bootstrap[i].len]);
             if (self.cancelled()) return error.AbortError;
         }
-        var gossip = self.config.gossip;
+        var gossip = self.heavy.?.config.gossip;
         gossip.random_seed = seed;
-        gossip.ip_allowlist = self.config.allowlist[0..self.config.allowlist_count];
-        gossip.topic_policy = if (self.config.topic_boundary_count == 0) null else self.config.topic_boundaries[0..self.config.topic_boundary_count];
+        gossip.ip_allowlist = self.heavy.?.config.allowlist[0..self.heavy.?.config.allowlist_count];
+        gossip.topic_policy = if (self.heavy.?.config.topic_boundary_count == 0) null else self.heavy.?.config.topic_boundaries[0..self.heavy.?.config.topic_boundary_count];
         try faults.check(.core);
-        try self.core.initManaged(allocator, io, .{
+        try self.heavy.?.core.initManaged(allocator, io, .{
             .wait_mode = .native_poll,
-            .host = &self.key,
-            .bind = self.config.bind,
-            .configuration = .{ .profile = self.config.profile, .seed = seed, .forks = self.config.forks[0..self.config.fork_count], .gossip = gossip },
-            .local = self.config.local,
-            .schedule = self.config.schedule,
-            .discovery = if (self.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.config.discovery_sequence, .advertisement = self.config.advertisement, .bootstrap = self.records[0..self.config.bootstrap_count] } else null,
+            .host = &self.heavy.?.key,
+            .bind = self.heavy.?.config.bind,
+            .configuration = if (self.heavy.?.application) |*application| try application.resolve(&self.heavy.?.config, seed) else .{ .profile = self.heavy.?.config.profile, .seed = seed, .forks = self.heavy.?.config.forks[0..self.heavy.?.config.fork_count], .gossip = gossip },
+            .local = self.heavy.?.config.local,
+            .schedule = self.heavy.?.config.schedule,
+            .discovery = if (self.heavy.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.heavy.?.config.discovery_sequence, .advertisement = self.heavy.?.config.advertisement, .bootstrap = self.heavy.?.records[0..self.heavy.?.config.bootstrap_count] } else null,
         });
-        defer {
-            self.core.shutdown(now(io));
-            self.core.deinit(io);
-            std.crypto.secureZero(u8, std.mem.asBytes(&self.core));
-        }
+        self.heavy.?.core_live = true;
         try faults.check(.wake_attach);
-        try self.core.setHostWake(self.wake.?.read_fd);
-        defer self.core.setHostWake(null) catch {};
+        try self.heavy.?.core.setHostWake(self.wake.?.read_fd);
+
+        self.lock();
+        defer self.unlock();
+        const plan = self.heavy.?.core.memoryPlan();
+        self.diag.nativeRequestedBytes = plan.inline_bytes + plan.allocated_bytes;
+        self.diag.nativeAllocationCount = self.heavy.?.core.reservations.allocation_calls;
+        const core = &self.heavy.?.core.core;
+        const limits = self.heavy.?.core.transport.engine.limits;
+        self.diag.resolvedCapacities = .{
+            .peerCapacity = core.catalog.options.capacity,
+            .targetPeers = core.catalog.options.target_peers,
+            .maxPeers = core.catalog.options.max_peers,
+            .minOutbound = core.catalog.options.min_outbound,
+            .outboundReserve = core.catalog.options.outbound_reserve,
+            .connectionCapacity = limits.connections_max,
+            .handshakingCapacity = limits.handshaking_max,
+            .dialingCapacity = limits.dialing_max,
+            .requestPeerCapacity = core.service.reqresp.inner.options.peers,
+            .admissionIdentityCapacity = if (core.service.reqresp.inner.admission) |*admission| admission.options.identities else 0,
+            .gossipConnectedCapacity = core.service.gossipsub.inner.options.connected_capacity,
+            .gossipRetainedCapacity = core.service.gossipsub.inner.options.retained_capacity,
+            .dialEngineCapacity = core.dial_queue.options.engine_dialing_max,
+        };
+    }
+    fn serve(self: *Runtime) !void {
+        if (!self.heavy.?.core_live) try self.initializeOwner();
+        const io = self.heavy.?.threaded.io();
+        try self.publishReady();
+        while (true) {
+            self.lock();
+            const stop = self.stop;
+            const graceful = self.graceful and self.active and self.reason == .requested;
+            self.unlock();
+            if (stop and !graceful) break;
+            const timestamp = now(io);
+            if (stop) {
+                if (self.closing_deadline == null) {
+                    self.lock();
+                    self.cancelCommandsLocked();
+                    self.pingLocked();
+                    self.unlock();
+                    self.closing_deadline = timestamp.mono_ms +| 2000;
+                    self.heavy.?.core.beginGracefulClose(timestamp);
+                }
+                if (timestamp.mono_ms >= self.closing_deadline.? or self.heavy.?.core.peerCounts().connected == 0) break;
+            } else try commands.executeCommands(self, timestamp);
+            self.lock();
+            self.wake.?.drain() catch {
+                self.stop = true;
+                self.reason = .failed;
+                self.startup_error = error.NetworkWakeFailed;
+            };
+            if (self.observation_rearm) {
+                self.observation_rearm = false;
+                if (!self.stop and (self.queue.len > 0 or (self.lane != null and self.lane.?.len > 0))) self.pingLocked();
+            }
+            const slot = self.slot;
+            self.diag.currentSlot = slot;
+            self.diag.clockRevision = self.revision;
+            const stopped = self.stop and !(self.graceful and self.active and self.reason == .requested);
+            const active = self.active;
+            const peer_room: usize = if (self.lane) |lane| 64 - @as(usize, lane.len) else self.heavy.?.outputs.len;
+            self.unlock();
+            if (stopped) break;
+            if (!active) {
+                var fd = std.c.pollfd{ .fd = self.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 };
+                if (commands.waitLimit(self, timestamp) == 0) continue;
+                const rc = std.c.poll(@ptrCast(&fd), 1, -1);
+                if (rc < 0 and std.c.errno(rc) != .INTR) return error.NetworkWakeFailed;
+                continue;
+            }
+            const sequence = try self.advanceSequence();
+            const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)] }, commands.waitLimit(self, timestamp));
+            commands.completeConnects(self, timestamp);
+
+            self.publishTurn(&result, timestamp, sequence);
+        }
+    }
+    fn publishReady(self: *Runtime) !void {
         if (comptime faults.enabled) {
-            if (self.test_scenario == .gossip) faults.captureGossip(&self.core.core.service.gossipsub.inner, &self.core.core.local.fork);
+            if (self.test_scenario == .gossip) faults.captureGossip(&self.heavy.?.core.core.service.gossipsub.inner, &self.heavy.?.core.core.local.fork);
         }
-        var identity: Identity = undefined;
-        identity.peer = self.core.peerId();
-        identity.endpoint = self.core.localAddress();
-        const multiaddr = self.core.localMultiaddr();
-        identity.multiaddr_len = @intCast((try multiaddr.encode(&identity.multiaddr)).len);
-        identity.enr_len = 0;
-        if (self.core.localRecord()) |record| {
-            identity.enr_len = @intCast(record.slice().len);
-            @memcpy(identity.enr[0..identity.enr_len], record.slice());
-        }
+        const identity = try self.readIdentity();
         try self.startupBarrier(.before_ready);
         self.lock();
         if (self.stop) {
@@ -391,72 +643,116 @@ pub const Runtime = struct {
                 for (0..67) |i| _ = self.queue.push(.{ .peerReady = .{ .index = @intCast(i), .generation = std.math.maxInt(u64) - i, .identity = identity.peer } });
                 self.queue.recordFailure(error.InjectedNetworkFailure);
                 self.queue.recordFailure(error.InjectedNetworkFailure);
+            } else if (self.test_scenario == .application_peer_lane) {
+                if (self.lane) |lane| for (0..64) |i| {
+                    const event: n.peers.Event = .{ .closed = .{
+                        .peer = .{ .index = @intCast(i), .generation = std.math.maxInt(u64) - i },
+                        .connection = .{ .index = @intCast(i % 16), .generation = std.math.maxInt(u32) - @as(u32, @intCast(i)) },
+                        .identity = identity.peer,
+                        .reason = .host,
+                    } };
+                    lane.publish(&.{event}, 0);
+                };
             } else if (self.test_scenario == .drain_publish) {
                 _ = self.queue.push(.{ .peerReady = .{ .index = 0, .generation = 1, .identity = identity.peer } });
             }
         }
         self.startup = .ready;
-        self.diag.state = .running;
-        const plan = self.core.memoryPlan();
+        self.diag.state = if (self.application) .prepared else .running;
+        self.active = !self.application;
+        const plan = self.heavy.?.core.memoryPlan();
         self.diag.nativeRequestedBytes = plan.inline_bytes + plan.allocated_bytes;
         self.pingLocked();
         self.unlock();
-        while (true) {
-            self.lock();
-            if (self.stop) {
-                self.unlock();
-                break;
+    }
+    fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: n.Now, sequence: u64) void {
+        const diagnostics = self.heavy.?.core.diagnostics();
+        self.lock();
+        const was_empty = self.queue.len == 0;
+        if (self.lane) |lane| {
+            const empty = lane.len == 0;
+            lane.publish(self.heavy.?.outputs[0..result.counts.peers], sequence);
+            if (empty and lane.len > 0) self.pingLocked();
+        }
+        if (comptime faults.enabled) {
+            if (self.test_drain_publication == .requested) {
+                _ = self.queue.push(.{ .peerUpdated = .{ .index = 0, .generation = 1, .identity = self.identity.peer } });
+                self.test_drain_publication = .published;
             }
-            self.wake.?.drain() catch {
+        }
+        for (self.heavy.?.outputs[0..result.counts.peers]) |event| {
+            const observation: Observation = switch (event) {
+                .ready => |p| .{ .peerReady = .{ .index = p.peer.index, .generation = p.peer.generation, .identity = p.identity } },
+                .updated => |p| .{ .peerUpdated = .{ .index = p.peer.index, .generation = p.peer.generation, .identity = p.identity } },
+                .closed => |p| .{ .peerClosed = .{ .peer = .{ .index = p.peer.index, .generation = p.peer.generation, .identity = p.identity }, .reason = p.reason } },
+            };
+            _ = self.queue.push(observation);
+        }
+        if (result.failure) |err| {
+            self.diag.operationalFailures +|= 1;
+            self.queue.recordFailure(err);
+            if (result.readiness.failure != null) {
                 self.stop = true;
                 self.reason = .failed;
-                self.startup_error = error.NetworkWakeFailed;
-            };
-            if (self.observation_rearm) {
-                self.observation_rearm = false;
-                if (!self.stop and self.queue.len > 0) self.pingLocked();
+                self.startup_error = err;
             }
-            const slot = self.slot;
-            self.diag.currentSlot = slot;
-            self.diag.clockRevision = self.revision;
-            const stopped = self.stop;
-            self.unlock();
-            if (stopped) break;
-            const timestamp = now(io);
-            const result = self.core.step(io, timestamp, slot, .{ .peers = &self.outputs }, 100);
-            const diagnostics = self.core.diagnostics();
-            self.lock();
-            const was_empty = self.queue.len == 0;
-            if (comptime faults.enabled) {
-                if (self.test_drain_publication == .requested) {
-                    _ = self.queue.push(.{ .peerUpdated = .{ .index = 0, .generation = 1, .identity = self.identity.peer } });
-                    self.test_drain_publication = .published;
-                }
-            }
-            for (self.outputs[0..result.counts.peers]) |event| {
-                const observation: Observation = switch (event) {
-                    .ready => |p| .{ .peerReady = .{ .index = p.peer.index, .generation = p.peer.generation, .identity = p.identity } },
-                    .updated => |p| .{ .peerUpdated = .{ .index = p.peer.index, .generation = p.peer.generation, .identity = p.identity } },
-                    .closed => |p| .{ .peerClosed = .{ .peer = .{ .index = p.peer.index, .generation = p.peer.generation, .identity = p.identity }, .reason = p.reason } },
-                };
-                _ = self.queue.push(observation);
-            }
-            if (result.failure) |err| {
-                self.diag.operationalFailures +|= 1;
-                self.queue.recordFailure(err);
-                if (result.readiness.failure != null) {
-                    self.stop = true;
-                    self.reason = .failed;
-                    self.startup_error = err;
-                }
-            }
-            self.diag.ownerTurns +|= 1;
-            self.diag.lastMonotonicMs = timestamp.mono_ms;
-            self.diag.peerCount = diagnostics.core.connected;
-            self.diag.readyPeerCount = diagnostics.core.relevant;
-            if (was_empty and self.queue.len > 0) self.pingLocked();
-            self.unlock();
         }
+        self.diag.ownerTurns +|= 1;
+        self.diag.lastMonotonicMs = timestamp.mono_ms;
+        self.diag.peerCount = diagnostics.core.connected;
+        self.diag.readyPeerCount = diagnostics.core.relevant;
+        if (was_empty and self.queue.len > 0) self.pingLocked();
+        self.unlock();
+    }
+    pub fn readIdentity(self: *Runtime) !Identity {
+        var identity: Identity = undefined;
+        identity.peer = self.heavy.?.core.peerId();
+        identity.endpoint = self.heavy.?.core.localAddress();
+        const multiaddr = self.heavy.?.core.localMultiaddr();
+        identity.multiaddr_len = @intCast((try multiaddr.encode(&identity.multiaddr)).len);
+        identity.enr_len = 0;
+        if (self.heavy.?.core.localRecord()) |record| {
+            identity.enr_len = @intCast(record.slice().len);
+            @memcpy(identity.enr[0..identity.enr_len], record.slice());
+        }
+        return identity;
+    }
+    pub fn advanceSequence(self: *Runtime) !u64 {
+        self.lock();
+        defer self.unlock();
+        return self.table.advance();
+    }
+    pub fn reserveCommand(self: *Runtime, command: commands.Command) !commands.Token {
+        self.lock();
+        defer self.unlock();
+        if (!self.application or self.stop or self.quiescent) return error.NetworkClosed;
+        if (!self.active and command != .applyIntent and command != .getIdentity) return error.NetworkNotActive;
+        const token = self.table.reserve(commands.storageKind(command)) catch |err| {
+            if (err == error.NetworkSequenceExhausted) {
+                self.stop = true;
+                self.reason = .failed;
+                self.startup_error = err;
+                self.signalLocked();
+            }
+            return err;
+        };
+        self.operations[token.index] = .{ .input = .{ .command = command } };
+        self.retain();
+        return token;
+    }
+    pub fn abortCommand(self: *Runtime, token: commands.Token) void {
+        self.lock();
+        self.table.retire(token);
+        self.retireStoresLocked();
+        self.unlock();
+        self.release();
+    }
+    pub fn queueCommand(self: *Runtime, token: commands.Token) !void {
+        self.lock();
+        defer self.unlock();
+        if (self.stop or self.quiescent) return error.NetworkClosed;
+        self.table.get(token).state = .queued;
+        self.signalLocked();
     }
     fn startupBarrier(self: *Runtime, stage: faults.Scenario) !void {
         if (comptime !faults.enabled) return;
@@ -525,4 +821,63 @@ test "committed mailbox wakes fail closed without rolling back revision" {
     try std.testing.expectEqual(Reason.failed, runtime.reason);
     try std.testing.expectEqual(error.NetworkWakeFailed, runtime.snapshot().terminal_error.?);
     try std.testing.expectError(error.NetworkClosed, runtime.setSlot(102));
+}
+
+test {
+    _ = commands;
+    _ = projection;
+}
+
+test "application typed store allocation prefixes release all requested bytes" {
+    for ([_]usize{ 64, 512 }) |capacity| {
+        for (0..3) |prefix| {
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = prefix });
+            try std.testing.expectError(error.OutOfMemory, Stores.create(failing.allocator(), capacity));
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        }
+        var measured = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const stores = try Stores.create(measured.allocator(), capacity);
+        try std.testing.expectEqual(Stores.bytes(capacity), measured.allocated_bytes);
+        stores.destroy();
+        try std.testing.expectEqual(measured.allocated_bytes, measured.freed_bytes);
+        std.debug.print("application bridge capacity={} stores={} shell={} owner={} lane={} store_prefixes={}\n", .{ capacity, Stores.bytes(capacity), @sizeOf(Runtime), @sizeOf(Owner), @sizeOf(projection.Lane), measured.alloc_index });
+    }
+}
+
+test "authenticated connect completion latches before a later close in the borrowed batch" {
+    const key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{2}));
+    const peer = n.PeerId.fromPublicKey(&key.publicKey());
+    const handle: n.Handle = .{ .index = 3, .generation = 7 };
+    const events = [_]n.Event{
+        .{ .connected = .{ .conn = handle, .peer_id = peer, .direction = .outbound } },
+        .{ .closed = .{ .conn = handle, .peer_id = peer, .direction = .outbound, .reason = .host } },
+    };
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .session = 1, .currentSlot = 100 }, .notify_live = false, .env_alive = false };
+    const token = try runtime.table.reserve(.connect);
+    runtime.table.get(token).state = .waiting;
+    runtime.operations[token.index] = .{ .input = .{ .command = .connect, .peer = peer }, .deadline = 2 };
+    try std.testing.expect(commands.latchConnects(&runtime.table, &runtime.operations, &events, .{ .mono_ms = 3, .unix_s = 0 }));
+    try std.testing.expectEqual(commands.State.terminal, runtime.table.get(token).state);
+    try std.testing.expect(runtime.operations[token.index].failure == null);
+    try std.testing.expect(!commands.latchConnects(&runtime.table, &runtime.operations, &events, .{ .mono_ms = 4, .unix_s = 0 }));
+    try std.testing.expect(runtime.operations[token.index].failure == null);
+    runtime.table.retire(token);
+}
+
+test "stop preserves latched success and cancels accepted nonterminal commands" {
+    var runtime: Runtime = .{ .env = undefined, .diag = .{ .session = 1, .currentSlot = 100 }, .notify_live = false, .env_alive = false };
+    const success = try runtime.table.reserve(.small);
+    const waiting = try runtime.table.reserve(.connect);
+    const queued = try runtime.table.reserve(.small);
+    const preparing = try runtime.table.reserve(.intent);
+    runtime.table.get(success).state = .terminal;
+    runtime.table.get(waiting).state = .waiting;
+    runtime.table.get(queued).state = .queued;
+    runtime.cancelCommandsLocked();
+    try std.testing.expect(runtime.operations[success.index].failure == null);
+    try std.testing.expectEqual(error.NetworkClosed, runtime.operations[waiting.index].failure.?);
+    try std.testing.expectEqual(error.NetworkClosed, runtime.operations[queued.index].failure.?);
+    try std.testing.expectEqual(commands.State.preparing, runtime.table.get(preparing).state);
+    for ([_]commands.Token{ success, waiting, queued, preparing }) |token| runtime.table.retire(token);
+    try std.testing.expectEqual(@as(u8, 0), runtime.table.occupied);
 }
