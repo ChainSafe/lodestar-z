@@ -15,7 +15,7 @@ The following status is maintainer-confirmed as of the review date:
 | BLS and pubkey cache | Exported through N-API | Lodestar-ts still uses `@chainsafe/blst` and its TypeScript pubkey cache |
 | State transition | Exported as `BeaconStateView.stateTransition` | Integration is in progress |
 | Fork choice | Implemented in Zig but not exported through N-API | Lodestar-ts owns production fork choice |
-| Networking and P2P validation | Not implemented here | Lodestar-ts owns gossip, req/resp, framing, peer scoring, and import orchestration |
+| Networking and P2P validation | Native QUIC, discovery, req/resp and gossipsub exported through `./network` on this branch | Local Lodestar integration is in progress. Host validators and import orchestration remain responsible for consensus acceptance. Public operation is unverified. |
 
 A report against an unintegrated surface should be classified as security readiness unless another
 supported caller supplies a current hostile path.
@@ -24,6 +24,8 @@ supported caller supplies a current hostile path.
 
 | Boundary or invariant | Current implementation evidence |
 | --- | --- |
+| Native networking lifecycle | [`network.js`](../../bindings/src/network.js) wraps one native runtime per instance. `ready` resolves after preparation; application `applyIntent` activates it. The `closed` promise reports terminal owner shutdown, independently of lossy diagnostic observations. |
+| Gossip score arithmetic | [`score.zig`](../../src/network/gossipsub/score.zig) bounds counters and caps at 1e6 and weights at 1e12, including configuration updates. Across 512 topics the resulting score remains below 1e40 in magnitude. Remote deliveries cannot increase counters beyond their caps. |
 | N-API exports and shared addon lifecycle | [`build.zig`](../../build.zig) and [`bindings/napi/root.zig`](../../bindings/napi/root.zig) give zapi class exports a Zig package and addon-specific identity. The identity's version component comes from `build.zig.zon`, which intentionally remains `0.0.0` independently of the npm bindings version. The root module registers exports and initializes or tears down process-wide configuration, pools, metrics, and the pubkey cache on first or last environment. |
 | Beacon-state construction | [`BeaconStateView.createFromBytes`](../../bindings/napi/BeaconStateView.zig) reads the slot and SSZ-deserializes bytes without authenticating a root. Its contract therefore requires trusted state bytes. |
 | State-transition candidate isolation | [`stateTransition`](../../src/state_transition/state_transition.zig) clones the cached state and destroys the clone on error before returning a post-state. Verification options are caller policy. |

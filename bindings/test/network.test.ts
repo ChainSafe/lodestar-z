@@ -8,6 +8,7 @@ it("owns a real native socket and releases it on idempotent close", async () => 
   const config = networkConfig();
   const expectedPeerId = privateKeyFromRaw(config.identitySecretKey).publicKey.toMultihash().bytes;
   const runtime = createNativeNetworkRuntime(config, () => undefined);
+  const terminal = runtime.closed;
   try {
     const identity = await runtime.ready;
     expect(identity.peerId).toEqual(expectedPeerId);
@@ -16,6 +17,7 @@ it("owns a real native socket and releases it on idempotent close", async () => 
     expect(runtime.diagnostics().nativeRequestedBytes).toBeGreaterThan(0);
     expect(runtime.setCurrentSlot(101n)).toBeGreaterThan(0n);
     const closing = runtime.close();
+    expect(terminal).toBe(closing);
     expect(runtime.close()).toBe(closing);
     await closing;
     expect(runtime.state).toBe("closed");

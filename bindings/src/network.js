@@ -35,6 +35,7 @@ class NativeRuntime {
     return () => weak.deref()?.#onReadable();
   }
 
+  get closed() { return this.#closed; }
   get state() { return this.#native.getState(); }
   diagnostics() { return this.#native.diagnostics(); }
   drain(maxEvents) { return this.#native.drain(maxEvents); }

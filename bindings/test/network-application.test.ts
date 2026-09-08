@@ -52,6 +52,7 @@ test("application stays prepared across the host clock fork boundary and activat
 test("failed intent does not activate or advance the clock", async () => {
   const config = applicationConfig();
   const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const terminal = runtime.closed;
   try {
     await runtime.ready;
     expect(() => runtime.getPeers()).toThrow("NetworkNotActive");
@@ -70,7 +71,8 @@ test("failed intent does not activate or advance the clock", async () => {
     expect(runtime.diagnostics().currentSlot).toBe(103n);
     expect("setCurrentSlot" in runtime).toBe(false);
   } finally {
-    await runtime.close();
+    expect(runtime.close()).toBe(terminal);
+    await expect(terminal).resolves.toEqual({reason: "requested"});
   }
 });
 

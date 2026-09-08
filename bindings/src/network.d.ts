@@ -241,6 +241,7 @@ export interface NativeRuntimeCloseResult {
 
 export interface NativeNetworkRuntime {
   readonly ready: Promise<NativeIdentity>;
+  readonly closed: Promise<NativeRuntimeCloseResult>;
   readonly state: NativeRuntimeState;
   setCurrentSlot(slot: bigint): bigint;
   diagnostics(): NativeRuntimeDiagnostics;
@@ -340,6 +341,7 @@ export interface NativePeerBatch {
 }
 
 export interface NativeNetworkApplicationRuntime {
+  readonly closed: Promise<NativeRuntimeCloseResult>;
   drainGossip(): NativeGossipBatch;
   reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): boolean;
   publishGossip(
