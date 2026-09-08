@@ -429,14 +429,9 @@ pub const EpochTransitionCache = struct {
             try reused_cache.current_epoch_participation.resize(reused_cache.allocator, validator_count);
 
             var previous_epoch_participation_view = try state.previousEpochParticipation();
-            const previous_epoch_participation = try previous_epoch_participation_view.getAll(allocator);
-            defer allocator.free(previous_epoch_participation);
+            _ = try previous_epoch_participation_view.getAllInto(reused_cache.previous_epoch_participation.items);
             var current_epoch_participation_view = try state.currentEpochParticipation();
-            const current_epoch_participation = try current_epoch_participation_view.getAll(allocator);
-            defer allocator.free(current_epoch_participation);
-
-            @memcpy(reused_cache.previous_epoch_participation.items[0..validator_count], previous_epoch_participation);
-            @memcpy(reused_cache.current_epoch_participation.items[0..validator_count], current_epoch_participation);
+            _ = try current_epoch_participation_view.getAllInto(reused_cache.current_epoch_participation.items);
 
             for (0..validator_count) |i| {
                 reused_cache.flags.items[i] |=
