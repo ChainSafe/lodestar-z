@@ -279,6 +279,8 @@ pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
     for (gindices) |gindex| {
         var current = @intFromEnum(gindex);
         try proof_indices.put(current, {});
+        // A gindex encodes left/right edges after its leading 1. Flip the last edge
+        // to select the sibling, then discard that edge to ascend to the parent.
         for (0..gindex.pathLen()) |_| {
             try proof_indices.put(current ^ 1, {});
             current >>= 1;
