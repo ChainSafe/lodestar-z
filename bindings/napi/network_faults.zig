@@ -3,7 +3,7 @@ const napi = @import("zapi:zapi").napi;
 const gossip = @import("network").gossipsub;
 pub const enabled = @import("network_runtime_options").network_runtime_test_failures;
 pub const Stage = enum(u8) { none, runtime_alloc, owner_alloc, application_stores, application_snapshot_0, application_snapshot_1, application_lane, incoming_table, incoming_input, incoming_response, incoming_result_0, incoming_result_1, incoming_result_2, incoming_result_3, incoming_result_4, incoming_result_5, incoming_result_6, incoming_result_7, incoming_result_8, operation_copy, ready_promise, close_promise, copy_error_ref, requested_ref, cancelled_ref, failed_ref, promise_holder, wake, wake_signal, notify, hook, spawn, entropy, key, enr, core, wake_attach, identity_copy, startup_copy, close_copy, drain_copy };
-pub const Scenario = enum(u8) { none, entry, key_ready, before_ready, observations, gossip, drain_publish, application_peer_lane, request_queued, request_negotiation, request_copy_close, request_copy_closed, incoming_copy_close, incoming_copy_closed, incoming_ack_close, incoming_response_close, incoming_observe, incoming_hold };
+pub const Scenario = enum(u8) { none, entry, key_ready, before_ready, observations, gossip, drain_publish, application_peer_lane, request_queued, request_negotiation, request_copy_close, request_copy_closed, incoming_copy_close, incoming_copy_closed, incoming_ack_close, incoming_response_close, incoming_observe, incoming_hold, incoming_prepare_refs, incoming_prepare_buffer, incoming_prepare_deferred, incoming_terminal_before, incoming_terminal_after };
 pub const DrainPublication = enum { idle, requested, published };
 var selected = std.atomic.Value(Stage).init(.none);
 var scenario = std.atomic.Value(Scenario).init(.none);
@@ -98,6 +98,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try exports.setNamedProperty("networkTestStage", try env.createFunction("networkTestStage", 0, getStage, null));
     try exports.setNamedProperty("networkTestRequest", try env.createFunction("networkTestRequest", 0, getRequest, null));
     try @import("network_incoming_faults.zig").register(env, exports);
+    try @import("network_incoming_phase_faults.zig").register(env, exports);
     try exports.setNamedProperty("networkTestGossip", try env.createFunction("networkTestGossip", 0, getGossip, null));
 }
 fn selectScenario(env: napi.Env, info: napi.CallbackInfo(1)) !napi.Value {
@@ -106,6 +107,7 @@ fn selectScenario(env: napi.Env, info: napi.CallbackInfo(1)) !napi.Value {
     var buffer: [32]u8 = undefined;
     const value = std.meta.stringToEnum(Scenario, try arg.getValueStringUtf8(&buffer)) orelse return error.InvalidNetworkConfig;
     reached.store(.none, .release);
+    @import("network_incoming_phase_faults.zig").reset();
     scenario.store(value, .release);
     return env.getUndefined();
 }

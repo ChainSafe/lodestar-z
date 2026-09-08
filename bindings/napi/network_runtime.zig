@@ -706,9 +706,12 @@ pub const Runtime = struct {
                 continue;
             }
             requests_mod.flags(self, timestamp);
+            _ = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, false);
             try incoming_mod.flags(self, timestamp);
+            const terminal_accepted = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, true);
             const sequence = try self.advanceSequence();
             const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, commands.waitLimit(self, timestamp));
+            if (terminal_accepted) |proof| @import("network_incoming_phase_faults.zig").afterStep(self, &proof, self.heavy.?.application_outputs[0..result.counts.application]);
             try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], timestamp);
             commands.completeConnects(self, timestamp);
 

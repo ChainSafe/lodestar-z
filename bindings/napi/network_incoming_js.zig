@@ -4,6 +4,7 @@ const Value = napi.Value;
 const cfg = @import("network_config.zig");
 const r = @import("network_runtime.zig");
 const incoming = @import("network_incoming.zig");
+const phases = @import("network_incoming_phase_faults.zig");
 const Runtime = r.Runtime;
 
 fn put(object: Value, comptime name: [:0]const u8, value: Value) !void {
@@ -96,7 +97,7 @@ pub fn take(runtime: *Runtime) !Value {
         runtime.unlock();
         runtime.failDelivery();
     }
-    try prepareResults(runtime.env, &cell.results, 0);
+    try prepareResults(runtime, &cell.results, 0, null);
     errdefer retireReferences(cell);
     const deferred = try runtime.env.createPromise();
     errdefer deferred.resolve(runtime.env.getUndefined() catch unreachable) catch unreachable;
@@ -171,9 +172,10 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         runtime.lock();
         cell.state = if (cell.native) .serving else .terminal;
         runtime.incoming.?.releasePayload(cell);
+        phases.rollbackLocked(runtime, cell);
         runtime.unlock();
     }
-    try prepareResults(runtime.env, &cell.next_results, try std.math.add(u32, cell.chunks, 1));
+    try prepareResults(runtime, &cell.next_results, try std.math.add(u32, cell.chunks, 1), cell);
     errdefer deleteResults(&cell.next_results);
     const len = viewLength(data, cell.protocol.info().response_max) catch |err| {
         if (err == error.ChunkTooLarge) return rejectInput(runtime.env, .chunk_too_large);
@@ -181,10 +183,18 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
     };
     try @import("network_faults.zig").check(.incoming_response);
     const copy = try r.allocator.alloc(u8, len);
-    errdefer r.allocator.free(copy);
+    errdefer {
+        r.allocator.free(copy);
+        phases.released(runtime, .buffer);
+    }
+    try phases.preparing(runtime, cell, .buffer, copy, null);
     const deferred = try runtime.env.createPromise();
-    errdefer deferred.resolve(runtime.env.getUndefined() catch unreachable) catch unreachable;
+    errdefer {
+        deferred.resolve(runtime.env.getUndefined() catch unreachable) catch unreachable;
+        phases.released(runtime, .deferred);
+    }
     try cfg.bytes(data, copy);
+    try phases.preparing(runtime, cell, .deferred, copy, deferred);
     runtime.lock();
     if (runtime.stop or cell.terminal != null) {
         runtime.unlock();
@@ -322,8 +332,13 @@ pub fn settle(env: napi.Env, runtime: *Runtime) void {
 }
 pub fn diagnostics(env: napi.Env, value: *const incoming.Diagnostics) !Value {
     const object = try env.createObject();
-    inline for (@typeInfo(incoming.Diagnostics).@"struct".fields, 0..) |field, i| {
-        try put(object, field.name, if (i >= 11) try env.createBigintUint64(@field(value, field.name)) else try env.createDouble(@floatFromInt(@field(value, field.name))));
+    const Gauge = enum { capacity, occupied, queued, highWater, pendingResponses, closedPromises, reservedBytes, reservedBytesHighWater, requestBytes, responseBytes, copyingBytes };
+    const Counter = enum { requestsTaken, requestBytesCopied, responseBytesCopied, chunksWritten, bytesWritten, capacityRefusals, byteRefusals, busyResponses };
+    inline for (@typeInfo(incoming.Diagnostics).@"struct".fields) |field| {
+        const gauge = @hasField(Gauge, field.name);
+        const counter = @hasField(Counter, field.name);
+        comptime std.debug.assert(gauge != counter);
+        try put(object, field.name, if (counter) try env.createBigintUint64(@field(value, field.name)) else try env.createDouble(@floatFromInt(@field(value, field.name))));
     }
     return object;
 }
@@ -341,7 +356,8 @@ fn resultIndex(terminal_value: incoming.Terminal) usize {
         .failed => |reason| 2 + @as(usize, @intFromEnum(reason)),
     };
 }
-fn prepareResults(env: napi.Env, refs: *incoming.ResultRefs, chunks: u32) !void {
+fn prepareResults(runtime: *Runtime, refs: *incoming.ResultRefs, chunks: u32, preparing_cell: ?*incoming.Cell) !void {
+    const env = runtime.env;
     for (refs) |ref| std.debug.assert(ref == null);
     errdefer deleteResults(refs);
     for (0..refs.len) |i| {
@@ -350,6 +366,7 @@ fn prepareResults(env: napi.Env, refs: *incoming.ResultRefs, chunks: u32) !void 
         const faults = @import("network_faults.zig");
         const stages = [_]faults.Stage{ .incoming_result_0, .incoming_result_1, .incoming_result_2, .incoming_result_3, .incoming_result_4, .incoming_result_5, .incoming_result_6, .incoming_result_7, .incoming_result_8 };
         try faults.check(stages[i]);
+        if (i == 2) if (preparing_cell) |cell| try phases.preparing(runtime, cell, .refs, &.{}, null);
     }
 }
 fn deleteResults(refs: *incoming.ResultRefs) void {
