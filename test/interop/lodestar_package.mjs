@@ -5,6 +5,7 @@ import {fileURLToPath, pathToFileURL} from "node:url";
 import {isDeepStrictEqual} from "node:util";
 import {runBoundedCommand} from "./bounded_child.mjs";
 import {
+  assertNetworkExports,
   assertPackageExports,
   collectPackSources,
   inspectArchive,
@@ -182,7 +183,7 @@ async function pack(nativeDir, out, buildRecordPath) {
       },
       command,
       files: inspected.files,
-      ordinaryExports: {network: inspected.networkExports},
+      ordinaryExports: {externalNamespaces: inspected.externalNamespaces, network: inspected.networkExports},
       package: {name: inspected.packageJson.name, version: inspected.packageJson.version},
       schemaVersion: 1,
       sourceCheck: {...sourceCheck, packageFiles: sourceFilesBefore},
@@ -326,6 +327,8 @@ async function verifyInstalled(hostDir, manifestPath) {
   const resolved = await resolveFromParents(hostDir, parents, archiveState.inspected.packageJson.exports, {load: true});
   const failures = resolved.resolutions.filter((row) => row.error !== undefined);
   if (failures.length !== 0) fail("HostResolutionFailed", JSON.stringify(failures));
+  const networkExports = resolved.exports["@chainsafe/lodestar-z/network"] ?? [];
+  assertNetworkExports(networkExports);
   const roots = [];
   for (const row of resolved.resolutions) roots.push(await packageRootForResolved(row.resolved));
   const packageRoots = [...new Set(roots)];
@@ -339,13 +342,10 @@ async function verifyInstalled(hostDir, manifestPath) {
   if (addon.bytes !== archiveState.manifest.addon.bytes || addon.sha256 !== archiveState.manifest.addon.sha256) {
     fail("InstalledAddonMismatch", JSON.stringify(addon));
   }
-  const networkExports = resolved.exports["@chainsafe/lodestar-z/network"] ?? [];
-  if (networkExports.some((name) => name.toLowerCase().includes("test"))) {
-    fail("NetworkTestExport", networkExports.join(","));
-  }
   const head = await runCommand("git", ["rev-parse", "HEAD"], hostDir, {allowFailure: true});
   return {
     archive: archiveState.manifest.archive,
+    archiveExternalNamespaces: archiveState.inspected.externalNamespaces,
     host: {head: head.exitCode === 0 ? head.stdout.trim() : null},
     installed: {addon, files: installedFiles, packageRoot},
     manifest: archiveState.manifest,

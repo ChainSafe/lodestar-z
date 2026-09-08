@@ -1,10 +1,12 @@
 import {randomBytes} from "node:crypto";
 import {lstat, mkdtemp, readFile, rm, stat} from "node:fs/promises";
 import {tmpdir} from "node:os";
+import * as nodePathNamespace from "node:path";
 import {basename, dirname, isAbsolute, join, relative, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {isDeepStrictEqual} from "node:util";
 import vm from "node:vm";
+import * as zapiNamespace from "@chainsafe/zapi";
 import {
   MAX_ARCHIVE_ENTRIES,
   MAX_FILES,
@@ -23,6 +25,7 @@ export const MAX_WRAPPER_BYTES = 1024 * 1024;
 const MAX_MODULES = 64;
 const MAX_MODULE_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_IMPORT_EDGES = 256;
+const TOOL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 export const HASH_PATTERN = /^[0-9a-f]{64}$/;
 export const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 export const EXPECTED_PACKAGE_EXPORTS = [
@@ -84,7 +87,7 @@ function parseVerboseEntry(line) {
   return {bytes, type: fields[0][0]};
 }
 
-function assertNetworkExports(names) {
+export function assertNetworkExports(names) {
   if (names.length > MAX_PACKAGE_EXPORTS) fail("PackageExportBound");
   if (names.some((name) => name.toLowerCase().includes("test"))) fail("NetworkTestExport", names.join(","));
   if (JSON.stringify(names) !== JSON.stringify(EXPECTED_NETWORK_EXPORTS)) {
@@ -93,16 +96,59 @@ function assertNetworkExports(names) {
   return names;
 }
 
+function namespaceNames(namespace) {
+  const names = Reflect.ownKeys(namespace)
+    .filter((name) => typeof name === "string")
+    .sort();
+  if (names.length > MAX_PACKAGE_EXPORTS) fail("PackageExportBound");
+  return names;
+}
+
+async function trustedExternalNamespaces(packageRoot) {
+  const toolPackage = await readJson(join(TOOL_ROOT, "package.json"), "tool package.json");
+  const zapiPin = toolPackage.dependencies?.["@chainsafe/zapi"];
+  if (typeof zapiPin !== "string" || !/^\d+\.\d+\.\d+$/.test(zapiPin)) fail("UnsupportedToolZapiPin");
+  const zapiEntry = fileURLToPath(import.meta.resolve("@chainsafe/zapi"));
+  const zapiPackage = await readJson(resolve(dirname(zapiEntry), "..", "package.json"), "tool zapi package.json");
+  if (zapiPackage.name !== "@chainsafe/zapi" || zapiPackage.version !== zapiPin) {
+    fail("ToolZapiVersionMismatch", JSON.stringify({actual: zapiPackage.version, expected: zapiPin}));
+  }
+  const archivePackage = await readJson(join(packageRoot, "package.json"), "archived package.json");
+  return new Map([
+    [
+      "@chainsafe/zapi",
+      {
+        assertArchiveDependency() {
+          if (archivePackage.dependencies?.["@chainsafe/zapi"] !== zapiPin) {
+            fail(
+              "ArchiveZapiVersionMismatch",
+              JSON.stringify({actual: archivePackage.dependencies?.["@chainsafe/zapi"] ?? null, expected: zapiPin})
+            );
+          }
+        },
+        exports: namespaceNames(zapiNamespace),
+        identity: {kind: "pinned-tool-dependency", specifier: "@chainsafe/zapi", version: zapiPin},
+      },
+    ],
+    [
+      "node:path",
+      {
+        assertArchiveDependency() {},
+        exports: namespaceNames(nodePathNamespace),
+        identity: {kind: "trusted-node-builtin", node: process.version, specifier: "node:path"},
+      },
+    ],
+  ]);
+}
+
 async function analyzeModuleExports(packageRoot, entryPath) {
   if (typeof vm.SourceTextModule !== "function" || typeof vm.SyntheticModule !== "function") {
     fail("UnsupportedVmModuleApi");
   }
-  const supportedExternalExports = new Map([
-    ["@chainsafe/zapi", ["requireNapiLibrary"]],
-    ["node:path", ["join"]],
-  ]);
+  const supportedExternalNamespaces = await trustedExternalNamespaces(packageRoot);
   const modules = new Map();
   const dependencies = new Map();
+  const usedExternalNamespaces = new Map();
   const queue = [];
   let importEdges = 0;
   let sourceBytes = 0;
@@ -137,11 +183,15 @@ async function analyzeModuleExports(packageRoot, entryPath) {
         requested.push(await admitLocal(fileURLToPath(new URL(request.specifier, current.module.identifier))));
         continue;
       }
-      const names = supportedExternalExports.get(request.specifier);
-      if (names === undefined) fail("UnsupportedArchiveExternalImport", request.specifier);
+      const externalNamespace = supportedExternalNamespaces.get(request.specifier);
+      if (externalNamespace === undefined) fail("UnsupportedArchiveExternalImport", request.specifier);
+      externalNamespace.assertArchiveDependency();
+      usedExternalNamespaces.set(request.specifier, externalNamespace);
       let external = modules.get(request.specifier);
       if (external === undefined) {
-        external = new vm.SyntheticModule(names, () => {}, {identifier: `external:${request.specifier}`});
+        external = new vm.SyntheticModule(externalNamespace.exports, () => {}, {
+          identifier: `external:${request.specifier}`,
+        });
         modules.set(request.specifier, external);
       }
       requested.push(external);
@@ -150,9 +200,12 @@ async function analyzeModuleExports(packageRoot, entryPath) {
   }
   for (const {module} of queue) module.linkRequests(dependencies.get(module));
   root.instantiate();
-  return Reflect.ownKeys(root.namespace)
-    .filter((name) => typeof name === "string")
-    .sort();
+  return {
+    exports: namespaceNames(root.namespace),
+    externalNamespaces: [...usedExternalNamespaces.values()]
+      .map(({exports, identity}) => ({...identity, exports}))
+      .sort((left, right) => left.specifier.localeCompare(right.specifier)),
+  };
 }
 
 async function inspectNetworkExports(packageRoot, packageJson, runCommand) {
@@ -165,14 +218,21 @@ async function inspectNetworkExports(packageRoot, packageJson, runCommand) {
     {allowFailure: true}
   );
   if (command.exitCode !== 0) failCommand("ArchiveExportInspectionFailed", command);
-  let names;
+  let result;
   try {
-    names = JSON.parse(command.stdout);
+    result = JSON.parse(command.stdout);
   } catch (error) {
     fail("InvalidArchiveExportOutput", error.message);
   }
-  if (!Array.isArray(names) || names.some((name) => typeof name !== "string")) fail("InvalidArchiveExportOutput");
-  return assertNetworkExports(names);
+  if (
+    !result ||
+    !Array.isArray(result.exports) ||
+    result.exports.some((name) => typeof name !== "string") ||
+    !Array.isArray(result.externalNamespaces)
+  ) {
+    fail("InvalidArchiveExportOutput");
+  }
+  return {...result, exports: assertNetworkExports(result.exports)};
 }
 
 export async function inspectArchive(archive, expectedAddon, runCommand, {maxSourceBytes = MAX_SOURCE_BYTES} = {}) {
@@ -224,8 +284,8 @@ export async function inspectArchive(archive, expectedAddon, runCommand, {maxSou
     }
     const packageJson = await readJson(join(packageRoot, "package.json"), "archived package.json");
     assertPackageExports(packageJson);
-    const networkExports = await inspectNetworkExports(packageRoot, packageJson, runCommand);
-    return {files, networkExports, packageJson};
+    const network = await inspectNetworkExports(packageRoot, packageJson, runCommand);
+    return {externalNamespaces: network.externalNamespaces, files, networkExports: network.exports, packageJson};
   } finally {
     await rm(extractDir, {force: true, recursive: true});
   }
