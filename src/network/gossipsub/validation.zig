@@ -39,6 +39,7 @@ pub const MessageEvent = struct {
     bytes: []const u8,
 };
 pub const Context = struct {
+    namespace: ?*const @import("topic_policy.zig").Namespace = null,
     state: *@import("state.zig").State,
     peers: *Peers,
     scores: *@import("score.zig").PeerScore,
@@ -68,6 +69,7 @@ pub const Validation = struct {
     tombstone_ms: u64,
 
     pub fn receive(self: *Validation, context: *const Context, workspace: *const Workspace, peer: u16, msg: protobuf.Message, now: u64) Received {
+        const rule = if (context.namespace) |ns| (ns.lookup(msg.topic) orelse return .ignored).rule else null;
         const header = admission.inspect(&msg);
         if (header == .rejected) return .ignored;
         const topic = context.state.findTopic(msg.topic) orelse return .ignored;
@@ -78,6 +80,7 @@ pub const Validation = struct {
             return .ignored;
         }
         const size = header.payload;
+        if (rule) |bounds| if (size < bounds.ssz_min or size > bounds.ssz_max) return .ignored;
         if (!workspace.event_available or size + msg.topic.len > workspace.arena.len - workspace.used.*) return .{ .blocked = .events };
         if (!self.available()) return .{ .blocked = .storage };
         if (!charge(context.options, workspace, msg.data.len, size)) return .{ .blocked = .work };

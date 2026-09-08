@@ -1,7 +1,7 @@
 import {expect, it} from "vitest";
 import bindings from "../src/bindings.js";
 import {type NativeRuntimeConfig, createNativeNetworkRuntime} from "../src/network.js";
-import {discoveryConfig, networkConfig} from "./utils/network.js";
+import {discoveryConfig, networkConfig, topicBoundary} from "./utils/network.js";
 
 const cases: readonly [string, (config: NativeRuntimeConfig) => void, string][] = [
   [
@@ -246,4 +246,187 @@ it.each([
   const before: unknown = typeof bindings.networkTestStats === "function" ? bindings.networkTestStats() : null;
   expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow(code);
   if (before) expect(bindings.networkTestStats()).toEqual(before);
+});
+
+it("accepts a complete configured topic namespace at ordinary startup", async () => {
+  const config = networkConfig();
+  Object.assign(config, {topicPolicy: [topicBoundary()]});
+  const runtime = createNativeNetworkRuntime(config, () => undefined);
+  try {
+    await runtime.ready;
+  } finally {
+    await runtime.close();
+  }
+});
+
+it("requires an explicit nullable topic namespace", () => {
+  const config = networkConfig();
+  Reflect.deleteProperty(config, "topicPolicy");
+  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
+});
+
+const namespaceCases: readonly [string, (boundary: ReturnType<typeof topicBoundary>) => unknown, string][] = [
+  ["empty array", () => [], "InvalidNetworkConfig"],
+  ["nonarray", () => ({}), "InvalidNetworkConfig"],
+  ["sparse array", () => new Array(1), "InvalidNetworkConfig"],
+  ["65 boundaries", (b) => Array.from({length: 65}, () => b), "InvalidNetworkConfig"],
+  ["duplicate digest", (b) => [b, b], "InvalidNetworkConfig"],
+  ["short digest", (b) => [{...b, digest: new Uint8Array(3)}], "InvalidNetworkBytes"],
+  ["wide digest elements", (b) => [{...b, digest: new Uint16Array(4)}], "InvalidNetworkBytes"],
+  ["missing boundary field", (b) => [{rules: b.rules}], "InvalidNetworkConfig"],
+  ["unknown boundary field", (b) => [{...b, typo: 1}], "InvalidNetworkConfig"],
+  [
+    "missing kind",
+    (b) => {
+      Reflect.deleteProperty(b.rules, "voluntary_exit");
+      return [b];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "unknown kind",
+    (b) => [{...b, rules: {...b.rules, unknown: {count: 0, sszMax: 0, sszMin: 0}}}],
+    "InvalidNetworkConfig",
+  ],
+  [
+    "missing rule field",
+    (b) => {
+      Reflect.deleteProperty(b.rules.beacon_block, "sszMin");
+      return [b];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "unknown rule field",
+    (b) => {
+      Object.assign(b.rules.beacon_block, {min: 0});
+      return [b];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "disabled nonzero bound",
+    (b) => {
+      b.rules.voluntary_exit.sszMax = 1;
+      return [b];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "empty boundary",
+    (b) => {
+      for (const rule of Object.values(b.rules)) Object.assign(rule, {count: 0, sszMax: 0, sszMin: 0});
+      return [b];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "singleton count",
+    (b) => {
+      b.rules.beacon_block.count = 2;
+      return [b];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "attestation count",
+    (b) => {
+      b.rules.beacon_attestation.count = 65;
+      return [b];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "sync count",
+    (b) => {
+      b.rules.sync_committee.count = 5;
+      return [b];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "blob count",
+    (b) => {
+      b.rules.blob_sidecar.count = 129;
+      return [b];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "column count",
+    (b) => {
+      b.rules.data_column_sidecar.count = 129;
+      return [b];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "reversed bounds",
+    (b) => {
+      b.rules.beacon_block.sszMin = 21;
+      return [b];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "global maximum",
+    (b) => {
+      b.rules.beacon_block.sszMax = 10485761;
+      return [b];
+    },
+    "InvalidNetworkInteger",
+  ],
+];
+
+it.each(namespaceCases)("rejects topic namespace %s before startup", (_label, mutate, expected) => {
+  const config = networkConfig();
+  Object.assign(config, {topicPolicy: mutate(topicBoundary())});
+  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow(expected);
+});
+
+it.each(["count", "sszMin", "sszMax"] as const)("rejects noninteger topic rule %s values", (key) => {
+  for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Infinity, 1n]) {
+    const config = networkConfig();
+    const boundary = topicBoundary();
+    Object.assign(boundary.rules.beacon_block, {[key]: value});
+    config.topicPolicy = [boundary];
+    expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
+  }
+});
+
+it("accepts 64 unique topic boundaries and copies byte views", async () => {
+  const config = networkConfig();
+  config.topicPolicy = Array.from({length: 64}, (_, i) => {
+    const b = topicBoundary();
+    b.digest = Uint8Array.of(255, i, 2, 3, 4, 255).subarray(1, 5);
+    return b;
+  });
+  const runtime = createNativeNetworkRuntime(config, () => undefined);
+  for (const b of config.topicPolicy) b.digest.fill(0);
+  try {
+    await runtime.ready;
+  } finally {
+    await runtime.close();
+  }
+});
+
+it("rejects sparse topic arrays even when inherited entries supply values", async () => {
+  const config = networkConfig();
+  const sparse = [topicBoundary()];
+  const inherited: Record<number, ReturnType<typeof topicBoundary>> = Object.create(Array.prototype);
+  inherited[0] = sparse[0];
+  Reflect.deleteProperty(sparse, "0");
+  Object.setPrototypeOf(sparse, inherited);
+  config.topicPolicy = sparse;
+  let runtime: ReturnType<typeof createNativeNetworkRuntime> | undefined;
+  try {
+    expect(() => {
+      runtime = createNativeNetworkRuntime(config, () => undefined);
+    }).toThrow("InvalidNetworkConfig");
+  } finally {
+    if (runtime) {
+      await runtime.ready;
+      await runtime.close();
+    }
+  }
 });

@@ -115,6 +115,32 @@ export interface NativeGossipStartupPolicy {
   score: NativeGlobalScoreParams;
 }
 
+export type NativeTopicKind =
+  | "beacon_block"
+  | "beacon_aggregate_and_proof"
+  | "beacon_attestation"
+  | "proposer_slashing"
+  | "attester_slashing"
+  | "voluntary_exit"
+  | "sync_committee_contribution_and_proof"
+  | "sync_committee"
+  | "light_client_finality_update"
+  | "light_client_optimistic_update"
+  | "bls_to_execution_change"
+  | "blob_sidecar"
+  | "data_column_sidecar";
+
+export interface NativeTopicRule {
+  count: number;
+  sszMin: number;
+  sszMax: number;
+}
+
+export interface NativeTopicBoundary {
+  digest: Uint8Array;
+  rules: Readonly<Record<NativeTopicKind, NativeTopicRule>>;
+}
+
 export interface NativeRuntimeConfig {
   profile: "small" | "beaconNode";
   identitySecretKey: Uint8Array;
@@ -125,6 +151,8 @@ export interface NativeRuntimeConfig {
   discovery: NativeDiscoveryConfig | null;
   initialSlot: bigint;
   gossipPolicy: NativeGossipStartupPolicy;
+  /** Immutable copied chain namespace. Null explicitly selects generic raw topic behavior. */
+  topicPolicy: readonly NativeTopicBoundary[] | null;
 }
 
 export interface NativeIdentity {

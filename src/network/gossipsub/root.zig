@@ -3,6 +3,7 @@ pub const receive_pool = @import("receive_pool.zig");
 pub const admission = @import("admission.zig");
 pub const constants = @import("constants.zig");
 pub const protobuf = @import("protobuf.zig");
+pub const topic_policy = @import("topic_policy.zig");
 pub const topic = @import("topic.zig");
 pub const topics = @import("topics.zig");
 pub const mcache = @import("mcache.zig");
@@ -25,6 +26,8 @@ pub const Verdict = gossipsub.Verdict;
 pub const ResourceSnapshot = gossipsub.ResourceSnapshot;
 
 test {
+    _ = @import("topic_policy_test.zig");
+    _ = @import("topic_policy_lifecycle_test.zig");
     _ = admission;
     _ = recovery;
     _ = receive_pool;

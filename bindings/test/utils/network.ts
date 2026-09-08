@@ -1,4 +1,4 @@
-import type {NativeDiscoveryConfig, NativeRuntimeConfig} from "../../src/network.js";
+import type {NativeDiscoveryConfig, NativeRuntimeConfig, NativeTopicBoundary} from "../../src/network.js";
 
 export function networkConfig(): NativeRuntimeConfig {
   const digest = Uint8Array.of(1, 2, 3, 4);
@@ -79,6 +79,7 @@ export function networkConfig(): NativeRuntimeConfig {
     },
     profile: "small",
     requestForks: [{digest: digest.slice(), fork: "deneb"}],
+    topicPolicy: null,
   };
 }
 
@@ -91,5 +92,29 @@ export function discoveryConfig(): NativeRuntimeConfig & {discovery: NativeDisco
       bootstrapEnrs: [],
       sequenceNumber: 7n,
     },
+  };
+}
+
+export function topicBoundary(): NativeTopicBoundary {
+  const disabled = () => ({count: 0, sszMax: 0, sszMin: 0});
+  return {
+    digest: Uint8Array.of(1, 2, 3, 4),
+    // biome-ignore-start lint/style/useNamingConvention: The namespace uses canonical protocol kind names.
+    rules: {
+      attester_slashing: disabled(),
+      beacon_aggregate_and_proof: disabled(),
+      beacon_attestation: {count: 64, sszMax: 131304, sszMin: 228},
+      beacon_block: {count: 1, sszMax: 20, sszMin: 10},
+      blob_sidecar: disabled(),
+      bls_to_execution_change: disabled(),
+      data_column_sidecar: disabled(),
+      light_client_finality_update: disabled(),
+      light_client_optimistic_update: disabled(),
+      proposer_slashing: disabled(),
+      sync_committee: disabled(),
+      sync_committee_contribution_and_proof: disabled(),
+      voluntary_exit: disabled(),
+    },
+    // biome-ignore-end lint/style/useNamingConvention: Canonical protocol names end here.
   };
 }

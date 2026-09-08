@@ -17,6 +17,10 @@ const GossipSnapshot = struct {
     topic: gossip.score.TopicParams,
     allowlist: [32][16]u8,
     allowlist_len: u8,
+    topic_boundaries: [gossip.topic_policy.boundary_max]gossip.topic_policy.Boundary,
+    topic_boundary_count: u8,
+    topic_count: u16,
+    topic_subscription_bytes: usize,
 };
 var gossip_mutex: std.Io.Mutex = .init;
 var gossip_snapshot: ?GossipSnapshot = null;
@@ -31,7 +35,18 @@ pub fn captureGossip(owner: *const gossip.Gossipsub) void {
         .topic = owner.scores.topic_params[0],
         .allowlist = owner.ip_allowlist,
         .allowlist_len = owner.ip_allowlist_len,
+        .topic_boundaries = undefined,
+        .topic_boundary_count = 0,
+        .topic_count = 0,
+        .topic_subscription_bytes = 0,
     };
+    if (owner.namespace) |*ns| {
+        const snapshot = &gossip_snapshot.?;
+        @memcpy(snapshot.topic_boundaries[0..ns.boundaries.len], ns.boundaries);
+        snapshot.topic_boundary_count = @intCast(ns.boundaries.len);
+        snapshot.topic_count = ns.topic_count;
+        snapshot.topic_subscription_bytes = ns.subscriptions.len * @sizeOf(u64);
+    }
 }
 
 pub fn publishDuringDrain(runtime: *@import("network_runtime.zig").Runtime) !void {
@@ -124,6 +139,18 @@ fn getGossip(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     const allowlist = try env.createArrayWithLength(value.allowlist_len);
     for (value.allowlist[0..value.allowlist_len], 0..) |address, i| try allowlist.setElement(@intCast(i), try copyBytes(env, &address));
     try object.setNamedProperty("ipAllowlist", allowlist);
+    try object.setNamedProperty("topicCount", try env.createUint32(value.topic_count));
+    try object.setNamedProperty("topicSubscriptionBytes", try env.createDouble(@floatFromInt(value.topic_subscription_bytes)));
+    const boundaries = try env.createArrayWithLength(value.topic_boundary_count);
+    for (value.topic_boundaries[0..value.topic_boundary_count], 0..) |*boundary, i| {
+        const copied = try env.createObject();
+        try copied.setNamedProperty("digest", try copyBytes(env, &boundary.digest));
+        const rules = try env.createArrayWithLength(gossip.topic_policy.kind_count);
+        for (boundary.rules, 0..) |rule, k| try rules.setElement(@intCast(k), try scalarFields(env, &rule));
+        try copied.setNamedProperty("rules", rules);
+        try boundaries.setElement(@intCast(i), copied);
+    }
+    try object.setNamedProperty("topicPolicy", if (value.topic_boundary_count == 0) try env.getNull() else boundaries);
     return object;
 }
 fn fail(env: napi.Env, info: napi.CallbackInfo(1)) !napi.Value {

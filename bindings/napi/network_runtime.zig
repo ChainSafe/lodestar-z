@@ -347,6 +347,7 @@ pub const Runtime = struct {
         var gossip = self.config.gossip;
         gossip.random_seed = seed;
         gossip.ip_allowlist = self.config.allowlist[0..self.config.allowlist_count];
+        gossip.topic_policy = if (self.config.topic_boundary_count == 0) null else self.config.topic_boundaries[0..self.config.topic_boundary_count];
         try faults.check(.core);
         try self.core.initManaged(allocator, io, .{
             .wait_mode = .native_poll,

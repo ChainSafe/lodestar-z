@@ -4,6 +4,7 @@ const score_mod = @import("score.zig");
 const storage = @import("message_store.zig");
 
 pub const Options = struct {
+    topic_policy: ?[]const @import("topic_policy.zig").Boundary = null,
     connected_capacity: u16 = constants.peers_cap,
     retained_capacity: u16 = @import("peers.zig").capacity,
     retained_outbound_reserve: u16 = @import("peers.zig").outbound_reserve,
@@ -59,7 +60,8 @@ pub const Options = struct {
     random_seed: ?u64 = null,
 };
 
-pub fn validate(o: *const Options) error{InvalidLimits}!void {
+pub fn validate(o: *const Options) (error{InvalidLimits} || @import("topic_policy.zig").Error)!void {
+    if (o.topic_policy) |boundaries| _ = try @import("topic_policy.zig").validate(boundaries);
     try score_mod.validateParams(o.score_params);
     if (o.random_seed == null or o.ip_allowlist.len > 32 or o.retained_score_ms == 0 or o.retained_score_ms > 86_400_000) return error.InvalidLimits;
     if (!@import("std").math.isFinite(o.gossip_factor) or o.gossip_factor < 0 or o.gossip_factor > 1) return error.InvalidLimits;

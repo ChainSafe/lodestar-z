@@ -5,6 +5,7 @@ const d = @import("discv5");
 const Value = napi.Value;
 const t = n.peers.types;
 const enr_max = d.wire.constants.enr_size_max;
+const topic_policy = n.gossipsub.topic_policy;
 const bootstrap_max = d.Maintenance.bootstrap_max;
 
 pub const Config = struct {
@@ -24,6 +25,8 @@ pub const Config = struct {
     gossip: n.gossipsub.Options,
     allowlist: [32][16]u8,
     allowlist_count: u8,
+    topic_boundaries: [topic_policy.boundary_max]topic_policy.Boundary,
+    topic_boundary_count: u8,
 
     pub fn wipe(self: *Config) void {
         std.crypto.secureZero(u8, &self.secret);
@@ -131,9 +134,11 @@ pub fn parse(value: Value, out: *Config) !void {
         .gossip = undefined,
         .allowlist = undefined,
         .allowlist_count = 0,
+        .topic_boundaries = undefined,
+        .topic_boundary_count = 0,
     };
     errdefer out.wipe();
-    try object(value, &.{ "profile", "identitySecretKey", "bind", "local", "forkSchedule", "requestForks", "discovery", "initialSlot", "gossipPolicy" });
+    try object(value, &.{ "profile", "identitySecretKey", "bind", "local", "forkSchedule", "requestForks", "discovery", "initialSlot", "gossipPolicy", "topicPolicy" });
     const profile = try get(value, "profile");
     if (try profile.typeof() != .string) return error.InvalidNetworkConfig;
     var buf: [32]u8 = undefined;
@@ -214,6 +219,7 @@ pub fn parse(value: Value, out: *Config) !void {
             out.advertisement = result;
         }
     }
+    try parseTopicPolicy(try get(value, "topicPolicy"), out);
     const resolved = n.configuration.resolve(.{ .profile = out.profile, .seed = 1, .forks = out.forks[0..out.fork_count] }) catch return error.InvalidNetworkConfig;
     out.gossip = resolved.core.service.gossipsub;
     const policy = try get(value, "gossipPolicy");
@@ -271,5 +277,46 @@ pub fn parse(value: Value, out: *Config) !void {
     out.gossip.score_params.topic.invalid_decay = try number(try get(topic, "invalidDecay"));
     var options = resolved.core;
     options.service.gossipsub = out.gossip;
+    options.service.gossipsub.topic_policy = if (out.topic_boundary_count == 0) null else out.topic_boundaries[0..out.topic_boundary_count];
     n.configuration.validate(resolved.limits, options) catch return error.InvalidNetworkConfig;
+}
+
+fn completeObject(value: Value, comptime names: []const []const u8) !void {
+    try object(value, names);
+    const keys = try value.getAllPropertyNames(.own_only, .all_properties, .numbers_to_strings);
+    if (try keys.getArrayLength() != names.len) return error.InvalidNetworkConfig;
+}
+
+fn parseTopicPolicy(value: Value, out: *Config) !void {
+    if (try value.typeof() == .null) return;
+    const count = try array(value, topic_policy.boundary_max);
+    if (count == 0) return error.InvalidNetworkConfig;
+    const fields = @typeInfo(topic_policy.Kind).@"enum".fields;
+    const names: [topic_policy.kind_count][]const u8 = comptime blk: {
+        var result: [topic_policy.kind_count][]const u8 = undefined;
+        for (fields, 0..) |field, i| result[i] = field.name;
+        break :blk result;
+    };
+    const env: napi.Env = .{ .env = value.env };
+    for (out.topic_boundaries[0..count], 0..) |*boundary, i| {
+        var index_buffer: [2]u8 = undefined;
+        const index = try std.fmt.bufPrint(&index_buffer, "{d}", .{i});
+        if (!try value.hasOwnProperty(try env.createStringUtf8(index))) return error.InvalidNetworkConfig;
+        const input = try value.getElement(@intCast(i));
+        try completeObject(input, &.{ "digest", "rules" });
+        boundary.digest = try fixed(4, try get(input, "digest"));
+        const rules = try get(input, "rules");
+        try completeObject(rules, &names);
+        inline for (fields) |field| {
+            const rule = try get(rules, field.name);
+            try completeObject(rule, &.{ "count", "sszMin", "sszMax" });
+            boundary.rules[field.value] = .{
+                .count = @intCast(try integer(try get(rule, "count"), std.math.maxInt(u16))),
+                .ssz_min = @intCast(try integer(try get(rule, "sszMin"), n.gossipsub.constants.MAX_PAYLOAD_SIZE)),
+                .ssz_max = @intCast(try integer(try get(rule, "sszMax"), n.gossipsub.constants.MAX_PAYLOAD_SIZE)),
+            };
+        }
+    }
+    _ = topic_policy.validate(out.topic_boundaries[0..count]) catch return error.InvalidNetworkConfig;
+    out.topic_boundary_count = @intCast(count);
 }
