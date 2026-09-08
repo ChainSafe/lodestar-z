@@ -917,3 +917,147 @@ test "application graceful quiescence sends shutdown Goodbye and suppresses admi
     }
     try std.testing.expect(received);
 }
+
+fn expectQuiescentGoodbye(setup: *Setup, admitted: u64) !void {
+    var received = false;
+    for (0..80) |_| {
+        try setup.pair.pump();
+        var transport: [32]Engine.Event = undefined;
+        var gossip: [8]@import("gossipsub/root.zig").Event = undefined;
+        const counts_local = setup.client.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{}, setup.pair.now, 100, &.{}, &.{}, &gossip);
+        for (gossip[0..counts_local.gossipsub]) |event| try std.testing.expect(event != .message);
+        try std.testing.expectEqual(@as(u64, 0), setup.client.service.gossipsub.counters().messages_received);
+        try std.testing.expectEqual(admitted, setup.client.service.reqresp.counters().admitted);
+        for (setup.client.service.reqresp.inner.inbound) |slot| {
+            if (slot.state != .free and !slot.protocol.isControl()) try std.testing.expect(slot.pending_event == null);
+        }
+        var control: [8]rr.Event = undefined;
+        const counts = setup.server.service.processPartitioned(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), &.{}, setup.pair.now, &.{}, &control, &.{});
+        for (control[0..counts.control]) |event| {
+            if (event != .request or event.request.protocol != .goodbye_v1) continue;
+            try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, event.request.bytes[0..8], .little));
+            received = true;
+        }
+    }
+    try std.testing.expect(received);
+}
+
+fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
+    const hold_selection = mode == .selection;
+    const multistream = @import("wire/multistream.zig");
+    var setup: Setup = .{};
+    var opts = @import("core_test.zig").options();
+    opts.service.reqresp.request_policy = @import("reqresp/request_policy_test.zig").fixture();
+    const quotas = @import("reqresp/admission_test.zig").quotas(1000, 1000);
+    opts.service.reqresp.admission = .{ .identities = 4, .peer = quotas, .global = quotas };
+    try setup.initOwnersWithOptions(&.{}, opts);
+    defer setup.deinit();
+    _ = try setup.pair.dial();
+    for (0..50) |_| try setup.step(0);
+    var peers: [4]t.Snapshot = undefined;
+    _ = setup.server.snapshots(&peers);
+    const stream = try setup.pair.server.openStream(peers[0].connection.?);
+    var bytes: [512]u8 = undefined;
+    const header = try multistream.encodeMessage(multistream.header, &bytes);
+    const proposal = try multistream.encodeMessage(rr.Protocol.blocks_by_root_v2.id(), bytes[header.len..]);
+    const body = try rr.codec.encodeRequest(&([_]u8{7} ** 32), bytes[header.len + proposal.len ..]);
+    const total = header.len + proposal.len + body.len;
+    const first = if (hold_selection) header.len else total;
+    try std.testing.expectEqual(first, try setup.pair.server.write(stream, bytes[0..first], mode == .borrowed));
+    for (0..20) |_| try setup.step(0);
+    var held = false;
+    if (hold_selection) {
+        for (setup.client.service.router.negotiator.entries) |entry| {
+            if (entry.state == .negotiating and entry.role == .listener and entry.stream.id == stream.id) held = true;
+        }
+    } else {
+        for (setup.client.service.reqresp.inner.inbound) |slot| {
+            if (slot.state != .free and slot.protocol == .blocks_by_root_v2 and (slot.state == .receiving_request or mode == .borrowed) and slot.io.decoder.isDone()) held = true;
+        }
+    }
+    try std.testing.expect(held);
+    var borrowed: []const u8 = &.{};
+    if (mode == .borrowed) {
+        var application: [1]rr.Event = undefined;
+        const counts = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &application, &.{});
+        try std.testing.expectEqual(@as(usize, 1), counts.application);
+        borrowed = application[0].request.bytes;
+        try std.testing.expectEqualSlices(u8, &([_]u8{7} ** 32), borrowed);
+    }
+    const admitted = setup.client.service.reqresp.counters().admitted;
+    setup.client.beginGracefulClose(setup.pair.now);
+    if (mode == .borrowed) {
+        try std.testing.expectEqualSlices(u8, &([_]u8{7} ** 32), borrowed);
+    } else try std.testing.expectEqual(total - first, try setup.pair.server.write(stream, bytes[first..total], true));
+    try expectQuiescentGoodbye(&setup, admitted);
+}
+
+test "application quiescence rejects the final request FIN on an existing application stream" {
+    try quiescenceRequest(.fin);
+}
+
+test "application quiescence rejects a held listener application selection" {
+    try quiescenceRequest(.selection);
+}
+
+fn quiescenceGossip(hold_selection: bool) !void {
+    const protobuf = @import("gossipsub/protobuf.zig");
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    const topic = "/eth2/00000000/beacon_block/ssz_snappy";
+    try std.testing.expect(setup.client.subscribe(topic));
+    try std.testing.expect(setup.server.subscribe(topic));
+    for (0..50) |_| try setup.step(0);
+    setup.pair.advance(1001);
+    for (0..30) |_| try setup.step(0);
+    var peers: [4]t.Snapshot = undefined;
+    _ = setup.server.snapshots(&peers);
+    const index = setup.server.service.gossipsub.inner.state.findPeer(peers[0].connection.?).?;
+    var stream = setup.server.service.gossipsub.inner.state.outStream(index).?;
+    if (hold_selection) {
+        stream = try setup.pair.server.openStream(peers[0].connection.?);
+        var header_bytes: [64]u8 = undefined;
+        const ms = @import("wire/multistream.zig");
+        const header = try ms.encodeMessage(ms.header, &header_bytes);
+        try std.testing.expectEqual(header.len, try setup.pair.server.write(stream, header, false));
+        for (0..10) |_| try setup.step(0);
+        var held = false;
+        for (setup.client.service.router.negotiator.entries) |entry| {
+            if (entry.state == .negotiating and entry.role == .listener and entry.stream.id == stream.id) held = true;
+        }
+        try std.testing.expect(held);
+    }
+    var compressed: [128]u8 = undefined;
+    const size = try @import("snappy").raw.compress("quiescence wire payload", &compressed);
+    var bytes: [256]u8 = undefined;
+    var writer = protobuf.Writer.init(&bytes);
+    writer.varint(protobuf.messageSize(compressed[0..size], topic));
+    protobuf.writeMessage(&writer, compressed[0..size], topic);
+    const frame = writer.written();
+    if (!hold_selection) try std.testing.expectEqual(frame.len - 1, try setup.pair.server.write(stream, frame[0 .. frame.len - 1], false));
+    for (0..10) |_| try setup.step(0);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.service.gossipsub.resourceSnapshot().pending_validations);
+    setup.client.beginGracefulClose(setup.pair.now);
+    if (hold_selection) {
+        var proposal_bytes: [64]u8 = undefined;
+        const proposal = try @import("wire/multistream.zig").encodeMessage("/meshsub/1.2.0", &proposal_bytes);
+        try std.testing.expectEqual(proposal.len, try setup.pair.server.write(stream, proposal, false));
+    }
+    const remaining = if (hold_selection) frame else frame[frame.len - 1 ..];
+    try std.testing.expectEqual(remaining.len, try setup.pair.server.write(stream, remaining, false));
+    try expectQuiescentGoodbye(&setup, 0);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.service.gossipsub.resourceSnapshot().pending_validations);
+}
+
+test "application quiescence rejects a partial message on an existing gossip stream" {
+    try quiescenceGossip(false);
+}
+
+test "application quiescence rejects a held gossip listener message handoff" {
+    try quiescenceGossip(true);
+}
+
+test "application quiescence preserves the current request borrow before deferred cancellation" {
+    try quiescenceRequest(.borrowed);
+}

@@ -600,6 +600,16 @@ pub const ReqResp = struct {
         self.cleanup(engine, router, self.inbound, false);
     }
 
+    pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *routing.Router) void {
+        for (self.outbound, 0..) |*slot, index| if (slot.active() and !slot.protocol.isControl()) {
+            _ = self.cancel(slot.handle(@intCast(index)));
+        };
+        for (self.inbound, 0..) |*slot, index| if (slot.active() and !slot.protocol.isControl()) {
+            _ = self.cancel(slot.handle(@intCast(index)));
+        };
+        self.cleanupPending(engine, router);
+    }
+
     pub fn shutdown(self: *ReqResp, engine: *Engine, router: *routing.Router) void {
         for (self.outbound, 0..) |*slot, index| if (slot.active()) {
             _ = self.cancel(slot.handle(@intCast(index)));

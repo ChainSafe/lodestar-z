@@ -716,7 +716,7 @@ pub const Core = struct {
         options: rr.reqresp.RequestOptions,
         now: Now,
     ) !rr.RequestHandle {
-        if (self.stopped) return error.Stopped;
+        if (self.stopped or self.quiescing) return error.Stopped;
         if (protocol.isControl()) return error.ControlProtocol;
         return self.service.request(engine, conn, protocol, bytes, sink, options, now);
     }
@@ -752,7 +752,7 @@ pub const Core = struct {
     }
     /// Copies host-calculated parameters. Preserves outstanding Service event borrows.
     pub fn configureTopic(self: *Core, topic: []const u8, params: *const gossip.score.TopicParams) (gossip.Gossipsub.ConfigureTopicError || error{Stopped})!void {
-        if (self.stopped) return error.Stopped;
+        if (self.stopped or self.quiescing) return error.Stopped;
         try self.service.gossipsub.configureTopic(topic, params);
     }
 
@@ -762,16 +762,16 @@ pub const Core = struct {
         bytes: []const u8,
         now: Now,
     ) !gossip.Gossipsub.PublishOutcome {
-        if (self.stopped) return error.Stopped;
+        if (self.stopped or self.quiescing) return error.Stopped;
         return self.publishGossipWithOptions(topic, bytes, .{}, now);
     }
 
     pub fn publishGossipWithOptions(self: *Core, topic: []const u8, bytes: []const u8, options: gossip.Gossipsub.PublishOptions, now: Now) !gossip.Gossipsub.PublishOutcome {
-        if (self.stopped) return error.Stopped;
+        if (self.stopped or self.quiescing) return error.Stopped;
         return self.service.gossipsub.publishWithOptions(topic, bytes, options, now);
     }
     pub fn subscribe(self: *Core, topic: []const u8) bool {
-        if (self.stopped) return false;
+        if (self.stopped or self.quiescing) return false;
         return self.service.gossipsub.subscribe(topic);
     }
     pub fn unsubscribe(self: *Core, topic: []const u8) bool {
@@ -788,6 +788,7 @@ pub const Core = struct {
     pub fn beginGracefulClose(self: *Core, now: Now) void {
         if (self.stopped or self.quiescing) return;
         self.quiescing = true;
+        self.service.quiesceApplications();
         var active = self.service.router.active_capabilities;
         active.receive = .initEmpty();
         self.service.router.setCapabilities(active);
