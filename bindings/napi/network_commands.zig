@@ -182,7 +182,11 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
     const core = &self.heavy.?.core;
     const store = self.table.cells[index].store;
     switch (input.command) {
-        .request => try @import("network_requests.zig").submit(self, input.request, timestamp),
+        .request => {
+            try @import("network_faults.zig").requestBarrier(self, input.request, .request_queued);
+            try @import("network_requests.zig").submit(self, input.request, timestamp);
+            try @import("network_faults.zig").requestBarrier(self, input.request, .request_negotiation);
+        },
         .applyIntent => {
             if (input.slot < self.slot) return error.ClockRegression;
             operation.boolean = try core.applyIntent(&self.stores.?.intents[store.?].value, timestamp);
