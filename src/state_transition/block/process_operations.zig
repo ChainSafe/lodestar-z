@@ -2,6 +2,7 @@ const std = @import("std");
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const BeaconState = @import("fork_types").BeaconState;
 const BlockType = @import("fork_types").BlockType;
 const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
@@ -29,6 +30,7 @@ pub fn processOperations(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    proposer_rewards: *ProposerRewards,
     slashings_cache: *SlashingsCache,
     comptime block_type: BlockType,
     body: *const BeaconBlockBody(block_type, fork),
@@ -44,7 +46,7 @@ pub fn processOperations(
     const current_epoch = epoch_cache.epoch;
 
     for (body.inner.proposer_slashings.items) |*proposer_slashing| {
-        try processProposerSlashing(fork, allocator, io, config, epoch_cache, state, slashings_cache, proposer_slashing, opts.verify_signature);
+        try processProposerSlashing(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, proposer_slashing, opts.verify_signature);
     }
 
     for (body.inner.attester_slashings.items) |*attester_slashing| {
@@ -55,6 +57,7 @@ pub fn processOperations(
             config,
             epoch_cache,
             state,
+            proposer_rewards,
             slashings_cache,
             current_epoch,
             attester_slashing,
@@ -62,7 +65,7 @@ pub fn processOperations(
         );
     }
 
-    try processAttestations(fork, allocator, io, config, epoch_cache, state, slashings_cache, body.inner.attestations.items, opts.verify_signature);
+    try processAttestations(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, body.inner.attestations.items, opts.verify_signature);
 
     for (body.inner.deposits.items) |*deposit| {
         try processDeposit(fork, allocator, io, config, epoch_cache, state, deposit);
@@ -117,6 +120,7 @@ test "process operations" {
         test_state.cached_state.config,
         test_state.cached_state.epoch_cache,
         try test_state.cached_state.state.tryCastToFork(.electra),
+        &test_state.cached_state.proposer_rewards,
         &test_state.cached_state.slashings_cache,
         .full,
         beacon_block.beaconBlockBody().castToFork(.full, .electra),

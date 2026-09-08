@@ -36,8 +36,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
         /// whether the corresponding child node/data has changed since the last update of the root
         changed: std.StaticBitSet(ST.chunk_count),
         original_nodes: [ST.chunk_count]?Node.Id,
-        /// Stable backing store for `getFieldRoot` return pointers on dirty basic fields, so the
-        /// temporary PMT node can be unref'd instead of leaking a Pool slot per call.
+        /// View-owned backing for `getFieldRoot` snapshots of dirty basic fields.
         field_root_cache: [ST.chunk_count][32]u8,
         pub const SszType = ST;
 
@@ -364,9 +363,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
             const ChildST = ST.getFieldType(field_name);
             if (comptime isBasicType(ChildST)) {
                 if (self.child_data[field_index]) |child_value| {
-                    const node = try ChildST.tree.fromValue(self.pool, &child_value);
-                    defer self.pool.unref(node);
-                    self.field_root_cache[field_index] = node.getRoot(self.pool).*;
+                    try ChildST.hashTreeRoot(&child_value, &self.field_root_cache[field_index]);
                     return &self.field_root_cache[field_index];
                 }
                 const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);

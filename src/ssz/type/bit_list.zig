@@ -286,10 +286,19 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             mixInLength(value.bit_len, out);
         }
 
-        /// Clones the underlying `ArrayList` in `data`.
-        ///
-        /// Caller owns the memory.
+        /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
         pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+            return cloneInto(@This(), allocator, value, out);
+        }
+
+        /// The caller initializes `out` with `DestinationST.default_value` and deinitializes it
+        /// after success or error. Errors leave `out` safe to deinitialize.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
             out.data = try value.data.clone(allocator);
             out.bit_len = value.bit_len;
         }
