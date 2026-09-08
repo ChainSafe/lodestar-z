@@ -67,9 +67,18 @@ pub const Options = struct {
     work_per_pump_max: u16 = 32,
 };
 
+pub const AbsoluteTimeouts = struct {
+    negotiation_ms: u64,
+    request_ms: u64,
+    response_ms: u64,
+};
+
+pub const RequestPhase = enum { negotiation, request, response };
+
 pub const RequestOptions = struct {
     expected_chunks: ?u32 = null,
     progress_timeout_ms: ?u64 = null,
+    absolute_timeouts: ?AbsoluteTimeouts = null,
 };
 
 pub const RequestHandle = struct {
@@ -98,7 +107,7 @@ pub const Failure = union(enum) {
 pub const Event = union(enum) {
     chunk: struct { request: RequestHandle, bytes: []const u8, fork: ?config.ForkSeq },
     done: struct { request: RequestHandle, chunks: u32 },
-    failed: struct { request: RequestHandle, reason: Failure },
+    failed: struct { request: RequestHandle, reason: Failure, phase: ?RequestPhase = null },
     request: struct { request: RequestHandle, peer: Handle, protocol: Protocol, bytes: []const u8 },
     chunk_sent: struct { request: RequestHandle, chunks: u32 },
     served: struct { request: RequestHandle, chunks: u32 },
@@ -794,7 +803,7 @@ pub const ReqResp = struct {
         self.complete(
             slot,
             index,
-            .{ .failed = .{ .request = slot.handle(index), .reason = reason } },
+            .{ .failed = .{ .request = slot.handle(index), .reason = reason, .phase = if (@TypeOf(slot) == *Client) slot.requestPhase() else null } },
             engine,
         );
     }

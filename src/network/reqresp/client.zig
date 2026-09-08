@@ -49,6 +49,8 @@ pub const Client = struct {
     progress_ms: u64 = 0,
     needs_service: bool = false,
     timeout_ms: u64 = 0,
+    absolute_timeouts: ?reqresp.AbsoluteTimeouts = null,
+    phase_deadline_ms: u64 = 0,
     chunks: u32 = 0,
     io: RequestIO = .{},
     error_message: [codec.error_message_max]u8 = undefined,
@@ -71,8 +73,19 @@ pub const Client = struct {
         self.request_ssz = &.{};
     }
 
+    pub fn requestPhase(self: *const Client) reqresp.RequestPhase {
+        return switch (self.state) {
+            .negotiating => .negotiation,
+            .sending_request => .request,
+            .awaiting, .reading, .chunk_ready => .response,
+            .free, .terminal, .reported => unreachable,
+        };
+    }
+
     pub fn deadline(self: *const Client, ctx: *const ReqResp) ?u64 {
-        if (!self.active() or self.terminal != null or self.state == .negotiating) return null;
+        if (!self.active() or self.terminal != null) return null;
+        if (self.absolute_timeouts != null) return self.phase_deadline_ms;
+        if (self.state == .negotiating) return null;
         const duration = if (self.pending_event != null or self.state == .chunk_ready)
             ctx.options.host_timeout_ms
         else
@@ -125,6 +138,7 @@ pub const Client = struct {
         slot.request_ssz = &.{};
         slot.io.writer = undefined;
         slot.state = .awaiting;
+        if (slot.absolute_timeouts) |policy| slot.phase_deadline_ms = now.mono_ms +| policy.response_ms;
         slot.progress_ms = now.mono_ms;
         Client.resetResponseDecoder(owner, slot);
         // Native response bytes may already be readable after this turn consumed activity.
@@ -258,6 +272,13 @@ pub const Client = struct {
         try owner.attach(engine);
         if (conn.index >= owner.options.peers) return error.InvalidCapacity;
         if (request_options.progress_timeout_ms == 0) return error.InvalidRequestOptions;
+        if (request_options.absolute_timeouts) |policy| {
+            if (request_options.progress_timeout_ms != null) return error.InvalidRequestOptions;
+            inline for (.{ "negotiation_ms", "request_ms", "response_ms" }) |field| {
+                const duration = @field(policy, field);
+                if (duration == 0 or duration > 60_000) return error.InvalidRequestOptions;
+            }
+        }
         if (request_ssz.len > bounds.request_max) return error.RequestTooLarge;
         if (request_ssz.len < bounds.request_min) return error.RequestTooSmall;
         const request_ceiling = if (owner.policy) |*policy|
@@ -275,16 +296,23 @@ pub const Client = struct {
             return error.TooManyRequests;
         const index = owner.availableOutboundFor(which) orelse return error.SlotsExhausted;
         const slot = &owner.outbound[index];
-        const stream = router.beginOutbound(engine, conn, .{ .reqresp = which }, now) catch |err| {
+        const opened = if (request_options.absolute_timeouts) |policy|
+            router.beginReqRespTimed(engine, conn, which, now, policy.negotiation_ms)
+        else
+            router.beginOutbound(engine, conn, .{ .reqresp = which }, now);
+        const stream = opened catch |err| {
             owner.outbound[index].state = .free;
             return switch (err) {
                 error.NegotiationTableFull => error.NegotiationTableFull,
+                error.ProtocolDisabled => error.ProtocolDisabled,
                 error.StaleHandle => error.StaleHandle,
                 else => error.Transport,
             };
         };
         slot.* = .{
             .state = .negotiating,
+            .absolute_timeouts = request_options.absolute_timeouts,
+            .phase_deadline_ms = if (request_options.absolute_timeouts) |policy| now.mono_ms +| policy.negotiation_ms else 0,
             .generation = slot.generation + 1,
             .conn = conn,
             .stream = stream,
@@ -321,6 +349,7 @@ pub const Client = struct {
                     slot.io.buffered_end = ready.leftover.len;
                     slot.io.fin_seen = ready.fin;
                     slot.state = .sending_request;
+                    if (slot.absolute_timeouts) |policy| slot.phase_deadline_ms = now.mono_ms +| policy.request_ms;
                     slot.needs_service = true;
                     slot.progress_ms = now.mono_ms;
                     slot.io.writer = codec.ChunkWriter.initRequest(slot.request_ssz);
@@ -329,7 +358,7 @@ pub const Client = struct {
                 },
                 .rejected => owner.fail(slot, index, .negotiation_rejected, null),
                 .failed => |failure| {
-                    owner.fail(slot, index, .{ .negotiation_failed = failure }, null);
+                    owner.fail(slot, index, if (failure == .timeout and slot.absolute_timeouts != null) .timeout else .{ .negotiation_failed = failure }, null);
                 },
             }
             return true;

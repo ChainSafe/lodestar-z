@@ -1600,3 +1600,207 @@ test "reqresp request admission host capacity cancellation and quota error write
     try std.testing.expectEqual(@as(u128, 1), setup.server.counters.charged_work);
     try std.testing.expectEqual(@as(usize, 0), setup.server.resourceSnapshot().pending_events);
 }
+
+test "reqresp absolute response deadline captures the live phase" {
+    var setup: ReqRespPair = .{};
+    try setup.init(.{}, .{});
+    defer setup.deinit();
+    const request = statusBytes(5);
+    var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
+    const handle = try setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .status_v1, &request, &sink, .{
+        .absolute_timeouts = .{ .negotiation_ms = 5_000, .request_ms = 5_000, .response_ms = 100 },
+    }, setup.pair.now);
+    try waitForRequest(&setup);
+    const due = setup.client.outbound[handle.index].deadline(&setup.client).?;
+    setup.pair.now.mono_ms = due - 1;
+    var events: [1]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 0), setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events));
+    setup.pair.now.mono_ms = due;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events));
+    try std.testing.expectEqual(.timeout, events[0].failed.reason);
+    try std.testing.expectEqual(.response, events[0].failed.phase.?);
+}
+
+test "reqresp absolute request phase expires under real stream backpressure" {
+    var setup: ReqRespPair = .{};
+    try setup.init(.{ .progress_timeout_ms = 2_000 }, .{});
+    defer setup.deinit();
+    _ = setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &.{});
+    const request = [_]u8{0} ** 8;
+    var sink: [8]u8 = undefined;
+    const handle = try setup.client.request(
+        &setup.pair.client,
+        &setup.client_neg,
+        setup.handles.client,
+        .ping_v1,
+        &request,
+        &sink,
+        .{ .absolute_timeouts = .{ .negotiation_ms = 5000, .request_ms = 2000, .response_ms = 10000 } },
+        setup.pair.now,
+    );
+    var negotiated = false;
+    for (0..50) |_| {
+        try setup.pair.pump();
+        var storage: [16]engine_mod.Event = undefined;
+        for (setup.pair.events(&setup.pair.server, &storage)) |event| switch (event) {
+            .stream_opened => |stream| try setup.server_neg.negotiator.acceptInbound(
+                stream,
+                &protocol.ids,
+                setup.pair.now,
+            ),
+            else => {},
+        };
+        var outcomes: [8]negotiate.Outcome = undefined;
+        const listened = setup.server_neg.pump(&setup.pair.server, setup.pair.now, &outcomes);
+        for (outcomes[0..listened]) |outcome| try std.testing.expect(outcome.result == .ready);
+        const dialed = setup.client_neg.pump(&setup.pair.client, setup.pair.now, &outcomes);
+        for (outcomes[0..dialed]) |outcome| {
+            try std.testing.expect(outcome.result == .ready);
+            negotiated = setup.client.negotiated(outcome, setup.pair.now);
+        }
+        if (negotiated) break;
+    }
+    try std.testing.expect(negotiated);
+    const stream = setup.client.outbound[handle.index].stream;
+    const padding = [_]u8{0} ** 65536;
+    var blocked = false;
+    for (0..1024) |_| {
+        _ = setup.pair.client.write(stream, &padding, false) catch |err| switch (err) {
+            error.WouldBlock => {
+                blocked = true;
+                break;
+            },
+            else => return err,
+        };
+    }
+    try std.testing.expect(blocked);
+    const progress_ms = setup.client.outbound[handle.index].progress_ms;
+    var events: [8]Event = undefined;
+    for (0..3) |_| {
+        setup.pair.advance(500);
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events),
+        );
+        try std.testing.expectEqual(progress_ms, setup.client.outbound[handle.index].progress_ms);
+    }
+    setup.pair.advance(500);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events),
+    );
+    try std.testing.expect(events[0].failed.reason == .timeout);
+    try std.testing.expectEqual(.request, events[0].failed.phase.?);
+    try std.testing.expect(
+        !setup.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id),
+    );
+}
+
+test "reqresp absolute negotiation timeout phase survives terminal cleanup" {
+    for ([_]u64{ 50, 20_000 }) |duration| {
+        var setup: ReqRespPair = .{};
+        try setup.init(.{}, .{});
+        defer setup.deinit();
+        const request = statusBytes(5);
+        var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
+        const handle = try setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .status_v1, &request, &sink, .{ .absolute_timeouts = .{ .negotiation_ms = duration, .request_ms = 5000, .response_ms = 10000 } }, setup.pair.now);
+        const due = setup.pair.now.mono_ms + duration;
+        var events: [1]Event = undefined;
+        _ = setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events);
+        setup.pair.now.mono_ms = due - 1;
+        try std.testing.expectEqual(@as(usize, 0), setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events));
+        setup.pair.now.mono_ms = due;
+        try std.testing.expectEqual(@as(usize, 1), setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events));
+        try std.testing.expectEqual(handle, events[0].failed.request);
+        try std.testing.expectEqual(.timeout, events[0].failed.reason);
+        try std.testing.expectEqual(.negotiation, events[0].failed.phase.?);
+    }
+}
+
+test "reqresp absolute policies validate all durations before stream admission" {
+    var setup: ReqRespPair = .{};
+    try setup.init(.{}, .{});
+    defer setup.deinit();
+    const request = statusBytes(5);
+    var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
+    inline for (.{ "negotiation_ms", "request_ms", "response_ms" }) |field| {
+        for ([_]u64{ 0, 60001, std.math.maxInt(u64) }) |invalid| {
+            var policy: reqresp.AbsoluteTimeouts = .{ .negotiation_ms = 1, .request_ms = 1, .response_ms = 1 };
+            @field(policy, field) = invalid;
+            try std.testing.expectError(error.InvalidRequestOptions, setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .status_v1, &request, &sink, .{ .absolute_timeouts = policy }, setup.pair.now));
+        }
+    }
+    try std.testing.expectError(error.InvalidRequestOptions, setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .status_v1, &request, &sink, .{ .absolute_timeouts = .{ .negotiation_ms = 1, .request_ms = 1, .response_ms = 1 }, .progress_timeout_ms = 1 }, setup.pair.now));
+    try std.testing.expectEqual(@as(u64, 0), setup.client.counters.requests_sent);
+    try std.testing.expectEqual(@as(usize, 0), setup.client_neg.negotiator.active());
+}
+
+test "reqresp absolute response includes paused host time without renewing at chunks or consume" {
+    for ([_]bool{ false, true }) |consume| {
+        var setup: ReqRespPair = .{};
+        try setup.init(.{}, .{});
+        defer setup.deinit();
+        const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
+        defer std.testing.allocator.free(sink);
+        const block = [_]u8{7} ** 4000;
+        const roots = [_]u8{0} ** 64;
+        const handle = try setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .blocks_by_root_v2, &roots, sink, .{ .absolute_timeouts = .{ .negotiation_ms = 5000, .request_ms = 5000, .response_ms = 1000 } }, setup.pair.now);
+        var held = false;
+        for (0..80) |_| {
+            try setup.pumpOnce();
+            for (setup.serverEvents()) |event| if (event == .request) try setup.server.respond(event.request.request, &block, .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now);
+            for (setup.clientEvents()) |event| if (event == .chunk) {
+                held = true;
+            };
+            if (held) break;
+        }
+        try std.testing.expect(held);
+        const due = setup.client.outbound[handle.index].deadline(&setup.client).?;
+        setup.pair.now.mono_ms = due - 1;
+        if (consume) try std.testing.expect(setup.client.consume(handle, setup.pair.now));
+        try std.testing.expectEqual(@as(?u64, due), setup.client.outbound[handle.index].deadline(&setup.client));
+        var events: [1]Event = undefined;
+        try std.testing.expectEqual(@as(usize, 0), setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events));
+        setup.pair.now.mono_ms = due;
+        try std.testing.expectEqual(@as(usize, 1), setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events));
+        try std.testing.expectEqual(if (consume) std.meta.Tag(reqresp.Failure).timeout else .host_timeout, std.meta.activeTag(events[0].failed.reason));
+        try std.testing.expectEqual(.response, events[0].failed.phase.?);
+    }
+}
+
+test "reqresp absolute response expires despite continuous wire progress while legacy renews" {
+    for ([_]bool{ false, true }) |absolute| {
+        var setup: ReqRespPair = .{};
+        try setup.init(.{ .progress_timeout_ms = 100 }, .{});
+        defer setup.deinit();
+        const request = statusBytes(5);
+        var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
+        const options: reqresp.RequestOptions = if (absolute) .{ .absolute_timeouts = .{ .negotiation_ms = 5000, .request_ms = 5000, .response_ms = 100 } } else .{};
+        const handle = try setup.client.request(&setup.pair.client, &setup.client_neg, setup.handles.client, .status_v1, &request, &sink, options, setup.pair.now);
+        try waitForRequest(&setup);
+        const due = setup.client.outbound[handle.index].deadline(&setup.client).?;
+        const stream = setup.server.inbound[0].stream;
+        var wire: [codec.frame_scratch_max]u8 = undefined;
+        const encoded = try codec.encodeChunk(0, null, &request, &wire);
+        try std.testing.expect(encoded.len > 10);
+        var events: [1]Event = undefined;
+        for (0..9) |i| {
+            setup.pair.now.mono_ms = due - 90 + i * 10;
+            try std.testing.expectEqual(@as(usize, 1), try setup.pair.server.write(stream, encoded[i .. i + 1], false));
+            try setup.pair.pump();
+            setup.client.connectionActivity(setup.handles.client);
+            try std.testing.expectEqual(@as(usize, 0), setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events));
+            if (absolute) try std.testing.expectEqual(@as(?u64, due), setup.client.outbound[handle.index].deadline(&setup.client));
+        }
+        setup.pair.now.mono_ms = due;
+        const count = setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events);
+        if (absolute) {
+            try std.testing.expectEqual(@as(usize, 1), count);
+            try std.testing.expectEqual(.timeout, events[0].failed.reason);
+            try std.testing.expectEqual(.response, events[0].failed.phase.?);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), count);
+            try std.testing.expect(setup.client.outbound[handle.index].deadline(&setup.client).? > due);
+        }
+    }
+}
