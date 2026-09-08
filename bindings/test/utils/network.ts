@@ -1,4 +1,11 @@
-import type {NativeDiscoveryConfig, NativeRuntimeConfig, NativeTopicBoundary} from "../../src/network.js";
+import type {
+  NativeApplicationConfig,
+  NativeDiscoveryConfig,
+  NativeLocalIntent,
+  NativeProtocolId,
+  NativeRuntimeConfig,
+  NativeTopicBoundary,
+} from "../../src/network.js";
 
 export function networkConfig(): NativeRuntimeConfig {
   const digest = Uint8Array.of(1, 2, 3, 4);
@@ -116,5 +123,84 @@ export function topicBoundary(): NativeTopicBoundary {
       voluntary_exit: disabled(),
     },
     // biome-ignore-end lint/style/useNamingConvention: Canonical protocol names end here.
+  };
+}
+
+export function applicationConfig(): NativeApplicationConfig {
+  const config = networkConfig();
+  config.local.metadata.custodyGroupCount = 1n;
+  const protocols: NativeProtocolId[] = [
+    "/ipfs/id/1.0.0",
+    "/meshsub/1.2.0",
+    "/meshsub/1.1.0",
+    "/meshsub/1.0.0",
+    "/eth2/beacon_chain/req/ping/1/ssz_snappy",
+    "/eth2/beacon_chain/req/goodbye/1/ssz_snappy",
+    "/eth2/beacon_chain/req/metadata/2/ssz_snappy",
+    "/eth2/beacon_chain/req/metadata/3/ssz_snappy",
+    "/eth2/beacon_chain/req/status/1/ssz_snappy",
+    "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy",
+    "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
+    "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy",
+    "/eth2/beacon_chain/req/blob_sidecars_by_root/1/ssz_snappy",
+  ];
+  return {
+    ...config,
+    capabilities: {
+      receive: protocols,
+      request: [
+        ...protocols,
+        "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy",
+        "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy",
+        "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy",
+        "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy",
+      ],
+    },
+    identify: {agentVersion: "lodestar-z/application-test", protocolVersion: "eth2/1.0.0"},
+    requestPolicy: {
+      blobIdentifiersDeneb: 768,
+      blobIdentifiersElectra: 1152,
+      blobSchedule: [{maxBlobs: 6, startSlot: 0n}],
+      blocksDeneb: 128,
+      blocksPreDeneb: 1024,
+      columnChunks: 16384,
+      denebStartSlot: 0n,
+      hostIntegerMax: 9007199254740991n,
+      numberOfColumns: 128,
+    },
+    resources: {
+      bridgeBudgetBytes: 16 * 1024 * 1024,
+      connectionCapacity: 16,
+      dialingCapacity: 4,
+      handshakingCapacity: 8,
+      maxPeers: 12,
+      minOutbound: 2,
+      nativeBudgetBytes: 80 * 1024 * 1024,
+      outboundReserve: 4,
+      peerCapacity: 64,
+      receiveBudgetBytes: 64 * 1024 * 1024,
+      targetPeers: 8,
+    },
+    topicPolicy: [topicBoundary()],
+  };
+}
+
+export function localIntent(config: NativeApplicationConfig): NativeLocalIntent {
+  return {
+    demand: {
+      attestationTarget: 1,
+      attnets: new Uint8Array(8),
+      expiresAtSlot: config.initialSlot + 100n,
+      groupTargets: Array<number>(128).fill(0),
+      syncTarget: 1,
+      syncnets: 0,
+    },
+    subscriptions: [],
+    update: {
+      capabilities: structuredClone(config.capabilities),
+      endpoints: config.discovery?.advertisement ?? null,
+      local: structuredClone(config.local),
+      schedule: structuredClone(config.forkSchedule),
+    },
   };
 }
