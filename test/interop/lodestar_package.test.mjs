@@ -257,6 +257,18 @@ test("install and verify use a relocated archive without the native checkout", a
   assert.equal(result.installed.addon.sha256, result.manifest.addon.sha256);
   assert.equal(await stat(join(evidenceDir, "install-evidence.json")).then((value) => value.isFile()), true);
 
+  const installedNetworkPath = join(result.installed.packageRoot, "bindings", "src", "network.js");
+  const installedNetworkSource = await readFile(installedNetworkPath, "utf8");
+  await writeFile(installedNetworkPath, `${installedNetworkSource}\nexport const basename = true;\n`);
+  const divergentExports = await command(
+    process.execPath,
+    [tool.pathname, "verify", "--host-dir", hostDir, "--manifest", `${deployedArchive}.json`],
+    root
+  );
+  assert.equal(divergentExports.exitCode, 1);
+  assert.equal(JSON.parse(divergentExports.stderr).error.code, "UnexpectedNetworkExports");
+  await writeFile(installedNetworkPath, installedNetworkSource);
+
   await writeFile(join(result.installed.packageRoot, "bindings", "src", "index.js"), "export const changed = true;\n");
   const divergent = await command(
     process.execPath,
@@ -339,7 +351,7 @@ test("install persists and emits a structured pnpm failure record", async () => 
   assert.equal(saved.attempts[0].command.stdout, "install-out");
 });
 
-test("install rejects a named re-exported network test hook before host mutation", async () => {
+test("install rejects external-star ambiguity before host mutation", async () => {
   const {root, nativeDir, out, buildRecord} = await fixture();
   const packed = await command(
     process.execPath,
@@ -376,27 +388,28 @@ test("install rejects a named re-exported network test hook before host mutation
   const internalLock = join(hostDir, "node_modules", ".pnpm", "lock.yaml");
   const beforeLock = await sha256(internalLock);
 
-  await writeFile(join(nativeDir, "bindings", "src", "hooks.js"), "export const networkTestHook = true;\n");
+  await writeFile(join(nativeDir, "bindings", "src", "join-conflict.js"), "export const join = null;\n");
   await writeFile(
     join(nativeDir, "bindings", "src", "network.js"),
     "export const createNativeNetworkApplicationRuntime = () => {};\n" +
       "export const createNativeNetworkRuntime = () => {};\n" +
-      'export {networkTestHook} from "./hooks.js";\n'
+      'export * from "node:path";\n' +
+      'export * from "./join-conflict.js";\n'
   );
-  const badArchive = join(root, "lodestar-z-reexport.tgz");
+  const badArchive = join(root, "lodestar-z-external-star.tgz");
   const repacked = await command(
     "corepack",
     ["pnpm", "--config.ignore-scripts=true", "pack", "--json", "--out", badArchive],
     nativeDir
   );
   assert.equal(repacked.exitCode, 0, JSON.stringify(repacked));
-  const extracted = join(root, "reexport-package");
+  const extracted = join(root, "external-star-package");
   await mkdir(extracted);
   const extractedArchive = await command("tar", ["-xzf", badArchive, "-C", extracted], root);
   assert.equal(extractedArchive.exitCode, 0, JSON.stringify(extractedArchive));
   const manifest = JSON.parse(await readFile(`${out}.json`, "utf8"));
   const archiveInfo = await stat(badArchive);
-  manifest.archive = {bytes: archiveInfo.size, file: "lodestar-z-reexport.tgz", sha256: await sha256(badArchive)};
+  manifest.archive = {bytes: archiveInfo.size, file: "lodestar-z-external-star.tgz", sha256: await sha256(badArchive)};
   manifest.files = await collectFiles(join(extracted, "package"));
   const badManifest = `${badArchive}.json`;
   await writeFile(badManifest, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -408,10 +421,10 @@ test("install rejects a named re-exported network test hook before host mutation
     root
   );
   assert.equal(installed.exitCode, 1);
-  assert.equal(JSON.parse(installed.stderr).error.code, "NetworkTestExport", JSON.stringify(installed));
+  assert.equal(JSON.parse(installed.stderr).error.code, "UnexpectedNetworkExports", JSON.stringify(installed));
   assert.equal(
     JSON.parse(await readFile(join(evidenceDir, "install-failure.json"), "utf8")).failure.code,
-    "NetworkTestExport"
+    "UnexpectedNetworkExports"
   );
   assert.equal(await realpath(join(hostDir, "node_modules", "@chainsafe", "lodestar-z")), installedRoot);
   assert.deepEqual(await collectFiles(installedRoot), beforeInstalled);
