@@ -28,7 +28,8 @@ pub fn upgradeStateToDeneb(
     try capella_state.latestExecutionPayloadHeader(allocator, &capella_latest_execution_payload_header);
     defer ct.capella.ExecutionPayloadHeader.deinit(allocator, &capella_latest_execution_payload_header);
 
-    try ct.capella.ExecutionPayloadHeader.clone(
+    try ct.capella.ExecutionPayloadHeader.cloneInto(
+        ct.deneb.ExecutionPayloadHeader,
         allocator,
         &capella_latest_execution_payload_header,
         &new_latest_execution_payload_header,

@@ -266,7 +266,7 @@ pub const Pool = struct {
     nodes: std.MultiArrayList(Node).Slice,
     next_free_node: Id,
     // Reused scratch for chunked_leaf root recompute: single-threaded, and chunked_leaf is a leaf
-    // of getRoot's recursion, so at most one computeRoot uses it at a time.
+    // of getRoot's traversal, so at most one computeRoot uses it at a time.
     chunked_leaf_scratch: [ChunkedLeaf.K / 2][32]u8 align(64),
 
     pub const InitOptions = struct {
@@ -738,6 +738,7 @@ pub const Id = enum(u32) {
 
     /// Returns the root hash, computing lazy branches with bounded, allocation-free traversal.
     /// Branch paths must be acyclic and contain at most `max_depth` branches.
+    /// Traversal-bound violations indicate invalid native tree construction and panic.
     /// Opaque container callbacks retain their own hashing behavior.
     pub fn getRoot(node_id: Id, pool: *Pool) *const [32]u8 {
         const idx = @intFromEnum(node_id);
