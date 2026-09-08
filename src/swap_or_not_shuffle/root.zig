@@ -61,6 +61,8 @@ const ShufflingManager = struct {
 inline fn maskedSwap(comptime T: type, out: []T, i: usize, j: usize, bit: u8) void {
     std.debug.assert(bit <= 1);
 
+    // Bit 0 makes delta zero, preserving both values. Bit 1 makes delta left ^ right,
+    // so left ^ delta = right and right ^ delta = left.
     const mask = @as(T, 0) -% @as(T, bit);
     const left = out[i];
     const right = out[j];
