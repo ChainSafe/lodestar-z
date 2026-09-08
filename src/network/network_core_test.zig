@@ -282,6 +282,10 @@ test "managed runtime every allocation prefix cleans up and memory plan counts o
     var node: runtime.NetworkCore = undefined;
     try node.init(allocation.allocator(), std.testing.io, opts);
     const plan = node.memoryPlan();
+    try std.testing.expectEqual(@sizeOf(@import("gossipsub/local_intent.zig").Workspace), plan.local_intent_bytes);
+    try std.testing.expectEqual(@sizeOf(runtime.NetworkCore), plan.inline_bytes);
+    try std.testing.expectEqual(plan.allocated_bytes, plan.transport_bytes + plan.core_bytes + plan.scratch_bytes + plan.local_intent_bytes + plan.discovery_bytes);
+    std.debug.print("local intent memory: allocated={} inline={} workspace={} prefixes={} core={} transport={} scratch={} discovery={}\n", .{ plan.allocated_bytes, plan.inline_bytes, plan.local_intent_bytes, allocation.alloc_index, plan.core_bytes, plan.transport_bytes, plan.scratch_bytes, plan.discovery_bytes });
     try std.testing.expectEqual(allocation.allocated_bytes, plan.allocated_bytes);
     const allocations = allocation.alloc_index;
     const runtime_calls = node.reservations.allocation_calls;
@@ -1173,4 +1177,365 @@ fn recycledPeerOperations(a: *runtime.NetworkCore, b: *runtime.NetworkCore, c: *
     try std.testing.expect(!a.reStatusPeer(selected.peer, previous.connection.?, a.last_now));
     try std.testing.expectEqualDeep(selected, a.core.catalog.get(selected.peer).?);
     try std.testing.expect(a.closePeer(selected.peer, selected.connection.?, a.last_now));
+}
+
+test "managed runtime complete local intent rejects invalid last topic atomically" {
+    const gossip = @import("gossipsub/root.zig");
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{41}));
+    var opts = options(&key);
+    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.core.service.identify = .{ .agent = "local-intent" };
+    opts.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_policy_test.zig").full(.{ 1, 2, 3, 4 })};
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const block_topic = "/eth2/01020304/beacon_block/ssz_snappy";
+    const update: runtime.LocalUpdate = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.core.service.router.capabilities() };
+    var desired: runtime.LocalIntent = .{ .update = update, .demand = .{}, .subscriptions = &.{.{ .name = block_topic, .params = .{} }} };
+    const now = node.last_now;
+    try std.testing.expect(try node.applyIntent(&desired, now));
+    try std.testing.expect(!(try node.applyIntent(&desired, now)));
+    const before = ActivationSnapshot.capture(&node);
+    const identify = node.core.service.identify.?.local;
+    const demand = node.core.demand;
+    const g = &node.core.service.gossipsub.inner;
+    const topic = g.state.findTopic(block_topic).?;
+    const params = g.scores.topic_params[topic];
+    desired.update.local.metadata.attnets[0] = 1;
+    desired.subscriptions = &[_]gossip.local_intent.Subscription{
+        .{ .name = block_topic, .params = .{ .weight = 2 } },
+        .{ .name = "invalid", .params = .{} },
+    };
+    try std.testing.expectError(error.InvalidTopic, node.applyIntent(&desired, now));
+    try before.expectUnchanged(&node);
+    try std.testing.expectEqualDeep(identify, node.core.service.identify.?.local);
+    try std.testing.expectEqualDeep(demand, node.core.demand);
+    try std.testing.expectEqualDeep(params, g.scores.topic_params[topic]);
+    try std.testing.expect(g.state.subscribed(topic));
+    try std.testing.expectEqual(@as(?u16, topic), g.state.findTopic(block_topic));
+}
+
+fn intentFor(node: *const runtime.NetworkCore) runtime.LocalIntent {
+    return .{
+        .update = .{ .local = node.localState(), .schedule = node.schedule, .endpoints = node.advertisementEndpoints(), .capabilities = node.core.service.router.capabilities() },
+        .demand = node.core.demand,
+        .subscriptions = &.{},
+    };
+}
+
+test "managed runtime local intent demand candidate sequence and stopped refusals" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{42}));
+    for (0..2) |exhausted| {
+        var opts = options(&key);
+        opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) }, .sequence = if (exhausted == 0) std.math.maxInt(u64) else 1 };
+        if (exhausted == 1) opts.local.metadata.seq_number = std.math.maxInt(u64);
+        opts.core.service.identify = .{ .agent = "local-intent" };
+        opts.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_policy_test.zig").full(.{ 1, 2, 3, 4 })};
+        var node: runtime.NetworkCore = undefined;
+        try node.init(std.testing.allocator, std.testing.io, opts);
+        defer node.deinit(std.testing.io);
+        const before = ActivationSnapshot.capture(&node);
+        const identify = node.core.service.identify.?.local;
+        const g = &node.core.service.gossipsub.inner;
+        const revision = g.scores.revision;
+        var desired = intentFor(&node);
+        desired.subscriptions = &.{.{ .name = "/eth2/01020304/beacon_block/ssz_snappy", .params = .{ .weight = 2 } }};
+        desired.update.local.fork.custody_groups = 1;
+        desired.demand.group_targets[1] = 1;
+        try desired.demand.validate(&node.core.local.fork, node.core.catalog.options.max_peers);
+        try std.testing.expectError(error.InvalidDemand, node.applyIntent(&desired, node.last_now));
+        desired.update.local.fork = node.core.local.fork;
+        desired.demand.group_targets[1] = node.core.catalog.options.max_peers + 1;
+        try std.testing.expectError(error.InvalidDemand, node.applyIntent(&desired, node.last_now));
+        desired.demand = .{ .attnets = 1, .expires_at_slot = 100 };
+        desired.update.local.metadata.attnets[0] = 1;
+        try std.testing.expectError(error.SequenceExhausted, node.applyIntent(&desired, node.last_now));
+        try before.expectUnchanged(&node);
+        try std.testing.expectEqualDeep(identify, node.core.service.identify.?.local);
+        try std.testing.expectEqualDeep(t.Demand{}, node.core.demand);
+        try std.testing.expectEqual(revision, g.scores.revision);
+        try std.testing.expect(g.state.findTopic(desired.subscriptions[0].name) == null);
+        node.shutdown(node.last_now);
+        try std.testing.expectError(error.Stopped, node.applyIntent(&desired, node.last_now));
+        try before.expectUnchanged(&node);
+    }
+}
+
+test "managed runtime local intent topic demand no-op preserves Status scheduling and counters" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{43}));
+    var opts = options(&key);
+    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.core.service.gossipsub.topic_policy = &.{@import("gossipsub/topic_policy_test.zig").full(.{ 1, 2, 3, 4 })};
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const g = &node.core.service.gossipsub.inner;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    const before = ActivationSnapshot.capture(&node);
+    const calls = node.reservations.allocation_calls;
+    node.core.control.schedules[0].peer = .{ .index = 0, .generation = 1 };
+    node.core.control.schedules[0].status_due_ms = node.last_now.mono_ms + 500;
+    const schedule = node.core.control.schedules[0];
+    defer node.core.control.schedules[0].peer = null;
+    var desired = intentFor(&node);
+    desired.subscriptions = &.{.{ .name = name, .params = .{ .weight = 2 } }};
+    try std.testing.expect(try node.applyIntent(&desired, node.last_now));
+    const row = g.state.findTopic(name).?;
+    g.scores.invalid(0, row);
+    const counters = g.scores.topics[row];
+    const revision = g.scores.revision;
+    const retained = g.state.topics[row].retire_after_ms;
+    try std.testing.expect(!try node.applyIntent(&desired, node.last_now));
+    try std.testing.expectEqual(revision, g.scores.revision);
+    desired.demand = .{ .attnets = 1, .expires_at_slot = 100 };
+    try std.testing.expect(try node.applyIntent(&desired, node.last_now));
+    try std.testing.expect(!try node.applyIntent(&desired, node.last_now));
+    try std.testing.expectEqualDeep(desired.demand, node.core.demand);
+    try std.testing.expectEqualDeep(counters, g.scores.topics[row]);
+    try std.testing.expectEqual(retained, g.state.topics[row].retire_after_ms);
+    try std.testing.expectEqualDeep(schedule, node.core.control.schedules[0]);
+    try before.expectUnchanged(&node);
+    desired.subscriptions = &.{};
+    try std.testing.expect(try node.applyIntent(&desired, node.last_now));
+    try std.testing.expect(!g.state.subscribed(row));
+    const deadline = g.state.topics[row].retire_after_ms;
+    try std.testing.expect(!try node.applyIntent(&desired, .{ .mono_ms = node.last_now.mono_ms + 1, .unix_s = node.last_now.unix_s }));
+    try std.testing.expectEqual(deadline, g.state.topics[row].retire_after_ms);
+    try std.testing.expectEqual(calls, node.reservations.allocation_calls);
+}
+
+const IntentPair = struct {
+    a: runtime.NetworkCore = undefined,
+    b: runtime.NetworkCore = undefined,
+    a_gossip: [16]@import("gossipsub/root.zig").Event = undefined,
+    b_gossip: [16]@import("gossipsub/root.zig").Event = undefined,
+    b_app: [4]@import("reqresp/root.zig").Event = undefined,
+
+    fn pump(self: *IntentPair) !struct { a: runtime.Result, b: runtime.Result } {
+        const now = try @import("driver.zig").currentTime(std.testing.io);
+        const a = self.a.step(std.testing.io, now, 100, .{ .gossipsub = &self.a_gossip }, 1);
+        if (a.failure) |err| return err;
+        const b = self.b.step(std.testing.io, now, 100, .{ .gossipsub = &self.b_gossip, .application = &self.b_app }, 1);
+        if (b.failure) |err| return err;
+        return .{ .a = a, .b = b };
+    }
+};
+
+test "managed runtime local intent fork BPO announcements remembered peer and event borrows" {
+    const full = @import("gossipsub/topic_policy_test.zig").full;
+    const old = "/eth2/00000000/beacon_block/ssz_snappy";
+    const active = "/eth2/01020304/beacon_block/ssz_snappy";
+    const bpo = "/eth2/05060708/beacon_block/ssz_snappy";
+    const key_a = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{44}));
+    const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{45}));
+    const pair = try std.testing.allocator.create(IntentPair);
+    defer std.testing.allocator.destroy(pair);
+    var opts = options(&key_a);
+    opts.core.service.gossipsub.topic_policy = &.{ full(@splat(0)), full(.{ 1, 2, 3, 4 }), full(.{ 5, 6, 7, 8 }) };
+    opts.core.service.reqresp.forks = &.{ .{ .digest = @splat(0), .fork = .phase0 }, .{ .digest = .{ 1, 2, 3, 4 }, .fork = .fulu }, .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu } };
+    opts.local.metadata.custody_group_count = 4;
+    opts.local.fork.minimum_sampling_groups = @min(8, opts.local.fork.custody_groups);
+    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    try pair.a.init(std.testing.allocator, std.testing.io, opts);
+    defer pair.a.deinit(std.testing.io);
+    opts.transport.host = &key_b;
+    try pair.b.init(std.testing.allocator, std.testing.io, opts);
+    defer pair.b.deinit(std.testing.io);
+    var a_intent = intentFor(&pair.a);
+    a_intent.subscriptions = &.{ .{ .name = old, .params = .{} }, .{ .name = active, .params = .{} }, .{ .name = bpo, .params = .{} } };
+    var b_intent = intentFor(&pair.b);
+    b_intent.subscriptions = &.{.{ .name = old, .params = .{} }};
+    try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
+    try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
+    try pair.a.addDirectPeer(&pair.b.peerId(), &.{pair.b.localAddress()}, pair.a.last_now);
+    const start = pair.a.last_now.mono_ms;
+    const gb = &pair.b.core.service.gossipsub.inner;
+    var connected = false;
+    for (0..3000) |_| {
+        _ = try pair.pump();
+        if (pair.a.last_now.mono_ms - start > 10_000) break;
+        const ns = &gb.namespace.?;
+        if (pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1 and ns.subscribed(0, ns.lookup(active).?.ordinal) and ns.subscribed(0, ns.lookup(bpo).?.ordinal) and gb.state.peers[0].out_stream != null and pair.a.core.service.gossipsub.inner.state.peers[0].out_stream != null) {
+            connected = true;
+            break;
+        }
+    }
+    try std.testing.expect(connected);
+    try std.testing.expect(gb.state.findTopic(active) == null);
+    const calls = pair.b.reservations.allocation_calls;
+    for ([_]*runtime.LocalIntent{ &a_intent, &b_intent }) |intent| {
+        intent.update.local.fork.fork = .fulu;
+        intent.update.local.fork.digest = .{ 1, 2, 3, 4 };
+        intent.update.local.status.fork_digest = intent.update.local.fork.digest;
+        intent.update.local.status.earliest_available_slot = 0;
+        intent.update.capabilities = try @import("capabilities.zig").forFork(.fulu, false, &.{ .v1_2, .v1_1 });
+    }
+    b_intent.subscriptions = &.{.{ .name = active, .params = .{ .weight = 7 } }};
+    try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
+    try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
+    const activated = gb.state.findTopic(active).?;
+    try std.testing.expectEqual(@as(f64, 7), gb.scores.topic_params[activated].weight);
+    try std.testing.expectEqual(@as(usize, 1), gb.state.subscribers(activated).count());
+    const publication = try pair.b.publishGossipWithOptions(active, "0123456789", .{ .allow_zero_peers = false }, pair.b.last_now);
+    try std.testing.expectEqual(@as(usize, 1), publication.queued);
+    var announced = false;
+    var withdrawn = false;
+    var delivered = false;
+    for (0..3000) |_| {
+        const result = try pair.pump();
+        for (pair.a_gossip[0..result.a.counts.gossipsub]) |event| switch (event) {
+            .subscription_change => |value| {
+                if (std.mem.eql(u8, value.topic, active) and value.subscribed) announced = true;
+                if (std.mem.eql(u8, value.topic, old) and !value.subscribed) withdrawn = true;
+            },
+            .message => |value| {
+                try std.testing.expectEqualStrings(active, value.topic);
+                try std.testing.expectEqualStrings("0123456789", value.bytes);
+                delivered = true;
+                _ = pair.a.reportValidation(value.handle, .accept, pair.a.last_now);
+            },
+        };
+        if (announced and withdrawn and delivered and pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1) break;
+    }
+    try std.testing.expect(announced and withdrawn and delivered);
+    for ([_]*runtime.LocalIntent{ &a_intent, &b_intent }) |intent| {
+        intent.update.local.fork.digest = .{ 5, 6, 7, 8 };
+        intent.update.local.status.fork_digest = intent.update.local.fork.digest;
+    }
+    b_intent.subscriptions = &.{.{ .name = bpo, .params = .{ .weight = 9 } }};
+    try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
+    try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
+    announced = false;
+    withdrawn = false;
+    for (0..3000) |_| {
+        const result = try pair.pump();
+        for (pair.a_gossip[0..result.a.counts.gossipsub]) |event| if (event == .subscription_change) {
+            const value = event.subscription_change;
+            if (std.mem.eql(u8, value.topic, bpo) and value.subscribed) announced = true;
+            if (std.mem.eql(u8, value.topic, active) and !value.subscribed) withdrawn = true;
+        };
+        if (announced and withdrawn and pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1) break;
+    }
+    try std.testing.expect(announced and withdrawn);
+    const borrowed_topic = gb.state.findTopic(bpo).?;
+    try std.testing.expectEqual(@as(f64, 9), gb.scores.topic_params[borrowed_topic].weight);
+    const peer = pair.a.core.catalog.find(&pair.b.peerId()).?;
+    var request: [24]u8 = @splat(0);
+    request[8] = 1;
+    request[16] = 1;
+    const sink = try std.testing.allocator.alloc(u8, @import("reqresp/root.zig").Protocol.blocks_by_range_v2.info().response_max);
+    defer std.testing.allocator.free(sink);
+    _ = try pair.a.sendReqRespRequest(peer, .blocks_by_range_v2, &request, sink, .{}, pair.a.last_now);
+    _ = try pair.a.publishGossip(bpo, "borrowed gossip", pair.a.last_now);
+    var got_request = false;
+    var got_message = false;
+    for (0..3000) |_| {
+        const result = try pair.pump();
+        for (pair.b_app[0..result.b.counts.application]) |event| if (event == .request) {
+            const bytes = event.request.bytes;
+            try std.testing.expectEqualSlices(u8, &request, bytes);
+            try intentBorrowUpdate(&pair.b, &b_intent);
+            try std.testing.expectEqualSlices(u8, &request, bytes);
+            try std.testing.expect(pair.b.finish(event.request.request, pair.b.last_now));
+            got_request = true;
+        };
+        for (pair.b_gossip[0..result.b.counts.gossipsub]) |event| if (event == .message) {
+            try std.testing.expectEqual(@as(f64, 9), gb.scores.topic_params[borrowed_topic].weight);
+            try intentBorrowUpdate(&pair.b, &b_intent);
+            try std.testing.expectEqualStrings(bpo, event.message.topic);
+            try std.testing.expectEqualStrings("borrowed gossip", event.message.bytes);
+            _ = pair.b.reportValidation(event.message.handle, .reject, pair.b.last_now);
+            try std.testing.expect(gb.scores.retainsTopic(borrowed_topic));
+            got_message = true;
+        };
+        if (got_request and got_message) break;
+    }
+    try std.testing.expect(got_request and got_message);
+    try std.testing.expectEqual(calls, pair.b.reservations.allocation_calls);
+}
+
+fn intentBorrowUpdate(node: *runtime.NetworkCore, desired: *runtime.LocalIntent) !void {
+    desired.demand.attnets ^= 1;
+    desired.demand.expires_at_slot = 1000;
+    desired.subscriptions = if (desired.demand.attnets == 1) &.{
+        .{ .name = "/eth2/05060708/beacon_block/ssz_snappy", .params = .{ .weight = 9 } },
+        .{ .name = "/eth2/05060708/voluntary_exit/ssz_snappy", .params = .{ .weight = 0 } },
+    } else &.{
+        .{ .name = "/eth2/05060708/beacon_block/ssz_snappy", .params = .{ .weight = 9 } },
+        .{ .name = "/eth2/05060708/proposer_slashing/ssz_snappy", .params = .{ .weight = 0 } },
+    };
+    try std.testing.expect(try node.applyIntent(desired, node.last_now));
+    var invalid = desired.*;
+    invalid.update.local.metadata.attnets[0] ^= 1;
+    invalid.subscriptions = &.{ desired.subscriptions[0], .{ .name = "invalid", .params = .{} } };
+    const before = ActivationSnapshot.capture(node);
+    try std.testing.expectError(error.InvalidTopic, node.applyIntent(&invalid, node.last_now));
+    try before.expectUnchanged(node);
+}
+
+const BoundaryUnion = struct {
+    names: [615][@import("gossipsub/topic.zig").topic_max_len]u8 = undefined,
+    entries: [615]@import("gossipsub/local_intent.zig").Subscription = undefined,
+    len: usize = 0,
+
+    fn fill(self: *BoundaryUnion, columns: u16) !void {
+        std.debug.assert(columns <= 128);
+        self.len = 0;
+        for ([_]u32{ 0, 0x01020304, 0x05060708 }) |digest| {
+            for ([_][]const u8{ "beacon_block", "beacon_aggregate_and_proof", "proposer_slashing", "attester_slashing", "voluntary_exit", "sync_committee_contribution_and_proof", "light_client_finality_update", "light_client_optimistic_update", "bls_to_execution_change" }) |kind| {
+                try self.append(digest, kind, null);
+            }
+            for (0..64) |index| try self.append(digest, "beacon_attestation", @intCast(index));
+            for (0..4) |index| try self.append(digest, "sync_committee", @intCast(index));
+            for (0..columns) |index| try self.append(digest, "data_column_sidecar", @intCast(index));
+        }
+    }
+
+    fn append(self: *BoundaryUnion, digest: u32, kind: []const u8, index: ?u16) !void {
+        std.debug.assert(self.len < self.entries.len);
+        const name = if (index) |value|
+            try std.fmt.bufPrint(&self.names[self.len], "/eth2/{x:0>8}/{s}_{d}/ssz_snappy", .{ digest, kind, value })
+        else
+            try std.fmt.bufPrint(&self.names[self.len], "/eth2/{x:0>8}/{s}/ssz_snappy", .{ digest, kind });
+        self.entries[self.len] = .{ .name = name, .params = .{ .weight = 2 } };
+        self.len += 1;
+    }
+};
+
+test "managed runtime local intent three boundaries fit and all-column overlap refuses atomically" {
+    const full = @import("gossipsub/topic_policy_test.zig").full;
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{46}));
+    var opts = options(&key);
+    opts.discovery = .{ .bind = .{ .ip4 = .loopback(0) } };
+    opts.core.service.gossipsub.topic_policy = &.{ full(@splat(0)), full(.{ 1, 2, 3, 4 }), full(.{ 5, 6, 7, 8 }) };
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const union_topics = try std.testing.allocator.create(BoundaryUnion);
+    defer std.testing.allocator.destroy(union_topics);
+    try union_topics.fill(64);
+    try std.testing.expectEqual(@as(usize, 423), union_topics.len);
+    var desired = intentFor(&node);
+    desired.subscriptions = union_topics.entries[0..union_topics.len];
+    desired.update.local.metadata.attnets[0] = 1;
+    try std.testing.expect(try node.applyIntent(&desired, node.last_now));
+    const before = ActivationSnapshot.capture(&node);
+    const g = &node.core.service.gossipsub.inner;
+    const revision = g.scores.revision;
+    const old_demand = node.core.demand;
+    try union_topics.fill(128);
+    try std.testing.expectEqual(@as(usize, 615), union_topics.len);
+    desired.subscriptions = union_topics.entries[0..union_topics.len];
+    desired.update.local.metadata.attnets[0] = 2;
+    desired.demand = .{ .attnets = 3, .expires_at_slot = 100 };
+    try std.testing.expectError(error.TopicCapacity, node.applyIntent(&desired, node.last_now));
+    try before.expectUnchanged(&node);
+    try std.testing.expectEqualDeep(old_demand, node.core.demand);
+    try std.testing.expectEqual(revision, g.scores.revision);
+    var count: usize = 0;
+    for (g.state.topics) |row| if (row.subscribed) {
+        count += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 423), count);
+    try std.testing.expect(g.state.findTopic("/eth2/05060708/data_column_sidecar_127/ssz_snappy") == null);
 }

@@ -3,6 +3,7 @@ const snappy = @import("snappy");
 const constants = @import("constants.zig");
 const protobuf = @import("protobuf.zig");
 const topic_policy = @import("topic_policy.zig");
+const local_intent = @import("local_intent.zig");
 const topic_mod = @import("topic.zig");
 const mcache_mod = @import("mcache.zig");
 const storage = @import("message_store.zig");
@@ -260,11 +261,12 @@ pub const Gossipsub = struct {
         if (!self.validTopic(name)) return null;
         if (self.state.findTopic(name)) |topic| return topic;
         if (self.state.internTopic(name)) |topic| return self.initializeTopic(topic);
+        const pins = self.retirementPins();
         for (0..constants.topics_cap) |index| {
             const topic: u16 = @intCast(index);
             if (self.state.topics[topic].generation == std.math.maxInt(u64) or
-                !self.canReclaimTopic(topic)) continue;
-            for (0..constants.topics_cap) |reclaim| self.reclaimTopic(@intCast(reclaim));
+                !self.retirement(topic, &pins, self.last_now_ms).reusable) continue;
+            for (0..constants.topics_cap) |reclaim| self.reclaimObserved(@intCast(reclaim), self.retirement(@intCast(reclaim), &pins, self.last_now_ms));
             return self.initializeTopic(self.state.internTopic(name) orelse unreachable);
         }
         return null;
@@ -283,45 +285,126 @@ pub const Gossipsub = struct {
         return topic;
     }
 
-    fn topicRetirementBlocked(self: *const Gossipsub, topic: u16) bool {
-        const row = &self.state.topics[topic];
-        if (!row.active or row.subscribed or row.mesh.count() > 0 or row.fanout.count() > 0) return true;
-        if (self.mesh_policy.pending_prunes[topic].count() > 0) return true;
-        for (self.validation.entries) |entry| if (entry.pinned and entry.topic == topic) return true;
+    fn retirementPins(self: *const Gossipsub) local_intent.Pins {
+        var pins: local_intent.Pins = .{};
+        for (self.validation.entries) |*entry| if (entry.pinned) {
+            pins.validation.set(entry.topic);
+        };
         for (self.io.peers, 0..) |*io, peer| {
-            if (self.state.peers[peer].active and io.subscription_dirty.isSet(topic)) return true;
+            if (self.state.peers[peer].active) pins.announcements.setUnion(io.subscription_dirty);
         }
-        return false;
+        return pins;
     }
 
-    fn hasTopicBackoff(self: *const Gossipsub, topic: u16) bool {
+    const Retirement = struct { blocked: bool, expired: bool, reusable: bool };
+
+    fn retirement(self: *const Gossipsub, topic: u16, pins: *const local_intent.Pins, now_ms: u64) Retirement {
         const row = &self.state.topics[topic];
+        if (!row.active or row.subscribed or row.mesh.count() > 0 or row.fanout.count() > 0 or
+            self.mesh_policy.pending_prunes[topic].count() > 0 or pins.validation.isSet(topic) or
+            pins.announcements.isSet(topic)) return .{ .blocked = true, .expired = false, .reusable = false };
+        const expired = if (row.retire_after_ms) |deadline| now_ms >= deadline else false;
+        var backoff = false;
         for (0..self.peers.rows.len) |peer| {
-            const backoff = self.peers.backoffs[peer * constants.topics_cap + topic];
-            if (backoff.topic_generation == row.generation and self.last_now_ms < backoff.until) return true;
+            const value = self.peers.backoffs[peer * constants.topics_cap + topic];
+            if (value.topic_generation == row.generation and now_ms < value.until) {
+                backoff = true;
+                break;
+            }
         }
-        return false;
+        return .{ .blocked = false, .expired = expired, .reusable = (expired or !self.scores.retainsTopic(topic)) and !backoff };
     }
 
-    fn canReclaimTopic(self: *const Gossipsub, topic: u16) bool {
-        if (self.topicRetirementBlocked(topic)) return false;
-        const expired = if (self.state.topics[topic].retire_after_ms) |deadline|
-            self.last_now_ms >= deadline
-        else
-            false;
-        return (expired or !self.scores.retainsTopic(topic)) and !self.hasTopicBackoff(topic);
+    fn reclaimObserved(self: *Gossipsub, topic: u16, observed: Retirement) void {
+        if (observed.blocked) return;
+        if (observed.expired) self.scores.resetTopic(topic);
+        if (!observed.reusable) return;
+        self.state.topics[topic].active = false;
+        self.state.topics[topic].subscribers = .initEmpty();
+        self.scores.configureTopic(topic, self.options.score_params.topic) catch unreachable;
     }
 
     fn reclaimTopic(self: *Gossipsub, topic: u16) void {
-        if (self.topicRetirementBlocked(topic)) return;
-        const row = &self.state.topics[topic];
-        if (row.retire_after_ms) |deadline| {
-            if (self.last_now_ms >= deadline) self.scores.resetTopic(topic);
+        const pins = self.retirementPins();
+        self.reclaimObserved(topic, self.retirement(topic, &pins, self.last_now_ms));
+    }
+
+    /// Does not mutate protocol state or end event borrows. Commit must immediately follow acceptance.
+    pub fn prepareSubscriptions(self: *Gossipsub, subscriptions: []const local_intent.Subscription, workspace: *local_intent.Workspace, now: Now) local_intent.Error!bool {
+        workspace.prepared = false;
+        if (subscriptions.len > constants.topics_cap) return error.TopicCapacity;
+        if (subscriptions.len > 0 and self.namespace == null) return error.TopicPolicyRequired;
+        workspace.len = @intCast(subscriptions.len);
+        workspace.reserved = .initEmpty();
+        workspace.now_ms = @max(self.last_now_ms, now.mono_ms);
+        var changed = false;
+        for (subscriptions, 0..) |*subscription, i| {
+            if (!self.validTopic(subscription.name)) return error.InvalidTopic;
+            try score_mod.validateTopic(subscription.params);
+            const entry = &workspace.entries[i];
+            entry.len = @intCast(subscription.name.len);
+            @memcpy(entry.bytes[0..entry.len], subscription.name);
+            entry.params = subscription.params;
+            for (workspace.entries[0..i]) |*earlier| {
+                if (std.mem.eql(u8, entry.name(), earlier.name())) return error.DuplicateTopic;
+            }
+            entry.row = self.state.findTopic(entry.name());
+            entry.existing = entry.row != null;
+            if (entry.row) |row| {
+                workspace.reserved.set(row);
+                entry.generation = self.state.topics[row].generation;
+                changed = changed or !self.state.subscribed(row) or !std.meta.eql(entry.params, self.scores.topic_params[row]);
+            } else changed = true;
         }
-        if (self.scores.retainsTopic(topic) or self.hasTopicBackoff(topic)) return;
-        row.active = false;
-        row.subscribers = .initEmpty();
-        self.scores.configureTopic(topic, self.options.score_params.topic) catch unreachable;
+        workspace.pins = self.retirementPins();
+        var cursor: usize = 0;
+        for (workspace.entries[0..workspace.len]) |*entry| {
+            if (entry.existing) continue;
+            while (cursor < constants.topics_cap) : (cursor += 1) {
+                const row = &self.state.topics[cursor];
+                if (workspace.reserved.isSet(cursor) or row.generation == std.math.maxInt(u64)) continue;
+                if (row.active and !self.retirement(@intCast(cursor), &workspace.pins, workspace.now_ms).reusable) continue;
+                entry.row = @intCast(cursor);
+                entry.generation = row.generation;
+                workspace.reserved.set(cursor);
+                cursor += 1;
+                break;
+            }
+            if (entry.row == null) return error.TopicCapacity;
+        }
+        for (&self.state.topics, 0..) |*row, index| {
+            if (row.active and row.subscribed and !workspace.reserved.isSet(index)) changed = true;
+        }
+        workspace.prepared = true;
+        return changed;
+    }
+
+    pub fn commitSubscriptions(self: *Gossipsub, workspace: *local_intent.Workspace) void {
+        assert(workspace.prepared);
+        workspace.prepared = false;
+        self.last_now_ms = workspace.now_ms;
+        for (workspace.entries[0..workspace.len]) |*entry| {
+            const index = entry.row.?;
+            const row = &self.state.topics[index];
+            assert(row.generation == entry.generation);
+            if (!entry.existing) {
+                self.scores.resetTopic(index);
+                row.active = false;
+                self.state.assignTopic(index, entry.name(), entry.generation);
+                _ = self.initializeTopic(index);
+            }
+            self.scores.configureTopic(index, entry.params) catch unreachable;
+        }
+        for (workspace.entries[0..workspace.len]) |*entry| {
+            const subscribed = self.subscribe(entry.name());
+            assert(subscribed);
+        }
+        for (&self.state.topics, 0..) |*row, index| {
+            if (row.active and row.subscribed and !workspace.reserved.isSet(index)) {
+                const unsubscribed = self.unsubscribe(self.state.topicString(@intCast(index)));
+                assert(unsubscribed);
+            }
+        }
     }
 
     pub const ConfigureTopicError = error{ InvalidLimits, InvalidTopic, TopicCapacity };
@@ -2261,4 +2344,54 @@ test "publication subscribed fanout expires through owner maintenance" {
     try std.testing.expectEqual(@as(usize, 0), g.io.peers[p.index].data_count);
     const queued = g.io.peers[next.index].data[g.io.peers[next.index].data_head].message;
     try std.testing.expectEqual(topic_mod.validMessageId(name, "fresh fanout", .{}), g.store.get(queued).?.id);
+}
+
+test "local intent reclaimed history answers actual IWANT with original wire topic and bytes" {
+    var g = try Gossipsub.init(std.testing.allocator, .{
+        .random_seed = 1,
+        .connected_capacity = 2,
+        .retained_capacity = 4,
+        .retained_outbound_reserve = 1,
+        .topic_policy = &.{@import("topic_policy_test.zig").full(.{ 1, 2, 3, 4 })},
+    });
+    defer g.deinit();
+    const workspace = try std.testing.allocator.create(local_intent.Workspace);
+    defer std.testing.allocator.destroy(workspace);
+    workspace.* = .{};
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    const replacement = "/eth2/01020304/voluntary_exit/ssz_snappy";
+    for (g.state.topics[1..]) |*row| row.generation = std.math.maxInt(u64);
+    const now: Now = .{ .mono_ms = 1, .unix_s = 0 };
+    _ = try g.publish(name, "original payload", now);
+    const id = topic_mod.validMessageId(name, "original payload", .{});
+    const message = g.mcache.get(&g.store, id).?.message;
+    try std.testing.expect(try g.prepareSubscriptions(&.{.{ .name = replacement, .params = .{} }}, workspace, now));
+    g.commitSubscriptions(workspace);
+    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    var request: [64]u8 = undefined;
+    var writer = protobuf.Writer.init(&request);
+    protobuf.beginIwantRpc(&writer, 1, id.len);
+    protobuf.writeIwantId(&writer, &id);
+    var reader = protobuf.RpcReader.init(writer.written());
+    g.onIwant(peer.index, (try reader.next()).?.iwant);
+    const io = &g.io.peers[peer.index];
+    try std.testing.expectEqual(@as(usize, 1), io.data_count);
+    try std.testing.expectEqual(message, io.data[io.data_head].message);
+    try std.testing.expectEqual(@as(u8, 1), g.mcache.get(&g.store, id).?.counts[g.logical(peer.index).index]);
+    var wire: [512]u8 = undefined;
+    var used: usize = 0;
+    for (0..8) |_| {
+        const segment = io.segment(&g.store);
+        if (segment.len == 0) break;
+        try std.testing.expect(used + segment.len <= wire.len);
+        @memcpy(wire[used..][0..segment.len], segment);
+        used += segment.len;
+        _ = io.advance(&g.store, segment.len);
+    }
+    try std.testing.expectEqual(@as(usize, 0), io.data_count);
+    try std.testing.expect(std.mem.indexOf(u8, wire[0..used], name) != null);
+    var decompressed: [64]u8 = undefined;
+    const size = try snappy.raw.uncompress(g.store.segment(message, g.store.cursor(message)), &decompressed);
+    try std.testing.expectEqualStrings("original payload", decompressed[0..size]);
+    try std.testing.expectEqualStrings(replacement, g.state.topicString(0));
 }

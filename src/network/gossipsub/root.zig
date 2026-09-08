@@ -1,3 +1,4 @@
+pub const local_intent = @import("local_intent.zig");
 pub const recovery = @import("recovery.zig");
 pub const receive_pool = @import("receive_pool.zig");
 pub const admission = @import("admission.zig");
@@ -26,6 +27,7 @@ pub const Verdict = gossipsub.Verdict;
 pub const ResourceSnapshot = gossipsub.ResourceSnapshot;
 
 test {
+    _ = @import("local_intent_test.zig");
     _ = @import("topic_policy_test.zig");
     _ = @import("topic_policy_lifecycle_test.zig");
     _ = admission;
