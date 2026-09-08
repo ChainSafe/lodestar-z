@@ -269,3 +269,11 @@ pub fn observeEpochTransitionStep(
 pub fn write(writer: *std.Io.Writer) !void {
     try m.write(&state_transition, writer);
 }
+
+/// Deinitializes all metrics and resets them to noop
+///
+/// Used only in tests.
+pub fn deinit() void {
+    state_transition.deinit();
+    state_transition = m.initializeNoop(Metrics);
+}
