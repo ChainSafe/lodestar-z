@@ -6,6 +6,7 @@ const preset = @import("preset").preset;
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const ForkTypes = @import("fork_types").ForkTypes;
 const BeaconState = @import("fork_types").BeaconState;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
@@ -37,6 +38,7 @@ pub fn processAttestationsAltair(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    proposer_rewards: *ProposerRewards,
     slashings_cache: *const SlashingsCache,
     attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signature: bool,
@@ -131,6 +133,7 @@ pub fn processAttestationsAltair(
         proposer_reward += @divFloor(proposer_reward_numerator, PROPOSER_REWARD_DOMINATOR);
     }
     try increaseBalance(fork, state, try getBeaconProposer(fork, epoch_cache, state, state_slot), proposer_reward);
+    proposer_rewards.attestations = proposer_reward;
 }
 
 pub fn getAttestationParticipationStatus(

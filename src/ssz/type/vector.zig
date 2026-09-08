@@ -3,7 +3,7 @@ const TypeKind = @import("type_kind.zig").TypeKind;
 const isBasicType = @import("type_kind.zig").isBasicType;
 const isFixedType = @import("type_kind.zig").isFixedType;
 const canMemcpySsz = @import("type_kind.zig").canMemcpySsz;
-const OffsetIterator = @import("offsets.zig").OffsetIterator;
+const VariableElementIterator = @import("variable_element_iterator.zig").VariableElementIterator;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const getZeroHash = @import("hashing").getZeroHash;
@@ -430,6 +430,8 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
         }
     }
     return struct {
+        const Self = @This();
+
         pub const kind = TypeKind.vector;
         pub const Element: type = ST;
         pub const length: usize = _length;
@@ -476,15 +478,23 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
             try merkleize(@ptrCast(&chunks), chunk_depth, out);
         }
 
-        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
-            comptime {
-                const OutInfo = @typeInfo(@TypeOf(out.*));
-                std.debug.assert(OutInfo == .array);
-                std.debug.assert(OutInfo.array.len == length);
-            }
+        /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
+        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+            return cloneInto(@This(), allocator, value, out);
+        }
+
+        /// The caller initializes `out` with `DestinationST.default_value` and deinitializes it
+        /// after success or error. Errors leave `out` safe to deinitialize.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
+            comptime std.debug.assert(DestinationST.length == length);
 
             for (value, 0..) |*element, i| {
-                try Element.clone(allocator, element, &out[i]);
+                try Element.cloneInto(DestinationST.Element, allocator, element, &out[i]);
             }
         }
 
@@ -512,21 +522,17 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                 return error.InvalidSize;
             }
 
-            const offsets = try readVariableOffsets(data);
-            for (0..length) |i| {
-                try Element.deserializeFromBytes(allocator, data[offsets[i]..offsets[i + 1]], &out[i]);
+            var elements = try VariableElementIterator(Self).init(data);
+            errdefer {
+                Self.deinit(allocator, out);
+                out.* = default_value;
             }
-        }
 
-        pub fn readVariableOffsets(data: []const u8) ![length + 1]usize {
-            var iterator = OffsetIterator(@This()).init(data);
-            var offsets: [length + 1]usize = undefined;
-            for (0..length) |i| {
-                offsets[i] = try iterator.next();
+            var i: usize = 0;
+            while (try elements.next()) |element_bytes| : (i += 1) {
+                try Element.deserializeFromBytes(allocator, element_bytes, &out[i]);
             }
-            offsets[length] = data.len;
-
-            return offsets;
+            std.debug.assert(i == length);
         }
 
         pub const serialized = struct {
@@ -535,18 +541,21 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                     return error.InvalidSize;
                 }
 
-                const offsets = try readVariableOffsets(data);
-                for (0..length) |i| {
-                    try Element.serialized.validate(data[offsets[i]..offsets[i + 1]]);
+                var elements = try VariableElementIterator(Self).init(data);
+                while (try elements.next()) |element_bytes| {
+                    try Element.serialized.validate(element_bytes);
                 }
             }
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
-                const offsets = try readVariableOffsets(data);
-                for (0..length) |i| {
-                    try Element.serialized.hashTreeRoot(allocator, data[offsets[i]..offsets[i + 1]], &chunks[i]);
+                var elements = try VariableElementIterator(Self).init(data);
+                var i: usize = 0;
+                while (try elements.next()) |element_bytes| : (i += 1) {
+                    try Element.serialized.hashTreeRoot(allocator, element_bytes, &chunks[i]);
                 }
+                std.debug.assert(i == length);
+
                 try merkleize(@ptrCast(&chunks), chunk_depth, out);
             }
         };
@@ -570,15 +579,16 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                     return error.InvalidSize;
                 }
 
-                const offsets = try readVariableOffsets(data);
+                var elements = try VariableElementIterator(Self).init(data);
                 // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
                 var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
-                for (0..length) |i| {
-                    const elem_bytes = data[offsets[i]..offsets[i + 1]];
+                var i: usize = 0;
+                while (try elements.next()) |elem_bytes| : (i += 1) {
                     nodes[i] = try Element.tree.deserializeFromBytes(pool, elem_bytes);
                 }
+                std.debug.assert(i == length);
 
                 return try Node.fillWithContents(pool, &nodes, chunk_depth);
             }

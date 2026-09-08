@@ -214,6 +214,9 @@ fn loadValidators(
     const seed_count = try seed_validators.length();
     const new_count = new_validators_bytes.len / types.phase0.Validator.fixed_size;
     const min_count = @min(seed_count, new_count);
+    if (seed_state_validators_bytes) |bytes| {
+        if (bytes.len / types.phase0.Validator.fixed_size < min_count) return error.InvalidSize;
+    }
 
     var migrated_validators = try seed_validators.clone(.{ .transfer_cache = false });
     errdefer migrated_validators.deinit();
