@@ -339,18 +339,24 @@ pub const PeerScore = struct {
 };
 
 pub const peer_capacity = 512;
-// Each squared counter is at most 1e12, each weighted topic at most 1e24.
-// Summing 512 topic terms and global terms remains far below f64 overflow.
 pub const counter_max: f64 = 1_000_000;
+// Two weights and a squared counter bound each topic term by 1e36.
+// Summing all 512 topics and global terms stays below 1e40.
+pub const weight_max: f64 = 1_000_000_000_000;
 
 fn safeMagnitude(value: f64) bool {
     return std.math.isFinite(value) and @abs(value) <= counter_max;
 }
 
+fn safeParameter(comptime name: []const u8, value: f64) bool {
+    const weight = comptime std.mem.eql(u8, name, "weight") or std.mem.endsWith(u8, name, "_weight");
+    return std.math.isFinite(value) and @abs(value) <= (if (weight) weight_max else counter_max);
+}
+
 pub fn validateTopic(p: TopicParams) error{InvalidLimits}!void {
     inline for (std.meta.fields(TopicParams)) |field| {
         const value = @field(p, field.name);
-        if (field.type == f64 and !safeMagnitude(value)) return error.InvalidLimits;
+        if (field.type == f64 and !safeParameter(field.name, value)) return error.InvalidLimits;
     }
     if (p.weight < 0 or p.time_in_mesh_weight < 0 or p.time_in_mesh_cap < 0 or
         p.time_in_mesh_quantum_ms == 0 or p.first_delivery_weight < 0 or p.first_delivery_cap < 0 or
@@ -365,7 +371,7 @@ pub fn validateTopic(p: TopicParams) error{InvalidLimits}!void {
 pub fn validateParams(p: Params) error{InvalidLimits}!void {
     try validateTopic(p.topic);
     inline for (std.meta.fields(Params)) |field| {
-        if (field.type == f64 and !safeMagnitude(@field(p, field.name))) return error.InvalidLimits;
+        if (field.type == f64 and !safeParameter(field.name, @field(p, field.name))) return error.InvalidLimits;
     }
     if (p.decay_interval_ms == 0 or p.decay_to_zero <= 0 or p.behaviour_threshold < 0 or
         p.behaviour_weight > 0 or p.behaviour_decay < 0 or p.behaviour_decay >= 1 or
@@ -387,6 +393,30 @@ fn decayed(value: f64, decay: f64, intervals: u64, zero: f64) f64 {
     assert(exponent == 0);
     const next = value * factor;
     return if (next < zero) 0 else next;
+}
+
+test "score accepts small validator set weights with bounded counters" {
+    var score = try PeerScore.init(std.testing.allocator, .{});
+    defer score.deinit(std.testing.allocator);
+    try score.configureTopic(0, .{ .mesh_failure_weight = -30_494_071.26802956 });
+    score.graft(0, 0, 0);
+    score.prune(0, 0, 30_001);
+    try std.testing.expectApproxEqAbs(@as(f64, -762_351_781.700739), score.score(0, 30_001), 0.001);
+    try std.testing.expectError(error.InvalidLimits, score.configureTopic(0, .{ .first_delivery_cap = counter_max + 1 }));
+}
+
+test "score weight limit keeps worst case arithmetic finite" {
+    var score = try PeerScore.initCapacity(std.testing.allocator, .{}, 1);
+    defer score.deinit(std.testing.allocator);
+    for (0..constants.topics_cap) |topic| {
+        try score.configureTopic(@intCast(topic), .{ .weight = weight_max, .invalid_weight = -weight_max });
+        score.tc(0, @intCast(topic)).invalid = counter_max;
+    }
+    const worst = score.score(0, 0);
+    try std.testing.expect(std.math.isFinite(worst) and worst < 0 and worst > -1e40);
+    try std.testing.expectError(error.InvalidLimits, score.configureTopic(0, .{ .weight = weight_max + 1 }));
+    try std.testing.expectError(error.InvalidLimits, validateParams(.{ .app_weight = weight_max + 1 }));
+    try std.testing.expectError(error.InvalidLimits, validateParams(.{ .behaviour_threshold = counter_max + 1 }));
 }
 
 test "score rewards deliveries and punishes invalid messages" {
