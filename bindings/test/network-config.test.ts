@@ -430,3 +430,59 @@ it("rejects sparse topic arrays even when inherited entries supply values", asyn
     }
   }
 });
+
+it("requires explicit minimum sampling groups before owner startup", async () => {
+  const config = networkConfig();
+  Reflect.deleteProperty(config.local.fork, "minimumSamplingGroups");
+  let runtime: ReturnType<typeof createNativeNetworkRuntime> | undefined;
+  try {
+    expect(() => {
+      runtime = createNativeNetworkRuntime(config, () => undefined);
+    }).toThrow("InvalidNetworkInteger");
+  } finally {
+    if (runtime) {
+      await runtime.ready;
+      await runtime.close();
+    }
+  }
+});
+
+it("accepts host minimum sampling groups at ordinary startup", async () => {
+  const config = networkConfig();
+  Object.assign(config.local.fork, {custodyGroups: 128, minimumSamplingGroups: 8});
+  const runtime = createNativeNetworkRuntime(config, () => undefined);
+  try {
+    await runtime.ready;
+  } finally {
+    await runtime.close();
+  }
+});
+
+it.each([
+  undefined,
+  null,
+  "8",
+  8n,
+  -1,
+  0.5,
+  Number.NaN,
+  Number.POSITIVE_INFINITY,
+  Number.MAX_SAFE_INTEGER + 1,
+  129,
+])("rejects malformed minimum sampling groups %s", (value) => {
+  const config = networkConfig();
+  Object.assign(config.local.fork, {minimumSamplingGroups: value});
+  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
+});
+
+it("rejects minimum sampling groups above the active group bound", () => {
+  const config = networkConfig();
+  Object.assign(config.local.fork, {minimumSamplingGroups: 2});
+  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
+});
+
+it("rejects unknown fork context fields", () => {
+  const config = networkConfig();
+  Object.assign(config.local.fork, {samplingGroups: 0});
+  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
+});

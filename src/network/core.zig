@@ -368,7 +368,7 @@ pub const Core = struct {
     }
     fn observeDelivery(self: *Core) void {
         var ready: @TypeOf(self.delivery_ready) = .initEmpty();
-        if (self.demand.coverage.attnets != 0 or self.demand.coverage.syncnets != 0) {
+        if (self.demand.attnets != 0 or self.demand.syncnets != 0 or self.demand.wanted().groups.count() != 0) {
             for (self.catalog.rows, 0..) |row, index| {
                 self.counters.availability_rows +|= 1;
                 const conn = row.connection orelse continue;
@@ -464,7 +464,7 @@ pub const Core = struct {
         if (self.current_slot < self.demand.expires_at_slot and self.selection.dial_budget > 0) {
             std.mem.writeInt(u64, &result.attnets, self.selection.deficits.missing.attnets, .little);
             result.syncnets = self.selection.deficits.missing.syncnets;
-            result.custody = self.selection.deficits.custody > 0;
+            result.custody = self.selection.deficits.groups > 0;
         }
         return result;
     }
@@ -522,8 +522,8 @@ pub const Core = struct {
             if (self.service.gossipsub.deliveryAvailable(conn)) {
                 input.coverage.attnets = std.mem.readInt(u64, &metadata.attnets, .little);
                 input.coverage.syncnets = @intCast(metadata.syncnets);
+                input.coverage.groups = snapshot.sampling_groups orelse .initEmpty();
             }
-            input.coverage.custody = snapshot.custody_groups orelse .initEmpty();
         }
         self.selection = policy.select(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed);
         for (self.policy_scratch[0..input_count], 0..) |input, i| if (self.selection.reasons[i]) |reason| {
@@ -562,7 +562,7 @@ pub const Core = struct {
         }
         self.local = local.*;
         self.service.reqresp.inner.setRequestFork(local.fork.fork);
-        for (self.local.fork.custody_groups..128) |index| self.demand.coverage.custody.unset(index);
+        for (self.local.fork.custody_groups..128) |index| self.demand.group_targets[index] = 0;
         var budget: u16 = 0;
         _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
         _ = self.dial_queue.advanceCustody(&self.local.fork, now.mono_ms, &budget);

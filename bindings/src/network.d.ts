@@ -33,6 +33,7 @@ export interface NativeForkContext {
   fork: NetworkFork;
   digest: Uint8Array;
   custodyGroups: number;
+  minimumSamplingGroups: number;
 }
 
 export interface NativeLocalState {

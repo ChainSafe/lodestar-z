@@ -10,7 +10,7 @@ test "peer dial custody diagnostics count unfinished derivations without mutatin
     var q = try mod.DialQueue.init(ledger.allocator(), .{ .capacity = 4, .seed = 4 });
     defer q.deinit(ledger.allocator());
     var wanted: t.Coverage = .{};
-    wanted.custody.setRangeValue(.{ .start = 0, .end = 128 }, true);
+    wanted.groups.setRangeValue(.{ .start = 0, .end = 128 }, true);
     for ([_]u16{ 2, 1, 128, 2 }, 0..) |count, index| {
         var candidate = try discovered(@intCast(index + 1), 0);
         candidate.custody_group_count = count;
@@ -338,7 +338,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     candidate.attnets = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
     candidate.custody_group_count = 128;
     var wanted: t.Coverage = .{ .attnets = 1, .syncnets = 1 };
-    wanted.custody.set(0);
+    wanted.groups.set(0);
     try q.enqueueDiscovered(&candidate, &.{}, &wanted, 0);
     q.configureSelection(&wanted, false, &.{}, 0);
     try std.testing.expectEqual(@as(u16, 3), q.rows[0].priority);
@@ -412,7 +412,7 @@ test "peer dial review custody-only full table recovers at fixed horizon with bo
     var scarce = try discovered(3, 0);
     scarce.custody_group_count = 127;
     var wanted: t.Coverage = .{};
-    wanted.custody.setRangeValue(.{ .start = 0, .end = 128 }, true);
+    wanted.groups.setRangeValue(.{ .start = 0, .end = 128 }, true);
     try q.enqueueDiscovered(&first_candidate, &.{}, &wanted, 0);
     try q.enqueueDiscovered(&second_candidate, &.{}, &wanted, 0);
     const reservation = q.memoryPlan().allocated_bytes;
@@ -572,4 +572,27 @@ test "peer retained attempt does not hide canonical connection closure" {
     try std.testing.expectEqual(token.generation + 1, intents[0].token.generation);
     try std.testing.expectEqualDeep(peer, intents[0].peer);
     try std.testing.expectEqualDeep(second, intents[0].address);
+}
+
+test "peer dial actual custody gives no utility for connected sampling only groups" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    var candidate = try discovered(1, 0);
+    candidate.custody_group_count = 4;
+    const context: t.ForkContext = .{ .fork = .fulu, .minimum_sampling_groups = 8 };
+    var pair = try @import("custody.zig").SamplingDerivation.init(&candidate.node_id, .{ .groups = 128, .columns = 128 }, 4, 8);
+    const derived = (try pair.step(64)).?;
+    var wanted: t.Coverage = .{ .groups = derived.sampling.differenceWith(derived.custody) };
+    try std.testing.expectEqual(@as(usize, 4), wanted.groups.count());
+    try q.enqueueDiscovered(&candidate, &context, &wanted, 0);
+    var budget: u16 = 64;
+    try std.testing.expect(!q.advanceCustody(&context, 0, &budget));
+    q.configureSelection(&wanted, false, &context, 0);
+    try std.testing.expectEqual(@as(u16, 0), q.rows[0].priority);
+    try std.testing.expect(!q.rows[0].selected);
+    try std.testing.expectEqual(@as(u16, 4), @import("policy.zig").utility(&.{ .groups = derived.sampling }, &wanted));
+    wanted.groups = derived.custody;
+    q.configureSelection(&wanted, false, &context, 0);
+    try std.testing.expectEqual(@as(u16, 4), q.rows[0].priority);
+    try std.testing.expect(q.rows[0].selected);
 }

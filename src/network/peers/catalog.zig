@@ -5,7 +5,7 @@ const reputation = @import("reputation.zig");
 
 pub const Row = struct {
     identify: ?@import("../identify/root.zig").Metadata = null,
-    custody_work: ?custody.Derivation = null,
+    custody_work: ?custody.SamplingDerivation = null,
     custody_context: ?t.ForkContext = null,
     generation: u64 = 0,
     occupied: bool = false,
@@ -72,22 +72,22 @@ pub const Catalog = struct {
                 row.custody_work = null;
                 continue;
             }
-            if (!std.meta.eql(row.custody_context, context.*) or (if (row.custody_work) |work| work.requested != count else true)) {
+            if (!std.meta.eql(row.custody_context, context.*) or (if (row.custody_work) |work| work.custody_count != count else true)) {
                 self.revision +|= 1;
                 row.custody_work = null;
                 row.custody_context = context.*;
                 const node_id = custody.nodeId(&row.identity) catch continue;
-                row.custody_work = custody.Derivation.init(&node_id, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count) catch continue;
+                row.custody_work = custody.SamplingDerivation.init(&node_id, .{ .groups = context.custody_groups, .columns = @import("preset").NUMBER_OF_COLUMNS }, count, context.minimum_sampling_groups) catch continue;
             }
             if (now_ms >= row.metadata_at_ms +| freshness_ms) continue;
             const work = &row.custody_work.?;
-            const before = work.hashes;
+            const before = work.totalHashes();
             const result = work.step(@min(custody.hashes_per_row, budget.*)) catch {
-                budget.* -= work.hashes - before;
+                budget.* -= work.totalHashes() - before;
                 continue;
             };
-            budget.* -= work.hashes - before;
-            if (work.hashes != before and result != null) self.revision +|= 1;
+            budget.* -= work.totalHashes() - before;
+            if (work.totalHashes() != before and result != null) self.revision +|= 1;
             pending = pending or result == null;
         }
         // A rotating work start prevents a large configured catalog from monopolizing the budget.
@@ -116,6 +116,7 @@ pub const Catalog = struct {
 
     pub fn get(self: *const Catalog, ref: t.PeerRef) ?t.Snapshot {
         const row = self.rowFor(ref) orelse return null;
+        const derived = if (row.custody_work) |*work| work.complete() else null;
         return .{
             .peer = ref,
             .identity = row.identity,
@@ -129,7 +130,8 @@ pub const Catalog = struct {
             .identify = row.identify,
             .status_at_ms = row.status_at_ms,
             .metadata_at_ms = row.metadata_at_ms,
-            .custody_groups = if (row.custody_work) |work| if (!work.exhausted and work.groups.count() == work.requested) work.groups else null else null,
+            .custody_groups = if (derived) |value| value.custody else null,
+            .sampling_groups = if (derived) |value| value.sampling else null,
             .connected_at_ms = row.connected_at_ms,
             .direct = row.direct,
             .score = row.reputation.score,
@@ -250,6 +252,8 @@ pub const Catalog = struct {
         const row = self.connectedRow(ref, conn) orelse return false;
         self.revision +|= 1;
         row.connection = null;
+        row.custody_work = null;
+        row.custody_context = null;
         row.status = null;
         row.metadata = null;
         row.pending_update = false;

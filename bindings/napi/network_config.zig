@@ -164,10 +164,11 @@ pub fn parse(value: Value, out: *Config) !void {
     out.local.metadata.syncnets = @intCast(try integer(try get(metadata, "syncnets"), 15));
     out.local.metadata.custody_group_count = try optionalBigint(try get(metadata, "custodyGroupCount"));
     const context = try get(local, "fork");
-    try object(context, &.{ "fork", "digest", "custodyGroups" });
+    try object(context, &.{ "fork", "digest", "custodyGroups", "minimumSamplingGroups" });
     out.local.fork.fork = try fork(try get(context, "fork"));
     out.local.fork.digest = try fixed(4, try get(context, "digest"));
     out.local.fork.custody_groups = @intCast(try integer(try get(context, "custodyGroups"), 128));
+    out.local.fork.minimum_sampling_groups = @intCast(try integer(try get(context, "minimumSamplingGroups"), 128));
     const schedule = try get(value, "forkSchedule");
     try object(schedule, &.{ "fuluScheduled", "nextVersion", "nextEpoch", "nextDigest" });
     out.schedule.fulu_scheduled = try boolean(try get(schedule, "fuluScheduled"));

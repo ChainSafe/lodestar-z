@@ -13,6 +13,7 @@ pub var notifications = std.atomic.Value(u32).init(0);
 pub var owners = std.atomic.Value(u32).init(0);
 const GossipSnapshot = struct {
     options: gossip.Options,
+    minimum_sampling_groups: u16,
     score: gossip.score.Params,
     topic: gossip.score.TopicParams,
     allowlist: [32][16]u8,
@@ -25,12 +26,13 @@ const GossipSnapshot = struct {
 var gossip_mutex: std.Io.Mutex = .init;
 var gossip_snapshot: ?GossipSnapshot = null;
 
-pub fn captureGossip(owner: *const gossip.Gossipsub) void {
+pub fn captureGossip(owner: *const gossip.Gossipsub, context: *const @import("network").peers.ForkContext) void {
     if (comptime !enabled) return;
     std.Io.Threaded.mutexLock(&gossip_mutex);
     defer std.Io.Threaded.mutexUnlock(&gossip_mutex);
     gossip_snapshot = .{
         .options = owner.options,
+        .minimum_sampling_groups = context.minimum_sampling_groups,
         .score = owner.scores.params,
         .topic = owner.scores.topic_params[0],
         .allowlist = owner.ip_allowlist,
@@ -139,6 +141,7 @@ fn getGossip(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     const allowlist = try env.createArrayWithLength(value.allowlist_len);
     for (value.allowlist[0..value.allowlist_len], 0..) |address, i| try allowlist.setElement(@intCast(i), try copyBytes(env, &address));
     try object.setNamedProperty("ipAllowlist", allowlist);
+    try object.setNamedProperty("minimumSamplingGroups", try env.createUint32(value.minimum_sampling_groups));
     try object.setNamedProperty("topicCount", try env.createUint32(value.topic_count));
     try object.setNamedProperty("topicSubscriptionBytes", try env.createDouble(@floatFromInt(value.topic_subscription_bytes)));
     const boundaries = try env.createArrayWithLength(value.topic_boundary_count);

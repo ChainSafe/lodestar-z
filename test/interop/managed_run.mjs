@@ -23,7 +23,11 @@ for (const fork of ["phase0", "altair", "fulu"]) {
     await zig.command("capacity", {capacity: 1});
     await waitFor(() => zig.events.some((event) => event.event === "ready"));
     const first = await zig.command("snapshot");
-    if (fork === "fulu") await waitFor(async () => (await zig.command("snapshot")).custody === 4);
+    if (fork === "fulu")
+      await waitFor(async () => {
+        const snapshot = await zig.command("snapshot");
+        return snapshot.custody === 4 && snapshot.sampling === 8;
+      });
     const expectedStatus = fork === "fulu" ? wire.status2 : wire.status1;
     const expectedMetadata = fork === "fulu" ? wire.metadata3 : fork === "altair" ? wire.metadata2 : wire.metadata1;
     const automatic = await js.command("managedSnapshot");
