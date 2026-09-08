@@ -56,9 +56,7 @@ pub fn getAttestationDeltas(epoch_cache: *const EpochCache, cache: *const EpochT
     const prev_epoch_head_stake_by_increment = cache.prev_epoch_unslashed_stake_head_by_increment;
 
     // sqrt first, before factoring out the increment for later usage
-    const total_balance_in_gwei_f64: f64 = @floatFromInt(total_balance_in_gwei);
-    const total_balance_in_gwei_sqrt: f64 = @sqrt(total_balance_in_gwei_f64);
-    const balance_sq_root: u64 = @intFromFloat(total_balance_in_gwei_sqrt);
+    const balance_sq_root: u64 = std.math.sqrt(total_balance_in_gwei);
     const finality_delay = cache.prev_epoch - finalized_epoch;
 
     const BASE_REWARDS_PER_EPOCH = BASE_REWARDS_PER_EPOCH_CONST;

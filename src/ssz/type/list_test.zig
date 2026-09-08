@@ -71,8 +71,8 @@ test "clone FixedListType" {
     };
     try list.append(allocator, cp);
     var cloned: CheckpointList.Type = CheckpointList.default_value;
-    try CheckpointList.clone(allocator, &list, &cloned);
     defer cloned.deinit(allocator);
+    try CheckpointList.clone(allocator, &list, &cloned);
     try std.testing.expect(&list != &cloned);
     try std.testing.expect(CheckpointList.equals(&list, &cloned));
 
@@ -85,7 +85,7 @@ test "clone FixedListType" {
     const CheckpointHexList = FixedListType(CheckpointHex, 8, .{});
     var list_hex: CheckpointHexList.Type = CheckpointHexList.default_value;
     defer list_hex.deinit(allocator);
-    try CheckpointList.clone(allocator, &list, &list_hex);
+    try CheckpointList.cloneInto(CheckpointHexList, allocator, &list, &list_hex);
     try std.testing.expect(list_hex.items.len == 1);
     try std.testing.expect(list_hex.items[0].epoch == cp.epoch);
     try std.testing.expectEqualSlices(u8, &list_hex.items[0].root, &cp.root);
@@ -119,7 +119,7 @@ test "clone VariableListType" {
     const ListBar = VariableListType(Bar, 8);
     var list_bar: ListBar.Type = ListBar.default_value;
     defer ListBar.deinit(allocator, &list_bar);
-    try ListFoo.clone(allocator, &list, &list_bar);
+    try ListFoo.cloneInto(ListBar, allocator, &list, &list_bar);
     try std.testing.expect(list_bar.items.len == 1);
     try std.testing.expect(FieldA.equals(&list_bar.items[0].a, &fielda));
 }
