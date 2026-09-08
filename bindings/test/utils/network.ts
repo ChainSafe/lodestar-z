@@ -66,7 +66,7 @@ export function networkConfig(): NativeRuntimeConfig {
     identitySecretKey: key,
     initialSlot: 100n,
     local: {
-      fork: {custodyGroups: 1, digest: digest.slice(), fork: "deneb"},
+      fork: {custodyGroups: 1, digest: digest.slice(), fork: "deneb", minimumSamplingGroups: 0},
       metadata: {attnets: new Uint8Array(8), custodyGroupCount: null, sequenceNumber: 1n, syncnets: 0},
       status: {
         earliestAvailableSlot: null,

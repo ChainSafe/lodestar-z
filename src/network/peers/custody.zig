@@ -64,6 +64,56 @@ pub const Derivation = struct {
     }
 };
 
+pub const Derived = struct { custody: Groups, sampling: Groups };
+pub const SamplingDerivation = struct {
+    walk: Derivation,
+    custody_count: u16,
+    sampling_count: u16,
+    checkpoint: ?Groups = null,
+
+    pub fn init(node_id: *const [32]u8, config: Config, custody_count: u64, minimum_sampling_groups: u16) !SamplingDerivation {
+        const walk = try Derivation.init(node_id, config, custody_count);
+        if (minimum_sampling_groups > config.groups) return error.InvalidCount;
+        var result: SamplingDerivation = .{
+            .walk = walk,
+            .custody_count = @intCast(custody_count),
+            .sampling_count = @max(@as(u16, @intCast(custody_count)), minimum_sampling_groups),
+        };
+        _ = try result.step(0);
+        return result;
+    }
+
+    pub fn step(self: *SamplingDerivation, budget: u16) error{WorkLimit}!?Derived {
+        std.debug.assert(budget <= hashes_per_row);
+        const before = self.totalHashes();
+        if (self.checkpoint == null) {
+            self.checkpoint = try self.walk.step(budget);
+            if (self.checkpoint == null) return null;
+            self.walk.requested = self.sampling_count;
+            if (self.sampling_count == self.walk.config.groups)
+                self.walk.groups.setRangeValue(.{ .start = 0, .end = self.walk.config.groups }, true);
+        }
+        _ = self.walk.step(budget - (self.totalHashes() - before)) catch |err| {
+            self.checkpoint = null;
+            return err;
+        };
+        return self.complete();
+    }
+
+    pub fn complete(self: *const SamplingDerivation) ?Derived {
+        if (self.exhausted() or self.walk.groups.count() != self.sampling_count) return null;
+        return .{ .custody = self.checkpoint orelse return null, .sampling = self.walk.groups };
+    }
+
+    pub fn totalHashes(self: *const SamplingDerivation) u16 {
+        return self.walk.hashes;
+    }
+
+    pub fn exhausted(self: *const SamplingDerivation) bool {
+        return self.walk.exhausted;
+    }
+};
+
 pub fn nodeId(identity: *const @import("types.zig").PeerId) ![32]u8 {
     const key = try identity.publicKey();
     const uncompressed = try @import("discv5").identity.crypto.uncompressedPublicKey(&key.bytes);

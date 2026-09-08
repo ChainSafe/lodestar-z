@@ -367,7 +367,7 @@ pub const Runtime = struct {
         try self.core.setHostWake(self.wake.?.read_fd);
         defer self.core.setHostWake(null) catch {};
         if (comptime faults.enabled) {
-            if (self.test_scenario == .gossip) faults.captureGossip(&self.core.core.service.gossipsub.inner);
+            if (self.test_scenario == .gossip) faults.captureGossip(&self.core.core.service.gossipsub.inner, &self.core.core.local.fork);
         }
         var identity: Identity = undefined;
         identity.peer = self.core.peerId();

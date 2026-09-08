@@ -270,6 +270,7 @@ test "core startup allocation failure cleans every prefix and memory accounts ex
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     var core = try managed.Core.init(failing.allocator(), &identity, &.{}, options());
     const expected = core.memoryPlan().allocated_bytes;
+    std.debug.print("sampling core allocation={d} prefixes={d} inline={d}\n", .{ expected, failing.alloc_index, @sizeOf(managed.Core) });
     try std.testing.expectEqual(expected, failing.allocated_bytes);
     core.deinit();
     try std.testing.expectEqual(expected, failing.freed_bytes);
@@ -277,13 +278,16 @@ test "core startup allocation failure cleans every prefix and memory accounts ex
 
 test "core native deterministic replacement cancels old control and ignores stale physical close" {
     var setup: Setup = .{};
-    try setup.initDirection(&.{}, true);
+    const local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
+    try setup.initDirection(&local, true);
     defer setup.deinit();
     for (0..60) |_| try setup.step(1);
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
     const old = snapshots[0];
     try std.testing.expect(old.relevant);
+    try std.testing.expectEqual(@as(usize, 4), old.custody_groups.?.count());
+    try std.testing.expectEqual(@as(usize, 8), old.sampling_groups.?.count());
     setup.client.reStatusPeers(setup.pair.now);
     try setup.step(1);
     var old_request: ?rr.RequestHandle = null;
@@ -299,6 +303,8 @@ test "core native deterministic replacement cancels old control and ignores stal
     try std.testing.expect(!std.meta.eql(old.connection, snapshots[0].connection));
     try std.testing.expect(snapshots[0].relevant);
     const selected = snapshots[0];
+    try std.testing.expectEqual(old.custody_groups, selected.custody_groups);
+    try std.testing.expectEqual(old.sampling_groups, selected.sampling_groups);
     try std.testing.expect(setup.pair.client.registry.slots[old.connection.?.index].conn == null);
     try std.testing.expectEqual(@as(u16, 1), setup.pair.client.registry.active_len);
     try std.testing.expectError(error.StaleHandle, setup.pair.client.openStream(old.connection.?));
@@ -794,9 +800,9 @@ test "core coverage demand copies expires at host slot and keeps general discove
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
-    var demand: t.Demand = .{ .coverage = .{ .syncnets = 1 }, .expires_at_slot = 101 };
+    var demand: t.Demand = .{ .syncnets = 1, .expires_at_slot = 101 };
     try setup.client.setDemand(&demand);
-    demand.coverage.syncnets = 2;
+    demand.syncnets = 2;
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 1), setup.client.discoveryNeed().syncnets);
@@ -814,11 +820,11 @@ test "core coverage authenticated custody differs from gossip delivery and inval
     var local: t.LocalState = .{ .fork = .{ .fork = .fulu }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .syncnets = 1, .custody_group_count = 128 } };
     try setup.init(&local);
     defer setup.deinit();
-    var demand: t.Demand = .{ .coverage = .{ .syncnets = 1 }, .expires_at_slot = 200 };
-    demand.coverage.custody.set(0);
+    var demand: t.Demand = .{ .syncnets = 1, .expires_at_slot = 200 };
+    demand.group_targets[0] = 1;
     try setup.client.setDemand(&demand);
     for (0..60) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().custody);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
@@ -826,16 +832,17 @@ test "core coverage authenticated custody differs from gossip delivery and inval
     const index = setup.client.service.gossipsub.inner.state.findPeer(connection).?;
     setup.client.service.gossipsub.inner.resetOutbound(&setup.pair.client, index);
     try std.testing.expect(!setup.client.service.gossipsub.deliveryAvailable(connection));
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     setup.client.service.gossipsub.streams[index].outbound = .{ .waiting = setup.pair.now.mono_ms +| 30_000 };
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().custody);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     local.fork.custody_groups = 64;
     local.metadata.custody_group_count = 64;
     try setup.client.updateFork(&local, setup.pair.now);
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
-    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().custody);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(snapshots[0].custody_groups == null);
 }
@@ -910,8 +917,8 @@ test "core coverage bounded custody work resumes without output and stale metada
     const local: t.LocalState = .{ .fork = .{ .fork = .fulu }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 127, .syncnets = 1 } };
     try setup.init(&local);
     defer setup.deinit();
-    var demand: t.Demand = .{ .coverage = .{ .syncnets = 1 }, .expires_at_slot = 200 };
-    demand.coverage.custody.set(0);
+    var demand: t.Demand = .{ .syncnets = 1, .expires_at_slot = 200 };
+    demand.group_targets[0] = 1;
     try setup.client.setDemand(&demand);
     for (0..50) |_| try setup.step(0);
     var initial: [4]t.Snapshot = undefined;
@@ -943,7 +950,7 @@ test "core coverage bounded custody work resumes without output and stale metada
     try std.testing.expectEqual(@as(usize, 127), snapshots[0].custody_groups.?.count());
     setup.pair.advance(60_000);
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
-    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().custody);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
 }
 
@@ -983,7 +990,7 @@ test "core coverage review same-digest group update disables cached automatic ca
     defer setup.deinit();
     var candidate = try candidateFor(&setup.pair.server_ctx.local_peer_id, 128);
     candidate.syncnets = 1;
-    try setup.client.setDemand(&.{ .coverage = .{ .syncnets = 1 }, .expires_at_slot = 200 });
+    try setup.client.setDemand(&.{ .syncnets = 1, .expires_at_slot = 200 });
     try setup.client.discovered(&candidate, setup.pair.now);
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     local.fork.custody_groups = 64;
@@ -1025,7 +1032,7 @@ test "core reconciliation raw mutators deadlines and read getters invalidate onc
     const local: t.LocalState = .{ .fork = .{ .fork = .altair }, .metadata = .{ .syncnets = 1 } };
     try setup.init(&local);
     defer setup.deinit();
-    const demand: t.Demand = .{ .coverage = .{ .syncnets = 1 }, .expires_at_slot = 200 };
+    const demand: t.Demand = .{ .syncnets = 1, .expires_at_slot = 200 };
     try setup.client.setDemand(&demand);
     for (0..60) |_| try setup.step(0);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
@@ -1320,4 +1327,81 @@ test "core native retained attempt survives public close and reconciliation with
     try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &intents));
     try std.testing.expectEqualDeep(accepted.identity, intents[0].peer);
     try std.testing.expectEqual(token.generation + 1, intents[0].token.generation);
+}
+
+fn waitSampling(setup: *Setup) !t.Snapshot {
+    var snapshots: [4]t.Snapshot = undefined;
+    for (0..200) |_| {
+        try setup.step(0);
+        if (setup.client.snapshots(&snapshots) == 1) {
+            const snapshot = snapshots[0];
+            if (snapshot.sampling_groups != null and snapshot.relevant and
+                setup.client.service.gossipsub.deliveryAvailable(snapshot.connection.?)) return snapshot;
+        }
+        setup.pair.advance(25);
+    }
+    return error.SamplingReadinessTimeout;
+}
+
+test "core sampling delivery follows real outbound stream retirement replacement and stale events" {
+    var setup: Setup = .{};
+    const local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
+    try setup.init(&local);
+    defer setup.deinit();
+    const snapshot = try waitSampling(&setup);
+    try std.testing.expectEqual(@as(usize, 4), snapshot.custody_groups.?.count());
+    try std.testing.expectEqual(@as(usize, 8), snapshot.sampling_groups.?.count());
+    var demand: t.Demand = .{ .expires_at_slot = 200 };
+    for (0..128) |i| if (snapshot.sampling_groups.?.isSet(i)) {
+        demand.group_targets[i] = 1;
+    };
+    try setup.client.setDemand(&demand);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
+    const handler = &setup.client.service.gossipsub;
+    const index = handler.inner.state.findPeer(snapshot.connection.?).?;
+    const old_stream = handler.streams[index].outbound.live;
+    setup.pair.client.closeStream(old_stream, 0);
+    handler.transportEvents(&setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);
+    try std.testing.expect(!handler.deliveryAvailable(snapshot.connection.?));
+    try std.testing.expectEqual(@as(u16, 8), setup.client.coverageDeficits().groups);
+    try std.testing.expectEqual(snapshot.custody_groups, setup.client.catalog.get(snapshot.peer).?.custody_groups);
+    handler.negotiationResult(&setup.pair.client, .{ .stream = old_stream, .direction = .outbound, .owner = .meshsub, .result = .{ .ready = .{ .protocol = .{ .meshsub = .v1_2 }, .leftover = &.{}, .fin = false } } }, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 8), setup.client.coverageDeficits().groups);
+    _ = try waitSampling(&setup);
+    const replacement_stream = handler.streams[index].outbound.live;
+    try std.testing.expect(!std.meta.eql(old_stream, replacement_stream));
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
+    handler.transportEvents(&setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);
+    try std.testing.expect(handler.deliveryAvailable(snapshot.connection.?));
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
+    try std.testing.expectEqual(snapshot.custody_groups, setup.client.catalog.get(snapshot.peer).?.custody_groups);
+    setup.client.shutdown(&setup.pair.client, setup.pair.now);
+    _ = setup.client.process(&setup.pair.client, &.{.{ .stream_closed = .{ .stream = replacement_stream, .reset_code = 0 } }}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().connected);
+    try std.testing.expect(!handler.deliveryAvailable(snapshot.connection.?));
+}
+
+test "core sampling demand rejects atomically trims fork bound and expires exclusively" {
+    var setup: Setup = .{};
+    var local: t.LocalState = .{ .fork = .{ .fork = .fulu, .minimum_sampling_groups = 8 }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 4 } };
+    try setup.initOwners(&local);
+    defer setup.deinit();
+    var demand: t.Demand = .{ .expires_at_slot = 101 };
+    demand.group_targets[0] = 1;
+    demand.group_targets[127] = setup.client.catalog.options.max_peers;
+    try setup.client.setDemand(&demand);
+    const before = setup.client.demand;
+    demand.group_targets[1] = setup.client.catalog.options.max_peers + 1;
+    try std.testing.expectError(error.InvalidDemand, setup.client.setDemand(&demand));
+    try std.testing.expectEqualDeep(before, setup.client.demand);
+    try std.testing.expectEqual(@as(u16, 4), setup.client.coverageDeficits().groups);
+    local.fork.custody_groups = 64;
+    try setup.client.updateFork(&local, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.demand.group_targets[127]);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 101, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
+    try std.testing.expectEqualDeep(t.Demand{}, setup.client.demand);
 }

@@ -362,7 +362,7 @@ test "managed runtime demand expires before discovery submission without another
     var node: runtime.NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, opts);
     defer node.deinit(std.testing.io);
-    try node.setDemand(&.{ .coverage = .{ .attnets = 1 }, .expires_at_slot = 5 });
+    try node.setDemand(&.{ .attnets = 1, .expires_at_slot = 5 });
     const now = try @import("driver.zig").currentTime(std.testing.io);
     _ = node.step(std.testing.io, now, 4, .{}, 0);
     try std.testing.expectEqual(@as(u8, 1), node.discovery.?.coordinator.demand.attnets[0]);

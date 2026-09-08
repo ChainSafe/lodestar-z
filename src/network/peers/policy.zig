@@ -12,7 +12,7 @@ pub const Input = struct {
 pub const Deficits = struct {
     attestation: u16 = 0,
     sync: u16 = 0,
-    custody: u16 = 0,
+    groups: u16 = 0,
     outbound: u16 = 0,
     missing: t.Coverage = .{},
 };
@@ -26,12 +26,12 @@ pub const Result = struct {
 pub fn utility(coverage: *const t.Coverage, wanted: *const t.Coverage) u16 {
     return @as(u16, @popCount(coverage.attnets & wanted.attnets)) +
         @as(u16, @popCount(coverage.syncnets & wanted.syncnets)) +
-        @as(u16, @intCast(coverage.custody.intersectWith(wanted.custody).count()));
+        @as(u16, @intCast(coverage.groups.intersectWith(wanted.groups).count()));
 }
 const Counts = struct {
     attestation: [64]u16 = @splat(0),
     sync: [4]u16 = @splat(0),
-    custody: [128]u16 = @splat(0),
+    groups: [128]u16 = @splat(0),
     outbound: u16 = 0,
 
     fn change(self: *Counts, input: *const Input, add: bool) void {
@@ -42,44 +42,44 @@ const Counts = struct {
         for (0..4) |i| if (input.coverage.syncnets & (@as(u4, 1) << @intCast(i)) != 0) {
             adjust(&self.sync[i], add);
         };
-        for (0..128) |i| if (input.coverage.custody.isSet(i)) {
-            adjust(&self.custody[i], add);
+        for (0..128) |i| if (input.coverage.groups.isSet(i)) {
+            adjust(&self.groups[i], add);
         };
     }
     fn protects(self: *const Counts, input: *const Input, demand: *const t.Demand, minimum: u16) bool {
         if (input.direct or !input.relevant or (input.outbound and self.outbound <= minimum)) return true;
         for (0..64) |i| {
             const bit = @as(u64, 1) << @intCast(i);
-            if (input.coverage.attnets & demand.coverage.attnets & bit != 0 and self.attestation[i] <= demand.attestation_target) return true;
+            if (input.coverage.attnets & demand.attnets & bit != 0 and self.attestation[i] <= demand.attestation_target) return true;
         }
         for (0..4) |i| {
             const bit = @as(u4, 1) << @intCast(i);
-            if (input.coverage.syncnets & demand.coverage.syncnets & bit != 0 and self.sync[i] <= demand.sync_target) return true;
+            if (input.coverage.syncnets & demand.syncnets & bit != 0 and self.sync[i] <= demand.sync_target) return true;
         }
-        for (0..128) |i| if (input.coverage.custody.isSet(i) and demand.coverage.custody.isSet(i) and self.custody[i] <= demand.custody_target) return true;
+        for (0..128) |i| if (input.coverage.groups.isSet(i) and demand.group_targets[i] > 0 and self.groups[i] <= demand.group_targets[i]) return true;
         return false;
     }
     fn deficits(self: *const Counts, demand: *const t.Demand, minimum: u16) Deficits {
         var result: Deficits = .{ .outbound = minimum -| self.outbound };
         for (0..64) |i| {
             const bit = @as(u64, 1) << @intCast(i);
-            if (demand.coverage.attnets & bit == 0) continue;
+            if (demand.attnets & bit == 0) continue;
             const missing = demand.attestation_target -| self.attestation[i];
             result.attestation += missing;
             if (missing > 0) result.missing.attnets |= bit;
         }
         for (0..4) |i| {
             const bit = @as(u4, 1) << @intCast(i);
-            if (demand.coverage.syncnets & bit == 0) continue;
+            if (demand.syncnets & bit == 0) continue;
             const missing = demand.sync_target -| self.sync[i];
             result.sync += missing;
             if (missing > 0) result.missing.syncnets |= bit;
         }
         for (0..128) |i| {
-            if (!demand.coverage.custody.isSet(i)) continue;
-            const missing = demand.custody_target -| self.custody[i];
-            result.custody += missing;
-            if (missing > 0) result.missing.custody.set(i);
+            if (demand.group_targets[i] == 0) continue;
+            const missing = demand.group_targets[i] -| self.groups[i];
+            result.groups += missing;
+            if (missing > 0) result.missing.groups.set(i);
         }
         return result;
     }
@@ -106,6 +106,7 @@ pub fn select(inputs: []const Input, demand: *const t.Demand, options: t.Options
     var order: [256]Rank = undefined;
     var random: std.Random.DefaultPrng = .init(seed);
     var len: usize = 0;
+    const demanded = demand.wanted();
     for (inputs, 0..) |*input, i| {
         if (input.reject) |reason| {
             result.reasons[i] = reason;
@@ -114,7 +115,7 @@ pub fn select(inputs: []const Input, demand: *const t.Demand, options: t.Options
         result.retained.set(i);
         result.retained_count += 1;
         counts.change(input, true);
-        order[len] = .{ .index = @intCast(i), .direct = input.direct, .usefulness = utility(&input.coverage, &demand.coverage), .health = if (std.math.isFinite(input.score)) std.math.clamp(input.score, -1e6, 1e6) else -1e6, .outbound = input.outbound, .tie = random.random().int(u32) };
+        order[len] = .{ .index = @intCast(i), .direct = input.direct, .usefulness = utility(&input.coverage, &demanded), .health = if (std.math.isFinite(input.score)) std.math.clamp(input.score, -1e6, 1e6) else -1e6, .outbound = input.outbound, .tie = random.random().int(u32) };
         len += 1;
     }
     std.sort.insertion(Rank, order[0..len], {}, less);
@@ -130,7 +131,7 @@ pub fn select(inputs: []const Input, demand: *const t.Demand, options: t.Options
         counts.change(input, false);
     }
     result.deficits = counts.deficits(demand, options.min_outbound);
-    const coverage_missing = result.deficits.attestation > 0 or result.deficits.sync > 0 or result.deficits.custody > 0;
+    const coverage_missing = result.deficits.attestation > 0 or result.deficits.sync > 0 or result.deficits.groups > 0;
     const wanted = @max(options.target_peers -| result.retained_count, @max(result.deficits.outbound, @as(u16, if (coverage_missing) 1 else 0)));
     result.dial_budget = @min(wanted, options.max_peers -| result.retained_count);
     return result;

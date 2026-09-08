@@ -245,7 +245,7 @@ pub const DialQueue = struct {
         if (now_ms >= row.hints_at_ms +| hint_freshness_ms or !hints.validFor(context)) return .{};
         var result: t.Coverage = .{ .attnets = if (hints.attnets) |bits| std.mem.readInt(u64, &bits, .little) else 0, .syncnets = @intCast(hints.syncnets orelse 0) };
         if (std.meta.eql(row.custody_context, context.*)) if (row.custody_work) |work| {
-            if (!work.exhausted and work.groups.count() == work.requested) result.custody = work.groups;
+            if (!work.exhausted and work.groups.count() == work.requested) result.groups = work.groups;
         };
         return result;
     }

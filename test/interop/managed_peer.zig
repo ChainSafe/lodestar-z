@@ -56,6 +56,7 @@ const Peer = struct {
             var native_generation: ?u32 = null;
             var metadata_sequence: ?[]const u8 = null;
             var custody: ?usize = null;
+            var sampling: ?usize = null;
             var reason: ?[]const u8 = null;
             var deadline: ?u64 = null;
             for (rows[0..count]) |row| if (row.connection) |conn| {
@@ -63,10 +64,11 @@ const Peer = struct {
                 native_generation = conn.generation;
                 if (row.metadata) |metadata| metadata_sequence = try std.fmt.bufPrint(&seq, "{d}", .{metadata.seq_number});
                 if (row.custody_groups) |groups| custody = groups.count();
+                if (row.sampling_groups) |groups| sampling = groups.count();
                 if (row.disconnect_reason) |value| reason = @tagName(value);
                 if (self.node.core.control.schedules[row.peer.index].closing) |closing| deadline = closing.deadline_ms;
             };
-            return control.emit(self.allocator, .{ .id = instruction.id, .ok = true, .connected = self.node.peerCounts().connected, .relevant = self.node.peerCounts().relevant, .generation = native_generation, .sequence = metadata_sequence, .custody = custody, .closed = self.node.isClosed(), .memory = self.node.memoryPlan().allocated_bytes, .reason = reason, .deadline = deadline, .now = self.now.mono_ms });
+            return control.emit(self.allocator, .{ .id = instruction.id, .ok = true, .connected = self.node.peerCounts().connected, .relevant = self.node.peerCounts().relevant, .generation = native_generation, .sequence = metadata_sequence, .custody = custody, .sampling = sampling, .closed = self.node.isClosed(), .memory = self.node.memoryPlan().allocated_bytes, .reason = reason, .deadline = deadline, .now = self.now.mono_ms });
         } else if (std.mem.eql(u8, instruction.op, "disconnect")) {
             if (!self.node.disconnect(self.peer orelse return error.NoPeer, .host, self.now)) return error.NoPeer;
         } else if (std.mem.eql(u8, instruction.op, "shutdown")) {
@@ -101,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
     peer.emitted = 0;
     const key = try network.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{32}));
     var local: t.LocalState = .{
-        .fork = .{ .fork = fork, .digest = .{ 1, 2, 3, 4 } },
+        .fork = .{ .minimum_sampling_groups = if (fork.gte(.fulu)) 8 else 0, .fork = fork, .digest = .{ 1, 2, 3, 4 } },
         .status = .{ .fork_digest = .{ 1, 2, 3, 4 }, .finalized_epoch = 0x01020304, .head_slot = 0x08070605, .earliest_available_slot = 0x090a0b0c },
         .metadata = .{ .seq_number = 0x0807060504030201, .attnets = .{ 0x81, 1, 0, 0x80, 0, 0, 0, 0x80 }, .syncnets = 13, .custody_group_count = 4 },
     };

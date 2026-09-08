@@ -400,6 +400,20 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
       await runtime.close();
     }
   });
+  it("copies the host sampling minimum into the actual local context", async () => {
+    const config = networkConfig();
+    config.local.fork.custodyGroups = 128;
+    config.local.fork.minimumSamplingGroups = 8;
+    bindings.networkTestScenario("gossip");
+    const runtime = createNativeNetworkRuntime(config, () => undefined);
+    config.local.fork.minimumSamplingGroups = 0;
+    try {
+      await runtime.ready;
+      expect(bindings.networkTestGossip()).toMatchObject({minimumSamplingGroups: 8});
+    } finally {
+      await runtime.close();
+    }
+  });
   it("forwards immutable topic namespace into the actual native owner", async () => {
     const config = networkConfig();
     const boundary = topicBoundary();

@@ -344,3 +344,76 @@ test "identify catalog metadata copies only to current full peer and transport g
     try std.testing.expect(!c.updateIdentify(stale, replacement, &metadata));
     try std.testing.expect(c.updateIdentify(ref, replacement, &metadata));
 }
+
+test "peer catalog sampling memory layout" {
+    std.debug.print("sampling layout Row={d} Snapshot={d}\n", .{ @sizeOf(@import("catalog.zig").Row), @sizeOf(t.Snapshot) });
+}
+
+test "peer catalog sampling publishes complete pair and invalidates closed generation" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
+    var fork: t.ForkContext = .{ .fork = .fulu, .custody_groups = 128, .minimum_sampling_groups = 127 };
+    const metadata: t.Metadata = .{ .custody_group_count = 4 };
+    try std.testing.expect(c.updateStatus(ref, first, &.{ .earliest_available_slot = 0 }, 0));
+    try std.testing.expect(c.updateMetadata(ref, first, &metadata, 0));
+    var budget: u16 = 64;
+    try std.testing.expect(c.advanceCustody(&fork, 0, 60_000, &budget));
+    try std.testing.expectEqual(@as(u16, 0), budget);
+    try std.testing.expect(c.get(ref).?.custody_groups == null);
+    try std.testing.expect(c.get(ref).?.sampling_groups == null);
+    const before = c.rows[ref.index].custody_work.?.totalHashes();
+    try std.testing.expect(c.updateMetadata(ref, first, &metadata, 1));
+    try std.testing.expectEqual(before, c.rows[ref.index].custody_work.?.totalHashes());
+    for (0..63) |_| {
+        budget = 64;
+        _ = c.advanceCustody(&fork, 1, 60_000, &budget);
+    }
+    try std.testing.expectEqual(@as(usize, 4), c.get(ref).?.custody_groups.?.count());
+    try std.testing.expectEqual(@as(usize, 127), c.get(ref).?.sampling_groups.?.count());
+    fork.minimum_sampling_groups = 128;
+    budget = 64;
+    _ = c.advanceCustody(&fork, 1, 60_000, &budget);
+    try std.testing.expectEqual(@as(usize, 4), c.get(ref).?.custody_groups.?.count());
+    try std.testing.expectEqual(@as(usize, 128), c.get(ref).?.sampling_groups.?.count());
+    try std.testing.expect(c.disconnect(ref, first, .host, 2));
+    try std.testing.expect(c.get(ref).?.custody_groups == null);
+    try std.testing.expect(c.get(ref).?.sampling_groups == null);
+    var events: [1]t.Event = undefined;
+    _ = c.pollEvents(&events);
+    const reused = admit(&c, &third, replacement, .outbound, 3).admitted.peer;
+    try std.testing.expectEqual(ref.index, reused.index);
+    try std.testing.expect(reused.generation > ref.generation);
+    try std.testing.expect(!c.updateMetadata(ref, first, &metadata, 3));
+    try std.testing.expect(c.get(reused).?.sampling_groups == null);
+}
+
+test "peer catalog sampling exhaustion never exposes custody checkpoint or retries" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
+    const fork: t.ForkContext = .{ .fork = .fulu, .minimum_sampling_groups = 127 };
+    const metadata: t.Metadata = .{ .custody_group_count = 4 };
+    try std.testing.expect(c.updateStatus(ref, first, &.{ .earliest_available_slot = 0 }, 0));
+    try std.testing.expect(c.updateMetadata(ref, first, &metadata, 0));
+    var budget: u16 = 64;
+    try std.testing.expect(c.advanceCustody(&fork, 0, 60_000, &budget));
+    const work = &c.rows[ref.index].custody_work.?;
+    try std.testing.expect(work.checkpoint != null);
+    work.walk.hashes = 4095;
+    budget = 64;
+    try std.testing.expect(!c.advanceCustody(&fork, 0, 60_000, &budget));
+    try std.testing.expectEqual(@as(u16, 63), budget);
+    try std.testing.expect(work.exhausted());
+    try std.testing.expect(work.checkpoint == null);
+    try std.testing.expect(c.get(ref).?.custody_groups == null);
+    try std.testing.expect(c.get(ref).?.sampling_groups == null);
+    const score = c.get(ref).?.score;
+    for (0..4) |i| {
+        try std.testing.expect(c.updateMetadata(ref, first, &metadata, i + 1));
+        budget = 64;
+        try std.testing.expect(!c.advanceCustody(&fork, i + 1, 60_000, &budget));
+        try std.testing.expectEqual(@as(u16, 64), budget);
+        try std.testing.expectEqual(score, c.get(ref).?.score);
+    }
+}
