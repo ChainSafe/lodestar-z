@@ -96,6 +96,7 @@ pub const Queue = struct {
 
 pub const Identity = struct {
     peer: n.PeerId,
+    metadata: n.peers.types.Metadata,
     endpoint: n.Address,
     multiaddr: [n.wire.multiaddr.binary_length_max]u8,
     multiaddr_len: u8,
@@ -819,6 +820,7 @@ pub const Runtime = struct {
     pub fn readIdentity(self: *Runtime) !Identity {
         var identity: Identity = undefined;
         identity.peer = self.heavy.?.core.peerId();
+        identity.metadata = self.heavy.?.core.localState().metadata;
         identity.endpoint = self.heavy.?.core.localAddress();
         const multiaddr = self.heavy.?.core.localMultiaddr();
         identity.multiaddr_len = @intCast((try multiaddr.encode(&identity.multiaddr)).len);

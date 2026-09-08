@@ -8,7 +8,8 @@ implementation facts needed to establish a trust boundary or precondition.
 
 ## Integration status
 
-The following status is maintainer-confirmed as of the review date:
+Production statuses reflect the maintainer-confirmed baseline. Branch networking changes are noted
+separately.
 
 | Surface | Lodestar-z status | Lodestar production status |
 | --- | --- | --- |
@@ -25,6 +26,8 @@ supported caller supplies a current hostile path.
 | Boundary or invariant | Current implementation evidence |
 | --- | --- |
 | Native networking lifecycle | [`network.js`](../../bindings/src/network.js) wraps one native runtime per instance. `ready` resolves after preparation; application `applyIntent` activates it. The `closed` promise reports terminal owner shutdown, independently of lossy diagnostic observations. |
+| Native identity snapshots | [`network_runtime.zig`](../../bindings/napi/network_runtime.zig) copies local metadata and the signed ENR on the owner thread into each identity result. Later intent updates cannot alter that result. |
+| Native network dependencies and validation | [`build.zig.zon`](../../build.zig.zon) pins quiche-zig and Snappy. Native QUIC authentication, framing, req/resp decoding and gossip admission consume hostile network bytes. Host consensus validators still decide gossip acceptance. Local Lodestar integration bounds host serving and gossip retention across cancelled instances; uint64 peer Status fields require per-peer range checks before conversion to its number-based API. |
 | Gossip score arithmetic | [`score.zig`](../../src/network/gossipsub/score.zig) bounds counters and caps at 1e6 and weights at 1e12, including configuration updates. Across 512 topics the resulting score remains below 1e40 in magnitude. Remote deliveries cannot increase counters beyond their caps. |
 | N-API exports and shared addon lifecycle | [`build.zig`](../../build.zig) and [`bindings/napi/root.zig`](../../bindings/napi/root.zig) give zapi class exports a Zig package and addon-specific identity. The identity's version component comes from `build.zig.zon`, which intentionally remains `0.0.0` independently of the npm bindings version. The root module registers exports and initializes or tears down process-wide configuration, pools, metrics, and the pubkey cache on first or last environment. |
 | Beacon-state construction | [`BeaconStateView.createFromBytes`](../../bindings/napi/BeaconStateView.zig) reads the slot and SSZ-deserializes bytes without authenticating a root. Its contract therefore requires trusted state bytes. |

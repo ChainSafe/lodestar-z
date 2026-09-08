@@ -81,7 +81,7 @@ fn status(env: napi.Env, value: *const t.Status) !Value {
     try put(object, "earliestAvailableSlot", if (value.earliest_available_slot) |slot| try env.createBigintUint64(slot) else try env.getNull());
     return object;
 }
-fn metadata(env: napi.Env, value: *const t.Metadata) !Value {
+pub fn metadata(env: napi.Env, value: *const t.Metadata) !Value {
     const object = try env.createObject();
     try put(object, "sequenceNumber", try env.createBigintUint64(value.seq_number));
     try put(object, "attnets", try bytes(env, &value.attnets));

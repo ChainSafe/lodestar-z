@@ -162,6 +162,7 @@ export interface NativeIdentity {
   localEndpoint: IpEndpoint;
   localMultiaddr: Uint8Array;
   localEnr: Uint8Array | null;
+  metadata: NetworkMetadata;
 }
 
 export type NativeRuntimeState = "starting" | "prepared" | "running" | "stopping" | "closed" | "failed";

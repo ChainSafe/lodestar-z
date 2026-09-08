@@ -277,6 +277,7 @@ fn identity(env: napi.Env, value: *const r.Identity, session: u64) !Value {
     const object = try env.createObject();
     try put(object, "session", try env.createBigintUint64(session));
     try put(object, "peerId", try bytes(env, &value.peer.bytes));
+    try put(object, "metadata", try projection.metadata(env, &value.metadata));
     try put(object, "localEndpoint", try endpoint(env, value.endpoint));
     try put(object, "localMultiaddr", try bytes(env, value.multiaddr[0..value.multiaddr_len]));
     try put(object, "localEnr", if (value.enr_len == 0) try env.getNull() else try bytes(env, value.enr[0..value.enr_len]));
