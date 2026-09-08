@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const BeaconState = @import("fork_types").BeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const AggregatedSignatureSet = @import("../utils/signature_sets.zig").AggregatedSignatureSet;
@@ -29,6 +30,7 @@ pub fn processSyncAggregate(
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
+    proposer_rewards: *ProposerRewards,
     sync_aggregate: *const SyncAggregate,
     verify_signatures: bool,
 ) !void {
@@ -96,7 +98,7 @@ pub fn processSyncAggregate(
 
             // Proposer reward
             proposer_balance += sync_proposer_reward;
-            // TODO: proposer_rewards inside state
+            proposer_rewards.sync_aggregate += sync_proposer_reward;
         } else {
             // Negative rewards for non participants
             if (index == proposer_index) {
@@ -225,6 +227,7 @@ test "process sync aggregate - sanity" {
         config,
         epoch_cache,
         fork_state,
+        &test_state.cached_state.proposer_rewards,
         &sync_aggregate,
         true,
     );
@@ -239,6 +242,7 @@ test "process sync aggregate - sanity" {
         config,
         epoch_cache,
         fork_state,
+        &test_state.cached_state.proposer_rewards,
         &sync_aggregate,
         true,
     );

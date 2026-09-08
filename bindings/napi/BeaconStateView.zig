@@ -8,6 +8,7 @@ const CachedBeaconState = st.CachedBeaconState;
 const AnyBeaconState = fork_types.AnyBeaconState;
 const AnyExecutionPayloadHeader = fork_types.AnyExecutionPayloadHeader;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const BlockType = fork_types.BlockType;
 const preset = @import("preset").preset;
 const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
@@ -1498,7 +1499,7 @@ pub fn stateTransition(
     const fork_seq = cached_state.config.forkSeqAtEpoch(block_epoch);
     if (fork_seq.gte(.gloas)) return error.UnsupportedFork;
 
-    const block_type: fork_types.BlockType = if (try is_blinded.toBool()) .blinded else .full;
+    const block_type: BlockType = if (try is_blinded.toBool()) .blinded else .full;
     const signed_block = try AnySignedBeaconBlock.deserialize(allocator, block_type, fork_seq, bytes);
     defer signed_block.deinit(allocator);
 
