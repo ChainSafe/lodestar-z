@@ -9,12 +9,18 @@ import {join} from "node:path";
 const FIFO_OPEN_TIMEOUT_MS = 5000;
 const OUTPUT_DRAIN_TIMEOUT_MS = 1000;
 
+function commandError(code, detail = "") {
+  const error = new Error(detail === "" ? code : `${code}: ${detail}`);
+  error.code = code;
+  return error;
+}
+
 function terminate(child) {
   if (child.pid === undefined) return;
   try {
     process.kill(-child.pid, "SIGKILL");
-  } catch (error) {
-    if (error.code !== "ESRCH") child.kill("SIGKILL");
+  } catch {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
 }
 
@@ -23,7 +29,7 @@ async function makeFifos(stdoutPath, stderrPath) {
   const timer = setTimeout(() => child.kill("SIGKILL"), FIFO_OPEN_TIMEOUT_MS);
   try {
     const [exitCode, signal] = await once(child, "close");
-    if (exitCode !== 0) throw new Error(`FifoCreateFailed: ${JSON.stringify({exitCode, signal})}`);
+    if (exitCode !== 0) throw commandError("FifoCreateFailed", JSON.stringify({exitCode, signal}));
   } finally {
     clearTimeout(timer);
   }
@@ -58,7 +64,7 @@ function capture(reader, name, state, child) {
           state[name].push(chunk.subarray(0, remaining));
           state.storedBytes += remaining;
         }
-        state.error ??= new Error(`CommandOutputBound: combined output exceeds ${state.maxOutputBytes} bytes`);
+        state.error ??= commandError("CommandOutputBound", `combined output exceeds ${state.maxOutputBytes} bytes`);
         terminate(child);
         return;
       }
@@ -76,7 +82,7 @@ async function boundedDrain(promises, readers) {
     await Promise.race([
       Promise.all(promises),
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("CommandOutputDrainTimeout")), OUTPUT_DRAIN_TIMEOUT_MS);
+        timer = setTimeout(() => reject(commandError("CommandOutputDrainTimeout")), OUTPUT_DRAIN_TIMEOUT_MS);
       }),
     ]);
   } finally {
@@ -85,7 +91,12 @@ async function boundedDrain(promises, readers) {
   }
 }
 
-export async function runBoundedCommand(program, args, cwd, {allowFailure = false, maxOutputBytes, timeoutMs}) {
+export async function runBoundedCommand(
+  program,
+  args,
+  cwd,
+  {allowFailure = false, env = process.env, maxOutputBytes, timeoutMs}
+) {
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) throw new Error("InvalidCommand");
   if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) throw new Error("InvalidOutputBound");
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error("InvalidCommandTimeout");
@@ -103,33 +114,39 @@ export async function runBoundedCommand(program, args, cwd, {allowFailure = fals
     child = spawn(program, args, {
       cwd,
       detached: true,
+      env,
       stdio: ["ignore", stdoutFifo.writer.fd, stderrFifo.writer.fd],
     });
     const state = {bytes: 0, error: undefined, maxOutputBytes, stderr: [], stdout: [], storedBytes: 0};
     const captures = [
-      capture(stdoutFifo.reader, "stdout", state, child),
-      capture(stderrFifo.reader, "stderr", state, child),
+      capture(stdoutFifo.reader, "stdout", state, child).catch((error) => {
+        error.code ??= "CommandOutputReadFailed";
+        state.error ??= error;
+        terminate(child);
+      }),
+      capture(stderrFifo.reader, "stderr", state, child).catch((error) => {
+        error.code ??= "CommandOutputReadFailed";
+        state.error ??= error;
+        terminate(child);
+      }),
     ];
     stdoutFifo.writer.destroy();
     stderrFifo.writer.destroy();
     const timer = setTimeout(() => {
-      state.error ??= new Error(`CommandTimeout: exceeded ${timeoutMs}ms`);
+      state.error ??= commandError("CommandTimeout", `exceeded ${timeoutMs}ms`);
       terminate(child);
     }, timeoutMs);
-    let result;
-    try {
-      result = await new Promise((resolveResult) => {
-        child.once("error", (error) => resolveResult({exitCode: null, signal: null, spawnError: error}));
-        child.once("close", (exitCode, signal) => resolveResult({exitCode, signal}));
-      });
-    } finally {
-      clearTimeout(timer);
-    }
+    const result = await new Promise((resolveResult) => {
+      child.once("error", (error) => resolveResult({exitCode: null, signal: null, spawnError: error}));
+      child.once("close", (exitCode, signal) => resolveResult({exitCode, signal}));
+    });
     let drainError;
     try {
       await boundedDrain(captures, [stdoutFifo.reader, stderrFifo.reader]);
     } catch (error) {
       drainError = error;
+    } finally {
+      clearTimeout(timer);
     }
     const record = {
       argv: [program, ...args],
@@ -151,13 +168,13 @@ export async function runBoundedCommand(program, args, cwd, {allowFailure = fals
       throw result.spawnError;
     }
     if (!allowFailure && result.exitCode !== 0) {
-      const error = new Error(`CommandFailed: ${JSON.stringify(record)}`);
+      const error = commandError("CommandFailed", `exit code ${record.exitCode}`);
       error.commandRecord = record;
       throw error;
     }
     return record;
   } finally {
-    if (child?.exitCode === null && child?.signalCode === null) terminate(child);
+    if (child !== undefined) terminate(child);
     stdoutFifo?.reader.destroy();
     stdoutFifo?.writer.destroy();
     stderrFifo?.reader.destroy();
