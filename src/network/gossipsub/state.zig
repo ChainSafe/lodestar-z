@@ -13,8 +13,9 @@ pub const Version = enum(u8) { v1_0, v1_1, v1_2 };
 
 pub const PeerHandle = struct { index: u16, generation: u64 };
 
-/// One gossip peer, keyed by its transport connection. Its subscriptions and
-/// mesh membership live in the topic table as per-topic peer sets; the peer row
+/// One gossip peer, keyed by its transport connection. Live subscriptions and mesh
+/// membership reside in the topic table as per-topic peer sets. Configured
+/// namespace subscriptions belong to Gossipsub and outlive inactive topic rows. The peer row
 /// holds the connection, protocol version, the two directional streams, and the
 /// bounded set of message ids the peer has asked us not to send.
 const Peer = struct {

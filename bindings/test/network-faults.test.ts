@@ -3,7 +3,7 @@ import {setTimeout as delay} from "node:timers/promises";
 import {describe, expect, it} from "vitest";
 import bindings from "../src/bindings.js";
 import {createNativeNetworkRuntime} from "../src/network.js";
-import {discoveryConfig, networkConfig} from "./utils/network.js";
+import {discoveryConfig, networkConfig, topicBoundary} from "./utils/network.js";
 
 async function collected() {
   for (let i = 0; i < 100; i++) {
@@ -396,6 +396,38 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
         },
       });
       // biome-ignore-end lint/style/useNamingConvention: Native snapshot field mapping ends here.
+    } finally {
+      await runtime.close();
+    }
+  });
+  it("forwards immutable topic namespace into the actual native owner", async () => {
+    const config = networkConfig();
+    const boundary = topicBoundary();
+    config.topicPolicy = [boundary];
+    bindings.networkTestScenario("gossip");
+    const runtime = createNativeNetworkRuntime(config, () => undefined);
+    boundary.digest.fill(0);
+    boundary.rules.beacon_attestation.count = 1;
+    boundary.rules.beacon_block.sszMax = 1;
+    try {
+      await runtime.ready;
+      expect(bindings.networkTestGossip()).toMatchObject({
+        topicCount: 65,
+        topicPolicy: [
+          {
+            digest: Uint8Array.of(1, 2, 3, 4),
+            // biome-ignore-start lint/style/useNamingConvention: Snapshot preserves native rule field names.
+            rules: [
+              {count: 1, ssz_max: 20, ssz_min: 10},
+              {count: 0, ssz_max: 0, ssz_min: 0},
+              {count: 64, ssz_max: 131304, ssz_min: 228},
+              ...Array.from({length: 10}, () => ({count: 0, ssz_max: 0, ssz_min: 0})),
+            ],
+            // biome-ignore-end lint/style/useNamingConvention: Native snapshot ends here.
+          },
+        ],
+        topicSubscriptionBytes: 192,
+      });
     } finally {
       await runtime.close();
     }

@@ -2,6 +2,7 @@ const std = @import("std");
 const snappy = @import("snappy");
 const constants = @import("constants.zig");
 const protobuf = @import("protobuf.zig");
+const topic_policy = @import("topic_policy.zig");
 const topic_mod = @import("topic.zig");
 const mcache_mod = @import("mcache.zig");
 const storage = @import("message_store.zig");
@@ -27,7 +28,7 @@ const Version = state_mod.Version;
 
 pub const Options = @import("options.zig").Options;
 
-pub const InitError = Allocator.Error || error{InvalidLimits};
+pub const InitError = Allocator.Error || error{InvalidLimits} || topic_policy.Error;
 
 /// Advertised protocol ids, newest first; the negotiator settles the version.
 pub const meshsub_ids = @import("../router.zig").meshsub_ids;
@@ -113,6 +114,7 @@ pub const ResourceSnapshot = struct {
 pub const Gossipsub = struct {
     allocator: Allocator,
     options: Options,
+    namespace: ?topic_policy.Namespace,
     state: *State,
     scores: score_mod.PeerScore,
     peers: peers_mod.Peers,
@@ -161,6 +163,9 @@ pub const Gossipsub = struct {
 
     pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
         try @import("options.zig").validate(&options);
+        var namespace: ?topic_policy.Namespace = if (options.topic_policy) |boundaries| try topic_policy.Namespace.init(allocator, boundaries, options.connected_capacity) else null;
+        errdefer if (namespace) |*ns| ns.deinit(allocator);
+
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);
         state.* = try State.init(allocator, options.connected_capacity);
@@ -199,6 +204,7 @@ pub const Gossipsub = struct {
         var result: Gossipsub = .{
             .allocator = allocator,
             .options = options,
+            .namespace = namespace,
             .state = state,
             .scores = scores,
             .peers = peers,
@@ -216,6 +222,7 @@ pub const Gossipsub = struct {
         @memcpy(result.ip_allowlist[0..options.ip_allowlist.len], options.ip_allowlist);
         result.ip_allowlist_len = @intCast(options.ip_allowlist.len);
         result.options.ip_allowlist = &.{};
+        result.options.topic_policy = null;
         return result;
     }
 
@@ -233,6 +240,7 @@ pub const Gossipsub = struct {
         self.peers.deinit(self.allocator);
         self.state.deinit(self.allocator);
         self.allocator.destroy(self.state);
+        if (self.namespace) |*ns| ns.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -249,16 +257,30 @@ pub const Gossipsub = struct {
     }
 
     fn internTopic(self: *Gossipsub, name: []const u8) ?u16 {
-        if (name.len > topic_mod.topic_max_len or topic_mod.parse(name) == null) return null;
-        if (self.state.internTopic(name)) |topic| return topic;
+        if (!self.validTopic(name)) return null;
+        if (self.state.findTopic(name)) |topic| return topic;
+        if (self.state.internTopic(name)) |topic| return self.initializeTopic(topic);
         for (0..constants.topics_cap) |index| {
             const topic: u16 = @intCast(index);
             if (self.state.topics[topic].generation == std.math.maxInt(u64) or
                 !self.canReclaimTopic(topic)) continue;
             for (0..constants.topics_cap) |reclaim| self.reclaimTopic(@intCast(reclaim));
-            return self.state.internTopic(name) orelse unreachable;
+            return self.initializeTopic(self.state.internTopic(name) orelse unreachable);
         }
         return null;
+    }
+
+    fn validTopic(self: *const Gossipsub, name: []const u8) bool {
+        if (self.namespace) |*ns| return ns.lookup(name) != null;
+        return name.len <= topic_mod.topic_max_len and topic_mod.parse(name) != null;
+    }
+
+    fn initializeTopic(self: *Gossipsub, topic: u16) u16 {
+        if (self.namespace) |*ns| {
+            const match = ns.lookup(self.state.topicString(topic)).?;
+            ns.initializeSubscribers(match.ordinal, &self.state.topics[topic].subscribers);
+        }
+        return topic;
     }
 
     fn topicRetirementBlocked(self: *const Gossipsub, topic: u16) bool {
@@ -308,7 +330,7 @@ pub const Gossipsub = struct {
     pub fn configureTopic(self: *Gossipsub, name: []const u8, params: *const score_mod.TopicParams) ConfigureTopicError!void {
         const copied = params.*;
         try score_mod.validateTopic(copied);
-        if (name.len > topic_mod.topic_max_len or topic_mod.parse(name) == null) return error.InvalidTopic;
+        if (!self.validTopic(name)) return error.InvalidTopic;
         const topic = self.internTopic(name) orelse return error.TopicCapacity;
         self.scores.configureTopic(topic, copied) catch unreachable;
     }
@@ -355,6 +377,7 @@ pub const Gossipsub = struct {
             if (self.peers.rows[ref.index].connection != null) return .duplicate;
         }
         const handle = self.state.addPeer(conn, version) orelse return .capacity;
+        if (self.namespace) |*ns| ns.clearPeer(handle.index);
         const admitted = self.peers.admit(conn, metadata, now.mono_ms);
         if (admitted != .admitted) {
             self.state.removePeer(handle.index);
@@ -459,6 +482,7 @@ pub const Gossipsub = struct {
         self.scores.setConnected(ref.index, false, self.last_now_ms);
         self.peers.disconnect(ref, self.last_now_ms, self.scores.score(ref.index, self.last_now_ms) < 0);
         self.state.removePeer(index);
+        if (self.namespace) |*ns| ns.clearPeer(index);
     }
 
     fn sendSubscriptions(self: *Gossipsub, index: u16) void {
@@ -501,7 +525,10 @@ pub const Gossipsub = struct {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
         const now_ms = self.last_now_ms;
         if (ssz.len > constants.MAX_PAYLOAD_SIZE) return error.PayloadTooLarge;
-        _ = topic_mod.parse(topic_str) orelse return error.UnknownTopic;
+        if (!self.validTopic(topic_str)) return error.UnknownTopic;
+        if (self.namespace) |*ns| {
+            if (ssz.len > ns.lookup(topic_str).?.rule.ssz_max) return error.PayloadTooLarge;
+        }
         const id = topic_mod.validMessageId(topic_str, ssz, self.options.message_id_policy);
         if (self.seen.contains(id, now_ms)) {
             if (options.ignore_duplicate) return .{ .duplicate = true };
@@ -524,7 +551,7 @@ pub const Gossipsub = struct {
     }
 
     fn validationContext(self: *Gossipsub) validation_mod.Context {
-        return .{ .state = self.state, .peers = &self.peers, .scores = &self.scores, .store = &self.store, .history = &self.mcache, .seen = &self.seen, .options = &self.options };
+        return .{ .state = self.state, .peers = &self.peers, .scores = &self.scores, .store = &self.store, .history = &self.mcache, .seen = &self.seen, .options = &self.options, .namespace = if (self.namespace) |*ns| ns else null };
     }
 
     /// Event slices remain valid until the next pump, including after report or publish.
@@ -583,7 +610,7 @@ pub const Gossipsub = struct {
             self.store.entries.len * @sizeOf(storage.Entry) + self.store.next.len * @sizeOf(u32) +
             self.validation.entries.len * @sizeOf(validation_mod.Entry) + self.mcache.entries.len * @sizeOf(mcache_mod.HistoryEntry) +
             self.mcache.counts.len + self.mcache.generations.len * @sizeOf(u64) + self.mcache.ids.len * @sizeOf(MessageId) + self.mcache.index.slots.len * @sizeOf(u32) +
-            self.recovery.memoryBytes() + self.receive_pool.metadataBytes() +
+            self.recovery.memoryBytes() + self.receive_pool.metadataBytes() + (if (self.namespace) |*ns| ns.allocatedBytes() else @as(usize, 0)) +
             self.seen.ids.len * (@sizeOf(MessageId) + @sizeOf(u64)) + self.seen.index.slots.len * @sizeOf(u32) +
             self.scores.topics.len * @sizeOf(@TypeOf(self.scores.topics[0])) + self.scores.app_score.len * @sizeOf(f64) + self.scores.behaviour.len * @sizeOf(f64);
         return .{
@@ -1051,7 +1078,7 @@ pub const Gossipsub = struct {
             switch (item) {
                 .subscription => |sub| {
                     if (io.subscriptions < constants.max_subscriptions_per_rpc) {
-                        if (self.state.findTopic(sub.topic) != null and (count.* == events.len or self.decompressed.len - self.decompressed_used < sub.topic.len)) {
+                        if (self.validTopic(sub.topic) and self.state.findTopic(sub.topic) != null and (count.* == events.len or self.decompressed.len - self.decompressed_used < sub.topic.len)) {
                             self.pressure(index, .events, now.mono_ms);
                             return false;
                         }
@@ -1219,6 +1246,10 @@ pub const Gossipsub = struct {
         events: []Event,
         start: usize,
     ) usize {
+        if (self.namespace) |*ns| {
+            const match = ns.lookup(sub.topic) orelse return start;
+            ns.setSubscription(index, match.ordinal, sub.subscribe);
+        }
         const topic = self.state.findTopic(sub.topic) orelse return start;
         assert(start < events.len);
         if (!sub.subscribe and self.state.mesh(topic).isSet(index)) self.scores.prune(self.logical(index).index, topic, self.last_now_ms);
