@@ -864,13 +864,17 @@ pub const EpochCache = struct {
     }
 
     pub fn rotateSyncCommitteeIndexed(self: *EpochCache, allocator: Allocator, next_sync_committee_indices: []const ValidatorIndex) !void {
+        var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(allocator, next_sync_committee_indices);
+        errdefer next_sync_committee_indexed.deinit();
+
+        const next_sync_committee_indexed_rc = try SyncCommitteeCacheRc.init(allocator, next_sync_committee_indexed);
+
         // unref the old instance
         self.current_sync_committee_indexed.unref();
         // this is the transfer of reference count
         // should not do an unref() then ref() here as it may trigger a deinit()
         self.current_sync_committee_indexed = self.next_sync_committee_indexed;
-        const next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(allocator, next_sync_committee_indices);
-        self.next_sync_committee_indexed = try SyncCommitteeCacheRc.init(allocator, next_sync_committee_indexed);
+        self.next_sync_committee_indexed = next_sync_committee_indexed_rc;
     }
 
     /// this is used at fork boundary from phase0 to altair
