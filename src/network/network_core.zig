@@ -32,6 +32,11 @@ pub const LocalUpdate = struct {
     endpoints: ?AdvertisementEndpoints,
     capabilities: @import("capabilities.zig").Directional,
 };
+pub const LocalIntent = struct {
+    update: LocalUpdate,
+    demand: peers.Demand,
+    subscriptions: []const gossip.local_intent.Subscription,
+};
 pub const DiscoveryOptions = struct {
     advertisement: ?AdvertisementEndpoints = null,
     bind: std.Io.net.IpAddress,
@@ -104,6 +109,7 @@ pub const MemoryPlan = struct {
     transport_bytes: usize = 0,
     core_bytes: usize = 0,
     scratch_bytes: usize = 0,
+    local_intent_bytes: usize = 0,
     discovery_bytes: usize = 0,
     transport_windows: @import("quic/api.zig").MemoryPlan,
     caller_borrows_included: bool = false,
@@ -147,6 +153,7 @@ pub const NetworkCore = struct {
     discovery: ?*DiscoveryOwners,
     native_events: []engine.Event,
     activity: []engine.Handle,
+    local_intent_workspace: *gossip.local_intent.Workspace,
     schedule: ForkSchedule,
     counters: Counters = .{},
     last_now: Now,
@@ -186,6 +193,10 @@ pub const NetworkCore = struct {
         self.activity = try allocator.alloc(engine.Handle, options.transport.limits.connections_max);
         errdefer allocator.free(self.activity);
         self.memory.scratch_bytes = self.native_events.len * @sizeOf(engine.Event) + self.activity.len * @sizeOf(engine.Handle);
+        self.local_intent_workspace = try allocator.create(gossip.local_intent.Workspace);
+        errdefer allocator.destroy(self.local_intent_workspace);
+        self.local_intent_workspace.* = .{};
+        self.memory.local_intent_bytes = @sizeOf(gossip.local_intent.Workspace);
         const before_discovery = self.reservations.bytes;
         if (options.discovery) |discovery_options| {
             const owned = try allocator.create(DiscoveryOwners);
@@ -201,7 +212,7 @@ pub const NetworkCore = struct {
         if (self.core.service.identify) |*identify| identify.local = identify_local;
         self.memory.discovery_bytes = self.reservations.bytes - before_discovery;
         self.memory.allocated_bytes = self.reservations.bytes;
-        std.debug.assert(self.memory.allocated_bytes == self.memory.transport_bytes + self.memory.core_bytes + self.memory.scratch_bytes + self.memory.discovery_bytes);
+        std.debug.assert(self.memory.allocated_bytes == self.memory.transport_bytes + self.memory.core_bytes + self.memory.scratch_bytes + self.memory.local_intent_bytes + self.memory.discovery_bytes);
         self.initialized = true;
     }
 
@@ -225,6 +236,7 @@ pub const NetworkCore = struct {
             owned.deinit(self.allocator, io);
             self.allocator.destroy(owned);
         }
+        self.allocator.destroy(self.local_intent_workspace);
         self.core.deinit();
         self.allocator.free(self.activity);
         self.allocator.free(self.native_events);
@@ -405,8 +417,17 @@ pub const NetworkCore = struct {
         return local;
     }
 
-    /// Prepares every owner before ENR publication; caller sequence input is ignored.
-    pub fn applyLocal(self: *NetworkCore, update: *const LocalUpdate, now: Now) !bool {
+    const PreparedLocal = struct {
+        local: t.LocalState,
+        schedule: ForkSchedule,
+        endpoints: ?AdvertisementEndpoints,
+        capabilities: @import("capabilities.zig").Directional,
+        identify: ?@import("identify/root.zig").Local,
+        record: ?d.identity.enr.Record = null,
+        changed: bool,
+    };
+
+    fn prepareLocal(self: *const NetworkCore, update: *const LocalUpdate) !PreparedLocal {
         if (self.core.stopped) return error.Stopped;
         const schedule = update.schedule;
         const endpoints = update.endpoints;
@@ -423,23 +444,66 @@ pub const NetworkCore = struct {
         const identify_local = try self.prepareIdentifyLocal(endpoints, capabilities);
         const metadata_changed = !std.meta.eql(local.metadata, self.core.local.metadata);
         if (metadata_changed) local.metadata.seq_number = try peers.enr.nextSequence(local.metadata.seq_number);
-        if (std.meta.eql(local, self.core.local) and std.meta.eql(schedule, self.schedule) and std.meta.eql(endpoints, self.advertisementEndpoints()) and std.meta.eql(capabilities, self.core.service.router.capabilities())) return false;
-        if (self.discovery) |owned| {
+        var prepared: PreparedLocal = .{
+            .local = local,
+            .schedule = schedule,
+            .endpoints = endpoints,
+            .capabilities = capabilities,
+            .identify = identify_local,
+            .changed = !(std.meta.eql(local, self.core.local) and std.meta.eql(schedule, self.schedule) and
+                std.meta.eql(endpoints, self.advertisementEndpoints()) and std.meta.eql(capabilities, self.core.service.router.capabilities())),
+        };
+        if (prepared.changed) if (self.discovery) |owned| {
             const advertisement = advertisementFor(&local, schedule, endpoints.?);
             const previous = advertisementFor(&self.core.local, self.schedule, owned.endpoints);
             if (!std.meta.eql(advertisement, previous)) {
                 const sequence = try peers.enr.nextSequence(owned.engine.localRecord().sequence);
-                const record = try peers.enr.build(&owned.engine.channel.local_key, sequence, &advertisement, &local.fork);
-                try owned.engine.updateLocalRecord(&record);
+                prepared.record = try peers.enr.build(&owned.engine.channel.local_key, sequence, &advertisement, &local.fork);
             }
-            owned.endpoints = endpoints.?;
-            owned.coordinator.updateFork(&local.fork) catch unreachable;
+        };
+        return prepared;
+    }
+
+    fn publishLocal(self: *NetworkCore, prepared: *const PreparedLocal) !void {
+        if (prepared.record) |*record| try self.discovery.?.engine.updateLocalRecord(record);
+    }
+
+    fn commitLocal(self: *NetworkCore, prepared: *const PreparedLocal, now: Now) void {
+        std.debug.assert(prepared.changed);
+        if (self.discovery) |owned| {
+            owned.endpoints = prepared.endpoints.?;
+            owned.coordinator.updateFork(&prepared.local.fork) catch unreachable;
         }
-        // All fallible preparation precedes publication. Both consumers validate the same copy.
-        if (self.core.service.identify) |*identify| identify.local = identify_local;
-        self.core.service.router.setCapabilities(capabilities);
-        self.core.commitLocal(&local, now);
-        self.schedule = schedule;
+        if (self.core.service.identify) |*identify| identify.local = prepared.identify;
+        self.core.service.router.setCapabilities(prepared.capabilities);
+        self.core.commitLocal(&prepared.local, now);
+        self.schedule = prepared.schedule;
+    }
+
+    /// Prepares every owner before ENR publication; caller sequence input is ignored.
+    pub fn applyLocal(self: *NetworkCore, update: *const LocalUpdate, now: Now) !bool {
+        const prepared = try self.prepareLocal(update);
+        if (!prepared.changed) return false;
+        try self.publishLocal(&prepared);
+        self.commitLocal(&prepared, now);
+        return true;
+    }
+
+    /// Applies a complete copied subscription union in this serialized call without ending event borrows.
+    pub fn applyIntent(self: *NetworkCore, intent: *const LocalIntent, now: Now) !bool {
+        const prepared = try self.prepareLocal(&intent.update);
+        const demand = intent.demand;
+        try demand.validate(&prepared.local.fork, self.core.catalog.options.max_peers);
+        const topics_changed = try self.core.service.gossipsub.inner.prepareSubscriptions(intent.subscriptions, self.local_intent_workspace, now);
+        const demand_changed = !std.meta.eql(demand, self.core.demand);
+        if (!prepared.changed and !topics_changed and !demand_changed) return false;
+        try self.publishLocal(&prepared);
+        if (prepared.changed) self.commitLocal(&prepared, now);
+        if (topics_changed) self.core.service.gossipsub.inner.commitSubscriptions(self.local_intent_workspace);
+        if (demand_changed) {
+            self.core.demand = demand;
+            self.core.policy_dirty = true;
+        }
         return true;
     }
 

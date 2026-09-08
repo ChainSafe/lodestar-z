@@ -169,16 +169,24 @@ pub const State = struct {
         var copied_bytes: [topic_mod.topic_max_len]u8 = undefined;
         const copied = copied_bytes[0..topic_str.len];
         @memcpy(copied, topic_str);
-        const parsed = topic_mod.parse(copied) orelse return null;
+        _ = topic_mod.parse(copied) orelse return null;
         if (self.findTopic(copied)) |index| return index;
         const index = self.freeTopic() orelse return null;
+        self.assignTopic(@intCast(index), copied, self.topics[index].generation);
+        return @intCast(index);
+    }
+
+    pub fn assignTopic(self: *State, index: u16, copied: []const u8, generation: u64) void {
+        assert(copied.len <= topic_mod.topic_max_len);
+        const parsed = topic_mod.parse(copied).?;
         const topic = &self.topics[index];
-        topic.* = .{ .active = true, .generation = topic.generation + 1 };
+        assert(topic.generation == generation and generation != std.math.maxInt(u64));
+        assert(!topic.active);
+        topic.* = .{ .active = true, .generation = generation + 1 };
         @memcpy(topic.name[0..parsed.name.len], parsed.name);
         topic.name_len = @intCast(parsed.name.len);
         @memcpy(topic.string[0..copied.len], copied);
         topic.string_len = @intCast(copied.len);
-        return @intCast(index);
     }
 
     pub fn findTopic(self: *State, topic_str: []const u8) ?u16 {
