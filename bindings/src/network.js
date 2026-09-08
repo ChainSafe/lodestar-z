@@ -1,4 +1,5 @@
 import bindings from "./bindings.js";
+import {NativeRequest} from "./network-request.js";
 
 class NativeRuntime {
   #native;
@@ -33,6 +34,9 @@ class NativeRuntime {
   getDirectPeers() { return this.#native.getDirectPeers(); }
   reportPeer(peerId, action) { return this.#native.reportPeer(peerId, action); }
   drainPeers(maxEvents) { return this.#native.drainPeers(maxEvents); }
+  request(peerId, protocol, data, options) {
+    return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options));
+  }
   close() {
     this.#native.close();
     return this.#closed;

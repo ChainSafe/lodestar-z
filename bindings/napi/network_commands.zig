@@ -117,7 +117,7 @@ test "typed reservations unwind and identities never wrap" {
 }
 
 const n = @import("network");
-pub const Command = enum { applyIntent, getIdentity, getPeers, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, reportPeer };
+pub const Command = enum { applyIntent, getIdentity, getPeers, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, reportPeer, request };
 pub fn storageKind(command: Command) Kind {
     return switch (command) {
         .applyIntent => .intent,
@@ -129,6 +129,7 @@ pub fn storageKind(command: Command) Kind {
 }
 pub const Input = struct {
     command: Command,
+    request: @import("network_requests.zig").Token = undefined,
     peer: n.PeerId = undefined,
     addresses: [2]n.Address = undefined,
     address_count: u8 = 0,
@@ -161,6 +162,11 @@ pub fn executeCommands(self: *Runtime, timestamp: n.Now) !void {
         executeOne(self, i, timestamp) catch |err| {
             self.operations[i].failure = err;
         };
+        if (self.operations[i].input.command == .request) {
+            if (self.operations[i].failure) |err| return err;
+            self.abortCommand(token);
+            continue;
+        }
         self.lock();
         if (cell.state == .executing) {
             if (self.stop) self.operations[i].failure = self.startup_error orelse error.NetworkClosed;
@@ -176,6 +182,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
     const core = &self.heavy.?.core;
     const store = self.table.cells[index].store;
     switch (input.command) {
+        .request => try @import("network_requests.zig").submit(self, input.request, timestamp),
         .applyIntent => {
             if (input.slot < self.slot) return error.ClockRegression;
             operation.boolean = try core.applyIntent(&self.stores.?.intents[store.?].value, timestamp);
