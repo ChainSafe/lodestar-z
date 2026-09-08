@@ -181,8 +181,6 @@ pub fn stateTransition(
         allocator.destroy(post_cached_state);
     }
 
-    try metrics.state_transition.onStateClone(post_cached_state, .state_transition);
-
     try processSlots(
         allocator,
         io,
