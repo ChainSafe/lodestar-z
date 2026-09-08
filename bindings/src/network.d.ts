@@ -100,6 +100,8 @@ export interface NativeGlobalScoreParams {
 export interface NativeGossipStartupPolicy {
   phase0Digest: Uint8Array | null;
   heartbeatIntervalMs: bigint;
+  iwantFollowupMs: bigint;
+  idontwantMinDataSize: number;
   validationTimeoutMs: bigint;
   validationTombstoneMs: bigint;
   pressureTimeoutMs: bigint;

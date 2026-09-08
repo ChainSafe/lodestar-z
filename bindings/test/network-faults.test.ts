@@ -276,12 +276,16 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     expect(output).toContain("callback-closed");
   });
 
-  it("forwards every immutable gossip policy into the actual resolved owner", async () => {
+  it.each([
+    16829, 1462,
+  ])("forwards immutable gossip policy with host threshold %i into the actual resolved owner", async (idontwantMinDataSize) => {
     const config = networkConfig();
     config.gossipPolicy = {
       gossipFactor: 0.3,
       heartbeatIntervalMs: 1100n,
+      idontwantMinDataSize,
       ipAllowlist: [Uint8Array.of(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 127, 0, 0, 1)],
+      iwantFollowupMs: 12000n,
       largeFrameTimeoutMs: 35000n,
       opportunisticGraftIntervalMs: 61000n,
       phase0Digest: Uint8Array.of(9, 8, 7, 6),
@@ -331,6 +335,8 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     config.gossipPolicy.phase0Digest?.fill(0);
     config.gossipPolicy.ipAllowlist[0].fill(0);
     config.gossipPolicy.score.decayIntervalMs = 12000n;
+    config.gossipPolicy.iwantFollowupMs = 1n;
+    config.gossipPolicy.idontwantMinDataSize = 0;
     try {
       await runtime.ready;
       // biome-ignore-start lint/style/useNamingConvention: The copied snapshot preserves native names to verify JS-to-native field mapping.
@@ -340,6 +346,8 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
           connected_capacity: 12,
           gossip_factor: 0.3,
           heartbeat_interval_ms: 1100n,
+          idontwant_min_data_size: idontwantMinDataSize,
+          iwant_followup_ms: 12000n,
           large_frame_timeout_ms: 35000n,
           mcache_capacity: 256,
           opportunistic_graft_interval_ms: 61000n,

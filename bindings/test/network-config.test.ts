@@ -213,3 +213,37 @@ it("rejects a noncanonical bootstrap encoding during ordinary owner startup", as
   expect(await runtime.close()).toEqual({reason: "failed"});
   expect(runtime.diagnostics().terminalErrorCode).toBe("InvalidRecord");
 });
+
+it("accepts explicit host wire policy and zero IDONTWANT threshold", async () => {
+  const config = networkConfig();
+  Object.assign(config.gossipPolicy, {idontwantMinDataSize: 0, iwantFollowupMs: 12000n});
+  const runtime = createNativeNetworkRuntime(config, () => undefined);
+  try {
+    await runtime.ready;
+  } finally {
+    await runtime.close();
+  }
+});
+
+it.each([
+  ["missing interval", {iwantFollowupMs: undefined}, "InvalidNetworkInteger"],
+  ["missing threshold", {idontwantMinDataSize: undefined}, "InvalidNetworkInteger"],
+  ["unknown wire field", {iwantDeadline: 12000n}, "InvalidNetworkConfig"],
+  ["numeric interval", {iwantFollowupMs: 12000}, "InvalidNetworkInteger"],
+  ["zero interval", {iwantFollowupMs: 0n}, "InvalidNetworkConfig"],
+  ["large interval", {iwantFollowupMs: 86400001n}, "InvalidNetworkConfig"],
+  ["negative interval", {iwantFollowupMs: -1n}, "InvalidNetworkInteger"],
+  ["bigint threshold", {idontwantMinDataSize: 128n}, "InvalidNetworkInteger"],
+  ["fractional threshold", {idontwantMinDataSize: 1.5}, "InvalidNetworkInteger"],
+  ["unsafe threshold", {idontwantMinDataSize: Number.MAX_SAFE_INTEGER + 1}, "InvalidNetworkInteger"],
+  ["negative threshold", {idontwantMinDataSize: -1}, "InvalidNetworkInteger"],
+  ["large threshold", {idontwantMinDataSize: 20 * 1024 * 1024}, "InvalidNetworkInteger"],
+] as const)("rejects %s wire policy before startup", (_name, fields, code) => {
+  const config = networkConfig();
+  Object.assign(config.gossipPolicy, fields);
+  for (const [key, value] of Object.entries(fields))
+    if (value === undefined) Reflect.deleteProperty(config.gossipPolicy, key);
+  const before: unknown = typeof bindings.networkTestStats === "function" ? bindings.networkTestStats() : null;
+  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow(code);
+  if (before) expect(bindings.networkTestStats()).toEqual(before);
+});

@@ -488,22 +488,37 @@ pub const Gossipsub = struct {
         io.subscription_since = null;
     }
 
-    pub const PublishError = error{ PayloadTooLarge, UnknownTopic, CompressFailed, ResourceExhausted };
-    pub const PublishOutcome = struct { queued: u16 = 0, pressured: u16 = 0 };
+    pub const PublishOptions = struct { allow_zero_peers: bool = true, ignore_duplicate: bool = false, flood: bool = false };
+    pub const PublishError = error{ PayloadTooLarge, UnknownTopic, CompressFailed, ResourceExhausted, Duplicate, NoPeersSubscribedToTopic };
+    pub const PublishOutcome = struct { queued: u16 = 0, pressured: u16 = 0, selected: u16 = 0, unavailable: u16 = 0, duplicate: bool = false };
 
-    /// Admits local history and reports queued and pressured recipient counts. Zero recipients is a local publish.
     pub fn publish(self: *Gossipsub, topic_str: []const u8, ssz: []const u8, now: Now) PublishError!PublishOutcome {
+        return self.publishWithOptions(topic_str, ssz, .{}, now);
+    }
+
+    /// Admits one shared history payload; queued counts live stream queue admissions.
+    pub fn publishWithOptions(self: *Gossipsub, topic_str: []const u8, ssz: []const u8, options: PublishOptions, now: Now) PublishError!PublishOutcome {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
+        const now_ms = self.last_now_ms;
         if (ssz.len > constants.MAX_PAYLOAD_SIZE) return error.PayloadTooLarge;
-        const topic = self.internTopic(topic_str) orelse return error.UnknownTopic;
-        const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return error.CompressFailed;
+        _ = topic_mod.parse(topic_str) orelse return error.UnknownTopic;
         const id = topic_mod.validMessageId(topic_str, ssz, self.options.message_id_policy);
+        if (self.seen.contains(id, now_ms)) {
+            if (options.ignore_duplicate) return .{ .duplicate = true };
+            return error.Duplicate;
+        }
+        const topic = self.internTopic(topic_str) orelse return error.UnknownTopic;
+        const context = self.meshContext(now_ms);
+        const recipients = self.mesh_policy.publicationRecipients(&context, topic, options.flood);
+        if (recipients.count() == 0 and !options.allow_zero_peers) return error.NoPeersSubscribedToTopic;
+        const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return error.CompressFailed;
         const h = self.mcache.admitPayload(&self.store, id, topic_str, self.msg_scratch[0..clen]) orelse return error.ResourceExhausted;
         self.mcache.put(&self.store, h);
         self.store.seal(h);
-        _ = self.seen.add(id, now.mono_ms);
-        const peers = if (self.state.subscribed(topic)) self.state.mesh(topic) else self.fillFanout(topic, now);
-        const result = self.deliver(peers, h, null, now.mono_ms);
+        const fresh = self.seen.add(id, now_ms);
+        assert(fresh);
+        self.resolvePromises(id);
+        const result = self.deliver(&recipients, h, null, now_ms);
         self.counters.messages_published += 1;
         return result;
     }
@@ -525,21 +540,27 @@ pub const Gossipsub = struct {
         return result.outcome;
     }
 
-    fn deliver(self: *Gossipsub, peers: *state_mod.PeerSet, h: storage.Handle, source: ?validation_mod.PeerRef, now_ms: u64) PublishOutcome {
+    fn deliver(self: *Gossipsub, peers: *const state_mod.PeerSet, h: storage.Handle, source: ?validation_mod.PeerRef, now_ms: u64) PublishOutcome {
         const id = self.store.get(h).?.id;
         var result: PublishOutcome = .{};
         var recipients = peers.*;
         const topic = self.state.findTopic(self.store.get(h).?.topicString()).?;
-        for (self.state.peers, 0..) |*row, peer| {
+        if (source != null) for (self.state.peers, 0..) |*row, peer| {
             if (row.active and self.peers.rows[row.logical.index].direct and self.state.subscribers(topic).isSet(peer)) recipients.set(peer);
-        }
+        };
         var it = recipients.iterator(.{});
         while (it.next()) |peer| {
             const index: u16 = @intCast(peer);
-            if (!self.state.peers[index].active) continue;
-            if (source) |p| if (std.meta.eql(p, self.logical(index))) continue;
-            if (self.state.suppresses(index, id, self.last_now_ms)) continue;
+            if (!self.state.peers[index].active or self.mesh_policy.retire.isSet(index)) continue;
+            if (source) |p| {
+                if (std.meta.eql(p, self.logical(index)) or self.state.suppresses(index, id, now_ms)) continue;
+            }
             if (!self.peers.rows[self.logical(index).index].direct and self.peerScore(index, now_ms) < self.options.score_params.publish_threshold) continue;
+            result.selected += 1;
+            if (self.state.peers[index].out_stream == null) {
+                result.unavailable += 1;
+                continue;
+            }
             if (self.io.peers[index].queueData(&self.store, h, self.options.tx_peer_bytes, now_ms) == .queued) {
                 result.queued += 1;
             } else {
@@ -547,12 +568,8 @@ pub const Gossipsub = struct {
                 self.counters.send_dropped += 1;
             }
         }
+        assert(result.selected == result.queued + result.pressured + result.unavailable);
         return result;
-    }
-
-    fn fillFanout(self: *Gossipsub, topic: u16, now: Now) *state_mod.PeerSet {
-        const context = self.meshContext(now.mono_ms);
-        return self.mesh_policy.fanout(&context, topic, true);
     }
 
     fn meshContext(self: *Gossipsub, now_ms: u64) mesh_mod.Context {
@@ -821,7 +838,7 @@ pub const Gossipsub = struct {
             if (!topic.active) continue;
             var context = self.meshContext(now.mono_ms);
             context.use_snapshot = true;
-            if (!topic.subscribed and topic.fanout.count() > 0) _ = self.mesh_policy.fanout(&context, index, false);
+            if (topic.fanout.count() > 0) _ = self.mesh_policy.fanout(&context, index, false);
             self.maintainTopic(index, now);
             if (self.opportunistic_pending) self.opportunisticGraft(index, now);
             self.emitGossip(index);
@@ -870,7 +887,7 @@ pub const Gossipsub = struct {
     }
 
     fn controlSent(self: *Gossipsub, peer: u16, token: u64, now_ms: u64) void {
-        self.recovery.controlSent(self.state.peers[peer].conn, token, now_ms);
+        self.recovery.controlSent(self.state.peers[peer].conn, token, self.options.iwant_followup_ms, now_ms);
     }
 
     fn expirePromises(self: *Gossipsub, now_ms: u64) void {
@@ -1092,7 +1109,7 @@ pub const Gossipsub = struct {
                 events[start] = .{ .message = event };
                 self.resolvePromises(event.id);
                 self.counters.messages_received += 1;
-                if (event.bytes.len >= constants.idontwant_size_threshold) self.broadcastIdontwant(self.state.findTopic(event.topic).?, event.id, index);
+                if (msg.data.len >= self.options.idontwant_min_data_size) self.broadcastIdontwant(self.state.findTopic(event.topic).?, event.id, index);
                 return start + 1;
             },
         }
@@ -1598,6 +1615,7 @@ test "gossip policy duplicate connections preserve one logical owner and direct 
     g.state.setSubscription(g.state.findTopic(topic).?, first.index, true);
     g.markDirect(conn);
     try std.testing.expect(g.setPeerScore(conn, -100_000));
+    g.state.peers[first.index].out_stream = .{ .conn = conn, .id = 2, .slot = 0 };
     const result = try g.publish(topic, "direct data", now);
     try std.testing.expectEqual(@as(u16, 1), result.queued);
     try std.testing.expectEqual(@as(usize, 0), g.state.mesh(g.state.findTopic(topic).?).count());
@@ -1698,6 +1716,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
         const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
         g.state.setSubscription(first, peer.index, true);
         g.state.setSubscription(second, peer.index, true);
+        g.state.peers[peer.index].out_stream = .{ .conn = g.state.peers[peer.index].conn, .id = 2, .slot = 0 };
     }
     const start: Now = .{ .mono_ms = 1, .unix_s = 0 };
     _ = try g.publish(first_name, "first", start);
@@ -2067,4 +2086,148 @@ test "gossip topic configuration snapshots aliased text under full capacity" {
     try std.testing.expectEqual(generation + 1, g.state.topics[0].generation);
     try std.testing.expectEqual(@as(f64, 2), g.scores.topic_params[0].weight);
     try std.testing.expectEqual(calls, ledger.allocation_calls);
+}
+
+test "gossipsub configured IWANT receipt starts twelve second deadline once" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .iwant_followup_ms = 12_000 });
+    defer g.deinit();
+    const conn: Handle = .{ .index = 0, .generation = 1 };
+    const p = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    const io = &g.io.peers[p.index];
+    const token = io.appendControl("control", false, 1).?;
+    g.recovery.add(&g.peers, [_]u8{1} ** 20, g.logical(p.index), conn, token);
+    g.recovery.controlSent(.{ .index = 0, .generation = 2 }, token, 12_000, 5);
+    g.controlSent(p.index, token + 1, 5);
+    try std.testing.expect(g.recovery.nextExpiry() == null);
+    _ = io.segment(&g.store);
+    try std.testing.expect(io.advance(&g.store, 1) == null);
+    try std.testing.expect(g.recovery.nextExpiry() == null);
+    g.controlSent(p.index, io.advance(&g.store, 6).?, 100);
+    g.controlSent(p.index, token, 200);
+    try std.testing.expectEqual(@as(?u64, 12_100), g.recovery.nextExpiry());
+    g.expirePromises(12_099);
+    try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
+    g.expirePromises(12_100);
+    try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.broken_promises);
+    try std.testing.expectEqual(@as(u32, 0), g.peers.rows[g.logical(p.index).index].pins);
+}
+
+test "gossipsub configured IDONTWANT uses admitted compressed wire bytes" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .idontwant_min_data_size = 128 });
+    defer g.deinit();
+    const source = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const destination = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    g.state.mesh(g.state.findTopic(name).?).set(destination.index);
+    var payload: [126]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @intCast(index);
+    var compressed: [constants.maxCompressedLen(256)]u8 = undefined;
+    var events: [1]Event = undefined;
+    for ([_]usize{ 124, 125, 126 }, [_]usize{ 127, 128, 129 }) |size, wire_size| {
+        g.io.peers[destination.index].resetTx(&g.store);
+        const len = try snappy.raw.compress(payload[0..size], &compressed);
+        try std.testing.expectEqual(wire_size, len);
+        g.budget = .{ .work = g.options.work_per_pump };
+        try std.testing.expectEqual(@as(?usize, 1), g.onMessage(source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
+        try std.testing.expectEqual(wire_size >= 128, g.io.peers[destination.index].control.used > 0);
+        g.io.peers[destination.index].resetTx(&g.store);
+        try std.testing.expectEqual(@as(?usize, 0), g.onMessage(source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
+        try std.testing.expectEqual(@as(usize, 0), g.io.peers[destination.index].control.used);
+    }
+    const len = try snappy.raw.compress(&([_]u8{0} ** 256), &compressed);
+    try std.testing.expect(len < 128);
+    try std.testing.expectEqual(@as(?usize, 1), g.onMessage(source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
+    try std.testing.expectEqual(@as(usize, 0), g.io.peers[destination.index].control.used);
+    _ = g.onMessage(source.index, .{ .topic = name, .data = &.{ 5, 0 } }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0);
+    try std.testing.expectEqual(@as(usize, 0), g.io.peers[destination.index].control.used);
+    const fresh_len = try snappy.raw.compress("nonadmitted", &compressed);
+    g.options.idontwant_min_data_size = 0;
+    try std.testing.expectEqual(@as(?usize, null), g.onMessage(source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, .{ .mono_ms = 1, .unix_s = 0 }, &.{}, 0));
+    try std.testing.expectEqual(@as(usize, 0), g.io.peers[destination.index].control.used);
+    try std.testing.expectEqual(@as(?usize, 1), g.onMessage(source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
+    try std.testing.expect(g.io.peers[destination.index].control.used > 0);
+}
+
+test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event through local publication" {
+    var pair: @import("gossipsub_test.zig").GossipPair = .{};
+    try pair.init();
+    defer pair.deinit();
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(pair.client.subscribe(name));
+    try std.testing.expect(pair.server.subscribe(name));
+    for (0..20) |_| try pair.pumpOnce();
+    const destination = pair.server.state.findPeer(pair.handles.server).?;
+    const source = @import("test_support.zig").addPeer(&pair.server, .{ .index = 77, .generation = 1 }, .v1_2).?;
+    pair.server.state.mesh(pair.server.state.findTopic(name).?).set(destination);
+    const suppressed_id = topic_mod.validMessageId(name, "remote suppressed", .{});
+    pair.server.state.suppress(destination, suppressed_id, pair.pair.now.mono_ms, 60_000);
+    var events: [1]Event = undefined;
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&pair.server, source.index, "remote suppressed", pair.pair.now.mono_ms, &events));
+    const borrowed = events[0].message;
+    try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, pair.server.report(borrowed.handle, .accept, pair.pair.now));
+    try std.testing.expectEqual(@as(usize, 0), pair.server.io.peers[destination].data_count);
+    const local = try pair.server.publish(name, "local while borrowed", pair.pair.now);
+    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, local);
+    try std.testing.expectError(error.Duplicate, pair.server.publish(name, "local while borrowed", pair.pair.now));
+    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .duplicate = true }, try pair.server.publishWithOptions(name, "local while borrowed", .{ .ignore_duplicate = true }, pair.pair.now));
+    try std.testing.expectEqualStrings(name, borrowed.topic);
+    try std.testing.expectEqualStrings("remote suppressed", borrowed.bytes);
+    var received: usize = 0;
+    for (0..30) |_| {
+        try pair.pumpOnce();
+        for (pair.clientEvents()) |event| if (event == .message) {
+            try std.testing.expectEqualStrings("local while borrowed", event.message.bytes);
+            received += 1;
+        };
+    }
+    try std.testing.expectEqual(@as(usize, 1), received);
+    try std.testing.expectEqual(@as(u64, 0), pair.server.counters.messages_forwarded);
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&pair.server, source.index, "remote forwarded", pair.pair.now.mono_ms, &events));
+    try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, pair.server.report(events[0].message.handle, .accept, pair.pair.now));
+    try std.testing.expectEqual(@as(usize, 1), pair.server.io.peers[destination].data_count);
+    received = 0;
+    for (0..30) |_| {
+        try pair.pumpOnce();
+        for (pair.clientEvents()) |event| if (event == .message) {
+            try std.testing.expectEqualStrings("remote forwarded", event.message.bytes);
+            received += 1;
+        };
+    }
+    try std.testing.expectEqual(@as(usize, 1), received);
+    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.messages_forwarded);
+}
+
+test "publication subscribed fanout expires through owner maintenance" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const conn: Handle = .{ .index = 0, .generation = 1 };
+    const p = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    const t = g.state.findTopic(name).?;
+    g.state.setSubscription(t, p.index, true);
+    g.state.peers[p.index].out_stream = .{ .conn = conn, .id = 2, .slot = 0 };
+    _ = try g.publish(name, "fanout expiry", .{ .mono_ms = 0, .unix_s = 0 });
+    try std.testing.expectEqual(@as(usize, 1), g.state.fanout(t).count());
+    g.heartbeat(.{ .mono_ms = 59_999, .unix_s = 0 });
+    g.maintainTopics(.{ .mono_ms = 59_999, .unix_s = 0 });
+    try std.testing.expectEqual(@as(usize, 1), g.state.fanout(t).count());
+    g.heartbeat(.{ .mono_ms = 60_000, .unix_s = 0 });
+    g.maintainTopics(.{ .mono_ms = 60_000, .unix_s = 0 });
+    try std.testing.expectEqual(@as(usize, 0), g.state.fanout(t).count());
+    g.state.setSubscription(t, p.index, false);
+    g.io.peers[p.index].resetTx(&g.store);
+    const next_conn: Handle = .{ .index = 1, .generation = 1 };
+    const next = @import("test_support.zig").addPeer(&g, next_conn, .v1_2).?;
+    g.state.setSubscription(t, next.index, true);
+    g.state.peers[next.index].out_stream = .{ .conn = next_conn, .id = 2, .slot = 0 };
+    const result = try g.publish(name, "fresh fanout", .{ .mono_ms = 60_001, .unix_s = 0 });
+    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, result);
+    try std.testing.expectEqual(@as(usize, 1), g.state.fanout(t).count());
+    try std.testing.expect(g.state.fanout(t).isSet(next.index));
+    try std.testing.expectEqual(@as(usize, 0), g.io.peers[p.index].data_count);
+    const queued = g.io.peers[next.index].data[g.io.peers[next.index].data_head].message;
+    try std.testing.expectEqual(topic_mod.validMessageId(name, "fresh fanout", .{}), g.store.get(queued).?.id);
 }

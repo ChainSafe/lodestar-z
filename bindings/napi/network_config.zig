@@ -217,7 +217,9 @@ pub fn parse(value: Value, out: *Config) !void {
     const resolved = n.configuration.resolve(.{ .profile = out.profile, .seed = 1, .forks = out.forks[0..out.fork_count] }) catch return error.InvalidNetworkConfig;
     out.gossip = resolved.core.service.gossipsub;
     const policy = try get(value, "gossipPolicy");
-    try object(policy, &.{ "phase0Digest", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score" });
+    try object(policy, &.{ "phase0Digest", "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score" });
+    out.gossip.iwant_followup_ms = try bigint(try get(policy, "iwantFollowupMs"));
+    out.gossip.idontwant_min_data_size = @intCast(try integer(try get(policy, "idontwantMinDataSize"), n.gossipsub.constants.GOSSIP_MAX_SIZE));
     out.gossip.heartbeat_interval_ms = try bigint(try get(policy, "heartbeatIntervalMs"));
     out.gossip.validation_timeout_ms = try bigint(try get(policy, "validationTimeoutMs"));
     out.gossip.validation_tombstone_ms = try bigint(try get(policy, "validationTombstoneMs"));

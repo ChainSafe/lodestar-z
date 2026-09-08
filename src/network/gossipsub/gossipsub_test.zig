@@ -495,6 +495,7 @@ fn connectMesh(setup: *GossipPair) !void {
 }
 
 fn publishAdmissionA(setup: *GossipPair) !struct { count: usize, handle: ?gossipsub.ValidationHandle } {
+    setup.pair.advance(1);
     const queued = try setup.client.publish(test_topic, "A", setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), queued.queued);
     var count: usize = 0;
@@ -514,6 +515,7 @@ test "gossipsub readmission reuses tombstones across repeated Seen eviction" {
     var setup: GossipPair = .{};
     try setup.initOpts(.{
         .random_seed = 1,
+        .seen_ttl_ms = 1,
     }, .{ .random_seed = 1, .seen_capacity = 1, .validation_capacity = 4, .mcache_capacity = 1 });
     defer setup.deinit();
     try connectMesh(&setup);
@@ -532,8 +534,10 @@ test "gossipsub readmission reuses tombstones across repeated Seen eviction" {
         const payload = [_]u8{@as(u8, @intCast(i)) + 'C'};
         _ = try setup.server.publish(test_topic, &payload, setup.pair.now);
         try std.testing.expect(!setup.server.seen.contains(id, setup.pair.now.mono_ms));
+        const duplicates_before = setup.server.counters.duplicates;
         const duplicate = try publishAdmissionA(&setup);
         try std.testing.expectEqual(@as(usize, 0), duplicate.count);
+        try std.testing.expectEqual(duplicates_before + 1, setup.server.counters.duplicates);
         var pending: usize = 0;
         for (setup.server.validation.entries) |entry| {
             if (entry.state == .pending and std.mem.eql(u8, &entry.id, &id)) pending += 1;
@@ -596,8 +600,12 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
     defer std.testing.allocator.free(payload);
     var rng = std.Random.DefaultPrng.init(73);
     rng.random().bytes(payload);
+    const destination = setup.client.state.findPeer(setup.handles.client).?;
+    const topic_index = setup.client.state.findTopic(test_topic).?;
+    setup.client.state.setSubscription(topic_index, destination, false);
     const result = try setup.client.publish(test_topic, payload, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), result.queued);
+    setup.client.state.setSubscription(topic_index, destination, true);
     const id = topic_mod.validMessageId(test_topic, payload, .{});
     const pb = @import("protobuf.zig");
     var buf: [64]u8 = undefined;

@@ -16,7 +16,9 @@ export function networkConfig(): NativeRuntimeConfig {
     gossipPolicy: {
       gossipFactor: 0.25,
       heartbeatIntervalMs: 1000n,
+      idontwantMinDataSize: 16829,
       ipAllowlist: [],
+      iwantFollowupMs: 12000n,
       largeFrameTimeoutMs: 30000n,
       opportunisticGraftIntervalMs: 60000n,
       phase0Digest: null,

@@ -74,6 +74,10 @@ export class RawGossip {
     const id = messageId(TOPIC, data, true, true);
     let rpc;
     switch (command.kind) {
+      case "subscribe":
+      case "unsubscribe":
+        rpc = {subscriptions: [{subscribe: command.kind === "subscribe", topic: TOPIC}]};
+        break;
       case "graft":
         rpc = {control: {graft: [{topicID: TOPIC}]}};
         break;

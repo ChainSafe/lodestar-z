@@ -34,7 +34,7 @@ pub const backoff_slack_heartbeats: u64 = 2;
 /// A GRAFT arriving within this long after we PRUNE a peer is graft flooding and
 /// draws a second behavioural penalty.
 pub const graft_flood_threshold_ms: u64 = 10_000;
-pub const iwant_followup_ms: u64 = 3_000;
+pub const default_iwant_followup_ms: u64 = 3_000;
 pub const opportunistic_graft_ms: u64 = 60_000;
 pub const opportunistic_graft_peers: u8 = 2;
 /// The seen-cache holds message ids for two epochs; the host supplies the slot
@@ -48,7 +48,7 @@ pub const mcache_gossip: usize = 3;
 
 /// Only announce IDONTWANT for messages at least this large, so small topics
 /// (attestations) are not burdened; blocks and data columns clear it.
-pub const idontwant_size_threshold: usize = 16 * 1024;
+pub const default_idontwant_min_data_size: usize = 16 * 1024;
 
 /// Per-RPC and per-heartbeat element caps beyond `GOSSIP_MAX_SIZE`.
 pub const max_subscriptions_per_rpc: usize = 200;

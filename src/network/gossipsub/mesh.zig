@@ -285,6 +285,46 @@ pub const Mesh = struct {
         }
     }
 
+    pub fn publicationRecipients(self: *Mesh, context: *const Context, topic: u16, flood: bool) Set {
+        var result: Set = .initEmpty();
+        const threshold = context.scores.params.publish_threshold;
+        if (flood) {
+            for (0..context.state.peers.len) |index| {
+                if (self.eligible(context, topic, @intCast(index), threshold)) result.set(index);
+            }
+        } else {
+            var it = context.state.mesh(topic).iterator(.{});
+            while (it.next()) |index| {
+                if (self.eligible(context, topic, @intCast(index), threshold)) result.set(index);
+            }
+            if (result.count() == 0) {
+                result = self.fanout(context, topic, true).*;
+            } else self.fillPublication(context, topic, &result);
+        }
+        for (context.state.peers, 0..) |*row, index| {
+            if (row.active and !self.retire.isSet(index) and context.peers.rows[row.logical.index].direct and context.state.subscribers(topic).isSet(index)) result.set(index);
+        }
+        return result;
+    }
+
+    fn fillPublication(self: *Mesh, context: *const Context, topic: u16, members: *Set) void {
+        if (members.count() >= c.mesh_d) return;
+        var candidate_peers: [c.peers_cap]u16 = undefined;
+        var count: usize = 0;
+        for (0..context.state.peers.len) |index| {
+            const peer: u16 = @intCast(index);
+            if (members.isSet(peer) or context.state.peers[peer].out_stream == null) continue;
+            if (!self.eligible(context, topic, peer, context.scores.params.publish_threshold)) continue;
+            candidate_peers[count] = peer;
+            count += 1;
+        }
+        self.shuffle(candidate_peers[0..count]);
+        for (candidate_peers[0..count]) |peer| {
+            if (members.count() >= c.mesh_d) break;
+            members.set(peer);
+        }
+    }
+
     pub fn fanout(self: *Mesh, context: *const Context, topic: u16, publishing: bool) *Set {
         const row = &context.state.topics[topic];
         if (!publishing and context.now -| row.fanout_last_ms >= c.fanout_ttl_ms) {
@@ -296,13 +336,7 @@ pub const Mesh = struct {
         while (it.next()) |peer| if (!self.eligible(context, topic, @intCast(peer), context.scores.params.publish_threshold)) {
             row.fanout.unset(peer);
         };
-        var candidates_buf: [c.peers_cap]u16 = undefined;
-        const n = self.candidates(context, topic, &candidates_buf, false, context.scores.params.publish_threshold);
-        self.shuffle(candidates_buf[0..n]);
-        for (candidates_buf[0..n]) |peer| {
-            if (row.fanout.count() >= c.mesh_d) break;
-            row.fanout.set(peer);
-        }
+        self.fillPublication(context, topic, &row.fanout);
         return &row.fanout;
     }
 
@@ -433,6 +467,9 @@ test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
     };
     try std.testing.expect(high_selected);
     f.g.state.setSubscribed(f.topic, false);
+    for (f.g.state.peers) |*row| if (row.active) {
+        row.out_stream = .{ .conn = row.conn, .id = 2, .slot = 0 };
+    };
     const fanout = f.g.mesh_policy.fanout(&context, f.topic, true);
     try std.testing.expectEqual(@as(usize, c.mesh_d), fanout.count());
     try std.testing.expect(!fanout.isSet(0) and !fanout.isSet(1));

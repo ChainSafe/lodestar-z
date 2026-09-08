@@ -750,7 +750,12 @@ pub const Core = struct {
         now: Now,
     ) !gossip.Gossipsub.PublishOutcome {
         if (self.stopped) return error.Stopped;
-        return self.service.gossipsub.publish(topic, bytes, now);
+        return self.publishGossipWithOptions(topic, bytes, .{}, now);
+    }
+
+    pub fn publishGossipWithOptions(self: *Core, topic: []const u8, bytes: []const u8, options: gossip.Gossipsub.PublishOptions, now: Now) !gossip.Gossipsub.PublishOutcome {
+        if (self.stopped) return error.Stopped;
+        return self.service.gossipsub.publishWithOptions(topic, bytes, options, now);
     }
     pub fn subscribe(self: *Core, topic: []const u8) bool {
         if (self.stopped) return false;

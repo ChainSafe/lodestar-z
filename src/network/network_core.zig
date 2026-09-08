@@ -351,7 +351,11 @@ pub const NetworkCore = struct {
     }
 
     pub fn publishGossip(self: *NetworkCore, topic: []const u8, bytes: []const u8, now: Now) !gossip.Gossipsub.PublishOutcome {
-        return self.core.publishGossip(topic, bytes, now);
+        return self.publishGossipWithOptions(topic, bytes, .{}, now);
+    }
+
+    pub fn publishGossipWithOptions(self: *NetworkCore, topic: []const u8, bytes: []const u8, options: gossip.Gossipsub.PublishOptions, now: Now) !gossip.Gossipsub.PublishOutcome {
+        return self.core.publishGossipWithOptions(topic, bytes, options, now);
     }
     pub fn subscribe(self: *NetworkCore, topic: []const u8) bool {
         return self.core.subscribe(topic);

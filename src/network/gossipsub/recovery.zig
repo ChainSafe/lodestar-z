@@ -72,10 +72,11 @@ pub const Recovery = struct {
         return removed;
     }
 
-    pub fn controlSent(self: *Recovery, connection: Handle, token: u64, now_ms: u64) void {
+    pub fn controlSent(self: *Recovery, connection: Handle, token: u64, followup_ms: u64, now_ms: u64) void {
+        std.debug.assert(followup_ms > 0 and followup_ms <= 86_400_000);
         for (self.promises[0..self.len]) |*p| {
             if (p.expiry == null and p.token == token and std.meta.eql(p.connection, connection)) {
-                p.expiry = now_ms +| constants.iwant_followup_ms;
+                p.expiry = now_ms +| followup_ms;
             }
         }
     }
@@ -130,21 +131,21 @@ test "recovery receipts bind connection generation and token and release only ca
     const peer = peers.admit(connection, &metadata, 0).admitted.peer;
     recovery.add(&peers, [_]u8{1} ** 20, peer, connection, 7);
     recovery.add(&peers, [_]u8{2} ** 20, peer, connection, 8);
-    recovery.controlSent(next_connection, 7, 10);
-    recovery.controlSent(connection, 6, 10);
+    recovery.controlSent(next_connection, 7, 3000, 10);
+    recovery.controlSent(connection, 6, 3000, 10);
     try std.testing.expect(recovery.nextExpiry() == null);
-    recovery.controlSent(connection, 7, 20);
+    recovery.controlSent(connection, 7, 3000, 20);
     try std.testing.expectEqual(@as(?u64, 3020), recovery.nextExpiry());
     try std.testing.expectEqual(@as(u64, 0), recovery.cancel(&peers, next_connection, true));
     try std.testing.expectEqual(@as(u64, 1), recovery.cancel(&peers, connection, false));
     try std.testing.expectEqual(@as(u32, 1), peers.rows[peer.index].pins);
-    recovery.controlSent(connection, 7, 200);
-    recovery.controlSent(connection, 8, 200);
+    recovery.controlSent(connection, 7, 3000, 200);
+    recovery.controlSent(connection, 8, 3000, 200);
     try std.testing.expectEqual(@as(?u64, 3020), recovery.nextExpiry());
     try std.testing.expectEqual(@as(u64, 1), recovery.cancel(&peers, connection, true));
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
     try std.testing.expectEqual(@as(usize, constants.promises_cap), recovery.available());
-    recovery.controlSent(connection, 7, 300);
+    recovery.controlSent(connection, 7, 3000, 300);
     try std.testing.expect(recovery.nextExpiry() == null);
 }
 

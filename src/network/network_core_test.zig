@@ -240,7 +240,9 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
         if (!published and turn > 20 and a.core.service.gossipsub.inner.resourceSnapshot().remote_subscriptions > 0 and
             a.core.service.gossipsub.inner.peers.rows[0].direct)
         {
-            const sent = try a.publishGossip(topic, &response, tick);
+            const sent = try a.publishGossipWithOptions(topic, &response, .{ .allow_zero_peers = false }, tick);
+            try std.testing.expectError(error.Duplicate, a.publishGossip(topic, &response, tick));
+            try std.testing.expect((try a.publishGossipWithOptions(topic, &response, .{ .ignore_duplicate = true }, tick)).duplicate);
             published = sent.queued > 0;
         }
         const received = b.step(std.testing.io, tick, 100, .{ .gossipsub = if (turn > 30) &messages else &.{} }, 1);
