@@ -5,6 +5,8 @@ const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
 const proof = @import("proof.zig");
 const Depth = @import("hashing").Depth;
+const max_depth: usize = @import("hashing").max_depth;
+const hashOne = @import("hashing").hashOne;
 const ChunkedLeaf = @import("ChunkedLeaf.zig");
 
 const DescriptorTestCase = struct {
@@ -232,6 +234,90 @@ test "compact multiproof reconstruction should reject empty leaves" {
         proof.Error.InvalidWitnessLength,
         proof.createNodeFromCompactMultiProof(&pool, &leaves, &descriptor),
     );
+}
+
+fn spineDescriptor(depth: usize, left: bool, out: []u8) []const u8 {
+    const bit_length = 2 * depth + 1;
+    const bytes = out[0 .. (bit_length + 7) / 8];
+    @memset(bytes, 0);
+    for (0..depth + 1) |i| {
+        const bit_index = if (left) depth + i else @min(2 * i + 1, bit_length - 1);
+        bytes[bit_index / 8] |= @as(u8, 0x80) >> @intCast(bit_index % 8);
+    }
+    return bytes;
+}
+
+test "compact multiproof reconstruction rejects paths beyond max_depth" {
+    const depth = max_depth + 1;
+    var descriptor_bytes: [(2 * depth + 8) / 8]u8 = undefined;
+    var leaves: [depth + 1][32]u8 = @splat(makeLeaf(1));
+    for ([_]bool{ true, false }) |left| {
+        var pool = try Node.Pool.init(.{
+            .page_allocator = testing.allocator,
+            .allocator = testing.allocator,
+            .pool_size = 2 * depth + 1,
+        });
+        defer pool.deinit();
+        const baseline = pool.getNodesInUse();
+        const descriptor = spineDescriptor(depth, left, &descriptor_bytes);
+
+        try testing.expectError(error.InvalidProofDepth, proof.createNodeFromCompactMultiProof(&pool, &leaves, descriptor));
+        try testing.expectEqual(baseline, pool.getNodesInUse());
+    }
+}
+
+test "compact multiproof depth validation precedes allocation" {
+    const depth = max_depth + 1;
+    var descriptor_bytes: [(2 * depth + 8) / 8]u8 = undefined;
+    var leaves: [depth + 1][32]u8 = @splat(makeLeaf(1));
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var pool = try Node.Pool.init(.{
+        .page_allocator = testing.allocator,
+        .allocator = failing.allocator(),
+        .pool_size = 0,
+    });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+
+    for ([_]bool{ true, false }) |left| {
+        const descriptor = spineDescriptor(depth, left, &descriptor_bytes);
+        try testing.expectError(error.InvalidProofDepth, proof.descriptorToBitlist(failing.allocator(), descriptor));
+        try testing.expectError(error.InvalidProofDepth, proof.createNodeFromCompactMultiProof(&pool, &leaves, descriptor));
+        try testing.expectEqual(baseline, pool.getNodesInUse());
+        try testing.expect(!failing.has_induced_failure);
+    }
+}
+
+test "compact multiproof reconstruction hashes depth zero and max_depth spines" {
+    var descriptor_bytes: [(2 * max_depth + 8) / 8]u8 = undefined;
+    var leaves: [max_depth + 1][32]u8 = undefined;
+    for (&leaves, 0..) |*leaf, i| leaf.* = makeLeaf(@intCast(i));
+
+    for ([_]usize{ 0, max_depth }) |depth| {
+        for ([_]bool{ true, false }) |left| {
+            var pool = try Node.Pool.init(.{
+                .page_allocator = testing.allocator,
+                .allocator = testing.allocator,
+                .pool_size = @intCast(2 * depth + 1),
+            });
+            defer pool.deinit();
+            const descriptor = spineDescriptor(depth, left, &descriptor_bytes);
+            const root = try proof.createNodeFromCompactMultiProof(&pool, leaves[0 .. depth + 1], descriptor);
+            defer pool.unref(root);
+
+            var expected = if (left) leaves[0] else leaves[depth];
+            for (0..depth) |i| {
+                var next: [32]u8 = undefined;
+                if (left) {
+                    hashOne(&next, &expected, &leaves[i + 1]);
+                } else {
+                    hashOne(&next, &leaves[depth - i - 1], &expected);
+                }
+                expected = next;
+            }
+            try testing.expectEqualSlices(u8, &expected, root.getRoot(&pool));
+        }
+    }
 }
 
 // Prove individual chunks inside a `.chunked_leaf` node: createSingleProof
