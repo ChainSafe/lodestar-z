@@ -24,6 +24,7 @@ pub const InitError = reqresp_mod.service.InitError || gossip_mod.service.InitEr
 pub const Service = struct {
     identify: ?identify_mod.Handler,
     automatic_gossip_admission: bool,
+    applications: enum { active, quiescing, closed } = .active,
     router: routing.Router,
     reqresp: reqresp_mod.Handler,
     gossipsub: gossip_mod.Handler,
@@ -76,6 +77,7 @@ pub const Service = struct {
         options: reqresp_mod.reqresp.RequestOptions,
         now: types.Now,
     ) reqresp_mod.reqresp.RequestError!reqresp_mod.RequestHandle {
+        if (self.applications != .active and !protocol.isControl()) return error.ProtocolDisabled;
         return self.reqresp.request(
             &self.router,
             engine,
@@ -120,7 +122,7 @@ pub const Service = struct {
             capacities.application,
             capacities.control,
         );
-        const gossip = self.gossipsub.nextWakeup(now, capacities.gossipsub);
+        const gossip = if (self.applications == .active) self.gossipsub.nextWakeup(now, capacities.gossipsub) else null;
         const identify_due = if (self.identify) |*identify| identify.nextWakeup(now, capacities.identify) else null;
         var due = request_due;
         for ([_]?u64{ gossip, identify_due }) |next| if (next) |value| {
@@ -145,7 +147,7 @@ pub const Service = struct {
         if (self.identify) |*identify| _ = identify.pump(&self.router, engine, now, &.{});
         return .{
             .reqresp = self.reqresp.pump(&self.router, engine, now, requests),
-            .gossipsub = self.gossipsub.pump(&self.router, engine, now, gossip),
+            .gossipsub = if (self.applications == .active) self.gossipsub.pump(&self.router, engine, now, gossip) else 0,
         };
     }
 
@@ -166,7 +168,24 @@ pub const Service = struct {
     pub fn processOutputs(self: *Service, engine: *engine_mod.Engine, events: []const engine_mod.Event, activity: []const engine_mod.Handle, now: types.Now, outputs: Outputs) OutputCounts {
         self.prepare(engine, events, activity, now);
         const counts = self.reqresp.pumpPartitioned(&self.router, engine, now, outputs.application, outputs.control);
-        return .{ .application = counts.application, .control = counts.control, .gossipsub = self.gossipsub.pump(&self.router, engine, now, outputs.gossipsub), .identify = if (self.identify) |*identify| identify.pump(&self.router, engine, now, outputs.identify) else 0 };
+        return .{ .application = counts.application, .control = counts.control, .gossipsub = if (self.applications == .active) self.gossipsub.pump(&self.router, engine, now, outputs.gossipsub) else 0, .identify = if (self.identify) |*identify| identify.pump(&self.router, engine, now, outputs.identify) else 0 };
+    }
+
+    /// Defer stream cleanup until the next process call, preserving the current event borrows.
+    pub fn quiesceApplications(self: *Service) void {
+        if (self.applications == .active) self.applications = .quiescing;
+    }
+
+    fn rejectApplication(self: *const Service, outcome: *const routing.Outcome) bool {
+        if (self.applications == .active) return false;
+        return switch (outcome.result) {
+            .ready => |selection| switch (selection.protocol) {
+                .reqresp => |which| !which.isControl(),
+                .meshsub => true,
+                .identify => false,
+            },
+            else => false,
+        };
     }
 
     fn prepare(
@@ -177,23 +196,32 @@ pub const Service = struct {
         now: types.Now,
     ) void {
         std.debug.assert(activity.len <= engine.limits.connections_max);
+        if (self.applications == .quiescing) {
+            self.reqresp.inner.cancelApplications(engine, &self.router);
+            self.gossipsub.shutdown(&self.router, engine);
+            self.applications = .closed;
+        }
         for (activity) |conn| {
             if (self.identify) |*identify| identify.connectionActivity(conn);
             self.reqresp.inner.connectionActivity(conn);
-            self.gossipsub.connectionActivity(conn);
+            if (self.applications == .active) self.gossipsub.connectionActivity(conn);
         }
         self.reqresp.inner.cleanupPending(engine, &self.router);
         self.router.transportEvents(engine, events, now);
         self.reqresp.transportEvents(events);
         if (self.identify) |*identify| identify.transportEvents(engine, events);
         for (events) |event| {
-            if (!self.automatic_gossip_admission and event == .connected) continue;
+            if (self.applications != .active or (!self.automatic_gossip_admission and event == .connected)) continue;
             self.gossipsub.transportEvents(engine, &.{event}, now);
         }
         var outcomes: [routing.outcomes_per_pump]routing.Outcome = undefined;
         const count = self.router.pump(engine, now, &outcomes);
         for (outcomes[0..count]) |outcome| {
             const owner = outcome.owner orelse continue;
+            if (self.rejectApplication(&outcome)) {
+                engine.closeStream(outcome.stream, 0);
+                continue;
+            }
             switch (owner) {
                 .identify => if (self.identify) |*identify| identify.negotiationResult(&self.router, engine, outcome, now),
                 .reqresp => self.reqresp.negotiationResult(engine, outcome, now),

@@ -63,6 +63,19 @@ pub const Handler = struct {
         self.* = undefined;
     }
 
+    pub fn shutdown(self: *Handler, router: *routing.Router, engine: *Engine) void {
+        for (self.streams, 0..) |*supervisor, index| {
+            const peer = supervisor.peer orelse continue;
+            if (!self.inner.state.peerMatches(peer.index, peer.generation)) continue;
+            if (supervisor.outbound == .negotiating) router.cancel(engine, supervisor.outbound.negotiating);
+            const conn = self.inner.state.peers[index].conn;
+            self.inner.resetInbound(engine, @intCast(index));
+            self.inner.resetOutbound(engine, @intCast(index));
+            self.inner.connectionClosed(conn);
+            supervisor.* = .{};
+        }
+    }
+
     pub fn subscribe(self: *Handler, topic: []const u8) bool {
         return self.inner.subscribe(topic);
     }
