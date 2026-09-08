@@ -87,9 +87,9 @@ test "clone" {
     var b: Bits.Type = try Bits.Type.fromBitLen(allocator, 30);
     defer b.deinit(allocator);
 
-    var cloned: Bits.Type = undefined;
-    try Bits.clone(allocator, &b, &cloned);
+    var cloned = Bits.default_value;
     defer cloned.deinit(allocator);
+    try Bits.clone(allocator, &b, &cloned);
 
     try std.testing.expect(&b != &cloned);
     try std.testing.expect(b.bit_len == cloned.bit_len);
