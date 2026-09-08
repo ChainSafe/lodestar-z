@@ -1,30 +1,13 @@
 import assert from "node:assert/strict";
-import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
-import {pathToFileURL} from "node:url";
 import {Child, verifyExecutable, waitFor} from "./child.mjs";
 import {TOPIC, encodePayload, messageId, payload, readPayload, sendFragments, summary} from "./codec.mjs";
 import {status2} from "./managed_wire.mjs";
+import {stockPackages} from "./stock_packages.mjs";
 
 const hostRoot = process.argv[3];
 assert(hostRoot, "pass the pinned Lodestar host root as the second argument");
-async function packageInfo(name) {
-  const directory = resolve(hostRoot, "packages/beacon-node/node_modules", name);
-  return {directory, pkg: JSON.parse(await readFile(resolve(directory, "package.json"), "utf8"))};
-}
-async function load(name) {
-  const parts = name.split("/");
-  const packageName = parts.slice(0, name.startsWith("@") ? 2 : 1).join("/");
-  const subpath = name.slice(packageName.length);
-  const {directory, pkg} = await packageInfo(packageName);
-  const entry = pkg.exports?.[subpath ? `.${subpath}` : "."];
-  const target = typeof entry === "string" ? entry : (entry?.import ?? entry?.default ?? pkg.main);
-  assert(typeof target === "string", `missing ESM export: ${name}`);
-  return import(pathToFileURL(resolve(directory, target)).href);
-}
-async function version(name) {
-  return (await packageInfo(name)).pkg.version;
-}
+const {load, version} = stockPackages(hostRoot);
 const packages = ["libp2p", "@libp2p/identify", "@libp2p/gossipsub", "@libp2p/crypto", "@chainsafe/libp2p-quic"];
 const versions = Object.fromEntries(await Promise.all(packages.map(async (name) => [name, await version(name)])));
 const {createLibp2p} = await load("libp2p");

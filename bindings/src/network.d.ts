@@ -167,6 +167,7 @@ export interface NativeIdentity {
 export type NativeRuntimeState = "starting" | "prepared" | "running" | "stopping" | "closed" | "failed";
 
 export interface NativeRuntimeDiagnostics {
+  requests: NativeRequestDiagnostics;
   state: NativeRuntimeState;
   terminalErrorCode: string | null;
   session: bigint;
@@ -337,6 +338,12 @@ export interface NativePeerBatch {
 }
 
 export interface NativeNetworkApplicationRuntime {
+  request(
+    peerId: Uint8Array,
+    protocol: string,
+    data: Uint8Array,
+    options?: NativeRequestOptions
+  ): AsyncIterableIterator<NativeResponseChunk>;
   readonly ready: Promise<NativeIdentity>;
   readonly state: NativeRuntimeState;
   diagnostics(): NativeRuntimeDiagnostics;
@@ -458,4 +465,73 @@ export interface NativeResolvedCapacities {
   gossipConnectedCapacity: number;
   gossipRetainedCapacity: number;
   dialEngineCapacity: number;
+}
+
+export interface NativeRequestOptions {
+  expectedChunks?: number;
+  negotiationTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  responseTimeoutMs?: number;
+}
+export interface NativeResponseChunk {
+  data: Uint8Array;
+  fork: NetworkFork | null;
+  protocol: string;
+}
+export type NativeRequestPhase = "negotiation" | "request" | "response";
+export type NativeRequestRejection =
+  | "disconnected"
+  | "protocol_disabled"
+  | "invalid_request"
+  | "invalid_request_options"
+  | "too_many_requests"
+  | "slots_exhausted"
+  | "negotiation_table_full"
+  | "transport";
+export type NativeRequestFailure =
+  | "timeout"
+  | "host_timeout"
+  | "quota_timeout"
+  | "cancelled"
+  | "negotiation_rejected"
+  | "negotiation_failed"
+  | "invalid_response"
+  | "too_many_chunks"
+  | "unknown_context"
+  | "peer_error"
+  | "connection_closed"
+  | "stream_closed"
+  | "transport";
+export type NativeRequestError = Error &
+  (
+    | {code: "NetworkRequestRejected"; reason: NativeRequestRejection}
+    | {
+        code: "NetworkRequestFailed";
+        reason: NativeRequestFailure;
+        phase: NativeRequestPhase | null;
+        detail: string | null;
+        context: Uint8Array | null;
+        peerStatus: number | null;
+        peerMessage: Uint8Array | null;
+      }
+    | {code: "NetworkClosed"}
+    | {code: "NetworkRequestBusy"}
+  );
+export interface NativeRequestDiagnostics {
+  capacity: number;
+  occupied: number;
+  highWater: number;
+  pendingPulls: number;
+  terminalCells: number;
+  reservedBytes: number;
+  reservedBytesHighWater: number;
+  inputBytes: number;
+  sinkBytes: number;
+  copyingBytes: number;
+  chunksCopied: bigint;
+  bytesCopied: bigint;
+  requestFull: bigint;
+  commandFull: bigint;
+  bridgeFull: bigint;
+  busyPulls: bigint;
 }

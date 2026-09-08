@@ -7,6 +7,8 @@ const r = @import("network_runtime.zig");
 const Runtime = r.Runtime;
 const faults = @import("network_faults.zig");
 const Value = napi.Value;
+const requests = @import("network_requests.zig");
+const request_js = @import("network_request_js.zig");
 
 pub const js_meta = js.class(.{});
 
@@ -90,8 +92,12 @@ fn acquire(self: *@This(), config: js.Value, callback: js.Value, application: bo
 fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Config) !void {
     runtime.peer_capacity = app.resources.peerCapacity;
     runtime.max_peers = app.resources.maxPeers;
-    const bridge = @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
+    const resolved = try n.configuration.resolve(try app.resolve(&runtime.heavy.?.config, 1));
+    const limits = resolved.core.service.reqresp;
+    const request_capacity: usize = @min(32, limits.outbound_max - limits.outbound_control_reserved);
+    const bridge = request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
     if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
+    runtime.requests = try requests.Table.init(r.allocator, request_capacity, app.resources.bridgeBudgetBytes - bridge);
     runtime.stores = try r.Stores.create(r.allocator, runtime.peer_capacity);
     try faults.check(.application_lane);
     runtime.lane = try r.allocator.create(projection.Lane);
@@ -118,6 +124,7 @@ pub fn deinit(self: *@This()) void {
     if (self.runtime) |runtime| {
         runtime.forceStop(false);
         runtime.removeHook();
+        if (runtime.notify_finalized) runtime.retireClosedRequests();
         runtime.release();
         self.runtime = null;
     }
@@ -127,7 +134,7 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
     runtime.lock();
     runtime.notification_pending = false;
     const alive = runtime.env_alive;
-    const unref_notify = alive and runtime.notify_live and !runtime.stop and runtime.startup == .ready and runtime.table.occupied == 0;
+    const unref_notify = alive and runtime.notify_live and !runtime.stop and runtime.startup == .ready and runtime.table.occupied == 0 and !runtime.requestObligations();
     const startup = runtime.startup;
     const startup_error = runtime.startup_error;
     const session = runtime.diag.session;
@@ -150,8 +157,9 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
         } else rejectReady(env, runtime, startup_error.?);
     }
     settleOperations(env, runtime);
+    request_js.settle(env, runtime);
     runtime.lock();
-    const idle = runtime.table.occupied == 0 and runtime.notify_live and !runtime.stop;
+    const idle = runtime.table.occupied == 0 and !runtime.requestObligations() and runtime.notify_live and !runtime.stop;
     runtime.unlock();
     if (idle) runtime.notify.unref(env) catch {};
     settleClose(env, runtime);
@@ -278,6 +286,7 @@ pub fn diagnostics(self: *@This()) !js.Value {
     const resolved = try js.env().createObject();
     inline for (@typeInfo(r.ResolvedCapacities).@"struct".fields) |field| try put(resolved, field.name, try js.env().createUint32(@field(snapshot.resolvedCapacities, field.name)));
     try put(object, "resolvedCapacities", resolved);
+    try put(object, "requests", try request_js.diagnostics(js.env(), &snapshot.requests));
     return .{ .val = object };
 }
 fn diagnosticPeer(object: Value, value: r.Observation.Peer) !void {
@@ -521,4 +530,14 @@ pub fn drainPeers(self: *@This(), limit: js.Value) !js.Value {
     }
     runtime.unlock();
     return .{ .val = object };
+}
+
+pub fn requestStart(self: *@This(), peer: js.Value, protocol: js.Value, data: js.Value, options: js.Value) !js.Value {
+    return .{ .val = try request_js.start(try self.owner(), peer.val, protocol.val, data.val, options.val) };
+}
+pub fn requestPull(self: *@This(), handle: js.Value) !js.Value {
+    return .{ .val = try request_js.pull(try self.owner(), handle.val) };
+}
+pub fn requestRetire(self: *@This(), handle: js.Value, abandoned: js.Value) !js.Value {
+    return .{ .val = try request_js.retire(try self.owner(), handle.val, try cfg.boolean(abandoned.val)) };
 }

@@ -33,6 +33,8 @@ pub const Peer = struct {
     finish_calls: usize = 0,
     quit: bool = false,
     status_accepted: bool = false,
+    application: bool = false,
+    control_responses: [8][92]u8 = undefined,
 
     pub fn pump(self: *Peer) !void {
         if (self.steps >= 10_000_000) return error.StepBound;
@@ -83,6 +85,29 @@ pub const Peer = struct {
     fn requestEvent(self: *Peer, event: network.reqresp.Event) !void {
         switch (event) {
             .request => |r| {
+                if (self.application and r.protocol.isControl()) {
+                    if (r.protocol == .goodbye_v1) {
+                        std.debug.assert(self.service.reqresp.finish(r.request, self.now));
+                        return;
+                    }
+                    const out = &self.control_responses[r.request.index];
+                    @memset(out, 0);
+                    const len: usize = switch (r.protocol) {
+                        .status_v1, .status_v2, .ping_v1 => blk: {
+                            @memcpy(out[0..r.bytes.len], r.bytes);
+                            break :blk r.bytes.len;
+                        },
+                        .metadata_v1 => 16,
+                        .metadata_v2 => 17,
+                        .metadata_v3 => blk: {
+                            out[17] = 1;
+                            break :blk 25;
+                        },
+                        else => unreachable,
+                    };
+                    try self.service.reqresp.respond(r.request, out[0..len], null, self.now);
+                    return;
+                }
                 if (r.protocol == .status_v2 and self.service.identify != null) {
                     const remote = try network.peers.control_wire.decodeStatus(.status_v2, r.bytes);
                     const local = try network.peers.control_wire.decodeStatus(.status_v2, &identify_status);
@@ -131,7 +156,7 @@ pub const Peer = struct {
         if (std.mem.eql(u8, c.op, "listen")) {
             var text: [network.wire.multiaddr.text_length_max]u8 = undefined;
             const addr = self.transport.localMultiaddr();
-            return control.emit(self.allocator, .{ .id = c.id, .ok = true, .address = try addr.toText(&text) });
+            return control.emit(self.allocator, .{ .id = c.id, .ok = true, .address = try addr.toText(&text), .peer = &std.fmt.bytesToHex(addr.peer.?.bytes, .lower) });
         }
         if (std.mem.eql(u8, c.op, "snapshot")) return snapshot.emit(self, c.id);
         if (std.mem.eql(u8, c.op, "dial")) {
@@ -240,10 +265,11 @@ pub fn main(init: std.process.Init) !void {
     var quotas = network.reqresp.limiter.defaultQuotas();
     quotas[@intFromEnum(network.reqresp.Protocol.ping_v1)] = .{ .tokens = 16, .period_ms = 30_000 };
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    const identify_enabled = args.len == 2 and std.mem.eql(u8, args[1], "--identify");
+    const application = args.len == 2 and std.mem.eql(u8, args[1], "--application");
+    const identify_enabled = application or (args.len == 2 and std.mem.eql(u8, args[1], "--identify"));
     const peer = try a.create(Peer);
     defer a.destroy(peer);
-    peer.* = .{ .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = if (identify_enabled) .{ .agent = "lodestar-z-identify" } else null, .reqresp = .{ .peers = 4, .outbound_max = 1, .inbound_max = 1, .inbound_per_peer_max = 1, .forks = &.{.{ .digest = .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
+    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = if (identify_enabled) .{ .agent = "lodestar-z-identify" } else null, .reqresp = .{ .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
     defer peer.service.deinit();
     peer.sink = try a.alloc(u8, max_payload);
     defer a.free(peer.sink);
