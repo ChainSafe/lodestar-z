@@ -174,6 +174,18 @@ pub const Router = struct {
         return self.negotiator.beginOutbound(engine, conn, protocol.id(), now);
     }
 
+    pub fn beginReqRespTimed(
+        self: *Router,
+        engine: *engine_mod.Engine,
+        conn: engine_mod.Handle,
+        protocol: @import("reqresp/protocol.zig").Protocol,
+        now: types.Now,
+        timeout_ms: u64,
+    ) Error!engine_mod.StreamHandle {
+        if (!self.active_capabilities.request.contains(.{ .reqresp = protocol })) return error.ProtocolDisabled;
+        return self.negotiator.beginOutboundTimed(engine, conn, protocol, now, timeout_ms);
+    }
+
     pub fn beginMeshsub(
         self: *Router,
         engine: *engine_mod.Engine,

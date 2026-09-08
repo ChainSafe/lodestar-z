@@ -55,6 +55,7 @@ const Entry = struct {
     control: bool = false,
     stream: StreamHandle = undefined,
     started_ms: u64 = 0,
+    timeout_ms: u64 = negotiate_timeout_ms,
     role: Role = undefined,
     selected: ?u8 = null,
     needs_service: bool = false,
@@ -136,7 +137,18 @@ pub const Negotiator = struct {
         now: types.Now,
     ) Error!StreamHandle {
         if (!protocol.isControl()) return error.InvalidLimits;
-        return self.beginCandidates(engine, conn, &.{protocol.id()}, now, true);
+        return self.beginCandidates(engine, conn, &.{protocol.id()}, now, true, self.timeout_ms);
+    }
+
+    pub fn beginOutboundTimed(
+        self: *Negotiator,
+        engine: *Engine,
+        conn: Handle,
+        protocol: @import("reqresp/protocol.zig").Protocol,
+        now: types.Now,
+        timeout_ms: u64,
+    ) Error!StreamHandle {
+        return self.beginCandidates(engine, conn, &.{protocol.id()}, now, protocol.isControl(), timeout_ms);
     }
 
     /// Copies the bounded offer list; protocol strings must outlive negotiation.
@@ -147,7 +159,7 @@ pub const Negotiator = struct {
         protocols: []const []const u8,
         now: types.Now,
     ) Error!StreamHandle {
-        return self.beginCandidates(engine, conn, protocols, now, false);
+        return self.beginCandidates(engine, conn, protocols, now, false, self.timeout_ms);
     }
 
     fn beginCandidates(
@@ -157,7 +169,9 @@ pub const Negotiator = struct {
         protocols: []const []const u8,
         now: types.Now,
         control: bool,
+        timeout_ms: u64,
     ) Error!StreamHandle {
+        if (timeout_ms == 0) return error.InvalidLimits;
         if (protocols.len == 0 or protocols.len > candidates_max) return error.InvalidLimits;
         for (protocols) |protocol| _ = try multistream.Dialer.init(protocol);
         const entry = self.claim(control) orelse return error.NegotiationTableFull;
@@ -171,6 +185,7 @@ pub const Negotiator = struct {
         entry.control = control;
         entry.stream = stream;
         entry.started_ms = now.mono_ms;
+        entry.timeout_ms = timeout_ms;
         entry.role = .{ .dialer = dialer };
         entry.selected = null;
         entry.fin_seen = false;
@@ -195,6 +210,7 @@ pub const Negotiator = struct {
         assert(entry.state == .free);
         entry.stream = stream;
         entry.started_ms = now.mono_ms;
+        entry.timeout_ms = self.timeout_ms;
         entry.control = false;
         @memcpy(entry.supported[0..supported.len], supported);
         entry.role = .{ .listener = multistream.Listener.init(entry.supported[0..supported.len]) };
@@ -217,7 +233,7 @@ pub const Negotiator = struct {
             },
             .negotiating => {
                 if (entry.needs_service) return now.mono_ms;
-                const due = @max(now.mono_ms, entry.started_ms +| self.timeout_ms);
+                const due = @max(now.mono_ms, entry.started_ms +| entry.timeout_ms);
                 deadline = if (deadline) |prior| @min(prior, due) else due;
             },
         };
@@ -308,10 +324,10 @@ pub const Negotiator = struct {
         return null;
     }
 
-    fn advance(self: *Negotiator, engine: *Engine, entry: *Entry, now: types.Now) ?Outcome {
+    fn advance(_: *Negotiator, engine: *Engine, entry: *Entry, now: types.Now) ?Outcome {
         assert(entry.state == .negotiating);
         const waited_ms = now.mono_ms -| entry.started_ms;
-        if (waited_ms >= self.timeout_ms) return fail(engine, entry, .timeout);
+        if (waited_ms >= entry.timeout_ms) return fail(engine, entry, .timeout);
         const flushed = entry.outbox.pump(engine, entry.stream) catch |err|
             return failStream(engine, entry, err);
         if (!flushed) return null;
@@ -413,4 +429,27 @@ comptime {
     assert(supported_max < std.math.maxInt(u8));
     assert(negotiations_max_default <= negotiations_max_ceiling);
     assert(2 * multistream.message_length_max <= outbox_capacity);
+}
+
+test "negotiation timed entry owns exact expiry below and above the default" {
+    const support = @import("test_support.zig");
+    for ([_]u64{ 50, 20_000 }) |duration| {
+        var pair: support.Pair = .{};
+        try pair.init(.{}, .{});
+        defer pair.deinit();
+        const handles = try support.connectPair(&pair);
+        var negotiator = try Negotiator.init(std.testing.allocator, 2);
+        defer negotiator.deinit();
+        const stream = try negotiator.beginOutboundTimed(&pair.client, handles.client, .ping_v1, pair.now, duration);
+        const due = pair.now.mono_ms + duration;
+        var outcomes: [1]Outcome = undefined;
+        try std.testing.expectEqual(@as(usize, 0), negotiator.pump(&pair.client, pair.now, &outcomes));
+        try std.testing.expectEqual(@as(?u64, due), negotiator.nextWakeup(pair.now, 1));
+        pair.now.mono_ms = due - 1;
+        try std.testing.expectEqual(@as(usize, 0), negotiator.pump(&pair.client, pair.now, &outcomes));
+        pair.now.mono_ms = due;
+        try std.testing.expectEqual(@as(usize, 1), negotiator.pump(&pair.client, pair.now, &outcomes));
+        try std.testing.expectEqual(stream, outcomes[0].stream);
+        try std.testing.expectEqual(.timeout, outcomes[0].result.failed);
+    }
 }
