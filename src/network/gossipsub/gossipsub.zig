@@ -596,7 +596,7 @@ pub const Gossipsub = struct {
     }
 
     pub const PublishOptions = struct { allow_zero_peers: bool = true, ignore_duplicate: bool = false, flood: bool = false };
-    pub const PublishError = error{ PayloadTooLarge, UnknownTopic, CompressFailed, ResourceExhausted, Duplicate, NoPeersSubscribedToTopic };
+    pub const PublishError = error{ PayloadTooSmall, PayloadTooLarge, UnknownTopic, CompressFailed, ResourceExhausted, Duplicate, NoPeersSubscribedToTopic };
     pub const PublishOutcome = struct { queued: u16 = 0, pressured: u16 = 0, selected: u16 = 0, unavailable: u16 = 0, duplicate: bool = false };
 
     pub fn publish(self: *Gossipsub, topic_str: []const u8, ssz: []const u8, now: Now) PublishError!PublishOutcome {
@@ -610,6 +610,7 @@ pub const Gossipsub = struct {
         if (ssz.len > constants.MAX_PAYLOAD_SIZE) return error.PayloadTooLarge;
         if (!self.validTopic(topic_str)) return error.UnknownTopic;
         if (self.namespace) |*ns| {
+            if (ssz.len < ns.lookup(topic_str).?.rule.ssz_min) return error.PayloadTooSmall;
             if (ssz.len > ns.lookup(topic_str).?.rule.ssz_max) return error.PayloadTooLarge;
         }
         const id = topic_mod.validMessageId(topic_str, ssz, self.options.message_id_policy);

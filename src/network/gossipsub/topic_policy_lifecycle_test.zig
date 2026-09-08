@@ -97,7 +97,7 @@ test "topic policy incoming lengths precede decode work arena store and validati
     try std.testing.expect(peer_work > 0);
 }
 
-test "topic policy local publication enforces maximum before state but permits below minimum" {
+test "topic policy local publication enforces both size bounds before state" {
     var g = try Gossipsub.init(std.testing.allocator, options(&.{boundary()}));
     defer g.deinit();
     try std.testing.expectError(error.PayloadTooLarge, g.publish(name, "012345678901234567890", .{ .mono_ms = 1, .unix_s = 0 }));
@@ -107,9 +107,11 @@ test "topic policy local publication enforces maximum before state but permits b
     try std.testing.expectError(error.InvalidTopic, g.configureTopic(unknown, &.{}));
     try std.testing.expect(!g.subscribe(unknown));
     try std.testing.expectEqual(@as(usize, 0), live(&g));
-    _ = try g.publish(name, "short", .{ .mono_ms = 1, .unix_s = 0 });
+    try std.testing.expectError(error.PayloadTooSmall, g.publish(name, "short", .{ .mono_ms = 1, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(usize, 0), live(&g));
+    _ = try g.publish(name, "0123456789", .{ .mono_ms = 1, .unix_s = 0 });
     try std.testing.expectEqual(@as(u64, 1), g.counters.messages_published);
-    try std.testing.expectError(error.Duplicate, g.publish(name, "short", .{ .mono_ms = 1, .unix_s = 0 }));
+    try std.testing.expectError(error.Duplicate, g.publish(name, "0123456789", .{ .mono_ms = 1, .unix_s = 0 }));
 }
 
 test "topic policy physical close clears bits while same connection stream replacement preserves them" {
@@ -162,9 +164,14 @@ test "topic policy real wire receives only bounded SSZ and keeps borrowed payloa
             for (pair.serverEvents()) |event| if (event == .message) {
                 try std.testing.expect(size == 10 or size == 20);
                 seen += 1;
+                const entry = &pair.server.validation.entries[event.message.handle.index];
+                try std.testing.expectEqual(entry.admitted_ms, event.message.admitted_ms);
+                try std.testing.expectEqual(entry.deadline, event.message.deadline);
+                try std.testing.expect(event.message.identity.eql(&pair.server.peers.rows[entry.source.index].identity));
                 try std.testing.expectEqualSlices(u8, payload[0..size], event.message.bytes);
                 try pair.server.configureTopic(event.message.topic, &.{ .weight = 2 });
-                const local: [2]u8 = .{ 'x', @intCast(size) };
+                var local: [10]u8 = @splat('x');
+                local[0] = @intCast(size);
                 _ = try pair.server.publish(event.message.topic, &local, pair.pair.now);
                 try std.testing.expectEqualStrings(name, event.message.topic);
                 try std.testing.expectEqualSlices(u8, payload[0..size], event.message.bytes);
