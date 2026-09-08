@@ -68,6 +68,7 @@ pub const Table = struct {
     cells: []Cell = &.{},
     backing: std.mem.Allocator,
     budget: usize,
+    shared: ?*@import("network_incoming.zig").Budget = null,
     diag: Diagnostics = .{},
 
     pub fn init(backing: std.mem.Allocator, capacity: usize, budget: usize) !Table {
@@ -102,6 +103,10 @@ pub const Table = struct {
             self.diag.bridgeFull +|= 1;
             return error.NetworkBridgeFull;
         }
+        if (self.shared) |shared| shared.reserve(amount) catch |err| {
+            self.diag.bridgeFull +|= 1;
+            return err;
+        };
         self.cells[token.index] = .{ .state = .preparing, .generation = token.generation, .protocol = which, .reservation = amount };
         self.diag.occupied += 1;
         self.diag.highWater = @max(self.diag.highWater, self.diag.occupied);
@@ -125,6 +130,7 @@ pub const Table = struct {
         if (cell.chunk != null) return;
         self.backing.free(cell.sink);
         cell.sink = &.{};
+        if (self.shared) |shared| shared.release(cell.reservation);
         self.diag.reservedBytes -= cell.reservation;
         cell.reservation = 0;
     }
@@ -220,9 +226,10 @@ pub fn capture(runtime: *Runtime, events: []const rr.Event, now: n.Now) !void {
     defer runtime.unlock();
     const core = &runtime.heavy.?.core;
     for (events) |event| {
+        try @import("network_incoming.zig").captureLocked(runtime, event, now);
         switch (event) {
             .request => |incoming| {
-                try core.respondError(incoming.request, 2, "application handlers unavailable", now);
+                if (runtime.incoming == null) try core.respondError(incoming.request, 2, "application handlers unavailable", now);
                 continue;
             },
             .chunk_sent, .served, .over_limit => continue,

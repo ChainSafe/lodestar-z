@@ -1,3 +1,4 @@
+pub const testing = if (@import("builtin").is_test) @import("reqresp_test.zig") else struct {};
 pub const codec = @import("codec.zig");
 pub const constants = @import("constants.zig");
 pub const request_policy = @import("request_policy.zig");

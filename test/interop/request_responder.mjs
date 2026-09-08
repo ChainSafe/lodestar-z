@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
+import {resolve} from "node:path";
+import {pathToFileURL} from "node:url";
 import {boundedLines} from "./bounded_lines.mjs";
-import {encodePayload, payload, readPayload, sendFragments} from "./codec.mjs";
+import {encodePayload, payload, readPayload, sendFragments, summary} from "./codec.mjs";
 import {readEmptyRequest} from "./managed_control.mjs";
 import {stockPackages} from "./stock_packages.mjs";
 
@@ -152,6 +154,51 @@ for await (const line of boundedLines(process.stdin)) {
       const reply = await readPayload(stream, true);
       assert.equal(reply.result, 0);
       response = {length: reply.bytes.length};
+    } else if (command.op === "request") {
+      command.address ??= multiaddr(Buffer.from(command.addressBytes, "hex")).toString();
+      assert(/^\/ip4\/127\.0\.0\.1\/udp\/[0-9]+\/quic-v1\/p2p\/[A-Za-z0-9]+$/.test(command.address));
+      const {responseDecode} = await import(
+        pathToFileURL(resolve(process.argv[2], "packages/reqresp/lib/encoders/responseDecode.js")).href
+      );
+      const stream = await node.dialProtocol(multiaddr(command.address), blockProtocol, {
+        signal: AbortSignal.timeout(5000),
+      });
+      try {
+        const input = Buffer.from(command.data ?? "00".repeat(64), "hex");
+        assert(input.length <= 4096);
+        await sendFragments(stream, encodePayload(input), AbortSignal.timeout(5000));
+        await stream.close({signal: AbortSignal.timeout(5000)});
+        const contexts = [];
+        const protocol = {
+          contextBytes: {
+            config: {
+              forkDigest2ForkBoundary(bytes) {
+                const digest = Buffer.from(bytes).toString("hex");
+                assert(["01020304", "05060708"].includes(digest));
+                contexts.push(digest);
+                return {fork: "deneb"};
+              },
+            },
+            type: 1,
+          },
+          encoding: "ssz_snappy",
+          responseSizes: () => ({maxSize: 10 * 1024 * 1024, minSize: 1000}),
+          version: 2,
+        };
+        const chunks = [];
+        try {
+          for await (const chunk of responseDecode(protocol, stream, {signal: AbortSignal.timeout(20000)})) {
+            assert(chunks.length < 8);
+            chunks.push({...summary(chunk.data), fork: chunk.fork});
+          }
+          response = {chunks, contexts};
+        } catch (error) {
+          if (typeof error.status !== "number") throw error;
+          response = {chunks, contexts, message: error.type.errorMessage, status: error.status};
+        }
+      } finally {
+        stream.abort(Error("fixture request finished"));
+      }
     } else if (command.op === "shutdown") {
       for (const stream of held) stream.abort(Error("fixture shutdown"));
       await node.stop();

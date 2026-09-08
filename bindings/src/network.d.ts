@@ -168,6 +168,7 @@ export type NativeRuntimeState = "starting" | "prepared" | "running" | "stopping
 
 export interface NativeRuntimeDiagnostics {
   requests: NativeRequestDiagnostics;
+  incoming: NativeIncomingDiagnostics;
   state: NativeRuntimeState;
   terminalErrorCode: string | null;
   session: bigint;
@@ -338,6 +339,7 @@ export interface NativePeerBatch {
 }
 
 export interface NativeNetworkApplicationRuntime {
+  takeIncomingRequest(): NativeIncomingRequest | null;
   request(
     peerId: Uint8Array,
     protocol: string,
@@ -534,4 +536,71 @@ export interface NativeRequestDiagnostics {
   commandFull: bigint;
   bridgeFull: bigint;
   busyPulls: bigint;
+}
+
+export interface NativeIncomingRequest {
+  readonly peerId: Uint8Array;
+  readonly connection: NativeConnection;
+  readonly protocol: string;
+  readonly data: Uint8Array;
+  readonly closed: Promise<NativeIncomingResult>;
+  respond(data: Uint8Array, context: NativeForkEntry | null): Promise<void>;
+  finish(): Promise<NativeIncomingResult>;
+  fail(status: number, message: Uint8Array): Promise<NativeIncomingResult>;
+  cancel(): Promise<NativeIncomingResult>;
+}
+
+export type NativeIncomingFailure =
+  | "timeout"
+  | "host_timeout"
+  | "quota_timeout"
+  | "cancelled"
+  | "connection_closed"
+  | "stream_closed"
+  | "transport";
+
+export type NativeIncomingResult =
+  | {reason: "served"; chunks: number}
+  | {reason: "failed"; failure: NativeIncomingFailure; chunks: number}
+  | {reason: "closed"; chunks: number};
+
+/** Operational request errors. Malformed arguments and allocation failures retain their existing specific errors. */
+export type NativeIncomingError = Error &
+  (
+    | {code: "NetworkIncomingBusy"}
+    | {code: "NetworkIncomingClosed"}
+    | {
+        code: "NetworkIncomingRejected";
+        reason:
+          | "invalid_context"
+          | "unknown_fork"
+          | "chunk_too_large"
+          | "chunk_too_small"
+          | "too_many_chunks"
+          | "invalid_error";
+      }
+    | {code: "NetworkIncomingFailed"; failure: NativeIncomingFailure}
+    | {code: "NetworkClosed"}
+  );
+
+export interface NativeIncomingDiagnostics {
+  capacity: number;
+  occupied: number;
+  queued: number;
+  highWater: number;
+  pendingResponses: number;
+  closedPromises: number;
+  reservedBytes: number;
+  reservedBytesHighWater: number;
+  requestBytes: number;
+  responseBytes: number;
+  copyingBytes: number;
+  requestsTaken: bigint;
+  requestBytesCopied: bigint;
+  responseBytesCopied: bigint;
+  chunksWritten: bigint;
+  bytesWritten: bigint;
+  capacityRefusals: bigint;
+  byteRefusals: bigint;
+  busyResponses: bigint;
 }
