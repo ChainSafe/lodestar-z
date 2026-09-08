@@ -194,10 +194,15 @@ fn terminalError(env: napi.Env, terminal: requests.Terminal, cell: *const reques
         .done => unreachable,
     }
 }
-fn chunkResult(env: napi.Env, cell: *const requests.Cell) !Value {
+fn chunkResult(env: napi.Env, runtime: *Runtime, cell: *const requests.Cell) !Value {
     const chunk = cell.chunk.?;
     const object = try env.createObject();
-    try put(object, "data", try bytes(env, cell.sink[0..chunk.len]));
+    var destination: [*]u8 = undefined;
+    const buffer = try env.createArrayBuffer(chunk.len, &destination);
+    const data = try env.createTypedarray(.uint8, chunk.len, buffer, 0);
+    try @import("network_faults.zig").closeDuringRequestCopy(runtime, cell, destination[0..chunk.len]);
+    @memcpy(destination[0..chunk.len], cell.sink[0..chunk.len]);
+    try put(object, "data", data);
     try @import("network_faults.zig").check(.operation_copy);
     try put(object, "fork", if (requests.forkLabel(chunk.fork)) |fork| try env.createStringUtf8(fork) else try env.getNull());
     try put(object, "protocol", try env.createStringUtf8(cell.protocol.id()));
@@ -238,7 +243,7 @@ pub fn settle(env: napi.Env, runtime: *Runtime) void {
         var failed_copy = false;
         if (deferred) |pending| {
             if (deliver_chunk) {
-                const value = chunkResult(env, cell) catch blk: {
+                const value = chunkResult(env, runtime, cell) catch blk: {
                     failed_copy = true;
                     break :blk runtime.copy_error.?.getValue() catch unreachable;
                 };
