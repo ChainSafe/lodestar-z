@@ -228,6 +228,7 @@ test "peer catalog memory plan equals actual allocation reservation" {
     try std.testing.expectEqual(a.allocated_bytes, plan.allocated_bytes);
     c.deinit(a.allocator());
     try std.testing.expectEqual(a.allocated_bytes, a.freed_bytes);
+    std.debug.print("sampling layout Row={d} Snapshot={d}\n", .{ @sizeOf(@import("catalog.zig").Row), @sizeOf(t.Snapshot) });
 }
 
 test "peer catalog accepts native generation zero and still rejects another full handle" {
@@ -343,10 +344,6 @@ test "identify catalog metadata copies only to current full peer and transport g
     stale.generation += 1;
     try std.testing.expect(!c.updateIdentify(stale, replacement, &metadata));
     try std.testing.expect(c.updateIdentify(ref, replacement, &metadata));
-}
-
-test "peer catalog sampling memory layout" {
-    std.debug.print("sampling layout Row={d} Snapshot={d}\n", .{ @sizeOf(@import("catalog.zig").Row), @sizeOf(t.Snapshot) });
 }
 
 test "peer catalog sampling publishes complete pair and invalidates closed generation" {
