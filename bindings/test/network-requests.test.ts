@@ -352,10 +352,11 @@ test.each([
   expect(output).toContain(`request-lifecycle ${mode} ok`);
 }, 25000);
 
-test("native peers refuse new application requests while managed control remains live", async () => {
+test("native peers refuse requests without bridge bytes while managed control remains live", async () => {
   const leftConfig = applicationConfig();
   const rightConfig = applicationConfig();
   leftConfig.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
+  rightConfig.resources.bridgeBudgetBytes = 1024 * 1024;
   rightConfig.identitySecretKey[31] = 2;
   const left = createNativeNetworkApplicationRuntime(leftConfig, () => undefined);
   const right = createNativeNetworkApplicationRuntime(rightConfig, () => undefined);
@@ -368,7 +369,7 @@ test("native peers refuse new application requests while managed control remains
     await left.connect(remote.peerId, [remote.localEndpoint], 5000n);
     await expect(left.request(remote.peerId, BLOCKS, new Uint8Array(32)).next()).rejects.toMatchObject({
       code: "NetworkRequestFailed",
-      peerMessage: new TextEncoder().encode("application handlers unavailable"),
+      peerMessage: new TextEncoder().encode("application capacity exhausted"),
       peerStatus: 2,
       reason: "peer_error",
     });

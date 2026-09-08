@@ -8,6 +8,8 @@ const Runtime = r.Runtime;
 const faults = @import("network_faults.zig");
 const Value = napi.Value;
 const requests = @import("network_requests.zig");
+const incoming = @import("network_incoming.zig");
+const incoming_js = @import("network_incoming_js.zig");
 const request_js = @import("network_request_js.zig");
 
 pub const js_meta = js.class(.{});
@@ -95,9 +97,14 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const resolved = try n.configuration.resolve(try app.resolve(&runtime.heavy.?.config, 1));
     const limits = resolved.core.service.reqresp;
     const request_capacity: usize = @min(32, limits.outbound_max - limits.outbound_control_reserved);
-    const bridge = request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
+    const incoming_capacity: usize = @min(32, limits.inbound_max - limits.inbound_control_reserved);
+    const bridge = incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
     if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
     runtime.requests = try requests.Table.init(r.allocator, request_capacity, app.resources.bridgeBudgetBytes - bridge);
+    runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge;
+    runtime.requests.?.shared = &runtime.payload_budget;
+    try faults.check(.incoming_table);
+    runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
     runtime.stores = try r.Stores.create(r.allocator, runtime.peer_capacity);
     try faults.check(.application_lane);
     runtime.lane = try r.allocator.create(projection.Lane);
@@ -158,13 +165,14 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
     }
     settleOperations(env, runtime);
     request_js.settle(env, runtime);
+    incoming_js.settle(env, runtime);
     runtime.lock();
     const idle = runtime.table.occupied == 0 and !runtime.requestObligations() and runtime.notify_live and !runtime.stop;
     runtime.unlock();
     if (idle) runtime.notify.unref(env) catch {};
     settleClose(env, runtime);
     runtime.lock();
-    const readable = !runtime.disposed and !runtime.quiescent and (runtime.queue.len > 0 or (runtime.lane != null and runtime.lane.?.len > 0));
+    const readable = !runtime.disposed and !runtime.quiescent and (runtime.queue.len > 0 or (runtime.lane != null and runtime.lane.?.len > 0) or (runtime.incoming != null and runtime.incoming.?.oldest() != null));
     runtime.unlock();
     if (readable) _ = env.callFunction(callback, env.getUndefined() catch return, .{}) catch return;
 }
@@ -287,6 +295,7 @@ pub fn diagnostics(self: *@This()) !js.Value {
     inline for (@typeInfo(r.ResolvedCapacities).@"struct".fields) |field| try put(resolved, field.name, try js.env().createUint32(@field(snapshot.resolvedCapacities, field.name)));
     try put(object, "resolvedCapacities", resolved);
     try put(object, "requests", try request_js.diagnostics(js.env(), &snapshot.requests));
+    try put(object, "incoming", try incoming_js.diagnostics(js.env(), &snapshot.incoming));
     return .{ .val = object };
 }
 fn diagnosticPeer(object: Value, value: r.Observation.Peer) !void {
@@ -540,4 +549,14 @@ pub fn requestPull(self: *@This(), handle: js.Value) !js.Value {
 }
 pub fn requestRetire(self: *@This(), handle: js.Value, abandoned: js.Value) !js.Value {
     return .{ .val = try request_js.retire(try self.owner(), handle.val, try cfg.boolean(abandoned.val)) };
+}
+
+pub fn takeIncomingRequest(self: *@This()) !js.Value {
+    return .{ .val = try incoming_js.take(try self.owner()) };
+}
+pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !js.Value {
+    return .{ .val = try incoming_js.respond(try self.owner(), handle.val, data.val, context.val) };
+}
+pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, status: js.Value, message: js.Value) !js.Value {
+    return .{ .val = try incoming_js.terminal(try self.owner(), handle.val, action.val, status.val, message.val) };
 }

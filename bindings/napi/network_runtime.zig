@@ -3,6 +3,7 @@ const n = @import("network");
 const d = @import("discv5");
 const napi = @import("zapi:zapi").napi;
 const faults = @import("network_faults.zig");
+pub const incoming_mod = @import("network_incoming.zig");
 pub const requests_mod = @import("network_requests.zig");
 pub const commands = @import("network_commands.zig");
 pub const application_config = @import("network_application_config.zig");
@@ -167,6 +168,7 @@ pub const Diagnostics = struct {
     nativeAllocationCount: usize = 0,
     resolvedCapacities: ResolvedCapacities = .{},
     requests: requests_mod.Diagnostics = .{},
+    incoming: incoming_mod.Diagnostics = .{},
     bridgeRequestedBytes: usize = @sizeOf(Runtime) + @sizeOf(Owner) - @sizeOf(n.NetworkCore),
 };
 
@@ -235,6 +237,9 @@ pub const Runtime = struct {
     lane: ?*projection.Lane = null,
     table: commands.Table = .{},
     requests: ?requests_mod.Table = null,
+    incoming: ?incoming_mod.Table = null,
+    payload_budget: incoming_mod.Budget = .{},
+    test_incoming_deadline: u64 = 0,
     operations: [32]Operation = @splat(.{}),
     peer_capacity: u16 = 0,
     max_peers: u16 = 0,
@@ -268,7 +273,7 @@ pub const Runtime = struct {
     diag: Diagnostics,
 
     pub fn requestObligations(self: *const Runtime) bool {
-        return if (self.requests) |*requests| requests.obligated() else false;
+        return (if (self.requests) |*requests| requests.obligated() else false) or (if (self.incoming) |*incoming| incoming.obligated() else false);
     }
     pub fn retireRequest(self: *Runtime, token: requests_mod.Token) void {
         self.lock();
@@ -278,6 +283,12 @@ pub const Runtime = struct {
     }
     pub fn retireRequestStorageLocked(self: *Runtime) void {
         if (!self.quiescent) return;
+        if (self.incoming) |*table| {
+            if (table.diag.occupied == 0) {
+                table.backing.free(table.cells);
+                table.cells = &.{};
+            }
+        }
         if (self.requests) |*table| {
             if (table.diag.occupied != 0) return;
             table.backing.free(table.cells);
@@ -295,6 +306,7 @@ pub const Runtime = struct {
         if (self.heavy) |heavy| {
             if (heavy.core_live) {
                 heavy.core.shutdown(now(heavy.threaded.io()));
+                incoming_mod.closeLocked(self);
                 heavy.core.deinit(heavy.threaded.io());
             }
             if (heavy.threaded_live) heavy.threaded.deinit();
@@ -319,6 +331,7 @@ pub const Runtime = struct {
             if (self.stores) |stores| stores.destroy();
             if (self.lane) |lane| allocator.destroy(lane);
             if (self.requests) |*requests| requests.deinit();
+            if (self.incoming) |*incoming| incoming.deinit();
             faults.count(&faults.runtimes, false);
             std.crypto.secureZero(u8, std.mem.asBytes(self));
             allocator.destroy(self);
@@ -402,6 +415,14 @@ pub const Runtime = struct {
         result.liveBridgeRequestedBytes = @sizeOf(Runtime) + result.peerLaneBytes + result.typedStoreBytes + if (self.heavy != null) @sizeOf(Owner) - @sizeOf(n.NetworkCore) else @as(usize, 0);
 
         if (self.requests) |*requests| result.liveBridgeRequestedBytes += requests.cells.len * @sizeOf(requests_mod.Cell) + result.requests.inputBytes + result.requests.sinkBytes;
+        if (self.incoming) |*incoming| {
+            result.incoming = incoming.snapshot();
+            for (incoming.cells) |cell| {
+                result.copyingPins += @intFromBool(cell.copying);
+                result.preparingPins += @intFromBool(cell.state == .response_preparing);
+            }
+            result.liveBridgeRequestedBytes += incoming.cells.len * @sizeOf(incoming_mod.Cell) + result.incoming.requestBytes + result.incoming.responseBytes;
+        }
         return result;
     }
     pub fn commitDrain(self: *Runtime, count: usize, reported_more: bool) void {
@@ -470,11 +491,17 @@ pub const Runtime = struct {
             std.debug.assert(cell.pull == null and cell.retirement == null);
             self.retireRequest(.{ .index = @intCast(i), .generation = cell.generation });
         };
+        if (self.incoming) |*table| for (table.cells, 0..) |cell, i| {
+            if (cell.state == .free) continue;
+            std.debug.assert(!cell.native and !cell.copying and cell.closed == null and cell.pending == null);
+            @import("network_incoming_js.zig").retireReferences(&table.cells[i]);
+            table.retire(.{ .index = @intCast(i), .generation = cell.generation });
+        };
         self.retireRequestStorageLocked();
         self.disposeJsReferences();
     }
     pub fn disposeTerminalReferences(self: *Runtime) void {
-        if (self.notify_finalized and (self.requests == null or self.requests.?.diag.occupied == 0)) self.disposeJsReferences();
+        if (self.notify_finalized and (self.requests == null or self.requests.?.diag.occupied == 0) and (self.incoming == null or self.incoming.?.diag.occupied == 0)) self.disposeJsReferences();
     }
     pub fn disposeJsReferences(self: *Runtime) void {
         if (self.copy_error) |ref| ref.delete() catch unreachable;
@@ -500,6 +527,12 @@ pub const Runtime = struct {
         }
         if (self.requests) |*requests| for (requests.cells, 0..) |cell, i| {
             if (cell.state != .free) self.retireRequest(.{ .index = @intCast(i), .generation = cell.generation });
+        };
+        if (self.incoming) |*incoming| for (incoming.cells, 0..) |cell, i| {
+            if (cell.state != .free) {
+                @import("network_incoming_js.zig").retireReferences(&incoming.cells[i]);
+                incoming.retire(.{ .index = @intCast(i), .generation = cell.generation });
+            }
         };
         self.disposeJsReferences();
         self.release();
@@ -544,6 +577,7 @@ pub const Runtime = struct {
         self.lock();
         self.destroyOwner();
         requests_mod.closeLocked(self);
+        incoming_mod.closeLocked(self);
         self.cancelCommandsLocked();
         if (self.startup == .pending) {
             self.startup = .failed;
@@ -672,6 +706,7 @@ pub const Runtime = struct {
                 continue;
             }
             requests_mod.flags(self, timestamp);
+            try incoming_mod.flags(self, timestamp);
             const sequence = try self.advanceSequence();
             const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, commands.waitLimit(self, timestamp));
             try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], timestamp);
@@ -938,6 +973,7 @@ test "stop preserves latched success and cancels accepted nonterminal commands" 
 
 test {
     _ = requests_mod;
+    _ = @import("network_incoming.zig");
 }
 
 test "request table storage retires only after physical quiescence and final pins" {

@@ -1,4 +1,5 @@
 import bindings from "./bindings.js";
+import {NativeIncoming} from "./network-incoming.js";
 import {NativeRequest} from "./network-request.js";
 
 class NativeRuntime {
@@ -12,6 +13,17 @@ class NativeRuntime {
     this.#onReadable = onReadable;
     const promises = this.#native[application ? "prepare" : "start"](config, NativeRuntime.#notifier(new WeakRef(this)));
     if (!application) this.setCurrentSlot = (slot) => this.#native.setCurrentSlot(slot);
+    if (application) {
+      this.takeIncomingRequest = () => {
+        const descriptor = this.#native.takeIncomingRequest();
+        if (descriptor === null) return null;
+        try { return new NativeIncoming(this.#native, descriptor); }
+        catch (error) {
+          this.#native.incomingTerminal(descriptor.handle, 2, undefined, undefined);
+          throw error;
+        }
+      };
+    }
     this.ready = promises.ready;
     this.#closed = promises.closed;
   }
