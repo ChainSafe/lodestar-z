@@ -72,42 +72,30 @@ const ReusedEpochTransitionCache = struct {
         errdefer self.is_active_current_epoch.deinit(allocator);
         self.is_active_next_epoch = try BoolArray.initCapacity(allocator, validator_count);
         errdefer self.is_active_next_epoch.deinit(allocator);
-        self.proposer_indices = try UsizeArray.initCapacity(allocator, validator_count);
-        errdefer self.proposer_indices.deinit(allocator);
-        self.inclusion_delays = try UsizeArray.initCapacity(allocator, validator_count);
-        errdefer self.inclusion_delays.deinit(allocator);
+        self.proposer_indices = .empty;
+        self.inclusion_delays = .empty;
         self.flags = try U8Array.initCapacity(allocator, validator_count);
         errdefer self.flags.deinit(allocator);
         self.next_epoch_shuffling_active_validator_indices = try std.ArrayList(ValidatorIndex).initCapacity(allocator, validator_count);
         errdefer self.next_epoch_shuffling_active_validator_indices.deinit(allocator);
-        self.is_compounding_validator_arr = try BoolArray.initCapacity(allocator, validator_count);
-        errdefer self.is_compounding_validator_arr.deinit(allocator);
-        self.previous_epoch_participation = try U8Array.initCapacity(allocator, validator_count);
-        errdefer self.previous_epoch_participation.deinit(allocator);
-        self.current_epoch_participation = try U8Array.initCapacity(allocator, validator_count);
-        errdefer self.current_epoch_participation.deinit(allocator);
+        self.is_compounding_validator_arr = .empty;
+        self.previous_epoch_participation = .empty;
+        self.current_epoch_participation = .empty;
         self.rewards = try U64Array.initCapacity(allocator, validator_count);
         errdefer self.rewards.deinit(allocator);
         self.penalties = try U64Array.initCapacity(allocator, validator_count);
         errdefer self.penalties.deinit(allocator);
-        self.slashing_penalties = try U64Array.initCapacity(allocator, validator_count);
-        errdefer self.slashing_penalties.deinit(allocator);
+        self.slashing_penalties = .empty;
     }
 
     pub fn resize(self: *ReusedEpochTransitionCache, validator_count: usize) !void {
         try self.is_active_prev_epoch.resize(self.allocator, validator_count);
         try self.is_active_current_epoch.resize(self.allocator, validator_count);
         try self.is_active_next_epoch.resize(self.allocator, validator_count);
-        try self.proposer_indices.resize(self.allocator, validator_count);
-        try self.inclusion_delays.resize(self.allocator, validator_count);
         try self.flags.resize(self.allocator, validator_count);
         try self.next_epoch_shuffling_active_validator_indices.resize(self.allocator, validator_count);
-        try self.is_compounding_validator_arr.resize(self.allocator, validator_count);
-        try self.previous_epoch_participation.resize(self.allocator, validator_count);
-        try self.current_epoch_participation.resize(self.allocator, validator_count);
         try self.rewards.resize(self.allocator, validator_count);
         try self.penalties.resize(self.allocator, validator_count);
-        try self.slashing_penalties.resize(self.allocator, validator_count);
 
         @memset(self.is_active_prev_epoch.items, true);
         @memset(self.is_active_current_epoch.items, true);
@@ -248,6 +236,9 @@ pub const EpochTransitionCache = struct {
         var next_epoch_shuffling_active_indices_length: usize = 0;
 
         var reused_cache = try getReusedEpochTransitionCache(allocator, io, validator_count);
+        if (fork_seq.gte(.electra)) {
+            try reused_cache.is_compounding_validator_arr.resize(reused_cache.allocator, validator_count);
+        }
         for (0..validator_count) |i| {
             const validator = try validators_it.nextValuePtr();
             var flag: u8 = 0;
@@ -504,6 +495,14 @@ pub const EpochTransitionCache = struct {
         for (validator_activation_list.items) |activation| {
             try indices_eligible_for_activation.append(allocator, activation.validator_index);
         }
+
+        // Indices are ascending; validator-indexed penalties need a length of the last index plus one.
+        const slashing_penalties_length: usize = if (indices_to_slash.items.len == 0)
+            0
+        else
+            @intCast(indices_to_slash.items[indices_to_slash.items.len - 1] + 1);
+        // Resizing to zero clears the previous epoch's length while retaining capacity.
+        try reused_cache.slashing_penalties.resize(reused_cache.allocator, slashing_penalties_length);
 
         return .{
             .prev_epoch = prev_epoch,
