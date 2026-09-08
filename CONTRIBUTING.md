@@ -220,9 +220,10 @@ If the PR contains a self-contained and complete feature or bug fix that does no
 
 - Fill in the PR template. Motivation is never empty: state the problem at whatever length it
   needs, quote the error or log, and link the issue or discussion. Description is one sentence
-  saying what the PR does, then bullets naming each change.
-- Keep it flat. No headings, tables, or verification sections. Reasoning beyond Motivation belongs
-  in commit messages and review comments.
+  saying what the PR does, with further detail appropriate to the change.
+- Keep simple changes brief. Use bullets, tables, or short subsections when they clarify
+  before/after behavior, tradeoffs, or validation. Include the context needed to review the change
+  in the PR description, and link CI instead of repeating routine output.
 - If the PR modifies critical code paths, add references to relevant issues, benchmarks, or related discussions.
 - Ensure the PR adheres to our standard PR etiquette and commit message guidelines.
 

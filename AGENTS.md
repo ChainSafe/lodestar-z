@@ -358,7 +358,7 @@ unless a maintainer asks otherwise.
 Title: conventional-commit prefix, then an imperative subject of about four words, lowercase, no
 period. `refactor: extract tests to _test.zig`.
 
-Description: use the Lodestar template and keep it flat.
+Description: use the Lodestar template and scale the detail to the change.
 
 ```markdown
 **Motivation**
@@ -384,12 +384,13 @@ One line.
   links the issue, review comment, or discussion it came from.
 - Quote the evidence: the error, the log, the command output, in a code block. Long output goes in
   a `<details>` block.
-- Description length tracks the diff. A one-line fix gets a sentence; a large refactor gets more
-  bullets, not sections.
+- Description length tracks the diff. A one-line fix gets a sentence; a larger change can use
+  bullets, tables, or short subsections to explain behavior and relevant evidence.
 - Bullets name concrete changes by identifier in backticks.
-- No `##` headings, tables, or screenshots of text.
-- Rationale goes in Motivation. Do not argue the approach in Description, and do not add a
-  verification section; CI is the verification.
+- Use tables or short subsections when they make before/after behavior, tradeoffs, or validation
+  easier to review. Use text or code blocks instead of screenshots of text.
+- Put the main rationale in Motivation. Include design constraints and validation evidence in
+  Description when they help reviewers assess the change; link CI instead of repeating routine output.
 - Do not list example files to illustrate a point.
 - Code blocks are for real output or a before/after of an interface, never for explaining a
   concept.

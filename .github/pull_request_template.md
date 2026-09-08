@@ -4,7 +4,7 @@
 
 **Description**
 
-<!-- One sentence saying what this does, then bullets naming each change. Keep it flat: no headings or tables. The why belongs in Motivation above. -->
+<!-- Summarize the resulting behavior and concrete changes. Use brief prose or bullets for simple PRs; add a table or subsection when it clarifies behavior, tradeoffs, or validation. -->
 
 Closes #issue_number
 
