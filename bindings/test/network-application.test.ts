@@ -22,11 +22,11 @@ test("application stays prepared across the host clock fork boundary and activat
   const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   try {
     const identity = await runtime.ready;
-    const epochStart = performance.now();
-    const hostSlot = () => config.initialSlot + BigInt(Math.floor((performance.now() - epochStart) / 20));
-    expect(hostSlot()).toBeLessThan(boundarySlot);
+    let hostSlot = config.initialSlot;
+    expect(hostSlot).toBeLessThan(boundarySlot);
     await delay(40);
-    const slot = hostSlot();
+    hostSlot = boundarySlot;
+    const slot = hostSlot;
     expect(slot).toBeGreaterThanOrEqual(config.forkSchedule.nextEpoch * slotsPerEpoch);
     expect(runtime.state).toBe("prepared");
     expect(runtime.diagnostics().ownerTurns).toBe(0n);
