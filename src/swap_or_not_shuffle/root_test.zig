@@ -28,15 +28,20 @@ test "innerShuffleList roundtrip matches reference vector" {
     try std.testing.expectEqualSlices(u32, expected_input[0..], input[0..]);
 }
 
-test "innerShuffleList generic over u64" {
-    var input: [100]u64 = undefined;
-    for (0..input.len) |i| input[i] = i;
-    var seed: [SEED_SIZE]u8 = undefined;
-    for (0..SEED_SIZE) |i| seed[i] = @intCast(i * 7 % 256);
+test "innerShuffleList should preserve full-width values" {
+    const seed = [_]u8{42} ** SEED_SIZE;
+    const input = [_]u32{ 0, std.math.maxInt(u32), 1, 2, std.math.maxInt(u32) / 2, std.math.maxInt(u32) - 1 };
+    var actual = input;
 
-    try shuffle.shuffleList(u64, input[0..], seed[0..], 90);
-    try shuffle.unshuffleList(u64, input[0..], seed[0..], 90);
-    for (0..input.len) |i| try std.testing.expectEqual(@as(u64, i), input[i]);
+    var reference = try shuffle.ComputeShuffledIndex.init(std.testing.allocator, &seed, input.len, 90);
+    defer reference.deinit();
+
+    try shuffle.unshuffleList(u32, &actual, &seed, 90);
+    for (actual, 0..) |value, i| {
+        try std.testing.expectEqual(input[try reference.get(@intCast(i))], value);
+    }
+    try shuffle.shuffleList(u32, &actual, &seed, 90);
+    try std.testing.expectEqualSlices(u32, &input, &actual);
 }
 
 test "unshuffleList matches spec test vector" {
