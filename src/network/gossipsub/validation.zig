@@ -37,6 +37,9 @@ pub const MessageEvent = struct {
     peer: @import("../quic/engine.zig").Handle,
     topic: []const u8,
     bytes: []const u8,
+    identity: @import("../wire/peer_id.zig").PeerId,
+    admitted_ms: u64,
+    deadline: u64,
 };
 pub const Context = struct {
     namespace: ?*const @import("topic_policy.zig").Namespace = null,
@@ -110,7 +113,9 @@ pub const Validation = struct {
         @memcpy(room[written..][0..msg.topic.len], msg.topic);
         workspace.used.* += written + msg.topic.len;
         _ = context.seen.add(id, now);
-        return .{ .admitted = .{ .handle = handle, .id = id, .peer = context.state.peers[peer].conn, .topic = room[written..][0..msg.topic.len], .bytes = room[0..written] } };
+        const entry = &self.entries[handle.index];
+        assert(context.peers.matches(entry.source));
+        return .{ .admitted = .{ .identity = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .deadline = entry.deadline, .handle = handle, .id = id, .peer = context.state.peers[peer].conn, .topic = room[written..][0..msg.topic.len], .bytes = room[0..written] } };
     }
 
     pub fn report(self: *Validation, context: *const Context, handle: Handle, verdict: Verdict, now: u64) Report {
