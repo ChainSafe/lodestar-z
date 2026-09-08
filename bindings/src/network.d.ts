@@ -169,6 +169,7 @@ export type NativeRuntimeState = "starting" | "prepared" | "running" | "stopping
 export interface NativeRuntimeDiagnostics {
   requests: NativeRequestDiagnostics;
   incoming: NativeIncomingDiagnostics;
+  gossip: NativeGossipDiagnostics;
   state: NativeRuntimeState;
   terminalErrorCode: string | null;
   session: bigint;
@@ -339,6 +340,13 @@ export interface NativePeerBatch {
 }
 
 export interface NativeNetworkApplicationRuntime {
+  drainGossip(): NativeGossipBatch;
+  reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): boolean;
+  publishGossip(
+    topic: string,
+    data: Uint8Array,
+    options?: NativeGossipPublishOptions
+  ): Promise<NativeGossipPublishResult>;
   takeIncomingRequest(): NativeIncomingRequest | null;
   request(
     peerId: Uint8Array,
@@ -605,3 +613,82 @@ export interface NativeIncomingDiagnostics {
   byteRefusals: bigint;
   busyResponses: bigint;
 }
+
+export interface NativeGossipHandle {
+  session: bigint;
+  index: number;
+  generation: bigint;
+}
+export type NativeGossipVerdict = "accept" | "reject" | "ignore";
+export interface NativeGossipMessage {
+  handle: NativeGossipHandle;
+  peerId: Uint8Array;
+  connection: NativeConnection;
+  topic: string;
+  id: Uint8Array;
+  data: Uint8Array;
+  receivedAtUnixMs: number;
+}
+export interface NativeGossipBatch {
+  messages: NativeGossipMessage[];
+  more: boolean;
+}
+export interface NativeGossipPublishOptions {
+  allowZeroPeers?: boolean;
+  ignoreDuplicate?: boolean;
+  flood?: boolean;
+}
+export interface NativeGossipPublishResult {
+  queued: number;
+  pressured: number;
+  selected: number;
+  unavailable: number;
+  duplicate: boolean;
+}
+
+export interface NativeGossipDiagnostics {
+  capacity: number;
+  occupied: number;
+  highWater: number;
+  queued: number;
+  pendingVerdicts: number;
+  reservedBytes: number;
+  reservedBytesHighWater: number;
+  payloadBytes: number;
+  copyingBytes: number;
+  publicationBytes: number;
+  publicationBytesHighWater: number;
+  messagesCopied: bigint;
+  bytesCopied: bigint;
+  capacityRefusals: bigint;
+  byteRefusals: bigint;
+  queuedExpired: bigint;
+  deliveredExpired: bigint;
+  staleReports: bigint;
+  reportsAccepted: bigint;
+  reportsAppliedAccept: bigint;
+  reportsAppliedReject: bigint;
+  reportsAppliedIgnore: bigint;
+  reportsAlreadyResolved: bigint;
+  reportsExpired: bigint;
+  reportsStale: bigint;
+  publicationCopies: bigint;
+  publicationBytesCopied: bigint;
+  publicationQueued: bigint;
+  publicationPressured: bigint;
+  publicationSelected: bigint;
+  publicationUnavailable: bigint;
+  publicationDuplicates: bigint;
+}
+
+export type NetworkGossipPublishFailed = Error & {
+  code: "NetworkGossipPublishFailed";
+  reason:
+    | "unknown_topic"
+    | "payload_too_small"
+    | "payload_too_large"
+    | "compress_failed"
+    | "resource_exhausted"
+    | "duplicate"
+    | "no_peers_subscribed_to_topic";
+};

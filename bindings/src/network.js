@@ -14,6 +14,9 @@ class NativeRuntime {
     const promises = this.#native[application ? "prepare" : "start"](config, NativeRuntime.#notifier(new WeakRef(this)));
     if (!application) this.setCurrentSlot = (slot) => this.#native.setCurrentSlot(slot);
     if (application) {
+      this.drainGossip = () => this.#native.drainGossip();
+      this.reportGossip = (handle, verdict) => this.#native.reportGossip(handle, verdict);
+      this.publishGossip = (topic, data, options) => this.#native.publishGossip(topic, data, options);
       this.takeIncomingRequest = () => {
         const descriptor = this.#native.takeIncomingRequest();
         if (descriptor === null) return null;

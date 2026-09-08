@@ -3,6 +3,7 @@ const n = @import("network");
 const d = @import("discv5");
 const napi = @import("zapi:zapi").napi;
 const faults = @import("network_faults.zig");
+pub const gossip_mod = @import("network_gossip.zig");
 pub const incoming_mod = @import("network_incoming.zig");
 pub const requests_mod = @import("network_requests.zig");
 pub const commands = @import("network_commands.zig");
@@ -169,6 +170,7 @@ pub const Diagnostics = struct {
     resolvedCapacities: ResolvedCapacities = .{},
     requests: requests_mod.Diagnostics = .{},
     incoming: incoming_mod.Diagnostics = .{},
+    gossip: gossip_mod.Diagnostics = .{},
     bridgeRequestedBytes: usize = @sizeOf(Runtime) + @sizeOf(Owner) - @sizeOf(n.NetworkCore),
 };
 
@@ -182,6 +184,7 @@ pub const Owner = struct {
     records: [d.Maintenance.bootstrap_max]d.identity.enr.Record = undefined,
     outputs: [32]n.peers.Event = undefined,
     application_outputs: [32]n.reqresp.Event = undefined,
+    gossip_outputs: [32]n.gossipsub.Event = undefined,
     application: ?@import("network_application_config.zig").Config = null,
 };
 
@@ -195,6 +198,7 @@ pub const Operation = struct {
     identity: Identity = undefined,
     count: usize = 0,
     counts: n.Core.PeerCounts = undefined,
+    publication: n.gossipsub.Gossipsub.PublishOutcome = .{},
 };
 pub const Stores = struct {
     backing: std.mem.Allocator,
@@ -238,8 +242,11 @@ pub const Runtime = struct {
     table: commands.Table = .{},
     requests: ?requests_mod.Table = null,
     incoming: ?incoming_mod.Table = null,
+    gossip: ?gossip_mod.Table = null,
     payload_budget: incoming_mod.Budget = .{},
     test_incoming_deadline: u64 = 0,
+    test_gossip_held: if (faults.enabled) bool else void = if (faults.enabled) false else {},
+    test_gossip_expiry: if (faults.enabled) ?gossip_mod.Token else void = if (faults.enabled) null else {},
     operations: [32]Operation = @splat(.{}),
     peer_capacity: u16 = 0,
     max_peers: u16 = 0,
@@ -283,6 +290,7 @@ pub const Runtime = struct {
     }
     pub fn retireRequestStorageLocked(self: *Runtime) void {
         if (!self.quiescent) return;
+        if (self.gossip) |*table| table.trim();
         if (self.incoming) |*table| {
             if (table.diag.occupied == 0) {
                 table.backing.free(table.cells);
@@ -307,6 +315,7 @@ pub const Runtime = struct {
             if (heavy.core_live) {
                 heavy.core.shutdown(now(heavy.threaded.io()));
                 incoming_mod.closeLocked(self);
+                gossip_mod.closeLocked(self);
                 heavy.core.deinit(heavy.threaded.io());
             }
             if (heavy.threaded_live) heavy.threaded.deinit();
@@ -332,6 +341,7 @@ pub const Runtime = struct {
             if (self.lane) |lane| allocator.destroy(lane);
             if (self.requests) |*requests| requests.deinit();
             if (self.incoming) |*incoming| incoming.deinit();
+            if (self.gossip) |*gossip| gossip.deinit();
             faults.count(&faults.runtimes, false);
             std.crypto.secureZero(u8, std.mem.asBytes(self));
             allocator.destroy(self);
@@ -422,6 +432,11 @@ pub const Runtime = struct {
                 result.preparingPins += @intFromBool(cell.state == .response_preparing);
             }
             result.liveBridgeRequestedBytes += incoming.cells.len * @sizeOf(incoming_mod.Cell) + result.incoming.requestBytes + result.incoming.responseBytes;
+        }
+        if (self.gossip) |*gossip| {
+            result.gossip = gossip.snapshot();
+            for (gossip.cells) |cell| result.copyingPins += @intFromBool(cell.state == .copying);
+            result.liveBridgeRequestedBytes += gossip.cells.len * @sizeOf(gossip_mod.Cell) + result.gossip.payloadBytes + result.gossip.publicationBytes;
         }
         return result;
     }
@@ -558,6 +573,7 @@ pub const Runtime = struct {
         for (&self.table.cells, 0..) |*cell, i| {
             switch (cell.state) {
                 .queued, .executing, .waiting => {
+                    gossip_mod.releasePublicationLocked(self, &self.operations[i].input);
                     self.operations[i].failure = self.startup_error orelse error.NetworkClosed;
                     cell.state = .terminal;
                 },
@@ -578,6 +594,7 @@ pub const Runtime = struct {
         self.destroyOwner();
         requests_mod.closeLocked(self);
         incoming_mod.closeLocked(self);
+        gossip_mod.closeLocked(self);
         self.cancelCommandsLocked();
         if (self.startup == .pending) {
             self.startup = .failed;
@@ -688,7 +705,7 @@ pub const Runtime = struct {
             };
             if (self.observation_rearm) {
                 self.observation_rearm = false;
-                if (!self.stop and (self.queue.len > 0 or (self.lane != null and self.lane.?.len > 0))) self.pingLocked();
+                if (!self.stop and (self.queue.len > 0 or (self.lane != null and self.lane.?.len > 0) or (self.incoming != null and self.incoming.?.oldest() != null) or (self.gossip != null and self.gossip.?.oldest() != null))) self.pingLocked();
             }
             const slot = self.slot;
             self.diag.currentSlot = slot;
@@ -705,14 +722,17 @@ pub const Runtime = struct {
                 if (rc < 0 and std.c.errno(rc) != .INTR) return error.NetworkWakeFailed;
                 continue;
             }
+            try gossip_mod.flags(self, io);
             requests_mod.flags(self, timestamp);
             _ = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, false);
             try incoming_mod.flags(self, timestamp);
             const terminal_accepted = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, true);
             const sequence = try self.advanceSequence();
-            const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs }, commands.waitLimit(self, timestamp));
+            const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs, .gossipsub = &self.heavy.?.gossip_outputs }, commands.waitLimit(self, timestamp));
+            @import("network_gossip_faults.zig").afterStep(self);
             if (terminal_accepted) |proof| @import("network_incoming_phase_faults.zig").afterStep(self, &proof, self.heavy.?.application_outputs[0..result.counts.application]);
             try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], timestamp);
+            try gossip_mod.capture(self, self.heavy.?.gossip_outputs[0..result.counts.gossipsub], try gossip_mod.sample(io));
             commands.completeConnects(self, timestamp);
 
             self.publishTurn(&result, timestamp, sequence);
@@ -834,6 +854,7 @@ pub const Runtime = struct {
     }
     pub fn abortCommand(self: *Runtime, token: commands.Token) void {
         self.lock();
+        gossip_mod.releasePublicationLocked(self, &self.operations[token.index].input);
         self.table.retire(token);
         self.retireStoresLocked();
         self.unlock();
@@ -1002,4 +1023,8 @@ test "request table storage retires only after physical quiescence and final pin
     try std.testing.expectEqual(@as(usize, 0), runtime.requests.?.cells.len);
     try std.testing.expectEqual(@as(usize, 1), runtime.requests.?.diag.capacity);
     try std.testing.expect(runtime.requests.?.get(token) == null);
+}
+
+test {
+    _ = @import("network_gossip.zig");
 }

@@ -1,5 +1,9 @@
 import {setTimeout as delay} from "node:timers/promises";
-import type {NativeIncomingRequest, NativeNetworkApplicationRuntime} from "../../src/network.js";
+import type {
+  NativeApplicationConfig,
+  NativeIncomingRequest,
+  NativeNetworkApplicationRuntime,
+} from "../../src/network.js";
 import {createNativeNetworkApplicationRuntime} from "../../src/network.js";
 import {applicationConfig, localIntent} from "./network.js";
 
@@ -8,7 +12,8 @@ export const BLOCKS = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy
 export async function incomingPair(
   beforeServer?: () => void,
   serverBudget?: number,
-  onServerReadable: () => void = () => undefined
+  onServerReadable: () => void = () => undefined,
+  configure?: (left: NativeApplicationConfig, right: NativeApplicationConfig) => void
 ) {
   const leftConfig = applicationConfig();
   const rightConfig = applicationConfig();
@@ -18,6 +23,7 @@ export async function incomingPair(
   for (const config of [leftConfig, rightConfig]) {
     config.requestForks.push({digest: Uint8Array.of(5, 6, 7, 8), fork: "deneb"});
   }
+  configure?.(leftConfig, rightConfig);
   let left: NativeNetworkApplicationRuntime | undefined;
   let right: NativeNetworkApplicationRuntime | undefined;
   try {
