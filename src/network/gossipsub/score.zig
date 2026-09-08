@@ -692,3 +692,32 @@ test "score activation and quantum deadlines never invent an overflowing instant
     try std.testing.expectEqual(@as(?u64, null), score.nextChange(0));
     try std.testing.expectEqual(@as(f64, 0), score.score(0, maximum));
 }
+
+test "score retirement invalidates primed totals with identical parameters" {
+    var score = try PeerScore.initCapacity(std.testing.allocator, .{}, 2);
+    defer score.deinit(std.testing.allocator);
+    score.refresh(0);
+    score.deliver(0, 0);
+    score.invalid(1, 0);
+    for ([_]f64{ 1, -100 }, 0..) |expected, peer| {
+        try std.testing.expectEqual(expected, score.score(@intCast(peer), 1));
+        try std.testing.expect(!score.dirty[peer]);
+        try std.testing.expectEqual(@as(?u64, null), score.nextChange(@intCast(peer)));
+    }
+    const params = score.topic_params[0];
+    const revision = score.revision;
+    score.resetTopic(0);
+    try std.testing.expect(score.revision > revision);
+    const retired_revision = score.revision;
+    try score.configureTopic(0, params);
+    try std.testing.expectEqual(retired_revision, score.revision);
+    for (0..2) |peer| {
+        try std.testing.expect(score.dirty[peer]);
+        try std.testing.expectEqual(@as(f64, 0), score.score(@intCast(peer), 1));
+    }
+    const calculations = score.calculations;
+    score.refresh(score.params.decay_interval_ms);
+    for (0..2) |peer| try std.testing.expectEqual(@as(f64, 0), score.score(@intCast(peer), score.params.decay_interval_ms));
+    try std.testing.expectEqual(retired_revision, score.revision);
+    try std.testing.expectEqual(calculations, score.calculations);
+}

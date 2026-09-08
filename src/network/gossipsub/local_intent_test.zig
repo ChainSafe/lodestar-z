@@ -179,3 +179,67 @@ test "local intent copies retired row input before another assignment reuses it"
     try std.testing.expectEqualStrings(next, g.state.topicString(2));
     try std.testing.expectEqual(@as(f64, 5), g.scores.topic_params[2].weight);
 }
+
+test "local intent equal-parameter retirement invalidates primed positive and negative scores" {
+    try cachedRetirement(true);
+}
+
+test "ordinary equal-parameter retirement invalidates primed positive and negative scores" {
+    try cachedRetirement(false);
+}
+
+fn cachedRetirement(complete_intent: bool) !void {
+    for ([_]bool{ false, true }) |negative| {
+        var opts = options();
+        opts.retained_score_ms = 1;
+        var g = try gossip.Gossipsub.init(std.testing.allocator, opts);
+        defer g.deinit();
+        const w = try std.testing.allocator.create(local.Workspace);
+        defer std.testing.allocator.destroy(w);
+        w.* = .{};
+        unavailableExcept(&g, 1);
+        try std.testing.expect(g.subscribe(name));
+        try std.testing.expect(g.unsubscribe(name));
+        const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+        const logical = g.state.peers[peer.index].logical.index;
+        if (negative) g.scores.invalid(logical, 0) else g.scores.deliver(logical, 0);
+        const expected: f64 = if (negative) -100 else 1;
+        try std.testing.expectEqual(expected, g.scores.score(logical, now.mono_ms));
+        try std.testing.expect(!g.scores.dirty[logical]);
+        try std.testing.expectEqual(@as(?u64, null), g.scores.nextChange(logical));
+        const revision = g.scores.revision;
+        const params = g.scores.topic_params[0];
+        const generation = g.state.topics[0].generation;
+        try std.testing.expect(now.mono_ms >= g.state.topics[0].retire_after_ms.?);
+        if (complete_intent) {
+            try std.testing.expect(try apply(&g, w, &.{.{ .name = next, .params = params }}));
+        } else {
+            g.last_now_ms = now.mono_ms;
+            try g.configureTopic(next, &params);
+        }
+        try std.testing.expectEqualStrings(next, g.state.topicString(0));
+        try std.testing.expectEqual(generation + 1, g.state.topics[0].generation);
+        try std.testing.expectEqualDeep(params, g.scores.topic_params[0]);
+        try std.testing.expect(!g.scores.retainsTopic(0));
+        try std.testing.expect(g.scores.revision > revision);
+        try std.testing.expect(g.scores.dirty[logical]);
+        try std.testing.expectEqual(@as(f64, 0), g.scores.score(logical, now.mono_ms));
+        const retired_revision = g.scores.revision;
+        const calculations = g.scores.calculations;
+        const refreshed = now.mono_ms + g.scores.params.decay_interval_ms;
+        g.scores.refresh(refreshed);
+        try std.testing.expectEqual(@as(f64, 0), g.scores.score(logical, refreshed));
+        try std.testing.expectEqual(retired_revision, g.scores.revision);
+        try std.testing.expectEqual(calculations, g.scores.calculations);
+        if (complete_intent) {
+            g.scores.invalid(logical, 0);
+            try std.testing.expectEqual(@as(f64, -100), g.scores.score(logical, refreshed));
+            const current_revision = g.scores.revision;
+            const counters = g.scores.topics[@as(usize, logical) * 512];
+            try std.testing.expect(!try apply(&g, w, &.{.{ .name = next, .params = params }}));
+            try std.testing.expectEqual(current_revision, g.scores.revision);
+            try std.testing.expectEqualDeep(counters, g.scores.topics[@as(usize, logical) * 512]);
+            try std.testing.expectEqual(@as(f64, -100), g.scores.score(logical, refreshed));
+        }
+    }
+}
