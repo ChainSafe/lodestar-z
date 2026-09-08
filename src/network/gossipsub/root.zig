@@ -45,5 +45,6 @@ test {
     _ = service;
     _ = handler;
     _ = @import("gossipsub_test.zig");
+    _ = @import("publication_test.zig");
     _ = @import("service_test.zig");
 }

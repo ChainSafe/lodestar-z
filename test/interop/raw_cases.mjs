@@ -69,9 +69,13 @@ export async function exerciseRaw(Child, waitFor, binary) {
 
     await js.command("rawRpc", {kind: "prune"});
     await waitFor(async () => (await zig.command("snapshot")).meshMembers === 0);
+    await js.command("rawRpc", {kind: "unsubscribe"});
+    await waitFor(async () => (await zig.command("snapshot")).remoteSubscriptions === 0);
     const cached = payload(65538, 0x71000102);
     const cachedId = messageId(TOPIC, cached, true, true).toString("hex");
     assert.equal((await zig.command("publish", {seed: 0x71000102, size: cached.length})).queued, 0);
+    await js.command("rawRpc", {kind: "subscribe"});
+    await waitFor(async () => (await zig.command("snapshot")).remoteSubscriptions === 1);
     await zig.command("advance", {ms: 700});
     await waitFor(() => countId("ihave", cachedId) >= 1);
     assert.equal(

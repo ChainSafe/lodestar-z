@@ -8,6 +8,8 @@ pub const Options = struct {
     retained_capacity: u16 = @import("peers.zig").capacity,
     retained_outbound_reserve: u16 = @import("peers.zig").outbound_reserve,
     message_id_policy: topic_mod.MessageIdPolicy = .{},
+    iwant_followup_ms: u64 = constants.default_iwant_followup_ms,
+    idontwant_min_data_size: usize = constants.default_idontwant_min_data_size,
     heartbeat_interval_ms: u64 = constants.heartbeat_interval_ms,
     seen_capacity: usize = 65_536,
     mcache_capacity: usize = 8_192,
@@ -86,7 +88,8 @@ pub fn validate(o: *const Options) error{InvalidLimits}!void {
     try range(o.calls_per_pump, 1, 65536);
     const byte_credits = [_]usize{ o.input_per_peer, o.input_per_pump, o.output_per_peer, o.output_per_pump, o.work_per_pump, o.decompress_per_peer_bytes };
     for (byte_credits) |bytes| try range(bytes, 1, 128 * 1024 * 1024);
-    const timers = [_]u64{ o.heartbeat_interval_ms, o.validation_timeout_ms, o.validation_tombstone_ms, o.pressure_timeout_ms, o.tx_timeout_ms, o.large_frame_timeout_ms, o.seen_ttl_ms, o.opportunistic_graft_interval_ms };
+    try range(o.idontwant_min_data_size, 0, constants.GOSSIP_MAX_SIZE);
+    const timers = [_]u64{ o.iwant_followup_ms, o.heartbeat_interval_ms, o.validation_timeout_ms, o.validation_tombstone_ms, o.pressure_timeout_ms, o.tx_timeout_ms, o.large_frame_timeout_ms, o.seen_ttl_ms, o.opportunistic_graft_interval_ms };
     for (timers) |timer| if (timer == 0 or timer > 86_400_000) return error.InvalidLimits;
 }
 
@@ -106,4 +109,20 @@ test "gossip policy default epoch timers follow the selected preset and require 
     };
     try std.testing.expectEqual(expected, o.seen_ttl_ms);
     try std.testing.expectEqual(expected * 50, o.retained_score_ms);
+}
+
+test "gossip policy wire limits validate inclusive boundaries" {
+    const std = @import("std");
+    var o: Options = .{ .random_seed = 1, .iwant_followup_ms = 12_000, .idontwant_min_data_size = 0 };
+    try validate(&o);
+    o.iwant_followup_ms = 86_400_000;
+    o.idontwant_min_data_size = constants.GOSSIP_MAX_SIZE;
+    try validate(&o);
+    o.iwant_followup_ms = 0;
+    try std.testing.expectError(error.InvalidLimits, validate(&o));
+    o.iwant_followup_ms = 86_400_001;
+    try std.testing.expectError(error.InvalidLimits, validate(&o));
+    o.iwant_followup_ms = 1;
+    o.idontwant_min_data_size = constants.GOSSIP_MAX_SIZE + 1;
+    try std.testing.expectError(error.InvalidLimits, validate(&o));
 }

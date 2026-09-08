@@ -81,7 +81,11 @@ pub const Handler = struct {
         ssz: []const u8,
         now: Now,
     ) Gossipsub.PublishError!Gossipsub.PublishOutcome {
-        return self.inner.publish(topic, ssz, now);
+        return self.publishWithOptions(topic, ssz, .{}, now);
+    }
+
+    pub fn publishWithOptions(self: *Handler, topic: []const u8, ssz: []const u8, options: Gossipsub.PublishOptions, now: Now) Gossipsub.PublishError!Gossipsub.PublishOutcome {
+        return self.inner.publishWithOptions(topic, ssz, options, now);
     }
 
     pub fn report(self: *Handler, handle: ValidationHandle, verdict: Verdict, now: Now) gossipsub_mod.ReportOutcome {

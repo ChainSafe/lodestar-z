@@ -533,7 +533,9 @@ test "core native preserves gossip events under one output and caller validation
     setup.pair.advance(1_001);
     for (0..10) |_| try setup.step(0);
     const payload = "bounded Core gossip payload";
-    _ = try setup.client.publishGossip(topic, payload, setup.pair.now);
+    _ = try setup.client.publishGossipWithOptions(topic, payload, .{ .allow_zero_peers = false }, setup.pair.now);
+    try std.testing.expectError(error.Duplicate, setup.client.publishGossip(topic, payload, setup.pair.now));
+    try std.testing.expect((try setup.client.publishGossipWithOptions(topic, payload, .{ .ignore_duplicate = true }, setup.pair.now)).duplicate);
     var received: usize = 0;
     for (0..50) |_| {
         try setup.pair.pump();
