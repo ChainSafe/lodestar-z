@@ -547,6 +547,7 @@ export interface NativeIncomingRequest {
   respond(data: Uint8Array, context: NativeForkEntry | null): Promise<void>;
   finish(): Promise<NativeIncomingResult>;
   fail(status: number, message: Uint8Array): Promise<NativeIncomingResult>;
+  /** Applies cancellation at the owner's next servicing opportunity; intervening native completion remains authoritative. */
   cancel(): Promise<NativeIncomingResult>;
 }
 

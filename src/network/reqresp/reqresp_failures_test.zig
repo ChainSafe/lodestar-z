@@ -1804,3 +1804,48 @@ test "reqresp absolute response expires despite continuous wire progress while l
         }
     }
 }
+
+test "reqresp canonical cancel supersedes accepted unfinished finish and error" {
+    for ([_]bool{ false, true }) |error_response| {
+        var setup: ReqRespPair = .{};
+        try setup.init(.{}, .{});
+        defer setup.deinit();
+        var request: [24]u8 = undefined;
+        const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_range_v2.info().response_max);
+        defer std.testing.allocator.free(sink);
+        _ = try requestBlocks(&setup, &request, 2, sink);
+        try waitForRequest(&setup);
+        const handle = setup.serverEvents()[0].request.request;
+        const response = [_]u8{7} ** 4000;
+        try setup.server.respond(handle, &response, .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now);
+        var sent = false;
+        for (0..20) |_| {
+            try setup.pumpOnce();
+            for (setup.serverEvents()) |event| if (event == .chunk_sent) {
+                try std.testing.expectEqual(handle, event.chunk_sent.request);
+                try std.testing.expectEqual(@as(u32, 1), event.chunk_sent.chunks);
+                sent = true;
+            };
+            if (sent) break;
+        }
+        try std.testing.expect(sent);
+        if (error_response) {
+            try setup.server.respondError(handle, 139, "unfinished", setup.pair.now);
+        } else try std.testing.expect(setup.server.finish(handle, setup.pair.now));
+        const slot = setup.server.inboundSlot(handle).?;
+        try std.testing.expectEqual(@as(@TypeOf(slot.state), if (error_response) .writing_chunk else .finishing), slot.state);
+        try std.testing.expect(slot.terminal == null);
+        try std.testing.expectEqual(@as(u32, 1), slot.chunks);
+        try std.testing.expect(setup.server.cancel(handle));
+        try std.testing.expectEqual(.cancelled, slot.terminal.?.failed.reason);
+        try std.testing.expectEqual(@as(u32, 1), slot.chunks);
+        try std.testing.expect(!setup.server.cancel(handle));
+        setup.server.cleanupPending(&setup.pair.server, &setup.server_neg);
+        var events: [1]Event = undefined;
+        try std.testing.expectEqual(@as(usize, 1), setup.server.pump(&setup.pair.server, &setup.server_neg, setup.pair.now, &events));
+        try std.testing.expectEqual(handle, events[0].failed.request);
+        try std.testing.expectEqual(.cancelled, events[0].failed.reason);
+        _ = setup.server.pump(&setup.pair.server, &setup.server_neg, setup.pair.now, &events);
+        try std.testing.expect(setup.server.inboundSlot(handle) == null);
+    }
+}
