@@ -117,7 +117,7 @@ test "typed reservations unwind and identities never wrap" {
 }
 
 const n = @import("network");
-pub const Command = enum { applyIntent, getIdentity, getPeers, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, reportPeer, request };
+pub const Command = enum { applyIntent, getIdentity, getPeers, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, reportPeer, request, publishGossip };
 pub fn storageKind(command: Command) Kind {
     return switch (command) {
         .applyIntent => .intent,
@@ -129,6 +129,11 @@ pub fn storageKind(command: Command) Kind {
 }
 pub const Input = struct {
     command: Command,
+    publication: []u8 = &.{},
+    publication_reservation: usize = 0,
+    topic: [@import("network_gossip.zig").topic_max]u8 = undefined,
+    topic_len: u16 = 0,
+    publish_options: n.gossipsub.Gossipsub.PublishOptions = .{},
     request: @import("network_requests.zig").Token = undefined,
     peer: n.PeerId = undefined,
     addresses: [2]n.Address = undefined,
@@ -169,7 +174,7 @@ pub fn executeCommands(self: *Runtime, timestamp: n.Now) !void {
         }
         self.lock();
         if (cell.state == .executing) {
-            if (self.stop) self.operations[i].failure = self.startup_error orelse error.NetworkClosed;
+            if (self.stop and self.operations[i].input.command != .publishGossip) self.operations[i].failure = self.startup_error orelse error.NetworkClosed;
             cell.state = .terminal;
         }
         if (cell.state == .terminal) self.pingLocked();
@@ -182,6 +187,17 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
     const core = &self.heavy.?.core;
     const store = self.table.cells[index].store;
     switch (input.command) {
+        .publishGossip => {
+            defer {
+                self.lock();
+                @import("network_gossip.zig").releasePublicationLocked(self, input);
+                self.unlock();
+            }
+            operation.publication = try core.publishGossipWithOptions(input.topic[0..input.topic_len], input.publication, input.publish_options, timestamp);
+            self.lock();
+            @import("network_gossip.zig").published(self, operation.publication);
+            self.unlock();
+        },
         .request => {
             try @import("network_faults.zig").requestBarrier(self, input.request, .request_queued);
             try @import("network_requests.zig").submit(self, input.request, timestamp);
@@ -261,6 +277,7 @@ pub fn waitLimit(self: *Runtime, timestamp: n.Now) u32 {
         if (cell.state == .queued) return 0;
         if (cell.state == .waiting) limit = @min(limit, self.operations[i].deadline -| timestamp.mono_ms);
     }
+    if (self.gossip) |*gossip| limit = gossip.waitLimit(timestamp.mono_ms, limit);
     if (self.closing_deadline) |deadline| limit = @min(limit, deadline -| timestamp.mono_ms);
     return @intCast(limit);
 }

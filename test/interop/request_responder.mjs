@@ -3,7 +3,7 @@ import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 import {boundedLines} from "./bounded_lines.mjs";
-import {encodePayload, payload, readPayload, sendFragments, summary} from "./codec.mjs";
+import {encodePayload, messageId, payload, readPayload, sendFragments, summary} from "./codec.mjs";
 import {readEmptyRequest} from "./managed_control.mjs";
 import {stockPackages} from "./stock_packages.mjs";
 
@@ -13,6 +13,24 @@ const {quic} = await load("@chainsafe/libp2p-quic");
 const {privateKeyFromRaw} = await load("@libp2p/crypto/keys");
 const {identify} = await load("@libp2p/identify");
 const {multiaddr} = await load("@multiformats/multiaddr");
+const gossipMode = process.argv[4] === "gossip";
+const gossipMessages = [];
+const gossipTopics = new Set();
+let gossipService;
+if (gossipMode) {
+  const {gossipsub, StrictNoSign} = await load("@libp2p/gossipsub");
+  const {compressSync, uncompressSync} = await load("snappy");
+  gossipService = gossipsub({
+    allowPublishToZeroTopicPeers: false,
+    dataTransform: {
+      inboundTransform: (_topic, data) => uncompressSync(data),
+      outboundTransform: (_topic, data) => compressSync(data),
+    },
+    floodPublish: true,
+    globalSignaturePolicy: StrictNoSign,
+    msgIdFn: (message) => messageId(message.topic, message.data),
+  });
+}
 const secret = new Uint8Array(32);
 secret[31] = 62;
 const blockProtocol = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
@@ -29,7 +47,7 @@ const node = await createLibp2p({
   addresses: {listen: ["/ip4/127.0.0.1/udp/0/quic-v1"]},
   connectionGater: {denyDialMultiaddr: async (address) => !address.toString().startsWith("/ip4/127.0.0.1/")},
   privateKey: privateKeyFromRaw(secret),
-  services: {identify: identify({runOnConnectionOpen: false})},
+  services: {identify: identify({runOnConnectionOpen: false}), ...(gossipService ? {pubsub: gossipService} : {})},
   start: false,
   transports: [quic()],
 });
@@ -119,6 +137,15 @@ await node.handle(
   },
   {maxInboundStreams: 8, maxOutboundStreams: 8}
 );
+if (gossipMode)
+  node.services.pubsub.addEventListener("message", (event) => {
+    assert(gossipMessages.length < 128);
+    gossipMessages.push({
+      ...summary(event.detail.data),
+      messageId: messageId(event.detail.topic, event.detail.data).toString("hex"),
+      topic: event.detail.topic,
+    });
+  });
 await node.start();
 let commands = 0;
 for await (const line of boundedLines(process.stdin)) {
@@ -132,7 +159,31 @@ for await (const line of boundedLines(process.stdin)) {
         peer: Buffer.from(node.peerId.toMultihash().bytes).toString("hex"),
         versions: {libp2p: await version("libp2p"), quic: await version("@chainsafe/libp2p-quic")},
       };
-    else if (command.op === "scenario") {
+    else if (command.op === "gossipSubscribe") {
+      assert(gossipMode && /^\/eth2\/[0-9a-f]{8}\/beacon_block\/ssz_snappy$/.test(command.topic));
+      assert(gossipTopics.size < 4);
+      gossipTopics.add(command.topic);
+      node.services.pubsub.subscribe(command.topic);
+    } else if (command.op === "gossipPublish") {
+      assert(gossipMode && gossipTopics.has(command.topic));
+      assert(Number.isInteger(command.length) && command.length >= 10 && command.length <= 10 * 1024 * 1024);
+      const data = command.hoodi ? await readFile(process.argv[3]) : payload(command.length, command.seed ?? 71);
+      const result = await node.services.pubsub.publish(command.topic, data);
+      response = {
+        ...summary(data),
+        messageId: messageId(command.topic, data).toString("hex"),
+        recipients: result.recipients.length,
+      };
+    } else if (command.op === "gossipStats") {
+      assert(gossipMode);
+      response = {
+        messages: gossipMessages,
+        subscribers: [...gossipTopics].map((topic) => ({
+          count: node.services.pubsub.getSubscribers(topic).length,
+          topic,
+        })),
+      };
+    } else if (command.op === "scenario") {
       assert(["chunks", "empty", "peer-error", "hold", "hoodi"].includes(command.scenario));
       scenario = command.scenario;
       length = command.length ?? 4000;
@@ -143,6 +194,7 @@ for await (const line of boundedLines(process.stdin)) {
       assert.equal(digest.length, 4);
     } else if (command.op === "stats") response = {active, control, lastRequest, requests};
     else if (command.op === "ping") {
+      command.address ??= multiaddr(Buffer.from(command.addressBytes, "hex")).toString();
       assert(/^\/ip4\/127\.0\.0\.1\/udp\/[0-9]+\/quic-v1\/p2p\/[A-Za-z0-9]+$/.test(command.address));
       const stream = await node.dialProtocol(multiaddr(command.address), "/eth2/beacon_chain/req/ping/1/ssz_snappy", {
         signal: AbortSignal.timeout(5000),

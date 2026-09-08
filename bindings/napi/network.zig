@@ -8,6 +8,8 @@ const Runtime = r.Runtime;
 const faults = @import("network_faults.zig");
 const Value = napi.Value;
 const requests = @import("network_requests.zig");
+const gossip = @import("network_gossip.zig");
+const gossip_js = @import("network_gossip_js.zig");
 const incoming = @import("network_incoming.zig");
 const incoming_js = @import("network_incoming_js.zig");
 const request_js = @import("network_request_js.zig");
@@ -98,13 +100,16 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const limits = resolved.core.service.reqresp;
     const request_capacity: usize = @min(32, limits.outbound_max - limits.outbound_control_reserved);
     const incoming_capacity: usize = @min(32, limits.inbound_max - limits.inbound_control_reserved);
-    const bridge = incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
+    const gossip_capacity: usize = @min(1024, resolved.core.service.gossipsub.validation_capacity);
+    const bridge = gossip_capacity * @sizeOf(gossip.Cell) + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
     if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
     runtime.requests = try requests.Table.init(r.allocator, request_capacity, app.resources.bridgeBudgetBytes - bridge);
     runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge;
     runtime.requests.?.shared = &runtime.payload_budget;
     try faults.check(.incoming_table);
     runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
+    try faults.check(.gossip_table);
+    runtime.gossip = try gossip.Table.init(r.allocator, gossip_capacity, &runtime.payload_budget);
     runtime.stores = try r.Stores.create(r.allocator, runtime.peer_capacity);
     try faults.check(.application_lane);
     runtime.lane = try r.allocator.create(projection.Lane);
@@ -172,7 +177,7 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
     if (idle) runtime.notify.unref(env) catch {};
     settleClose(env, runtime);
     runtime.lock();
-    const readable = !runtime.disposed and !runtime.quiescent and (runtime.queue.len > 0 or (runtime.lane != null and runtime.lane.?.len > 0) or (runtime.incoming != null and runtime.incoming.?.oldest() != null));
+    const readable = !runtime.disposed and !runtime.quiescent and (runtime.queue.len > 0 or (runtime.lane != null and runtime.lane.?.len > 0) or (runtime.incoming != null and runtime.incoming.?.oldest() != null) or (runtime.gossip != null and runtime.gossip.?.oldest() != null));
     runtime.unlock();
     if (readable) _ = env.callFunction(callback, env.getUndefined() catch return, .{}) catch return;
 }
@@ -295,6 +300,7 @@ pub fn diagnostics(self: *@This()) !js.Value {
     inline for (@typeInfo(r.ResolvedCapacities).@"struct".fields) |field| try put(resolved, field.name, try js.env().createUint32(@field(snapshot.resolvedCapacities, field.name)));
     try put(object, "resolvedCapacities", resolved);
     try put(object, "requests", try request_js.diagnostics(js.env(), &snapshot.requests));
+    try put(object, "gossip", try gossip_js.diagnostics(js.env(), &snapshot.gossip));
     try put(object, "incoming", try incoming_js.diagnostics(js.env(), &snapshot.incoming));
     return .{ .val = object };
 }
@@ -453,7 +459,7 @@ fn settleOperations(env: napi.Env, runtime: *Runtime) void {
         const operation = &runtime.operations[i];
         if (operation.deferred) |deferred| {
             if (operation.failure) |err| {
-                deferred.reject(makeError(env, err) catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
+                deferred.reject((if (operation.input.command == .publishGossip) gossip_js.publishError(env, err) else makeError(env, err)) catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
             } else {
                 const value = copyOperation(env, runtime, i) catch {
                     deferred.reject(runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
@@ -477,6 +483,7 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     const operation = &runtime.operations[index];
     const store = runtime.table.cells[index].store;
     const object = switch (operation.input.command) {
+        .publishGossip => return gossip_js.publishResult(env, operation.publication),
         .getIdentity => try identity(env, &operation.identity, runtime.diag.session),
         .applyIntent, .getPeers, .getDirectPeers => try env.createObject(),
         .removeDirectPeer => return env.getBoolean(operation.boolean),
@@ -559,4 +566,14 @@ pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context
 }
 pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, status: js.Value, message: js.Value) !js.Value {
     return .{ .val = try incoming_js.terminal(try self.owner(), handle.val, action.val, status.val, message.val) };
+}
+
+pub fn drainGossip(self: *@This()) !js.Value {
+    return .{ .val = try gossip_js.drain(try self.owner()) };
+}
+pub fn reportGossip(self: *@This(), handle: js.Value, verdict: js.Value) !js.Value {
+    return .{ .val = try gossip_js.report(try self.owner(), handle.val, verdict.val) };
+}
+pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: js.Value) !js.Value {
+    return .{ .val = try gossip_js.publish(try self.owner(), topic.val, data.val, options.val) };
 }
