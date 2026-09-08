@@ -76,6 +76,36 @@ test("failed intent does not activate or advance the clock", async () => {
   }
 });
 
+test("identity metadata belongs to its owner snapshot across queued intent updates", async () => {
+  const config = applicationConfig();
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  try {
+    const ready = await runtime.ready;
+    expect(ready.metadata).toEqual(config.local.metadata);
+    const first = localIntent(config);
+    first.update.local.metadata.sequenceNumber = ready.metadata.sequenceNumber + 1n;
+    first.update.local.metadata.attnets[0] = 1;
+    const second = structuredClone(first);
+    second.update.local.metadata.sequenceNumber = ready.metadata.sequenceNumber + 2n;
+    second.update.local.metadata.attnets[0] = 2;
+    const operations = [
+      runtime.applyIntent(first, 100n),
+      runtime.getIdentity(),
+      runtime.applyIntent(second, 100n),
+      runtime.getIdentity(),
+    ] as const;
+    const [appliedFirst, identityFirst, appliedSecond, identitySecond] = await Promise.all(operations);
+    expect(identityFirst.metadata).toEqual(first.update.local.metadata);
+    expect(identitySecond.metadata).toEqual(second.update.local.metadata);
+    expect(identityFirst.ownerSequence).toBeGreaterThan(appliedFirst.ownerSequence);
+    expect(identityFirst.ownerSequence).toBeLessThan(appliedSecond.ownerSequence);
+    identityFirst.metadata.attnets.fill(255);
+    expect((await runtime.getIdentity()).metadata).toEqual(second.update.local.metadata);
+  } finally {
+    await runtime.close();
+  }
+});
+
 test("complete getters, membership and command results survive a throwing notifier", async () => {
   const config = applicationConfig();
   let notifierCalls = 0;
