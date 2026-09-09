@@ -5,6 +5,69 @@ const discovery = @import("discovery.zig");
 const types = @import("types.zig");
 const context = types.ForkContext{ .digest = .{ 1, 2, 3, 4 } };
 
+test "peer discovery publishes signed referrals before their discovery endpoint responds" {
+    try referralCase(null);
+}
+
+test "peer discovery referrals retain fork demand endpoint and output bounds" {
+    for ([_]discovery.Rejection{ .incompatible_fork, .demand, .endpoint_scope, .no_quic, .output_capacity }) |reason| {
+        try referralCase(reason);
+    }
+}
+
+fn referralCase(rejection: ?discovery.Rejection) !void {
+    var a: Node = undefined;
+    try a.init(1, 9001);
+    defer a.deinit();
+    var b: Node = undefined;
+    try b.init(2, 9002);
+    defer b.deinit();
+    var c: Node = undefined;
+    try c.init(7, if (rejection == .no_quic) null else if (rejection == .endpoint_scope) 1024 else 9003);
+    defer c.deinit();
+    const now = try d.Driver.monotonicMilliseconds(std.testing.io);
+    const b_peer: d.types.Endpoint = .{ .node_id = b.engine.localRecord().node_id, .address = b.udp.localAddress() };
+    const c_peer: d.types.Endpoint = .{ .node_id = c.engine.localRecord().node_id, .address = c.udp.localAddress() };
+    _ = try a.engine.confirmPeer(&b_peer, b.engine.localRecord(), now);
+    _ = try b.engine.confirmPeer(&c_peer, c.engine.localRecord(), now);
+    var fork = context;
+    if (rejection == .incompatible_fork) fork.digest[0] = 9;
+    var controller = try discovery.Discovery.init(std.testing.allocator, &a.driver, &fork, &.{}, now, .{});
+    defer controller.deinit();
+    try controller.request(if (rejection == .demand) .{ .syncnets = 1 } else .{ .general = true }, now);
+    const seed = a.engine.peerRecord(&b_peer.node_id).?;
+    try controller.lookup.init(&controller.storage.foreground, a.engine.localRecord().node_id, c_peer.node_id, &.{seed});
+    controller.lookup_active = true;
+    var output: [16]adapter.Candidate = undefined;
+    var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
+    var found: ?adapter.Candidate = null;
+    for (0..100) |_| {
+        const tick = try d.Driver.monotonicMilliseconds(std.testing.io);
+        const result = try controller.step(std.testing.io, tick, tick, output[0..if (rejection == .output_capacity) @as(usize, 0) else output.len]);
+        if (result.failure) |err| return err;
+        const remote = try b.driver.stepUntil(std.testing.io, &expiries, tick);
+        if (remote.failure) |err| return err;
+        for (output[0..result.candidates]) |candidate| {
+            if (std.mem.eql(u8, &candidate.node_id, &c_peer.node_id)) found = candidate;
+        }
+        if (controller.counters.referrals_received > 0) break;
+    }
+    try std.testing.expectEqual(@as(u64, 1), controller.counters.referrals_received);
+    try std.testing.expect(a.engine.peerRecord(&c_peer.node_id) == null);
+    if (rejection) |reason| {
+        try std.testing.expect(found == null);
+        try std.testing.expectEqual(@as(u64, 0), controller.counters.referrals_published);
+        try std.testing.expect(controller.rejections[@intFromEnum(reason)] > 0);
+        return;
+    }
+    try std.testing.expect(found != null);
+    try std.testing.expectEqual(@as(u64, 1), controller.counters.referrals_published);
+    _ = try a.driver.stepUntil(std.testing.io, &expiries, now);
+    try adapter.requireIdentity(c.engine.localRecord(), &found.?.peer);
+    try std.testing.expectEqual(@as(u16, 9003), found.?.addresses[0].port());
+    try handoff(&found.?);
+}
+
 test "peer discovery publishes authenticated foreground and bootstrap responders outside a full routing bucket" {
     for ([_]bool{ false, true }) |foreground| {
         var a: Node = undefined;
@@ -369,7 +432,7 @@ fn handoff(candidate: *const adapter.Candidate) !void {
     var intents: [2]dial.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), core.dialIntents(&pair.client, pair.now, &intents));
     try std.testing.expect(intents[0].peer.eql(&candidate.peer));
-    try std.testing.expectEqual(@as(u16, 9002), intents[0].address.port());
+    try std.testing.expectEqual(candidate.addresses[0], intents[0].address);
     try std.testing.expect(core.dialFailed(intents[0].token, pair.now));
     try core.discovered(candidate, pair.now);
     try std.testing.expectEqual(@as(usize, 0), core.dialIntents(&pair.client, pair.now, &intents));
