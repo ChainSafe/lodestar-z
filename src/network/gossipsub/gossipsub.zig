@@ -98,6 +98,9 @@ pub const ResourceSnapshot = struct {
     critical_bytes_per_row_high_water: usize = 0,
     critical_frames_per_row_high_water: usize = 0,
     oldest_tx_age_ms: ?u64 = null,
+    inbound_streams: usize = 0,
+    outbound_streams: usize = 0,
+    subscription_pending_peers: usize = 0,
 
     admitted_peers: usize,
     remote_subscriptions: usize,
@@ -162,6 +165,16 @@ pub const Gossipsub = struct {
         promises_cancelled_pressure: u64 = 0,
         local_pressure_resets: u64 = 0,
         tx_stalled: u64 = 0,
+        subscription_timeouts: u64 = 0,
+        receive_pressure_timeouts: u64 = 0,
+        receive_frame_timeouts: u64 = 0,
+        send_queue_timeouts: u64 = 0,
+        send_progress_timeouts: u64 = 0,
+        negotiation_started: u64 = 0,
+        negotiation_ready: u64 = 0,
+        negotiation_rejected: u64 = 0,
+        negotiation_failed: u64 = 0,
+        negotiation_deferred: u64 = 0,
     };
 
     pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
@@ -767,6 +780,9 @@ pub const Gossipsub = struct {
         };
         for (self.state.peers, self.io.peers) |*peer, *io| {
             if (peer.active) result.admitted_peers += 1;
+            result.inbound_streams += @intFromBool(peer.in_stream != null);
+            result.outbound_streams += @intFromBool(peer.out_stream != null);
+            result.subscription_pending_peers += @intFromBool(io.subscription_since != null);
             result.queued_descriptors += io.data_count;
             result.queued_bytes += io.data_bytes;
             result.control_frames += io.control.count;
@@ -906,12 +922,21 @@ pub const Gossipsub = struct {
         std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, @tagName(io.last_drop), io.drops[@intFromEnum(io.last_drop)], io.data_count, peer_io_mod.data_capacity, io.data_bytes, self.options.tx_peer_bytes, io.control.count, io.control.used, if (io.oldestTx()) |oldest| now_ms -| oldest else 0 });
     }
 
+    fn logIoTimeout(self: *Gossipsub, index: u16, reason: []const u8, now_ms: u64) void {
+        const row = &self.state.peers[index];
+        const io = &self.io.peers[index];
+        const identity = &self.peers.rows[row.logical.index].identity;
+        std.log.scoped(.network_gossip_errors).debug("gossip_io_timeout peer={f} connection={d}:{d} reason={s} inbound={any} outbound={any} blocked={s} subscriptions={d} data_queued={d} data_bytes={d} control_bytes={d} critical_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, reason, row.in_stream != null, row.out_stream != null, @tagName(io.blocked), io.subscription_dirty.count(), io.data_count, io.data_bytes, io.control.used, io.critical.used, if (io.oldestTx()) |oldest| now_ms -| oldest else 0 });
+    }
+
     fn expireIo(self: *Gossipsub, engine: *Engine, now_ms: u64) void {
         for (self.io.peers, 0..) |*io, index| {
             if (!self.state.peers[index].active) continue;
             if (io.subscription_since) |since| {
                 if (now_ms -| since >= self.options.pressure_timeout_ms) {
                     self.counters.local_pressure_resets += 1;
+                    self.counters.subscription_timeouts += 1;
+                    self.logIoTimeout(@intCast(index), "subscriptions", now_ms);
                     self.resetInbound(engine, @intCast(index));
                     self.resetOutbound(engine, @intCast(index));
                     self.connectionClosed(self.state.peers[index].conn);
@@ -921,6 +946,8 @@ pub const Gossipsub = struct {
             if (io.pressure_since) |since| {
                 if (now_ms -| since >= self.options.pressure_timeout_ms) {
                     self.counters.local_pressure_resets += 1;
+                    self.counters.receive_pressure_timeouts += 1;
+                    self.logIoTimeout(@intCast(index), "receive_pressure", now_ms);
                     self.resetInbound(engine, @intCast(index));
                 }
             }
@@ -929,6 +956,8 @@ pub const Gossipsub = struct {
                     (io.pressure_since == null and now_ms -| io.progress_ms >= self.options.large_frame_timeout_ms))
                 {
                     if (io.pressure_since != null) self.counters.local_pressure_resets += 1 else self.counters.large_stalled += 1;
+                    self.counters.receive_frame_timeouts += 1;
+                    self.logIoTimeout(@intCast(index), "receive_frame", now_ms);
                     self.resetInbound(engine, @intCast(index));
                 }
             }
@@ -937,6 +966,9 @@ pub const Gossipsub = struct {
                     (io.tx_progress_ms != null and now_ms -| io.tx_progress_ms.? >= self.options.large_frame_timeout_ms))
                 {
                     self.counters.tx_stalled += 1;
+                    const expired = now_ms -| since >= self.options.tx_timeout_ms;
+                    if (expired) self.counters.send_queue_timeouts += 1 else self.counters.send_progress_timeouts += 1;
+                    self.logIoTimeout(@intCast(index), if (expired) "send_queue" else "send_progress", now_ms);
                     self.resetOutbound(engine, @intCast(index));
                 }
             }
@@ -1858,6 +1890,8 @@ test "gossip policy unsent subscriptions cannot pin retired topics indefinitely"
     var events: [0]Event = .{};
     _ = g.pump(&pair.server, .{ .mono_ms = 11, .unix_s = 0 }, &events);
     try std.testing.expect(g.state.findPeer(conn) == null);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.subscription_timeouts);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
     const topic = g.state.findTopic(name).?;
     g.reclaimTopic(topic);
     try std.testing.expect(!g.state.topics[topic].active);

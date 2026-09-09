@@ -943,7 +943,9 @@ test "reqresp cancellation removes Router ownership before output delivery" {
     try std.testing.expect(events[0].failed.reason == .cancelled);
     try std.testing.expect(!setup.client.cancel(handle));
     try std.testing.expectEqual(@as(usize, 0), setup.client.pump(&setup.pair.client, &setup.client_neg, setup.pair.now, &events));
-    try std.testing.expectEqual(@as(u64, 1), setup.client.counters.failures);
+    try std.testing.expectEqual(@as(u64, 0), setup.client.counters.failures);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.protocol_counters[@intFromEnum(Protocol.ping_v1)].outgoing_cancelled);
+    try std.testing.expectEqual(@as(u64, 0), setup.client.protocol_counters[@intFromEnum(Protocol.ping_v1)].outgoing_errors);
     try std.testing.expectEqual(@as(usize, 0), setup.client.resourceSnapshot().outbound_occupied);
     try std.testing.expectEqual(@as(usize, 0), setup.client.resourceSnapshot().pending_terminals);
 }
@@ -1072,8 +1074,8 @@ test "reqresp cancellation releases read held chunk and response write states on
         try std.testing.expect(events[0].failed.reason == .cancelled);
         try std.testing.expectEqual(@as(usize, 1), setup.server.pump(&setup.pair.server, &setup.server_neg, setup.pair.now, &events));
         try std.testing.expect(events[0].failed.reason == .cancelled);
-        try std.testing.expectEqual(@as(u64, 1), setup.client.counters.failures);
-        try std.testing.expectEqual(@as(u64, 1), setup.server.counters.failures);
+        try std.testing.expectEqual(@as(u64, 0), setup.client.counters.failures);
+        try std.testing.expectEqual(@as(u64, 0), setup.server.counters.failures);
     }
 }
 

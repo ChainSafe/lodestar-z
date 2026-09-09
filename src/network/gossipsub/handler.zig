@@ -186,6 +186,12 @@ pub const Handler = struct {
         };
         const supervisor = &self.streams[index];
         const peer = supervisor.peer orelse return;
+        switch (outcome.result) {
+            .ready => self.inner.counters.negotiation_ready += 1,
+            .rejected => self.inner.counters.negotiation_rejected += 1,
+            .failed => self.inner.counters.negotiation_failed += 1,
+        }
+        if (outcome.result != .ready) std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_failed connection={d}:{d} stream={d} direction={s} reason={s} attempts={d}", .{ outcome.stream.conn.index, outcome.stream.conn.generation, outcome.stream.id, @tagName(outcome.direction), if (outcome.result == .failed) @tagName(outcome.result.failed) else "rejected", supervisor.failures });
         if (!self.inner.state.peerMatches(peer.index, peer.generation)) return;
         if (outcome.direction == .outbound) {
             const pending = switch (supervisor.outbound) {
@@ -196,6 +202,7 @@ pub const Handler = struct {
             switch (outcome.result) {
                 .ready => |selection| {
                     if (selection.leftover.len != 0) {
+                        std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_leftover connection={d}:{d} stream={d} bytes={d} fin={any}", .{ outcome.stream.conn.index, outcome.stream.conn.generation, outcome.stream.id, selection.leftover.len, selection.fin });
                         engine.closeStream(outcome.stream, 0);
                         self.retry(index, now);
                         return;
@@ -300,10 +307,13 @@ pub const Handler = struct {
         now: Now,
     ) void {
         const conn = self.inner.state.peers[index].conn;
-        const stream = router.beginMeshsub(engine, conn, now) catch {
+        const stream = router.beginMeshsub(engine, conn, now) catch |err| {
+            self.inner.counters.negotiation_deferred += 1;
+            std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_deferred connection={d}:{d} reason={s} attempts={d}", .{ conn.index, conn.generation, @errorName(err), self.streams[index].failures });
             self.retry(index, now);
             return;
         };
+        self.inner.counters.negotiation_started += 1;
         self.streams[index].outbound = .{ .negotiating = stream };
     }
 

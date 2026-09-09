@@ -136,7 +136,9 @@ const DiscoveryOwners = struct {
         try self.engine.initWithConfig(allocator, host.inner, record, options.engine);
         errdefer self.engine.deinit(allocator);
         self.driver = try d.Driver.initWithConfig(&self.engine, &self.udp, .{ .poll_interval_ms = poll_wait_max_ms });
-        self.coordinator = try peers.Discovery.init(allocator, &self.driver, &local.fork, options.bootstrap, now.mono_ms, options.coordinator);
+        var coordinator_options = options.coordinator;
+        coordinator_options.quic_ipv6_enabled = quic == .ip6;
+        self.coordinator = try peers.Discovery.init(allocator, &self.driver, &local.fork, options.bootstrap, now.mono_ms, coordinator_options);
     }
     fn deinit(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io) void {
         self.coordinator.deinit();

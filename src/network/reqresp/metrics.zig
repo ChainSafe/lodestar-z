@@ -22,6 +22,7 @@ pub const ErrorReason = enum {
                 .request => .REQUEST_ERROR_REQUEST_TIMEOUT,
                 .response => .REQUEST_ERROR_RESP_TIMEOUT,
             },
+            .negotiation_failed => |failure| if (failure == .timeout) .REQUEST_ERROR_DIAL_TIMEOUT else .REQUEST_ERROR_REQUEST_ERROR,
             .invalid_response, .too_many_chunks, .unknown_context => .REQUEST_ERROR_INVALID_RESPONSE_SSZ,
             .peer_error => |err| switch (err.code) {
                 1 => .REQUEST_ERROR_INVALID_REQUEST,
@@ -39,6 +40,8 @@ pub const ProtocolCounters = struct {
     outgoing: u64 = 0,
     incoming: u64 = 0,
     outgoing_errors: u64 = 0,
+    outgoing_cancelled: u64 = 0,
+    incoming_cancelled: u64 = 0,
     request_write_stops: u64 = 0,
     response_finish_stops: u64 = 0,
     incoming_errors: u64 = 0,
@@ -49,6 +52,7 @@ pub const ProtocolCounters = struct {
 
 test "request error labels match host timeout phases and response status mapping" {
     try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_DIAL_TIMEOUT, ErrorReason.fromFailure(.timeout, .negotiation));
+    try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_DIAL_TIMEOUT, ErrorReason.fromFailure(.{ .negotiation_failed = .timeout }, .negotiation));
     try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_REQUEST_TIMEOUT, ErrorReason.fromFailure(.timeout, .request));
     try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_RESP_TIMEOUT, ErrorReason.fromFailure(.timeout, .response));
     try std.testing.expectEqual(ErrorReason.REQUEST_ERROR_SERVER_ERROR, ErrorReason.fromFailure(.{ .peer_error = .{ .code = 2, .message_len = 0 } }, .response));

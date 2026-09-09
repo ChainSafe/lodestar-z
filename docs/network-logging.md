@@ -79,7 +79,9 @@ mesh transitions have separate scopes to reduce contention with routine traffic.
 by scope and level, plus queue occupancy, capacity and high-water gauges. Emitted
 means enqueued, not acknowledged by the host logger. Lodestar also exports
 `lodestar_native_log_delivery_errors_total` and reports accumulated native loss at
-most once per 30 seconds. Check these before interpreting an absent event.
+most once per 30 seconds when queue records are dropped or truncated. Routine debug
+suppression remains visible in metrics without producing warnings. Check these before
+interpreting an absent event.
 
 ## Runtime investigation
 
@@ -151,16 +153,28 @@ Foreground discovery prioritizes current-network QUIC records and counts only
 matching successes toward convergence. Each walk permits at most 128 queries
 with three in flight. `lodestar_native_discovery_` counters show query progress,
 authenticated candidates and publications. Candidate rejection labels distinguish
-missing `eth2`, incompatible fork, malformed ENR, absent QUIC, endpoint scope,
+missing `eth2`, incompatible fork, malformed ENR, absent QUIC, unsupported address family, endpoint scope,
 unwanted subnet/custody coverage and output capacity. A signed advertisement alone
 does not prove its QUIC endpoint is reachable.
 
 `gossip_send_pressure` distinguishes descriptor, payload-byte and control-queue
-limits. Each peer has 128 data descriptors to accommodate a 64-verdict host burst;
+limits. Each peer has 512 data descriptors for bursts of small gossip messages;
 configured byte and age limits still apply. Its counters are
 `lodestar_native_gossip_queue_drops_total{reason}` and survive connection-slot reuse.
 These count queue admission refusals, not packets lost on the wire. Sampled logs
 include queue occupancy and oldest age at logging time, after any intervening drain.
+
+`gossip_io_timeout` records the connection, subscription backlog, stream availability
+and queue occupancy before a timeout retires a stream or gossip relationship.
+Subscription, receive and transmit timeouts have separate native counters.
+`gossip_negotiation_failed` and `gossip_negotiation_deferred` report negotiation
+outcomes separately from message traffic. Stream gauges distinguish admitted peers
+from established inbound and outbound gossip streams.
+
+Local request cancellation retains its terminal API outcome but increments separate
+`lodestar_native_reqresp_{incoming,outgoing}_cancelled_total` counters rather than
+request errors. The `request_cancelled` log includes delivered chunk count.
+Negotiation timeouts use the existing `REQUEST_ERROR_DIAL_TIMEOUT` label.
 
 For the Cayman Hoodi deployment, existing Loki labels can select these records:
 

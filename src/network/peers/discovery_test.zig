@@ -387,14 +387,14 @@ fn handoff(candidate: *const adapter.Candidate) !void {
 }
 
 test "peer discovery fork and subnet filtering plus output pressure preserve confirmed routing" {
-    for (0..4) |mode| {
+    for (0..5) |mode| {
         var a: Node = undefined;
         try a.init(1, 9001);
         defer a.deinit();
         var b: Node = undefined;
         try b.init(2, 9002);
         defer b.deinit();
-        if (mode == 3) {
+        if (mode >= 3) {
             const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{2}));
             const dual = try adapter.build(&key, 2, &.{
                 .fork = .{ .digest = context.digest, .next_version = @splat(0), .next_epoch = 0 },
@@ -408,7 +408,7 @@ test "peer discovery fork and subnet filtering plus output pressure preserve con
         const now = try d.Driver.monotonicMilliseconds(std.testing.io);
         var fork = context;
         if (mode == 0) fork.digest[0] = 9;
-        var controller = try discovery.Discovery.init(std.testing.allocator, &a.driver, &fork, &.{b.engine.localRecord().*}, now, .{});
+        var controller = try discovery.Discovery.init(std.testing.allocator, &a.driver, &fork, &.{b.engine.localRecord().*}, now, .{ .quic_ipv6_enabled = mode != 4 });
         defer controller.deinit();
         try controller.request(if (mode == 1) .{ .syncnets = 1 } else .{ .general = true }, now);
         var output: [1]adapter.Candidate = undefined;
@@ -430,6 +430,7 @@ test "peer discovery fork and subnet filtering plus output pressure preserve con
             1 => .demand,
             2 => .output_capacity,
             3 => .endpoint_scope,
+            4 => .endpoint_family,
             else => unreachable,
         };
         try std.testing.expect(controller.rejections[@intFromEnum(reason)] > 0);
