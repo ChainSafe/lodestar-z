@@ -25,7 +25,12 @@ pub const Topic = struct {
     }
 };
 
+pub const ValidationTime = @import("../metrics_histogram.zig").Histogram(&.{ 10, 30, 100, 300, 1000, 3000, 10000 });
+
 pub const Counters = struct {
+    accepted: u64 = 0,
+    rejected: u64 = 0,
+    ignored: u64 = 0,
     published: u64 = 0,
     published_peers: u64 = 0,
     forwarded: u64 = 0,

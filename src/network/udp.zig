@@ -26,7 +26,16 @@ pub const SendError = net.Socket.SendError || error{DatagramTooLarge};
 
 pub const Family = enum { ip4, ip6 };
 
+pub const Counters = struct {
+    received_bytes: u64 = 0,
+    sent_bytes: u64 = 0,
+    received_datagrams: u64 = 0,
+    sent_datagrams: u64 = 0,
+    truncated_datagrams: u64 = 0,
+};
+
 pub const Udp = struct {
+    counters: Counters = .{},
     socket: net.Socket,
     family: Family,
     buffer: [constants.datagram_size_max]u8 = undefined,
@@ -62,7 +71,12 @@ pub const Udp = struct {
     ) ReceiveTimeoutError!Datagram {
         if (self.admitted != null) return error.AdmissionUnavailable;
         const incoming = try self.socket.receiveTimeout(io, &self.buffer, timeout);
-        if (incoming.flags.trunc) return error.DatagramTooLarge;
+        self.counters.received_datagrams +|= 1;
+        if (incoming.flags.trunc) {
+            self.counters.truncated_datagrams +|= 1;
+            return error.DatagramTooLarge;
+        }
+        self.counters.received_bytes +|= incoming.data.len;
         const successor = std.math.add(u64, self.next_generation, 1) catch
             return error.GenerationExhausted;
         std.debug.assert(incoming.data.len <= self.buffer.len);
@@ -85,7 +99,7 @@ pub const Udp = struct {
     }
 
     pub fn send(
-        self: *const Udp,
+        self: *Udp,
         io: std.Io,
         destination: *const types.Address,
         bytes: []const u8,
@@ -93,10 +107,12 @@ pub const Udp = struct {
         std.debug.assert(bytes.len > 0);
         if (bytes.len > constants.datagram_size_max) return error.DatagramTooLarge;
         const address = toNetwork(destination.*, self.family);
-        return self.socket.send(io, &address, bytes);
+        try self.socket.send(io, &address, bytes);
+        self.counters.sent_bytes +|= bytes.len;
+        self.counters.sent_datagrams +|= 1;
     }
 
-    pub fn sendMany(self: *const Udp, io: std.Io, batch: []const types.Sent) SendError!void {
+    pub fn sendMany(self: *Udp, io: std.Io, batch: []const types.Sent) SendError!void {
         std.debug.assert(batch.len <= constants.send_batch_max);
         std.debug.assert(batch.len > 0);
         var addresses: [constants.send_batch_max]net.IpAddress = undefined;
@@ -110,7 +126,14 @@ pub const Udp = struct {
                 .data_len = sent.bytes.len,
             };
         }
-        try self.socket.sendMany(io, messages[0..batch.len], .{});
+        // Socket.sendMany discards the successful prefix on error. Count that prefix too.
+        const failure, const count = io.vtable.netSend(io.userdata, self.socket.handle, messages[0..batch.len], .{});
+        std.debug.assert(count <= batch.len);
+        for (messages[0..count]) |message| {
+            self.counters.sent_bytes +|= message.data_len;
+            self.counters.sent_datagrams +|= 1;
+        }
+        if (count != batch.len) return failure.?;
         for (messages[0..batch.len], batch) |message, sent| {
             if (message.data_len != sent.bytes.len) return error.MessageOversize;
         }

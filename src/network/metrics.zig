@@ -5,6 +5,11 @@ const gossip = @import("gossipsub/root.zig");
 const topic_metrics = @import("gossipsub/metrics.zig");
 const peer_types = @import("peers/types.zig");
 const Writer = std.Io.Writer;
+const prom = @import("metrics_prometheus.zig");
+const scalar = prom.scalar;
+const family = prom.family;
+const sample = prom.sample;
+const counterFields = prom.counterFields;
 
 pub const interval_ms = 1_000;
 pub const text_capacity = 256 * 1024;
@@ -33,6 +38,10 @@ pub const Snapshot = struct {
     runtime: network.Counters = .{},
     transport: @import("quic/api.zig").Counters = .{},
     requests: rr.Counters = .{},
+    udp: @import("udp.zig").Counters = .{},
+    outgoing_error_reasons: [rr.reqresp.metrics.error_reason_count]u64 = @splat(0),
+    validation_time: topic_metrics.ValidationTime = .{},
+    scores: @import("metrics_score.zig").Snapshot = .{},
     protocols: [rr.Protocol.count]rr.reqresp.ProtocolCounters = @splat(.{}),
     gossip_counts: gossip.Gossipsub.Counters = .{},
     gossip_topics: topic_metrics.Topics = .{},
@@ -60,6 +69,9 @@ pub const Snapshot = struct {
         self.runtime = owner.counters;
         self.transport = owner.transport.engine.counters;
         self.requests = core.service.reqresp.inner.counters;
+        self.udp = owner.transport.udp.counters;
+        self.outgoing_error_reasons = core.service.reqresp.inner.outgoing_error_reasons;
+        self.validation_time = g.validation_time;
         self.protocols = core.service.reqresp.inner.protocol_counters;
         self.gossip_counts = g.counters;
         self.gossip_topics = g.topic_metrics;
@@ -104,7 +116,9 @@ pub const Snapshot = struct {
             self.topic_count += 1;
         }
         for (g.state.peers, 0..) |*row, index| {
-            if (!row.active or !mesh_peers.isSet(index)) continue;
+            if (!row.active) continue;
+            self.scores.observe(g.scores.snapshot(row.logical.index, now_ms), &g.scores.params);
+            if (!mesh_peers.isSet(index)) continue;
             var client: Client = .Unknown;
             for (core.catalog.rows) |*peer| {
                 if (peer.connection) |connection| if (std.meta.eql(connection, row.conn)) {
@@ -124,6 +138,7 @@ pub const Snapshot = struct {
 
     pub fn stop(self: *Snapshot) void {
         self.running = false;
+        self.scores = .{};
         self.peers = 0;
         self.relevant = 0;
         self.clients = @splat(0);
@@ -149,7 +164,9 @@ pub const Snapshot = struct {
         }
         try self.writeTopics(w);
         try self.writeRequests(w);
+        try self.writeRequestTimes(w);
         try self.writeGossip(w);
+        try self.writeScores(w);
         try scalar(w, "lodestar_discovery_total_dial_attempts", .counter, "Started native QUIC dials", self.runtime.dial_started);
         if (self.discovery_enabled) {
             try scalar(w, "lodestar_discv5_active_session_count", .gauge, "Stored discovery sessions", self.discovery_sessions);
@@ -160,12 +177,23 @@ pub const Snapshot = struct {
         try scalar(w, "lodestar_native_network_running", .gauge, "Network owner is running", @intFromBool(self.running));
         try counterFields(w, "lodestar_native_network_", &self.runtime);
         try counterFields(w, "lodestar_native_quic_", &self.transport);
+        inline for (.{
+            .{ "received_bytes", "Complete QUIC UDP payload bytes received, excluding truncated datagrams" },
+            .{ "sent_bytes", "QUIC UDP payload bytes sent, including successful prefixes of failed batches" },
+            .{ "received_datagrams", "QUIC UDP datagrams received, including truncated datagrams" },
+            .{ "sent_datagrams", "QUIC UDP datagrams sent" },
+            .{ "truncated_datagrams", "Oversized QUIC UDP datagrams discarded on receive" },
+        }) |metric| try scalar(w, "lodestar_native_quic_udp_" ++ metric[0] ++ "_total", .counter, metric[1], @field(self.udp, metric[0]));
         try counterFields(w, "lodestar_native_reqresp_", &self.requests);
         try counterFields(w, "lodestar_native_gossipsub_", &self.gossip_counts);
         if (self.gossip_resources) |*resources| {
             inline for (@typeInfo(gossip.ResourceSnapshot).@"struct".fields) |field| {
                 if (comptime @typeInfo(field.type) == .optional) {
-                    if (@field(resources, field.name)) |value| try scalar(w, "lodestar_native_gossipsub_" ++ field.name, .gauge, "Native gossip " ++ field.name, value);
+                    if (@field(resources, field.name)) |value| {
+                        if (comptime std.mem.endsWith(u8, field.name, "_ms")) {
+                            try scalar(w, "lodestar_native_gossipsub_" ++ field.name[0 .. field.name.len - 3] ++ "_seconds", .gauge, "Native gossip " ++ field.name ++ " in seconds", @as(f64, @floatFromInt(value)) / 1000);
+                        } else try scalar(w, "lodestar_native_gossipsub_" ++ field.name, .gauge, "Native gossip " ++ field.name, value);
+                    }
                 } else try scalar(w, "lodestar_native_gossipsub_" ++ field.name, .gauge, "Native gossip " ++ field.name, @field(resources, field.name));
             }
         }
@@ -202,12 +230,7 @@ pub const Snapshot = struct {
         }) |metric| {
             try family(w, metric[0], .counter, metric[2]);
             for (rr.protocol.methods, 0..) |method, index| {
-                var repeated = false;
-                for (rr.protocol.methods[0..index]) |previous| if (std.mem.eql(u8, method, previous)) {
-                    repeated = true;
-                    break;
-                };
-                if (repeated) continue;
+                if (!firstMethod(index)) continue;
                 var count: u64 = 0;
                 for (rr.protocol.methods, &self.protocols) |candidate, *values| {
                     if (std.mem.eql(u8, candidate, method)) count +|= @field(values, metric[1]);
@@ -217,9 +240,46 @@ pub const Snapshot = struct {
         }
     }
 
+    fn writeRequestTimes(self: *const Snapshot, w: *Writer) Writer.Error!void {
+        inline for (.{
+            .{ "beacon_reqresp_outgoing_request_roundtrip_time_seconds", "outgoing_time", "Outgoing request duration from stream creation through native completion or failure" },
+            .{ "beacon_reqresp_incoming_request_handler_time_seconds", "incoming_time", "Incoming request duration from accepted stream through native completion or failure" },
+        }) |metric| {
+            try family(w, metric[0], .histogram, metric[2]);
+            for (rr.protocol.methods, 0..) |method, index| {
+                if (!firstMethod(index)) continue;
+                var aggregate: @TypeOf(@field(self.protocols[0], metric[1])) = .{};
+                for (rr.protocol.methods, &self.protocols) |candidate, *values| {
+                    if (std.mem.eql(u8, candidate, method)) aggregate.merge(&@field(values, metric[1]));
+                }
+                try prom.histogram(w, metric[0], "method", method, &aggregate);
+            }
+        }
+        try family(w, "beacon_reqresp_outgoing_requests_error_reason_total", .counter, "Terminal outgoing native failures using host request error labels");
+        inline for (@typeInfo(rr.reqresp.metrics.ErrorReason).@"enum".fields) |field| {
+            try sample(w, "beacon_reqresp_outgoing_requests_error_reason_total", "reason", field.name, self.outgoing_error_reasons[field.value]);
+        }
+    }
+
+    fn writeScores(self: *const Snapshot, w: *Writer) Writer.Error!void {
+        try scalar(w, "lodestar_gossip_score_avg_min_max_min", .gauge, "Minimum connected gossip peer score", self.scores.min);
+        try scalar(w, "lodestar_gossip_score_avg_min_max_max", .gauge, "Maximum connected gossip peer score", self.scores.max);
+        try scalar(w, "lodestar_gossip_score_avg_min_max_avg", .gauge, "Average connected gossip peer score", self.scores.average());
+        try scalar(w, "lodestar_native_gossip_scored_peers", .gauge, "Connected gossip peers included in score gauges", self.scores.count);
+        try family(w, "lodestar_gossip_peer_score_by_threshold_count", .gauge, "Connected gossip peers at or above configured score thresholds");
+        inline for (.{ "graylist", "publish", "gossip", "mesh" }) |threshold| {
+            try sample(w, "lodestar_gossip_peer_score_by_threshold_count", "threshold", threshold, @field(self.scores, threshold));
+        }
+    }
+
     fn writeGossip(self: *const Snapshot, w: *Writer) Writer.Error!void {
         try scalar(w, "gossipsub_rpc_recv_count_total", .counter, "Complete received gossip RPCs", self.gossip_counts.rpcs_received);
+        try family(w, "gossipsub_async_validation_delay_from_first_seen", .histogram, "Seconds from native gossip admission until an applied validation verdict");
+        try prom.histogram(w, "gossipsub_async_validation_delay_from_first_seen", null, "", &self.validation_time);
         inline for (.{
+            .{ "gossipsub_accepted_messages_total", "accepted" },
+            .{ "gossipsub_rejected_messages_total", "rejected" },
+            .{ "gossipsub_ignored_messages_total", "ignored" },
             .{ "gossipsub_msg_publish_count_total", "published" },
             .{ "gossipsub_msg_publish_peers_total", "published_peers" },
             .{ "gossipsub_msg_forward_count_total", "forwarded" },
@@ -236,26 +296,15 @@ pub const Snapshot = struct {
     }
 };
 
+fn firstMethod(index: usize) bool {
+    std.debug.assert(index < rr.Protocol.count);
+    for (rr.protocol.methods[0..index]) |previous| if (std.mem.eql(u8, rr.protocol.methods[index], previous)) return false;
+    return true;
+}
+
 fn rowClient(identify: *const ?@import("identify/root.zig").Metadata) Client {
     if (identify.*) |*metadata| if (metadata.agent) |*agent| return clientKind(agent.slice());
     return .Unknown;
-}
-
-const MetricType = enum { counter, gauge };
-fn family(w: *Writer, comptime name: []const u8, comptime kind: MetricType, comptime help: []const u8) Writer.Error!void {
-    try w.writeAll("# HELP " ++ name ++ " " ++ help ++ "\n# TYPE " ++ name ++ " " ++ @tagName(kind) ++ "\n");
-}
-fn scalar(w: *Writer, comptime name: []const u8, comptime kind: MetricType, comptime help: []const u8, value: anytype) Writer.Error!void {
-    try family(w, name, kind, help);
-    try w.print(name ++ " {d}\n", .{value});
-}
-fn sample(w: *Writer, comptime name: []const u8, comptime label: []const u8, value: []const u8, count: anytype) Writer.Error!void {
-    try w.print(name ++ "{{" ++ label ++ "=\"{s}\"}} {d}\n", .{ value, count });
-}
-fn counterFields(w: *Writer, comptime prefix: []const u8, values: anytype) Writer.Error!void {
-    inline for (@typeInfo(@TypeOf(values.*)).@"struct".fields) |field| {
-        try scalar(w, prefix ++ field.name ++ "_total", .counter, "Native " ++ field.name, @field(values, field.name));
-    }
 }
 
 test "metrics format exact counters, merge protocol versions and bound maximum output" {
@@ -263,6 +312,9 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing = 4;
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing = 5;
     snapshot.runtime.dial_started = std.math.maxInt(u64);
+    snapshot.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing_time.observe(100);
+    snapshot.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing_time.observe(300);
+    snapshot.requests.withheld_ms_total = 1500;
     snapshot.topic_count = snapshot.topics.len;
     for (&snapshot.topics, 0..) |*entry, index| entry.* = .{ .digest = .{ 1, 2, @intCast(index / 256), @truncate(index) }, .kind = .data_column_sidecar, .subnet = 127, .mesh = 4096, .subscribers = 4096 };
     const buffer = try std.testing.allocator.alloc(u8, text_capacity);
@@ -276,6 +328,10 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     try std.testing.expectEqual(Client.Lighthouse, clientKind("lighthouse/v1.2.3"));
     try std.testing.expectEqual(Client.Lodestar, clientKind("js-libp2p/1"));
     try std.testing.expectEqual(Client.Unknown, clientKind("attacker\"\nmetric 1"));
+    try std.testing.expect(std.mem.indexOf(u8, output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_bucket{method=\"status\",le=\"0.1\"} 1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method=\"status\"} 2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_withheld_seconds_total 1.5\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "_total_total") == null);
     snapshot.stop();
     try std.testing.expectEqual(@as(usize, 0), snapshot.topic_count);
     try std.testing.expectEqual(std.math.maxInt(u64), snapshot.runtime.dial_started);

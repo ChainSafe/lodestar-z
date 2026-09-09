@@ -41,6 +41,11 @@ test "UDP admits one mutable datagram at a time" {
     const second = try receiver.receiveTimeout(std.testing.io, oneSecond());
     try std.testing.expect(second.handle.generation > first.handle.generation);
     try receiver.release(second.handle);
+    try std.testing.expectEqual(@as(u64, 2), sender.counters.sent_datagrams);
+    try std.testing.expectEqual(@as(u64, 3), receiver.counters.received_datagrams);
+    try std.testing.expectEqual(@as(u64, 2 * payload.len), sender.counters.sent_bytes);
+    try std.testing.expectEqual(sender.counters.sent_bytes, receiver.counters.received_bytes);
+    try std.testing.expectEqual(@as(u64, 1), receiver.counters.truncated_datagrams);
 }
 
 test "UDP receive times out without traffic" {
@@ -93,4 +98,27 @@ test "UDP address conversion maps IPv4 destinations onto IPv6 sockets" {
     const plain = udp_mod.toNetwork(ip4, .ip4);
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 7 }, &plain.ip4.bytes);
     try std.testing.expectEqual(@as(u16, 4_001), plain.ip4.port);
+}
+
+test "UDP metrics count successful batch prefixes when a later send fails" {
+    const Fake = struct {
+        fn send(_: ?*anyopaque, _: net.Socket.Handle, messages: []net.OutgoingMessage, _: net.SendFlags) struct { ?net.Socket.SendError, usize } {
+            std.debug.assert(messages.len == 2);
+            return .{ error.NetworkUnreachable, 1 };
+        }
+    };
+    var socket = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer socket.close(std.testing.io);
+    var vtable = std.testing.io.vtable.*;
+    vtable.netSend = Fake.send;
+    const io: std.Io = .{ .userdata = null, .vtable = &vtable };
+    const destination = socket.localAddress();
+    var first = "first".*;
+    var unsent = "unsent".*;
+    try std.testing.expectError(error.NetworkUnreachable, socket.sendMany(io, &.{
+        .{ .to = destination, .bytes = &first },
+        .{ .to = destination, .bytes = &unsent },
+    }));
+    try std.testing.expectEqual(@as(u64, 1), socket.counters.sent_datagrams);
+    try std.testing.expectEqual(@as(u64, 5), socket.counters.sent_bytes);
 }

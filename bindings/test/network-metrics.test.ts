@@ -1,3 +1,4 @@
+import {setTimeout as delay} from "node:timers/promises";
 import {expect, test, vi} from "vitest";
 import {createNativeNetworkRuntime} from "../src/network.js";
 import {networkConfig} from "./utils/network.js";
@@ -49,6 +50,7 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
     void pending.catch(() => undefined);
     samples(pair.right.getMetrics());
     const request = await takeIncoming(pair.right);
+    await delay(125);
     await request.finish();
     expect(await pending).toEqual({done: true, value: undefined});
     await vi.waitFor(
@@ -59,6 +61,17 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
         expect(left.get('lodestar_peers_by_direction_count{direction="outbound"}')).toBe(1);
         expect(right.get('lodestar_peers_by_direction_count{direction="inbound"}')).toBe(1);
         expect(left.get(outgoing)).toBe(1);
+        expect(
+          left.get('beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method="beacon_blocks_by_root"}')
+        ).toBe(1);
+        expect(
+          left.get('beacon_reqresp_outgoing_request_roundtrip_time_seconds_sum{method="beacon_blocks_by_root"}')
+        ).toBeGreaterThanOrEqual(0.1);
+        expect(
+          right.get('beacon_reqresp_incoming_request_handler_time_seconds_count{method="beacon_blocks_by_root"}')
+        ).toBe(1);
+        expect(left.get("lodestar_native_quic_udp_sent_bytes_total")).toBeGreaterThan(0);
+        expect(right.get("lodestar_native_quic_udp_received_bytes_total")).toBeGreaterThan(0);
         expect(left.get(incoming)).toBe(0);
         expect(right.get(incoming)).toBe(1);
         expect(right.get(outgoing)).toBe(0);

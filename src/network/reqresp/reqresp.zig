@@ -174,13 +174,8 @@ pub const Counters = struct {
     over_limit_dropped: u64 = 0,
 };
 
-pub const ProtocolCounters = struct {
-    outgoing: u64 = 0,
-    incoming: u64 = 0,
-    outgoing_errors: u64 = 0,
-    incoming_errors: u64 = 0,
-    rate_limited: u64 = 0,
-};
+pub const metrics = @import("metrics.zig");
+pub const ProtocolCounters = metrics.ProtocolCounters;
 
 const OverLimit = struct {
     peer: Handle,
@@ -213,6 +208,7 @@ pub const ReqResp = struct {
     last_now_ms: u64 = 0,
     counters: Counters = .{},
     protocol_counters: [Protocol.count]ProtocolCounters = @splat(.{}),
+    outgoing_error_reasons: [metrics.error_reason_count]u64 = @splat(0),
     forks: [64]ForkEntry = undefined,
     fork_count: u8 = 0,
     work_cursor: usize = 0,
@@ -785,9 +781,11 @@ pub const ReqResp = struct {
         event: Event,
         engine: ?*Engine,
     ) void {
-        _ = self;
         _ = index;
         if (slot.terminal != null) return;
+        const counts = &self.protocol_counters[@intFromEnum(slot.protocol)];
+        const duration_ms = self.last_now_ms -| slot.started_ms;
+        if (@TypeOf(slot) == *Client) counts.outgoing_time.observe(duration_ms) else counts.incoming_time.observe(duration_ms);
         slot.terminal = event;
         slot.state = .terminal;
         slot.clear();
@@ -802,7 +800,10 @@ pub const ReqResp = struct {
         if (slot.terminal != null) return;
         self.counters.failures += 1;
         const counters = &self.protocol_counters[@intFromEnum(slot.protocol)];
-        if (@TypeOf(slot) == *Client) counters.outgoing_errors +|= 1 else counters.incoming_errors +|= 1;
+        if (@TypeOf(slot) == *Client) {
+            counters.outgoing_errors +|= 1;
+            self.outgoing_error_reasons[@intFromEnum(metrics.ErrorReason.fromFailure(reason, slot.requestPhase()))] +|= 1;
+        } else counters.incoming_errors +|= 1;
         slot.close_code = switch (reason) {
             .timeout => constants.app_error_timeout,
             .invalid_response,

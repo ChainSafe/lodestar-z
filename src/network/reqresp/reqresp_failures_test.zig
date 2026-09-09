@@ -94,6 +94,10 @@ test "reqresp fails a request whose peer stops making progress" {
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(u16, 0), setup.client.active().outbound);
     try std.testing.expectEqual(@as(u16, 0), setup.server.active().inbound);
+    const counts = &setup.client.protocol_counters[@intFromEnum(Protocol.status_v1)];
+    try std.testing.expectEqual(@as(u64, 1), counts.outgoing_time.count);
+    try std.testing.expect(counts.outgoing_time.sum_ms >= 2500);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.outgoing_error_reasons[@intFromEnum(reqresp.metrics.ErrorReason.REQUEST_ERROR_RESP_TIMEOUT)]);
 }
 
 test "reqresp delivers error chunks with the peer's code and message" {
