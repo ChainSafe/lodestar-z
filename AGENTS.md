@@ -333,8 +333,9 @@ test {
 - Private test helpers move with the tests they serve.
 - Do not widen a declaration to `pub` only to relocate a test. Tests that exercise private
   internals stay inline.
-- A test file covering a whole module rather than one sibling module stays wired from the package
-  `root.zig`.
+- Prefix memory safety regression test names with `memory_safety: ` and keep them in the sibling
+  test file for the module they cover.
+- Tests covering a whole package belong in `root_test.zig`, wired from the package `root.zig`.
 
 ## Pull request guidelines
 
