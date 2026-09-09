@@ -43,7 +43,25 @@ pub const HandshakeState = struct {
 
 const alpn_protos = [_]u8{constants.alpn.len} ++ constants.alpn.*;
 
-var ex_data_index: c_int = -1;
+const HandshakeIndex = struct {
+    value: std.atomic.Value(c_int) = .init(-1),
+    mutex: std.Io.Mutex = .init,
+
+    fn get(self: *HandshakeIndex) error{OpenSslFailed}!c_int {
+        const ready = self.value.load(.acquire);
+        if (ready >= 0) return ready;
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        const initialized = self.value.load(.monotonic);
+        if (initialized >= 0) return initialized;
+        const index = c.SSL_get_ex_new_index(0, null, null, null, null);
+        if (index < 0) return error.OpenSslFailed;
+        self.value.store(index, .release);
+        return index;
+    }
+};
+
+var handshake_index: HandshakeIndex = .{};
 
 pub const Context = struct {
     ssl_ctx: *c.SSL_CTX,
@@ -61,10 +79,7 @@ pub const Context = struct {
         now_unix: i64,
         serial: [8]u8,
     ) Error!Context {
-        if (ex_data_index < 0) {
-            ex_data_index = c.SSL_get_ex_new_index(0, null, null, null, null);
-            if (ex_data_index < 0) return error.OpenSslFailed;
-        }
+        _ = try handshake_index.get();
 
         var certificate = try cert.Certificate.createWith(host_key, signer, now_unix, serial);
         errdefer certificate.deinit();
@@ -108,13 +123,15 @@ pub const Context = struct {
     pub fn newSsl(self: *const Context, state: *HandshakeState) Error!*c.SSL {
         const ssl = c.SSL_new(self.ssl_ctx) orelse return error.OpenSslFailed;
         errdefer c.SSL_free(ssl);
-        if (c.SSL_set_ex_data(ssl, ex_data_index, state) != 1) return error.OpenSslFailed;
+        if (c.SSL_set_ex_data(ssl, try handshake_index.get(), state) != 1) return error.OpenSslFailed;
         return ssl;
     }
 };
 
 pub fn handshakeState(ssl: *c.SSL) ?*HandshakeState {
-    const raw = c.SSL_get_ex_data(ssl, ex_data_index) orelse return null;
+    const index = handshake_index.value.load(.acquire);
+    if (index < 0) return null;
+    const raw = c.SSL_get_ex_data(ssl, index) orelse return null;
     return @ptrCast(@alignCast(raw));
 }
 
@@ -163,4 +180,37 @@ fn alpnSelect(
     );
     if (result == c.OPENSSL_NPN_NEGOTIATED) return c.SSL_TLSEXT_ERR_OK;
     return c.SSL_TLSEXT_ERR_ALERT_FATAL;
+}
+
+test "context publishes one handshake index across concurrent initializers" {
+    const Worker = struct {
+        index: *HandshakeIndex,
+        start: *std.Io.Event,
+        result: c_int = -1,
+
+        fn run(self: *@This()) void {
+            self.start.waitUncancelable(std.testing.io);
+            self.result = self.index.get() catch return;
+        }
+    };
+    var index: HandshakeIndex = .{};
+    var start: std.Io.Event = .unset;
+    var workers: [8]Worker = undefined;
+    var threads: [workers.len]std.Thread = undefined;
+    var started: usize = 0;
+    defer {
+        start.set(std.testing.io);
+        for (threads[0..started]) |thread| thread.join();
+    }
+    for (&workers, &threads) |*worker, *thread| {
+        worker.* = .{ .index = &index, .start = &start };
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{worker});
+        started += 1;
+    }
+    start.set(std.testing.io);
+    for (threads) |thread| thread.join();
+    started = 0;
+    const published = try index.get();
+    try std.testing.expect(published >= 0);
+    for (workers) |worker| try std.testing.expectEqual(published, worker.result);
 }
