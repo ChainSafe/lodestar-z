@@ -5,6 +5,63 @@ const discovery = @import("discovery.zig");
 const types = @import("types.zig");
 const context = types.ForkContext{ .digest = .{ 1, 2, 3, 4 } };
 
+test "peer discovery publishes authenticated foreground and bootstrap responders outside a full routing bucket" {
+    for ([_]bool{ false, true }) |foreground| {
+        var a: Node = undefined;
+        try a.init(1, 9001);
+        defer a.deinit();
+        var b: Node = undefined;
+        try b.init(2, 9002);
+        defer b.deinit();
+        const now = try d.Driver.monotonicMilliseconds(std.testing.io);
+        var controller = try discovery.Discovery.init(std.testing.allocator, &a.driver, &context, &.{b.engine.localRecord().*}, now, .{ .query_interval_ms = 1, .local_retry_ms = 1 });
+        defer controller.deinit();
+        try controller.request(.{ .general = true }, now);
+        var output: [1]adapter.Candidate = undefined;
+        var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
+        var checked = false;
+        for (0..300) |_| {
+            const tick = try d.Driver.monotonicMilliseconds(std.testing.io);
+            if (foreground and !controller.lookup_active) controller.query_due_ms = tick;
+            const result = try controller.step(std.testing.io, tick, tick, &output);
+            if (result.failure) |err| return err;
+            const remote = try b.driver.stepUntil(std.testing.io, &expiries, tick);
+            if (remote.failure) |err| return err;
+            const progress = try a.driver.stepUntil(std.testing.io, &expiries, tick);
+            if (progress.failure) |err| return err;
+            const selected = progress.event == .response and progress.event.response.matched.terminal and
+                (controller.lookup_active and controller.lookup.ownsCall(progress.event.response.matched.handle)) == foreground;
+            if (selected) try fillResponderBucket(&a.engine, b.engine.localRecord(), progress.now_ms);
+            const consumed = controller.consume(&progress, expiries[0..progress.calls_expired], &output);
+            if (consumed.failure) |err| return err;
+            if (selected) {
+                try std.testing.expect(a.engine.peerRecord(&b.engine.localRecord().node_id) == null);
+                try std.testing.expectEqual(@as(usize, 1), consumed.candidates);
+                try adapter.requireIdentity(b.engine.localRecord(), &output[0].peer);
+                try std.testing.expectEqual(@as(u16, 9002), output[0].addresses[0].port());
+                try std.testing.expectEqual(@as(u64, 1), controller.counters.authenticated_not_retained);
+                checked = true;
+                break;
+            }
+        }
+        try std.testing.expect(checked);
+    }
+}
+
+fn fillResponderBucket(engine: *d.Engine, responder: *const d.identity.enr.Record, now_ms: u64) !void {
+    if (engine.peerRecord(&responder.node_id)) |entry| try std.testing.expect(engine.forgetPeerIfStale(&responder.node_id, entry.last_verified_ms));
+    try std.testing.expect(d.types.logDistance(&engine.localRecord().node_id, &responder.node_id) > 8);
+    for (1..d.RoutingTable.bucket_size + 1) |index| {
+        var record = std.mem.zeroes(d.identity.enr.Record);
+        record.node_id = responder.node_id;
+        record.node_id[31] ^= @intCast(index);
+        record.ip4 = .{ 10, @intCast(index), 0, 1 };
+        record.udp = 19_000;
+        const peer: d.types.Endpoint = .{ .node_id = record.node_id, .address = record.endpoint().? };
+        try std.testing.expectEqual(d.RoutingTable.PutResult.inserted, try engine.confirmPeer(&peer, &record, now_ms));
+    }
+}
+
 test "peer discovery clears an active foreground walk at demand expiry and can restart" {
     var a: Node = undefined;
     try a.init(61, 9061);
@@ -181,10 +238,15 @@ test "peer discovery consumes actual response and expiry alongside failure befor
         if (remote.failure) |err| return err;
         var progress = try a.driver.stepUntil(std.testing.io, &expiries, tick);
         const response = progress.event == .response;
-        if (response) progress.failure = error.DestinationUnreachable;
+        if (response) {
+            progress.failure = error.DestinationUnreachable;
+            progress.failure_stage = .maintenance;
+        }
         const consumed = controller.consume(&progress, expiries[0..progress.calls_expired], &output);
         if (response) {
             try std.testing.expectEqual(error.DestinationUnreachable, consumed.failure.?);
+            try std.testing.expectEqual(d.Driver.FailureStage.maintenance, consumed.failure_stage);
+            try std.testing.expectEqual(@as(u64, 1), controller.counters.maintenance_failures);
             try std.testing.expectEqual(@as(usize, 1), consumed.candidates);
             candidate = output[0];
             break;

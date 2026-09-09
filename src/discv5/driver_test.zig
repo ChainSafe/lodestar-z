@@ -61,6 +61,71 @@ test "driver retains a routing incumbent that answers revalidation" {
     try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
 }
 
+test "driver bounds failed revalidation retries while continuing receive and later recovers" {
+    var pair: Pair = undefined;
+    try pair.init(1_000, true);
+    defer pair.deinit();
+    try pair.fillBucket();
+    const now_ms = try Driver.monotonicMilliseconds(std.testing.io);
+    RevalidationFault.active = .{ .socket = pair.udp_a.socket.handle, .now_ms = now_ms };
+    defer RevalidationFault.active = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.netSend = RevalidationFault.send;
+    vtable.now = RevalidationFault.now;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var expired: [4]CallTable.Expired = undefined;
+    const oversized = [_]u8{0xff} ** 1_281;
+    try pair.udp_b.socket.send(std.testing.io, &pair.udp_a.socket.address, &oversized);
+    const failed = try pair.driver_a.stepUntil(io, &expired, now_ms);
+    try std.testing.expectEqual(error.Unexpected, failed.failure.?);
+    try std.testing.expectEqual(Driver.FailureStage.maintenance, failed.failure_stage);
+    try std.testing.expectEqual(types.RejectReason.oversized_datagram, failed.datagram.rejected);
+    try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
+    try std.testing.expectEqual(@as(usize, 1), pair.node_a.routing.pendingCount());
+    try std.testing.expectEqual(@as(usize, 1), RevalidationFault.active.sends);
+    for (0..32) |_| {
+        const deferred = try pair.driver_a.stepUntil(io, &expired, now_ms);
+        try std.testing.expect(deferred.failure == null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), RevalidationFault.active.sends);
+    RevalidationFault.active.now_ms += Driver.maintenance_retry_ms - 1;
+    _ = try pair.driver_a.stepUntil(io, &expired, now_ms);
+    try std.testing.expectEqual(@as(usize, 1), RevalidationFault.active.sends);
+    RevalidationFault.active.now_ms += 1;
+    _ = try pair.driver_a.stepUntil(io, &expired, now_ms);
+    try std.testing.expectEqual(@as(usize, 2), RevalidationFault.active.sends);
+    RevalidationFault.active.socket = null;
+    RevalidationFault.active.now_ms += Driver.maintenance_retry_ms;
+    const resumed = try pair.driver_a.stepUntil(io, &expired, now_ms);
+    try std.testing.expect(resumed.failure == null);
+    try std.testing.expect(resumed.progress.maintenance_started);
+    const answered = try pair.driver_b.step(std.testing.io, &expired);
+    try std.testing.expect(answered.failure == null);
+    const completed = try pair.driver_a.stepUntil(io, &expired, now_ms);
+    try std.testing.expect(completed.failure == null);
+    try std.testing.expectEqual(@as(usize, 0), pair.node_a.routing.pendingCount());
+    try std.testing.expect(pair.node_a.routing.contains(&pair.record_b.node_id));
+}
+
+const RevalidationFault = struct {
+    socket: ?net.Socket.Handle = null,
+    now_ms: u64 = 0,
+    sends: usize = 0,
+    threadlocal var active: RevalidationFault = .{};
+
+    fn send(userdata: ?*anyopaque, socket: net.Socket.Handle, messages: []net.OutgoingMessage, flags: net.SendFlags) struct { ?net.Socket.SendError, usize } {
+        if (socket == active.socket) {
+            active.sends += 1;
+            return .{ error.Unexpected, 0 };
+        }
+        return std.testing.io.vtable.netSend(userdata, socket, messages, flags);
+    }
+
+    fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        return .{ .nanoseconds = @as(i96, active.now_ms) * std.time.ns_per_ms };
+    }
+};
+
 test "driver replaces a routing incumbent when revalidation expires" {
     var pair: Pair = undefined;
     try pair.init(1, true);

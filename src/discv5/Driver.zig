@@ -23,6 +23,8 @@ pub const Error = Engine.Error || Udp.ReceiveTimeoutError || Udp.ReleaseError ||
 pub const Config = struct {
     poll_interval_ms: u32 = 100,
 };
+pub const maintenance_retry_ms: u64 = 1_000;
+pub const FailureStage = enum { coordinator, clock, maintenance, receive, process };
 
 pub const DatagramResult = union(enum) {
     timeout,
@@ -46,6 +48,7 @@ pub const StepResult = struct {
     calls_expired: usize = 0,
     progress: Progress = .{},
     failure: ?Error = null,
+    failure_stage: FailureStage = .coordinator,
 };
 
 /// A clock reading and fresh entropy for one outbound packet.
@@ -59,6 +62,7 @@ const Driver = @This();
 core: *Engine,
 udp: *Udp,
 config: Config,
+maintenance_retry_at_ms: u64 = 0,
 scratch: Engine.Scratch = .{},
 response: ResponsePlan = .{},
 output: [constants.packet_size_max]u8 = undefined,
@@ -128,15 +132,18 @@ pub fn transmit(
     destination: types.Address,
     bytes: []const u8,
 ) Error!void {
-    return self.udp.send(io, destination, bytes) catch |err| switch (err) {
-        error.AccessDenied,
-        error.AddressFamilyUnsupported,
-        error.ConnectionRefused,
-        error.ConnectionResetByPeer,
-        error.HostUnreachable,
-        error.NetworkUnreachable,
-        => error.DestinationUnreachable,
-        else => err,
+    return self.udp.send(io, destination, bytes) catch |err| {
+        std.log.scoped(.network_discovery).debug("discovery_send_failed endpoint={any} bytes={d} reason={s}", .{ destination, bytes.len, @errorName(err) });
+        return switch (err) {
+            error.AccessDenied,
+            error.AddressFamilyUnsupported,
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            => error.DestinationUnreachable,
+            else => err,
+        };
     };
 }
 
@@ -162,7 +169,7 @@ pub fn stepUntil(
     if (expired_calls.len == 0) return error.MissingExpiryStorage;
     var result = StepResult{};
     self.runStep(io, expired_calls, wake_ms, &result) catch |err| {
-        result.failure = err;
+        recordFailure(&result, err, .clock);
     };
     return result;
 }
@@ -175,13 +182,18 @@ fn runStep(
     result: *StepResult,
 ) Error!void {
     try self.advance(io, expired_calls, result);
-    try self.maintain(io, result);
+    self.maintain(io, result);
 
-    const datagram = try self.receiveDatagram(io, wake_ms, result);
+    const datagram = self.receiveDatagram(io, wake_ms, result) catch |err| {
+        recordFailure(result, err, .receive);
+        return;
+    };
     defer if (datagram) |admitted| self.udp.release(admitted.handle) catch unreachable;
     try self.advance(io, expired_calls, result);
-    if (datagram) |admitted| try self.processDatagram(io, admitted, result);
-    try self.maintain(io, result);
+    if (datagram) |admitted| self.processDatagram(io, admitted, result) catch |err| {
+        recordFailure(result, err, .process);
+    };
+    self.maintain(io, result);
 }
 
 fn advance(
@@ -199,9 +211,20 @@ fn advance(
     result.progress.sessions_expired += expired.sessions;
 }
 
-fn maintain(self: *Driver, io: std.Io, result: *StepResult) Error!void {
-    if (result.progress.maintenance_started) return;
-    result.progress.maintenance_started = try self.startMaintenance(io, result.now_ms);
+fn maintain(self: *Driver, io: std.Io, result: *StepResult) void {
+    if (result.progress.maintenance_started or result.now_ms < self.maintenance_retry_at_ms) return;
+    result.progress.maintenance_started = self.startMaintenance(io, result.now_ms) catch |err| {
+        self.maintenance_retry_at_ms = result.now_ms +| maintenance_retry_ms;
+        recordFailure(result, err, .maintenance);
+        std.log.scoped(.network_discovery).debug("revalidation_deferred reason={s} retry_ms={d}", .{ @errorName(err), maintenance_retry_ms });
+        return;
+    };
+}
+
+fn recordFailure(result: *StepResult, err: Error, stage: FailureStage) void {
+    if (result.failure != null) return;
+    result.failure = err;
+    result.failure_stage = stage;
 }
 
 fn receiveDatagram(self: *Driver, io: std.Io, wake_ms: u64, result: *StepResult) Error!?Udp.Datagram {
