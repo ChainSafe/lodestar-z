@@ -6,6 +6,12 @@ const PeerScore = @import("score.zig").PeerScore;
 const Handle = @import("../quic/engine.zig").Handle;
 const MessageId = @import("topic.zig").MessageId;
 
+pub const promises_per_peer = constants.max_ihave_per_heartbeat * constants.gossip_ids_max;
+
+comptime {
+    std.debug.assert(promises_per_peer < constants.promises_cap);
+}
+
 pub const Promise = struct {
     id: MessageId,
     peer: PeerRef,
@@ -37,6 +43,42 @@ pub const Recovery = struct {
 
     pub fn available(self: *const Recovery) usize {
         return self.promises.len - self.len;
+    }
+
+    pub fn select(self: *const Recovery, peer: PeerRef, ids: []MessageId) error{PeerCapacity}!usize {
+        std.debug.assert(ids.len <= constants.gossip_ids_max);
+        std.sort.heap(MessageId, ids, {}, lessThan);
+        var unique: usize = 0;
+        for (ids) |id| {
+            if (unique > 0 and std.mem.eql(u8, &ids[unique - 1], &id)) continue;
+            ids[unique] = id;
+            unique += 1;
+        }
+        var requested = std.StaticBitSet(constants.gossip_ids_max).initEmpty();
+        var pending: usize = 0;
+        for (self.promises[0..self.len]) |*promise| {
+            if (!std.meta.eql(promise.peer, peer)) continue;
+            pending += 1;
+            if (std.sort.binarySearch(MessageId, ids[0..unique], &promise.id, compare)) |index| requested.set(index);
+        }
+        if (pending >= promises_per_peer) return error.PeerCapacity;
+        const capacity = @min(self.available(), promises_per_peer - pending);
+        var count: usize = 0;
+        for (ids[0..unique], 0..) |id, index| {
+            if (count == capacity) break;
+            if (requested.isSet(index)) continue;
+            ids[count] = id;
+            count += 1;
+        }
+        return count;
+    }
+
+    fn lessThan(_: void, left: MessageId, right: MessageId) bool {
+        return std.mem.lessThan(u8, &left, &right);
+    }
+
+    fn compare(left: *const MessageId, right: MessageId) std.math.Order {
+        return std.mem.order(u8, left, &right);
     }
 
     pub fn memoryBytes(self: *const Recovery) usize {
