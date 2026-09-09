@@ -225,6 +225,7 @@ pub const Snapshot = struct {
             .{ "beacon_reqresp_outgoing_requests_total", "outgoing", "Started outgoing native requests, including control methods" },
             .{ "beacon_reqresp_incoming_requests_total", "incoming", "Accepted incoming native request streams, including control methods" },
             .{ "beacon_reqresp_outgoing_requests_error_total", "outgoing_errors", "Outgoing requests with a terminal native failure" },
+            .{ "lodestar_native_reqresp_request_write_stops_total", "request_write_stops", "Peer stops of the request write direction that retain response processing" },
             .{ "beacon_reqresp_incoming_requests_error_total", "incoming_errors", "Incoming requests with a terminal native failure" },
             .{ "beacon_reqresp_rate_limiter_errors_total", "rate_limited", "Requests refused by native admission quotas or identity capacity" },
         }) |metric| {
@@ -311,6 +312,7 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     var snapshot: Snapshot = .{};
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing = 4;
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing = 5;
+    snapshot.protocols[@intFromEnum(rr.Protocol.metadata_v3)].request_write_stops = 7;
     snapshot.runtime.dial_started = std.math.maxInt(u64);
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing_time.observe(100);
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing_time.observe(300);
@@ -325,6 +327,7 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     try log_stats.write(&writer);
     const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_request_write_stops_total{method=\"metadata\"} 7\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_discovery_total_dial_attempts 18446744073709551615\n") != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "beacon_reqresp_outgoing_requests_total{method=\"status\"}"));
     try std.testing.expectEqual(Client.Lighthouse, clientKind("lighthouse/v1.2.3"));

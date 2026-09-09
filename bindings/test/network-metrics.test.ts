@@ -31,6 +31,9 @@ test("metrics are available through startup and remain readable after close", as
     expect(samples(runtime.getMetrics()).get("libp2p_peers")).toBe(0);
     await runtime.ready;
     await vi.waitFor(() => expect(samples(runtime.getMetrics()).get("lodestar_native_network_running")).toBe(1));
+    expect(
+      samples(runtime.getMetrics()).get('lodestar_native_reqresp_request_write_stops_total{method="metadata"}')
+    ).toBe(0);
   } finally {
     await runtime.close();
   }

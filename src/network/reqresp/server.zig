@@ -294,6 +294,7 @@ pub const Server = struct {
 
     pub fn writeChunk(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: Now) void {
         const flushed = slot.io.flush(engine, slot.stream, false) catch |err| {
+            slot.io.failure_detail = @errorName(err);
             const reason: Failure = switch (err) {
                 error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
                 else => .transport,

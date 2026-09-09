@@ -802,7 +802,7 @@ pub const ReqResp = struct {
             .invalid_response => |err| @errorName(err),
             .invalid_request => |err| @errorName(err),
             .negotiation_failed => |failure| @tagName(failure),
-            else => "none",
+            else => slot.io.failure_detail,
         };
         const peer_code: u16 = if (reason == .peer_error) reason.peer_error.code else 0;
         std.log.scoped(.network_reqresp_errors).debug("request_failed direction={s} request={d}:{d} connection={d}:{d} method={s} phase={s} reason={s} detail={s} peer_code={d} chunks={d} elapsed_ms={d}", .{ if (@TypeOf(slot) == *Client) "outbound" else "inbound", index, slot.generation, slot.conn.index, slot.conn.generation, @tagName(slot.protocol), if (@TypeOf(slot) == *Client) @tagName(slot.requestPhase()) else @tagName(slot.state), @tagName(reason), detail, peer_code, slot.chunks, self.last_now_ms -| slot.started_ms });
@@ -835,6 +835,7 @@ pub const ReqResp = struct {
         err: engine_mod.StreamError,
         engine: *Engine,
     ) void {
+        slot.io.failure_detail = @errorName(err);
         const reason: Failure = switch (err) {
             error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
             else => .transport,

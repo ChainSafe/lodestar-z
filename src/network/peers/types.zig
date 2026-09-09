@@ -55,6 +55,7 @@ pub const DisconnectReason = enum {
     reputation,
     banned,
     count_pruning,
+    health_error,
 };
 pub const Snapshot = struct {
     identify: ?@import("../identify/root.zig").Metadata = null,
