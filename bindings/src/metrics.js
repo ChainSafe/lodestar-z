@@ -6,6 +6,5 @@ export const init = native.init;
 export const observeStateHashTreeRoot = native.observeStateHashTreeRoot;
 export const scrapeMetrics = native.scrapeMetrics;
 export const scrapeStateTransitionMetrics = native.scrapeStateTransitionMetrics;
-export const scrapeValidatorMonitorMetrics = native.scrapeValidatorMonitorMetrics;
 export const registerLocalValidator = native.registerLocalValidator;
 export const unregisterLocalValidator = native.unregisterLocalValidator;

@@ -18,9 +18,6 @@ export declare function scrapeMetrics(): string;
 /** Scrape only native state-transition metrics in Prometheus text format. */
 export declare function scrapeStateTransitionMetrics(): string;
 
-/** Scrape only native validator-monitor metrics in Prometheus text format. */
-export declare function scrapeValidatorMonitorMetrics(): string;
-
 /**
  * Register a validator index with the native validator monitor. Metrics
  * are recorded for registered validators on every epoch transition.

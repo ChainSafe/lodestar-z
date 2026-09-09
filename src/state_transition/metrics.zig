@@ -335,14 +335,10 @@ pub fn writeStateTransition(writer: *std.Io.Writer) !void {
     try m.write(&state_transition, writer);
 }
 
-pub fn writeValidatorMonitor(writer: *std.Io.Writer) !void {
-    try m.write(&validator_monitor, writer);
-}
-
 /// Writes all metrics to `writer`.
 pub fn write(writer: *std.Io.Writer) !void {
     try writeStateTransition(writer);
-    try writeValidatorMonitor(writer);
+    try m.write(&validator_monitor, writer);
 }
 
 /// Deinitializes all metrics and resets them to noop, making it safe to keep

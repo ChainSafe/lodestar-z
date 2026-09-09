@@ -406,7 +406,6 @@ declare const bindings: {
     observeStateHashTreeRoot: (source: StateHashTreeRootSource, seconds: number) => void;
     scrapeMetrics: () => string;
     scrapeStateTransitionMetrics: () => string;
-    scrapeValidatorMonitorMetrics: () => string;
     registerLocalValidator: (index: number) => void;
     unregisterLocalValidator: (index: number) => void;
   };
