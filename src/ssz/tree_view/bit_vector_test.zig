@@ -332,3 +332,34 @@ test "BitVectorTreeView full-chunk edge cases (remainder=0)" {
         if (len > 258) try std.testing.expect(!bools[257]);
     }
 }
+
+test "memory_safety: BitVectorTreeView set should reclaim unpublished node on OOM" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const Bits = BitVectorType(44);
+    const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
+    var view = try Bits.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try std.testing.expect(!try view.get(0));
+    const nodes_in_use = pool.getNodesInUse();
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.set(0, true));
+    failing.fail_index = std.math.maxInt(usize);
+
+    // The failed update must not leave an extra in-use pool node.
+    try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+    try std.testing.expect(!try view.get(0));
+
+    try view.set(0, true);
+    try std.testing.expect(try view.get(0));
+}
