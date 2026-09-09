@@ -123,12 +123,21 @@ pub const Client = struct {
     }
 
     pub fn sendRequest(owner: *ReqResp, engine: *Engine, slot: *Client, index: u16, now: Now) void {
-        const flushed = slot.io.flush(engine, slot.stream, true) catch |err| {
-            const reason: Failure = switch (err) {
-                error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
+        const flushed = slot.io.flush(engine, slot.stream, true) catch |err| stopped: {
+            if (err == error.StreamStopped or (err == error.UnknownStream and slot.io.fin_seen)) {
+                // STOP_SENDING closes only the request direction; the peer can still send a response.
+                // quiche may already have retired that stream if its response FIN was read by the router.
+                slot.io.writing = false;
+                slot.io.outbox = .{};
+                owner.protocol_counters[@intFromEnum(slot.protocol)].request_write_stops +|= 1;
+                std.log.scoped(.network_reqresp).debug("request_write_stopped request={d}:{d} connection={d}:{d} method={s} detail={s} response_fin={any} awaiting_response=true", .{ index, slot.generation, slot.conn.index, slot.conn.generation, @tagName(slot.protocol), @errorName(err), slot.io.fin_seen });
+                break :stopped RequestIO.Flush{ .done = true, .progressed = false };
+            }
+            slot.io.failure_detail = @errorName(err);
+            owner.fail(slot, index, switch (err) {
+                error.StaleHandle, error.UnknownStream => .stream_closed,
                 else => .transport,
-            };
-            owner.fail(slot, index, reason, engine);
+            }, engine);
             return;
         };
         if (flushed.progressed) slot.progress_ms = now.mono_ms;

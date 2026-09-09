@@ -217,7 +217,9 @@ pub const Control = struct {
         const row = self.schedule(peer, conn) orelse return false;
         if (!catalog.markUnavailable(peer, conn, reason)) return false;
         if (row.closing == null) {
-            std.log.scoped(.network_peers).debug("peer_disconnect_scheduled connection={d}:{d} reason={s} grace_ms=2000", .{ conn.index, conn.generation, @tagName(reason) });
+            const snapshot = catalog.get(peer).?;
+            const agent = if (snapshot.identify) |*identify| if (identify.agent) |*value| value.slice() else "unknown" else "unknown";
+            std.log.scoped(.network_peers).debug("peer_disconnect_scheduled peer={f} connection={d}:{d} reason={s} grace_ms=2000 agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, @tagName(reason), std.json.fmt(agent, .{}) });
             row.closing = .{ .reason = reason, .deadline_ms = now.mono_ms +| 2_000 };
         }
         return true;
@@ -264,6 +266,7 @@ pub const Control = struct {
             .invalid_status,
             .invalid_metadata,
             .health_timeout,
+            .health_error,
             .reputation,
             .banned,
             => 3,
@@ -665,12 +668,14 @@ pub const Control = struct {
                     row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
                 },
                 else => {
-                    _ = self.disconnect(catalog, op.peer, op.conn, .health_timeout, now);
+                    const timed_out = failed.reason == .timeout or
+                        (failed.reason == .negotiation_failed and failed.reason.negotiation_failed == .timeout);
+                    _ = self.disconnect(catalog, op.peer, op.conn, if (timed_out) .health_timeout else .health_error, now);
                 },
             },
             .done => {
                 if (!op.received and op.protocol != .goodbye_v1) {
-                    _ = self.disconnect(catalog, op.peer, op.conn, .health_timeout, now);
+                    _ = self.disconnect(catalog, op.peer, op.conn, .health_error, now);
                 }
                 const snapshot = catalog.get(op.peer) orelse return;
                 if (op.protocol == .ping_v1 or op.protocol == .metadata_v1 or

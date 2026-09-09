@@ -15,6 +15,7 @@ pub const RequestIO = struct {
     writer: codec.ChunkWriter = undefined,
     writing: bool = false,
     outbox: stream_io.Outbox = .{},
+    failure_detail: []const u8 = "none",
 
     pub const Flush = struct { done: bool, progressed: bool };
 

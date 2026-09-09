@@ -257,6 +257,45 @@ test "core native control timeout releases owners independent of public output" 
     try std.testing.expectEqual(t.DisconnectReason.health_timeout, events[0].closed.reason);
 }
 
+test "core native control distinguishes RPC errors timeouts and local retries" {
+    const Case = struct { failure: rr.Failure, reason: ?t.DisconnectReason };
+    for ([_]Case{
+        .{ .failure = .stream_closed, .reason = .health_error },
+        .{ .failure = .{ .invalid_response = error.Truncated }, .reason = .health_error },
+        .{ .failure = .{ .negotiation_failed = .timeout }, .reason = .health_timeout },
+        .{ .failure = .host_timeout, .reason = null },
+    }) |case| {
+        var setup: Setup = .{};
+        try setup.init(&.{});
+        defer setup.deinit();
+        for (0..50) |_| try setup.step(0);
+        try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+        setup.client.reStatusPeers(setup.pair.now);
+        try setup.step(0);
+        var injected = false;
+        for (setup.client.control.operations) |operation| if (operation.request) |request| {
+            if (operation.protocol != .status_v1) continue;
+            const service = &setup.client.service.reqresp.inner;
+            const slot = service.outboundSlot(request).?;
+            service.fail(slot, request.index, case.failure, &setup.pair.client);
+            injected = true;
+            break;
+        };
+        try std.testing.expect(injected);
+        for (0..4) |_| try setup.step(0);
+        setup.pair.advance(2_001);
+        for (0..12) |_| try setup.step(0);
+        if (case.reason) |reason| {
+            try std.testing.expectEqual(@as(u16, 0), setup.client.catalog.connectedCount());
+            var events: [1]t.Event = undefined;
+            try std.testing.expectEqual(@as(usize, 1), setup.client.catalog.pollEvents(&events));
+            try std.testing.expectEqual(reason, events[0].closed.reason);
+        } else {
+            try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
+        }
+    }
+}
+
 fn allocationCheck(a: std.mem.Allocator) !void {
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     var core = try managed.Core.init(a, &identity, &.{}, options());

@@ -89,6 +89,16 @@ with host identity and process lifetime when correlating across restarts. Follow
 `request_completed` or `request_failed`. Gossip verdicts carry message IDs and
 peer identities; mesh transitions carry topic and connection handles.
 
+`request_write_stopped` records QUIC request half-closure while response processing
+continues. Its `detail` distinguishes STOP_SENDING from a stream already retired
+after buffered response EOF. The per-method counter
+`lodestar_native_reqresp_request_write_stops_total` counts these transitions even
+when debug records are suppressed. A later `request_failed` remains authoritative
+for response decoding, reset, or timeout failures and includes the native I/O error
+in `detail`. Scheduled disconnects include peer identity and the reported agent.
+`health_timeout` means an RPC deadline expired; `health_error` covers other failed
+or empty health responses. Neither label implies a consensus validation failure.
+
 For the Cayman Hoodi deployment, existing Loki labels can select these records:
 
 ```logql
