@@ -630,11 +630,11 @@ pub const Gossipsub = struct {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
         const now_ms = self.last_now_ms;
         if (ssz.len > constants.MAX_PAYLOAD_SIZE) return error.PayloadTooLarge;
-        if (!self.validTopic(topic_str)) return error.UnknownTopic;
         if (self.namespace) |*ns| {
-            if (ssz.len < ns.lookup(topic_str).?.rule.ssz_min) return error.PayloadTooSmall;
-            if (ssz.len > ns.lookup(topic_str).?.rule.ssz_max) return error.PayloadTooLarge;
-        }
+            const rule = (ns.lookup(topic_str) orelse return error.UnknownTopic).rule;
+            if (ssz.len < rule.ssz_min) return error.PayloadTooSmall;
+            if (ssz.len > rule.ssz_max) return error.PayloadTooLarge;
+        } else if (topic_mod.parse(topic_str) == null) return error.UnknownTopic;
         const id = topic_mod.validMessageId(topic_str, ssz, self.options.message_id_policy);
         if (self.seen.contains(id, now_ms)) {
             if (options.ignore_duplicate) return .{ .duplicate = true };

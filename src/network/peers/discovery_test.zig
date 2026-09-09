@@ -36,8 +36,9 @@ fn referralCase(rejection: ?discovery.Rejection) !void {
     defer controller.deinit();
     try controller.request(if (rejection == .demand) .{ .syncnets = 1 } else .{ .general = true }, now);
     const seed = a.engine.peerRecord(&b_peer.node_id).?;
-    try controller.lookup.init(&controller.storage.foreground, a.engine.localRecord().node_id, c_peer.node_id, &.{seed});
-    controller.lookup_active = true;
+    var lookup: d.Lookup = undefined;
+    try lookup.init(&controller.storage.foreground, a.engine.localRecord().node_id, c_peer.node_id, &.{seed});
+    controller.lookup = lookup;
     var output: [16]adapter.Candidate = undefined;
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     var found: ?adapter.Candidate = null;
@@ -85,7 +86,7 @@ test "peer discovery publishes authenticated foreground and bootstrap responders
         var checked = false;
         for (0..300) |_| {
             const tick = try d.Driver.monotonicMilliseconds(std.testing.io);
-            if (foreground and !controller.lookup_active) controller.query_due_ms = tick;
+            if (foreground and controller.lookup == null) controller.query_due_ms = tick;
             const result = try controller.step(std.testing.io, tick, tick, &output);
             if (result.failure) |err| return err;
             const remote = try b.driver.stepUntil(std.testing.io, &expiries, tick);
@@ -93,7 +94,7 @@ test "peer discovery publishes authenticated foreground and bootstrap responders
             const progress = try a.driver.stepUntil(std.testing.io, &expiries, tick);
             if (progress.failure) |err| return err;
             const selected = progress.event == .response and progress.event.response.matched.terminal and
-                (controller.lookup_active and controller.lookup.ownsCall(progress.event.response.matched.handle)) == foreground;
+                (controller.lookup != null and controller.lookup.?.ownsCall(progress.event.response.matched.handle)) == foreground;
             if (selected) try fillResponderBucket(&a.engine, b.engine.localRecord(), progress.now_ms);
             const consumed = controller.consume(&progress, expiries[0..progress.calls_expired], &output);
             if (consumed.failure) |err| return err;
@@ -151,12 +152,12 @@ test "peer discovery clears an active foreground walk at demand expiry and can r
         const tick = now + if (replace_demand) @as(u64, 4000) else @as(u64, 2000);
         try controller.request(.{ .attnets = .{1} ++ .{0} ** 7, .expires_ms = tick + 1 }, tick);
         _ = try controller.step(std.testing.io, tick, now, &candidates);
-        try std.testing.expect(controller.lookup_active and controller.lookup.waitingCount() > 0);
-        const waiting = controller.lookup.waitingCount();
+        try std.testing.expect(controller.lookup != null and controller.lookup.?.waitingCount() > 0);
+        const waiting = controller.lookup.?.waitingCount();
         const count = a.engine.calls.count();
         const background = controller.maintenance.pending;
         if (replace_demand) try controller.request(.{}, tick + 1) else _ = try controller.step(std.testing.io, tick + 1, now, &candidates);
-        try std.testing.expect(!controller.lookup_active);
+        try std.testing.expect(controller.lookup == null);
         try std.testing.expect(a.engine.calls.count() <= count - waiting);
         try std.testing.expectEqualDeep(background, controller.maintenance.pending);
         try std.testing.expect(!controller.stopped);
@@ -521,7 +522,7 @@ fn foregroundQuery(a: *Node, b: *Node) !void {
         if (remote.failure) |err| return err;
         if (result.candidates != 0) {
             try adapter.requireIdentity(b.engine.localRecord(), &output[0].peer);
-            try std.testing.expect(controller.lookup_active);
+            try std.testing.expect(controller.lookup != null);
             try std.testing.expectEqual(@as(u64, 0), controller.counters.lookups_completed);
             try std.testing.expectEqual(@as(u64, 1), controller.counters.candidates_published);
             try std.testing.expect(controller.last_candidate_ms != null);
@@ -607,7 +608,7 @@ test "peer discovery foreground retains authenticated IPv6 source over alternate
             if (remote.failure) |err| return err;
         }
         try std.testing.expect(completed);
-        try std.testing.expect(controller.lookup_active);
+        try std.testing.expect(controller.lookup != null);
         controller.cancel();
         try std.testing.expectEqual(@as(usize, 0), a.engine.calls.count());
     }

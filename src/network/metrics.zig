@@ -182,12 +182,12 @@ pub const Snapshot = struct {
             self.discovery_enabled = true;
             self.discovery_sessions = discovery.engine.channel.sessions.sessionCount();
             self.discovery_peers = discovery.engine.peerCount();
-            self.discovery_lookups = @intFromBool(discovery.coordinator.lookup_active);
+            self.discovery_lookups = @intFromBool(discovery.coordinator.lookup != null);
             self.lookup_time = discovery.coordinator.lookup_time;
             self.lookup_finishes = discovery.coordinator.lookup_finishes;
             self.discovery_pending_revalidations = discovery.engine.routing.pendingCount();
-            self.discovery_waiting_queries = if (discovery.coordinator.lookup_active)
-                discovery.coordinator.lookup.waitingCount()
+            self.discovery_waiting_queries = if (discovery.coordinator.lookup) |*lookup|
+                lookup.waitingCount()
             else
                 0;
             if (discovery.coordinator.last_candidate_ms) |last|
