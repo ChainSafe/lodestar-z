@@ -29,6 +29,7 @@ test("metrics are available through startup and remain readable after close", as
   const runtime = createNativeNetworkRuntime(networkConfig(), () => undefined);
   try {
     expect(samples(runtime.getMetrics()).get("libp2p_peers")).toBe(0);
+    expect(samples(runtime.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
     await runtime.ready;
     await vi.waitFor(() => expect(samples(runtime.getMetrics()).get("lodestar_native_network_running")).toBe(1));
     expect(
@@ -40,6 +41,9 @@ test("metrics are available through startup and remain readable after close", as
   const closed = runtime.getMetrics();
   expect(samples(closed).get("lodestar_native_network_running")).toBe(0);
   expect(samples(closed).get("libp2p_peers")).toBe(0);
+  expect(samples(closed).get("lodestar_peer_connection_seconds_count")).toBe(0);
+  expect(samples(closed).get("lodestar_native_quic_connections_active")).toBe(0);
+  expect(samples(closed).get("lodestar_native_dial_attempts")).toBe(0);
   expect(runtime.getMetrics()).toBe(closed);
 });
 
@@ -63,6 +67,11 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
         expect(left.get("libp2p_peers")).toBe(1);
         expect(left.get('lodestar_peers_by_direction_count{direction="outbound"}')).toBe(1);
         expect(right.get('lodestar_peers_by_direction_count{direction="inbound"}')).toBe(1);
+        expect(left.get("lodestar_peer_connection_seconds_count")).toBe(1);
+        expect(right.get("lodestar_peer_long_lived_attnets_count_count")).toBe(1);
+        expect(left.get('lodestar_native_quic_connections_established_total{direction="outbound"}')).toBe(1);
+        expect(right.get('lodestar_native_quic_connections_established_total{direction="inbound"}')).toBe(1);
+        expect(left.get('lodestar_discovery_dial_time_seconds_count{status="success"}')).toBe(1);
         expect(left.get(outgoing)).toBe(1);
         expect(
           left.get('beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method="beacon_blocks_by_root"}')
@@ -88,4 +97,6 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
   expect(samples(pair.left.getMetrics()).get(outgoing)).toBe(1);
   expect(samples(pair.right.getMetrics()).get(incoming)).toBe(1);
   expect(samples(pair.left.getMetrics()).get("libp2p_peers")).toBe(0);
+  expect(samples(pair.left.getMetrics()).get('lodestar_discovery_dial_time_seconds_count{status="success"}')).toBe(1);
+  expect(samples(pair.left.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
 }, 20000);

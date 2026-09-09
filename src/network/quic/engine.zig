@@ -184,6 +184,7 @@ pub const Engine = struct {
     stream_window: u64,
     outbound_max: u16,
     counters: Counters = .{},
+    connection_metrics: @import("metrics.zig").Counters = .{},
     host_work_pending: bool = false,
     // Physical slot positions preserve continuation through active-list swap removal.
     event_cursor: u16 = 0,
@@ -845,6 +846,7 @@ pub const Engine = struct {
                     slot.deferClose(.peer_id_mismatch, types.app_error_peer_id_mismatch);
                 } else {
                     slot.connected_pending = true;
+                    self.connection_metrics.established[@intFromEnum(slot.direction)] +|= 1;
                     std.log.scoped(.network_quic).debug("connection_established connection={d}:{d} direction={s} peer={f}", .{ index, slot.generation, @tagName(slot.direction), @import("../logging.zig").peer(&id) });
                 }
             } else {
@@ -862,6 +864,7 @@ pub const Engine = struct {
     fn markClosed(self: *Engine, index: u16, reason: CloseReason) void {
         const slot = &self.registry.slots[index];
         assert(slot.state == .handshaking or slot.state == .established);
+        self.connection_metrics.closed[@intFromEnum(slot.direction)][@intFromEnum(reason)] +|= 1;
         const code: u64 = switch (reason) {
             .peer_closed => |closed| closed.code,
             .transport_error => |value| value,

@@ -38,6 +38,8 @@ test "engine handshake connects both sides with verified peer ids" {
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
     try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &pair.client.connection_metrics.established);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 0 }, &pair.server.connection_metrics.established);
 }
 
 test "engine counts only inbound handshakes against the permit bound" {
@@ -113,6 +115,8 @@ test "engine reconnects with the same TLS contexts" {
     const server_events = pair.events(&pair.server, &storage);
     try std.testing.expectEqual(@as(usize, 1), server_events.len);
     _ = try expectConnected(server_events[0], .inbound, &pair.client_ctx);
+    try std.testing.expectEqual(@as(u64, 2), pair.client.connection_metrics.established[1]);
+    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(engine_mod.CloseReason.host)]);
 }
 
 test "engine reports connection metadata through handles" {

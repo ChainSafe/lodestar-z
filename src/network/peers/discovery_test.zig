@@ -190,6 +190,13 @@ test "peer discovery empty lookup backs off and startup allocations balance" {
     const result = try controller.step(std.testing.io, 10, 10, &out);
     try std.testing.expectEqual(@as(usize, 0), result.candidates);
     try std.testing.expect(controller.nextWakeup(10).? > 10);
+    try std.testing.expectEqual(@as(u64, 1), controller.lookup_time.count);
+    try std.testing.expectEqual(@as(u64, 1), controller.lookup_finishes[@intFromEnum(d.Lookup.FinishReason.exhausted)]);
+    const completed = controller.lookup_time;
+    const progress: d.Driver.StepResult = .{ .now_ms = 11 };
+    _ = controller.consume(&progress, &.{}, &out);
+    try std.testing.expectEqualDeep(completed, controller.lookup_time);
+    try std.testing.expect(controller.last_candidate_ms == null);
     try std.testing.expectEqual(allocation.allocated_bytes, plan.allocated_bytes);
     controller.deinit();
     try std.testing.expectEqual(allocation.allocated_bytes, allocation.freed_bytes);
@@ -453,6 +460,7 @@ fn foregroundQuery(a: *Node, b: *Node) !void {
             try std.testing.expect(controller.lookup_active);
             try std.testing.expectEqual(@as(u64, 0), controller.counters.lookups_completed);
             try std.testing.expectEqual(@as(u64, 1), controller.counters.candidates_published);
+            try std.testing.expect(controller.last_candidate_ms != null);
             found = true;
             break;
         }
