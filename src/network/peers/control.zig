@@ -34,6 +34,7 @@ const Response = struct {
     bytes: [wire.status_size_max]u8 = undefined,
 };
 const Schedule = struct {
+    direction: t.Direction = .inbound,
     identify_enabled: bool = false,
     identify_state: enum { pending, started, done } = .pending,
     identify_retry_ms: u64 = 0,
@@ -67,7 +68,7 @@ pub const Control = struct {
         gossip_refused: u64 = 0,
         closed: [@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
         closed_by_client: [client.count][@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(@splat(0)),
-        goodbyes: [goodbye.count]u64 = @splat(0),
+        events: @import("control_metrics.zig").Counters = .{},
     };
 
     pub const Resources = struct {
@@ -173,7 +174,9 @@ pub const Control = struct {
         now: Now,
     ) void {
         std.debug.assert(peer.index < self.schedules.len);
+        self.counters.events.connected[@intFromEnum(direction)] +|= 1;
         self.schedules[peer.index] = .{
+            .direction = direction,
             .peer = peer,
             .conn = conn,
             .status_due_ms = now.mono_ms +| if (direction == .inbound)
@@ -208,7 +211,10 @@ pub const Control = struct {
             }
         };
         service.reqresp.inner.cleanupPending(engine, &service.router);
-        if (self.schedule(peer, conn)) |row| row.peer = null;
+        if (self.schedule(peer, conn)) |row| {
+            self.counters.events.disconnected[@intFromEnum(row.direction)] +|= 1;
+            row.peer = null;
+        }
     }
     pub fn disconnect(
         self: *Control,
@@ -368,6 +374,7 @@ pub const Control = struct {
             };
             if (action == .goodbye) {
                 row.closing.?.sent = self.start(service, engine, row, protocol, local, now);
+                if (row.closing.?.sent) self.counters.events.observeGoodbye(goodbyeReason(row.closing.?.reason), true, snapshot.connected_at_ms, now.mono_ms);
                 row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
                 continue;
             }
@@ -413,8 +420,8 @@ pub const Control = struct {
 
     pub fn receivedGoodbye(self: *Control, catalog: *Catalog, peer: t.PeerRef, conn: t.Handle, code: u64, now: Now, during_close: bool) void {
         const reason = goodbye.reason(code);
-        self.counters.goodbyes[@intFromEnum(reason)] +|= 1;
         const snapshot = catalog.get(peer).?;
+        self.counters.events.observeGoodbye(code, false, snapshot.connected_at_ms, now.mono_ms);
         std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} cooldown_ms={d} during_close={any} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, code, @tagName(reason), goodbye.cooldownMs(code), during_close, std.json.fmt(client.agent(&snapshot.identify), .{}) });
         _ = catalog.remoteGoodbye(peer, conn, now.mono_ms, goodbye.cooldownMs(code));
     }
@@ -430,7 +437,8 @@ pub const Control = struct {
         now: Now,
     ) void {
         if (self.schedule(peer, conn) == null) return;
-        const kind = client.fromIdentify(&catalog.get(peer).?.identify);
+        const snapshot = catalog.get(peer).?;
+        const kind = client.fromIdentify(&snapshot.identify);
         self.cancelConnection(service, engine, peer, conn);
         service.gossipsub.transportEvents(
             engine,
@@ -462,6 +470,7 @@ pub const Control = struct {
         const row = self.schedule(peer, conn) orelse return;
         if (row.closing != null) return;
         const status = wire.decodeStatus(protocol, bytes) catch {
+            self.counters.events.observeRelevance(.invalid_status);
             _ = self.disconnect(catalog, peer, conn, .invalid_status, now);
             return;
         };
@@ -469,7 +478,9 @@ pub const Control = struct {
         // relevance. A bounded grace permits its old-context bytes without penalizing it.
         if (inbound and now.mono_ms < row.transition_until_ms and protocol == row.previous_protocol and
             std.mem.eql(u8, &status.fork_digest, &row.previous_digest)) return;
-        if (wire.relevance(local, &status, slot)) |reason| {
+        const relevance = wire.relevance(local, &status, slot);
+        self.counters.events.observeRelevance(relevance);
+        if (relevance) |reason| {
             _ = self.disconnect(catalog, peer, conn, reason, now);
             return;
         }
