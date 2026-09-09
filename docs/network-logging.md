@@ -133,6 +133,20 @@ Unreachable dial destinations rotate to the next advertised address and use
 failure backoff. Local resource refusals remain deferred without penalizing the
 peer. `dial_failed` and `dial_deferred` identify the endpoint and native error.
 
+Peer age, app/gossip score, attnet and custody-count histograms describe the current
+connected population and are rebuilt each snapshot. Read their buckets directly,
+without `rate()`. Metadata availability gauges distinguish unknown coverage from
+an advertised zero. `lodestar_native_peers_by_client_direction` separates the
+client mix by connection direction. QUIC close counters include failures before
+peer admission, and Identify failures have fixed reason labels.
+
+`lodestar_discovery_dial_time_seconds{status="success"|"error"}` and
+`lodestar_discovery_find_node_query_time_seconds` are cumulative duration
+histograms. Local dial deferrals and cancelled operations are excluded. Native
+dial/QUIC occupancy gauges, pending routing revalidations, foreground queries and
+candidate idle time distinguish pressure from stalled discovery. Candidate idle
+time is absent before the first publication and after close.
+
 Foreground discovery prioritizes current-network QUIC records and counts only
 matching successes toward convergence. Each walk permits at most 128 queries
 with three in flight. `lodestar_native_discovery_` counters show query progress,

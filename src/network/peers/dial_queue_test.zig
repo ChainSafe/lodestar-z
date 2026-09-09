@@ -4,6 +4,33 @@ const t = @import("types.zig");
 const a = std.testing.allocator;
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 1234 } };
 
+test "peer dial metrics count each completed attempt once and exclude local deferrals" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    try q.enqueue(&peer, &.{address}, true, 0);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    try std.testing.expect(q.dialDeferred(out[0].token, 100));
+    try std.testing.expectEqual(@as(u64, 0), q.durations[1].count);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(1100, &out));
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    try std.testing.expect(q.dialStarted(out[0].token, conn));
+    q.accepted(&peer, conn, 1250);
+    q.accepted(&peer, conn, 1300);
+    try std.testing.expectEqual(@as(u64, 1), q.durations[0].count);
+    try std.testing.expectEqual(@as(u128, 150), q.durations[0].sum_ms);
+    q.disconnected(&peer, 1250, .transport_closed, 1500);
+    const due = q.nextWakeup(1500, 1).?;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(due, &out));
+    try std.testing.expect(q.dialStarted(out[0].token, conn));
+    try std.testing.expect(q.dialClosed(conn, due + 250));
+    try std.testing.expect(!q.dialClosed(conn, due + 300));
+    try std.testing.expect(!q.dialFailed(out[0].token, due + 300));
+    try std.testing.expectEqual(@as(u64, 1), q.durations[1].count);
+    try std.testing.expectEqual(@as(u128, 250), q.durations[1].sum_ms);
+}
+
 test "peer dial custody diagnostics count unfinished derivations without mutating retained coverage" {
     const custody = @import("custody.zig");
     var ledger: @import("../reservations.zig").Reservations = .{ .backing = a };

@@ -23,6 +23,7 @@ pub const Counters = struct {
     processing_failures: u64 = 0,
     coordinator_failures: u64 = 0,
 };
+pub const LookupTime = @import("../metrics_histogram.zig").Histogram(&.{ 1000, 5000, 10000, 30000, 60000, 120000 });
 pub const Options = struct {
     query_interval_ms: u64 = 1_000,
     local_retry_ms: u64 = 1_000,
@@ -86,6 +87,9 @@ pub const Discovery = struct {
     query_due_ms: u64,
     refill_due_ms: u64 = 0,
     resource_retry_ms: u64 = 0,
+    lookup_time: LookupTime = .{},
+    lookup_finishes: [@typeInfo(d.Lookup.FinishReason).@"enum".fields.len]u64 = @splat(0),
+    last_candidate_ms: ?u64 = null,
     stopped: bool = false,
     counters: Counters = .{},
     rejections: [rejection_count]u64 = @splat(0),
@@ -182,6 +186,8 @@ pub const Discovery = struct {
         if (self.lookup_active and self.lookup.isFinished()) {
             const confirmed_records = self.lookup.confirmedResults(&self.storage.records);
             self.counters.lookups_completed +|= 1;
+            self.lookup_time.observe(progress.now_ms -| self.lookup_started_ms);
+            self.lookup_finishes[@intFromEnum(self.lookup.finishReason().?)] +|= 1;
             std.log.scoped(.network_discovery).debug("lookup_completed reason={s} confirmed={d} queried={d} candidates={d} published={d} elapsed_ms={d}", .{ @tagName(self.lookup.finishReason().?), confirmed_records.len, self.lookup.queries_started, self.lookup.candidateCount(), self.counters.candidates_published -| self.lookup_published, progress.now_ms -| self.lookup_started_ms });
             self.lookup_active = false;
             self.query_due_ms = progress.now_ms +| self.options.query_interval_ms;
@@ -355,6 +361,7 @@ pub const Discovery = struct {
         out[result.candidates] = candidate;
         result.candidates += 1;
         self.counters.candidates_published +|= 1;
+        self.last_candidate_ms = now_ms;
     }
 };
 

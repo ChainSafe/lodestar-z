@@ -41,6 +41,19 @@ pub const Snapshot = struct {
     outgoing_error_reasons: [rr.reqresp.metrics.error_reason_count]u64 = @splat(0),
     validation_time: topic_metrics.ValidationTime = .{},
     scores: @import("metrics_score.zig").Snapshot = .{},
+    peer_population: @import("metrics_peers.zig").Snapshot = .{},
+    connections: @import("quic/metrics.zig").Counters = .{},
+    transport_resources: ?@import("quic/engine.zig").Engine.Resources = null,
+    dial_resources: ?@import("peers/dial_queue.zig").DialQueue.Resources = null,
+    dial_time: [2]@import("peers/dial_queue.zig").DialTime = @splat(.{}),
+    lookup_time: discovery_metrics.LookupTime = .{},
+    lookup_finishes: [@typeInfo(@import("discv5").Lookup.FinishReason).@"enum".fields.len]u64 = @splat(0),
+    discovery_pending_revalidations: usize = 0,
+    discovery_waiting_queries: usize = 0,
+    discovery_candidate_idle_ms: ?u64 = null,
+    identify_started: u64 = 0,
+    identify_deferred: u64 = 0,
+    identify_failures: [@typeInfo(@import("identify/root.zig").Failure).@"enum".fields.len]u64 = @splat(0),
     protocols: [rr.Protocol.count]rr.reqresp.ProtocolCounters = @splat(.{}),
     gossip_counts: gossip.Gossipsub.Counters = .{},
     gossip_topics: topic_metrics.Topics = .{},
@@ -73,6 +86,10 @@ pub const Snapshot = struct {
         const g = &core.service.gossipsub.inner;
         self.runtime = owner.counters;
         self.transport = owner.transport.engine.counters;
+        self.connections = owner.transport.engine.connection_metrics;
+        self.transport_resources = owner.transport.engine.resourceSnapshot();
+        self.dial_resources = core.dial_queue.resourceSnapshot();
+        self.dial_time = core.dial_queue.durations;
         self.requests = core.service.reqresp.inner.counters;
         self.udp = owner.transport.udp.counters;
         self.outgoing_error_reasons = core.service.reqresp.inner.outgoing_error_reasons;
@@ -82,6 +99,9 @@ pub const Snapshot = struct {
         self.gossip_topics = g.topic_metrics;
         self.gossip_resources = g.resourceSnapshot();
         self.closed = core.control.counters.closed;
+        self.identify_started = core.control.counters.identify_started;
+        self.identify_deferred = core.control.counters.identify_deferred;
+        self.identify_failures = core.control.counters.identify_failures;
         self.closed_by_client = core.control.counters.closed_by_client;
         self.goodbyes = core.control.counters.goodbyes;
         self.dial = core.dial_queue.counters;
@@ -92,6 +112,7 @@ pub const Snapshot = struct {
         for (core.catalog.rows) |*row| {
             if (row.connection == null) continue;
             self.peers += 1;
+            self.peer_population.observe(row, now_ms);
             self.relevant += @intFromBool(row.status != null);
             const client = rowClient(&row.identify);
             self.clients[@intFromEnum(client)] += 1;
@@ -128,8 +149,8 @@ pub const Snapshot = struct {
         }
         for (g.state.peers, 0..) |*row, index| {
             if (!row.active) continue;
-            self.scores.observe(g.scores.snapshot(row.logical.index, now_ms), &g.scores.params);
-            if (!mesh_peers.isSet(index)) continue;
+            const score = g.scores.snapshot(row.logical.index, now_ms);
+            self.scores.observe(score, &g.scores.params);
             var client: Client = .Unknown;
             for (core.catalog.rows) |*peer| {
                 if (peer.connection) |connection| if (std.meta.eql(connection, row.conn)) {
@@ -137,6 +158,8 @@ pub const Snapshot = struct {
                     break;
                 };
             }
+            self.peer_population.gossip_scores[@intFromEnum(client)].observe(score);
+            if (!mesh_peers.isSet(index)) continue;
             self.mesh_clients[@intFromEnum(client)] += 1;
         }
         if (owner.discovery) |discovery| {
@@ -146,12 +169,24 @@ pub const Snapshot = struct {
             self.discovery_sessions = discovery.engine.channel.sessions.sessionCount();
             self.discovery_peers = discovery.engine.peerCount();
             self.discovery_lookups = @intFromBool(discovery.coordinator.lookup_active);
+            self.lookup_time = discovery.coordinator.lookup_time;
+            self.lookup_finishes = discovery.coordinator.lookup_finishes;
+            self.discovery_pending_revalidations = discovery.engine.routing.pendingCount();
+            self.discovery_waiting_queries = if (discovery.coordinator.lookup_active)
+                discovery.coordinator.lookup.waitingCount()
+            else
+                0;
+            if (discovery.coordinator.last_candidate_ms) |last|
+                self.discovery_candidate_idle_ms = now_ms -| last;
         }
     }
 
     pub fn stop(self: *Snapshot) void {
         self.running = false;
         self.scores = .{};
+        self.peer_population = .{};
+        if (self.transport_resources) |*resources| resources.* = .{ .capacity = resources.capacity, .active = 0, .handshaking = 0, .dialing = 0, .outbound = 0 };
+        if (self.dial_resources) |*resources| resources.* = .{ .capacity = resources.capacity };
         self.peers = 0;
         self.relevant = 0;
         self.clients = @splat(0);
@@ -162,6 +197,9 @@ pub const Snapshot = struct {
         self.discovery_sessions = 0;
         self.discovery_peers = 0;
         self.discovery_lookups = 0;
+        self.discovery_pending_revalidations = 0;
+        self.discovery_waiting_queries = 0;
+        self.discovery_candidate_idle_ms = null;
     }
 
     pub fn write(self: *const Snapshot, w: *Writer) Writer.Error!void {
@@ -180,6 +218,9 @@ pub const Snapshot = struct {
         try self.writeRequestTimes(w);
         try self.writeGossip(w);
         try self.writeScores(w);
+        try self.peer_population.write(w);
+        try self.connections.write(w);
+        try self.writePeeringProgress(w);
         try scalar(w, "lodestar_discovery_total_dial_attempts", .counter, "Started native QUIC dials", self.runtime.dial_started);
         if (self.discovery_enabled) {
             try scalar(w, "lodestar_discv5_active_session_count", .gauge, "Stored discovery sessions", self.discovery_sessions);
@@ -227,6 +268,37 @@ pub const Snapshot = struct {
         }
         try family(w, "lodestar_native_peer_goodbyes_total", .counter, "Received Ethereum Goodbye reasons; unknown wire codes share one label");
         inline for (@typeInfo(goodbye.Reason).@"enum".fields) |reason| try sample(w, "lodestar_native_peer_goodbyes_total", "reason", reason.name, self.goodbyes[reason.value]);
+    }
+
+    fn writePeeringProgress(self: *const Snapshot, w: *Writer) Writer.Error!void {
+        try scalar(w, "lodestar_native_peer_identify_started_total", .counter, "Started Identify exchanges", self.identify_started);
+        try scalar(w, "lodestar_native_peer_identify_deferred_total", .counter, "Identify starts deferred by local pressure", self.identify_deferred);
+        try family(w, "lodestar_native_peer_identify_failures_total", .counter, "Identify failures by bounded protocol reason");
+        inline for (@typeInfo(@import("identify/root.zig").Failure).@"enum".fields) |field|
+            try sample(w, "lodestar_native_peer_identify_failures_total", "reason", field.name, self.identify_failures[field.value]);
+        if (self.transport_resources) |*resources| {
+            inline for (@typeInfo(@TypeOf(resources.*)).@"struct".fields) |field|
+                try scalar(w, "lodestar_native_quic_connections_" ++ field.name, .gauge, "Native QUIC connection slots " ++ field.name, @field(resources, field.name));
+        }
+        if (self.dial_resources) |*resources| {
+            inline for (@typeInfo(@TypeOf(resources.*)).@"struct".fields) |field|
+                try scalar(w, "lodestar_native_dial_" ++ field.name, .gauge, "Native dial queue rows " ++ field.name, @field(resources, field.name));
+        }
+        try family(w, "lodestar_discovery_dial_time_seconds", .histogram, "Time from selecting a dial through authenticated connection or terminal failure; cancellations excluded");
+        inline for (.{ "success", "error" }, 0..) |status, index|
+            try prom.histogram(w, "lodestar_discovery_dial_time_seconds", "status", status, &self.dial_time[index]);
+        if (!self.discovery_enabled) return;
+        try family(w, "lodestar_discovery_find_node_query_time_seconds", .histogram, "Time to finish a foreground FINDNODE walk; cancelled walks excluded");
+        try prom.histogram(w, "lodestar_discovery_find_node_query_time_seconds", null, "", &self.lookup_time);
+        try family(w, "lodestar_native_discovery_lookup_finishes_total", .counter, "Completed foreground discovery walks by finish reason; cancellations excluded");
+        inline for (@typeInfo(@import("discv5").Lookup.FinishReason).@"enum".fields) |field| {
+            if (comptime !std.mem.eql(u8, field.name, "cancelled"))
+                try sample(w, "lodestar_native_discovery_lookup_finishes_total", "reason", field.name, self.lookup_finishes[field.value]);
+        }
+        try scalar(w, "lodestar_native_discovery_pending_revalidations", .gauge, "Routing buckets waiting for incumbent revalidation", self.discovery_pending_revalidations);
+        try scalar(w, "lodestar_native_discovery_waiting_queries", .gauge, "Foreground FINDNODE calls awaiting responses", self.discovery_waiting_queries);
+        if (self.discovery_candidate_idle_ms) |elapsed|
+            try scalar(w, "lodestar_native_discovery_candidate_idle_seconds", .gauge, "Time since the last candidate publication while running; absent before first publication", @as(f64, @floatFromInt(elapsed)) / 1000);
     }
 
     fn writeTopics(self: *const Snapshot, w: *Writer) Writer.Error!void {
@@ -343,6 +415,10 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.protocols[@intFromEnum(rr.Protocol.metadata_v3)].request_write_stops = 7;
     snapshot.protocols[@intFromEnum(rr.Protocol.ping_v1)].response_finish_stops = 3;
     snapshot.runtime.dial_started = std.math.maxInt(u64);
+    snapshot.discovery_enabled = true;
+    snapshot.discovery_candidate_idle_ms = 1500;
+    snapshot.lookup_time.observe(5000);
+    snapshot.dial_time[1].observe(100);
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing_time.observe(100);
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing_time.observe(300);
     snapshot.requests.withheld_ms_total = 1500;
@@ -371,6 +447,8 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     try std.testing.expect(std.mem.indexOf(u8, output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method=\"status\"} 2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_withheld_seconds_total 1.5\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "_total_total") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_discovery_dial_time_seconds_bucket{status=\"error\",le=\"0.1\"} 1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_discovery_candidate_idle_seconds 1.5\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_closes_by_client_total{client=\"Lighthouse\",reason=\"remote_goodbye\"} 13\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_goodbyes_total{reason=\"too_many_peers\"} 11\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_gossip_queue_drops_total{reason=\"data_bytes\"} 17\n") != null);
@@ -378,4 +456,7 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.stop();
     try std.testing.expectEqual(@as(usize, 0), snapshot.topic_count);
     try std.testing.expectEqual(std.math.maxInt(u64), snapshot.runtime.dial_started);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.lookup_time.count);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.dial_time[1].count);
+    try std.testing.expect(snapshot.discovery_candidate_idle_ms == null);
 }

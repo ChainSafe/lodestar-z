@@ -30,7 +30,11 @@ pub fn histogram(w: *Writer, comptime name: []const u8, comptime label: ?[]const
         cumulative +|= count;
         try w.writeAll(name ++ "_bucket{");
         if (label) |key| try w.print(key ++ "=\"{s}\",", .{label_value});
-        try w.print("le=\"{d}\"}} {d}\n", .{ @as(f64, @floatFromInt(bound)) / 1000, cumulative });
+        const boundary = if (comptime @hasField(H, "sum_ms"))
+            @as(f64, @floatFromInt(bound)) / 1000
+        else
+            bound;
+        try w.print("le=\"{d}\"}} {d}\n", .{ boundary, cumulative });
     }
     try w.writeAll(name ++ "_bucket{");
     if (label) |key| try w.print(key ++ "=\"{s}\",", .{label_value});
@@ -39,7 +43,11 @@ pub fn histogram(w: *Writer, comptime name: []const u8, comptime label: ?[]const
         try w.writeAll(name ++ "_" ++ suffix);
         if (label) |key| try w.print("{{" ++ key ++ "=\"{s}\"}}", .{label_value});
         if (comptime std.mem.eql(u8, suffix, "sum")) {
-            try w.print(" {d}\n", .{@as(f64, @floatFromInt(value.sum_ms)) / 1000});
+            const sum = if (comptime @hasField(H, "sum_ms"))
+                @as(f64, @floatFromInt(value.sum_ms)) / 1000
+            else
+                value.sum;
+            try w.print(" {d}\n", .{sum});
         } else try w.print(" {d}\n", .{value.count});
     }
 }

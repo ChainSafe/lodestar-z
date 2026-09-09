@@ -140,6 +140,10 @@ test "engine closes on handshake timeout when the server never answers" {
         engine_mod.CloseReason.handshake_timeout,
         try expectClosed(client_events[0], handle, .outbound, null),
     );
+    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(engine_mod.CloseReason.handshake_timeout)]);
+    try std.testing.expectEqual(@as(u64, 0), pair.client.connection_metrics.established[1]);
+    try std.testing.expectEqual(@as(usize, 0), pair.events(&pair.client, &storage).len);
+    try std.testing.expectEqual(@as(u64, 1), pair.client.connection_metrics.closed[1][@intFromEnum(engine_mod.CloseReason.handshake_timeout)]);
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
 }
 

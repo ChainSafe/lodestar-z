@@ -14,6 +14,7 @@ pub const Options = struct {
 pub const history_retention_ms: u64 = 600_000;
 pub const hint_freshness_ms: u64 = 300_000;
 pub const connect_timeout_ms: u64 = 30_000;
+pub const DialTime = @import("../metrics_histogram.zig").Histogram(&.{ 100, 500, 1000, 5000, 10000, 60000 });
 const stable_connection_ms: u64 = 300_000;
 pub const Hints = struct {
     node_id: [32]u8,
@@ -53,6 +54,7 @@ const Row = struct {
     conn: ?t.Handle = null,
     eligible_at_ms: u64 = 0,
     lease_expires_at_ms: u64 = 0,
+    attempt_started_ms: u64 = 0,
     failures: u8 = 0,
     manual_until_ms: u64 = 0,
 };
@@ -65,6 +67,7 @@ pub const DialQueue = struct {
     custody_cursor: usize = 0,
     random: std.Random.DefaultPrng,
     counters: Counters = .{},
+    durations: [2]DialTime = @splat(.{}),
 
     pub const Counters = struct {
         manual_completed: u64 = 0,
@@ -390,6 +393,7 @@ pub const DialQueue = struct {
                     row.connected = true;
                     return;
                 }
+                self.durations[0].observe(now_ms -| row.attempt_started_ms);
             }
             row.conn = null;
             self.connection(peer, true, now_ms);
@@ -494,6 +498,8 @@ pub const DialQueue = struct {
         return true;
     }
     fn failed(self: *DialQueue, row: *Row, now_ms: u64) void {
+        std.debug.assert(row.attempt);
+        self.durations[1].observe(now_ms -| row.attempt_started_ms);
         row.attempt = false;
         row.conn = null;
         row.failures = @min(row.failures +| 1, 7);
@@ -559,6 +565,7 @@ pub const DialQueue = struct {
             const row = &self.rows[index];
             row.generation += 1;
             row.attempt = true;
+            row.attempt_started_ms = now_ms;
             row.lease_expires_at_ms = if (row.direct or row.automatic) now_ms +| 10_000 else @min(row.manual_until_ms, now_ms +| 10_000);
             out[count] = .{
                 .token = .{ .index = @intCast(index), .generation = row.generation },
