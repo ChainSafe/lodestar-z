@@ -1302,7 +1302,7 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
         allocator.destroy(post_state);
     }
 
-    try st.processSlots(allocator, js.io(), post_state, slot_value, .{});
+    try st.processSlots(allocator, js.io(), post_state, slot_value);
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
