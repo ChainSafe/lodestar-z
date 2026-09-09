@@ -17,7 +17,6 @@ const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
 const verifyProposerSignature = @import("./signature_sets/proposer.zig").verifyProposerSignature;
 pub const processBlock = @import("./block/process_block.zig").processBlock;
-const EpochTransitionCacheOpts = @import("cache/epoch_transition_cache.zig").EpochTransitionCacheOpts;
 const EpochTransitionCache = @import("cache/epoch_transition_cache.zig").EpochTransitionCache;
 const processEpoch = @import("epoch/process_epoch.zig").processEpoch;
 const computeEpochAtSlot = @import("utils/epoch.zig").computeEpochAtSlot;
@@ -52,7 +51,6 @@ pub fn processSlots(
     io: std.Io,
     cached_state: *CachedBeaconState,
     slot: Slot,
-    _: EpochTransitionCacheOpts,
 ) !void {
     const config = cached_state.config;
     const epoch_cache = cached_state.epoch_cache;
@@ -181,14 +179,11 @@ pub fn stateTransition(
         allocator.destroy(post_cached_state);
     }
 
-    try metrics.state_transition.onStateClone(post_cached_state, .state_transition);
-
     try processSlots(
         allocator,
         io,
         post_cached_state,
         block_slot,
-        .{},
     );
 
     const config = post_cached_state.config;

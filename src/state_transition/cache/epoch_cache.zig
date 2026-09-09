@@ -923,3 +923,7 @@ pub const EpochCache = struct {
         return self.epoch >= self.config.chain.ELECTRA_FORK_EPOCH;
     }
 };
+
+test {
+    _ = @import("epoch_cache_test.zig");
+}

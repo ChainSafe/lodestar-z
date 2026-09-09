@@ -298,6 +298,9 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                 if (len > limit) {
                     return error.gtLimit;
                 }
+                if (comptime Element.kind == .bool) {
+                    try serialized.validate(data);
+                }
 
                 const chunk_count = if (comptime isBasicType(Element))
                     (Element.fixed_size * len + 31) / 32
@@ -595,13 +598,12 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                 const content_root = try node.getLeft(pool);
                 const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
 
-                const chunked_leaf_ids_buf = try pool.allocator.alloc(Node.Id, chunked_leaf_count);
-                defer pool.allocator.free(chunked_leaf_ids_buf);
-                try content_root.getNodesAtDepth(pool, chunked_leaf_depth, 0, chunked_leaf_ids_buf);
+                var it = Node.DepthIterator.init(pool, content_root, chunked_leaf_depth, 0);
 
                 const state_col = pool.nodes.items(.state);
                 var byte_idx: usize = 0;
-                outer: for (chunked_leaf_ids_buf) |sid| {
+                outer: for (0..chunked_leaf_count) |_| {
+                    const sid = try it.next();
                     // Zero subtree at chunked_leaf boundary == all-zero output.
                     if (state_col[@intFromEnum(sid)].kind() == .zero) {
                         const remaining = serialized_size - byte_idx;
@@ -620,6 +622,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                         byte_idx += bytes_to_copy;
                     }
                 }
+                std.debug.assert(byte_idx == serialized_size);
                 return serialized_size;
             }
 

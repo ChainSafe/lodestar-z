@@ -1,6 +1,7 @@
 //! Tests for `container.zig`.
 
 const std = @import("std");
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 const Node = @import("persistent_merkle_tree").Node;
 const container = @import("../type/container.zig");
 const FixedContainerType = container.FixedContainerType;
@@ -20,6 +21,43 @@ const Checkpoint = FixedContainerType(struct {
     epoch: UintType(64),
     root: ByteVectorType(32),
 });
+
+test "ContainerTreeView failed child get preserves commit and retry" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 32,
+    });
+    defer pool.deinit();
+
+    const Child = FixedContainerType(struct { value: UintType(64) });
+    const Parent = FixedContainerType(struct { child: Child });
+    const value: Parent.Type = .{ .child = .{ .value = 7 } };
+    const root = try Parent.tree.fromValue(&pool, &value);
+    var view = try Parent.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    const nodes_before = pool.getNodesInUse();
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.get("child"));
+    try std.testing.expect(failing.has_induced_failure);
+    failing.fail_index = std.math.maxInt(usize);
+
+    try view.commit();
+    try std.testing.expectEqual(root, view.getRoot());
+    try std.testing.expectEqual(nodes_before, pool.getNodesInUse());
+
+    const child = try view.get("child");
+    try std.testing.expectEqual(@as(u64, 7), try child.get("value"));
+    try child.set("value", 9);
+    try view.commit();
+
+    var actual: Parent.Type = undefined;
+    try Parent.tree.toValue(view.getRoot(), &pool, &actual);
+    try std.testing.expectEqual(@as(u64, 9), actual.child.value);
+}
 
 test "StructContainerTreeView - basic get/set/commit/root" {
     const allocator = std.testing.allocator;
@@ -640,4 +678,256 @@ test "ContainerTreeView - serialize (with nested list)" {
     // 0xdc3619cbbc5ef0e0a3b38e3ca5d31c2b16868eacb6e4bcf8b4510963354315f5
     const expected_root = [_]u8{ 0xdc, 0x36, 0x19, 0xcb, 0xbc, 0x5e, 0xf0, 0xe0, 0xa3, 0xb3, 0x8e, 0x3c, 0xa5, 0xd3, 0x1c, 0x2b, 0x16, 0x86, 0x8e, 0xac, 0xb6, 0xe4, 0xbc, 0xf8, 0xb4, 0x51, 0x09, 0x63, 0x35, 0x43, 0x15, 0xf5 };
     try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
+}
+
+test "memory_safety: TreeView container setValue/commit - OOM does not double-free" {
+    const new_root_bytes: [32]u8 = [_]u8{0xee} ** 32;
+
+    var saw_oom = false;
+    // Create the original view before enabling failures. The sweep then walks allocations made by
+    // setValue() and commit().
+    for (0..200) |fail_after| {
+        var oom = DoubleFreeDetectAllocator.init(
+            std.testing.allocator,
+            std.math.maxInt(usize),
+        );
+        defer oom.deinit();
+
+        var operation_succeeded = false;
+        {
+            const allocator = oom.allocator();
+            var pool = try Node.Pool.init(.{
+                .page_allocator = std.testing.allocator,
+                .allocator = allocator,
+                .pool_size = 256,
+            });
+            defer pool.deinit();
+
+            const checkpoint: Checkpoint.Type = .{ .epoch = 1, .root = [_]u8{1} ** 32 };
+            const root_node = try Checkpoint.tree.fromValue(&pool, &checkpoint);
+            var view = try Checkpoint.TreeView.init(allocator, &pool, root_node);
+            defer view.deinit();
+
+            oom.failing.fail_index = oom.failing.alloc_index + fail_after;
+            var operation_error: ?anyerror = null;
+            view.setValue("root", &new_root_bytes) catch |err| {
+                operation_error = err;
+            };
+            if (operation_error == null) {
+                view.commit() catch |err| {
+                    operation_error = err;
+                };
+            }
+            if (operation_error) |err| {
+                switch (err) {
+                    error.OutOfMemory => saw_oom = true,
+                    else => return err,
+                }
+            } else {
+                operation_succeeded = true;
+            }
+        }
+        // The child view, container view, and Pool have all completed cleanup at this point.
+        try std.testing.expect(!oom.double_free);
+
+        if (operation_succeeded) {
+            try std.testing.expect(saw_oom);
+            return;
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "memory_safety: ContainerTreeView commit should reclaim basic nodes after pool exhaustion" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
+    defer pool.deinit();
+
+    const TwoBasic = FixedContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+    const value: TwoBasic.Type = .{ .a = 1, .b = 2 };
+    const root = try TwoBasic.tree.fromValue(&pool, &value);
+    var view = try TwoBasic.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    const old_root = view.getRoot();
+    const old_a = try view.getRootNode("a");
+    try view.set("a", 10);
+    try view.set("b", 20);
+
+    var filler: std.ArrayList(Node.Id) = .empty;
+    defer {
+        for (filler.items) |node| pool.unref(node);
+        filler.deinit(allocator);
+    }
+    fill: for (0..pool.nodes.len) |_| {
+        const node = pool.createLeafFromUint(0) catch |err| switch (err) {
+            error.PoolExhausted => break :fill,
+        };
+        errdefer pool.unref(node);
+
+        try filler.append(allocator, node);
+    }
+    try std.testing.expectEqual(
+        pool.nodes.len,
+        @as(usize, @intFromEnum(pool.next_free_node)),
+    );
+    try std.testing.expect(filler.items.len >= 2);
+    // Reserve two slots for the basic leaves; their parent exhausts the pool.
+    pool.unref(filler.pop().?);
+    pool.unref(filler.pop().?);
+    const baseline = pool.getNodesInUse();
+
+    try std.testing.expectError(error.PoolExhausted, view.commit());
+    try std.testing.expectEqual(old_root, view.getRoot());
+    // The field cache must remain aligned with the unchanged root after rebuild failure.
+    try std.testing.expectEqual(old_a, try view.getRootNode("a"));
+    try std.testing.expect(!old_a.getState(&pool).isFree());
+    // Fresh leaves must be reclaimed when no rebuilt parent adopts them.
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+
+    pool.unref(filler.pop().?);
+    pool.unref(filler.pop().?);
+    const nodes_in_use_before_retry = pool.getNodesInUse();
+    try view.commit();
+    const committed_root = view.getRoot();
+    // A retry must publish the values that remained staged after the failed rebuild.
+    try std.testing.expect(committed_root != old_root);
+    try std.testing.expect((try view.getRootNode("a")) != old_a);
+    try view.commit();
+    try std.testing.expectEqual(committed_root, view.getRoot());
+
+    var committed: TwoBasic.Type = undefined;
+    try TwoBasic.tree.toValue(view.getRoot(), &pool, &committed);
+    try std.testing.expectEqual(@as(u64, 10), committed.a);
+    try std.testing.expectEqual(@as(u64, 20), committed.b);
+    try std.testing.expectEqual(nodes_in_use_before_retry, pool.getNodesInUse());
+}
+
+test "memory_safety: ContainerTreeView retry should adopt a child committed before outer pool exhaustion" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
+    defer pool.deinit();
+    const pool_baseline = pool.getNodesInUse();
+
+    {
+        const Inner = FixedContainerType(struct { a: UintType(64), b: UintType(64) });
+        const Outer = FixedContainerType(struct { inner: Inner, c: UintType(64) });
+        const value: Outer.Type = .{ .inner = .{ .a = 1, .b = 2 }, .c = 3 };
+        const root = try Outer.tree.fromValue(&pool, &value);
+        var outer = try Outer.TreeView.init(allocator, &pool, root);
+        defer outer.deinit();
+
+        const old_outer_root = outer.getRoot();
+        const old_inner_root = try outer.getRootNode("inner");
+        var inner = try outer.get("inner");
+        try inner.set("a", 10);
+
+        var filler: std.ArrayList(Node.Id) = .empty;
+        defer {
+            for (filler.items) |node| pool.unref(node);
+            filler.deinit(allocator);
+        }
+        fill: for (0..pool.nodes.len) |_| {
+            const node = pool.createLeafFromUint(0) catch |err| switch (err) {
+                error.PoolExhausted => break :fill,
+            };
+            errdefer pool.unref(node);
+
+            try filler.append(allocator, node);
+        }
+        try std.testing.expectEqual(
+            pool.nodes.len,
+            @as(usize, @intFromEnum(pool.next_free_node)),
+        );
+        try std.testing.expect(filler.items.len >= 2);
+        // Reserve two slots for the child leaf and inner branch; the outer parent exhausts
+        // the pool.
+        pool.unref(filler.pop().?);
+        pool.unref(filler.pop().?);
+
+        try std.testing.expectError(error.PoolExhausted, outer.commit());
+        try std.testing.expectEqual(old_outer_root, outer.getRoot());
+        // A failed outer rebuild must not publish the committed child through its field cache.
+        try std.testing.expectEqual(old_inner_root, try outer.getRootNode("inner"));
+        try std.testing.expect(inner.getRoot() != old_inner_root);
+
+        var committed_inner: Inner.Type = undefined;
+        try Inner.tree.toValue(inner.getRoot(), &pool, &committed_inner);
+        try std.testing.expectEqual(@as(u64, 10), committed_inner.a);
+        try std.testing.expectEqual(@as(u64, 2), committed_inner.b);
+
+        pool.unref(filler.pop().?);
+        try outer.commit();
+        // A retry must adopt the child root that committed before the outer rebuild failed.
+        try std.testing.expect(outer.getRoot() != old_outer_root);
+        try std.testing.expectEqual(inner.getRoot(), try outer.getRootNode("inner"));
+
+        var committed_outer: Outer.Type = undefined;
+        try Outer.tree.toValue(outer.getRoot(), &pool, &committed_outer);
+        try std.testing.expectEqual(@as(u64, 10), committed_outer.inner.a);
+        try std.testing.expectEqual(@as(u64, 2), committed_outer.inner.b);
+        try std.testing.expectEqual(@as(u64, 3), committed_outer.c);
+    }
+    try std.testing.expectEqual(pool_baseline, pool.getNodesInUse());
+}
+
+test "memory_safety: TreeView container fromValue - view allocation OOM leaves no orphan pool nodes" {
+    const checkpoint: Checkpoint.Type = .{ .epoch = 7, .root = [_]u8{7} ** 32 };
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 64 });
+    defer pool.deinit();
+
+    const baseline = pool.getNodesInUse();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Checkpoint.TreeView.fromValue(failing.allocator(), &pool, &checkpoint),
+    );
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "memory_safety: TreeView container getFieldRoot on a dirty basic field leaves no orphan pool nodes" {
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 256 });
+    defer pool.deinit();
+
+    const checkpoint: Checkpoint.Type = .{ .epoch = 1, .root = [_]u8{1} ** 32 };
+    const root_node = try Checkpoint.tree.fromValue(&pool, &checkpoint);
+    var view = try Checkpoint.TreeView.init(std.testing.allocator, &pool, root_node);
+    defer view.deinit();
+
+    try view.set("epoch", 99);
+    const baseline = pool.getNodesInUse();
+
+    var expected = [_]u8{0} ** 32;
+    std.mem.writeInt(u64, expected[0..8], 99, .little);
+    for (0..10) |_| {
+        const field_root = try view.getFieldRoot("epoch");
+        try std.testing.expectEqualSlices(u8, &expected, field_root);
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "memory_safety: TreeView container deserialize - view allocation OOM leaves no orphan pool nodes" {
+    const value: Checkpoint.Type = .{ .epoch = 7, .root = [_]u8{0x5a} ** 32 };
+    var bytes: [Checkpoint.fixed_size]u8 = undefined;
+    _ = Checkpoint.serializeIntoBytes(&value, &bytes);
+
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 64 });
+    defer pool.deinit();
+
+    const baseline = pool.getNodesInUse();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Checkpoint.TreeView.deserialize(failing.allocator(), &pool, &bytes),
+    );
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
