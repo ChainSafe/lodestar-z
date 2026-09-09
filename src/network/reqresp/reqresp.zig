@@ -821,6 +821,11 @@ pub const ReqResp = struct {
 
     pub fn fail(self: *ReqResp, slot: anytype, index: u16, reason: Failure, engine: ?*Engine) void {
         if (slot.terminal != null) return;
+        if (reason == .cancelled) {
+            const counters = &self.protocol_counters[@intFromEnum(slot.protocol)];
+            if (@TypeOf(slot) == *Client) counters.outgoing_cancelled +|= 1 else counters.incoming_cancelled +|= 1;
+            std.log.scoped(.network_reqresp).debug("request_cancelled direction={s} request={d}:{d} connection={d}:{d} method={s} chunks={d} elapsed_ms={d}", .{ if (@TypeOf(slot) == *Client) "outbound" else "inbound", index, slot.generation, slot.conn.index, slot.conn.generation, @tagName(slot.protocol), slot.chunks, self.last_now_ms -| slot.started_ms });
+        }
         const detail: []const u8 = switch (reason) {
             .invalid_response => |err| @errorName(err),
             .invalid_request => |err| @errorName(err),
@@ -828,10 +833,10 @@ pub const ReqResp = struct {
             else => slot.io.failure_detail,
         };
         const peer_code: u16 = if (reason == .peer_error) reason.peer_error.code else 0;
-        std.log.scoped(.network_reqresp_errors).debug("request_failed direction={s} request={d}:{d} connection={d}:{d} method={s} phase={s} reason={s} detail={s} peer_code={d} chunks={d} elapsed_ms={d}", .{ if (@TypeOf(slot) == *Client) "outbound" else "inbound", index, slot.generation, slot.conn.index, slot.conn.generation, @tagName(slot.protocol), if (@TypeOf(slot) == *Client) @tagName(slot.requestPhase()) else @tagName(slot.state), @tagName(reason), detail, peer_code, slot.chunks, self.last_now_ms -| slot.started_ms });
-        self.counters.failures += 1;
+        if (reason != .cancelled) std.log.scoped(.network_reqresp_errors).debug("request_failed direction={s} request={d}:{d} connection={d}:{d} method={s} phase={s} reason={s} detail={s} peer_code={d} chunks={d} elapsed_ms={d}", .{ if (@TypeOf(slot) == *Client) "outbound" else "inbound", index, slot.generation, slot.conn.index, slot.conn.generation, @tagName(slot.protocol), if (@TypeOf(slot) == *Client) @tagName(slot.requestPhase()) else @tagName(slot.state), @tagName(reason), detail, peer_code, slot.chunks, self.last_now_ms -| slot.started_ms });
+        if (reason != .cancelled) self.counters.failures += 1;
         const counters = &self.protocol_counters[@intFromEnum(slot.protocol)];
-        if (@TypeOf(slot) == *Client) {
+        if (reason == .cancelled) {} else if (@TypeOf(slot) == *Client) {
             counters.outgoing_errors +|= 1;
             self.outgoing_error_reasons[@intFromEnum(metrics.ErrorReason.fromFailure(reason, slot.requestPhase()))] +|= 1;
         } else counters.incoming_errors +|= 1;

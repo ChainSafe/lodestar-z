@@ -540,3 +540,30 @@ test "lookup confirmed result retains global IPv6 provenance over private IPv4 r
     try std.testing.expect(RoutingTable.relayAllowed(confirmed[0].record.endpoint().?, target));
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
 }
+
+test "lookup skips unreachable IPv6 candidates without consuming call capacity" {
+    for ([_]bool{ false, true }) |enabled| {
+        var core = try initEngine();
+        defer core.deinit(std.testing.allocator);
+        var seeds = [_]RoutingTable.Entry{ fakeEntry(1), fakeEntry(2) };
+        seeds[0].peer.address = test_support.address6(.{ 0x20, 1 } ++ .{0} ** 13 ++ .{1}, 9000);
+        seeds[0].record = fakeRecord(seeds[0].peer.node_id, seeds[0].peer.address, 1);
+        for (seeds) |seed| installSession(&core, seed.peer, 0x55);
+        var operation: Lookup = undefined;
+        var candidates: Lookup.Candidates = undefined;
+        try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds);
+        defer operation.cancel(&core);
+        operation.ipv6_enabled = enabled;
+        var packet: [1280]u8 = undefined;
+        var count: usize = 0;
+        for (0..3) |index| {
+            const started = (try operation.startNext(&core, &packet, try message.RequestId.init(&.{@intCast(index + 1)}), 1, &sealEntropy(@intCast(index + 1)))) orelse break;
+            if (!enabled) try std.testing.expect(started.peer.address == .ip4);
+            count += 1;
+            try operation.onFailure(&core, started.call.handle);
+        }
+        try std.testing.expectEqual(@as(usize, if (enabled) 2 else 1), count);
+        try std.testing.expectEqual(@as(usize, 0), core.calls.count());
+        try std.testing.expect(operation.isFinished());
+    }
+}

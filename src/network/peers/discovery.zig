@@ -7,7 +7,7 @@ const types = @import("types.zig");
 
 pub const Error = d.Driver.Error || d.Maintenance.Error || adapter.Error || std.mem.Allocator.Error || error{ Stopped, InvalidOptions, InvalidDemand };
 pub const queries_max = 128;
-pub const Rejection = enum { missing_eth2, incompatible_fork, invalid_enr, no_quic, endpoint_scope, demand, output_capacity };
+pub const Rejection = enum { missing_eth2, incompatible_fork, invalid_enr, no_quic, endpoint_family, endpoint_scope, demand, output_capacity };
 pub const rejection_count = @typeInfo(Rejection).@"enum".fields.len;
 pub const Counters = struct {
     lookups_started: u64 = 0,
@@ -25,6 +25,7 @@ pub const Counters = struct {
 };
 pub const LookupTime = @import("../metrics_histogram.zig").Histogram(&.{ 1000, 5000, 10000, 30000, 60000, 120000 });
 pub const Options = struct {
+    quic_ipv6_enabled: bool = true,
     query_interval_ms: u64 = 1_000,
     local_retry_ms: u64 = 1_000,
     maintenance: d.Maintenance.Config = .{},
@@ -106,6 +107,7 @@ pub const Discovery = struct {
         for (bootstrap, 0..) |*record, index| storage.bootstrap[index] = try d.identity.enr.Record.init(record.slice());
         var maintenance: d.Maintenance = undefined;
         try maintenance.init(&storage.background, storage.bootstrap[0..bootstrap.len], now_ms, options.maintenance);
+        maintenance.ipv6_enabled = driver.udp.localAddress() == .ip6;
         return .{ .allocator = allocator, .driver = driver, .storage = storage, .maintenance = maintenance, .context = context.*, .options = options, .query_due_ms = now_ms };
     }
 
@@ -215,6 +217,7 @@ pub const Discovery = struct {
             const closest = self.driver.core.closestNodes(&target, &seeds);
             try self.lookup.init(&self.storage.foreground, self.driver.core.localRecord().node_id, target, closest);
             self.lookup.filter = .{ .context = &self.context, .matches = matchesNetwork };
+            self.lookup.ipv6_enabled = self.driver.udp.localAddress() == .ip6;
             self.lookup.query_limit = queries_max;
             self.lookup_started_ms = now_ms;
             self.lookup_published = self.counters.candidates_published;
@@ -338,7 +341,10 @@ pub const Discovery = struct {
             return;
         }
         var count: u8 = 0;
+        var supported: u8 = 0;
         for (candidate.addresses[0..candidate.address_count]) |address| {
+            if (!self.options.quic_ipv6_enabled and address == .ip6) continue;
+            supported += 1;
             if (!relayAllowed(source, address)) continue;
             candidate.addresses[count] = address;
             count += 1;
@@ -346,7 +352,7 @@ pub const Discovery = struct {
         candidate.address_count = count;
         @memset(candidate.addresses[count..], .unspecified);
         if (count == 0) {
-            self.rejected(.endpoint_scope, result);
+            self.rejected(if (supported == 0) .endpoint_family else .endpoint_scope, result);
             return;
         }
         if (!self.demand.matches(&candidate)) {

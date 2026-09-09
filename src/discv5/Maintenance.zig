@@ -34,6 +34,7 @@ const Pending = struct {
 
 const Maintenance = @This();
 config: Config,
+ipv6_enabled: bool = true,
 bootstrap: []const enr.Record,
 candidates: *Lookup.Candidates,
 lookup: Lookup = undefined,
@@ -258,6 +259,7 @@ fn selectProbe(self: *Maintenance, core: *Engine, now_ms: u64) void {
         for (0..self.bootstrap.len) |_| {
             const record = self.bootstrap[self.bootstrap_cursor];
             self.bootstrap_cursor = (self.bootstrap_cursor + 1) % self.bootstrap.len;
+            if (!self.ipv6_enabled and record.endpoint().? == .ip6) continue;
             if (std.mem.eql(u8, &record.node_id, &core.localRecord().node_id)) continue;
             if (core.isPeerBusy(&record.node_id)) continue;
             self.bootstrap_due_ms = now_ms +| self.config.bootstrap_interval_ms;
@@ -277,6 +279,7 @@ fn selectProbe(self: *Maintenance, core: *Engine, now_ms: u64) void {
         now_ms,
         self.config.stale_after_ms,
     ) orelse return;
+    if (!self.ipv6_enabled and entry.peer.address == .ip6) return;
     if (core.isPeerBusy(&entry.peer.node_id)) return;
     self.pending = .{ .entry = entry, .ready_ms = now_ms };
 }
@@ -337,6 +340,7 @@ fn startRefresh(
     const closest = core.closestNodes(&target, &seeds);
     if (closest.len == 0) return;
     try self.lookup.init(self.candidates, core.localRecord().node_id, target, closest);
+    self.lookup.ipv6_enabled = self.ipv6_enabled;
     self.lookup_active = true;
 }
 

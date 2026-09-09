@@ -758,3 +758,22 @@ test "maintenance drops an unstarted ENR hint when a caller reuses the peer" {
     try std.testing.expect(core.isPeerBusy(&peer.node_id));
     try std.testing.expectEqual(@as(usize, 1), core.calls.count());
 }
+
+test "maintenance skips unsupported IPv6 bootstrap and still probes IPv4" {
+    var core = try initEngine();
+    defer core.deinit(std.testing.allocator);
+    const remote = try record(2, 1);
+    const unused = try record(3, 1);
+    const ipv6 = test_support.fakeRecord(unused.node_id, test_support.address6(.{ 0x20, 1 } ++ .{0} ** 13 ++ .{1}, 9000), 1);
+    const peer = test_support.endpoint(&remote);
+    test_support.installSession(&core, peer, 0x55);
+    var candidates: Lookup.Candidates = undefined;
+    var controller: Maintenance = undefined;
+    try controller.init(&candidates, &.{ ipv6, remote }, 0, testConfig());
+    defer controller.cancel(&core);
+    controller.ipv6_enabled = false;
+    var out: [1280]u8 = undefined;
+    const started = (try controller.startNext(&core, &out, try message.RequestId.init(&.{1}), 0, &sealEntropy(1))).?;
+    try std.testing.expectEqual(peer, started.peer);
+    try std.testing.expectEqual(@as(usize, 1), core.calls.count());
+}

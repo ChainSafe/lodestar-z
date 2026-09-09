@@ -77,6 +77,7 @@ queries_started: u16,
 capacity_drops: u32,
 finish_reason: ?FinishReason,
 filter: ?Filter = null,
+ipv6_enabled: bool = true,
 query_limit: u16 = candidate_capacity,
 
 /// Borrows `candidates` for the life of the lookup and allocates nothing.
@@ -321,6 +322,7 @@ fn nextCandidateIndex(self: *const Lookup, core: ?*const Engine) ?usize {
     var selected: ?usize = null;
     for (self.activeCandidates(), 0..) |*candidate, index| {
         if (candidate.state != .unqueried) continue;
+        if (!self.ipv6_enabled and candidate.peer.address == .ip6) continue;
         if (boundary) |node_id| {
             if (!types.xorCloser(&candidate.peer.node_id, &node_id, &self.target))
                 continue;
