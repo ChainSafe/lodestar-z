@@ -541,7 +541,6 @@ fn runBenchmark(
         io,
         cached_state,
         block_slot,
-        .{},
         null,
     );
     try cached_state.state.commit();
