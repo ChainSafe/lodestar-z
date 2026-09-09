@@ -111,6 +111,18 @@ the client even for a transport close without Goodbye. Compare
 `lodestar_native_peer_closes_by_client_total{client,reason}` with the connected-client
 gauges, and use `lodestar_native_peer_goodbyes_total{reason}` for received reasons.
 An absent Goodbye is not evidence of a particular remote policy decision.
+`during_close=true` means the Goodbye was recovered from retained authenticated
+stream bytes before connection cancellation. The counters
+`lodestar_native_reqresp_goodbyes_{recovered,incomplete}_on_close_total` distinguish
+successful recovery from unavailable or incomplete data. Incomplete cases log
+the buffered and decoded byte counts, decoder phase, FIN state and native error.
+An already selected local disconnect reason retains precedence.
+
+`response_finish_stopped` records a peer stopping only the final response FIN
+after complete chunks were written. This completes the local serving operation;
+it does not claim the peer validated the response. The per-method counter is
+`lodestar_native_reqresp_response_finish_stops_total`. Stops before any chunk or
+while response bytes remain pending still fail.
 
 `dial_backoff` includes consecutive failures, connection lifetime and retry delay.
 Successful one-shot `connect()` calls retire their dial intent. Expiry and explicit
