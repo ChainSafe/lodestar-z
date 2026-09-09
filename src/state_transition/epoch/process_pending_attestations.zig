@@ -53,11 +53,6 @@ pub fn processPendingAttestations(
         const committee = @as([]const u64, try epoch_cache.getBeaconCommittee(att_slot, att_data.index));
         var participants = try att.aggregation_bits.intersectValues(ValidatorIndex, allocator, committee);
         defer participants.deinit(allocator);
-        for (committee, 0..) |validator_index, bit_index| {
-            if (try att.aggregation_bits.get(bit_index)) {
-                try participants.append(allocator, validator_index);
-            }
-        }
 
         if (epoch == prev_epoch) {
             for (participants.items) |p| {
