@@ -1,5 +1,13 @@
 // biome-ignore-all lint/style/useNamingConvention: spec-canonical fork names in `ForkName`
 
+export type StateHashTreeRootSource =
+  | "state_transition"
+  | "block_transition"
+  | "prepare_next_slot"
+  | "prepare_next_epoch"
+  | "regen_state"
+  | "compute_new_state_root";
+
 interface BeaconBlockHeader {
   slot: number;
   proposerIndex: number;
@@ -391,6 +399,7 @@ declare const bindings: {
   };
   metrics: {
     init: () => void;
+    observeStateHashTreeRoot: (source: StateHashTreeRootSource, seconds: number) => void;
     scrapeMetrics: () => string;
     registerLocalValidator: (index: number) => void;
     unregisterLocalValidator: (index: number) => void;

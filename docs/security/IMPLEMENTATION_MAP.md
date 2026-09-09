@@ -4,7 +4,7 @@ This is the volatile companion to the stable [threat model](../../THREAT_MODEL.m
 implementation facts needed to establish a trust boundary or precondition.
 
 - **Owner:** `@ChainSafe/lodestar`
-- **Last reviewed:** 2026-08-21
+- **Last reviewed:** 2026-09-06
 
 ## Integration status
 
@@ -25,6 +25,7 @@ supported caller supplies a current hostile path.
 | Boundary or invariant | Current implementation evidence |
 | --- | --- |
 | N-API exports and shared addon lifecycle | [`build.zig`](../../build.zig) and [`bindings/napi/root.zig`](../../bindings/napi/root.zig) give zapi class exports a Zig package and addon-specific identity. The identity's version component comes from `build.zig.zon`, which intentionally remains `0.0.0` independently of the npm bindings version. The root module registers exports and initializes or tears down process-wide configuration, pools, metrics, and the pubkey cache on first or last environment. |
+| Native metrics bridge | [`metrics.observeStateHashTreeRoot`](../../bindings/napi/metrics.zig) requires prior metrics initialization, validates the caller-provided source name, and accepts durations from zero through one hour before recording them in the process-wide native registry. |
 | Beacon-state construction | [`BeaconStateView.createFromBytes`](../../bindings/napi/BeaconStateView.zig) reads the slot and SSZ-deserializes bytes without authenticating a root. Its contract therefore requires trusted state bytes. |
 | State-transition candidate isolation | [`stateTransition`](../../src/state_transition/state_transition.zig) clones the cached state and destroys the clone on error before returning a post-state. Verification options are caller policy. |
 | Serialized block boundary | [`BeaconStateView.stateTransition`](../../bindings/napi/BeaconStateView.zig) accepts serialized signed-block bytes and a caller-selected full or blinded block type, then passes the decoded block to the transition. The fork-aware decoder rejects unsupported blinded forks. This is a hostile-input boundary for integrated callers. |
@@ -32,6 +33,8 @@ supported caller supplies a current hostile path.
 | Pubkey cache | [`pubkey_cache.zig`](../../src/state_transition/cache/pubkey_cache.zig) defines an application-wide, append-only cache with locked access and no escaping pointers into movable storage. [`bindings/napi/pubkeys.zig`](../../bindings/napi/pubkeys.zig) owns its process-wide instance. |
 | Persistent Merkle tree pool | [`Node.Pool`](../../src/persistent_merkle_tree/Node.zig) allocates a fixed number of user slots and returns `PoolExhausted` without resizing. The shared addon reads `LODESTAR_Z_NODE_POOL_CAPACITY` during initialization, defaults to 10,000,000 slots, and rejects invalid values. [`BeaconStateView.release`](../../bindings/napi/BeaconStateView.zig) releases a view's tree nodes and pool reference deterministically; the idempotent N-API finalizer remains a fallback. Chunked-leaf and container payloads use a separate dynamic allocator. |
 | Reused epoch cache | [`epoch_transition_cache.zig`](../../src/state_transition/cache/epoch_transition_cache.zig) stores process-global arrays borrowed by an `EpochTransitionCache`. Fork-specific columns grow only in their consuming fork branches. Slashing penalties use validator-indexed storage up to the last index due for penalties, or an empty slice when none are due. Capacity is retained across calls. Penalty calculation uses the total initialized by `EpochCache` and maintained by validator slashing and epoch resets. The lock covers acquisition and resize, not the full borrowed lifetime. Current safe use requires non-overlapping transitions and no concurrent teardown. |
+| Persistent Merkle tree pool | [`Node.Pool`](../../src/persistent_merkle_tree/Node.zig) allocates a fixed number of user slots and returns `PoolExhausted` without resizing. The shared addon reads `LODESTAR_Z_NODE_POOL_CAPACITY` during initialization, defaults to 10,000,000 slots, and rejects invalid values. [`BeaconStateView.release`](../../bindings/napi/BeaconStateView.zig) releases a view's tree nodes and pool reference deterministically; the idempotent N-API finalizer remains a fallback. Chunked-leaf and container payloads use a separate dynamic allocator. |
+| Reused epoch cache | [`epoch_transition_cache.zig`](../../src/state_transition/cache/epoch_transition_cache.zig) stores process-global arrays borrowed by an `EpochTransitionCache`. The lock covers acquisition and resize, not the full borrowed lifetime. Current safe use requires non-overlapping transitions and no concurrent teardown. |
 | PKIX persistence | [`pkix.zig`](../../src/state_transition/cache/pkix.zig) checks framing, bounds, ABI compatibility, and corruption checksums. It does not authenticate the file or semantically revalidate affine entries, so file provenance remains trusted. |
 | Build and release provenance | [`build.zig.zon`](../../build.zig.zon) and [`pnpm-lock.yaml`](../../pnpm-lock.yaml) pin dependency inputs. [`publish-bindings.yml`](../../.github/workflows/publish-bindings.yml) pins actions, builds ReleaseSafe artifacts, and publishes them with npm provenance. |
 

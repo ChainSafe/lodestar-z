@@ -17,6 +17,8 @@ pub const StateCloneSource = enum {
     process_slots,
 };
 
+pub const state_hash_tree_root_duration_seconds_max: f64 = 60 * 60;
+
 pub const StateHashTreeRootSource = enum {
     state_transition,
     block_transition,
@@ -319,6 +321,14 @@ pub fn observeEpochTransitionStep(
         labels,
         @as(f64, @floatFromInt(ns)) / std.time.ns_per_s,
     );
+}
+
+pub fn observeStateHashTreeRoot(source: StateHashTreeRootSource, seconds: f64) !void {
+    std.debug.assert(std.math.isFinite(seconds));
+    std.debug.assert(seconds >= 0);
+    std.debug.assert(seconds <= state_hash_tree_root_duration_seconds_max);
+
+    try state_transition.state_hash_tree_root.observe(.{ .source = source }, seconds);
 }
 
 /// Writes all metrics to `writer`.

@@ -46,6 +46,8 @@ pub fn processEpoch(
         try observeEpochTransitionStep(.{ .step = .process_inactivity_updates }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
     }
 
+    metrics.state_transition.validators_in_activation_queue.set(@intCast(cache.indices_eligible_for_activation_queue.items.len));
+    metrics.state_transition.validators_in_exit_queue.set(@intCast(cache.indices_to_eject.items.len));
     timer = time.start(io);
     try processRegistryUpdates(fork, config, epoch_cache, state, cache);
     try observeEpochTransitionStep(.{ .step = .process_registry_updates }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
@@ -70,10 +72,10 @@ pub fn processEpoch(
         try observeEpochTransitionStep(.{ .step = .process_pending_consolidations }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
     }
 
-    // const numUpdate = processEffectiveBalanceUpdates(fork, state, cache);
     timer = time.start(io);
-    _ = try processEffectiveBalanceUpdates(fork, allocator, epoch_cache, state, cache);
+    const num_update = try processEffectiveBalanceUpdates(fork, allocator, epoch_cache, state, cache);
     try observeEpochTransitionStep(.{ .step = .process_effective_balance_updates }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
+    metrics.state_transition.num_effective_balance_updates.set(@intCast(num_update));
 
     try processSlashingsReset(fork, epoch_cache, state, cache);
     try processRandaoMixesReset(fork, state, cache);
