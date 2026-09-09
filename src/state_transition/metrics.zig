@@ -289,10 +289,7 @@ pub fn deinit() void {
 test "exports the expected metric names" {
     const allocator = std.testing.allocator;
     try init(allocator, std.testing.io, .{});
-    defer {
-        state_transition.deinit();
-        state_transition = m.initializeNoop(Metrics);
-    }
+    defer deinit();
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -317,6 +314,13 @@ test "exports the expected metric names" {
         "lodestar_stfn_new_seen_attesters_effective_balance_per_block_total",
         "lodestar_stfn_attestations_per_block_total",
         "lodestar_stfn_proposer_rewards_total",
+        "validator_monitor_prev_epoch_on_chain_balance",
+        "validator_monitor_prev_epoch_on_chain_source_attester_hit_total",
+        "validator_monitor_prev_epoch_on_chain_source_attester_miss_total",
+        "validator_monitor_prev_epoch_on_chain_head_attester_hit_total",
+        "validator_monitor_prev_epoch_on_chain_head_attester_miss_total",
+        "validator_monitor_prev_epoch_on_chain_target_attester_hit_total",
+        "validator_monitor_prev_epoch_on_chain_target_attester_miss_total",
     };
 
     var names: std.ArrayList([]const u8) = .empty;
