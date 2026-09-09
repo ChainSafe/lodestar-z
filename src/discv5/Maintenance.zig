@@ -151,6 +151,12 @@ pub fn startNext(
     return null;
 }
 
+pub fn knownRecord(self: *const Maintenance, handle: CallTable.Handle) ?*const enr.Record {
+    if (self.pending) |*pending| if (std.meta.eql(pending.handle, handle)) return &pending.entry.record;
+    if (self.lookup_active) return self.lookup.knownRecord(handle);
+    return null;
+}
+
 pub fn onEvent(
     self: *Maintenance,
     core: *Engine,

@@ -14,9 +14,14 @@ pub const Counters = struct {
     lookups_completed: u64 = 0,
     queries_started: u64 = 0,
     authenticated_candidates: u64 = 0,
+    authenticated_not_retained: u64 = 0,
     candidates_published: u64 = 0,
     query_timeouts: u64 = 0,
     query_failures: u64 = 0,
+    maintenance_failures: u64 = 0,
+    receive_failures: u64 = 0,
+    processing_failures: u64 = 0,
+    coordinator_failures: u64 = 0,
 };
 pub const Options = struct {
     query_interval_ms: u64 = 1_000,
@@ -50,6 +55,7 @@ pub const Result = struct {
     dropped: u16 = 0,
     unowned: u16 = 0,
     failure: ?Error = null,
+    failure_stage: d.Driver.FailureStage = .coordinator,
 };
 pub const MemoryPlan = struct {
     inline_bytes: usize,
@@ -143,19 +149,26 @@ pub const Discovery = struct {
         var result = Result{};
         self.refill(io, now_ms, &result) catch |err| {
             result.failure = err;
+            self.counters.coordinator_failures +|= 1;
             self.resource_retry_ms = now_ms +| self.options.local_retry_ms;
         };
         const progress = try self.driver.stepUntil(io, &self.storage.expiries, @min(wake_ms, self.nextWakeup(now_ms).?));
         const consumed = self.consume(&progress, self.storage.expiries[0..progress.calls_expired], out);
-        return .{ .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .failure = result.failure orelse consumed.failure };
+        return .{ .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .failure = result.failure orelse consumed.failure, .failure_stage = if (result.failure != null) .coordinator else consumed.failure_stage };
     }
 
     /// Supports hosts that drive the borrowed Driver themselves. Consume every result exactly
     /// once before another Driver step, including results containing failure. No slice escapes.
     pub fn consume(self: *Discovery, progress: *const d.Driver.StepResult, expiries: []const d.CallTable.Expired, out: []adapter.Candidate) Result {
         std.debug.assert(expiries.len == progress.calls_expired and expiries.len <= d.CallTable.capacity_max);
-        var result = Result{ .failure = progress.failure };
+        var result = Result{ .failure = progress.failure, .failure_stage = progress.failure_stage };
         if (self.stopped) return result;
+        if (progress.failure != null) switch (progress.failure_stage) {
+            .maintenance => self.counters.maintenance_failures +|= 1,
+            .receive => self.counters.receive_failures +|= 1,
+            .process => self.counters.processing_failures +|= 1,
+            .clock, .coordinator => self.counters.coordinator_failures +|= 1,
+        };
         for (expiries) |expired| {
             self.counters.query_timeouts +|= 1;
             if (self.lookup_active and self.lookup.ownsCall(expired.handle)) {
@@ -251,12 +264,13 @@ pub const Discovery = struct {
         if (self.lookup_active and self.lookup.ownsCall(handle)) {
             switch (progress.event) {
                 .response => |*response| {
+                    const known = self.lookup.knownRecord(handle).?.*;
                     self.lookup.onResponse(self.driver.core, response, progress.now_ms) catch |err| {
                         self.lookup.onFailure(self.driver.core, handle) catch unreachable;
                         result.failure = result.failure orelse err;
                         return;
                     };
-                    if (response.matched.terminal) self.publishConfirmed(response.peer, progress.now_ms, out, result);
+                    if (response.matched.terminal) self.publishResponse(response, &known, progress.now_ms, out, result);
                 },
                 .failed => self.lookup.onFailure(self.driver.core, handle) catch unreachable,
                 else => unreachable,
@@ -264,6 +278,7 @@ pub const Discovery = struct {
             self.refill_due_ms = progress.now_ms;
             return;
         }
+        const known: ?d.identity.enr.Record = if (self.maintenance.knownRecord(handle)) |record| record.* else null;
         const consumed = self.maintenance.onEvent(self.driver.core, &progress.event, progress.now_ms) catch |err| {
             _ = self.maintenance.onFailure(self.driver.core, handle, progress.now_ms, .local);
             result.failure = result.failure orelse err;
@@ -276,15 +291,25 @@ pub const Discovery = struct {
         if (progress.event == .response) {
             const response = &progress.event.response;
             if (!response.matched.terminal) return;
-            self.publishConfirmed(response.peer, progress.now_ms, out, result);
+            if (known) |*record| self.publishResponse(response, record, progress.now_ms, out, result);
         }
     }
 
-    fn publishConfirmed(self: *Discovery, peer: d.types.Endpoint, now_ms: u64, out: []adapter.Candidate, result: *Result) void {
-        const entry = self.driver.core.peerRecord(&peer.node_id) orelse return;
-        if (entry.last_verified_ms != now_ms or !std.meta.eql(entry.peer, peer)) return;
+    fn publishResponse(self: *Discovery, response: *const d.Engine.AuthenticatedResponse, known: *const d.identity.enr.Record, now_ms: u64, out: []adapter.Candidate, result: *Result) void {
+        std.debug.assert(response.matched.terminal);
+        std.debug.assert(std.mem.eql(u8, &known.node_id, &response.peer.node_id));
+        var record = known.*;
+        if (response.record) |*updated| if (updated.sequence > record.sequence and std.mem.eql(u8, &updated.node_id, &response.peer.node_id)) {
+            record = updated.*;
+        };
+        std.debug.assert(response.node_records.len <= d.types.findnode_result_max);
+        for (response.node_records) |*updated| {
+            if (updated.sequence > record.sequence and std.mem.eql(u8, &updated.node_id, &response.peer.node_id)) record = updated.*;
+        }
         self.counters.authenticated_candidates +|= 1;
-        self.publish(&entry.record, peer.address, now_ms, out, result);
+        const retained = self.driver.core.peerRecord(&response.peer.node_id);
+        if (retained == null or retained.?.last_verified_ms != now_ms or !std.meta.eql(retained.?.peer, response.peer)) self.counters.authenticated_not_retained +|= 1;
+        self.publish(&record, response.peer.address, now_ms, out, result);
     }
 
     fn rejected(self: *Discovery, reason: Rejection, result: *Result) void {

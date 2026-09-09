@@ -599,7 +599,7 @@ pub const NetworkCore = struct {
                 self.counters.candidates_refused +|= intake.refused;
                 if (result.discovery.candidates > 0) std.log.scoped(.network_discovery).debug("candidates_received count={d} refused={d}", .{ result.discovery.candidates, intake.refused });
                 if (result.discovery.failure) |err| {
-                    std.log.scoped(.network_discovery).debug("discovery_failed reason={s}", .{@errorName(err)});
+                    std.log.scoped(.network_discovery).debug("discovery_failed stage={s} reason={s}", .{ @tagName(result.discovery.failure_stage), @errorName(err) });
                     self.counters.discovery_failures +|= 1;
                     result.failure = result.failure orelse err;
                 }

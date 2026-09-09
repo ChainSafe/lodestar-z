@@ -489,6 +489,10 @@ test "managed runtime socket faults preserve the other owner and local dial refu
         ReceiveFault.active = .{ .socket = socket };
         const result = node.step(io, now, 0, .{}, 1000);
         try std.testing.expectEqual(error.Canceled, result.failure.?);
+        if (socket == node.discovery.?.udp.socket.handle) {
+            try std.testing.expectEqual(@import("discv5").Driver.FailureStage.receive, result.discovery.failure_stage);
+            try std.testing.expectEqual(@as(u64, 1), node.discovery.?.coordinator.counters.receive_failures);
+        }
         try std.testing.expect(ReceiveFault.active.calls >= 2);
         try std.testing.expect(ReceiveFault.active.longest_wait_ms <= runtime.poll_wait_max_ms);
         try std.testing.expect(node.last_now.mono_ms >= now.mono_ms);

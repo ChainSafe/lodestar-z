@@ -160,3 +160,18 @@ With JSON output, parse context according to the configured Lodestar logger
 format. Peer IDs, request handles and message IDs belong in log content, never
 Prometheus or Loki index labels. Logging does not capture quiche internals,
 packet traces, successful gossip validation for every message, or payload bytes.
+
+Discovery failures include `stage=coordinator|clock|maintenance|receive|process`.
+`discovery_send_failed` records the destination and packet length without payload
+bytes. `revalidation_deferred` records the local retry interval. A failed routing
+revalidation does not stop receive processing or evict its incumbent, and cannot
+retry within one second. The `lodestar_native_discovery_` counters
+`maintenance_failures_total`, `receive_failures_total`,
+`processing_failures_total`, and `coordinator_failures_total` distinguish failures
+from ordinary query timeouts.
+
+`lodestar_native_discovery_authenticated_not_retained_total` counts authenticated
+responders that were not retained at their exact endpoint in the routing table.
+They still pass through the ordinary ENR, fork, demand and endpoint-scope checks
+before publication to the dialer. Routing-table occupancy does not establish
+whether a peer is authenticated or usable.
