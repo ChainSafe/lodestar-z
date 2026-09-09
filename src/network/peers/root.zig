@@ -25,6 +25,7 @@ pub const Snapshot = types.Snapshot;
 pub const Event = types.Event;
 pub const Options = types.Options;
 test {
+    _ = @import("goodbye.zig");
     _ = custody;
     _ = policy;
     _ = @import("discovery_test.zig");

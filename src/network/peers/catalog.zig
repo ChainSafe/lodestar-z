@@ -251,7 +251,7 @@ pub const Catalog = struct {
         now_ms: u64,
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
-        std.log.scoped(.network_peers).debug("peer_disconnected peer={f} connection={d}:{d} reason={s} connected_ms={d}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(reason), now_ms -| row.connected_at_ms });
+        std.log.scoped(.network_peers).debug("peer_disconnected peer={f} connection={d}:{d} reason={s} connected_ms={d} relevant={any} agent={f}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(reason), now_ms -| row.connected_at_ms, row.status != null, std.json.fmt(@import("client.zig").agent(&row.identify), .{}) });
         self.revision +|= 1;
         row.connection = null;
         row.custody_work = null;

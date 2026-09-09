@@ -96,6 +96,57 @@ fn expectFailure(pair: *Pair, expected: rr.Failure) !void {
     try std.testing.expectEqualDeep(expected, failure.?);
 }
 
+test "reqresp dispatches a complete Goodbye before FIN and keeps other request framing strict" {
+    const Case = enum { goodbye, ping, truncated, trailing };
+    for (std.enums.values(Case)) |case| {
+        var pair: Pair = .{};
+        try pair.init(.{ .outbound_max = 1 }, .{ .inbound_max = 1 });
+        defer pair.deinit();
+        const method: protocol.Protocol = if (case == .ping) .ping_v1 else .goodbye_v1;
+        var payload: [8]u8 = undefined;
+        std.mem.writeInt(u64, &payload, 129, .little);
+        var sink: [8]u8 = undefined;
+        const request = try negotiate(&pair, method, &payload, &sink, .{});
+        _ = try pair.server.accept(&pair.pair.server, request.remote, .{ .protocol = .{ .reqresp = method }, .leftover = &.{}, .fin = false }, pair.requestSink(), pair.pair.now);
+        const local = pair.client.outbound[request.handle.index].stream;
+        var wire: [128]u8 = undefined;
+        const encoded = try codec.encodeRequest(&payload, &wire);
+        var len = encoded.len;
+        if (case == .truncated) len -= 1;
+        if (case == .trailing) {
+            wire[len] = 0;
+            len += 1;
+        }
+        try std.testing.expectEqual(len, try pair.pair.client.write(local, wire[0..len], false));
+        var requests: usize = 0;
+        for (0..8) |_| {
+            try pair.pair.pump();
+            pair.server.connectionActivity(pair.handles.server);
+            const count = pair.server.pump(&pair.pair.server, &pair.server_neg, pair.pair.now, &pair.server_events);
+            for (pair.server_events[0..count]) |event| if (event == .request) {
+                try std.testing.expectEqualSlices(u8, &payload, event.request.bytes);
+                requests += 1;
+            };
+        }
+        try std.testing.expectEqual(@as(usize, @intFromBool(case == .goodbye)), requests);
+        if (case == .trailing) {
+            try std.testing.expectError(error.StreamStopped, pair.pair.client.write(local, &.{}, true));
+        } else {
+            _ = try pair.pair.client.write(local, &.{}, true);
+        }
+        for (0..8) |_| {
+            try pair.pair.pump();
+            pair.server.connectionActivity(pair.handles.server);
+            const count = pair.server.pump(&pair.pair.server, &pair.server_neg, pair.pair.now, &pair.server_events);
+            for (pair.server_events[0..count]) |event| if (event == .request) {
+                try std.testing.expectEqualSlices(u8, &payload, event.request.bytes);
+                requests += 1;
+            };
+        }
+        try std.testing.expectEqual(@as(usize, @intFromBool(case == .goodbye or case == .ping)), requests);
+    }
+}
+
 test "reqresp half close preserves early metadata and nonempty request responses" {
     for ([_]protocol.Protocol{ .metadata_v1, .metadata_v2, .metadata_v3, .ping_v1 }) |method| {
         for ([_]bool{ false, true }) |stop| {

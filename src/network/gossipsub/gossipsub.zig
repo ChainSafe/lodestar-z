@@ -884,6 +884,7 @@ pub const Gossipsub = struct {
                 count = self.readPeer(engine, @intCast(index), io, now, events, count);
             }
             if (!write_first and io.tx_ready) self.flush(engine, @intCast(index), io, now);
+            self.logSendPressure(@intCast(index), now.mono_ms);
             serviced += 1;
             if (serviced == self.options.peers_per_pump) break;
         }
@@ -893,6 +894,16 @@ pub const Gossipsub = struct {
         self.maintainTopics(now);
         self.expirePromises(now.mono_ms);
         return count;
+    }
+
+    fn logSendPressure(self: *Gossipsub, index: u16, now_ms: u64) void {
+        const io = &self.io.peers[index];
+        if (!io.pressure_pending or now_ms < io.pressure_log_due_ms) return;
+        io.pressure_pending = false;
+        io.pressure_log_due_ms = now_ms +| 1_000;
+        const row = &self.state.peers[index];
+        const identity = &self.peers.rows[row.logical.index].identity;
+        std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, @tagName(io.last_drop), io.drops[@intFromEnum(io.last_drop)], io.data_count, peer_io_mod.data_capacity, io.data_bytes, self.options.tx_peer_bytes, io.control.count, io.control.used, if (io.oldestTx()) |oldest| now_ms -| oldest else 0 });
     }
 
     fn expireIo(self: *Gossipsub, engine: *Engine, now_ms: u64) void {
@@ -1407,7 +1418,10 @@ pub const Gossipsub = struct {
             if (io.tx_progress_ms == null) io.tx_progress_ms = now.mono_ms;
             const written = engine.write(stream, segment[0..take], false) catch |err| {
                 io.tx_ready = false;
-                if (err != error.WouldBlock) self.resetOutbound(engine, index);
+                if (err != error.WouldBlock) {
+                    std.log.scoped(.network_gossip_errors).debug("gossip_write_failed connection={d}:{d} stream={d} reason={s} queued={d} bytes={d}", .{ stream.conn.index, stream.conn.generation, stream.id, @errorName(err), io.data_count, io.data_bytes });
+                    self.resetOutbound(engine, index);
+                }
                 return;
             };
             if (written == 0) {

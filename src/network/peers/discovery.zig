@@ -6,6 +6,18 @@ const adapter = @import("enr.zig");
 const types = @import("types.zig");
 
 pub const Error = d.Driver.Error || d.Maintenance.Error || adapter.Error || std.mem.Allocator.Error || error{ Stopped, InvalidOptions, InvalidDemand };
+pub const queries_max = 128;
+pub const Rejection = enum { missing_eth2, incompatible_fork, invalid_enr, no_quic, endpoint_scope, demand, output_capacity };
+pub const rejection_count = @typeInfo(Rejection).@"enum".fields.len;
+pub const Counters = struct {
+    lookups_started: u64 = 0,
+    lookups_completed: u64 = 0,
+    queries_started: u64 = 0,
+    authenticated_candidates: u64 = 0,
+    candidates_published: u64 = 0,
+    query_timeouts: u64 = 0,
+    query_failures: u64 = 0,
+};
 pub const Options = struct {
     query_interval_ms: u64 = 1_000,
     local_retry_ms: u64 = 1_000,
@@ -69,6 +81,10 @@ pub const Discovery = struct {
     refill_due_ms: u64 = 0,
     resource_retry_ms: u64 = 0,
     stopped: bool = false,
+    counters: Counters = .{},
+    rejections: [rejection_count]u64 = @splat(0),
+    lookup_started_ms: u64 = 0,
+    lookup_published: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, driver: *d.Driver, context: *const types.ForkContext, bootstrap: []const d.identity.enr.Record, now_ms: u64, options: Options) Error!Discovery {
         try context.validate();
@@ -103,6 +119,10 @@ pub const Discovery = struct {
     pub fn updateFork(self: *Discovery, context: *const types.ForkContext) Error!void {
         if (self.stopped) return error.Stopped;
         try context.validate();
+        if (!std.mem.eql(u8, &self.context.digest, &context.digest) and self.lookup_active) {
+            self.lookup.cancel(self.driver.core);
+            self.lookup_active = false;
+        }
         self.context = context.*;
     }
 
@@ -137,6 +157,7 @@ pub const Discovery = struct {
         var result = Result{ .failure = progress.failure };
         if (self.stopped) return result;
         for (expiries) |expired| {
+            self.counters.query_timeouts +|= 1;
             if (self.lookup_active and self.lookup.ownsCall(expired.handle)) {
                 self.lookup.onFailure(self.driver.core, expired.handle) catch unreachable;
                 result.expired += 1;
@@ -147,10 +168,8 @@ pub const Discovery = struct {
         self.consumeEvent(progress, out, &result);
         if (self.lookup_active and self.lookup.isFinished()) {
             const confirmed_records = self.lookup.confirmedResults(&self.storage.records);
-            std.log.scoped(.network_discovery).debug("lookup_completed confirmed={d}", .{confirmed_records.len});
-            for (confirmed_records) |*confirmed| {
-                self.publish(&confirmed.record, confirmed.peer.address, progress.now_ms, out, &result);
-            }
+            self.counters.lookups_completed +|= 1;
+            std.log.scoped(.network_discovery).debug("lookup_completed reason={s} confirmed={d} queried={d} candidates={d} published={d} elapsed_ms={d}", .{ @tagName(self.lookup.finishReason().?), confirmed_records.len, self.lookup.queries_started, self.lookup.candidateCount(), self.counters.candidates_published -| self.lookup_published, progress.now_ms -| self.lookup_started_ms });
             self.lookup_active = false;
             self.query_due_ms = progress.now_ms +| self.options.query_interval_ms;
         }
@@ -176,6 +195,11 @@ pub const Discovery = struct {
             var seeds: [d.Lookup.result_max]d.RoutingTable.Entry = undefined;
             const closest = self.driver.core.closestNodes(&target, &seeds);
             try self.lookup.init(&self.storage.foreground, self.driver.core.localRecord().node_id, target, closest);
+            self.lookup.filter = .{ .context = &self.context, .matches = matchesNetwork };
+            self.lookup.query_limit = queries_max;
+            self.lookup_started_ms = now_ms;
+            self.lookup_published = self.counters.candidates_published;
+            self.counters.lookups_started +|= 1;
             std.log.scoped(.network_discovery).debug("lookup_started target={x} seeds={d}", .{ target, closest.len });
             self.lookup_active = true;
         }
@@ -208,6 +232,7 @@ pub const Discovery = struct {
             else => return err,
         } orelse return;
         result.started += 1;
+        self.counters.queries_started +|= 1;
         self.driver.transmit(io, started.peer.address, packet[0..started.call.packet_length]) catch |err| {
             if (background) {
                 std.debug.assert(self.maintenance.onFailure(self.driver.core, started.call.handle, now_ms, .local));
@@ -222,11 +247,16 @@ pub const Discovery = struct {
             .failed => |failed| failed.handle,
             else => return,
         };
+        if (progress.event == .failed) self.counters.query_failures +|= 1;
         if (self.lookup_active and self.lookup.ownsCall(handle)) {
             switch (progress.event) {
-                .response => |*response| self.lookup.onResponse(self.driver.core, response, progress.now_ms) catch |err| {
-                    self.lookup.onFailure(self.driver.core, handle) catch unreachable;
-                    result.failure = result.failure orelse err;
+                .response => |*response| {
+                    self.lookup.onResponse(self.driver.core, response, progress.now_ms) catch |err| {
+                        self.lookup.onFailure(self.driver.core, handle) catch unreachable;
+                        result.failure = result.failure orelse err;
+                        return;
+                    };
+                    if (response.matched.terminal) self.publishConfirmed(response.peer, progress.now_ms, out, result);
                 },
                 .failed => self.lookup.onFailure(self.driver.core, handle) catch unreachable,
                 else => unreachable,
@@ -246,18 +276,36 @@ pub const Discovery = struct {
         if (progress.event == .response) {
             const response = &progress.event.response;
             if (!response.matched.terminal) return;
-            const entry = self.driver.core.peerRecord(&response.peer.node_id) orelse return;
-            if (entry.last_verified_ms != progress.now_ms or !std.meta.eql(entry.peer, response.peer)) return;
-            self.publish(&entry.record, response.peer.address, progress.now_ms, out, result);
+            self.publishConfirmed(response.peer, progress.now_ms, out, result);
         }
+    }
+
+    fn publishConfirmed(self: *Discovery, peer: d.types.Endpoint, now_ms: u64, out: []adapter.Candidate, result: *Result) void {
+        const entry = self.driver.core.peerRecord(&peer.node_id) orelse return;
+        if (entry.last_verified_ms != now_ms or !std.meta.eql(entry.peer, peer)) return;
+        self.counters.authenticated_candidates +|= 1;
+        self.publish(&entry.record, peer.address, now_ms, out, result);
+    }
+
+    fn rejected(self: *Discovery, reason: Rejection, result: *Result) void {
+        self.rejections[@intFromEnum(reason)] +|= 1;
+        result.rejected +|= 1;
     }
 
     fn publish(self: *Discovery, record: *const d.identity.enr.Record, source: d.types.Address, now_ms: u64, out: []adapter.Candidate, result: *Result) void {
         if (!self.demand.active(now_ms)) return;
-        var candidate = adapter.decode(record, &self.context) catch {
-            result.rejected += 1;
+        var candidate = adapter.decode(record, &self.context) catch |err| {
+            self.rejected(switch (err) {
+                error.MissingEth2 => .missing_eth2,
+                error.IncompatibleFork => .incompatible_fork,
+                else => .invalid_enr,
+            }, result);
             return;
         };
+        if (candidate.address_count == 0) {
+            self.rejected(.no_quic, result);
+            return;
+        }
         var count: u8 = 0;
         for (candidate.addresses[0..candidate.address_count]) |address| {
             if (!relayAllowed(source, address)) continue;
@@ -266,18 +314,31 @@ pub const Discovery = struct {
         }
         candidate.address_count = count;
         @memset(candidate.addresses[count..], .unspecified);
-        if (count == 0 or !self.demand.matches(&candidate)) {
-            result.rejected += 1;
+        if (count == 0) {
+            self.rejected(.endpoint_scope, result);
+            return;
+        }
+        if (!self.demand.matches(&candidate)) {
+            self.rejected(.demand, result);
             return;
         }
         if (result.candidates == out.len) {
             result.dropped += 1;
+            self.rejections[@intFromEnum(Rejection.output_capacity)] +|= 1;
             return;
         }
         out[result.candidates] = candidate;
         result.candidates += 1;
+        self.counters.candidates_published +|= 1;
     }
 };
+
+fn matchesNetwork(context_opaque: *const anyopaque, record: *const d.identity.enr.Record) bool {
+    const context: *const types.ForkContext = @ptrCast(@alignCast(context_opaque));
+    const eth2 = (record.fieldBytes("eth2") catch return false) orelse return false;
+    if (eth2.len != 16 or !std.mem.eql(u8, eth2[0..4], &context.digest)) return false;
+    return (record.fieldBytes("quic") catch return false) != null or (record.fieldBytes("quic6") catch return false) != null;
+}
 
 pub fn relayAllowed(source: d.types.Address, candidate: types.Address) bool {
     if (candidate.port() < d.Lookup.discovered_port_min) return false;

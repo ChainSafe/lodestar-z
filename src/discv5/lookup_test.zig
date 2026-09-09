@@ -276,6 +276,70 @@ test "lookup stops after the closest sixteen successful peers" {
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
 }
 
+fn matchesNode(context: *const anyopaque, record: *const enr.Record) bool {
+    const wanted: *const types.NodeId = @ptrCast(@alignCast(context));
+    return std.mem.eql(u8, wanted, &record.node_id);
+}
+
+test "filtered lookup continues past sixteen unrelated successes and prioritizes matching records" {
+    var core = try initEngine();
+    defer core.deinit(std.testing.allocator);
+    var seeds: [Lookup.result_max]RoutingTable.Entry = undefined;
+    for (&seeds, 0..) |*seed, index| {
+        seed.* = fakeEntry(@intCast(index + 1));
+        installSession(&core, seed.peer, 0x55);
+    }
+    var operation: Lookup = undefined;
+    var candidates: Lookup.Candidates = undefined;
+    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds);
+    defer operation.cancel(&core);
+    const wanted = nodeId(40);
+    operation.filter = .{ .context = &wanted, .matches = matchesNode };
+    var packet: [1280]u8 = undefined;
+    for (0..Lookup.result_max) |i| {
+        const id = try message.RequestId.init(&.{@intCast(i + 1)});
+        const started = (try operation.startNext(&core, &packet, id, i + 1, &sealEntropy(@intCast(i + 1)))).?;
+        const records: []const enr.Record = if (i == Lookup.result_max - 1)
+            &.{ fakeEntry(20).record, fakeEntry(40).record }
+        else
+            &.{};
+        try completeNodes(&core, &operation, started, id, records, i + 2);
+    }
+    const id = try message.RequestId.init(&.{40});
+    installSession(&core, fakeEntry(40).peer, 0x55);
+    const matching = (try operation.startNext(&core, &packet, id, 40, &sealEntropy(40))).?;
+    try std.testing.expectEqual(wanted, matching.peer.node_id);
+    try completeNodes(&core, &operation, matching, id, &.{}, 41);
+    var results: [Lookup.result_max]enr.Record = undefined;
+    try std.testing.expectEqual(@as(usize, 1), operation.results(&results).len);
+    try std.testing.expectEqual(wanted, results[0].node_id);
+    try std.testing.expectEqual(@as(usize, 0), core.calls.count());
+}
+
+test "filtered lookup stops at its query budget after retiring pending calls" {
+    var core = try initEngine();
+    defer core.deinit(std.testing.allocator);
+    const seeds = [_]RoutingTable.Entry{ fakeEntry(1), fakeEntry(2), fakeEntry(3), fakeEntry(4) };
+    for (&seeds) |*seed| installSession(&core, seed.peer, 0x55);
+    var operation: Lookup = undefined;
+    var candidates: Lookup.Candidates = undefined;
+    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds);
+    defer operation.cancel(&core);
+    const wanted = nodeId(40);
+    operation.filter = .{ .context = &wanted, .matches = matchesNode };
+    operation.query_limit = 2;
+    var packet: [1280]u8 = undefined;
+    var pending: [2]Lookup.Started = undefined;
+    for (&pending, 1..) |*started, i| started.* = (try operation.startNext(&core, &packet, try message.RequestId.init(&.{@intCast(i)}), 1, &sealEntropy(@intCast(i)))).?;
+    try std.testing.expect((try operation.startNext(&core, &packet, try message.RequestId.init(&.{3}), 2, &sealEntropy(3))) == null);
+    try std.testing.expect(!operation.isFinished());
+    for (pending) |started| try operation.onFailure(&core, started.call.handle);
+    try std.testing.expect((try operation.startNext(&core, &packet, try message.RequestId.init(&.{4}), 3, &sealEntropy(4))) == null);
+    try std.testing.expectEqual(Lookup.FinishReason.budget_exhausted, operation.finishReason().?);
+    try std.testing.expectEqual(@as(u16, 2), operation.statistics().queries_started);
+    try std.testing.expectEqual(@as(usize, 0), core.calls.count());
+}
+
 test "lookup initialization cleans up after an invalid seed" {
     var seed = fakeEntry(1);
     seed.record.node_id = nodeId(2);

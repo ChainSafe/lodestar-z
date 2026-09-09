@@ -344,7 +344,7 @@ pub const Core = struct {
                         snapshot.disconnect_reason orelse .transport_closed,
                         now,
                     );
-                    self.dial_queue.connection(&snapshot.identity, false, now.mono_ms);
+                    self.dial_queue.disconnected(&snapshot.identity, snapshot.connected_at_ms, snapshot.disconnect_reason orelse .transport_closed, now.mono_ms);
                 }
             },
             else => {},
@@ -359,7 +359,11 @@ pub const Core = struct {
         self.candidates_revision = self.catalog.revision;
     }
     fn syncCandidate(self: *Core, snapshot: *const t.Snapshot, now: Now) void {
-        self.dial_queue.syncConnection(&snapshot.identity, snapshot.connection != null, now.mono_ms);
+        if (snapshot.connection != null) {
+            self.dial_queue.syncConnection(&snapshot.identity, true, now.mono_ms);
+        } else {
+            self.dial_queue.disconnected(&snapshot.identity, snapshot.connected_at_ms, snapshot.disconnect_reason orelse .transport_closed, now.mono_ms);
+        }
         if (snapshot.relevant) self.dial_queue.relevant(&snapshot.identity, snapshot.status_at_ms);
         if (snapshot.ban_until_ms > now.mono_ms or snapshot.score <= -50 or snapshot.goodbye_until_ms > now.mono_ms) {
             const due = @max(self.catalog.nextDeadline(now.mono_ms) orelse now.mono_ms +| 1_000, snapshot.goodbye_until_ms);
@@ -582,7 +586,6 @@ pub const Core = struct {
         _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
         _ = self.dial_queue.advanceCustody(&self.local.fork, now.mono_ms, &budget);
         self.policy_dirty = true;
-        self.reStatusPeers(now);
     }
     pub fn reStatusPeer(self: *Core, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
         if (self.stopped) return false;
@@ -613,10 +616,13 @@ pub const Core = struct {
         addresses: []const t.Address,
         now: Now,
     ) !void {
+        return self.connectUntil(identity, addresses, now, now.mono_ms +| dial_mod.connect_timeout_ms);
+    }
+    pub fn connectUntil(self: *Core, identity: *const t.PeerId, addresses: []const t.Address, now: Now, deadline_ms: u64) !void {
         self.reconciliation_now = now;
         if (self.stopped) return error.Stopped;
         if (identity.eql(&self.local_identity)) return error.SelfDial;
-        try self.dial_queue.enqueue(identity, addresses, false, now.mono_ms);
+        try self.dial_queue.enqueueUntil(identity, addresses, false, now.mono_ms, deadline_ms);
         self.syncIdentity(identity, now);
         self.policy_dirty = true;
     }
@@ -650,7 +656,8 @@ pub const Core = struct {
         const snapshot = self.catalog.get(peer) orelse return false;
         if (!std.meta.eql(snapshot.connection, connection)) return false;
         self.control.close(&self.service, &self.catalog, engine, peer, connection, .host, now);
-        self.dial_queue.connection(&snapshot.identity, false, now.mono_ms);
+        self.dial_queue.cancelConnect(engine, &snapshot.identity, now.mono_ms);
+        self.dial_queue.disconnected(&snapshot.identity, snapshot.connected_at_ms, .host, now.mono_ms);
         self.policy_dirty = true;
         return true;
     }

@@ -164,8 +164,10 @@ pub const Server = struct {
                     return;
                 }
             }
-            if (input.fin) {
-                slot.io.fin_seen = true;
+            // Goodbye only closes this authenticated peer's connection. Handle its complete
+            // bounded frame before FIN, which can race the peer's connection shutdown.
+            if (input.fin or (slot.protocol == .goodbye_v1 and slot.io.decoding and slot.io.decoder.isDone())) {
+                slot.io.fin_seen = input.fin;
                 const finished = !slot.io.decoding or slot.io.decoder.isDone();
                 if (!finished) {
                     Server.rejectRequest(owner, slot, now);

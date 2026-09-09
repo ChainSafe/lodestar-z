@@ -119,7 +119,7 @@ test "peer dial queue bounded pressure generation exhaustion and zero output do 
     try q.enqueue(&first, &.{address}, true, 0);
     try q.enqueue(&second, &.{address}, false, 0);
     try std.testing.expectError(error.Capacity, q.enqueue(&third, &.{address}, false, 0));
-    try std.testing.expectEqual(@as(?u64, null), q.nextWakeup(0, 0));
+    try std.testing.expectEqual(@as(?u64, mod.connect_timeout_ms), q.nextWakeup(0, 0));
     var out: [2]mod.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
     try std.testing.expectEqual(@as(?u64, 10_000), q.nextWakeup(0, 2));
@@ -142,7 +142,7 @@ test "peer dial queue exponential retry remains bounded through repeated failure
     );
     defer q.deinit(a);
     const peer: t.PeerId = .{ .bytes = @splat(1) };
-    try q.enqueue(&peer, &.{address}, false, 0);
+    try q.enqueue(&peer, &.{address}, true, 0);
     var now: u64 = 0;
     var out: [1]mod.DialIntent = undefined;
     for (0..20) |_| {
@@ -181,13 +181,17 @@ test "peer dial queue polling and failure without native owner preserve started 
     try std.testing.expectEqual(@as(?u64, 10_000), q.nextWakeup(10_000, 0));
     try std.testing.expect(q.dialClosed(conn, 10_000));
     try std.testing.expect(q.rows[0].connected);
+    try std.testing.expectEqual(@as(u64, 0), q.rows[0].manual_until_ms);
+    try std.testing.expectEqual(@as(u64, 1), q.counters.manual_completed);
+    q.disconnected(&peer, 10_000, .transport_closed, 10_001);
+    try std.testing.expectEqual(@as(usize, 0), q.poll(20_000, &out));
 }
 
 test "peer dial queue review cooldown cannot extend a lost acknowledgement lease" {
     var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .engine_dialing_max = 1, .seed = 5 });
     defer q.deinit(a);
     const peer: t.PeerId = .{ .bytes = @splat(1) };
-    try q.enqueue(&peer, &.{address}, false, 0);
+    try q.enqueue(&peer, &.{address}, true, 0);
     var out: [1]mod.DialIntent = undefined;
     _ = q.poll(0, &out);
     const expired = out[0].token;
@@ -506,7 +510,9 @@ test "peer explicit address updates reject overflow and invalid input without mu
     try std.testing.expectEqual(selection.custody_cursor, q.custody_cursor);
     for ([_]t.Address{ address, second }) |known| {
         try q.enqueue(&peer, &.{known}, false, 10);
-        try std.testing.expectEqualDeep(before, q.rows[0]);
+        var refreshed = before;
+        refreshed.manual_until_ms = 10 + mod.connect_timeout_ms;
+        try std.testing.expectEqualDeep(refreshed, q.rows[0]);
     }
 }
 
@@ -595,4 +601,53 @@ test "peer dial actual custody gives no utility for connected sampling only grou
     q.configureSelection(&wanted, false, &context, 0);
     try std.testing.expectEqual(@as(u16, 4), q.rows[0].priority);
     try std.testing.expect(q.rows[0].selected);
+}
+
+test "peer manual dial completes once and expires without retaining intent" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    var out: [1]mod.DialIntent = undefined;
+    try q.enqueueUntil(&peer, &.{address}, false, 0, 5_000);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    const token = out[0].token;
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    try std.testing.expect(q.dialStarted(token, conn));
+    q.accepted(&peer, conn, 1);
+    q.disconnected(&peer, 1, .transport_closed, 20);
+    try std.testing.expectEqual(@as(usize, 0), q.poll(20_000, &out));
+    try std.testing.expectEqual(@as(usize, 0), q.resourceSnapshot().occupied);
+    try std.testing.expectEqual(@as(u64, 1), q.counters.manual_completed);
+    try q.enqueueUntil(&peer, &.{address}, false, 20_000, 21_000);
+    try std.testing.expectEqual(@as(usize, 0), q.poll(21_000, &out));
+    try std.testing.expectEqual(@as(usize, 0), q.resourceSnapshot().occupied);
+    try std.testing.expectEqual(@as(u64, 1), q.counters.manual_expired);
+    try std.testing.expect(!q.dialFailed(token, 21_000));
+}
+
+test "peer manual dial deadlines merge while direct reconnects back off" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    try q.enqueueUntil(&peer, &.{address}, false, 0, 10_000);
+    try q.enqueueUntil(&peer, &.{address}, false, 1, 20_000);
+    try q.enqueueUntil(&peer, &.{address}, false, 2, 5_000);
+    try std.testing.expectEqual(@as(u64, 20_000), q.rows[0].manual_until_ms);
+    try q.enqueue(&peer, &.{address}, true, 2);
+    var out: [1]mod.DialIntent = undefined;
+    var now: u64 = 2;
+    for (0..3) |i| {
+        try std.testing.expectEqual(@as(usize, 1), q.poll(now, &out));
+        const conn: t.Handle = .{ .index = 0, .generation = @intCast(i) };
+        try std.testing.expect(q.dialStarted(out[0].token, conn));
+        q.accepted(&peer, conn, now);
+        q.disconnected(&peer, now, .health_timeout, now + 100);
+        const due = q.nextWakeup(now + 100, 1).?;
+        const minimum = @as(u64, 5_000) << @intCast(i);
+        try std.testing.expect(due >= now + 100 + minimum and due <= now + 1_100 + minimum);
+        try std.testing.expectEqual(@as(usize, 0), q.poll(due - 1, &out));
+        now = due;
+    }
+    try std.testing.expectEqual(@as(u64, 3), q.counters.connection_backoffs);
+    try std.testing.expect(q.isDirect(&peer));
 }

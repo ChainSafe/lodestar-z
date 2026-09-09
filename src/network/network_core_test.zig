@@ -439,6 +439,40 @@ fn noEntropy(_: ?*anyopaque, _: []u8) std.Io.RandomSecureError!void {
     return error.EntropyUnavailable;
 }
 
+fn unreachableSend(_: ?*anyopaque, _: std.Io.net.Socket.Handle, _: []std.Io.net.OutgoingMessage, _: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
+    return .{ error.AddressFamilyUnsupported, 0 };
+}
+
+test "managed runtime unreachable destination backs off and rotates to its alternate address" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
+    const remote = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, options(&key));
+    defer node.deinit(std.testing.io);
+    const now = try @import("driver.zig").currentTime(std.testing.io);
+    const peer = t.PeerId.fromPublicKey(&remote.publicKey());
+    try node.connect(&peer, &.{
+        .{ .ip6 = .{ .octets = .{0} ** 15 ++ .{1}, .port = 19003 } },
+        .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 19003 } },
+    }, now);
+    var vtable = std.testing.io.vtable.*;
+    vtable.netSend = unreachableSend;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const refused = node.step(io, now, 0, .{}, 0);
+    try std.testing.expectEqual(error.DestinationUnreachable, refused.failure.?);
+    try std.testing.expectEqual(@as(u8, 1), refused.dial_failed);
+    try std.testing.expectEqual(@as(u8, 0), refused.dial_deferred);
+    const row = &node.core.dial_queue.rows[0];
+    try std.testing.expectEqual(@as(u8, 1), row.failures);
+    try std.testing.expectEqual(@as(u8, 1), row.address_index);
+    try std.testing.expect(!row.attempt);
+    try std.testing.expect(row.eligible_at_ms >= now.mono_ms + 1000);
+    const retry: @import("types.zig").Now = .{ .mono_ms = row.eligible_at_ms, .unix_s = now.unix_s };
+    const result = node.step(std.testing.io, retry, 0, .{}, 0);
+    try std.testing.expectEqual(@as(u8, 1), result.dial_started);
+    try std.testing.expect(row.conn != null);
+}
+
 test "managed runtime socket faults preserve the other owner and local dial refusal is deferred" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{22}));
     const remote_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{23}));

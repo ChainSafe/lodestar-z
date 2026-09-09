@@ -5,6 +5,33 @@ const wire = @import("peers/control_wire.zig");
 const rr = @import("reqresp/root.zig");
 const Engine = @import("quic/engine.zig");
 
+test "core local head and metadata updates preserve periodic status scheduling" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(1);
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
+    const peer = snapshots[0].peer;
+    try std.testing.expect(snapshots[0].relevant);
+    const due = setup.client.control.schedules[peer.index].status_due_ms;
+    const started = setup.client.service.reqresp.inner.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
+    for (0..3) |_| {
+        var local = setup.client.local;
+        local.status.head_slot += 1;
+        local.metadata.seq_number += 1;
+        setup.client.commitLocal(&local, setup.pair.now);
+        for (0..40) |_| try setup.step(1);
+        try std.testing.expectEqual(due, setup.client.control.schedules[peer.index].status_due_ms);
+        try std.testing.expectEqual(started, setup.client.service.reqresp.inner.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
+    }
+    setup.pair.advance(1);
+    setup.client.reStatusPeers(setup.pair.now);
+    for (0..40) |_| try setup.step(1);
+    try std.testing.expectEqual(started + 1, setup.client.service.reqresp.inner.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
+    try std.testing.expect(setup.client.control.schedules[peer.index].status_due_ms > due);
+}
+
 test "core native stalled fork transition only wakes for eligible work" {
     var setup: Setup = .{};
     try setup.init(&.{});

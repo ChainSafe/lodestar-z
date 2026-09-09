@@ -1,7 +1,7 @@
 const std = @import("std");
 const prom = @import("metrics_prometheus.zig");
 
-pub const Scope = enum { network_runtime, network_core, network_quic, network_peers, network_reqresp, network_reqresp_errors, network_gossip, network_mesh, network_discovery, network_bridge };
+pub const Scope = enum { network_runtime, network_core, network_quic, network_peers, network_reqresp, network_reqresp_errors, network_gossip, network_mesh, network_discovery, network_bridge, network_gossip_errors };
 pub const capacity = 128;
 pub const message_capacity = 768;
 pub const drain_max = 32;
@@ -18,6 +18,7 @@ pub const scope_levels: []const std.log.ScopeLevel = &.{
     .{ .scope = .network_mesh, .level = .debug },
     .{ .scope = .network_discovery, .level = .debug },
     .{ .scope = .network_bridge, .level = .debug },
+    .{ .scope = .network_gossip_errors, .level = .debug },
 };
 
 pub const Record = struct {

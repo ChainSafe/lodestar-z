@@ -226,18 +226,30 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
         .addDirectPeer => try core.addDirectPeer(&input.peer, input.addresses[0..input.address_count], timestamp),
         .connect => {
             if (core.core.catalog.find(&input.peer)) |peer| if (core.core.catalog.get(peer).?.connection != null) return;
-            try core.connect(&input.peer, input.addresses[0..input.address_count], timestamp);
             operation.deadline = timestamp.mono_ms +| input.timeout_ms;
+            try core.connectUntil(&input.peer, input.addresses[0..input.address_count], timestamp, operation.deadline);
             self.lock();
             self.table.cells[index].state = .waiting;
             self.unlock();
         },
-        .disconnect, .reportPeer => if (core.core.catalog.find(&input.peer)) |peer| {
-            const row = core.core.catalog.get(peer).?;
-            if (input.command == .reportPeer) {
-                _ = core.reportPeer(peer, input.action, timestamp);
-            } else if (row.connection) |handle| {
-                _ = core.closePeer(peer, handle, timestamp);
+        .disconnect, .reportPeer => {
+            if (input.command == .disconnect) {
+                core.cancelConnect(&input.peer, timestamp);
+                self.lock();
+                for (&self.table.cells, 0..) |*cell, i| {
+                    if (cell.state != .waiting or !self.operations[i].input.peer.eql(&input.peer)) continue;
+                    self.operations[i].failure = error.NetworkConnectCancelled;
+                    cell.state = .terminal;
+                }
+                self.unlock();
+            }
+            if (core.core.catalog.find(&input.peer)) |peer| {
+                const row = core.core.catalog.get(peer).?;
+                if (input.command == .reportPeer) {
+                    _ = core.reportPeer(peer, input.action, timestamp);
+                } else if (row.connection) |handle| {
+                    _ = core.closePeer(peer, handle, timestamp);
+                }
             }
         },
         .reStatusPeers => for (self.stores.?.targets[store.?][0..input.target_count]) |*identity| {

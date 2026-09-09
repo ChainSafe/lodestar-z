@@ -5,9 +5,11 @@ const frame = @import("frame.zig");
 const constants = @import("constants.zig");
 const topic = @import("topic.zig");
 const assert = std.debug.assert;
-pub const data_capacity = 16;
+pub const data_capacity = 128;
 pub const control_frames = 128;
 pub const QueueResult = enum { queued, full };
+pub const DropReason = enum { data_descriptors, data_bytes, control_frames, control_bytes, critical_frames, critical_bytes, token_exhausted };
+pub const drop_reason_count = @typeInfo(DropReason).@"enum".fields.len;
 
 pub const ControlQueue = struct {
     bytes: []u8,
@@ -197,6 +199,10 @@ pub const PeerIo = struct {
     ihave_recv: u16 = 0,
     iwant_ids_sent: u16 = 0,
     idontwant_recv: u16 = 0,
+    drops: [drop_reason_count]u64 = @splat(0),
+    pressure_pending: bool = false,
+    pressure_log_due_ms: u64 = 0,
+    last_drop: DropReason = .data_descriptors,
 
     pub fn feedUnread(self: *PeerIo, body: []u8, limit: usize, now_ms: u64) frame.Error!struct { consumed: usize, complete: bool } {
         assert(limit > 0 and limit <= self.unread_end - self.unread_start);
@@ -225,17 +231,34 @@ pub const PeerIo = struct {
         return self.appendControl(bytes, false, now_ms) != null;
     }
     pub fn appendControl(self: *PeerIo, bytes: []const u8, critical: bool, now_ms: u64) ?u64 {
-        if (self.sequence == std.math.maxInt(u64)) return null;
+        if (self.sequence == std.math.maxInt(u64)) {
+            self.dropped(.token_exhausted);
+            return null;
+        }
         const token = self.sequence + 1;
         const queue = if (critical) &self.critical else &self.control;
-        if (queue.append(bytes, token, now_ms) == .full) return null;
+        if (queue.append(bytes, token, now_ms) == .full) {
+            self.dropped(if (queue.count == control_frames)
+                (if (critical) .critical_frames else .control_frames)
+            else
+                (if (critical) .critical_bytes else .control_bytes));
+            return null;
+        }
         self.sequence = token;
         self.tx_ready = true;
         return token;
     }
     pub fn queueData(self: *PeerIo, store: *storage.Store, h: storage.Handle, byte_limit: usize, now_ms: u64) QueueResult {
         const e = store.get(h).?;
-        if (self.data_count == data_capacity or e.len > byte_limit - self.data_bytes) return .full;
+        assert(self.data_bytes <= byte_limit);
+        if (self.data_count == data_capacity) {
+            self.dropped(.data_descriptors);
+            return .full;
+        }
+        if (e.len > byte_limit - self.data_bytes) {
+            self.dropped(.data_bytes);
+            return .full;
+        }
         self.data[(self.data_head + self.data_count) % data_capacity] = DataTx.init(store, h, now_ms);
         self.data_count += 1;
         self.data_bytes += e.len;
@@ -244,6 +267,11 @@ pub const PeerIo = struct {
         store.retainTx(h);
         self.tx_ready = true;
         return .queued;
+    }
+    fn dropped(self: *PeerIo, reason: DropReason) void {
+        self.drops[@intFromEnum(reason)] +|= 1;
+        self.pressure_pending = true;
+        self.last_drop = reason;
     }
     pub fn pending(self: *const PeerIo) bool {
         return self.data_count != 0 or self.control.count != 0 or self.critical.count != 0;
@@ -305,6 +333,7 @@ pub const PeerIo = struct {
 
     pub fn resetTx(self: *PeerIo, store: *storage.Store) void {
         for (0..self.data_count) |i| store.releaseTx(self.data[(self.data_head + i) % data_capacity].message);
+        self.pressure_pending = false;
         self.data_head = 0;
         self.data_count = 0;
         self.data_bytes = 0;
@@ -397,8 +426,8 @@ test "gossip critical capacity and data queue pressure are independent and relea
     store.seal(h);
     for (0..data_capacity) |_| try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, 8192, 0));
     try std.testing.expectEqual(QueueResult.full, io.queueData(&store, h, 8192, 0));
-    try std.testing.expectEqual(@as(usize, 16), io.data_bytes_high_water);
-    try std.testing.expectEqual(@as(usize, 16), io.data_descriptors_high_water);
+    try std.testing.expectEqual(@as(usize, data_capacity), io.data_bytes_high_water);
+    try std.testing.expectEqual(@as(usize, data_capacity), io.data_descriptors_high_water);
     try std.testing.expect(io.append("12345678", 0));
     try std.testing.expect(!io.append("x", 0));
     try std.testing.expect(io.appendControl("critical", true, 0) != null);
@@ -406,6 +435,49 @@ test "gossip critical capacity and data queue pressure are independent and relea
     io.resetTx(&store);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
     try std.testing.expectEqual(@as(usize, 1), store.free_pages);
+    try std.testing.expectEqual(@as(u64, 1), io.drops[@intFromEnum(DropReason.data_descriptors)]);
+    try std.testing.expectEqual(@as(u64, 1), io.drops[@intFromEnum(DropReason.control_bytes)]);
+    try std.testing.expect(!io.pressure_pending);
+}
+
+test "gossip queues a full validation burst in order and preserves byte bounds" {
+    const burst = 64;
+    var store = try storage.Store.init(std.testing.allocator, burst, burst * 4096);
+    defer store.deinit(std.testing.allocator);
+    var normal: [8]u8 = undefined;
+    var critical: [8]u8 = undefined;
+    var body: [1]u8 = undefined;
+    var unread: [1]u8 = undefined;
+    var io: PeerIo = .{ .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical }, .body = &body, .unread = &unread };
+    defer io.resetTx(&store);
+    var expected: [4096]u8 = undefined;
+    var writer = protobuf.Writer.init(&expected);
+    for (0..burst) |i| {
+        const payload = [_]u8{@intCast(i)};
+        const h = store.put([_]u8{@intCast(i)} ** 20, "topic", &payload).?;
+        store.retainHistory(h);
+        store.seal(h);
+        try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, burst, 0));
+        writer.varint(protobuf.messageSize(&payload, "topic"));
+        protobuf.writeMessage(&writer, &payload, "topic");
+        if (i == burst - 1) try std.testing.expectEqual(QueueResult.full, io.queueData(&store, h, burst, 0));
+        store.releaseHistory(h);
+    }
+    var actual: [4096]u8 = undefined;
+    var used: usize = 0;
+    for (0..burst * 3) |_| {
+        const segment = io.segment(&store);
+        if (segment.len == 0) break;
+        @memcpy(actual[used..][0..segment.len], segment);
+        used += segment.len;
+        _ = io.advance(&store, segment.len);
+    }
+    try std.testing.expect(!io.pending());
+    try std.testing.expectEqualSlices(u8, writer.written(), actual[0..used]);
+    try std.testing.expectEqual(@as(usize, 0), store.used_entries);
+    try std.testing.expectEqual(@as(usize, burst), store.free_pages);
+    try std.testing.expectEqual(@as(u64, 1), io.drops[@intFromEnum(DropReason.data_bytes)]);
+    try std.testing.expectEqual(@as(u64, 0), io.drops[@intFromEnum(DropReason.data_descriptors)]);
 }
 
 test "gossip control high water survives partial write refusal and reset" {
