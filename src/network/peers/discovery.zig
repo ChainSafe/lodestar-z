@@ -82,8 +82,7 @@ pub const Discovery = struct {
     driver: *d.Driver,
     storage: *Storage,
     maintenance: d.Maintenance,
-    lookup: d.Lookup = undefined,
-    lookup_active: bool = false,
+    lookup: ?d.Lookup = null,
     context: types.ForkContext,
     options: Options,
     demand: Demand = .{},
@@ -133,10 +132,7 @@ pub const Discovery = struct {
     pub fn updateFork(self: *Discovery, context: *const types.ForkContext) Error!void {
         if (self.stopped) return error.Stopped;
         try context.validate();
-        if (!std.mem.eql(u8, &self.context.digest, &context.digest) and self.lookup_active) {
-            self.lookup.cancel(self.driver.core);
-            self.lookup_active = false;
-        }
+        if (!std.mem.eql(u8, &self.context.digest, &context.digest)) self.cancelForeground();
         self.context = context.*;
     }
 
@@ -144,8 +140,9 @@ pub const Discovery = struct {
         if (self.stopped) return null;
         var next = self.driver.core.nextDeadlineMs() orelse std.math.maxInt(u64);
         if (self.maintenance.nextDeadlineMs()) |deadline| next = @min(next, @max(deadline, self.resource_retry_ms));
-        if (self.lookup_active and self.lookup.waitingCount() < d.Lookup.parallelism) next = @min(next, @max(self.refill_due_ms, self.resource_retry_ms));
-        if (!self.lookup_active and self.demand.active(now_ms)) next = @min(next, @max(self.query_due_ms, self.resource_retry_ms));
+        if (self.lookup) |*lookup| {
+            if (lookup.waitingCount() < d.Lookup.parallelism) next = @min(next, @max(self.refill_due_ms, self.resource_retry_ms));
+        } else if (self.demand.active(now_ms)) next = @min(next, @max(self.query_due_ms, self.resource_retry_ms));
         if (self.demand.active(now_ms)) next = @min(next, self.demand.expires_ms);
         return @max(now_ms, next);
     }
@@ -179,31 +176,30 @@ pub const Discovery = struct {
         };
         for (expiries) |expired| {
             self.counters.query_timeouts +|= 1;
-            if (self.lookup_active and self.lookup.ownsCall(expired.handle)) {
-                self.lookup.onFailure(self.driver.core, expired.handle) catch unreachable;
+            if (self.lookupForCall(expired.handle)) |lookup| {
+                lookup.onFailure(self.driver.core, expired.handle) catch unreachable;
                 result.expired += 1;
             } else if (self.maintenance.onFailure(self.driver.core, expired.handle, progress.now_ms, .expired)) {
                 result.expired += 1;
             } else result.unowned += 1;
         }
         self.consumeEvent(progress, out, &result);
-        if (self.lookup_active and self.lookup.isFinished()) {
-            const confirmed_records = self.lookup.confirmedResults(&self.storage.records);
+        if (self.lookup) |*lookup| if (lookup.isFinished()) {
+            const confirmed_records = lookup.confirmedResults(&self.storage.records);
             self.counters.lookups_completed +|= 1;
             self.lookup_time.observe(progress.now_ms -| self.lookup_started_ms);
-            self.lookup_finishes[@intFromEnum(self.lookup.finishReason().?)] +|= 1;
-            std.log.scoped(.network_discovery).debug("lookup_completed reason={s} confirmed={d} queried={d} candidates={d} published={d} elapsed_ms={d}", .{ @tagName(self.lookup.finishReason().?), confirmed_records.len, self.lookup.queries_started, self.lookup.candidateCount(), self.counters.candidates_published -| self.lookup_published, progress.now_ms -| self.lookup_started_ms });
-            self.lookup_active = false;
+            self.lookup_finishes[@intFromEnum(lookup.finishReason().?)] +|= 1;
+            std.log.scoped(.network_discovery).debug("lookup_completed reason={s} confirmed={d} queried={d} candidates={d} published={d} elapsed_ms={d}", .{ @tagName(lookup.finishReason().?), confirmed_records.len, lookup.queries_started, lookup.candidateCount(), self.counters.candidates_published -| self.lookup_published, progress.now_ms -| self.lookup_started_ms });
+            self.lookup = null;
             self.query_due_ms = progress.now_ms +| self.options.query_interval_ms;
-        }
+        };
         return result;
     }
 
     pub fn cancel(self: *Discovery) void {
         if (self.stopped) return;
-        if (self.lookup_active) self.lookup.cancel(self.driver.core);
+        self.cancelForeground();
         self.maintenance.cancel(self.driver.core);
-        self.lookup_active = false;
         self.demand = .{};
         self.stopped = true;
     }
@@ -211,26 +207,27 @@ pub const Discovery = struct {
     fn refill(self: *Discovery, io: std.Io, now_ms: u64, result: *Result) Error!void {
         self.expireForeground(now_ms);
         if (now_ms < self.resource_retry_ms) return;
-        if (!self.lookup_active and self.demand.active(now_ms) and now_ms >= self.query_due_ms) {
+        if (self.lookup == null and self.demand.active(now_ms) and now_ms >= self.query_due_ms) {
             self.query_due_ms = now_ms +| self.options.query_interval_ms;
             var target: d.types.NodeId = undefined;
             try std.Io.randomSecure(io, &target);
             var seeds: [d.Lookup.result_max]d.RoutingTable.Entry = undefined;
             const closest = self.driver.core.closestNodes(&target, &seeds);
-            try self.lookup.init(&self.storage.foreground, self.driver.core.localRecord().node_id, target, closest);
-            self.lookup.filter = .{ .context = &self.context, .matches = matchesNetwork };
-            self.lookup.ipv6_enabled = self.driver.udp.localAddress() == .ip6;
-            self.lookup.query_limit = queries_max;
+            var lookup: d.Lookup = undefined;
+            try lookup.init(&self.storage.foreground, self.driver.core.localRecord().node_id, target, closest);
+            lookup.filter = .{ .context = &self.context, .matches = matchesNetwork };
+            lookup.ipv6_enabled = self.driver.udp.localAddress() == .ip6;
+            lookup.query_limit = queries_max;
+            self.lookup = lookup;
             self.lookup_started_ms = now_ms;
             self.lookup_published = self.counters.candidates_published;
             self.counters.lookups_started +|= 1;
             std.log.scoped(.network_discovery).debug("lookup_started target={x} seeds={d}", .{ target, closest.len });
-            self.lookup_active = true;
         }
         if (self.maintenance.nextDeadlineMs()) |deadline| if (now_ms >= deadline) {
             try self.start(io, now_ms, true, result);
         };
-        if (!self.lookup_active or now_ms < self.refill_due_ms) return;
+        if (self.lookup == null or now_ms < self.refill_due_ms) return;
         self.refill_due_ms = now_ms +| self.options.local_retry_ms;
         for (0..d.Lookup.parallelism) |_| {
             const before = result.started;
@@ -240,9 +237,12 @@ pub const Discovery = struct {
     }
 
     fn expireForeground(self: *Discovery, now_ms: u64) void {
-        if (!self.lookup_active or self.demand.active(now_ms)) return;
-        self.lookup.cancel(self.driver.core);
-        self.lookup_active = false;
+        if (!self.demand.active(now_ms)) self.cancelForeground();
+    }
+
+    fn cancelForeground(self: *Discovery) void {
+        if (self.lookup) |*lookup| lookup.cancel(self.driver.core);
+        self.lookup = null;
     }
 
     fn start(self: *Discovery, io: std.Io, now_ms: u64, background: bool, result: *Result) Error!void {
@@ -251,7 +251,7 @@ pub const Discovery = struct {
         defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
         const id = try d.Driver.requestId(io);
         var packet: [d.wire.constants.packet_size_max]u8 = undefined;
-        const started = (if (background) self.maintenance.startNext(self.driver.core, &packet, id, now_ms, &entropy) else self.lookup.startNext(self.driver.core, &packet, id, now_ms, &entropy)) catch |err| switch (err) {
+        const started = (if (background) self.maintenance.startNext(self.driver.core, &packet, id, now_ms, &entropy) else self.lookup.?.startNext(self.driver.core, &packet, id, now_ms, &entropy)) catch |err| switch (err) {
             error.TableFull, error.PeerBusy => return,
             else => return err,
         } orelse return;
@@ -260,9 +260,14 @@ pub const Discovery = struct {
         self.driver.transmit(io, started.peer.address, packet[0..started.call.packet_length]) catch |err| {
             if (background) {
                 std.debug.assert(self.maintenance.onFailure(self.driver.core, started.call.handle, now_ms, .local));
-            } else self.lookup.onFailure(self.driver.core, started.call.handle) catch unreachable;
+            } else self.lookup.?.onFailure(self.driver.core, started.call.handle) catch unreachable;
             return err;
         };
+    }
+
+    fn lookupForCall(self: *Discovery, handle: d.CallTable.Handle) ?*d.Lookup {
+        const lookup = if (self.lookup) |*active| active else return null;
+        return if (lookup.ownsCall(handle)) lookup else null;
     }
 
     fn consumeEvent(self: *Discovery, progress: *const d.Driver.StepResult, out: []adapter.Candidate, result: *Result) void {
@@ -272,19 +277,19 @@ pub const Discovery = struct {
             else => return,
         };
         if (progress.event == .failed) self.counters.query_failures +|= 1;
-        if (self.lookup_active and self.lookup.ownsCall(handle)) {
+        if (self.lookupForCall(handle)) |lookup| {
             switch (progress.event) {
                 .response => |*response| {
-                    const known = self.lookup.knownRecord(handle).?.*;
-                    self.lookup.onResponse(self.driver.core, response, progress.now_ms) catch |err| {
-                        self.lookup.onFailure(self.driver.core, handle) catch unreachable;
+                    const known = lookup.knownRecord(handle).?.*;
+                    lookup.onResponse(self.driver.core, response, progress.now_ms) catch |err| {
+                        lookup.onFailure(self.driver.core, handle) catch unreachable;
                         result.failure = result.failure orelse err;
                         return;
                     };
                     self.publishReferrals(response, progress.now_ms, out, result);
                     if (response.matched.terminal) self.publishResponse(response, &known, progress.now_ms, out, result);
                 },
-                .failed => self.lookup.onFailure(self.driver.core, handle) catch unreachable,
+                .failed => lookup.onFailure(self.driver.core, handle) catch unreachable,
                 else => unreachable,
             }
             self.refill_due_ms = progress.now_ms;
