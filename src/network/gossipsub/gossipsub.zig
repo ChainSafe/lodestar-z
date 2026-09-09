@@ -1320,18 +1320,23 @@ pub const Gossipsub = struct {
 
     fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
         if (self.belowGossip(index, now.mono_ms)) {
-            self.rpc_metrics.ihave_ignored[0] +|= 1;
+            self.rpc_metrics.ignoreIhave(.low_score);
             return;
         }
         const io = &self.io.peers[index];
         if (io.ihave_recv >= constants.max_ihave_per_heartbeat) {
-            self.rpc_metrics.ihave_ignored[1] +|= 1;
+            self.rpc_metrics.ignoreIhave(.limit);
             return;
         }
         io.ihave_recv += 1;
+        const topic = self.state.findTopic(ihave.topic);
+        if (topic == null or !self.state.subscribed(topic.?)) {
+            self.rpc_metrics.ignoreIhave(.unsubscribed);
+            return;
+        }
         const id_budget = constants.max_ihave_ids_per_heartbeat -| @as(usize, io.iwant_ids_sent);
         if (id_budget == 0 or self.recovery.available() == 0) {
-            self.rpc_metrics.ihave_ignored[if (id_budget == 0) @as(usize, 1) else 2] +|= 1;
+            self.rpc_metrics.ignoreIhave(if (id_budget == 0) .limit else .capacity);
             return;
         }
         const metrics = self.topic_metrics.get(ihave.topic);
@@ -1342,7 +1347,7 @@ pub const Gossipsub = struct {
         while (it.next() catch return) |id_bytes| {
             if (examined == constants.max_ihave_ids_per_heartbeat) break;
             examined += 1;
-            if (count == wanted.len or count >= id_budget or count == self.recovery.available()) break;
+            if (count == wanted.len or count >= id_budget) break;
             if (id_bytes.len != constants.message_id_length) continue;
             const id: MessageId = id_bytes[0..constants.message_id_length].*;
             metrics.ihave_ids +|= 1;
@@ -1352,6 +1357,14 @@ pub const Gossipsub = struct {
             count += 1;
         }
         if (count == 0) return;
+        count = self.recovery.select(self.logical(index), wanted[0..count]) catch {
+            self.rpc_metrics.ignoreIhave(.peer_capacity);
+            return;
+        };
+        if (count == 0) {
+            self.rpc_metrics.ignoreIhave(.no_new_ids);
+            return;
+        }
         var writer = protobuf.Writer.init(self.msg_scratch);
         writer.varint(protobuf.iwantRpcSize(count, constants.message_id_length));
         protobuf.beginIwantRpc(&writer, count, constants.message_id_length);
@@ -1672,6 +1685,73 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
     g.expirePromises(20_000);
     try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
+}
+
+test "gossipsub IHAVE security ignores unknown and unsubscribed topics through RPC decoding" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const subscribed = "/eth2/01020304/beacon_block/ssz_snappy";
+    const retired = "/eth2/01020304/beacon_aggregate_and_proof/ssz_snappy";
+    try std.testing.expect(g.subscribe(subscribed));
+    try std.testing.expect(g.subscribe(retired));
+    try std.testing.expect(g.unsubscribe(retired));
+    for ([_][]const u8{ "/eth2/01020304/unknown/ssz_snappy", retired, subscribed }) |name| {
+        var bytes: [256]u8 = undefined;
+        var writer = protobuf.Writer.init(&bytes);
+        protobuf.beginIhaveRpc(&writer, name, 1, constants.message_id_length);
+        protobuf.writeIhaveId(&writer, &([_]u8{7} ** 20));
+        const io = &g.io.peers[peer.index];
+        io.rpc = protobuf.RpcReader.init(writer.written());
+        io.rpc_had_control = false;
+        io.fields_pump = 0;
+        g.budget = .{ .items = 128, .fields = 131072 };
+        var items: usize = 128;
+        var count: usize = 0;
+        try std.testing.expect(try g.processRpc(peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &.{}, &count, &items));
+        try std.testing.expectEqual(@as(usize, @intFromBool(std.mem.eql(u8, name, subscribed))), g.recovery.len);
+    }
+}
+
+test "gossipsub IHAVE security bounds one identity and deduplicates queued requests" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .iwant_followup_ms = 12000 });
+    defer g.deinit();
+    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    var bytes: [4096]u8 = undefined;
+    var writer = protobuf.Writer.init(&bytes);
+    const duplicate = [_]u8{7} ** 20;
+    for (0..128) |_| writer.bytesField(2, &duplicate);
+    const io = &g.io.peers[peer.index];
+    for (0..2) |_| g.onIhave(peer.index, .{ .topic = name, .body = writer.written() }, .{ .mono_ms = 1, .unix_s = 1 });
+    try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
+    for (0..7) |heartbeat| {
+        io.resetHeartbeat();
+        for (0..constants.max_ihave_per_heartbeat) |batch| {
+            writer.len = 0;
+            for (0..constants.gossip_ids_max) |item| {
+                var id: MessageId = @splat(0);
+                std.mem.writeInt(u32, id[0..4], @intCast((heartbeat * constants.max_ihave_per_heartbeat + batch) * constants.gossip_ids_max + item), .little);
+                writer.bytesField(2, &id);
+            }
+            g.onIhave(peer.index, .{ .topic = name, .body = writer.written() }, .{ .mono_ms = heartbeat * 1000, .unix_s = 1 });
+            for (0..4) |_| {
+                const segment = io.segment(&g.store);
+                if (segment.len == 0) break;
+                if (io.advance(&g.store, segment.len)) |token| g.controlSent(peer.index, token, heartbeat * 1000);
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, constants.gossip_ids_max * constants.max_ihave_per_heartbeat), g.recovery.len);
+    const other = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+    const occupied = g.recovery.len;
+    g.onIhave(other.index, .{ .topic = name, .body = writer.written() }, .{ .mono_ms = 7000, .unix_s = 1 });
+    try std.testing.expectEqual(occupied + constants.gossip_ids_max, g.recovery.len);
+    try std.testing.expectEqual(occupied, g.recovery.cancel(&g.peers, g.state.peers[peer.index].conn, true));
+    io.resetHeartbeat();
+    g.onIhave(peer.index, .{ .topic = name, .body = writer.written() }, .{ .mono_ms = 7000, .unix_s = 1 });
+    try std.testing.expectEqual(@as(usize, 2 * constants.gossip_ids_max), g.recovery.len);
 }
 
 test "gossipsub rejects incompatible memory plans and cleans partial startup allocations" {
