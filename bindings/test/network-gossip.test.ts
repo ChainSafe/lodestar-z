@@ -176,6 +176,16 @@ test.each([
     message.data.fill(0);
     expect(pair.right.reportGossip(message.handle, verdict)).toBe(true);
     expect(pair.right.reportGossip(message.handle, verdict)).toBe(false);
+    const verdictMetric = {accept: "accepted", ignore: "ignored", reject: "rejected"}[verdict];
+    await vi.waitFor(
+      () => {
+        const metrics = pair.right.getMetrics();
+        expect(metrics).toContain(`gossipsub_${verdictMetric}_messages_total{topic="beacon_block"} 1\n`);
+        expect(metrics).toContain("gossipsub_async_validation_delay_from_first_seen_count 1\n");
+        expect(metrics).toContain("lodestar_native_gossip_scored_peers 1\n");
+      },
+      {timeout: 5000}
+    );
     const counter = {
       accept: "reportsAppliedAccept",
       ignore: "reportsAppliedIgnore",

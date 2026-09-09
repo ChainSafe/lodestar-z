@@ -47,6 +47,7 @@ pub const Client = struct {
     stream: StreamHandle = undefined,
     protocol: Protocol = .status_v1,
     progress_ms: u64 = 0,
+    started_ms: u64 = 0,
     needs_service: bool = false,
     timeout_ms: u64 = 0,
     absolute_timeouts: ?reqresp.AbsoluteTimeouts = null,
@@ -318,6 +319,7 @@ pub const Client = struct {
             .stream = stream,
             .protocol = which,
             .progress_ms = now.mono_ms,
+            .started_ms = now.mono_ms,
             .timeout_ms = request_options.progress_timeout_ms orelse
                 owner.options.progress_timeout_ms,
             .io = .{ .sink = sink, .scratch = slot.io.scratch, .read_buffer = slot.io.read_buffer },

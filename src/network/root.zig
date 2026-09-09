@@ -87,4 +87,7 @@ test {
 test {
     _ = identify;
     _ = metrics;
+    _ = @import("metrics_histogram.zig");
+    _ = @import("metrics_score.zig");
+    _ = @import("reqresp/metrics.zig");
 }

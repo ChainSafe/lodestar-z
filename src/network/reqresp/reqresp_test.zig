@@ -246,6 +246,8 @@ test "reqresp rejects non-null status context then completes a status round trip
     try std.testing.expectEqual(@as(u64, 1), setup.client.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing);
     try std.testing.expectEqual(@as(u64, 1), setup.server.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming);
     try std.testing.expectEqual(@as(u64, 1), setup.server.counters.requests_served);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing_time.count);
+    try std.testing.expectEqual(@as(u64, 1), setup.server.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming_time.count);
     try std.testing.expectEqual(@as(u64, 1), setup.client.counters.chunks_received);
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(u16, 0), setup.client.active().outbound);

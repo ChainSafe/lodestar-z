@@ -362,13 +362,13 @@ fn receiveTimeout(wait_ms: ?u32, earliest_ms: ?u64) std.Io.Timeout {
     } else .{ .duration = .{ .raw = .zero, .clock = .awake } };
 }
 
-fn sendMany(io: std.Io, udp: *const Udp, batch: []const types.Sent) StepError!void {
+fn sendMany(io: std.Io, udp: *Udp, batch: []const types.Sent) StepError!void {
     return udp.sendMany(io, batch) catch |err| mapSendError(err);
 }
 
 fn send(
     io: std.Io,
-    udp: *const Udp,
+    udp: *Udp,
     destination: *const types.Address,
     bytes: []const u8,
 ) StepError!void {

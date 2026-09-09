@@ -195,6 +195,22 @@ pub const PeerScore = struct {
             self.cached_ip[peer] == self.ip_count[peer]) return self.cached[peer];
         self.calculations +|= 1;
         self.topic_visits +|= constants.topics_cap;
+        const result = self.evaluate(peer, now_ms);
+        self.dirty[peer] = false;
+        self.cached_at[peer] = now_ms;
+        self.cached_until[peer] = result.next_change;
+        self.cached_ip[peer] = self.ip_count[peer];
+        self.cached[peer] = result.total;
+        return result.total;
+    }
+
+    /// Evaluates current counters without changing decay, cache validity or policy metrics.
+    pub fn snapshot(self: *const PeerScore, peer: u16, now_ms: u64) f64 {
+        return self.evaluate(peer, now_ms).total;
+    }
+
+    fn evaluate(self: *const PeerScore, peer: u16, now_ms: u64) struct { total: f64, next_change: ?u64 } {
+        assert(peer < self.app_score.len);
         var next_change: ?u64 = null;
         var total: f64 = 0;
         var topic: usize = 0;
@@ -250,12 +266,7 @@ pub const PeerScore = struct {
         const excess_ip: f64 = @floatFromInt(self.ip_count[peer] -| self.params.ip_colocation_threshold);
         total += self.params.ip_colocation_weight * excess_ip * excess_ip;
         assert(std.math.isFinite(total));
-        self.dirty[peer] = false;
-        self.cached_at[peer] = now_ms;
-        self.cached_until[peer] = next_change;
-        self.cached_ip[peer] = self.ip_count[peer];
-        self.cached[peer] = total;
-        return total;
+        return .{ .total = total, .next_change = next_change };
     }
 
     /// Valid after score(peer, now). Background refresh invalidates on counter decay;
@@ -750,4 +761,25 @@ test "score retirement invalidates primed totals with identical parameters" {
     for (0..2) |peer| try std.testing.expectEqual(@as(f64, 0), score.score(@intCast(peer), score.params.decay_interval_ms));
     try std.testing.expectEqual(retired_revision, score.revision);
     try std.testing.expectEqual(calculations, score.calculations);
+}
+
+test "metrics score snapshots preserve cache state and match policy evaluation" {
+    var scores = try PeerScore.initCapacity(std.testing.allocator, .{}, 1);
+    defer scores.deinit(std.testing.allocator);
+    scores.graft(0, 0, 0);
+    _ = scores.score(0, 1000);
+    scores.deliver(0, 0);
+    const cached = scores.cached[0];
+    const calculations = scores.calculations;
+    const visits = scores.topic_visits;
+    const revision = scores.revision;
+    const next = scores.cached_until[0];
+    const value = scores.snapshot(0, 50000);
+    try std.testing.expectEqual(cached, scores.cached[0]);
+    try std.testing.expectEqual(calculations, scores.calculations);
+    try std.testing.expectEqual(visits, scores.topic_visits);
+    try std.testing.expectEqual(revision, scores.revision);
+    try std.testing.expectEqual(next, scores.cached_until[0]);
+    try std.testing.expect(scores.dirty[0]);
+    try std.testing.expectEqual(value, scores.score(0, 50000));
 }

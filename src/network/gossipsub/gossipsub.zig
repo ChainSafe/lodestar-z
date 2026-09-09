@@ -142,6 +142,7 @@ pub const Gossipsub = struct {
     recovery: Recovery,
     counters: Counters = .{},
     topic_metrics: @import("metrics.zig").Topics = .{},
+    validation_time: @import("metrics.zig").ValidationTime = .{},
 
     pub const Counters = struct {
         retained_penalty_evictions: u64 = 0,
@@ -647,6 +648,17 @@ pub const Gossipsub = struct {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
         const context = self.validationContext();
         const result = self.validation.report(&context, handle, verdict, now.mono_ms);
+        if (result.outcome == .applied) {
+            const entry = &self.validation.entries[handle.index];
+            const row = &self.state.topics[entry.topic];
+            const counts = self.topic_metrics.get(row.string[0..row.string_len]);
+            switch (verdict) {
+                .accept => counts.accepted +|= 1,
+                .reject => counts.rejected +|= 1,
+                .ignore => counts.ignored +|= 1,
+            }
+            self.validation_time.observe(now.mono_ms -| entry.admitted_ms);
+        }
         if (result.forward) |forward| {
             const delivered = self.deliver(self.state.mesh(forward.topic), forward.message, forward.source, now.mono_ms);
             if (delivered.queued > 0) {
