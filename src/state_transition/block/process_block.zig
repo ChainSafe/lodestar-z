@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const buildSlashingsCacheIfNeeded = @import("../cache/slashings_cache.zig").buildFromStateIfNeeded;
 const BeaconState = @import("fork_types").BeaconState;
@@ -25,8 +26,6 @@ const processSyncAggregate = @import("./process_sync_committee.zig").processSync
 const processWithdrawals = @import("./process_withdrawals.zig").processWithdrawals;
 const getExpectedWithdrawals = @import("./process_withdrawals.zig").getExpectedWithdrawals;
 const isExecutionEnabled = @import("../utils/execution.zig").isExecutionEnabled;
-// TODO: proposer reward api
-// const ProposerRewardType = @import("../types/proposer_reward.zig").ProposerRewardType;
 
 pub const ProcessBlockOpts = struct {
     verify_signature: bool = true,
@@ -40,6 +39,7 @@ pub fn processBlock(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    proposer_rewards: *ProposerRewards,
     slashings_cache: *SlashingsCache,
     comptime block_type: BlockType,
     block: *const BeaconBlock(block_type, fork),
@@ -110,9 +110,9 @@ pub fn processBlock(
 
     try processRandao(fork, io, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);
     try processEth1Data(fork, state, body.eth1Data());
-    try processOperations(fork, allocator, io, config, epoch_cache, state, slashings_cache, block_type, body, opts);
+    try processOperations(fork, allocator, io, config, epoch_cache, state, proposer_rewards, slashings_cache, block_type, body, opts);
     if (comptime fork.gte(.altair)) {
-        try processSyncAggregate(fork, allocator, io, config, epoch_cache, state, body.syncAggregate(), opts.verify_signature);
+        try processSyncAggregate(fork, allocator, io, config, epoch_cache, state, proposer_rewards, body.syncAggregate(), opts.verify_signature);
     }
 
     if (comptime fork.gte(.deneb)) {
