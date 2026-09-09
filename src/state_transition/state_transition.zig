@@ -98,6 +98,7 @@ pub fn processSlots(
             timer = time.start(io);
             try epoch_cache.afterProcessEpoch(state, &epoch_transition_cache);
             try observeEpochTransitionStep(.{ .step = .after_process_epoch }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
+            // state.commit
 
             const state_epoch = computeEpochAtSlot(next_slot);
 

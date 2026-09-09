@@ -42,6 +42,7 @@ const ValidatorActivation = struct {
 
 const ValidatorActivationList = std.ArrayList(ValidatorActivation);
 
+/// this is a cache that's never gc'd, it is used to store data that is reused across multiple epochs
 const ReusedEpochTransitionCache = struct {
     allocator: Allocator,
     is_active_prev_epoch: BoolArray,
@@ -191,6 +192,7 @@ pub const EpochTransitionCache = struct {
     is_active_curr_epoch: []const bool,
     is_active_next_epoch: []const bool,
 
+    // this is the same to beforeProcessEpoch in typesript version
     pub fn init(
         allocator: Allocator,
         io: std.Io,
@@ -330,9 +332,12 @@ pub const EpochTransitionCache = struct {
                 reused_cache.next_epoch_shuffling_active_validator_indices.items[next_epoch_shuffling_active_indices_length] = i;
                 next_epoch_shuffling_active_indices_length += 1;
             }
-        }
+        } // end validator loop
 
-        // Consumers borrow this slice and must allocate their own array for the next shuffling.
+        // no need to trigger async build as zig should be fast enough
+
+        // typescript: only the first `activeValidatorCount` elements are copied to `activeIndices`
+        // here in zig we simply return a slice, consumer only borrows this slice and need to allocate a separate array for the next shuffling computation
         const next_shuffling_active_indices = reused_cache.next_epoch_shuffling_active_validator_indices.items[0..next_epoch_shuffling_active_indices_length];
 
         if (total_active_stake_by_increment < 1) {
@@ -358,7 +363,7 @@ pub const EpochTransitionCache = struct {
         if (fork_seq == ForkSeq.phase0) {
             const fork_state = try state.tryCastToFork(.phase0);
             try reused_cache.proposer_indices.resize(reused_cache.allocator, validator_count);
-            // Use validator_count as the unset proposer index.
+            // in typescript we prefill with -1 as unset value, in zig we use  validator_count
             @memset(reused_cache.proposer_indices.items, validator_count);
             try reused_cache.inclusion_delays.resize(reused_cache.allocator, validator_count);
             @memset(reused_cache.inclusion_delays.items, 0);
@@ -484,6 +489,7 @@ pub const EpochTransitionCache = struct {
             curr_target_unsl_stake = 1;
         }
 
+        // zig specific map function similar to "indicesEligibleForActivation.map(({validatorIndex}) => validatorIndex)"
         var indices_eligible_for_activation = try std.ArrayList(ValidatorIndex).initCapacity(allocator, validator_activation_list.items.len);
         errdefer indices_eligible_for_activation.deinit(allocator);
         for (validator_activation_list.items) |activation| {
@@ -530,11 +536,18 @@ pub const EpochTransitionCache = struct {
     }
 
     pub fn deinit(self: *EpochTransitionCache, allocator: Allocator) void {
-        // Scratch arrays belong to ReusedEpochTransitionCache.
+        // no need to deinit proposer_indices and inclusion_delays as they are from reused_cache
+        // no need to deinit below as they are from reused_cache
+        // self.flags.deinit();
+        // self.is_active_prev_epoch.deinit();
+        // self.is_active_curr_epoch.deinit();
+        // self.is_active_next_epoch.deinit();
+        // self.is_compounding_validator_arr.deinit();
         self.indices_to_slash.deinit(allocator);
         self.indices_eligible_for_activation_queue.deinit(allocator);
         self.indices_eligible_for_activation.deinit(allocator);
         self.indices_to_eject.deinit(allocator);
+        // rewards and penalties are from reused_cache
         if (self.balances) |*balances| {
             balances.deinit(allocator);
         }
