@@ -334,17 +334,20 @@ pub const Core = struct {
             .closed => |closed| {
                 _ = self.dial_queue.dialClosed(closed.conn, now.mono_ms);
                 if (self.control.peerFor(closed.conn)) |peer| {
+                    const goodbye = self.service.reqresp.inner.closingGoodbye(engine, closed.conn, now);
+                    if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, now, true);
                     const snapshot = self.catalog.get(peer).?;
+                    const reason = snapshot.disconnect_reason orelse if (goodbye != null) t.DisconnectReason.remote_goodbye else .transport_closed;
                     self.control.close(
                         &self.service,
                         &self.catalog,
                         engine,
                         peer,
                         closed.conn,
-                        snapshot.disconnect_reason orelse .transport_closed,
+                        reason,
                         now,
                     );
-                    self.dial_queue.disconnected(&snapshot.identity, snapshot.connected_at_ms, snapshot.disconnect_reason orelse .transport_closed, now.mono_ms);
+                    self.dial_queue.disconnected(&snapshot.identity, snapshot.connected_at_ms, reason, now.mono_ms);
                 }
             },
             else => {},

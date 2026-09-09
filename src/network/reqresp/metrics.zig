@@ -40,6 +40,7 @@ pub const ProtocolCounters = struct {
     incoming: u64 = 0,
     outgoing_errors: u64 = 0,
     request_write_stops: u64 = 0,
+    response_finish_stops: u64 = 0,
     incoming_errors: u64 = 0,
     rate_limited: u64 = 0,
     outgoing_time: OutgoingTime = .{},

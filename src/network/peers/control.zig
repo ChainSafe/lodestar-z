@@ -411,6 +411,14 @@ pub const Control = struct {
         }
     }
 
+    pub fn receivedGoodbye(self: *Control, catalog: *Catalog, peer: t.PeerRef, conn: t.Handle, code: u64, now: Now, during_close: bool) void {
+        const reason = goodbye.reason(code);
+        self.counters.goodbyes[@intFromEnum(reason)] +|= 1;
+        const snapshot = catalog.get(peer).?;
+        std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} cooldown_ms={d} during_close={any} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, code, @tagName(reason), goodbye.cooldownMs(code), during_close, std.json.fmt(client.agent(&snapshot.identify), .{}) });
+        _ = catalog.remoteGoodbye(peer, conn, now.mono_ms, goodbye.cooldownMs(code));
+    }
+
     pub fn close(
         self: *Control,
         service: *Service,
@@ -569,11 +577,7 @@ pub const Control = struct {
             .goodbye_v1 => blk: {
                 std.debug.assert(event.bytes.len == 8);
                 const code = std.mem.readInt(u64, event.bytes[0..8], .little);
-                const reason = goodbye.reason(code);
-                self.counters.goodbyes[@intFromEnum(reason)] +|= 1;
-                const snapshot = catalog.get(peer).?;
-                std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} cooldown_ms={d} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), event.peer.index, event.peer.generation, code, @tagName(reason), goodbye.cooldownMs(code), std.json.fmt(client.agent(&snapshot.identify), .{}) });
-                _ = catalog.remoteGoodbye(peer, event.peer, now.mono_ms, goodbye.cooldownMs(code));
+                self.receivedGoodbye(catalog, peer, event.peer, code, now, false);
                 _ = self.disconnect(catalog, peer, event.peer, .remote_goodbye, now);
                 self.schedules[peer.index].closing.?.sent = true;
                 std.mem.writeInt(u64, response.bytes[0..8], 1, .little);

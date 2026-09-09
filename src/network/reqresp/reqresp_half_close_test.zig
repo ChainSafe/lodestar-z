@@ -96,6 +96,86 @@ fn expectFailure(pair: *Pair, expected: rr.Failure) !void {
     try std.testing.expectEqualDeep(expected, failure.?);
 }
 
+test "reqresp recovers only complete Goodbye bytes retained by a closed authenticated connection" {
+    for ([_]bool{ false, true }) |truncated| {
+        var pair: Pair = .{};
+        const quotas = @import("admission_test.zig").quotas(100, 1000);
+        try pair.init(.{}, .{ .request_policy = @import("request_policy_test.zig").fixture(), .admission = .{ .identities = 2, .peer = quotas, .global = quotas } });
+        defer pair.deinit();
+        var payload: [8]u8 = undefined;
+        std.mem.writeInt(u64, &payload, 129, .little);
+        var sink: [8]u8 = undefined;
+        const request = try negotiate(&pair, .goodbye_v1, &payload, &sink, .{});
+        _ = try pair.server.accept(&pair.pair.server, request.remote, .{ .protocol = .{ .reqresp = .goodbye_v1 }, .leftover = &.{}, .fin = false }, pair.requestSink(), pair.pair.now);
+        var wire: [128]u8 = undefined;
+        const encoded = try codec.encodeRequest(&payload, &wire);
+        const bytes = encoded[0 .. encoded.len - @intFromBool(truncated)];
+        try std.testing.expectEqual(bytes.len, try pair.pair.client.write(pair.client.outbound[request.handle.index].stream, bytes, true));
+        try pair.pair.pump();
+        try std.testing.expect(pair.pair.client.close(pair.handles.client, 0));
+        try pair.pair.pump();
+        try std.testing.expectEqual(.closed, pair.pair.server.registry.slots[pair.handles.server.index].state);
+        const result = pair.server.closingGoodbye(&pair.pair.server, pair.handles.server, pair.pair.now);
+        try std.testing.expectEqual(if (truncated) @as(?u64, null) else @as(?u64, 129), result);
+        try std.testing.expectEqual(@as(u64, @intFromBool(!truncated)), pair.server.counters.goodbyes_recovered_on_close);
+        try std.testing.expectEqual(@as(u64, @intFromBool(truncated)), pair.server.counters.goodbyes_incomplete_on_close);
+        try std.testing.expect(pair.server.closingGoodbye(&pair.pair.server, pair.handles.server, pair.pair.now) == null);
+        pair.server.connectionClosed(pair.handles.server);
+    }
+}
+
+test "reqresp response FIN stops complete written chunks but do not hide an empty stopped response" {
+    for ([_]bool{ false, true }) |send_chunk| {
+        var pair: Pair = .{};
+        try pair.init(.{}, .{});
+        defer pair.deinit();
+        const payload = [_]u8{7} ** 8;
+        var sink: [8]u8 = undefined;
+        const request = try pair.client.request(&pair.pair.client, &pair.client_neg, pair.handles.client, .ping_v1, &payload, &sink, .{}, pair.pair.now);
+        var incoming: ?rr.RequestHandle = null;
+        var sent = false;
+        for (0..32) |_| {
+            try pair.pumpOnce();
+            for (pair.serverEvents()) |event| switch (event) {
+                .request => |value| {
+                    incoming = value.request;
+                    if (send_chunk) try pair.server.respond(value.request, &payload, null, pair.pair.now);
+                },
+                .chunk_sent => sent = true,
+                .failed => return error.TestUnexpectedResult,
+                else => {},
+            };
+            if (incoming != null and (!send_chunk or sent)) break;
+        }
+        try std.testing.expect(incoming != null);
+        const stream = pair.client.outbound[request.index].stream;
+        pair.pair.client.shutdown(stream, .read, 0);
+        try pair.pair.pump();
+        try std.testing.expect(pair.server.finish(incoming.?, pair.pair.now));
+        var terminal = false;
+        for (0..8) |_| {
+            var events: [8]rr.Event = undefined;
+            const count = pair.server.pump(&pair.pair.server, &pair.server_neg, pair.pair.now, &events);
+            for (events[0..count]) |event| switch (event) {
+                .served => |value| {
+                    try std.testing.expect(send_chunk);
+                    try std.testing.expectEqual(@as(u32, 1), value.chunks);
+                    terminal = true;
+                },
+                .failed => |value| {
+                    try std.testing.expect(!send_chunk);
+                    try std.testing.expectEqual(rr.Failure.stream_closed, value.reason);
+                    terminal = true;
+                },
+                else => {},
+            };
+            if (terminal) break;
+        }
+        try std.testing.expect(terminal);
+        try std.testing.expectEqual(@as(u64, @intFromBool(send_chunk)), pair.server.protocol_counters[@intFromEnum(protocol.Protocol.ping_v1)].response_finish_stops);
+    }
+}
+
 test "reqresp dispatches a complete Goodbye before FIN and keeps other request framing strict" {
     const Case = enum { goodbye, ping, truncated, trailing };
     for (std.enums.values(Case)) |case| {

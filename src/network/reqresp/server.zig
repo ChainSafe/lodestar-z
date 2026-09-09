@@ -341,9 +341,15 @@ pub const Server = struct {
         now: Now,
     ) void {
         assert(slot.state == .finishing);
-        const flushed = slot.io.outbox.pump(engine, slot.stream) catch |err| {
-            owner.failStream(slot, index, err, engine);
-            return;
+        const flushed = slot.io.outbox.pump(engine, slot.stream) catch |err| stopped: {
+            if (err != error.StreamStopped or slot.chunks == 0 or slot.io.outbox.offset != slot.io.outbox.bytes.len) {
+                owner.failStream(slot, index, err, engine);
+                return;
+            }
+            owner.protocol_counters[@intFromEnum(slot.protocol)].response_finish_stops +|= 1;
+            std.log.scoped(.network_reqresp).debug("response_finish_stopped request={d}:{d} connection={d}:{d} stream={d} method={s} chunks={d}", .{ index, slot.generation, slot.conn.index, slot.conn.generation, slot.stream.id, @tagName(slot.protocol), slot.chunks });
+            slot.io.outbox = .{};
+            break :stopped true;
         };
         if (!flushed) return;
         slot.progress_ms = now.mono_ms;

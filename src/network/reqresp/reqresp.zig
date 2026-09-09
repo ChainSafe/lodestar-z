@@ -172,6 +172,8 @@ pub const Counters = struct {
     timeouts: u64 = 0,
     over_limit: u64 = 0,
     over_limit_dropped: u64 = 0,
+    goodbyes_recovered_on_close: u64 = 0,
+    goodbyes_incomplete_on_close: u64 = 0,
 };
 
 pub const metrics = @import("metrics.zig");
@@ -479,6 +481,27 @@ pub const ReqResp = struct {
                 slot.needs_service = true;
             }
         }
+    }
+
+    /// Read retained Goodbye bytes before the close event cancels streams and releases their sinks.
+    pub fn closingGoodbye(self: *ReqResp, engine: *Engine, conn: Handle, now: Now) ?u64 {
+        assert(now.mono_ms >= self.last_now_ms);
+        self.last_now_ms = now.mono_ms;
+        for (self.inbound, 0..) |*slot, index| {
+            if (!slot.active() or slot.terminal != null or slot.protocol != .goodbye_v1 or !std.meta.eql(slot.conn, conn)) continue;
+            if (slot.state != .receiving_request and (slot.pending_event == null or slot.pending_event.? != .request)) continue;
+            if (slot.state == .receiving_request and slot.pending_event == null) Server.readRequest(self, engine, slot, @intCast(index), now);
+            if (slot.pending_event) |event| if (event == .request) {
+                assert(event.request.bytes.len == 8);
+                self.counters.goodbyes_recovered_on_close +|= 1;
+                slot.pending_event = null;
+                slot.state = .serving;
+                return std.mem.readInt(u64, event.request.bytes[0..8], .little);
+            };
+            self.counters.goodbyes_incomplete_on_close +|= 1;
+            std.log.scoped(.network_reqresp_errors).debug("goodbye_incomplete_on_close request={d}:{d} connection={d}:{d} stream={d} buffered_bytes={d} decoded_bytes={d} decoder_phase={s} fin={any} detail={s}", .{ index, slot.generation, conn.index, conn.generation, slot.stream.id, slot.io.buffered_end - slot.io.buffered_start, if (slot.io.decoding) slot.io.decoder.written else 0, if (slot.io.decoding) @tagName(slot.io.decoder.phase) else "cleared", slot.io.fin_seen, slot.io.failure_detail });
+        }
+        return null;
     }
 
     pub fn connectionClosed(self: *ReqResp, conn: Handle) void {

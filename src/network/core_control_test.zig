@@ -5,6 +5,55 @@ const wire = @import("peers/control_wire.zig");
 const rr = @import("reqresp/root.zig");
 const Engine = @import("quic/engine.zig");
 
+test "core records a buffered Goodbye before transport cancellation and preserves selected local reasons" {
+    const multistream = @import("wire/multistream.zig");
+    const codec = @import("reqresp/codec.zig");
+    for ([_]bool{ false, true }) |local_ban| {
+        var setup: Setup = .{};
+        try setup.init(&.{});
+        defer setup.deinit();
+        for (0..50) |_| try setup.step(1);
+        var snapshots: [4]t.Snapshot = undefined;
+        _ = setup.client.snapshots(&snapshots);
+        const conn = snapshots[0].connection.?;
+        _ = setup.server.snapshots(&snapshots);
+        const peer = snapshots[0].peer;
+        const stream = try setup.pair.client.openStream(conn);
+        var wire_bytes: [512]u8 = undefined;
+        const header = try multistream.encodeMessage(multistream.header, &wire_bytes);
+        const selected = try multistream.encodeMessage(rr.Protocol.goodbye_v1.id(), wire_bytes[header.len..]);
+        const size = header.len + selected.len;
+        try std.testing.expectEqual(size, try setup.pair.client.write(stream, wire_bytes[0..size], false));
+        var ready = false;
+        for (0..40) |_| {
+            try setup.step(0);
+            for (setup.server.service.reqresp.inner.inbound) |slot| if (slot.state == .receiving_request and slot.protocol == .goodbye_v1) {
+                ready = true;
+            };
+            if (ready) break;
+        }
+        try std.testing.expect(ready);
+        var reason: [8]u8 = undefined;
+        std.mem.writeInt(u64, &reason, 129, .little);
+        const body = try codec.encodeRequest(&reason, &wire_bytes);
+        try std.testing.expectEqual(body.len, try setup.pair.client.write(stream, body, true));
+        try setup.pair.pump();
+        if (local_ban) try std.testing.expectEqual(t.ReputationDecision.ban, setup.server.reportPeer(peer, .fatal, setup.pair.now).?);
+        try std.testing.expect(setup.pair.client.close(conn, 0));
+        try setup.pair.pump();
+        var events: [32]Engine.Event = undefined;
+        _ = setup.server.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &events), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+        const snapshot = setup.server.catalog.get(peer).?;
+        try std.testing.expect(snapshot.connection == null);
+        var closed: [1]t.Event = undefined;
+        try std.testing.expectEqual(@as(usize, 1), setup.server.catalog.pollEvents(&closed));
+        try std.testing.expectEqual(if (local_ban) t.DisconnectReason.banned else .remote_goodbye, closed[0].closed.reason);
+        try std.testing.expect(snapshot.goodbye_until_ms >= setup.pair.now.mono_ms + 300_000);
+        try std.testing.expectEqual(@as(u64, 1), setup.server.control.counters.goodbyes[@intFromEnum(@import("peers/goodbye.zig").Reason.too_many_peers)]);
+        try std.testing.expectEqual(@as(u64, 1), setup.server.service.reqresp.inner.counters.goodbyes_recovered_on_close);
+    }
+}
+
 test "core local head and metadata updates preserve periodic status scheduling" {
     var setup: Setup = .{};
     try setup.init(&.{});
