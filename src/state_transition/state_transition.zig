@@ -14,7 +14,6 @@ const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
 const BeaconConfig = @import("config").BeaconConfig;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
-const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
 const verifyProposerSignature = @import("./signature_sets/proposer.zig").verifyProposerSignature;
 pub const processBlock = @import("./block/process_block.zig").processBlock;
 const EpochTransitionCacheOpts = @import("cache/epoch_transition_cache.zig").EpochTransitionCacheOpts;
@@ -91,14 +90,12 @@ pub fn processSlots(
                     );
                 },
             }
-            // TODO(bing): registerValidatorStatuses
 
             try state.setSlot(next_slot);
 
             timer = time.start(io);
             try epoch_cache.afterProcessEpoch(state, &epoch_transition_cache);
             try observeEpochTransitionStep(.{ .step = .after_process_epoch }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
-            // state.commit
 
             const state_epoch = computeEpochAtSlot(next_slot);
 
@@ -150,16 +147,6 @@ pub const TransitionOpts = struct {
     verify_signatures: bool = true,
     transfer_cache: bool = true,
     block_external_data: BlockExternalData = .{},
-};
-
-pub const StateTransitionResult = struct {
-    state: AnyBeaconState,
-    epoch_cache: *EpochCache,
-
-    pub fn deinit(self: *StateTransitionResult) void {
-        self.state.deinit();
-        self.epoch_cache.deinit();
-    }
 };
 
 pub fn stateTransition(
