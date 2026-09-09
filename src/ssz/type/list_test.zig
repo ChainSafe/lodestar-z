@@ -1,8 +1,11 @@
 //! Tests for `list.zig`.
 
 const std = @import("std");
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
+const ByteListType = @import("byte_list.zig").ByteListType;
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
+const BoolType = @import("bool.zig").BoolType;
 const UintType = @import("uint.zig").UintType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
@@ -10,6 +13,61 @@ const VariableContainerType = @import("container.zig").VariableContainerType;
 const TypeTestCase = @import("test_utils.zig").TypeTestCase;
 const FixedListType = @import("list.zig").FixedListType;
 const VariableListType = @import("list.zig").VariableListType;
+
+const PoolExhaustionCheckpoint = FixedContainerType(struct {
+    epoch: UintType(64),
+    root: ByteVectorType(32),
+});
+
+test "FixedListType - canonical boolean tree deserialization" {
+    const allocator = std.testing.allocator;
+    const byte_count = @as(usize, pmt.ChunkedLeaf.K) * 32 + 1;
+
+    inline for (.{ false, true }) |chunked_leaf| {
+        const List = FixedListType(BoolType(), byte_count, .{ .chunked_leaf = chunked_leaf });
+        var pool = try Node.Pool.init(.{
+            .page_allocator = allocator,
+            .allocator = allocator,
+            .pool_size = 1024,
+        });
+        defer pool.deinit();
+
+        var data: [byte_count]u8 = undefined;
+        for (&data, 0..) |*byte, i| byte.* = @intCast(i % 2);
+
+        const node = try List.tree.deserializeFromBytes(&pool, &data);
+        defer pool.unref(node);
+        const root = node.getRoot(&pool).*;
+
+        var value = List.default_value;
+        defer List.deinit(allocator, &value);
+        try List.tree.toValue(allocator, node, &pool, &value);
+        try std.testing.expectEqual(byte_count, value.items.len);
+        for (value.items, 0..) |item, i| try std.testing.expectEqual(i % 2 == 1, item);
+
+        var serialized: [byte_count]u8 = undefined;
+        const written = try List.tree.serializeIntoBytes(node, &pool, &serialized);
+        try std.testing.expectEqual(byte_count, written);
+        try std.testing.expectEqualSlices(u8, &data, &serialized);
+
+        const nodes_in_use = pool.getNodesInUse();
+        const next_free_node = pool.next_free_node;
+        for ([_]usize{ 0, 31, 32, byte_count - 2, byte_count - 1 }) |index| {
+            const original = data[index];
+            defer data[index] = original;
+            for ([_]u8{ 2, 0xff }) |invalid| {
+                data[index] = invalid;
+                try std.testing.expectError(
+                    error.invalidBoolean,
+                    List.tree.deserializeFromBytes(&pool, &data),
+                );
+                try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+                try std.testing.expectEqual(next_free_node, pool.next_free_node);
+                try std.testing.expectEqualSlices(u8, &root, node.getRoot(&pool));
+            }
+        }
+    }
+}
 
 const testCases = [_]TypeTestCase{
     .{ .id = "empty", .serializedHex = "0x", .json = "[]", .rootHex = "0x52e2647abc3d0c9d3be0387f3f0d925422c7a4e98cf4489066f0f43281a899f3" },
@@ -1112,4 +1170,262 @@ test "FixedListType opts.chunked_leaf=true: serialize -> deserialize round-trip"
     const round_id = try ListT.tree.deserializeFromBytes(&pool, buf);
     defer pool.unref(round_id);
     try std.testing.expectEqualSlices(u8, tree_id.getRoot(&pool), round_id.getRoot(&pool));
+}
+
+test "FixedListType chunked serialization needs no scratch allocation" {
+    const allocator = std.testing.allocator;
+    const items_per_chunked_leaf = @as(usize, pmt.ChunkedLeaf.K) * 4;
+
+    inline for (.{ items_per_chunked_leaf, 4 * items_per_chunked_leaf }) |limit| {
+        const List = FixedListType(UintType(64), limit, .{ .chunked_leaf = true });
+        const lengths = [_]usize{
+            0,
+            1,
+            3,
+            4,
+            5,
+            items_per_chunked_leaf - 1,
+            items_per_chunked_leaf,
+            items_per_chunked_leaf + 1,
+            2 * items_per_chunked_leaf + 7,
+            limit,
+        };
+        for (lengths) |len| {
+            if (len > limit) continue;
+
+            var failing = std.testing.FailingAllocator.init(allocator, .{});
+            var pool = try Node.Pool.init(.{
+                .page_allocator = failing.allocator(),
+                .allocator = failing.allocator(),
+                .pool_size = 64,
+            });
+            defer pool.deinit();
+
+            var value = List.default_value;
+            defer List.deinit(allocator, &value);
+            try value.resize(allocator, len);
+            for (value.items, 0..) |*item, i| item.* = @as(u64, @intCast(i + 1)) * 0x01020304050607;
+
+            const root = try List.tree.fromValue(&pool, &value);
+            defer pool.unref(root);
+            const zero_root = try List.tree.zeros(&pool, len);
+            defer pool.unref(zero_root);
+
+            const expected = try allocator.alloc(u8, List.serializedSize(&value));
+            defer allocator.free(expected);
+            _ = List.serializeIntoBytes(&value, expected);
+
+            const out = try allocator.alloc(u8, expected.len + 8);
+            defer allocator.free(out);
+
+            failing.fail_index = failing.alloc_index;
+            failing.resize_fail_index = failing.resize_index;
+            @memset(out, 0xaa);
+            try std.testing.expectEqual(
+                expected.len,
+                try List.tree.serializeIntoBytes(root, &pool, out),
+            );
+            try std.testing.expectEqualSlices(u8, expected, out[0..expected.len]);
+            try std.testing.expect(std.mem.allEqual(u8, out[expected.len..], 0xaa));
+
+            @memset(expected, 0);
+            @memset(out, 0xaa);
+            try std.testing.expectEqual(
+                expected.len,
+                try List.tree.serializeIntoBytes(zero_root, &pool, out),
+            );
+            try std.testing.expectEqualSlices(u8, expected, out[0..expected.len]);
+            try std.testing.expect(std.mem.allEqual(u8, out[expected.len..], 0xaa));
+            try std.testing.expect(!failing.has_induced_failure);
+        }
+    }
+}
+
+test "FixedListType chunked serialization preserves mixed zero subtrees without allocating" {
+    const allocator = std.testing.allocator;
+    const bytes_per_chunked_leaf = @as(usize, pmt.ChunkedLeaf.K) * 32;
+    const List = FixedListType(UintType(8), 4 * bytes_per_chunked_leaf, .{ .chunked_leaf = true });
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var pool = try Node.Pool.init(.{
+        .page_allocator = failing.allocator(),
+        .allocator = failing.allocator(),
+        .pool_size = 64,
+    });
+    defer pool.deinit();
+
+    var expected: [2 * bytes_per_chunked_leaf + 7]u8 = undefined;
+    for (&expected, 0..) |*byte, i| byte.* = @truncate(i + 1);
+    @memset(expected[bytes_per_chunked_leaf..][0..bytes_per_chunked_leaf], 0);
+
+    const root = try List.tree.deserializeFromBytes(&pool, &expected);
+    defer pool.unref(root);
+    const mixed_root = try root.setNodeAtDepth(
+        &pool,
+        List.chunk_depth + 1 - pmt.ChunkedLeaf.k_log2,
+        1,
+        @enumFromInt(pmt.ChunkedLeaf.k_log2),
+    );
+    defer pool.unref(mixed_root);
+
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    var out: [expected.len + 8]u8 = @splat(0xaa);
+    try std.testing.expectEqual(
+        expected.len,
+        try List.tree.serializeIntoBytes(mixed_root, &pool, &out),
+    );
+    try std.testing.expectEqualSlices(u8, &expected, out[0..expected.len]);
+    try std.testing.expect(std.mem.allEqual(u8, out[expected.len..], 0xaa));
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "memory_safety: VariableList clone should keep destination deinit-safe when the second child OOMs" {
+    const Bytes = ByteListType(8);
+    const ListType = VariableListType(Bytes, 2);
+
+    var source = ListType.default_value;
+    defer ListType.deinit(std.testing.allocator, &source);
+    try source.append(std.testing.allocator, Bytes.default_value);
+    try source.items[0].append(std.testing.allocator, 1);
+    try source.append(std.testing.allocator, Bytes.default_value);
+    try source.items[1].append(std.testing.allocator, 2);
+
+    var failing = DoubleFreeDetectAllocator.init(std.testing.allocator, 2);
+    defer failing.deinit();
+    const allocator = failing.allocator();
+
+    {
+        var cloned = ListType.default_value;
+        defer ListType.deinit(allocator, &cloned);
+
+        try std.testing.expectError(
+            error.OutOfMemory,
+            ListType.clone(allocator, &source, &cloned),
+        );
+    }
+
+    // The unvisited destination element must not be deinitialized as garbage.
+    try std.testing.expect(!failing.double_free);
+    try std.testing.expectEqual(@as(usize, 0), failing.live.count());
+}
+
+test "memory_safety: VariableList deserializeFromBytes should free offsets on malformed later offset" {
+    const ListType = VariableListType(ByteListType(8), 4);
+    // Offset 8 declares two elements, so decoding allocates the output list.
+    // Offset 4 then moves backward, triggering offsetNotIncreasing after allocation.
+    const serialized = [_]u8{ 8, 0, 0, 0, 4, 0, 0, 0 };
+    var tracking = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = tracking.allocator();
+
+    var out = ListType.default_value;
+    defer out.deinit(allocator);
+
+    try std.testing.expectError(
+        error.offsetNotIncreasing,
+        ListType.deserializeFromBytes(allocator, &serialized, &out),
+    );
+    // The partially initialized output must not leak after malformed input is rejected.
+    try std.testing.expectEqual(tracking.allocated_bytes, tracking.freed_bytes);
+}
+
+test "memory_safety: TreeView composite list fromValue - pool exhaustion leaves no orphan nodes" {
+    const ListType = FixedListType(PoolExhaustionCheckpoint, 16, .{});
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(std.testing.allocator);
+    for (0..6) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
+
+    var saw_exhaustion = false;
+    // Adding one slot per attempt moves the failure through element construction and then the
+    // list parents.
+    for (0..64) |pool_size| {
+        var pool = try Node.Pool.init(.{
+            .page_allocator = std.testing.allocator,
+            .allocator = std.testing.allocator,
+            .pool_size = @intCast(pool_size),
+        });
+        defer pool.deinit();
+
+        const baseline = pool.getNodesInUse();
+        const root = ListType.tree.fromValue(&pool, &list) catch |err| switch (err) {
+            error.PoolExhausted => {
+                saw_exhaustion = true;
+                try std.testing.expectEqual(baseline, pool.getNodesInUse());
+                continue;
+            },
+            else => return err,
+        };
+        pool.unref(root);
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+        try std.testing.expect(saw_exhaustion);
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "memory_safety: TreeView composite list deserializeFromBytes - pool exhaustion leaves no orphan nodes" {
+    const ListType = FixedListType(PoolExhaustionCheckpoint, 16, .{});
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(std.testing.allocator);
+    for (0..6) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
+
+    const bytes = try std.testing.allocator.alloc(u8, ListType.serializedSize(&list));
+    defer std.testing.allocator.free(bytes);
+    _ = ListType.serializeIntoBytes(&list, bytes);
+
+    var saw_exhaustion = false;
+    // Adding one slot per attempt moves the failure through element parsing and then the list
+    // parents.
+    for (0..64) |pool_size| {
+        var pool = try Node.Pool.init(.{
+            .page_allocator = std.testing.allocator,
+            .allocator = std.testing.allocator,
+            .pool_size = @intCast(pool_size),
+        });
+        defer pool.deinit();
+
+        const baseline = pool.getNodesInUse();
+        const root = ListType.tree.deserializeFromBytes(&pool, bytes) catch |err| switch (err) {
+            error.PoolExhausted => {
+                saw_exhaustion = true;
+                try std.testing.expectEqual(baseline, pool.getNodesInUse());
+                continue;
+            },
+            else => return err,
+        };
+        pool.unref(root);
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+        try std.testing.expect(saw_exhaustion);
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "memory_safety: TreeView composite list deserializeFromBytes - malformed input errors without leaking" {
+    const ListType = FixedListType(PoolExhaustionCheckpoint, 16, .{});
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(std.testing.allocator);
+    for (0..6) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
+
+    const bytes = try std.testing.allocator.alloc(u8, ListType.serializedSize(&list));
+    defer std.testing.allocator.free(bytes);
+    _ = ListType.serializeIntoBytes(&list, bytes);
+
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 512 });
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+
+    // Every truncated prefix must either parse cleanly (a shorter valid list) or error, and
+    // never leak pool nodes either way.
+    var len: usize = 0;
+    while (len <= bytes.len) : (len += 1) {
+        const root = ListType.tree.deserializeFromBytes(&pool, bytes[0..len]) catch {
+            try std.testing.expectEqual(baseline, pool.getNodesInUse());
+            continue;
+        };
+        pool.unref(root);
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    }
 }
