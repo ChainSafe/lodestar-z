@@ -49,8 +49,8 @@ pub fn scrapeMetrics() !js.String {
 }
 
 pub fn deinit() void {
-    validator_monitor.deinit();
     if (!initialized) return;
     state_transition.metrics.deinit();
+    validator_monitor.deinit();
     initialized = false;
 }
