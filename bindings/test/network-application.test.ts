@@ -282,6 +282,29 @@ test("connect timeout retains independently wanted direct membership", async () 
   }
 });
 
+test("disconnect cancels pending one-shot connects and releases their dial intent", async () => {
+  const config = applicationConfig();
+  const other = applicationConfig();
+  other.identitySecretKey[31] = 3;
+  const a = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const b = createNativeNetworkApplicationRuntime(other, () => undefined);
+  try {
+    await a.ready;
+    const identity = await b.ready;
+    await a.applyIntent(localIntent(config), 100n);
+    const pending = a.connect(identity.peerId, [identity.localEndpoint], 60000n).catch((error: Error) => error.message);
+    await a.disconnect(identity.peerId);
+    expect(await pending).toContain("NetworkConnectCancelled");
+    await b.applyIntent(localIntent(other), 100n);
+    await a.connect(identity.peerId, [identity.localEndpoint], 5000n);
+    expect((await a.getPeers()).counts.connected).toBe(1);
+    await a.disconnect(identity.peerId);
+    expect((await a.getPeers()).counts.connected).toBe(0);
+  } finally {
+    await Promise.all([a.close(), b.close()]);
+  }
+}, 15000);
+
 test("closed facade releases heavy native and typed storage", async () => {
   const config = applicationConfig();
   const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);

@@ -58,6 +58,12 @@ pub const Confirmed = struct {
     record: enr.Record,
 };
 
+/// The caller keeps context at a stable address until the lookup is cancelled or finished.
+pub const Filter = struct {
+    context: *const anyopaque,
+    matches: *const fn (*const anyopaque, *const enr.Record) bool,
+};
+
 pub const Candidates = [candidate_capacity]Candidate;
 
 const Lookup = @This();
@@ -70,6 +76,8 @@ waiting_count: u8,
 queries_started: u16,
 capacity_drops: u32,
 finish_reason: ?FinishReason,
+filter: ?Filter = null,
+query_limit: u16 = candidate_capacity,
 
 /// Borrows `candidates` for the life of the lookup and allocates nothing.
 pub fn init(
@@ -129,6 +137,11 @@ pub fn startNext(
     entropy: *const Engine.StartEntropy,
 ) Error!?Started {
     if (self.isFinished() or self.waiting_count == parallelism) return null;
+    std.debug.assert(self.query_limit > 0 and self.query_limit <= candidate_capacity);
+    if (self.queries_started >= self.query_limit) {
+        if (self.waiting_count == 0) self.finish_reason = .budget_exhausted;
+        return null;
+    }
     const index = self.nextCandidateIndex(core) orelse {
         if (self.waiting_count == 0 and self.nextCandidateIndex(null) == null) {
             self.finish_reason = if (self.capacity_drops > 0)
@@ -224,7 +237,7 @@ pub fn results(self: *const Lookup, out: []enr.Record) []enr.Record {
     const bounded = out[0..@min(out.len, result_max)];
     var length: usize = 0;
     for (self.activeCandidates()) |*candidate| {
-        if (candidate.state != .succeeded) continue;
+        if (candidate.state != .succeeded or !self.matches(&candidate.record)) continue;
         length = types.insertClosest(
             enr.Record,
             recordNodeId,
@@ -242,7 +255,7 @@ pub fn confirmedResults(self: *const Lookup, out: []Confirmed) []Confirmed {
     const bounded = out[0..@min(out.len, result_max)];
     var length: usize = 0;
     for (self.activeCandidates()) |*candidate| {
-        if (candidate.state != .succeeded) continue;
+        if (candidate.state != .succeeded or !self.matches(&candidate.record)) continue;
         length = types.insertClosest(
             Confirmed,
             confirmedNodeId,
@@ -316,6 +329,13 @@ fn nextCandidateIndex(self: *const Lookup, core: ?*const Engine) ?usize {
             if (engine.isPeerBusy(&candidate.peer.node_id)) continue;
         }
         if (selected) |previous| {
+            const preferred = self.matches(&candidate.record);
+            const previous_preferred = self.matches(&self.candidates[previous].record);
+            if (!preferred and previous_preferred) continue;
+            if (preferred and !previous_preferred) {
+                selected = index;
+                continue;
+            }
             if (!types.xorCloser(
                 &candidate.peer.node_id,
                 &self.candidates[previous].peer.node_id,
@@ -327,13 +347,12 @@ fn nextCandidateIndex(self: *const Lookup, core: ?*const Engine) ?usize {
     return selected;
 }
 
-// The sixteenth-closest success bounds the result set. A candidate farther away cannot improve
-// it.
+// Only matching successes count toward convergence for a filtered lookup.
 fn successBoundary(self: *const Lookup) ?types.NodeId {
     var closest: [result_max]*const Candidate = undefined;
     var length: usize = 0;
     for (self.activeCandidates()) |*candidate| {
-        if (candidate.state != .succeeded) continue;
+        if (candidate.state != .succeeded or !self.matches(&candidate.record)) continue;
         length = types.insertClosest(
             *const Candidate,
             candidateNodeId,
@@ -345,6 +364,11 @@ fn successBoundary(self: *const Lookup) ?types.NodeId {
     }
     if (length < result_max) return null;
     return closest[result_max - 1].peer.node_id;
+}
+
+fn matches(self: *const Lookup, record: *const enr.Record) bool {
+    const filter = self.filter orelse return true;
+    return filter.matches(filter.context, record);
 }
 
 fn findCandidate(

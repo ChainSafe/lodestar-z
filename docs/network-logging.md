@@ -47,12 +47,13 @@ Do not call policy functions that mutate state merely to compute a log field.
 | `network_runtime` | Initialization, preparation, activation, shutdown, terminal errors, 30-second health summaries |
 | `network_core` | Intent changes, dial starts and refusals |
 | `network_quic` | Authenticated connections, close reasons and codes, oversized datagram refusals |
-| `network_peers` | Admission, scheduled disconnection, disconnection reason and connection lifetime |
+| `network_peers` | Admission, Identify outcomes, Goodbye wire reason, disconnect client and lifetime, one-shot dial completion/expiry, retry backoff |
 | `network_reqresp` | Request start/completion, method, direction, stream, chunk count and duration |
 | `network_reqresp_errors` | Request failure phase/reason, response code, admission and rate-limit refusals |
 | `network_gossip` | Non-accept validation verdicts, expiry, stale verdicts, malformed RPCs, pressure and stream resets |
+| `network_gossip_errors` | Send queue refusal resource, occupancy, oldest age and transport write failures |
 | `network_mesh` | Graft/prune transitions, topic, connection and backoff |
-| `network_discovery` | Lookup starts/completion, candidate counts and discovery failures |
+| `network_discovery` | Lookup starts/completion, authenticated and published candidates, query counts, elapsed time and discovery failures |
 | `network_bridge` | Command failures, host/native request mapping, publication pressure |
 
 Info covers lifecycle and periodic health; errors cover terminal owner failures.
@@ -89,6 +90,11 @@ with host identity and process lifetime when correlating across restarts. Follow
 `request_completed` or `request_failed`. Gossip verdicts carry message IDs and
 peer identities; mesh transitions carry topic and connection handles.
 
+The Lodestar adapter's peer REST endpoints expose the bounded native peer snapshot,
+including client agent, QUIC address, Status and metadata. Remote uint64 fields
+remain decimal strings in diagnostic JSON. Wall-clock peer timestamp fields are
+zero when unavailable; use the native log timestamps for connection timing.
+
 `request_write_stopped` records QUIC request half-closure while response processing
 continues. Its `detail` distinguishes STOP_SENDING from a stream already retired
 after buffered response EOF. The per-method counter
@@ -98,6 +104,37 @@ for response decoding, reset, or timeout failures and includes the native I/O er
 in `detail`. Scheduled disconnects include peer identity and the reported agent.
 `health_timeout` means an RPC deadline expired; `health_error` covers other failed
 or empty health responses. Neither label implies a consensus validation failure.
+
+`peer_goodbye_received` records the remote uint64 code, its bounded reason label,
+the reported agent and the resulting retry cooldown. `peer_disconnected` identifies
+the client even for a transport close without Goodbye. Compare
+`lodestar_native_peer_closes_by_client_total{client,reason}` with the connected-client
+gauges, and use `lodestar_native_peer_goodbyes_total{reason}` for received reasons.
+An absent Goodbye is not evidence of a particular remote policy decision.
+
+`dial_backoff` includes consecutive failures, connection lifetime and retry delay.
+Successful one-shot `connect()` calls retire their dial intent. Expiry and explicit
+disconnect also retire it; direct membership remains independently persistent.
+The `lodestar_native_dial_` counters distinguish these outcomes. Periodic Status
+requests follow the peer timer; local head and metadata updates do not restart it.
+Unreachable dial destinations rotate to the next advertised address and use
+failure backoff. Local resource refusals remain deferred without penalizing the
+peer. `dial_failed` and `dial_deferred` identify the endpoint and native error.
+
+Foreground discovery prioritizes current-network QUIC records and counts only
+matching successes toward convergence. Each walk permits at most 128 queries
+with three in flight. `lodestar_native_discovery_` counters show query progress,
+authenticated candidates and publications. Candidate rejection labels distinguish
+missing `eth2`, incompatible fork, malformed ENR, absent QUIC, endpoint scope,
+unwanted subnet/custody coverage and output capacity. A signed advertisement alone
+does not prove its QUIC endpoint is reachable.
+
+`gossip_send_pressure` distinguishes descriptor, payload-byte and control-queue
+limits. Each peer has 128 data descriptors to accommodate a 64-verdict host burst;
+configured byte and age limits still apply. Its counters are
+`lodestar_native_gossip_queue_drops_total{reason}` and survive connection-slot reuse.
+These count queue admission refusals, not packets lost on the wire. Sampled logs
+include queue occupancy and oldest age at logging time, after any intervening drain.
 
 For the Cayman Hoodi deployment, existing Loki labels can select these records:
 

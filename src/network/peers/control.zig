@@ -6,6 +6,8 @@ const Service = @import("../service.zig").Service;
 const Engine = @import("../quic/engine.zig").Engine;
 const rr = @import("../reqresp/root.zig");
 const Now = @import("../types.zig").Now;
+const client = @import("client.zig");
+const goodbye = @import("goodbye.zig");
 pub const Options = struct {
     operations_max: u16 = 16,
     inbound_status_grace_ms: u64 = 15_000,
@@ -64,6 +66,8 @@ pub const Control = struct {
         deferred: u64 = 0,
         gossip_refused: u64 = 0,
         closed: [@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
+        closed_by_client: [client.count][@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(@splat(0)),
+        goodbyes: [goodbye.count]u64 = @splat(0),
     };
 
     pub const Resources = struct {
@@ -218,7 +222,7 @@ pub const Control = struct {
         if (!catalog.markUnavailable(peer, conn, reason)) return false;
         if (row.closing == null) {
             const snapshot = catalog.get(peer).?;
-            const agent = if (snapshot.identify) |*identify| if (identify.agent) |*value| value.slice() else "unknown" else "unknown";
+            const agent = client.agent(&snapshot.identify);
             std.log.scoped(.network_peers).debug("peer_disconnect_scheduled peer={f} connection={d}:{d} reason={s} grace_ms=2000 agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, @tagName(reason), std.json.fmt(agent, .{}) });
             row.closing = .{ .reason = reason, .deadline_ms = now.mono_ms +| 2_000 };
         }
@@ -392,8 +396,17 @@ pub const Control = struct {
             if (row.identify_state != .started) continue;
             row.identify_state = .done;
             switch (completion.outcome) {
-                .success => |*metadata| _ = catalog.updateIdentify(completion.peer, completion.conn, metadata),
-                .failed => |failure| self.counters.identify_failures[@intFromEnum(failure)] +|= 1,
+                .success => |*metadata| {
+                    if (catalog.updateIdentify(completion.peer, completion.conn, metadata)) {
+                        const snapshot = catalog.get(completion.peer).?;
+                        std.log.scoped(.network_peers).debug("identify_completed peer={f} connection={d}:{d} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), completion.conn.index, completion.conn.generation, std.json.fmt(client.agent(&snapshot.identify), .{}) });
+                    }
+                },
+                .failed => |failure| {
+                    self.counters.identify_failures[@intFromEnum(failure)] +|= 1;
+                    const snapshot = catalog.get(completion.peer).?;
+                    std.log.scoped(.network_peers).debug("identify_failed peer={f} connection={d}:{d} reason={s}", .{ @import("../logging.zig").peer(&snapshot.identity), completion.conn.index, completion.conn.generation, @tagName(failure) });
+                },
             }
         }
     }
@@ -409,6 +422,7 @@ pub const Control = struct {
         now: Now,
     ) void {
         if (self.schedule(peer, conn) == null) return;
+        const kind = client.fromIdentify(&catalog.get(peer).?.identify);
         self.cancelConnection(service, engine, peer, conn);
         service.gossipsub.transportEvents(
             engine,
@@ -422,6 +436,7 @@ pub const Control = struct {
         );
         _ = catalog.disconnect(peer, conn, reason, now.mono_ms);
         self.counters.closed[@intFromEnum(reason)] +|= 1;
+        self.counters.closed_by_client[@intFromEnum(kind)][@intFromEnum(reason)] +|= 1;
         _ = engine.close(conn, 0);
     }
     fn acceptStatus(
@@ -552,7 +567,13 @@ pub const Control = struct {
                 return;
             },
             .goodbye_v1 => blk: {
-                _ = catalog.remoteGoodbye(peer, event.peer, now.mono_ms, 60_000);
+                std.debug.assert(event.bytes.len == 8);
+                const code = std.mem.readInt(u64, event.bytes[0..8], .little);
+                const reason = goodbye.reason(code);
+                self.counters.goodbyes[@intFromEnum(reason)] +|= 1;
+                const snapshot = catalog.get(peer).?;
+                std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} cooldown_ms={d} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), event.peer.index, event.peer.generation, code, @tagName(reason), goodbye.cooldownMs(code), std.json.fmt(client.agent(&snapshot.identify), .{}) });
+                _ = catalog.remoteGoodbye(peer, event.peer, now.mono_ms, goodbye.cooldownMs(code));
                 _ = self.disconnect(catalog, peer, event.peer, .remote_goodbye, now);
                 self.schedules[peer.index].closing.?.sent = true;
                 std.mem.writeInt(u64, response.bytes[0..8], 1, .little);

@@ -10,10 +10,14 @@ const scalar = prom.scalar;
 const family = prom.family;
 const sample = prom.sample;
 const counterFields = prom.counterFields;
+const peer_client = @import("peers/client.zig");
+const goodbye = @import("peers/goodbye.zig");
+const discovery_metrics = @import("peers/discovery.zig");
+const peer_io = @import("gossipsub/peer_io.zig");
 
 pub const interval_ms = 1_000;
 pub const text_capacity = 256 * 1024;
-const Client = enum { Lighthouse, Nimbus, Teku, Prysm, Lodestar, Grandine, Unknown };
+const Client = peer_client.Client;
 const client_count = @typeInfo(Client).@"enum".fields.len;
 const Topic = struct {
     digest: [4]u8,
@@ -24,12 +28,7 @@ const Topic = struct {
 };
 
 fn clientKind(agent: []const u8) Client {
-    const prefix = agent[0 .. std.mem.indexOfScalar(u8, agent, '/') orelse agent.len];
-    inline for (@typeInfo(Client).@"enum".fields) |field| {
-        if (std.ascii.eqlIgnoreCase(prefix, field.name)) return @enumFromInt(field.value);
-    }
-    if (std.ascii.eqlIgnoreCase(prefix, "js-libp2p")) return .Lodestar;
-    return .Unknown;
+    return peer_client.kind(agent);
 }
 
 /// Only the network owner collects live state. Readers copy this pointer-free snapshot
@@ -47,6 +46,12 @@ pub const Snapshot = struct {
     gossip_topics: topic_metrics.Topics = .{},
     gossip_resources: ?gossip.ResourceSnapshot = null,
     closed: [@typeInfo(peer_types.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
+    closed_by_client: [client_count][@typeInfo(peer_types.DisconnectReason).@"enum".fields.len]u64 = @splat(@splat(0)),
+    goodbyes: [goodbye.count]u64 = @splat(0),
+    dial: @import("peers/dial_queue.zig").DialQueue.Counters = .{},
+    discovery_counts: discovery_metrics.Counters = .{},
+    discovery_rejections: [discovery_metrics.rejection_count]u64 = @splat(0),
+    gossip_queue_drops: [peer_io.drop_reason_count]u64 = @splat(0),
     peers: usize = 0,
     relevant: usize = 0,
     target: usize = 0,
@@ -77,6 +82,12 @@ pub const Snapshot = struct {
         self.gossip_topics = g.topic_metrics;
         self.gossip_resources = g.resourceSnapshot();
         self.closed = core.control.counters.closed;
+        self.closed_by_client = core.control.counters.closed_by_client;
+        self.goodbyes = core.control.counters.goodbyes;
+        self.dial = core.dial_queue.counters;
+        for (g.io.peers) |*io| {
+            for (&self.gossip_queue_drops, io.drops) |*total, value| total.* +|= value;
+        }
         self.target = core.catalog.options.target_peers;
         for (core.catalog.rows) |*row| {
             if (row.connection == null) continue;
@@ -129,6 +140,8 @@ pub const Snapshot = struct {
             self.mesh_clients[@intFromEnum(client)] += 1;
         }
         if (owner.discovery) |discovery| {
+            self.discovery_counts = discovery.coordinator.counters;
+            self.discovery_rejections = discovery.coordinator.rejections;
             self.discovery_enabled = true;
             self.discovery_sessions = discovery.engine.channel.sessions.sessionCount();
             self.discovery_peers = discovery.engine.peerCount();
@@ -186,6 +199,13 @@ pub const Snapshot = struct {
         }) |metric| try scalar(w, "lodestar_native_quic_udp_" ++ metric[0] ++ "_total", .counter, metric[1], @field(self.udp, metric[0]));
         try counterFields(w, "lodestar_native_reqresp_", &self.requests);
         try counterFields(w, "lodestar_native_gossipsub_", &self.gossip_counts);
+        try counterFields(w, "lodestar_native_dial_", &self.dial);
+        try counterFields(w, "lodestar_native_discovery_", &self.discovery_counts);
+        try family(w, "lodestar_native_discovery_candidate_rejections_total", .counter, "Authenticated discovery candidates rejected by reason");
+        inline for (@typeInfo(discovery_metrics.Rejection).@"enum".fields) |field| try sample(w, "lodestar_native_discovery_candidate_rejections_total", "reason", field.name, self.discovery_rejections[field.value]);
+        try family(w, "lodestar_native_gossip_queue_drops_total", .counter, "Gossip queue admissions refused by resource limit, including mesh control");
+        inline for (@typeInfo(peer_io.DropReason).@"enum".fields) |field| try sample(w, "lodestar_native_gossip_queue_drops_total", "reason", field.name, self.gossip_queue_drops[field.value]);
+        try scalar(w, "lodestar_native_gossip_data_descriptors_per_peer", .gauge, "Bounded outgoing data descriptors per gossip peer", peer_io.data_capacity);
         if (self.gossip_resources) |*resources| {
             inline for (@typeInfo(gossip.ResourceSnapshot).@"struct".fields) |field| {
                 if (comptime @typeInfo(field.type) == .optional) {
@@ -199,6 +219,14 @@ pub const Snapshot = struct {
         }
         try family(w, "lodestar_native_peer_closes_total", .counter, "Peer closes initiated by native peer control");
         inline for (@typeInfo(peer_types.DisconnectReason).@"enum".fields) |field| try sample(w, "lodestar_native_peer_closes_total", "reason", field.name, self.closed[field.value]);
+        try family(w, "lodestar_native_peer_closes_by_client_total", .counter, "Peer closes by identified client and local reason");
+        inline for (@typeInfo(Client).@"enum".fields) |client| {
+            inline for (@typeInfo(peer_types.DisconnectReason).@"enum".fields) |reason| {
+                try w.print("lodestar_native_peer_closes_by_client_total{{client=\"" ++ client.name ++ "\",reason=\"" ++ reason.name ++ "\"}} {d}\n", .{self.closed_by_client[client.value][reason.value]});
+            }
+        }
+        try family(w, "lodestar_native_peer_goodbyes_total", .counter, "Received Ethereum Goodbye reasons; unknown wire codes share one label");
+        inline for (@typeInfo(goodbye.Reason).@"enum".fields) |reason| try sample(w, "lodestar_native_peer_goodbyes_total", "reason", reason.name, self.goodbyes[reason.value]);
     }
 
     fn writeTopics(self: *const Snapshot, w: *Writer) Writer.Error!void {
@@ -304,8 +332,7 @@ fn firstMethod(index: usize) bool {
 }
 
 fn rowClient(identify: *const ?@import("identify/root.zig").Metadata) Client {
-    if (identify.*) |*metadata| if (metadata.agent) |*agent| return clientKind(agent.slice());
-    return .Unknown;
+    return peer_client.fromIdentify(identify);
 }
 
 test "metrics format exact counters, merge protocol versions and bound maximum output" {
@@ -317,6 +344,10 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing_time.observe(100);
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing_time.observe(300);
     snapshot.requests.withheld_ms_total = 1500;
+    snapshot.closed_by_client[@intFromEnum(Client.Lighthouse)][@intFromEnum(peer_types.DisconnectReason.remote_goodbye)] = 13;
+    snapshot.goodbyes[@intFromEnum(goodbye.Reason.too_many_peers)] = 11;
+    snapshot.gossip_queue_drops[@intFromEnum(peer_io.DropReason.data_bytes)] = 17;
+    snapshot.discovery_rejections[@intFromEnum(discovery_metrics.Rejection.incompatible_fork)] = 19;
     snapshot.topic_count = snapshot.topics.len;
     for (&snapshot.topics, 0..) |*entry, index| entry.* = .{ .digest = .{ 1, 2, @intCast(index / 256), @truncate(index) }, .kind = .data_column_sidecar, .subnet = 127, .mesh = 4096, .subscribers = 4096 };
     const buffer = try std.testing.allocator.alloc(u8, text_capacity);
@@ -337,6 +368,10 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     try std.testing.expect(std.mem.indexOf(u8, output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method=\"status\"} 2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_withheld_seconds_total 1.5\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "_total_total") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_closes_by_client_total{client=\"Lighthouse\",reason=\"remote_goodbye\"} 13\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_goodbyes_total{reason=\"too_many_peers\"} 11\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_gossip_queue_drops_total{reason=\"data_bytes\"} 17\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_discovery_candidate_rejections_total{reason=\"incompatible_fork\"} 19\n") != null);
     snapshot.stop();
     try std.testing.expectEqual(@as(usize, 0), snapshot.topic_count);
     try std.testing.expectEqual(std.math.maxInt(u64), snapshot.runtime.dial_started);

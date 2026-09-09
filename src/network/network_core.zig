@@ -77,6 +77,7 @@ pub const Result = struct {
     failure: ?OperationalError = null,
     dial_started: u8 = 0,
     dial_deferred: u8 = 0,
+    dial_failed: u8 = 0,
 };
 pub const FutureForkHint = struct {
     record_sequence: u64,
@@ -90,6 +91,7 @@ pub const Counters = struct {
     future_fork_mismatches: u64 = 0,
     dial_started: u64 = 0,
     dial_deferred: u64 = 0,
+    dial_failed: u64 = 0,
     transport_failures: u64 = 0,
     discovery_failures: u64 = 0,
     readiness_calls: u64 = 0,
@@ -301,6 +303,13 @@ pub const NetworkCore = struct {
     }
     pub fn connect(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now) !void {
         try self.core.connect(identity, addresses, now);
+    }
+    pub fn connectUntil(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now, deadline_ms: u64) !void {
+        try self.core.connectUntil(identity, addresses, now, deadline_ms);
+    }
+    pub fn cancelConnect(self: *NetworkCore, identity: *const t.PeerId, now: Now) void {
+        self.core.dial_queue.cancelConnect(&self.transport.engine, identity, now.mono_ms);
+        self.core.policy_dirty = true;
     }
     pub fn addDirectPeer(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now) !void {
         try self.core.addDirectPeer(identity, addresses, now);
@@ -600,9 +609,15 @@ pub const NetworkCore = struct {
             const count = self.core.dialIntents(&self.transport.engine, tick, intents[0..@min(room, intents.len)]);
             for (intents[0..count]) |intent| {
                 const handle = self.transport.dialPeer(io, intent.address, intent.peer) catch |err| {
-                    std.log.scoped(.network_core).debug("dial_deferred peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
-                    std.debug.assert(self.core.dialDeferred(intent.token, tick));
-                    result.dial_deferred += 1;
+                    if (err == error.DestinationUnreachable) {
+                        std.log.scoped(.network_core).debug("dial_failed peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
+                        std.debug.assert(self.core.dialFailed(intent.token, tick));
+                        result.dial_failed += 1;
+                    } else {
+                        std.log.scoped(.network_core).debug("dial_deferred peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
+                        std.debug.assert(self.core.dialDeferred(intent.token, tick));
+                        result.dial_deferred += 1;
+                    }
                     result.failure = result.failure orelse err;
                     continue;
                 };
@@ -612,6 +627,7 @@ pub const NetworkCore = struct {
             }
             self.counters.dial_started +|= result.dial_started;
             self.counters.dial_deferred +|= result.dial_deferred;
+            self.counters.dial_failed +|= result.dial_failed;
         }
         return result;
     }

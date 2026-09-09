@@ -395,7 +395,9 @@ export interface NativeNetworkApplicationRuntime {
   applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
   getIdentity(): Promise<NativeIdentitySnapshot>;
   getPeers(): Promise<NativePeerSnapshot>;
+  /** One-shot connection attempt, retired on success or timeout. Use addDirectPeer for persistent membership. */
   connect(peerId: Uint8Array, addresses: readonly IpEndpoint[], timeoutMs: bigint): Promise<void>;
+  /** Closes the connection and rejects pending connects with NetworkConnectCancelled. Direct membership remains. */
   disconnect(peerId: Uint8Array): Promise<void>;
   reStatusPeers(peerIds: readonly Uint8Array[]): Promise<void>;
   addDirectPeer(peerId: Uint8Array, addresses: readonly IpEndpoint[]): Promise<void>;

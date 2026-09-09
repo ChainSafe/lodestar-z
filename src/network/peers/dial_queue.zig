@@ -13,6 +13,8 @@ pub const Options = struct {
 };
 pub const history_retention_ms: u64 = 600_000;
 pub const hint_freshness_ms: u64 = 300_000;
+pub const connect_timeout_ms: u64 = 30_000;
+const stable_connection_ms: u64 = 300_000;
 pub const Hints = struct {
     node_id: [32]u8,
     sequence: u64,
@@ -52,6 +54,7 @@ const Row = struct {
     eligible_at_ms: u64 = 0,
     lease_expires_at_ms: u64 = 0,
     failures: u8 = 0,
+    manual_until_ms: u64 = 0,
 };
 pub const DialQueue = struct {
     rows: []Row,
@@ -61,6 +64,14 @@ pub const DialQueue = struct {
     cursor: usize = 0,
     custody_cursor: usize = 0,
     random: std.Random.DefaultPrng,
+    counters: Counters = .{},
+
+    pub const Counters = struct {
+        manual_completed: u64 = 0,
+        manual_expired: u64 = 0,
+        manual_cancelled: u64 = 0,
+        connection_backoffs: u64 = 0,
+    };
 
     pub const Resources = struct {
         capacity: usize = 0,
@@ -119,6 +130,11 @@ pub const DialQueue = struct {
         direct: bool,
         now_ms: u64,
     ) !void {
+        return self.enqueueUntil(peer, addresses, direct, now_ms, now_ms +| connect_timeout_ms);
+    }
+
+    pub fn enqueueUntil(self: *DialQueue, peer: *const t.PeerId, addresses: []const t.Address, direct: bool, now_ms: u64, deadline_ms: u64) !void {
+        if (deadline_ms <= now_ms or deadline_ms - now_ms > 86_400_000) return error.InvalidDeadline;
         if (addresses.len == 0 or addresses.len > 2) return error.InvalidAddress;
         for (addresses) |address| if (address.port() == 0) return error.InvalidAddress;
         var free: ?*Row = null;
@@ -139,6 +155,7 @@ pub const DialQueue = struct {
                 if (row.automatic) row.address_index = 0;
                 row.automatic = false;
                 row.direct = row.direct or direct;
+                if (!direct) row.manual_until_ms = @max(row.manual_until_ms, deadline_ms);
                 self.selection_dirty = true;
                 return;
             }
@@ -153,6 +170,7 @@ pub const DialQueue = struct {
             .peer = peer.*,
             .direct = direct,
             .eligible_at_ms = now_ms,
+            .manual_until_ms = if (direct) 0 else deadline_ms,
         };
         for (addresses) |address| {
             if (row.address_count != 0 and row.addresses[0].eql(address)) continue;
@@ -278,7 +296,7 @@ pub const DialQueue = struct {
             if (row.hints != null and now_ms < deadline) self.selection_deadline = @min(self.selection_deadline orelse deadline, deadline);
             row.priority = policy.utility(&coverage(row, context, now_ms), wanted);
             const compatible = if (row.hints) |hints| hints.validFor(context) else false;
-            row.selected = !row.automatic or (compatible and (general or row.priority > 0));
+            row.selected = compatible and (general or row.priority > 0);
         }
         self.selection_dirty = false;
     }
@@ -297,7 +315,7 @@ pub const DialQueue = struct {
     }
     pub fn hostDemand(self: *const DialQueue) u16 {
         var count: u16 = 0;
-        for (self.rows) |row| if (row.occupied and !row.automatic and !row.connected) {
+        for (self.rows) |row| if (row.occupied and (row.direct or row.manual_until_ms != 0) and !row.connected) {
             count += 1;
         };
         return count;
@@ -352,7 +370,6 @@ pub const DialQueue = struct {
             row.attempt = false;
             row.conn = null;
             row.eligible_at_ms = @max(row.eligible_at_ms, now_ms +| 1_000);
-            if (connected) row.failures = 0;
         };
     }
     pub fn accepted(
@@ -363,6 +380,11 @@ pub const DialQueue = struct {
     ) void {
         for (self.rows) |*row| {
             if (!row.occupied or !row.peer.eql(peer)) continue;
+            if (row.manual_until_ms != 0) {
+                row.manual_until_ms = 0;
+                self.counters.manual_completed +|= 1;
+                std.log.scoped(.network_peers).debug("dial_intent_completed peer={f} persistent={any}", .{ @import("../logging.zig").peer(peer), row.direct or row.automatic });
+            }
             if (row.conn) |attempt| {
                 if (!std.meta.eql(attempt, conn)) {
                     row.connected = true;
@@ -371,6 +393,41 @@ pub const DialQueue = struct {
             }
             row.conn = null;
             self.connection(peer, true, now_ms);
+            if (!row.automatic and !row.direct) row.occupied = false;
+            return;
+        }
+    }
+
+    pub fn disconnected(self: *DialQueue, peer: *const t.PeerId, connected_at_ms: u64, reason: t.DisconnectReason, now_ms: u64) void {
+        for (self.rows) |*row| {
+            if (!row.occupied or !row.connected or !row.peer.eql(peer)) continue;
+            self.connection(peer, false, now_ms);
+            const lifetime = now_ms -| connected_at_ms;
+            const unhealthy = reason == .health_timeout or reason == .health_error;
+            if (lifetime >= stable_connection_ms and !unhealthy) row.failures = 0;
+            row.failures = @min(row.failures +| 1, 7);
+            const delay = @min(@as(u64, 5_000) << @intCast(row.failures - 1), 300_000);
+            row.eligible_at_ms = @max(row.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
+            row.history_until_ms = @max(row.history_until_ms, now_ms +| history_retention_ms);
+            self.counters.connection_backoffs +|= 1;
+            std.log.scoped(.network_peers).debug("dial_backoff peer={f} reason={s} failures={d} connected_ms={d} retry_ms={d}", .{ @import("../logging.zig").peer(peer), @tagName(reason), row.failures, lifetime, row.eligible_at_ms -| now_ms });
+            return;
+        }
+    }
+
+    pub fn cancelConnect(self: *DialQueue, engine: *@import("../quic/engine.zig").Engine, peer: *const t.PeerId, now_ms: u64) void {
+        for (self.rows) |*row| {
+            if (!row.occupied or !row.peer.eql(peer)) continue;
+            if (row.manual_until_ms != 0) self.counters.manual_cancelled +|= 1;
+            row.manual_until_ms = 0;
+            if (row.attempt) {
+                if (row.conn) |conn| closeAttempt(engine, conn);
+                row.conn = null;
+                row.attempt = false;
+            }
+            row.eligible_at_ms = @max(row.eligible_at_ms, now_ms +| 60_000);
+            if (!row.automatic and !row.direct) row.occupied = false;
+            self.selection_dirty = true;
             return;
         }
     }
@@ -450,6 +507,26 @@ pub const DialQueue = struct {
         engine: ?*@import("../quic/engine.zig").Engine,
         now_ms: u64,
     ) void {
+        for (self.rows) |*row| {
+            if (!row.occupied) continue;
+            if (row.manual_until_ms == 0) {
+                if (!row.automatic and !row.direct and !row.attempt) row.occupied = false;
+                continue;
+            }
+            if (now_ms < row.manual_until_ms) continue;
+            if (!row.automatic and !row.direct and row.conn != null and engine == null) continue;
+            row.manual_until_ms = 0;
+            self.counters.manual_expired +|= 1;
+            std.log.scoped(.network_peers).debug("dial_intent_expired peer={f} persistent={any}", .{ @import("../logging.zig").peer(&row.peer), row.direct or row.automatic });
+            if (!row.automatic and !row.direct) {
+                if (row.conn) |conn| {
+                    closeAttempt(engine.?, conn);
+                }
+                row.attempt = false;
+                row.conn = null;
+                row.occupied = false;
+            }
+        }
         for (self.rows) |*row| if (row.occupied and row.attempt and
             now_ms >= row.lease_expires_at_ms)
         {
@@ -474,7 +551,7 @@ pub const DialQueue = struct {
             for (0..self.rows.len) |offset| {
                 const index = (self.cursor + offset) % self.rows.len;
                 const row = &self.rows[index];
-                if (!row.occupied or !row.selected or row.connected or row.attempt or now_ms < row.eligible_at_ms or row.generation == std.math.maxInt(u64)) continue;
+                if (!row.occupied or !hasDialIntent(row, now_ms) or row.connected or row.attempt or now_ms < row.eligible_at_ms or row.generation == std.math.maxInt(u64)) continue;
                 if (best == null or row.direct and !self.rows[best.?].direct or (row.direct == self.rows[best.?].direct and row.priority > self.rows[best.?].priority)) best = index;
             }
             const index = best orelse break;
@@ -482,7 +559,7 @@ pub const DialQueue = struct {
             const row = &self.rows[index];
             row.generation += 1;
             row.attempt = true;
-            row.lease_expires_at_ms = now_ms +| 10_000;
+            row.lease_expires_at_ms = if (row.direct or row.automatic) now_ms +| 10_000 else @min(row.manual_until_ms, now_ms +| 10_000);
             out[count] = .{
                 .token = .{ .index = @intCast(index), .generation = row.generation },
                 .peer = row.peer,
@@ -501,7 +578,8 @@ pub const DialQueue = struct {
         var due: ?u64 = null;
         for (self.rows) |row| {
             if (!row.occupied or (row.connected and !row.attempt)) continue;
-            if (!row.attempt and (!row.selected or output_capacity == 0 or active >= self.options.concurrent_max or
+            if (row.manual_until_ms > now_ms) due = @min(due orelse row.manual_until_ms, row.manual_until_ms);
+            if (!row.attempt and (!hasDialIntent(&row, now_ms) or output_capacity == 0 or active >= self.options.concurrent_max or
                 row.generation == std.math.maxInt(u64))) continue;
             const deadline = if (row.attempt) row.lease_expires_at_ms else row.eligible_at_ms;
             const next = @max(now_ms, deadline);
@@ -519,3 +597,7 @@ pub const DialQueue = struct {
         }
     }
 };
+
+fn hasDialIntent(row: *const Row, now_ms: u64) bool {
+    return row.direct or now_ms < row.manual_until_ms or (row.automatic and row.selected);
+}

@@ -768,7 +768,7 @@ test "core native dial expiry closes authenticated attempt before connected even
     }
 }
 
-test "core review native competing attempt expires during selected peer ban cooldown" {
+test "core competing one-shot attempt expires during selected peer ban cooldown" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -802,8 +802,8 @@ test "core review native competing attempt expires during selected peer ban cool
     try std.testing.expect(!setup.client.dialStarted(token, attempt));
     try std.testing.expect(!setup.client.dialFailed(token, setup.pair.now));
     try std.testing.expectEqual(@as(u16, 0), setup.pair.client.registry.outbound);
-    try std.testing.expect(setup.client.dial_queue.nextWakeup(setup.pair.now.mono_ms, 1).? >
-        setup.pair.now.mono_ms);
+    try std.testing.expectEqual(@as(?u64, null), setup.client.dial_queue.nextWakeup(setup.pair.now.mono_ms, 1));
+    try std.testing.expectEqual(@as(usize, 0), setup.client.dial_queue.resourceSnapshot().occupied);
 }
 
 test "core review early native close preserves selected reason and counts it once" {
@@ -1253,7 +1253,7 @@ test "core native immediate close preserves direct membership and rejects stale 
         try std.testing.expectEqual(@as(u64, 0), setup.server.control.counters.closed[@intFromEnum(t.DisconnectReason.remote_goodbye)]);
         try std.testing.expectEqual(@as(usize, 1), try setup.client.directPeers(&identities));
         _ = setup.server.catalog.pollEvents(&closed);
-        setup.pair.advance(1_000);
+        setup.pair.advance(60_000);
         var intents: [1]@import("peers/dial_queue.zig").DialIntent = undefined;
         try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &intents));
         const replacement = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now, setup.pair.nextEntropy());
@@ -1308,7 +1308,7 @@ test "core native peer counts distinguish open relevant invalidated and closed w
     try std.testing.expect(!setup.client.removeDirectPeer(&offline));
 }
 
-test "core native retained attempt survives public close and reconciliation without suppressing retry" {
+test "core native public close cancels overlapping attempts and preserves bounded direct retry" {
     var setup: Setup = .{};
     try setup.initOwners(&.{});
     defer setup.deinit();
@@ -1334,34 +1334,17 @@ test "core native retained attempt survives public close and reconciliation with
     try std.testing.expect(!std.meta.eql(attempt, accepted.connection.?));
     const row = &setup.client.dial_queue.rows[token.index];
     try std.testing.expect(row.connected and row.attempt);
-    const lease = row.lease_expires_at_ms;
     try std.testing.expect(setup.client.closePeer(&setup.pair.client, accepted.peer, accepted.connection.?, setup.pair.now));
-    const connected_after_close = row.connected;
-    try std.testing.expect(row.attempt);
-    try std.testing.expectEqualDeep(attempt, row.conn.?);
-    try std.testing.expectEqual(token.generation, row.generation);
-    try std.testing.expectEqual(lease, row.lease_expires_at_ms);
-    try std.testing.expect(setup.pair.client.registry.slots[attempt.index].close_reason == null);
-    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
-    try std.testing.expectEqual(setup.client.catalog.revision, setup.client.candidates_revision);
-    const connected_after_reconcile = row.connected;
-    try std.testing.expect(row.attempt);
-    try std.testing.expectEqualDeep(attempt, row.conn.?);
-    try std.testing.expectEqual(token.generation, row.generation);
-    try std.testing.expectEqual(lease, row.lease_expires_at_ms);
-    const revision = setup.client.catalog.revision;
-    try std.testing.expect(setup.pair.client.close(attempt, 0));
-    for (0..8) |_| try setup.step(0);
-    try std.testing.expectEqual(revision, setup.client.catalog.revision);
-    try std.testing.expect(!row.attempt);
+    try std.testing.expect(!row.connected and !row.attempt);
     try std.testing.expect(row.conn == null);
     try std.testing.expect(row.direct);
-    try std.testing.expect(setup.pair.client.registry.slots[attempt.index].conn == null);
+    try std.testing.expectEqual(token.generation, row.generation);
+    try std.testing.expect(setup.pair.client.registry.slots[attempt.index].close_reason != null);
+    for (0..8) |_| try setup.step(0);
+    try std.testing.expect(!row.connected and !row.attempt);
+    try std.testing.expect(!setup.client.dial_queue.dialClosed(attempt, setup.pair.now.mono_ms));
     const due = setup.client.dial_queue.nextWakeup(setup.pair.now.mono_ms, 1) orelse return error.MissingRetryDeadline;
-    try std.testing.expect(!connected_after_close);
-    try std.testing.expect(!connected_after_reconcile);
-    try std.testing.expect(!row.connected);
-    try std.testing.expect(due >= setup.pair.now.mono_ms + 1000 and due <= setup.pair.now.mono_ms + 2000);
+    try std.testing.expect(due >= setup.pair.now.mono_ms + 60_000);
     setup.pair.advance(due - setup.pair.now.mono_ms);
     try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &intents));
     try std.testing.expectEqualDeep(accepted.identity, intents[0].peer);

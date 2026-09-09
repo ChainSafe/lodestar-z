@@ -356,6 +356,14 @@ test "peer discovery fork and subnet filtering plus output pressure preserve con
             if (filtered > 0) break;
         }
         try std.testing.expect(filtered > 0);
+        const reason: discovery.Rejection = switch (mode) {
+            0 => .incompatible_fork,
+            1 => .demand,
+            2 => .output_capacity,
+            3 => .endpoint_scope,
+            else => unreachable,
+        };
+        try std.testing.expect(controller.rejections[@intFromEnum(reason)] > 0);
         try std.testing.expectEqual(@as(usize, 1), a.engine.peerCount());
         controller.cancel();
         try std.testing.expectEqual(@as(usize, 0), a.engine.calls.count());
@@ -380,12 +388,15 @@ fn foregroundQuery(a: *Node, b: *Node) !void {
         if (remote.failure) |err| return err;
         if (result.candidates != 0) {
             try adapter.requireIdentity(b.engine.localRecord(), &output[0].peer);
+            try std.testing.expect(controller.lookup_active);
+            try std.testing.expectEqual(@as(u64, 0), controller.counters.lookups_completed);
+            try std.testing.expectEqual(@as(u64, 1), controller.counters.candidates_published);
             found = true;
             break;
         }
     }
     try std.testing.expect(found and started != 0);
-    try std.testing.expect(controller.nextWakeup(now).? > now);
+    try std.testing.expect(controller.nextWakeup(now).? >= now);
     controller.cancel();
     try std.testing.expectEqual(@as(usize, 0), a.engine.calls.count());
 }
@@ -462,7 +473,7 @@ test "peer discovery foreground retains authenticated IPv6 source over alternate
             if (remote.failure) |err| return err;
         }
         try std.testing.expect(completed);
-        try std.testing.expect(!controller.lookup_active);
+        try std.testing.expect(controller.lookup_active);
         controller.cancel();
         try std.testing.expectEqual(@as(usize, 0), a.engine.calls.count());
     }
