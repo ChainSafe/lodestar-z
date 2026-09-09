@@ -284,6 +284,16 @@ fn identity(env: napi.Env, value: *const r.Identity, session: u64) !Value {
     return object;
 }
 
+pub fn getMetrics(self: *@This()) !js.String {
+    const metrics = @import("network").metrics;
+    const snapshot = (try self.owner()).metricsSnapshot();
+    const buffer = try r.allocator.alloc(u8, metrics.text_capacity);
+    defer r.allocator.free(buffer);
+    var writer: std.Io.Writer = .fixed(buffer);
+    snapshot.write(&writer) catch return error.NetworkMetricsCapacity;
+    return js.String.from(writer.buffered());
+}
+
 pub fn diagnostics(self: *@This()) !js.Value {
     const snapshot = (try self.owner()).snapshot();
     const object = try js.env().createObject();

@@ -241,6 +241,8 @@ export interface NativeRuntimeCloseResult {
 }
 
 export interface NativeNetworkRuntime {
+  /** Prometheus text from an owner snapshot refreshed at most once per second. Counters survive close. */
+  getMetrics(): string;
   readonly ready: Promise<NativeIdentity>;
   readonly closed: Promise<NativeRuntimeCloseResult>;
   readonly state: NativeRuntimeState;
@@ -342,6 +344,8 @@ export interface NativePeerBatch {
 }
 
 export interface NativeNetworkApplicationRuntime {
+  /** Prometheus text from an owner snapshot refreshed at most once per second. Counters survive close. */
+  getMetrics(): string;
   readonly closed: Promise<NativeRuntimeCloseResult>;
   drainGossip(): NativeGossipBatch;
   reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): boolean;

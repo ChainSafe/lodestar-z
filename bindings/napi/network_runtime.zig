@@ -229,6 +229,8 @@ pub const Stores = struct {
 };
 
 pub const Runtime = struct {
+    metrics: n.metrics.Snapshot = .{},
+    metrics_due_ms: u64 = 0,
     test_scenario: if (faults.enabled) faults.Scenario else void = if (faults.enabled) .none else {},
     test_drain_publication: if (faults.enabled) faults.DrainPublication else void = if (faults.enabled) .idle else {},
     refs: std.atomic.Value(u32) = .init(1),
@@ -315,6 +317,8 @@ pub const Runtime = struct {
         if (self.heavy) |heavy| {
             if (heavy.core_live) {
                 heavy.core.shutdown(now(heavy.threaded.io()));
+                self.metrics.collect(&heavy.core, self.diag.lastMonotonicMs);
+                self.metrics.stop();
                 incoming_mod.closeLocked(self);
                 gossip_mod.closeLocked(self);
                 heavy.core.deinit(heavy.threaded.io());
@@ -440,6 +444,11 @@ pub const Runtime = struct {
             result.liveBridgeRequestedBytes += gossip.cells.len * @sizeOf(gossip_mod.Cell) + result.gossip.payloadBytes + result.gossip.publicationBytes;
         }
         return result;
+    }
+    pub fn metricsSnapshot(self: *Runtime) n.metrics.Snapshot {
+        self.lock();
+        defer self.unlock();
+        return self.metrics;
     }
     pub fn commitDrain(self: *Runtime, count: usize, reported_more: bool) void {
         self.lock();
@@ -779,8 +788,15 @@ pub const Runtime = struct {
         self.unlock();
     }
     fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: n.Now, sequence: u64) void {
-        const diagnostics = self.heavy.?.core.diagnostics();
+        const counts = self.heavy.?.core.peerCounts();
+        var metrics: ?n.metrics.Snapshot = null;
+        if (timestamp.mono_ms >= self.metrics_due_ms) {
+            metrics = .{};
+            metrics.?.collect(&self.heavy.?.core, timestamp.mono_ms);
+            self.metrics_due_ms = timestamp.mono_ms +| n.metrics.interval_ms;
+        }
         self.lock();
+        if (metrics) |*value| self.metrics = value.*;
         const was_empty = self.queue.len == 0;
         if (self.lane) |lane| {
             const empty = lane.len == 0;
@@ -812,8 +828,8 @@ pub const Runtime = struct {
         }
         self.diag.ownerTurns +|= 1;
         self.diag.lastMonotonicMs = timestamp.mono_ms;
-        self.diag.peerCount = diagnostics.core.connected;
-        self.diag.readyPeerCount = diagnostics.core.relevant;
+        self.diag.peerCount = counts.connected;
+        self.diag.readyPeerCount = counts.relevant;
         if (was_empty and self.queue.len > 0) self.pingLocked();
         self.unlock();
     }

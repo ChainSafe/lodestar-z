@@ -38,6 +38,7 @@ class NativeRuntime {
   get closed() { return this.#closed; }
   get state() { return this.#native.getState(); }
   diagnostics() { return this.#native.diagnostics(); }
+  getMetrics() { return this.#native.getMetrics(); }
   drain(maxEvents) { return this.#native.drain(maxEvents); }
   applyIntent(intent, slot) { return this.#native.applyIntent(intent, slot); }
   getIdentity() { return this.#native.getIdentity(); }

@@ -39,6 +39,10 @@ pub const Protocol = enum(u8) {
         return ids[@intFromEnum(self)];
     }
 
+    pub fn method(self: Protocol) []const u8 {
+        return methods[@intFromEnum(self)];
+    }
+
     pub fn fromId(candidate: []const u8) ?Protocol {
         assert(ids.len == count);
         if (candidate.len > id_length_max) return null;
@@ -122,6 +126,12 @@ pub const ids: [Protocol.count][]const u8 = blk: {
         const protocol: Protocol = @enumFromInt(field.value);
         out[index] = prefix ++ name(protocol) ++ "/" ++ version(protocol) ++ suffix;
     }
+    break :blk out;
+};
+
+pub const methods: [Protocol.count][]const u8 = blk: {
+    var out: [Protocol.count][]const u8 = undefined;
+    for (&out, 0..) |*value, index| value.* = name(@enumFromInt(index));
     break :blk out;
 };
 

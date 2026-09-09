@@ -222,6 +222,7 @@ pub const Server = struct {
             .global_quota => owner.counters.aggregate_refusals +|= 1,
             .identity_capacity => owner.counters.identity_capacity_refusals +|= 1,
         }
+        owner.protocol_counters[@intFromEnum(slot.protocol)].rate_limited +|= 1;
         return false;
     }
 
@@ -406,6 +407,7 @@ pub const Server = struct {
             slot.io.decoding = true;
         }
         owner.limiter.bind(stream.conn, now.mono_ms);
+        owner.protocol_counters[@intFromEnum(which)].incoming +|= 1;
         slot.needs_service = true;
         assert(slot.active());
         return slot.handle(index);

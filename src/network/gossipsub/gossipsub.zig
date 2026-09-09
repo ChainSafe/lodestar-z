@@ -141,6 +141,7 @@ pub const Gossipsub = struct {
     decompressed_used: usize = 0,
     recovery: Recovery,
     counters: Counters = .{},
+    topic_metrics: @import("metrics.zig").Topics = .{},
 
     pub const Counters = struct {
         retained_penalty_evictions: u64 = 0,
@@ -631,6 +632,9 @@ pub const Gossipsub = struct {
         self.resolvePromises(id);
         const result = self.deliver(&recipients, h, null, now_ms);
         self.counters.messages_published += 1;
+        const counts = self.topic_metrics.get(topic_str);
+        counts.published +|= 1;
+        counts.published_peers +|= result.queued;
         return result;
     }
 
@@ -645,7 +649,13 @@ pub const Gossipsub = struct {
         const result = self.validation.report(&context, handle, verdict, now.mono_ms);
         if (result.forward) |forward| {
             const delivered = self.deliver(self.state.mesh(forward.topic), forward.message, forward.source, now.mono_ms);
-            if (delivered.queued > 0) self.counters.messages_forwarded += 1;
+            if (delivered.queued > 0) {
+                self.counters.messages_forwarded += 1;
+                const row = &self.state.topics[forward.topic];
+                const counts = self.topic_metrics.get(row.string[0..row.string_len]);
+                counts.forwarded +|= 1;
+                counts.forwarded_peers +|= delivered.queued;
+            }
         }
         self.wakeStorage();
         return result.outcome;
@@ -1205,6 +1215,7 @@ pub const Gossipsub = struct {
             .ignored => return start,
             .duplicate => |id| {
                 self.counters.duplicates += 1;
+                self.topic_metrics.get(msg.topic).duplicates +|= 1;
                 self.resolvePromises(id);
                 return start;
             },
@@ -1220,6 +1231,7 @@ pub const Gossipsub = struct {
                 events[start] = .{ .message = event };
                 self.resolvePromises(event.id);
                 self.counters.messages_received += 1;
+                self.topic_metrics.get(event.topic).admitted +|= 1;
                 if (msg.data.len >= self.options.idontwant_min_data_size) self.broadcastIdontwant(self.state.findTopic(event.topic).?, event.id, index);
                 return start + 1;
             },
