@@ -114,6 +114,119 @@ test "ListType - sanity" {
     try BytesBytes.deserializeFromBytes(allocator, bb_buf, &bb);
 }
 
+test "memory_safety: fixed list tree reads reuse output capacity without traversal allocations" {
+    const allocator = std.testing.allocator;
+    inline for (.{ UintType(64), BoolType(), PoolExhaustionCheckpoint }) |Element| {
+        inline for (.{ false, true }) |chunked| {
+            if (!chunked or Element.kind != .container) {
+                const List = FixedListType(Element, pmt.ChunkedLeaf.K * 64, .{ .chunked_leaf = chunked });
+                var failing = std.testing.FailingAllocator.init(allocator, .{});
+                var pool = try Node.Pool.init(.{
+                    .page_allocator = allocator,
+                    .allocator = failing.allocator(),
+                    .pool_size = 16384,
+                });
+                defer pool.deinit();
+
+                inline for (.{ 0, 1, 31, 32, 33, pmt.ChunkedLeaf.K * 32 + 1 }) |len| {
+                    var value = List.default_value;
+                    defer List.deinit(allocator, &value);
+                    try value.resize(allocator, len);
+                    for (value.items, 0..) |*item, i| {
+                        item.* = switch (Element.kind) {
+                            .uint => @intCast(i + 1),
+                            .bool => i % 2 == 0,
+                            .container => .{ .epoch = @intCast(i + 1), .root = @splat(@intCast(i % 256)) },
+                            else => unreachable,
+                        };
+                    }
+                    const node = try List.tree.fromValue(&pool, &value);
+                    defer pool.unref(node);
+                    const before = node.getRoot(&pool).*;
+                    const zero = try List.tree.zeros(&pool, len);
+                    defer pool.unref(zero);
+
+                    var out = List.default_value;
+                    defer List.deinit(failing.allocator(), &out);
+                    try out.ensureTotalCapacity(failing.allocator(), len);
+                    failing.fail_index = failing.alloc_index;
+                    failing.resize_fail_index = failing.resize_index;
+                    defer {
+                        failing.fail_index = std.math.maxInt(usize);
+                        failing.resize_fail_index = std.math.maxInt(usize);
+                    }
+
+                    try List.tree.toValue(failing.allocator(), node, &pool, &out);
+                    try std.testing.expect(List.equals(&value, &out));
+                    try std.testing.expectEqualSlices(u8, &before, node.getRoot(&pool));
+                    try List.tree.toValue(failing.allocator(), zero, &pool, &out);
+                    for (out.items) |item| {
+                        try std.testing.expect(Element.equals(&Element.default_value, &item));
+                    }
+                    try std.testing.expect(!failing.has_induced_failure);
+                }
+            }
+        }
+    }
+}
+
+test "memory_safety: variable list tree reads allocate only materialized values" {
+    const allocator = std.testing.allocator;
+    const Element = ByteListType(8);
+    const List = VariableListType(Element, 8);
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 64,
+    });
+    defer pool.deinit();
+    var value = List.default_value;
+    defer List.deinit(allocator, &value);
+    try value.appendNTimes(allocator, Element.default_value, 3);
+    const node = try List.tree.fromValue(&pool, &value);
+    defer pool.unref(node);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var out = List.default_value;
+    defer List.deinit(failing.allocator(), &out);
+    try out.ensureTotalCapacity(failing.allocator(), value.items.len);
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+
+    try List.tree.toValue(failing.allocator(), node, &pool, &out);
+    try std.testing.expect(List.equals(&value, &out));
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "memory_safety: variable list tree reads leave partial values deinit-safe" {
+    const allocator = std.testing.allocator;
+    const Element = ByteListType(8);
+    const List = VariableListType(Element, 8);
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 64,
+    });
+    defer pool.deinit();
+    var value = List.default_value;
+    defer List.deinit(allocator, &value);
+    try value.appendNTimes(allocator, Element.default_value, 3);
+    for (value.items, 0..) |*item, i| try item.append(allocator, @intCast(i + 1));
+    const node = try List.tree.fromValue(&pool, &value);
+    defer pool.unref(node);
+    const before = node.getRoot(&pool).*;
+
+    try std.testing.checkAllAllocationFailures(allocator, struct {
+        fn run(failing: std.mem.Allocator, source: Node.Id, source_pool: *Node.Pool, expected: *const List.Type) !void {
+            var out = List.default_value;
+            defer List.deinit(failing, &out);
+            try List.tree.toValue(failing, source, source_pool, &out);
+            try std.testing.expect(List.equals(expected, &out));
+        }
+    }.run, .{ node, &pool, &value });
+    try std.testing.expectEqualSlices(u8, &before, node.getRoot(&pool));
+}
+
 test "clone FixedListType" {
     const allocator = std.testing.allocator;
     const Checkpoint = FixedContainerType(struct {
