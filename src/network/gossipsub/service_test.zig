@@ -231,6 +231,30 @@ test "gossipsub service negotiates with a v1.1-only peer" {
     try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.server.handler.inner.state.peerVersion(server_index));
 }
 
+test "gossipsub service cancels negotiation when subscriptions retire a peer" {
+    var setup: ServicePair = .{};
+    try setup.init();
+    defer setup.deinit();
+    setup.client.handler.inner.options.pressure_timeout_ms = 5;
+    var topic_buffer: [topic_mod.topic_max_len]u8 = undefined;
+    const topic = topic_mod.build(digest, "beacon_block", &topic_buffer);
+    try std.testing.expect(setup.client.handler.subscribe(topic));
+    _ = setup.client.handler.pump(&setup.client.router, &setup.pair.client, setup.pair.now, &setup.client_events);
+    try std.testing.expect(setup.client.router.nextWakeup(setup.pair.now, 16) != null);
+
+    setup.pair.advance(6);
+    _ = setup.client.handler.pump(&setup.client.router, &setup.pair.client, setup.pair.now, &setup.client_events);
+    try std.testing.expect(!setup.client.handler.admitted(setup.handles.client));
+    try std.testing.expectEqual(@as(u64, 1), setup.client.handler.counters().subscription_timeouts);
+    try std.testing.expectEqual(@as(?u64, null), setup.client.router.nextWakeup(setup.pair.now, 16));
+    try std.testing.expect(setup.pair.client.peerId(setup.handles.client) != null);
+
+    setup.client.handler.inner.options.pressure_timeout_ms = 30_000;
+    try std.testing.expectEqual(.admitted, setup.client.handler.peerConnected(&setup.pair.client, setup.handles.client, setup.pair.now));
+    for (0..16) |_| try setup.pumpOnce();
+    try std.testing.expect(setup.client.handler.deliveryAvailable(setup.handles.client));
+}
+
 test "gossipsub service ignores stale outcomes after connection and peer slot reuse" {
     var setup: ServicePair = .{};
     try setup.init();
