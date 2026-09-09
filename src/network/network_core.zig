@@ -517,6 +517,7 @@ pub const NetworkCore = struct {
             self.core.demand = demand;
             self.core.policy_dirty = true;
         }
+        std.log.scoped(.network_core).debug("intent_applied local_changed={any} topics_changed={any} demand_changed={any} subscriptions={d} fork={s} digest={x}", .{ prepared.changed, topics_changed, demand_changed, intent.subscriptions.len, @tagName(prepared.local.fork.fork), prepared.local.fork.digest });
         return true;
     }
 
@@ -587,7 +588,9 @@ pub const NetworkCore = struct {
                 }
                 const intake = self.core.discoveredBatch(candidates[0..result.discovery.candidates], tick);
                 self.counters.candidates_refused +|= intake.refused;
+                if (result.discovery.candidates > 0) std.log.scoped(.network_discovery).debug("candidates_received count={d} refused={d}", .{ result.discovery.candidates, intake.refused });
                 if (result.discovery.failure) |err| {
+                    std.log.scoped(.network_discovery).debug("discovery_failed reason={s}", .{@errorName(err)});
                     self.counters.discovery_failures +|= 1;
                     result.failure = result.failure orelse err;
                 }
@@ -597,12 +600,14 @@ pub const NetworkCore = struct {
             const count = self.core.dialIntents(&self.transport.engine, tick, intents[0..@min(room, intents.len)]);
             for (intents[0..count]) |intent| {
                 const handle = self.transport.dialPeer(io, intent.address, intent.peer) catch |err| {
+                    std.log.scoped(.network_core).debug("dial_deferred peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
                     std.debug.assert(self.core.dialDeferred(intent.token, tick));
                     result.dial_deferred += 1;
                     result.failure = result.failure orelse err;
                     continue;
                 };
                 std.debug.assert(self.core.dialStarted(intent.token, handle));
+                std.log.scoped(.network_core).debug("dial_started peer={f} endpoint={any} connection={d}:{d}", .{ @import("logging.zig").peer(&intent.peer), intent.address, handle.index, handle.generation });
                 result.dial_started += 1;
             }
             self.counters.dial_started +|= result.dial_started;

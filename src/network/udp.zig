@@ -73,6 +73,7 @@ pub const Udp = struct {
         const incoming = try self.socket.receiveTimeout(io, &self.buffer, timeout);
         self.counters.received_datagrams +|= 1;
         if (incoming.flags.trunc) {
+            std.log.scoped(.network_quic).debug("datagram_refused reason=oversize capacity={d}", .{self.buffer.len});
             self.counters.truncated_datagrams +|= 1;
             return error.DatagramTooLarge;
         }

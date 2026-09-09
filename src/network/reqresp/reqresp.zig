@@ -781,10 +781,10 @@ pub const ReqResp = struct {
         event: Event,
         engine: ?*Engine,
     ) void {
-        _ = index;
         if (slot.terminal != null) return;
         const counts = &self.protocol_counters[@intFromEnum(slot.protocol)];
         const duration_ms = self.last_now_ms -| slot.started_ms;
+        if (event != .failed) std.log.scoped(.network_reqresp).debug("request_completed direction={s} request={d}:{d} connection={d}:{d} method={s} chunks={d} elapsed_ms={d}", .{ if (@TypeOf(slot) == *Client) "outbound" else "inbound", index, slot.generation, slot.conn.index, slot.conn.generation, @tagName(slot.protocol), slot.chunks, duration_ms });
         if (@TypeOf(slot) == *Client) counts.outgoing_time.observe(duration_ms) else counts.incoming_time.observe(duration_ms);
         slot.terminal = event;
         slot.state = .terminal;
@@ -798,6 +798,14 @@ pub const ReqResp = struct {
 
     pub fn fail(self: *ReqResp, slot: anytype, index: u16, reason: Failure, engine: ?*Engine) void {
         if (slot.terminal != null) return;
+        const detail: []const u8 = switch (reason) {
+            .invalid_response => |err| @errorName(err),
+            .invalid_request => |err| @errorName(err),
+            .negotiation_failed => |failure| @tagName(failure),
+            else => "none",
+        };
+        const peer_code: u16 = if (reason == .peer_error) reason.peer_error.code else 0;
+        std.log.scoped(.network_reqresp_errors).debug("request_failed direction={s} request={d}:{d} connection={d}:{d} method={s} phase={s} reason={s} detail={s} peer_code={d} chunks={d} elapsed_ms={d}", .{ if (@TypeOf(slot) == *Client) "outbound" else "inbound", index, slot.generation, slot.conn.index, slot.conn.generation, @tagName(slot.protocol), if (@TypeOf(slot) == *Client) @tagName(slot.requestPhase()) else @tagName(slot.state), @tagName(reason), detail, peer_code, slot.chunks, self.last_now_ms -| slot.started_ms });
         self.counters.failures += 1;
         const counters = &self.protocol_counters[@intFromEnum(slot.protocol)];
         if (@TypeOf(slot) == *Client) {
@@ -905,6 +913,7 @@ pub const ReqResp = struct {
     }
 
     pub fn pushOverLimit(self: *ReqResp, item: OverLimit) void {
+        std.log.scoped(.network_reqresp_errors).debug("request_rate_limited connection={d}:{d} method={s}", .{ item.peer.index, item.peer.generation, @tagName(item.protocol) });
         self.counters.over_limit += 1;
         if (self.over_limit_len == over_limit_queue_max) {
             self.counters.over_limit_dropped += 1;

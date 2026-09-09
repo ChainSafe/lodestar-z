@@ -216,10 +216,10 @@ pub const Control = struct {
     ) bool {
         const row = self.schedule(peer, conn) orelse return false;
         if (!catalog.markUnavailable(peer, conn, reason)) return false;
-        if (row.closing == null) row.closing = .{
-            .reason = reason,
-            .deadline_ms = now.mono_ms +| 2_000,
-        };
+        if (row.closing == null) {
+            std.log.scoped(.network_peers).debug("peer_disconnect_scheduled connection={d}:{d} reason={s} grace_ms=2000", .{ conn.index, conn.generation, @tagName(reason) });
+            row.closing = .{ .reason = reason, .deadline_ms = now.mono_ms +| 2_000 };
+        }
         return true;
     }
     pub fn reStatusPeer(self: *Control, peer: t.PeerRef, conn: t.Handle, now: Now) bool {

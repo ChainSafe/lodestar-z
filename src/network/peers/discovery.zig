@@ -146,7 +146,9 @@ pub const Discovery = struct {
         }
         self.consumeEvent(progress, out, &result);
         if (self.lookup_active and self.lookup.isFinished()) {
-            for (self.lookup.confirmedResults(&self.storage.records)) |*confirmed| {
+            const confirmed_records = self.lookup.confirmedResults(&self.storage.records);
+            std.log.scoped(.network_discovery).debug("lookup_completed confirmed={d}", .{confirmed_records.len});
+            for (confirmed_records) |*confirmed| {
                 self.publish(&confirmed.record, confirmed.peer.address, progress.now_ms, out, &result);
             }
             self.lookup_active = false;
@@ -174,6 +176,7 @@ pub const Discovery = struct {
             var seeds: [d.Lookup.result_max]d.RoutingTable.Entry = undefined;
             const closest = self.driver.core.closestNodes(&target, &seeds);
             try self.lookup.init(&self.storage.foreground, self.driver.core.localRecord().node_id, target, closest);
+            std.log.scoped(.network_discovery).debug("lookup_started target={x} seeds={d}", .{ target, closest.len });
             self.lookup_active = true;
         }
         if (self.maintenance.nextDeadlineMs()) |deadline| if (now_ms >= deadline) {

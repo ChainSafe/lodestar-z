@@ -214,7 +214,8 @@ pub const Server = struct {
 
     fn takeAdmission(owner: *ReqResp, engine: *Engine, slot: *Server, cost: u128, now: Now) bool {
         const identity = engine.peerId(slot.conn) orelse return false;
-        switch (owner.admission.?.take(&identity, slot.protocol, cost, slot.request_fork, now.mono_ms)) {
+        const decision = owner.admission.?.take(&identity, slot.protocol, cost, slot.request_fork, now.mono_ms);
+        switch (decision) {
             .allowed => {
                 owner.counters.charged_work +|= cost;
                 return true;
@@ -224,6 +225,7 @@ pub const Server = struct {
             .identity_capacity => owner.counters.identity_capacity_refusals +|= 1,
         }
         owner.protocol_counters[@intFromEnum(slot.protocol)].rate_limited +|= 1;
+        std.log.scoped(.network_reqresp_errors).debug("request_admission_refused connection={d}:{d} method={s} reason={s} cost={d}", .{ slot.conn.index, slot.conn.generation, @tagName(slot.protocol), @tagName(decision), cost });
         return false;
     }
 
@@ -410,6 +412,7 @@ pub const Server = struct {
         }
         owner.limiter.bind(stream.conn, now.mono_ms);
         owner.protocol_counters[@intFromEnum(which)].incoming +|= 1;
+        std.log.scoped(.network_reqresp).debug("request_started direction=inbound request={d}:{d} connection={d}:{d} stream={d} method={s}", .{ index, slot.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which) });
         slot.needs_service = true;
         assert(slot.active());
         return slot.handle(index);

@@ -289,12 +289,13 @@ pub const Core = struct {
                 const identity = engine.peerId(connected.conn) orelse return;
                 const endpoint = engine.peerAddress(connected.conn) orelse return;
                 const direction = engine.direction(connected.conn) orelse return;
-                switch (self.catalog.admit(
+                const decision = self.catalog.admit(
                     &identity,
                     &self.local_identity,
                     connected.conn,
                     &.{ .direction = direction, .endpoint = endpoint, .now_ms = now.mono_ms },
-                )) {
+                );
+                switch (decision) {
                     .admitted => |admission| {
                         if (admission.displaced) |old| {
                             self.counters.displaced +|= 1;
@@ -324,6 +325,7 @@ pub const Core = struct {
                         self.dial_queue.accepted(&identity, connected.conn, now.mono_ms);
                     },
                     else => {
+                        std.log.scoped(.network_peers).debug("peer_admission_refused peer={f} connection={d}:{d} reason={s}", .{ @import("logging.zig").peer(&identity), connected.conn.index, connected.conn.generation, @tagName(decision) });
                         self.counters.rejected +|= 1;
                         _ = engine.close(connected.conn, 0);
                     },

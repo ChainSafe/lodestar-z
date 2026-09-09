@@ -13,6 +13,10 @@ pub const NativeNetworkRuntime = @import("./network.zig");
 pub const pubkeys = @import("./pubkeys.zig");
 
 const options = @import("bls_options");
+pub const std_options: std.Options = .{
+    .log_scope_levels = @import("network").logging.scope_levels,
+    .logFn = @import("network").logging.logFn,
+};
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
