@@ -1309,7 +1309,6 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
         post_state,
         slot_value,
         .{},
-
         validator_monitor.get(),
     );
     return .{
