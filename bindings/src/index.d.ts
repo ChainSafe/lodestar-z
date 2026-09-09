@@ -120,6 +120,8 @@ interface SyncCommittee {
 export interface ProcessSlotsOpts {
   /** Default: false (cache is transferred). Set to true to opt out of cache transfer. */
   dontTransferCache?: boolean;
+  /** Record validator-monitor metrics for epoch transitions. Default: false. */
+  validatorMonitor?: boolean;
 }
 
 interface CompactMultiProof {
@@ -145,6 +147,8 @@ export interface TransitionOpts {
   verifySignatures?: boolean;
   /** Default: false (cache is transferred). Set to true to opt out of cache transfer. */
   dontTransferCache?: boolean;
+  /** Record validator-monitor metrics for epoch transitions. Default: false. */
+  validatorMonitor?: boolean;
 }
 
 interface ProposerRewards {
@@ -401,6 +405,8 @@ declare const bindings: {
     init: () => void;
     observeStateHashTreeRoot: (source: StateHashTreeRootSource, seconds: number) => void;
     scrapeMetrics: () => string;
+    scrapeStateTransitionMetrics: () => string;
+    scrapeValidatorMonitorMetrics: () => string;
     registerLocalValidator: (index: number) => void;
     unregisterLocalValidator: (index: number) => void;
   };

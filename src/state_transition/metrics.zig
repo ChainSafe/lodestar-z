@@ -331,10 +331,18 @@ pub fn observeStateHashTreeRoot(source: StateHashTreeRootSource, seconds: f64) !
     try state_transition.state_hash_tree_root.observe(.{ .source = source }, seconds);
 }
 
+pub fn writeStateTransition(writer: *std.Io.Writer) !void {
+    try m.write(&state_transition, writer);
+}
+
+pub fn writeValidatorMonitor(writer: *std.Io.Writer) !void {
+    try m.write(&validator_monitor, writer);
+}
+
 /// Writes all metrics to `writer`.
 pub fn write(writer: *std.Io.Writer) !void {
-    try m.write(&state_transition, writer);
-    try m.write(&validator_monitor, writer);
+    try writeStateTransition(writer);
+    try writeValidatorMonitor(writer);
 }
 
 /// Deinitializes all metrics and resets them to noop, making it safe to keep

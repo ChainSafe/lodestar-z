@@ -17,6 +17,7 @@ const pubkey = @import("./pubkeys.zig");
 const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
+const transition_opts = @import("./transition_opts.zig");
 const validator_monitor = @import("./validator_monitor.zig");
 
 /// Allocator used for all BeaconStateView instances.
@@ -1310,7 +1311,7 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
         post_state,
         slot_value,
         .{},
-        validator_monitor.get(),
+        if (try transition_opts.isValidatorMonitorEnabled(options)) validator_monitor.get() else null,
     );
     return .{
         .cached_state = post_state,
@@ -1332,7 +1333,7 @@ pub fn stateTransition(
     options: ?js.Value,
 ) !BeaconStateView {
     const cached_state = try self.requireState();
-    const opts = try @import("./transition_opts.zig").parseOptions(options);
+    const opts = try transition_opts.parseOptions(options);
 
     const bytes = try signed_block_bytes.toSlice();
 
@@ -1353,7 +1354,7 @@ pub fn stateTransition(
         cached_state,
         signed_block,
         opts,
-        validator_monitor.get(),
+        if (try transition_opts.isValidatorMonitorEnabled(options)) validator_monitor.get() else null,
     );
     return .{
         .cached_state = post_state,

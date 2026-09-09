@@ -14,6 +14,7 @@ const st = @import("state_transition");
 /// Recognized fields:
 /// - `verifyStateRoot`, `verifyProposer`, `verifySignatures`: bool
 /// - `dontTransferCache`: bool (negated to set `transfer_cache`)
+/// - `validatorMonitor`: bool
 /// - `executionPayloadStatus`: "valid" | "invalid"
 /// - `dataAvailabilityStatus`: "Available" | "PreData" | "OutOfRange"
 ///
@@ -21,6 +22,16 @@ const st = @import("state_transition");
 /// for unknown enum strings.
 ///
 /// TODO(bing): rename `dontTransferCache` → `transferCache` to drop the double negation.
+pub fn isValidatorMonitorEnabled(options: ?js.Value) !bool {
+    if (options) |value| {
+        const raw = value.toValue();
+        if (try raw.typeof() == .object and try raw.hasNamedProperty("validatorMonitor")) {
+            return (try raw.getNamedProperty("validatorMonitor")).getValueBool();
+        }
+    }
+    return false;
+}
+
 pub fn parseOptions(options: ?js.Value) !st.TransitionOpts {
     var transition_opts: st.TransitionOpts = .{};
 

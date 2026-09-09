@@ -24,6 +24,16 @@ describe("metrics", () => {
     expect(output).toContain(`lodestar_stfn_hash_tree_root_seconds_sum{source="${source}"} ${seconds}`);
   });
 
+  it("scrapes state transition and validator monitor metrics separately", () => {
+    const stateTransitionMetrics = bindings.metrics.scrapeStateTransitionMetrics();
+    const validatorMonitorMetrics = bindings.metrics.scrapeValidatorMonitorMetrics();
+
+    expect(stateTransitionMetrics).toContain("lodestar_stfn_hash_tree_root_seconds");
+    expect(stateTransitionMetrics).not.toContain("validator_monitor_");
+    expect(validatorMonitorMetrics).toContain("validator_monitor_prev_epoch_on_chain_balance");
+    expect(validatorMonitorMetrics).not.toContain("lodestar_stfn_");
+  });
+
   it("accepts the maximum duration", () => {
     expect(() => bindings.metrics.observeStateHashTreeRoot("block_transition", 60 * 60)).not.toThrow();
   });

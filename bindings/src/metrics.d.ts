@@ -12,8 +12,14 @@ export declare function init(): void;
 /** Record an externally timed state hash-tree-root operation. */
 export declare function observeStateHashTreeRoot(source: StateHashTreeRootSource, seconds: number): void;
 
-/** Scrape native state-transition metrics in Prometheus text format. */
+/** Scrape all native metrics in Prometheus text format. */
 export declare function scrapeMetrics(): string;
+
+/** Scrape only native state-transition metrics in Prometheus text format. */
+export declare function scrapeStateTransitionMetrics(): string;
+
+/** Scrape only native validator-monitor metrics in Prometheus text format. */
+export declare function scrapeValidatorMonitorMetrics(): string;
 
 /**
  * Register a validator index with the native validator monitor. Metrics

@@ -262,6 +262,7 @@ test "state transition - records per-block and per-epoch metrics" {
         test_state.cached_state,
         signed_beacon_block,
         .{ .verify_signatures = false, .verify_proposer = false, .verify_state_root = false },
+        null,
     );
     defer {
         post_state.deinit();
