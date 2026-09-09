@@ -65,6 +65,9 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
         const left = samples(pair.left.getMetrics());
         const right = samples(pair.right.getMetrics());
         expect(left.get("libp2p_peers")).toBe(1);
+        expect(left.get('lodestar_peer_connected_total{direction="outbound",status="open"}')).toBe(1);
+        expect(right.get('lodestar_peer_connected_total{direction="inbound",status="open"}')).toBe(1);
+        expect(left.get("lodestar_peer_manager_connected_peers_map_size")).toBe(1);
         expect(left.get('lodestar_peers_by_direction_count{direction="outbound"}')).toBe(1);
         expect(right.get('lodestar_peers_by_direction_count{direction="inbound"}')).toBe(1);
         expect(left.get("lodestar_peer_connection_seconds_count")).toBe(1);
@@ -97,6 +100,10 @@ test("real request and peer metrics are isolated, cumulative and do not drain re
   expect(samples(pair.left.getMetrics()).get(outgoing)).toBe(1);
   expect(samples(pair.right.getMetrics()).get(incoming)).toBe(1);
   expect(samples(pair.left.getMetrics()).get("libp2p_peers")).toBe(0);
+  expect(samples(pair.left.getMetrics()).get('lodestar_peer_disconnected_total{direction="outbound"}')).toBe(1);
+  expect(samples(pair.right.getMetrics()).get('lodestar_peer_disconnected_total{direction="inbound"}')).toBe(1);
+  expect(samples(pair.left.getMetrics()).get("lodestar_peer_manager_connected_peers_map_size")).toBe(0);
+  expect(samples(pair.left.getMetrics()).get("lodestar_peers_requested_total_to_connect")).toBe(0);
   expect(samples(pair.left.getMetrics()).get('lodestar_discovery_dial_time_seconds_count{status="success"}')).toBe(1);
   expect(samples(pair.left.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
 }, 20000);

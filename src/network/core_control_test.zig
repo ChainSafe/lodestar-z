@@ -49,7 +49,7 @@ test "core records a buffered Goodbye before transport cancellation and preserve
         try std.testing.expectEqual(@as(usize, 1), setup.server.catalog.pollEvents(&closed));
         try std.testing.expectEqual(if (local_ban) t.DisconnectReason.banned else .remote_goodbye, closed[0].closed.reason);
         try std.testing.expect(snapshot.goodbye_until_ms >= setup.pair.now.mono_ms + 300_000);
-        try std.testing.expectEqual(@as(u64, 1), setup.server.control.counters.goodbyes[@intFromEnum(@import("peers/goodbye.zig").Reason.too_many_peers)]);
+        try std.testing.expectEqual(@as(u64, 1), setup.server.control.counters.events.goodbyes[@intFromEnum(@import("peers/goodbye.zig").Reason.too_many_peers)]);
         try std.testing.expectEqual(@as(u64, 1), setup.server.service.reqresp.inner.counters.goodbyes_recovered_on_close);
     }
 }
@@ -1136,4 +1136,27 @@ test "application quiescence rejects a held gossip listener message handoff" {
 
 test "application quiescence preserves the current request borrow before deferred cancellation" {
     try quiescenceRequest(.borrowed);
+}
+
+test "peer lifecycle metrics count retired schedules once across connection generations" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..50) |_| try setup.step(1);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const peer = snapshots[0].peer;
+    const old = snapshots[0].connection.?;
+    const replacement: t.Handle = .{ .index = old.index, .generation = old.generation + 1 };
+    const control = &setup.client.control;
+    control.cancelConnection(&setup.client.service, &setup.pair.client, peer, replacement);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 0 }, &control.counters.events.disconnected);
+    control.cancelConnection(&setup.client.service, &setup.pair.client, peer, old);
+    control.connected(peer, replacement, .inbound, setup.pair.now);
+    control.cancelConnection(&setup.client.service, &setup.pair.client, peer, old);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &control.counters.events.disconnected);
+    control.cancelConnection(&setup.client.service, &setup.pair.client, peer, replacement);
+    control.cancelConnection(&setup.client.service, &setup.pair.client, peer, replacement);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 1 }, &control.counters.events.connected);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 1 }, &control.counters.events.disconnected);
 }

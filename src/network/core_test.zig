@@ -152,6 +152,9 @@ test "core native two owners establish relevance and fetch initial metadata with
         for (0..60) |_| try setup.step(0);
         try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
         try std.testing.expectEqual(@as(u16, 1), setup.server.peerCounts().relevant);
+        try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &setup.client.control.counters.events.connected);
+        try std.testing.expectEqualSlices(u64, &.{ 1, 0 }, &setup.server.control.counters.events.connected);
+        try std.testing.expect(setup.client.control.counters.events.relevance[0] > 0);
         var snapshots: [4]t.Snapshot = undefined;
         try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
         try std.testing.expectEqualDeep(local.metadata, snapshots[0].metadata.?);
@@ -675,6 +678,12 @@ test "core native Goodbye immediately removes relevance and delayed Status canno
     try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().connected);
     try std.testing.expectEqual(@as(usize, 1), setup.client.catalog.pollEvents(&event));
     try std.testing.expectEqual(t.DisconnectReason.reputation, event[0].closed.reason);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &setup.client.control.counters.events.disconnected);
+    const fault = @intFromEnum(@import("peers/goodbye.zig").Reason.fault);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.events.sent_goodbyes[fault]);
+    try std.testing.expectEqual(@as(u64, 1), setup.server.control.counters.events.goodbyes[fault]);
+    for (0..4) |_| try setup.step(0);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &setup.client.control.counters.events.disconnected);
 }
 
 test "core native hard close retires QUIC routes streams and registry with zero public output" {

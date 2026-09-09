@@ -41,6 +41,7 @@ pub const Snapshot = struct {
     outgoing_error_reasons: [rr.reqresp.metrics.error_reason_count]u64 = @splat(0),
     validation_time: topic_metrics.ValidationTime = .{},
     scores: @import("metrics_score.zig").Snapshot = .{},
+    peer_policy: @import("metrics_peer_policy.zig").Snapshot = .{},
     peer_population: @import("metrics_peers.zig").Snapshot = .{},
     connections: @import("quic/metrics.zig").Counters = .{},
     transport_resources: ?@import("quic/engine.zig").Engine.Resources = null,
@@ -60,7 +61,7 @@ pub const Snapshot = struct {
     gossip_resources: ?gossip.ResourceSnapshot = null,
     closed: [@typeInfo(peer_types.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
     closed_by_client: [client_count][@typeInfo(peer_types.DisconnectReason).@"enum".fields.len]u64 = @splat(@splat(0)),
-    goodbyes: [goodbye.count]u64 = @splat(0),
+    peer_events: @import("peers/control_metrics.zig").Counters = .{},
     dial: @import("peers/dial_queue.zig").DialQueue.Counters = .{},
     discovery_counts: discovery_metrics.Counters = .{},
     discovery_rejections: [discovery_metrics.rejection_count]u64 = @splat(0),
@@ -103,13 +104,18 @@ pub const Snapshot = struct {
         self.identify_deferred = core.control.counters.identify_deferred;
         self.identify_failures = core.control.counters.identify_failures;
         self.closed_by_client = core.control.counters.closed_by_client;
-        self.goodbyes = core.control.counters.goodbyes;
+        self.peer_events = core.control.counters.events;
         self.dial = core.dial_queue.counters;
         for (g.io.peers) |*io| {
             for (&self.gossip_queue_drops, io.drops) |*total, value| total.* +|= value;
         }
         self.target = core.catalog.options.target_peers;
+        self.peer_policy.collect(&core.selection, &core.demand, core.current_slot, core.local.fork.custody_groups);
+        for (core.control.schedules) |*schedule| {
+            self.peer_policy.managed_connections += @intFromBool(schedule.peer != null);
+        }
         for (core.catalog.rows) |*row| {
+            self.peer_policy.catalog_entries += @intFromBool(row.occupied);
             if (row.connection == null) continue;
             self.peers += 1;
             self.peer_population.observe(row, now_ms);
@@ -185,6 +191,7 @@ pub const Snapshot = struct {
         self.running = false;
         self.scores = .{};
         self.peer_population = .{};
+        self.peer_policy = .{};
         if (self.transport_resources) |*resources| resources.* = .{ .capacity = resources.capacity, .active = 0, .handshaking = 0, .dialing = 0, .outbound = 0 };
         if (self.dial_resources) |*resources| resources.* = .{ .capacity = resources.capacity };
         self.peers = 0;
@@ -219,6 +226,8 @@ pub const Snapshot = struct {
         try self.writeGossip(w);
         try self.writeScores(w);
         try self.peer_population.write(w);
+        try self.peer_events.write(w);
+        try self.peer_policy.write(w);
         try self.connections.write(w);
         try self.writePeeringProgress(w);
         try scalar(w, "lodestar_discovery_total_dial_attempts", .counter, "Started native QUIC dials", self.runtime.dial_started);
@@ -267,7 +276,7 @@ pub const Snapshot = struct {
             }
         }
         try family(w, "lodestar_native_peer_goodbyes_total", .counter, "Received Ethereum Goodbye reasons; unknown wire codes share one label");
-        inline for (@typeInfo(goodbye.Reason).@"enum".fields) |reason| try sample(w, "lodestar_native_peer_goodbyes_total", "reason", reason.name, self.goodbyes[reason.value]);
+        inline for (@typeInfo(goodbye.Reason).@"enum".fields) |reason| try sample(w, "lodestar_native_peer_goodbyes_total", "reason", reason.name, self.peer_events.goodbyes[reason.value]);
     }
 
     fn writePeeringProgress(self: *const Snapshot, w: *Writer) Writer.Error!void {
@@ -425,9 +434,11 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing_time.observe(300);
     snapshot.requests.withheld_ms_total = 1500;
     snapshot.closed_by_client[@intFromEnum(Client.Lighthouse)][@intFromEnum(peer_types.DisconnectReason.remote_goodbye)] = 13;
-    snapshot.goodbyes[@intFromEnum(goodbye.Reason.too_many_peers)] = 11;
+    snapshot.peer_events.goodbyes[@intFromEnum(goodbye.Reason.too_many_peers)] = 11;
     snapshot.gossip_queue_drops[@intFromEnum(peer_io.DropReason.data_bytes)] = 17;
     snapshot.discovery_rejections[@intFromEnum(discovery_metrics.Rejection.incompatible_fork)] = 19;
+    snapshot.peer_policy.group_count = 128;
+    snapshot.peer_policy.wanted = .{ .attnets = std.math.maxInt(u64), .syncnets = 15 };
     snapshot.topic_count = snapshot.topics.len;
     for (&snapshot.topics, 0..) |*entry, index| entry.* = .{ .digest = .{ 1, 2, @intCast(index / 256), @truncate(index) }, .kind = .data_column_sidecar, .subnet = 127, .mesh = 4096, .subscribers = 4096 };
     const buffer = try std.testing.allocator.alloc(u8, text_capacity);

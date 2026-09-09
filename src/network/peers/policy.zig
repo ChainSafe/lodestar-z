@@ -22,13 +22,14 @@ pub const Result = struct {
     reasons: [256]?t.DisconnectReason = @splat(null),
     deficits: Deficits = .{},
     dial_budget: u16 = 0,
+    coverage: Counts = .{},
 };
 pub fn utility(coverage: *const t.Coverage, wanted: *const t.Coverage) u16 {
     return @as(u16, @popCount(coverage.attnets & wanted.attnets)) +
         @as(u16, @popCount(coverage.syncnets & wanted.syncnets)) +
         @as(u16, @intCast(coverage.groups.intersectWith(wanted.groups).count()));
 }
-const Counts = struct {
+pub const Counts = struct {
     attestation: [64]u16 = @splat(0),
     sync: [4]u16 = @splat(0),
     groups: [128]u16 = @splat(0),
@@ -130,6 +131,7 @@ pub fn select(inputs: []const Input, demand: *const t.Demand, options: t.Options
         result.retained_count -= 1;
         counts.change(input, false);
     }
+    result.coverage = counts;
     result.deficits = counts.deficits(demand, options.min_outbound);
     const coverage_missing = result.deficits.attestation > 0 or result.deficits.sync > 0 or result.deficits.groups > 0;
     const wanted = @max(options.target_peers -| result.retained_count, @max(result.deficits.outbound, @as(u16, if (coverage_missing) 1 else 0)));
