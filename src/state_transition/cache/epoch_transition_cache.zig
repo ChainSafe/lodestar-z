@@ -262,6 +262,7 @@ pub const EpochTransitionCache = struct {
 
             // Both active validators and slashed-but-not-yet-withdrawn validators are eligible to receive penalties.
             // This is done to prevent self-slashing from being a way to escape inactivity leaks.
+            // TODO: Consider using an array of `eligible ValidatorIndex: number[]`
             if (is_active_prev or (validator.slashed and prev_epoch + 1 < validator.withdrawable_epoch)) {
                 flag |= FLAG_ELIGIBLE_ATTESTER;
             }
@@ -537,6 +538,19 @@ pub const EpochTransitionCache = struct {
         if (self.balances) |*balances| {
             balances.deinit(allocator);
         }
+    }
+
+    /// Ensure rewards/penalties arrays match the current validator count.
+    /// This is only used in benchmark tests where we want to reuse the cache across steps.
+    pub fn syncRewardPenaltyLengths(self: *EpochTransitionCache, io: std.Io, validator_count: usize) !void {
+        try _reused_lock.lock(io);
+        defer _reused_lock.unlock(io);
+
+        const reused_cache = _reused_cache orelse return error.ReusedEpochTransitionCacheUnavailable;
+        try reused_cache.rewards.resize(reused_cache.allocator, validator_count);
+        try reused_cache.penalties.resize(reused_cache.allocator, validator_count);
+        self.rewards = reused_cache.rewards.items;
+        self.penalties = reused_cache.penalties.items;
     }
 };
 

@@ -115,6 +115,28 @@ pub const CachedBeaconState = struct {
         self.allocator.destroy(self.state);
     }
 
+    pub fn isSlashed(self: *const CachedBeaconState, index: ValidatorIndex) bool {
+        return self.slashings_cache.isSlashed(index);
+    }
+
+    pub fn recordValidatorSlashing(self: *CachedBeaconState, block_slot: types.primitive.Slot.Type, index: ValidatorIndex) !void {
+        try self.slashings_cache.recordValidatorSlashing(block_slot, index);
+    }
+
+    pub fn updateSlashingsCacheLatestBlockSlot(self: *CachedBeaconState) !void {
+        var latest_block_header = try self.state.latestBlockHeader();
+        const latest_block_slot = try latest_block_header.get("slot");
+        self.slashings_cache.updateLatestBlockSlot(latest_block_slot);
+    }
+
+    // TODO: implement loadCachedBeaconState
+    // this is used when we load a state from disc, given a seed state
+    // need to do this once we switch to TreeView
+
+    // TODO: implement getCachedBeaconState
+    // this is used to create a CachedBeaconState based on a tree and an exising CachedBeaconState at fork transition
+    // implement this once we switch to TreeView
+
     /// Gets the beacon proposer index for a given slot.
     /// For the Fulu fork, this uses `proposer_lookahead` from the state.
     /// For earlier forks, this uses `EpochCache.getBeaconProposer()`.
