@@ -15,6 +15,8 @@ pub const Counters = struct {
     queries_started: u64 = 0,
     authenticated_candidates: u64 = 0,
     authenticated_not_retained: u64 = 0,
+    referrals_received: u64 = 0,
+    referrals_published: u64 = 0,
     candidates_published: u64 = 0,
     query_timeouts: u64 = 0,
     query_failures: u64 = 0,
@@ -279,6 +281,7 @@ pub const Discovery = struct {
                         result.failure = result.failure orelse err;
                         return;
                     };
+                    self.publishReferrals(response, progress.now_ms, out, result);
                     if (response.matched.terminal) self.publishResponse(response, &known, progress.now_ms, out, result);
                 },
                 .failed => self.lookup.onFailure(self.driver.core, handle) catch unreachable,
@@ -299,8 +302,21 @@ pub const Discovery = struct {
         }
         if (progress.event == .response) {
             const response = &progress.event.response;
+            self.publishReferrals(response, progress.now_ms, out, result);
             if (!response.matched.terminal) return;
             if (known) |*record| self.publishResponse(response, record, progress.now_ms, out, result);
+        }
+    }
+
+    fn publishReferrals(self: *Discovery, response: *const d.Engine.AuthenticatedResponse, now_ms: u64, out: []adapter.Candidate, result: *Result) void {
+        std.debug.assert(response.node_records.len <= d.types.findnode_result_max);
+        for (response.node_records) |*record| {
+            if (std.mem.eql(u8, &record.node_id, &response.peer.node_id) or
+                std.mem.eql(u8, &record.node_id, &self.driver.core.localRecord().node_id)) continue;
+            self.counters.referrals_received +|= 1;
+            const before = result.candidates;
+            self.publish(record, response.peer.address, now_ms, out, result);
+            self.counters.referrals_published +|= result.candidates - before;
         }
     }
 

@@ -152,7 +152,10 @@ time is absent before the first publication and after close.
 Foreground discovery prioritizes current-network QUIC records and counts only
 matching successes toward convergence. Each walk permits at most 128 queries
 with three in flight. `lodestar_native_discovery_` counters show query progress,
-authenticated candidates and publications. Candidate rejection labels distinguish
+authenticated responders, received referrals and publications. Signed referrals
+from authenticated NODES responses enter bounded dialing without requiring a
+separate discovery response from each advertised node. The `referrals_received_total`
+and `referrals_published_total` counters use the same prefix. Candidate rejection labels distinguish
 missing `eth2`, incompatible fork, malformed ENR, absent QUIC, unsupported address family, endpoint scope,
 unwanted subnet/custody coverage and output capacity. A signed advertisement alone
 does not prove its QUIC endpoint is reachable.
