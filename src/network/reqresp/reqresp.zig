@@ -836,10 +836,12 @@ pub const ReqResp = struct {
         if (reason != .cancelled) std.log.scoped(.network_reqresp_errors).debug("request_failed direction={s} request={d}:{d} connection={d}:{d} method={s} phase={s} reason={s} detail={s} peer_code={d} chunks={d} elapsed_ms={d}", .{ if (@TypeOf(slot) == *Client) "outbound" else "inbound", index, slot.generation, slot.conn.index, slot.conn.generation, @tagName(slot.protocol), if (@TypeOf(slot) == *Client) @tagName(slot.requestPhase()) else @tagName(slot.state), @tagName(reason), detail, peer_code, slot.chunks, self.last_now_ms -| slot.started_ms });
         if (reason != .cancelled) self.counters.failures += 1;
         const counters = &self.protocol_counters[@intFromEnum(slot.protocol)];
-        if (reason == .cancelled) {} else if (@TypeOf(slot) == *Client) {
-            counters.outgoing_errors +|= 1;
-            self.outgoing_error_reasons[@intFromEnum(metrics.ErrorReason.fromFailure(reason, slot.requestPhase()))] +|= 1;
-        } else counters.incoming_errors +|= 1;
+        if (reason != .cancelled) {
+            if (@TypeOf(slot) == *Client) {
+                counters.outgoing_errors +|= 1;
+                self.outgoing_error_reasons[@intFromEnum(metrics.ErrorReason.fromFailure(reason, slot.requestPhase()))] +|= 1;
+            } else counters.incoming_errors +|= 1;
+        }
         slot.close_code = switch (reason) {
             .timeout => constants.app_error_timeout,
             .invalid_response,

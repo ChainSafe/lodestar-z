@@ -66,13 +66,13 @@ pub const Handler = struct {
     pub fn shutdown(self: *Handler, router: *routing.Router, engine: *Engine) void {
         for (self.streams, 0..) |*supervisor, index| {
             const peer = supervisor.peer orelse continue;
-            if (!self.inner.state.peerMatches(peer.index, peer.generation)) continue;
             if (supervisor.outbound == .negotiating) router.cancel(engine, supervisor.outbound.negotiating);
+            supervisor.* = .{};
+            if (!self.inner.state.peerMatches(peer.index, peer.generation)) continue;
             const conn = self.inner.state.peers[index].conn;
             self.inner.resetInbound(engine, @intCast(index));
             self.inner.resetOutbound(engine, @intCast(index));
             self.inner.connectionClosed(conn);
-            supervisor.* = .{};
         }
     }
 
@@ -296,7 +296,18 @@ pub const Handler = struct {
                 .negotiating => {},
             }
         }
-        return self.inner.pump(engine, now, out);
+        const count = self.inner.pump(engine, now, out);
+        for (self.streams) |*supervisor| {
+            const peer = supervisor.peer orelse continue;
+            if (self.inner.state.peerMatches(peer.index, peer.generation)) continue;
+            if (supervisor.outbound == .negotiating) {
+                const stream = supervisor.outbound.negotiating;
+                std.log.scoped(.network_gossip).debug("gossip_negotiation_cancelled connection={d}:{d} stream={d} reason=peer_retired", .{ stream.conn.index, stream.conn.generation, stream.id });
+                router.cancel(engine, stream);
+            }
+            supervisor.* = .{};
+        }
+        return count;
     }
 
     fn openOutbound(
