@@ -81,7 +81,6 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
                 std.testing.io,
                 self.pre.cached_state,
                 try self.pre.cached_state.state.slot() + self.slots,
-                .{},
                 null,
             );
         }

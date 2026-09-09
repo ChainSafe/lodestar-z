@@ -153,13 +153,6 @@ pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
     }
 }
 
-pub const EpochTransitionCacheOpts = struct {
-    /// Assert progressive balances the same in the cache.
-    assert_correct_progressive_balances: bool = false,
-    ///  Do not queue shuffling calculation async. Forces sync JIT calculation in afterProcessEpoch
-    async_shuffling_calculation: bool = false,
-};
-
 pub const EpochTransitionCache = struct {
     prev_epoch: Epoch,
     current_epoch: Epoch,
@@ -463,7 +456,6 @@ pub const EpochTransitionCache = struct {
             }
         }
 
-        // assertCorrectProgressiveBalances = true by default
         if (fork_seq.gte(.altair)) {
             if (epoch_cache.current_target_unslashed_balance_increments != curr_target_unsl_stake) {
                 return error.InCorrectCurrentTargetUnslashedBalance;

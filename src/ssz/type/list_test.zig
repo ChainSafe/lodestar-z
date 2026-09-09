@@ -3,6 +3,7 @@
 const std = @import("std");
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
+const BoolType = @import("bool.zig").BoolType;
 const UintType = @import("uint.zig").UintType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
@@ -10,6 +11,56 @@ const VariableContainerType = @import("container.zig").VariableContainerType;
 const TypeTestCase = @import("test_utils.zig").TypeTestCase;
 const FixedListType = @import("list.zig").FixedListType;
 const VariableListType = @import("list.zig").VariableListType;
+
+test "FixedListType - canonical boolean tree deserialization" {
+    const allocator = std.testing.allocator;
+    const byte_count = @as(usize, pmt.ChunkedLeaf.K) * 32 + 1;
+
+    inline for (.{ false, true }) |chunked_leaf| {
+        const List = FixedListType(BoolType(), byte_count, .{ .chunked_leaf = chunked_leaf });
+        var pool = try Node.Pool.init(.{
+            .page_allocator = allocator,
+            .allocator = allocator,
+            .pool_size = 1024,
+        });
+        defer pool.deinit();
+
+        var data: [byte_count]u8 = undefined;
+        for (&data, 0..) |*byte, i| byte.* = @intCast(i % 2);
+
+        const node = try List.tree.deserializeFromBytes(&pool, &data);
+        defer pool.unref(node);
+        const root = node.getRoot(&pool).*;
+
+        var value = List.default_value;
+        defer List.deinit(allocator, &value);
+        try List.tree.toValue(allocator, node, &pool, &value);
+        try std.testing.expectEqual(byte_count, value.items.len);
+        for (value.items, 0..) |item, i| try std.testing.expectEqual(i % 2 == 1, item);
+
+        var serialized: [byte_count]u8 = undefined;
+        const written = try List.tree.serializeIntoBytes(node, &pool, &serialized);
+        try std.testing.expectEqual(byte_count, written);
+        try std.testing.expectEqualSlices(u8, &data, &serialized);
+
+        const nodes_in_use = pool.getNodesInUse();
+        const next_free_node = pool.next_free_node;
+        for ([_]usize{ 0, 31, 32, byte_count - 2, byte_count - 1 }) |index| {
+            const original = data[index];
+            defer data[index] = original;
+            for ([_]u8{ 2, 0xff }) |invalid| {
+                data[index] = invalid;
+                try std.testing.expectError(
+                    error.invalidBoolean,
+                    List.tree.deserializeFromBytes(&pool, &data),
+                );
+                try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+                try std.testing.expectEqual(next_free_node, pool.next_free_node);
+                try std.testing.expectEqualSlices(u8, &root, node.getRoot(&pool));
+            }
+        }
+    }
+}
 
 const testCases = [_]TypeTestCase{
     .{ .id = "empty", .serializedHex = "0x", .json = "[]", .rootHex = "0x52e2647abc3d0c9d3be0387f3f0d925422c7a4e98cf4489066f0f43281a899f3" },
@@ -1112,4 +1163,111 @@ test "FixedListType opts.chunked_leaf=true: serialize -> deserialize round-trip"
     const round_id = try ListT.tree.deserializeFromBytes(&pool, buf);
     defer pool.unref(round_id);
     try std.testing.expectEqualSlices(u8, tree_id.getRoot(&pool), round_id.getRoot(&pool));
+}
+
+test "FixedListType chunked serialization needs no scratch allocation" {
+    const allocator = std.testing.allocator;
+    const items_per_chunked_leaf = @as(usize, pmt.ChunkedLeaf.K) * 4;
+
+    inline for (.{ items_per_chunked_leaf, 4 * items_per_chunked_leaf }) |limit| {
+        const List = FixedListType(UintType(64), limit, .{ .chunked_leaf = true });
+        const lengths = [_]usize{
+            0,
+            1,
+            3,
+            4,
+            5,
+            items_per_chunked_leaf - 1,
+            items_per_chunked_leaf,
+            items_per_chunked_leaf + 1,
+            2 * items_per_chunked_leaf + 7,
+            limit,
+        };
+        for (lengths) |len| {
+            if (len > limit) continue;
+
+            var failing = std.testing.FailingAllocator.init(allocator, .{});
+            var pool = try Node.Pool.init(.{
+                .page_allocator = failing.allocator(),
+                .allocator = failing.allocator(),
+                .pool_size = 64,
+            });
+            defer pool.deinit();
+
+            var value = List.default_value;
+            defer List.deinit(allocator, &value);
+            try value.resize(allocator, len);
+            for (value.items, 0..) |*item, i| item.* = @as(u64, @intCast(i + 1)) * 0x01020304050607;
+
+            const root = try List.tree.fromValue(&pool, &value);
+            defer pool.unref(root);
+            const zero_root = try List.tree.zeros(&pool, len);
+            defer pool.unref(zero_root);
+
+            const expected = try allocator.alloc(u8, List.serializedSize(&value));
+            defer allocator.free(expected);
+            _ = List.serializeIntoBytes(&value, expected);
+
+            const out = try allocator.alloc(u8, expected.len + 8);
+            defer allocator.free(out);
+
+            failing.fail_index = failing.alloc_index;
+            failing.resize_fail_index = failing.resize_index;
+            @memset(out, 0xaa);
+            try std.testing.expectEqual(
+                expected.len,
+                try List.tree.serializeIntoBytes(root, &pool, out),
+            );
+            try std.testing.expectEqualSlices(u8, expected, out[0..expected.len]);
+            try std.testing.expect(std.mem.allEqual(u8, out[expected.len..], 0xaa));
+
+            @memset(expected, 0);
+            @memset(out, 0xaa);
+            try std.testing.expectEqual(
+                expected.len,
+                try List.tree.serializeIntoBytes(zero_root, &pool, out),
+            );
+            try std.testing.expectEqualSlices(u8, expected, out[0..expected.len]);
+            try std.testing.expect(std.mem.allEqual(u8, out[expected.len..], 0xaa));
+            try std.testing.expect(!failing.has_induced_failure);
+        }
+    }
+}
+
+test "FixedListType chunked serialization preserves mixed zero subtrees without allocating" {
+    const allocator = std.testing.allocator;
+    const bytes_per_chunked_leaf = @as(usize, pmt.ChunkedLeaf.K) * 32;
+    const List = FixedListType(UintType(8), 4 * bytes_per_chunked_leaf, .{ .chunked_leaf = true });
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var pool = try Node.Pool.init(.{
+        .page_allocator = failing.allocator(),
+        .allocator = failing.allocator(),
+        .pool_size = 64,
+    });
+    defer pool.deinit();
+
+    var expected: [2 * bytes_per_chunked_leaf + 7]u8 = undefined;
+    for (&expected, 0..) |*byte, i| byte.* = @truncate(i + 1);
+    @memset(expected[bytes_per_chunked_leaf..][0..bytes_per_chunked_leaf], 0);
+
+    const root = try List.tree.deserializeFromBytes(&pool, &expected);
+    defer pool.unref(root);
+    const mixed_root = try root.setNodeAtDepth(
+        &pool,
+        List.chunk_depth + 1 - pmt.ChunkedLeaf.k_log2,
+        1,
+        @enumFromInt(pmt.ChunkedLeaf.k_log2),
+    );
+    defer pool.unref(mixed_root);
+
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    var out: [expected.len + 8]u8 = @splat(0xaa);
+    try std.testing.expectEqual(
+        expected.len,
+        try List.tree.serializeIntoBytes(mixed_root, &pool, &out),
+    );
+    try std.testing.expectEqualSlices(u8, &expected, out[0..expected.len]);
+    try std.testing.expect(std.mem.allEqual(u8, out[expected.len..], 0xaa));
+    try std.testing.expect(!failing.has_induced_failure);
 }

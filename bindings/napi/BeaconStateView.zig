@@ -1308,9 +1308,9 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
         js.io(),
         post_state,
         slot_value,
-        .{},
         validator_monitor.get(),
     );
+
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
