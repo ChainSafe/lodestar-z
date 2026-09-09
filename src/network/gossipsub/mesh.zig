@@ -9,6 +9,12 @@ const topic_mod = @import("topic.zig");
 const assert = std.debug.assert;
 const Set = state_mod.PeerSet;
 const Snapshot = struct { generation: u64 = 0, score: f64 = 0 };
+
+fn logChange(context: *const Context, topic: u16, peer: u16, comptime event: []const u8, backoff_ms: u64) void {
+    const row = &context.state.topics[topic];
+    const conn = context.state.peers[peer].conn;
+    std.log.scoped(.network_mesh).debug(event ++ " connection={d}:{d} topic={s} backoff_ms={d}", .{ conn.index, conn.generation, row.string[0..row.string_len], backoff_ms });
+}
 pub const Context = struct {
     state: *state_mod.State,
     peers: *peers_mod.Peers,
@@ -127,11 +133,13 @@ pub const Mesh = struct {
         if (!queue(context, topic, peer, null)) return false;
         members.set(peer);
         context.scores.graft(context.state.peers[peer].logical.index, topic, context.now);
+        logChange(context, topic, peer, "mesh_graft_sent", 0);
         return true;
     }
 
     pub fn prune(self: *Mesh, context: *const Context, topic: u16, peer: u16, backoff_ms: u64) void {
         if (context.state.mesh(topic).isSet(peer)) {
+            logChange(context, topic, peer, "mesh_prune_local", backoff_ms);
             context.state.mesh(topic).unset(peer);
             context.scores.prune(context.state.peers[peer].logical.index, topic, context.now);
         }
@@ -212,10 +220,12 @@ pub const Mesh = struct {
         context.state.setSubscription(topic, peer, true);
         context.state.mesh(topic).set(peer);
         context.scores.graft(row.logical.index, topic, context.now);
+        logChange(context, topic, peer, "mesh_graft_received", 0);
     }
 
     pub fn onPrune(self: *Mesh, context: *const Context, topic: u16, peer: u16, backoff_ms: u64) void {
         _ = self;
+        logChange(context, topic, peer, "mesh_prune_received", backoff_ms);
         context.state.mesh(topic).unset(peer);
         context.scores.prune(context.state.peers[peer].logical.index, topic, context.now);
         context.peers.addBackoff(context.state.peers[peer].logical, topic, context.state.topics[topic].generation, context.now, backoff_ms);

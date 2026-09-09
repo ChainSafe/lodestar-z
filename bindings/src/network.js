@@ -39,6 +39,8 @@ class NativeRuntime {
   get state() { return this.#native.getState(); }
   diagnostics() { return this.#native.diagnostics(); }
   getMetrics() { return this.#native.getMetrics(); }
+  drainLogs(maxRecords = 32) { return this.#native.drainLogs(maxRecords); }
+  setLogLevel(level) { this.#native.setLogLevel(level); }
   drain(maxEvents) { return this.#native.drain(maxEvents); }
   applyIntent(intent, slot) { return this.#native.applyIntent(intent, slot); }
   getIdentity() { return this.#native.getIdentity(); }

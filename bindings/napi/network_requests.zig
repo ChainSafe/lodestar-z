@@ -200,6 +200,11 @@ pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
         } else cell.terminal = .{ .rejected = .disconnected };
     }
     cell.state = if (cell.native != null) .native else .terminal;
+    if (cell.native) |handle| {
+        std.log.scoped(.network_bridge).debug("host_request_submitted host_request={d}:{d} request={d}:{d} method={s} peer={f}", .{ token.index, token.generation, handle.index, handle.generation, @tagName(cell.protocol), n.logging.peer(&cell.peer) });
+    } else if (cell.terminal) |terminal| {
+        std.log.scoped(.network_bridge).debug("host_request_refused host_request={d}:{d} method={s} peer={f} reason={s}", .{ token.index, token.generation, @tagName(cell.protocol), n.logging.peer(&cell.peer), if (terminal == .rejected) @tagName(terminal.rejected) else @tagName(terminal) });
+    }
     table.releasePayload(cell);
     runtime.pingLocked();
 }

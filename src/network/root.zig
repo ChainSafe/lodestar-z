@@ -1,4 +1,5 @@
 pub const metrics = @import("metrics.zig");
+pub const logging = @import("logging.zig");
 pub const identify = @import("identify/root.zig");
 pub const capabilities = @import("capabilities.zig");
 pub const core = @import("core.zig");
@@ -87,6 +88,7 @@ test {
 test {
     _ = identify;
     _ = metrics;
+    _ = logging;
     _ = @import("metrics_histogram.zig");
     _ = @import("metrics_score.zig");
     _ = @import("reqresp/metrics.zig");

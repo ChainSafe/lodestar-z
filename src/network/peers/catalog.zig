@@ -206,6 +206,7 @@ pub const Catalog = struct {
     }
 
     fn connect(row: *Row, conn: t.Handle, options: *const t.AdmissionOptions) void {
+        std.log.scoped(.network_peers).debug("peer_admitted peer={f} connection={d}:{d} direction={s}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(options.direction) });
         row.identify = null;
         row.custody_work = null;
         row.custody_context = null;
@@ -250,6 +251,7 @@ pub const Catalog = struct {
         now_ms: u64,
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
+        std.log.scoped(.network_peers).debug("peer_disconnected peer={f} connection={d}:{d} reason={s} connected_ms={d}", .{ @import("../logging.zig").peer(&row.identity), conn.index, conn.generation, @tagName(reason), now_ms -| row.connected_at_ms });
         self.revision +|= 1;
         row.connection = null;
         row.custody_work = null;

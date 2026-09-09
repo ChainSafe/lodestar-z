@@ -328,6 +328,7 @@ pub const Client = struct {
         };
         owner.counters.requests_sent += 1;
         owner.protocol_counters[@intFromEnum(which)].outgoing +|= 1;
+        std.log.scoped(.network_reqresp).debug("request_started direction=outbound request={d}:{d} connection={d}:{d} stream={d} method={s} bytes={d} max_chunks={d}", .{ index, slot.generation, conn.index, conn.generation, stream.id, @tagName(which), request_ssz.len, chunks_max });
         assert(slot.active());
         return slot.handle(index);
     }

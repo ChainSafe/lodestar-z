@@ -219,9 +219,8 @@ async function checkReplacement(incoming: NativeIncomingRequest, session: bigint
     );
     await ack;
     expect((await read).value?.data).toEqual(new Uint8Array(4000).fill(29));
-    const done = stream.next();
     expect(await next.finish()).toEqual({chunks: 1, reason: "served"});
-    expect((await done).done).toBe(true);
+    expect((await stream.next()).done).toBe(true);
   } finally {
     await Promise.all([replacement.left.close(), replacement.right.close()]);
   }

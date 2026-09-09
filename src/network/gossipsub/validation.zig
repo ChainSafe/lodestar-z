@@ -242,6 +242,7 @@ pub const Validation = struct {
             return;
         }
         if (now < e.deadline) return;
+        std.log.scoped(.network_gossip).debug("validation_expired message_id={x} topic_index={d} generation={d} elapsed_ms={d}", .{ e.id, e.topic, e.generation, now -| e.admitted_ms });
         releaseAttribution(e, peers);
         e.state = .expired;
         e.tombstone_until = e.deadline +| self.tombstone_ms;

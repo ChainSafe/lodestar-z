@@ -165,6 +165,7 @@ pub fn executeCommands(self: *Runtime, timestamp: n.Now) !void {
         };
         self.unlock();
         executeOne(self, i, timestamp) catch |err| {
+            std.log.scoped(.network_bridge).debug("command_failed command={s} operation={d}:{d} sequence={d} reason={s}", .{ @tagName(self.operations[i].input.command), token.index, token.generation, self.operations[i].sequence, @errorName(err) });
             self.operations[i].failure = err;
         };
         if (self.operations[i].input.command == .request) {
@@ -194,6 +195,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
                 self.unlock();
             }
             operation.publication = try core.publishGossipWithOptions(input.topic[0..input.topic_len], input.publication, input.publish_options, timestamp);
+            if (operation.publication.pressured > 0) std.log.scoped(.network_bridge).debug("publication_pressured topic={s} queued={d} pressured={d} unavailable={d}", .{ input.topic[0..input.topic_len], operation.publication.queued, operation.publication.pressured, operation.publication.unavailable });
             self.lock();
             @import("network_gossip.zig").published(self, operation.publication);
             self.unlock();
@@ -208,6 +210,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             operation.boolean = try core.applyIntent(&self.stores.?.intents[store.?].value, timestamp);
             self.lock();
             self.slot = input.slot;
+            if (!self.active) std.log.scoped(.network_runtime).info("owner_activated slot={d}", .{input.slot});
             self.active = true;
             self.diag.currentSlot = input.slot;
             if (!self.stop) self.diag.state = .running;

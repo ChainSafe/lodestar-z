@@ -321,6 +321,8 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     defer std.testing.allocator.free(buffer);
     var writer: Writer = .fixed(buffer);
     try snapshot.write(&writer);
+    const log_stats: @import("logging.zig").Stats = .{};
+    try log_stats.write(&writer);
     const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_discovery_total_dial_attempts 18446744073709551615\n") != null);

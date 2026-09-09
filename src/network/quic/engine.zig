@@ -845,6 +845,7 @@ pub const Engine = struct {
                     slot.deferClose(.peer_id_mismatch, types.app_error_peer_id_mismatch);
                 } else {
                     slot.connected_pending = true;
+                    std.log.scoped(.network_quic).debug("connection_established connection={d}:{d} direction={s} peer={f}", .{ index, slot.generation, @tagName(slot.direction), @import("../logging.zig").peer(&id) });
                 }
             } else {
                 slot.close(.tls_failed, types.app_error_normal);
@@ -861,6 +862,12 @@ pub const Engine = struct {
     fn markClosed(self: *Engine, index: u16, reason: CloseReason) void {
         const slot = &self.registry.slots[index];
         assert(slot.state == .handshaking or slot.state == .established);
+        const code: u64 = switch (reason) {
+            .peer_closed => |closed| closed.code,
+            .transport_error => |value| value,
+            else => 0,
+        };
+        std.log.scoped(.network_quic).debug("connection_closed connection={d}:{d} direction={s} state={s} reason={s} code={d}", .{ index, slot.generation, @tagName(slot.direction), @tagName(slot.state), @tagName(reason), code });
         if (slot.state == .established and slot.pending_close == null) {
             slot.discoverPeerStreams();
         }

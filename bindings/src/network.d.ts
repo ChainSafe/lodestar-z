@@ -240,7 +240,32 @@ export interface NativeRuntimeCloseResult {
   reason: "requested" | "startupCancelled" | "failed";
 }
 
+export type NativeLogLevel = "error" | "warn" | "info" | "debug" | "off";
+
+export interface NativeLogRecord {
+  level: Exclude<NativeLogLevel, "off">;
+  scope: string;
+  message: string;
+  session: bigint;
+  sequence: bigint;
+  timestampMs: bigint;
+  monotonicMs: bigint;
+  truncated: boolean;
+}
+
+export interface NativeLogBatch {
+  records: NativeLogRecord[];
+  more: boolean;
+  dropped: bigint;
+  suppressed: bigint;
+  truncated: bigint;
+}
+
 export interface NativeNetworkRuntime {
+  /** Drain at most 32 copied records. Available after close; logging never invokes JavaScript. */
+  drainLogs(maxRecords?: number): NativeLogBatch;
+  /** Defaults to info. Debug remains available in ReleaseSafe builds. */
+  setLogLevel(level: NativeLogLevel): void;
   /** Prometheus text from an owner snapshot refreshed at most once per second. Counters survive close. */
   getMetrics(): string;
   readonly ready: Promise<NativeIdentity>;
@@ -344,6 +369,8 @@ export interface NativePeerBatch {
 }
 
 export interface NativeNetworkApplicationRuntime {
+  drainLogs(maxRecords?: number): NativeLogBatch;
+  setLogLevel(level: NativeLogLevel): void;
   /** Prometheus text from an owner snapshot refreshed at most once per second. Counters survive close. */
   getMetrics(): string;
   readonly closed: Promise<NativeRuntimeCloseResult>;

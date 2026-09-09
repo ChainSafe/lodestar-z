@@ -58,7 +58,8 @@ import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 test("incoming copied metadata and acknowledged multiple contexts preserve wire bytes", async () => {
   const pair = await incomingPair();
   try {
-    const query = new Uint8Array(64).fill(7);
+    // Leave room below the client chunk limit so this test observes server EOF, not client cancellation.
+    const query = new Uint8Array(3 * 32).fill(7);
     const stream = pair.left.request(pair.remote.peerId, BLOCKS, query);
     const pending = stream.next();
     void pending.catch(() => undefined);
@@ -198,9 +199,8 @@ test("incoming input validation rolls back before a later valid response", async
     });
     await incoming.respond(new Uint8Array(4000), pair.rightConfig.requestForks[0]);
     expect((await pending).done).toBe(false);
-    const done = stream.next();
     await incoming.finish();
-    expect((await done).done).toBe(true);
+    expect((await stream.next()).done).toBe(true);
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
@@ -219,9 +219,9 @@ test("incoming chunk ceiling rejects an extra response without losing finish", a
       code: "NetworkIncomingRejected",
       reason: "too_many_chunks",
     });
-    const done = stream.next();
+    // Consuming the final chunk closes the client stream; finish the server first.
     expect(await incoming.finish()).toEqual({chunks: 1, reason: "served"});
-    expect((await done).done).toBe(true);
+    expect((await stream.next()).done).toBe(true);
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }
@@ -609,9 +609,9 @@ test("incoming complete handles isolate direction, connection and replacement ge
         await ack;
         expect((await pending).done).toBe(false);
       }
-      const done = previous ? stream.next() : pending;
       native.incomingTerminal(handle, 0, undefined, undefined);
       expect(await descriptor.closed).toEqual({chunks: previous ? 1 : 0, reason: "served"});
+      const done = previous ? stream.next() : pending;
       expect((await done).done).toBe(true);
       previous = handle;
     }
@@ -722,9 +722,8 @@ instrumented.each(Array.from({length: 9}, (_, i) => `incoming_result_${i}`))(
       });
       await incoming.respond(new Uint8Array(4000), pair.rightConfig.requestForks[0]);
       expect((await pending).done).toBe(false);
-      const done = stream.next();
       expect(await incoming.finish()).toEqual({chunks: 1, reason: "served"});
-      expect((await done).done).toBe(true);
+      expect((await stream.next()).done).toBe(true);
       expect(pair.right.diagnostics().incoming).toMatchObject({occupied: 0, reservedBytes: 0, responseBytes: 0});
     } finally {
       await Promise.all([pair.left.close(), pair.right.close()]);

@@ -493,7 +493,10 @@ pub const Gossipsub = struct {
     }
 
     pub fn resetInbound(self: *Gossipsub, engine: *Engine, index: u16) void {
-        if (self.state.peers[index].in_stream) |stream| engine.closeStream(stream, 0);
+        if (self.state.peers[index].in_stream) |stream| {
+            std.log.scoped(.network_gossip).debug("gossip_stream_reset direction=inbound connection={d}:{d} stream={d} blocked={s}", .{ stream.conn.index, stream.conn.generation, stream.id, @tagName(self.io.peers[index].blocked) });
+            engine.closeStream(stream, 0);
+        }
         self.state.peers[index].in_stream = null;
         const io = &self.io.peers[index];
         self.releaseLarge(io);
@@ -501,7 +504,10 @@ pub const Gossipsub = struct {
     }
 
     pub fn resetOutbound(self: *Gossipsub, engine: *Engine, index: u16) void {
-        if (self.state.peers[index].out_stream) |stream| engine.closeStream(stream, 0);
+        if (self.state.peers[index].out_stream) |stream| {
+            std.log.scoped(.network_gossip).debug("gossip_stream_reset direction=outbound connection={d}:{d} stream={d}", .{ stream.conn.index, stream.conn.generation, stream.id });
+            engine.closeStream(stream, 0);
+        }
         self.state.peers[index].out_stream = null;
         self.io.peers[index].resetTx(&self.store);
         self.cancelPromises(index, false);
@@ -658,6 +664,9 @@ pub const Gossipsub = struct {
                 .ignore => counts.ignored +|= 1,
             }
             self.validation_time.observe(now.mono_ms -| entry.admitted_ms);
+            if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, entry.id, @tagName(verdict), row.string[0..row.string_len], @import("../logging.zig").peer(&self.peers.rows[entry.source.index].identity), now.mono_ms -| entry.admitted_ms });
+        } else {
+            std.log.scoped(.network_gossip).debug("validation_report_refused validation={d}:{d} verdict={s} reason={s}", .{ handle.index, handle.generation, @tagName(verdict), @tagName(result.outcome) });
         }
         if (result.forward) |forward| {
             const delivered = self.deliver(self.state.mesh(forward.topic), forward.message, forward.source, now.mono_ms);
@@ -1072,7 +1081,11 @@ pub const Gossipsub = struct {
 
     fn pressure(self: *Gossipsub, index: u16, reason: @TypeOf(@as(PeerIo, undefined).blocked), now_ms: u64) void {
         const io = &self.io.peers[index];
-        if (io.pressure_since == null) io.pressure_since = now_ms;
+        if (io.pressure_since == null) {
+            const conn = self.state.peers[index].conn;
+            std.log.scoped(.network_gossip).debug("gossip_pressure_started connection={d}:{d} reason={s}", .{ conn.index, conn.generation, @tagName(reason) });
+            io.pressure_since = now_ms;
+        }
         io.blocked = reason;
         io.rx_ready = false;
         self.cancelPromises(index, true);
@@ -1089,6 +1102,8 @@ pub const Gossipsub = struct {
         for (0..self.options.items_per_peer + self.options.calls_per_peer + self.options.input_per_peer + 1) |_| {
             if (io.rpc != null) {
                 const done = self.processRpc(index, now, events, &count, &items) catch {
+                    const conn = self.state.peers[index].conn;
+                    std.log.scoped(.network_gossip).debug("gossip_rpc_refused connection={d}:{d} reason=malformed", .{ conn.index, conn.generation });
                     self.counters.malformed_rpcs += 1;
                     self.resetInbound(engine, index);
                     return count;

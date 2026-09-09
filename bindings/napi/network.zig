@@ -286,12 +286,23 @@ fn identity(env: napi.Env, value: *const r.Identity, session: u64) !Value {
 
 pub fn getMetrics(self: *@This()) !js.String {
     const metrics = @import("network").metrics;
-    const snapshot = (try self.owner()).metricsSnapshot();
+    const runtime = try self.owner();
+    const snapshot = runtime.metricsSnapshot();
+    const logs = runtime.logs.snapshot();
     const buffer = try r.allocator.alloc(u8, metrics.text_capacity);
     defer r.allocator.free(buffer);
     var writer: std.Io.Writer = .fixed(buffer);
     snapshot.write(&writer) catch return error.NetworkMetricsCapacity;
+    logs.write(&writer) catch return error.NetworkMetricsCapacity;
     return js.String.from(writer.buffered());
+}
+
+pub fn drainLogs(self: *@This(), limit: js.Value) !js.Value {
+    return @import("network_logs.zig").drain(try self.owner(), limit.val);
+}
+
+pub fn setLogLevel(self: *@This(), level: js.Value) !void {
+    try @import("network_logs.zig").configure(try self.owner(), level.val);
 }
 
 pub fn diagnostics(self: *@This()) !js.Value {

@@ -229,8 +229,10 @@ pub const Stores = struct {
 };
 
 pub const Runtime = struct {
+    logs: n.logging.Sink = .{},
     metrics: n.metrics.Snapshot = .{},
     metrics_due_ms: u64 = 0,
+    health_log_due_ms: u64 = 0,
     test_scenario: if (faults.enabled) faults.Scenario else void = if (faults.enabled) .none else {},
     test_drain_publication: if (faults.enabled) faults.DrainPublication else void = if (faults.enabled) .idle else {},
     refs: std.atomic.Value(u32) = .init(1),
@@ -592,7 +594,11 @@ pub const Runtime = struct {
         }
     }
     pub fn run(self: *Runtime) void {
+        defer self.release();
+        const previous_log = n.logging.bind(&self.logs);
+        defer _ = n.logging.bind(previous_log);
         self.serve() catch |err| {
+            if (err != error.AbortError) std.log.scoped(.network_runtime).err("owner_failed reason={s}", .{@errorName(err)});
             self.lock();
             if (self.reason != .failed) {
                 self.startup_error = err;
@@ -616,15 +622,18 @@ pub const Runtime = struct {
         self.retireStoresLocked();
         self.retireRequestStorageLocked();
         self.diag.state = if (self.reason == .failed) .failed else .closed;
+        std.log.scoped(.network_runtime).info("owner_stopped reason={s} turns={d} operational_failures={d}", .{ @tagName(self.reason), self.diag.ownerTurns, self.diag.operationalFailures });
         self.pingLocked();
         const release_notify = self.notify_live;
         self.notify_live = false;
         self.unlock();
         if (release_notify) self.notify.release(.release) catch unreachable;
         faults.count(&faults.owners, false);
-        self.release();
     }
     pub fn initializeOwner(self: *Runtime) !void {
+        const previous_log = n.logging.bind(&self.logs);
+        defer _ = n.logging.bind(previous_log);
+        std.log.scoped(.network_runtime).info("owner_initializing application={any}", .{self.application});
         if (!self.application) try self.startupBarrier(.entry);
         if (self.cancelled()) return error.AbortError;
         self.heavy.?.threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
@@ -698,6 +707,7 @@ pub const Runtime = struct {
             const timestamp = now(io);
             if (stop) {
                 if (self.closing_deadline == null) {
+                    std.log.scoped(.network_runtime).info("owner_stopping mode=graceful peers={d}", .{self.heavy.?.core.peerCounts().connected});
                     self.lock();
                     self.cancelCommandsLocked();
                     self.pingLocked();
@@ -782,6 +792,7 @@ pub const Runtime = struct {
         self.startup = .ready;
         self.diag.state = if (self.application) .prepared else .running;
         self.active = !self.application;
+        std.log.scoped(.network_runtime).info("owner_ready state={s} peer={f} target_peers={d} max_peers={d}", .{ @tagName(self.diag.state), n.logging.peer(&self.identity.peer), self.diag.resolvedCapacities.targetPeers, self.diag.resolvedCapacities.maxPeers });
         const plan = self.heavy.?.core.memoryPlan();
         self.diag.nativeRequestedBytes = plan.inline_bytes + plan.allocated_bytes;
         self.pingLocked();
@@ -797,6 +808,11 @@ pub const Runtime = struct {
         }
         self.lock();
         if (metrics) |*value| self.metrics = value.*;
+        if (timestamp.mono_ms >= self.health_log_due_ms) {
+            const active_requests = self.heavy.?.core.core.service.reqresp.inner.active();
+            std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.metrics.target, active_requests.outbound, active_requests.inbound, self.metrics.runtime.dial_started, self.metrics.runtime.dial_deferred, self.metrics.discovery_peers, self.metrics.gossip_counts.local_pressure_resets, self.metrics.udp.received_bytes, self.metrics.udp.sent_bytes });
+            self.health_log_due_ms = timestamp.mono_ms +| 30000;
+        }
         const was_empty = self.queue.len == 0;
         if (self.lane) |lane| {
             const empty = lane.len == 0;
@@ -818,6 +834,7 @@ pub const Runtime = struct {
             _ = self.queue.push(observation);
         }
         if (result.failure) |err| {
+            std.log.scoped(.network_runtime).debug("owner_turn_failed reason={s} fatal={any}", .{ @errorName(err), result.readiness.failure != null });
             self.diag.operationalFailures +|= 1;
             self.queue.recordFailure(err);
             if (result.readiness.failure != null) {
