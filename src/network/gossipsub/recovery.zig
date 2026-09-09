@@ -12,11 +12,13 @@ pub const Promise = struct {
     token: u64,
     connection: Handle,
     expiry: ?u64 = null,
+    sent_at_ms: u64 = 0,
 };
 
 pub const Recovery = struct {
     promises: []Promise,
     len: usize = 0,
+    metrics: @import("metrics.zig").Recovery = .{},
 
     pub fn init(allocator: std.mem.Allocator) !Recovery {
         return .{ .promises = try allocator.alloc(Promise, constants.promises_cap) };
@@ -48,11 +50,18 @@ pub const Recovery = struct {
         self.len += 1;
     }
 
-    pub fn resolve(self: *Recovery, peers: *Peers, id: MessageId) void {
+    pub const Receipt = struct { now_ms: u64, duplicate: bool = false };
+
+    pub fn resolve(self: *Recovery, peers: *Peers, id: MessageId, receipt: ?Receipt) void {
         var index: usize = 0;
         for (0..self.promises.len) |_| {
             if (index == self.len) break;
             if (std.mem.eql(u8, &self.promises[index].id, &id)) {
+                if (receipt) |received| if (self.promises[index].expiry != null) {
+                    self.metrics.resolved +|= 1;
+                    self.metrics.resolved_duplicate +|= @intFromBool(received.duplicate);
+                    self.metrics.delivery.observe(received.now_ms -| self.promises[index].sent_at_ms);
+                };
                 self.remove(peers, index);
             } else index += 1;
         }
@@ -77,6 +86,8 @@ pub const Recovery = struct {
         for (self.promises[0..self.len]) |*p| {
             if (p.expiry == null and p.token == token and std.meta.eql(p.connection, connection)) {
                 p.expiry = now_ms +| followup_ms;
+                p.sent_at_ms = now_ms;
+                self.metrics.sent +|= 1;
             }
         }
     }
@@ -134,6 +145,7 @@ test "recovery receipts bind connection generation and token and release only ca
     recovery.controlSent(next_connection, 7, 3000, 10);
     recovery.controlSent(connection, 6, 3000, 10);
     try std.testing.expect(recovery.nextExpiry() == null);
+    try std.testing.expectEqual(@as(u64, 0), recovery.metrics.sent);
     recovery.controlSent(connection, 7, 3000, 20);
     try std.testing.expectEqual(@as(?u64, 3020), recovery.nextExpiry());
     try std.testing.expectEqual(@as(u64, 0), recovery.cancel(&peers, next_connection, true));
@@ -142,6 +154,7 @@ test "recovery receipts bind connection generation and token and release only ca
     recovery.controlSent(connection, 7, 3000, 200);
     recovery.controlSent(connection, 8, 3000, 200);
     try std.testing.expectEqual(@as(?u64, 3020), recovery.nextExpiry());
+    try std.testing.expectEqual(@as(u64, 1), recovery.metrics.sent);
     try std.testing.expectEqual(@as(u64, 1), recovery.cancel(&peers, connection, true));
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
     try std.testing.expectEqual(@as(usize, constants.promises_cap), recovery.available());
@@ -165,9 +178,48 @@ test "recovery capacity resolves every matching attribution and deinit releases 
         defer recovery.deinit(allocator, &peers);
         for (0..constants.promises_cap) |_| recovery.add(&peers, [_]u8{1} ** 20, peer, connection, 7);
         try std.testing.expectEqual(@as(usize, 0), recovery.available());
-        recovery.resolve(&peers, [_]u8{1} ** 20);
+        recovery.resolve(&peers, [_]u8{1} ** 20, .{ .now_ms = 100 });
         try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
+        try std.testing.expectEqual(@as(u64, 0), recovery.metrics.resolved);
         recovery.add(&peers, [_]u8{2} ** 20, peer, connection, 8);
     }
+    try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
+}
+
+test "recovery metrics distinguish incoming delivery from queued and locally resolved requests" {
+    const allocator = std.testing.allocator;
+    var peers = try Peers.initCapacity(allocator, 10_000, 2, 1);
+    defer peers.deinit(allocator);
+    var recovery = try Recovery.init(allocator);
+    defer recovery.deinit(allocator, &peers);
+    const connection: Handle = .{ .index = 0, .generation = 1 };
+    const metadata: @import("peers.zig").Metadata = .{
+        .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length },
+        .address = .unspecified,
+        .direction = .inbound,
+    };
+    const peer = peers.admit(connection, &metadata, 0).admitted.peer;
+    const id = [_]u8{1} ** 20;
+    recovery.add(&peers, id, peer, connection, 1);
+    recovery.add(&peers, id, peer, connection, 2);
+    recovery.controlSent(connection, 1, 3000, 100);
+    recovery.controlSent(connection, 1, 3000, 200);
+    recovery.resolve(&peers, id, .{ .now_ms = 600 });
+    recovery.resolve(&peers, id, .{ .now_ms = 700 });
+    try std.testing.expectEqual(@as(u64, 1), recovery.metrics.sent);
+    try std.testing.expectEqual(@as(u64, 1), recovery.metrics.resolved);
+    try std.testing.expectEqual(@as(u64, 0), recovery.metrics.resolved_duplicate);
+    try std.testing.expectEqual(@as(u128, 500), recovery.metrics.delivery.sum_ms);
+    recovery.add(&peers, id, peer, connection, 3);
+    recovery.controlSent(connection, 3, 3000, 1000);
+    recovery.resolve(&peers, id, .{ .now_ms = 1100, .duplicate = true });
+    recovery.add(&peers, id, peer, connection, 4);
+    recovery.controlSent(connection, 4, 3000, 1200);
+    recovery.resolve(&peers, id, null);
+    try std.testing.expectEqual(@as(u64, 3), recovery.metrics.sent);
+    try std.testing.expectEqual(@as(u64, 2), recovery.metrics.resolved);
+    try std.testing.expectEqual(@as(u64, 1), recovery.metrics.resolved_duplicate);
+    try std.testing.expectEqual(@as(u64, 2), recovery.metrics.delivery.count);
+    try std.testing.expectEqual(@as(u128, 600), recovery.metrics.delivery.sum_ms);
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
 }
