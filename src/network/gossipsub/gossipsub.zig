@@ -145,6 +145,7 @@ pub const Gossipsub = struct {
     recovery: Recovery,
     counters: Counters = .{},
     topic_metrics: @import("metrics.zig").Topics = .{},
+    rpc_metrics: @import("metrics.zig").Rpc = .{},
     validation_time: @import("metrics.zig").ValidationTime = .{},
 
     pub const Counters = struct {
@@ -649,12 +650,13 @@ pub const Gossipsub = struct {
         self.store.seal(h);
         const fresh = self.seen.add(id, now_ms);
         assert(fresh);
-        self.resolvePromises(id);
+        self.resolvePromises(id, null);
         const result = self.deliver(&recipients, h, null, now_ms);
         self.counters.messages_published += 1;
         const counts = self.topic_metrics.get(topic_str);
         counts.published +|= 1;
         counts.published_peers +|= result.queued;
+        counts.published_bytes +|= @as(u64, @intCast(clen)) * result.queued;
         return result;
     }
 
@@ -1062,8 +1064,8 @@ pub const Gossipsub = struct {
         self.recovery.add(&self.peers, id, self.logical(index), self.state.peers[index].conn, token);
     }
 
-    fn resolvePromises(self: *Gossipsub, id: MessageId) void {
-        self.recovery.resolve(&self.peers, id);
+    fn resolvePromises(self: *Gossipsub, id: MessageId, receipt: ?Recovery.Receipt) void {
+        self.recovery.resolve(&self.peers, id, receipt);
     }
 
     fn cancelPromises(self: *Gossipsub, peer: u16, local_pressure: bool) void {
@@ -1171,6 +1173,7 @@ pub const Gossipsub = struct {
                 };
                 input -= result.consumed;
                 self.budget.input -= result.consumed;
+                self.rpc_metrics.received_bytes +|= result.consumed;
                 if (result.complete) self.counters.rpcs_received += 1;
                 continue;
             }
@@ -1220,7 +1223,10 @@ pub const Gossipsub = struct {
 
     fn processRpc(self: *Gossipsub, index: u16, now: Now, events: []Event, count: *usize, items: *usize) protobuf.Error!bool {
         const io = &self.io.peers[index];
-        if (!self.peers.rows[self.logical(index).index].direct and self.peerScore(index, now.mono_ms) < self.options.score_params.graylist_threshold) return true;
+        if (!self.peers.rows[self.logical(index).index].direct and self.peerScore(index, now.mono_ms) < self.options.score_params.graylist_threshold) {
+            self.rpc_metrics.graylist_dropped +|= 1;
+            return true;
+        }
         for (0..self.options.items_per_peer) |_| {
             if (items.* == 0 or self.budget.items == 0) return false;
             items.* -= 1;
@@ -1232,7 +1238,11 @@ pub const Gossipsub = struct {
                 self.budget.fields -= available - fields;
                 io.fields_pump += available - fields;
                 switch (step) {
-                    .item => |item| io.item = item,
+                    .item => |item| {
+                        io.item = item;
+                        self.rpc_metrics.observeItem(item, &io.rpc_had_control);
+                        if (item == .message) self.topic_metrics.get(item.message.topic).prevalidation +|= 1;
+                    },
                     .end => return true,
                     .deferred => return false,
                     .skipped => continue,
@@ -1286,7 +1296,7 @@ pub const Gossipsub = struct {
             .duplicate => |id| {
                 self.counters.duplicates += 1;
                 self.topic_metrics.get(msg.topic).duplicates +|= 1;
-                self.resolvePromises(id);
+                self.resolvePromises(id, .{ .now_ms = now.mono_ms, .duplicate = true });
                 return start;
             },
             .blocked => |reason| {
@@ -1299,7 +1309,7 @@ pub const Gossipsub = struct {
             },
             .admitted => |event| {
                 events[start] = .{ .message = event };
-                self.resolvePromises(event.id);
+                self.resolvePromises(event.id, .{ .now_ms = now.mono_ms });
                 self.counters.messages_received += 1;
                 self.topic_metrics.get(event.topic).admitted +|= 1;
                 if (msg.data.len >= self.options.idontwant_min_data_size) self.broadcastIdontwant(self.state.findTopic(event.topic).?, event.id, index);
@@ -1309,12 +1319,22 @@ pub const Gossipsub = struct {
     }
 
     fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
-        if (self.belowGossip(index, now.mono_ms)) return;
+        if (self.belowGossip(index, now.mono_ms)) {
+            self.rpc_metrics.ihave_ignored[0] +|= 1;
+            return;
+        }
         const io = &self.io.peers[index];
-        if (io.ihave_recv >= constants.max_ihave_per_heartbeat) return;
+        if (io.ihave_recv >= constants.max_ihave_per_heartbeat) {
+            self.rpc_metrics.ihave_ignored[1] +|= 1;
+            return;
+        }
         io.ihave_recv += 1;
         const id_budget = constants.max_ihave_ids_per_heartbeat -| @as(usize, io.iwant_ids_sent);
-        if (id_budget == 0 or self.recovery.available() == 0) return;
+        if (id_budget == 0 or self.recovery.available() == 0) {
+            self.rpc_metrics.ihave_ignored[if (id_budget == 0) @as(usize, 1) else 2] +|= 1;
+            return;
+        }
+        const metrics = self.topic_metrics.get(ihave.topic);
         var wanted: [constants.gossip_ids_max]MessageId = undefined;
         var count: usize = 0;
         var examined: usize = 0;
@@ -1325,7 +1345,9 @@ pub const Gossipsub = struct {
             if (count == wanted.len or count >= id_budget or count == self.recovery.available()) break;
             if (id_bytes.len != constants.message_id_length) continue;
             const id: MessageId = id_bytes[0..constants.message_id_length].*;
+            metrics.ihave_ids +|= 1;
             if (self.seen.contains(id, now.mono_ms) or self.validation.find(id, now.mono_ms) != null) continue;
+            metrics.ihave_unseen +|= 1;
             wanted[count] = id;
             count += 1;
         }
@@ -1351,7 +1373,11 @@ pub const Gossipsub = struct {
             if (id_bytes.len != constants.message_id_length) continue;
             const id: MessageId = id_bytes[0..constants.message_id_length].*;
             if (self.state.suppresses(index, id, self.last_now_ms)) continue;
-            const cached = self.mcache.get(&self.store, id) orelse continue;
+            const cached = self.mcache.get(&self.store, id) orelse {
+                self.rpc_metrics.iwant_unknown +|= 1;
+                continue;
+            };
+            self.topic_metrics.get(self.store.get(cached.message).?.topicString()).iwant_ids +|= 1;
             const peer = self.logical(index);
             if (!self.mcache.iwantAllowed(cached, peer, constants.gossip_retransmission)) continue;
             if (self.io.peers[index].queueData(&self.store, cached.message, self.options.tx_peer_bytes, self.last_now_ms) == .queued) {
@@ -1388,6 +1414,8 @@ pub const Gossipsub = struct {
             if (examined >= constants.dont_send_cap) break;
             examined += 1;
             if (id_bytes.len != constants.message_id_length) continue;
+            self.rpc_metrics.idontwant_ids +|= 1;
+            if (self.mcache.get(&self.store, id_bytes[0..constants.message_id_length].*) == null) self.rpc_metrics.idontwant_unknown +|= 1;
             self.state.suppress(index, id_bytes[0..constants.message_id_length].*, self.last_now_ms, constants.mcache_len * self.options.heartbeat_interval_ms);
         }
     }
@@ -1464,7 +1492,13 @@ pub const Gossipsub = struct {
             self.budget.output -= written;
             io.tx_progress_ms = now.mono_ms;
             const free = self.store.free_pages;
+            const was_data = io.active == .data;
+            self.rpc_metrics.sent_bytes +|= written;
             if (io.advance(&self.store, written)) |token| self.controlSent(index, token, now.mono_ms);
+            if (io.active == .none) {
+                self.rpc_metrics.sent_frames +|= 1;
+                self.rpc_metrics.sent_messages +|= @intFromBool(was_data);
+            }
             if (self.store.free_pages != free) self.wakeStorage();
         }
     }
@@ -1487,6 +1521,64 @@ test "gossipsub preserves admission after zero event capacity" {
     _ = g.onMessage(peer.index, msg, .{ .mono_ms = 1, .unix_s = 1 }, &empty, 0);
     const delivered = g.onMessage(peer.index, msg, .{ .mono_ms = 2, .unix_s = 1 }, &events, 0);
     try std.testing.expectEqual(@as(?usize, 1), delivered);
+}
+
+test "gossipsub metrics count a deferred RPC item only once" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    var compressed: [128]u8 = undefined;
+    const n = try snappy.raw.compress("payload", &compressed);
+    var bytes: [256]u8 = undefined;
+    var writer = protobuf.Writer.init(&bytes);
+    protobuf.writeMessage(&writer, compressed[0..n], name);
+    g.io.peers[peer.index].rpc = protobuf.RpcReader.init(writer.written());
+    g.budget = .{ .items = 128, .fields = 131072, .work = 1024 * 1024 };
+    var count: usize = 0;
+    var items: usize = 128;
+    for (0..2) |_| try std.testing.expect(!try g.processRpc(peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &.{}, &count, &items));
+    try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.items[@intFromEnum(std.meta.Tag(protobuf.Item).message)]);
+    try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).prevalidation);
+    try std.testing.expectEqual(@as(u64, 0), g.counters.messages_received);
+    var events: [1]Event = undefined;
+    try std.testing.expect(try g.processRpc(peer.index, .{ .mono_ms = 2, .unix_s = 1 }, &events, &count, &items));
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).prevalidation);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.messages_received);
+}
+
+test "gossipsub metrics distinguish partial writes from complete publication RPCs" {
+    var setup: @import("gossipsub_test.zig").GossipPair = .{};
+    try setup.init();
+    defer setup.deinit();
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(setup.client.subscribe(name));
+    try std.testing.expect(setup.server.subscribe(name));
+    for (0..20) |_| try setup.pumpOnce();
+    const before = setup.client.rpc_metrics;
+    setup.client.options.output_per_peer = 1;
+    const result = try setup.client.publish(name, "payload", setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 1), result.queued);
+    try setup.pumpOnce();
+    try std.testing.expectEqual(before.sent_bytes + 1, setup.client.rpc_metrics.sent_bytes);
+    try std.testing.expectEqual(before.sent_frames, setup.client.rpc_metrics.sent_frames);
+    try std.testing.expectEqual(@as(u64, 0), setup.client.rpc_metrics.sent_messages);
+    var received = false;
+    for (0..1000) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| if (event == .message) {
+            try std.testing.expectEqualStrings("payload", event.message.bytes);
+            received = true;
+        };
+        if (received) break;
+    }
+    try std.testing.expect(received);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.rpc_metrics.sent_messages);
+    try std.testing.expectEqual(@as(u64, 1), setup.server.topic_metrics.get(name).prevalidation);
+    try std.testing.expect(setup.client.rpc_metrics.sent_bytes > before.sent_bytes + 1);
+    try std.testing.expectEqual(setup.client.rpc_metrics.sent_bytes, setup.server.rpc_metrics.received_bytes);
 }
 
 fn testMessage(g: *Gossipsub, peer: u16, text: []const u8, now_ms: u64, events: []Event) !?usize {
@@ -2304,9 +2396,12 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     _ = io.segment(&g.store);
     try std.testing.expect(io.advance(&g.store, 1) == null);
     try std.testing.expect(g.recovery.nextExpiry() == null);
+    try std.testing.expectEqual(@as(u64, 0), g.recovery.metrics.sent);
     g.controlSent(p.index, io.advance(&g.store, 6).?, 100);
     g.controlSent(p.index, token, 200);
     try std.testing.expectEqual(@as(?u64, 12_100), g.recovery.nextExpiry());
+    try std.testing.expectEqual(@as(u64, 1), g.recovery.metrics.sent);
+    try std.testing.expectEqual(@as(u64, 0), g.recovery.metrics.resolved);
     g.expirePromises(12_099);
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     g.expirePromises(12_100);

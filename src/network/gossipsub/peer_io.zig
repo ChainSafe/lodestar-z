@@ -178,6 +178,7 @@ pub const PeerIo = struct {
     unread_end: usize = 0,
     reader: frame.Reader = .{},
     rpc: ?protobuf.RpcReader = null,
+    rpc_had_control: bool = false,
     item: ?protobuf.Item = null,
     subscriptions: usize = 0,
     messages: usize = 0,
@@ -215,6 +216,7 @@ pub const PeerIo = struct {
         }
         if (result.frame) |rpc| {
             self.rpc = protobuf.RpcReader.init(rpc);
+            self.rpc_had_control = false;
             self.subscriptions = 0;
             self.messages = 0;
             self.controls = 0;

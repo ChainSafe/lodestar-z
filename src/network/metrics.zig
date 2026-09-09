@@ -58,6 +58,10 @@ pub const Snapshot = struct {
     protocols: [rr.Protocol.count]rr.reqresp.ProtocolCounters = @splat(.{}),
     gossip_counts: gossip.Gossipsub.Counters = .{},
     gossip_topics: topic_metrics.Topics = .{},
+    gossip_rpc: topic_metrics.Rpc = .{},
+    gossip_recovery: topic_metrics.Recovery = .{},
+    gossip_seen: usize = 0,
+    gossip_history: usize = 0,
     gossip_resources: ?gossip.ResourceSnapshot = null,
     closed: [@typeInfo(peer_types.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
     closed_by_client: [client_count][@typeInfo(peer_types.DisconnectReason).@"enum".fields.len]u64 = @splat(@splat(0)),
@@ -98,6 +102,10 @@ pub const Snapshot = struct {
         self.protocols = core.service.reqresp.inner.protocol_counters;
         self.gossip_counts = g.counters;
         self.gossip_topics = g.topic_metrics;
+        self.gossip_rpc = g.rpc_metrics;
+        self.gossip_recovery = g.recovery.metrics;
+        self.gossip_seen = g.seen.count;
+        self.gossip_history = g.mcache.count;
         self.gossip_resources = g.resourceSnapshot();
         self.closed = core.control.counters.closed;
         self.identify_started = core.control.counters.identify_started;
@@ -201,6 +209,8 @@ pub const Snapshot = struct {
         self.mesh_clients = @splat(0);
         self.topic_count = 0;
         self.gossip_resources = null;
+        self.gossip_seen = 0;
+        self.gossip_history = 0;
         self.discovery_sessions = 0;
         self.discovery_peers = 0;
         self.discovery_lookups = 0;
@@ -386,6 +396,15 @@ pub const Snapshot = struct {
     }
 
     fn writeGossip(self: *const Snapshot, w: *Writer) Writer.Error!void {
+        try self.gossip_rpc.write(w);
+        try self.gossip_recovery.write(w);
+        try scalar(w, "gossipsub_rpc_recv_err_count_total", .counter, "Malformed incoming RPC frames or protobuf items", self.gossip_counts.malformed_rpcs);
+        try scalar(w, "gossipsub_iwant_promise_broken", .counter, "Sent per-peer IWANT promises that expired without a message", self.gossip_counts.broken_promises);
+        try scalar(w, "gossipsub_mcache_size", .gauge, "Stored message history entries", self.gossip_history);
+        try family(w, "gossipsub_cache_size", .gauge, "Native bounded cache entry counts");
+        try sample(w, "gossipsub_cache_size", "cache", "seenCache", self.gossip_seen);
+        try sample(w, "gossipsub_cache_size", "cache", "mcache", self.gossip_history);
+        try sample(w, "gossipsub_cache_size", "cache", "gossipTracer.promises", if (self.gossip_resources) |r| r.promises else @as(usize, 0));
         try scalar(w, "gossipsub_rpc_recv_count_total", .counter, "Complete received gossip RPCs", self.gossip_counts.rpcs_received);
         try family(w, "gossipsub_async_validation_delay_from_first_seen", .histogram, "Seconds from native gossip admission until an applied validation verdict");
         try prom.histogram(w, "gossipsub_async_validation_delay_from_first_seen", null, "", &self.validation_time);
@@ -395,12 +414,17 @@ pub const Snapshot = struct {
             .{ "gossipsub_ignored_messages_total", "ignored" },
             .{ "gossipsub_msg_publish_count_total", "published" },
             .{ "gossipsub_msg_publish_peers_total", "published_peers" },
+            .{ "gossipsub_msg_publish_bytes_total", "published_bytes", "Compressed publication bytes summed over successfully queued peer copies" },
+            .{ "gossipsub_msg_received_prevalidation_total", "prevalidation", "Decoded publication items before admission, including deferred and refused items" },
+            .{ "gossipsub_ihave_rcv_msgids_total", "ihave_ids", "Examined valid IHAVE IDs within processing limits" },
+            .{ "gossipsub_ihave_rcv_not_seen_msgids_total", "ihave_unseen", "Examined IHAVE IDs absent from seen and pending validation caches" },
+            .{ "gossipsub_iwant_rcv_msgids_total", "iwant_ids", "Examined valid unsuppressed IWANT IDs present in message history" },
             .{ "gossipsub_msg_forward_count_total", "forwarded" },
             .{ "gossipsub_msg_forward_peers_total", "forwarded_peers" },
             .{ "gossipsub_pre_validation_valid_total", "admitted" },
             .{ "gossipsub_pre_validation_duplicate_total", "duplicates" },
         }) |metric| {
-            try family(w, metric[0], .counter, "Native gossip " ++ metric[1] ++ "; peer copies count successful queue admissions");
+            try family(w, metric[0], .counter, if (metric.len == 3) metric[2] else "Native gossip " ++ metric[1] ++ "; peer copies count successful queue admissions");
             inline for (@typeInfo(gossip.topic_policy.Kind).@"enum".fields) |field| {
                 try sample(w, metric[0], "topic", field.name, @field(self.gossip_topics.counts[field.value], metric[1]));
             }
