@@ -3,6 +3,7 @@
 const std = @import("std");
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
+const BoolType = @import("bool.zig").BoolType;
 const UintType = @import("uint.zig").UintType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedContainerType = @import("container.zig").FixedContainerType;
@@ -11,6 +12,54 @@ const VariableContainerType = @import("container.zig").VariableContainerType;
 const TypeTestCase = @import("test_utils.zig").TypeTestCase;
 const FixedVectorType = @import("vector.zig").FixedVectorType;
 const VariableVectorType = @import("vector.zig").VariableVectorType;
+
+test "FixedVectorType - canonical boolean tree deserialization" {
+    const allocator = std.testing.allocator;
+    const byte_count = @as(usize, pmt.ChunkedLeaf.K) * 32 + 1;
+
+    inline for (.{ false, true }) |chunked_leaf| {
+        const Vector = FixedVectorType(BoolType(), byte_count, .{ .chunked_leaf = chunked_leaf });
+        var pool = try Node.Pool.init(.{
+            .page_allocator = allocator,
+            .allocator = allocator,
+            .pool_size = 1024,
+        });
+        defer pool.deinit();
+
+        var data: [byte_count]u8 = undefined;
+        for (&data, 0..) |*byte, i| byte.* = @intCast(i % 2);
+
+        const node = try Vector.tree.deserializeFromBytes(&pool, &data);
+        defer pool.unref(node);
+        const root = node.getRoot(&pool).*;
+
+        var value: Vector.Type = undefined;
+        try Vector.tree.toValue(node, &pool, &value);
+        for (value, 0..) |item, i| try std.testing.expectEqual(i % 2 == 1, item);
+
+        var serialized: [byte_count]u8 = undefined;
+        const written = try Vector.tree.serializeIntoBytes(node, &pool, &serialized);
+        try std.testing.expectEqual(byte_count, written);
+        try std.testing.expectEqualSlices(u8, &data, &serialized);
+
+        const nodes_in_use = pool.getNodesInUse();
+        const next_free_node = pool.next_free_node;
+        for ([_]usize{ 0, 31, 32, byte_count - 2, byte_count - 1 }) |index| {
+            const original = data[index];
+            defer data[index] = original;
+            for ([_]u8{ 2, 0xff }) |invalid| {
+                data[index] = invalid;
+                try std.testing.expectError(
+                    error.invalidBoolean,
+                    Vector.tree.deserializeFromBytes(&pool, &data),
+                );
+                try std.testing.expectEqual(nodes_in_use, pool.getNodesInUse());
+                try std.testing.expectEqual(next_free_node, pool.next_free_node);
+                try std.testing.expectEqualSlices(u8, &root, node.getRoot(&pool));
+            }
+        }
+    }
+}
 
 const testCases = [_]TypeTestCase{
     // refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/vector/valid.test.ts#L20
