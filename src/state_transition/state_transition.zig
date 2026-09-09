@@ -60,14 +60,11 @@ pub fn processSlots(
 
     if (try state.slot() > slot) return error.outdatedSlot;
 
-    // Decides whether to track commit time later below.
-    var epoch_transition_processed = false;
     while (try state.slot() < slot) {
         try processSlot(cached_state.state);
 
         const next_slot = try state.slot() + 1;
         if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
-            epoch_transition_processed = true;
             const epoch_transition_timer = time.start(io);
 
             var timer = time.start(io);
@@ -137,19 +134,17 @@ pub fn processSlots(
             }
 
             try epoch_cache.finalProcessEpoch(state);
+
+            const commit_timer = time.start(io);
+            try state.commit();
+            metrics.state_transition.epoch_transition_commit.observe(time.durationSeconds(time.since(io, commit_timer)));
             metrics.state_transition.epoch_transition.observe(time.durationSeconds(time.since(io, epoch_transition_timer)));
         } else {
             try state.setSlot(next_slot);
         }
     }
 
-    // Unlike lodestar-ts, the epoch transition above does not commit on its own
-    // so we manually commit and report here
-    const commit_timer = time.start(io);
     try state.commit();
-    if (epoch_transition_processed) {
-        metrics.state_transition.epoch_transition_commit.observe(time.durationSeconds(time.since(io, commit_timer)));
-    }
 }
 
 pub const TransitionOpts = struct {
