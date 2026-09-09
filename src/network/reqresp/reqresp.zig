@@ -174,6 +174,14 @@ pub const Counters = struct {
     over_limit_dropped: u64 = 0,
 };
 
+pub const ProtocolCounters = struct {
+    outgoing: u64 = 0,
+    incoming: u64 = 0,
+    outgoing_errors: u64 = 0,
+    incoming_errors: u64 = 0,
+    rate_limited: u64 = 0,
+};
+
 const OverLimit = struct {
     peer: Handle,
     protocol: Protocol,
@@ -204,6 +212,7 @@ pub const ReqResp = struct {
     over_limit_len: u8 = 0,
     last_now_ms: u64 = 0,
     counters: Counters = .{},
+    protocol_counters: [Protocol.count]ProtocolCounters = @splat(.{}),
     forks: [64]ForkEntry = undefined,
     fork_count: u8 = 0,
     work_cursor: usize = 0,
@@ -792,6 +801,8 @@ pub const ReqResp = struct {
     pub fn fail(self: *ReqResp, slot: anytype, index: u16, reason: Failure, engine: ?*Engine) void {
         if (slot.terminal != null) return;
         self.counters.failures += 1;
+        const counters = &self.protocol_counters[@intFromEnum(slot.protocol)];
+        if (@TypeOf(slot) == *Client) counters.outgoing_errors +|= 1 else counters.incoming_errors +|= 1;
         slot.close_code = switch (reason) {
             .timeout => constants.app_error_timeout,
             .invalid_response,

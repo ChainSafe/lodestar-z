@@ -1,3 +1,4 @@
+pub const metrics = @import("metrics.zig");
 pub const identify = @import("identify/root.zig");
 pub const capabilities = @import("capabilities.zig");
 pub const core = @import("core.zig");
@@ -85,4 +86,5 @@ test {
 
 test {
     _ = identify;
+    _ = metrics;
 }

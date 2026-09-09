@@ -1,4 +1,4 @@
-import {expect, test} from "vitest";
+import {expect, test, vi} from "vitest";
 import {createNativeNetworkApplicationRuntime} from "../src/network.js";
 import {applicationConfig, localIntent} from "./utils/network.js";
 
@@ -152,6 +152,16 @@ test.each([
     expect(await published).toEqual({duplicate: false, pressured: 0, queued: 1, selected: 1, unavailable: 0});
     await delay(40);
     const message = await nextGossip(pair.right);
+    await vi.waitFor(
+      () => {
+        expect(pair.left.getMetrics()).toContain('gossipsub_msg_publish_count_total{topic="beacon_block"} 1\n');
+        expect(pair.right.getMetrics()).toContain('gossipsub_pre_validation_valid_total{topic="beacon_block"} 1\n');
+        expect(pair.left.getMetrics()).toContain(
+          'lodestar_gossip_topic_peers_by_type_count{type="beacon_block",boundary="01020304"} 1\n'
+        );
+      },
+      {timeout: 5000}
+    );
     expect(message.topic).toBe(TOPIC);
     expect(message.data).toEqual(new Uint8Array(10).fill(7));
     expect(message.peerId).toEqual(pair.identity.peerId);

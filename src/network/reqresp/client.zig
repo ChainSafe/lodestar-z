@@ -325,6 +325,7 @@ pub const Client = struct {
             .chunks_max = chunks_max,
         };
         owner.counters.requests_sent += 1;
+        owner.protocol_counters[@intFromEnum(which)].outgoing +|= 1;
         assert(slot.active());
         return slot.handle(index);
     }
