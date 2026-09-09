@@ -475,15 +475,23 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
             try merkleize(@ptrCast(&chunks), chunk_depth, out);
         }
 
-        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
-            comptime {
-                const OutInfo = @typeInfo(@TypeOf(out.*));
-                std.debug.assert(OutInfo == .array);
-                std.debug.assert(OutInfo.array.len == length);
-            }
+        /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
+        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+            return cloneInto(@This(), allocator, value, out);
+        }
+
+        /// The caller initializes `out` with `DestinationST.default_value` and deinitializes it
+        /// after success or error. Errors leave `out` safe to deinitialize.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
+            comptime std.debug.assert(DestinationST.length == length);
 
             for (value, 0..) |*element, i| {
-                try Element.clone(allocator, element, &out[i]);
+                try Element.cloneInto(DestinationST.Element, allocator, element, &out[i]);
             }
         }
 
