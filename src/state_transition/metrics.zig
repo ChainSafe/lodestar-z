@@ -271,4 +271,3 @@ test "exports the expected metric names" {
         try std.testing.expectEqualStrings(name, actual);
     }
 }
->>>>>>> conflict 1 of 1 ends
