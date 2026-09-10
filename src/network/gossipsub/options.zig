@@ -4,6 +4,7 @@ const score_mod = @import("score.zig");
 const storage = @import("message_store.zig");
 
 pub const Options = struct {
+    observe_subscriptions: bool = true,
     topic_policy: ?[]const @import("topic_policy.zig").Boundary = null,
     connected_capacity: u16 = constants.peers_cap,
     retained_capacity: u16 = @import("peer_book.zig").capacity,

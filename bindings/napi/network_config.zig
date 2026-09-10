@@ -193,6 +193,7 @@ pub fn parseCommon(value: Value, out: *Config) !void {
 fn parseGossip(value: Value, out: *Config) !void {
     const resolved = n.configuration.resolve(.{ .profile = out.profile, .seed = 1, .forks = out.forks[0..out.fork_count] }) catch return error.InvalidNetworkConfig;
     out.gossip = resolved.core.service.gossipsub;
+    out.gossip.observe_subscriptions = false;
     const policy = try get(value, "gossipPolicy");
     try object(policy, &.{ "phase0Digest", "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score" });
     out.gossip.iwant_followup_ms = try bigint(try get(policy, "iwantFollowupMs"));

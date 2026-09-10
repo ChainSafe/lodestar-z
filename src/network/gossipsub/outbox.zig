@@ -5,10 +5,11 @@ const constants = @import("constants.zig");
 const topic = @import("topic.zig");
 const assert = std.debug.assert;
 const ItemKind = std.meta.Tag(protobuf.Item);
-pub const data_capacity = 512;
+const delivery = @import("delivery.zig");
+pub const data_capacity = delivery.per_peer_limit;
 pub const control_frames = 128;
 pub const QueueResult = enum { queued, full };
-pub const DropReason = enum { data_descriptors, data_bytes, control_frames, control_bytes, critical_frames, critical_bytes, token_exhausted };
+pub const DropReason = enum { data_descriptors, data_pool, data_bytes, control_frames, control_bytes, critical_frames, critical_bytes, token_exhausted };
 pub const drop_reason_count = @typeInfo(DropReason).@"enum".fields.len;
 
 pub const Control = union(enum) {
@@ -126,81 +127,12 @@ pub const ControlQueue = struct {
     }
 };
 
-pub const DataTx = struct {
-    message: storage.Handle,
-    enqueued_ms: u64,
-    page: storage.Cursor,
-    prefix: [32]u8 = undefined,
-    prefix_len: u8,
-    trailer: [topic.topic_max_len + 2]u8 = undefined,
-    trailer_len: u8,
-    stage: enum { prefix, data, trailer, done } = .prefix,
-    offset: usize = 0,
-    wire_len: usize,
-
-    pub fn init(store: *const storage.Store, h: storage.Handle, now_ms: u64) DataTx {
-        const e = store.get(h).?;
-        var tx: DataTx = .{ .message = h, .enqueued_ms = now_ms, .page = store.cursor(h), .prefix_len = 0, .trailer_len = 0, .wire_len = 0 };
-        const lengths = encodePrefix(&tx.prefix, &tx.trailer, e.len, e.topicString());
-        tx.prefix_len = @intCast(lengths.prefix);
-        tx.trailer_len = @intCast(lengths.trailer);
-        tx.wire_len = lengths.prefix + e.len + lengths.trailer;
-        return tx;
-    }
-    pub fn segment(self: *const DataTx, store: *const storage.Store) []const u8 {
-        return switch (self.stage) {
-            .prefix => self.prefix[self.offset..self.prefix_len],
-            .data => store.segment(self.message, self.page),
-            .trailer => self.trailer[self.offset..self.trailer_len],
-            .done => &.{},
-        };
-    }
-    pub fn advance(self: *DataTx, store: *const storage.Store, len: usize) void {
-        assert(len > 0 and len <= self.segment(store).len);
-        switch (self.stage) {
-            .prefix, .trailer => {
-                self.offset += len;
-                const end = if (self.stage == .prefix) self.prefix_len else self.trailer_len;
-                if (self.offset == end) {
-                    self.stage = if (self.stage == .trailer) .done else if (self.page.remaining == 0) .trailer else .data;
-                    self.offset = 0;
-                }
-            },
-            .data => {
-                store.advance(&self.page, len);
-                if (self.page.remaining == 0) self.stage = .trailer;
-            },
-            .done => unreachable,
-        }
-    }
-};
-
-pub fn encodePrefix(prefix: []u8, trailer: []u8, len: usize, name: []const u8) struct { prefix: usize, trailer: usize } {
-    assert(len <= constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE));
-    assert(name.len <= topic.topic_max_len);
-    var tail = protobuf.Writer.init(trailer);
-    tail.bytesField(4, name);
-    const message_len = 1 + protobuf.varintLen(len) + len + tail.len;
-    const rpc_len = 1 + protobuf.varintLen(message_len) + message_len;
-    assert(rpc_len <= constants.GOSSIP_MAX_SIZE);
-    var head = protobuf.Writer.init(prefix);
-    head.varint(rpc_len);
-    head.tag(2, protobuf.wire_len);
-    head.varint(message_len);
-    head.tag(2, protobuf.wire_len);
-    head.varint(len);
-    return .{ .prefix = head.len, .trailer = tail.len };
-}
+pub const encodePrefix = storage.encodePrefix;
 
 pub const Outbox = struct {
     control: ControlQueue,
     critical: ControlQueue,
-    data: [data_capacity]DataTx = undefined,
-    data_head: usize = 0,
-    data_count: usize = 0,
-    data_bytes: usize = 0,
-    data_bytes_high_water: usize = 0,
-    data_descriptors_high_water: usize = 0,
+    data: delivery.Queue,
     active: enum { none, critical, control, data } = .none,
     control_burst: u8 = 0,
     sequence: u64 = 0,
@@ -211,7 +143,6 @@ pub const Outbox = struct {
     subscription_cursor: usize = 0,
     pending_prunes: std.StaticBitSet(constants.topics_cap) = .initEmpty(),
     prune_since: ?u64 = null,
-    retiring: bool = false,
     drops: [drop_reason_count]u64 = @splat(0),
     pressure_pending: bool = false,
     pressure_log_due_ms: u64 = 0,
@@ -223,29 +154,29 @@ pub const Outbox = struct {
         self.ready = true;
     }
 
-    pub fn synchronize(self: *Outbox, rows: []const @import("overlay.zig").Row, now: u64) void {
-        self.subscription_dirty = .initEmpty();
-        for (rows, 0..) |*row, index| {
-            if (row.active and row.subscribed) self.subscriptionChanged(index, now);
-        }
-        if (self.subscription_dirty.count() == 0) self.subscription_since = null;
+    pub fn synchronize(self: *Outbox, subscribed: *const std.StaticBitSet(constants.topics_cap), now: u64) void {
+        self.subscription_dirty = subscribed.*;
+        self.subscription_since = if (subscribed.count() == 0) null else self.subscription_since orelse now;
         self.ready = true;
     }
 
-    pub fn subscriptions(self: *Outbox, rows: []const @import("overlay.zig").Row, now: u64) void {
-        assert(rows.len == constants.topics_cap);
-        if (self.subscription_dirty.count() == 0) return;
+    pub fn nextSubscription(self: *Outbox) ?u16 {
+        if (self.subscription_dirty.count() == 0) return null;
         for (0..constants.topics_cap) |_| {
             const index = self.subscription_cursor;
-            if (self.subscription_dirty.isSet(index)) {
-                const row = &rows[index];
-                assert(row.active);
-                if (self.submit(&.{ .subscription = .{ .topic = row.string[0..row.string_len], .subscribed = row.subscribed } }, now) == null) return;
-                self.subscription_dirty.unset(index);
-            }
+            if (self.subscription_dirty.isSet(index)) return @intCast(index);
             self.subscription_cursor = (index + 1) % constants.topics_cap;
         }
-        self.subscription_since = null;
+        return null;
+    }
+
+    pub fn announce(self: *Outbox, index: u16, name: []const u8, subscribed: bool, now: u64) bool {
+        assert(self.subscription_dirty.isSet(index));
+        if (self.submit(&.{ .subscription = .{ .topic = name, .subscribed = subscribed } }, now) == null) return false;
+        self.subscription_dirty.unset(index);
+        self.subscription_cursor = (index + 1) % constants.topics_cap;
+        if (self.subscription_dirty.count() == 0) self.subscription_since = null;
+        return true;
     }
 
     pub fn deferPrune(self: *Outbox, index: usize, now: u64) void {
@@ -263,7 +194,11 @@ pub const Outbox = struct {
         self.subscription_since = null;
         self.pending_prunes = .initEmpty();
         self.prune_since = null;
-        self.retiring = false;
+    }
+
+    pub fn pruneExpired(self: *const Outbox, now: u64, timeout: u64) bool {
+        if (self.prune_since) |since| if (now >= since +| timeout) return true;
+        return false;
     }
 
     pub fn submit(self: *Outbox, control: *const Control, now_ms: u64) ?u64 {
@@ -308,22 +243,14 @@ pub const Outbox = struct {
     }
 
     pub fn queueData(self: *Outbox, store: *storage.Store, h: storage.Handle, byte_limit: usize, now_ms: u64) QueueResult {
-        const e = store.get(h).?;
-        assert(self.data_bytes <= byte_limit);
-        if (self.data_count == data_capacity) {
-            self.dropped(.data_descriptors);
+        self.data.append(store, h, byte_limit, now_ms) catch |err| {
+            self.dropped(switch (err) {
+                error.Descriptors => .data_descriptors,
+                error.PoolFull => .data_pool,
+                error.Bytes => .data_bytes,
+            });
             return .full;
-        }
-        if (e.len > byte_limit - self.data_bytes) {
-            self.dropped(.data_bytes);
-            return .full;
-        }
-        self.data[(self.data_head + self.data_count) % data_capacity] = DataTx.init(store, h, now_ms);
-        self.data_count += 1;
-        self.data_bytes += e.len;
-        self.data_bytes_high_water = @max(self.data_bytes_high_water, self.data_bytes);
-        self.data_descriptors_high_water = @max(self.data_descriptors_high_water, self.data_count);
-        store.retainTx(h);
+        };
         self.ready = true;
         return .queued;
     }
@@ -333,17 +260,17 @@ pub const Outbox = struct {
         self.last_drop = reason;
     }
     pub fn pending(self: *const Outbox) bool {
-        return self.data_count != 0 or self.control.count != 0 or self.critical.count != 0;
+        return self.data.count != 0 or self.control.count != 0 or self.critical.count != 0;
     }
     pub fn segment(self: *Outbox, store: *const storage.Store) []const u8 {
         if (self.active == .none) {
-            if (self.data_count > 0 and self.control_burst >= 4) {
+            if (self.data.count > 0 and self.control_burst >= 4) {
                 self.active = .data;
             } else if (self.critical.count > 0) {
                 self.active = .critical;
             } else if (self.control.count > 0) {
                 self.active = .control;
-            } else if (self.data_count > 0) {
+            } else if (self.data.count > 0) {
                 self.active = .data;
             }
         }
@@ -351,7 +278,7 @@ pub const Outbox = struct {
             .none => &.{},
             .critical => self.critical.segment(),
             .control => self.control.segment(),
-            .data => self.data[self.data_head].segment(store),
+            .data => self.data.first().?.segment(store),
         };
     }
     pub fn advance(self: *Outbox, store: *storage.Store, len: usize) ?Completion {
@@ -367,13 +294,7 @@ pub const Outbox = struct {
                 }
             },
             .data => {
-                const tx = &self.data[self.data_head];
-                tx.advance(store, len);
-                if (tx.stage == .done) {
-                    self.data_bytes -= store.get(tx.message).?.len;
-                    store.releaseTx(tx.message);
-                    self.data_head = (self.data_head + 1) % data_capacity;
-                    self.data_count -= 1;
+                if (self.data.advance(store, len)) {
                     self.active = .none;
                     self.progress_ms = null;
                     self.control_burst = 0;
@@ -385,18 +306,15 @@ pub const Outbox = struct {
     }
     pub fn oldest(self: *const Outbox) ?u64 {
         var first: ?u64 = null;
-        if (self.data_count > 0) first = self.data[self.data_head].enqueued_ms;
+        if (self.data.count > 0) first = self.data.first().?.enqueued_ms;
         if (self.control.count > 0) first = @min(first orelse std.math.maxInt(u64), self.control.enqueued_ms[self.control.head]);
         if (self.critical.count > 0) first = @min(first orelse std.math.maxInt(u64), self.critical.enqueued_ms[self.critical.head]);
         return first;
     }
 
     pub fn reset(self: *Outbox, store: *storage.Store) void {
-        for (0..self.data_count) |i| store.releaseTx(self.data[(self.data_head + i) % data_capacity].message);
+        self.data.reset(store);
         self.pressure_pending = false;
-        self.data_head = 0;
-        self.data_count = 0;
-        self.data_bytes = 0;
         self.active = .none;
         self.control.reset();
         self.critical.reset();
@@ -429,7 +347,9 @@ test "gossip transmit retains pages and never interleaves control into partial d
     defer store.deinit(std.testing.allocator);
     var normal: [64]u8 = undefined;
     var critical: [64]u8 = undefined;
-    var io: Outbox = .{ .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
+    var deliveries = try delivery.Pool.init(std.testing.allocator, 1, data_capacity);
+    defer deliveries.deinit(std.testing.allocator);
+    var io: Outbox = .{ .data = .{ .pool = &deliveries }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
     const h = store.put([_]u8{1} ** 20, "topic", "payload").?;
     store.retainHistory(h);
     store.seal(h);
@@ -466,14 +386,16 @@ test "gossip critical capacity and data queue pressure are independent and relea
     defer store.deinit(std.testing.allocator);
     var normal: [8]u8 = undefined;
     var critical: [8]u8 = undefined;
-    var io: Outbox = .{ .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
+    var deliveries = try delivery.Pool.init(std.testing.allocator, 1, data_capacity);
+    defer deliveries.deinit(std.testing.allocator);
+    var io: Outbox = .{ .data = .{ .pool = &deliveries }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
     const h = store.put([_]u8{1} ** 20, "t", "x").?;
     store.retainHistory(h);
     store.seal(h);
     for (0..data_capacity) |_| try std.testing.expectEqual(QueueResult.queued, io.queueData(&store, h, 8192, 0));
     try std.testing.expectEqual(QueueResult.full, io.queueData(&store, h, 8192, 0));
-    try std.testing.expectEqual(@as(usize, data_capacity), io.data_bytes_high_water);
-    try std.testing.expectEqual(@as(usize, data_capacity), io.data_descriptors_high_water);
+    try std.testing.expectEqual(@as(usize, data_capacity), io.data.bytes_high_water);
+    try std.testing.expectEqual(@as(usize, data_capacity), io.data.descriptors_high_water);
     try std.testing.expect(io.inject("12345678", 0));
     try std.testing.expect(!io.inject("x", 0));
     try std.testing.expect(io.appendControl("critical", true, null, 0) != null);
@@ -492,7 +414,9 @@ test "gossip queues a full validation burst in order and preserves byte bounds" 
     defer store.deinit(std.testing.allocator);
     var normal: [8]u8 = undefined;
     var critical: [8]u8 = undefined;
-    var io: Outbox = .{ .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
+    var deliveries = try delivery.Pool.init(std.testing.allocator, 1, data_capacity);
+    defer deliveries.deinit(std.testing.allocator);
+    var io: Outbox = .{ .data = .{ .pool = &deliveries }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
     defer io.reset(&store);
     var expected: [4096]u8 = undefined;
     var writer = protobuf.Writer.init(&expected);
@@ -529,7 +453,9 @@ test "metrics control kinds survive partial writes ring reuse and refused frames
     defer store.deinit(std.testing.allocator);
     var normal: [4]u8 = undefined;
     var critical: [4]u8 = undefined;
-    var io: Outbox = .{ .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
+    var deliveries = try delivery.Pool.init(std.testing.allocator, 1, data_capacity);
+    defer deliveries.deinit(std.testing.allocator);
+    var io: Outbox = .{ .data = .{ .pool = &deliveries }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
     var metrics: @import("metrics.zig").Rpc = .{};
     const kinds = [_]ItemKind{ .subscription, .ihave, .iwant, .graft, .prune, .idontwant };
     for (0..control_frames * kinds.len) |index| {
@@ -582,7 +508,9 @@ test "gossip typed controls preserve maximum ID lists and completion kinds" {
         .{ .idontwant = &ids },
     };
     var bytes: [8192]u8 = undefined;
-    var outbox: Outbox = .{ .control = .{ .bytes = bytes[0..4096] }, .critical = .{ .bytes = bytes[4096..] } };
+    var deliveries = try delivery.Pool.init(std.testing.allocator, 1, data_capacity);
+    defer deliveries.deinit(std.testing.allocator);
+    var outbox: Outbox = .{ .data = .{ .pool = &deliveries }, .control = .{ .bytes = bytes[0..4096] }, .critical = .{ .bytes = bytes[4096..] } };
     var store = try storage.Store.init(std.testing.allocator, 1, 4096);
     defer store.deinit(std.testing.allocator);
     for (&controls) |*control| {

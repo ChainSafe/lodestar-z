@@ -30,12 +30,12 @@ pub const PeerIo = struct {
         return options.control_bytes + options.critical_bytes + options.body_buffer_bytes + constants.read_scratch_len;
     }
 
-    pub fn init(bytes: []u8, options: *const @import("options.zig").Options) PeerIo {
+    pub fn init(bytes: []u8, options: *const @import("options.zig").Options, deliveries: *@import("delivery.zig").Pool) PeerIo {
         assert(bytes.len == bufferBytes(options));
         const critical = options.control_bytes;
         const body = critical + options.critical_bytes;
         const unread = body + options.body_buffer_bytes;
-        return .{ .tx = .{ .control = .{ .bytes = bytes[0..critical] }, .critical = .{ .bytes = bytes[critical..body] } }, .body = bytes[body..unread], .unread = bytes[unread..] };
+        return .{ .tx = .{ .data = .{ .pool = deliveries }, .control = .{ .bytes = bytes[0..critical] }, .critical = .{ .bytes = bytes[critical..body] } }, .body = bytes[body..unread], .unread = bytes[unread..] };
     }
 
     write_first: bool = false,

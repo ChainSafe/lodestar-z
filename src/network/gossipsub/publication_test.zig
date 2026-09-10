@@ -47,7 +47,8 @@ test "publication recipient policy tops up without graft and accounts unique sha
     try std.testing.expect(g.setPeerScore(g.sessions.rows[0].conn, -10_000));
     try std.testing.expect(g.setPeerScore(g.sessions.rows[10].conn, g.options.score_params.publish_threshold - 1));
     try std.testing.expect(g.setPeerScore(g.sessions.rows[9].conn, g.options.score_params.publish_threshold));
-    g.sessions.rows[11].io.tx.retiring = true;
+    g.options.pressure_timeout_ms = 1;
+    g.sessions.rows[11].io.tx.deferPrune(t, 0);
     g.overlay.rows[t].mesh.set(1);
     g.overlay.rows[t].mesh.set(10);
     g.overlay.rows[t].mesh.set(11);
@@ -64,13 +65,13 @@ test "publication recipient policy tops up without graft and accounts unique sha
         const io = &peer.io;
         try std.testing.expectEqual(@as(usize, 0), io.tx.critical.used);
         if (index == 0 or (index >= 2 and index <= 8)) {
-            try std.testing.expectEqual(@as(usize, 1), io.tx.data_count);
-            try std.testing.expectEqual(h, io.tx.data[io.tx.data_head].message);
-        } else try std.testing.expectEqual(@as(usize, 0), io.tx.data_count);
+            try std.testing.expectEqual(@as(usize, 1), io.tx.data.count);
+            try std.testing.expectEqual(h, io.tx.data.first().?.message);
+        } else try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
         io.tx.reset(&g.messages.store);
     }
     g.sessions.rows[2].outbound = .{ .waiting = 0 };
-    for (0..g.sessions.rows[3].io.tx.data.len) |_| try std.testing.expectEqual(.queued, g.sessions.rows[3].io.tx.queueData(&g.messages.store, h, g.options.tx_peer_bytes, 2));
+    for (0..@import("outbox.zig").data_capacity) |_| try std.testing.expectEqual(.queued, g.sessions.rows[3].io.tx.queueData(&g.messages.store, h, g.options.tx_peer_bytes, 2));
     const flood = try g.publishWithOptions(topic, "flood", .{ .flood = true }, .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 10, .queued = 6, .pressured = 1, .unavailable = 3 }, flood);
 }
@@ -140,7 +141,7 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
     for (g.sessions.rows) |*peer| peer.io.tx.reset(&g.messages.store);
     const full = try g.publish(topic, "full mesh", .{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 8, .queued = 8 }, full);
-    for (g.sessions.rows[0..10], 0..) |*peer, index| try std.testing.expectEqual(@as(usize, if (index < 8) 1 else 0), peer.io.tx.data_count);
+    for (g.sessions.rows[0..10], 0..) |*peer, index| try std.testing.expectEqual(@as(usize, if (index < 8) 1 else 0), peer.io.tx.data.count);
 }
 
 test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {

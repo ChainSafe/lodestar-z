@@ -7,6 +7,10 @@ const MessageId = [constants.message_id_length]u8;
 
 const empty_slot: u32 = std.math.maxInt(u32);
 
+pub fn indexCapacity(capacity: usize) usize {
+    return std.math.ceilPowerOfTwo(usize, @max(capacity * 2, 2)) catch unreachable;
+}
+
 fn hashId(id: MessageId) usize {
     // Stored IDs are computed SHA-256 truncations. Remote query IDs still use bounded probing.
     return std.mem.readInt(u64, id[0..8], .little);
@@ -20,7 +24,7 @@ const Index = struct {
     mask: usize,
 
     fn init(allocator: Allocator, capacity: usize, ids: []MessageId) Allocator.Error!Index {
-        const table_len = std.math.ceilPowerOfTwo(usize, @max(capacity * 2, 2)) catch unreachable;
+        const table_len = indexCapacity(capacity);
         const slots = try allocator.alloc(u32, table_len);
         @memset(slots, empty_slot);
         return .{ .slots = slots, .ids = ids, .mask = table_len - 1 };

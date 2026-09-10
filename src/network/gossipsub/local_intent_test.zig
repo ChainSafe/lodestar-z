@@ -95,7 +95,7 @@ test "local intent separate validation control score backoff and generation pins
     const handle = g.messages.validation.admit(&g.messages.store, &g.peers, message, logical, .{ .index = 0, .generation = 1 }, now.mono_ms);
     g.messages.store.seal(message);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.messages.validation.finish(&g.messages.store, &g.peers, handle, .ignore, now.mono_ms);
+    g.messages.validation.finish(&g.messages.store, handle, .ignore, now.mono_ms);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     g.messages.validation.expire(&g.messages.store, &g.peers, std.math.maxInt(u64));
     io.tx.subscription_dirty.set(0);
@@ -151,8 +151,8 @@ test "local intent history survives former row reuse and real retransmission des
     try std.testing.expect(served == .known);
     try std.testing.expectEqualStrings(name, served.known.topic);
     try std.testing.expectEqual(.queued, served.known.result);
-    try std.testing.expectEqual(retained, io.tx.data[io.tx.data_head].message);
-    try std.testing.expectEqualStrings(name, g.messages.store.get(io.tx.data[io.tx.data_head].message).?.topicString());
+    try std.testing.expectEqual(retained, io.tx.data.first().?.message);
+    try std.testing.expectEqualStrings(name, g.messages.store.get(io.tx.data.first().?.message).?.topicString());
     try std.testing.expect(io.tx.segment(&g.messages.store).len > 0);
 }
 

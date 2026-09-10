@@ -26,8 +26,8 @@ pub const ReceivePool = struct {
         self.* = undefined;
     }
 
-    pub fn metadataBytes(self: *const ReceivePool) usize {
-        return self.slots.len * @sizeOf(Slot);
+    pub fn metadataBytes(count: usize) usize {
+        return count * @sizeOf(Slot);
     }
 
     pub fn available(self: *const ReceivePool) usize {

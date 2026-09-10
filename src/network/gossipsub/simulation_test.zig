@@ -72,7 +72,7 @@ const Node = struct {
         const tx = &source.core.sessions.rows[source.session.index].io;
         const rx = &target.core.sessions.rows[target.session.index].io;
         if (rx.rpc != null) return;
-        tx.tx.subscriptions(&source.core.overlay.rows, source.core.last_now_ms);
+        source.core.overlay.flushSubscriptions(&tx.tx, source.core.last_now_ms);
         const segment = tx.tx.segment(&source.core.messages.store);
         if (segment.len == 0) return;
         const take = @min(bytes, segment.len, rx.unread.len);

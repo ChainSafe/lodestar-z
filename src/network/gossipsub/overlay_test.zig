@@ -150,10 +150,10 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     context.now = 71_002;
     f.g.overlay.onGraft(&context, f.topic, 0);
     try std.testing.expect(f.g.overlay.mesh(f.topic).isSet(0));
-    try std.testing.expect(!f.g.sessions.rows[0].io.tx.retiring);
+    try std.testing.expect(!f.g.sessions.rows[0].io.tx.pruneExpired(context.now, f.g.options.pressure_timeout_ms));
     f.g.overlay.rows[f.topic].mesh.unset(0);
     f.g.peers.scores.prune(f.g.sessions.rows[0].logical.index, f.topic, context.now);
-    f.g.sessions.rows[0].io.tx.retiring = true;
+    f.g.sessions.rows[0].io.tx.deferPrune(f.topic, 0);
     f.g.overlay.onGraft(&context, f.topic, 0);
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
 }
