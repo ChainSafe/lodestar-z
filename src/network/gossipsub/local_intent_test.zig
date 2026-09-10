@@ -14,7 +14,7 @@ fn options() gossip.Options {
 }
 
 fn unavailableExcept(g: *gossip.Gossipsub, count: usize) void {
-    for (g.state.registry.rows[count..]) |*row| row.generation = std.math.maxInt(u64);
+    for (g.overlay.rows[count..]) |*row| row.generation = std.math.maxInt(u64);
 }
 
 fn apply(g: *gossip.Gossipsub, w: *local.Workspace, desired: []const local.Subscription) !bool {
@@ -39,7 +39,7 @@ test "local intent exact capacity excess duplicate score and namespace refusal" 
     }
     const calls = ledger.allocation_calls;
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    try std.testing.expect(g.state.registry.findTopic(desired[0].name) == null);
+    try std.testing.expect(g.overlay.findTopic(desired[0].name) == null);
     try std.testing.expect(try apply(&g, w, desired[0..512]));
     try std.testing.expect(!try apply(&g, w, desired[0..512]));
     const revision = g.scores.revision;
@@ -48,11 +48,11 @@ test "local intent exact capacity excess duplicate score and namespace refusal" 
     try std.testing.expectError(error.InvalidLimits, apply(&g, w, &.{ desired[0], .{ .name = name, .params = .{ .weight = std.math.nan(f64) } } }));
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &.{.{ .name = name, .params = .{} }}));
     try std.testing.expectEqual(revision, g.scores.revision);
-    for (0..512) |i| try std.testing.expect(g.state.registry.subscribed(@intCast(i)));
+    for (0..512) |i| try std.testing.expect(g.overlay.subscribed(@intCast(i)));
     try std.testing.expect(try apply(&g, w, &.{}));
-    const deadline = g.state.registry.rows[0].retire_after_ms;
+    const deadline = g.overlay.rows[0].retire_after_ms;
     try std.testing.expect(!try g.prepareSubscriptions(&.{}, w, .{ .mono_ms = 200, .unix_s = 0 }));
-    try std.testing.expectEqual(deadline, g.state.registry.rows[0].retire_after_ms);
+    try std.testing.expectEqual(deadline, g.overlay.rows[0].retire_after_ms);
     try std.testing.expectEqual(calls, ledger.allocation_calls);
     var generic = try gossip.Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
     defer generic.deinit();
@@ -69,13 +69,13 @@ test "local intent reserves reclaimable desired rows and copies alias before rep
     unavailableExcept(&g, 2);
     try g.configureTopic(name, &.{ .weight = 2 });
     try g.configureTopic(next, &.{});
-    const aliased = g.state.registry.topicString(0);
-    const generation = g.state.registry.rows[0].generation;
+    const aliased = g.overlay.topicString(0);
+    const generation = g.overlay.rows[0].generation;
     const replace = "/eth2/05060708/beacon_block/ssz_snappy";
     try std.testing.expect(try apply(&g, w, &.{ .{ .name = replace, .params = .{ .weight = 3 } }, .{ .name = aliased, .params = .{ .weight = 4 } } }));
-    try std.testing.expectEqualStrings(name, g.state.registry.topicString(0));
-    try std.testing.expectEqual(generation, g.state.registry.rows[0].generation);
-    try std.testing.expectEqualStrings(replace, g.state.registry.topicString(1));
+    try std.testing.expectEqualStrings(name, g.overlay.topicString(0));
+    try std.testing.expectEqual(generation, g.overlay.rows[0].generation);
+    try std.testing.expectEqualStrings(replace, g.overlay.topicString(1));
     try std.testing.expectEqual(@as(f64, 4), g.scores.topic_params[0].weight);
 }
 
@@ -101,30 +101,30 @@ test "local intent separate validation control score backoff and generation pins
     io.subscription_dirty.set(0);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     io.subscription_dirty.unset(0);
-    g.state.registry.rows[0].mesh.set(peer.index);
+    g.overlay.rows[0].mesh.set(peer.index);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.state.registry.rows[0].mesh.unset(peer.index);
-    g.state.registry.rows[0].fanout.set(peer.index);
+    g.overlay.rows[0].mesh.unset(peer.index);
+    g.overlay.rows[0].fanout.set(peer.index);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.state.registry.rows[0].fanout.unset(peer.index);
-    g.mesh_policy.pending_prunes[0].set(peer.index);
+    g.overlay.rows[0].fanout.unset(peer.index);
+    g.overlay.pending_prunes[0].set(peer.index);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.mesh_policy.pending_prunes[0].unset(peer.index);
+    g.overlay.pending_prunes[0].unset(peer.index);
     g.scores.invalid(logical.index, 0);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.state.registry.rows[0].retire_after_ms = now.mono_ms;
-    const generation = g.state.registry.rows[0].generation;
+    g.overlay.rows[0].retire_after_ms = now.mono_ms;
+    const generation = g.overlay.rows[0].generation;
     g.peers.backoffs[logical.index * 512] = .{ .topic_generation = generation, .until = now.mono_ms + 1 };
     const revision = g.scores.revision;
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     try std.testing.expect(g.scores.retainsTopic(0));
     try std.testing.expectEqual(revision, g.scores.revision);
     g.peers.backoffs[logical.index * 512].topic_generation += 1;
-    g.state.registry.rows[0].generation = std.math.maxInt(u64);
+    g.overlay.rows[0].generation = std.math.maxInt(u64);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.state.registry.rows[0].generation = generation;
+    g.overlay.rows[0].generation = generation;
     try std.testing.expect(try apply(&g, w, &desired));
-    try std.testing.expectEqual(generation + 1, g.state.registry.rows[0].generation);
+    try std.testing.expectEqual(generation + 1, g.overlay.rows[0].generation);
     try std.testing.expect(!g.scores.retainsTopic(0));
 }
 
@@ -139,7 +139,7 @@ test "local intent history survives former row reuse and real retransmission des
     const id = topic.validMessageId(name, "history payload", .{});
     const retained = g.messages.history.get(&g.messages.store, id).?.message;
     try std.testing.expect(try apply(&g, w, &.{.{ .name = next, .params = .{} }}));
-    try std.testing.expectEqualStrings(next, g.state.registry.topicString(0));
+    try std.testing.expectEqualStrings(next, g.overlay.topicString(0));
     const entry = g.messages.store.get(retained).?;
     try std.testing.expectEqualStrings(name, entry.topicString());
     var payload: [64]u8 = undefined;
@@ -165,18 +165,18 @@ test "local intent copies retired row input before another assignment reuses it"
     try g.configureTopic(name, &.{});
     try g.configureTopic(next, &.{});
     try g.configureTopic("/eth2/01020304/proposer_slashing/ssz_snappy", &.{});
-    const input = g.state.registry.topicString(1);
+    const input = g.overlay.topicString(1);
     try g.configureTopic("/eth2/05060708/beacon_block/ssz_snappy", &.{});
-    try std.testing.expect(!g.state.registry.rows[1].active);
+    try std.testing.expect(!g.overlay.rows[1].active);
     try std.testing.expectEqualStrings(next, input);
     const replacement = "/eth2/090a0b0c/beacon_block/ssz_snappy";
     try std.testing.expect(try apply(&g, w, &.{
-        .{ .name = g.state.registry.topicString(0), .params = .{} },
+        .{ .name = g.overlay.topicString(0), .params = .{} },
         .{ .name = replacement, .params = .{} },
         .{ .name = input, .params = .{ .weight = 5 } },
     }));
-    try std.testing.expectEqualStrings(replacement, g.state.registry.topicString(1));
-    try std.testing.expectEqualStrings(next, g.state.registry.topicString(2));
+    try std.testing.expectEqualStrings(replacement, g.overlay.topicString(1));
+    try std.testing.expectEqualStrings(next, g.overlay.topicString(2));
     try std.testing.expectEqual(@as(f64, 5), g.scores.topic_params[2].weight);
 }
 
@@ -209,16 +209,16 @@ fn cachedRetirement(complete_intent: bool) !void {
         try std.testing.expectEqual(@as(?u64, null), g.scores.nextChange(logical));
         const revision = g.scores.revision;
         const params = g.scores.topic_params[0];
-        const generation = g.state.registry.rows[0].generation;
-        try std.testing.expect(now.mono_ms >= g.state.registry.rows[0].retire_after_ms.?);
+        const generation = g.overlay.rows[0].generation;
+        try std.testing.expect(now.mono_ms >= g.overlay.rows[0].retire_after_ms.?);
         if (complete_intent) {
             try std.testing.expect(try apply(&g, w, &.{.{ .name = next, .params = params }}));
         } else {
             g.last_now_ms = now.mono_ms;
             try g.configureTopic(next, &params);
         }
-        try std.testing.expectEqualStrings(next, g.state.registry.topicString(0));
-        try std.testing.expectEqual(generation + 1, g.state.registry.rows[0].generation);
+        try std.testing.expectEqualStrings(next, g.overlay.topicString(0));
+        try std.testing.expectEqual(generation + 1, g.overlay.rows[0].generation);
         try std.testing.expectEqualDeep(params, g.scores.topic_params[0]);
         try std.testing.expect(!g.scores.retainsTopic(0));
         try std.testing.expect(g.scores.revision > revision);

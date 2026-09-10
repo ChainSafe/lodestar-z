@@ -50,7 +50,7 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").No
     out.next = null;
     out.peer_count = 0;
     out.topic_count = 0;
-    for (&g.state.registry.rows, 0..) |*row, i| {
+    for (&g.overlay.rows, 0..) |*row, i| {
         if (!row.active) continue;
         const params = &g.scores.topic_params[i];
         const target = &out.topics[out.topic_count];
@@ -72,7 +72,7 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").No
         peer.* = .{ .identity = row.identity, .connected = row.connection != null, .outbound_ready = if (session) |i| g.state.peers[i].outStream() != null else false, .address = row.address, .retain_until = row.retain_until, .score = total, .app_score = g.scores.app_score[index], .behaviour = g.scores.behaviour[index], .weights = weights.global };
         for (out.topics[0..out.topic_count]) |*known| {
             const counters = &g.scores.topics[index * c.topics_cap + known.index];
-            const member = if (session) |i| g.state.registry.rows[known.index].mesh.isSet(i) else false;
+            const member = if (session) |i| g.overlay.rows[known.index].mesh.isSet(i) else false;
             if (!member and !counters.in_mesh and counters.first_deliveries == 0 and counters.mesh_deliveries == 0 and counters.mesh_failures == 0 and counters.invalid == 0) continue;
             peer.topics[peer.topic_count] = .{ .index = known.index, .counters = counters.*, .weights = weights.topics[known.index], .mesh_member = member };
             peer.topic_count += 1;
@@ -88,7 +88,7 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     defer g.deinit();
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(name));
-    const t = g.state.registry.findTopic(name).?;
+    const t = g.overlay.findTopic(name).?;
     for (0..10) |i| {
         const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
         g.scores.invalid(g.state.peers[peer.index].logical.index, t);
