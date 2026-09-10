@@ -4,7 +4,7 @@ set -euo pipefail
 FUZZ_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="${FUZZ_DIR}/zig-out/bin"
 CORPUS_DIR="${FUZZ_DIR}/corpus"
-TARGETS=(network_reqresp network_gossip network_managed)
+TARGETS=(network_reqresp network_gossip network_gossip_lifecycle network_managed)
 
 for target in "${TARGETS[@]}"; do
     bin="${BIN_DIR}/fuzz-${target}"
@@ -22,6 +22,7 @@ for target in "${TARGETS[@]}"; do
     log="/tmp/lodestar-z-afl-${target}.log"
     input_max=131072
     if test "$target" = network_managed; then input_max=302; fi
+    if test "$target" = network_gossip_lifecycle; then input_max=512; fi
     if ! AFL_SKIP_CPUFREQ=1 afl-fuzz -i "$corpus" -o "/tmp/lodestar-z-afl-${target}" -V 3 -G "$input_max" -- "$bin" >"$log" 2>&1; then
         cat "$log" >&2
         exit 1
