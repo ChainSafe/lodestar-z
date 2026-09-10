@@ -8,7 +8,6 @@ const protobuf = @import("protobuf.zig");
 const topic_mod = @import("topic.zig");
 const assert = std.debug.assert;
 const Set = state_mod.PeerSet;
-const Snapshot = struct { generation: u64 = 0, score: f64 = 0 };
 
 fn logChange(context: *const Context, topic: u16, peer: u16, comptime event: []const u8, backoff_ms: u64) void {
     const row = &context.state.registry.rows[topic];
@@ -22,12 +21,11 @@ pub const Context = struct {
     now: u64,
     heartbeat_ms: u64,
     pressure_ms: u64,
-    use_snapshot: bool = false,
+    snapshot: ?*const @import("heartbeat_cycle.zig").Scores = null,
 };
 
 pub const Mesh = struct {
     rng: std.Random.DefaultPrng,
-    snapshot: [c.peers_cap]Snapshot = [_]Snapshot{.{}} ** c.peers_cap,
     pending_prunes: [c.topics_cap]Set = [_]Set{.initEmpty()} ** c.topics_cap,
     pending_count: [c.peers_cap]u16 = [_]u16{0} ** c.peers_cap,
     pending_since: [c.peers_cap]?u64 = [_]?u64{null} ** c.peers_cap,
@@ -38,25 +36,16 @@ pub const Mesh = struct {
         return .{ .rng = std.Random.DefaultPrng.init(seed) };
     }
 
-    pub fn takeSnapshot(self: *Mesh, context: *const Context) void {
-        for (context.state.peers, 0..) |*peer, index| {
-            self.snapshot[index] = if (peer.active) .{
-                .generation = peer.generation,
-                .score = context.scores.score(peer.logical.index, context.now),
-            } else .{};
-        }
-    }
-
-    fn score(self: *const Mesh, context: *const Context, peer: u16) f64 {
-        if (!context.use_snapshot) return context.scores.score(context.state.peers[peer].logical.index, context.now);
-        if (self.snapshot[peer].generation != context.state.peerGeneration(peer)) return -score_mod.counter_max;
-        return self.snapshot[peer].score;
+    fn score(context: *const Context, peer: u16) f64 {
+        const snapshot = context.snapshot orelse return context.scores.score(context.state.peers[peer].logical.index, context.now);
+        if (snapshot[peer].generation != context.state.peerGeneration(peer)) return -score_mod.counter_max;
+        return snapshot[peer].value;
     }
 
     fn eligible(self: *const Mesh, context: *const Context, topic: u16, peer: u16, threshold: f64) bool {
         const row = &context.state.peers[peer];
         if (!row.active or context.peers.rows[row.logical.index].direct or self.retire.isSet(peer)) return false;
-        return context.state.registry.subscribers(topic).isSet(peer) and self.score(context, peer) >= threshold;
+        return context.state.registry.subscribers(topic).isSet(peer) and score(context, peer) >= threshold;
     }
 
     fn graftEligible(self: *const Mesh, context: *const Context, topic: u16, peer: u16) bool {
@@ -196,7 +185,6 @@ pub const Mesh = struct {
         for (&self.pending_prunes) |*set| set.unset(peer);
         self.pending_since[peer] = null;
         self.pending_count[peer] = 0;
-        self.snapshot[peer] = .{};
     }
 
     pub fn onGraft(self: *Mesh, context: *const Context, topic: u16, peer: u16) void {
@@ -242,7 +230,7 @@ pub const Mesh = struct {
             ordered[count] = @intCast(peer);
             count += 1;
         }
-        self.sort(context, ordered[0..count]);
+        sort(context, ordered[0..count]);
         self.shuffle(ordered[c.mesh_d_score..count]);
         var survivors: Set = .initEmpty();
         for (ordered[0..c.mesh_d_score]) |peer| survivors.set(peer);
@@ -262,12 +250,12 @@ pub const Mesh = struct {
         assert(context.state.registry.mesh(topic).count() == c.mesh_d);
     }
 
-    fn sort(self: *const Mesh, context: *const Context, members: []u16) void {
+    fn sort(context: *const Context, members: []u16) void {
         assert(members.len <= c.peers_cap);
         for (members, 0..) |peer, i| {
             var j = i;
             for (0..i) |_| {
-                if (self.score(context, members[j - 1]) >= self.score(context, peer)) break;
+                if (score(context, members[j - 1]) >= score(context, peer)) break;
                 members[j] = members[j - 1];
                 j -= 1;
                 if (j == 0) break;
@@ -286,15 +274,15 @@ pub const Mesh = struct {
             ordered[n] = @intCast(peer);
             n += 1;
         }
-        self.sort(context, ordered[0..n]);
-        const median = self.score(context, ordered[n / 2]);
+        sort(context, ordered[0..n]);
+        const median = score(context, ordered[n / 2]);
         if (median >= context.scores.params.opportunistic_graft_threshold) return;
         n = self.candidates(context, topic, &ordered, true, 0);
         self.shuffle(ordered[0..n]);
         var added: usize = 0;
         for (ordered[0..n]) |peer| {
             if (added == c.opportunistic_graft_peers) break;
-            if (self.score(context, peer) > median and self.graft(context, topic, peer)) added += 1;
+            if (score(context, peer) > median and self.graft(context, topic, peer)) added += 1;
         }
     }
 
@@ -402,7 +390,7 @@ const Fixture = struct {
         return .{ .g = g, .topic = topic };
     }
     fn context(self: *Fixture, now: u64) Context {
-        return .{ .state = self.g.state, .peers = &self.g.peers, .scores = &self.g.scores, .now = now, .heartbeat_ms = 700, .pressure_ms = 30_000, .use_snapshot = true };
+        return .{ .state = self.g.state, .peers = &self.g.peers, .scores = &self.g.scores, .now = now, .heartbeat_ms = 700, .pressure_ms = 30_000, .snapshot = &self.g.cycle.scores };
     }
 };
 
@@ -417,7 +405,7 @@ test "gossip policy mesh trimming preserves highest scores and outbound quota" {
     f.g.peers.rows[f.g.state.peers[14].logical.index].direction = .outbound;
     f.g.peers.rows[f.g.state.peers[15].logical.index].direction = .outbound;
     const context = f.context(2);
-    f.g.mesh_policy.takeSnapshot(&context);
+    f.g.cycle.takeSnapshot(context.state, context.scores, context.now);
     f.g.mesh_policy.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, c.mesh_d), f.g.state.registry.mesh(f.topic).count());
     for (0..4) |peer| try std.testing.expect(f.g.state.registry.mesh(f.topic).isSet(peer));
@@ -432,7 +420,7 @@ test "gossip policy outbound repair applies inside mesh degree limits" {
     f.g.peers.rows[f.g.state.peers[8].logical.index].direction = .outbound;
     f.g.peers.rows[f.g.state.peers[9].logical.index].direction = .outbound;
     const context = f.context(2);
-    f.g.mesh_policy.takeSnapshot(&context);
+    f.g.cycle.takeSnapshot(context.state, context.scores, context.now);
     f.g.mesh_policy.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 10), f.g.state.registry.mesh(f.topic).count());
     try std.testing.expect(f.g.state.registry.mesh(f.topic).isSet(8));
@@ -447,7 +435,7 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 0);
     try std.testing.expect(f.g.state.peers[0].io.appendControl(bytes, true, null, 1) != null);
-    f.g.mesh_policy.takeSnapshot(&context);
+    f.g.cycle.takeSnapshot(context.state, context.scores, context.now);
     f.g.mesh_policy.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 0), f.g.state.registry.mesh(f.topic).count());
     f.g.state.peers[0].io.resetTx(&f.g.messages.store);
@@ -456,7 +444,7 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     f.g.state.peers[0].io.resetTx(&f.g.messages.store);
     try std.testing.expect(f.g.state.peers[0].io.appendControl(bytes, true, null, 2) != null);
     try std.testing.expect(f.g.scores.setAppScore(0, -1));
-    f.g.mesh_policy.takeSnapshot(&context);
+    f.g.cycle.takeSnapshot(context.state, context.scores, context.now);
     f.g.mesh_policy.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 0), f.g.state.registry.mesh(f.topic).count());
     try std.testing.expect(f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
@@ -470,7 +458,7 @@ test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
     f.g.markDirect(f.g.state.peers[0].conn);
     try std.testing.expect(f.g.scores.setAppScore(1, -10_000));
     var context = f.context(2);
-    f.g.mesh_policy.takeSnapshot(&context);
+    f.g.cycle.takeSnapshot(context.state, context.scores, context.now);
     const recipients = f.g.mesh_policy.gossipRecipients(&context, f.topic, 0.5);
     try std.testing.expectEqual(@as(usize, 31), recipients.count());
     try std.testing.expect(!recipients.isSet(0) and !recipients.isSet(1));
@@ -515,7 +503,7 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     try std.testing.expect(!f.g.state.registry.mesh(f.topic).isSet(0));
     try std.testing.expectEqual(@as(?u64, 1), f.g.mesh_policy.pending_since[0]);
     f.g.state.peers[0].io.resetTx(&f.g.messages.store);
-    f.g.mesh_policy.takeSnapshot(&context);
+    f.g.cycle.takeSnapshot(context.state, context.scores, context.now);
     f.g.mesh_policy.maintain(&context, f.topic);
     try std.testing.expect(!f.g.state.registry.mesh(f.topic).isSet(0));
     try std.testing.expect(!f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
@@ -551,7 +539,7 @@ test "gossip policy delayed PRUNE preserves the effective remote backoff" {
         try std.testing.expect(f.g.state.peers[0].io.appendControl(bytes, true, null, 1) != null);
         f.g.mesh_policy.prune(&context, f.topic, 0, 1_000);
         context.now = queued_at;
-        f.g.mesh_policy.takeSnapshot(&context);
+        f.g.cycle.takeSnapshot(context.state, context.scores, context.now);
         f.g.mesh_policy.maintain(&context, f.topic);
         try std.testing.expect(f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
         try std.testing.expectEqual(@as(u64, 1_001), f.g.peers.backoff(logical, f.topic).until);
@@ -583,7 +571,7 @@ test "gossip policy review I3 bounded shuffle consumes one draw per swap" {
     var f = try Fixture.init(3);
     defer f.g.deinit();
     const context = f.context(1);
-    f.g.mesh_policy.takeSnapshot(&context);
+    f.g.cycle.takeSnapshot(context.state, context.scores, context.now);
     f.g.mesh_policy.rng = .{ .s = .{ 0, 1, 0, 0 } };
     var expected = f.g.mesh_policy.rng;
     for (0..2) |_| _ = expected.next();
