@@ -14,9 +14,10 @@ const peer_client = @import("peers/client.zig");
 const goodbye = @import("peers/goodbye.zig");
 const discovery_metrics = @import("peers/discovery.zig");
 const peer_io = @import("gossipsub/peer_io.zig");
+const score_metrics = @import("metrics_score.zig");
 
 pub const interval_ms = 1_000;
-pub const text_capacity = 256 * 1024;
+pub const text_capacity = 512 * 1024;
 const Client = peer_client.Client;
 const client_count = @typeInfo(Client).@"enum".fields.len;
 const Topic = struct {
@@ -40,7 +41,7 @@ pub const Snapshot = struct {
     udp: @import("udp.zig").Counters = .{},
     outgoing_error_reasons: [rr.reqresp.metrics.error_reason_count]u64 = @splat(0),
     validation_time: topic_metrics.ValidationTime = .{},
-    scores: @import("metrics_score.zig").Snapshot = .{},
+    scores: score_metrics.Snapshot = .{},
     peer_policy: @import("metrics_peer_policy.zig").Snapshot = .{},
     peer_population: @import("metrics_peers.zig").Snapshot = .{},
     connections: @import("quic/metrics.zig").Counters = .{},
@@ -133,10 +134,16 @@ pub const Snapshot = struct {
             self.directions[if (row.direction == .inbound) @as(usize, 0) else 1] += 1;
         }
         var mesh_peers = gossip.state.PeerSet.initEmpty();
-        for (&g.state.topics) |*row| {
+        var meshes: [score_metrics.kind_count]gossip.state.PeerSet = @splat(.initEmpty());
+        var score_kinds: score_metrics.TopicKinds = @splat(null);
+        for (&g.state.topics, 0..) |*row, topic_index| {
             if (!row.active) continue;
             mesh_peers.setUnion(row.mesh);
             const parsed = gossip.topic.parse(row.string[0..row.string_len]) orelse continue;
+            const label = topic_metrics.Topic.parse(parsed.name);
+            const kind: u8 = if (label) |known| @intFromEnum(known.kind) else gossip.topic_policy.kind_count;
+            score_kinds[topic_index] = kind;
+            meshes[kind].setUnion(row.mesh);
             var configured = std.mem.eql(u8, &parsed.digest, &core.local.fork.digest);
             if (g.namespace) |*namespace| for (namespace.boundaries) |*boundary| {
                 if (std.mem.eql(u8, &parsed.digest, &boundary.digest)) {
@@ -163,8 +170,13 @@ pub const Snapshot = struct {
         }
         for (g.state.peers, 0..) |*row, index| {
             if (!row.active) continue;
-            const score = g.scores.snapshot(row.logical.index, now_ms);
+            var breakdown: gossip.score.Breakdown = undefined;
+            const score = g.scores.snapshotWeights(row.logical.index, now_ms, &breakdown);
             self.scores.observe(score, &g.scores.params);
+            self.scores.observeWeights(&breakdown, &score_kinds);
+            for (&meshes, &self.scores.mesh_scores) |*mesh, *range| {
+                if (mesh.isSet(index)) range.observe(score);
+            }
             var client: Client = .Unknown;
             for (core.catalog.rows) |*peer| {
                 if (peer.connection) |connection| if (std.meta.eql(connection, row.conn)) {
@@ -176,6 +188,10 @@ pub const Snapshot = struct {
             if (!mesh_peers.isSet(index)) continue;
             self.mesh_clients[@intFromEnum(client)] += 1;
         }
+        self.scores.calls = g.scores.calls;
+        self.scores.runs = g.scores.calculations;
+        self.scores.cache_delta = g.scores.cache_delta;
+        self.scores.penalties = g.scores.penalties;
         if (owner.discovery) |discovery| {
             self.discovery_counts = discovery.coordinator.counters;
             self.discovery_rejections = discovery.coordinator.rejections;
@@ -197,7 +213,7 @@ pub const Snapshot = struct {
 
     pub fn stop(self: *Snapshot) void {
         self.running = false;
-        self.scores = .{};
+        self.scores = .{ .calls = self.scores.calls, .runs = self.scores.runs, .cache_delta = self.scores.cache_delta, .penalties = self.scores.penalties };
         self.peer_population = .{};
         self.peer_policy = .{};
         if (self.transport_resources) |*resources| resources.* = .{ .capacity = resources.capacity, .active = 0, .handshaking = 0, .dialing = 0, .outbound = 0 };
@@ -385,10 +401,11 @@ pub const Snapshot = struct {
     }
 
     fn writeScores(self: *const Snapshot, w: *Writer) Writer.Error!void {
-        try scalar(w, "lodestar_gossip_score_avg_min_max_min", .gauge, "Minimum connected gossip peer score", self.scores.min);
-        try scalar(w, "lodestar_gossip_score_avg_min_max_max", .gauge, "Maximum connected gossip peer score", self.scores.max);
+        try self.scores.write(w);
+        try scalar(w, "lodestar_gossip_score_avg_min_max_min", .gauge, "Minimum connected gossip peer score", self.scores.values.min);
+        try scalar(w, "lodestar_gossip_score_avg_min_max_max", .gauge, "Maximum connected gossip peer score", self.scores.values.max);
         try scalar(w, "lodestar_gossip_score_avg_min_max_avg", .gauge, "Average connected gossip peer score", self.scores.average());
-        try scalar(w, "lodestar_native_gossip_scored_peers", .gauge, "Connected gossip peers included in score gauges", self.scores.count);
+        try scalar(w, "lodestar_native_gossip_scored_peers", .gauge, "Connected gossip peers included in score gauges", self.scores.values.count);
         try family(w, "lodestar_gossip_peer_score_by_threshold_count", .gauge, "Connected gossip peers at or above configured score thresholds");
         inline for (.{ "graylist", "publish", "gossip", "mesh" }) |threshold| {
             try sample(w, "lodestar_gossip_peer_score_by_threshold_count", "threshold", threshold, @field(self.scores, threshold));
@@ -457,6 +474,12 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing_time.observe(100);
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing_time.observe(300);
     snapshot.requests.withheld_ms_total = 1500;
+    for (&snapshot.scores.weights) |*ranges| for (ranges) |*range| {
+        range.observe(-1e40);
+        range.observe(1e40);
+    };
+    for (&snapshot.scores.global) |*range| range.observe(-1e40);
+    for (&snapshot.scores.mesh_scores) |*range| range.observe(1e40);
     snapshot.closed_by_client[@intFromEnum(Client.Lighthouse)][@intFromEnum(peer_types.DisconnectReason.remote_goodbye)] = 13;
     snapshot.peer_events.goodbyes[@intFromEnum(goodbye.Reason.too_many_peers)] = 11;
     snapshot.gossip_queue_drops[@intFromEnum(peer_io.DropReason.data_bytes)] = 17;

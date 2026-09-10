@@ -145,6 +145,7 @@ pub const Recovery = struct {
             if (p.expiry != null and now_ms >= p.expiry.?) {
                 broken += 1;
                 scores.penalize(p.peer.index, 1);
+                scores.penalties.broken_promise +|= 1;
                 peers.rows[p.peer.index].negative = true;
                 self.remove(peers, index);
             } else index += 1;

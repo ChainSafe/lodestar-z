@@ -5,7 +5,7 @@ import {networkConfig} from "./utils/network.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 function samples(text: string): Map<string, number> {
-  expect(Buffer.byteLength(text)).toBeLessThanOrEqual(256 * 1024);
+  expect(Buffer.byteLength(text)).toBeLessThanOrEqual(512 * 1024);
   expect(text.endsWith("\n")).toBe(true);
   const result = new Map<string, number>();
   const families = new Set<string>();
@@ -32,6 +32,27 @@ test("metrics are available through startup and remain readable after close", as
     expect(samples(runtime.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
     await runtime.ready;
     await vi.waitFor(() => expect(samples(runtime.getMetrics()).get("lodestar_native_network_running")).toBe(1));
+    const metrics = samples(runtime.getMetrics());
+    for (const kind of ["subscription", "message", "control", "ihave", "iwant", "graft", "prune", "idontwant"]) {
+      expect(metrics.get(`gossipsub_rpc_sent_${kind}_total`)).toBe(0);
+    }
+    for (const stat of ["avg", "min", "max"]) {
+      expect(metrics.get(`gossipsub_score_${stat}`)).toBe(0);
+      expect(metrics.get(`gossipsub_score_per_mesh_${stat}{topic="beacon_block"}`)).toBe(0);
+      for (const p of ["p1", "p2", "p3", "p3b", "p4"]) {
+        expect(metrics.get(`gossipsub_score_weights_${stat}{topic="beacon_block",p="${p}"}`)).toBe(0);
+      }
+      for (const p of ["p5", "p6", "p7"]) {
+        expect(metrics.get(`gossipsub_score_weights_${stat}{topic="",p="${p}"}`)).toBe(0);
+      }
+    }
+    expect(metrics.get('gossipsub_peers_by_score_threshold_count{threshold="mesh"}')).toBe(0);
+    expect(metrics.has("gossipsub_score_fn_calls_total")).toBe(true);
+    expect(metrics.has("gossipsub_score_fn_runs_total")).toBe(true);
+    expect(metrics.has("gossipsub_score_cache_delta_count")).toBe(true);
+    for (const penalty of ["graft_backoff", "broken_promise", "message_deficit", "invalid_message"]) {
+      expect(metrics.get(`gossipsub_scoring_penalties_total{penalty="${penalty}"}`)).toBe(0);
+    }
     expect(
       samples(runtime.getMetrics()).get('lodestar_native_reqresp_request_write_stops_total{method="metadata"}')
     ).toBe(0);

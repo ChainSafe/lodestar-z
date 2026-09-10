@@ -206,7 +206,11 @@ pub const Mesh = struct {
         const blocked = backoff.topic_generation == context.state.topics[topic].generation and context.now < backoff.until;
         if (blocked) {
             context.scores.penalize(row.logical.index, 1);
-            if (context.now -| backoff.pruned_at < c.graft_flood_threshold_ms) context.scores.penalize(row.logical.index, 1);
+            context.scores.penalties.graft_backoff +|= 1;
+            if (context.now -| backoff.pruned_at < c.graft_flood_threshold_ms) {
+                context.scores.penalize(row.logical.index, 1);
+                context.scores.penalties.graft_backoff +|= 1;
+            }
         }
         if (self.retire.isSet(peer) or self.pending_prunes[topic].isSet(peer)) return;
         if (!context.state.subscribed(topic) or context.peers.rows[row.logical.index].direct or blocked or
@@ -379,7 +383,7 @@ fn queue(context: *const Context, topic: u16, peer: u16, prune_s: ?u64) bool {
         writer.varint(protobuf.graftRpcSize(name));
         protobuf.writeGraftRpc(&writer, name);
     }
-    return context.io[peer].appendControl(writer.written(), true, context.now) != null;
+    return context.io[peer].appendControl(writer.written(), true, if (prune_s != null) .prune else .graft, context.now) != null;
 }
 
 const Fixture = struct {
@@ -443,7 +447,7 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     const bytes = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 0);
-    try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, 1) != null);
+    try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, null, 1) != null);
     f.g.mesh_policy.takeSnapshot(&context);
     f.g.mesh_policy.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 0), f.g.state.mesh(f.topic).count());
@@ -451,7 +455,7 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     f.g.mesh_policy.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 1), f.g.state.mesh(f.topic).count());
     f.g.io.peers[0].resetTx(&f.g.store);
-    try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, 2) != null);
+    try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, null, 2) != null);
     try std.testing.expect(f.g.scores.setAppScore(0, -1));
     f.g.mesh_policy.takeSnapshot(&context);
     f.g.mesh_policy.maintain(&context, f.topic);
@@ -496,7 +500,7 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     const bytes = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 0);
-    try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, 1) != null);
+    try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, null, 1) != null);
     f.g.last_now_ms = 1;
     const name = f.g.state.topicString(f.topic);
     try std.testing.expect(f.g.unsubscribe(name));
@@ -504,6 +508,7 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     context.now = 2;
     f.g.mesh_policy.onGraft(&context, f.topic, 0);
     try std.testing.expectEqual(@as(f64, 2), f.g.scores.behaviour[f.g.state.peers[0].logical.index]);
+    try std.testing.expectEqual(@as(u64, 2), f.g.scores.penalties.graft_backoff);
     context.now = 11_001;
     f.g.last_now_ms = context.now;
     try std.testing.expect(f.g.subscribe(name));
@@ -544,7 +549,7 @@ test "gossip policy delayed PRUNE preserves the effective remote backoff" {
         const bytes = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
         defer std.testing.allocator.free(bytes);
         @memset(bytes, 0);
-        try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, 1) != null);
+        try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, null, 1) != null);
         f.g.mesh_policy.prune(&context, f.topic, 0, 1_000);
         context.now = queued_at;
         f.g.mesh_policy.takeSnapshot(&context);
@@ -625,7 +630,7 @@ test "gossip policy final review positive remainder respects rounded remote PRUN
     const full = try std.testing.allocator.alloc(u8, g.options.critical_bytes);
     defer std.testing.allocator.free(full);
     @memset(full, 0);
-    try std.testing.expect(g.io.peers[peer].appendControl(full, true, 1) != null);
+    try std.testing.expect(g.io.peers[peer].appendControl(full, true, null, 1) != null);
     g.mesh_policy.prune(&.{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .io = g.io.peers, .now = 1, .heartbeat_ms = 1, .pressure_ms = g.options.pressure_timeout_ms }, topic, peer, 1000);
     maintainFastHeartbeat(&g, topic, 1000);
     try std.testing.expect(g.mesh_policy.pending_prunes[topic].isSet(peer));
