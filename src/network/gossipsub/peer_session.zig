@@ -25,6 +25,12 @@ pub const Session = struct {
     dont_send_head: u8 = 0,
     dont_send_len: u8 = 0,
 
+    pub fn start(self: *Session, conn: Handle, version: Version) void {
+        std.debug.assert(!self.active and self.generation < std.math.maxInt(u64));
+        self.io.startSession();
+        self.* = .{ .io = self.io, .generation = self.generation + 1, .conn = conn, .version = version, .active = true };
+    }
+
     pub fn suppresses(self: *const Session, id: MessageId, now: u64) bool {
         for (0..self.dont_send_len) |offset| {
             const at = (@as(usize, self.dont_send_head) + constants.dont_send_cap - 1 - offset) %

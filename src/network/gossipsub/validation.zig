@@ -58,7 +58,8 @@ pub const Validation = struct {
         return .{ .entries = entries, .recent = recent, .timeout_ms = timeout_ms, .tombstone_ms = tombstone_ms };
     }
 
-    pub fn deinit(self: *Validation, a: std.mem.Allocator) void {
+    pub fn deinit(self: *Validation, a: std.mem.Allocator, store: *storage.Store, peers: *Peers) void {
+        self.clear(store, peers);
         a.free(self.recent);
         a.free(self.entries);
         self.* = undefined;
@@ -77,7 +78,7 @@ pub const Validation = struct {
         }
     }
 
-    pub fn memoryBytes(capacity: usize) usize {
+    pub fn backingBytes(capacity: usize) usize {
         return capacity * @sizeOf(Entry) + attributionCapacity(capacity) * @sizeOf(Attribution);
     }
 
@@ -267,7 +268,7 @@ test "gossip validation expires without pump and resolves exactly once" {
     var store = try storage.Store.init(std.testing.allocator, 2, 8192);
     defer store.deinit(std.testing.allocator);
     var v = try Validation.init(std.testing.allocator, 1, 10, 20);
-    defer v.deinit(std.testing.allocator);
+    defer v.deinit(std.testing.allocator, &store, &peers);
     const m = store.put([_]u8{1} ** 20, "t", "body").?;
     const h = v.admit(&store, &peers, m, .{ .index = 0, .generation = 1 }, .{ .index = 0, .generation = 1 }, 100);
     store.seal(m);
@@ -291,7 +292,7 @@ test "gossip validation readmission skips exhausted generation without hiding pe
     var store = try storage.Store.init(std.testing.allocator, 2, 8192);
     defer store.deinit(std.testing.allocator);
     var v = try Validation.init(std.testing.allocator, 2, 10, 20);
-    defer v.deinit(std.testing.allocator);
+    defer v.deinit(std.testing.allocator, &store, &peers);
     v.entries[0].generation = std.math.maxInt(u64) - 1;
     const id = [_]u8{1} ** 20;
     const source: PeerRef = .{ .index = 0, .generation = 1 };
@@ -324,8 +325,7 @@ test "gossip validation reservation rollback preserves attribution and prior out
     var store = try storage.Store.init(a, 1, storage.page_bytes);
     defer store.deinit(a);
     var v = try Validation.init(a, 1, 10, 20);
-    defer v.deinit(a);
-    defer v.clear(&store, &peers);
+    defer v.deinit(a, &store, &peers);
     const id = [_]u8{1} ** 20;
     const message = store.put(id, "topic", "payload").?;
     const handle = v.admit(&store, &peers, message, source, .{ .index = 0, .generation = 1 }, 0);
@@ -341,4 +341,28 @@ test "gossip validation reservation rollback preserves attribution and prior out
     try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, &peers, handle, 2).?);
     try std.testing.expectEqual(@as(u64, 0), v.delivery_evictions);
     try std.testing.expectEqual(@as(u32, 1), peers.rows[0].pins);
+}
+
+test "gossip validation destruction releases pending payloads and resolved attribution pins" {
+    const a = std.testing.allocator;
+    var peers = try Peers.initCapacity(a, 100, 2, 1);
+    defer peers.deinit(a);
+    const source = peers.admit(.{ .index = 0, .generation = 1 }, &.{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;
+    var store = try storage.Store.init(a, 2, 8192);
+    defer store.deinit(a);
+    {
+        var v = try Validation.init(a, 2, 10, 20);
+        defer v.deinit(a, &store, &peers);
+        for (0..2) |i| {
+            const message = store.put(@splat(@intCast(i)), "topic", "payload").?;
+            const handle = v.admit(&store, &peers, message, source, .{ .index = 0, .generation = 1 }, 0);
+            store.seal(message);
+            if (i == 0) v.finish(&store, handle, .accept, 1);
+        }
+        try std.testing.expectEqual(@as(u32, 2), peers.rows[source.index].pins);
+        try std.testing.expectEqual(@as(usize, 1), store.used_entries);
+    }
+    try std.testing.expectEqual(@as(u32, 0), peers.rows[source.index].pins);
+    try std.testing.expectEqual(@as(usize, 0), store.used_entries);
+    try std.testing.expectEqual(store.next.len, store.free_pages);
 }

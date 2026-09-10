@@ -67,7 +67,7 @@ pub const Namespace = struct {
         const count = try validate(input);
         if (connected_capacity == 0 or connected_capacity > constants.peers_cap) return error.InvalidTopicPolicy;
         const words_per_peer = (@as(usize, count) + 63) / 64;
-        const word_count = std.math.mul(usize, connected_capacity, words_per_peer) catch return error.InvalidTopicPolicy;
+        const word_count = subscriptionWords(count, connected_capacity);
         const boundaries = try a.dupe(Boundary, input);
         errdefer a.free(boundaries);
 
@@ -98,6 +98,20 @@ pub const Namespace = struct {
 
     pub fn allocatedBytes(self: *const Namespace) usize {
         return self.boundaries.len * @sizeOf(Boundary) + self.offsets.len * @sizeOf([kind_count]u16) + self.subscriptions.len * @sizeOf(u64);
+    }
+
+    pub fn backingBytes(input: []const Boundary, connected_capacity: u16) usize {
+        var count: usize = 0;
+        for (input) |*boundary| for (boundary.rules) |rule| {
+            count += rule.count;
+        };
+        return input.len * (@sizeOf(Boundary) + @sizeOf([kind_count]u16)) +
+            subscriptionWords(count, connected_capacity) * @sizeOf(u64);
+    }
+
+    fn subscriptionWords(topics: usize, peers: u16) usize {
+        assert(topics <= topic_max and peers <= constants.peers_cap);
+        return @as(usize, peers) * ((topics + 63) / 64);
     }
 
     pub fn lookup(self: *const Namespace, name: []const u8) ?Match {

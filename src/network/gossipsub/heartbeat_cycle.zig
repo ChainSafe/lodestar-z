@@ -1,7 +1,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const Sessions = @import("sessions.zig").Sessions;
-const PeerScore = @import("score.zig").PeerScore;
+const PeerBook = @import("peer_book.zig").PeerBook;
 
 pub const Score = struct { generation: u64 = 0, value: f64 = 0 };
 pub const Scores = [constants.peers_cap]Score;
@@ -13,16 +13,16 @@ pub const Cycle = struct {
     epoch: u64 = 0,
     opportunistic: bool = false,
 
-    pub fn takeSnapshot(self: *Cycle, sessions: *const Sessions, scores: *PeerScore, now: u64) void {
+    pub fn takeSnapshot(self: *Cycle, sessions: *const Sessions, peers: *PeerBook, now: u64) void {
         for (sessions.rows, 0..) |*peer, i| {
-            self.scores[i] = if (peer.active) .{ .generation = peer.generation, .value = scores.score(peer.logical.index, now) } else .{};
+            self.scores[i] = if (peer.active) .{ .generation = peer.generation, .value = peers.score(peer.logical, now) } else .{};
         }
     }
 
-    pub fn begin(self: *Cycle, sessions: *const Sessions, scores: *PeerScore, now: u64, opportunistic: bool) void {
+    pub fn begin(self: *Cycle, sessions: *const Sessions, peers: *PeerBook, now: u64, opportunistic: bool) void {
         std.debug.assert(self.phase == .idle and self.epoch < std.math.maxInt(u64));
         self.epoch += 1;
-        self.takeSnapshot(sessions, scores, now);
+        self.takeSnapshot(sessions, peers, now);
         self.phase = .{ .active = constants.topics_cap };
         self.opportunistic = opportunistic;
     }

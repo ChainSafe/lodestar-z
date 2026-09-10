@@ -81,8 +81,8 @@ pub const Pool = struct {
         self.* = undefined;
     }
 
-    pub fn memoryBytes(count: usize) usize {
-        return @sizeOf(Pool) + count * @sizeOf(Slot);
+    pub fn backingBytes(count: usize) usize {
+        return count * @sizeOf(Slot);
     }
 
     fn acquire(self: *Pool, queued: usize) ?u32 {

@@ -33,6 +33,7 @@ pub const Layout = struct {
     history: usize,
     seen: usize,
     validations: usize,
+    fingerprints: usize,
     payload_entries: usize,
     payload_bytes: usize,
     deliveries: usize,
@@ -43,21 +44,13 @@ pub const Layout = struct {
     namespace_bytes: usize,
 
     pub fn init(options: *const Options) Layout {
-        var namespace_bytes: usize = 0;
-        if (options.topic_policy) |boundaries| {
-            var topics: usize = 0;
-            for (boundaries) |boundary| for (boundary.rules) |rule| {
-                topics += rule.count;
-            };
-            namespace_bytes = boundaries.len * (@sizeOf(policy.Boundary) + @sizeOf([policy.kind_count]u16)) +
-                options.connected_capacity * ((topics + 63) / 64) * @sizeOf(u64);
-        }
         return .{
             .sessions = options.connected_capacity,
             .retained = options.retained_capacity,
             .history = options.mcache_capacity,
             .seen = options.seen_capacity,
             .validations = options.validation_capacity,
+            .fingerprints = 4 * options.validation_capacity,
             .payload_entries = options.mcache_capacity + options.validation_capacity,
             .payload_bytes = options.mcache_arena_bytes / storage.page_bytes * storage.page_bytes,
             .deliveries = delivery.Pool.capacity(options.connected_capacity, options.validation_capacity),
@@ -65,19 +58,18 @@ pub const Layout = struct {
             .receive_frame_bytes = options.large_message_bytes,
             .session_buffer_bytes = @import("peer_io.zig").PeerIo.bufferBytes(options),
             .output_bytes = options.decompressed_arena_bytes,
-            .namespace_bytes = namespace_bytes,
+            .namespace_bytes = if (options.topic_policy) |boundaries| policy.Namespace.backingBytes(boundaries, options.connected_capacity) else 0,
         };
     }
 
     pub fn plan(self: *const Layout) Plan {
         const peers = @import("peer_book.zig");
-        const scores = @import("score.zig");
         const metadata = @sizeOf(@import("gossipsub.zig").Gossipsub) +
             @sizeOf(@import("sessions.zig").Sessions) + @sizeOf(@import("overlay.zig").Overlay) +
-            @as(usize, self.sessions) * @sizeOf(@import("peer_session.zig").Session) +
-            @as(usize, self.retained) * (@sizeOf(peers.Row) + constants.topics_cap * (@sizeOf(peers.Backoff) + @sizeOf(scores.TopicCounters)) + 2 * @sizeOf(f64)) +
-            @import("messages.zig").Messages.metadataBytes(self) + delivery.Pool.memoryBytes(self.deliveries) +
-            @import("recovery.zig").Recovery.memoryBytes() + @import("receive_pool.zig").ReceivePool.metadataBytes(self.receive_frames) + self.namespace_bytes;
+            @import("sessions.zig").Sessions.metadataBytes(self) +
+            peers.PeerBook.backingBytes(self.retained) +
+            @import("messages.zig").Messages.metadataBytes(self) +
+            @import("recovery.zig").Recovery.backingBytes() + self.namespace_bytes;
         const frames = self.receive_frames * self.receive_frame_bytes;
         const buffers = self.sessions * self.session_buffer_bytes;
         return .{

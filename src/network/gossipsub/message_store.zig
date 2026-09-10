@@ -59,6 +59,10 @@ pub const Store = struct {
     entry_cursor: usize = 0,
     released: bool = false,
 
+    pub fn metadataBytes(capacity: usize, byte_capacity: usize) usize {
+        return capacity * @sizeOf(Entry) + byte_capacity / page_bytes * @sizeOf(u32);
+    }
+
     pub fn init(a: std.mem.Allocator, capacity: usize, byte_capacity: usize) !Store {
         if (capacity == 0 or capacity >= none or byte_capacity < page_bytes or byte_capacity / page_bytes >= none)
             return error.InvalidLimits;

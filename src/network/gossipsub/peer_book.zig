@@ -5,7 +5,7 @@ const Handle = @import("../quic/engine.zig").Handle;
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const assert = std.debug.assert;
 
-pub const capacity = 512;
+pub const capacity = constants.retained_peers_cap;
 pub const outbound_reserve = 32;
 pub const Ref = struct { index: u16, generation: u64 };
 pub const Backoff = struct { until: u64 = 0, pruned_at: u64 = 0, topic_generation: u64 = 0 };
@@ -64,8 +64,7 @@ pub const PeerBook = struct {
         const backoffs = try a.alloc(Backoff, @as(usize, count) * constants.topics_cap);
         errdefer a.free(backoffs);
         @memset(backoffs, .{});
-        var scores = try @import("score.zig").PeerScore.initCapacity(a, options.score_params, count);
-        @memset(&scores.connected, false);
+        const scores = try @import("score.zig").PeerScore.initCapacity(a, options.score_params, count);
         var book: PeerBook = .{ .rows = rows, .backoffs = backoffs, .scores = scores, .retention_ms = retention_ms, .reserved = reserved };
         @memcpy(book.ip_allowlist[0..options.ip_allowlist.len], options.ip_allowlist);
         book.ip_allowlist_len = @intCast(options.ip_allowlist.len);
@@ -148,7 +147,7 @@ pub const PeerBook = struct {
         row.connection = null;
         row.disconnected_at = now;
         row.retain_until = now +| self.retention_ms;
-        row.negative = self.scores.score(ref.index, now) < 0;
+        row.negative = self.score(ref, now) < 0;
         // Topic reclamation cannot reuse a generation while its backoff is live.
         for (self.backoffs[@as(usize, ref.index) * constants.topics_cap ..][0..constants.topics_cap]) |entry| {
             row.retain_until = @max(row.retain_until, entry.until);
@@ -157,8 +156,25 @@ pub const PeerBook = struct {
     }
 
     pub fn score(self: *PeerBook, ref: Ref, now: u64) f64 {
-        self.scores.ip_count[ref.index] = self.ipCount(ref, self.ip_allowlist[0..self.ip_allowlist_len]);
-        return self.scores.score(ref.index, now);
+        return self.scores.score(ref.index, now, self.scorePopulation(ref));
+    }
+
+    fn scorePopulation(self: *const PeerBook, ref: Ref) u16 {
+        assert(self.matches(ref));
+        if (self.scores.params.ip_colocation_weight == 0) return 0;
+        return self.ipCount(ref, self.ip_allowlist[0..self.ip_allowlist_len]);
+    }
+
+    pub fn snapshot(self: *const PeerBook, ref: Ref, now: u64) f64 {
+        return self.scores.snapshot(ref.index, now, self.scorePopulation(ref));
+    }
+
+    pub fn snapshotWeights(self: *const PeerBook, ref: Ref, now: u64, out: *@import("score.zig").Breakdown) f64 {
+        return self.scores.snapshotWeights(ref.index, now, self.scorePopulation(ref), out);
+    }
+
+    pub fn backingBytes(count: usize) usize {
+        return count * (@sizeOf(Row) + constants.topics_cap * @sizeOf(Backoff)) + @import("score.zig").PeerScore.backingBytes(count);
     }
 
     pub fn invalid(self: *PeerBook, ref: Ref, topic: u16) void {
@@ -177,9 +193,8 @@ pub const PeerBook = struct {
         for (self.rows, 0..) |row, i| {
             if (!row.occupied) continue;
             const ref: Ref = .{ .index = @intCast(i), .generation = row.generation };
-            self.scores.ip_count[i] = self.ipCount(ref, self.ip_allowlist[0..self.ip_allowlist_len]);
             if (row.connection == null) {
-                var useful = self.scores.score(@intCast(i), now) < 0;
+                var useful = self.score(ref, now) < 0;
                 for (self.backoffs[i * constants.topics_cap ..][0..constants.topics_cap]) |entry| {
                     if (now < entry.until) useful = true;
                 }
@@ -371,20 +386,20 @@ test "peer book retains reputation across pinned reconnect and clears it on expi
     book.invalid(first, 0);
     book.retain(first);
     book.disconnect(first, 1);
-    const score = book.scores.snapshot(first.index, 1);
+    const score = book.snapshot(first, 1);
     try std.testing.expect(score < 0);
     book.refresh(20);
     try std.testing.expect(book.matches(first));
     const reconnected = book.admit(.{ .index = 0, .generation = 2 }, &metadata, 20).admitted;
     try std.testing.expectEqualDeep(first, reconnected.peer);
     try std.testing.expect(!reconnected.fresh);
-    try std.testing.expectEqual(score, book.scores.snapshot(first.index, 20));
-    try std.testing.expect(book.scores.connected[first.index]);
+    try std.testing.expectEqual(score, book.snapshot(first, 20));
+    try std.testing.expect(book.scores.rows[first.index].connected);
     book.release(first);
     book.disconnect(first, 21);
     book.refresh(31);
     try std.testing.expect(!book.matches(first));
-    try std.testing.expect(!book.scores.connected[first.index]);
+    try std.testing.expect(!book.scores.rows[first.index].connected);
     const fresh = book.admit(.{ .index = 0, .generation = 3 }, &metadata, 31).admitted;
     try std.testing.expect(fresh.fresh);
     try std.testing.expect(fresh.peer.generation > first.generation);
@@ -398,4 +413,27 @@ fn allocateBook(a: std.mem.Allocator) !void {
 
 test "peer book releases identity and reputation allocations on partial initialization" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocateBook, .{});
+}
+
+test "gossip score snapshots follow population migration and identity reuse without policy reads" {
+    var book = try PeerBook.initOptions(std.testing.allocator, &.{ .retained_capacity = 2, .retained_outbound_reserve = 0, .retained_score_ms = 10, .score_params = .{ .ip_colocation_weight = -5, .ip_colocation_threshold = 1 } });
+    defer book.deinit(std.testing.allocator);
+    var metadata: Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } }, .direction = .inbound };
+    const conn: Handle = .{ .index = 0, .generation = 1 };
+    const first = book.admit(conn, &metadata, 0).admitted.peer;
+    try std.testing.expectEqual(@as(f64, 0), book.score(first, 0));
+    metadata.identity.bytes[0] = 2;
+    const second = book.admit(.{ .index = 1, .generation = 1 }, &metadata, 1).admitted.peer;
+    try std.testing.expectEqual(@as(f64, -5), book.snapshot(first, 1));
+    try std.testing.expectEqual(@as(f64, -5), book.score(first, 1));
+    book.migrate(conn, .{ .ip4 = .{ .octets = .{ 192, 0, 2, 2 }, .port = 1 } });
+    try std.testing.expectEqual(@as(f64, 0), book.snapshot(first, 2));
+    try std.testing.expectEqual(@as(f64, 0), book.snapshot(second, 2));
+    book.disconnect(first, 3);
+    metadata.identity.bytes[0] = 3;
+    metadata.address = .unspecified;
+    const fresh = book.admit(.{ .index = 0, .generation = 2 }, &metadata, 13).admitted.peer;
+    try std.testing.expectEqual(first.index, fresh.index);
+    try std.testing.expect(fresh.generation > first.generation);
+    try std.testing.expectEqual(@as(f64, 0), book.snapshot(fresh, 13));
 }

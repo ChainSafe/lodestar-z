@@ -137,7 +137,7 @@ test "local intent history survives former row reuse and real retransmission des
     unavailableExcept(&g, 1);
     _ = try g.publish(name, "history payload", now);
     const id = topic.validMessageId(name, "history payload", .{});
-    const retained = g.messages.history.get(&g.messages.store, id).?.message;
+    const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
     try std.testing.expect(try apply(&g, w, &.{.{ .name = next, .params = .{} }}));
     try std.testing.expectEqualStrings(next, g.overlay.topicString(0));
     const entry = g.messages.store.get(retained).?;
@@ -205,8 +205,8 @@ fn cachedRetirement(complete_intent: bool) !void {
         const logical = g.sessions.rows[peer.index].logical.index;
         if (negative) g.peers.scores.invalid(logical, 0) else g.peers.scores.deliver(logical, 0);
         const expected: f64 = if (negative) -100 else 1;
-        try std.testing.expectEqual(expected, g.peers.scores.score(logical, now.mono_ms));
-        try std.testing.expect(!g.peers.scores.dirty[logical]);
+        try std.testing.expectEqual(expected, g.peers.score(g.sessions.rows[peer.index].logical, now.mono_ms));
+        try std.testing.expect(!g.peers.scores.rows[logical].dirty);
         try std.testing.expectEqual(@as(?u64, null), g.peers.scores.nextChange(logical));
         const revision = g.peers.scores.revision;
         const params = g.peers.scores.topic_params[0];
@@ -223,24 +223,24 @@ fn cachedRetirement(complete_intent: bool) !void {
         try std.testing.expectEqualDeep(params, g.peers.scores.topic_params[0]);
         try std.testing.expect(!g.peers.scores.retainsTopic(0));
         try std.testing.expect(g.peers.scores.revision > revision);
-        try std.testing.expect(g.peers.scores.dirty[logical]);
-        try std.testing.expectEqual(@as(f64, 0), g.peers.scores.score(logical, now.mono_ms));
+        try std.testing.expect(g.peers.scores.rows[logical].dirty);
+        try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[peer.index].logical, now.mono_ms));
         const retired_revision = g.peers.scores.revision;
         const calculations = g.peers.scores.calculations;
         const refreshed = now.mono_ms + g.peers.scores.params.decay_interval_ms;
         g.peers.scores.refresh(refreshed);
-        try std.testing.expectEqual(@as(f64, 0), g.peers.scores.score(logical, refreshed));
+        try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[peer.index].logical, refreshed));
         try std.testing.expectEqual(retired_revision, g.peers.scores.revision);
         try std.testing.expectEqual(calculations, g.peers.scores.calculations);
         if (complete_intent) {
             g.peers.scores.invalid(logical, 0);
-            try std.testing.expectEqual(@as(f64, -100), g.peers.scores.score(logical, refreshed));
+            try std.testing.expectEqual(@as(f64, -100), g.peers.score(g.sessions.rows[peer.index].logical, refreshed));
             const current_revision = g.peers.scores.revision;
             const counters = g.peers.scores.topics[@as(usize, logical) * 512];
             try std.testing.expect(!try apply(&g, w, &.{.{ .name = next, .params = params }}));
             try std.testing.expectEqual(current_revision, g.peers.scores.revision);
             try std.testing.expectEqualDeep(counters, g.peers.scores.topics[@as(usize, logical) * 512]);
-            try std.testing.expectEqual(@as(f64, -100), g.peers.scores.score(logical, refreshed));
+            try std.testing.expectEqual(@as(f64, -100), g.peers.score(g.sessions.rows[peer.index].logical, refreshed));
         }
     }
 }

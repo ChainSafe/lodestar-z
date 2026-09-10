@@ -105,7 +105,7 @@ pub const Recovery = struct {
         return std.mem.order(u8, left, &right);
     }
 
-    pub fn memoryBytes() usize {
+    pub fn backingBytes() usize {
         return constants.promises_cap * (@sizeOf(Request) + @sizeOf(Batch));
     }
 

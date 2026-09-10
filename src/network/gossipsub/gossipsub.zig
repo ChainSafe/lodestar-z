@@ -282,9 +282,6 @@ pub const Gossipsub = struct {
         if (admitted.admitted.penalty_evicted) self.counters.retained_penalty_evictions += 1;
         const ref = admitted.admitted.peer;
         self.sessions.rows[handle.index].logical = ref;
-        self.sessions.rows[handle.index].io.tx.reset(&self.messages.store);
-        self.sessions.rows[handle.index].io.resetRx();
-        self.sessions.rows[handle.index].io.resetHeartbeat();
         self.sendSubscriptions(handle.index);
         return .{ .admitted = handle };
     }
@@ -300,8 +297,6 @@ pub const Gossipsub = struct {
         self.cancelWrites(self.sessions.ref(index));
         const context = self.overlayContext(self.last_now_ms);
         self.overlay.peerDisconnected(&context, index);
-        self.sessions.rows[index].io.write_first = false;
-        self.sessions.rows[index].io.tx.subscription_since = null;
         const ref = self.logical(index);
         self.peers.disconnect(ref, self.last_now_ms);
         self.sessions.removePeer(index);
@@ -309,7 +304,7 @@ pub const Gossipsub = struct {
 
     pub fn cancelWrites(self: *Gossipsub, session: sessions_mod.SessionRef) void {
         if (!self.sessions.matches(session)) return;
-        self.sessions.rows[session.index].io.tx.reset(&self.messages.store);
+        self.sessions.rows[session.index].io.tx.cancelStream(&self.messages.store);
         self.cancelPromises(session.index, false);
         self.wakeStorage();
     }
@@ -576,7 +571,7 @@ pub const Gossipsub = struct {
         if (self.cycle.isActive()) return;
         const opportunistic = self.opportunistic_at != 0 and now.mono_ms >= self.opportunistic_at;
         if (self.opportunistic_at == 0 or opportunistic) self.opportunistic_at = now.mono_ms +| self.options.opportunistic_graft_interval_ms;
-        self.cycle.begin(self.sessions, &self.peers.scores, now.mono_ms, opportunistic);
+        self.cycle.begin(self.sessions, &self.peers, now.mono_ms, opportunistic);
     }
 
     fn maintainTopics(self: *Gossipsub, now: Now) void {
@@ -1067,12 +1062,12 @@ test "gossipsub duplicate invalid bytes do not evict useful history" {
     try std.testing.expect(g.subscribe(topic));
     _ = try g.publish(topic, "useful", .{ .mono_ms = 1, .unix_s = 1 });
     const useful = topic_mod.validMessageId(topic, "useful", .{});
-    const retained = g.messages.history.get(&g.messages.store, useful).?.message;
+    const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, useful).?);
     var events: [1]Event = undefined;
     for (0..20) |_| {
         try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "useful", 2, &events));
         _ = receiveForTest(&g, peer.index, .{ .topic = topic, .data = &.{ 5, 0 } }, .{ .mono_ms = 2, .unix_s = 1 }, &events, 0);
-        try std.testing.expectEqual(retained, g.messages.history.get(&g.messages.store, useful).?.message);
+        try std.testing.expectEqual(retained, g.messages.history.message(g.messages.history.get(&g.messages.store, useful).?));
     }
 }
 
@@ -1089,7 +1084,7 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
     try std.testing.expect(g.sessions.rows[peer.index].io.tx.inject(&([_]u8{0} ** 64), 1));
     g.onIhave(peer.index, .{ .topic = topic, .body = w.written() }, .{ .mono_ms = 1, .unix_s = 1 });
     try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
-    g.sessions.rows[peer.index].io.tx.reset(&g.messages.store);
+    g.sessions.rows[peer.index].io.tx.cancelStream(&g.messages.store);
     g.onIhave(peer.index, .{ .topic = topic, .body = w.written() }, .{ .mono_ms = 2, .unix_s = 1 });
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     g.expirePromises(10_000);
@@ -1293,8 +1288,8 @@ test "gossipsub validation attribution cannot penalize reused source or duplicat
     const replacement1 = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 2 }, .v1_2).?;
     const replacement2 = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 2 }, .v1_2).?;
     try std.testing.expectEqual(ReportOutcome{ .applied = .reject }, g.report(handle, .reject, .{ .mono_ms = 3, .unix_s = 1 }));
-    try std.testing.expectEqual(@as(f64, 0), g.peers.scores.score(g.logical(replacement1.index).index, 3));
-    try std.testing.expectEqual(@as(f64, 0), g.peers.scores.score(g.logical(replacement2.index).index, 3));
+    try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.logical(replacement1.index), 3));
+    try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.logical(replacement2.index), 3));
 }
 
 test "gossip policy reconnect retains authenticated penalty" {
@@ -1321,7 +1316,7 @@ test "gossip policy reconnect retains authenticated penalty" {
     try std.testing.expectEqual(original, g.logical(second.index));
     try std.testing.expect(g.peers.backedOff(original, topic, topic_generation, 60_000));
     try std.testing.expect(!g.peers.backedOff(original, topic, topic_generation, 60_001));
-    try std.testing.expect(g.peers.scores.score(g.logical(second.index).index, 1) < 0);
+    try std.testing.expect(g.peers.score(g.logical(second.index), 1) < 0);
 }
 
 test "gossip policy GRAFT rejects negative peers and excludes direct peers" {
@@ -1473,7 +1468,7 @@ test "gossip policy topic retirement bounds arbitrarily slow active score decay"
     g.peers.scores.refresh(11);
     g.reclaimTopic(topic);
     try std.testing.expect(!g.overlay.rows[topic].active);
-    try std.testing.expectEqual(@as(f64, 0), g.peers.scores.score(g.logical(peer.index).index, 11));
+    try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.logical(peer.index), 11));
 }
 
 test "gossip policy unsent subscriptions cannot pin retired topics indefinitely" {
@@ -1533,7 +1528,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     };
     try std.testing.expect(g.peers.scores.setAppScore(g.logical(@intCast(retained)).index, -10_000));
     try std.testing.expect(g.peers.scores.setAppScore(g.logical(advertised).index, -10_000));
-    for (g.sessions.rows) |*peer| peer.io.tx.reset(&g.messages.store);
+    for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
     g.last_now_ms = 2;
     g.opportunistic_at = 2;
     g.heartbeat(.{ .mono_ms = 2, .unix_s = 0 });
@@ -1545,7 +1540,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.tx.control.count);
     g.maintainTopics(.{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expect(!g.cycle.isActive());
-    for (g.sessions.rows) |*peer| peer.io.tx.reset(&g.messages.store);
+    for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
     g.last_now_ms = 701;
     g.heartbeat(.{ .mono_ms = 701, .unix_s = 0 });
     g.maintainTopics(.{ .mono_ms = 701, .unix_s = 0 });
@@ -1659,9 +1654,9 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
         try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, g.sessions.rows[first.index].io.tx.queueData(&g.messages.store, message, g.options.tx_peer_bytes, 1));
     }
     g.onIwant(first.index, iwant);
-    try std.testing.expectEqual(@as(u8, 0), g.messages.history.get(&g.messages.store, id).?.counts[logical_peer.index]);
+    try std.testing.expectEqual(@as(u8, 0), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[logical_peer.index]);
     try std.testing.expectEqual(@as(u64, 1), g.counters.send_dropped);
-    g.sessions.rows[first.index].io.tx.reset(&g.messages.store);
+    g.sessions.rows[first.index].io.tx.cancelStream(&g.messages.store);
     for (0..4) |_| g.onIwant(first.index, iwant);
     try std.testing.expectEqual(@as(usize, 3), g.sessions.rows[first.index].io.tx.data.count);
     g.connectionClosed(.{ .index = 0, .generation = 1 });
@@ -1684,7 +1679,7 @@ test "gossip resolved capacities allocate owner rows and reject stale ceiling ha
     try std.testing.expectEqual(@as(usize, 2), g.sessions.rows.len);
     try std.testing.expectEqual(@as(usize, 2), g.sessions.rows.len);
     try std.testing.expectEqual(@as(usize, 4), g.peers.rows.len);
-    try std.testing.expectEqual(@as(usize, 4), g.peers.scores.app_score.len);
+    try std.testing.expectEqual(@as(usize, 4), g.peers.scores.rows.len);
     try std.testing.expect(!g.sessions.matches(.{ .index = 2, .generation = 0 }));
     try std.testing.expect(!g.peers.matches(.{ .index = 4, .generation = 0 }));
     try std.testing.expectEqual(ledger.bytes, g.memoryPlan().total_bytes - @sizeOf(Gossipsub));
@@ -1748,12 +1743,13 @@ test "gossip topic rejection preserves expired scores and retained obligations" 
     const old_backoffs = try std.testing.allocator.dupe(@TypeOf(g.peers.backoffs[0]), g.peers.backoffs);
     defer std.testing.allocator.free(old_backoffs);
     const old_params = g.peers.scores.topic_params;
-    const old_dirty = g.peers.scores.dirty;
+    const old_rows = try std.testing.allocator.dupe(score_mod.PeerScore.PeerState, g.peers.scores.rows);
+    defer std.testing.allocator.free(old_rows);
     try std.testing.expectError(error.TopicCapacity, g.configureTopic("/eth2/ffffffff/custom/ssz_snappy", &.{}));
     try std.testing.expectEqualDeep(old_scores, g.peers.scores.topics);
     try std.testing.expectEqualDeep(old_backoffs, g.peers.backoffs);
     try std.testing.expectEqualDeep(old_params, g.peers.scores.topic_params);
-    try std.testing.expectEqualDeep(old_dirty, g.peers.scores.dirty);
+    try std.testing.expectEqualDeep(old_rows, g.peers.scores.rows);
     for (old_topics, &g.overlay.rows) |*before, *after| {
         try std.testing.expectEqual(before.active, after.active);
         try std.testing.expectEqual(before.generation, after.generation);
@@ -1789,7 +1785,7 @@ test "gossip diagnostics tracks queued age and preserves peaks after owner relea
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const io = &g.sessions.rows[peer.index].io;
-    io.tx.reset(&g.messages.store);
+    io.tx.cancelStream(&g.messages.store);
     const message = g.messages.store.put([_]u8{1} ** 20, "t", "abc").?;
     g.messages.store.retainHistory(message);
     g.messages.store.seal(message);
@@ -1930,12 +1926,12 @@ test "gossipsub configured IDONTWANT uses admitted compressed wire bytes" {
     var compressed: [constants.maxCompressedLen(256)]u8 = undefined;
     var events: [1]Event = undefined;
     for ([_]usize{ 124, 125, 126 }, [_]usize{ 127, 128, 129 }) |size, wire_size| {
-        g.sessions.rows[destination.index].io.tx.reset(&g.messages.store);
+        g.sessions.rows[destination.index].io.tx.cancelStream(&g.messages.store);
         const len = try snappy.raw.compress(payload[0..size], &compressed);
         try std.testing.expectEqual(wire_size, len);
         try std.testing.expectEqual(@as(?usize, 1), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
         try std.testing.expectEqual(wire_size >= 128, g.sessions.rows[destination.index].io.tx.control.used > 0);
-        g.sessions.rows[destination.index].io.tx.reset(&g.messages.store);
+        g.sessions.rows[destination.index].io.tx.cancelStream(&g.messages.store);
         try std.testing.expectEqual(@as(?usize, 0), receiveForTest(&g, source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
         try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     }
@@ -2021,7 +2017,7 @@ test "publication subscribed fanout expires through owner maintenance" {
     g.maintainTopics(.{ .mono_ms = 60_000, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 0), g.overlay.fanoutMembers(t).count());
     g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, p.index, false);
-    g.sessions.rows[p.index].io.tx.reset(&g.messages.store);
+    g.sessions.rows[p.index].io.tx.cancelStream(&g.messages.store);
     const next_conn: Handle = .{ .index = 1, .generation = 1 };
     const next = @import("test_support.zig").addPeer(&g, next_conn, .v1_2).?;
     g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, next.index, true);
@@ -2053,7 +2049,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     const now: Now = .{ .mono_ms = 1, .unix_s = 0 };
     _ = try g.publish(name, "original payload", now);
     const id = topic_mod.validMessageId(name, "original payload", .{});
-    const message = g.messages.history.get(&g.messages.store, id).?.message;
+    const message = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
     try std.testing.expect(try g.prepareSubscriptions(&.{.{ .name = replacement, .params = .{} }}, workspace, now));
     g.commitSubscriptions(workspace);
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
@@ -2066,7 +2062,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     const io = &g.sessions.rows[peer.index].io;
     try std.testing.expectEqual(@as(usize, 1), io.tx.data.count);
     try std.testing.expectEqual(message, io.tx.data.first().?.message);
-    try std.testing.expectEqual(@as(u8, 1), g.messages.history.get(&g.messages.store, id).?.counts[g.logical(peer.index).index]);
+    try std.testing.expectEqual(@as(u8, 1), g.messages.history.countsRow(g.messages.history.get(&g.messages.store, id).?)[g.logical(peer.index).index]);
     var wire: [512]u8 = undefined;
     var used: usize = 0;
     for (0..8) |_| {
@@ -2121,10 +2117,10 @@ test "gossip advertisements sample the whole burst independently for each recipi
         std.mem.writeInt(u64, &bytes, i, .little);
         _ = try g.publish(name, &bytes, .{ .mono_ms = 1, .unix_s = 0 });
     }
-    for (g.sessions.rows) |*peer| peer.io.tx.reset(&g.messages.store);
+    for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
     g.overlay.rows[t].fanout = .initEmpty();
     const context = g.overlayContext(1);
-    g.cycle.begin(context.sessions, &context.peers.scores, context.now, false);
+    g.cycle.begin(context.sessions, context.peers, context.now, false);
     var snapshot_context = context;
     snapshot_context.snapshot = &g.cycle.scores;
     g.emitGossip(t, &snapshot_context);
@@ -2135,7 +2131,7 @@ test "gossip advertisements sample the whole burst independently for each recipi
     var beyond_prefix: usize = 0;
     for (g.messages.gossip_ids[0..constants.gossip_ids_max]) |id| {
         const entry = g.messages.history.get(&g.messages.store, id).?;
-        if (entry.message.index >= constants.gossip_ids_max) beyond_prefix += 1;
+        if (g.messages.history.message(entry).index >= constants.gossip_ids_max) beyond_prefix += 1;
     }
     try std.testing.expect(beyond_prefix > constants.gossip_ids_max / 2);
 }
@@ -2223,7 +2219,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
                 g.heartbeat(now);
                 g.maintainTopics(now);
             },
-            8 => for (g.sessions.rows) |*peer| peer.io.tx.reset(&g.messages.store),
+            8 => for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store),
             else => unreachable,
         }
         var pending: usize = 0;
@@ -2240,7 +2236,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
             try std.testing.expectEqual(@as(usize, @intFromBool(entry.validation)), validations);
             pending += validations;
             const history = g.messages.history.get(&g.messages.store, entry.id);
-            try std.testing.expectEqual(entry.history, if (history) |record| record.message.index == index and record.message.generation == entry.generation else false);
+            try std.testing.expectEqual(entry.history, if (history) |record| g.messages.history.message(record).index == index and g.messages.history.message(record).generation == entry.generation else false);
             var retained: u32 = 0;
             for (g.sessions.rows) |*peer| retained += @intCast(peer.io.tx.data.retains(.{ .index = @intCast(index), .generation = entry.generation }));
             try std.testing.expectEqual(entry.tx, retained);

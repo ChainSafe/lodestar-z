@@ -66,17 +66,14 @@ pub fn seenTtlMs(slots_per_epoch: u64, seconds_per_slot: u64) u64 {
 
 /// Fixed connected-peer capacity and room for two full supported fork topic sets.
 pub const peers_cap: usize = 256;
+pub const retained_peers_cap: u16 = 512;
 pub const topics_cap: usize = 512;
 /// Message ids a single peer may suppress at once through IDONTWANT.
 pub const dont_send_cap: usize = 128;
 
-/// Per-peer I/O buffer sizes. The send buffer batches control and small
-/// messages; the body buffer accumulates one inbound frame in the common case,
-/// and a larger frame is streamed through a claimed pool buffer instead.
-pub const send_buffer_len: usize = 32 * 1024;
+/// Ordinary inbound frames use the body buffer; larger frames claim a shared lease.
 pub const body_buffer_len: usize = 64 * 1024;
 pub const read_scratch_len: usize = 16 * 1024;
-pub const reads_per_pump_max: u32 = 8;
 
 /// Outstanding IWANT promises tracked at once, and the ids carried in one
 /// emitted IHAVE or requested in one IWANT.

@@ -67,9 +67,9 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").No
         if (!row.occupied) continue;
         const session = if (row.connection) |conn| g.sessions.findPeer(conn) else null;
         var weights: score.Breakdown = undefined;
-        const total = g.peers.scores.snapshotWeights(@intCast(index), now.mono_ms, &weights);
+        const total = g.peers.snapshotWeights(.{ .index = @intCast(index), .generation = row.generation }, now.mono_ms, &weights);
         const peer = &out.peers[out.peer_count];
-        peer.* = .{ .identity = row.identity, .connected = row.connection != null, .outbound_ready = if (session) |i| g.sessions.rows[i].outStream() != null else false, .address = row.address, .retain_until = row.retain_until, .score = total, .app_score = g.peers.scores.app_score[index], .behaviour = g.peers.scores.behaviour[index], .weights = weights.global };
+        peer.* = .{ .identity = row.identity, .connected = row.connection != null, .outbound_ready = if (session) |i| g.sessions.rows[i].outStream() != null else false, .address = row.address, .retain_until = row.retain_until, .score = total, .app_score = g.peers.scores.rows[index].app_score, .behaviour = g.peers.scores.rows[index].behaviour, .weights = weights.global };
         for (out.topics[0..out.topic_count]) |*known| {
             const counters = &g.peers.scores.topics[index * c.topics_cap + known.index];
             const member = if (session) |i| g.overlay.rows[known.index].mesh.isSet(i) else false;
@@ -97,7 +97,8 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     defer a.destroy(page);
     const calls = g.peers.scores.calls;
     const revision = g.peers.scores.revision;
-    const dirty = g.peers.scores.dirty;
+    const rows = try a.dupe(score.PeerScore.PeerState, g.peers.scores.rows);
+    defer a.free(rows);
     try capture(&g, 0, .{ .mono_ms = 200, .unix_s = 1000 }, page);
     try std.testing.expectEqual(@as(u8, 8), page.peer_count);
     try std.testing.expectEqual(@as(?u16, 8), page.next);
@@ -105,12 +106,12 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     try std.testing.expect(page.topics[0].subscribed);
     try std.testing.expect(!page.peers[0].topics[0].mesh_member);
     try std.testing.expectEqual(@as(f64, 1), page.peers[0].topics[0].counters.invalid);
-    try std.testing.expectEqual(g.peers.scores.snapshot(0, 200), page.peers[0].score);
+    try std.testing.expectEqual(g.peers.snapshot(g.sessions.rows[0].logical, 200), page.peers[0].score);
     try capture(&g, page.next.?, .{ .mono_ms = 200, .unix_s = 1000 }, page);
     try std.testing.expectEqual(@as(u8, 2), page.peer_count);
     try std.testing.expectEqual(@as(?u16, null), page.next);
     try std.testing.expectEqual(calls, g.peers.scores.calls);
     try std.testing.expectEqual(revision, g.peers.scores.revision);
-    try std.testing.expectEqualSlices(bool, &dirty, &g.peers.scores.dirty);
+    try std.testing.expectEqualDeep(rows, g.peers.scores.rows);
     try std.testing.expectError(error.InvalidDiagnosticsCursor, capture(&g, 17, .{ .mono_ms = 200, .unix_s = 1000 }, page));
 }

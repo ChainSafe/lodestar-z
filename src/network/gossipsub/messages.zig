@@ -93,24 +93,24 @@ pub const Messages = struct {
     }
 
     pub fn initLayout(a: std.mem.Allocator, options: *const Options, layout: *const @import("layout.zig").Layout) !Messages {
+        assert(std.meta.eql(layout.*, @import("layout.zig").Layout.init(options)));
         var store = try storage.Store.init(a, layout.payload_entries, layout.payload_bytes);
         errdefer store.deinit(a);
         var history = try mcache.History.initCapacity(a, layout.history, layout.retained);
         errdefer history.deinit(a);
         var seen = try mcache.SeenCache.init(a, layout.seen, options.seen_ttl_ms);
         errdefer seen.deinit(a);
-        var pending = try validation.Validation.init(a, layout.validations, options.validation_timeout_ms, options.validation_tombstone_ms);
-        errdefer pending.deinit(a);
         const gossip_ids = try a.alloc(MessageId, layout.history);
         errdefer a.free(gossip_ids);
-        const fast = try a.alloc(FastEntry, Validation.attributionCapacity(layout.validations));
+        const fast = try a.alloc(FastEntry, layout.fingerprints);
+        errdefer a.free(fast);
         @memset(fast, .{});
+        const pending = try validation.Validation.init(a, layout.validations, options.validation_timeout_ms, options.validation_tombstone_ms);
         return .{ .store = store, .history = history, .seen = seen, .validation = pending, .gossip_ids = gossip_ids, .fast = fast };
     }
 
     pub fn deinit(self: *Messages, a: std.mem.Allocator, peers: *Peers) void {
-        self.validation.clear(&self.store, peers);
-        self.validation.deinit(a);
+        self.validation.deinit(a, &self.store, peers);
         self.history.deinit(a);
         self.seen.deinit(a);
         self.store.deinit(a);
@@ -120,11 +120,10 @@ pub const Messages = struct {
     }
 
     pub fn metadataBytes(layout: *const @import("layout.zig").Layout) usize {
-        return layout.payload_entries * @sizeOf(storage.Entry) + layout.payload_bytes / storage.page_bytes * @sizeOf(u32) +
-            Validation.memoryBytes(layout.validations) + Validation.attributionCapacity(layout.validations) * @sizeOf(FastEntry) +
-            layout.history * (@sizeOf(mcache.HistoryEntry) + layout.retained + 2 * @sizeOf(MessageId)) +
-            layout.retained * @sizeOf(u64) + mcache.indexCapacity(layout.history) * @sizeOf(u32) +
-            layout.seen * (@sizeOf(MessageId) + @sizeOf(u64)) + mcache.indexCapacity(layout.seen) * @sizeOf(u32);
+        return storage.Store.metadataBytes(layout.payload_entries, layout.payload_bytes) +
+            Validation.backingBytes(layout.validations) + layout.fingerprints * @sizeOf(FastEntry) +
+            mcache.History.backingBytes(layout.history, layout.retained) + layout.history * @sizeOf(MessageId) +
+            mcache.SeenCache.backingBytes(layout.seen);
     }
 
     pub const Stats = struct {
@@ -175,12 +174,12 @@ pub const Messages = struct {
     };
 
     pub fn serve(self: *Messages, outbox: *@import("outbox.zig").Outbox, peer: PeerRef, id: MessageId, byte_limit: usize, now: u64) ServeOutcome {
-        const entry = self.history.get(&self.store, id) orelse return .unknown;
-        const topic = self.store.get(entry.message).?.topicString();
+        const slot = self.history.get(&self.store, id) orelse return .unknown;
+        const topic = self.store.get(self.history.message(slot)).?.topicString();
         self.history.bindPeer(peer);
-        if (!self.history.iwantAllowed(entry, peer, @import("constants.zig").gossip_retransmission)) return .{ .known = .{ .topic = topic, .result = .limited } };
-        const queued = outbox.queueData(&self.store, entry.message, byte_limit, now) == .queued;
-        if (queued) self.history.sent(entry, peer);
+        if (!self.history.iwantAllowed(slot, peer, @import("constants.zig").gossip_retransmission)) return .{ .known = .{ .topic = topic, .result = .limited } };
+        const queued = outbox.queueData(&self.store, self.history.message(slot), byte_limit, now) == .queued;
+        if (queued) self.history.sent(slot, peer);
         return .{ .known = .{ .topic = topic, .result = if (queued) .queued else .pressured } };
     }
 
