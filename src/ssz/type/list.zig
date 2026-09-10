@@ -122,19 +122,24 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
             mixInLength(value.items.len, out);
         }
 
-        /// Clones the underlying `ArrayList`.
-        ///
-        /// Caller owns the memory.
-        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
-            comptime {
-                const OutInfo = @typeInfo(@TypeOf(out));
-                std.debug.assert(OutInfo == .pointer);
-            }
+        /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
+        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+            return cloneInto(@This(), allocator, value, out);
+        }
 
-            try out.resize(allocator, value.items.len);
+        /// The caller initializes `out` with `DestinationST.default_value` and deinitializes it
+        /// after success or error. Errors leave `out` safe to deinitialize.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
+            try out.ensureTotalCapacity(allocator, value.items.len);
 
-            for (value.items, 0..) |v, i| {
-                try Element.clone(&v, &out.items[i]);
+            for (value.items) |*element| {
+                out.appendAssumeCapacity(DestinationST.Element.default_value);
+                try Element.clone(element, &out.items[out.items.len - 1]);
             }
         }
 
@@ -292,6 +297,9 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                 const len = try std.math.divExact(usize, data.len, Element.fixed_size);
                 if (len > limit) {
                     return error.gtLimit;
+                }
+                if (comptime Element.kind == .bool) {
+                    try serialized.validate(data);
                 }
 
                 const chunk_count = if (comptime isBasicType(Element))
@@ -590,13 +598,12 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                 const content_root = try node.getLeft(pool);
                 const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
 
-                const chunked_leaf_ids_buf = try pool.allocator.alloc(Node.Id, chunked_leaf_count);
-                defer pool.allocator.free(chunked_leaf_ids_buf);
-                try content_root.getNodesAtDepth(pool, chunked_leaf_depth, 0, chunked_leaf_ids_buf);
+                var it = Node.DepthIterator.init(pool, content_root, chunked_leaf_depth, 0);
 
                 const state_col = pool.nodes.items(.state);
                 var byte_idx: usize = 0;
-                outer: for (chunked_leaf_ids_buf) |sid| {
+                outer: for (0..chunked_leaf_count) |_| {
+                    const sid = try it.next();
                     // Zero subtree at chunked_leaf boundary == all-zero output.
                     if (state_col[@intFromEnum(sid)].kind() == .zero) {
                         const remaining = serialized_size - byte_idx;
@@ -615,6 +622,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                         byte_idx += bytes_to_copy;
                     }
                 }
+                std.debug.assert(byte_idx == serialized_size);
                 return serialized_size;
             }
 
@@ -701,17 +709,30 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
             value.deinit(allocator);
         }
 
-        /// Clones the underlying `ArrayList`.
-        /// Caller owns the memory.
-        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: anytype) !void {
-            comptime {
-                const OutInfo = @typeInfo(@TypeOf(out));
-                std.debug.assert(OutInfo == .pointer);
-            }
+        /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
+        pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
+            return cloneInto(@This(), allocator, value, out);
+        }
 
-            try out.resize(allocator, value.items.len);
-            for (0..value.items.len) |i|
-                try Element.clone(allocator, &value.items[i], &out.items[i]);
+        /// The caller initializes `out` with `DestinationST.default_value` and deinitializes it
+        /// after success or error. Errors leave `out` safe to deinitialize.
+        pub fn cloneInto(
+            comptime DestinationST: type,
+            allocator: std.mem.Allocator,
+            value: *const Type,
+            out: *DestinationST.Type,
+        ) !void {
+            try out.ensureTotalCapacity(allocator, value.items.len);
+
+            for (value.items) |*element| {
+                out.appendAssumeCapacity(DestinationST.Element.default_value);
+                try Element.cloneInto(
+                    DestinationST.Element,
+                    allocator,
+                    element,
+                    &out.items[out.items.len - 1],
+                );
+            }
         }
 
         pub fn chunkCount(value: *const Type) usize {

@@ -58,6 +58,19 @@ const ShufflingManager = struct {
     }
 };
 
+inline fn maskedSwap(comptime T: type, out: []T, i: usize, j: usize, bit: u8) void {
+    std.debug.assert(bit <= 1);
+
+    // Bit 0 makes delta zero, preserving both values. Bit 1 makes delta left ^ right,
+    // so left ^ delta = right and right ^ delta = left.
+    const mask = @as(T, 0) -% @as(T, bit);
+    const left = out[i];
+    const right = out[j];
+    const delta = (left ^ right) & mask;
+    out[i] = left ^ delta;
+    out[j] = right ^ delta;
+}
+
 /// Shuffles an entire list in-place, equivalent to running
 /// `compute_shuffled_index` over every index but ~250x faster on large lists.
 /// Algorithm by [@protolambda](https://github.com/protolambda).
@@ -119,9 +132,7 @@ pub fn innerShuffleList(comptime T: type, out: []T, seed: []const u8, rounds: i3
             }
             const bit_v = (byte_v >> @intCast(j & 0x07)) & 0x01;
 
-            if (bit_v == 1) {
-                std.mem.swap(T, &out[i], &out[j]);
-            }
+            maskedSwap(T, out, i, j, bit_v);
         }
 
         // reset mirror to middle of opposing section of pivot
@@ -146,9 +157,7 @@ pub fn innerShuffleList(comptime T: type, out: []T, seed: []const u8, rounds: i3
             }
             const bit_v = (byte_v >> @intCast(j & 0x07)) & 0x01;
 
-            if (bit_v == 1) {
-                std.mem.swap(T, &out[i], &out[j]);
-            }
+            maskedSwap(T, out, i, j, bit_v);
         }
 
         // update current_round and stop when reaching the end of the
