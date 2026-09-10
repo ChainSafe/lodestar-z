@@ -4,7 +4,7 @@ const isBasicType = @import("type_kind.zig").isBasicType;
 const isFixedType = @import("type_kind.zig").isFixedType;
 const canMemcpySsz = @import("type_kind.zig").canMemcpySsz;
 const VariableElementIterator = @import("variable_element_iterator.zig").VariableElementIterator;
-const merkleize = @import("hashing").merkleize;
+const MerkleAccumulator = @import("hashing").MerkleAccumulator;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const getZeroHash = @import("hashing").getZeroHash;
@@ -105,20 +105,35 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
             } else return value.items.len;
         }
 
-        pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            const chunks = try allocator.alloc([32]u8, (chunkCount(value) + 1) / 2 * 2);
-            defer allocator.free(chunks);
-
-            @memset(chunks, [_]u8{0} ** 32);
-
+        pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
+            if (value.items.len > limit) return error.gtLimit;
+            var accumulator = MerkleAccumulator.init(chunk_depth);
             if (comptime isBasicType(Element)) {
-                _ = serializeIntoBytes(value, @ptrCast(chunks));
+                const items_per_chunk = 32 / Element.fixed_size;
+                var next: usize = 0;
+                for (0..chunkCount(value)) |_| {
+                    var chunk: [32]u8 = @splat(0);
+                    const end = next + @min(items_per_chunk, value.items.len - next);
+                    if (comptime canMemcpySsz(Element)) {
+                        const bytes = std.mem.sliceAsBytes(value.items[next..end]);
+                        @memcpy(chunk[0..bytes.len], bytes);
+                    } else {
+                        for (value.items[next..end], 0..) |*element, i| {
+                            _ = Element.serializeIntoBytes(element, chunk[i * Element.fixed_size ..]);
+                        }
+                    }
+                    try accumulator.append(&chunk);
+                    next = end;
+                }
+                std.debug.assert(next == value.items.len);
             } else {
-                for (value.items, 0..) |element, i| {
-                    try Element.hashTreeRoot(&element, &chunks[i]);
+                for (value.items) |*element| {
+                    var chunk: [32]u8 = undefined;
+                    try Element.hashTreeRoot(element, &chunk);
+                    try accumulator.append(&chunk);
                 }
             }
-            try merkleize(@ptrCast(chunks), chunk_depth, out);
+            try accumulator.finish(out);
             mixInLength(value.items.len, out);
         }
 
@@ -229,29 +244,30 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                 return len;
             }
 
-            pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
+            pub fn hashTreeRoot(_: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 const len = try length(data);
-
-                const chunk_count = if (comptime isBasicType(Element))
-                    (Element.fixed_size * len + 31) / 32
-                else
-                    len;
-                const chunks = try allocator.alloc([32]u8, (chunk_count + 1) / 2 * 2);
-                defer allocator.free(chunks);
-
-                @memset(chunks, [_]u8{0} ** 32);
-
+                var accumulator = MerkleAccumulator.init(chunk_depth);
                 if (comptime isBasicType(Element)) {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0..data.len], data);
+                    var next: usize = 0;
+                    for (0..(data.len + 31) / 32) |_| {
+                        var chunk: [32]u8 = @splat(0);
+                        const end = next + @min(32, data.len - next);
+                        @memcpy(chunk[0 .. end - next], data[next..end]);
+                        try accumulator.append(&chunk);
+                        next = end;
+                    }
+                    std.debug.assert(next == data.len);
                 } else {
                     for (0..len) |i| {
+                        var chunk: [32]u8 = undefined;
                         try Element.serialized.hashTreeRoot(
                             data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
-                            &chunks[i],
+                            &chunk,
                         );
+                        try accumulator.append(&chunk);
                     }
                 }
-                try merkleize(@ptrCast(chunks), chunk_depth, out);
+                try accumulator.finish(out);
                 mixInLength(len, out);
             }
         };
@@ -740,15 +756,14 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
         }
 
         pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            const chunks = try allocator.alloc([32]u8, (chunkCount(value) + 1) / 2 * 2);
-            defer allocator.free(chunks);
-
-            @memset(chunks, [_]u8{0} ** 32);
-
-            for (value.items, 0..) |element, i| {
-                try Element.hashTreeRoot(allocator, &element, &chunks[i]);
+            if (value.items.len > limit) return error.gtLimit;
+            var accumulator = MerkleAccumulator.init(chunk_depth);
+            for (value.items) |*element| {
+                var chunk: [32]u8 = undefined;
+                try Element.hashTreeRoot(allocator, element, &chunk);
+                try accumulator.append(&chunk);
             }
-            try merkleize(@ptrCast(chunks), chunk_depth, out);
+            try accumulator.finish(out);
             mixInLength(value.items.len, out);
         }
 
@@ -814,21 +829,14 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 var elements = try VariableElementIterator(Self).init(data);
-                const len = elements.len;
-                const chunk_count = len;
-
-                const chunks = try allocator.alloc([32]u8, (chunk_count + 1) / 2 * 2);
-                defer allocator.free(chunks);
-                @memset(chunks, [_]u8{0} ** 32);
-
-                var i: usize = 0;
-                while (try elements.next()) |element_bytes| : (i += 1) {
-                    try Element.serialized.hashTreeRoot(allocator, element_bytes, &chunks[i]);
+                var accumulator = MerkleAccumulator.init(chunk_depth);
+                for (0..elements.len) |_| {
+                    var chunk: [32]u8 = undefined;
+                    try Element.serialized.hashTreeRoot(allocator, (try elements.next()).?, &chunk);
+                    try accumulator.append(&chunk);
                 }
-                std.debug.assert(i == len);
-
-                try merkleize(@ptrCast(chunks), chunk_depth, out);
-                mixInLength(len, out);
+                try accumulator.finish(out);
+                mixInLength(elements.len, out);
             }
         };
 
