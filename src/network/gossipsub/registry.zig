@@ -14,7 +14,6 @@ pub const Context = struct {
     scores: *score_mod.PeerScore,
     validation: *const @import("validation.zig").Validation,
     mesh_policy: *@import("mesh.zig").Mesh,
-    io: []@import("peer_io.zig").PeerIo,
     options: *const @import("options.zig").Options,
     now: u64,
 };
@@ -54,13 +53,14 @@ pub const Registry = struct {
             row.fanout = .initEmpty();
             row.retire_after_ms = null;
         } else {
-            const mesh_context: @import("mesh.zig").Context = .{ .state = context.state, .peers = context.peers, .scores = context.scores, .io = context.io, .now = context.now, .heartbeat_ms = context.options.heartbeat_interval_ms, .pressure_ms = context.options.pressure_timeout_ms };
+            const mesh_context: @import("mesh.zig").Context = .{ .state = context.state, .peers = context.peers, .scores = context.scores, .now = context.now, .heartbeat_ms = context.options.heartbeat_interval_ms, .pressure_ms = context.options.pressure_timeout_ms };
             var it = row.mesh.iterator(.{});
             while (it.next()) |peer| context.mesh_policy.prune(&mesh_context, index, @intCast(peer), constants.unsubscribe_backoff_ms);
             row.retire_after_ms = context.now +| context.options.retained_score_ms;
         }
         row.subscribed = on;
-        for (context.io, context.state.peers) |*io, *peer| {
+        for (context.state.peers) |*peer| {
+            const io = &peer.io;
             if (!peer.active) continue;
             io.subscription_dirty.set(index);
             if (io.subscription_since == null) io.subscription_since = context.now;
@@ -101,8 +101,8 @@ pub const Registry = struct {
         for (context.validation.entries) |*entry| if (entry.pinned) {
             pins.validation.set(entry.topic);
         };
-        for (context.io, 0..) |*io, peer| {
-            if (context.state.peers[peer].active) pins.announcements.setUnion(io.subscription_dirty);
+        for (context.state.peers) |*peer| {
+            if (peer.active) pins.announcements.setUnion(peer.io.subscription_dirty);
         }
         return pins;
     }

@@ -441,6 +441,7 @@ pub const Control = struct {
         const kind = client.fromIdentify(&snapshot.identify);
         self.cancelConnection(service, engine, peer, conn);
         service.gossipsub.transportEvents(
+            &service.router,
             engine,
             &.{.{ .closed = .{
                 .conn = conn,

@@ -262,7 +262,7 @@ test "topic policy remembered ordinals remain independent of retained validation
     const len = try @import("snappy").raw.compress("0123456789", &compressed);
     const received = g.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = compressed[0..len] }, 1).admitted;
     try std.testing.expect(g.unsubscribe(name));
-    g.io.peers[peer.index].subscription_dirty.unset(old);
+    g.state.peers[peer.index].io.subscription_dirty.unset(old);
     var buffer: [@import("topic.zig").topic_max_len]u8 = undefined;
     for (0..511) |i| {
         const next = try std.fmt.bufPrint(&buffer, "/eth2/{x:0>2}020304/data_column_sidecar_{d}/ssz_snappy", .{ i / 128 + 1, i % 128 });
