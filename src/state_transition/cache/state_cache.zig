@@ -95,7 +95,7 @@ pub const CachedBeaconState = struct {
             .epoch_cache = cloned_epoch_cache,
             .slashings_cache = slashings_cache,
             .state = state,
-            .proposer_rewards = self.proposer_rewards,
+            .proposer_rewards = .{},
             .created_with_transfer_cache = opts.transfer_cache,
         };
 

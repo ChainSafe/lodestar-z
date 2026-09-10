@@ -92,6 +92,10 @@ pub fn deinit(self: *BeaconStateView) void {
     }
 }
 
+pub fn release(self: *BeaconStateView) void {
+    self.deinit();
+}
+
 fn initCachedState(
     cached_state: *CachedBeaconState,
     io: std.Io,
@@ -1297,8 +1301,9 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
         post_state.deinit();
         allocator.destroy(post_state);
     }
+    st.metrics.state_transition.pre_state_cloned_count.observe(cached_state.cloned_count);
 
-    try st.processSlots(allocator, js.io(), post_state, slot_value, .{});
+    try st.processSlots(allocator, js.io(), post_state, slot_value);
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),

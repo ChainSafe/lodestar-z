@@ -95,9 +95,9 @@ test "clone VariableContainerType" {
     try f.a.append(allocator, 42);
     try f.b.append(allocator, 42);
     defer Foo.deinit(allocator, &f);
-    var cloned_f: Foo.Type = undefined;
-    try Foo.clone(allocator, &f, &cloned_f);
+    var cloned_f = Foo.default_value;
     defer Foo.deinit(allocator, &cloned_f);
+    try Foo.clone(allocator, &f, &cloned_f);
     try std.testing.expect(&cloned_f != &f);
 
     try expectEqualRootsAlloc(Foo, allocator, f, cloned_f);
@@ -112,10 +112,9 @@ test "clone VariableContainerType" {
         // 1 additional field
         c: FieldC,
     });
-    var cloned_f2: Foo2.Type = undefined;
-    cloned_f2.c = FieldC.default_value;
-    try Foo.clone(allocator, &f, &cloned_f2);
+    var cloned_f2 = Foo2.default_value;
     defer Foo2.deinit(allocator, &cloned_f2);
+    try Foo.cloneInto(Foo2, allocator, &f, &cloned_f2);
     try std.testing.expectEqualSlices(u8, f.a.items, cloned_f2.a.items);
     try std.testing.expectEqualSlices(u8, f.b.items, cloned_f2.b.items);
 }

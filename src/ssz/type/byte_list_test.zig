@@ -17,7 +17,7 @@ test "clone" {
     defer b.deinit(allocator);
     try b.append(allocator, 5);
 
-    var cloned: Bits.Type = undefined;
+    var cloned = Bits.default_value;
     defer cloned.deinit(allocator);
     try Bits.clone(allocator, &b, &cloned);
     try std.testing.expect(&b != &cloned);

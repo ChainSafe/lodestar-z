@@ -160,6 +160,7 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
+                &BenchState.cloned_cached_state.proposer_rewards,
                 &BenchState.cloned_cached_state.slashings_cache,
                 .full,
                 self.body,
@@ -182,6 +183,7 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
+                &BenchState.cloned_cached_state.proposer_rewards,
                 self.body.syncAggregate(),
                 opts.verify_signature,
             ) catch unreachable;
@@ -203,6 +205,7 @@ fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
+                &BenchState.cloned_cached_state.proposer_rewards,
                 &BenchState.cloned_cached_state.slashings_cache,
                 .full,
                 self.block,
@@ -229,6 +232,7 @@ fn ProcessBlockRootBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type 
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
+                &BenchState.cloned_cached_state.proposer_rewards,
                 &BenchState.cloned_cached_state.slashings_cache,
                 .full,
                 self.block,
@@ -389,6 +393,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.config,
                 epoch_cache,
                 state,
+                &BenchState.cloned_cached_state.proposer_rewards,
                 &BenchState.cloned_cached_state.slashings_cache,
                 .full,
                 self.body,
@@ -405,6 +410,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                     BenchState.cloned_cached_state.config,
                     epoch_cache,
                     state,
+                    &BenchState.cloned_cached_state.proposer_rewards,
                     self.body.syncAggregate(),
                     true,
                 ) catch unreachable;
@@ -535,7 +541,6 @@ fn runBenchmark(
         io,
         cached_state,
         block_slot,
-        .{},
     );
     try cached_state.state.commit();
     try state_transition.buildSlashingsCacheFromStateIfNeeded(allocator, cached_state.state, &cached_state.slashings_cache);
