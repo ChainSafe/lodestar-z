@@ -6,11 +6,14 @@ const SyncCommitteeCache = @import("sync_committee_cache.zig").SyncCommitteeCach
 
 test "memory_safety: initValidatorIndices should release cloned indices on init failure" {
     const indices = [_]ValidatorIndex{ 0, 1, 2 };
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
-
-    try std.testing.expectError(
-        error.OutOfMemory,
-        SyncCommitteeCache.initValidatorIndices(failing.allocator(), &indices),
-    );
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    var saw_oom = false;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, input: []const ValidatorIndex, failed: *bool) !void {
+            errdefer failed.* = true;
+            var cache = try SyncCommitteeCache.initValidatorIndices(allocator, input);
+            defer cache.deinit();
+            try std.testing.expectEqualSlices(ValidatorIndex, input, cache.getValidatorIndices());
+        }
+    }.run, .{ &indices, &saw_oom });
+    try std.testing.expect(saw_oom);
 }
