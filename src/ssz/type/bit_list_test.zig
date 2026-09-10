@@ -407,3 +407,32 @@ test "BitListType - tree.zeros" {
         try std.testing.expectEqualSlices(u8, &expected_root, tree_node.getRoot(&pool));
     }
 }
+
+test "BitList hashing streams chunk and batch boundaries without allocation" {
+    const allocator = std.testing.allocator;
+    const Bits = BitListType(65 * 256 + 7);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
+    defer pool.deinit();
+    for ([_]usize{ 0, 1, 7, 8, 9, 255, 256, 257, 63 * 256, 64 * 256, 64 * 256 + 1, Bits.limit }) |len| {
+        var value = try Bits.Type.fromBitLen(allocator, len);
+        defer value.deinit(allocator);
+        for (0..len) |i| try value.setAssumeCapacity(i, i % 3 == 0);
+        const node = try Bits.tree.fromValue(&pool, &value);
+        defer pool.unref(node);
+        const bytes = try allocator.alloc(u8, Bits.serializedSize(&value));
+        defer allocator.free(bytes);
+        _ = Bits.serializeIntoBytes(&value, bytes);
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        var root: [32]u8 = undefined;
+        try Bits.hashTreeRoot(failing.allocator(), &value, &root);
+        try std.testing.expectEqualSlices(u8, node.getRoot(&pool), &root);
+        try Bits.serialized.hashTreeRoot(failing.allocator(), bytes, &root);
+        try std.testing.expectEqualSlices(u8, node.getRoot(&pool), &root);
+    }
+    var root: [32]u8 = undefined;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.InvalidSize, Bits.serialized.hashTreeRoot(failing.allocator(), &.{}, &root));
+    try std.testing.expectError(error.noPaddingBit, Bits.serialized.hashTreeRoot(failing.allocator(), &.{0}, &root));
+    const Small = BitListType(1);
+    try std.testing.expectError(error.tooLarge, Small.serialized.hashTreeRoot(failing.allocator(), &.{4}, &root));
+}

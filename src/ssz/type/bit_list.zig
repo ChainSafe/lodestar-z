@@ -5,7 +5,7 @@ const hexToBytes = @import("hex").hexToBytes;
 const bytesToHex = @import("hex").bytesToHex;
 const hexByteLen = @import("hex").hexByteLen;
 const hexLenFromBytes = @import("hex").hexLenFromBytes;
-const merkleize = @import("hashing").merkleize;
+const MerkleAccumulator = @import("hashing").MerkleAccumulator;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const getZeroHash = @import("hashing").getZeroHash;
@@ -275,14 +275,18 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             return (value.bit_len + 255) / 256;
         }
 
-        pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            const chunks = try allocator.alloc([32]u8, (chunkCount(value) + 1) / 2 * 2);
-            defer allocator.free(chunks);
-
-            @memset(chunks, [_]u8{0} ** 32);
-            @memcpy(@as([]u8, @ptrCast(chunks))[0..value.data.items.len], value.data.items);
-
-            try merkleize(@ptrCast(chunks), chunk_depth, out);
+        pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
+            if (value.bit_len > limit) return error.tooLarge;
+            std.debug.assert(value.data.items.len == (value.bit_len + 7) / 8);
+            var accumulator = MerkleAccumulator.init(chunk_depth);
+            for (0..chunkCount(value)) |i| {
+                var chunk: [32]u8 = @splat(0);
+                const start = i * 32;
+                const len = @min(32, value.data.items.len - start);
+                @memcpy(chunk[0..len], value.data.items[start..][0..len]);
+                try accumulator.append(&chunk);
+            }
+            try accumulator.finish(out);
             mixInLength(value.bit_len, out);
         }
 
@@ -394,23 +398,22 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                 return (try parse(data)).bit_len;
             }
 
-            pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
+            pub fn hashTreeRoot(_: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 const parsed = try parse(data);
+                const byte_len = (parsed.bit_len + 7) / 8;
                 const chunk_count = (parsed.bit_len + 255) / 256;
-                const chunks = try allocator.alloc([32]u8, (chunk_count + 1) / 2 * 2);
-                defer allocator.free(chunks);
-
-                @memset(chunks, [_]u8{0} ** 32);
-                if (parsed.bit_len % 8 == 0) {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0 .. data.len - 1], data[0 .. data.len - 1]);
-                } else {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0..data.len], data);
-                    // remove padding bit
-                    @as([]u8, @ptrCast(chunks))[data.len - 1] ^=
-                        @as(u8, 1) << parsed.padding_bit_index;
+                var accumulator = MerkleAccumulator.init(chunk_depth);
+                for (0..chunk_count) |i| {
+                    var chunk: [32]u8 = @splat(0);
+                    const start = i * 32;
+                    const len = @min(32, byte_len - start);
+                    @memcpy(chunk[0..len], data[start..][0..len]);
+                    if (i + 1 == chunk_count and parsed.bit_len % 8 != 0) {
+                        chunk[len - 1] ^= @as(u8, 1) << parsed.padding_bit_index;
+                    }
+                    try accumulator.append(&chunk);
                 }
-
-                try merkleize(@ptrCast(chunks), chunk_depth, out);
+                try accumulator.finish(out);
                 mixInLength(parsed.bit_len, out);
             }
         };
