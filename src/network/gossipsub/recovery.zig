@@ -5,48 +5,66 @@ const PeerRef = @import("peers.zig").Ref;
 const PeerScore = @import("score.zig").PeerScore;
 const Handle = @import("../quic/engine.zig").Handle;
 const MessageId = @import("topic.zig").MessageId;
+const assert = std.debug.assert;
+const none = std.math.maxInt(u16);
 
 pub const promises_per_peer = constants.max_ihave_per_heartbeat * constants.gossip_ids_max;
 
-comptime {
-    std.debug.assert(promises_per_peer < constants.promises_cap);
-}
-
-pub const Promise = struct {
-    id: MessageId,
+const Request = struct { id: MessageId = undefined, next: u16 = none };
+pub const Batch = struct {
     peer: PeerRef,
     token: u64,
     connection: Handle,
+    head: u16 = none,
+    count: u16 = 0,
+    sample: u16 = none,
     expiry: ?u64 = null,
     sent_at_ms: u64 = 0,
 };
 
 pub const Recovery = struct {
-    promises: []Promise,
+    requests: []Request,
+    batches: []Batch,
+    free: u16 = 0,
     len: usize = 0,
+    batch_len: usize = 0,
     metrics: @import("metrics.zig").Recovery = .{},
 
     pub fn init(allocator: std.mem.Allocator) !Recovery {
-        return .{ .promises = try allocator.alloc(Promise, constants.promises_cap) };
+        comptime assert(promises_per_peer < constants.promises_cap and constants.promises_cap < none);
+        const requests = try allocator.alloc(Request, constants.promises_cap);
+        errdefer allocator.free(requests);
+        const batches = try allocator.alloc(Batch, constants.promises_cap);
+        var result: Recovery = .{ .requests = requests, .batches = batches };
+        result.resetFree();
+        return result;
     }
 
     pub fn deinit(self: *Recovery, allocator: std.mem.Allocator, peers: *Peers) void {
         self.clear(peers);
-        allocator.free(self.promises);
+        allocator.free(self.requests);
+        allocator.free(self.batches);
         self.* = undefined;
     }
 
     pub fn clear(self: *Recovery, peers: *Peers) void {
-        for (self.promises[0..self.len]) |promise| peers.release(promise.peer);
+        for (self.batches[0..self.batch_len]) |batch| peers.release(batch.peer);
         self.len = 0;
+        self.batch_len = 0;
+        self.resetFree();
+    }
+
+    fn resetFree(self: *Recovery) void {
+        for (self.requests, 0..) |*request, i| request.* = .{ .next = if (i + 1 < self.requests.len) @intCast(i + 1) else none };
+        self.free = 0;
     }
 
     pub fn available(self: *const Recovery) usize {
-        return self.promises.len - self.len;
+        return self.requests.len - self.len;
     }
 
     pub fn select(self: *const Recovery, peer: PeerRef, ids: []MessageId) error{PeerCapacity}!usize {
-        std.debug.assert(ids.len <= constants.gossip_ids_max);
+        assert(ids.len <= constants.gossip_ids_max);
         std.sort.heap(MessageId, ids, {}, lessThan);
         var unique: usize = 0;
         for (ids) |id| {
@@ -56,10 +74,16 @@ pub const Recovery = struct {
         }
         var requested = std.StaticBitSet(constants.gossip_ids_max).initEmpty();
         var pending: usize = 0;
-        for (self.promises[0..self.len]) |*promise| {
-            if (!std.meta.eql(promise.peer, peer)) continue;
-            pending += 1;
-            if (std.sort.binarySearch(MessageId, ids[0..unique], &promise.id, compare)) |index| requested.set(index);
+        for (self.batches[0..self.batch_len]) |batch| {
+            if (!std.meta.eql(batch.peer, peer)) continue;
+            pending += batch.count;
+            var slot = batch.head;
+            for (0..batch.count) |_| {
+                const request = self.requests[slot];
+                if (std.sort.binarySearch(MessageId, ids[0..unique], &request.id, compare)) |index| requested.set(index);
+                slot = request.next;
+            }
+            assert(slot == none);
         }
         if (pending >= promises_per_peer) return error.PeerCapacity;
         const capacity = @min(self.available(), promises_per_peer - pending);
@@ -82,54 +106,84 @@ pub const Recovery = struct {
     }
 
     pub fn memoryBytes(self: *const Recovery) usize {
-        return self.promises.len * @sizeOf(Promise);
+        return self.requests.len * @sizeOf(Request) + self.batches.len * @sizeOf(Batch);
     }
 
     pub fn add(self: *Recovery, peers: *Peers, id: MessageId, peer: PeerRef, connection: Handle, token: u64) void {
-        std.debug.assert(self.available() > 0);
+        self.addBatch(peers, &.{id}, peer, connection, token, 0);
+    }
+
+    pub fn addBatch(self: *Recovery, peers: *Peers, ids: []const MessageId, peer: PeerRef, connection: Handle, token: u64, sample: usize) void {
+        assert(ids.len > 0 and ids.len <= constants.gossip_ids_max and ids.len <= self.available() and sample < ids.len);
+        const batch = &self.batches[self.batch_len];
+        batch.* = .{ .peer = peer, .connection = connection, .token = token, .count = @intCast(ids.len) };
+        for (ids, 0..) |id, i| {
+            const slot = self.free;
+            assert(slot != none);
+            self.free = self.requests[slot].next;
+            self.requests[slot] = .{ .id = id, .next = batch.head };
+            batch.head = slot;
+            if (i == sample) batch.sample = slot;
+        }
         peers.retain(peer);
-        self.promises[self.len] = .{ .id = id, .peer = peer, .connection = connection, .token = token };
-        self.len += 1;
+        self.len += ids.len;
+        self.batch_len += 1;
     }
 
     pub const Receipt = struct { now_ms: u64, duplicate: bool = false };
 
     pub fn resolve(self: *Recovery, peers: *Peers, id: MessageId, receipt: ?Receipt) void {
         var index: usize = 0;
-        for (0..self.promises.len) |_| {
-            if (index == self.len) break;
-            if (std.mem.eql(u8, &self.promises[index].id, &id)) {
-                if (receipt) |received| if (self.promises[index].expiry != null) {
+        const batches = self.batch_len;
+        for (0..batches) |_| {
+            if (index == self.batch_len) break;
+            const batch = &self.batches[index];
+            var link = &batch.head;
+            const count = batch.count;
+            for (0..count) |_| {
+                const slot = link.*;
+                const request = &self.requests[slot];
+                if (!std.mem.eql(u8, &request.id, &id)) {
+                    link = &request.next;
+                    continue;
+                }
+                if (receipt) |received| if (batch.expiry != null) {
                     self.metrics.resolved +|= 1;
                     self.metrics.resolved_duplicate +|= @intFromBool(received.duplicate);
-                    self.metrics.delivery.observe(received.now_ms -| self.promises[index].sent_at_ms);
+                    self.metrics.delivery.observe(received.now_ms -| batch.sent_at_ms);
                 };
-                self.remove(peers, index);
-            } else index += 1;
+                link.* = request.next;
+                if (batch.sample == slot) batch.sample = none;
+                batch.count -= 1;
+                self.releaseRequest(slot);
+            }
+            if (batch.count == 0) self.remove(peers, index) else index += 1;
         }
     }
 
     pub fn cancel(self: *Recovery, peers: *Peers, connection: Handle, local_pressure: bool) u64 {
         var removed: u64 = 0;
         var index: usize = 0;
-        for (0..self.promises.len) |_| {
-            if (index == self.len) break;
-            const p = self.promises[index];
-            if (std.meta.eql(p.connection, connection) and (local_pressure or p.expiry == null)) {
+        const count = self.batch_len;
+        for (0..count) |_| {
+            if (index == self.batch_len) break;
+            const batch = self.batches[index];
+            if (std.meta.eql(batch.connection, connection) and (local_pressure or batch.expiry == null)) {
+                removed += batch.count;
                 self.remove(peers, index);
-                removed += 1;
             } else index += 1;
         }
         return removed;
     }
 
     pub fn controlSent(self: *Recovery, connection: Handle, token: u64, followup_ms: u64, now_ms: u64) void {
-        std.debug.assert(followup_ms > 0 and followup_ms <= 86_400_000);
-        for (self.promises[0..self.len]) |*p| {
-            if (p.expiry == null and p.token == token and std.meta.eql(p.connection, connection)) {
-                p.expiry = now_ms +| followup_ms;
-                p.sent_at_ms = now_ms;
-                self.metrics.sent +|= 1;
+        assert(followup_ms > 0 and followup_ms <= 86_400_000);
+        for (self.batches[0..self.batch_len]) |*batch| {
+            if (batch.expiry == null and batch.token == token and std.meta.eql(batch.connection, connection)) {
+                batch.expiry = now_ms +| followup_ms;
+                batch.sent_at_ms = now_ms;
+                self.metrics.sent +|= batch.count;
+                self.metrics.batches_sent +|= 1;
             }
         }
     }
@@ -137,16 +191,19 @@ pub const Recovery = struct {
     pub fn expire(self: *Recovery, peers: *Peers, scores: *PeerScore, now_ms: u64) u64 {
         var broken: u64 = 0;
         var index: usize = 0;
-        for (0..self.promises.len) |_| {
-            if (index == self.len) break;
-            const p = self.promises[index];
-            // Each promise pins attribution until removal, preventing identity-slot reuse.
-            std.debug.assert(peers.matches(p.peer));
-            if (p.expiry != null and now_ms >= p.expiry.?) {
-                broken += 1;
-                scores.penalize(p.peer.index, 1);
-                scores.penalties.broken_promise +|= 1;
-                peers.rows[p.peer.index].negative = true;
+        const count = self.batch_len;
+        for (0..count) |_| {
+            if (index == self.batch_len) break;
+            const batch = self.batches[index];
+            assert(peers.matches(batch.peer));
+            if (batch.expiry != null and now_ms >= batch.expiry.?) {
+                self.metrics.expired_ids +|= batch.count;
+                if (batch.sample != none) {
+                    broken += 1;
+                    scores.penalize(batch.peer.index, 1);
+                    scores.penalties.broken_promise +|= 1;
+                    peers.rows[batch.peer.index].negative = true;
+                }
                 self.remove(peers, index);
             } else index += 1;
         }
@@ -155,17 +212,31 @@ pub const Recovery = struct {
 
     pub fn nextExpiry(self: *const Recovery) ?u64 {
         var next: ?u64 = null;
-        for (self.promises[0..self.len]) |promise| if (promise.expiry) |expiry| {
+        for (self.batches[0..self.batch_len]) |batch| if (batch.expiry) |expiry| {
             next = @min(next orelse expiry, expiry);
         };
         return next;
     }
 
-    fn remove(self: *Recovery, peers: *Peers, index: usize) void {
-        std.debug.assert(index < self.len);
-        peers.release(self.promises[index].peer);
+    fn releaseRequest(self: *Recovery, slot: u16) void {
+        self.requests[slot].next = self.free;
+        self.free = slot;
         self.len -= 1;
-        self.promises[index] = self.promises[self.len];
+    }
+
+    fn remove(self: *Recovery, peers: *Peers, index: usize) void {
+        assert(index < self.batch_len);
+        const batch = self.batches[index];
+        var slot = batch.head;
+        for (0..batch.count) |_| {
+            const next = self.requests[slot].next;
+            self.releaseRequest(slot);
+            slot = next;
+        }
+        assert(slot == none);
+        peers.release(batch.peer);
+        self.batch_len -= 1;
+        self.batches[index] = self.batches[self.batch_len];
     }
 };
 
@@ -264,5 +335,39 @@ test "recovery metrics distinguish incoming delivery from queued and locally res
     try std.testing.expectEqual(@as(u64, 1), recovery.metrics.resolved_duplicate);
     try std.testing.expectEqual(@as(u64, 2), recovery.metrics.delivery.count);
     try std.testing.expectEqual(@as(u128, 600), recovery.metrics.delivery.sum_ms);
+    try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
+}
+
+test "recovery batches pin identity once and score one randomly selected promise" {
+    const a = std.testing.allocator;
+    var peers = try Peers.initCapacity(a, 10000, 2, 1);
+    defer peers.deinit(a);
+    var scores = try PeerScore.initCapacity(a, .{}, 2);
+    defer scores.deinit(a);
+    var recovery = try Recovery.init(a);
+    defer recovery.deinit(a, &peers);
+    const connection: Handle = .{ .index = 0, .generation = 1 };
+    const metadata: @import("peers.zig").Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound };
+    const peer = peers.admit(connection, &metadata, 0).admitted.peer;
+    var ids: [constants.gossip_ids_max]MessageId = undefined;
+    for (&ids, 0..) |*id, i| id.* = @splat(@intCast(i));
+    recovery.addBatch(&peers, &ids, peer, connection, 1, 64);
+    try std.testing.expectEqual(@as(u32, 1), peers.rows[peer.index].pins);
+    try std.testing.expectEqual(@as(u64, 0), recovery.expire(&peers, &scores, 20000));
+    recovery.controlSent(connection, 1, 3000, 20000);
+    try std.testing.expectEqual(@as(u64, 1), recovery.expire(&peers, &scores, 23000));
+    try std.testing.expectEqual(@as(u64, 1), scores.penalties.broken_promise);
+    try std.testing.expectEqual(@as(u64, 128), recovery.metrics.expired_ids);
+    try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
+    recovery.addBatch(&peers, &ids, peer, connection, 2, 64);
+    recovery.controlSent(connection, 2, 3000, 24000);
+    recovery.resolve(&peers, ids[64], .{ .now_ms = 25000 });
+    try std.testing.expectEqual(@as(usize, 127), recovery.len);
+    try std.testing.expectEqual(@as(u32, 1), peers.rows[peer.index].pins);
+    try std.testing.expectEqual(@as(u64, 0), recovery.expire(&peers, &scores, 27000));
+    try std.testing.expectEqual(@as(u64, 1), scores.penalties.broken_promise);
+    try std.testing.expectEqual(@as(u64, 255), recovery.metrics.expired_ids);
+    try std.testing.expectEqual(@as(u64, 2), recovery.metrics.batches_sent);
+    try std.testing.expectEqual(@as(usize, constants.promises_cap), recovery.available());
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
 }

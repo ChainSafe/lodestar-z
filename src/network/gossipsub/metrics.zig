@@ -137,6 +137,8 @@ pub const Rpc = struct {
 };
 
 pub const Recovery = struct {
+    batches_sent: u64 = 0,
+    expired_ids: u64 = 0,
     sent: u64 = 0,
     resolved: u64 = 0,
     resolved_duplicate: u64 = 0,
@@ -144,6 +146,8 @@ pub const Recovery = struct {
 
     pub fn write(self: *const Recovery, w: *std.Io.Writer) std.Io.Writer.Error!void {
         const prom = @import("../metrics_prometheus.zig");
+        try prom.scalar(w, "gossipsub_iwant_batches_sent_total", .counter, "IWANT batches with one scoring sample and a completed write receipt", self.batches_sent);
+        try prom.scalar(w, "gossipsub_iwant_expired_ids_total", .counter, "Requested IDs still missing when their batch expires", self.expired_ids);
         try prom.scalar(w, "gossipsub_iwant_promise_sent_total", .counter, "Per-peer IWANT promises whose request frame was fully written", self.sent);
         try prom.scalar(w, "gossipsub_iwant_promise_resolved_total", .counter, "Sent per-peer IWANT promises fulfilled by incoming gossip", self.resolved);
         try prom.scalar(w, "gossipsub_iwant_promise_resolved_from_duplicate_total", .counter, "Sent per-peer IWANT promises fulfilled by duplicate incoming gossip", self.resolved_duplicate);
