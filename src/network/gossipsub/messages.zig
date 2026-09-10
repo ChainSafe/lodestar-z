@@ -24,6 +24,7 @@ pub const Context = struct {
     overlay: *const @import("overlay.zig").Overlay,
     peers: *Peers,
     options: *const Options,
+    epoch: u64,
 };
 
 pub const Source = struct {
@@ -118,16 +119,8 @@ pub const Messages = struct {
         return self.history.get(&self.store, id) != null;
     }
 
-    pub fn beginCycle(self: *Messages) void {
-        self.history.beginCycle();
-    }
-
-    pub fn finishCycle(self: *Messages) void {
-        if (self.history.cycling) self.history.finishCycle(&self.store);
-    }
-
-    pub fn gossipIds(self: *Messages, topic: []const u8) []MessageId {
-        const count = self.history.gossip(&self.store, topic, self.gossip_ids);
+    pub fn gossipIds(self: *Messages, topic: []const u8, epoch: u64) []MessageId {
+        const count = self.history.gossip(&self.store, topic, self.gossip_ids, epoch);
         return self.gossip_ids[0..count];
     }
 
@@ -146,9 +139,9 @@ pub const Messages = struct {
         return .{ .known = .{ .topic = topic, .result = if (queued) .queued else .pressured } };
     }
 
-    pub fn publish(self: *Messages, id: MessageId, name: []const u8, compressed: []const u8, now: u64) ?storage.Handle {
+    pub fn publish(self: *Messages, id: MessageId, name: []const u8, compressed: []const u8, now: u64, epoch: u64) ?storage.Handle {
         const handle = self.history.admitPayload(&self.store, id, name, compressed) orelse return null;
-        self.history.put(&self.store, handle);
+        self.history.put(&self.store, handle, epoch);
         self.store.seal(handle);
         std.debug.assert(self.seen.add(id, now));
         return handle;
@@ -246,7 +239,7 @@ pub const Messages = struct {
         var result: Applied = .{ .verdict = verdict, .id = entry.id, .source = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .topic_bytes = undefined, .topic_len = @intCast(name.len) };
         @memcpy(result.topic_bytes[0..name.len], name);
         if (verdict == .accept) {
-            self.history.put(&self.store, message);
+            self.history.put(&self.store, message, context.epoch);
             if (context.overlay.subscribed(entry.topic.index)) result.forward = .{ .message = message, .source = entry.source, .topic = entry.topic };
         }
         if (verdict != .ignore) {

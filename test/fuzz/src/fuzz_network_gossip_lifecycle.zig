@@ -23,6 +23,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     var handles: [16]gossip.ValidationHandle = @splat(.{ .index = 0, .generation = 0 });
     var tx: [6]?Handle = @splat(null);
     var now: u64 = 1;
+    var epoch: u64 = 0;
     var payload: [16384]u8 = @splat(9);
     for (input[0..len], 0..) |byte, step| {
         const at = byte / 16;
@@ -39,7 +40,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
             },
             2, 3 => if (validation.inspect(store, &peers, handles[at], now) == null) {
                 const handle = handles[at];
-                if (byte % 10 == 2) messages.history.put(store, validation.entries[handle.index].state.pending.message);
+                if (byte % 10 == 2) messages.history.put(store, validation.entries[handle.index].state.pending.message, epoch);
                 validation.finish(store, &peers, handle, if (byte % 10 == 2) .accept else .ignore, now);
             },
             4 => {
@@ -47,7 +48,8 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                 messages.expire(&peers, now);
             },
             5 => {
-                if (messages.history.cycling) messages.history.finishCycle(store) else messages.history.beginCycle();
+                epoch += 1;
+                messages.history.age(store, epoch);
             },
             6 => {
                 const index = at % tx.len;

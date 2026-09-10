@@ -45,3 +45,9 @@ pub fn processRpc(g: *gossip.Gossipsub, index: u16, now: @import("../types.zig")
     items.* = peer.items;
     return result == .done;
 }
+
+pub fn ageHistory(g: *gossip.Gossipsub) void {
+    std.debug.assert(!g.cycle.isActive());
+    g.cycle.epoch += 1;
+    g.messages.history.age(&g.messages.store, g.cycle.epoch);
+}

@@ -159,13 +159,10 @@ pub const HistoryEntry = struct {
     next: u32 = empty_slot,
     prev: u32 = empty_slot,
     message: storage.Handle = undefined,
-    window: u8 = 0,
-    cycle: u64 = 0,
+    born_epoch: u64 = 0,
     counts: []u8,
 };
 pub const History = struct {
-    cycle: u64 = 0,
-    cycling: bool = false,
     generations: []u64,
     counts: []u8,
     entries: []HistoryEntry,
@@ -234,7 +231,8 @@ pub const History = struct {
     fn reclaimable(e: *const storage.Entry) bool {
         return e.history and !e.provisional and !e.validation and e.tx == 0;
     }
-    pub fn put(self: *History, store: *storage.Store, h: storage.Handle) void {
+    pub fn put(self: *History, store: *storage.Store, h: storage.Handle, epoch: u64) void {
+        if (self.tail != empty_slot) assert(self.entries[self.tail].born_epoch <= epoch);
         const message = store.get(h).?;
         if (message.history) return;
         const id = message.id;
@@ -245,7 +243,7 @@ pub const History = struct {
         self.free = self.entries[slot].next;
         const counts = self.entries[slot].counts;
         @memset(counts, 0);
-        self.entries[slot] = .{ .message = h, .prev = self.tail, .counts = counts, .cycle = self.cycle };
+        self.entries[slot] = .{ .message = h, .prev = self.tail, .counts = counts, .born_epoch = epoch };
         if (self.tail != empty_slot) self.entries[self.tail].next = slot else self.head = slot;
         self.tail = slot;
         self.ids[slot] = id;
@@ -291,28 +289,15 @@ pub const History = struct {
         self.free = slot;
         self.count -= 1;
     }
-    pub fn beginCycle(self: *History) void {
-        assert(!self.cycling and self.cycle < std.math.maxInt(u64));
-        self.cycle += 1;
-        self.cycling = true;
-    }
-    pub fn finishCycle(self: *History, store: *storage.Store) void {
-        assert(self.cycling);
-        self.shift(store);
-        self.cycling = false;
-    }
-    pub fn shift(self: *History, store: *storage.Store) void {
-        var slot = self.head;
-        for (0..self.count) |_| {
-            if (!self.cycling or self.entries[slot].cycle < self.cycle) self.entries[slot].window +|= 1;
-            slot = self.entries[slot].next;
-        }
+    pub fn age(self: *History, store: *storage.Store, epoch: u64) void {
         for (0..self.entries.len) |_| {
-            if (self.count == 0 or self.entries[self.head].window < constants.mcache_len) break;
+            if (self.count == 0) break;
+            assert(self.entries[self.head].born_epoch <= epoch);
+            if (epoch - self.entries[self.head].born_epoch < constants.mcache_len) break;
             _ = self.evictOldest(store);
         }
     }
-    pub fn gossip(self: *const History, store: *const storage.Store, name: []const u8, out: []MessageId) usize {
+    pub fn gossip(self: *const History, store: *const storage.Store, name: []const u8, out: []MessageId, epoch: u64) usize {
         var count: usize = 0;
         var slot = self.head;
         for (0..self.count) |_| {
@@ -320,7 +305,10 @@ pub const History = struct {
             const e = &self.entries[slot];
             slot = e.next;
             const m = store.get(e.message).?;
-            if ((self.cycling and e.cycle == self.cycle) or e.window >= constants.mcache_gossip or !std.mem.eql(u8, name, m.topicString())) continue;
+            assert(e.born_epoch <= epoch);
+            // Arrivals in this epoch receive their first advertising window in the next one.
+            const windows = epoch - e.born_epoch;
+            if (windows == 0 or windows > constants.mcache_gossip or !std.mem.eql(u8, name, m.topicString())) continue;
             out[count] = m.id;
             count += 1;
         }
@@ -366,23 +354,23 @@ test "gossip history indexed replacement keeps FIFO age and independent TX reten
     const a = [_]u8{1} ** 20;
     const b = [_]u8{2} ** 20;
     const first = store.put(a, "a", "old").?;
-    history.put(&store, first);
+    history.put(&store, first, 0);
     store.seal(first);
     store.retainTx(first);
     const second = store.put(b, "b", "other").?;
-    history.put(&store, second);
+    history.put(&store, second, 0);
     store.seal(second);
-    history.shift(&store);
+    history.age(&store, 1);
     const replacement = store.put(a, "a", "new").?;
-    history.put(&store, replacement);
+    history.put(&store, replacement, 1);
     store.seal(replacement);
     try std.testing.expectEqual(@as(usize, 2), history.count);
     try std.testing.expectEqual(replacement, history.get(&store, a).?.message);
     try std.testing.expect(!store.get(first).?.history);
-    for (0..constants.mcache_len - 1) |_| history.shift(&store);
+    history.age(&store, constants.mcache_len);
     try std.testing.expect(history.get(&store, b) == null);
     try std.testing.expect(history.get(&store, a) != null);
-    history.shift(&store);
+    history.age(&store, constants.mcache_len + 1);
     try std.testing.expectEqual(@as(usize, 0), history.count);
     store.releaseTx(first);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
@@ -442,13 +430,13 @@ test "gossip history replacement resets message retransmission counts" {
     defer history.deinit(std.testing.allocator);
     const id: MessageId = @splat(1);
     const first = store.put(id, "t", "first").?;
-    history.put(&store, first);
+    history.put(&store, first, 0);
     store.seal(first);
     const peer: PeerRef = .{ .index = 0, .generation = 1 };
     history.bindPeer(peer);
     for (0..3) |_| history.sent(history.get(&store, id).?, peer);
     const replacement = store.put(id, "t", "replacement").?;
-    history.put(&store, replacement);
+    history.put(&store, replacement, 0);
     store.seal(replacement);
     try std.testing.expect(history.iwantAllowed(history.get(&store, id).?, peer, 3));
     try std.testing.expectEqual(@as(u8, 0), history.get(&store, id).?.counts[peer.index]);
@@ -504,7 +492,7 @@ test "gossip failed admission preserves history pinned by transmit queues" {
     for (&handles, 0..) |*handle, i| {
         const id: MessageId = @splat(@intCast(i));
         handle.* = history.admitPayload(&store, id, "topic", "x").?;
-        history.put(&store, handle.*);
+        history.put(&store, handle.*, 0);
         store.seal(handle.*);
         store.retainTx(handle.*);
     }
@@ -527,25 +515,25 @@ test "gossip history emits three windows and defers arrivals during a cycle" {
     var history = try History.initCapacity(a, 3, 2);
     defer history.deinit(a);
     const first = store.put(@splat(1), "topic", "first").?;
-    history.put(&store, first);
+    history.put(&store, first, 0);
     store.seal(first);
-    history.beginCycle();
+    var epoch: u64 = 1;
     const second = store.put(@splat(2), "topic", "second").?;
-    history.put(&store, second);
+    history.put(&store, second, epoch);
     store.seal(second);
     var ids: [3]MessageId = undefined;
-    try std.testing.expectEqual(@as(usize, 1), history.gossip(&store, "topic", &ids));
-    history.finishCycle(&store);
+    try std.testing.expectEqual(@as(usize, 1), history.gossip(&store, "topic", &ids, epoch));
+    history.age(&store, epoch);
     for (0..2) |_| {
-        history.beginCycle();
-        try std.testing.expectEqual(@as(usize, 2), history.gossip(&store, "topic", &ids));
-        history.finishCycle(&store);
+        epoch += 1;
+        try std.testing.expectEqual(@as(usize, 2), history.gossip(&store, "topic", &ids, epoch));
+        history.age(&store, epoch);
     }
-    history.beginCycle();
-    try std.testing.expectEqual(@as(usize, 1), history.gossip(&store, "topic", &ids));
+    epoch += 1;
+    try std.testing.expectEqual(@as(usize, 1), history.gossip(&store, "topic", &ids, epoch));
     try std.testing.expectEqual(@as(MessageId, @splat(2)), ids[0]);
-    history.finishCycle(&store);
-    history.beginCycle();
-    try std.testing.expectEqual(@as(usize, 0), history.gossip(&store, "topic", &ids));
-    history.finishCycle(&store);
+    history.age(&store, epoch);
+    epoch += 1;
+    try std.testing.expectEqual(@as(usize, 0), history.gossip(&store, "topic", &ids, epoch));
+    history.age(&store, epoch);
 }

@@ -553,7 +553,7 @@ test "gossipsub readmission reuses tombstones across repeated Seen eviction" {
     try std.testing.expectEqual(gossipsub.ReportOutcome.already_resolved, setup.server.report(current, .accept, setup.pair.now));
     try std.testing.expect(setup.server.messages.store.get(retained) == null);
     try std.testing.expectEqual(@as(usize, 1), setup.server.messages.store.used_entries);
-    for (0..@import("constants.zig").mcache_len) |_| setup.server.messages.history.shift(&setup.server.messages.store);
+    for (0..@import("constants.zig").mcache_len) |_| @import("test_support.zig").ageHistory(&setup.server);
     try std.testing.expectEqual(@as(usize, 0), setup.server.messages.store.used_entries);
     try std.testing.expectEqual(setup.server.messages.store.next.len, setup.server.messages.store.free_pages);
 }
