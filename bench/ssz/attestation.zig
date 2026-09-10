@@ -76,6 +76,7 @@ const HashAttestation = struct {
     pub fn run(self: *HashAttestation, allocator: std.mem.Allocator) void {
         var scratch = ssz.Hasher(Attestation).init(allocator) catch unreachable;
         defer scratch.deinit(allocator);
+
         var out: [32]u8 = undefined;
         ssz.Hasher(Attestation).hash(&scratch, self.attestation, &out) catch unreachable;
     }
@@ -160,26 +161,25 @@ pub fn main(init: std.process.Init) !void {
     try bench.addParam("validate attestation", &validate_attestation, .{});
 
     const hash_attestation = HashAttestation{ .attestation = attestation };
-    try bench.addParam("hash attestation managed cold", &hash_attestation, .{});
+    try bench.addParam("hash attestation", &hash_attestation, .{});
 
     var scratch = ssz.Hasher(Attestation).init(allocator) catch unreachable;
     defer scratch.deinit(allocator);
+
     var root: [32]u8 = undefined;
     ssz.Hasher(Attestation).hash(&scratch, attestation, &root) catch unreachable;
 
     const hash_attestation_no_alloc = HashAttestationNoAlloc{ .attestation = attestation, .scratch = &scratch };
-    try bench.addParam("hash attestation managed warm", &hash_attestation_no_alloc, .{});
+    try bench.addParam("hash attestation prealloc", &hash_attestation_no_alloc, .{});
 
     const hash_attestation_oneshot = HashAttestationOneshot{ .attestation = attestation };
-    try bench.addParam("hash attestation value", &hash_attestation_oneshot, .{});
+    try bench.addParam("hash attestation oneshot", &hash_attestation_oneshot, .{});
 
     const hash_attestation_serialized = HashAttestationSerialized{ .bytes = attestation_bytes };
     try bench.addParam("hash attestation serialized", &hash_attestation_serialized, .{});
 
     const equals_attestation = EqualsAttestation{ .a = attestation, .b = attestation };
     try bench.addParam("equals attestation", &equals_attestation, .{});
-
-    try @import("hash_memory.zig").report(Attestation, io, allocator, "attestation", attestation);
 
     try bench.run(io, std.Io.File.stdout());
 }
