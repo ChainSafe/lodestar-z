@@ -232,12 +232,26 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             }
 
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
-                const allocator = pool.allocator;
-                var value = Self.default_value;
-                defer Self.deinit(allocator, &value);
-
-                try toValue(allocator, node, pool, &value);
-                return Self.serializeIntoBytes(&value, out);
+                const len = try length(node, pool);
+                const size = try std.math.mul(usize, len, Element.fixed_size);
+                if (out.len < size) return error.InvalidSize;
+                const chunk_count = if (comptime isBasicType(Element))
+                    size / 32 + @intFromBool(size % 32 != 0)
+                else
+                    len;
+                var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
+                var offset: usize = 0;
+                while (try it.next()) |chunk| {
+                    if (comptime isBasicType(Element)) {
+                        const byte_count = @min(32, size - offset);
+                        @memcpy(out[offset..][0..byte_count], chunk.getRoot(pool)[0..byte_count]);
+                        offset += byte_count;
+                    } else {
+                        offset += try Element.tree.serializeIntoBytes(chunk, pool, out[offset..][0..Element.fixed_size]);
+                    }
+                }
+                std.debug.assert(offset == size);
+                return size;
             }
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {

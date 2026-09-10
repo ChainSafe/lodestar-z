@@ -256,3 +256,57 @@ test "memory_safety: variable progressive list tree.toValue preserves out on OOM
     try std.testing.expect(saw_failure);
     try std.testing.expect(saw_success);
 }
+
+test "fixed progressive tree serialization streams without temporary values" {
+    const allocator = std.testing.allocator;
+    const Pair = FixedContainerType(struct { a: UintType(64), b: UintType(64) });
+    inline for (.{ UintType(8), UintType(64), BoolType(), Pair }) |Element| {
+        const List = FixedProgressiveListType(Element);
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = failing.allocator(), .pool_size = 8192 });
+        defer pool.deinit();
+        const per_chunk = if (Element.kind == .container) 1 else 32 / Element.fixed_size;
+        for ([_]usize{ 0, 1, per_chunk, per_chunk + 1, 5 * per_chunk, 5 * per_chunk + 1, 21 * per_chunk, 21 * per_chunk + 1, 85 * per_chunk + 1 }) |len| {
+            var value = List.default_value;
+            defer List.deinit(allocator, &value);
+            try value.resize(allocator, len);
+            for (value.items, 0..) |*item, i| item.* = switch (Element.kind) {
+                .uint => @truncate(i),
+                .bool => i % 3 == 0,
+                .container => .{ .a = i, .b = i + 1 },
+                else => unreachable,
+            };
+            const node = try List.tree.fromValue(&pool, &value);
+            defer pool.unref(node);
+            const expected = try allocator.alloc(u8, List.serializedSize(&value));
+            defer allocator.free(expected);
+            const out = try allocator.alloc(u8, expected.len);
+            defer allocator.free(out);
+            _ = List.serializeIntoBytes(&value, expected);
+            failing.fail_index = failing.alloc_index;
+            defer failing.fail_index = std.math.maxInt(usize);
+            try std.testing.expectEqual(expected.len, try List.tree.serializeIntoBytes(node, &pool, out));
+            try std.testing.expectEqualSlices(u8, expected, out);
+            if (out.len > 0) try std.testing.expectError(error.InvalidSize, List.tree.serializeIntoBytes(node, &pool, out[0 .. out.len - 1]));
+        }
+    }
+}
+
+test "fixed progressive tree serialization checks terminators and expands implicit zeros" {
+    const allocator = std.testing.allocator;
+    const List = FixedProgressiveListType(UintType(8));
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
+    defer pool.deinit();
+    const length = try pool.createLeafFromUint(65);
+    const root = try pool.createBranch(@enumFromInt(0), length);
+    defer pool.unref(root);
+    var out: [65]u8 = @splat(0xff);
+    try std.testing.expectEqual(out.len, try List.tree.serializeIntoBytes(root, &pool, &out));
+    try std.testing.expectEqual([_]u8{0} ** 65, out);
+
+    const bad_terminator = try pool.createLeafFromUint(1);
+    const contents = try pool.createBranch(@enumFromInt(0), bad_terminator);
+    const bad_root = try pool.createBranch(contents, try pool.createLeafFromUint(1));
+    defer pool.unref(bad_root);
+    try std.testing.expectError(error.InvalidTerminatorNode, List.tree.serializeIntoBytes(bad_root, &pool, &out));
+}
