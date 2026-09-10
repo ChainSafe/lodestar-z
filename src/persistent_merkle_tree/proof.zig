@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const GindexUint = @import("hashing").GindexUint;
+const max_depth = @import("hashing").max_depth;
 const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
 
@@ -14,6 +15,8 @@ pub const Error = error{
     InvalidGindex,
     /// Witness list length does not match the gindex path length.
     InvalidWitnessLength,
+    /// A proof branch path exceeds the supported tree depth.
+    InvalidProofDepth,
 };
 
 pub const ProofType = enum {
@@ -437,38 +440,46 @@ fn getBit(bitlist: []const u8, bit_index: usize) bool {
     return (byte & (@as(u8, 0x80) >> bit_idx)) != 0;
 }
 
-/// Convert descriptor bytes to bitlist
+/// Converts a canonical descriptor to a bitlist after validating its shape and depth.
+/// Returns `InvalidProofDepth` before allocation if a path exceeds `max_depth` branches.
 pub fn descriptorToBitlist(allocator: Allocator, descriptor: []const u8) ![]bool {
-    var bools: std.ArrayList(bool) = .empty;
-    errdefer bools.deinit(allocator);
+    const bit_length = try validateDescriptor(descriptor);
+    const bools = try allocator.alloc(bool, bit_length);
+    for (bools, 0..) |*bit, i| bit.* = getBit(descriptor, i);
+    return bools;
+}
 
-    const max_bit_length = descriptor.len * 8;
-    var count0: usize = 0;
-    var count1: usize = 0;
+fn validateDescriptor(descriptor: []const u8) Error!usize {
+    const max_bit_length = std.math.mul(usize, descriptor.len, 8) catch return error.InvalidWitnessLength;
+    var right_pending: [max_depth]bool = undefined;
+    var depth: usize = 0;
 
     var i: usize = 0;
     while (i < max_bit_length) : (i += 1) {
-        const bit = getBit(descriptor, i);
-        try bools.append(allocator, bit);
-
-        if (bit) {
-            count1 += 1;
-        } else {
-            count0 += 1;
+        if (!getBit(descriptor, i)) {
+            if (depth == max_depth) return error.InvalidProofDepth;
+            right_pending[depth] = true;
+            depth += 1;
+            continue;
         }
 
-        if (count1 > count0) {
-            i += 1;
-            // Verify remaining bits are all zero (padding)
-            if (i + 7 < max_bit_length) {
-                return error.InvalidWitnessLength;
+        while (depth > 0) {
+            if (right_pending[depth - 1]) {
+                right_pending[depth - 1] = false;
+                break;
             }
-            while (i < max_bit_length) : (i += 1) {
-                if (getBit(descriptor, i)) {
+            depth -= 1;
+        }
+
+        if (depth == 0) {
+            const bit_length = i + 1;
+            if (max_bit_length - bit_length > 7) return error.InvalidWitnessLength;
+            for (bit_length..max_bit_length) |padding_index| {
+                if (getBit(descriptor, padding_index)) {
                     return error.InvalidWitnessLength;
                 }
             }
-            return bools.toOwnedSlice(allocator);
+            return bit_length;
         }
     }
 
@@ -562,7 +573,7 @@ fn compactMultiProofToNode(
     return pool.createBranch(left, right);
 }
 
-/// Create a Node from a compact multiproof
+/// Creates a node from a compact multiproof, rejecting paths beyond `max_depth`.
 pub fn createNodeFromCompactMultiProof(
     pool: *Node.Pool,
     leaves: [][32]u8,
