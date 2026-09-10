@@ -1509,7 +1509,7 @@ test "memory_safety: ListBasicTreeView non-chunked_leaf: sliceTo doesn't leak po
     try std.testing.expectEqual(before, after);
 }
 
-// Path 3 (shared chunked_leaf) CoWs a fresh node + 2KB blob; if setChildNode OOMs
+// A shared chunked_leaf needs a fresh node + 2KB blob; if setChildNode OOMs
 // it must be reclaimed. Leak shows as getNodesInUse (slot) + testing.allocator (blob).
 test "memory_safety: ListBasicTreeView chunked_leaf: set OOM in setChildNode reclaims the CoW chunked_leaf (no leak)" {
     const allocator = std.testing.allocator;
@@ -1533,7 +1533,7 @@ test "memory_safety: ListBasicTreeView chunked_leaf: set OOM in setChildNode rec
 
     const baseline = pool.getNodesInUse();
 
-    // First set on the committed (shared, rc>=1) chunked_leaf takes Path 3.
+    // The first set copies the committed chunked_leaf (shared, rc>=1).
     armer.armed = true;
     try std.testing.expectError(error.OutOfMemory, view.set(0, 999));
     view_failing.fail_index = std.math.maxInt(usize); // disarm for cleanup
@@ -1541,4 +1541,57 @@ test "memory_safety: ListBasicTreeView chunked_leaf: set OOM in setChildNode rec
 
     // The freshly-CoW'd node + its 2KB blob were reclaimed, not leaked.
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "ListBasicTreeView chunked_leaf: packed edits agree with plain trees for every basic type" {
+    const BoolType = @import("../type/bool.zig").BoolType;
+    const allocator = std.testing.allocator;
+    inline for (.{ BoolType(), UintType(8), UintType(16), UintType(32), UintType(64), UintType(128), UintType(256) }) |ST| {
+        const items_per_chunk = 32 / ST.fixed_size;
+        const boundary = ChunkedLeafType.K * items_per_chunk;
+        const ListT = FixedListType(ST, boundary * 2, .{ .chunked_leaf = true });
+        const PlainList = FixedListType(ST, boundary * 2, .{});
+        const nonzero: ST.Type = if (ST.Type == bool) true else std.math.maxInt(ST.Type);
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
+        defer pool.deinit();
+
+        var expected: ListT.Type = .empty;
+        defer expected.deinit(allocator);
+        try expected.resize(allocator, boundary + 1);
+        @memset(expected.items, ST.default_value);
+        expected.items[0] = nonzero;
+        const view = try ListT.TreeView.fromValue(allocator, &pool, &expected);
+        defer view.deinit();
+        const snapshot = try view.clone(.{ .transfer_cache = false });
+        defer snapshot.deinit();
+        var original_hash: [32]u8 = undefined;
+        try snapshot.hashTreeRootInto(&original_hash);
+
+        for ([_]usize{ 1, items_per_chunk - 1, items_per_chunk, boundary - 1, boundary }) |index| {
+            try view.set(index, nonzero);
+            expected.items[index] = nonzero;
+            try std.testing.expectEqual(nonzero, try view.get(index));
+        }
+        try view.push(nonzero);
+        try expected.append(allocator, nonzero);
+        var expected_hash: [32]u8 = undefined;
+        try PlainList.hashTreeRoot(allocator, &expected, &expected_hash);
+        var actual_hash: [32]u8 = undefined;
+        try view.hashTreeRootInto(&actual_hash);
+        try std.testing.expectEqualSlices(u8, &expected_hash, &actual_hash);
+
+        try view.set(0, ST.default_value);
+        expected.items[0] = ST.default_value;
+        try PlainList.hashTreeRoot(allocator, &expected, &expected_hash);
+        try view.hashTreeRootInto(&actual_hash);
+        try std.testing.expectEqualSlices(u8, &expected_hash, &actual_hash);
+        var decoded: ListT.Type = .empty;
+        defer decoded.deinit(allocator);
+        try view.toValue(allocator, &decoded);
+        try std.testing.expectEqualSlices(ST.Type, expected.items, decoded.items);
+        try snapshot.hashTreeRootInto(&actual_hash);
+        try std.testing.expectEqualSlices(u8, &original_hash, &actual_hash);
+        try std.testing.expectEqual(nonzero, try snapshot.get(0));
+        try std.testing.expectEqual(ST.default_value, try snapshot.get(boundary));
+    }
 }
