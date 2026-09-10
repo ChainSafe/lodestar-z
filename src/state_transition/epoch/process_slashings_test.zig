@@ -1,6 +1,9 @@
 const std = @import("std");
 const Node = @import("persistent_merkle_tree").Node;
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
+const preset = @import("preset").preset;
+const processSlashings = @import("./process_slashings.zig").processSlashings;
 
 test "processSlashings stores a high-index penalty compactly" {
     const allocator = std.testing.allocator;
