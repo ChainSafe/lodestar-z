@@ -1,7 +1,6 @@
 const std = @import("std");
-const VariableElementIterator = @import("variable_element_iterator.zig").VariableElementIterator;
 const TypeKind = @import("type_kind.zig").TypeKind;
-const ssz = @import("ssz");
+const VariableElementIterator = @import("variable_element_iterator.zig").VariableElementIterator;
 
 /// A dummy ssz variable element used for tests.
 const VariableElement = struct {
