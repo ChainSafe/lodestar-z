@@ -1217,14 +1217,8 @@ test "memory_safety: TreeView composite list clone should not double-free cached
     defer list.deinit(std.testing.allocator);
     try list.append(std.testing.allocator, .{ .epoch = 1, .root = [_]u8{1} ** 32 });
 
-    var saw_oom = false;
-    for (0..200) |fail_after| {
-        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
-        defer oom.deinit();
-
-        var operation_succeeded = false;
-        {
-            const allocator = oom.allocator();
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, value: *const ListType.Type) !void {
             var pool = try Node.Pool.init(.{
                 .page_allocator = std.testing.allocator,
                 .allocator = allocator,
@@ -1232,37 +1226,21 @@ test "memory_safety: TreeView composite list clone should not double-free cached
             });
             defer pool.deinit();
 
-            var view = try ListType.TreeView.fromValue(allocator, &pool, &list);
+            var view = try ListType.TreeView.fromValue(allocator, &pool, value);
             defer view.deinit();
             const child = try view.get(0);
             try view.commit();
 
-            // Setup must not consume the injected failure; sweep clone's allocations only.
-            oom.failing.fail_index = oom.failing.alloc_index + fail_after;
-            if (view.clone(.{ .transfer_cache = true })) |cloned| {
-                defer cloned.deinit();
-                oom.failing.fail_index = std.math.maxInt(usize);
-                operation_succeeded = true;
-                try std.testing.expectEqual(@as(usize, 0), view.chunks.children_data.count());
-                try std.testing.expectEqual(child, try cloned.get(0));
-            } else |err| switch (err) {
-                error.OutOfMemory => {
-                    saw_oom = true;
-                    try std.testing.expect(oom.failing.has_induced_failure);
-                    try std.testing.expect(oom.live.contains(@intFromPtr(child)));
-                    oom.failing.fail_index = std.math.maxInt(usize);
-                    try std.testing.expectEqual(child, try view.get(0));
-                },
-                else => return err,
-            }
-        }
-        try std.testing.expect(!oom.double_free);
-        try std.testing.expectEqual(@as(usize, 0), oom.live.count());
+            const cloned = view.clone(.{ .transfer_cache = true }) catch |err| {
+                try std.testing.expectEqual(@as(usize, 1), view.chunks.children_data.count());
+                try std.testing.expectEqual(child, try view.getReadonly(0));
+                return err;
+            };
+            defer cloned.deinit();
 
-        if (operation_succeeded) {
-            try std.testing.expect(saw_oom);
-            return;
+            try std.testing.expectEqual(@as(usize, 0), view.chunks.children_data.count());
+            try std.testing.expectEqual(@as(usize, 1), cloned.chunks.children_data.count());
+            try std.testing.expectEqual(child, try cloned.getReadonly(0));
         }
-    }
-    return error.TestUnexpectedResult;
+    }.run, .{&list});
 }
