@@ -2146,7 +2146,7 @@ test "gossip advertisements sample the whole burst independently for each recipi
         _ = try g.publish(name, &bytes, .{ .mono_ms = 1, .unix_s = 0 });
     }
     for (g.sessions.rows) |*peer| peer.io.resetTx(&g.messages.store);
-    g.overlay.fanoutMembers(t).* = .initEmpty();
+    g.overlay.rows[t].fanout = .initEmpty();
     const context = g.overlayContext(1);
     g.cycle.takeSnapshot(context.sessions, &context.peers.scores, context.now);
     var snapshot_context = context;
