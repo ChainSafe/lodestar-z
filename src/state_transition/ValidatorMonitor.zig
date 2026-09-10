@@ -12,7 +12,7 @@ const Allocator = std.mem.Allocator;
 const Epoch = types.primitive.Epoch.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 
-pub const ValidatorMonitor = @This();
+const ValidatorMonitor = @This();
 
 allocator: Allocator,
 /// Unordered list of validators that require additional monitoring.
