@@ -311,9 +311,7 @@ pub const Driver = struct {
             engine.closeStream(stream, 0);
             self.inner.sessions.rows[index].retry(self.inner.last_now_ms);
         }
-        self.inner.sessions.rows[index].io.resetTx(&self.inner.messages.store);
-        self.inner.cancelPromises(index, false);
-        self.inner.wakeStorage();
+        self.inner.cancelWrites(self.inner.sessions.ref(index));
     }
 
     pub fn replaceInbound(
@@ -357,8 +355,8 @@ pub const Driver = struct {
             router.cancel(engine, stream);
             peer.outbound = .{ .waiting = 0 };
         }
-        self.resetInbound(engine, index);
-        self.resetOutbound(engine, index);
+        if (peer.in_stream) |stream| engine.closeStream(stream, 0);
+        if (peer.outStream()) |stream| engine.closeStream(stream, 0);
         self.inner.connectionClosed(peer.conn);
     }
 
@@ -432,11 +430,11 @@ pub const Driver = struct {
         const stream = self.inner.sessions.rows[index].outStream() orelse return;
         var bytes = self.inner.options.output_per_peer;
         for (0..self.inner.options.calls_per_peer) |_| {
-            self.inner.queueSubscriptions(io);
-            const segment = io.segment(&self.inner.messages.store);
+            io.tx.subscriptions(&self.inner.overlay.rows, self.inner.last_now_ms);
+            const segment = io.tx.segment(&self.inner.messages.store);
             if (segment.len == 0) {
-                io.tx_ready = false;
-                io.tx_progress_ms = null;
+                io.tx.ready = false;
+                io.tx.progress_ms = null;
                 return;
             }
             if (bytes == 0 or self.inner.budget.output == 0 or io.calls_pump == 0 or self.inner.budget.calls == 0) return;
@@ -444,55 +442,49 @@ pub const Driver = struct {
             io.calls_pump -= 1;
             io.write_first = false;
             self.inner.budget.calls -= 1;
-            if (io.tx_progress_ms == null) io.tx_progress_ms = now.mono_ms;
+            if (io.tx.progress_ms == null) io.tx.progress_ms = now.mono_ms;
             const written = engine.write(stream, segment[0..take], false) catch |err| {
-                io.tx_ready = false;
+                io.tx.ready = false;
                 if (err != error.WouldBlock) {
-                    std.log.scoped(.network_gossip_errors).debug("gossip_write_failed connection={d}:{d} stream={d} reason={s} queued={d} bytes={d}", .{ stream.conn.index, stream.conn.generation, stream.id, @errorName(err), io.data_count, io.data_bytes });
+                    std.log.scoped(.network_gossip_errors).debug("gossip_write_failed connection={d}:{d} stream={d} reason={s} queued={d} bytes={d}", .{ stream.conn.index, stream.conn.generation, stream.id, @errorName(err), io.tx.data_count, io.tx.data_bytes });
                     self.resetOutbound(engine, index);
                 }
                 return;
             };
             if (written == 0) {
-                io.tx_ready = false;
+                io.tx.ready = false;
                 return;
             }
             bytes -= written;
             self.inner.budget.output -= written;
-            io.tx_progress_ms = now.mono_ms;
+            io.tx.progress_ms = now.mono_ms;
             const free = self.inner.messages.store.free_pages;
             self.inner.rpc_metrics.sent_bytes +|= written;
-            if (io.advance(&self.inner.messages.store, written)) |completion| self.inner.writeCompleted(self.inner.sessions.ref(index), completion, now.mono_ms);
+            if (io.tx.advance(&self.inner.messages.store, written)) |completion| self.inner.writeCompleted(self.inner.sessions.ref(index), completion, now.mono_ms);
             if (self.inner.messages.store.free_pages != free) self.inner.wakeStorage();
         }
     }
 
     fn logSendPressure(self: *const Driver, index: u16, now_ms: u64) void {
         const io = &self.inner.sessions.rows[index].io;
-        if (!io.pressure_pending or now_ms < io.pressure_log_due_ms) return;
-        io.pressure_pending = false;
-        io.pressure_log_due_ms = now_ms +| 1_000;
+        if (!io.tx.pressure_pending or now_ms < io.tx.pressure_log_due_ms) return;
+        io.tx.pressure_pending = false;
+        io.tx.pressure_log_due_ms = now_ms +| 1_000;
         const row = &self.inner.sessions.rows[index];
         const identity = &self.inner.peers.rows[row.logical.index].identity;
-        std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, @tagName(io.last_drop), io.drops[@intFromEnum(io.last_drop)], io.data_count, peer_io_mod.data_capacity, io.data_bytes, self.inner.options.tx_peer_bytes, io.control.count, io.control.used, if (io.oldestTx()) |oldest| now_ms -| oldest else 0 });
+        std.log.scoped(.network_gossip_errors).debug("gossip_send_pressure peer={f} connection={d}:{d} reason={s} total={d} data_queued={d}/{d} data_bytes={d}/{d} control_frames={d} control_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, @tagName(io.tx.last_drop), io.tx.drops[@intFromEnum(io.tx.last_drop)], io.tx.data_count, @import("outbox.zig").data_capacity, io.tx.data_bytes, self.inner.options.tx_peer_bytes, io.tx.control.count, io.tx.control.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0 });
     }
 
     fn logIoTimeout(self: *const Driver, index: u16, reason: []const u8, now_ms: u64) void {
         const row = &self.inner.sessions.rows[index];
         const io = &self.inner.sessions.rows[index].io;
         const identity = &self.inner.peers.rows[row.logical.index].identity;
-        std.log.scoped(.network_gossip_errors).debug("gossip_io_timeout peer={f} connection={d}:{d} reason={s} inbound={any} outbound={any} blocked={s} subscriptions={d} data_queued={d} data_bytes={d} control_bytes={d} critical_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, reason, row.in_stream != null, row.outStream() != null, @tagName(io.blocked), io.subscription_dirty.count(), io.data_count, io.data_bytes, io.control.used, io.critical.used, if (io.oldestTx()) |oldest| now_ms -| oldest else 0 });
+        std.log.scoped(.network_gossip_errors).debug("gossip_io_timeout peer={f} connection={d}:{d} reason={s} inbound={any} outbound={any} blocked={s} subscriptions={d} data_queued={d} data_bytes={d} control_bytes={d} critical_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, reason, row.in_stream != null, row.outStream() != null, @tagName(io.blocked), io.tx.subscription_dirty.count(), io.tx.data_count, io.tx.data_bytes, io.tx.control.used, io.tx.critical.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0 });
     }
 
     pub fn pumpReady(self: *const Driver, router: *routing.Router, engine: *Engine, now: Now, events: []Event) usize {
         self.inner.beginPump(now);
         self.expireIo(router, engine, now.mono_ms);
-        self.inner.overlay.expireActions(now.mono_ms, self.inner.options.pressure_timeout_ms);
-        var retired = self.inner.overlay.retire.iterator(.{});
-        while (retired.next()) |index| {
-            const peer: u16 = @intCast(index);
-            self.retirePeer(router, engine, peer);
-        }
         self.inner.tick(now);
         var count: usize = 0;
         var serviced: usize = 0;
@@ -507,11 +499,11 @@ pub const Driver = struct {
             io.fields_pump = 0;
             io.calls_pump = self.inner.options.calls_per_peer;
             const write_first = io.write_first;
-            if (write_first and io.tx_ready) self.flush(engine, @intCast(index), io, now);
+            if (write_first and io.tx.ready) self.flush(engine, @intCast(index), io, now);
             if (io.rx_ready or (io.blocked == .events and count < events.len)) {
                 count = self.readPeer(engine, @intCast(index), io, now, events, count);
             }
-            if (!write_first and io.tx_ready) self.flush(engine, @intCast(index), io, now);
+            if (!write_first and io.tx.ready) self.flush(engine, @intCast(index), io, now);
             self.logSendPressure(@intCast(index), now.mono_ms);
             serviced += 1;
             if (serviced == self.inner.options.peers_per_pump) break;
@@ -561,8 +553,8 @@ pub const Driver = struct {
             if (!self.inner.sessions.rows[i].active) continue;
             if (self.inner.sessions.rows[i].in_stream != null and
                 ((io.rx_ready and io.blocked != .events) or (io.blocked == .events and event_capacity > 0))) return now.mono_ms;
-            if (self.inner.sessions.rows[i].outStream() != null and io.tx_ready and
-                (io.pending() or io.subscription_dirty.count() > 0)) return now.mono_ms;
+            if (self.inner.sessions.rows[i].outStream() != null and io.tx.ready and
+                (io.tx.pending() or io.tx.subscription_dirty.count() > 0)) return now.mono_ms;
             if (io.deadlines(&self.inner.options).next()) |due| deadline = @min(deadline, due);
         }
         return @max(now.mono_ms, deadline);
@@ -573,10 +565,18 @@ pub const Driver = struct {
         for (g.sessions.rows, 0..) |*peer, index| {
             if (!peer.active) continue;
             const io = &peer.io;
+            if (io.tx.retiring) {
+                self.retirePeer(router, engine, @intCast(index));
+                continue;
+            }
             for (0..3) |_| {
                 const reason = io.deadlines(&g.options).expired(now_ms) orelse break;
                 self.logIoTimeout(@intCast(index), @tagName(reason), now_ms);
                 switch (reason) {
+                    .prunes => {
+                        self.retirePeer(router, engine, @intCast(index));
+                        break;
+                    },
                     .subscriptions => {
                         g.counters.local_pressure_resets += 1;
                         g.counters.subscription_timeouts += 1;

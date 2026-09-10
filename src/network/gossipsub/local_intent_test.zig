@@ -98,18 +98,18 @@ test "local intent separate validation control score backoff and generation pins
     g.messages.validation.finish(&g.messages.store, &g.peers, handle, .ignore, now.mono_ms);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     g.messages.validation.expire(&g.messages.store, &g.peers, std.math.maxInt(u64));
-    io.subscription_dirty.set(0);
+    io.tx.subscription_dirty.set(0);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    io.subscription_dirty.unset(0);
+    io.tx.subscription_dirty.unset(0);
     g.overlay.rows[0].mesh.set(peer.index);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     g.overlay.rows[0].mesh.unset(peer.index);
     g.overlay.rows[0].fanout.set(peer.index);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     g.overlay.rows[0].fanout.unset(peer.index);
-    g.overlay.pending_prunes[0].set(peer.index);
+    g.sessions.rows[peer.index].io.tx.pending_prunes.set(0);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.overlay.pending_prunes[0].unset(peer.index);
+    g.sessions.rows[peer.index].io.tx.pending_prunes.unset(0);
     g.peers.scores.invalid(logical.index, 0);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     g.overlay.rows[0].retire_after_ms = now.mono_ms;
@@ -147,13 +147,13 @@ test "local intent history survives former row reuse and real retransmission des
     try std.testing.expectEqualStrings("history payload", payload[0..read]);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const io = &g.sessions.rows[peer.index].io;
-    const served = g.messages.serve(io, g.sessions.rows[peer.index].logical, id, g.options.tx_peer_bytes, now.mono_ms);
+    const served = g.messages.serve(&io.tx, g.sessions.rows[peer.index].logical, id, g.options.tx_peer_bytes, now.mono_ms);
     try std.testing.expect(served == .known);
     try std.testing.expectEqualStrings(name, served.known.topic);
     try std.testing.expectEqual(.queued, served.known.result);
-    try std.testing.expectEqual(retained, io.data[io.data_head].message);
-    try std.testing.expectEqualStrings(name, g.messages.store.get(io.data[io.data_head].message).?.topicString());
-    try std.testing.expect(io.segment(&g.messages.store).len > 0);
+    try std.testing.expectEqual(retained, io.tx.data[io.tx.data_head].message);
+    try std.testing.expectEqualStrings(name, g.messages.store.get(io.tx.data[io.tx.data_head].message).?.topicString());
+    try std.testing.expect(io.tx.segment(&g.messages.store).len > 0);
 }
 
 test "local intent copies retired row input before another assignment reuses it" {

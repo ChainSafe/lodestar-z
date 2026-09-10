@@ -41,6 +41,7 @@ test {
     _ = @import("message_store.zig");
     _ = @import("validation.zig");
     _ = @import("peer_io.zig");
+    _ = @import("outbox.zig");
     _ = constants;
     _ = protobuf;
     _ = topic;
