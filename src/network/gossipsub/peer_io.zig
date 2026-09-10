@@ -38,7 +38,6 @@ pub const PeerIo = struct {
         return .{ .tx = .{ .control = .{ .bytes = bytes[0..critical] }, .critical = .{ .bytes = bytes[critical..body] } }, .body = bytes[body..unread], .unread = bytes[unread..] };
     }
 
-    calls_pump: usize = 0,
     write_first: bool = false,
     tx: Outbox,
     body: []u8,
@@ -59,8 +58,6 @@ pub const PeerIo = struct {
     pressure_since: ?u64 = null,
     rx_ready: bool = true,
     blocked: enum { none, events, storage } = .none,
-    decompressed_pump: usize = 0,
-    fields_pump: usize = 0,
     ihave_recv: u16 = 0,
     iwant_ids_sent: u16 = 0,
     idontwant_recv: u16 = 0,

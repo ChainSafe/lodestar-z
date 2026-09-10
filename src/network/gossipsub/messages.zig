@@ -285,9 +285,9 @@ fn recordDuplicate(context: *const Context, entry: *Delivery, source: *const Sou
 
 fn charge(options: *const @import("options.zig").Options, workspace: *const Workspace, compressed: usize, decoded: usize) bool {
     const cost = compressed * 2 + decoded * 2;
-    if (cost <= workspace.work.* and cost <= options.decompress_per_peer_bytes -| workspace.peer_work.*) {
+    if (cost <= workspace.work.* and cost <= workspace.peer_work.*) {
         workspace.work.* -= cost;
-        workspace.peer_work.* += cost;
+        workspace.peer_work.* -= cost;
         return true;
     }
     if (!workspace.large_used.* and cost > @min(options.work_per_pump, options.decompress_per_peer_bytes)) {

@@ -23,8 +23,25 @@ pub fn driver(g: *gossip.Gossipsub) @import("session_driver.zig").Driver {
 }
 
 pub fn pump(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now, events: []gossip.Event) usize {
+    return pumpTurn(g, transport, now, events).count;
+}
+
+pub fn pumpTurn(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now, events: []gossip.Event) @import("turn.zig").Turn {
     var router = @import("../router.zig").Router.init(std.testing.allocator, .{ .negotiations_max = 1, .reqresp = false }) catch @panic("test router allocation failed");
     defer router.deinit();
     const io = driver(g);
-    return io.pumpReady(&router, transport, now, events);
+    var turn = g.beginPump(now, events);
+    io.runTurn(&router, transport, &turn);
+    return turn;
+}
+
+pub fn processRpc(g: *gossip.Gossipsub, index: u16, now: @import("../types.zig").Now, events: []gossip.Event, count: *usize, items: *usize) !bool {
+    var turn = @import("turn.zig").Turn.init(&g.options, now, events, g.decompressed, g.msg_scratch);
+    turn.count = count.*;
+    var peer = @import("turn.zig").Credits.peer(&g.options);
+    peer.items = items.*;
+    const result = try driver(g).processRpc(index, &turn, &peer);
+    count.* = turn.count;
+    items.* = peer.items;
+    return result == .done;
 }
