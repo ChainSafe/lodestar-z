@@ -165,32 +165,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
                 return std.mem.readInt(usize, hash[0..8], .little);
             }
 
-            pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
-                const len = try length(node, pool);
-                const chunk_count = (len + 31) / 32;
-                if (chunk_count == 0) {
-                    try out.resize(allocator, 0);
-                    return;
-                }
-
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-                try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
-
-                try out.resize(allocator, len);
-                for (0..chunk_count) |i| {
-                    const start_idx = i * 32;
-                    const remaining_bytes = len - start_idx;
-
-                    // Determine how many bytes to copy for this chunk
-                    const bytes_to_copy = @min(remaining_bytes, 32);
-
-                    // Copy data if there are bytes to copy
-                    if (bytes_to_copy > 0) {
-                        @memcpy(out.items[start_idx..][0..bytes_to_copy], nodes[i].getRoot(pool)[0..bytes_to_copy]);
-                    }
-                }
-            }
+            pub const toValue = GenericList.tree.toValue;
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 const chunk_count = chunkCount(value);

@@ -474,8 +474,13 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                     for (0..chunk_count) |_| {
                         const chunk = try it.next();
                         const end_item = next_item + @min(items_per_chunk, len - next_item);
-                        for (next_item..end_item) |i| {
-                            try Element.tree.toValuePacked(chunk, pool, i, &out.items[i]);
+                        if (comptime canMemcpySsz(Element)) {
+                            const bytes = std.mem.sliceAsBytes(out.items[next_item..end_item]);
+                            @memcpy(bytes, chunk.getRoot(pool)[0..bytes.len]);
+                        } else {
+                            for (next_item..end_item) |i| {
+                                try Element.tree.toValuePacked(chunk, pool, i, &out.items[i]);
+                            }
                         }
                         next_item = end_item;
                     }
