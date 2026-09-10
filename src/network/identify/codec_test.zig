@@ -240,7 +240,7 @@ test "identify maximum key envelope and advertisement respect all exact local bo
     var protocols: @import("../capabilities.zig").Set = .initEmpty();
     protocols.insert(.identify);
     for (std.enums.values(@import("../reqresp/protocol.zig").Protocol)) |which| protocols.insert(.{ .reqresp = which });
-    for (std.enums.values(@import("../gossipsub/state.zig").Version)) |version| protocols.insert(.{ .meshsub = version });
+    for (std.enums.values(@import("../gossipsub/sessions.zig").Version)) |version| protocols.insert(.{ .meshsub = version });
     const encoded = try local.encode(protocols, &frame);
     try std.testing.expect(encoded.len <= 8194);
     decoder = codec.Decoder.init(&peer);

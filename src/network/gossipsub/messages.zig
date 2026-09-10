@@ -4,13 +4,12 @@ const storage = @import("message_store.zig");
 const validation = @import("validation.zig");
 const Options = @import("options.zig").Options;
 const MessageId = @import("topic.zig").MessageId;
-const Peers = @import("peers.zig").Peers;
+const Peers = @import("peer_book.zig").PeerBook;
 
 pub const Context = struct {
-    state: *@import("state.zig").State,
+    sessions: *@import("sessions.zig").Sessions,
     overlay: *@import("overlay.zig").Overlay,
     peers: *Peers,
-    scores: *@import("score.zig").PeerScore,
     options: *const Options,
 };
 
@@ -60,7 +59,7 @@ pub const Messages = struct {
     }
 
     fn validationContext(self: *Messages, context: *const Context) validation.Context {
-        return .{ .state = context.state, .overlay = context.overlay, .peers = context.peers, .scores = context.scores, .options = context.options, .store = &self.store, .history = &self.history, .seen = &self.seen };
+        return .{ .sessions = context.sessions, .overlay = context.overlay, .peers = context.peers, .options = context.options, .store = &self.store, .history = &self.history, .seen = &self.seen };
     }
 
     pub fn receive(self: *Messages, context: *const Context, workspace: *const validation.Workspace, peer: u16, message: @import("protobuf.zig").Message, now: u64) validation.Received {

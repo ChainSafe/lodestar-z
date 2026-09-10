@@ -2,7 +2,7 @@ const std = @import("std");
 const routing = @import("router.zig");
 const reqresp = @import("reqresp/protocol.zig");
 const ForkSeq = @import("config").ForkSeq;
-const Version = @import("gossipsub/state.zig").Version;
+const Version = @import("gossipsub/sessions.zig").Version;
 
 pub const protocol_count = reqresp.Protocol.count + 4;
 const Bits = std.meta.Int(.unsigned, protocol_count);

@@ -124,7 +124,7 @@ pub const Snapshot = struct {
         self.closed_by_client = core.control.counters.closed_by_client;
         self.peer_events = core.control.counters.events;
         self.dial = core.dial_queue.counters;
-        for (g.state.peers) |*session| {
+        for (g.sessions.rows) |*session| {
             const io = &session.io;
             for (&self.gossip_queue_drops, io.drops) |*total, value| total.* +|= value;
         }
@@ -143,8 +143,8 @@ pub const Snapshot = struct {
             self.clients[@intFromEnum(client)] += 1;
             self.directions[if (row.direction == .inbound) @as(usize, 0) else 1] += 1;
         }
-        var mesh_peers = gossip.state.PeerSet.initEmpty();
-        var meshes: [score_metrics.kind_count]gossip.state.PeerSet = @splat(.initEmpty());
+        var mesh_peers = gossip.sessions.PeerSet.initEmpty();
+        var meshes: [score_metrics.kind_count]gossip.sessions.PeerSet = @splat(.initEmpty());
         var score_kinds: score_metrics.TopicKinds = @splat(null);
         for (&g.overlay.rows, 0..) |*row, topic_index| {
             if (!row.active) continue;
@@ -178,11 +178,11 @@ pub const Snapshot = struct {
             self.topics[self.topic_count] = .{ .digest = parsed.digest, .kind = known.kind, .subnet = subnet, .mesh = row.mesh.count(), .subscribers = row.subscribers.count() };
             self.topic_count += 1;
         }
-        for (g.state.peers, 0..) |*row, index| {
+        for (g.sessions.rows, 0..) |*row, index| {
             if (!row.active) continue;
             var breakdown: gossip.score.Breakdown = undefined;
-            const score = g.scores.snapshotWeights(row.logical.index, now_ms, &breakdown);
-            self.scores.observe(score, &g.scores.params);
+            const score = g.peers.scores.snapshotWeights(row.logical.index, now_ms, &breakdown);
+            self.scores.observe(score, &g.peers.scores.params);
             self.scores.observeWeights(&breakdown, &score_kinds);
             for (&meshes, &self.scores.mesh_scores) |*mesh, *range| {
                 if (mesh.isSet(index)) range.observe(score);
@@ -198,10 +198,10 @@ pub const Snapshot = struct {
             if (!mesh_peers.isSet(index)) continue;
             self.mesh_clients[@intFromEnum(client)] += 1;
         }
-        self.scores.calls = g.scores.calls;
-        self.scores.runs = g.scores.calculations;
-        self.scores.cache_delta = g.scores.cache_delta;
-        self.scores.penalties = g.scores.penalties;
+        self.scores.calls = g.peers.scores.calls;
+        self.scores.runs = g.peers.scores.calculations;
+        self.scores.cache_delta = g.peers.scores.cache_delta;
+        self.scores.penalties = g.peers.scores.penalties;
         if (owner.discovery) |discovery| {
             self.discovery_counts = discovery.coordinator.counters;
             self.discovery_rejections = discovery.coordinator.rejections;

@@ -124,8 +124,8 @@ pub const Core = struct {
             .reqresp_resources = self.service.reqresp.inner.resourceSnapshot(),
             .gossip = g.counters,
             .gossip_resources = g.resourceSnapshot(),
-            .score_calculations = g.scores.calculations,
-            .score_topic_visits = g.scores.topic_visits,
+            .score_calculations = g.peers.scores.calculations,
+            .score_topic_visits = g.peers.scores.topic_visits,
         };
     }
 
@@ -405,7 +405,7 @@ pub const Core = struct {
         if (self.policyChanged() or expired) {
             self.refreshSelection(now);
             self.catalog_revision = self.catalog.revision;
-            self.score_revision = self.service.gossipsub.inner.scores.revision;
+            self.score_revision = self.service.gossipsub.inner.peers.scores.revision;
             self.reconciliation_deadline = self.catalog.nextDeadline(now.mono_ms);
             if (self.metadata_deadline) |due| self.reconciliation_deadline = @min(self.reconciliation_deadline orelse due, due);
             self.dial_queue.selection_dirty = true;
@@ -417,7 +417,7 @@ pub const Core = struct {
         }
     }
     fn policyChanged(self: *const Core) bool {
-        const score_revision = self.service.gossipsub.inner.scores.revision;
+        const score_revision = self.service.gossipsub.inner.peers.scores.revision;
         return self.policy_dirty or self.catalog_revision != self.catalog.revision or
             self.score_revision != score_revision or self.catalog.revision == std.math.maxInt(u64) or
             score_revision == std.math.maxInt(u64);

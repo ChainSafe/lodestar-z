@@ -34,52 +34,70 @@ pub const Admission = union(enum) {
     capacity,
 };
 
-pub const Peers = struct {
+pub const PeerBook = struct {
+    scores: @import("score.zig").PeerScore,
+    ip_allowlist: [32]Ip = undefined,
+    ip_allowlist_len: u8 = 0,
     rows: []Row,
     backoffs: []Backoff,
     retention_ms: u64,
     reserved: u16,
 
-    pub fn init(a: std.mem.Allocator, retention_ms: u64) !Peers {
+    pub fn init(a: std.mem.Allocator, retention_ms: u64) !PeerBook {
         return initCapacity(a, retention_ms, capacity, outbound_reserve);
     }
 
-    pub fn initCapacity(a: std.mem.Allocator, retention_ms: u64, count: u16, reserved: u16) !Peers {
+    pub fn initCapacity(a: std.mem.Allocator, retention_ms: u64, count: u16, reserved: u16) !PeerBook {
+        return initOptions(a, &.{ .retained_score_ms = retention_ms, .retained_capacity = count, .retained_outbound_reserve = reserved });
+    }
+
+    pub fn initOptions(a: std.mem.Allocator, options: *const @import("options.zig").Options) !PeerBook {
+        const retention_ms = options.retained_score_ms;
+        const count = options.retained_capacity;
+        const reserved = options.retained_outbound_reserve;
+        if (options.ip_allowlist.len > 32) return error.InvalidLimits;
         if (count == 0 or count > capacity or reserved >= count) return error.InvalidLimits;
         assert(retention_ms > 0);
         const rows = try a.alloc(Row, count);
         errdefer a.free(rows);
         @memset(rows, .{});
         const backoffs = try a.alloc(Backoff, @as(usize, count) * constants.topics_cap);
+        errdefer a.free(backoffs);
         @memset(backoffs, .{});
-        return .{ .rows = rows, .backoffs = backoffs, .retention_ms = retention_ms, .reserved = reserved };
+        var scores = try @import("score.zig").PeerScore.initCapacity(a, options.score_params, count);
+        @memset(&scores.connected, false);
+        var book: PeerBook = .{ .rows = rows, .backoffs = backoffs, .scores = scores, .retention_ms = retention_ms, .reserved = reserved };
+        @memcpy(book.ip_allowlist[0..options.ip_allowlist.len], options.ip_allowlist);
+        book.ip_allowlist_len = @intCast(options.ip_allowlist.len);
+        return book;
     }
 
-    pub fn deinit(self: *Peers, a: std.mem.Allocator) void {
+    pub fn deinit(self: *PeerBook, a: std.mem.Allocator) void {
+        self.scores.deinit(a);
         a.free(self.backoffs);
         a.free(self.rows);
         self.* = undefined;
     }
 
-    pub fn matches(self: *const Peers, ref: Ref) bool {
+    pub fn matches(self: *const PeerBook, ref: Ref) bool {
         return ref.index < self.rows.len and self.rows[ref.index].occupied and
             self.rows[ref.index].generation == ref.generation;
     }
 
-    pub fn find(self: *const Peers, identity: *const PeerId) ?Ref {
+    pub fn find(self: *const PeerBook, identity: *const PeerId) ?Ref {
         for (self.rows, 0..) |*row, i| {
             if (row.occupied and row.identity.eql(identity)) return .{ .index = @intCast(i), .generation = row.generation };
         }
         return null;
     }
 
-    pub fn admit(self: *Peers, conn: Handle, metadata: *const Metadata, now: u64) Admission {
+    pub fn admit(self: *PeerBook, conn: Handle, metadata: *const Metadata, now: u64) Admission {
         var expired: ?usize = null;
         if (self.find(&metadata.identity)) |ref| {
             const row = &self.rows[ref.index];
             if (row.connection != null) return .duplicate;
             if (row.pins > 0 or now < row.retain_until) {
-                self.connect(row, conn, metadata);
+                self.connect(ref.index, conn, metadata, now);
                 return .{ .admitted = .{ .peer = ref, .fresh = false, .penalty_evicted = false } };
             }
             if (row.generation != std.math.maxInt(u64)) expired = ref.index;
@@ -91,7 +109,8 @@ pub const Peers = struct {
         const penalty_evicted = row.occupied and row.negative and now < row.retain_until;
         @memset(self.backoffs[index * constants.topics_cap ..][0..constants.topics_cap], .{});
         row.* = .{ .generation = row.generation + 1, .occupied = true, .identity = metadata.identity };
-        self.connect(row, conn, metadata);
+        self.scores.resetPeer(@intCast(index));
+        self.connect(@intCast(index), conn, metadata, now);
         return .{ .admitted = .{
             .peer = .{ .index = @intCast(index), .generation = row.generation },
             .fresh = true,
@@ -99,13 +118,15 @@ pub const Peers = struct {
         } };
     }
 
-    fn connect(_: *Peers, row: *Row, conn: Handle, metadata: *const Metadata) void {
+    fn connect(self: *PeerBook, index: u16, conn: Handle, metadata: *const Metadata, now: u64) void {
+        const row = &self.rows[index];
+        self.scores.setConnected(index, true, now);
         row.connection = conn;
         row.address = normalize(metadata.address);
         row.direction = metadata.direction;
     }
 
-    fn reclaimable(self: *const Peers, direction: types.Direction, now: u64) ?usize {
+    fn reclaimable(self: *const PeerBook, direction: types.Direction, now: u64) ?usize {
         var reusable: ?usize = null;
         var negative: ?usize = null;
         const limit: usize = if (direction == .outbound) self.rows.len else self.rows.len - self.reserved;
@@ -119,14 +140,15 @@ pub const Peers = struct {
         return reusable orelse if (direction == .outbound) negative else null;
     }
 
-    pub fn disconnect(self: *Peers, ref: Ref, now: u64, negative: bool) void {
+    pub fn disconnect(self: *PeerBook, ref: Ref, now: u64) void {
         assert(self.matches(ref));
         const row = &self.rows[ref.index];
         assert(row.connection != null);
+        self.scores.setConnected(ref.index, false, now);
         row.connection = null;
         row.disconnected_at = now;
         row.retain_until = now +| self.retention_ms;
-        row.negative = negative;
+        row.negative = self.scores.score(ref.index, now) < 0;
         // Topic reclamation cannot reuse a generation while its backoff is live.
         for (self.backoffs[@as(usize, ref.index) * constants.topics_cap ..][0..constants.topics_cap]) |entry| {
             row.retain_until = @max(row.retain_until, entry.until);
@@ -134,25 +156,63 @@ pub const Peers = struct {
         }
     }
 
-    pub fn retain(self: *Peers, ref: Ref) void {
+    pub fn score(self: *PeerBook, ref: Ref, now: u64) f64 {
+        self.scores.ip_count[ref.index] = self.ipCount(ref, self.ip_allowlist[0..self.ip_allowlist_len]);
+        return self.scores.score(ref.index, now);
+    }
+
+    pub fn invalid(self: *PeerBook, ref: Ref, topic: u16) void {
+        assert(self.matches(ref));
+        self.scores.invalid(ref.index, topic);
+        self.rows[ref.index].negative = true;
+    }
+
+    pub fn penalize(self: *PeerBook, ref: Ref, count: f64) void {
+        assert(self.matches(ref));
+        self.scores.penalize(ref.index, count);
+        self.rows[ref.index].negative = true;
+    }
+
+    pub fn refresh(self: *PeerBook, now: u64) void {
+        for (self.rows, 0..) |row, i| {
+            if (!row.occupied) continue;
+            const ref: Ref = .{ .index = @intCast(i), .generation = row.generation };
+            self.scores.ip_count[i] = self.ipCount(ref, self.ip_allowlist[0..self.ip_allowlist_len]);
+            if (row.connection == null) {
+                var useful = self.scores.score(@intCast(i), now) < 0;
+                for (self.backoffs[i * constants.topics_cap ..][0..constants.topics_cap]) |entry| {
+                    if (now < entry.until) useful = true;
+                }
+                self.rows[i].negative = useful;
+            }
+            if (row.connection == null and row.pins == 0 and now >= row.retain_until) {
+                self.scores.resetPeer(@intCast(i));
+                self.rows[i].occupied = false;
+                @memset(self.backoffs[i * constants.topics_cap ..][0..constants.topics_cap], .{});
+            }
+        }
+        self.scores.refresh(now);
+    }
+
+    pub fn retain(self: *PeerBook, ref: Ref) void {
         assert(self.matches(ref));
         assert(self.rows[ref.index].pins < std.math.maxInt(u32));
         self.rows[ref.index].pins += 1;
     }
 
-    pub fn release(self: *Peers, ref: Ref) void {
+    pub fn release(self: *PeerBook, ref: Ref) void {
         assert(self.matches(ref));
         assert(self.rows[ref.index].pins > 0);
         self.rows[ref.index].pins -= 1;
     }
 
-    pub fn backoff(self: *Peers, ref: Ref, topic: u16) *Backoff {
+    pub fn backoff(self: *PeerBook, ref: Ref, topic: u16) *Backoff {
         assert(self.matches(ref));
         assert(topic < constants.topics_cap);
         return &self.backoffs[@as(usize, ref.index) * constants.topics_cap + topic];
     }
 
-    pub fn addBackoff(self: *Peers, ref: Ref, topic: u16, generation: u64, now: u64, duration_ms: u64) void {
+    pub fn addBackoff(self: *PeerBook, ref: Ref, topic: u16, generation: u64, now: u64, duration_ms: u64) void {
         const entry = self.backoff(ref, topic);
         if (entry.topic_generation != generation) entry.* = .{ .topic_generation = generation };
         entry.until = @max(entry.until, now +| @min(duration_ms, 3_600_000));
@@ -160,12 +220,12 @@ pub const Peers = struct {
         self.rows[ref.index].negative = true;
     }
 
-    pub fn backedOff(self: *Peers, ref: Ref, topic: u16, generation: u64, now: u64) bool {
+    pub fn backedOff(self: *PeerBook, ref: Ref, topic: u16, generation: u64, now: u64) bool {
         const entry = self.backoff(ref, topic);
         return entry.topic_generation == generation and now < entry.until;
     }
 
-    pub fn migrate(self: *Peers, conn: Handle, address: types.Address) void {
+    pub fn migrate(self: *PeerBook, conn: Handle, address: types.Address) void {
         for (self.rows) |*row| {
             if (row.connection) |current| if (std.meta.eql(current, conn)) {
                 row.address = normalize(address);
@@ -174,7 +234,7 @@ pub const Peers = struct {
         }
     }
 
-    pub fn ipCount(self: *const Peers, ref: Ref, allowlist: []const Ip) u16 {
+    pub fn ipCount(self: *const PeerBook, ref: Ref, allowlist: []const Ip) u16 {
         assert(self.matches(ref));
         assert(allowlist.len <= 32);
         const row = &self.rows[ref.index];
@@ -197,7 +257,7 @@ pub fn normalize(address: types.Address) Ip {
 }
 
 test "gossip policy peers retain identity and reserve outbound recovery under negative churn" {
-    var peers = try Peers.init(std.testing.allocator, 10_000);
+    var peers = try PeerBook.init(std.testing.allocator, 10_000);
     defer peers.deinit(std.testing.allocator);
     var metadata: Metadata = .{ .identity = undefined, .address = .unspecified, .direction = .inbound };
     for (0..capacity) |i| {
@@ -208,7 +268,8 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
             metadata.direction = .outbound;
         }
         const result = peers.admit(.{ .index = 0, .generation = 1 }, &metadata, i).admitted;
-        peers.disconnect(result.peer, i, true);
+        _ = peers.scores.setAppScore(result.peer.index, if (true) -1 else 0);
+        peers.disconnect(result.peer, i);
     }
     metadata.identity.bytes[2] = 1;
     metadata.direction = .inbound;
@@ -220,7 +281,8 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
     try std.testing.expect(fallback.penalty_evicted);
     try std.testing.expectEqual(@as(u16, 1), fallback.peer.index);
     try std.testing.expectEqual(Admission.duplicate, peers.admit(.{ .index = 1, .generation = 1 }, &metadata, 1001));
-    peers.disconnect(fallback.peer, 1001, true);
+    _ = peers.scores.setAppScore(fallback.peer.index, if (true) -1 else 0);
+    peers.disconnect(fallback.peer, 1001);
     const resumed = peers.admit(.{ .index = 2, .generation = 1 }, &metadata, 1002).admitted;
     try std.testing.expect(!resumed.fresh);
     try std.testing.expectEqual(fallback.peer, resumed.peer);
@@ -228,7 +290,7 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
 }
 
 test "gossip policy IP colocation normalizes ports mapping and current path generation" {
-    var peers = try Peers.init(std.testing.allocator, 100);
+    var peers = try PeerBook.init(std.testing.allocator, 100);
     defer peers.deinit(std.testing.allocator);
     const first_conn: Handle = .{ .index = 0, .generation = 1 };
     const first: Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } }, .direction = .inbound };
@@ -249,13 +311,14 @@ test "gossip policy IP colocation normalizes ports mapping and current path gene
 }
 
 test "gossip policy identity generation exhaustion cannot revive stale references" {
-    var peers = try Peers.init(std.testing.allocator, 100);
+    var peers = try PeerBook.init(std.testing.allocator, 100);
     defer peers.deinit(std.testing.allocator);
     peers.rows[0].generation = std.math.maxInt(u64);
     const metadata: Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
     const first = peers.admit(.{ .index = 0, .generation = 1 }, &metadata, 0).admitted.peer;
     try std.testing.expectEqual(@as(u16, 1), first.index);
-    peers.disconnect(first, 0, true);
+    _ = peers.scores.setAppScore(first.index, if (true) -1 else 0);
+    peers.disconnect(first, 0);
     const next = peers.admit(.{ .index = 0, .generation = 2 }, &metadata, 100).admitted.peer;
     try std.testing.expectEqual(first.index, next.index);
     try std.testing.expectEqual(first.generation + 1, next.generation);
@@ -263,7 +326,7 @@ test "gossip policy identity generation exhaustion cannot revive stale reference
 }
 
 test "gossip policy review I1 live backoff prevents immediate inbound eviction" {
-    var peers = try Peers.init(std.testing.allocator, 100_000);
+    var peers = try PeerBook.init(std.testing.allocator, 100_000);
     defer peers.deinit(std.testing.allocator);
     var metadata: Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
     const connection: Handle = .{ .index = 0, .generation = 1 };
@@ -271,7 +334,8 @@ test "gossip policy review I1 live backoff prevents immediate inbound eviction" 
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
         const ref = peers.admit(connection, &metadata, i).admitted.peer;
         if (i == 0) peers.addBackoff(ref, 0, 1, 0, 60_000);
-        peers.disconnect(ref, i, i != 0);
+        _ = peers.scores.setAppScore(ref.index, if (i != 0) -1 else 0);
+        peers.disconnect(ref, i);
     }
     const original: Ref = .{ .index = 0, .generation = peers.rows[0].generation };
     metadata.identity.bytes[2] = 1;
@@ -282,17 +346,56 @@ test "gossip policy review I1 live backoff prevents immediate inbound eviction" 
     try std.testing.expect(!resumed.fresh);
     try std.testing.expectEqual(original, resumed.peer);
     try std.testing.expect(peers.backedOff(original, 0, 1, 1000));
-    peers.disconnect(resumed.peer, 1000, false);
+    _ = peers.scores.setAppScore(resumed.peer.index, if (false) -1 else 0);
+    peers.disconnect(resumed.peer, 1000);
     metadata.direction = .outbound;
     metadata.identity.bytes[2] = 1;
     for (0..outbound_reserve) |i| {
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
         const ref = peers.admit(connection, &metadata, 1001 + i).admitted.peer;
-        peers.disconnect(ref, 1001 + i, true);
+        _ = peers.scores.setAppScore(ref.index, if (true) -1 else 0);
+        peers.disconnect(ref, 1001 + i);
     }
     metadata.identity.bytes[2] = 2;
     const fallback = peers.admit(connection, &metadata, 1100).admitted;
     try std.testing.expect(fallback.penalty_evicted);
     try std.testing.expect(fallback.peer.index != 0);
     try std.testing.expect(peers.backedOff(original, 0, 1, 1100));
+}
+
+test "peer book retains reputation across pinned reconnect and clears it on expiry" {
+    var book = try PeerBook.initCapacity(std.testing.allocator, 10, 2, 1);
+    defer book.deinit(std.testing.allocator);
+    const metadata: Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound };
+    const first = book.admit(.{ .index = 0, .generation = 1 }, &metadata, 0).admitted.peer;
+    book.invalid(first, 0);
+    book.retain(first);
+    book.disconnect(first, 1);
+    const score = book.scores.snapshot(first.index, 1);
+    try std.testing.expect(score < 0);
+    book.refresh(20);
+    try std.testing.expect(book.matches(first));
+    const reconnected = book.admit(.{ .index = 0, .generation = 2 }, &metadata, 20).admitted;
+    try std.testing.expectEqualDeep(first, reconnected.peer);
+    try std.testing.expect(!reconnected.fresh);
+    try std.testing.expectEqual(score, book.scores.snapshot(first.index, 20));
+    try std.testing.expect(book.scores.connected[first.index]);
+    book.release(first);
+    book.disconnect(first, 21);
+    book.refresh(31);
+    try std.testing.expect(!book.matches(first));
+    try std.testing.expect(!book.scores.connected[first.index]);
+    const fresh = book.admit(.{ .index = 0, .generation = 3 }, &metadata, 31).admitted;
+    try std.testing.expect(fresh.fresh);
+    try std.testing.expect(fresh.peer.generation > first.generation);
+    try std.testing.expectEqual(@as(f64, 0), book.score(fresh.peer, 31));
+}
+
+fn allocateBook(a: std.mem.Allocator) !void {
+    var book = try PeerBook.initCapacity(a, 10, 2, 1);
+    defer book.deinit(a);
+}
+
+test "peer book releases identity and reputation allocations on partial initialization" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocateBook, .{});
 }

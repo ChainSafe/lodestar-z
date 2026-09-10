@@ -67,7 +67,8 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                 _ = Validation.duplicate(validation.delivery(handles[at]), &peers, duplicate, byte < 128);
             },
             9 => {
-                peers.disconnect(source, now, true);
+                _ = peers.scores.setAppScore(source.index, -1);
+                peers.disconnect(source, now);
                 const admitted = peers.admit(.{ .index = 0, .generation = @intCast(step + 2) }, &.{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound }, now).admitted;
                 assert(std.meta.eql(source, admitted.peer));
             },

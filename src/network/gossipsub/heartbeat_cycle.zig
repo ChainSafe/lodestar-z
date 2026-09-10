@@ -1,6 +1,6 @@
 const std = @import("std");
 const constants = @import("constants.zig");
-const State = @import("state.zig").State;
+const Sessions = @import("sessions.zig").Sessions;
 const PeerScore = @import("score.zig").PeerScore;
 
 pub const Score = struct { generation: u64 = 0, value: f64 = 0 };
@@ -12,15 +12,15 @@ pub const Cycle = struct {
     remaining: usize = 0,
     opportunistic: bool = false,
 
-    pub fn takeSnapshot(self: *Cycle, state: *const State, scores: *PeerScore, now: u64) void {
-        for (state.peers, 0..) |*peer, i| {
+    pub fn takeSnapshot(self: *Cycle, sessions: *const Sessions, scores: *PeerScore, now: u64) void {
+        for (sessions.rows, 0..) |*peer, i| {
             self.scores[i] = if (peer.active) .{ .generation = peer.generation, .value = scores.score(peer.logical.index, now) } else .{};
         }
     }
 
-    pub fn begin(self: *Cycle, state: *const State, scores: *PeerScore, now: u64, opportunistic: bool) void {
+    pub fn begin(self: *Cycle, sessions: *const Sessions, scores: *PeerScore, now: u64, opportunistic: bool) void {
         std.debug.assert(self.remaining == 0);
-        self.takeSnapshot(state, scores, now);
+        self.takeSnapshot(sessions, scores, now);
         self.remaining = constants.topics_cap;
         self.opportunistic = opportunistic;
     }

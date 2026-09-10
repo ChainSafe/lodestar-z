@@ -1,7 +1,7 @@
 const std = @import("std");
 const engine_mod = @import("../quic/engine.zig");
 const routing = @import("../router.zig");
-const state_mod = @import("state.zig");
+const sessions_mod = @import("sessions.zig");
 const types = @import("../types.zig");
 const gossipsub_mod = @import("gossipsub.zig");
 
@@ -17,7 +17,7 @@ pub const outcomes_per_pump: usize = 16;
 pub const Options = struct {
     gossipsub: gossipsub_mod.Options = .{},
     negotiations_max: u16 = 512,
-    versions: []const state_mod.Version = &.{ .v1_2, .v1_1, .v1_0 },
+    versions: []const sessions_mod.Version = &.{ .v1_2, .v1_1, .v1_0 },
 };
 
 pub const InitError = routing.Error || gossipsub_mod.InitError;

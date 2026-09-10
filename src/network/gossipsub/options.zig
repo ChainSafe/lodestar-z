@@ -6,8 +6,8 @@ const storage = @import("message_store.zig");
 pub const Options = struct {
     topic_policy: ?[]const @import("topic_policy.zig").Boundary = null,
     connected_capacity: u16 = constants.peers_cap,
-    retained_capacity: u16 = @import("peers.zig").capacity,
-    retained_outbound_reserve: u16 = @import("peers.zig").outbound_reserve,
+    retained_capacity: u16 = @import("peer_book.zig").capacity,
+    retained_outbound_reserve: u16 = @import("peer_book.zig").outbound_reserve,
     message_id_policy: topic_mod.MessageIdPolicy = .{},
     iwant_followup_ms: u64 = constants.default_iwant_followup_ms,
     idontwant_min_data_size: usize = constants.default_idontwant_min_data_size,
@@ -53,7 +53,7 @@ pub const Options = struct {
     seen_ttl_ms: u64 = constants.seenTtlMs(@import("preset").preset.SLOTS_PER_EPOCH, 12),
     gossip_factor: f64 = 0.25,
     retained_score_ms: u64 = 100 * @import("preset").preset.SLOTS_PER_EPOCH * 12_000,
-    ip_allowlist: []const @import("peers.zig").Ip = &.{},
+    ip_allowlist: []const @import("peer_book.zig").Ip = &.{},
     score_params: score_mod.Params = .{},
     opportunistic_graft_interval_ms: u64 = constants.opportunistic_graft_ms,
     /// Required independent host entropy. Initialization rejects null; tests seed explicitly.
@@ -66,7 +66,7 @@ pub fn validate(o: *const Options) (error{InvalidLimits} || @import("topic_polic
     if (o.random_seed == null or o.ip_allowlist.len > 32 or o.retained_score_ms == 0 or o.retained_score_ms > 86_400_000) return error.InvalidLimits;
     if (!@import("std").math.isFinite(o.gossip_factor) or o.gossip_factor < 0 or o.gossip_factor > 1) return error.InvalidLimits;
     try range(o.connected_capacity, 1, constants.peers_cap);
-    try range(o.retained_capacity, o.connected_capacity, @import("peers.zig").capacity);
+    try range(o.retained_capacity, o.connected_capacity, @import("peer_book.zig").capacity);
     try range(o.retained_outbound_reserve, 1, o.retained_capacity - 1);
     const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
     try range(o.validation_capacity, 1, 8192);
