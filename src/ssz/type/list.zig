@@ -424,24 +424,23 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                 @memset(out.items, Element.default_value);
 
                 return if (comptime use_chunked_leaf)
-                    toValueChunkedLeaf(allocator, node, pool, out, len, chunk_count)
+                    toValueChunkedLeaf(node, pool, out, len, chunk_count)
                 else
-                    toValuePlain(allocator, node, pool, out, len, chunk_count);
+                    toValuePlain(node, pool, out, len, chunk_count);
             }
 
             /// `toValue` for chunked_leaf layouts. `out.items` is pre-resized
             /// to `len` and zero-initialised by the caller.
-            fn toValueChunkedLeaf(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type, len: usize, chunk_count: usize) !void {
+            fn toValueChunkedLeaf(node: Node.Id, pool: *Node.Pool, out: *Type, len: usize, chunk_count: usize) !void {
                 const content_root = try node.getLeft(pool);
                 const items_per_chunk = 32 / Element.fixed_size;
                 const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
-                const chunked_leaf_ids = try allocator.alloc(Node.Id, chunked_leaf_count);
-                defer allocator.free(chunked_leaf_ids);
-                try content_root.getNodesAtDepth(pool, chunked_leaf_depth, 0, chunked_leaf_ids);
+                var it = Node.DepthIterator.init(pool, content_root, chunked_leaf_depth, 0);
 
                 const state_col = pool.nodes.items(.state);
                 var item_idx: usize = 0;
-                outer: for (chunked_leaf_ids) |sid| {
+                outer: for (0..chunked_leaf_count) |_| {
+                    const sid = try it.next();
                     // A zero subtree at chunked_leaf boundary is semantically an
                     // all-zero chunked_leaf — out.items already initialised to
                     // Element.default_value via the @memset above, so
@@ -466,29 +465,24 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
 
             /// `toValue` for non-chunked_leaf layouts. `out.items` is
             /// pre-resized to `len` by the caller.
-            fn toValuePlain(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type, len: usize, chunk_count: usize) !void {
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-
-                try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
+            fn toValuePlain(node: Node.Id, pool: *Node.Pool, out: *Type, len: usize, chunk_count: usize) !void {
+                var it = Node.DepthIterator.init(pool, node, chunk_depth + 1, 0);
 
                 if (comptime isBasicType(Element)) {
-                    // tightly packed list
-                    for (0..len) |i| {
-                        try Element.tree.toValuePacked(
-                            nodes[i * Element.fixed_size / 32],
-                            pool,
-                            i,
-                            &out.items[i],
-                        );
+                    const items_per_chunk = 32 / Element.fixed_size;
+                    var next_item: usize = 0;
+                    for (0..chunk_count) |_| {
+                        const chunk = try it.next();
+                        const end_item = next_item + @min(items_per_chunk, len - next_item);
+                        for (next_item..end_item) |i| {
+                            try Element.tree.toValuePacked(chunk, pool, i, &out.items[i]);
+                        }
+                        next_item = end_item;
                     }
+                    std.debug.assert(next_item == len);
                 } else {
-                    for (0..len) |i| {
-                        try Element.tree.toValue(
-                            nodes[i],
-                            pool,
-                            &out.items[i],
-                        );
+                    for (out.items) |*item| {
+                        try Element.tree.toValue(try it.next(), pool, item);
                     }
                 }
             }
@@ -913,20 +907,12 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
                     return;
                 }
 
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-
-                try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
+                var it = Node.DepthIterator.init(pool, node, chunk_depth + 1, 0);
 
                 try out.resize(allocator, len);
                 @memset(out.items, Element.default_value);
-                for (0..len) |i| {
-                    try Element.tree.toValue(
-                        allocator,
-                        nodes[i],
-                        pool,
-                        &out.items[i],
-                    );
+                for (out.items) |*item| {
+                    try Element.tree.toValue(allocator, try it.next(), pool, item);
                 }
             }
 
