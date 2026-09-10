@@ -76,8 +76,8 @@ const Node = struct {
         const tx = &source.core.sessions.rows[source.session.index].io;
         const rx = &target.core.sessions.rows[target.session.index].io;
         if (rx.rpc != null) return;
-        source.core.queueSubscriptions(tx);
-        const segment = tx.segment(&source.core.messages.store);
+        tx.tx.subscriptions(&source.core.overlay.rows, source.core.last_now_ms);
+        const segment = tx.tx.segment(&source.core.messages.store);
         if (segment.len == 0) return;
         const take = @min(bytes, segment.len, rx.unread.len);
         @memcpy(rx.unread[0..take], segment[0..take]);
@@ -86,7 +86,7 @@ const Node = struct {
         const body = target.core.sessions.frameBody(rx) orelse return error.TestUnexpectedResult;
         const result = try rx.feedUnread(body, take, now.mono_ms);
         try std.testing.expectEqual(take, result.consumed);
-        if (tx.advance(&source.core.messages.store, take)) |completion| source.core.writeCompleted(source.session, completion, now.mono_ms);
+        if (tx.tx.advance(&source.core.messages.store, take)) |completion| source.core.writeCompleted(source.session, completion, now.mono_ms);
         rx.unread_start = 0;
         rx.unread_end = 0;
     }

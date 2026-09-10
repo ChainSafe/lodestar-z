@@ -51,7 +51,7 @@ pub const Sessions = struct {
     pub fn addPeer(self: *Sessions, conn: Handle, version: Version) ?SessionRef {
         const index = self.freePeer() orelse return null;
         const peer = &self.rows[index];
-        assert(peer.io.data_count == 0 and peer.io.large_slot == null);
+        assert(peer.io.tx.data_count == 0 and peer.io.large_slot == null);
         peer.active = true;
         peer.generation += 1;
         peer.conn = conn;
@@ -69,7 +69,7 @@ pub const Sessions = struct {
     pub fn removePeer(self: *Sessions, index: u16) void {
         assert(index < self.rows.len);
         if (!self.rows[index].active) return;
-        assert(self.rows[index].io.large_slot == null and !self.rows[index].io.pending());
+        assert(self.rows[index].io.large_slot == null and !self.rows[index].io.tx.pending());
         self.rows[index].active = false;
         self.rows[index].outbound = .{ .waiting = 0 };
         self.rows[index].in_stream = null;
@@ -110,7 +110,7 @@ pub const Sessions = struct {
         if (out) |stream| self.rows[index].outbound = .{ .live = stream };
         if (in) |stream| self.rows[index].in_stream = stream;
         self.rows[index].io.rx_ready = in != null;
-        self.rows[index].io.tx_ready = out != null;
+        self.rows[index].io.tx.ready = out != null;
     }
 
     pub fn outStream(self: *const Sessions, index: u16) ?StreamHandle {
@@ -159,7 +159,7 @@ pub const Sessions = struct {
         const index = self.findPeer(conn) orelse return;
         self.rows[index].needs_service = true;
         self.rows[index].io.rx_ready = true;
-        self.rows[index].io.tx_ready = true;
+        self.rows[index].io.tx.ready = true;
     }
 
     pub fn resetRx(self: *Sessions, index: u16) bool {

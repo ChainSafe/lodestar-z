@@ -299,7 +299,7 @@ pub const Gossipsub = struct {
         if (admitted.admitted.penalty_evicted) self.counters.retained_penalty_evictions += 1;
         const ref = admitted.admitted.peer;
         self.sessions.rows[handle.index].logical = ref;
-        self.sessions.rows[handle.index].io.resetTx(&self.messages.store);
+        self.sessions.rows[handle.index].io.tx.reset(&self.messages.store);
         self.sessions.rows[handle.index].io.resetRx();
         self.sessions.rows[handle.index].io.resetHeartbeat();
         self.sendSubscriptions(handle.index);
@@ -314,43 +314,25 @@ pub const Gossipsub = struct {
     pub fn connectionClosed(self: *Gossipsub, conn: Handle) void {
         const index = self.sessions.findPeer(conn) orelse return;
         _ = self.sessions.resetRx(index);
-        self.sessions.rows[index].io.resetTx(&self.messages.store);
-        self.cancelPromises(index, false);
-        self.wakeStorage();
+        self.cancelWrites(self.sessions.ref(index));
         const context = self.overlayContext(self.last_now_ms);
         self.overlay.peerDisconnected(&context, index);
         self.sessions.rows[index].io.write_first = false;
-        self.sessions.rows[index].io.subscription_since = null;
+        self.sessions.rows[index].io.tx.subscription_since = null;
         const ref = self.logical(index);
         self.peers.disconnect(ref, self.last_now_ms);
         self.sessions.removePeer(index);
     }
 
-    pub fn sendSubscriptions(self: *Gossipsub, index: u16) void {
-        const io = &self.sessions.rows[index].io;
-        io.subscription_dirty = .initEmpty();
-        for (&self.overlay.rows, 0..) |*topic, t| {
-            if (topic.active and topic.subscribed) io.subscription_dirty.set(t);
-        }
-        io.tx_ready = true;
-        io.subscription_since = if (io.subscription_dirty.count() > 0) io.subscription_since orelse self.last_now_ms else null;
+    pub fn cancelWrites(self: *Gossipsub, session: sessions_mod.SessionRef) void {
+        if (!self.sessions.matches(session)) return;
+        self.sessions.rows[session.index].io.tx.reset(&self.messages.store);
+        self.cancelPromises(session.index, false);
+        self.wakeStorage();
     }
 
-    pub fn queueSubscriptions(self: *Gossipsub, io: *PeerIo) void {
-        var buf: [sub_frame_max]u8 = undefined;
-        for (0..constants.topics_cap) |_| {
-            const topic = io.subscription_cursor;
-            if (io.subscription_dirty.isSet(topic)) {
-                const t = &self.overlay.rows[topic];
-                var w = protobuf.Writer.init(&buf);
-                w.varint(protobuf.subscriptionSize(t.string[0..t.string_len]));
-                protobuf.writeSubscription(&w, t.subscribed, t.string[0..t.string_len]);
-                if (io.appendControl(w.written(), true, .subscription, self.last_now_ms) == null) return;
-                io.subscription_dirty.unset(topic);
-            }
-            io.subscription_cursor = (topic + 1) % constants.topics_cap;
-        }
-        io.subscription_since = null;
+    pub fn sendSubscriptions(self: *Gossipsub, index: u16) void {
+        self.sessions.rows[index].io.tx.synchronize(&self.overlay.rows, self.last_now_ms);
     }
 
     pub const PublishOptions = struct { allow_zero_peers: bool = true, ignore_duplicate: bool = false, flood: bool = false };
@@ -437,7 +419,7 @@ pub const Gossipsub = struct {
         var it = recipients.iterator(.{});
         while (it.next()) |peer| {
             const index: u16 = @intCast(peer);
-            if (!self.sessions.rows[index].active or self.overlay.retire.isSet(index)) continue;
+            if (!self.sessions.rows[index].active or self.sessions.rows[index].io.tx.retiring) continue;
             if (source) |p| {
                 if (std.meta.eql(p, self.logical(index)) or self.sessions.suppresses(index, id, now_ms)) continue;
             }
@@ -447,7 +429,7 @@ pub const Gossipsub = struct {
                 result.unavailable += 1;
                 continue;
             }
-            if (self.sessions.rows[index].io.queueData(&self.messages.store, h, self.options.tx_peer_bytes, now_ms) == .queued) {
+            if (self.sessions.rows[index].io.tx.queueData(&self.messages.store, h, self.options.tx_peer_bytes, now_ms) == .queued) {
                 result.queued += 1;
             } else {
                 result.pressured += 1;
@@ -500,9 +482,6 @@ pub const Gossipsub = struct {
         if (self.cycle.remaining > 0) return now.mono_ms;
         var deadline = if (self.heartbeat_at == 0) now.mono_ms else self.heartbeat_at;
         if (self.messages.nextDeadline()) |d| deadline = @min(deadline, d);
-        for (self.overlay.pending_since) |since| if (since) |started| {
-            deadline = @min(deadline, started +| self.options.pressure_timeout_ms);
-        };
         if (self.recovery.nextExpiry()) |expiry| deadline = @min(deadline, expiry);
         return @max(now.mono_ms, deadline);
     }
@@ -563,8 +542,8 @@ pub const Gossipsub = struct {
             .message_entries = self.messages.store.entries.len,
             .validation_capacity = self.messages.validationCapacity(),
             .duplicate_attributions_per_validation = validation_mod.duplicates_max,
-            .data_descriptors_per_peer = peer_io_mod.data_capacity,
-            .data_descriptors_total = self.sessions.rows.len * peer_io_mod.data_capacity,
+            .data_descriptors_per_peer = @import("outbox.zig").data_capacity,
+            .data_descriptors_total = self.sessions.rows.len * @import("outbox.zig").data_capacity,
             .legal_atomic_work_bytes = 2 * constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + 2 * constants.MAX_PAYLOAD_SIZE,
             .page_bytes = storage.page_bytes,
             .rounding_per_message_max = storage.page_bytes - 1,
@@ -599,20 +578,20 @@ pub const Gossipsub = struct {
             if (peer.active) result.admitted_peers += 1;
             result.inbound_streams += @intFromBool(peer.in_stream != null);
             result.outbound_streams += @intFromBool(peer.outStream() != null);
-            result.subscription_pending_peers += @intFromBool(io.subscription_since != null);
-            result.queued_descriptors += io.data_count;
-            result.queued_bytes += io.data_bytes;
-            result.control_frames += io.control.count;
-            result.control_bytes += io.control.used;
-            result.critical_frames += io.critical.count;
-            result.critical_bytes += io.critical.used;
-            result.data_bytes_per_row_high_water = @max(result.data_bytes_per_row_high_water, io.data_bytes_high_water);
-            result.data_descriptors_per_row_high_water = @max(result.data_descriptors_per_row_high_water, io.data_descriptors_high_water);
-            result.control_bytes_per_row_high_water = @max(result.control_bytes_per_row_high_water, io.control.bytes_high_water);
-            result.control_frames_per_row_high_water = @max(result.control_frames_per_row_high_water, io.control.frames_high_water);
-            result.critical_bytes_per_row_high_water = @max(result.critical_bytes_per_row_high_water, io.critical.bytes_high_water);
-            result.critical_frames_per_row_high_water = @max(result.critical_frames_per_row_high_water, io.critical.frames_high_water);
-            if (io.oldestTx()) |since| result.oldest_tx_age_ms = @max(result.oldest_tx_age_ms orelse 0, self.last_now_ms -| since);
+            result.subscription_pending_peers += @intFromBool(io.tx.subscription_since != null);
+            result.queued_descriptors += io.tx.data_count;
+            result.queued_bytes += io.tx.data_bytes;
+            result.control_frames += io.tx.control.count;
+            result.control_bytes += io.tx.control.used;
+            result.critical_frames += io.tx.critical.count;
+            result.critical_bytes += io.tx.critical.used;
+            result.data_bytes_per_row_high_water = @max(result.data_bytes_per_row_high_water, io.tx.data_bytes_high_water);
+            result.data_descriptors_per_row_high_water = @max(result.data_descriptors_per_row_high_water, io.tx.data_descriptors_high_water);
+            result.control_bytes_per_row_high_water = @max(result.control_bytes_per_row_high_water, io.tx.control.bytes_high_water);
+            result.control_frames_per_row_high_water = @max(result.control_frames_per_row_high_water, io.tx.control.frames_high_water);
+            result.critical_bytes_per_row_high_water = @max(result.critical_bytes_per_row_high_water, io.tx.critical.bytes_high_water);
+            result.critical_frames_per_row_high_water = @max(result.critical_frames_per_row_high_water, io.tx.critical.frames_high_water);
+            if (io.tx.oldest()) |since| result.oldest_tx_age_ms = @max(result.oldest_tx_age_ms orelse 0, self.last_now_ms -| since);
             if (io.reader.declaredLen() != null or io.rpc != null) result.held_frames += 1;
         }
         for (self.overlay.rows) |topic| {
@@ -676,11 +655,7 @@ pub const Gossipsub = struct {
                 const j = self.overlay.rng.random().uintLessThan(usize, count - i) + i;
                 std.mem.swap(MessageId, &ids[i], &ids[j]);
             }
-            var writer = protobuf.Writer.init(self.msg_scratch);
-            writer.varint(protobuf.ihaveRpcSize(topic_str, n, constants.message_id_length));
-            protobuf.beginIhaveRpc(&writer, topic_str, n, constants.message_id_length);
-            for (ids[0..n]) |id| protobuf.writeIhaveId(&writer, &id);
-            if (self.sessions.rows[peer].io.appendControl(writer.written(), false, .ihave, self.last_now_ms) == null) self.counters.send_dropped += 1;
+            if (self.sessions.rows[peer].io.tx.submit(&.{ .ihave = .{ .topic = topic_str, .ids = ids[0..n] } }, self.last_now_ms) == null) self.counters.send_dropped += 1;
         }
     }
 
@@ -697,7 +672,7 @@ pub const Gossipsub = struct {
         if (local_pressure) self.counters.promises_cancelled_pressure += removed;
     }
 
-    pub fn writeCompleted(self: *Gossipsub, session: sessions_mod.SessionRef, completion: peer_io_mod.Completion, now_ms: u64) void {
+    pub fn writeCompleted(self: *Gossipsub, session: sessions_mod.SessionRef, completion: @import("outbox.zig").Completion, now_ms: u64) void {
         if (!self.sessions.matches(session)) return;
         const peer = session.index;
         self.rpc_metrics.observeSent(completion.itemKind());
@@ -847,11 +822,7 @@ pub const Gossipsub = struct {
             self.rpc_metrics.ignoreIhave(.no_new_ids);
             return;
         }
-        var writer = protobuf.Writer.init(self.msg_scratch);
-        writer.varint(protobuf.iwantRpcSize(count, constants.message_id_length));
-        protobuf.beginIwantRpc(&writer, count, constants.message_id_length);
-        for (wanted[0..count]) |id| protobuf.writeIwantId(&writer, &id);
-        if (io.appendControl(writer.written(), false, .iwant, now.mono_ms)) |token| {
+        if (io.tx.submit(&.{ .iwant = wanted[0..count] }, now.mono_ms)) |token| {
             self.recovery.addBatch(&self.peers, wanted[0..count], self.logical(index), self.sessions.rows[index].conn, token, self.overlay.rng.random().uintLessThan(usize, count));
             io.iwant_ids_sent += @intCast(count);
             self.counters.iwant_sent += 1;
@@ -868,7 +839,7 @@ pub const Gossipsub = struct {
             if (id_bytes.len != constants.message_id_length) continue;
             const id: MessageId = id_bytes[0..constants.message_id_length].*;
             if (self.sessions.suppresses(index, id, self.last_now_ms)) continue;
-            switch (self.messages.serve(&self.sessions.rows[index].io, self.logical(index), id, self.options.tx_peer_bytes, self.last_now_ms)) {
+            switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, self.options.tx_peer_bytes, self.last_now_ms)) {
                 .unknown => self.rpc_metrics.iwant_unknown +|= 1,
                 .known => |known| {
                     self.topic_metrics.get(known.topic).iwant_ids +|= 1;
@@ -881,18 +852,12 @@ pub const Gossipsub = struct {
     /// v1.2: on the first copy of a large message, tell mesh peers not to send
     /// their duplicate. Sent before validation, only to peers on 1.2.0.
     fn broadcastIdontwant(self: *Gossipsub, topic: u16, id: MessageId, source: u16) void {
-        var buf: [control_frame_max]u8 = undefined;
-        var writer = protobuf.Writer.init(&buf);
-        writer.varint(protobuf.idontwantRpcSize(1, constants.message_id_length));
-        protobuf.beginIdontwantRpc(&writer, 1, constants.message_id_length);
-        protobuf.writeIdontwantId(&writer, &id);
-        const rpc = writer.written();
         var it = self.overlay.mesh(topic).iterator(.{});
         while (it.next()) |peer| {
             const peer_index: u16 = @intCast(peer);
             if (peer_index == source) continue;
             if (self.sessions.peerVersion(peer_index) != .v1_2) continue;
-            if (self.sessions.rows[peer_index].io.appendControl(rpc, false, .idontwant, self.last_now_ms) == null) self.counters.send_dropped += 1;
+            if (self.sessions.rows[peer_index].io.tx.submit(&.{ .idontwant = &.{id} }, self.last_now_ms) == null) self.counters.send_dropped += 1;
         }
     }
 
@@ -1101,19 +1066,19 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
     var w = protobuf.Writer.init(&body);
     const id = [_]u8{7} ** 20;
     w.bytesField(2, &id);
-    try std.testing.expect(g.sessions.rows[peer.index].io.append(&([_]u8{0} ** 64), 1));
+    try std.testing.expect(g.sessions.rows[peer.index].io.tx.inject(&([_]u8{0} ** 64), 1));
     g.onIhave(peer.index, .{ .topic = topic, .body = w.written() }, .{ .mono_ms = 1, .unix_s = 1 });
     try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
-    g.sessions.rows[peer.index].io.resetTx(&g.messages.store);
+    g.sessions.rows[peer.index].io.tx.reset(&g.messages.store);
     g.onIhave(peer.index, .{ .topic = topic, .body = w.written() }, .{ .mono_ms = 2, .unix_s = 1 });
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     g.expirePromises(10_000);
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
     const io = &g.sessions.rows[peer.index].io;
-    const first = io.segment(&g.messages.store);
-    _ = io.advance(&g.messages.store, 1);
+    const first = io.tx.segment(&g.messages.store);
+    _ = io.tx.advance(&g.messages.store, 1);
     try std.testing.expect(g.recovery.batches[0].expiry == null);
-    const token = io.advance(&g.messages.store, first.len - 1).?.control.token;
+    const token = io.tx.advance(&g.messages.store, first.len - 1).?.control.token;
     g.controlSent(peer.index, token, 10_000);
     try std.testing.expectEqual(@as(?u64, 13_000), g.recovery.batches[0].expiry);
     var empty: [0]Event = .{};
@@ -1181,9 +1146,9 @@ test "gossipsub IHAVE security bounds one identity and deduplicates queued reque
             }
             g.onIhave(peer.index, .{ .topic = name, .body = writer.written() }, .{ .mono_ms = heartbeat * 1000, .unix_s = 1 });
             for (0..4) |_| {
-                const segment = io.segment(&g.messages.store);
+                const segment = io.tx.segment(&g.messages.store);
                 if (segment.len == 0) break;
-                if (io.advance(&g.messages.store, segment.len)) |completion| g.writeCompleted(g.sessions.ref(peer.index), completion, heartbeat * 1000);
+                if (io.tx.advance(&g.messages.store, segment.len)) |completion| g.writeCompleted(g.sessions.ref(peer.index), completion, heartbeat * 1000);
             }
         }
     }
@@ -1377,7 +1342,7 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
         var read_turns: usize = 0;
         var write_turns: usize = 0;
         for (0..8) |_| {
-            try std.testing.expect(setup.client.sessions.rows[peer].io.append(&.{0}, setup.pair.now.mono_ms));
+            try std.testing.expect(setup.client.sessions.rows[peer].io.tx.inject(&.{0}, setup.pair.now.mono_ms));
             setup.client.sessions.connectionActivity(setup.handles.client);
             _ = @import("test_support.zig").pump(&setup.client, &setup.pair.client, setup.pair.now, &events);
             const calls = global - setup.client.budget.calls;
@@ -1392,7 +1357,7 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
             _ = @import("test_support.zig").pump(&setup.client, &setup.pair.client, setup.pair.now, &events);
             try std.testing.expect(global - setup.client.budget.calls <= 1);
         }
-        try std.testing.expect(!setup.client.sessions.rows[peer].io.pending());
+        try std.testing.expect(!setup.client.sessions.rows[peer].io.tx.pending());
         try std.testing.expect(@import("test_support.zig").driver(&setup.client).nextIoWakeup(setup.pair.now, events.len).? > setup.pair.now.mono_ms);
     }
 }
@@ -1486,7 +1451,7 @@ test "gossip policy topic retirement bounds arbitrarily slow active score decay"
     const topic = g.overlay.findTopic(name).?;
     g.peers.scores.deliver(g.logical(peer.index).index, topic);
     try std.testing.expect(g.unsubscribe(name));
-    g.queueSubscriptions(&g.sessions.rows[peer.index].io);
+    g.sessions.rows[peer.index].io.tx.subscriptions(&g.overlay.rows, g.last_now_ms);
     g.last_now_ms = 11;
     g.peers.scores.refresh(11);
     g.reclaimTopic(topic);
@@ -1522,7 +1487,7 @@ test "gossip policy subscription retry preserves its first pressure deadline" {
     try std.testing.expect(g.subscribe("/eth2/01020304/beacon_block/ssz_snappy"));
     g.last_now_ms = 1;
     g.sendSubscriptions(peer.index);
-    try std.testing.expectEqual(@as(?u64, 0), g.sessions.rows[peer.index].io.subscription_since);
+    try std.testing.expectEqual(@as(?u64, 0), g.sessions.rows[peer.index].io.tx.subscription_since);
 }
 
 test "gossip policy review I4 heartbeat fanout and advertisements share one snapshot" {
@@ -1551,7 +1516,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     };
     try std.testing.expect(g.peers.scores.setAppScore(g.logical(@intCast(retained)).index, -10_000));
     try std.testing.expect(g.peers.scores.setAppScore(g.logical(advertised).index, -10_000));
-    for (g.sessions.rows) |*peer| peer.io.resetTx(&g.messages.store);
+    for (g.sessions.rows) |*peer| peer.io.tx.reset(&g.messages.store);
     g.last_now_ms = 2;
     g.opportunistic_at = 2;
     g.heartbeat(.{ .mono_ms = 2, .unix_s = 0 });
@@ -1559,19 +1524,19 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     g.maintainTopics(.{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expect(g.overlay.fanoutMembers(second).isSet(retained));
     try std.testing.expectEqual(@as(usize, 8), g.overlay.fanoutMembers(second).count());
-    try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[advertised].io.control.count);
-    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.control.count);
+    try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[advertised].io.tx.control.count);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.tx.control.count);
     g.maintainTopics(.{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 0), g.cycle.remaining);
-    for (g.sessions.rows) |*peer| peer.io.resetTx(&g.messages.store);
+    for (g.sessions.rows) |*peer| peer.io.tx.reset(&g.messages.store);
     g.last_now_ms = 701;
     g.heartbeat(.{ .mono_ms = 701, .unix_s = 0 });
     g.maintainTopics(.{ .mono_ms = 701, .unix_s = 0 });
     g.maintainTopics(.{ .mono_ms = 702, .unix_s = 0 });
     try std.testing.expect(!g.overlay.fanoutMembers(second).isSet(retained));
     try std.testing.expectEqual(@as(usize, 7), g.overlay.fanoutMembers(second).count());
-    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[advertised].io.control.count);
-    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.control.count);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[advertised].io.tx.control.count);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.tx.control.count);
     const live = g.overlay.fanoutMembers(second).findFirstSet().?;
     try std.testing.expect(g.peers.scores.setAppScore(g.logical(@intCast(live)).index, -10_000));
     _ = try g.publish(second_name, "live publish", .{ .mono_ms = 703, .unix_s = 0 });
@@ -1677,27 +1642,27 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     protobuf.writeIwantId(&writer, &id);
     var reader = protobuf.RpcReader.init(writer.written());
     const iwant = (try reader.next()).?.iwant;
-    for (0..peer_io_mod.data_capacity) |_| {
-        try std.testing.expectEqual(peer_io_mod.QueueResult.queued, g.sessions.rows[first.index].io.queueData(&g.messages.store, message, g.options.tx_peer_bytes, 1));
+    for (0..@import("outbox.zig").data_capacity) |_| {
+        try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, g.sessions.rows[first.index].io.tx.queueData(&g.messages.store, message, g.options.tx_peer_bytes, 1));
     }
     g.onIwant(first.index, iwant);
     try std.testing.expectEqual(@as(u8, 0), g.messages.history.get(&g.messages.store, id).?.counts[logical_peer.index]);
     try std.testing.expectEqual(@as(u64, 1), g.counters.send_dropped);
-    g.sessions.rows[first.index].io.resetTx(&g.messages.store);
+    g.sessions.rows[first.index].io.tx.reset(&g.messages.store);
     for (0..4) |_| g.onIwant(first.index, iwant);
-    try std.testing.expectEqual(@as(usize, 3), g.sessions.rows[first.index].io.data_count);
+    try std.testing.expectEqual(@as(usize, 3), g.sessions.rows[first.index].io.tx.data_count);
     g.connectionClosed(.{ .index = 0, .generation = 1 });
     const second = g.addPeer(.{ .index = 0, .generation = 2 }, .v1_2, &metadata, now).admitted;
     try std.testing.expectEqual(logical_peer, g.logical(second.index));
     g.onIwant(second.index, iwant);
-    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[second.index].io.data_count);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[second.index].io.tx.data_count);
     g.connectionClosed(.{ .index = 0, .generation = 2 });
     const expired: Now = .{ .mono_ms = g.peers.retention_ms + 2, .unix_s = 0 };
     const third = g.addPeer(.{ .index = 0, .generation = 3 }, .v1_2, &metadata, expired).admitted;
     try std.testing.expectEqual(logical_peer.index, g.logical(third.index).index);
     try std.testing.expect(g.logical(third.index).generation > logical_peer.generation);
     for (0..4) |_| g.onIwant(third.index, iwant);
-    try std.testing.expectEqual(@as(usize, 3), g.sessions.rows[third.index].io.data_count);
+    try std.testing.expectEqual(@as(usize, 3), g.sessions.rows[third.index].io.tx.data_count);
 }
 
 test "gossip resolved capacities allocate owner rows and reject stale ceiling handles" {
@@ -1811,12 +1776,12 @@ test "gossip diagnostics tracks queued age and preserves peaks after owner relea
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const io = &g.sessions.rows[peer.index].io;
-    io.resetTx(&g.messages.store);
+    io.tx.reset(&g.messages.store);
     const message = g.messages.store.put([_]u8{1} ** 20, "t", "abc").?;
     g.messages.store.retainHistory(message);
     g.messages.store.seal(message);
-    try std.testing.expectEqual(peer_io_mod.QueueResult.queued, io.queueData(&g.messages.store, message, 10, 7));
-    try std.testing.expect(io.appendControl("ctrl", true, null, 9) != null);
+    try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, io.tx.queueData(&g.messages.store, message, 10, 7));
+    try std.testing.expect(io.tx.injectFrame("ctrl", true, null, 9) != null);
     g.last_now_ms = 20;
     const snapshot = g.resourceSnapshot();
     try std.testing.expectEqual(@as(?u64, 13), snapshot.oldest_tx_age_ms);
@@ -1917,16 +1882,16 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const p = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const io = &g.sessions.rows[p.index].io;
-    const token = io.appendControl("control", false, null, 1).?;
+    const token = io.tx.injectFrame("control", false, null, 1).?;
     g.recovery.add(&g.peers, [_]u8{1} ** 20, g.logical(p.index), conn, token);
     g.recovery.controlSent(.{ .index = 0, .generation = 2 }, token, 12_000, 5);
     g.controlSent(p.index, token + 1, 5);
     try std.testing.expect(g.recovery.nextExpiry() == null);
-    _ = io.segment(&g.messages.store);
-    try std.testing.expect(io.advance(&g.messages.store, 1) == null);
+    _ = io.tx.segment(&g.messages.store);
+    try std.testing.expect(io.tx.advance(&g.messages.store, 1) == null);
     try std.testing.expect(g.recovery.nextExpiry() == null);
     try std.testing.expectEqual(@as(u64, 0), g.recovery.metrics.sent);
-    g.writeCompleted(g.sessions.ref(p.index), io.advance(&g.messages.store, 6).?, 100);
+    g.writeCompleted(g.sessions.ref(p.index), io.tx.advance(&g.messages.store, 6).?, 100);
     g.controlSent(p.index, token, 200);
     try std.testing.expectEqual(@as(?u64, 12_100), g.recovery.nextExpiry());
     try std.testing.expectEqual(@as(u64, 1), g.recovery.metrics.sent);
@@ -1952,28 +1917,28 @@ test "gossipsub configured IDONTWANT uses admitted compressed wire bytes" {
     var compressed: [constants.maxCompressedLen(256)]u8 = undefined;
     var events: [1]Event = undefined;
     for ([_]usize{ 124, 125, 126 }, [_]usize{ 127, 128, 129 }) |size, wire_size| {
-        g.sessions.rows[destination.index].io.resetTx(&g.messages.store);
+        g.sessions.rows[destination.index].io.tx.reset(&g.messages.store);
         const len = try snappy.raw.compress(payload[0..size], &compressed);
         try std.testing.expectEqual(wire_size, len);
         g.budget = .{ .work = g.options.work_per_pump };
         try std.testing.expectEqual(@as(?usize, 1), g.onMessage(source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
-        try std.testing.expectEqual(wire_size >= 128, g.sessions.rows[destination.index].io.control.used > 0);
-        g.sessions.rows[destination.index].io.resetTx(&g.messages.store);
+        try std.testing.expectEqual(wire_size >= 128, g.sessions.rows[destination.index].io.tx.control.used > 0);
+        g.sessions.rows[destination.index].io.tx.reset(&g.messages.store);
         try std.testing.expectEqual(@as(?usize, 0), g.onMessage(source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
-        try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.control.used);
+        try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     }
     const len = try snappy.raw.compress(&([_]u8{0} ** 256), &compressed);
     try std.testing.expect(len < 128);
     try std.testing.expectEqual(@as(?usize, 1), g.onMessage(source.index, .{ .topic = name, .data = compressed[0..len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
-    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.control.used);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     _ = g.onMessage(source.index, .{ .topic = name, .data = &.{ 5, 0 } }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0);
-    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.control.used);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     const fresh_len = try snappy.raw.compress("nonadmitted", &compressed);
     g.options.idontwant_min_data_size = 0;
     try std.testing.expectEqual(@as(?usize, null), g.onMessage(source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, .{ .mono_ms = 1, .unix_s = 0 }, &.{}, 0));
-    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.control.used);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[destination.index].io.tx.control.used);
     try std.testing.expectEqual(@as(?usize, 1), g.onMessage(source.index, .{ .topic = name, .data = compressed[0..fresh_len] }, .{ .mono_ms = 1, .unix_s = 0 }, &events, 0));
-    try std.testing.expect(g.sessions.rows[destination.index].io.control.used > 0);
+    try std.testing.expect(g.sessions.rows[destination.index].io.tx.control.used > 0);
 }
 
 test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event through local publication" {
@@ -1993,7 +1958,7 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&pair.server, source.index, "remote suppressed", pair.pair.now.mono_ms, &events));
     const borrowed = events[0].message;
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, pair.server.report(borrowed.handle, .accept, pair.pair.now));
-    try std.testing.expectEqual(@as(usize, 0), pair.server.sessions.rows[destination].io.data_count);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.sessions.rows[destination].io.tx.data_count);
     const local = try pair.server.publish(name, "local while borrowed", pair.pair.now);
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, local);
     try std.testing.expectError(error.Duplicate, pair.server.publish(name, "local while borrowed", pair.pair.now));
@@ -2012,7 +1977,7 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
     try std.testing.expectEqual(@as(u64, 0), pair.server.counters.messages_forwarded);
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&pair.server, source.index, "remote forwarded", pair.pair.now.mono_ms, &events));
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, pair.server.report(events[0].message.handle, .accept, pair.pair.now));
-    try std.testing.expectEqual(@as(usize, 1), pair.server.sessions.rows[destination].io.data_count);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.sessions.rows[destination].io.tx.data_count);
     received = 0;
     for (0..30) |_| {
         try pair.pumpOnce();
@@ -2044,7 +2009,7 @@ test "publication subscribed fanout expires through owner maintenance" {
     g.maintainTopics(.{ .mono_ms = 60_000, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 0), g.overlay.fanoutMembers(t).count());
     g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, p.index, false);
-    g.sessions.rows[p.index].io.resetTx(&g.messages.store);
+    g.sessions.rows[p.index].io.tx.reset(&g.messages.store);
     const next_conn: Handle = .{ .index = 1, .generation = 1 };
     const next = @import("test_support.zig").addPeer(&g, next_conn, .v1_2).?;
     g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, next.index, true);
@@ -2053,8 +2018,8 @@ test "publication subscribed fanout expires through owner maintenance" {
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, result);
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
     try std.testing.expect(g.overlay.fanoutMembers(t).isSet(next.index));
-    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[p.index].io.data_count);
-    const queued = g.sessions.rows[next.index].io.data[g.sessions.rows[next.index].io.data_head].message;
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[p.index].io.tx.data_count);
+    const queued = g.sessions.rows[next.index].io.tx.data[g.sessions.rows[next.index].io.tx.data_head].message;
     try std.testing.expectEqual(topic_mod.validMessageId(name, "fresh fanout", .{}), g.messages.store.get(queued).?.id);
 }
 
@@ -2087,20 +2052,20 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     var reader = protobuf.RpcReader.init(writer.written());
     g.onIwant(peer.index, (try reader.next()).?.iwant);
     const io = &g.sessions.rows[peer.index].io;
-    try std.testing.expectEqual(@as(usize, 1), io.data_count);
-    try std.testing.expectEqual(message, io.data[io.data_head].message);
+    try std.testing.expectEqual(@as(usize, 1), io.tx.data_count);
+    try std.testing.expectEqual(message, io.tx.data[io.tx.data_head].message);
     try std.testing.expectEqual(@as(u8, 1), g.messages.history.get(&g.messages.store, id).?.counts[g.logical(peer.index).index]);
     var wire: [512]u8 = undefined;
     var used: usize = 0;
     for (0..8) |_| {
-        const segment = io.segment(&g.messages.store);
+        const segment = io.tx.segment(&g.messages.store);
         if (segment.len == 0) break;
         try std.testing.expect(used + segment.len <= wire.len);
         @memcpy(wire[used..][0..segment.len], segment);
         used += segment.len;
-        _ = io.advance(&g.messages.store, segment.len);
+        _ = io.tx.advance(&g.messages.store, segment.len);
     }
-    try std.testing.expectEqual(@as(usize, 0), io.data_count);
+    try std.testing.expectEqual(@as(usize, 0), io.tx.data_count);
     try std.testing.expect(std.mem.indexOf(u8, wire[0..used], name) != null);
     var decompressed: [64]u8 = undefined;
     const size = try snappy.raw.uncompress(g.messages.store.segment(message, g.messages.store.cursor(message)), &decompressed);
@@ -2145,15 +2110,15 @@ test "gossip advertisements sample the whole burst independently for each recipi
         std.mem.writeInt(u64, &bytes, i, .little);
         _ = try g.publish(name, &bytes, .{ .mono_ms = 1, .unix_s = 0 });
     }
-    for (g.sessions.rows) |*peer| peer.io.resetTx(&g.messages.store);
+    for (g.sessions.rows) |*peer| peer.io.tx.reset(&g.messages.store);
     g.overlay.rows[t].fanout = .initEmpty();
     const context = g.overlayContext(1);
     g.cycle.takeSnapshot(context.sessions, &context.peers.scores, context.now);
     var snapshot_context = context;
     snapshot_context.snapshot = &g.cycle.scores;
     g.emitGossip(t, &snapshot_context);
-    const first = g.sessions.rows[0].io.segment(&g.messages.store);
-    const second = g.sessions.rows[1].io.segment(&g.messages.store);
+    const first = g.sessions.rows[0].io.tx.segment(&g.messages.store);
+    const second = g.sessions.rows[1].io.tx.segment(&g.messages.store);
     try std.testing.expect(first.len > 0 and second.len > 0);
     try std.testing.expect(!std.mem.eql(u8, first, second));
     var beyond_prefix: usize = 0;
@@ -2249,7 +2214,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
                 g.heartbeat(now);
                 g.maintainTopics(now);
             },
-            8 => for (g.sessions.rows) |*peer| peer.io.resetTx(&g.messages.store),
+            8 => for (g.sessions.rows) |*peer| peer.io.tx.reset(&g.messages.store),
             else => unreachable,
         }
         var pending: usize = 0;
@@ -2268,8 +2233,8 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
             const history = g.messages.history.get(&g.messages.store, entry.id);
             try std.testing.expectEqual(entry.history, if (history) |record| record.message.index == index and record.message.generation == entry.generation else false);
             var retained: u32 = 0;
-            for (g.sessions.rows) |*peer| for (0..peer.io.data_count) |queued| {
-                const handle = peer.io.data[(peer.io.data_head + queued) % peer_io_mod.data_capacity].message;
+            for (g.sessions.rows) |*peer| for (0..peer.io.tx.data_count) |queued| {
+                const handle = peer.io.tx.data[(peer.io.tx.data_head + queued) % @import("outbox.zig").data_capacity].message;
                 if (handle.index == index and handle.generation == entry.generation) retained += 1;
             };
             try std.testing.expectEqual(entry.tx, retained);

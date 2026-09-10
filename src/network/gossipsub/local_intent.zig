@@ -10,7 +10,7 @@ pub const Subscription = struct {
 pub const TopicSet = std.StaticBitSet(constants.topics_cap);
 pub const Pins = struct {
     validation: TopicSet = .initEmpty(),
-    announcements: TopicSet = .initEmpty(),
+    outbound: TopicSet = .initEmpty(),
 };
 pub const Assignment = struct {
     bytes: [topic.topic_max_len]u8,

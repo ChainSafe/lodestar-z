@@ -309,7 +309,7 @@ test "gossipsub service detects an idle remote stop and retries without fabricat
     const remote = setup.server.handler.inner.sessions.rows[server_index].in_stream.?;
     try std.testing.expectEqual(first.id, remote.id);
     const io = &setup.client.handler.inner.sessions.rows[client_index].io;
-    try std.testing.expect(!io.pending());
+    try std.testing.expect(!io.tx.pending());
     setup.pair.server.closeStream(remote, 0);
     for (0..4) |_| try setup.pumpOnce();
     try std.testing.expect(setup.client.handler.inner.sessions.outStream(client_index) == null);

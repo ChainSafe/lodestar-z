@@ -784,7 +784,7 @@ test "gossipsub frame and TX absolute residence survive steady byte progress" {
     try std.testing.expectEqual(@as(u64, 1), setup.server.counters.large_stalled);
     try std.testing.expect(setup.server.sessions.rows[server_peer].io.large_slot == null);
     try std.testing.expectEqual(@as(u64, 1), setup.client.counters.tx_stalled);
-    try std.testing.expectEqual(@as(usize, 0), setup.client.sessions.rows[client_peer].io.data_count);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.sessions.rows[client_peer].io.tx.data_count);
     for (setup.client.messages.store.entries) |e| if (e.active) try std.testing.expectEqual(@as(u32, 0), e.tx);
 }
 
@@ -859,10 +859,10 @@ test "gossipsub native write credit behind cursor resumes and blocked writes qui
         try setup.pair.pump();
     }
     const io = &setup.client.sessions.rows[index].io;
-    try std.testing.expect(io.data_count > 0);
-    try std.testing.expect(!io.tx_ready);
+    try std.testing.expect(io.tx.data_count > 0);
+    try std.testing.expect(!io.tx.ready);
     try std.testing.expect(@import("test_support.zig").driver(&setup.client).nextIoWakeup(setup.pair.now, 16).? > setup.pair.now.mono_ms);
-    const before = io.data[io.data_head].page.remaining;
+    const before = io.tx.data[io.tx.data_head].page.remaining;
     const extra = @import("test_support.zig").addPeer(&setup.client, .{ .index = 77, .generation = 1 }, .v1_2).?;
     setup.client.sessions.cursor = extra.index;
     setup.server.sessions.connectionActivity(setup.handles.server);
@@ -876,9 +876,9 @@ test "gossipsub native write credit behind cursor resumes and blocked writes qui
     _ = @import("test_support.zig").pump(&setup.client, &setup.pair.client, setup.pair.now, &events);
     try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), @import("test_support.zig").driver(&setup.client).nextIoWakeup(setup.pair.now, 16));
     _ = @import("test_support.zig").pump(&setup.client, &setup.pair.client, setup.pair.now, &events);
-    try std.testing.expect(io.data[io.data_head].page.remaining < before);
+    try std.testing.expect(io.tx.data[io.tx.data_head].page.remaining < before);
     setup.client.connectionClosed(setup.handles.client);
-    try std.testing.expectEqual(@as(usize, 0), io.data_count);
+    try std.testing.expectEqual(@as(usize, 0), io.tx.data_count);
     for (setup.client.messages.store.entries) |entry| if (entry.active) try std.testing.expectEqual(@as(u32, 0), entry.tx);
 }
 
@@ -898,8 +898,8 @@ test "gossipsub healthy continuous frame turnover does not expire a nonempty que
     const began = setup.pair.now.mono_ms;
     for (2..34) |i| {
         try setup.pumpOnce();
-        try std.testing.expect(setup.client.sessions.rows[index].io.pending());
-        try std.testing.expect(setup.client.sessions.rows[index].io.data_count > 0);
+        try std.testing.expect(setup.client.sessions.rows[index].io.tx.pending());
+        try std.testing.expect(setup.client.sessions.rows[index].io.tx.data_count > 0);
         setup.pair.advance(25);
         std.mem.writeInt(u64, &bytes, i, .little);
         const result = try setup.client.publish(test_topic, &bytes, setup.pair.now);
