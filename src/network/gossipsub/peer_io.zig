@@ -27,7 +27,7 @@ pub const ControlQueue = struct {
     bytes_high_water: usize = 0,
     frames_high_water: usize = 0,
 
-    pub fn append(self: *ControlQueue, bytes: []const u8, token: u64, now_ms: u64) QueueResult {
+    pub fn append(self: *ControlQueue, bytes: []const u8, token: u64, kind: ?ItemKind, now_ms: u64) QueueResult {
         if (self.count == control_frames or bytes.len > self.bytes.len - self.used) return .full;
         assert(bytes.len > 0);
         const n = @min(bytes.len, self.bytes.len - self.write_at);
@@ -36,7 +36,7 @@ pub const ControlQueue = struct {
         const slot = (self.head + self.count) % control_frames;
         self.lengths[slot] = @intCast(bytes.len);
         self.tokens[slot] = token;
-        self.kinds[slot] = null;
+        self.kinds[slot] = kind;
         self.enqueued_ms[slot] = now_ms;
         self.count += 1;
         self.used += bytes.len;
@@ -243,7 +243,7 @@ pub const PeerIo = struct {
         }
         const token = self.sequence + 1;
         const queue = if (critical) &self.critical else &self.control;
-        if (queue.append(bytes, token, now_ms) == .full) {
+        if (queue.append(bytes, token, kind, now_ms) == .full) {
             self.dropped(if (queue.count == control_frames)
                 (if (critical) .critical_frames else .control_frames)
             else
@@ -251,7 +251,6 @@ pub const PeerIo = struct {
             return null;
         }
         self.sequence = token;
-        queue.kinds[(queue.head + queue.count - 1) % control_frames] = kind;
         self.tx_ready = true;
         return token;
     }
@@ -532,8 +531,8 @@ test "metrics control kinds survive partial writes ring reuse and refused frames
 test "gossip control high water survives partial write refusal and reset" {
     var bytes: [4]u8 = undefined;
     var queue: ControlQueue = .{ .bytes = &bytes };
-    try std.testing.expectEqual(QueueResult.queued, queue.append("abc", 1, 7));
-    try std.testing.expectEqual(QueueResult.full, queue.append("ab", 2, 8));
+    try std.testing.expectEqual(QueueResult.queued, queue.append("abc", 1, null, 7));
+    try std.testing.expectEqual(QueueResult.full, queue.append("ab", 2, null, 8));
     try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);
     try std.testing.expectEqual(@as(usize, 1), queue.frames_high_water);
     try std.testing.expectEqual(@as(?u64, null), queue.advance(1));

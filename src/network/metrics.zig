@@ -152,7 +152,7 @@ pub const Snapshot = struct {
                 }
             };
             if (!configured) continue;
-            const known = topic_metrics.Topic.parse(parsed.name) orelse continue;
+            const known = label orelse continue;
             const subnet = if (known.kind == .blob_sidecar) 0 else known.subnet;
             var found = false;
             for (self.topics[0..self.topic_count]) |*entry| {
