@@ -240,6 +240,11 @@ pub fn stateTransition(
     }
     metrics.state_transition.process_block.observe(time.durationSeconds(time.since(io, timer)));
 
+    const proposer_rewards = post_cached_state.proposer_rewards;
+    try metrics.state_transition.proposer_rewards.set(.{ .type = .attestation }, proposer_rewards.attestations);
+    try metrics.state_transition.proposer_rewards.set(.{ .type = .sync_aggregate }, proposer_rewards.sync_aggregate);
+    try metrics.state_transition.proposer_rewards.set(.{ .type = .slashing }, proposer_rewards.slashing);
+
     timer = time.start(io);
     try post_state.commit();
     metrics.state_transition.process_block_commit.observe(time.durationSeconds(time.since(io, timer)));
