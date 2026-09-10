@@ -1,6 +1,7 @@
 //! Tests for `list_composite.zig`.
 
 const std = @import("std");
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 const Node = @import("persistent_merkle_tree").Node;
 const container = @import("../type/container.zig");
 const FixedContainerType = container.FixedContainerType;
@@ -866,7 +867,8 @@ test "memory_safety: getAllReadonlyValues should deinit completed prefix and cur
     var view = try ListType.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
-    try std.testing.checkAllAllocationFailures(allocator, struct {
+    var backing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
         fn run(output_allocator: std.mem.Allocator, input: *ListType.TreeView) !void {
             const values = try input.getAllReadonlyValues(output_allocator);
             defer output_allocator.free(values);
@@ -903,7 +905,8 @@ test "memory_safety: iterator nextValue should deinit current value on conversio
     var view = try ListType.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
-    try std.testing.checkAllAllocationFailures(allocator, struct {
+    var backing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
         fn run(output_allocator: std.mem.Allocator, input: *ListType.TreeView) !void {
             var iterator = input.iteratorReadonly(0);
             var value = try iterator.nextValue(output_allocator);
@@ -947,8 +950,13 @@ test "memory_safety: TreeView composite list setValue - OOM does not double-free
     for (0..3) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-        fn run(allocator: std.mem.Allocator, value: *const ListType.Type) !void {
+    var backing = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
+    defer backing.deinit();
+
+    var saw_operation_oom = false;
+
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
+        fn run(allocator: std.mem.Allocator, value: *const ListType.Type, saw_oom: *bool) !void {
             var pool = try Node.Pool.init(.{
                 .page_allocator = std.testing.allocator,
                 .allocator = allocator,
@@ -959,9 +967,15 @@ test "memory_safety: TreeView composite list setValue - OOM does not double-free
             var view = try ListType.TreeView.fromValue(allocator, &pool, value);
             defer view.deinit();
 
-            try view.setValue(0, &newval);
+            view.setValue(0, &newval) catch |err| {
+                saw_oom.* = err == error.OutOfMemory;
+                return err;
+            };
         }
-    }.run, .{&list});
+    }.run, .{ &list, &saw_operation_oom });
+    try std.testing.expect(!backing.double_free);
+    try std.testing.expectEqual(@as(usize, 0), backing.live.count());
+    try std.testing.expect(saw_operation_oom);
 }
 
 test "memory_safety: TreeView composite list push - OOM does not double-free" {
@@ -972,8 +986,13 @@ test "memory_safety: TreeView composite list push - OOM does not double-free" {
     for (0..3) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-        fn run(allocator: std.mem.Allocator, value: *const ListType.Type) !void {
+    var backing = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
+    defer backing.deinit();
+
+    var saw_operation_oom = false;
+
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
+        fn run(allocator: std.mem.Allocator, value: *const ListType.Type, saw_oom: *bool) !void {
             var pool = try Node.Pool.init(.{
                 .page_allocator = std.testing.allocator,
                 .allocator = allocator,
@@ -984,9 +1003,15 @@ test "memory_safety: TreeView composite list push - OOM does not double-free" {
             var view = try ListType.TreeView.fromValue(allocator, &pool, value);
             defer view.deinit();
 
-            try view.pushValue(&newval);
+            view.pushValue(&newval) catch |err| {
+                saw_oom.* = err == error.OutOfMemory;
+                return err;
+            };
         }
-    }.run, .{&list});
+    }.run, .{ &list, &saw_operation_oom });
+    try std.testing.expect(!backing.double_free);
+    try std.testing.expectEqual(@as(usize, 0), backing.live.count());
+    try std.testing.expect(saw_operation_oom);
 }
 
 test "memory_safety: TreeView composite list set(index, ownedView) - failed set leaves the element view to the caller" {
@@ -997,8 +1022,18 @@ test "memory_safety: TreeView composite list set(index, ownedView) - failed set 
     for (0..3) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-        fn run(allocator: std.mem.Allocator, value: *const ListType.Type) !void {
+    var backing = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
+    defer backing.deinit();
+
+    var saw_operation_oom = false;
+
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            value: *const ListType.Type,
+            tracker: *const DoubleFreeDetectAllocator,
+            saw_oom: *bool,
+        ) !void {
             var pool = try Node.Pool.init(.{
                 .page_allocator = std.testing.allocator,
                 .allocator = allocator,
@@ -1011,6 +1046,8 @@ test "memory_safety: TreeView composite list set(index, ownedView) - failed set 
 
             const elem_view = try Checkpoint.TreeView.fromValue(allocator, &pool, &newval);
             view.set(0, elem_view) catch |err| {
+                saw_oom.* = err == error.OutOfMemory;
+                try std.testing.expect(tracker.live.contains(@intFromPtr(elem_view)));
                 defer elem_view.deinit();
                 var actual: Checkpoint.Type = undefined;
                 try elem_view.toValue(allocator, &actual);
@@ -1018,7 +1055,10 @@ test "memory_safety: TreeView composite list set(index, ownedView) - failed set 
                 return err;
             };
         }
-    }.run, .{&list});
+    }.run, .{ &list, &backing, &saw_operation_oom });
+    try std.testing.expect(!backing.double_free);
+    try std.testing.expectEqual(@as(usize, 0), backing.live.count());
+    try std.testing.expect(saw_operation_oom);
 }
 
 test "memory_safety: TreeView composite list commit - OOM does not double-free" {
@@ -1029,8 +1069,13 @@ test "memory_safety: TreeView composite list commit - OOM does not double-free" 
     for (0..3) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
     const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
 
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-        fn run(allocator: std.mem.Allocator, value: *const ListType.Type) !void {
+    var backing = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
+    defer backing.deinit();
+
+    var saw_operation_oom = false;
+
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
+        fn run(allocator: std.mem.Allocator, value: *const ListType.Type, saw_oom: *bool) !void {
             var pool = try Node.Pool.init(.{
                 .page_allocator = std.testing.allocator,
                 .allocator = allocator,
@@ -1042,9 +1087,15 @@ test "memory_safety: TreeView composite list commit - OOM does not double-free" 
             defer view.deinit();
 
             try view.setValue(0, &newval);
-            try view.commit();
+            view.commit() catch |err| {
+                saw_oom.* = err == error.OutOfMemory;
+                return err;
+            };
         }
-    }.run, .{&list});
+    }.run, .{ &list, &saw_operation_oom });
+    try std.testing.expect(!backing.double_free);
+    try std.testing.expectEqual(@as(usize, 0), backing.live.count());
+    try std.testing.expect(saw_operation_oom);
 }
 
 test "memory_safety: TreeView composite list sliceTo doesn't leak pool nodes" {
@@ -1082,8 +1133,18 @@ test "memory_safety: TreeView composite list clone should not double-free cached
     defer list.deinit(std.testing.allocator);
     try list.append(std.testing.allocator, .{ .epoch = 1, .root = [_]u8{1} ** 32 });
 
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-        fn run(allocator: std.mem.Allocator, value: *const ListType.Type) !void {
+    var backing = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
+    defer backing.deinit();
+
+    var saw_operation_oom = false;
+
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            value: *const ListType.Type,
+            tracker: *const DoubleFreeDetectAllocator,
+            saw_oom: *bool,
+        ) !void {
             var pool = try Node.Pool.init(.{
                 .page_allocator = std.testing.allocator,
                 .allocator = allocator,
@@ -1097,6 +1158,8 @@ test "memory_safety: TreeView composite list clone should not double-free cached
             try view.commit();
 
             const cloned = view.clone(.{ .transfer_cache = true }) catch |err| {
+                saw_oom.* = err == error.OutOfMemory;
+                try std.testing.expect(tracker.live.contains(@intFromPtr(child)));
                 try std.testing.expectEqual(@as(usize, 1), view.chunks.children_data.count());
                 try std.testing.expectEqual(child, try view.getReadonly(0));
                 return err;
@@ -1107,5 +1170,8 @@ test "memory_safety: TreeView composite list clone should not double-free cached
             try std.testing.expectEqual(@as(usize, 1), cloned.chunks.children_data.count());
             try std.testing.expectEqual(child, try cloned.getReadonly(0));
         }
-    }.run, .{&list});
+    }.run, .{ &list, &backing, &saw_operation_oom });
+    try std.testing.expect(!backing.double_free);
+    try std.testing.expectEqual(@as(usize, 0), backing.live.count());
+    try std.testing.expect(saw_operation_oom);
 }

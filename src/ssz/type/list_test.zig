@@ -1,6 +1,7 @@
 //! Tests for `list.zig`.
 
 const std = @import("std");
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 const ByteListType = @import("byte_list.zig").ByteListType;
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
@@ -1289,7 +1290,10 @@ test "memory_safety: VariableList clone should keep destination deinit-safe on a
     try source.append(std.testing.allocator, Bytes.default_value);
     try source.items[1].append(std.testing.allocator, 2);
 
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+    var backing = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
+    defer backing.deinit();
+
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
         fn run(allocator: std.mem.Allocator, input: *const ListType.Type) !void {
             var cloned = ListType.default_value;
             defer ListType.deinit(allocator, &cloned);
@@ -1297,6 +1301,8 @@ test "memory_safety: VariableList clone should keep destination deinit-safe on a
             try std.testing.expect(ListType.equals(input, &cloned));
         }
     }.run, .{&source});
+    try std.testing.expect(!backing.double_free);
+    try std.testing.expectEqual(@as(usize, 0), backing.live.count());
 }
 
 test "memory_safety: VariableList deserializeFromBytes should free offsets on malformed later offset" {

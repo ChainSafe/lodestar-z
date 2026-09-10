@@ -1,6 +1,7 @@
 //! Tests for `container.zig`.
 
 const std = @import("std");
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 const Node = @import("persistent_merkle_tree").Node;
 const container = @import("../type/container.zig");
 const FixedContainerType = container.FixedContainerType;
@@ -682,8 +683,13 @@ test "ContainerTreeView - serialize (with nested list)" {
 test "memory_safety: TreeView container setValue/commit - OOM does not double-free" {
     const new_root_bytes: [32]u8 = [_]u8{0xee} ** 32;
 
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-        fn run(allocator: std.mem.Allocator) !void {
+    var backing = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
+    defer backing.deinit();
+
+    var saw_operation_oom = false;
+
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
+        fn run(allocator: std.mem.Allocator, saw_oom: *bool) !void {
             var pool = try Node.Pool.init(.{
                 .page_allocator = std.testing.allocator,
                 .allocator = allocator,
@@ -694,10 +700,19 @@ test "memory_safety: TreeView container setValue/commit - OOM does not double-fr
             const checkpoint: Checkpoint.Type = .{ .epoch = 1, .root = [_]u8{1} ** 32 };
             var view = try Checkpoint.TreeView.fromValue(allocator, &pool, &checkpoint);
             defer view.deinit();
-            try view.setValue("root", &new_root_bytes);
-            try view.commit();
+            view.setValue("root", &new_root_bytes) catch |err| {
+                saw_oom.* = err == error.OutOfMemory;
+                return err;
+            };
+            view.commit() catch |err| {
+                saw_oom.* = err == error.OutOfMemory;
+                return err;
+            };
         }
-    }.run, .{});
+    }.run, .{&saw_operation_oom});
+    try std.testing.expect(!backing.double_free);
+    try std.testing.expectEqual(@as(usize, 0), backing.live.count());
+    try std.testing.expect(saw_operation_oom);
 }
 
 test "memory_safety: ContainerTreeView commit should reclaim basic nodes after pool exhaustion" {
