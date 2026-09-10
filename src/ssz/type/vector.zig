@@ -69,15 +69,44 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
         }
 
         pub fn hashTreeRoot(value: *const Type, out: *[32]u8) !void {
-            var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+            if (comptime chunk_count <= 64) {
+                var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+                if (comptime isBasicType(Element)) {
+                    _ = serializeIntoBytes(value, @ptrCast(&chunks));
+                } else {
+                    for (value, 0..) |*element, i| {
+                        try Element.hashTreeRoot(element, &chunks[i]);
+                    }
+                }
+                return merkleize(@ptrCast(&chunks), chunk_depth, out);
+            }
+            var accumulator = @import("hashing").MerkleAccumulator.init(chunk_depth);
             if (comptime isBasicType(Element)) {
-                _ = serializeIntoBytes(value, @ptrCast(&chunks));
+                const items_per_chunk = 32 / Element.fixed_size;
+                var next: usize = 0;
+                for (0..chunk_count) |_| {
+                    var chunk: [32]u8 = @splat(0);
+                    const end = next + @min(items_per_chunk, length - next);
+                    if (comptime canMemcpySsz(Element)) {
+                        const bytes = std.mem.sliceAsBytes(value[next..end]);
+                        @memcpy(chunk[0..bytes.len], bytes);
+                    } else {
+                        for (value[next..end], 0..) |*element, i| {
+                            _ = Element.serializeIntoBytes(element, chunk[i * Element.fixed_size ..]);
+                        }
+                    }
+                    try accumulator.append(&chunk);
+                    next = end;
+                }
+                std.debug.assert(next == length);
             } else {
-                for (value, 0..) |element, i| {
-                    try Element.hashTreeRoot(&element, &chunks[i]);
+                for (value) |*element| {
+                    var chunk: [32]u8 = undefined;
+                    try Element.hashTreeRoot(element, &chunk);
+                    try accumulator.append(&chunk);
                 }
             }
-            try merkleize(@ptrCast(&chunks), chunk_depth, out);
+            try accumulator.finish(out);
         }
 
         pub fn clone(value: *const Type, out: anytype) !void {
@@ -138,18 +167,41 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
             }
 
             pub fn hashTreeRoot(data: []const u8, out: *[32]u8) !void {
-                var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+                if (data.len != fixed_size) return error.InvalidSize;
+                if (comptime chunk_count <= 64) {
+                    var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+                    if (comptime isBasicType(Element)) {
+                        @memcpy(@as([]u8, @ptrCast(&chunks))[0..fixed_size], data);
+                    } else {
+                        for (0..length) |i| {
+                            try Element.serialized.hashTreeRoot(
+                                data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
+                                &chunks[i],
+                            );
+                        }
+                    }
+                    return merkleize(@ptrCast(&chunks), chunk_depth, out);
+                }
+                var accumulator = @import("hashing").MerkleAccumulator.init(chunk_depth);
                 if (comptime isBasicType(Element)) {
-                    @memcpy(@as([]u8, @ptrCast(&chunks))[0..fixed_size], data);
+                    for (0..chunk_count) |i| {
+                        var chunk: [32]u8 = @splat(0);
+                        const start = i * 32;
+                        const len = @min(32, data.len - start);
+                        @memcpy(chunk[0..len], data[start..][0..len]);
+                        try accumulator.append(&chunk);
+                    }
                 } else {
                     for (0..length) |i| {
+                        var chunk: [32]u8 = undefined;
                         try Element.serialized.hashTreeRoot(
-                            data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
-                            &chunks[i],
+                            data[i * Element.fixed_size ..][0..Element.fixed_size],
+                            &chunk,
                         );
+                        try accumulator.append(&chunk);
                     }
                 }
-                try merkleize(@ptrCast(&chunks), chunk_depth, out);
+                try accumulator.finish(out);
             }
         };
 
