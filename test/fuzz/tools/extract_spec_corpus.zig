@@ -36,21 +36,15 @@ const bitlist_selectors = [_]struct {
 };
 
 // ssz_bitvector: BitVector(4)=0, BitVector(32)=1,
-//               BitVector(64)=2
+//               BitVector(64)=2, BitVector(512)=3
 const bitvec_selectors = [_]struct {
     size: []const u8,
     sel: u8,
 }{
-    .{ .size = "1", .sel = 0x00 },
-    .{ .size = "2", .sel = 0x00 },
-    .{ .size = "3", .sel = 0x00 },
     .{ .size = "4", .sel = 0x00 },
-    .{ .size = "5", .sel = 0x01 },
-    .{ .size = "8", .sel = 0x01 },
-    .{ .size = "16", .sel = 0x01 },
-    .{ .size = "31", .sel = 0x01 },
+    .{ .size = "32", .sel = 0x01 },
+    .{ .size = "64", .sel = 0x02 },
     .{ .size = "512", .sel = 0x03 },
-    .{ .size = "513", .sel = 0x03 },
 };
 
 // ssz_containers: consensus types
@@ -70,6 +64,44 @@ const container_selectors = [_]struct {
 
 /// 4 MiB buffer size — enough for any spec test vector.
 const buf_len = 4 * 1024 * 1024;
+
+const spec_version_file_path = "../../test/spec/version.txt";
+const spec_version_file_size_max = 1024;
+const spec_version_size_max = 64;
+const spec_tests_root = "../../test/spec/spec_tests/";
+const generic_spec_suffix = "/general/tests/general/phase0/ssz_generic";
+const static_spec_suffix = "/minimal/tests/minimal/phase0/ssz_static";
+const spec_path_size_max = spec_tests_root.len + spec_version_size_max + @max(
+    generic_spec_suffix.len,
+    static_spec_suffix.len,
+);
+
+fn readSpecVersion(cwd: Dir, io: std.Io, file_buf: []u8) ![]const u8 {
+    std.debug.assert(file_buf.len == spec_version_file_size_max + 1);
+
+    const contents = try cwd.readFile(io, spec_version_file_path, file_buf);
+    if (contents.len > spec_version_file_size_max) {
+        return error.SpecVersionFileTooLong;
+    }
+
+    var version: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    for (0..contents.len + 1) |_| {
+        const untrimmed_line = lines.next() orelse break;
+        const line = std.mem.trim(u8, untrimmed_line, " \t\r");
+        if (line.len == 0) continue;
+        if (std.mem.startsWith(u8, line, "//")) continue;
+
+        var tokens = std.mem.tokenizeAny(u8, line, " \t\r");
+        const token = tokens.next() orelse unreachable;
+        if (tokens.next() != null) return error.InvalidSpecVersionLine;
+        if (token.len > spec_version_size_max) return error.SpecVersionTooLong;
+        if (version != null) return error.MultipleSpecVersions;
+        version = token;
+    }
+
+    return version orelse error.MissingSpecVersion;
+}
 
 /// Read a .ssz_snappy file, decompress it, and return
 /// the raw SSZ bytes (slice into decompress_buf).
@@ -471,13 +503,29 @@ pub fn main(init: std.process.Init) !void {
     // Build system places the exe; we use CWD (test/fuzz/).
     const cwd = std.Io.Dir.cwd();
 
-    // Spec test base paths
-    const generic_path =
-        "../../test/spec/spec_tests/v1.5.0" ++
-        "/general/tests/general/phase0/ssz_generic";
-    const static_path =
-        "../../test/spec/spec_tests/v1.5.0" ++
-        "/minimal/tests/minimal/phase0/ssz_static";
+    var version_file_buf: [spec_version_file_size_max + 1]u8 = undefined;
+    const spec_version = readSpecVersion(cwd, io, &version_file_buf) catch |err| {
+        std.debug.print(
+            "Cannot read spec test version at {s}: {}\n" ++
+                "Run: zig build run:download_spec_tests\n",
+            .{ spec_version_file_path, err },
+        );
+        return err;
+    };
+
+    var generic_path_buf: [spec_path_size_max]u8 = undefined;
+    const generic_path = std.fmt.bufPrint(
+        &generic_path_buf,
+        "{s}{s}{s}",
+        .{ spec_tests_root, spec_version, generic_spec_suffix },
+    ) catch return error.SpecTestPathTooLong;
+
+    var static_path_buf: [spec_path_size_max]u8 = undefined;
+    const static_path = std.fmt.bufPrint(
+        &static_path_buf,
+        "{s}{s}{s}",
+        .{ spec_tests_root, spec_version, static_spec_suffix },
+    ) catch return error.SpecTestPathTooLong;
 
     var generic_dir = cwd.openDir(
         io,

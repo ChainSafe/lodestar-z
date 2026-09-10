@@ -5,10 +5,11 @@
 //     the container_struct root, both fields, and every internal/leaf node
 //     of the vec field's 1024-chunk subtree (including the chunked_leaf
 //     nodes it is built from). Out-of-tree gindices fall in the same band
-//     and exercise createSingleProof's InvalidNode/InvalidGindex paths.
+//     and exercise createSingleProof's InvalidNode path.
 
 const std = @import("std");
 const assert = std.debug.assert;
+const fuzz_options = @import("fuzz_options");
 const ssz = @import("ssz");
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
@@ -31,14 +32,18 @@ const op_size: usize = 2;
 const gindex_min: u64 = 1;
 const gindex_max: u64 = 4095;
 const gindex_span: u64 = gindex_max - gindex_min + 1;
+const vector_leaf_depth = 1 + std.math.log2_int(usize, Vec.fixed_size / 32);
 
 pub export fn zig_fuzz_init() callconv(.c) void {}
 
 pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
+    if (len > fuzz_options.max_input_len) return;
     if (len < 1 + op_size) return;
 
     var fba = std.heap.FixedBufferAllocator.init(&fuzz_buf);
-    const allocator = fba.allocator();
+    var tracker = std.testing.FailingAllocator.init(fba.allocator(), .{});
+    defer assert(tracker.allocated_bytes == tracker.freed_bytes);
+    const allocator = tracker.allocator();
 
     var value: Outer.Type = .{
         .vec = Vec.default_value,
@@ -57,33 +62,43 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
     }) catch return;
     defer pool.deinit();
 
-    // Pool baseline = pre-populated zero sentinels. Final assert catches
-    // any transient ref/unref imbalance introduced by createSingleProof or
-    // its materialize plumbing.
     const baseline_in_use = pool.getNodesInUse();
-    var leak_check_armed = false;
-    defer {
-        if (leak_check_armed) {
-            const final_in_use = pool.getNodesInUse();
-            assert(final_in_use == baseline_in_use);
-        }
-    }
+    defer assert(pool.getNodesInUse() == baseline_in_use);
 
-    const root = Outer.tree.fromValue(&pool, &value) catch return;
+    const root = Outer.tree.fromValue(&pool, &value) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("constructing nested opaque tree", err),
+    };
     defer pool.unref(root);
 
     const original_root = root.getRoot(&pool).*;
-
-    leak_check_armed = true;
 
     var i: usize = 1;
     while (i + op_size <= len) : (i += op_size) {
         const raw = (@as(u64, buf[i + 1]) << 8) | @as(u64, buf[i]);
         const g = gindex_min + (raw % gindex_span);
         const gindex = Gindex.fromUint(g);
+        const depth = std.math.log2_int(u64, g);
+        // Only the left field has descendants: its 1024 chunks end at container depth 11.
+        const valid = g <= 3 or
+            (depth <= vector_leaf_depth and g < @as(u64, 3) << @intCast(depth - 1));
 
-        var single_proof = proof.createSingleProof(allocator, &pool, root, gindex) catch continue;
+        var single_proof = proof.createSingleProof(
+            allocator,
+            &pool,
+            root,
+            gindex,
+        ) catch |err| switch (err) {
+            error.InvalidNode => {
+                assert(!valid);
+                continue;
+            },
+            error.OutOfMemory => return,
+            else => panicUnexpected("creating nested opaque proof", err),
+        };
         defer single_proof.deinit(allocator);
+        assert(valid);
+        assert(single_proof.witnesses.len == depth);
 
         var pool2 = Node.Pool.init(.{
             .page_allocator = allocator,
@@ -92,16 +107,26 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
         }) catch continue;
         defer pool2.deinit();
 
+        const pool2_baseline_in_use = pool2.getNodesInUse();
+        defer assert(pool2.getNodesInUse() == pool2_baseline_in_use);
+
         const rebuilt = proof.createNodeFromSingleProof(
             &pool2,
             gindex,
             single_proof.leaf,
             single_proof.witnesses,
-        ) catch continue;
+        ) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            else => panicUnexpected("reconstructing nested opaque proof", err),
+        };
         defer pool2.unref(rebuilt);
 
         // A correct single proof rebuilds to the original root hash.
         const rebuilt_root = rebuilt.getRoot(&pool2).*;
         assert(std.mem.eql(u8, &original_root, &rebuilt_root));
     }
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }

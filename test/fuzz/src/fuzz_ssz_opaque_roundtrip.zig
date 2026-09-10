@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const fuzz_options = @import("fuzz_options");
 const ssz = @import("ssz");
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
@@ -42,10 +43,13 @@ const VecChunkedLeaf = ssz.FixedVectorType(ssz.UintType(64), ChunkedLeaf.K * 4 *
 pub export fn zig_fuzz_init() callconv(.c) void {}
 
 pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
-    if (len < 2) return;
+    if (len > fuzz_options.max_input_len) return;
+    if (len < 1) return;
 
     var fba = std.heap.FixedBufferAllocator.init(&fuzz_buf);
-    const allocator = fba.allocator();
+    var tracker = std.testing.FailingAllocator.init(fba.allocator(), .{});
+    defer assert(tracker.allocated_bytes == tracker.freed_bytes);
+    const allocator = tracker.allocator();
 
     const data = buf[1..len];
     switch (buf[0] % selector_count) {
@@ -57,11 +61,7 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
     }
 }
 
-fn fuzzListRoundtrip(comptime ListT: type, allocator: std.mem.Allocator, raw: []const u8) void {
-    // deserializeFromBytes wants a whole number of elements; trim the tail.
-    const elem_size = ListT.Element.fixed_size;
-    const data = raw[0 .. raw.len - raw.len % elem_size];
-
+fn fuzzListRoundtrip(comptime ListT: type, allocator: std.mem.Allocator, data: []const u8) void {
     var pool = Node.Pool.init(.{
         .page_allocator = allocator,
         .allocator = allocator,
@@ -69,33 +69,63 @@ fn fuzzListRoundtrip(comptime ListT: type, allocator: std.mem.Allocator, raw: []
     }) catch return;
     defer pool.deinit();
 
-    // Pool baseline = pre-populated zero sentinels. Any tree id the round-trip
-    // fails to unref accumulates here and trips the assert at function exit.
     const baseline_in_use = pool.getNodesInUse();
-    var leak_check_armed = false;
-    defer {
-        if (leak_check_armed) {
-            assert(pool.getNodesInUse() == baseline_in_use);
-        }
-    }
+    defer assert(pool.getNodesInUse() == baseline_in_use);
 
-    const node = ListT.tree.deserializeFromBytes(&pool, data) catch return;
+    const node = ListT.tree.deserializeFromBytes(&pool, data) catch |err| switch (err) {
+        error.UnexpectedRemainder => {
+            assert(data.len % ListT.Element.fixed_size != 0);
+            return;
+        },
+        error.gtLimit => {
+            assert(data.len / ListT.Element.fixed_size > ListT.limit);
+            return;
+        },
+        error.OutOfMemory => return,
+        else => panicUnexpected("deserializing opaque list tree", err),
+    };
     defer pool.unref(node);
-    leak_check_armed = true;
+    assert(data.len % ListT.Element.fixed_size == 0);
+    assert(data.len / ListT.Element.fixed_size <= ListT.limit);
+
+    var expected_root: [32]u8 = undefined;
+    ListT.serialized.hashTreeRoot(allocator, data, &expected_root) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("hashing opaque list input bytes", err),
+    };
+    assert(std.mem.eql(u8, node.getRoot(&pool), &expected_root));
 
     // tree -> bytes round-trips back to the input.
-    const size = ListT.tree.serializedSize(node, &pool) catch return;
+    const size = ListT.tree.serializedSize(node, &pool) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("sizing opaque list tree", err),
+    };
     assert(size == data.len);
     const out = allocator.alloc(u8, size) catch return;
     defer allocator.free(out);
-    const written = ListT.tree.serializeIntoBytes(node, &pool, out) catch return;
+    const written = ListT.tree.serializeIntoBytes(node, &pool, out) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("serializing opaque list tree", err),
+    };
     assert(written == size);
     assert(std.mem.eql(u8, out, data));
 
     // tree -> value -> bytes round-trips too.
     var value: ListT.Type = .empty;
     defer value.deinit(allocator);
-    ListT.tree.toValue(allocator, node, &pool, &value) catch return;
+    ListT.tree.toValue(allocator, node, &pool, &value) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("reading opaque list tree value", err),
+    };
+    assert(value.items.len == data.len / ListT.Element.fixed_size);
+    for (value.items, 0..) |item, index| {
+        const expected = std.mem.readInt(
+            ListT.Element.Type,
+            data[index * ListT.Element.fixed_size ..][0..ListT.Element.fixed_size],
+            .little,
+        );
+        assert(item == expected);
+    }
     const value_size = ListT.serializedSize(&value);
     assert(value_size == data.len);
     const value_out = allocator.alloc(u8, value_size) catch return;
@@ -105,14 +135,15 @@ fn fuzzListRoundtrip(comptime ListT: type, allocator: std.mem.Allocator, raw: []
     assert(std.mem.eql(u8, value_out, data));
 
     // value -> tree rebuilds the same root.
-    const rebuilt = ListT.tree.fromValue(&pool, &value) catch return;
+    const rebuilt = ListT.tree.fromValue(&pool, &value) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("rebuilding opaque list tree", err),
+    };
     defer pool.unref(rebuilt);
     assert(std.mem.eql(u8, node.getRoot(&pool), rebuilt.getRoot(&pool)));
 }
 
 fn fuzzContainerRoundtrip(allocator: std.mem.Allocator, data: []const u8) void {
-    if (data.len != ContainerT.fixed_size) return;
-
     var pool = Node.Pool.init(.{
         .page_allocator = allocator,
         .allocator = allocator,
@@ -121,46 +152,75 @@ fn fuzzContainerRoundtrip(allocator: std.mem.Allocator, data: []const u8) void {
     defer pool.deinit();
 
     const baseline_in_use = pool.getNodesInUse();
-    var leak_check_armed = false;
-    defer {
-        if (leak_check_armed) {
-            assert(pool.getNodesInUse() == baseline_in_use);
-        }
-    }
+    defer assert(pool.getNodesInUse() == baseline_in_use);
 
-    const node = ContainerT.tree.deserializeFromBytes(&pool, data) catch return;
+    const node = ContainerT.tree.deserializeFromBytes(&pool, data) catch |err| switch (err) {
+        error.InvalidSize => {
+            assert(data.len != ContainerT.fixed_size);
+            return;
+        },
+        error.OutOfMemory => return,
+        else => panicUnexpected("deserializing opaque container tree", err),
+    };
     defer pool.unref(node);
-    leak_check_armed = true;
+    assert(data.len == ContainerT.fixed_size);
+
+    var expected_root: [32]u8 = undefined;
+    ContainerT.serialized.hashTreeRoot(data, &expected_root) catch |err| {
+        panicUnexpected("hashing opaque container input bytes", err);
+    };
+    assert(std.mem.eql(u8, node.getRoot(&pool), &expected_root));
 
     // tree -> bytes round-trips back to the input.
     var out: [ContainerT.fixed_size]u8 = undefined;
-    const written = ContainerT.tree.serializeIntoBytes(node, &pool, &out) catch return;
+    const written = ContainerT.tree.serializeIntoBytes(
+        node,
+        &pool,
+        &out,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("serializing opaque container tree", err),
+    };
     assert(written == ContainerT.fixed_size);
     assert(std.mem.eql(u8, &out, data));
 
     // tree -> value -> bytes round-trips too.
     var value: ContainerT.Type = undefined;
-    ContainerT.tree.toValue(node, &pool, &value) catch return;
+    ContainerT.tree.toValue(node, &pool, &value) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("reading opaque container tree value", err),
+    };
+    assert(value.x == std.mem.readInt(u64, data[0..8], .little));
+    assert(value.y == std.mem.readInt(u32, data[8..12], .little));
+    assert(value.z == std.mem.readInt(u64, data[12..20], .little));
+    assert(std.mem.eql(u8, &value.blob, data[20..52]));
     var value_out: [ContainerT.fixed_size]u8 = undefined;
     const value_written = ContainerT.serializeIntoBytes(&value, &value_out);
     assert(value_written == ContainerT.fixed_size);
     assert(std.mem.eql(u8, &value_out, data));
 
     // getValuePtr hands back the same struct toValue produced, with no copy.
-    const value_ptr = ContainerT.tree.getValuePtr(node, &pool) catch return;
+    const value_ptr = ContainerT.tree.getValuePtr(node, &pool) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("borrowing opaque container value", err),
+    };
     assert(ContainerT.equals(value_ptr, &value));
+    const same_value_ptr = ContainerT.tree.getValuePtr(node, &pool) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("reborrowing opaque container value", err),
+    };
+    assert(same_value_ptr == value_ptr);
 
     // value -> tree rebuilds the same root.
-    const rebuilt = ContainerT.tree.fromValue(&pool, &value) catch return;
+    const rebuilt = ContainerT.tree.fromValue(&pool, &value) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("rebuilding opaque container tree", err),
+    };
     defer pool.unref(rebuilt);
     assert(std.mem.eql(u8, node.getRoot(&pool), rebuilt.getRoot(&pool)));
 }
 
-fn fuzzVectorRoundtrip(comptime VecT: type, allocator: std.mem.Allocator, raw: []const u8) void {
-    // A vector is fixed-size; take the leading fixed_size bytes.
-    if (raw.len < VecT.fixed_size) return;
-    const data = raw[0..VecT.fixed_size];
-
+fn fuzzVectorRoundtrip(comptime VecT: type, allocator: std.mem.Allocator, data: []const u8) void {
     var pool = Node.Pool.init(.{
         .page_allocator = allocator,
         .allocator = allocator,
@@ -169,33 +229,62 @@ fn fuzzVectorRoundtrip(comptime VecT: type, allocator: std.mem.Allocator, raw: [
     defer pool.deinit();
 
     const baseline_in_use = pool.getNodesInUse();
-    var leak_check_armed = false;
-    defer {
-        if (leak_check_armed) {
-            assert(pool.getNodesInUse() == baseline_in_use);
-        }
-    }
+    defer assert(pool.getNodesInUse() == baseline_in_use);
 
-    const node = VecT.tree.deserializeFromBytes(&pool, data) catch return;
+    const node = VecT.tree.deserializeFromBytes(&pool, data) catch |err| switch (err) {
+        error.InvalidSize => {
+            assert(data.len != VecT.fixed_size);
+            return;
+        },
+        error.OutOfMemory => return,
+        else => panicUnexpected("deserializing opaque vector tree", err),
+    };
     defer pool.unref(node);
-    leak_check_armed = true;
+    assert(data.len == VecT.fixed_size);
+
+    var expected_root: [32]u8 = undefined;
+    VecT.serialized.hashTreeRoot(data, &expected_root) catch |err| {
+        panicUnexpected("hashing opaque vector input bytes", err);
+    };
+    assert(std.mem.eql(u8, node.getRoot(&pool), &expected_root));
 
     // tree -> bytes round-trips back to the input.
     var out: [VecT.fixed_size]u8 = undefined;
-    const written = VecT.tree.serializeIntoBytes(node, &pool, &out) catch return;
+    const written = VecT.tree.serializeIntoBytes(node, &pool, &out) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("serializing opaque vector tree", err),
+    };
     assert(written == VecT.fixed_size);
     assert(std.mem.eql(u8, &out, data));
 
     // tree -> value -> bytes round-trips too.
     var value: VecT.Type = undefined;
-    VecT.tree.toValue(node, &pool, &value) catch return;
+    VecT.tree.toValue(node, &pool, &value) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("reading opaque vector tree value", err),
+    };
+    for (value, 0..) |item, index| {
+        const expected = std.mem.readInt(
+            VecT.Element.Type,
+            data[index * VecT.Element.fixed_size ..][0..VecT.Element.fixed_size],
+            .little,
+        );
+        assert(item == expected);
+    }
     var value_out: [VecT.fixed_size]u8 = undefined;
     const value_written = VecT.serializeIntoBytes(&value, &value_out);
     assert(value_written == VecT.fixed_size);
     assert(std.mem.eql(u8, &value_out, data));
 
     // value -> tree rebuilds the same root.
-    const rebuilt = VecT.tree.fromValue(&pool, &value) catch return;
+    const rebuilt = VecT.tree.fromValue(&pool, &value) catch |err| switch (err) {
+        error.OutOfMemory => return,
+        else => panicUnexpected("rebuilding opaque vector tree", err),
+    };
     defer pool.unref(rebuilt);
     assert(std.mem.eql(u8, node.getRoot(&pool), rebuilt.getRoot(&pool)));
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }

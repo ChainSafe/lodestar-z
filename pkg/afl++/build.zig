@@ -19,11 +19,7 @@ pub fn addInstrumentedExe(
         .{},
     );
 
-    const afl_cc = b.addSystemCommand(&.{
-        b.findProgram(&.{"afl-cc"}, &.{}) catch
-            @panic("Could not find 'afl-cc', which is required to build"),
-        "-O3",
-    });
+    const afl_cc = b.addSystemCommand(&.{ "afl-cc", "-O3" });
     afl_cc.addArg("-o");
     const fuzz_exe = afl_cc.addOutputFileArg(obj.name);
     afl_cc.addFileArg(pkg.path("afl.c"));
@@ -44,11 +40,7 @@ pub fn addFuzzerRun(
     corpus_dir: std.Build.LazyPath,
     output_dir: std.Build.LazyPath,
 ) *std.Build.Step.Run {
-    const run = b.addSystemCommand(&.{
-        b.findProgram(&.{"afl-fuzz"}, &.{}) catch
-            @panic("Could not find 'afl-fuzz', which is required to run"),
-        "-i",
-    });
+    const run = b.addSystemCommand(&.{ "afl-fuzz", "-i" });
     run.addDirectoryArg(corpus_dir);
     run.addArgs(&.{"-o"});
     run.addDirectoryArg(output_dir);
