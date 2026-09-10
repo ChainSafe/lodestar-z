@@ -206,23 +206,26 @@ pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, no
     return n;
 }
 
-pub fn fillWithContents(allocator: std.mem.Allocator, pool: *Node.Pool, nodes: []Node.Id) !Node.Id {
-    const subtree_count = subtreeIndex(nodes.len);
+pub fn fillWithContents(_: std.mem.Allocator, pool: *Node.Pool, nodes: []Node.Id) !Node.Id {
+    const max_subtrees = @min((@import("hashing").max_depth - 1) / 3, (@bitSizeOf(usize) - 1) / 2) + 1;
+    var subtree_starts: [max_subtrees]usize = undefined;
+    var subtree_count: usize = 0;
+    var pos: usize = 0;
+    for (0..max_subtrees) |i| {
+        if (pos == nodes.len) break;
+        subtree_starts[i] = pos;
+        pos += @min(@as(usize, 1) << @intCast(2 * i), nodes.len - pos);
+        subtree_count += 1;
+    }
+    if (pos != nodes.len) return error.InputTooLong;
+
     var n: Node.Id = @enumFromInt(0);
     errdefer pool.unref(n);
-
-    var subtree_starts = std.ArrayList(usize).empty;
-    defer subtree_starts.deinit(allocator);
-    var pos: usize = 0;
-    for (0..subtree_count) |subtree_i| {
-        try subtree_starts.append(allocator, pos);
-        pos += @min(subtreeLength(subtree_i), nodes.len - pos);
-    }
 
     for (0..subtree_count) |i| {
         const subtree_i = subtree_count - 1 - i;
         const subtree_depth = subtreeDepth(subtree_i);
-        const l = subtree_starts.items[subtree_i];
+        const l = subtree_starts[subtree_i];
         const subtree_length = @min(subtreeLength(subtree_i), nodes.len - l);
 
         const subtree_root = try Node.fillWithContents(pool, nodes[l .. l + subtree_length], subtree_depth);
@@ -230,4 +233,8 @@ pub fn fillWithContents(allocator: std.mem.Allocator, pool: *Node.Pool, nodes: [
     }
 
     return n;
+}
+
+test {
+    _ = @import("progressive_test.zig");
 }
