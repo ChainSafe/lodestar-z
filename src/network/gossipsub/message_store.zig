@@ -32,6 +32,7 @@ pub const Store = struct {
     free_page: u32,
     free_pages: usize,
     used_entries: usize = 0,
+    retired_entries: usize = 0,
     entry_cursor: usize = 0,
 
     pub fn init(a: std.mem.Allocator, capacity: usize, byte_capacity: usize) !Store {
@@ -64,7 +65,7 @@ pub const Store = struct {
     }
 
     pub fn canReserve(self: *const Store, len: usize) bool {
-        return self.used_entries < self.entries.len and pagesFor(len) <= self.free_pages;
+        return self.used_entries + self.retired_entries < self.entries.len and pagesFor(len) <= self.free_pages;
     }
 
     pub fn pagesFor(len: usize) usize {
@@ -191,6 +192,7 @@ pub const Store = struct {
         assert(page == none);
         e.active = false;
         self.used_entries -= 1;
+        if (e.generation == std.math.maxInt(u64)) self.retired_entries += 1;
     }
 };
 

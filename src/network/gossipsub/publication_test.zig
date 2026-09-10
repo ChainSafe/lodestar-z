@@ -166,3 +166,15 @@ test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {
     }
     try std.testing.expectEqual(@as(usize, 1), received);
 }
+
+test "publication distinguishes topic capacity from unknown wire names" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    for (0..@import("constants.zig").topics_cap) |i| {
+        var bytes: [128]u8 = undefined;
+        const name = try std.fmt.bufPrint(&bytes, "/eth2/01020304/topic_{d}/ssz_snappy", .{i});
+        try std.testing.expect(g.subscribe(name));
+    }
+    try std.testing.expectError(error.ResourceExhausted, g.publish(topic, "body", .{ .mono_ms = 1, .unix_s = 0 }));
+    try std.testing.expectError(error.UnknownTopic, g.publish("invalid", "body", .{ .mono_ms = 1, .unix_s = 0 }));
+}

@@ -71,13 +71,13 @@ test "topic policy incoming lengths precede decode work arena store and validati
     var work: usize = 10000;
     var large_used = false;
     var arena: [1024]u8 = @splat(0xaa);
-    var workspace: validation.Workspace = .{ .arena = &arena, .used = &used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = false };
+    var workspace: validation.Workspace = .{ .arena = &arena, .scratch = g.msg_scratch, .used = &used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = false };
     var compressed: [100]u8 = undefined;
     const payload: [21]u8 = @splat('x');
     for ([_]usize{ 9, 21 }) |size| {
         const len = try @import("snappy").raw.compress(payload[0..size], &compressed);
-        try std.testing.expectEqual(validation.Received.ignored, g.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = compressed[0..len] }, 1));
-        try std.testing.expectEqual(validation.Received.ignored, g.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = &.{@intCast(size)} }, 1));
+        try std.testing.expectEqual(validation.Received{ .invalid = .ssz_size }, g.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = compressed[0..len] }, 1));
+        try std.testing.expectEqual(validation.Received{ .invalid = .ssz_size }, g.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = &.{@intCast(size)} }, 1));
         try std.testing.expectEqual(@as(usize, 0), used);
         try std.testing.expectEqual(@as(usize, 0), peer_work);
         try std.testing.expectEqual(@as(usize, 10000), work);
@@ -257,7 +257,7 @@ test "topic policy remembered ordinals remain independent of retained validation
     var work: usize = 10000;
     var peer_work: usize = 0;
     var large_used = false;
-    const workspace: validation.Workspace = .{ .arena = g.decompressed, .used = &g.decompressed_used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = true };
+    const workspace: validation.Workspace = .{ .arena = g.decompressed, .scratch = g.msg_scratch, .used = &g.decompressed_used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = true };
     var compressed: [64]u8 = undefined;
     const len = try @import("snappy").raw.compress("0123456789", &compressed);
     const received = g.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = compressed[0..len] }, 1).admitted;

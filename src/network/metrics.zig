@@ -62,6 +62,8 @@ pub const Snapshot = struct {
     gossip_rpc: topic_metrics.Rpc = .{},
     gossip_recovery: topic_metrics.Recovery = .{},
     gossip_seen: usize = 0,
+    gossip_fast_hits: u64 = 0,
+    gossip_decoded: u64 = 0,
     gossip_history: usize = 0,
     gossip_resources: ?gossip.ResourceSnapshot = null,
     closed: [@typeInfo(peer_types.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
@@ -106,6 +108,8 @@ pub const Snapshot = struct {
         self.gossip_rpc = g.rpc_metrics;
         self.gossip_recovery = g.recovery.metrics;
         self.gossip_seen = g.seen.count;
+        self.gossip_fast_hits = g.validation.fast_hits;
+        self.gossip_decoded = g.validation.decoded_messages;
         self.gossip_history = g.mcache.count;
         self.gossip_resources = g.resourceSnapshot();
         self.closed = core.control.counters.closed;
@@ -414,6 +418,8 @@ pub const Snapshot = struct {
 
     fn writeGossip(self: *const Snapshot, w: *Writer) Writer.Error!void {
         try self.gossip_rpc.write(w);
+        try scalar(w, "gossipsub_fast_message_id_hits_total", .counter, "Exact compressed fingerprints avoiding repeated decompression", self.gossip_fast_hits);
+        try scalar(w, "gossipsub_message_decode_total", .counter, "Snappy body decode attempts", self.gossip_decoded);
         try self.gossip_recovery.write(w);
         try scalar(w, "gossipsub_rpc_recv_err_count_total", .counter, "Malformed incoming RPC frames or protobuf items", self.gossip_counts.malformed_rpcs);
         try scalar(w, "gossipsub_iwant_promise_broken", .counter, "Sent per-peer IWANT promises that expired without a message", self.gossip_counts.broken_promises);

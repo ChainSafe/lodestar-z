@@ -160,9 +160,12 @@ pub const HistoryEntry = struct {
     prev: u32 = empty_slot,
     message: storage.Handle = undefined,
     window: u8 = 0,
+    cycle: u64 = 0,
     counts: []u8,
 };
 pub const History = struct {
+    cycle: u64 = 0,
+    cycling: bool = false,
     generations: []u64,
     counts: []u8,
     entries: []HistoryEntry,
@@ -202,11 +205,34 @@ pub const History = struct {
         self.* = undefined;
     }
     pub fn admitPayload(self: *History, store: *storage.Store, id: MessageId, name: []const u8, bytes: []const u8) ?storage.Handle {
-        for (0..self.entries.len) |_| {
-            if (store.canReserve(bytes.len)) break;
-            if (!self.evictOldest(store)) return null;
+        if (!store.canReserve(bytes.len)) {
+            const required = storage.Store.pagesFor(bytes.len);
+            var pages = store.free_pages;
+            var entries = store.entries.len - store.used_entries - store.retired_entries;
+            var slot = self.head;
+            for (0..self.count) |_| {
+                const e = store.get(self.entries[slot].message).?;
+                slot = self.entries[slot].next;
+                if (!reclaimable(e)) continue;
+                pages += storage.Store.pagesFor(e.len);
+                entries += @intFromBool(e.generation != std.math.maxInt(u64));
+                if (pages >= required and entries > 0) break;
+            }
+            if (pages < required or entries == 0) return null;
+            slot = self.head;
+            const count = self.count;
+            for (0..count) |_| {
+                if (store.canReserve(bytes.len)) break;
+                const candidate = slot;
+                slot = self.entries[slot].next;
+                if (reclaimable(store.get(self.entries[candidate].message).?)) self.remove(store, candidate);
+            }
+            assert(store.canReserve(bytes.len));
         }
         return store.put(id, name, bytes);
+    }
+    fn reclaimable(e: *const storage.Entry) bool {
+        return e.history and !e.provisional and !e.validation and e.tx == 0;
     }
     pub fn put(self: *History, store: *storage.Store, h: storage.Handle) void {
         const message = store.get(h).?;
@@ -219,7 +245,7 @@ pub const History = struct {
         self.free = self.entries[slot].next;
         const counts = self.entries[slot].counts;
         @memset(counts, 0);
-        self.entries[slot] = .{ .message = h, .prev = self.tail, .counts = counts };
+        self.entries[slot] = .{ .message = h, .prev = self.tail, .counts = counts, .cycle = self.cycle };
         if (self.tail != empty_slot) self.entries[self.tail].next = slot else self.head = slot;
         self.tail = slot;
         self.ids[slot] = id;
@@ -265,10 +291,20 @@ pub const History = struct {
         self.free = slot;
         self.count -= 1;
     }
+    pub fn beginCycle(self: *History) void {
+        assert(!self.cycling and self.cycle < std.math.maxInt(u64));
+        self.cycle += 1;
+        self.cycling = true;
+    }
+    pub fn finishCycle(self: *History, store: *storage.Store) void {
+        assert(self.cycling);
+        self.shift(store);
+        self.cycling = false;
+    }
     pub fn shift(self: *History, store: *storage.Store) void {
         var slot = self.head;
         for (0..self.count) |_| {
-            self.entries[slot].window +|= 1;
+            if (!self.cycling or self.entries[slot].cycle < self.cycle) self.entries[slot].window +|= 1;
             slot = self.entries[slot].next;
         }
         for (0..self.entries.len) |_| {
@@ -284,7 +320,7 @@ pub const History = struct {
             const e = &self.entries[slot];
             slot = e.next;
             const m = store.get(e.message).?;
-            if (e.window >= constants.mcache_gossip or !std.mem.eql(u8, name, m.topicString())) continue;
+            if ((self.cycling and e.cycle == self.cycle) or e.window >= constants.mcache_gossip or !std.mem.eql(u8, name, m.topicString())) continue;
             out[count] = m.id;
             count += 1;
         }
@@ -456,4 +492,60 @@ test "history resolved retained capacity bounds counters and stale peers" {
     try std.testing.expectEqual(@as(usize, 4), history.entries[0].counts.len);
     try std.testing.expect(!history.iwantAllowed(&history.entries[0], .{ .index = 4, .generation = 1 }, 3));
     history.sent(&history.entries[0], .{ .index = 4, .generation = 1 });
+}
+
+test "gossip failed admission preserves history pinned by transmit queues" {
+    const a = std.testing.allocator;
+    var store = try storage.Store.init(a, 3, storage.page_bytes * 2);
+    defer store.deinit(a);
+    var history = try History.initCapacity(a, 2, 2);
+    defer history.deinit(a);
+    var handles: [2]storage.Handle = undefined;
+    for (&handles, 0..) |*handle, i| {
+        const id: MessageId = @splat(@intCast(i));
+        handle.* = history.admitPayload(&store, id, "topic", "x").?;
+        history.put(&store, handle.*);
+        store.seal(handle.*);
+        store.retainTx(handle.*);
+    }
+    defer for (handles) |handle| store.releaseTx(handle);
+    try std.testing.expectEqual(@as(usize, 2), history.count);
+    try std.testing.expect(history.admitPayload(&store, @splat(9), "topic", "x") == null);
+    try std.testing.expectEqual(@as(usize, 2), history.count);
+    try std.testing.expectEqual(@as(usize, 0), store.free_pages);
+    store.releaseTx(handles[1]);
+    store.retainValidation(handles[1]);
+    try std.testing.expect(history.admitPayload(&store, @splat(9), "topic", "x") == null);
+    store.retainTx(handles[1]);
+    store.releaseValidation(handles[1]);
+}
+
+test "gossip history emits three windows and defers arrivals during a cycle" {
+    const a = std.testing.allocator;
+    var store = try storage.Store.init(a, 3, 3 * storage.page_bytes);
+    defer store.deinit(a);
+    var history = try History.initCapacity(a, 3, 2);
+    defer history.deinit(a);
+    const first = store.put(@splat(1), "topic", "first").?;
+    history.put(&store, first);
+    store.seal(first);
+    history.beginCycle();
+    const second = store.put(@splat(2), "topic", "second").?;
+    history.put(&store, second);
+    store.seal(second);
+    var ids: [3]MessageId = undefined;
+    try std.testing.expectEqual(@as(usize, 1), history.gossip(&store, "topic", &ids));
+    history.finishCycle(&store);
+    for (0..2) |_| {
+        history.beginCycle();
+        try std.testing.expectEqual(@as(usize, 2), history.gossip(&store, "topic", &ids));
+        history.finishCycle(&store);
+    }
+    history.beginCycle();
+    try std.testing.expectEqual(@as(usize, 1), history.gossip(&store, "topic", &ids));
+    try std.testing.expectEqual(@as(MessageId, @splat(2)), ids[0]);
+    history.finishCycle(&store);
+    history.beginCycle();
+    try std.testing.expectEqual(@as(usize, 0), history.gossip(&store, "topic", &ids));
+    history.finishCycle(&store);
 }
