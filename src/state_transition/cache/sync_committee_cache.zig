@@ -198,3 +198,7 @@ test computeSyncCommitteeIndices {
         &out,
     );
 }
+
+test {
+    _ = @import("sync_committee_cache_test.zig");
+}

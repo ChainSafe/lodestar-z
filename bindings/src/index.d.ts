@@ -198,6 +198,7 @@ export type VoluntaryExitValidity =
 export declare class BeaconStateView {
   static createFromBytes(bytes: Uint8Array): BeaconStateView;
 
+  release(): void;
   slot: number;
   fork: Fork;
   forkName: ForkName;

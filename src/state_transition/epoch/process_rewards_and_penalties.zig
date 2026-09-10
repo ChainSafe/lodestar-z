@@ -67,3 +67,7 @@ pub fn getRewardsAndPenalties(
     }
     return try getRewardsAndPenaltiesAltair(fork, config, epoch_cache, state, cache, rewards, penalties);
 }
+
+test {
+    _ = @import("process_rewards_and_penalties_test.zig");
+}

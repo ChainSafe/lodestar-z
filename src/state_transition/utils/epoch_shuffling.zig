@@ -168,3 +168,7 @@ pub fn calculateShufflingDecisionRoot(state: *AnyBeaconState, epoch: Epoch) ![32
     const anchor = try AnchorCheckpoint.fromState(state);
     return anchor.checkpoint.root;
 }
+
+test {
+    _ = @import("epoch_shuffling_test.zig");
+}

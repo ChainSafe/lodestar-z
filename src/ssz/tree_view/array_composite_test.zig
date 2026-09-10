@@ -1,6 +1,7 @@
 //! Tests for `array_composite.zig`.
 
 const std = @import("std");
+const Gindex = @import("persistent_merkle_tree").Gindex;
 const Node = @import("persistent_merkle_tree").Node;
 const UintType = @import("../type/uint.zig").UintType;
 const FixedVectorType = @import("../type/vector.zig").FixedVectorType;
@@ -440,4 +441,69 @@ test "ArrayCompositeTreeView - get and set" {
     const bytes1_written = try elem1.serializeIntoBytes(&bytes1);
     try std.testing.expectEqual(bytes1.len, bytes1_written);
     try std.testing.expectEqualSlices(u8, &new_val, &bytes1);
+}
+
+test "memory_safety: ArrayCompositeTreeView get should leave caches unchanged on OOM" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const Inner = FixedContainerType(struct { x: UintType(64) });
+    const VectorType = FixedVectorType(Inner, 2, .{});
+    const value: VectorType.Type = .{ .{ .x = 1 }, .{ .x = 2 } };
+    const root = try VectorType.tree.fromValue(&pool, &value);
+    var view = try VectorType.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try view.chunks.state.changed.ensureUnusedCapacity(failing.allocator(), 1);
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, view.get(0));
+    failing.fail_index = std.math.maxInt(usize);
+
+    // A failed mutable get must not publish the index as changed.
+    try std.testing.expectEqual(@as(usize, 0), view.chunks.state.changed.count());
+
+    _ = try view.get(0);
+}
+
+test "memory_safety: ArrayCompositeTreeView getReadonly should reclaim unpublished child view on OOM" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 128,
+    });
+    defer pool.deinit();
+
+    const Inner = FixedContainerType(struct { x: UintType(64) });
+    const VectorType = FixedVectorType(Inner, 2, .{});
+    const value: VectorType.Type = .{ .{ .x = 1 }, .{ .x = 2 } };
+    const root = try VectorType.tree.fromValue(&pool, &value);
+    var view = try VectorType.TreeView.init(failing.allocator(), &pool, root);
+    defer view.deinit();
+
+    try view.chunks.state.children_nodes.ensureUnusedCapacity(failing.allocator(), 1);
+    const gindex = Gindex.fromDepth(VectorType.chunk_depth, 0);
+    const child_node = try view.chunks.state.getChildNode(gindex);
+    const child_ref_count = child_node.getState(&pool).refCount();
+    const outstanding_bytes = failing.allocated_bytes - failing.freed_bytes;
+
+    failing.fail_index = failing.alloc_index + 1;
+    try std.testing.expectError(error.OutOfMemory, view.getReadonly(0));
+    failing.fail_index = std.math.maxInt(usize);
+
+    // A failed readonly cache insertion must release the child view's node ref and allocation.
+    try std.testing.expectEqual(child_ref_count, child_node.getState(&pool).refCount());
+    try std.testing.expectEqual(outstanding_bytes, failing.allocated_bytes - failing.freed_bytes);
+
+    _ = try view.getReadonly(0);
 }
