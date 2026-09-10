@@ -615,3 +615,45 @@ test "FixedVectorType opts.chunked_leaf=true: serialize -> deserialize round-tri
     defer pool.unref(round_id);
     try std.testing.expectEqualSlices(u8, tree_id.getRoot(&pool), round_id.getRoot(&pool));
 }
+
+test "fixed vector streaming hashes match trees across packed batch boundaries" {
+    const allocator = std.testing.allocator;
+    inline for (.{ UintType(64), BoolType() }) |Element| {
+        const per_chunk = 32 / Element.fixed_size;
+        inline for (.{ 1, per_chunk - 1, per_chunk, per_chunk + 1, 63 * per_chunk, 64 * per_chunk, 65 * per_chunk + 1 }) |len| {
+            const Vector = FixedVectorType(Element, len, .{});
+            var value: Vector.Type = undefined;
+            for (&value, 0..) |*item, i| item.* = if (Element.kind == .bool) i % 3 == 0 else @intCast(i * 17);
+            var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
+            defer pool.deinit();
+            const node = try Vector.tree.fromValue(&pool, &value);
+            defer pool.unref(node);
+            var root: [32]u8 = undefined;
+            try Vector.hashTreeRoot(&value, &root);
+            try std.testing.expectEqualSlices(u8, node.getRoot(&pool), &root);
+            var bytes: [Vector.fixed_size]u8 = undefined;
+            _ = Vector.serializeIntoBytes(&value, &bytes);
+            try Vector.serialized.hashTreeRoot(&bytes, &root);
+            try std.testing.expectEqualSlices(u8, node.getRoot(&pool), &root);
+            try std.testing.expectError(error.InvalidSize, Vector.serialized.hashTreeRoot(bytes[0 .. bytes.len - 1], &root));
+        }
+    }
+}
+
+test "fixed composite vector streaming hashes match tree roots" {
+    const Element = FixedContainerType(struct { number: UintType(64), root: ByteVectorType(32) });
+    const Vector = FixedVectorType(Element, 65, .{});
+    var value = Vector.default_value;
+    for (&value, 0..) |*item, i| item.* = .{ .number = i, .root = @splat(@intCast(i)) };
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1024 });
+    defer pool.deinit();
+    const node = try Vector.tree.fromValue(&pool, &value);
+    defer pool.unref(node);
+    var root: [32]u8 = undefined;
+    try Vector.hashTreeRoot(&value, &root);
+    try std.testing.expectEqualSlices(u8, node.getRoot(&pool), &root);
+    var bytes: [Vector.fixed_size]u8 = undefined;
+    _ = Vector.serializeIntoBytes(&value, &bytes);
+    try Vector.serialized.hashTreeRoot(&bytes, &root);
+    try std.testing.expectEqualSlices(u8, node.getRoot(&pool), &root);
+}
