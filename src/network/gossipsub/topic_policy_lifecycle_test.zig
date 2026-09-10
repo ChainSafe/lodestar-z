@@ -35,7 +35,7 @@ test "topic policy remembers real inactive subscriptions without event pressure 
     try std.testing.expect(pair.client.subscribe(unknown));
     for (0..20) |_| try pair.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), live(&pair.server));
-    try std.testing.expectEqual(@as(usize, 0), pair.server.decompressed_used);
+    try std.testing.expectEqual(@as(usize, 0), pair.server_count);
     try std.testing.expectEqual(@as(u64, 0), pair.server.counters.local_pressure_resets);
     try pair.server.configureTopic(name, &.{ .weight = 2 });
     const t = pair.server.overlay.findTopic(name).?;
@@ -67,7 +67,7 @@ test "topic policy incoming lengths precede decode work arena store and validati
     const context: @import("messages.zig").Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options };
     const source: @import("messages.zig").Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = g.sessions.ref(peer.index), .connection = g.sessions.rows[peer.index].conn };
     var used: usize = 0;
-    var peer_work: usize = 0;
+    var peer_work: usize = g.options.decompress_per_peer_bytes;
     var work: usize = 10000;
     var large_used = false;
     var arena: [1024]u8 = @splat(0xaa);
@@ -79,7 +79,7 @@ test "topic policy incoming lengths precede decode work arena store and validati
         try std.testing.expectEqual(validation.Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1));
         try std.testing.expectEqual(validation.Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = &.{@intCast(size)} }, 1));
         try std.testing.expectEqual(@as(usize, 0), used);
-        try std.testing.expectEqual(@as(usize, 0), peer_work);
+        try std.testing.expectEqual(g.options.decompress_per_peer_bytes, peer_work);
         try std.testing.expectEqual(@as(usize, 10000), work);
         try std.testing.expect(!large_used);
         try std.testing.expectEqual(@as(usize, 0), g.messages.store.used_entries);
@@ -94,7 +94,7 @@ test "topic policy incoming lengths precede decode work arena store and validati
         try std.testing.expectEqualSlices(u8, payload[0..size], received.admitted.bytes);
         _ = g.report(received.admitted.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 });
     }
-    try std.testing.expect(peer_work > 0);
+    try std.testing.expect(peer_work < g.options.decompress_per_peer_bytes);
 }
 
 test "topic policy local publication enforces both size bounds before state" {
@@ -256,9 +256,10 @@ test "topic policy remembered ordinals remain independent of retained validation
     const context: @import("messages.zig").Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options };
     const source: @import("messages.zig").Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = g.sessions.ref(peer.index), .connection = g.sessions.rows[peer.index].conn };
     var work: usize = 10000;
-    var peer_work: usize = 0;
+    var peer_work: usize = g.options.decompress_per_peer_bytes;
     var large_used = false;
-    const workspace: validation.Workspace = .{ .arena = g.decompressed, .scratch = g.msg_scratch, .used = &g.decompressed_used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = true };
+    var used: usize = 0;
+    const workspace: validation.Workspace = .{ .arena = g.decompressed, .scratch = g.msg_scratch, .used = &used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = true };
     var compressed: [64]u8 = undefined;
     const len = try @import("snappy").raw.compress("0123456789", &compressed);
     const received = g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1).admitted;

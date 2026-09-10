@@ -21,6 +21,9 @@ const Gossipsub = gossipsub_mod.Gossipsub;
 const Event = gossipsub_mod.Event;
 const ValidationHandle = gossipsub_mod.ValidationHandle;
 const Verdict = gossipsub_mod.Verdict;
+const Turn = @import("turn.zig").Turn;
+const Credits = @import("turn.zig").Credits;
+const Progress = @import("turn.zig").Progress;
 
 pub const outcomes_per_pump: usize = 16;
 
@@ -360,43 +363,41 @@ pub const Driver = struct {
         self.inner.connectionClosed(peer.conn);
     }
 
-    fn readPeer(self: *const Driver, engine: *Engine, index: u16, io: *PeerIo, now: Now, events: []Event, start: usize) usize {
-        var count = start;
-        const stream = self.inner.sessions.rows[index].in_stream orelse return count;
-        var input: usize = self.inner.options.input_per_peer;
-        var items: usize = self.inner.options.items_per_peer;
+    fn readPeer(self: *const Driver, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn, peer: *Credits) void {
+        const now = turn.now;
+        const stream = self.inner.sessions.rows[index].in_stream orelse return;
         io.rx_ready = true;
         io.blocked = .none;
         // A turn consumes at least one item, byte, or transport-call credit per iteration.
         for (0..self.inner.options.items_per_peer + self.inner.options.calls_per_peer + self.inner.options.input_per_peer + 1) |_| {
             if (io.rpc != null) {
-                const done = self.processRpc(index, now, events, &count, &items) catch {
+                const done = self.processRpc(index, turn, peer) catch {
                     const conn = self.inner.sessions.rows[index].conn;
                     std.log.scoped(.network_gossip).debug("gossip_rpc_refused connection={d}:{d} reason=malformed", .{ conn.index, conn.generation });
                     self.inner.counters.malformed_rpcs += 1;
                     self.resetInbound(engine, index);
-                    return count;
+                    return;
                 };
-                if (!done) return count;
+                if (done != .done) return;
                 io.rpc = null;
                 io.frame_since = null;
                 io.pressure_since = null;
                 if (self.inner.sessions.releaseFrame(io)) self.inner.wakeStorage();
             }
             if (io.unread_start < io.unread_end) {
-                if (input == 0 or self.inner.budget.input == 0) return count;
+                if (peer.input == 0 or turn.budget.input == 0) return;
                 const body = self.inner.sessions.frameBody(io) orelse {
                     self.inner.pressure(index, .storage, now.mono_ms);
-                    return count;
+                    return;
                 };
-                const take = @min(io.unread_end - io.unread_start, input, self.inner.budget.input);
+                const take = @min(io.unread_end - io.unread_start, peer.input, turn.budget.input);
                 const result = io.feedUnread(body, take, now.mono_ms) catch {
                     self.inner.counters.malformed_rpcs += 1;
                     self.resetInbound(engine, index);
-                    return count;
+                    return;
                 };
-                input -= result.consumed;
-                self.inner.budget.input -= result.consumed;
+                peer.input -= result.consumed;
+                turn.budget.input -= result.consumed;
                 self.inner.rpc_metrics.received_bytes +|= result.consumed;
                 if (result.complete) self.inner.counters.rpcs_received += 1;
                 continue;
@@ -405,30 +406,30 @@ pub const Driver = struct {
             io.unread_end = 0;
             if (io.fin_seen) {
                 self.resetInbound(engine, index);
-                return count;
+                return;
             }
-            if (io.calls_pump == 0 or self.inner.budget.calls == 0 or input == 0 or self.inner.budget.input == 0) return count;
-            io.calls_pump -= 1;
+            if (peer.calls == 0 or turn.budget.calls == 0 or peer.input == 0 or turn.budget.input == 0) return;
+            peer.calls -= 1;
             io.write_first = true;
-            self.inner.budget.calls -= 1;
-            const read = engine.read(stream, io.unread[0..@min(io.unread.len, input, self.inner.budget.input)]) catch |err| {
+            turn.budget.calls -= 1;
+            const read = engine.read(stream, io.unread[0..@min(io.unread.len, peer.input, turn.budget.input)]) catch |err| {
                 io.rx_ready = false;
                 if (err != error.WouldBlock) self.resetInbound(engine, index);
-                return count;
+                return;
             };
             io.unread_end = read.len;
             io.fin_seen = read.fin;
             if (read.len == 0 and !read.fin) {
                 io.rx_ready = false;
-                return count;
+                return;
             }
         }
-        return count;
+        return;
     }
 
-    fn flush(self: *const Driver, engine: *Engine, index: u16, io: *PeerIo, now: Now) void {
+    fn flush(self: *const Driver, engine: *Engine, index: u16, io: *PeerIo, turn: *Turn, peer: *Credits) void {
+        const now = turn.now;
         const stream = self.inner.sessions.rows[index].outStream() orelse return;
-        var bytes = self.inner.options.output_per_peer;
         for (0..self.inner.options.calls_per_peer) |_| {
             io.tx.subscriptions(&self.inner.overlay.rows, self.inner.last_now_ms);
             const segment = io.tx.segment(&self.inner.messages.store);
@@ -437,11 +438,11 @@ pub const Driver = struct {
                 io.tx.progress_ms = null;
                 return;
             }
-            if (bytes == 0 or self.inner.budget.output == 0 or io.calls_pump == 0 or self.inner.budget.calls == 0) return;
-            const take = @min(bytes, self.inner.budget.output, segment.len);
-            io.calls_pump -= 1;
+            if (peer.output == 0 or turn.budget.output == 0 or peer.calls == 0 or turn.budget.calls == 0) return;
+            const take = @min(peer.output, turn.budget.output, segment.len);
+            peer.calls -= 1;
             io.write_first = false;
-            self.inner.budget.calls -= 1;
+            turn.budget.calls -= 1;
             if (io.tx.progress_ms == null) io.tx.progress_ms = now.mono_ms;
             const written = engine.write(stream, segment[0..take], false) catch |err| {
                 io.tx.ready = false;
@@ -455,8 +456,8 @@ pub const Driver = struct {
                 io.tx.ready = false;
                 return;
             }
-            bytes -= written;
-            self.inner.budget.output -= written;
+            peer.output -= written;
+            turn.budget.output -= written;
             io.tx.progress_ms = now.mono_ms;
             const free = self.inner.messages.store.free_pages;
             self.inner.rpc_metrics.sent_bytes +|= written;
@@ -483,10 +484,15 @@ pub const Driver = struct {
     }
 
     pub fn pumpReady(self: *const Driver, router: *routing.Router, engine: *Engine, now: Now, events: []Event) usize {
-        self.inner.beginPump(now);
+        var turn = self.inner.beginPump(now, events);
+        self.runTurn(router, engine, &turn);
+        return turn.count;
+    }
+
+    pub fn runTurn(self: *const Driver, router: *routing.Router, engine: *Engine, turn: *Turn) void {
+        const now = turn.now;
         self.expireIo(router, engine, now.mono_ms);
         self.inner.tick(now);
-        var count: usize = 0;
         var serviced: usize = 0;
         var first_serviced: ?usize = null;
         for (0..self.inner.sessions.rows.len) |_| {
@@ -495,15 +501,13 @@ pub const Driver = struct {
             if (!self.inner.sessions.rows[index].active) continue;
             if (first_serviced == null) first_serviced = index;
             const io = &self.inner.sessions.rows[index].io;
-            io.decompressed_pump = 0;
-            io.fields_pump = 0;
-            io.calls_pump = self.inner.options.calls_per_peer;
+            var peer = Credits.peer(&self.inner.options);
             const write_first = io.write_first;
-            if (write_first and io.tx.ready) self.flush(engine, @intCast(index), io, now);
-            if (io.rx_ready or (io.blocked == .events and count < events.len)) {
-                count = self.readPeer(engine, @intCast(index), io, now, events, count);
+            if (write_first and io.tx.ready) self.flush(engine, @intCast(index), io, turn, &peer);
+            if (io.rx_ready or (io.blocked == .events and turn.count < turn.events.len)) {
+                self.readPeer(engine, @intCast(index), io, turn, &peer);
             }
-            if (!write_first and io.tx.ready) self.flush(engine, @intCast(index), io, now);
+            if (!write_first and io.tx.ready) self.flush(engine, @intCast(index), io, turn, &peer);
             self.logSendPressure(@intCast(index), now.mono_ms);
             serviced += 1;
             if (serviced == self.inner.options.peers_per_pump) break;
@@ -512,38 +516,44 @@ pub const Driver = struct {
             if (first_serviced) |first| self.inner.sessions.cursor = (first + 1) % self.inner.sessions.rows.len;
         }
         self.inner.finishPump(now);
-        return count;
     }
 
-    pub fn processRpc(self: *const Driver, index: u16, now: Now, events: []Event, count: *usize, items: *usize) protobuf.Error!bool {
+    pub fn processRpc(self: *const Driver, index: u16, turn: *Turn, peer: *Credits) protobuf.Error!Progress {
+        const now = turn.now;
         const io = &self.inner.sessions.rows[index].io;
-        if (self.inner.ignoreRpc(index, now)) return true;
+        if (self.inner.ignoreRpc(index, now)) return .done;
         for (0..self.inner.options.items_per_peer) |_| {
-            if (items.* == 0 or self.inner.budget.items == 0) return false;
-            items.* -= 1;
-            self.inner.budget.items -= 1;
+            if (peer.items == 0 or turn.budget.items == 0) return .credits;
+            peer.items -= 1;
+            turn.budget.items -= 1;
             if (io.item == null) {
-                const available = @min(self.inner.budget.fields, self.inner.options.fields_per_peer - io.fields_pump);
+                const available = @min(turn.budget.fields, peer.fields);
                 var fields = available;
                 const step = try io.rpc.?.step(&fields);
-                self.inner.budget.fields -= available - fields;
-                io.fields_pump += available - fields;
+                turn.budget.fields -= available - fields;
+                peer.fields -= available - fields;
                 switch (step) {
                     .item => |item| {
                         io.item = item;
                         self.inner.rpc_metrics.observeItem(item, &io.rpc_had_control);
                         if (item == .message) self.inner.topic_metrics.get(item.message.topic).prevalidation +|= 1;
                     },
-                    .end => return true,
-                    .deferred => return false,
+                    .end => return .done,
+                    .deferred => return .credits,
                     .skipped => continue,
                 }
             }
-            if (!self.inner.receiveItem(self.inner.sessions.ref(index), io.item.?, now, events, count)) return false;
+            const result = self.inner.receiveItem(self.inner.sessions.ref(index), io.item.?, turn, peer);
+            switch (result) {
+                .events => self.inner.pressure(index, .events, now.mono_ms),
+                .storage => self.inner.pressure(index, .storage, now.mono_ms),
+                .done, .credits => {},
+            }
+            if (result != .done) return result;
             io.item = null;
             io.pressure_since = null;
         }
-        return false;
+        return .credits;
     }
 
     pub fn nextIoWakeup(self: *const Driver, now: Now, event_capacity: usize) ?u64 {

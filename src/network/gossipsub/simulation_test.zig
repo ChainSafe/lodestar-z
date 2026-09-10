@@ -1,6 +1,5 @@
 const std = @import("std");
 const gossip = @import("gossipsub.zig");
-const Driver = @import("session_driver.zig").Driver;
 const SessionRef = @import("sessions.zig").SessionRef;
 const Now = @import("../types.zig").Now;
 const name = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -40,10 +39,8 @@ const Node = struct {
                 pending.* = null;
             }
         };
-        self.core.beginPump(now);
+        _ = self.core.beginPump(now, &.{});
         self.core.tick(now);
-        self.core.sessions.rows[self.session.index].io.decompressed_pump = 0;
-        self.core.sessions.rows[self.session.index].io.fields_pump = 0;
     }
 
     fn receive(self: *Node, now: Now, host_available: bool) !void {
@@ -52,8 +49,7 @@ const Node = struct {
         var events: [16]gossip.Event = undefined;
         var count: usize = 0;
         var items: usize = self.core.options.items_per_peer;
-        const driver: Driver = .{ .inner = &self.core };
-        const done = try driver.processRpc(self.session.index, now, events[0..if (host_available) events.len else 0], &count, &items);
+        const done = try @import("test_support.zig").processRpc(&self.core, self.session.index, now, events[0..if (host_available) events.len else 0], &count, &items);
         for (events[0..count]) |event| switch (event) {
             .message => |message| {
                 try std.testing.expectEqual(@as(usize, 1), message.bytes.len);
@@ -139,10 +135,11 @@ test "gossip simulation ignores decoded items and write receipts from a retired 
     node.core.connectionClosed(node.core.sessions.rows[old.index].conn);
     node.session = node.core.addPeer(.{ .index = 0, .generation = 2 }, .v1_2, &.{ .identity = .{ .bytes = @splat(2) }, .address = .unspecified, .direction = .outbound }, .{ .mono_ms = 1, .unix_s = 0 }).admitted;
     try std.testing.expect(old.generation != node.session.generation);
-    var count: usize = 0;
     const now: Now = .{ .mono_ms = 2, .unix_s = 0 };
     try node.begin(now);
-    try std.testing.expect(node.core.receiveItem(old, .{ .subscription = .{ .topic = name, .subscribe = true } }, now, &.{}, &count));
+    var turn = node.core.beginPump(now, &.{});
+    var peer = @import("turn.zig").Credits.peer(&node.core.options);
+    try std.testing.expectEqual(.done, node.core.receiveItem(old, .{ .subscription = .{ .topic = name, .subscribe = true } }, &turn, &peer));
     node.core.writeCompleted(old, .{ .control = .{ .token = 1, .kind = .iwant } }, now.mono_ms);
     try std.testing.expectEqual(@as(usize, 0), node.core.resourceSnapshot().remote_subscriptions);
     try std.testing.expectEqual(@as(u64, 0), node.core.rpc_metrics.sent_frames);
