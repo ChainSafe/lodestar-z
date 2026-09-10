@@ -74,6 +74,7 @@ const HashState = struct {
     state: *BeaconState.Type,
     pub fn run(self: *HashState, allocator: std.mem.Allocator) void {
         var scratch = ssz.Hasher(BeaconState).init(allocator) catch unreachable;
+        defer scratch.deinit(allocator);
         var out: [32]u8 = undefined;
         ssz.Hasher(BeaconState).hash(&scratch, self.state, &out) catch unreachable;
     }
@@ -142,20 +143,23 @@ pub fn main(init: std.process.Init) !void {
     try bench.addParam("validate state", &validate_state, .{});
 
     const hash_state = HashState{ .state = state };
-    try bench.addParam("hash state", &hash_state, .{});
+    try bench.addParam("hash state managed cold", &hash_state, .{});
 
     var scratch = ssz.Hasher(BeaconState).init(allocator) catch unreachable;
+    defer scratch.deinit(allocator);
     var root: [32]u8 = undefined;
     ssz.Hasher(BeaconState).hash(&scratch, state, &root) catch unreachable;
 
     const hash_state_no_alloc = HashStateNoAlloc{ .state = state, .scratch = &scratch };
-    try bench.addParam("hash state prealloc", &hash_state_no_alloc, .{});
+    try bench.addParam("hash state managed warm", &hash_state_no_alloc, .{});
 
     const hash_state_oneshot = HashStateOneshot{ .state = state };
-    try bench.addParam("hash state oneshot", &hash_state_oneshot, .{});
+    try bench.addParam("hash state value", &hash_state_oneshot, .{});
 
     const hash_state_serialized = HashStateSerialized{ .bytes = state_bytes };
     try bench.addParam("hash state serialized", &hash_state_serialized, .{});
+
+    try @import("hash_memory.zig").report(BeaconState, io, allocator, "state", state);
 
     try bench.run(io, std.Io.File.stdout());
 }

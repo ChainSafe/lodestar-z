@@ -74,6 +74,7 @@ const HashBlock = struct {
     block: *BeaconBlock.Type,
     pub fn run(self: *HashBlock, allocator: std.mem.Allocator) void {
         var scratch = ssz.Hasher(BeaconBlock).init(allocator) catch unreachable;
+        defer scratch.deinit(allocator);
         var out: [32]u8 = undefined;
         ssz.Hasher(BeaconBlock).hash(&scratch, self.block, &out) catch unreachable;
     }
@@ -145,20 +146,23 @@ pub fn main(init: std.process.Init) !void {
     try bench.addParam("validate block", &validate_block, .{});
 
     const hash_block = HashBlock{ .block = block };
-    try bench.addParam("hash block", &hash_block, .{});
+    try bench.addParam("hash block managed cold", &hash_block, .{});
 
     var scratch = ssz.Hasher(BeaconBlock).init(allocator) catch unreachable;
+    defer scratch.deinit(allocator);
     var root: [32]u8 = undefined;
     ssz.Hasher(BeaconBlock).hash(&scratch, block, &root) catch unreachable;
 
     const hash_block_no_alloc = HashBlockNoAlloc{ .block = block, .scratch = &scratch };
-    try bench.addParam("hash block prealloc", &hash_block_no_alloc, .{});
+    try bench.addParam("hash block managed warm", &hash_block_no_alloc, .{});
 
     const hash_block_oneshot = HashBlockOneshot{ .block = block };
-    try bench.addParam("hash block oneshot", &hash_block_oneshot, .{});
+    try bench.addParam("hash block value", &hash_block_oneshot, .{});
 
     const hash_block_serialized = HashBlockSerialized{ .bytes = block_bytes };
     try bench.addParam("hash block serialized", &hash_block_serialized, .{});
+
+    try @import("hash_memory.zig").report(BeaconBlock, io, allocator, "block", block);
 
     try bench.run(io, std.Io.File.stdout());
 }
