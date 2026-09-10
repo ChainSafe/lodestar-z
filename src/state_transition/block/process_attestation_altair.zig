@@ -1,4 +1,5 @@
 const std = @import("std");
+const metrics = @import("../metrics.zig");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
@@ -52,8 +53,8 @@ pub fn processAttestationsAltair(
     defer root_cache.deinit();
 
     // Process all attestations first and then increase the balance of the proposer once
-    // let newSeenAttesters = 0;
-    // let newSeenAttestersEffectiveBalance = 0;
+    var new_seen_attesters: u64 = 0;
+    var new_seen_attesters_effective_balance: u64 = 0;
 
     var proposer_reward: u64 = 0;
     for (attestations) |*attestation| {
@@ -102,6 +103,10 @@ pub fn processAttestationsAltair(
 
             // Returns flags that are NOT set before (~ bitwise NOT) AND are set after
             const flags_new_set = ~flags & flags_attestation;
+            if (flags_new_set != 0) {
+                new_seen_attesters += 1;
+                new_seen_attesters_effective_balance += effective_balance_increments[validator_index];
+            }
 
             // Spec:
             // baseReward = state.validators[index].effectiveBalance / EFFECTIVE_BALANCE_INCREMENT * baseRewardPerIncrement;
@@ -132,6 +137,11 @@ pub fn processAttestationsAltair(
         const proposer_reward_numerator = total_increments * epoch_cache.base_reward_per_increment;
         proposer_reward += @divFloor(proposer_reward_numerator, PROPOSER_REWARD_DOMINATOR);
     }
+
+    metrics.state_transition.new_seen_attesters_per_block.set(new_seen_attesters);
+    metrics.state_transition.new_seen_attesters_effective_balance_per_block.set(new_seen_attesters_effective_balance);
+    metrics.state_transition.attestations_per_block.set(@intCast(attestations.len));
+
     try increaseBalance(fork, state, try getBeaconProposer(fork, epoch_cache, state, state_slot), proposer_reward);
     proposer_rewards.attestations = proposer_reward;
 }

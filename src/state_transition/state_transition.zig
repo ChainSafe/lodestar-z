@@ -132,6 +132,10 @@ pub fn processSlots(
             }
 
             try epoch_cache.finalProcessEpoch(state);
+
+            const commit_timer = time.start(io);
+            try state.commit();
+            metrics.state_transition.epoch_transition_commit.observe(time.durationSeconds(time.since(io, commit_timer)));
             metrics.state_transition.epoch_transition.observe(time.durationSeconds(time.since(io, epoch_transition_timer)));
         } else {
             try state.setSlot(next_slot);
@@ -178,6 +182,8 @@ pub fn stateTransition(
         post_cached_state.deinit();
         allocator.destroy(post_cached_state);
     }
+
+    metrics.state_transition.pre_state_cloned_count.observe(cached_state.cloned_count);
 
     try processSlots(
         allocator,
