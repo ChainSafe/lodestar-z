@@ -117,11 +117,11 @@ test "typed reservations unwind and identities never wrap" {
 }
 
 const n = @import("network");
-pub const Command = enum { applyIntent, getIdentity, getPeers, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, reportPeer, request, publishGossip };
+pub const Command = enum { applyIntent, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, reportPeer, request, publishGossip };
 pub fn storageKind(command: Command) Kind {
     return switch (command) {
         .applyIntent => .intent,
-        .getPeers, .getDirectPeers => .snapshot,
+        .getPeers, .getDirectPeers, .getGossipDiagnostics => .snapshot,
         .connect => .connect,
         .reStatusPeers => .targets,
         else => .small,
@@ -141,6 +141,7 @@ pub const Input = struct {
     slot: u64 = 0,
     timeout_ms: u64 = 0,
     target_count: u16 = 0,
+    diagnostics_cursor: u16 = 0,
     action: n.peers.types.PeerAction = .high_tolerance,
 };
 
@@ -221,6 +222,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             operation.count = try core.completeSnapshots(self.stores.?.snapshots[store.?]);
             operation.counts = core.peerCounts();
         },
+        .getGossipDiagnostics => try n.gossipsub.diagnostics.capture(&core.core.service.gossipsub.inner, input.diagnostics_cursor, timestamp, &self.stores.?.gossip_diagnostics[store.?]),
         .getDirectPeers => operation.count = try core.directPeers(&self.stores.?.direct[store.?]),
         .removeDirectPeer => operation.boolean = core.removeDirectPeer(&input.peer),
         .addDirectPeer => try core.addDirectPeer(&input.peer, input.addresses[0..input.address_count], timestamp),

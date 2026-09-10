@@ -407,6 +407,7 @@ fn submit(self: *@This(), comptime command: commands.Command, args: []const Valu
             try application_cfg.parseIntent(args[0], &runtime.stores.?.intents[store.?], runtime.max_peers);
         },
         .getIdentity, .getPeers, .getDirectPeers => {},
+        .getGossipDiagnostics => operation.input.diagnostics_cursor = @intCast(try cfg.integer(args[0], 512)),
         .reStatusPeers => {
             operation.input.target_count = @intCast(try cfg.array(args[0], 256));
             for (runtime.stores.?.targets[store.?][0..operation.input.target_count], 0..) |*peer, i| {
@@ -444,6 +445,9 @@ pub fn getIdentity(self: *@This()) !js.Value {
 }
 pub fn getPeers(self: *@This()) !js.Value {
     return self.submit(.getPeers, &.{});
+}
+pub fn getGossipDiagnostics(self: *@This(), cursor: js.Value) !js.Value {
+    return self.submit(.getGossipDiagnostics, &.{cursor.val});
 }
 pub fn connect(self: *@This(), peer: js.Value, addresses: js.Value, timeout: js.Value) !js.Value {
     return self.submit(.connect, &.{ peer.val, addresses.val, timeout.val });
@@ -506,6 +510,7 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     const store = runtime.table.cells[index].store;
     const object = switch (operation.input.command) {
         .publishGossip => return gossip_js.publishResult(env, operation.publication),
+        .getGossipDiagnostics => try @import("network_gossip_diagnostics.zig").copy(env, &runtime.stores.?.gossip_diagnostics[store.?]),
         .getIdentity => try identity(env, &operation.identity, runtime.diag.session),
         .applyIntent, .getPeers, .getDirectPeers => try env.createObject(),
         .removeDirectPeer => return env.getBoolean(operation.boolean),

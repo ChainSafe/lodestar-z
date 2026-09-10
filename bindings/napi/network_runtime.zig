@@ -205,6 +205,7 @@ pub const Stores = struct {
     backing: std.mem.Allocator,
     intents: [2]application_config.Intent = undefined,
     snapshots: [2][]n.peers.types.Snapshot,
+    gossip_diagnostics: [2]n.gossipsub.diagnostics.Page = undefined,
     direct: [2][256]n.PeerId = undefined,
     targets: [2][256]n.PeerId = undefined,
     pub fn create(backing: std.mem.Allocator, capacity: usize) !*Stores {

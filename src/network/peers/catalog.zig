@@ -135,6 +135,7 @@ pub const Catalog = struct {
             .connected_at_ms = row.connected_at_ms,
             .direct = row.direct,
             .score = row.reputation.score,
+            .score_at_ms = row.reputation.decay_at_ms,
             .ban_until_ms = row.reputation.ban_until_ms,
             .goodbye_until_ms = row.reputation.goodbye_until_ms,
         };

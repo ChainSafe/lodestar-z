@@ -356,7 +356,10 @@ test("native peers refuse requests without bridge bytes while managed control re
   const leftConfig = applicationConfig();
   const rightConfig = applicationConfig();
   leftConfig.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
-  rightConfig.resources.bridgeBudgetBytes = 1024 * 1024;
+  const baseline = createNativeNetworkApplicationRuntime(rightConfig, () => undefined);
+  await baseline.ready;
+  rightConfig.resources.bridgeBudgetBytes = baseline.diagnostics().bridgeRequestedBytes;
+  await baseline.close();
   rightConfig.identitySecretKey[31] = 2;
   const left = createNativeNetworkApplicationRuntime(leftConfig, () => undefined);
   const right = createNativeNetworkApplicationRuntime(rightConfig, () => undefined);

@@ -43,7 +43,7 @@ pub const Params = struct {
     topic: TopicParams = .{},
 };
 
-const TopicCounters = struct {
+pub const TopicCounters = struct {
     in_mesh: bool = false,
     graft_ms: u64 = 0,
     first_deliveries: f64 = 0,

@@ -394,6 +394,7 @@ export interface NativeNetworkApplicationRuntime {
   drain(maxEvents: number): NativeDrainBatch;
   applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
   getIdentity(): Promise<NativeIdentitySnapshot>;
+  getGossipDiagnostics(cursor?: number): Promise<NativeGossipDiagnosticsPage>;
   getPeers(): Promise<NativePeerSnapshot>;
   /** One-shot connection attempt, retired on success or timeout. Use addDirectPeer for persistent membership. */
   connect(peerId: Uint8Array, addresses: readonly IpEndpoint[], timeoutMs: bigint): Promise<void>;
@@ -483,6 +484,7 @@ export interface NativePeerState {
   connectedAtMs: bigint;
   direct: boolean;
   score: number;
+  scoreAtMs: bigint;
   banUntilMs: bigint;
   goodbyeUntilMs: bigint;
 }
@@ -729,3 +731,44 @@ export type NetworkGossipPublishFailed = Error & {
     | "duplicate"
     | "no_peers_subscribed_to_topic";
 };
+
+export interface NativeGossipTopicDiagnostic {
+  index: number;
+  topic: string;
+  subscribed: boolean;
+  weight: number;
+  meshDeliveryActivationMs: bigint;
+}
+export interface NativeGossipTopicScoreDiagnostic {
+  index: number;
+  inMesh: boolean;
+  meshMember: boolean;
+  graftTimeMs: bigint;
+  meshTimeMs: bigint;
+  firstMessageDeliveries: number;
+  meshMessageDeliveries: number;
+  meshFailurePenalty: number;
+  invalidMessageDeliveries: number;
+  weights: {p1: number; p2: number; p3: number; p3b: number; p4: number};
+}
+export interface NativeGossipPeerDiagnostic {
+  identity: Uint8Array;
+  ip: Uint8Array;
+  connected: boolean;
+  outboundReady: boolean;
+  expireAtMs: bigint;
+  score: number;
+  appScore: number;
+  behaviourPenalty: number;
+  weights: {p5: number; p6: number; p7: number};
+  topics: NativeGossipTopicScoreDiagnostic[];
+}
+/** Each page is copied from one owner turn. Cursors traverse at most 512 retained peer slots. */
+export interface NativeGossipDiagnosticsPage {
+  ownerSequence: bigint;
+  observedMonoMs: bigint;
+  observedUnixMs: bigint;
+  nextCursor: number | null;
+  topics: NativeGossipTopicDiagnostic[];
+  peers: NativeGossipPeerDiagnostic[];
+}
