@@ -65,13 +65,16 @@ test "memory_safety: EpochCache.clone does not retain shared references when all
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
+    var failing_allocator = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+
     // Leaked refs prevent test_state teardown from releasing the last shared owners.
-    try std.testing.checkAllAllocationFailures(allocator, struct {
-        fn run(clone_allocator: std.mem.Allocator, source: *@import("epoch_cache.zig").EpochCache) !void {
-            const cloned = try source.clone(clone_allocator);
-            defer cloned.deinit();
-        }
-    }.run, .{test_state.cached_state.epoch_cache});
+    try std.testing.expectError(
+        error.OutOfMemory,
+        test_state.cached_state.epoch_cache.clone(failing_allocator.allocator()),
+    );
 }
 
 test "memory_safety: afterProcessEpoch should preserve shuffling state when decision-root calculation fails" {

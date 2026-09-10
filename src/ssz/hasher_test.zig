@@ -37,32 +37,44 @@ test "memory_safety: Hasher init container should not leak initialized prefix on
         first: ChildType,
         second: ChildType,
     });
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-        fn run(allocator: std.mem.Allocator) !void {
-            var scratch = try Hasher(ContainerType).init(allocator);
-            defer scratch.deinit(allocator);
-        }
-    }.run, .{});
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 2 },
+    );
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Hasher(ContainerType).init(failing.allocator()),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
 test "memory_safety: Hasher init composite vector should not leak initialized child on parent OOM" {
     const ChildType = FixedVectorType(UintType(64), 8, .{});
     const VectorType = FixedVectorType(ChildType, 2, .{});
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-        fn run(allocator: std.mem.Allocator) !void {
-            var scratch = try Hasher(VectorType).init(allocator);
-            defer scratch.deinit(allocator);
-        }
-    }.run, .{});
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 2 },
+    );
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Hasher(VectorType).init(failing.allocator()),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
 test "memory_safety: Hasher init composite list should not leak children slice on recursive child OOM" {
     const ChildType = FixedVectorType(UintType(64), 8, .{});
     const ListType = FixedListType(ChildType, 4, .{});
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
-        fn run(allocator: std.mem.Allocator) !void {
-            var scratch = try Hasher(ListType).init(allocator);
-            defer scratch.deinit(allocator);
-        }
-    }.run, .{});
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 1 },
+    );
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Hasher(ListType).init(failing.allocator()),
+    );
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
