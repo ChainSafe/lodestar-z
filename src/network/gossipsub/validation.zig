@@ -53,54 +53,97 @@ pub const Context = struct {
 };
 pub const Workspace = struct {
     arena: []u8,
+    scratch: []u8,
     used: *usize,
     peer_work: *usize,
     work: *usize,
     large_used: *bool,
     event_available: bool,
 };
-pub const Received = union(enum) { ignored, duplicate: topic_mod.MessageId, admitted: MessageEvent, blocked: enum { events, storage, work } };
+pub const InvalidReason = enum { signed, compressed_size, ssz_size, snappy };
+pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: topic_mod.MessageId, admitted: MessageEvent, blocked: enum { events, storage, work } };
 pub const Report = struct {
     outcome: Outcome,
     forward: ?struct { message: storage.Handle, source: PeerRef, topic: u16 } = null,
 };
 
+const FastEntry = struct {
+    fingerprint: [32]u8 = @splat(0),
+    result: union(enum) { empty, valid: topic_mod.MessageId, invalid: topic_mod.MessageId } = .empty,
+};
+
 pub const Validation = struct {
     entries: []Entry,
+    fast: []FastEntry,
+    fast_hits: u64 = 0,
+    decoded_messages: u64 = 0,
     cursor: usize = 0,
     timeout_ms: u64,
     tombstone_ms: u64,
 
     pub fn receive(self: *Validation, context: *const Context, workspace: *const Workspace, peer: u16, msg: protobuf.Message, now: u64) Received {
         const rule = if (context.namespace) |ns| (ns.lookup(msg.topic) orelse return .ignored).rule else null;
-        const header = admission.inspect(&msg);
-        if (header == .rejected) return .ignored;
         const topic = context.state.findTopic(msg.topic) orelse return .ignored;
         if (!context.state.subscribed(topic)) return .ignored;
+        if (msg.signed) return invalid(context, peer, topic, .signed);
+        const header = admission.inspect(&msg);
+        if (header == .rejected) return invalid(context, peer, topic, if (msg.data.len > @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE)) .compressed_size else .ssz_size);
         if (header == .invalid) {
             if (!charge(context.options, workspace, msg.data.len, 0)) return .{ .blocked = .work };
             _ = context.seen.add(topic_mod.invalidMessageId(msg.topic, msg.data, context.options.message_id_policy), now);
-            return .ignored;
+            return invalid(context, peer, topic, .snappy);
         }
         const size = header.payload;
-        if (rule) |bounds| if (size < bounds.ssz_min or size > bounds.ssz_max) return .ignored;
-        if (!workspace.event_available or size + msg.topic.len > workspace.arena.len - workspace.used.*) return .{ .blocked = .events };
-        if (!self.available()) return .{ .blocked = .storage };
+        if (rule) |bounds| if (size < bounds.ssz_min or size > bounds.ssz_max) return invalid(context, peer, topic, .ssz_size);
         if (!charge(context.options, workspace, msg.data.len, size)) return .{ .blocked = .work };
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update(&.{@intCast(msg.topic.len)});
+        hash.update(msg.topic);
+        hash.update(msg.data);
+        const fingerprint = hash.finalResult();
+        const cached = &self.fast[std.mem.readInt(u64, fingerprint[0..8], .little) % self.fast.len];
+        if (std.mem.eql(u8, &cached.fingerprint, &fingerprint)) switch (cached.result) {
+            .valid => |id| if (self.duplicateId(context, peer, topic, id, now)) {
+                self.fast_hits +|= 1;
+                return .{ .duplicate = id };
+            },
+            .invalid => |id| {
+                _ = context.seen.add(id, now);
+                self.fast_hits +|= 1;
+                return invalid(context, peer, topic, .snappy);
+            },
+            .empty => {},
+        };
         const room = workspace.arena[workspace.used.*..];
-        const decoded = admission.decode(&msg, room[0..size], context.options.message_id_policy);
+        const output = if (room.len >= size) room[0..size] else workspace.scratch[0..size];
+        const decoded = admission.decode(&msg, output, context.options.message_id_policy);
+        self.decoded_messages +|= 1;
+        cached.* = .{ .fingerprint = fingerprint, .result = if (decoded == .invalid) .{ .invalid = decoded.invalid } else .{ .valid = decoded.valid.id } };
         if (decoded == .invalid) {
             _ = context.seen.add(decoded.invalid, now);
-            return .ignored;
+            return invalid(context, peer, topic, .snappy);
         }
-        const written = decoded.valid.bytes.len;
         const id = decoded.valid.id;
+        if (self.duplicateId(context, peer, topic, id, now)) return .{ .duplicate = id };
+        if (!workspace.event_available or size + msg.topic.len > room.len) return .{ .blocked = .events };
+        if (!self.available()) return .{ .blocked = .storage };
+        return self.commit(context, workspace, peer, topic, msg, id, size, now);
+    }
+
+    fn duplicateId(self: *Validation, context: *const Context, peer: u16, topic: u16, id: topic_mod.MessageId, now: u64) bool {
         const pending = self.find(id, now);
         if ((pending != null and pending.?.state == .pending) or context.seen.contains(id, now)) {
             if (pending) |entry| recordDuplicate(context, entry, peer, topic, now);
-            return .{ .duplicate = id };
+            return true;
         }
-        return self.commit(context, workspace, peer, topic, msg, id, written, now);
+        return false;
+    }
+
+    fn invalid(context: *const Context, peer: u16, topic: u16, reason: InvalidReason) Received {
+        const ref = context.state.peers[peer].logical;
+        context.scores.invalid(ref.index, topic);
+        context.peers.rows[ref.index].negative = true;
+        return .{ .invalid = reason };
     }
 
     fn commit(self: *Validation, context: *const Context, workspace: *const Workspace, peer: u16, topic: u16, msg: protobuf.Message, id: topic_mod.MessageId, written: usize, now: u64) Received {
@@ -146,12 +189,19 @@ pub const Validation = struct {
     pub fn init(a: std.mem.Allocator, capacity: usize, timeout_ms: u64, tombstone_ms: u64) !Validation {
         if (capacity == 0 or capacity > 8192 or timeout_ms == 0 or tombstone_ms == 0) return error.InvalidLimits;
         const entries = try a.alloc(Entry, capacity);
+        errdefer a.free(entries);
         @memset(entries, .{});
-        return .{ .entries = entries, .timeout_ms = timeout_ms, .tombstone_ms = tombstone_ms };
+        const fast = try a.alloc(FastEntry, capacity * 4);
+        @memset(fast, .{});
+        return .{ .entries = entries, .fast = fast, .timeout_ms = timeout_ms, .tombstone_ms = tombstone_ms };
     }
     pub fn deinit(self: *Validation, a: std.mem.Allocator) void {
+        a.free(self.fast);
         a.free(self.entries);
         self.* = undefined;
+    }
+    pub fn memoryBytes(self: *const Validation) usize {
+        return self.entries.len * @sizeOf(Entry) + self.fast.len * @sizeOf(FastEntry);
     }
     pub fn available(self: *const Validation) bool {
         for (self.entries) |e| if (e.state != .pending and e.generation != std.math.maxInt(u64)) return true;

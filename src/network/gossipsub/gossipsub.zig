@@ -139,6 +139,7 @@ pub const Gossipsub = struct {
     heartbeat_at: u64 = 0,
     opportunistic_at: u64 = 0,
     last_now_ms: u64 = 0,
+    gossip_ids: []MessageId,
     msg_scratch: []u8,
     decompressed: []u8,
     decompressed_used: usize = 0,
@@ -211,6 +212,8 @@ pub const Gossipsub = struct {
         errdefer io.deinit(allocator);
         const msg_scratch = try allocator.alloc(u8, constants.GOSSIP_MAX_SIZE);
         errdefer allocator.free(msg_scratch);
+        const gossip_ids = try allocator.alloc(MessageId, options.mcache_capacity);
+        errdefer allocator.free(gossip_ids);
         const decompressed = try allocator.alloc(u8, options.decompressed_arena_bytes);
         errdefer allocator.free(decompressed);
         var recovery = try Recovery.init(allocator);
@@ -232,6 +235,7 @@ pub const Gossipsub = struct {
             .io = io,
             .receive_pool = receive_pool,
             .msg_scratch = msg_scratch,
+            .gossip_ids = gossip_ids,
             .decompressed = decompressed,
             .recovery = recovery,
             .mesh_policy = mesh_mod.Mesh.init(options.random_seed.?),
@@ -248,6 +252,7 @@ pub const Gossipsub = struct {
         self.recovery.deinit(self.allocator, &self.peers);
         self.allocator.free(self.decompressed);
         self.allocator.free(self.msg_scratch);
+        self.allocator.free(self.gossip_ids);
         self.io.deinit(self.allocator);
         self.mcache.deinit(self.allocator);
         self.validation.deinit(self.allocator);
@@ -640,7 +645,7 @@ pub const Gossipsub = struct {
             if (options.ignore_duplicate) return .{ .duplicate = true };
             return error.Duplicate;
         }
-        const topic = self.internTopic(topic_str) orelse return error.UnknownTopic;
+        const topic = self.internTopic(topic_str) orelse return error.ResourceExhausted;
         const context = self.meshContext(now_ms);
         const recipients = self.mesh_policy.publicationRecipients(&context, topic, options.flood);
         if (recipients.count() == 0 and !options.allow_zero_peers) return error.NoPeersSubscribedToTopic;
@@ -738,9 +743,9 @@ pub const Gossipsub = struct {
     pub fn memoryPlan(self: *const Gossipsub) MemoryPlan {
         const metadata = @sizeOf(Gossipsub) + @sizeOf(State) + self.state.peers.len * @sizeOf(@TypeOf(self.state.peers[0])) + self.peers.rows.len * @sizeOf(peers_mod.Row) + self.peers.backoffs.len * @sizeOf(peers_mod.Backoff) + self.io.peers.len * @sizeOf(PeerIo) +
             self.store.entries.len * @sizeOf(storage.Entry) + self.store.next.len * @sizeOf(u32) +
-            self.validation.entries.len * @sizeOf(validation_mod.Entry) + self.mcache.entries.len * @sizeOf(mcache_mod.HistoryEntry) +
+            self.validation.memoryBytes() + self.mcache.entries.len * @sizeOf(mcache_mod.HistoryEntry) +
             self.mcache.counts.len + self.mcache.generations.len * @sizeOf(u64) + self.mcache.ids.len * @sizeOf(MessageId) + self.mcache.index.slots.len * @sizeOf(u32) +
-            self.recovery.memoryBytes() + self.receive_pool.metadataBytes() + (if (self.namespace) |*ns| ns.allocatedBytes() else @as(usize, 0)) +
+            self.gossip_ids.len * @sizeOf(MessageId) + self.recovery.memoryBytes() + self.receive_pool.metadataBytes() + (if (self.namespace) |*ns| ns.allocatedBytes() else @as(usize, 0)) +
             self.seen.ids.len * (@sizeOf(MessageId) + @sizeOf(u64)) + self.seen.index.slots.len * @sizeOf(u32) +
             self.scores.topics.len * @sizeOf(@TypeOf(self.scores.topics[0])) + self.scores.app_score.len * @sizeOf(f64) + self.scores.behaviour.len * @sizeOf(f64);
         return .{
@@ -1001,6 +1006,7 @@ pub const Gossipsub = struct {
             const context = self.meshContext(now.mono_ms);
             self.mesh_policy.takeSnapshot(&context);
             self.topics_remaining = constants.topics_cap;
+            self.mcache.beginCycle();
         }
         if (self.opportunistic_at == 0) {
             self.opportunistic_at = now.mono_ms +| self.options.opportunistic_graft_interval_ms;
@@ -1008,7 +1014,6 @@ pub const Gossipsub = struct {
             self.opportunistic_at = now.mono_ms +| self.options.opportunistic_graft_interval_ms;
             self.opportunistic_pending = true;
         }
-        self.mcache.shift(&self.store);
     }
 
     fn maintainTopics(self: *Gossipsub, now: Now) void {
@@ -1016,6 +1021,7 @@ pub const Gossipsub = struct {
         for (0..constants.topics_cap) |_| {
             if (self.topics_remaining == 0) {
                 self.opportunistic_pending = false;
+                if (self.mcache.cycling) self.mcache.finishCycle(&self.store);
                 return;
             }
             const index: u16 = @intCast(self.topic_cursor);
@@ -1031,7 +1037,11 @@ pub const Gossipsub = struct {
             self.emitGossip(index);
             self.reclaimTopic(index);
             serviced += 1;
-            if (serviced == self.options.topics_per_pump) return;
+            if (serviced == self.options.topics_per_pump) break;
+        }
+        if (self.topics_remaining == 0) {
+            self.opportunistic_pending = false;
+            self.mcache.finishCycle(&self.store);
         }
     }
 
@@ -1043,20 +1053,23 @@ pub const Gossipsub = struct {
 
     fn emitGossip(self: *Gossipsub, topic: u16) void {
         const topic_str = self.state.topicString(topic);
-        var ids: [constants.gossip_ids_max]MessageId = undefined;
-        const n = self.mcache.gossip(&self.store, topic_str, &ids);
-        if (n == 0) return;
-        var writer = protobuf.Writer.init(self.msg_scratch);
-        writer.varint(protobuf.ihaveRpcSize(topic_str, n, constants.message_id_length));
-        protobuf.beginIhaveRpc(&writer, topic_str, n, constants.message_id_length);
-        for (ids[0..n]) |id| protobuf.writeIhaveId(&writer, &id);
-        const rpc = writer.written();
+        const count = self.mcache.gossip(&self.store, topic_str, self.gossip_ids);
+        if (count == 0) return;
+        const n = @min(count, constants.gossip_ids_max);
         var context = self.meshContext(self.last_now_ms);
         context.use_snapshot = true;
         const recipients = self.mesh_policy.gossipRecipients(&context, topic, self.options.gossip_factor);
         var it = recipients.iterator(.{});
         while (it.next()) |peer| {
-            if (self.io.peers[peer].appendControl(rpc, false, .ihave, self.last_now_ms) == null) self.counters.send_dropped += 1;
+            for (0..n) |i| {
+                const j = self.mesh_policy.rng.random().uintLessThan(usize, count - i) + i;
+                std.mem.swap(MessageId, &self.gossip_ids[i], &self.gossip_ids[j]);
+            }
+            var writer = protobuf.Writer.init(self.msg_scratch);
+            writer.varint(protobuf.ihaveRpcSize(topic_str, n, constants.message_id_length));
+            protobuf.beginIhaveRpc(&writer, topic_str, n, constants.message_id_length);
+            for (self.gossip_ids[0..n]) |id| protobuf.writeIhaveId(&writer, &id);
+            if (self.io.peers[peer].appendControl(writer.written(), false, .ihave, self.last_now_ms) == null) self.counters.send_dropped += 1;
         }
     }
 
@@ -1290,9 +1303,15 @@ pub const Gossipsub = struct {
 
     fn onMessage(self: *Gossipsub, index: u16, msg: protobuf.Message, now: Now, events: []Event, start: usize) ?usize {
         const context = self.validationContext();
-        const workspace: validation_mod.Workspace = .{ .arena = self.decompressed, .used = &self.decompressed_used, .peer_work = &self.io.peers[index].decompressed_pump, .work = &self.budget.work, .large_used = &self.budget.large_used, .event_available = start < events.len };
+        const workspace: validation_mod.Workspace = .{ .arena = self.decompressed, .scratch = self.msg_scratch, .used = &self.decompressed_used, .peer_work = &self.io.peers[index].decompressed_pump, .work = &self.budget.work, .large_used = &self.budget.large_used, .event_available = start < events.len };
         switch (self.validation.receive(&context, &workspace, index, msg, now.mono_ms)) {
             .ignored => return start,
+            .invalid => |reason| {
+                self.rpc_metrics.invalid_messages[@intFromEnum(reason)] +|= 1;
+                const conn = self.state.peers[index].conn;
+                std.log.scoped(.network_gossip).debug("invalid_message connection={d}:{d} topic={s} reason={s} compressed_bytes={d}", .{ conn.index, conn.generation, msg.topic, @tagName(reason), msg.data.len });
+                return start;
+            },
             .duplicate => |id| {
                 self.counters.duplicates += 1;
                 self.topic_metrics.get(msg.topic).duplicates +|= 1;
@@ -2668,4 +2687,58 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     const size = try snappy.raw.uncompress(g.store.segment(message, g.store.cursor(message)), &decompressed);
     try std.testing.expectEqualStrings("original payload", decompressed[0..size]);
     try std.testing.expectEqualStrings(replacement, g.state.topicString(0));
+}
+
+test "gossip duplicate fast path ignores host capacity and malformed bodies receive penalties" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = 1 });
+    defer g.deinit();
+    const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    var events: [1]Event = undefined;
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "pending", 1, &events));
+    const handle = events[0].message.handle;
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 2, &.{}));
+    try std.testing.expectEqual(@as(u64, 1), g.validation.decoded_messages);
+    try std.testing.expectEqual(@as(u64, 1), g.validation.fast_hits);
+    _ = g.report(handle, .ignore, .{ .mono_ms = 3, .unix_s = 1 });
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 4, &events));
+    for (0..20) |_| {
+        g.budget = .{ .work = g.options.work_per_pump };
+        _ = g.onMessage(peer.index, .{ .topic = name, .data = &.{5} }, .{ .mono_ms = 5, .unix_s = 1 }, &events, 0);
+    }
+    try std.testing.expectEqual(@as(u64, 20), g.scores.penalties.invalid_message);
+    try std.testing.expectEqual(@as(u64, 2), g.validation.decoded_messages);
+}
+
+test "gossip advertisements sample the whole burst independently for each recipient" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 17 });
+    defer g.deinit();
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    const t = g.internTopic(name).?;
+    for (0..2) |i| {
+        const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+        g.state.setSubscription(t, peer.index, true);
+        g.state.peers[peer.index].out_stream = .{ .conn = g.state.peers[peer.index].conn, .id = 2, .slot = 0 };
+    }
+    for (0..512) |i| {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, i, .little);
+        _ = try g.publish(name, &bytes, .{ .mono_ms = 1, .unix_s = 0 });
+    }
+    for (g.io.peers) |*io| io.resetTx(&g.store);
+    g.state.fanout(t).* = .initEmpty();
+    const context = g.meshContext(1);
+    g.mesh_policy.takeSnapshot(&context);
+    g.emitGossip(t);
+    const first = g.io.peers[0].segment(&g.store);
+    const second = g.io.peers[1].segment(&g.store);
+    try std.testing.expect(first.len > 0 and second.len > 0);
+    try std.testing.expect(!std.mem.eql(u8, first, second));
+    var beyond_prefix: usize = 0;
+    for (g.gossip_ids[0..constants.gossip_ids_max]) |id| {
+        const entry = g.mcache.get(&g.store, id).?;
+        if (entry.message.index >= constants.gossip_ids_max) beyond_prefix += 1;
+    }
+    try std.testing.expect(beyond_prefix > constants.gossip_ids_max / 2);
 }
