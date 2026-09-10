@@ -125,9 +125,7 @@ pub const Gossipsub = struct {
     ip_allowlist_len: u8 = 0,
     messages: @import("messages.zig").Messages,
     peer_cursor: usize = 0,
-    topic_cursor: usize = 0,
-    topics_remaining: usize = 0,
-    opportunistic_pending: bool = false,
+    cycle: @import("heartbeat_cycle.zig").Cycle = .{},
     budget: Budget = .{},
     receive_pool: ReceivePool,
     mesh_policy: mesh_mod.Mesh,
@@ -649,7 +647,7 @@ pub const Gossipsub = struct {
     }
 
     pub fn nextWakeup(self: *const Gossipsub, now: Now, event_capacity: usize) ?u64 {
-        if (self.topics_remaining > 0) return now.mono_ms;
+        if (self.cycle.remaining > 0) return now.mono_ms;
         var deadline = if (self.heartbeat_at == 0) now.mono_ms else self.heartbeat_at;
         if (self.messages.validation.nextDeadline()) |d| deadline = @min(deadline, d);
         for (self.state.peers, 0..) |*peer, i| {
@@ -834,63 +832,38 @@ pub const Gossipsub = struct {
             }
         }
         self.scores.refresh(now.mono_ms);
-        if (self.topics_remaining == 0) {
-            const context = self.meshContext(now.mono_ms);
-            self.mesh_policy.takeSnapshot(&context);
-            self.topics_remaining = constants.topics_cap;
-            self.messages.history.beginCycle();
-        }
-        if (self.opportunistic_at == 0) {
-            self.opportunistic_at = now.mono_ms +| self.options.opportunistic_graft_interval_ms;
-        } else if (now.mono_ms >= self.opportunistic_at) {
-            self.opportunistic_at = now.mono_ms +| self.options.opportunistic_graft_interval_ms;
-            self.opportunistic_pending = true;
-        }
+        if (self.cycle.remaining > 0) return;
+        const opportunistic = self.opportunistic_at != 0 and now.mono_ms >= self.opportunistic_at;
+        if (self.opportunistic_at == 0 or opportunistic) self.opportunistic_at = now.mono_ms +| self.options.opportunistic_graft_interval_ms;
+        self.cycle.begin(self.state, &self.scores, now.mono_ms, opportunistic);
+        self.messages.history.beginCycle();
     }
 
     fn maintainTopics(self: *Gossipsub, now: Now) void {
         var serviced: usize = 0;
         for (0..constants.topics_cap) |_| {
-            if (self.topics_remaining == 0) {
-                self.opportunistic_pending = false;
-                if (self.messages.history.cycling) self.messages.history.finishCycle(&self.messages.store);
-                return;
-            }
-            const index: u16 = @intCast(self.topic_cursor);
-            self.topic_cursor = (self.topic_cursor + 1) % constants.topics_cap;
-            self.topics_remaining -= 1;
+            const index = self.cycle.next() orelse break;
             const topic = &self.state.registry.rows[index];
             if (!topic.active) continue;
             var context = self.meshContext(now.mono_ms);
-            context.use_snapshot = true;
+            context.snapshot = &self.cycle.scores;
             if (topic.fanout.count() > 0) _ = self.mesh_policy.fanout(&context, index, false);
-            self.maintainTopic(index, now);
-            if (self.opportunistic_pending) self.opportunisticGraft(index, now);
-            self.emitGossip(index);
+            self.mesh_policy.maintain(&context, index);
+            if (self.cycle.opportunistic) self.mesh_policy.opportunistic(&context, index);
+            self.emitGossip(index, &context);
             self.reclaimTopic(index);
             serviced += 1;
             if (serviced == self.options.topics_per_pump) break;
         }
-        if (self.topics_remaining == 0) {
-            self.opportunistic_pending = false;
-            self.messages.history.finishCycle(&self.messages.store);
-        }
+        if (self.cycle.remaining == 0 and self.messages.history.cycling) self.messages.history.finishCycle(&self.messages.store);
     }
 
-    fn opportunisticGraft(self: *Gossipsub, topic: u16, now: Now) void {
-        var context = self.meshContext(now.mono_ms);
-        context.use_snapshot = true;
-        self.mesh_policy.opportunistic(&context, topic);
-    }
-
-    fn emitGossip(self: *Gossipsub, topic: u16) void {
+    fn emitGossip(self: *Gossipsub, topic: u16, context: *const mesh_mod.Context) void {
         const topic_str = self.state.registry.topicString(topic);
         const count = self.messages.history.gossip(&self.messages.store, topic_str, self.messages.gossip_ids);
         if (count == 0) return;
         const n = @min(count, constants.gossip_ids_max);
-        var context = self.meshContext(self.last_now_ms);
-        context.use_snapshot = true;
-        const recipients = self.mesh_policy.gossipRecipients(&context, topic, self.options.gossip_factor);
+        const recipients = self.mesh_policy.gossipRecipients(context, topic, self.options.gossip_factor);
         var it = recipients.iterator(.{});
         while (it.next()) |peer| {
             for (0..n) |i| {
@@ -924,12 +897,6 @@ pub const Gossipsub = struct {
 
     fn expirePromises(self: *Gossipsub, now_ms: u64) void {
         self.counters.broken_promises += self.recovery.expire(&self.peers, &self.scores, now_ms);
-    }
-
-    fn maintainTopic(self: *Gossipsub, topic: u16, now: Now) void {
-        var context = self.meshContext(now.mono_ms);
-        context.use_snapshot = true;
-        self.mesh_policy.maintain(&context, topic);
     }
 
     fn peerScore(self: *Gossipsub, index: u16, now_ms: u64) f64 {
@@ -1776,7 +1743,9 @@ test "gossip policy GRAFT rejects negative peers and excludes direct peers" {
     try std.testing.expect(g.setPeerScore(conn, 0));
     g.markDirect(conn);
     g.state.registry.setSubscription(topic, peer.index, true);
-    g.maintainTopic(topic, .{ .mono_ms = 100_000, .unix_s = 0 });
+    var context = g.meshContext(100_000);
+    context.snapshot = &g.cycle.scores;
+    g.mesh_policy.maintain(&context, topic);
     try std.testing.expectEqual(@as(usize, 0), g.state.registry.mesh(topic).count());
 }
 
@@ -1959,7 +1928,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     _ = try g.publish(second_name, "second", start);
     g.heartbeat(start);
     g.maintainTopics(start);
-    try std.testing.expectEqual(@as(usize, 1), g.topic_cursor);
+    try std.testing.expectEqual(@as(usize, 1), g.cycle.cursor);
     const retained = g.state.registry.fanout(second).findFirstSet().?;
     var advertised: u16 = 0;
     for (0..9) |i| if (!g.state.registry.fanout(second).isSet(i)) {
@@ -1969,13 +1938,16 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     try std.testing.expect(g.scores.setAppScore(g.logical(advertised).index, -10_000));
     for (g.state.peers) |*peer| peer.io.resetTx(&g.messages.store);
     g.last_now_ms = 2;
+    g.opportunistic_at = 2;
+    g.heartbeat(.{ .mono_ms = 2, .unix_s = 0 });
+    try std.testing.expect(!g.cycle.opportunistic);
     g.maintainTopics(.{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expect(g.state.registry.fanout(second).isSet(retained));
     try std.testing.expectEqual(@as(usize, 8), g.state.registry.fanout(second).count());
     try std.testing.expectEqual(@as(usize, 1), g.state.peers[advertised].io.control.count);
     try std.testing.expectEqual(@as(usize, 0), g.state.peers[retained].io.control.count);
     g.maintainTopics(.{ .mono_ms = 3, .unix_s = 0 });
-    try std.testing.expectEqual(@as(usize, 0), g.topics_remaining);
+    try std.testing.expectEqual(@as(usize, 0), g.cycle.remaining);
     for (g.state.peers) |*peer| peer.io.resetTx(&g.messages.store);
     g.last_now_ms = 701;
     g.heartbeat(.{ .mono_ms = 701, .unix_s = 0 });
@@ -2561,8 +2533,10 @@ test "gossip advertisements sample the whole burst independently for each recipi
     for (g.state.peers) |*peer| peer.io.resetTx(&g.messages.store);
     g.state.registry.fanout(t).* = .initEmpty();
     const context = g.meshContext(1);
-    g.mesh_policy.takeSnapshot(&context);
-    g.emitGossip(t);
+    g.cycle.takeSnapshot(context.state, context.scores, context.now);
+    var snapshot_context = context;
+    snapshot_context.snapshot = &g.cycle.scores;
+    g.emitGossip(t, &snapshot_context);
     const first = g.state.peers[0].io.segment(&g.messages.store);
     const second = g.state.peers[1].io.segment(&g.messages.store);
     try std.testing.expect(first.len > 0 and second.len > 0);
