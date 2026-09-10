@@ -422,7 +422,7 @@ pub const Snapshot = struct {
         try scalar(w, "gossipsub_message_decode_total", .counter, "Snappy body decode attempts", self.gossip_decoded);
         try self.gossip_recovery.write(w);
         try scalar(w, "gossipsub_rpc_recv_err_count_total", .counter, "Malformed incoming RPC frames or protobuf items", self.gossip_counts.malformed_rpcs);
-        try scalar(w, "gossipsub_iwant_promise_broken", .counter, "Sent per-peer IWANT promises that expired without a message", self.gossip_counts.broken_promises);
+        try scalar(w, "gossipsub_iwant_promise_broken", .counter, "Randomly sampled IWANT batch promises that expired without their sampled message", self.gossip_counts.broken_promises);
         try scalar(w, "gossipsub_mcache_size", .gauge, "Stored message history entries", self.gossip_history);
         try family(w, "gossipsub_cache_size", .gauge, "Native bounded cache entry counts");
         try sample(w, "gossipsub_cache_size", "cache", "seenCache", self.gossip_seen);

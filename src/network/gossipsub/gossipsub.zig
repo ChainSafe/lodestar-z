@@ -1389,7 +1389,7 @@ pub const Gossipsub = struct {
         protobuf.beginIwantRpc(&writer, count, constants.message_id_length);
         for (wanted[0..count]) |id| protobuf.writeIwantId(&writer, &id);
         if (io.appendControl(writer.written(), false, .iwant, now.mono_ms)) |token| {
-            for (wanted[0..count]) |id| self.addPromise(id, index, token);
+            self.recovery.addBatch(&self.peers, wanted[0..count], self.logical(index), self.state.peers[index].conn, token, self.mesh_policy.rng.random().uintLessThan(usize, count));
             io.iwant_ids_sent += @intCast(count);
             self.counters.iwant_sent += 1;
         } else self.counters.send_dropped += 1;
@@ -1698,10 +1698,10 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
     const io = &g.io.peers[peer.index];
     const first = io.segment(&g.store);
     _ = io.advance(&g.store, 1);
-    try std.testing.expect(g.recovery.promises[0].expiry == null);
+    try std.testing.expect(g.recovery.batches[0].expiry == null);
     const token = io.advance(&g.store, first.len - 1).?;
     g.controlSent(peer.index, token, 10_000);
-    try std.testing.expectEqual(@as(?u64, 13_000), g.recovery.promises[0].expiry);
+    try std.testing.expectEqual(@as(?u64, 13_000), g.recovery.batches[0].expiry);
     var empty: [0]Event = .{};
     try std.testing.expectEqual(@as(?usize, null), try testMessage(&g, peer.index, "held behind host pressure", 11_000, &empty));
     g.expirePromises(14_000);
@@ -1995,7 +1995,7 @@ test "gossip policy sent promise survives reconnect without token rearming" {
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     const next = g.addPeer(.{ .index = 0, .generation = 2 }, .v1_2, &metadata, now).admitted;
     g.controlSent(next.index, 9, 2000);
-    try std.testing.expectEqual(@as(?u64, 3010), g.recovery.promises[0].expiry);
+    try std.testing.expectEqual(@as(?u64, 3010), g.recovery.batches[0].expiry);
     g.expirePromises(3010);
     try std.testing.expectEqual(@as(u64, 1), g.counters.broken_promises);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[ref.index].pins);
