@@ -880,17 +880,20 @@ pub const EpochCache = struct {
     /// this is used at fork boundary from phase0 to altair
     pub fn setSyncCommitteesIndexed(self: *EpochCache, next_sync_committee_indices: []const ValidatorIndex) !void {
         // both current and next sync committee are set to the same value at fork boundary
-        var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
-        errdefer next_sync_committee_indexed.deinit();
+        const next_sync_committee_indexed_rc = blk: {
+            var next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
+            errdefer next_sync_committee_indexed.deinit();
 
-        const next_sync_committee_indexed_rc = try SyncCommitteeCacheRc.init(self.allocator, next_sync_committee_indexed);
+            break :blk try SyncCommitteeCacheRc.init(self.allocator, next_sync_committee_indexed);
+        };
         errdefer next_sync_committee_indexed_rc.unref();
 
-        var current_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
-        errdefer current_sync_committee_indexed.deinit();
+        const current_sync_committee_indexed_rc = blk: {
+            var current_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(self.allocator, next_sync_committee_indices);
+            errdefer current_sync_committee_indexed.deinit();
 
-        const current_sync_committee_indexed_rc = try SyncCommitteeCacheRc.init(self.allocator, current_sync_committee_indexed);
-        errdefer current_sync_committee_indexed_rc.unref();
+            break :blk try SyncCommitteeCacheRc.init(self.allocator, current_sync_committee_indexed);
+        };
 
         self.next_sync_committee_indexed.unref();
         self.next_sync_committee_indexed = next_sync_committee_indexed_rc;
