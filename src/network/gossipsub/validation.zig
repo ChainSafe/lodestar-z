@@ -94,6 +94,7 @@ pub const Validation = struct {
         owner: ?*Validation,
         index: u32,
         record: u32,
+        previous: ?u32,
 
         pub fn cancel(self: *Reservation) void {
             const owner = self.owner orelse return;
@@ -109,12 +110,12 @@ pub const Validation = struct {
             const record = &owner.recent[self.record];
             assert(entry.reserved and record.reserved and topic.generation > 0);
             const id = store.get(message).?.id;
-            for (owner.recent, 0..) |*prior, index| {
-                if (index == self.record or prior.state == .free or !std.mem.eql(u8, &prior.id, &id)) continue;
-                assert(!prior.reserved and prior.state != .pending);
+            if (self.previous) |index| if (index != self.record) {
+                const prior = &owner.recent[index];
+                assert(!prior.reserved and prior.state == .resolved and std.mem.eql(u8, &prior.id, &id));
                 releaseAttribution(prior, peers);
                 prior.state = .free;
-            }
+            };
             if (record.pinned and now < record.until and !std.mem.eql(u8, &record.id, &id)) owner.delivery_evictions +|= 1;
             releaseAttribution(record, peers);
             const handle: Handle = .{ .index = self.index, .generation = entry.generation + 1 };
@@ -131,11 +132,14 @@ pub const Validation = struct {
     /// outcomes. Cancellation leaves them intact if payload admission fails.
     /// Commit or cancel in the same owner call, before another validation mutation.
     pub fn reserve(self: *Validation, id: topic_mod.MessageId) ?Reservation {
-        for (self.recent) |*record| {
+        var previous_record: ?u32 = null;
+        for (self.recent, 0..) |*record, index| {
             if (record.state == .free or !std.mem.eql(u8, &record.id, &id)) continue;
             if (record.reserved or record.state == .pending) return null;
             const previous = &self.entries[record.handle.index];
             if (previous.generation == record.handle.generation and previous.generation < std.math.maxInt(u64)) self.cursor = record.handle.index;
+            previous_record = @intCast(index);
+            break;
         }
         for (0..self.entries.len) |_| {
             const index = self.cursor;
@@ -144,7 +148,7 @@ pub const Validation = struct {
             if (e.reserved or e.state == .pending or e.generation == std.math.maxInt(u64)) continue;
             const record = self.reserveAttribution();
             e.reserved = true;
-            return .{ .owner = self, .index = @intCast(index), .record = record };
+            return .{ .owner = self, .index = @intCast(index), .record = record, .previous = previous_record };
         }
         return null;
     }
