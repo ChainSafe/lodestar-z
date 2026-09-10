@@ -147,13 +147,22 @@ pub const PublicKey = struct {
     }
 
     /// Serializes this public key to bytes.
-    pub fn toBytes(self: *const PublicKey, compress: ?js.Boolean) !js.Uint8Array {
+    pub fn toBytes(self: *const PublicKey, compress: ?js.Boolean) !js.OwnedUint8Array {
+        const c_allocator = js.allocator();
+
         if (try boolOrDefault(compress, true)) {
-            const bytes = self.raw.compress();
-            return js.Uint8Array.fromExternal(bytes[0..]);
+            const bytes = try c_allocator.alloc(u8, NativePublicKey.COMPRESS_SIZE);
+            errdefer c_allocator.free(bytes);
+
+            bls.c.blst_p1_affine_compress(bytes.ptr, &self.raw.point);
+            return js.OwnedUint8Array.fromOwnedSlice(c_allocator, bytes);
         }
-        const bytes = self.raw.serialize();
-        return js.Uint8Array.fromExternal(bytes[0..]);
+
+        const bytes = try c_allocator.alloc(u8, NativePublicKey.SERIALIZE_SIZE);
+        errdefer c_allocator.free(bytes);
+
+        bls.c.blst_p1_affine_serialize(bytes.ptr, &self.raw.point);
+        return js.OwnedUint8Array.fromOwnedSlice(c_allocator, bytes);
     }
 
     pub fn toHex(self: *const PublicKey, compress: ?js.Boolean) !js.String {
@@ -228,13 +237,22 @@ pub const Signature = struct {
     }
 
     /// Serializes this signature to bytes.
-    pub fn toBytes(self: *const Signature, compress: ?js.Boolean) !js.Uint8Array {
+    pub fn toBytes(self: *const Signature, compress: ?js.Boolean) !js.OwnedUint8Array {
+        const c_allocator = js.allocator();
+
         if (try boolOrDefault(compress, true)) {
-            const bytes = self.raw.compress();
-            return js.Uint8Array.fromExternal(bytes[0..]);
+            const bytes = try c_allocator.alloc(u8, NativeSignature.COMPRESS_SIZE);
+            errdefer c_allocator.free(bytes);
+
+            bls.c.blst_p2_affine_compress(bytes.ptr, &self.raw.point);
+            return js.OwnedUint8Array.fromOwnedSlice(c_allocator, bytes);
         }
-        const bytes = self.raw.serialize();
-        return js.Uint8Array.fromExternal(bytes[0..]);
+
+        const bytes = try c_allocator.alloc(u8, NativeSignature.SERIALIZE_SIZE);
+        errdefer c_allocator.free(bytes);
+
+        bls.c.blst_p2_affine_serialize(bytes.ptr, &self.raw.point);
+        return js.OwnedUint8Array.fromOwnedSlice(c_allocator, bytes);
     }
 
     pub fn toHex(self: *const Signature, compress: ?js.Boolean) !js.String {
@@ -323,9 +341,14 @@ pub const SecretKey = struct {
     }
 
     /// Serializes the SecretKey to bytes (32 bytes).
-    pub fn toBytes(self: *const SecretKey) !js.Uint8Array {
-        const bytes = self.raw.serialize();
-        return js.Uint8Array.fromExternal(bytes[0..]);
+    pub fn toBytes(self: *const SecretKey) !js.OwnedUint8Array {
+        const c_allocator = js.allocator();
+
+        const bytes = try c_allocator.alloc(u8, NativeSecretKey.serialize_size);
+        errdefer c_allocator.free(bytes);
+
+        bls.c.blst_bendian_from_scalar(bytes.ptr, &self.raw.value);
+        return js.OwnedUint8Array.fromOwnedSlice(c_allocator, bytes);
     }
 
     pub fn toHex(self: *const SecretKey) !js.String {
