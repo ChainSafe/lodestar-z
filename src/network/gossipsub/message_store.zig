@@ -5,6 +5,9 @@ const constants = @import("constants.zig");
 const assert = std.debug.assert;
 
 pub const page_bytes: usize = 4096;
+comptime {
+    assert(topic.topic_max_len < 128);
+}
 pub const none: u32 = std.math.maxInt(u32);
 pub const Handle = struct { index: u32, generation: u64 };
 pub const Cursor = struct { page: u32, offset: u32 = 0, remaining: u32 };
