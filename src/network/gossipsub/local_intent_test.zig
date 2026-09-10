@@ -91,13 +91,13 @@ test "local intent separate validation control score backoff and generation pins
     const logical = g.state.peers[peer.index].logical;
     const io = &g.state.peers[peer.index].io;
     const desired = [_]local.Subscription{.{ .name = next, .params = .{ .weight = 2 } }};
-    const message = g.store.put([_]u8{1} ** 20, name, "payload").?;
-    const handle = g.validation.admit(&g.store, &g.peers, message, logical, 0, now.mono_ms);
-    g.store.seal(message);
+    const message = g.messages.store.put([_]u8{1} ** 20, name, "payload").?;
+    const handle = g.messages.validation.admit(&g.messages.store, &g.peers, message, logical, 0, now.mono_ms);
+    g.messages.store.seal(message);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.validation.finish(&g.store, &g.peers, handle, .ignore, now.mono_ms);
+    g.messages.validation.finish(&g.messages.store, &g.peers, handle, .ignore, now.mono_ms);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.validation.expire(&g.store, &g.peers, std.math.maxInt(u64));
+    g.messages.validation.expire(&g.messages.store, &g.peers, std.math.maxInt(u64));
     io.subscription_dirty.set(0);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     io.subscription_dirty.unset(0);
@@ -137,22 +137,22 @@ test "local intent history survives former row reuse and real retransmission des
     unavailableExcept(&g, 1);
     _ = try g.publish(name, "history payload", now);
     const id = topic.validMessageId(name, "history payload", .{});
-    const retained = g.mcache.get(&g.store, id).?.message;
+    const retained = g.messages.history.get(&g.messages.store, id).?.message;
     try std.testing.expect(try apply(&g, w, &.{.{ .name = next, .params = .{} }}));
     try std.testing.expectEqualStrings(next, g.state.registry.topicString(0));
-    const entry = g.store.get(retained).?;
+    const entry = g.messages.store.get(retained).?;
     try std.testing.expectEqualStrings(name, entry.topicString());
     var payload: [64]u8 = undefined;
-    const read = try @import("snappy").raw.uncompress(g.store.segment(retained, g.store.cursor(retained)), &payload);
+    const read = try @import("snappy").raw.uncompress(g.messages.store.segment(retained, g.messages.store.cursor(retained)), &payload);
     try std.testing.expectEqualStrings("history payload", payload[0..read]);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const io = &g.state.peers[peer.index].io;
-    const cached = g.mcache.get(&g.store, id).?;
-    try std.testing.expect(g.mcache.iwantAllowed(cached, g.state.peers[peer.index].logical, @import("constants.zig").gossip_retransmission));
-    try std.testing.expectEqual(.queued, io.queueData(&g.store, retained, g.options.tx_peer_bytes, now.mono_ms));
+    const cached = g.messages.history.get(&g.messages.store, id).?;
+    try std.testing.expect(g.messages.history.iwantAllowed(cached, g.state.peers[peer.index].logical, @import("constants.zig").gossip_retransmission));
+    try std.testing.expectEqual(.queued, io.queueData(&g.messages.store, retained, g.options.tx_peer_bytes, now.mono_ms));
     try std.testing.expectEqual(retained, io.data[io.data_head].message);
-    try std.testing.expectEqualStrings(name, g.store.get(io.data[io.data_head].message).?.topicString());
-    try std.testing.expect(io.segment(&g.store).len > 0);
+    try std.testing.expectEqualStrings(name, g.messages.store.get(io.data[io.data_head].message).?.topicString());
+    try std.testing.expect(io.segment(&g.messages.store).len > 0);
 }
 
 test "local intent copies retired row input before another assignment reuses it" {

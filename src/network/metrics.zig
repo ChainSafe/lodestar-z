@@ -64,6 +64,8 @@ pub const Snapshot = struct {
     gossip_seen: usize = 0,
     gossip_fast_hits: u64 = 0,
     gossip_decoded: u64 = 0,
+    gossip_recent: usize = 0,
+    gossip_delivery_evictions: u64 = 0,
     gossip_history: usize = 0,
     gossip_resources: ?gossip.ResourceSnapshot = null,
     closed: [@typeInfo(peer_types.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
@@ -107,10 +109,13 @@ pub const Snapshot = struct {
         self.gossip_topics = g.topic_metrics;
         self.gossip_rpc = g.rpc_metrics;
         self.gossip_recovery = g.recovery.metrics;
-        self.gossip_seen = g.seen.count;
-        self.gossip_fast_hits = g.validation.fast_hits;
-        self.gossip_decoded = g.validation.decoded_messages;
-        self.gossip_history = g.mcache.count;
+        self.gossip_seen = g.messages.seen.count;
+        self.gossip_fast_hits = g.messages.validation.fast_hits;
+        self.gossip_decoded = g.messages.validation.decoded_messages;
+        self.gossip_recent = 0;
+        for (g.messages.validation.recent) |*record| self.gossip_recent += @intFromBool(record.state != .free);
+        self.gossip_delivery_evictions = g.messages.validation.delivery_evictions;
+        self.gossip_history = g.messages.history.count;
         self.gossip_resources = g.resourceSnapshot();
         self.closed = core.control.counters.closed;
         self.identify_started = core.control.counters.identify_started;
@@ -421,6 +426,7 @@ pub const Snapshot = struct {
         try self.gossip_rpc.write(w);
         try scalar(w, "gossipsub_fast_message_id_hits_total", .counter, "Exact compressed fingerprints avoiding repeated decompression", self.gossip_fast_hits);
         try scalar(w, "gossipsub_message_decode_total", .counter, "Snappy body decode attempts", self.gossip_decoded);
+        try scalar(w, "gossipsub_delivery_attribution_evictions_total", .counter, "Resolved delivery records replaced before their attribution deadline", self.gossip_delivery_evictions);
         try self.gossip_recovery.write(w);
         try scalar(w, "gossipsub_rpc_recv_err_count_total", .counter, "Malformed incoming RPC frames or protobuf items", self.gossip_counts.malformed_rpcs);
         try scalar(w, "gossipsub_iwant_promise_broken", .counter, "Randomly sampled IWANT batch promises that expired without their sampled message", self.gossip_counts.broken_promises);
@@ -428,6 +434,7 @@ pub const Snapshot = struct {
         try family(w, "gossipsub_cache_size", .gauge, "Native bounded cache entry counts");
         try sample(w, "gossipsub_cache_size", "cache", "seenCache", self.gossip_seen);
         try sample(w, "gossipsub_cache_size", "cache", "mcache", self.gossip_history);
+        try sample(w, "gossipsub_cache_size", "cache", "deliveryCache", self.gossip_recent);
         try sample(w, "gossipsub_cache_size", "cache", "gossipTracer.promises", if (self.gossip_resources) |r| r.promises else @as(usize, 0));
         try scalar(w, "gossipsub_rpc_recv_count_total", .counter, "Complete received gossip RPCs", self.gossip_counts.rpcs_received);
         try family(w, "gossipsub_async_validation_delay_from_first_seen", .histogram, "Seconds from native gossip admission until an applied validation verdict");

@@ -9,23 +9,23 @@ test "publication refusal retry duplicate and exact expiry preserve admission" {
     defer g.deinit();
     const id = topic_mod.validMessageId(topic, "local", .{});
     try std.testing.expectError(error.NoPeersSubscribedToTopic, g.publishWithOptions(topic, "local", .{ .allow_zero_peers = false }, .{ .mono_ms = 10, .unix_s = 0 }));
-    try std.testing.expect(!g.seen.contains(id, 10));
-    try std.testing.expectEqual(@as(usize, 0), g.mcache.count);
+    try std.testing.expect(!g.messages.seen.contains(id, 10));
+    try std.testing.expectEqual(@as(usize, 0), g.messages.history.count);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const t = g.state.registry.findTopic(topic).?;
     g.state.registry.setSubscription(t, peer.index, true);
     g.markDirect(g.state.peers[peer.index].conn);
     const admitted = try g.publishWithOptions(topic, "local", .{ .allow_zero_peers = false }, .{ .mono_ms = 11, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .unavailable = 1 }, admitted);
-    const retained = g.mcache.get(&g.store, id).?.message;
-    const tx_before = g.store.get(retained).?.tx;
-    const seen_at = g.seen.added_ms[g.seen.tail];
+    const retained = g.messages.history.get(&g.messages.store, id).?.message;
+    const tx_before = g.messages.store.get(retained).?.tx;
+    const seen_at = g.messages.seen.added_ms[g.messages.seen.tail];
     const fanout_at = g.state.registry.rows[t].fanout_last_ms;
     try std.testing.expectError(error.Duplicate, g.publish(topic, "local", .{ .mono_ms = 20, .unix_s = 0 }));
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .duplicate = true }, try g.publishWithOptions(topic, "local", .{ .ignore_duplicate = true }, .{ .mono_ms = 110, .unix_s = 0 }));
-    try std.testing.expectEqual(retained, g.mcache.get(&g.store, id).?.message);
-    try std.testing.expectEqual(tx_before, g.store.get(retained).?.tx);
-    try std.testing.expectEqual(seen_at, g.seen.added_ms[g.seen.tail]);
+    try std.testing.expectEqual(retained, g.messages.history.get(&g.messages.store, id).?.message);
+    try std.testing.expectEqual(tx_before, g.messages.store.get(retained).?.tx);
+    try std.testing.expectEqual(seen_at, g.messages.seen.added_ms[g.messages.seen.tail]);
     try std.testing.expectEqual(fanout_at, g.state.registry.rows[t].fanout_last_ms);
     try std.testing.expectEqual(@as(u64, 1), g.counters.messages_published);
     _ = try g.publish(topic, "local", .{ .mono_ms = 111, .unix_s = 0 });
@@ -57,9 +57,9 @@ test "publication recipient policy tops up without graft and accounts unique sha
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 9, .queued = 8, .unavailable = 1 }, outcome);
     try std.testing.expectEqual(@as(usize, 3), g.state.registry.mesh(t).count());
     const id = topic_mod.validMessageId(topic, "short mesh", .{});
-    const h = g.mcache.get(&g.store, id).?.message;
-    try std.testing.expectEqual(@as(usize, 1), g.store.used_entries);
-    try std.testing.expectEqual(@as(u32, 8), g.store.get(h).?.tx);
+    const h = g.messages.history.get(&g.messages.store, id).?.message;
+    try std.testing.expectEqual(@as(usize, 1), g.messages.store.used_entries);
+    try std.testing.expectEqual(@as(u32, 8), g.messages.store.get(h).?.tx);
     for (g.state.peers[0..12], 0..) |*peer, index| {
         const io = &peer.io;
         try std.testing.expectEqual(@as(usize, 0), io.critical.used);
@@ -67,10 +67,10 @@ test "publication recipient policy tops up without graft and accounts unique sha
             try std.testing.expectEqual(@as(usize, 1), io.data_count);
             try std.testing.expectEqual(h, io.data[io.data_head].message);
         } else try std.testing.expectEqual(@as(usize, 0), io.data_count);
-        io.resetTx(&g.store);
+        io.resetTx(&g.messages.store);
     }
     g.state.peers[2].outbound = .{ .waiting = 0 };
-    for (0..g.state.peers[3].io.data.len) |_| try std.testing.expectEqual(.queued, g.state.peers[3].io.queueData(&g.store, h, g.options.tx_peer_bytes, 2));
+    for (0..g.state.peers[3].io.data.len) |_| try std.testing.expectEqual(.queued, g.state.peers[3].io.queueData(&g.messages.store, h, g.options.tx_peer_bytes, 2));
     const flood = try g.publishWithOptions(topic, "flood", .{ .flood = true }, .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 10, .queued = 6, .pressured = 1, .unavailable = 3 }, flood);
 }
@@ -83,8 +83,8 @@ test "publication failed history admission retains payloads and recovery attribu
     var retained: [2]@import("message_store.zig").Handle = undefined;
     for ([_][]const u8{ "retained zero", "retained one" }, &retained) |payload, *h| {
         _ = try g.publish(topic, payload, .{ .mono_ms = 1, .unix_s = 0 });
-        h.* = g.mcache.get(&g.store, topic_mod.validMessageId(topic, payload, .{})).?.message;
-        try std.testing.expectEqual(.queued, g.state.peers[peer.index].io.queueData(&g.store, h.*, g.options.tx_peer_bytes, 1));
+        h.* = g.messages.history.get(&g.messages.store, topic_mod.validMessageId(topic, payload, .{})).?.message;
+        try std.testing.expectEqual(.queued, g.state.peers[peer.index].io.queueData(&g.messages.store, h.*, g.options.tx_peer_bytes, 1));
     }
     const id = topic_mod.validMessageId(topic, "retry", .{});
     const logical = g.state.peers[peer.index].logical;
@@ -95,18 +95,18 @@ test "publication failed history admission retains payloads and recovery attribu
     g.recovery.add(&g.peers, id, second_logical, second_conn, 2);
     g.recovery.controlSent(conn, 1, 12_000, 1);
     try std.testing.expectError(error.ResourceExhausted, g.publish(topic, "retry", .{ .mono_ms = 2, .unix_s = 0 }));
-    try std.testing.expect(!g.seen.contains(id, 2));
+    try std.testing.expect(!g.messages.seen.contains(id, 2));
     try std.testing.expectEqual(@as(usize, 2), g.recovery.len);
     try std.testing.expectEqual(@as(?u64, 12_001), g.recovery.nextExpiry());
     try std.testing.expectEqual(@as(u32, 1), g.peers.rows[logical.index].pins);
     try std.testing.expectEqual(@as(u32, 1), g.peers.rows[second_logical.index].pins);
     for (retained, [_][]const u8{ "retained zero", "retained one" }) |h, expected| {
-        try std.testing.expectEqual(@as(u32, 1), g.store.get(h).?.tx);
+        try std.testing.expectEqual(@as(u32, 1), g.messages.store.get(h).?.tx);
         var decoded: [32]u8 = undefined;
-        const size = try @import("snappy").raw.uncompress(g.store.segment(h, g.store.cursor(h)), &decoded);
+        const size = try @import("snappy").raw.uncompress(g.messages.store.segment(h, g.messages.store.cursor(h)), &decoded);
         try std.testing.expectEqualStrings(expected, decoded[0..size]);
     }
-    g.state.peers[peer.index].io.resetTx(&g.store);
+    g.state.peers[peer.index].io.resetTx(&g.messages.store);
     _ = try g.publish(topic, "retry", .{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[logical.index].pins);
@@ -137,7 +137,7 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
     _ = try g.publish(topic, "reuse fanout", .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expectEqual(fanout, g.state.registry.fanout(t).*);
     for (0..8) |index| g.state.registry.mesh(t).set(index);
-    for (g.state.peers) |*peer| peer.io.resetTx(&g.store);
+    for (g.state.peers) |*peer| peer.io.resetTx(&g.messages.store);
     const full = try g.publish(topic, "full mesh", .{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 8, .queued = 8 }, full);
     for (g.state.peers[0..10], 0..) |*peer, index| try std.testing.expectEqual(@as(usize, if (index < 8) 1 else 0), peer.io.data_count);
