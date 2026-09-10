@@ -183,7 +183,6 @@ pub fn stateTransition(
         allocator.destroy(post_cached_state);
     }
 
-    try metrics.state_transition.onStateClone(post_cached_state, .state_transition);
     metrics.state_transition.pre_state_cloned_count.observe(cached_state.cloned_count);
 
     try processSlots(
