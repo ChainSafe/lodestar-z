@@ -488,13 +488,8 @@ pub const EpochTransitionCache = struct {
             try indices_eligible_for_activation.append(allocator, activation.validator_index);
         }
 
-        // Indices are ascending; validator-indexed penalties need a length of the last index plus one.
-        const slashing_penalties_length: usize = if (indices_to_slash.items.len == 0)
-            0
-        else
-            @intCast(indices_to_slash.items[indices_to_slash.items.len - 1] + 1);
         // Resizing to zero clears the previous epoch's length while retaining capacity.
-        try reused_cache.slashing_penalties.resize(reused_cache.allocator, slashing_penalties_length);
+        try reused_cache.slashing_penalties.resize(reused_cache.allocator, indices_to_slash.items.len);
 
         return .{
             .prev_epoch = prev_epoch,

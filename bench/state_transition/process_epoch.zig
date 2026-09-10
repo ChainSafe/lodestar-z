@@ -135,7 +135,7 @@ fn ProcessSlashingsBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
-                true,
+                false,
             ) catch unreachable;
         }
     };
