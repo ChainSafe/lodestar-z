@@ -1,7 +1,6 @@
 //! Tests for `container.zig`.
 
 const std = @import("std");
-const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 const Node = @import("persistent_merkle_tree").Node;
 const container = @import("../type/container.zig");
 const FixedContainerType = container.FixedContainerType;
@@ -683,19 +682,8 @@ test "ContainerTreeView - serialize (with nested list)" {
 test "memory_safety: TreeView container setValue/commit - OOM does not double-free" {
     const new_root_bytes: [32]u8 = [_]u8{0xee} ** 32;
 
-    var saw_oom = false;
-    // Create the original view before enabling failures. The sweep then walks allocations made by
-    // setValue() and commit().
-    for (0..200) |fail_after| {
-        var oom = DoubleFreeDetectAllocator.init(
-            std.testing.allocator,
-            std.math.maxInt(usize),
-        );
-        defer oom.deinit();
-
-        var operation_succeeded = false;
-        {
-            const allocator = oom.allocator();
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
             var pool = try Node.Pool.init(.{
                 .page_allocator = std.testing.allocator,
                 .allocator = allocator,
@@ -704,38 +692,12 @@ test "memory_safety: TreeView container setValue/commit - OOM does not double-fr
             defer pool.deinit();
 
             const checkpoint: Checkpoint.Type = .{ .epoch = 1, .root = [_]u8{1} ** 32 };
-            const root_node = try Checkpoint.tree.fromValue(&pool, &checkpoint);
-            var view = try Checkpoint.TreeView.init(allocator, &pool, root_node);
+            var view = try Checkpoint.TreeView.fromValue(allocator, &pool, &checkpoint);
             defer view.deinit();
-
-            oom.failing.fail_index = oom.failing.alloc_index + fail_after;
-            var operation_error: ?anyerror = null;
-            view.setValue("root", &new_root_bytes) catch |err| {
-                operation_error = err;
-            };
-            if (operation_error == null) {
-                view.commit() catch |err| {
-                    operation_error = err;
-                };
-            }
-            if (operation_error) |err| {
-                switch (err) {
-                    error.OutOfMemory => saw_oom = true,
-                    else => return err,
-                }
-            } else {
-                operation_succeeded = true;
-            }
+            try view.setValue("root", &new_root_bytes);
+            try view.commit();
         }
-        // The child view, container view, and Pool have all completed cleanup at this point.
-        try std.testing.expect(!oom.double_free);
-
-        if (operation_succeeded) {
-            try std.testing.expect(saw_oom);
-            return;
-        }
-    }
-    return error.TestUnexpectedResult;
+    }.run, .{});
 }
 
 test "memory_safety: ContainerTreeView commit should reclaim basic nodes after pool exhaustion" {
@@ -876,19 +838,20 @@ test "memory_safety: ContainerTreeView retry should adopt a child committed befo
 
 test "memory_safety: TreeView container fromValue - view allocation OOM leaves no orphan pool nodes" {
     const checkpoint: Checkpoint.Type = .{ .epoch = 7, .root = [_]u8{7} ** 32 };
-    var failing = std.testing.FailingAllocator.init(
-        std.testing.allocator,
-        .{ .fail_index = 0 },
-    );
     var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 64 });
     defer pool.deinit();
 
-    const baseline = pool.getNodesInUse();
-    try std.testing.expectError(
-        error.OutOfMemory,
-        Checkpoint.TreeView.fromValue(failing.allocator(), &pool, &checkpoint),
-    );
-    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, input_pool: *Node.Pool, value: *const Checkpoint.Type) !void {
+            const baseline = input_pool.getNodesInUse();
+            const view = Checkpoint.TreeView.fromValue(allocator, input_pool, value) catch |err| {
+                try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
+                return err;
+            };
+            view.deinit();
+            try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
+        }
+    }.run, .{ &pool, &checkpoint });
 }
 
 test "memory_safety: TreeView container getFieldRoot on a dirty basic field leaves no orphan pool nodes" {
@@ -917,17 +880,18 @@ test "memory_safety: TreeView container deserialize - view allocation OOM leaves
     var bytes: [Checkpoint.fixed_size]u8 = undefined;
     _ = Checkpoint.serializeIntoBytes(&value, &bytes);
 
-    var failing = std.testing.FailingAllocator.init(
-        std.testing.allocator,
-        .{ .fail_index = 0 },
-    );
     var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 64 });
     defer pool.deinit();
 
-    const baseline = pool.getNodesInUse();
-    try std.testing.expectError(
-        error.OutOfMemory,
-        Checkpoint.TreeView.deserialize(failing.allocator(), &pool, &bytes),
-    );
-    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, input_pool: *Node.Pool, serialized: []const u8) !void {
+            const baseline = input_pool.getNodesInUse();
+            const view = Checkpoint.TreeView.deserialize(allocator, input_pool, serialized) catch |err| {
+                try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
+                return err;
+            };
+            view.deinit();
+            try std.testing.expectEqual(baseline, input_pool.getNodesInUse());
+        }
+    }.run, .{ &pool, &bytes });
 }

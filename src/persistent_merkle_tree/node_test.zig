@@ -958,30 +958,35 @@ test "memory_safety: setNodesGrouped should release an intermediate root when a 
 }
 
 test "memory_safety: createChunkedLeafEmpty should not consume slots or leak payloads on allocation failure" {
-    var failing = std.testing.FailingAllocator.init(
-        std.testing.allocator,
-        .{ .fail_index = 0 },
-    );
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var pool = try Node.Pool.init(.{
+                .page_allocator = std.testing.allocator,
+                .allocator = allocator,
+                .pool_size = 1,
+            });
+            defer pool.deinit();
+
+            const baseline = pool.getNodesInUse();
+            const leaf = pool.createChunkedLeafEmpty(1) catch |err| {
+                try std.testing.expectEqual(baseline, pool.getNodesInUse());
+                return err;
+            };
+            pool.unref(leaf);
+            try std.testing.expectEqual(baseline, pool.getNodesInUse());
+        }
+    }.run, .{});
+
     var pool = try Node.Pool.init(.{
         .page_allocator = std.testing.allocator,
-        .allocator = failing.allocator(),
+        .allocator = std.testing.allocator,
         .pool_size = 1,
     });
     defer pool.deinit();
-
-    // The first call fails before it can take a Pool slot.
-    const baseline = pool.getNodesInUse();
-    try std.testing.expectError(error.OutOfMemory, pool.createChunkedLeafEmpty(1));
-    try std.testing.expectEqual(baseline, pool.getNodesInUse());
-
-    // With the only slot occupied, the next call allocates its payload and then fails to attach
-    // it. The payload must be freed on the way out.
-    failing.fail_index = std.math.maxInt(usize);
     const leaf = try pool.createLeafFromUint(1);
     defer pool.unref(leaf);
 
     try std.testing.expectError(error.PoolExhausted, pool.createChunkedLeafEmpty(1));
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
 test "memory_safety: fillWithContents exhaustion should preserve inputs and restore pool slots" {
