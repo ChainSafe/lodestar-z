@@ -93,7 +93,7 @@ pub const Snapshot = struct {
     pub fn collect(self: *Snapshot, owner: *const network.NetworkCore, now_ms: u64) void {
         self.* = .{ .sampled_ms = now_ms, .running = true };
         const core = &owner.core;
-        const g = &core.service.gossipsub.inner;
+        const g = core.service.gossipsub.inner;
         self.runtime = owner.counters;
         self.transport = owner.transport.engine.counters;
         self.connections = owner.transport.engine.connection_metrics;
@@ -109,13 +109,13 @@ pub const Snapshot = struct {
         self.gossip_topics = g.topic_metrics;
         self.gossip_rpc = g.rpc_metrics;
         self.gossip_recovery = g.recovery.metrics;
-        self.gossip_seen = g.messages.seen.count;
-        self.gossip_fast_hits = g.messages.validation.fast_hits;
-        self.gossip_decoded = g.messages.validation.decoded_messages;
-        self.gossip_recent = 0;
-        for (g.messages.validation.recent) |*record| self.gossip_recent += @intFromBool(record.state != .free);
-        self.gossip_delivery_evictions = g.messages.validation.delivery_evictions;
-        self.gossip_history = g.messages.history.count;
+        const messages = g.messages.stats();
+        self.gossip_seen = messages.seen;
+        self.gossip_fast_hits = messages.fast_hits;
+        self.gossip_decoded = messages.decoded;
+        self.gossip_recent = messages.recent;
+        self.gossip_delivery_evictions = messages.delivery_evictions;
+        self.gossip_history = messages.history;
         self.gossip_resources = g.resourceSnapshot();
         self.closed = core.control.counters.closed;
         self.identify_started = core.control.counters.identify_started;

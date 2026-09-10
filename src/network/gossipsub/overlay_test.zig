@@ -31,7 +31,7 @@ test "gossip policy mesh trimming preserves highest scores and outbound quota" {
     var f = try Fixture.init(16);
     defer f.g.deinit();
     for (0..16) |peer| {
-        f.g.overlay.mesh(f.topic).set(peer);
+        f.g.overlay.rows[f.topic].mesh.set(peer);
         f.g.peers.scores.graft(@intCast(peer), f.topic, 1);
         if (peer < 4) try std.testing.expect(f.g.peers.scores.setAppScore(@intCast(peer), 100));
     }
@@ -49,7 +49,7 @@ test "gossip policy mesh trimming preserves highest scores and outbound quota" {
 test "gossip policy outbound repair applies inside mesh degree limits" {
     var f = try Fixture.init(10);
     defer f.g.deinit();
-    for (0..8) |peer| f.g.overlay.mesh(f.topic).set(peer);
+    for (0..8) |peer| f.g.overlay.rows[f.topic].mesh.set(peer);
     f.g.peers.rows[f.g.sessions.rows[8].logical.index].direction = .outbound;
     f.g.peers.rows[f.g.sessions.rows[9].logical.index].direction = .outbound;
     const context = f.context(2);
@@ -100,7 +100,7 @@ test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
         high_selected = true;
     };
     try std.testing.expect(high_selected);
-    f.g.overlay.setSubscribed(f.topic, false);
+    f.g.overlay.setLocal(&context, f.topic, false);
     for (f.g.sessions.rows) |*row| if (row.active) {
         row.outbound = .{ .live = .{ .conn = row.conn, .id = 2, .slot = 0 } };
     };
@@ -153,7 +153,7 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     try std.testing.expect(f.g.overlay.mesh(f.topic).isSet(0));
     f.g.overlay.expireActions(context.now, 30_000);
     try std.testing.expect(!f.g.overlay.retire.isSet(0));
-    f.g.overlay.mesh(f.topic).unset(0);
+    f.g.overlay.rows[f.topic].mesh.unset(0);
     f.g.peers.scores.prune(f.g.sessions.rows[0].logical.index, f.topic, context.now);
     f.g.overlay.retire.set(0);
     f.g.overlay.onGraft(&context, f.topic, 0);

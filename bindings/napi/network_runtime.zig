@@ -761,7 +761,7 @@ pub const Runtime = struct {
     }
     fn publishReady(self: *Runtime) !void {
         if (comptime faults.enabled) {
-            if (self.test_scenario == .gossip) faults.captureGossip(&self.heavy.?.core.core.service.gossipsub.inner, &self.heavy.?.core.core.local.fork);
+            if (self.test_scenario == .gossip) faults.captureGossip(self.heavy.?.core.core.service.gossipsub.inner, &self.heavy.?.core.core.local.fork);
         }
         const identity = try self.readIdentity();
         try self.startupBarrier(.before_ready);

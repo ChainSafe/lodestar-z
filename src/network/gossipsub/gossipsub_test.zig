@@ -476,7 +476,7 @@ test "gossipsub queues incompressible 64 KiB publish" {
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(topic));
-    g.overlay.mesh(g.overlay.findTopic(topic).?).set(peer.index);
+    g.overlay.rows[g.overlay.findTopic(topic).?].mesh.set(peer.index);
     var payload: [65536]u8 = undefined;
     var rng = std.Random.DefaultPrng.init(42);
     rng.random().bytes(&payload);
@@ -768,7 +768,7 @@ test "gossipsub frame and TX absolute residence survive steady byte progress" {
     for (0..4) |_| try setup.pumpOnce();
     try std.testing.expect(setup.server.sessions.rows[server_peer].io.large_slot != null);
     try std.testing.expect(setup.client.subscribe(test_topic));
-    setup.client.overlay.mesh(setup.client.overlay.findTopic(test_topic).?).set(client_peer);
+    setup.client.overlay.rows[setup.client.overlay.findTopic(test_topic).?].mesh.set(client_peer);
     _ = try setup.client.publish(test_topic, "held transmit payload", setup.pair.now);
     for (0..4) |_| try setup.pumpOnce();
     const began = setup.pair.now.mono_ms;
