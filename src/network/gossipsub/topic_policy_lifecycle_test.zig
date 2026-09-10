@@ -64,8 +64,7 @@ test "topic policy incoming lengths precede decode work arena store and validati
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     try std.testing.expect(g.subscribe(name));
-    var context: validation.Context = .{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .store = &g.store, .history = &g.mcache, .seen = &g.seen, .options = &g.options };
-    context.namespace = if (g.state.registry.namespace) |*ns| ns else null;
+    var context: validation.Context = .{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .store = &g.messages.store, .history = &g.messages.history, .seen = &g.messages.seen, .options = &g.options };
     var used: usize = 0;
     var peer_work: usize = 0;
     var work: usize = 10000;
@@ -76,20 +75,20 @@ test "topic policy incoming lengths precede decode work arena store and validati
     const payload: [21]u8 = @splat('x');
     for ([_]usize{ 9, 21 }) |size| {
         const len = try @import("snappy").raw.compress(payload[0..size], &compressed);
-        try std.testing.expectEqual(validation.Received{ .invalid = .ssz_size }, g.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = compressed[0..len] }, 1));
-        try std.testing.expectEqual(validation.Received{ .invalid = .ssz_size }, g.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = &.{@intCast(size)} }, 1));
+        try std.testing.expectEqual(validation.Received{ .invalid = .ssz_size }, g.messages.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = compressed[0..len] }, 1));
+        try std.testing.expectEqual(validation.Received{ .invalid = .ssz_size }, g.messages.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = &.{@intCast(size)} }, 1));
         try std.testing.expectEqual(@as(usize, 0), used);
         try std.testing.expectEqual(@as(usize, 0), peer_work);
         try std.testing.expectEqual(@as(usize, 10000), work);
         try std.testing.expect(!large_used);
-        try std.testing.expectEqual(@as(usize, 0), g.store.used_entries);
-        for (g.validation.entries) |entry| try std.testing.expect(entry.state == .free);
+        try std.testing.expectEqual(@as(usize, 0), g.messages.store.used_entries);
+        for (g.messages.validation.entries) |entry| try std.testing.expect(entry.state == .free);
         try std.testing.expectEqualSlices(u8, &(@as([1024]u8, @splat(0xaa))), &arena);
     }
     workspace.event_available = true;
     for ([_]usize{ 10, 20 }) |size| {
         const len = try @import("snappy").raw.compress(payload[0..size], &compressed);
-        const received = g.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = compressed[0..len] }, 1);
+        const received = g.messages.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = compressed[0..len] }, 1);
         try std.testing.expect(received == .admitted);
         try std.testing.expectEqualSlices(u8, payload[0..size], received.admitted.bytes);
         _ = g.report(received.admitted.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 });
@@ -102,7 +101,7 @@ test "topic policy local publication enforces both size bounds before state" {
     defer g.deinit();
     try std.testing.expectError(error.PayloadTooLarge, g.publish(name, "012345678901234567890", .{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectEqual(@as(usize, 0), live(&g));
-    try std.testing.expectEqual(@as(usize, 0), g.store.used_entries);
+    try std.testing.expectEqual(@as(usize, 0), g.messages.store.used_entries);
     try std.testing.expectError(error.UnknownTopic, g.publish(unknown, "", .{ .mono_ms = 1, .unix_s = 0 }));
     try std.testing.expectError(error.InvalidTopic, g.configureTopic(unknown, &.{}));
     try std.testing.expect(!g.subscribe(unknown));
@@ -164,9 +163,9 @@ test "topic policy real wire receives only bounded SSZ and keeps borrowed payloa
             for (pair.serverEvents()) |event| if (event == .message) {
                 try std.testing.expect(size == 10 or size == 20);
                 seen += 1;
-                const entry = &pair.server.validation.entries[event.message.handle.index];
+                const entry = pair.server.messages.validation.delivery(event.message.handle);
                 try std.testing.expectEqual(entry.admitted_ms, event.message.admitted_ms);
-                try std.testing.expectEqual(entry.deadline, event.message.deadline);
+                try std.testing.expectEqual(pair.server.messages.validation.entries[event.message.handle.index].state.pending.deadline, event.message.deadline);
                 try std.testing.expect(event.message.identity.eql(&pair.server.peers.rows[entry.source.index].identity));
                 try std.testing.expectEqualSlices(u8, payload[0..size], event.message.bytes);
                 try pair.server.configureTopic(event.message.topic, &.{ .weight = 2 });
@@ -253,14 +252,14 @@ test "topic policy remembered ordinals remain independent of retained validation
     try std.testing.expect(g.subscribe(name));
     const old = g.state.registry.findTopic(name).?;
     const generation = g.state.registry.rows[old].generation;
-    const context: validation.Context = .{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .store = &g.store, .history = &g.mcache, .seen = &g.seen, .options = &g.options, .namespace = &g.state.registry.namespace.? };
+    const context: validation.Context = .{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .store = &g.messages.store, .history = &g.messages.history, .seen = &g.messages.seen, .options = &g.options };
     var work: usize = 10000;
     var peer_work: usize = 0;
     var large_used = false;
     const workspace: validation.Workspace = .{ .arena = g.decompressed, .scratch = g.msg_scratch, .used = &g.decompressed_used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = true };
     var compressed: [64]u8 = undefined;
     const len = try @import("snappy").raw.compress("0123456789", &compressed);
-    const received = g.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = compressed[0..len] }, 1).admitted;
+    const received = g.messages.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = compressed[0..len] }, 1).admitted;
     try std.testing.expect(g.unsubscribe(name));
     g.state.peers[peer.index].io.subscription_dirty.unset(old);
     var buffer: [@import("topic.zig").topic_max_len]u8 = undefined;
@@ -275,7 +274,7 @@ test "topic policy remembered ordinals remain independent of retained validation
     try std.testing.expectEqualStrings("0123456789", received.bytes);
     try std.testing.expectEqual(gossip.ReportOutcome{ .applied = .ignore }, g.report(received.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expectError(error.TopicCapacity, g.configureTopic(replacement, &.{}));
-    g.validation.expire(&g.store, &g.peers, 100000);
+    g.messages.validation.expire(&g.messages.store, &g.peers, 100000);
     try g.configureTopic(replacement, &.{});
     try std.testing.expectEqual(old, g.state.registry.findTopic(replacement).?);
     try std.testing.expectEqual(generation + 1, g.state.registry.rows[old].generation);

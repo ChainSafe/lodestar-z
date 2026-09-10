@@ -14,12 +14,19 @@ pub const duplicates_max = 16;
 pub const Duplicate = struct { peer: PeerRef, eligible: bool };
 pub const Entry = struct {
     generation: u64 = 0,
-    state: enum { free, pending, resolved, expired } = .free,
-    deadline: u64 = 0,
-    tombstone_until: u64 = 0,
+    state: union(enum) {
+        free,
+        pending: struct { message: storage.Handle, delivery: u32, deadline: u64 },
+        resolved: u64,
+        expired: u64,
+    } = .free,
+};
+
+pub const Delivery = struct {
+    handle: Handle = undefined,
+    state: enum { free, pending, resolved } = .free,
+    until: u64 = 0,
     verdict: Verdict = .ignore,
-    superseded: bool = false,
-    message: storage.Handle = undefined,
     id: topic_mod.MessageId = undefined,
     source: PeerRef = undefined,
     topic: u16 = 0,
@@ -42,7 +49,6 @@ pub const MessageEvent = struct {
     deadline: u64,
 };
 pub const Context = struct {
-    namespace: ?*const @import("topic_policy.zig").Namespace = null,
     state: *@import("state.zig").State,
     peers: *Peers,
     scores: *@import("score.zig").PeerScore,
@@ -62,9 +68,34 @@ pub const Workspace = struct {
 };
 pub const InvalidReason = enum { signed, compressed_size, ssz_size, snappy };
 pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: topic_mod.MessageId, admitted: MessageEvent, blocked: enum { events, storage, work } };
-pub const Report = struct {
-    outcome: Outcome,
+pub const Applied = struct {
+    verdict: Verdict,
+    id: topic_mod.MessageId,
+    source: @import("../wire/peer_id.zig").PeerId,
+    admitted_ms: u64,
+    topic_bytes: [topic_mod.topic_max_len]u8,
+    topic_len: u8,
     forward: ?struct { message: storage.Handle, source: PeerRef, topic: u16 } = null,
+
+    pub fn topicString(self: *const Applied) []const u8 {
+        return self.topic_bytes[0..self.topic_len];
+    }
+};
+
+pub const Report = union(enum) {
+    applied: Applied,
+    already_resolved,
+    expired,
+    stale_handle,
+
+    pub fn outcome(self: *const Report) Outcome {
+        return switch (self.*) {
+            .applied => |applied| .{ .applied = applied.verdict },
+            .already_resolved => .already_resolved,
+            .expired => .expired,
+            .stale_handle => .stale_handle,
+        };
+    }
 };
 
 const FastEntry = struct {
@@ -74,6 +105,9 @@ const FastEntry = struct {
 
 pub const Validation = struct {
     entries: []Entry,
+    recent: []Delivery,
+    recent_cursor: usize = 0,
+    delivery_evictions: u64 = 0,
     fast: []FastEntry,
     fast_hits: u64 = 0,
     decoded_messages: u64 = 0,
@@ -82,7 +116,7 @@ pub const Validation = struct {
     tombstone_ms: u64,
 
     pub fn receive(self: *Validation, context: *const Context, workspace: *const Workspace, peer: u16, msg: protobuf.Message, now: u64) Received {
-        const rule = if (context.namespace) |ns| (ns.lookup(msg.topic) orelse return .ignored).rule else null;
+        const rule = if (context.state.registry.namespace) |*ns| (ns.lookup(msg.topic) orelse return .ignored).rule else null;
         const topic = context.state.registry.findTopic(msg.topic) orelse return .ignored;
         if (!context.state.registry.subscribed(topic)) return .ignored;
         if (msg.signed) return invalid(context, peer, topic, .signed);
@@ -149,26 +183,34 @@ pub const Validation = struct {
     fn commit(self: *Validation, context: *const Context, workspace: *const Workspace, peer: u16, topic: u16, msg: protobuf.Message, id: topic_mod.MessageId, written: usize, now: u64) Received {
         const message = context.history.admitPayload(context.store, id, msg.topic, msg.data) orelse return .{ .blocked = .storage };
         const handle = self.admit(context.store, context.peers, message, context.state.peers[peer].logical, topic, now);
-        self.entries[handle.index].source_eligible = context.state.registry.mesh(topic).isSet(peer);
-        self.entries[handle.index].topic_generation = context.state.registry.rows[topic].generation;
+        self.delivery(handle).source_eligible = context.state.registry.mesh(topic).isSet(peer);
+        self.delivery(handle).topic_generation = context.state.registry.rows[topic].generation;
         context.store.seal(message);
         const room = workspace.arena[workspace.used.*..];
         @memcpy(room[written..][0..msg.topic.len], msg.topic);
         workspace.used.* += written + msg.topic.len;
         _ = context.seen.add(id, now);
-        const entry = &self.entries[handle.index];
+        const entry = self.delivery(handle);
         assert(context.peers.matches(entry.source));
-        return .{ .admitted = .{ .identity = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .deadline = entry.deadline, .handle = handle, .id = id, .peer = context.state.peers[peer].conn, .topic = room[written..][0..msg.topic.len], .bytes = room[0..written] } };
+        return .{ .admitted = .{ .identity = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .deadline = self.entries[handle.index].state.pending.deadline, .handle = handle, .id = id, .peer = context.state.peers[peer].conn, .topic = room[written..][0..msg.topic.len], .bytes = room[0..written] } };
     }
 
     pub fn report(self: *Validation, context: *const Context, handle: Handle, verdict: Verdict, now: u64) Report {
-        if (self.inspect(context.store, context.peers, handle, now)) |outcome| return .{ .outcome = outcome };
-        const entry = &self.entries[handle.index];
+        if (self.inspect(context.store, context.peers, handle, now)) |outcome| return switch (outcome) {
+            .already_resolved => .already_resolved,
+            .expired => .expired,
+            .stale_handle => .stale_handle,
+            .applied => unreachable,
+        };
+        const entry = self.delivery(handle);
         assert(context.state.registry.rows[entry.topic].generation == entry.topic_generation);
-        var result: Report = .{ .outcome = .{ .applied = verdict } };
+        const message = self.entries[handle.index].state.pending.message;
+        const name = context.state.registry.topicString(entry.topic);
+        var result: Applied = .{ .verdict = verdict, .id = entry.id, .source = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .topic_bytes = undefined, .topic_len = @intCast(name.len) };
+        @memcpy(result.topic_bytes[0..name.len], name);
         if (verdict == .accept) {
-            context.history.put(context.store, entry.message);
-            if (context.state.registry.subscribed(entry.topic)) result.forward = .{ .message = entry.message, .source = entry.source, .topic = entry.topic };
+            context.history.put(context.store, message);
+            if (context.state.registry.subscribed(entry.topic)) result.forward = .{ .message = message, .source = entry.source, .topic = entry.topic };
         }
         if (verdict != .ignore) {
             assert(context.peers.matches(entry.source));
@@ -183,7 +225,7 @@ pub const Validation = struct {
             for (entry.duplicates[0..entry.duplicate_len]) |d| context.peers.rows[d.peer.index].negative = true;
         }
         self.finish(context.store, context.peers, handle, verdict, now);
-        return result;
+        return .{ .applied = result };
     }
 
     pub fn init(a: std.mem.Allocator, capacity: usize, timeout_ms: u64, tombstone_ms: u64) !Validation {
@@ -191,70 +233,98 @@ pub const Validation = struct {
         const entries = try a.alloc(Entry, capacity);
         errdefer a.free(entries);
         @memset(entries, .{});
+        const recent = try a.alloc(Delivery, capacity * 4);
+        errdefer a.free(recent);
+        @memset(recent, .{});
         const fast = try a.alloc(FastEntry, capacity * 4);
         @memset(fast, .{});
-        return .{ .entries = entries, .fast = fast, .timeout_ms = timeout_ms, .tombstone_ms = tombstone_ms };
+        return .{ .entries = entries, .recent = recent, .fast = fast, .timeout_ms = timeout_ms, .tombstone_ms = tombstone_ms };
     }
+
     pub fn deinit(self: *Validation, a: std.mem.Allocator) void {
         a.free(self.fast);
+        a.free(self.recent);
         a.free(self.entries);
         self.* = undefined;
     }
-    pub fn memoryBytes(self: *const Validation) usize {
-        return self.entries.len * @sizeOf(Entry) + self.fast.len * @sizeOf(FastEntry);
+
+    pub fn clear(self: *Validation, store: *storage.Store, peers: *Peers) void {
+        for (self.entries) |*entry| {
+            if (entry.state == .pending) store.releaseValidation(entry.state.pending.message);
+            entry.state = .free;
+        }
+        for (self.recent) |*record| {
+            releaseAttribution(record, peers);
+            record.state = .free;
+        }
     }
+
+    pub fn memoryBytes(self: *const Validation) usize {
+        return self.entries.len * @sizeOf(Entry) + self.recent.len * @sizeOf(Delivery) + self.fast.len * @sizeOf(FastEntry);
+    }
+
     pub fn available(self: *const Validation) bool {
-        for (self.entries) |e| if (e.state != .pending and e.generation != std.math.maxInt(u64)) return true;
+        for (self.entries) |*e| if (e.state != .pending and e.generation != std.math.maxInt(u64)) return true;
         return false;
     }
+
     pub fn admit(self: *Validation, store: *storage.Store, peers: *Peers, message: storage.Handle, source: PeerRef, topic: u16, now: u64) Handle {
         assert(self.available());
         const id = store.get(message).?.id;
-        for (self.entries, 0..) |*e, index| {
-            if (e.state == .free or e.superseded or !std.mem.eql(u8, &e.id, &id)) continue;
-            assert(e.state != .pending);
-            if (e.generation == std.math.maxInt(u64)) {
-                // Preserve the old handle outcome without letting it own the replacement's ID lookup.
-                e.superseded = true;
-                continue;
-            }
-            self.cursor = index;
-            break;
+        for (self.recent) |*record| {
+            if (record.state == .free or !std.mem.eql(u8, &record.id, &id)) continue;
+            assert(record.state != .pending);
+            const previous = &self.entries[record.handle.index];
+            if (previous.generation == record.handle.generation and previous.generation < std.math.maxInt(u64)) self.cursor = record.handle.index;
+            releaseAttribution(record, peers);
+            record.state = .free;
         }
         for (0..self.entries.len) |_| {
             const index = self.cursor;
             self.cursor = (index + 1) % self.entries.len;
             const e = &self.entries[index];
             if (e.state == .pending or e.generation == std.math.maxInt(u64)) continue;
-            releaseAttribution(e, peers);
+            const record = self.reserveDelivery(peers, now);
             peers.retain(source);
-            e.* = .{
-                .generation = e.generation + 1,
-                .state = .pending,
-                .deadline = now +| self.timeout_ms,
-                .message = message,
-                .id = id,
-                .source = source,
-                .admitted_ms = now,
-                .pinned = true,
-                .topic = topic,
-            };
+            self.recent[record] = .{ .handle = .{ .index = @intCast(index), .generation = e.generation + 1 }, .state = .pending, .id = id, .source = source, .topic = topic, .admitted_ms = now, .pinned = true };
+            e.* = .{ .generation = e.generation + 1, .state = .{ .pending = .{ .message = message, .delivery = record, .deadline = now +| self.timeout_ms } } };
             store.retainValidation(message);
             return .{ .index = @intCast(index), .generation = e.generation };
         }
         unreachable;
     }
-    pub fn find(self: *Validation, id: topic_mod.MessageId, now: u64) ?*Entry {
-        for (self.entries) |*e| {
-            if (e.state == .free or e.superseded) continue;
-            if (e.state != .pending and now >= e.tombstone_until) continue;
+
+    fn reserveDelivery(self: *Validation, peers: *Peers, now: u64) u32 {
+        for (0..self.recent.len) |_| {
+            const index = self.recent_cursor;
+            self.recent_cursor = (index + 1) % self.recent.len;
+            const record = &self.recent[index];
+            if (record.state == .pending) continue;
+            if (record.pinned and now < record.until) self.delivery_evictions +|= 1;
+            releaseAttribution(record, peers);
+            return @intCast(index);
+        }
+        unreachable;
+    }
+
+    pub fn delivery(self: *Validation, h: Handle) *Delivery {
+        const e = &self.entries[h.index];
+        assert(e.generation == h.generation and e.state == .pending);
+        const record = &self.recent[e.state.pending.delivery];
+        assert(record.state == .pending);
+        return record;
+    }
+
+    pub fn find(self: *Validation, id: topic_mod.MessageId, now: u64) ?*Delivery {
+        for (self.recent) |*e| {
+            if (e.state == .free or (e.state == .resolved and now >= e.until)) continue;
             if (std.mem.eql(u8, &e.id, &id)) return e;
         }
         return null;
     }
-    pub fn duplicate(e: *Entry, peers: *Peers, peer: PeerRef, eligible: bool) bool {
-        if (!e.pinned) return false;
-        if (std.meta.eql(e.source, peer)) return false;
+
+    pub fn duplicate(e: *Delivery, peers: *Peers, peer: PeerRef, eligible: bool) bool {
+        if (!e.pinned or std.meta.eql(e.source, peer)) return false;
         for (e.duplicates[0..e.duplicate_len]) |d| if (std.meta.eql(d.peer, peer)) return false;
         if (e.duplicate_len == duplicates_max) return false;
         peers.retain(peer);
@@ -262,52 +332,64 @@ pub const Validation = struct {
         e.duplicate_len += 1;
         return true;
     }
+
     pub fn inspect(self: *Validation, store: *storage.Store, peers: *Peers, h: Handle, now: u64) ?Outcome {
         if (h.index >= self.entries.len) return .stale_handle;
         const e = &self.entries[h.index];
-        if (e.generation != h.generation or e.state == .free) return .stale_handle;
+        if (e.generation != h.generation) return .stale_handle;
         self.expireEntry(store, peers, e, now);
         return switch (e.state) {
             .pending => null,
-            .resolved => if (now < e.tombstone_until) .already_resolved else .stale_handle,
-            .expired => if (now < e.tombstone_until) .expired else .stale_handle,
+            .resolved => |until| if (now < until) .already_resolved else .stale_handle,
+            .expired => |until| if (now < until) .expired else .stale_handle,
             .free => .stale_handle,
         };
     }
+
     pub fn finish(self: *Validation, store: *storage.Store, peers: *Peers, h: Handle, verdict: Verdict, now: u64) void {
         _ = peers;
         const e = &self.entries[h.index];
-        assert(e.state == .pending and e.generation == h.generation and now < e.deadline);
-        e.state = .resolved;
-        e.verdict = verdict;
-        e.tombstone_until = now +| self.tombstone_ms;
-        store.releaseValidation(e.message);
+        assert(e.state == .pending and e.generation == h.generation and now < e.state.pending.deadline);
+        const pending = e.state.pending;
+        const record = &self.recent[pending.delivery];
+        record.state = .resolved;
+        record.verdict = verdict;
+        record.until = now +| self.tombstone_ms;
+        e.state = .{ .resolved = record.until };
+        store.releaseValidation(pending.message);
     }
+
     pub fn expire(self: *Validation, store: *storage.Store, peers: *Peers, now: u64) void {
         for (self.entries) |*e| self.expireEntry(store, peers, e, now);
-    }
-    fn expireEntry(self: *Validation, store: *storage.Store, peers: *Peers, e: *Entry, now: u64) void {
-        if (e.state != .pending) {
-            if (now >= e.tombstone_until) releaseAttribution(e, peers);
-            return;
+        for (self.recent) |*record| {
+            if (record.state != .resolved or now < record.until) continue;
+            releaseAttribution(record, peers);
+            record.state = .free;
         }
-        if (now < e.deadline) return;
-        std.log.scoped(.network_gossip).debug("validation_expired message_id={x} topic_index={d} generation={d} elapsed_ms={d}", .{ e.id, e.topic, e.generation, now -| e.admitted_ms });
-        releaseAttribution(e, peers);
-        e.state = .expired;
-        e.tombstone_until = e.deadline +| self.tombstone_ms;
-        store.releaseValidation(e.message);
     }
+
+    fn expireEntry(self: *Validation, store: *storage.Store, peers: *Peers, e: *Entry, now: u64) void {
+        if (e.state != .pending or now < e.state.pending.deadline) return;
+        const pending = e.state.pending;
+        const record = &self.recent[pending.delivery];
+        std.log.scoped(.network_gossip).debug("validation_expired message_id={x} topic_index={d} generation={d} elapsed_ms={d}", .{ record.id, record.topic, e.generation, now -| record.admitted_ms });
+        releaseAttribution(record, peers);
+        record.state = .free;
+        e.state = .{ .expired = pending.deadline +| self.tombstone_ms };
+        store.releaseValidation(pending.message);
+    }
+
     pub fn nextDeadline(self: *const Validation) ?u64 {
         var next: ?u64 = null;
-        for (self.entries) |e| if (e.state == .pending) {
-            next = @min(next orelse e.deadline, e.deadline);
+        for (self.entries) |*e| if (e.state == .pending) {
+            const deadline = e.state.pending.deadline;
+            next = @min(next orelse deadline, deadline);
         };
         return next;
     }
 };
 
-fn recordDuplicate(context: *const Context, entry: *Entry, peer: u16, topic: u16, now: u64) void {
+fn recordDuplicate(context: *const Context, entry: *Delivery, peer: u16, topic: u16, now: u64) void {
     const ref = context.state.peers[peer].logical;
     const eligible = context.state.registry.mesh(topic).isSet(peer) and now -| entry.admitted_ms <= context.scores.topic_params[topic].mesh_delivery_window_ms;
     if (!Validation.duplicate(entry, context.peers, ref, eligible) or entry.state != .resolved) return;
@@ -331,7 +413,7 @@ fn charge(options: *const @import("options.zig").Options, workspace: *const Work
     return false;
 }
 
-fn releaseAttribution(e: *Entry, peers: *Peers) void {
+fn releaseAttribution(e: *Delivery, peers: *Peers) void {
     if (!e.pinned) return;
     peers.release(e.source);
     for (e.duplicates[0..e.duplicate_len]) |d| peers.release(d.peer);
@@ -383,7 +465,7 @@ test "gossip validation readmission skips exhausted generation without hiding pe
     try std.testing.expectEqual(std.math.maxInt(u64), old.generation);
     try std.testing.expectEqual(@as(u64, 1), current.generation);
     try std.testing.expect(old.index != current.index);
-    try std.testing.expectEqual(&v.entries[current.index], v.find(id, 103).?);
+    try std.testing.expectEqual(v.delivery(current), v.find(id, 103).?);
     try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, &peers, old, 103).?);
     try std.testing.expectEqual(@as(usize, 1), store.used_entries);
     v.finish(&store, &peers, current, .reject, 104);

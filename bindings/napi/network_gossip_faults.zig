@@ -69,7 +69,7 @@ pub fn afterStep(runtime: *Runtime) void {
     }
     const token = runtime.test_gossip_expiry orelse return;
     const cell = runtime.gossip.?.get(token).?;
-    const entry = &runtime.heavy.?.core.core.service.gossipsub.inner.validation.entries[cell.handle.index];
+    const entry = &runtime.heavy.?.core.core.service.gossipsub.inner.messages.validation.entries[cell.handle.index];
     if (entry.generation != cell.handle.generation or entry.state != .expired or !cell.retired) return;
     std.debug.assert(cell.state == .copying and cell.input.len > 0 and cell.reservation == 2 * cell.input.len);
     runtime.test_gossip_expiry = null;

@@ -435,7 +435,7 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
         for (0..10) |_| try setup.pumpOnce();
         _ = try setup.client.publish(topic, "hello", setup.pair.now);
         const valid = idFromHex(vector.valid);
-        try std.testing.expect(setup.client.seen.contains(valid, setup.pair.now.mono_ms));
+        try std.testing.expect(setup.client.messages.seen.contains(valid, setup.pair.now.mono_ms));
         var received = false;
         for (0..20) |_| {
             try setup.pumpOnce();
@@ -463,7 +463,7 @@ test "gossipsub uses configured message IDs on publish and wire receive" {
                 try setup.pair.client.write(setup.client_send, wire, false),
             );
             for (0..4) |_| try setup.pumpOnce();
-            try std.testing.expect(setup.server.seen.contains(idFromHex(expected), setup.pair.now.mono_ms));
+            try std.testing.expect(setup.server.messages.seen.contains(idFromHex(expected), setup.pair.now.mono_ms));
         }
     }
 }
@@ -523,39 +523,39 @@ test "gossipsub readmission reuses tombstones across repeated Seen eviction" {
     try std.testing.expectEqual(@as(usize, 1), first.count);
     const old = first.handle.?;
     try std.testing.expectEqual(gossipsub.ReportOutcome{ .applied = .ignore }, setup.server.report(old, .ignore, setup.pair.now));
-    try std.testing.expectEqual(@as(usize, 0), setup.server.store.used_entries);
+    try std.testing.expectEqual(@as(usize, 0), setup.server.messages.store.used_entries);
     _ = try setup.server.publish(test_topic, "B", setup.pair.now);
     const second = try publishAdmissionA(&setup);
     try std.testing.expectEqual(@as(usize, 1), second.count);
     const current = second.handle.?;
-    const retained = setup.server.validation.entries[current.index].message;
+    const retained = setup.server.messages.validation.entries[current.index].state.pending.message;
     const id = topic_mod.validMessageId(test_topic, "A", .{});
     for (0..8) |i| {
         const payload = [_]u8{@as(u8, @intCast(i)) + 'C'};
         _ = try setup.server.publish(test_topic, &payload, setup.pair.now);
-        try std.testing.expect(!setup.server.seen.contains(id, setup.pair.now.mono_ms));
+        try std.testing.expect(!setup.server.messages.seen.contains(id, setup.pair.now.mono_ms));
         const duplicates_before = setup.server.counters.duplicates;
         const duplicate = try publishAdmissionA(&setup);
         try std.testing.expectEqual(@as(usize, 0), duplicate.count);
         try std.testing.expectEqual(duplicates_before + 1, setup.server.counters.duplicates);
         var pending: usize = 0;
-        for (setup.server.validation.entries) |entry| {
+        for (setup.server.messages.validation.recent) |entry| {
             if (entry.state == .pending and std.mem.eql(u8, &entry.id, &id)) pending += 1;
         }
         try std.testing.expectEqual(@as(usize, 1), pending);
-        try std.testing.expectEqual(@as(usize, 2), setup.server.store.used_entries);
-        try std.testing.expect(setup.server.store.get(retained).?.validation);
+        try std.testing.expectEqual(@as(usize, 2), setup.server.messages.store.used_entries);
+        try std.testing.expect(setup.server.messages.store.get(retained).?.validation);
     }
     try std.testing.expectEqual(old.index, current.index);
     try std.testing.expectEqual(old.generation + 1, current.generation);
     try std.testing.expectEqual(gossipsub.ReportOutcome.stale_handle, setup.server.report(old, .accept, setup.pair.now));
     try std.testing.expectEqual(gossipsub.ReportOutcome{ .applied = .ignore }, setup.server.report(current, .ignore, setup.pair.now));
     try std.testing.expectEqual(gossipsub.ReportOutcome.already_resolved, setup.server.report(current, .accept, setup.pair.now));
-    try std.testing.expect(setup.server.store.get(retained) == null);
-    try std.testing.expectEqual(@as(usize, 1), setup.server.store.used_entries);
-    for (0..@import("constants.zig").mcache_len) |_| setup.server.mcache.shift(&setup.server.store);
-    try std.testing.expectEqual(@as(usize, 0), setup.server.store.used_entries);
-    try std.testing.expectEqual(setup.server.store.next.len, setup.server.store.free_pages);
+    try std.testing.expect(setup.server.messages.store.get(retained) == null);
+    try std.testing.expectEqual(@as(usize, 1), setup.server.messages.store.used_entries);
+    for (0..@import("constants.zig").mcache_len) |_| setup.server.messages.history.shift(&setup.server.messages.store);
+    try std.testing.expectEqual(@as(usize, 0), setup.server.messages.store.used_entries);
+    try std.testing.expectEqual(setup.server.messages.store.next.len, setup.server.messages.store.free_pages);
 }
 
 test "gossipsub legal maximum and above two MiB publish use actual resumable IO" {
@@ -624,7 +624,7 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
         if (received) break;
     }
     try std.testing.expect(received);
-    const cached = setup.client.mcache.get(&setup.client.store, id).?;
+    const cached = setup.client.messages.history.get(&setup.client.messages.store, id).?;
     try std.testing.expectEqual(@as(u8, 1), cached.counts[0]);
 }
 
@@ -785,7 +785,7 @@ test "gossipsub frame and TX absolute residence survive steady byte progress" {
     try std.testing.expect(setup.server.state.peers[server_peer].io.large_slot == null);
     try std.testing.expectEqual(@as(u64, 1), setup.client.counters.tx_stalled);
     try std.testing.expectEqual(@as(usize, 0), setup.client.state.peers[client_peer].io.data_count);
-    for (setup.client.store.entries) |e| if (e.active) try std.testing.expectEqual(@as(u32, 0), e.tx);
+    for (setup.client.messages.store.entries) |e| if (e.active) try std.testing.expectEqual(@as(u32, 0), e.tx);
 }
 
 test "gossipsub pinned payload pressure resumes held large frame after host report" {
@@ -879,7 +879,7 @@ test "gossipsub native write credit behind cursor resumes and blocked writes qui
     try std.testing.expect(io.data[io.data_head].page.remaining < before);
     setup.client.connectionClosed(setup.handles.client);
     try std.testing.expectEqual(@as(usize, 0), io.data_count);
-    for (setup.client.store.entries) |entry| if (entry.active) try std.testing.expectEqual(@as(u32, 0), entry.tx);
+    for (setup.client.messages.store.entries) |entry| if (entry.active) try std.testing.expectEqual(@as(u32, 0), entry.tx);
 }
 
 test "gossipsub healthy continuous frame turnover does not expire a nonempty queue" {

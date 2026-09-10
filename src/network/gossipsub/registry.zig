@@ -98,7 +98,7 @@ pub const Registry = struct {
 
     fn retirementPins(context: *const Context) local_intent.Pins {
         var pins: local_intent.Pins = .{};
-        for (context.validation.entries) |*entry| if (entry.pinned) {
+        for (context.validation.recent) |*entry| if (entry.pinned) {
             pins.validation.set(entry.topic);
         };
         for (context.state.peers) |*peer| {
