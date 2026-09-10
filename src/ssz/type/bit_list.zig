@@ -486,31 +486,15 @@ pub fn BitListType(comptime _limit: comptime_int) type {
 
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const bit_len = try length(node, pool);
-                const chunk_count = (bit_len + 255) / 256;
-                if (chunk_count == 0) {
-                    try out.resize(allocator, 0);
-                    return;
-                }
-
-                const byte_length = (bit_len + 7) / 8;
-
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-
-                try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
-
                 try out.resize(allocator, bit_len);
+                const chunk_count = (bit_len + 255) / 256;
+                const byte_length = out.data.items.len;
+                var it = Node.DepthIterator.init(pool, node, chunk_depth + 1, 0);
                 for (0..chunk_count) |i| {
-                    const start_idx = i * 32;
-                    const remaining_bytes = byte_length - start_idx;
-
-                    // Determine how many bytes to copy for this chunk
-                    const bytes_to_copy = @min(remaining_bytes, 32);
-
-                    // Copy data if there are bytes to copy
-                    if (bytes_to_copy > 0) {
-                        @memcpy(out.data.items[start_idx..][0..bytes_to_copy], nodes[i].getRoot(pool)[0..bytes_to_copy]);
-                    }
+                    const start = i * 32;
+                    const len = @min(32, byte_length - start);
+                    const chunk = try it.next();
+                    @memcpy(out.data.items[start..][0..len], chunk.getRoot(pool)[0..len]);
                 }
             }
 
