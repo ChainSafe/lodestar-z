@@ -615,3 +615,32 @@ test "FixedVectorType opts.chunked_leaf=true: serialize -> deserialize round-tri
     defer pool.unref(round_id);
     try std.testing.expectEqualSlices(u8, tree_id.getRoot(&pool), round_id.getRoot(&pool));
 }
+
+test "variable vector streaming hashes need no scratch allocation" {
+    const allocator = std.testing.allocator;
+    const Element = @import("byte_list.zig").ByteListType(33);
+    inline for (.{ 1, 63, 64, 65, 129 }) |len| {
+        const Vector = VariableVectorType(Element, len);
+        var value = Vector.default_value;
+        defer Vector.deinit(allocator, &value);
+        for (&value, 0..) |*item, i| {
+            try item.resize(allocator, i % 34);
+            @memset(item.items, @truncate(i));
+        }
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
+        defer pool.deinit();
+        const node = try Vector.tree.fromValue(&pool, &value);
+        defer pool.unref(node);
+        const bytes = try allocator.alloc(u8, Vector.serializedSize(&value));
+        defer allocator.free(bytes);
+        _ = Vector.serializeIntoBytes(&value, bytes);
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        var root: [32]u8 = undefined;
+        try Vector.hashTreeRoot(failing.allocator(), &value, &root);
+        try std.testing.expectEqualSlices(u8, node.getRoot(&pool), &root);
+        try Vector.serialized.hashTreeRoot(failing.allocator(), bytes, &root);
+        try std.testing.expectEqualSlices(u8, node.getRoot(&pool), &root);
+        std.mem.writeInt(u32, bytes[0..4], 0, .little);
+        try std.testing.expectError(error.zeroOffset, Vector.serialized.hashTreeRoot(failing.allocator(), bytes, &root));
+    }
+}
