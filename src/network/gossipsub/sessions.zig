@@ -14,6 +14,7 @@ pub const Version = enum(u8) { v1_0, v1_1, v1_2 };
 pub const SessionRef = struct { index: u16, generation: u64 };
 
 const ReceivePool = @import("receive_pool.zig").ReceivePool;
+const DeliveryPool = @import("delivery.zig").Pool;
 const PeerIo = @import("peer_io.zig").PeerIo;
 
 const Session = @import("peer_session.zig").Session;
@@ -23,6 +24,7 @@ pub const Sessions = struct {
     cursor: usize = 0,
     io_arena: []u8,
     receive_pool: ReceivePool,
+    deliveries: *DeliveryPool,
 
     pub fn init(a: std.mem.Allocator, capacity: u16) !Sessions {
         return initOptions(a, &.{ .connected_capacity = capacity });
@@ -30,17 +32,31 @@ pub const Sessions = struct {
 
     pub fn initOptions(a: std.mem.Allocator, options: *const @import("options.zig").Options) !Sessions {
         if (options.connected_capacity == 0 or options.connected_capacity > constants.peers_cap) return error.InvalidLimits;
-        const rows = try a.alloc(Session, options.connected_capacity);
+        const layout = @import("layout.zig").Layout.init(options);
+        return initLayout(a, options, &layout);
+    }
+
+    pub fn initLayout(a: std.mem.Allocator, options: *const @import("options.zig").Options, layout: *const @import("layout.zig").Layout) !Sessions {
+        const rows = try a.alloc(Session, layout.sessions);
         errdefer a.free(rows);
-        const per_peer = PeerIo.bufferBytes(options);
+        const per_peer = layout.session_buffer_bytes;
         const arena = try a.alloc(u8, rows.len * per_peer);
         errdefer a.free(arena);
-        const receive_pool = try ReceivePool.init(a, options.large_pool_count, options.large_message_bytes);
-        for (rows, 0..) |*row, i| row.* = .{ .io = PeerIo.init(arena[i * per_peer ..][0..per_peer], options) };
-        return .{ .rows = rows, .io_arena = arena, .receive_pool = receive_pool };
+        const receive_pool = try ReceivePool.init(a, layout.receive_frames, layout.receive_frame_bytes);
+        errdefer {
+            var pool = receive_pool;
+            pool.deinit(a);
+        }
+        const deliveries = try a.create(DeliveryPool);
+        errdefer a.destroy(deliveries);
+        deliveries.* = try DeliveryPool.initCapacity(a, rows.len, layout.deliveries);
+        for (rows, 0..) |*row, i| row.* = .{ .io = PeerIo.init(arena[i * per_peer ..][0..per_peer], options, deliveries) };
+        return .{ .rows = rows, .io_arena = arena, .receive_pool = receive_pool, .deliveries = deliveries };
     }
 
     pub fn deinit(self: *Sessions, a: std.mem.Allocator) void {
+        self.deliveries.deinit(a);
+        a.destroy(self.deliveries);
         self.receive_pool.deinit(a);
         a.free(self.rows);
         a.free(self.io_arena);
@@ -51,7 +67,7 @@ pub const Sessions = struct {
     pub fn addPeer(self: *Sessions, conn: Handle, version: Version) ?SessionRef {
         const index = self.freePeer() orelse return null;
         const peer = &self.rows[index];
-        assert(peer.io.tx.data_count == 0 and peer.io.large_slot == null);
+        assert(peer.io.tx.data.count == 0 and peer.io.large_slot == null);
         peer.active = true;
         peer.generation += 1;
         peer.conn = conn;

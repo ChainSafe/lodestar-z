@@ -9,16 +9,55 @@ const protobuf = @import("protobuf.zig");
 const admission = @import("admission.zig");
 const assert = std.debug.assert;
 const PeerRef = validation.PeerRef;
-const Workspace = validation.Workspace;
-const Received = validation.Received;
-const InvalidReason = validation.InvalidReason;
+const Workspace = @import("turn.zig").Workspace;
 const Handle = validation.Handle;
 const Verdict = validation.Verdict;
-const Report = validation.Report;
-const Applied = validation.Applied;
-const Delivery = validation.Delivery;
+const Outcome = validation.Outcome;
+const Attribution = validation.Attribution;
 const Validation = validation.Validation;
 const Peers = @import("peer_book.zig").PeerBook;
+
+pub const MessageEvent = struct {
+    handle: Handle,
+    id: topic_mod.MessageId,
+    peer: @import("../quic/engine.zig").Handle,
+    topic: []const u8,
+    bytes: []const u8,
+    identity: @import("../wire/peer_id.zig").PeerId,
+    admitted_ms: u64,
+    deadline: u64,
+};
+pub const InvalidReason = enum { signed, compressed_size, ssz_size, snappy };
+pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: topic_mod.MessageId, admitted: MessageEvent, blocked: enum { events, storage, work } };
+pub const Applied = struct {
+    verdict: Verdict,
+    id: topic_mod.MessageId,
+    source: @import("../wire/peer_id.zig").PeerId,
+    admitted_ms: u64,
+    topic_bytes: [topic_mod.topic_max_len]u8,
+    topic_len: u8,
+    forward: ?struct { message: storage.Handle, source: PeerRef, topic: topic_mod.Ref } = null,
+
+    pub fn topicString(self: *const Applied) []const u8 {
+        return self.topic_bytes[0..self.topic_len];
+    }
+};
+
+pub const Report = union(enum) {
+    applied: Applied,
+    already_resolved,
+    expired,
+    stale_handle,
+
+    pub fn outcome(self: *const Report) Outcome {
+        return switch (self.*) {
+            .applied => |applied| .{ .applied = applied.verdict },
+            .already_resolved => .already_resolved,
+            .expired => .expired,
+            .stale_handle => .stale_handle,
+        };
+    }
+};
 
 pub const Context = struct {
     overlay: *const @import("overlay.zig").Overlay,
@@ -49,17 +88,22 @@ pub const Messages = struct {
     fast: []FastEntry,
 
     pub fn init(a: std.mem.Allocator, options: *const Options) !Messages {
-        var store = try storage.Store.init(a, options.mcache_capacity + options.validation_capacity, options.mcache_arena_bytes);
+        const layout = @import("layout.zig").Layout.init(options);
+        return initLayout(a, options, &layout);
+    }
+
+    pub fn initLayout(a: std.mem.Allocator, options: *const Options, layout: *const @import("layout.zig").Layout) !Messages {
+        var store = try storage.Store.init(a, layout.payload_entries, layout.payload_bytes);
         errdefer store.deinit(a);
-        var history = try mcache.History.initCapacity(a, options.mcache_capacity, options.retained_capacity);
+        var history = try mcache.History.initCapacity(a, layout.history, layout.retained);
         errdefer history.deinit(a);
-        var seen = try mcache.SeenCache.init(a, options.seen_capacity, options.seen_ttl_ms);
+        var seen = try mcache.SeenCache.init(a, layout.seen, options.seen_ttl_ms);
         errdefer seen.deinit(a);
-        var pending = try validation.Validation.init(a, options.validation_capacity, options.validation_timeout_ms, options.validation_tombstone_ms);
+        var pending = try validation.Validation.init(a, layout.validations, options.validation_timeout_ms, options.validation_tombstone_ms);
         errdefer pending.deinit(a);
-        const gossip_ids = try a.alloc(MessageId, options.mcache_capacity);
+        const gossip_ids = try a.alloc(MessageId, layout.history);
         errdefer a.free(gossip_ids);
-        const fast = try a.alloc(FastEntry, options.validation_capacity * 4);
+        const fast = try a.alloc(FastEntry, Validation.attributionCapacity(layout.validations));
         @memset(fast, .{});
         return .{ .store = store, .history = history, .seen = seen, .validation = pending, .gossip_ids = gossip_ids, .fast = fast };
     }
@@ -75,11 +119,12 @@ pub const Messages = struct {
         self.* = undefined;
     }
 
-    pub fn metadataBytes(self: *const Messages) usize {
-        return self.store.entries.len * @sizeOf(storage.Entry) + self.store.next.len * @sizeOf(u32) + self.validation.memoryBytes() + self.fast.len * @sizeOf(FastEntry) +
-            self.history.entries.len * @sizeOf(mcache.HistoryEntry) + self.history.counts.len + self.history.generations.len * @sizeOf(u64) +
-            self.history.ids.len * @sizeOf(MessageId) + self.history.index.slots.len * @sizeOf(u32) + self.gossip_ids.len * @sizeOf(MessageId) +
-            self.seen.ids.len * (@sizeOf(MessageId) + @sizeOf(u64)) + self.seen.index.slots.len * @sizeOf(u32);
+    pub fn metadataBytes(layout: *const @import("layout.zig").Layout) usize {
+        return layout.payload_entries * @sizeOf(storage.Entry) + layout.payload_bytes / storage.page_bytes * @sizeOf(u32) +
+            Validation.memoryBytes(layout.validations) + Validation.attributionCapacity(layout.validations) * @sizeOf(FastEntry) +
+            layout.history * (@sizeOf(mcache.HistoryEntry) + layout.retained + 2 * @sizeOf(MessageId)) +
+            layout.retained * @sizeOf(u64) + mcache.indexCapacity(layout.history) * @sizeOf(u32) +
+            layout.seen * (@sizeOf(MessageId) + @sizeOf(u64)) + mcache.indexCapacity(layout.seen) * @sizeOf(u32);
     }
 
     pub const Stats = struct {
@@ -155,13 +200,13 @@ pub const Messages = struct {
         const header = admission.inspect(&msg);
         if (header == .rejected) return invalid(context, source, topic, if (msg.data.len > @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE)) .compressed_size else .ssz_size);
         if (header == .invalid) {
-            if (!charge(context.options, workspace, msg.data.len, 0)) return .{ .blocked = .work };
+            if (!workspace.charge(context.options, msg.data.len, 0)) return .{ .blocked = .work };
             _ = self.seen.add(topic_mod.invalidMessageId(msg.topic, msg.data, context.options.message_id_policy), now);
             return invalid(context, source, topic, .snappy);
         }
         const size = header.payload;
         if (rule) |bounds| if (size < bounds.ssz_min or size > bounds.ssz_max) return invalid(context, source, topic, .ssz_size);
-        if (!charge(context.options, workspace, msg.data.len, size)) return .{ .blocked = .work };
+        if (!workspace.charge(context.options, msg.data.len, size)) return .{ .blocked = .work };
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         hash.update(&.{@intCast(msg.topic.len)});
         hash.update(msg.topic);
@@ -192,7 +237,6 @@ pub const Messages = struct {
         const id = decoded.valid.id;
         if (self.duplicateId(context, source, topic, id, now)) return .{ .duplicate = id };
         if (!workspace.event_available or size + msg.topic.len > room.len) return .{ .blocked = .events };
-        if (!self.validation.available()) return .{ .blocked = .storage };
         return self.admitReceived(context, workspace, source, topic, msg, id, size, now);
     }
 
@@ -212,15 +256,17 @@ pub const Messages = struct {
     }
 
     fn admitReceived(self: *Messages, context: *const Context, workspace: *const Workspace, source: *const Source, topic: u16, msg: protobuf.Message, id: topic_mod.MessageId, written: usize, now: u64) Received {
+        var reservation = self.validation.reserve(id) orelse return .{ .blocked = .storage };
+        defer reservation.cancel();
         const message = self.history.admitPayload(&self.store, id, msg.topic, msg.data) orelse return .{ .blocked = .storage };
-        const handle = self.validation.admit(&self.store, context.peers, message, source.peer, context.overlay.ref(topic), now);
-        self.validation.delivery(handle).source_eligible = context.overlay.inMesh(topic, source.session.index);
+        const handle = reservation.commit(&self.store, context.peers, message, source.peer, context.overlay.ref(topic), now);
+        self.validation.attribution(handle).source_eligible = context.overlay.inMesh(topic, source.session.index);
         self.store.seal(message);
         const room = workspace.arena[workspace.used.*..];
         @memcpy(room[written..][0..msg.topic.len], msg.topic);
         workspace.used.* += written + msg.topic.len;
         _ = self.seen.add(id, now);
-        const entry = self.validation.delivery(handle);
+        const entry = self.validation.attribution(handle);
         assert(context.peers.matches(entry.source));
         return .{ .admitted = .{ .identity = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .deadline = self.validation.entries[handle.index].state.pending.deadline, .handle = handle, .id = id, .peer = source.connection, .topic = room[written..][0..msg.topic.len], .bytes = room[0..written] } };
     }
@@ -232,7 +278,7 @@ pub const Messages = struct {
             .stale_handle => .stale_handle,
             .applied => unreachable,
         };
-        const entry = self.validation.delivery(handle);
+        const entry = self.validation.attribution(handle);
         assert(context.overlay.matches(entry.topic));
         const message = self.validation.entries[handle.index].state.pending.message;
         const name = context.overlay.topicString(entry.topic.index);
@@ -250,7 +296,7 @@ pub const Messages = struct {
                 if (verdict == .reject) context.peers.invalid(d.peer, entry.topic.index) else if (d.eligible) context.peers.scores.creditMesh(d.peer.index, entry.topic.index);
             }
         }
-        self.validation.finish(&self.store, context.peers, handle, verdict, now);
+        self.validation.finish(&self.store, handle, verdict, now);
         return .{ .applied = result };
     }
 
@@ -265,27 +311,20 @@ pub const Messages = struct {
     pub fn expire(self: *Messages, peers: *Peers, now: u64) void {
         self.validation.expire(&self.store, peers, now);
     }
+
+    pub fn takeReleased(self: *Messages) bool {
+        const released = self.store.released or self.validation.released;
+        self.store.released = false;
+        self.validation.released = false;
+        return released;
+    }
 };
 
-fn recordDuplicate(context: *const Context, entry: *Delivery, source: *const Source, topic: u16, now: u64) void {
+fn recordDuplicate(context: *const Context, entry: *Attribution, source: *const Source, topic: u16, now: u64) void {
     const ref = source.peer;
     const eligible = context.overlay.inMesh(topic, source.session.index) and now -| entry.admitted_ms <= context.peers.scores.topic_params[topic].mesh_delivery_window_ms;
     if (!Validation.duplicate(entry, context.peers, ref, eligible) or entry.state != .resolved) return;
     if (entry.verdict == .reject) {
         context.peers.invalid(ref, topic);
     } else if (entry.verdict == .accept and eligible) context.peers.scores.creditMesh(ref.index, topic);
-}
-
-fn charge(options: *const @import("options.zig").Options, workspace: *const Workspace, compressed: usize, decoded: usize) bool {
-    const cost = compressed * 2 + decoded * 2;
-    if (cost <= workspace.work.* and cost <= workspace.peer_work.*) {
-        workspace.work.* -= cost;
-        workspace.peer_work.* -= cost;
-        return true;
-    }
-    if (!workspace.large_used.* and cost > @min(options.work_per_pump, options.decompress_per_peer_bytes)) {
-        workspace.large_used.* = true;
-        return true;
-    }
-    return false;
 }

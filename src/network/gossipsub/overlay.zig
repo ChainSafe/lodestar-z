@@ -65,9 +65,24 @@ pub const Overlay = struct {
         for (context.sessions.rows) |*peer| {
             const io = &peer.io;
             if (!peer.active) continue;
-            io.tx.subscription_dirty.set(index);
-            if (io.tx.subscription_since == null) io.tx.subscription_since = context.now;
-            io.tx.ready = true;
+            io.tx.subscriptionChanged(index, context.now);
+        }
+    }
+
+    pub fn synchronize(self: *const Overlay, outbox: *@import("outbox.zig").Outbox, now: u64) void {
+        var announcements = std.StaticBitSet(constants.topics_cap).initEmpty();
+        for (self.rows, 0..) |row, index| if (row.active and row.subscribed) {
+            announcements.set(index);
+        };
+        outbox.synchronize(&announcements, now);
+    }
+
+    pub fn flushSubscriptions(self: *const Overlay, outbox: *@import("outbox.zig").Outbox, now: u64) void {
+        for (0..constants.topics_cap) |_| {
+            const index = outbox.nextSubscription() orelse return;
+            const row = &self.rows[index];
+            assert(row.active);
+            if (!outbox.announce(index, row.string[0..row.string_len], row.subscribed, now)) return;
         }
     }
 
@@ -308,7 +323,7 @@ pub const Overlay = struct {
 
     fn eligible(self: *const Overlay, context: *const Context, topic: u16, peer: u16, threshold: f64) bool {
         const row = &context.sessions.rows[peer];
-        if (!row.active or context.peers.rows[row.logical.index].direct or context.sessions.rows[peer].io.tx.retiring) return false;
+        if (!row.active or context.peers.rows[row.logical.index].direct or context.sessions.rows[peer].io.tx.pruneExpired(context.now, context.options.pressure_timeout_ms)) return false;
         return self.subscribers(topic).isSet(peer) and score(context, peer) >= threshold;
     }
 
@@ -406,6 +421,7 @@ pub const Overlay = struct {
         for (context.sessions.rows, 0..) |*row, peer| {
             if (!row.io.tx.pending_prunes.isSet(topic)) continue;
             assert(row.active);
+            if (row.io.tx.pruneExpired(context.now, context.options.pressure_timeout_ms)) continue;
             const logical = context.sessions.rows[peer].logical;
             const entry = context.peers.backoff(logical, topic);
             const remaining_ms = entry.until -| context.now;
@@ -415,7 +431,7 @@ pub const Overlay = struct {
                 if (remaining_ms == 0) context.peers.addBackoff(logical, topic, self.rows[topic].generation, context.now, backoff_ms);
                 entry.until = @max(entry.until, context.now +| (seconds *| 1000));
                 context.sessions.rows[peer].io.tx.pruneQueued(topic);
-            } else if (context.now -| row.io.tx.prune_since.? >= context.options.pressure_timeout_ms) row.io.tx.retiring = true;
+            }
         }
     }
 
@@ -431,7 +447,7 @@ pub const Overlay = struct {
                 context.peers.scores.penalties.graft_backoff +|= 1;
             }
         }
-        if (context.sessions.rows[peer].io.tx.retiring or context.sessions.rows[peer].io.tx.pending_prunes.isSet(topic)) return;
+        if (context.sessions.rows[peer].io.tx.pruneExpired(context.now, context.options.pressure_timeout_ms) or context.sessions.rows[peer].io.tx.pending_prunes.isSet(topic)) return;
         if (!self.subscribed(topic) or context.peers.rows[row.logical.index].direct or blocked or
             context.peers.scores.score(row.logical.index, context.now) < 0 or
             (!self.mesh(topic).isSet(peer) and self.mesh(topic).count() >= c.mesh_d_high and !outbound(context, peer)))
@@ -533,7 +549,7 @@ pub const Overlay = struct {
             } else self.fillPublication(context, topic, &result);
         }
         for (context.sessions.rows, 0..) |*row, index| {
-            if (row.active and !context.sessions.rows[index].io.tx.retiring and context.peers.rows[row.logical.index].direct and self.subscribers(topic).isSet(index)) result.set(index);
+            if (row.active and !context.sessions.rows[index].io.tx.pruneExpired(context.now, context.options.pressure_timeout_ms) and context.peers.rows[row.logical.index].direct and self.subscribers(topic).isSet(index)) result.set(index);
         }
         return result;
     }

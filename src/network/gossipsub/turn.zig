@@ -1,5 +1,4 @@
 const Options = @import("options.zig").Options;
-const validation = @import("validation.zig");
 
 pub const Progress = enum { done, credits, events, storage };
 
@@ -50,7 +49,31 @@ pub const Turn = struct {
         };
     }
 
-    pub fn workspace(self: *Turn, peer: *Credits) validation.Workspace {
+    pub fn workspace(self: *Turn, peer: *Credits) Workspace {
         return .{ .arena = self.arena, .scratch = self.scratch, .used = &self.used, .peer_work = &peer.work, .work = &self.budget.work, .large_used = &self.large_used, .event_available = self.count < self.events.len };
+    }
+};
+
+pub const Workspace = struct {
+    arena: []u8,
+    scratch: []u8,
+    used: *usize,
+    peer_work: *usize,
+    work: *usize,
+    large_used: *bool,
+    event_available: bool,
+
+    pub fn charge(workspace: *const Workspace, options: *const Options, compressed: usize, decoded: usize) bool {
+        const cost = compressed * 2 + decoded * 2;
+        if (cost <= workspace.work.* and cost <= workspace.peer_work.*) {
+            workspace.work.* -= cost;
+            workspace.peer_work.* -= cost;
+            return true;
+        }
+        if (!workspace.large_used.* and cost > @min(options.work_per_pump, options.decompress_per_peer_bytes)) {
+            workspace.large_used.* = true;
+            return true;
+        }
+        return false;
     }
 };

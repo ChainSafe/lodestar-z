@@ -105,8 +105,21 @@ pub const Recovery = struct {
         return std.mem.order(u8, left, &right);
     }
 
-    pub fn memoryBytes(self: *const Recovery) usize {
-        return self.requests.len * @sizeOf(Request) + self.batches.len * @sizeOf(Batch);
+    pub fn memoryBytes() usize {
+        return constants.promises_cap * (@sizeOf(Request) + @sizeOf(Batch));
+    }
+
+    pub fn requestBatch(self: *Recovery, peers: *Peers, outbox: *@import("outbox.zig").Outbox, ids: []MessageId, peer: PeerRef, connection: Handle, random: std.Random, now: u64) error{ PeerCapacity, NoNewIds, OutboxFull }!usize {
+        const count = try self.select(peer, ids);
+        if (count == 0) return error.NoNewIds;
+        const index = self.batch_len;
+        self.addBatch(peers, ids[0..count], peer, connection, 0, random.uintLessThan(usize, count));
+        const token = outbox.submit(&.{ .iwant = ids[0..count] }, now) orelse {
+            self.remove(peers, index);
+            return error.OutboxFull;
+        };
+        self.batches[index].token = token;
+        return count;
     }
 
     pub fn add(self: *Recovery, peers: *Peers, id: MessageId, peer: PeerRef, connection: Handle, token: u64) void {

@@ -70,7 +70,7 @@ test "metric topic labels have a fixed vocabulary and canonical subnet bounds" {
 pub const IhaveIgnore = enum { low_score, limit, capacity, unsubscribed, no_new_ids, peer_capacity };
 
 pub const Rpc = struct {
-    invalid_messages: [std.meta.fields(@import("validation.zig").InvalidReason).len]u64 = @splat(0),
+    invalid_messages: [std.meta.fields(@import("messages.zig").InvalidReason).len]u64 = @splat(0),
     received_bytes: u64 = 0,
     sent_bytes: u64 = 0,
     sent_frames: u64 = 0,
@@ -128,7 +128,7 @@ pub const Rpc = struct {
         inline for (std.meta.fields(ItemKind)) |field|
             try prom.scalar(w, "gossipsub_rpc_sent_" ++ field.name ++ "_total", .counter, "RPC " ++ field.name ++ " items in complete frames accepted by QUIC", self.sent_items[field.value]);
         try prom.family(w, "gossipsub_pre_validation_invalid_total", .counter, "Subscribed publications rejected before host validation");
-        inline for (std.meta.fields(@import("validation.zig").InvalidReason)) |field|
+        inline for (std.meta.fields(@import("messages.zig").InvalidReason)) |field|
             try prom.sample(w, "gossipsub_pre_validation_invalid_total", "reason", field.name, self.invalid_messages[field.value]);
         try prom.family(w, "gossipsub_ihave_rcv_ignored_total", .counter, "IHAVE items producing no request at an admission boundary");
         inline for (std.meta.fields(IhaveIgnore)) |field|

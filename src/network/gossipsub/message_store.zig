@@ -1,5 +1,6 @@
 const std = @import("std");
 const topic = @import("topic.zig");
+const protobuf = @import("protobuf.zig");
 const constants = @import("constants.zig");
 const assert = std.debug.assert;
 
@@ -17,13 +18,32 @@ pub const Entry = struct {
     first: u32 = none,
     len: u32 = 0,
     id: topic.MessageId = undefined,
-    topic_bytes: [topic.topic_max_len]u8 = undefined,
+    prefix: [32]u8 = undefined,
+    prefix_len: u8 = 0,
+    trailer: [topic.topic_max_len + 2]u8 = undefined,
     topic_len: u8 = 0,
 
     pub fn topicString(self: *const Entry) []const u8 {
-        return self.topic_bytes[0..self.topic_len];
+        return self.trailer[2..][0..self.topic_len];
     }
 };
+
+pub fn encodePrefix(prefix: []u8, trailer: []u8, len: usize, name: []const u8) struct { prefix: usize, trailer: usize } {
+    assert(len <= constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE));
+    assert(name.len <= topic.topic_max_len);
+    var tail = protobuf.Writer.init(trailer);
+    tail.bytesField(4, name);
+    const message_len = 1 + protobuf.varintLen(len) + len + tail.len;
+    const rpc_len = 1 + protobuf.varintLen(message_len) + message_len;
+    assert(rpc_len <= constants.GOSSIP_MAX_SIZE);
+    var head = protobuf.Writer.init(prefix);
+    head.varint(rpc_len);
+    head.tag(2, protobuf.wire_len);
+    head.varint(message_len);
+    head.tag(2, protobuf.wire_len);
+    head.varint(len);
+    return .{ .prefix = head.len, .trailer = tail.len };
+}
 
 pub const Store = struct {
     bytes: []u8,
@@ -34,6 +54,7 @@ pub const Store = struct {
     used_entries: usize = 0,
     retired_entries: usize = 0,
     entry_cursor: usize = 0,
+    released: bool = false,
 
     pub fn init(a: std.mem.Allocator, capacity: usize, byte_capacity: usize) !Store {
         if (capacity == 0 or capacity >= none or byte_capacity < page_bytes or byte_capacity / page_bytes >= none)
@@ -89,7 +110,7 @@ pub const Store = struct {
                 .len = @intCast(data.len),
                 .topic_len = @intCast(name.len),
             };
-            @memcpy(entry.topic_bytes[0..name.len], name);
+            entry.prefix_len = @intCast(encodePrefix(&entry.prefix, &entry.trailer, data.len, name).prefix);
             var link = &entry.first;
             var offset: usize = 0;
             for (0..pagesFor(data.len)) |_| {
@@ -164,7 +185,7 @@ pub const Store = struct {
     }
     pub fn retainTx(self: *Store, h: Handle) void {
         const e = self.mutable(h);
-        assert(!e.provisional and e.tx < constants.peers_cap * 256);
+        assert(!e.provisional and e.tx < std.math.maxInt(u32));
         e.tx += 1;
     }
     pub fn releaseTx(self: *Store, h: Handle) void {
@@ -191,6 +212,7 @@ pub const Store = struct {
         }
         assert(page == none);
         e.active = false;
+        self.released = true;
         self.used_entries -= 1;
         if (e.generation == std.math.maxInt(u64)) self.retired_entries += 1;
     }

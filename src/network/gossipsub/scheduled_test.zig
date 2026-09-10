@@ -85,6 +85,10 @@ const Simulation = struct {
             work = true;
             var output: [16]gossip.Event = undefined;
             const count = node.process(quic, incoming, activity[0..active], now, output[0..self.capacity(i)]);
+            const resources = node.handler.resourceSnapshot();
+            try std.testing.expectEqual(resources.delivery_descriptors_capacity, resources.delivery_descriptors_available + resources.queued_descriptors);
+            try std.testing.expectEqual(resources.queued_descriptors, resources.held_tx_retains);
+            try std.testing.expect(resources.delivery_descriptors_available >= resources.delivery_descriptors_reserved);
             for (output[0..count]) |event| switch (event) {
                 .subscription_change => {},
                 .message => |message| {

@@ -71,13 +71,13 @@ test "topic policy incoming lengths precede decode work arena store and validati
     var work: usize = 10000;
     var large_used = false;
     var arena: [1024]u8 = @splat(0xaa);
-    var workspace: validation.Workspace = .{ .arena = &arena, .scratch = g.msg_scratch, .used = &used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = false };
+    var workspace: @import("turn.zig").Workspace = .{ .arena = &arena, .scratch = g.msg_scratch, .used = &used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = false };
     var compressed: [100]u8 = undefined;
     const payload: [21]u8 = @splat('x');
     for ([_]usize{ 9, 21 }) |size| {
         const len = try @import("snappy").raw.compress(payload[0..size], &compressed);
-        try std.testing.expectEqual(validation.Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1));
-        try std.testing.expectEqual(validation.Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = &.{@intCast(size)} }, 1));
+        try std.testing.expectEqual(@import("messages.zig").Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1));
+        try std.testing.expectEqual(@import("messages.zig").Received{ .invalid = .ssz_size }, g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = &.{@intCast(size)} }, 1));
         try std.testing.expectEqual(@as(usize, 0), used);
         try std.testing.expectEqual(g.options.decompress_per_peer_bytes, peer_work);
         try std.testing.expectEqual(@as(usize, 10000), work);
@@ -164,7 +164,7 @@ test "topic policy real wire receives only bounded SSZ and keeps borrowed payloa
             for (pair.serverEvents()) |event| if (event == .message) {
                 try std.testing.expect(size == 10 or size == 20);
                 seen += 1;
-                const entry = pair.server.messages.validation.delivery(event.message.handle);
+                const entry = pair.server.messages.validation.attribution(event.message.handle);
                 try std.testing.expectEqual(entry.admitted_ms, event.message.admitted_ms);
                 try std.testing.expectEqual(pair.server.messages.validation.entries[event.message.handle.index].state.pending.deadline, event.message.deadline);
                 try std.testing.expect(event.message.identity.eql(&pair.server.peers.rows[entry.source.index].identity));
@@ -259,7 +259,7 @@ test "topic policy remembered ordinals remain independent of retained validation
     var peer_work: usize = g.options.decompress_per_peer_bytes;
     var large_used = false;
     var used: usize = 0;
-    const workspace: validation.Workspace = .{ .arena = g.decompressed, .scratch = g.msg_scratch, .used = &used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = true };
+    const workspace: @import("turn.zig").Workspace = .{ .arena = g.decompressed, .scratch = g.msg_scratch, .used = &used, .peer_work = &peer_work, .work = &work, .large_used = &large_used, .event_available = true };
     var compressed: [64]u8 = undefined;
     const len = try @import("snappy").raw.compress("0123456789", &compressed);
     const received = g.messages.receive(&context, &workspace, &source, .{ .topic = name, .data = compressed[0..len] }, 1).admitted;
