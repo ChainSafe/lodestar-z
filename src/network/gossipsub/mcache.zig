@@ -177,10 +177,10 @@ pub const History = struct {
     count: usize = 0,
 
     pub fn init(a: Allocator, capacity: usize) !History {
-        return initCapacity(a, capacity, @import("peers.zig").capacity);
+        return initCapacity(a, capacity, @import("peer_book.zig").capacity);
     }
     pub fn initCapacity(a: Allocator, capacity: usize, retained: u16) !History {
-        if (retained == 0 or retained > @import("peers.zig").capacity) return error.InvalidLimits;
+        if (retained == 0 or retained > @import("peer_book.zig").capacity) return error.InvalidLimits;
         if (capacity == 0 or capacity > 65536) return error.InvalidLimits;
         const entries = try a.alloc(HistoryEntry, capacity);
         errdefer a.free(entries);

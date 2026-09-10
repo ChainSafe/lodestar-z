@@ -6,8 +6,8 @@ const admission = @import("admission.zig");
 const assert = std.debug.assert;
 
 pub const Handle = struct { index: u32, generation: u64 };
-const Peers = @import("peers.zig").Peers;
-pub const PeerRef = @import("peers.zig").Ref;
+const Peers = @import("peer_book.zig").PeerBook;
+pub const PeerRef = @import("peer_book.zig").Ref;
 pub const Verdict = enum { accept, reject, ignore };
 pub const Outcome = union(enum) { applied: Verdict, already_resolved, expired, stale_handle };
 pub const duplicates_max = 16;
@@ -49,10 +49,9 @@ pub const MessageEvent = struct {
     deadline: u64,
 };
 pub const Context = struct {
-    state: *@import("state.zig").State,
+    sessions: *@import("sessions.zig").Sessions,
     overlay: *@import("overlay.zig").Overlay,
     peers: *Peers,
-    scores: *@import("score.zig").PeerScore,
     store: *storage.Store,
     history: *@import("mcache.zig").History,
     seen: *@import("mcache.zig").SeenCache,
@@ -175,15 +174,14 @@ pub const Validation = struct {
     }
 
     fn invalid(context: *const Context, peer: u16, topic: u16, reason: InvalidReason) Received {
-        const ref = context.state.peers[peer].logical;
-        context.scores.invalid(ref.index, topic);
-        context.peers.rows[ref.index].negative = true;
+        const ref = context.sessions.rows[peer].logical;
+        context.peers.invalid(ref, topic);
         return .{ .invalid = reason };
     }
 
     fn commit(self: *Validation, context: *const Context, workspace: *const Workspace, peer: u16, topic: u16, msg: protobuf.Message, id: topic_mod.MessageId, written: usize, now: u64) Received {
         const message = context.history.admitPayload(context.store, id, msg.topic, msg.data) orelse return .{ .blocked = .storage };
-        const handle = self.admit(context.store, context.peers, message, context.state.peers[peer].logical, topic, now);
+        const handle = self.admit(context.store, context.peers, message, context.sessions.rows[peer].logical, topic, now);
         self.delivery(handle).source_eligible = context.overlay.mesh(topic).isSet(peer);
         self.delivery(handle).topic_generation = context.overlay.rows[topic].generation;
         context.store.seal(message);
@@ -193,7 +191,7 @@ pub const Validation = struct {
         _ = context.seen.add(id, now);
         const entry = self.delivery(handle);
         assert(context.peers.matches(entry.source));
-        return .{ .admitted = .{ .identity = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .deadline = self.entries[handle.index].state.pending.deadline, .handle = handle, .id = id, .peer = context.state.peers[peer].conn, .topic = room[written..][0..msg.topic.len], .bytes = room[0..written] } };
+        return .{ .admitted = .{ .identity = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .deadline = self.entries[handle.index].state.pending.deadline, .handle = handle, .id = id, .peer = context.sessions.rows[peer].conn, .topic = room[written..][0..msg.topic.len], .bytes = room[0..written] } };
     }
 
     pub fn report(self: *Validation, context: *const Context, handle: Handle, verdict: Verdict, now: u64) Report {
@@ -215,15 +213,11 @@ pub const Validation = struct {
         }
         if (verdict != .ignore) {
             assert(context.peers.matches(entry.source));
-            if (verdict == .accept) context.scores.deliverEligible(entry.source.index, entry.topic, entry.source_eligible) else context.scores.invalid(entry.source.index, entry.topic);
+            if (verdict == .accept) context.peers.scores.deliverEligible(entry.source.index, entry.topic, entry.source_eligible) else context.peers.invalid(entry.source, entry.topic);
             for (entry.duplicates[0..entry.duplicate_len]) |d| {
                 assert(context.peers.matches(d.peer));
-                if (verdict == .reject) context.scores.invalid(d.peer.index, entry.topic) else if (d.eligible) context.scores.creditMesh(d.peer.index, entry.topic);
+                if (verdict == .reject) context.peers.invalid(d.peer, entry.topic) else if (d.eligible) context.peers.scores.creditMesh(d.peer.index, entry.topic);
             }
-        }
-        if (verdict == .reject) {
-            context.peers.rows[entry.source.index].negative = true;
-            for (entry.duplicates[0..entry.duplicate_len]) |d| context.peers.rows[d.peer.index].negative = true;
         }
         self.finish(context.store, context.peers, handle, verdict, now);
         return .{ .applied = result };
@@ -391,13 +385,12 @@ pub const Validation = struct {
 };
 
 fn recordDuplicate(context: *const Context, entry: *Delivery, peer: u16, topic: u16, now: u64) void {
-    const ref = context.state.peers[peer].logical;
-    const eligible = context.overlay.mesh(topic).isSet(peer) and now -| entry.admitted_ms <= context.scores.topic_params[topic].mesh_delivery_window_ms;
+    const ref = context.sessions.rows[peer].logical;
+    const eligible = context.overlay.mesh(topic).isSet(peer) and now -| entry.admitted_ms <= context.peers.scores.topic_params[topic].mesh_delivery_window_ms;
     if (!Validation.duplicate(entry, context.peers, ref, eligible) or entry.state != .resolved) return;
     if (entry.verdict == .reject) {
-        context.scores.invalid(ref.index, topic);
-        context.peers.rows[ref.index].negative = true;
-    } else if (entry.verdict == .accept and eligible) context.scores.creditMesh(ref.index, topic);
+        context.peers.invalid(ref, topic);
+    } else if (entry.verdict == .accept and eligible) context.peers.scores.creditMesh(ref.index, topic);
 }
 
 fn charge(options: *const @import("options.zig").Options, workspace: *const Workspace, compressed: usize, decoded: usize) bool {

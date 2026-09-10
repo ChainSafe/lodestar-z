@@ -110,7 +110,7 @@ pub const GossipPair = struct {
         const ready = neg.pump(engine, now, &outcomes);
         for (outcomes[0..ready]) |outcome| switch (outcome.result) {
             .ready => |selection| {
-                const index = gs.state.findPeer(outcome.stream.conn) orelse continue;
+                const index = gs.sessions.findPeer(outcome.stream.conn) orelse continue;
                 if (outcome.direction == .outbound) {
                     gs.replaceOutbound(engine, index, outcome.stream, selection.protocol.meshsub);
                 } else {
@@ -267,8 +267,8 @@ test "gossipsub prunes a peer whose messages are rejected" {
     try std.testing.expect(rejected);
 
     // the server's score for the client is now negative and the heartbeat prunes it
-    const client_index = setup.server.state.findPeer(setup.handles.server).?;
-    try std.testing.expect(setup.server.scores.score(client_index, setup.pair.now.mono_ms) < 0);
+    const client_index = setup.server.sessions.findPeer(setup.handles.server).?;
+    try std.testing.expect(setup.server.peers.scores.score(client_index, setup.pair.now.mono_ms) < 0);
     setup.pair.advance(constants_heartbeat + 100);
     rounds = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
@@ -305,10 +305,10 @@ test "gossipsub credits first delivery only after the host accepts" {
     try std.testing.expect(handle != null);
 
     // receiving the message must not credit the sender; only the host's accept does
-    const client_index = setup.server.state.findPeer(setup.handles.server).?;
-    const before = setup.server.scores.score(client_index, setup.pair.now.mono_ms);
+    const client_index = setup.server.sessions.findPeer(setup.handles.server).?;
+    const before = setup.server.peers.scores.score(client_index, setup.pair.now.mono_ms);
     _ = setup.server.report(handle.?, .accept, setup.pair.now);
-    const after = setup.server.scores.score(client_index, setup.pair.now.mono_ms);
+    const after = setup.server.peers.scores.score(client_index, setup.pair.now.mono_ms);
     try std.testing.expect(after > before);
 }
 
@@ -363,7 +363,7 @@ fn expectControlFloodBounded(control_tag: u8) !void {
     }, .{ .random_seed = 1, .items_per_peer = 4096, .items_per_pump = 8192 });
     defer setup.deinit();
     for (0..20) |_| try setup.pumpOnce();
-    const peer = setup.server.state.findPeer(setup.handles.server).?;
+    const peer = setup.server.sessions.findPeer(setup.handles.server).?;
     const before = setup.server.counters.rpcs_received;
     var rpc: [8195]u8 = undefined;
     var writer = @import("protobuf.zig").Writer.init(&rpc);
@@ -380,9 +380,9 @@ fn expectControlFloodBounded(control_tag: u8) !void {
     }
     try std.testing.expectEqual(before + 17, setup.server.counters.rpcs_received);
     const count = if (control_tag == 0x0a)
-        setup.server.state.peers[peer].io.ihave_recv
+        setup.server.sessions.rows[peer].io.ihave_recv
     else
-        setup.server.state.peers[peer].io.idontwant_recv;
+        setup.server.sessions.rows[peer].io.idontwant_recv;
     try std.testing.expectEqual(@as(u16, 10), count);
 }
 
@@ -600,7 +600,7 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
     defer std.testing.allocator.free(payload);
     var rng = std.Random.DefaultPrng.init(73);
     rng.random().bytes(payload);
-    const destination = setup.client.state.findPeer(setup.handles.client).?;
+    const destination = setup.client.sessions.findPeer(setup.handles.client).?;
     const topic_index = setup.client.overlay.findTopic(test_topic).?;
     setup.client.overlay.setSubscription(&setup.client.overlayContext(setup.client.last_now_ms), topic_index, destination, false);
     const result = try setup.client.publish(test_topic, payload, setup.pair.now);
@@ -693,7 +693,7 @@ test "gossipsub subscription cursors synchronize all topics through small critic
         if (received == topic_capacity) break;
     }
     try std.testing.expectEqual(@as(usize, topic_capacity), received);
-    const peer = setup.client.state.findPeer(setup.handles.client).?;
+    const peer = setup.client.sessions.findPeer(setup.handles.client).?;
     setup.client.resetOutbound(&setup.pair.client, peer);
     setup.client_send = try setup.client_neg.beginOutbound(&setup.pair.client, setup.handles.client, .{ .meshsub = .v1_2 }, setup.pair.now);
     received = 0;
@@ -721,7 +721,7 @@ test "gossipsub activity behind partial peer cursor remains ready and generation
     }, .{ .random_seed = 1, .peers_per_pump = 1 });
     defer setup.deinit();
     try connectMesh(&setup);
-    const real_peer = setup.server.state.findPeer(setup.handles.server).?;
+    const real_peer = setup.server.sessions.findPeer(setup.handles.server).?;
     const extra = @import("test_support.zig").addPeer(&setup.server, .{ .index = 77, .generation = 9 }, .v1_2).?;
     setup.server.peer_cursor = extra.index;
     const pb = @import("protobuf.zig");
@@ -747,9 +747,9 @@ test "gossipsub activity behind partial peer cursor remains ready and generation
         if (setup.server.nextWakeup(setup.pair.now, 1).? > setup.pair.now.mono_ms) break;
         _ = setup.server.pump(&setup.pair.server, setup.pair.now, &events);
     }
-    try std.testing.expect(!setup.server.state.peers[real_peer].io.rx_ready);
+    try std.testing.expect(!setup.server.sessions.rows[real_peer].io.rx_ready);
     setup.server.connectionActivity(.{ .index = setup.handles.server.index, .generation = setup.handles.server.generation + 1 });
-    try std.testing.expect(!setup.server.state.peers[real_peer].io.rx_ready);
+    try std.testing.expect(!setup.server.sessions.rows[real_peer].io.rx_ready);
     try std.testing.expect(setup.server.nextWakeup(setup.pair.now, 1).? > setup.pair.now.mono_ms);
 }
 
@@ -758,15 +758,15 @@ test "gossipsub frame and TX absolute residence survive steady byte progress" {
     try setup.initOpts(.{ .random_seed = 1, .output_per_peer = 1, .tx_timeout_ms = 500 }, .{ .random_seed = 1, .body_buffer_bytes = 64, .large_frame_timeout_ms = 150, .pressure_timeout_ms = 500 });
     defer setup.deinit();
     for (0..16) |_| try setup.pumpOnce();
-    const server_peer = setup.server.state.findPeer(setup.handles.server).?;
-    const client_peer = setup.client.state.findPeer(setup.handles.client).?;
+    const server_peer = setup.server.sessions.findPeer(setup.handles.server).?;
+    const client_peer = setup.client.sessions.findPeer(setup.handles.client).?;
     var prefix: [8]u8 = undefined;
     var w = @import("protobuf.zig").Writer.init(&prefix);
     w.varint(65536);
     w.bytes("x");
     try std.testing.expectEqual(w.len, try setup.pair.client.write(setup.client_send, w.written(), false));
     for (0..4) |_| try setup.pumpOnce();
-    try std.testing.expect(setup.server.state.peers[server_peer].io.large_slot != null);
+    try std.testing.expect(setup.server.sessions.rows[server_peer].io.large_slot != null);
     try std.testing.expect(setup.client.subscribe(test_topic));
     setup.client.overlay.mesh(setup.client.overlay.findTopic(test_topic).?).set(client_peer);
     _ = try setup.client.publish(test_topic, "held transmit payload", setup.pair.now);
@@ -776,15 +776,15 @@ test "gossipsub frame and TX absolute residence survive steady byte progress" {
         setup.pair.advance(100);
         try std.testing.expectEqual(@as(usize, 1), try setup.pair.client.write(setup.client_send, "x", false));
         try setup.pumpOnce();
-        try std.testing.expect(setup.server.state.peers[server_peer].io.large_slot != null);
-        try std.testing.expect(setup.server.state.peers[server_peer].io.progress_ms > began);
+        try std.testing.expect(setup.server.sessions.rows[server_peer].io.large_slot != null);
+        try std.testing.expect(setup.server.sessions.rows[server_peer].io.progress_ms > began);
     }
     setup.pair.advance(100);
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(u64, 1), setup.server.counters.large_stalled);
-    try std.testing.expect(setup.server.state.peers[server_peer].io.large_slot == null);
+    try std.testing.expect(setup.server.sessions.rows[server_peer].io.large_slot == null);
     try std.testing.expectEqual(@as(u64, 1), setup.client.counters.tx_stalled);
-    try std.testing.expectEqual(@as(usize, 0), setup.client.state.peers[client_peer].io.data_count);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.sessions.rows[client_peer].io.data_count);
     for (setup.client.messages.store.entries) |e| if (e.active) try std.testing.expectEqual(@as(u32, 0), e.tx);
 }
 
@@ -811,13 +811,13 @@ test "gossipsub pinned payload pressure resumes held large frame after host repo
     }
     try std.testing.expect(handle != null);
     _ = try setup.client.publish(test_topic, payload[0 .. 3 * 1024 * 1024], setup.pair.now);
-    const peer = setup.server.state.findPeer(setup.handles.server).?;
+    const peer = setup.server.sessions.findPeer(setup.handles.server).?;
     for (0..2000) |_| {
         try setup.pumpOnce();
-        if (setup.server.state.peers[peer].io.blocked == .storage) break;
+        if (setup.server.sessions.rows[peer].io.blocked == .storage) break;
     }
-    try std.testing.expectEqual(.storage, setup.server.state.peers[peer].io.blocked);
-    try std.testing.expect(setup.server.state.peers[peer].io.large_slot != null);
+    try std.testing.expectEqual(.storage, setup.server.sessions.rows[peer].io.blocked);
+    try std.testing.expect(setup.server.sessions.rows[peer].io.large_slot != null);
     try std.testing.expect(setup.server.nextWakeup(setup.pair.now, 16).? > setup.pair.now.mono_ms);
     try std.testing.expectEqual(@as(u64, 1), setup.server.counters.messages_received);
     _ = setup.server.report(handle.?, .ignore, setup.pair.now);
@@ -832,7 +832,7 @@ test "gossipsub pinned payload pressure resumes held large frame after host repo
         if (received) break;
     }
     try std.testing.expect(received);
-    try std.testing.expect(setup.server.state.peers[peer].io.large_slot == null);
+    try std.testing.expect(setup.server.sessions.rows[peer].io.large_slot == null);
     try std.testing.expectEqual(@as(u64, 0), setup.server.counters.local_pressure_resets);
 }
 
@@ -843,7 +843,7 @@ test "gossipsub native write credit behind cursor resumes and blocked writes qui
     });
     defer setup.deinit();
     try connectMesh(&setup);
-    const index = setup.client.state.findPeer(setup.handles.client).?;
+    const index = setup.client.sessions.findPeer(setup.handles.client).?;
     const payload = try std.testing.allocator.alloc(u8, @import("constants.zig").MAX_PAYLOAD_SIZE);
     defer std.testing.allocator.free(payload);
     var rng = std.Random.DefaultPrng.init(112);
@@ -858,7 +858,7 @@ test "gossipsub native write credit behind cursor resumes and blocked writes qui
         _ = setup.client.pump(&setup.pair.client, setup.pair.now, &events);
         try setup.pair.pump();
     }
-    const io = &setup.client.state.peers[index].io;
+    const io = &setup.client.sessions.rows[index].io;
     try std.testing.expect(io.data_count > 0);
     try std.testing.expect(!io.tx_ready);
     try std.testing.expect(setup.client.nextWakeup(setup.pair.now, 16).? > setup.pair.now.mono_ms);
@@ -889,7 +889,7 @@ test "gossipsub healthy continuous frame turnover does not expire a nonempty que
     });
     defer setup.deinit();
     try connectMesh(&setup);
-    const index = setup.client.state.findPeer(setup.handles.client).?;
+    const index = setup.client.sessions.findPeer(setup.handles.client).?;
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, 0, .little);
     _ = try setup.client.publish(test_topic, &bytes, setup.pair.now);
@@ -898,8 +898,8 @@ test "gossipsub healthy continuous frame turnover does not expire a nonempty que
     const began = setup.pair.now.mono_ms;
     for (2..34) |i| {
         try setup.pumpOnce();
-        try std.testing.expect(setup.client.state.peers[index].io.pending());
-        try std.testing.expect(setup.client.state.peers[index].io.data_count > 0);
+        try std.testing.expect(setup.client.sessions.rows[index].io.pending());
+        try std.testing.expect(setup.client.sessions.rows[index].io.data_count > 0);
         setup.pair.advance(25);
         std.mem.writeInt(u64, &bytes, i, .little);
         const result = try setup.client.publish(test_topic, &bytes, setup.pair.now);
@@ -907,7 +907,7 @@ test "gossipsub healthy continuous frame turnover does not expire a nonempty que
     }
     try std.testing.expect(setup.pair.now.mono_ms - began > 500);
     try std.testing.expectEqual(@as(u64, 0), setup.client.counters.tx_stalled);
-    try std.testing.expect(setup.client.state.outStream(index) != null);
+    try std.testing.expect(setup.client.sessions.outStream(index) != null);
 }
 
 test "gossipsub temporary frame pool pressure preserves prefix unread bytes and resumes" {
@@ -919,18 +919,18 @@ test "gossipsub temporary frame pool pressure preserves prefix unread bytes and 
     try connectMesh(&setup);
     const owner_conn: engine_mod.Handle = .{ .index = 77, .generation = 1 };
     const owner = @import("test_support.zig").addPeer(&setup.server, owner_conn, .v1_2).?;
-    setup.server.state.peers[owner.index].io.large_slot = setup.server.receive_pool.claim().?;
+    setup.server.sessions.rows[owner.index].io.large_slot = setup.server.receive_pool.claim().?;
     var payload: [65536]u8 = undefined;
     var rng = std.Random.DefaultPrng.init(113);
     rng.random().bytes(&payload);
     _ = try setup.client.publish(test_topic, &payload, setup.pair.now);
-    const peer = setup.server.state.findPeer(setup.handles.server).?;
+    const peer = setup.server.sessions.findPeer(setup.handles.server).?;
     for (0..64) |_| {
         try setup.pumpOnce();
-        if (setup.server.state.peers[peer].io.blocked == .storage) break;
+        if (setup.server.sessions.rows[peer].io.blocked == .storage) break;
     }
-    try std.testing.expectEqual(.storage, setup.server.state.peers[peer].io.blocked);
-    try std.testing.expect(setup.server.state.peers[peer].io.reader.declaredLen() != null);
+    try std.testing.expectEqual(.storage, setup.server.sessions.rows[peer].io.blocked);
+    try std.testing.expect(setup.server.sessions.rows[peer].io.reader.declaredLen() != null);
     try std.testing.expectEqual(@as(u64, 0), setup.server.counters.messages_received);
     try std.testing.expect(setup.server.nextWakeup(setup.pair.now, 16).? > setup.pair.now.mono_ms);
     setup.server.connectionClosed(owner_conn);

@@ -877,12 +877,12 @@ test "core coverage authenticated custody differs from gossip delivery and inval
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
     const connection = snapshots[0].connection.?;
-    const index = setup.client.service.gossipsub.inner.state.findPeer(connection).?;
+    const index = setup.client.service.gossipsub.inner.sessions.findPeer(connection).?;
     setup.client.service.gossipsub.inner.resetOutbound(&setup.pair.client, index);
     try std.testing.expect(!setup.client.service.gossipsub.deliveryAvailable(connection));
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
-    setup.client.service.gossipsub.inner.state.peers[index].outbound = .{ .waiting = setup.pair.now.mono_ms +| 30_000 };
+    setup.client.service.gossipsub.inner.sessions.rows[index].outbound = .{ .waiting = setup.pair.now.mono_ms +| 30_000 };
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
@@ -1389,8 +1389,8 @@ test "core sampling delivery follows real outbound stream retirement replacement
     try setup.client.setDemand(&demand);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     const handler = &setup.client.service.gossipsub;
-    const index = handler.inner.state.findPeer(snapshot.connection.?).?;
-    const old_stream = handler.inner.state.peers[index].outbound.live;
+    const index = handler.inner.sessions.findPeer(snapshot.connection.?).?;
+    const old_stream = handler.inner.sessions.rows[index].outbound.live;
     setup.pair.client.closeStream(old_stream, 0);
     handler.transportEvents(&setup.client.service.router, &setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);
     try std.testing.expect(!handler.deliveryAvailable(snapshot.connection.?));
@@ -1399,7 +1399,7 @@ test "core sampling delivery follows real outbound stream retirement replacement
     handler.negotiationResult(&setup.pair.client, .{ .stream = old_stream, .direction = .outbound, .owner = .meshsub, .result = .{ .ready = .{ .protocol = .{ .meshsub = .v1_2 }, .leftover = &.{}, .fin = false } } }, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 8), setup.client.coverageDeficits().groups);
     _ = try waitSampling(&setup);
-    const replacement_stream = handler.inner.state.peers[index].outbound.live;
+    const replacement_stream = handler.inner.sessions.rows[index].outbound.live;
     try std.testing.expect(!std.meta.eql(old_stream, replacement_stream));
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     handler.transportEvents(&setup.client.service.router, &setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);

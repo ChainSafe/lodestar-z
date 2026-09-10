@@ -64,7 +64,7 @@ test "topic policy incoming lengths precede decode work arena store and validati
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     try std.testing.expect(g.subscribe(name));
-    var context: validation.Context = .{ .state = g.state, .overlay = g.overlay, .peers = &g.peers, .scores = &g.scores, .store = &g.messages.store, .history = &g.messages.history, .seen = &g.messages.seen, .options = &g.options };
+    var context: validation.Context = .{ .sessions = g.sessions, .overlay = g.overlay, .peers = &g.peers, .store = &g.messages.store, .history = &g.messages.history, .seen = &g.messages.seen, .options = &g.options };
     var used: usize = 0;
     var peer_work: usize = 0;
     var work: usize = 10000;
@@ -119,7 +119,7 @@ test "topic policy physical close clears bits while same connection stream repla
     defer pair.deinit();
     try std.testing.expect(pair.client.subscribe(name));
     for (0..20) |_| try pair.pumpOnce();
-    const index = pair.server.state.findPeer(pair.handles.server).?;
+    const index = pair.server.sessions.findPeer(pair.handles.server).?;
     const ns = &pair.server.overlay.namespace.?;
     try std.testing.expect(ns.subscribed(index, 0));
     pair.server.resetInbound(&pair.pair.server, index);
@@ -252,7 +252,7 @@ test "topic policy remembered ordinals remain independent of retained validation
     try std.testing.expect(g.subscribe(name));
     const old = g.overlay.findTopic(name).?;
     const generation = g.overlay.rows[old].generation;
-    const context: validation.Context = .{ .state = g.state, .overlay = g.overlay, .peers = &g.peers, .scores = &g.scores, .store = &g.messages.store, .history = &g.messages.history, .seen = &g.messages.seen, .options = &g.options };
+    const context: validation.Context = .{ .sessions = g.sessions, .overlay = g.overlay, .peers = &g.peers, .store = &g.messages.store, .history = &g.messages.history, .seen = &g.messages.seen, .options = &g.options };
     var work: usize = 10000;
     var peer_work: usize = 0;
     var large_used = false;
@@ -261,7 +261,7 @@ test "topic policy remembered ordinals remain independent of retained validation
     const len = try @import("snappy").raw.compress("0123456789", &compressed);
     const received = g.messages.validation.receive(&context, &workspace, peer.index, .{ .topic = name, .data = compressed[0..len] }, 1).admitted;
     try std.testing.expect(g.unsubscribe(name));
-    g.state.peers[peer.index].io.subscription_dirty.unset(old);
+    g.sessions.rows[peer.index].io.subscription_dirty.unset(old);
     var buffer: [@import("topic.zig").topic_max_len]u8 = undefined;
     for (0..511) |i| {
         const next = try std.fmt.bufPrint(&buffer, "/eth2/{x:0>2}020304/data_column_sidecar_{d}/ssz_snappy", .{ i / 128 + 1, i % 128 });

@@ -1,7 +1,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
 const topic = @import("topic.zig");
-const PeerSet = @import("state.zig").PeerSet;
+const PeerSet = @import("sessions.zig").PeerSet;
 const assert = std.debug.assert;
 
 pub const boundary_max = 64;

@@ -9,7 +9,7 @@ pub const topic_policy = @import("topic_policy.zig");
 pub const topic = @import("topic.zig");
 pub const topics = @import("topics.zig");
 pub const mcache = @import("mcache.zig");
-pub const state = @import("state.zig");
+pub const sessions = @import("sessions.zig");
 pub const frame = @import("frame.zig");
 pub const score = @import("score.zig");
 pub const gossipsub = @import("gossipsub.zig");
@@ -37,7 +37,7 @@ test {
     _ = receive_pool;
     _ = @import("overlay.zig");
     _ = @import("overlay_test.zig");
-    _ = @import("peers.zig");
+    _ = @import("peer_book.zig");
     _ = @import("message_store.zig");
     _ = @import("validation.zig");
     _ = @import("peer_io.zig");
@@ -46,7 +46,7 @@ test {
     _ = topic;
     _ = topics;
     _ = mcache;
-    _ = state;
+    _ = sessions;
     _ = frame;
     _ = score;
     _ = gossipsub;

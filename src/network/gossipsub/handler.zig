@@ -1,7 +1,7 @@
 const std = @import("std");
 const engine_mod = @import("../quic/engine.zig");
 const routing = @import("../router.zig");
-const state_mod = @import("state.zig");
+const sessions_mod = @import("sessions.zig");
 const types = @import("../types.zig");
 const gossipsub_mod = @import("gossipsub.zig");
 const constants = @import("constants.zig");
@@ -39,7 +39,7 @@ pub const Handler = struct {
     }
 
     pub fn shutdown(self: *Handler, router: *routing.Router, engine: *Engine) void {
-        for (self.inner.state.peers, 0..) |*peer, index| {
+        for (self.inner.sessions.rows, 0..) |*peer, index| {
             if (peer.active) self.inner.retirePeer(router, engine, @intCast(index));
         }
     }
@@ -94,16 +94,16 @@ pub const Handler = struct {
     /// Retry peerConnected with the same live handle after capacity returns or its duplicate closes.
     /// Hosts schedule retries at most once per second per connection, bounded by transport capacity.
     pub fn admitted(self: *Handler, conn: Handle) bool {
-        return self.inner.state.findPeer(conn) != null;
+        return self.inner.sessions.findPeer(conn) != null;
     }
 
     pub fn deliveryAvailable(self: *const Handler, conn: Handle) bool {
-        const index = self.inner.state.findPeer(conn) orelse return false;
-        return self.inner.state.peers[index].outStream() != null;
+        const index = self.inner.sessions.findPeer(conn) orelse return false;
+        return self.inner.sessions.rows[index].outStream() != null;
     }
 
     pub fn peerConnected(self: *Handler, engine: *Engine, conn: Handle, now: Now) Admission {
-        if (self.inner.state.findPeer(conn) != null) return .admitted;
+        if (self.inner.sessions.findPeer(conn) != null) return .admitted;
         const identity = engine.peerId(conn) orelse return .unauthenticated;
         const address = engine.peerAddress(conn) orelse return .unauthenticated;
         const direction = engine.direction(conn) orelse return .unauthenticated;
@@ -113,7 +113,7 @@ pub const Handler = struct {
             .duplicate => return .duplicate,
             .capacity => return .capacity,
         };
-        self.inner.state.peers[peer.index].outbound = .{ .waiting = now.mono_ms };
+        self.inner.sessions.rows[peer.index].outbound = .{ .waiting = now.mono_ms };
         return .admitted;
     }
 
@@ -132,7 +132,7 @@ pub const Handler = struct {
             .path_changed => |changed| self.inner.peers.migrate(changed.conn, changed.peer),
             .stream_closed => |closed| self.streamClosed(engine, closed.stream, now),
             .closed => |closed| {
-                const index = self.inner.state.findPeer(closed.conn) orelse continue;
+                const index = self.inner.sessions.findPeer(closed.conn) orelse continue;
                 self.inner.retirePeer(router, engine, index);
             },
             else => {},
@@ -145,11 +145,11 @@ pub const Handler = struct {
         outcome: routing.Outcome,
         now: Now,
     ) void {
-        const index = self.inner.state.findPeer(outcome.stream.conn) orelse {
+        const index = self.inner.sessions.findPeer(outcome.stream.conn) orelse {
             engine.closeStream(outcome.stream, 0);
             return;
         };
-        const session = &self.inner.state.peers[index];
+        const session = &self.inner.sessions.rows[index];
         switch (outcome.result) {
             .ready => self.inner.counters.negotiation_ready += 1,
             .rejected => self.inner.counters.negotiation_rejected += 1,
@@ -197,13 +197,13 @@ pub const Handler = struct {
 
     pub fn connectionActivity(self: *Handler, conn: Handle) void {
         self.inner.connectionActivity(conn);
-        const index = self.inner.state.findPeer(conn) orelse return;
-        self.inner.state.peers[index].needs_service = true;
+        const index = self.inner.sessions.findPeer(conn) orelse return;
+        self.inner.sessions.rows[index].needs_service = true;
     }
 
     pub fn nextWakeup(self: *const Handler, now: Now, event_capacity: usize) ?u64 {
         var next = self.inner.nextWakeup(now, event_capacity);
-        for (self.inner.state.peers) |*session| {
+        for (self.inner.sessions.rows) |*session| {
             if (!session.active) continue;
             if (session.needs_service) return now.mono_ms;
             switch (session.outbound) {
@@ -225,11 +225,11 @@ pub const Handler = struct {
         self.inner.last_now_ms = @max(self.inner.last_now_ms, now.mono_ms);
         var openings: usize = 0;
         var examined: usize = 0;
-        for (0..self.inner.state.peers.len) |_| {
+        for (0..self.inner.sessions.rows.len) |_| {
             if (examined == 32) break;
             const index: u16 = @intCast(self.open_cursor);
-            self.open_cursor = (self.open_cursor + 1) % self.inner.state.peers.len;
-            const session = &self.inner.state.peers[index];
+            self.open_cursor = (self.open_cursor + 1) % self.inner.sessions.rows.len;
+            const session = &self.inner.sessions.rows[index];
             if (!session.active) continue;
             session.needs_service = false;
             examined += 1;
@@ -259,24 +259,24 @@ pub const Handler = struct {
         index: u16,
         now: Now,
     ) void {
-        const conn = self.inner.state.peers[index].conn;
+        const conn = self.inner.sessions.rows[index].conn;
         const stream = router.beginMeshsub(engine, conn, now) catch |err| {
             self.inner.counters.negotiation_deferred += 1;
-            std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_deferred connection={d}:{d} reason={s} attempts={d}", .{ conn.index, conn.generation, @errorName(err), self.inner.state.peers[index].failures });
+            std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_deferred connection={d}:{d} reason={s} attempts={d}", .{ conn.index, conn.generation, @errorName(err), self.inner.sessions.rows[index].failures });
             self.retry(index, now);
             return;
         };
         self.inner.counters.negotiation_started += 1;
-        self.inner.state.peers[index].outbound = .{ .negotiating = stream };
+        self.inner.sessions.rows[index].outbound = .{ .negotiating = stream };
     }
 
     fn retry(self: *Handler, index: u16, now: Now) void {
-        self.inner.state.peers[index].retry(now.mono_ms);
+        self.inner.sessions.rows[index].retry(now.mono_ms);
     }
 
     fn streamClosed(self: *Handler, engine: *Engine, stream: StreamHandle, now: Now) void {
-        const index = self.inner.state.findPeer(stream.conn) orelse return;
-        const session = &self.inner.state.peers[index];
+        const index = self.inner.sessions.findPeer(stream.conn) orelse return;
+        const session = &self.inner.sessions.rows[index];
         switch (session.outbound) {
             .live => |live| if (std.meta.eql(live, stream)) {
                 self.inner.resetOutbound(engine, index);

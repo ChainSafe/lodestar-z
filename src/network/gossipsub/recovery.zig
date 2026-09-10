@@ -1,7 +1,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
-const Peers = @import("peers.zig").Peers;
-const PeerRef = @import("peers.zig").Ref;
+const Peers = @import("peer_book.zig").PeerBook;
+const PeerRef = @import("peer_book.zig").Ref;
 const PeerScore = @import("score.zig").PeerScore;
 const Handle = @import("../quic/engine.zig").Handle;
 const MessageId = @import("topic.zig").MessageId;
@@ -188,7 +188,7 @@ pub const Recovery = struct {
         }
     }
 
-    pub fn expire(self: *Recovery, peers: *Peers, scores: *PeerScore, now_ms: u64) u64 {
+    pub fn expire(self: *Recovery, peers: *Peers, now_ms: u64) u64 {
         var broken: u64 = 0;
         var index: usize = 0;
         const count = self.batch_len;
@@ -200,9 +200,8 @@ pub const Recovery = struct {
                 self.metrics.expired_ids +|= batch.count;
                 if (batch.sample != none) {
                     broken += 1;
-                    scores.penalize(batch.peer.index, 1);
-                    scores.penalties.broken_promise +|= 1;
-                    peers.rows[batch.peer.index].negative = true;
+                    peers.penalize(batch.peer, 1);
+                    peers.scores.penalties.broken_promise +|= 1;
                 }
                 self.remove(peers, index);
             } else index += 1;
@@ -248,7 +247,7 @@ test "recovery receipts bind connection generation and token and release only ca
     defer recovery.deinit(allocator, &peers);
     const connection: Handle = .{ .index = 0, .generation = 1 };
     const next_connection: Handle = .{ .index = 0, .generation = 2 };
-    const metadata: @import("peers.zig").Metadata = .{
+    const metadata: @import("peer_book.zig").Metadata = .{
         .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length },
         .address = .unspecified,
         .direction = .inbound,
@@ -281,7 +280,7 @@ test "recovery capacity resolves every matching attribution and deinit releases 
     var peers = try Peers.initCapacity(allocator, 10_000, 2, 1);
     defer peers.deinit(allocator);
     const connection: Handle = .{ .index = 0, .generation = 1 };
-    const metadata: @import("peers.zig").Metadata = .{
+    const metadata: @import("peer_book.zig").Metadata = .{
         .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length },
         .address = .unspecified,
         .direction = .inbound,
@@ -307,7 +306,7 @@ test "recovery metrics distinguish incoming delivery from queued and locally res
     var recovery = try Recovery.init(allocator);
     defer recovery.deinit(allocator, &peers);
     const connection: Handle = .{ .index = 0, .generation = 1 };
-    const metadata: @import("peers.zig").Metadata = .{
+    const metadata: @import("peer_book.zig").Metadata = .{
         .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length },
         .address = .unspecified,
         .direction = .inbound,
@@ -342,21 +341,19 @@ test "recovery batches pin identity once and score one randomly selected promise
     const a = std.testing.allocator;
     var peers = try Peers.initCapacity(a, 10000, 2, 1);
     defer peers.deinit(a);
-    var scores = try PeerScore.initCapacity(a, .{}, 2);
-    defer scores.deinit(a);
     var recovery = try Recovery.init(a);
     defer recovery.deinit(a, &peers);
     const connection: Handle = .{ .index = 0, .generation = 1 };
-    const metadata: @import("peers.zig").Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound };
+    const metadata: @import("peer_book.zig").Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound };
     const peer = peers.admit(connection, &metadata, 0).admitted.peer;
     var ids: [constants.gossip_ids_max]MessageId = undefined;
     for (&ids, 0..) |*id, i| id.* = @splat(@intCast(i));
     recovery.addBatch(&peers, &ids, peer, connection, 1, 64);
     try std.testing.expectEqual(@as(u32, 1), peers.rows[peer.index].pins);
-    try std.testing.expectEqual(@as(u64, 0), recovery.expire(&peers, &scores, 20000));
+    try std.testing.expectEqual(@as(u64, 0), recovery.expire(&peers, 20000));
     recovery.controlSent(connection, 1, 3000, 20000);
-    try std.testing.expectEqual(@as(u64, 1), recovery.expire(&peers, &scores, 23000));
-    try std.testing.expectEqual(@as(u64, 1), scores.penalties.broken_promise);
+    try std.testing.expectEqual(@as(u64, 1), recovery.expire(&peers, 23000));
+    try std.testing.expectEqual(@as(u64, 1), peers.scores.penalties.broken_promise);
     try std.testing.expectEqual(@as(u64, 128), recovery.metrics.expired_ids);
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
     recovery.addBatch(&peers, &ids, peer, connection, 2, 64);
@@ -364,8 +361,8 @@ test "recovery batches pin identity once and score one randomly selected promise
     recovery.resolve(&peers, ids[64], .{ .now_ms = 25000 });
     try std.testing.expectEqual(@as(usize, 127), recovery.len);
     try std.testing.expectEqual(@as(u32, 1), peers.rows[peer.index].pins);
-    try std.testing.expectEqual(@as(u64, 0), recovery.expire(&peers, &scores, 27000));
-    try std.testing.expectEqual(@as(u64, 1), scores.penalties.broken_promise);
+    try std.testing.expectEqual(@as(u64, 0), recovery.expire(&peers, 27000));
+    try std.testing.expectEqual(@as(u64, 1), peers.scores.penalties.broken_promise);
     try std.testing.expectEqual(@as(u64, 255), recovery.metrics.expired_ids);
     try std.testing.expectEqual(@as(u64, 2), recovery.metrics.batches_sent);
     try std.testing.expectEqual(@as(usize, constants.promises_cap), recovery.available());

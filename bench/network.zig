@@ -219,7 +219,7 @@ fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected:
 
 fn printReconciliation(node: *network.NetworkCore, name: []const u8) void {
     const c = node.core.counters;
-    const score = &node.core.service.gossipsub.inner.scores;
+    const score = &node.core.service.gossipsub.inner.peers.scores;
     std.debug.print("case={s} selections={} selection_rows={} candidate_syncs={} candidate_rows={} candidate_lookup_rows={} availability_rows={} candidate_selections={} score_calculations={} score_topic_visits={}\n", .{ name, c.selections, c.selection_rows, c.candidate_syncs, c.candidate_rows, c.candidate_lookup_rows, c.availability_rows, c.candidate_selections, score.calculations, score.topic_visits });
 }
 

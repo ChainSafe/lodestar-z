@@ -3,7 +3,7 @@ const constants = @import("constants.zig");
 const Handle = @import("../quic/engine.zig").Handle;
 const StreamHandle = @import("../quic/engine.zig").StreamHandle;
 const MessageId = @import("topic.zig").MessageId;
-const Version = @import("state.zig").Version;
+const Version = @import("sessions.zig").Version;
 pub const retry_min_ms: u64 = 1000;
 pub const retry_max_ms: u64 = 30000;
 pub const Outbound = union(enum) { waiting: u64, negotiating: StreamHandle, live: StreamHandle };
@@ -13,7 +13,7 @@ pub const Session = struct {
     outbound: Outbound = .{ .waiting = 0 },
     failures: u8 = 0,
     needs_service: bool = false,
-    logical: @import("peers.zig").Ref = undefined,
+    logical: @import("peer_book.zig").Ref = undefined,
     active: bool = false,
     generation: u64 = 0,
     conn: Handle = undefined,

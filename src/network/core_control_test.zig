@@ -1089,8 +1089,8 @@ fn quiescenceGossip(hold_selection: bool) !void {
     for (0..30) |_| try setup.step(0);
     var peers: [4]t.Snapshot = undefined;
     _ = setup.server.snapshots(&peers);
-    const index = setup.server.service.gossipsub.inner.state.findPeer(peers[0].connection.?).?;
-    var stream = setup.server.service.gossipsub.inner.state.outStream(index).?;
+    const index = setup.server.service.gossipsub.inner.sessions.findPeer(peers[0].connection.?).?;
+    var stream = setup.server.service.gossipsub.inner.sessions.outStream(index).?;
     if (hold_selection) {
         stream = try setup.pair.server.openStream(peers[0].connection.?);
         var header_bytes: [64]u8 = undefined;

@@ -4,7 +4,7 @@ const engine_mod = @import("quic/engine.zig");
 const types = @import("types.zig");
 const reqresp = @import("reqresp/protocol.zig");
 const capability = @import("capabilities.zig");
-const Version = @import("gossipsub/state.zig").Version;
+const Version = @import("gossipsub/sessions.zig").Version;
 
 pub const meshsub_ids = [_][]const u8{ "/meshsub/1.2.0", "/meshsub/1.1.0", "/meshsub/1.0.0" };
 pub const Kind = enum { reqresp, meshsub, identify };

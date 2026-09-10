@@ -52,7 +52,7 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").No
     out.topic_count = 0;
     for (&g.overlay.rows, 0..) |*row, i| {
         if (!row.active) continue;
-        const params = &g.scores.topic_params[i];
+        const params = &g.peers.scores.topic_params[i];
         const target = &out.topics[out.topic_count];
         target.* = .{ .index = @intCast(i), .name = undefined, .len = row.string_len, .subscribed = row.subscribed, .weight = params.weight, .mesh_activation_ms = params.mesh_delivery_activation_ms };
         @memcpy(target.name[0..target.len], row.string[0..row.string_len]);
@@ -65,13 +65,13 @@ pub fn capture(g: *const Gossipsub, cursor: u16, now: @import("../types.zig").No
         position += 1;
         const row = &g.peers.rows[index];
         if (!row.occupied) continue;
-        const session = if (row.connection) |conn| g.state.findPeer(conn) else null;
+        const session = if (row.connection) |conn| g.sessions.findPeer(conn) else null;
         var weights: score.Breakdown = undefined;
-        const total = g.scores.snapshotWeights(@intCast(index), now.mono_ms, &weights);
+        const total = g.peers.scores.snapshotWeights(@intCast(index), now.mono_ms, &weights);
         const peer = &out.peers[out.peer_count];
-        peer.* = .{ .identity = row.identity, .connected = row.connection != null, .outbound_ready = if (session) |i| g.state.peers[i].outStream() != null else false, .address = row.address, .retain_until = row.retain_until, .score = total, .app_score = g.scores.app_score[index], .behaviour = g.scores.behaviour[index], .weights = weights.global };
+        peer.* = .{ .identity = row.identity, .connected = row.connection != null, .outbound_ready = if (session) |i| g.sessions.rows[i].outStream() != null else false, .address = row.address, .retain_until = row.retain_until, .score = total, .app_score = g.peers.scores.app_score[index], .behaviour = g.peers.scores.behaviour[index], .weights = weights.global };
         for (out.topics[0..out.topic_count]) |*known| {
-            const counters = &g.scores.topics[index * c.topics_cap + known.index];
+            const counters = &g.peers.scores.topics[index * c.topics_cap + known.index];
             const member = if (session) |i| g.overlay.rows[known.index].mesh.isSet(i) else false;
             if (!member and !counters.in_mesh and counters.first_deliveries == 0 and counters.mesh_deliveries == 0 and counters.mesh_failures == 0 and counters.invalid == 0) continue;
             peer.topics[peer.topic_count] = .{ .index = known.index, .counters = counters.*, .weights = weights.topics[known.index], .mesh_member = member };
@@ -91,13 +91,13 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     const t = g.overlay.findTopic(name).?;
     for (0..10) |i| {
         const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
-        g.scores.invalid(g.state.peers[peer.index].logical.index, t);
+        g.peers.scores.invalid(g.sessions.rows[peer.index].logical.index, t);
     }
     const page = try a.create(Page);
     defer a.destroy(page);
-    const calls = g.scores.calls;
-    const revision = g.scores.revision;
-    const dirty = g.scores.dirty;
+    const calls = g.peers.scores.calls;
+    const revision = g.peers.scores.revision;
+    const dirty = g.peers.scores.dirty;
     try capture(&g, 0, .{ .mono_ms = 200, .unix_s = 1000 }, page);
     try std.testing.expectEqual(@as(u8, 8), page.peer_count);
     try std.testing.expectEqual(@as(?u16, 8), page.next);
@@ -105,12 +105,12 @@ test "gossip diagnostic pages bound peers preserve scores and include empty mesh
     try std.testing.expect(page.topics[0].subscribed);
     try std.testing.expect(!page.peers[0].topics[0].mesh_member);
     try std.testing.expectEqual(@as(f64, 1), page.peers[0].topics[0].counters.invalid);
-    try std.testing.expectEqual(g.scores.snapshot(0, 200), page.peers[0].score);
+    try std.testing.expectEqual(g.peers.scores.snapshot(0, 200), page.peers[0].score);
     try capture(&g, page.next.?, .{ .mono_ms = 200, .unix_s = 1000 }, page);
     try std.testing.expectEqual(@as(u8, 2), page.peer_count);
     try std.testing.expectEqual(@as(?u16, null), page.next);
-    try std.testing.expectEqual(calls, g.scores.calls);
-    try std.testing.expectEqual(revision, g.scores.revision);
-    try std.testing.expectEqualSlices(bool, &dirty, &g.scores.dirty);
+    try std.testing.expectEqual(calls, g.peers.scores.calls);
+    try std.testing.expectEqual(revision, g.peers.scores.revision);
+    try std.testing.expectEqualSlices(bool, &dirty, &g.peers.scores.dirty);
     try std.testing.expectError(error.InvalidDiagnosticsCursor, capture(&g, 17, .{ .mono_ms = 200, .unix_s = 1000 }, page));
 }

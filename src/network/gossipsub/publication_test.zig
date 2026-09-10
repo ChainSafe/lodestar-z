@@ -14,7 +14,7 @@ test "publication refusal retry duplicate and exact expiry preserve admission" {
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const t = g.overlay.findTopic(topic).?;
     g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, peer.index, true);
-    g.markDirect(g.state.peers[peer.index].conn);
+    g.markDirect(g.sessions.rows[peer.index].conn);
     const admitted = try g.publishWithOptions(topic, "local", .{ .allow_zero_peers = false }, .{ .mono_ms = 11, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .unavailable = 1 }, admitted);
     const retained = g.messages.history.get(&g.messages.store, id).?.message;
@@ -41,18 +41,18 @@ test "publication recipient policy tops up without graft and accounts unique sha
         const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
         const peer = support.addPeer(&g, conn, .v1_2).?;
         g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, peer.index, true);
-        g.state.peers[peer.index].outbound = .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } };
+        g.sessions.rows[peer.index].outbound = .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } };
     }
-    g.markDirect(g.state.peers[0].conn);
-    try std.testing.expect(g.setPeerScore(g.state.peers[0].conn, -10_000));
-    try std.testing.expect(g.setPeerScore(g.state.peers[10].conn, g.options.score_params.publish_threshold - 1));
-    try std.testing.expect(g.setPeerScore(g.state.peers[9].conn, g.options.score_params.publish_threshold));
+    g.markDirect(g.sessions.rows[0].conn);
+    try std.testing.expect(g.setPeerScore(g.sessions.rows[0].conn, -10_000));
+    try std.testing.expect(g.setPeerScore(g.sessions.rows[10].conn, g.options.score_params.publish_threshold - 1));
+    try std.testing.expect(g.setPeerScore(g.sessions.rows[9].conn, g.options.score_params.publish_threshold));
     g.overlay.retire.set(11);
     g.overlay.mesh(t).set(1);
     g.overlay.mesh(t).set(10);
     g.overlay.mesh(t).set(11);
-    g.state.peers[1].outbound = .{ .waiting = 0 };
-    g.state.peers[9].outbound = .{ .waiting = 0 };
+    g.sessions.rows[1].outbound = .{ .waiting = 0 };
+    g.sessions.rows[9].outbound = .{ .waiting = 0 };
     const outcome = try g.publish(topic, "short mesh", .{ .mono_ms = 1, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 9, .queued = 8, .unavailable = 1 }, outcome);
     try std.testing.expectEqual(@as(usize, 3), g.overlay.mesh(t).count());
@@ -60,7 +60,7 @@ test "publication recipient policy tops up without graft and accounts unique sha
     const h = g.messages.history.get(&g.messages.store, id).?.message;
     try std.testing.expectEqual(@as(usize, 1), g.messages.store.used_entries);
     try std.testing.expectEqual(@as(u32, 8), g.messages.store.get(h).?.tx);
-    for (g.state.peers[0..12], 0..) |*peer, index| {
+    for (g.sessions.rows[0..12], 0..) |*peer, index| {
         const io = &peer.io;
         try std.testing.expectEqual(@as(usize, 0), io.critical.used);
         if (index == 0 or (index >= 2 and index <= 8)) {
@@ -69,8 +69,8 @@ test "publication recipient policy tops up without graft and accounts unique sha
         } else try std.testing.expectEqual(@as(usize, 0), io.data_count);
         io.resetTx(&g.messages.store);
     }
-    g.state.peers[2].outbound = .{ .waiting = 0 };
-    for (0..g.state.peers[3].io.data.len) |_| try std.testing.expectEqual(.queued, g.state.peers[3].io.queueData(&g.messages.store, h, g.options.tx_peer_bytes, 2));
+    g.sessions.rows[2].outbound = .{ .waiting = 0 };
+    for (0..g.sessions.rows[3].io.data.len) |_| try std.testing.expectEqual(.queued, g.sessions.rows[3].io.queueData(&g.messages.store, h, g.options.tx_peer_bytes, 2));
     const flood = try g.publishWithOptions(topic, "flood", .{ .flood = true }, .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 10, .queued = 6, .pressured = 1, .unavailable = 3 }, flood);
 }
@@ -84,13 +84,13 @@ test "publication failed history admission retains payloads and recovery attribu
     for ([_][]const u8{ "retained zero", "retained one" }, &retained) |payload, *h| {
         _ = try g.publish(topic, payload, .{ .mono_ms = 1, .unix_s = 0 });
         h.* = g.messages.history.get(&g.messages.store, topic_mod.validMessageId(topic, payload, .{})).?.message;
-        try std.testing.expectEqual(.queued, g.state.peers[peer.index].io.queueData(&g.messages.store, h.*, g.options.tx_peer_bytes, 1));
+        try std.testing.expectEqual(.queued, g.sessions.rows[peer.index].io.queueData(&g.messages.store, h.*, g.options.tx_peer_bytes, 1));
     }
     const id = topic_mod.validMessageId(topic, "retry", .{});
-    const logical = g.state.peers[peer.index].logical;
+    const logical = g.sessions.rows[peer.index].logical;
     const second_conn: @import("../quic/engine.zig").Handle = .{ .index = 1, .generation = 1 };
     const second_peer = support.addPeer(&g, second_conn, .v1_2).?;
-    const second_logical = g.state.peers[second_peer.index].logical;
+    const second_logical = g.sessions.rows[second_peer.index].logical;
     g.recovery.add(&g.peers, id, logical, conn, 1);
     g.recovery.add(&g.peers, id, second_logical, second_conn, 2);
     g.recovery.controlSent(conn, 1, 12_000, 1);
@@ -106,7 +106,7 @@ test "publication failed history admission retains payloads and recovery attribu
         const size = try @import("snappy").raw.uncompress(g.messages.store.segment(h, g.messages.store.cursor(h)), &decoded);
         try std.testing.expectEqualStrings(expected, decoded[0..size]);
     }
-    g.state.peers[peer.index].io.resetTx(&g.messages.store);
+    g.sessions.rows[peer.index].io.resetTx(&g.messages.store);
     _ = try g.publish(topic, "retry", .{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[logical.index].pins);
@@ -127,7 +127,7 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
         const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
         const p = support.addPeer(&g, conn, .v1_2).?;
         g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, p.index, true);
-        g.state.peers[p.index].outbound = .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } };
+        g.sessions.rows[p.index].outbound = .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } };
     }
     const first = try g.publish(topic, "empty mesh", .{ .mono_ms = 1, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 8, .queued = 8 }, first);
@@ -137,10 +137,10 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
     _ = try g.publish(topic, "reuse fanout", .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expectEqual(fanout, g.overlay.fanoutMembers(t).*);
     for (0..8) |index| g.overlay.mesh(t).set(index);
-    for (g.state.peers) |*peer| peer.io.resetTx(&g.messages.store);
+    for (g.sessions.rows) |*peer| peer.io.resetTx(&g.messages.store);
     const full = try g.publish(topic, "full mesh", .{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 8, .queued = 8 }, full);
-    for (g.state.peers[0..10], 0..) |*peer, index| try std.testing.expectEqual(@as(usize, if (index < 8) 1 else 0), peer.io.data_count);
+    for (g.sessions.rows[0..10], 0..) |*peer, index| try std.testing.expectEqual(@as(usize, if (index < 8) 1 else 0), peer.io.data_count);
 }
 
 test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {
@@ -150,9 +150,9 @@ test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {
     try std.testing.expect(pair.client.subscribe(topic));
     try std.testing.expect(pair.server.subscribe(topic));
     for (0..20) |_| try pair.pumpOnce();
-    const destination = pair.client.state.findPeer(pair.handles.client).?;
+    const destination = pair.client.sessions.findPeer(pair.handles.client).?;
     const id = topic_mod.validMessageId(topic, "originated wire bytes", .{});
-    pair.client.state.suppress(destination, id, pair.pair.now.mono_ms, 60_000);
+    pair.client.sessions.suppress(destination, id, pair.pair.now.mono_ms, 60_000);
     const outcome = try pair.client.publishWithOptions(topic, "originated wire bytes", .{ .allow_zero_peers = false }, pair.pair.now);
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, outcome);
     var received: usize = 0;

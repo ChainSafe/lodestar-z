@@ -18,7 +18,7 @@ pub fn emit(peer: *Peer, id: u32) !void {
     }
     var inbound_version: ?[]const u8 = null;
     var outbound_version: ?[]const u8 = null;
-    for (peer.service.gossipsub.inner.state.peers) |entry| {
+    for (peer.service.gossipsub.inner.sessions.rows) |entry| {
         if (!entry.active) continue;
         if (entry.in_stream != null) inbound_version = @tagName(entry.inbound_version);
         if (entry.out_stream != null) outbound_version = @tagName(entry.version);

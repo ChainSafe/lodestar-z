@@ -286,13 +286,14 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     defer server.deinit();
     defer server.reqresp.shutdown(&server.router, &pair.server);
     const handles = try support.connectPair(&pair);
-    const peers = @import("gossipsub/peers.zig");
+    const peers = @import("gossipsub/peer_book.zig");
     for (0..peers.capacity - peers.outbound_reserve) |i| {
         var metadata: peers.Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** @import("wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
         const ref = server.gossipsub.inner.peers.admit(.{ .index = 0, .generation = 1 }, &metadata, pair.now.mono_ms).admitted.peer;
-        server.gossipsub.inner.scores.penalize(ref.index, 20);
-        server.gossipsub.inner.peers.disconnect(ref, pair.now.mono_ms, true);
+        server.gossipsub.inner.peers.scores.penalize(ref.index, 20);
+        _ = server.gossipsub.inner.peers.scores.setAppScore(ref.index, -1);
+        server.gossipsub.inner.peers.disconnect(ref, pair.now.mono_ms);
     }
     try std.testing.expectEqual(gs.Handler.Admission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
     try std.testing.expect(!server.gossipsub.admitted(handles.server));
@@ -346,7 +347,7 @@ test "router capabilities validate service limits and preserve configured prefer
     active.receive.insert(.{ .reqresp = .ping_v1 });
     active.request.insert(.{ .meshsub = .v1_0 });
     active.request.insert(.{ .meshsub = .v1_2 });
-    var versions = [_]@import("gossipsub/state.zig").Version{ .v1_0, .v1_2 };
+    var versions = [_]@import("gossipsub/sessions.zig").Version{ .v1_0, .v1_2 };
     var router = try routing.Router.init(std.testing.allocator, .{ .capabilities = active, .meshsub_versions = &versions });
     defer router.deinit();
     versions[0] = .v1_1;

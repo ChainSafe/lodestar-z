@@ -73,7 +73,7 @@ pub const Local = struct {
         for (std.enums.values(reqresp)) |which| if (receive.contains(.{ .reqresp = which })) {
             size += pb.bytesFieldSize(3, which.id().len);
         };
-        for (std.enums.values(@import("../gossipsub/state.zig").Version)) |version| {
+        for (std.enums.values(@import("../gossipsub/sessions.zig").Version)) |version| {
             const protocol: routing.Protocol = .{ .meshsub = version };
             if (receive.contains(protocol)) size += pb.bytesFieldSize(3, protocol.id().len);
         }
@@ -85,7 +85,7 @@ pub const Local = struct {
         writer.bytesField(1, &self.public_key);
         for (self.addresses[0..self.address_count]) |address| writer.bytesField(2, address.bytes[0..address.len]);
         for (std.enums.values(reqresp)) |which| if (receive.contains(.{ .reqresp = which })) writer.bytesField(3, which.id());
-        for (std.enums.values(@import("../gossipsub/state.zig").Version)) |version| {
+        for (std.enums.values(@import("../gossipsub/sessions.zig").Version)) |version| {
             const protocol: routing.Protocol = .{ .meshsub = version };
             if (receive.contains(protocol)) writer.bytesField(3, protocol.id());
         }
