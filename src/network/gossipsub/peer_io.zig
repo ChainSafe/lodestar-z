@@ -5,7 +5,7 @@ const constants = @import("constants.zig");
 const assert = std.debug.assert;
 const Outbox = @import("outbox.zig").Outbox;
 
-pub const TimeoutReason = enum { prunes, subscriptions, receive_pressure, receive_frame, send_queue, send_progress };
+pub const TimeoutReason = enum { subscriptions, receive_pressure, receive_frame, send_queue, send_progress, prunes };
 pub const Deadlines = struct {
     values: [@typeInfo(TimeoutReason).@"enum".fields.len]?u64 = @splat(null),
 

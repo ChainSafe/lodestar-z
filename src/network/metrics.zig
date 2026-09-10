@@ -13,7 +13,7 @@ const counterFields = prom.counterFields;
 const peer_client = @import("peers/client.zig");
 const goodbye = @import("peers/goodbye.zig");
 const discovery_metrics = @import("peers/discovery.zig");
-const peer_io = @import("gossipsub/peer_io.zig");
+const outbox = @import("gossipsub/outbox.zig");
 const score_metrics = @import("metrics_score.zig");
 
 pub const interval_ms = 1_000;
@@ -74,7 +74,7 @@ pub const Snapshot = struct {
     dial: @import("peers/dial_queue.zig").DialQueue.Counters = .{},
     discovery_counts: discovery_metrics.Counters = .{},
     discovery_rejections: [discovery_metrics.rejection_count]u64 = @splat(0),
-    gossip_queue_drops: [peer_io.drop_reason_count]u64 = @splat(0),
+    gossip_queue_drops: [outbox.drop_reason_count]u64 = @splat(0),
     peers: usize = 0,
     relevant: usize = 0,
     target: usize = 0,
@@ -126,7 +126,7 @@ pub const Snapshot = struct {
         self.dial = core.dial_queue.counters;
         for (g.sessions.rows) |*session| {
             const io = &session.io;
-            for (&self.gossip_queue_drops, io.drops) |*total, value| total.* +|= value;
+            for (&self.gossip_queue_drops, io.tx.drops) |*total, value| total.* +|= value;
         }
         self.target = core.catalog.options.target_peers;
         self.peer_policy.collect(&core.selection, &core.demand, core.current_slot, core.local.fork.custody_groups);
@@ -290,8 +290,8 @@ pub const Snapshot = struct {
         try family(w, "lodestar_native_discovery_candidate_rejections_total", .counter, "Authenticated discovery candidates rejected by reason");
         inline for (@typeInfo(discovery_metrics.Rejection).@"enum".fields) |field| try sample(w, "lodestar_native_discovery_candidate_rejections_total", "reason", field.name, self.discovery_rejections[field.value]);
         try family(w, "lodestar_native_gossip_queue_drops_total", .counter, "Gossip queue admissions refused by resource limit, including mesh control");
-        inline for (@typeInfo(peer_io.DropReason).@"enum".fields) |field| try sample(w, "lodestar_native_gossip_queue_drops_total", "reason", field.name, self.gossip_queue_drops[field.value]);
-        try scalar(w, "lodestar_native_gossip_data_descriptors_per_peer", .gauge, "Bounded outgoing data descriptors per gossip peer", peer_io.data_capacity);
+        inline for (@typeInfo(outbox.DropReason).@"enum".fields) |field| try sample(w, "lodestar_native_gossip_queue_drops_total", "reason", field.name, self.gossip_queue_drops[field.value]);
+        try scalar(w, "lodestar_native_gossip_data_descriptors_per_peer", .gauge, "Bounded outgoing data descriptors per gossip peer", outbox.data_capacity);
         if (self.gossip_resources) |*resources| {
             inline for (@typeInfo(gossip.ResourceSnapshot).@"struct".fields) |field| {
                 if (comptime @typeInfo(field.type) == .optional) {
@@ -496,7 +496,7 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     for (&snapshot.scores.mesh_scores) |*range| range.observe(1e40);
     snapshot.closed_by_client[@intFromEnum(Client.Lighthouse)][@intFromEnum(peer_types.DisconnectReason.remote_goodbye)] = 13;
     snapshot.peer_events.goodbyes[@intFromEnum(goodbye.Reason.too_many_peers)] = 11;
-    snapshot.gossip_queue_drops[@intFromEnum(peer_io.DropReason.data_bytes)] = 17;
+    snapshot.gossip_queue_drops[@intFromEnum(outbox.DropReason.data_bytes)] = 17;
     snapshot.discovery_rejections[@intFromEnum(discovery_metrics.Rejection.incompatible_fork)] = 19;
     snapshot.peer_policy.group_count = 128;
     snapshot.peer_policy.wanted = .{ .attnets = std.math.maxInt(u64), .syncnets = 15 };
