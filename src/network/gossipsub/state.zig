@@ -18,7 +18,6 @@ const Session = @import("peer_session.zig").Session;
 pub const State = struct {
     peers: []Session,
     io_arena: []u8,
-    registry: @import("registry.zig").Registry = .{},
 
     pub fn init(a: std.mem.Allocator, capacity: u16) !State {
         return initOptions(a, &.{ .connected_capacity = capacity });
@@ -36,7 +35,6 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State, a: std.mem.Allocator) void {
-        self.registry.deinit(a);
         a.free(self.peers);
         a.free(self.io_arena);
     }
@@ -64,12 +62,6 @@ pub const State = struct {
     pub fn removePeer(self: *State, index: u16) void {
         assert(index < self.peers.len);
         if (!self.peers[index].active) return;
-        for (&self.registry.rows) |*topic| {
-            if (!topic.active) continue;
-            topic.subscribers.unset(index);
-            topic.mesh.unset(index);
-            topic.fanout.unset(index);
-        }
         self.peers[index].active = false;
         self.peers[index].outbound = .{ .waiting = 0 };
         self.peers[index].in_stream = null;
@@ -128,7 +120,7 @@ pub const State = struct {
     }
 };
 
-test "state tracks peers, topics, subscriptions, and mesh membership" {
+test "session slots track connection generations" {
     var state = try std.testing.allocator.create(State);
     defer std.testing.allocator.destroy(state);
     state.* = try State.init(std.testing.allocator, constants.peers_cap);
@@ -138,22 +130,7 @@ test "state tracks peers, topics, subscriptions, and mesh membership" {
     try std.testing.expectEqual(@as(?u16, peer.index), state.findPeer(conn));
     try std.testing.expectEqual(Version.v1_2, state.peerVersion(peer.index));
 
-    const digest = topic_mod.ForkDigest{ 0x6a, 0x95, 0xa1, 0xa9 };
-    var buf: [topic_mod.topic_max_len]u8 = undefined;
-    const topic_str = topic_mod.build(digest, "beacon_block", &buf);
-    const topic = state.registry.internVacant(topic_str).?;
-    try std.testing.expectEqual(@as(?u16, topic), state.registry.internVacant(topic_str)); // interns once
-    state.registry.setSubscribed(topic, true);
-    try std.testing.expect(state.registry.subscribed(topic));
-
-    state.registry.setSubscription(topic, peer.index, true);
-    try std.testing.expect(state.registry.subscribers(topic).isSet(peer.index));
-    state.registry.mesh(topic).set(peer.index);
-    try std.testing.expect(state.registry.mesh(topic).isSet(peer.index));
-
     state.removePeer(peer.index);
-    try std.testing.expect(!state.registry.subscribers(topic).isSet(peer.index));
-    try std.testing.expect(!state.registry.mesh(topic).isSet(peer.index));
     try std.testing.expectEqual(@as(?u16, null), state.findPeer(conn));
 }
 
@@ -174,14 +151,14 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
     const names = @import("topics.zig");
     var gossip = try @import("gossipsub.zig").Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
     defer gossip.deinit();
-    const state = gossip.state;
+    const overlay = gossip.overlay;
     var name: [topic_mod.name_max_len]u8 = undefined;
     var buffer: [topic_mod.topic_max_len]u8 = undefined;
     for (0..3) |fork| {
         if (fork == 2) {
-            for (&state.registry.rows, 0..) |*topic, index| {
-                if (topic.active and std.mem.startsWith(u8, state.registry.topicString(@intCast(index)), "/eth2/00000000/")) {
-                    try std.testing.expect(gossip.unsubscribe(state.registry.topicString(@intCast(index))));
+            for (&overlay.rows, 0..) |*topic, index| {
+                if (topic.active and std.mem.startsWith(u8, overlay.topicString(@intCast(index)), "/eth2/00000000/")) {
+                    try std.testing.expect(gossip.unsubscribe(overlay.topicString(@intCast(index))));
                 }
             }
         }
@@ -199,27 +176,27 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
             try std.testing.expect(gossip.subscribe(topic_mod.build(digest, n, &buffer)));
         }
     }
-    try std.testing.expect(state.registry.findTopic("/eth2/00000000/beacon_block/ssz_snappy") == null);
-    try std.testing.expect(state.registry.findTopic("/eth2/01000000/beacon_block/ssz_snappy") != null);
-    try std.testing.expect(state.registry.findTopic("/eth2/02000000/beacon_block/ssz_snappy") != null);
+    try std.testing.expect(overlay.findTopic("/eth2/00000000/beacon_block/ssz_snappy") == null);
+    try std.testing.expect(overlay.findTopic("/eth2/01000000/beacon_block/ssz_snappy") != null);
+    try std.testing.expect(overlay.findTopic("/eth2/02000000/beacon_block/ssz_snappy") != null);
 }
 
 test "gossip state intern snapshots an aliased retiring topic string" {
-    var state = try State.init(std.testing.allocator, 1);
-    defer state.deinit(std.testing.allocator);
+    var overlay = @import("overlay.zig").Overlay.init(1);
+    defer overlay.deinit(std.testing.allocator);
     const oversized = [_]u8{'x'} ** (topic_mod.topic_max_len + 1);
-    try std.testing.expectEqual(@as(?u16, null), state.registry.internVacant(&oversized));
-    try std.testing.expectEqual(@as(?u16, null), state.registry.internVacant("invalid"));
+    try std.testing.expectEqual(@as(?u16, null), overlay.internVacant(&oversized));
+    try std.testing.expectEqual(@as(?u16, null), overlay.internVacant("invalid"));
     const original = "/eth2/00000000/a/ssz_snappy/b/ssz_snappy";
     const shorter = "/eth2/00000000/a/ssz_snappy";
-    try std.testing.expectEqual(@as(?u16, 0), state.registry.internVacant(original));
-    const input = state.registry.topicString(0)[0..shorter.len];
-    state.registry.rows[0].active = false;
-    try std.testing.expectEqual(@as(?u16, 0), state.registry.internVacant(input));
-    try std.testing.expectEqualStrings(shorter, state.registry.topicString(0));
-    try std.testing.expectEqual(@as(u64, 2), state.registry.rows[0].generation);
+    try std.testing.expectEqual(@as(?u16, 0), overlay.internVacant(original));
+    const input = overlay.topicString(0)[0..shorter.len];
+    overlay.rows[0].active = false;
+    try std.testing.expectEqual(@as(?u16, 0), overlay.internVacant(input));
+    try std.testing.expectEqualStrings(shorter, overlay.topicString(0));
+    try std.testing.expectEqual(@as(u64, 2), overlay.rows[0].generation);
     const maximum = "/eth2/00000000/sync_committee_contribution_and_proof/ssz_snappy";
     try std.testing.expectEqual(topic_mod.topic_max_len, maximum.len);
-    try std.testing.expectEqual(@as(?u16, 1), state.registry.internVacant(maximum));
-    try std.testing.expectEqualStrings(maximum, state.registry.topicString(1));
+    try std.testing.expectEqual(@as(?u16, 1), overlay.internVacant(maximum));
+    try std.testing.expectEqualStrings(maximum, overlay.topicString(1));
 }

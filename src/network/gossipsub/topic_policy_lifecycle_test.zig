@@ -20,7 +20,7 @@ fn options(boundaries: []const p.Boundary) gossip.Options {
 }
 fn live(g: *const Gossipsub) usize {
     var count: usize = 0;
-    for (g.state.registry.rows) |row| if (row.active) {
+    for (g.overlay.rows) |row| if (row.active) {
         count += 1;
     };
     return count;
@@ -38,8 +38,8 @@ test "topic policy remembers real inactive subscriptions without event pressure 
     try std.testing.expectEqual(@as(usize, 0), pair.server.decompressed_used);
     try std.testing.expectEqual(@as(u64, 0), pair.server.counters.local_pressure_resets);
     try pair.server.configureTopic(name, &.{ .weight = 2 });
-    const t = pair.server.state.registry.findTopic(name).?;
-    try std.testing.expectEqual(@as(usize, 1), pair.server.state.registry.subscribers(t).count());
+    const t = pair.server.overlay.findTopic(name).?;
+    try std.testing.expectEqual(@as(usize, 1), pair.server.overlay.subscribers(t).count());
     try std.testing.expect(pair.server.subscribe(name));
     pair.server_event_capacity = 16;
     const result = try pair.server.publishWithOptions(name, "0123456789", .{ .allow_zero_peers = false }, pair.pair.now);
@@ -55,8 +55,8 @@ test "topic policy remembers real inactive subscriptions without event pressure 
     try std.testing.expect(delivered);
     try std.testing.expect(pair.client.unsubscribe(name));
     for (0..20) |_| try pair.pumpOnce();
-    try std.testing.expectEqual(@as(usize, 0), pair.server.state.registry.subscribers(t).count());
-    try std.testing.expect(!pair.server.state.registry.namespace.?.subscribed(0, 0));
+    try std.testing.expectEqual(@as(usize, 0), pair.server.overlay.subscribers(t).count());
+    try std.testing.expect(!pair.server.overlay.namespace.?.subscribed(0, 0));
 }
 
 test "topic policy incoming lengths precede decode work arena store and validation admission" {
@@ -64,7 +64,7 @@ test "topic policy incoming lengths precede decode work arena store and validati
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     try std.testing.expect(g.subscribe(name));
-    var context: validation.Context = .{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .store = &g.messages.store, .history = &g.messages.history, .seen = &g.messages.seen, .options = &g.options };
+    var context: validation.Context = .{ .state = g.state, .overlay = g.overlay, .peers = &g.peers, .scores = &g.scores, .store = &g.messages.store, .history = &g.messages.history, .seen = &g.messages.seen, .options = &g.options };
     var used: usize = 0;
     var peer_work: usize = 0;
     var work: usize = 10000;
@@ -120,7 +120,7 @@ test "topic policy physical close clears bits while same connection stream repla
     try std.testing.expect(pair.client.subscribe(name));
     for (0..20) |_| try pair.pumpOnce();
     const index = pair.server.state.findPeer(pair.handles.server).?;
-    const ns = &pair.server.state.registry.namespace.?;
+    const ns = &pair.server.overlay.namespace.?;
     try std.testing.expect(ns.subscribed(index, 0));
     pair.server.resetInbound(&pair.pair.server, index);
     pair.server.resetOutbound(&pair.pair.server, index);
@@ -141,9 +141,9 @@ test "topic policy physical close clears bits while same connection stream repla
     try std.testing.expectEqual(index, replacement.index);
     try std.testing.expect(!ns.subscribed(index, 0));
     try std.testing.expect(pair.server.subscribe(name));
-    const t = pair.server.state.registry.findTopic(name).?;
-    try std.testing.expect(!pair.server.state.registry.subscribers(t).isSet(index));
-    try std.testing.expect(pair.server.state.registry.subscribers(t).isSet(other.index));
+    const t = pair.server.overlay.findTopic(name).?;
+    try std.testing.expect(!pair.server.overlay.subscribers(t).isSet(index));
+    try std.testing.expect(pair.server.overlay.subscribers(t).isSet(other.index));
 }
 
 test "topic policy real wire receives only bounded SSZ and keeps borrowed payloads stable" {
@@ -194,7 +194,7 @@ test "topic policy all 784 names stay separate from retained live topic capacity
                 var short: [@import("topic.zig").name_max_len]u8 = undefined;
                 const part = if (kind.countMax() == 1) field.name else try std.fmt.bufPrint(&short, field.name ++ "_{d}", .{subnet});
                 const topic_name = @import("topic.zig").build(b.digest, part, &buffer);
-                try std.testing.expect(g.state.registry.namespace.?.lookup(topic_name) != null);
+                try std.testing.expect(g.overlay.namespace.?.lookup(topic_name) != null);
                 if (names < 512) {
                     try std.testing.expect(g.subscribe(topic_name));
                 } else {
@@ -207,7 +207,7 @@ test "topic policy all 784 names stay separate from retained live topic capacity
     }
     try std.testing.expectEqual(@as(usize, 784), names);
     try std.testing.expectEqual(@as(usize, 512), live(&g));
-    for (g.state.registry.rows) |row| {
+    for (g.overlay.rows) |row| {
         try std.testing.expect(row.subscribed);
         try std.testing.expectEqual(@as(u64, 1), row.generation);
     }
@@ -219,7 +219,7 @@ test "topic policy copied startup allocation prefixes and whole owner memory rec
     var boundaries = @import("topic_policy_test.zig").hoodi();
     var g = try Gossipsub.init(ledger.allocator(), options(&boundaries));
     defer g.deinit();
-    const ns = &g.state.registry.namespace.?;
+    const ns = &g.overlay.namespace.?;
     try std.testing.expectEqual(@as(usize, 2 * 13 * 8), ns.subscriptions.len * 8);
     try std.testing.expectEqual(g.memoryPlan().total_bytes - @sizeOf(Gossipsub), ledger.bytes);
     try std.testing.expect(g.options.topic_policy == null);
@@ -239,7 +239,7 @@ fn startup(a: std.mem.Allocator) !void {
     const boundaries = @import("topic_policy_test.zig").hoodi();
     var g = try Gossipsub.init(a, options(&boundaries));
     defer g.deinit();
-    try std.testing.expectEqual(@as(u16, 784), g.state.registry.namespace.?.topic_count);
+    try std.testing.expectEqual(@as(u16, 784), g.overlay.namespace.?.topic_count);
 }
 
 test "topic policy remembered ordinals remain independent of retained validation generations" {
@@ -248,11 +248,11 @@ test "topic policy remembered ordinals remain independent of retained validation
     var g = try Gossipsub.init(std.testing.allocator, options(&boundaries));
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    g.state.registry.namespace.?.setSubscription(peer.index, 0, true);
+    g.overlay.namespace.?.setSubscription(peer.index, 0, true);
     try std.testing.expect(g.subscribe(name));
-    const old = g.state.registry.findTopic(name).?;
-    const generation = g.state.registry.rows[old].generation;
-    const context: validation.Context = .{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .store = &g.messages.store, .history = &g.messages.history, .seen = &g.messages.seen, .options = &g.options };
+    const old = g.overlay.findTopic(name).?;
+    const generation = g.overlay.rows[old].generation;
+    const context: validation.Context = .{ .state = g.state, .overlay = g.overlay, .peers = &g.peers, .scores = &g.scores, .store = &g.messages.store, .history = &g.messages.history, .seen = &g.messages.seen, .options = &g.options };
     var work: usize = 10000;
     var peer_work: usize = 0;
     var large_used = false;
@@ -269,17 +269,17 @@ test "topic policy remembered ordinals remain independent of retained validation
     }
     const replacement = "/eth2/04020304/data_column_sidecar_127/ssz_snappy";
     try std.testing.expectError(error.TopicCapacity, g.configureTopic(replacement, &.{}));
-    try std.testing.expectEqual(generation, g.state.registry.rows[old].generation);
+    try std.testing.expectEqual(generation, g.overlay.rows[old].generation);
     try std.testing.expectEqualStrings(name, received.topic);
     try std.testing.expectEqualStrings("0123456789", received.bytes);
     try std.testing.expectEqual(gossip.ReportOutcome{ .applied = .ignore }, g.report(received.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expectError(error.TopicCapacity, g.configureTopic(replacement, &.{}));
     g.messages.validation.expire(&g.messages.store, &g.peers, 100000);
     try g.configureTopic(replacement, &.{});
-    try std.testing.expectEqual(old, g.state.registry.findTopic(replacement).?);
-    try std.testing.expectEqual(generation + 1, g.state.registry.rows[old].generation);
-    try std.testing.expectEqual(@as(usize, 0), g.state.registry.subscribers(old).count());
-    try std.testing.expect(g.state.registry.namespace.?.subscribed(peer.index, 0));
+    try std.testing.expectEqual(old, g.overlay.findTopic(replacement).?);
+    try std.testing.expectEqual(generation + 1, g.overlay.rows[old].generation);
+    try std.testing.expectEqual(@as(usize, 0), g.overlay.subscribers(old).count());
+    try std.testing.expect(g.overlay.namespace.?.subscribed(peer.index, 0));
     try std.testing.expectEqualStrings(name, received.topic);
     try std.testing.expectEqualStrings("0123456789", received.bytes);
 }

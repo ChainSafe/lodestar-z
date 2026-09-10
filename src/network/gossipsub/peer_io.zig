@@ -12,6 +12,19 @@ pub const QueueResult = enum { queued, full };
 pub const DropReason = enum { data_descriptors, data_bytes, control_frames, control_bytes, critical_frames, critical_bytes, token_exhausted };
 pub const drop_reason_count = @typeInfo(DropReason).@"enum".fields.len;
 
+pub const ControlReceipt = struct { token: u64, kind: ?ItemKind };
+pub const Completion = union(enum) {
+    control: ControlReceipt,
+    data,
+
+    pub fn itemKind(self: Completion) ?ItemKind {
+        return switch (self) {
+            .control => |receipt| receipt.kind,
+            .data => .message,
+        };
+    }
+};
+
 pub const ControlQueue = struct {
     bytes: []u8,
     lengths: [control_frames]u32 = undefined,
@@ -49,16 +62,16 @@ pub const ControlQueue = struct {
         if (self.count == 0) return &.{};
         return self.bytes[self.read_at..][0..@min(self.lengths[self.head], self.bytes.len - self.read_at)];
     }
-    pub fn advance(self: *ControlQueue, len: usize) ?u64 {
+    pub fn advance(self: *ControlQueue, len: usize) ?ControlReceipt {
         assert(len > 0 and len <= self.segment().len);
         self.lengths[self.head] -= @intCast(len);
         self.used -= len;
         self.read_at = (self.read_at + len) % self.bytes.len;
         if (self.lengths[self.head] != 0) return null;
-        const token = self.tokens[self.head];
+        const receipt: ControlReceipt = .{ .token = self.tokens[self.head], .kind = self.kinds[self.head] };
         self.head = (self.head + 1) % control_frames;
         self.count -= 1;
-        return token;
+        return receipt;
     }
     pub fn reset(self: *ControlQueue) void {
         self.* = .{ .bytes = self.bytes, .bytes_high_water = self.bytes_high_water, .frames_high_water = self.frames_high_water };
@@ -256,14 +269,6 @@ pub const PeerIo = struct {
         return token;
     }
 
-    pub fn sendingKind(self: *const PeerIo) ?ItemKind {
-        return switch (self.active) {
-            .none => null,
-            .data => .message,
-            .critical => self.critical.kinds[self.critical.head],
-            .control => self.control.kinds[self.control.head],
-        };
-    }
     pub fn queueData(self: *PeerIo, store: *storage.Store, h: storage.Handle, byte_limit: usize, now_ms: u64) QueueResult {
         const e = store.get(h).?;
         assert(self.data_bytes <= byte_limit);
@@ -311,16 +316,16 @@ pub const PeerIo = struct {
             .data => self.data[self.data_head].segment(store),
         };
     }
-    pub fn advance(self: *PeerIo, store: *storage.Store, len: usize) ?u64 {
+    pub fn advance(self: *PeerIo, store: *storage.Store, len: usize) ?Completion {
         switch (self.active) {
             .none => unreachable,
             .critical, .control => {
                 const q = if (self.active == .critical) &self.critical else &self.control;
-                if (q.advance(len)) |token| {
+                if (q.advance(len)) |receipt| {
                     self.active = .none;
                     self.tx_progress_ms = null;
                     self.control_burst +|= 1;
-                    return token;
+                    return .{ .control = receipt };
                 }
             },
             .data => {
@@ -334,6 +339,7 @@ pub const PeerIo = struct {
                     self.active = .none;
                     self.tx_progress_ms = null;
                     self.control_burst = 0;
+                    return .data;
                 }
             },
         }
@@ -417,7 +423,10 @@ test "gossip transmit retains pages and never interleaves control into partial d
         if (segment.len == 0) break;
         out[n] = segment[0];
         n += 1;
-        if (io.advance(&store, 1)) |done| try std.testing.expectEqual(token, done);
+        if (io.advance(&store, 1)) |done| switch (done) {
+            .control => |receipt| try std.testing.expectEqual(token, receipt.token),
+            .data => try std.testing.expectEqual(@as(usize, 0), store.used_entries),
+        };
     }
     try std.testing.expect(!io.pending());
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
@@ -512,11 +521,12 @@ test "metrics control kinds survive partial writes ring reuse and refused frames
         try std.testing.expect(io.appendControl("ab", false, .prune, 1) == null);
         for (0..3) |byte| {
             _ = io.segment(&store);
-            try std.testing.expectEqual(kind, io.sendingKind().?);
-            const sent_kind = io.sendingKind();
             const receipt = io.advance(&store, 1);
-            if (byte < 2) try std.testing.expect(receipt == null) else try std.testing.expectEqual(token, receipt.?);
-            if (io.active == .none) metrics.observeSent(sent_kind);
+            if (byte < 2) try std.testing.expect(receipt == null) else {
+                try std.testing.expectEqual(token, receipt.?.control.token);
+                try std.testing.expectEqual(kind, receipt.?.itemKind().?);
+            }
+            if (receipt) |done| metrics.observeSent(done.itemKind());
             try std.testing.expectEqual(index + @intFromBool(byte == 2), metrics.sent_frames);
         }
     }
@@ -536,7 +546,7 @@ test "gossip control high water survives partial write refusal and reset" {
     try std.testing.expectEqual(QueueResult.full, queue.append("ab", 2, null, 8));
     try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);
     try std.testing.expectEqual(@as(usize, 1), queue.frames_high_water);
-    try std.testing.expectEqual(@as(?u64, null), queue.advance(1));
+    try std.testing.expect(queue.advance(1) == null);
     try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);
     queue.reset();
     try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);

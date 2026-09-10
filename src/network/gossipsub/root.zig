@@ -35,7 +35,8 @@ test {
     _ = admission;
     _ = recovery;
     _ = receive_pool;
-    _ = @import("mesh.zig");
+    _ = @import("overlay.zig");
+    _ = @import("overlay_test.zig");
     _ = @import("peers.zig");
     _ = @import("message_store.zig");
     _ = @import("validation.zig");

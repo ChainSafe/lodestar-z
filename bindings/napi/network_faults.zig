@@ -42,7 +42,7 @@ pub fn captureGossip(owner: *const gossip.Gossipsub, context: *const @import("ne
         .topic_count = 0,
         .topic_subscription_bytes = 0,
     };
-    if (owner.state.registry.namespace) |*ns| {
+    if (owner.overlay.namespace) |*ns| {
         const snapshot = &gossip_snapshot.?;
         @memcpy(snapshot.topic_boundaries[0..ns.boundaries.len], ns.boundaries);
         snapshot.topic_boundary_count = @intCast(ns.boundaries.len);

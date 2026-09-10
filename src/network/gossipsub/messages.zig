@@ -8,6 +8,7 @@ const Peers = @import("peers.zig").Peers;
 
 pub const Context = struct {
     state: *@import("state.zig").State,
+    overlay: *@import("overlay.zig").Overlay,
     peers: *Peers,
     scores: *@import("score.zig").PeerScore,
     options: *const Options,
@@ -59,7 +60,7 @@ pub const Messages = struct {
     }
 
     fn validationContext(self: *Messages, context: *const Context) validation.Context {
-        return .{ .state = context.state, .peers = context.peers, .scores = context.scores, .options = context.options, .store = &self.store, .history = &self.history, .seen = &self.seen };
+        return .{ .state = context.state, .overlay = context.overlay, .peers = context.peers, .scores = context.scores, .options = context.options, .store = &self.store, .history = &self.history, .seen = &self.seen };
     }
 
     pub fn receive(self: *Messages, context: *const Context, workspace: *const validation.Workspace, peer: u16, message: @import("protobuf.zig").Message, now: u64) validation.Received {
@@ -70,6 +71,14 @@ pub const Messages = struct {
     pub fn report(self: *Messages, context: *const Context, handle: validation.Handle, verdict: validation.Verdict, now: u64) validation.Report {
         const owner = self.validationContext(context);
         return self.validation.report(&owner, handle, verdict, now);
+    }
+
+    pub fn topicPins(self: *const Messages) @import("local_intent.zig").TopicSet {
+        var pins: @import("local_intent.zig").TopicSet = .initEmpty();
+        for (self.validation.recent) |*entry| if (entry.pinned) {
+            pins.set(entry.topic);
+        };
+        return pins;
     }
 
     pub fn expire(self: *Messages, peers: *Peers, now: u64) void {

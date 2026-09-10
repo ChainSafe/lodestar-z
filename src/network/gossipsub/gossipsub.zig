@@ -12,7 +12,7 @@ const ReceivePool = @import("receive_pool.zig").ReceivePool;
 const Recovery = @import("recovery.zig").Recovery;
 const peer_io_mod = @import("peer_io.zig");
 const score_mod = @import("score.zig");
-const mesh_mod = @import("mesh.zig");
+const overlay_mod = @import("overlay.zig");
 const peers_mod = @import("peers.zig");
 const state_mod = @import("state.zig");
 const engine_mod = @import("../quic/engine.zig");
@@ -128,7 +128,7 @@ pub const Gossipsub = struct {
     cycle: @import("heartbeat_cycle.zig").Cycle = .{},
     budget: Budget = .{},
     receive_pool: ReceivePool,
-    mesh_policy: mesh_mod.Mesh,
+    overlay: *overlay_mod.Overlay,
     heartbeat_at: u64 = 0,
     opportunistic_at: u64 = 0,
     last_now_ms: u64 = 0,
@@ -184,6 +184,10 @@ pub const Gossipsub = struct {
         state.* = try State.initOptions(allocator, &options);
         errdefer state.deinit(allocator);
 
+        const overlay = try allocator.create(overlay_mod.Overlay);
+        errdefer allocator.destroy(overlay);
+        overlay.* = overlay_mod.Overlay.init(options.random_seed.?);
+
         var peers = try peers_mod.Peers.initCapacity(allocator, options.retained_score_ms, options.retained_capacity, options.retained_outbound_reserve);
         errdefer peers.deinit(allocator);
 
@@ -213,9 +217,9 @@ pub const Gossipsub = struct {
             .msg_scratch = msg_scratch,
             .decompressed = decompressed,
             .recovery = recovery,
-            .mesh_policy = mesh_mod.Mesh.init(options.random_seed.?),
+            .overlay = overlay,
         };
-        result.state.registry.namespace = namespace;
+        result.overlay.namespace = namespace;
         @memcpy(result.ip_allowlist[0..options.ip_allowlist.len], options.ip_allowlist);
         result.ip_allowlist_len = @intCast(options.ip_allowlist.len);
         result.options.ip_allowlist = &.{};
@@ -232,6 +236,8 @@ pub const Gossipsub = struct {
         self.messages.deinit(self.allocator, &self.peers);
         self.scores.deinit(self.allocator);
         self.peers.deinit(self.allocator);
+        self.overlay.deinit(self.allocator);
+        self.allocator.destroy(self.overlay);
         self.state.deinit(self.allocator);
         self.allocator.destroy(self.state);
         self.* = undefined;
@@ -239,47 +245,46 @@ pub const Gossipsub = struct {
 
     // Subscriptions ----------------------------------------------------------
 
-    fn topicContext(self: *Gossipsub) @import("registry.zig").Context {
-        return .{ .state = self.state, .peers = &self.peers, .scores = &self.scores, .validation = &self.messages.validation, .mesh_policy = &self.mesh_policy, .options = &self.options, .now = self.last_now_ms };
-    }
-
     pub fn subscribe(self: *Gossipsub, name: []const u8) bool {
         const topic = self.internTopic(name) orelse return false;
-        const context = self.topicContext();
-        self.state.registry.setLocal(&context, topic, true);
+        const context = self.overlayContext(self.last_now_ms);
+        self.overlay.setLocal(&context, topic, true);
         return true;
     }
 
     pub fn unsubscribe(self: *Gossipsub, name: []const u8) bool {
-        const topic = self.state.registry.findTopic(name) orelse return false;
-        const context = self.topicContext();
-        self.state.registry.setLocal(&context, topic, false);
+        const topic = self.overlay.findTopic(name) orelse return false;
+        const context = self.overlayContext(self.last_now_ms);
+        self.overlay.setLocal(&context, topic, false);
         return true;
     }
 
     fn internTopic(self: *Gossipsub, name: []const u8) ?u16 {
-        const context = self.topicContext();
-        return self.state.registry.internTopic(&context, name);
+        const context = self.overlayContext(self.last_now_ms);
+        const pins = self.messages.topicPins();
+        return self.overlay.internTopic(&context, &pins, name);
     }
 
     fn validTopic(self: *const Gossipsub, name: []const u8) bool {
-        return self.state.registry.validTopic(name);
+        return self.overlay.validTopic(name);
     }
 
     fn reclaimTopic(self: *Gossipsub, topic: u16) void {
-        const context = self.topicContext();
-        self.state.registry.reclaimTopic(&context, topic);
+        const context = self.overlayContext(self.last_now_ms);
+        const pins = self.messages.topicPins();
+        self.overlay.reclaimTopic(&context, &pins, topic);
     }
 
     pub fn prepareSubscriptions(self: *Gossipsub, subscriptions: []const local_intent.Subscription, workspace: *local_intent.Workspace, now: Now) local_intent.Error!bool {
-        const context = self.topicContext();
-        return self.state.registry.prepareSubscriptions(&context, subscriptions, workspace, now.mono_ms);
+        const context = self.overlayContext(self.last_now_ms);
+        const pins = self.messages.topicPins();
+        return self.overlay.prepareSubscriptions(&context, &pins, subscriptions, workspace, now.mono_ms);
     }
 
     pub fn commitSubscriptions(self: *Gossipsub, workspace: *local_intent.Workspace) void {
         self.last_now_ms = workspace.now_ms;
-        const context = self.topicContext();
-        self.state.registry.commitSubscriptions(&context, workspace);
+        const context = self.overlayContext(self.last_now_ms);
+        self.overlay.commitSubscriptions(&context, workspace);
     }
 
     pub const ConfigureTopicError = error{ InvalidLimits, InvalidTopic, TopicCapacity };
@@ -304,7 +309,7 @@ pub const Gossipsub = struct {
             if (self.peers.rows[ref.index].connection != null) return .duplicate;
         }
         const handle = self.state.addPeer(conn, version) orelse return .capacity;
-        if (self.state.registry.namespace) |*ns| ns.clearPeer(handle.index);
+        if (self.overlay.namespace) |*ns| ns.clearPeer(handle.index);
         const admitted = self.peers.admit(conn, metadata, now.mono_ms);
         if (admitted != .admitted) {
             self.state.removePeer(handle.index);
@@ -406,23 +411,20 @@ pub const Gossipsub = struct {
         self.state.peers[index].io.resetRx();
         self.cancelPromises(index, false);
         self.wakeStorage();
-        self.mesh_policy.forget(index);
+        const context = self.overlayContext(self.last_now_ms);
+        self.overlay.peerDisconnected(&context, index);
         self.state.peers[index].io.write_first = false;
         self.state.peers[index].io.subscription_since = null;
         const ref = self.logical(index);
-        for (&self.state.registry.rows, 0..) |*topic, t| {
-            if (topic.mesh.isSet(index)) self.scores.prune(ref.index, @intCast(t), self.last_now_ms);
-        }
         self.scores.setConnected(ref.index, false, self.last_now_ms);
         self.peers.disconnect(ref, self.last_now_ms, self.scores.score(ref.index, self.last_now_ms) < 0);
         self.state.removePeer(index);
-        if (self.state.registry.namespace) |*ns| ns.clearPeer(index);
     }
 
     fn sendSubscriptions(self: *Gossipsub, index: u16) void {
         const io = &self.state.peers[index].io;
         io.subscription_dirty = .initEmpty();
-        for (&self.state.registry.rows, 0..) |*topic, t| {
+        for (&self.overlay.rows, 0..) |*topic, t| {
             if (topic.active and topic.subscribed) io.subscription_dirty.set(t);
         }
         io.tx_ready = true;
@@ -434,7 +436,7 @@ pub const Gossipsub = struct {
         for (0..constants.topics_cap) |_| {
             const topic = io.subscription_cursor;
             if (io.subscription_dirty.isSet(topic)) {
-                const t = &self.state.registry.rows[topic];
+                const t = &self.overlay.rows[topic];
                 var w = protobuf.Writer.init(&buf);
                 w.varint(protobuf.subscriptionSize(t.string[0..t.string_len]));
                 protobuf.writeSubscription(&w, t.subscribed, t.string[0..t.string_len]);
@@ -459,7 +461,7 @@ pub const Gossipsub = struct {
         self.last_now_ms = @max(self.last_now_ms, now.mono_ms);
         const now_ms = self.last_now_ms;
         if (ssz.len > constants.MAX_PAYLOAD_SIZE) return error.PayloadTooLarge;
-        if (self.state.registry.namespace) |*ns| {
+        if (self.overlay.namespace) |*ns| {
             const rule = (ns.lookup(topic_str) orelse return error.UnknownTopic).rule;
             if (ssz.len < rule.ssz_min) return error.PayloadTooSmall;
             if (ssz.len > rule.ssz_max) return error.PayloadTooLarge;
@@ -470,8 +472,8 @@ pub const Gossipsub = struct {
             return error.Duplicate;
         }
         const topic = self.internTopic(topic_str) orelse return error.ResourceExhausted;
-        const context = self.meshContext(now_ms);
-        const recipients = self.mesh_policy.publicationRecipients(&context, topic, options.flood);
+        const context = self.overlayContext(now_ms);
+        const recipients = self.overlay.publicationRecipients(&context, topic, options.flood);
         if (recipients.count() == 0 and !options.allow_zero_peers) return error.NoPeersSubscribedToTopic;
         const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return error.CompressFailed;
         const h = self.messages.publish(id, topic_str, self.msg_scratch[0..clen], now_ms) orelse return error.ResourceExhausted;
@@ -486,7 +488,7 @@ pub const Gossipsub = struct {
     }
 
     fn messageContext(self: *Gossipsub) @import("messages.zig").Context {
-        return .{ .state = self.state, .peers = &self.peers, .scores = &self.scores, .options = &self.options };
+        return .{ .state = self.state, .overlay = self.overlay, .peers = &self.peers, .scores = &self.scores, .options = &self.options };
     }
 
     /// Event slices remain valid until the next pump, including after report or publish.
@@ -505,7 +507,7 @@ pub const Gossipsub = struct {
             self.validation_time.observe(now.mono_ms -| applied.admitted_ms);
             if (verdict != .accept) std.log.scoped(.network_gossip).debug("validation_verdict validation={d}:{d} message_id={x} verdict={s} topic={s} peer={f} elapsed_ms={d}", .{ handle.index, handle.generation, applied.id, @tagName(verdict), applied.topicString(), @import("../logging.zig").peer(&applied.source), now.mono_ms -| applied.admitted_ms });
             if (applied.forward) |forward| {
-                const delivered = self.deliver(self.state.registry.mesh(forward.topic), forward.message, forward.source, now.mono_ms);
+                const delivered = self.deliver(self.overlay.mesh(forward.topic), forward.message, forward.source, now.mono_ms);
                 if (delivered.queued > 0) {
                     self.counters.messages_forwarded += 1;
                     counts.forwarded +|= 1;
@@ -523,14 +525,14 @@ pub const Gossipsub = struct {
         const id = self.messages.store.get(h).?.id;
         var result: PublishOutcome = .{};
         var recipients = peers.*;
-        const topic = self.state.registry.findTopic(self.messages.store.get(h).?.topicString()).?;
+        const topic = self.overlay.findTopic(self.messages.store.get(h).?.topicString()).?;
         if (source != null) for (self.state.peers, 0..) |*row, peer| {
-            if (row.active and self.peers.rows[row.logical.index].direct and self.state.registry.subscribers(topic).isSet(peer)) recipients.set(peer);
+            if (row.active and self.peers.rows[row.logical.index].direct and self.overlay.subscribers(topic).isSet(peer)) recipients.set(peer);
         };
         var it = recipients.iterator(.{});
         while (it.next()) |peer| {
             const index: u16 = @intCast(peer);
-            if (!self.state.peers[index].active or self.mesh_policy.retire.isSet(index)) continue;
+            if (!self.state.peers[index].active or self.overlay.retire.isSet(index)) continue;
             if (source) |p| {
                 if (std.meta.eql(p, self.logical(index)) or self.state.suppresses(index, id, now_ms)) continue;
             }
@@ -551,15 +553,15 @@ pub const Gossipsub = struct {
         return result;
     }
 
-    fn meshContext(self: *Gossipsub, now_ms: u64) mesh_mod.Context {
-        return .{ .state = self.state, .peers = &self.peers, .scores = &self.scores, .now = now_ms, .heartbeat_ms = self.options.heartbeat_interval_ms, .pressure_ms = self.options.pressure_timeout_ms };
+    pub fn overlayContext(self: *Gossipsub, now_ms: u64) overlay_mod.Context {
+        return .{ .state = self.state, .peers = &self.peers, .scores = &self.scores, .now = now_ms, .options = &self.options };
     }
 
     // Pump -------------------------------------------------------------------
 
     pub fn memoryPlan(self: *const Gossipsub) MemoryPlan {
-        const metadata = @sizeOf(Gossipsub) + @sizeOf(State) + self.state.peers.len * @sizeOf(@TypeOf(self.state.peers[0])) + self.peers.rows.len * @sizeOf(peers_mod.Row) + self.peers.backoffs.len * @sizeOf(peers_mod.Backoff) +
-            self.messages.metadataBytes() + self.recovery.memoryBytes() + self.receive_pool.metadataBytes() + (if (self.state.registry.namespace) |*ns| ns.allocatedBytes() else @as(usize, 0)) +
+        const metadata = @sizeOf(Gossipsub) + @sizeOf(State) + @sizeOf(overlay_mod.Overlay) + self.state.peers.len * @sizeOf(@TypeOf(self.state.peers[0])) + self.peers.rows.len * @sizeOf(peers_mod.Row) + self.peers.backoffs.len * @sizeOf(peers_mod.Backoff) +
+            self.messages.metadataBytes() + self.recovery.memoryBytes() + self.receive_pool.metadataBytes() + (if (self.overlay.namespace) |*ns| ns.allocatedBytes() else @as(usize, 0)) +
             self.scores.topics.len * @sizeOf(@TypeOf(self.scores.topics[0])) + self.scores.app_score.len * @sizeOf(f64) + self.scores.behaviour.len * @sizeOf(f64);
         return .{
             .retained_bytes = self.messages.store.bytes.len,
@@ -619,7 +621,7 @@ pub const Gossipsub = struct {
             if (io.oldestTx()) |since| result.oldest_tx_age_ms = @max(result.oldest_tx_age_ms orelse 0, self.last_now_ms -| since);
             if (io.reader.declaredLen() != null or io.rpc != null) result.held_frames += 1;
         }
-        for (self.state.registry.rows) |topic| {
+        for (self.overlay.rows) |topic| {
             if (!topic.active) continue;
             for (0..self.state.peers.len) |peer| {
                 if (topic.subscribers.isSet(peer)) result.remote_subscriptions += 1;
@@ -668,7 +670,7 @@ pub const Gossipsub = struct {
             }
             if (io.tx_progress_ms) |progress| deadline = @min(deadline, progress +| self.options.large_frame_timeout_ms);
         }
-        for (self.mesh_policy.pending_since) |since| if (since) |started| {
+        for (self.overlay.pending_since) |since| if (since) |started| {
             deadline = @min(deadline, started +| self.options.pressure_timeout_ms);
         };
         if (self.recovery.nextExpiry()) |expiry| deadline = @min(deadline, expiry);
@@ -707,8 +709,8 @@ pub const Gossipsub = struct {
         self.messages.expire(&self.peers, now.mono_ms);
         if (self.messages.store.free_pages != free_before) self.wakeStorage();
         self.expireIo(router, engine, now.mono_ms);
-        self.mesh_policy.expireActions(now.mono_ms, self.options.pressure_timeout_ms);
-        var retired = self.mesh_policy.retire.iterator(.{});
+        self.overlay.expireActions(now.mono_ms, self.options.pressure_timeout_ms);
+        var retired = self.overlay.retire.iterator(.{});
         while (retired.next()) |index| {
             const peer: u16 = @intCast(index);
             self.retirePeer(router, engine, peer);
@@ -843,13 +845,13 @@ pub const Gossipsub = struct {
         var serviced: usize = 0;
         for (0..constants.topics_cap) |_| {
             const index = self.cycle.next() orelse break;
-            const topic = &self.state.registry.rows[index];
+            const topic = &self.overlay.rows[index];
             if (!topic.active) continue;
-            var context = self.meshContext(now.mono_ms);
+            var context = self.overlayContext(now.mono_ms);
             context.snapshot = &self.cycle.scores;
-            if (topic.fanout.count() > 0) _ = self.mesh_policy.fanout(&context, index, false);
-            self.mesh_policy.maintain(&context, index);
-            if (self.cycle.opportunistic) self.mesh_policy.opportunistic(&context, index);
+            if (topic.fanout.count() > 0) _ = self.overlay.maintainFanout(&context, index, false);
+            self.overlay.maintain(&context, index);
+            if (self.cycle.opportunistic) self.overlay.opportunistic(&context, index);
             self.emitGossip(index, &context);
             self.reclaimTopic(index);
             serviced += 1;
@@ -858,16 +860,16 @@ pub const Gossipsub = struct {
         if (self.cycle.remaining == 0 and self.messages.history.cycling) self.messages.history.finishCycle(&self.messages.store);
     }
 
-    fn emitGossip(self: *Gossipsub, topic: u16, context: *const mesh_mod.Context) void {
-        const topic_str = self.state.registry.topicString(topic);
+    fn emitGossip(self: *Gossipsub, topic: u16, context: *const overlay_mod.Context) void {
+        const topic_str = self.overlay.topicString(topic);
         const count = self.messages.history.gossip(&self.messages.store, topic_str, self.messages.gossip_ids);
         if (count == 0) return;
         const n = @min(count, constants.gossip_ids_max);
-        const recipients = self.mesh_policy.gossipRecipients(context, topic, self.options.gossip_factor);
+        const recipients = self.overlay.gossipRecipients(context, topic, self.options.gossip_factor);
         var it = recipients.iterator(.{});
         while (it.next()) |peer| {
             for (0..n) |i| {
-                const j = self.mesh_policy.rng.random().uintLessThan(usize, count - i) + i;
+                const j = self.overlay.rng.random().uintLessThan(usize, count - i) + i;
                 std.mem.swap(MessageId, &self.messages.gossip_ids[i], &self.messages.gossip_ids[j]);
             }
             var writer = protobuf.Writer.init(self.msg_scratch);
@@ -889,6 +891,14 @@ pub const Gossipsub = struct {
     fn cancelPromises(self: *Gossipsub, peer: u16, local_pressure: bool) void {
         const removed = self.recovery.cancel(&self.peers, self.state.peers[peer].conn, local_pressure);
         if (local_pressure) self.counters.promises_cancelled_pressure += removed;
+    }
+
+    pub fn writeCompleted(self: *Gossipsub, peer: u16, completion: peer_io_mod.Completion, now_ms: u64) void {
+        self.rpc_metrics.observeSent(completion.itemKind());
+        switch (completion) {
+            .control => |receipt| self.controlSent(peer, receipt.token, now_ms),
+            .data => {},
+        }
     }
 
     fn controlSent(self: *Gossipsub, peer: u16, token: u64, now_ms: u64) void {
@@ -929,9 +939,9 @@ pub const Gossipsub = struct {
     pub fn markDirect(self: *Gossipsub, conn: Handle) void {
         const index = self.state.findPeer(conn) orelse return;
         self.peers.rows[self.logical(index).index].direct = true;
-        const context = self.meshContext(self.last_now_ms);
-        for (&self.state.registry.rows, 0..) |*topic, t| {
-            if (topic.mesh.isSet(index)) self.mesh_policy.prune(&context, @intCast(t), index, constants.prune_backoff_ms);
+        const context = self.overlayContext(self.last_now_ms);
+        for (&self.overlay.rows, 0..) |*topic, t| {
+            if (topic.mesh.isSet(index)) self.overlay.prune(&context, @intCast(t), index, constants.prune_backoff_ms);
             topic.fanout.unset(index);
         }
     }
@@ -1064,7 +1074,7 @@ pub const Gossipsub = struct {
             switch (item) {
                 .subscription => |sub| {
                     if (io.subscriptions < constants.max_subscriptions_per_rpc) {
-                        if (self.validTopic(sub.topic) and self.state.registry.findTopic(sub.topic) != null and (count.* == events.len or self.decompressed.len - self.decompressed_used < sub.topic.len)) {
+                        if (self.validTopic(sub.topic) and self.overlay.findTopic(sub.topic) != null and (count.* == events.len or self.decompressed.len - self.decompressed_used < sub.topic.len)) {
                             self.pressure(index, .events, now.mono_ms);
                             return false;
                         }
@@ -1130,7 +1140,7 @@ pub const Gossipsub = struct {
                 self.resolvePromises(event.id, .{ .now_ms = now.mono_ms });
                 self.counters.messages_received += 1;
                 self.topic_metrics.get(event.topic).admitted +|= 1;
-                if (msg.data.len >= self.options.idontwant_min_data_size) self.broadcastIdontwant(self.state.registry.findTopic(event.topic).?, event.id, index);
+                if (msg.data.len >= self.options.idontwant_min_data_size) self.broadcastIdontwant(self.overlay.findTopic(event.topic).?, event.id, index);
                 return start + 1;
             },
         }
@@ -1147,8 +1157,8 @@ pub const Gossipsub = struct {
             return;
         }
         io.ihave_recv += 1;
-        const topic = self.state.registry.findTopic(ihave.topic);
-        if (topic == null or !self.state.registry.subscribed(topic.?)) {
+        const topic = self.overlay.findTopic(ihave.topic);
+        if (topic == null or !self.overlay.subscribed(topic.?)) {
             self.rpc_metrics.ignoreIhave(.unsubscribed);
             return;
         }
@@ -1188,7 +1198,7 @@ pub const Gossipsub = struct {
         protobuf.beginIwantRpc(&writer, count, constants.message_id_length);
         for (wanted[0..count]) |id| protobuf.writeIwantId(&writer, &id);
         if (io.appendControl(writer.written(), false, .iwant, now.mono_ms)) |token| {
-            self.recovery.addBatch(&self.peers, wanted[0..count], self.logical(index), self.state.peers[index].conn, token, self.mesh_policy.rng.random().uintLessThan(usize, count));
+            self.recovery.addBatch(&self.peers, wanted[0..count], self.logical(index), self.state.peers[index].conn, token, self.overlay.rng.random().uintLessThan(usize, count));
             io.iwant_ids_sent += @intCast(count);
             self.counters.iwant_sent += 1;
         } else self.counters.send_dropped += 1;
@@ -1226,7 +1236,7 @@ pub const Gossipsub = struct {
         protobuf.beginIdontwantRpc(&writer, 1, constants.message_id_length);
         protobuf.writeIdontwantId(&writer, &id);
         const rpc = writer.written();
-        var it = self.state.registry.mesh(topic).iterator(.{});
+        var it = self.overlay.mesh(topic).iterator(.{});
         while (it.next()) |peer| {
             const peer_index: u16 = @intCast(peer);
             if (peer_index == source) continue;
@@ -1252,16 +1262,16 @@ pub const Gossipsub = struct {
     }
 
     fn onGraft(self: *Gossipsub, index: u16, topic_str: []const u8, now: Now) void {
-        const topic = self.state.registry.findTopic(topic_str) orelse return;
+        const topic = self.overlay.findTopic(topic_str) orelse return;
         _ = self.peerScore(index, now.mono_ms);
-        const context = self.meshContext(now.mono_ms);
-        self.mesh_policy.onGraft(&context, topic, index);
+        const context = self.overlayContext(now.mono_ms);
+        self.overlay.onGraft(&context, topic, index);
     }
 
     fn onPrune(self: *Gossipsub, index: u16, prune: protobuf.Prune, now: Now) void {
-        const topic = self.state.registry.findTopic(prune.topic) orelse return;
-        const context = self.meshContext(now.mono_ms);
-        self.mesh_policy.onPrune(&context, topic, index, if (prune.backoff == 0) constants.prune_backoff_ms else prune.backoff *| 1000);
+        const topic = self.overlay.findTopic(prune.topic) orelse return;
+        const context = self.overlayContext(now.mono_ms);
+        self.overlay.onPrune(&context, topic, index, if (prune.backoff == 0) constants.prune_backoff_ms else prune.backoff *| 1000);
     }
 
     fn onSubscription(
@@ -1271,14 +1281,9 @@ pub const Gossipsub = struct {
         events: []Event,
         start: usize,
     ) usize {
-        if (self.state.registry.namespace) |*ns| {
-            const match = ns.lookup(sub.topic) orelse return start;
-            ns.setSubscription(index, match.ordinal, sub.subscribe);
-        }
-        const topic = self.state.registry.findTopic(sub.topic) orelse return start;
+        const context = self.overlayContext(self.last_now_ms);
+        _ = self.overlay.peerSubscription(&context, index, sub.topic, sub.subscribe) orelse return start;
         assert(start < events.len);
-        if (!sub.subscribe and self.state.registry.mesh(topic).isSet(index)) self.scores.prune(self.logical(index).index, topic, self.last_now_ms);
-        self.state.registry.setSubscription(topic, index, sub.subscribe);
         const name = self.decompressed[self.decompressed_used..][0..sub.topic.len];
         @memcpy(name, sub.topic);
         self.decompressed_used += name.len;
@@ -1323,10 +1328,8 @@ pub const Gossipsub = struct {
             self.budget.output -= written;
             io.tx_progress_ms = now.mono_ms;
             const free = self.messages.store.free_pages;
-            const sent_kind = io.sendingKind();
             self.rpc_metrics.sent_bytes +|= written;
-            if (io.advance(&self.messages.store, written)) |token| self.controlSent(index, token, now.mono_ms);
-            if (io.active == .none) self.rpc_metrics.observeSent(sent_kind);
+            if (io.advance(&self.messages.store, written)) |completion| self.writeCompleted(index, completion, now.mono_ms);
             if (self.messages.store.free_pages != free) self.wakeStorage();
         }
     }
@@ -1498,7 +1501,7 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
     const first = io.segment(&g.messages.store);
     _ = io.advance(&g.messages.store, 1);
     try std.testing.expect(g.recovery.batches[0].expiry == null);
-    const token = io.advance(&g.messages.store, first.len - 1).?;
+    const token = io.advance(&g.messages.store, first.len - 1).?.control.token;
     g.controlSent(peer.index, token, 10_000);
     try std.testing.expectEqual(@as(?u64, 13_000), g.recovery.batches[0].expiry);
     var empty: [0]Event = .{};
@@ -1568,7 +1571,7 @@ test "gossipsub IHAVE security bounds one identity and deduplicates queued reque
             for (0..4) |_| {
                 const segment = io.segment(&g.messages.store);
                 if (segment.len == 0) break;
-                if (io.advance(&g.messages.store, segment.len)) |token| g.controlSent(peer.index, token, heartbeat * 1000);
+                if (io.advance(&g.messages.store, segment.len)) |completion| g.writeCompleted(peer.index, completion, heartbeat * 1000);
             }
         }
     }
@@ -1611,7 +1614,7 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
     for (0..20) |_| try setup.pumpOnce();
     const destination = setup.server.state.findPeer(setup.handles.server).?;
     const source = @import("test_support.zig").addPeer(&setup.server, .{ .index = 77, .generation = 1 }, .v1_2).?;
-    setup.server.state.registry.mesh(setup.server.state.registry.findTopic(topic).?).set(destination);
+    setup.server.overlay.mesh(setup.server.overlay.findTopic(topic).?).set(destination);
     const payload = try std.testing.allocator.alloc(u8, constants.MAX_PAYLOAD_SIZE);
     defer std.testing.allocator.free(payload);
     var rng = std.Random.DefaultPrng.init(91);
@@ -1716,8 +1719,8 @@ test "gossip policy reconnect retains authenticated penalty" {
     g.scores.penalize(original.index, 20);
     const topic_name = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(topic_name));
-    const topic = g.state.registry.findTopic(topic_name).?;
-    const topic_generation = g.state.registry.rows[topic].generation;
+    const topic = g.overlay.findTopic(topic_name).?;
+    const topic_generation = g.overlay.rows[topic].generation;
     g.peers.addBackoff(original, topic, topic_generation, 1, 60_000);
     g.connectionClosed(.{ .index = 0, .generation = 1 });
     const second = g.addPeer(.{ .index = 0, .generation = 2 }, .v1_2, &metadata, now).admitted;
@@ -1736,17 +1739,17 @@ test "gossip policy GRAFT rejects negative peers and excludes direct peers" {
     const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const topic_str = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(topic_str));
-    const topic = g.state.registry.findTopic(topic_str).?;
+    const topic = g.overlay.findTopic(topic_str).?;
     try std.testing.expect(g.setPeerScore(conn, -1));
     g.onGraft(peer.index, topic_str, .{ .mono_ms = 1, .unix_s = 0 });
-    try std.testing.expectEqual(@as(usize, 0), g.state.registry.mesh(topic).count());
+    try std.testing.expectEqual(@as(usize, 0), g.overlay.mesh(topic).count());
     try std.testing.expect(g.setPeerScore(conn, 0));
     g.markDirect(conn);
-    g.state.registry.setSubscription(topic, peer.index, true);
-    var context = g.meshContext(100_000);
+    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), topic, peer.index, true);
+    var context = g.overlayContext(100_000);
     context.snapshot = &g.cycle.scores;
-    g.mesh_policy.maintain(&context, topic);
-    try std.testing.expectEqual(@as(usize, 0), g.state.registry.mesh(topic).count());
+    g.overlay.maintain(&context, topic);
+    try std.testing.expectEqual(@as(usize, 0), g.overlay.mesh(topic).count());
 }
 
 test "gossip policy combined transport calls respect one shared peer allowance" {
@@ -1815,13 +1818,13 @@ test "gossip policy duplicate connections preserve one logical owner and direct 
     try std.testing.expectEqual(@as(?u16, first.index), g.state.findPeer(conn));
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(topic));
-    g.state.registry.setSubscription(g.state.registry.findTopic(topic).?, first.index, true);
+    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), g.overlay.findTopic(topic).?, first.index, true);
     g.markDirect(conn);
     try std.testing.expect(g.setPeerScore(conn, -100_000));
     g.state.peers[first.index].outbound = .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } };
     const result = try g.publish(topic, "direct data", now);
     try std.testing.expectEqual(@as(u16, 1), result.queued);
-    try std.testing.expectEqual(@as(usize, 0), g.state.registry.mesh(g.state.registry.findTopic(topic).?).count());
+    try std.testing.expectEqual(@as(usize, 0), g.overlay.mesh(g.overlay.findTopic(topic).?).count());
     g.connectionClosed(conn);
     const next = g.addPeer(second, .v1_2, &metadata, now).admitted;
     try std.testing.expect(g.peers.rows[g.logical(next.index).index].direct);
@@ -1834,8 +1837,8 @@ test "gossip policy topic reuse waits for attribution and preserves copied event
     const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(name));
-    const topic = g.state.registry.findTopic(name).?;
-    const generation = g.state.registry.rows[topic].generation;
+    const topic = g.overlay.findTopic(name).?;
+    const generation = g.overlay.rows[topic].generation;
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, peer.index, "retained", 1, &events));
     const event = events[0].message;
@@ -1848,16 +1851,16 @@ test "gossip policy topic reuse waits for attribution and preserves copied event
     try std.testing.expect(g.unsubscribe(name));
     g.connectionClosed(conn);
     g.reclaimTopic(topic);
-    try std.testing.expect(g.state.registry.rows[topic].active);
+    try std.testing.expect(g.overlay.rows[topic].active);
     _ = g.report(event.handle, .ignore, .{ .mono_ms = 2, .unix_s = 0 });
     g.messages.validation.expire(&g.messages.store, &g.peers, 30_002);
     g.last_now_ms = 30_002;
     g.reclaimTopic(topic);
-    try std.testing.expect(!g.state.registry.rows[topic].active);
+    try std.testing.expect(!g.overlay.rows[topic].active);
     const next_name = "/eth2/02030405/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(next_name));
-    try std.testing.expectEqual(@as(?u16, topic), g.state.registry.findTopic(next_name));
-    try std.testing.expect(g.state.registry.rows[topic].generation > generation);
+    try std.testing.expectEqual(@as(?u16, topic), g.overlay.findTopic(next_name));
+    try std.testing.expect(g.overlay.rows[topic].generation > generation);
     try std.testing.expectEqualStrings(name, event.topic);
     try std.testing.expectEqualStrings("retained", event.bytes);
 }
@@ -1868,14 +1871,14 @@ test "gossip policy topic retirement bounds arbitrarily slow active score decay"
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(name));
-    const topic = g.state.registry.findTopic(name).?;
+    const topic = g.overlay.findTopic(name).?;
     g.scores.deliver(g.logical(peer.index).index, topic);
     try std.testing.expect(g.unsubscribe(name));
     g.queueSubscriptions(&g.state.peers[peer.index].io);
     g.last_now_ms = 11;
     g.scores.refresh(11);
     g.reclaimTopic(topic);
-    try std.testing.expect(!g.state.registry.rows[topic].active);
+    try std.testing.expect(!g.overlay.rows[topic].active);
     try std.testing.expectEqual(@as(f64, 0), g.scores.score(g.logical(peer.index).index, 11));
 }
 
@@ -1895,9 +1898,9 @@ test "gossip policy unsent subscriptions cannot pin retired topics indefinitely"
     try std.testing.expect(g.state.findPeer(conn) == null);
     try std.testing.expectEqual(@as(u64, 1), g.counters.subscription_timeouts);
     try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
-    const topic = g.state.registry.findTopic(name).?;
+    const topic = g.overlay.findTopic(name).?;
     g.reclaimTopic(topic);
-    try std.testing.expect(!g.state.registry.rows[topic].active);
+    try std.testing.expect(!g.overlay.rows[topic].active);
 }
 
 test "gossip policy subscription retry preserves its first pressure deadline" {
@@ -1919,8 +1922,8 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     const second = g.internTopic(second_name).?;
     for (0..9) |i| {
         const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
-        g.state.registry.setSubscription(first, peer.index, true);
-        g.state.registry.setSubscription(second, peer.index, true);
+        g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), first, peer.index, true);
+        g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), second, peer.index, true);
         g.state.peers[peer.index].outbound = .{ .live = .{ .conn = g.state.peers[peer.index].conn, .id = 2, .slot = 0 } };
     }
     const start: Now = .{ .mono_ms = 1, .unix_s = 0 };
@@ -1929,9 +1932,9 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     g.heartbeat(start);
     g.maintainTopics(start);
     try std.testing.expectEqual(@as(usize, 1), g.cycle.cursor);
-    const retained = g.state.registry.fanout(second).findFirstSet().?;
+    const retained = g.overlay.fanoutMembers(second).findFirstSet().?;
     var advertised: u16 = 0;
-    for (0..9) |i| if (!g.state.registry.fanout(second).isSet(i)) {
+    for (0..9) |i| if (!g.overlay.fanoutMembers(second).isSet(i)) {
         advertised = @intCast(i);
     };
     try std.testing.expect(g.scores.setAppScore(g.logical(@intCast(retained)).index, -10_000));
@@ -1942,8 +1945,8 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     g.heartbeat(.{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expect(!g.cycle.opportunistic);
     g.maintainTopics(.{ .mono_ms = 2, .unix_s = 0 });
-    try std.testing.expect(g.state.registry.fanout(second).isSet(retained));
-    try std.testing.expectEqual(@as(usize, 8), g.state.registry.fanout(second).count());
+    try std.testing.expect(g.overlay.fanoutMembers(second).isSet(retained));
+    try std.testing.expectEqual(@as(usize, 8), g.overlay.fanoutMembers(second).count());
     try std.testing.expectEqual(@as(usize, 1), g.state.peers[advertised].io.control.count);
     try std.testing.expectEqual(@as(usize, 0), g.state.peers[retained].io.control.count);
     g.maintainTopics(.{ .mono_ms = 3, .unix_s = 0 });
@@ -1953,14 +1956,14 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     g.heartbeat(.{ .mono_ms = 701, .unix_s = 0 });
     g.maintainTopics(.{ .mono_ms = 701, .unix_s = 0 });
     g.maintainTopics(.{ .mono_ms = 702, .unix_s = 0 });
-    try std.testing.expect(!g.state.registry.fanout(second).isSet(retained));
-    try std.testing.expectEqual(@as(usize, 7), g.state.registry.fanout(second).count());
+    try std.testing.expect(!g.overlay.fanoutMembers(second).isSet(retained));
+    try std.testing.expectEqual(@as(usize, 7), g.overlay.fanoutMembers(second).count());
     try std.testing.expectEqual(@as(usize, 0), g.state.peers[advertised].io.control.count);
     try std.testing.expectEqual(@as(usize, 0), g.state.peers[retained].io.control.count);
-    const live = g.state.registry.fanout(second).findFirstSet().?;
+    const live = g.overlay.fanoutMembers(second).findFirstSet().?;
     try std.testing.expect(g.scores.setAppScore(g.logical(@intCast(live)).index, -10_000));
     _ = try g.publish(second_name, "live publish", .{ .mono_ms = 703, .unix_s = 0 });
-    try std.testing.expect(!g.state.registry.fanout(second).isSet(live));
+    try std.testing.expect(!g.overlay.fanoutMembers(second).isSet(live));
 }
 
 test "gossipsub resource snapshot starts empty" {
@@ -2140,17 +2143,17 @@ test "gossip topic rejection preserves expired scores and retained obligations" 
         const text = try std.fmt.bufPrint(&name, "/eth2/{x:0>8}/custom/ssz_snappy", .{index});
         try std.testing.expect(g.subscribe(text));
     }
-    const first = g.state.registry.topicString(0);
+    const first = g.overlay.topicString(0);
     try std.testing.expect(g.unsubscribe(first));
     g.scores.invalid(0, 0);
-    g.last_now_ms = g.state.registry.rows[0].retire_after_ms.?;
-    g.peers.backoffs[0] = .{ .topic_generation = g.state.registry.rows[0].generation, .until = g.last_now_ms + 100 };
+    g.last_now_ms = g.overlay.rows[0].retire_after_ms.?;
+    g.peers.backoffs[0] = .{ .topic_generation = g.overlay.rows[0].generation, .until = g.last_now_ms + 100 };
     const revision = g.scores.revision;
-    const generation = g.state.registry.rows[0].generation;
+    const generation = g.overlay.rows[0].generation;
     const score = g.scores.topics[0];
     const old_scores = try std.testing.allocator.dupe(@TypeOf(score), g.scores.topics);
     defer std.testing.allocator.free(old_scores);
-    const old_topics = try std.testing.allocator.dupe(@TypeOf(g.state.registry.rows[0]), &g.state.registry.rows);
+    const old_topics = try std.testing.allocator.dupe(@TypeOf(g.overlay.rows[0]), &g.overlay.rows);
     defer std.testing.allocator.free(old_topics);
     const old_backoffs = try std.testing.allocator.dupe(@TypeOf(g.peers.backoffs[0]), g.peers.backoffs);
     defer std.testing.allocator.free(old_backoffs);
@@ -2161,7 +2164,7 @@ test "gossip topic rejection preserves expired scores and retained obligations" 
     try std.testing.expectEqualDeep(old_backoffs, g.peers.backoffs);
     try std.testing.expectEqualDeep(old_params, g.scores.topic_params);
     try std.testing.expectEqualDeep(old_dirty, g.scores.dirty);
-    for (old_topics, &g.state.registry.rows) |*before, *after| {
+    for (old_topics, &g.overlay.rows) |*before, *after| {
         try std.testing.expectEqual(before.active, after.active);
         try std.testing.expectEqual(before.generation, after.generation);
         try std.testing.expectEqual(before.subscribed, after.subscribed);
@@ -2172,18 +2175,18 @@ test "gossip topic rejection preserves expired scores and retained obligations" 
         try std.testing.expectEqualStrings(before.string[0..before.string_len], after.string[0..after.string_len]);
     }
     try std.testing.expectEqual(revision, g.scores.revision);
-    try std.testing.expectEqual(generation, g.state.registry.rows[0].generation);
-    try std.testing.expect(g.state.registry.rows[0].active);
+    try std.testing.expectEqual(generation, g.overlay.rows[0].generation);
+    try std.testing.expect(g.overlay.rows[0].active);
     try std.testing.expectError(error.InvalidTopic, g.configureTopic("invalid", &.{}));
     try std.testing.expectEqualDeep(score, g.scores.topics[0]);
     try std.testing.expectEqual(revision, g.scores.revision);
     g.last_now_ms += 100;
-    g.state.registry.rows[0].generation = std.math.maxInt(u64);
+    g.overlay.rows[0].generation = std.math.maxInt(u64);
     try std.testing.expectError(error.TopicCapacity, g.configureTopic("/eth2/ffffffff/custom/ssz_snappy", &.{}));
     try std.testing.expectEqualDeep(score, g.scores.topics[0]);
-    g.state.registry.rows[0].generation = generation;
+    g.overlay.rows[0].generation = generation;
     try g.configureTopic("/eth2/ffffffff/custom/ssz_snappy", &.{ .weight = 2 });
-    try std.testing.expectEqual(generation + 1, g.state.registry.rows[0].generation);
+    try std.testing.expectEqual(generation + 1, g.overlay.rows[0].generation);
     try std.testing.expect(!g.scores.retainsTopic(0));
     try std.testing.expectEqual(@as(f64, 2), g.scores.topic_params[0].weight);
 }
@@ -2233,13 +2236,13 @@ test "gossip topic retirement clears expired scores while backoff remains" {
     try std.testing.expect(g.subscribe(name));
     g.scores.invalid(0, 0);
     try std.testing.expect(g.unsubscribe(name));
-    g.last_now_ms = g.state.registry.rows[0].retire_after_ms.?;
-    const generation = g.state.registry.rows[0].generation;
+    g.last_now_ms = g.overlay.rows[0].retire_after_ms.?;
+    const generation = g.overlay.rows[0].generation;
     g.peers.backoffs[0] = .{ .topic_generation = generation, .until = g.last_now_ms + 100 };
     g.reclaimTopic(0);
     try std.testing.expect(!g.scores.retainsTopic(0));
-    try std.testing.expect(g.state.registry.rows[0].active);
-    try std.testing.expectEqual(generation, g.state.registry.rows[0].generation);
+    try std.testing.expect(g.overlay.rows[0].active);
+    try std.testing.expectEqual(generation, g.overlay.rows[0].generation);
     try std.testing.expectEqual(g.last_now_ms + 100, g.peers.backoffs[0].until);
 }
 
@@ -2259,15 +2262,15 @@ test "gossip topic configuration snapshots aliased policy before reclamation" {
             const text = try std.fmt.bufPrint(&name, "/eth2/{x:0>8}/custom/ssz_snappy", .{index});
             try std.testing.expect(g.subscribe(text));
         }
-        try g.configureTopic(g.state.registry.topicString(@intCast(source)), &.{ .weight = 2 });
+        try g.configureTopic(g.overlay.topicString(@intCast(source)), &.{ .weight = 2 });
         const expected = g.scores.topic_params[source];
-        try std.testing.expect(g.unsubscribe(g.state.registry.topicString(0)));
-        try std.testing.expect(g.unsubscribe(g.state.registry.topicString(1)));
-        const generation = g.state.registry.rows[0].generation;
+        try std.testing.expect(g.unsubscribe(g.overlay.topicString(0)));
+        try std.testing.expect(g.unsubscribe(g.overlay.topicString(1)));
+        const generation = g.overlay.rows[0].generation;
         const replacement = "/eth2/ffffffff/custom/ssz_snappy";
         try g.configureTopic(replacement, &g.scores.topic_params[source]);
-        try std.testing.expectEqual(@as(?u16, 0), g.state.registry.findTopic(replacement));
-        try std.testing.expectEqual(generation + 1, g.state.registry.rows[0].generation);
+        try std.testing.expectEqual(@as(?u16, 0), g.overlay.findTopic(replacement));
+        try std.testing.expectEqual(generation + 1, g.overlay.rows[0].generation);
         try std.testing.expectEqualDeep(expected, g.scores.topic_params[0]);
         try std.testing.expectEqual(calls, ledger.allocation_calls);
     }
@@ -2286,12 +2289,12 @@ test "gossip topic configuration snapshots aliased text under full capacity" {
         const text = try std.fmt.bufPrint(&name, "/eth2/{x:0>8}/custom/ssz_snappy", .{index});
         try std.testing.expect(g.subscribe(text));
     }
-    const input = g.state.registry.topicString(0)[0..shorter.len];
-    try std.testing.expect(g.unsubscribe(g.state.registry.topicString(0)));
-    const generation = g.state.registry.rows[0].generation;
+    const input = g.overlay.topicString(0)[0..shorter.len];
+    try std.testing.expect(g.unsubscribe(g.overlay.topicString(0)));
+    const generation = g.overlay.rows[0].generation;
     try g.configureTopic(input, &.{ .weight = 2 });
-    try std.testing.expectEqualStrings(shorter, g.state.registry.topicString(0));
-    try std.testing.expectEqual(generation + 1, g.state.registry.rows[0].generation);
+    try std.testing.expectEqualStrings(shorter, g.overlay.topicString(0));
+    try std.testing.expectEqual(generation + 1, g.overlay.rows[0].generation);
     try std.testing.expectEqual(@as(f64, 2), g.scores.topic_params[0].weight);
     try std.testing.expectEqual(calls, ledger.allocation_calls);
 }
@@ -2311,7 +2314,7 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     try std.testing.expect(io.advance(&g.messages.store, 1) == null);
     try std.testing.expect(g.recovery.nextExpiry() == null);
     try std.testing.expectEqual(@as(u64, 0), g.recovery.metrics.sent);
-    g.controlSent(p.index, io.advance(&g.messages.store, 6).?, 100);
+    g.writeCompleted(p.index, io.advance(&g.messages.store, 6).?, 100);
     g.controlSent(p.index, token, 200);
     try std.testing.expectEqual(@as(?u64, 12_100), g.recovery.nextExpiry());
     try std.testing.expectEqual(@as(u64, 1), g.recovery.metrics.sent);
@@ -2331,7 +2334,7 @@ test "gossipsub configured IDONTWANT uses admitted compressed wire bytes" {
     const destination = @import("test_support.zig").addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(name));
-    g.state.registry.mesh(g.state.registry.findTopic(name).?).set(destination.index);
+    g.overlay.mesh(g.overlay.findTopic(name).?).set(destination.index);
     var payload: [126]u8 = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @intCast(index);
     var compressed: [constants.maxCompressedLen(256)]u8 = undefined;
@@ -2371,7 +2374,7 @@ test "gossipsub remote forwarding honors IDONTWANT and preserves borrowed event 
     for (0..20) |_| try pair.pumpOnce();
     const destination = pair.server.state.findPeer(pair.handles.server).?;
     const source = @import("test_support.zig").addPeer(&pair.server, .{ .index = 77, .generation = 1 }, .v1_2).?;
-    pair.server.state.registry.mesh(pair.server.state.registry.findTopic(name).?).set(destination);
+    pair.server.overlay.mesh(pair.server.overlay.findTopic(name).?).set(destination);
     const suppressed_id = topic_mod.validMessageId(name, "remote suppressed", .{});
     pair.server.state.suppress(destination, suppressed_id, pair.pair.now.mono_ms, 60_000);
     var events: [1]Event = undefined;
@@ -2417,27 +2420,27 @@ test "publication subscribed fanout expires through owner maintenance" {
     const p = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(name));
-    const t = g.state.registry.findTopic(name).?;
-    g.state.registry.setSubscription(t, p.index, true);
+    const t = g.overlay.findTopic(name).?;
+    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, p.index, true);
     g.state.peers[p.index].outbound = .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } };
     _ = try g.publish(name, "fanout expiry", .{ .mono_ms = 0, .unix_s = 0 });
-    try std.testing.expectEqual(@as(usize, 1), g.state.registry.fanout(t).count());
+    try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
     g.heartbeat(.{ .mono_ms = 59_999, .unix_s = 0 });
     g.maintainTopics(.{ .mono_ms = 59_999, .unix_s = 0 });
-    try std.testing.expectEqual(@as(usize, 1), g.state.registry.fanout(t).count());
+    try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
     g.heartbeat(.{ .mono_ms = 60_000, .unix_s = 0 });
     g.maintainTopics(.{ .mono_ms = 60_000, .unix_s = 0 });
-    try std.testing.expectEqual(@as(usize, 0), g.state.registry.fanout(t).count());
-    g.state.registry.setSubscription(t, p.index, false);
+    try std.testing.expectEqual(@as(usize, 0), g.overlay.fanoutMembers(t).count());
+    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, p.index, false);
     g.state.peers[p.index].io.resetTx(&g.messages.store);
     const next_conn: Handle = .{ .index = 1, .generation = 1 };
     const next = @import("test_support.zig").addPeer(&g, next_conn, .v1_2).?;
-    g.state.registry.setSubscription(t, next.index, true);
+    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, next.index, true);
     g.state.peers[next.index].outbound = .{ .live = .{ .conn = next_conn, .id = 2, .slot = 0 } };
     const result = try g.publish(name, "fresh fanout", .{ .mono_ms = 60_001, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, result);
-    try std.testing.expectEqual(@as(usize, 1), g.state.registry.fanout(t).count());
-    try std.testing.expect(g.state.registry.fanout(t).isSet(next.index));
+    try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
+    try std.testing.expect(g.overlay.fanoutMembers(t).isSet(next.index));
     try std.testing.expectEqual(@as(usize, 0), g.state.peers[p.index].io.data_count);
     const queued = g.state.peers[next.index].io.data[g.state.peers[next.index].io.data_head].message;
     try std.testing.expectEqual(topic_mod.validMessageId(name, "fresh fanout", .{}), g.messages.store.get(queued).?.id);
@@ -2457,7 +2460,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     workspace.* = .{};
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     const replacement = "/eth2/01020304/voluntary_exit/ssz_snappy";
-    for (g.state.registry.rows[1..]) |*row| row.generation = std.math.maxInt(u64);
+    for (g.overlay.rows[1..]) |*row| row.generation = std.math.maxInt(u64);
     const now: Now = .{ .mono_ms = 1, .unix_s = 0 };
     _ = try g.publish(name, "original payload", now);
     const id = topic_mod.validMessageId(name, "original payload", .{});
@@ -2490,7 +2493,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
     var decompressed: [64]u8 = undefined;
     const size = try snappy.raw.uncompress(g.messages.store.segment(message, g.messages.store.cursor(message)), &decompressed);
     try std.testing.expectEqualStrings("original payload", decompressed[0..size]);
-    try std.testing.expectEqualStrings(replacement, g.state.registry.topicString(0));
+    try std.testing.expectEqualStrings(replacement, g.overlay.topicString(0));
 }
 
 test "gossip duplicate fast path ignores host capacity and malformed bodies receive penalties" {
@@ -2522,7 +2525,7 @@ test "gossip advertisements sample the whole burst independently for each recipi
     const t = g.internTopic(name).?;
     for (0..2) |i| {
         const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
-        g.state.registry.setSubscription(t, peer.index, true);
+        g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, peer.index, true);
         g.state.peers[peer.index].outbound = .{ .live = .{ .conn = g.state.peers[peer.index].conn, .id = 2, .slot = 0 } };
     }
     for (0..512) |i| {
@@ -2531,8 +2534,8 @@ test "gossip advertisements sample the whole burst independently for each recipi
         _ = try g.publish(name, &bytes, .{ .mono_ms = 1, .unix_s = 0 });
     }
     for (g.state.peers) |*peer| peer.io.resetTx(&g.messages.store);
-    g.state.registry.fanout(t).* = .initEmpty();
-    const context = g.meshContext(1);
+    g.overlay.fanoutMembers(t).* = .initEmpty();
+    const context = g.overlayContext(1);
     g.cycle.takeSnapshot(context.state, context.scores, context.now);
     var snapshot_context = context;
     snapshot_context.snapshot = &g.cycle.scores;
@@ -2591,7 +2594,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
     const metadata: peers_mod.Metadata = .{ .identity = g.peers.rows[g.logical(source.index).index].identity, .address = .unspecified, .direction = .inbound };
     g.markDirect(conn);
     g.state.peers[source.index].outbound = .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } };
-    if (g.state.registry.findTopic(name)) |topic| g.state.registry.setSubscription(topic, source.index, true);
+    if (g.overlay.findTopic(name)) |topic| g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), topic, source.index, true);
     var handles: [8]?ValidationHandle = @splat(null);
     for (0..512) |step| {
         const now: Now = .{ .mono_ms = step * 17 + 1, .unix_s = 0 };
@@ -2622,10 +2625,10 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
                 source = g.addPeer(conn, .v1_2, &metadata, now).admitted;
                 g.markDirect(conn);
                 g.state.peers[source.index].outbound = .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } };
-                if (g.state.registry.findTopic(name)) |topic| g.state.registry.setSubscription(topic, source.index, true);
+                if (g.overlay.findTopic(name)) |topic| g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), topic, source.index, true);
             },
             6 => {
-                const subscribed = if (g.state.registry.findTopic(name)) |topic| g.state.registry.subscribed(topic) else false;
+                const subscribed = if (g.overlay.findTopic(name)) |topic| g.overlay.subscribed(topic) else false;
                 if (subscribed) {
                     try std.testing.expect(g.unsubscribe(name));
                 } else try std.testing.expect(g.subscribe(name));

@@ -836,12 +836,12 @@ test "managed runtime topic policy copies values and rejects atomically" {
     text[6] = '0';
     const owner = &node.core.service.gossipsub.inner;
     try std.testing.expectEqual(@as(f64, 2), owner.scores.topic_params[0].weight);
-    try std.testing.expectEqualStrings("/eth2/ABCDEF00/custom/name/ssz_snappy", owner.state.registry.topicString(0));
+    try std.testing.expectEqualStrings("/eth2/ABCDEF00/custom/name/ssz_snappy", owner.overlay.topicString(0));
     const revision = owner.scores.revision;
     try std.testing.expectError(error.InvalidLimits, node.configureTopic(&text, &.{ .weight = std.math.nan(f64) }));
     try std.testing.expectError(error.InvalidTopic, node.configureTopic("bad", &.{}));
     try std.testing.expectEqual(revision, owner.scores.revision);
-    try std.testing.expectEqual(@as(u64, 1), owner.state.registry.rows[0].generation);
+    try std.testing.expectEqual(@as(u64, 1), owner.overlay.rows[0].generation);
     for (0..@import("gossipsub/constants.zig").topics_cap) |index| {
         var name: [@import("gossipsub/topic.zig").topic_max_len]u8 = undefined;
         const topic = try std.fmt.bufPrint(&name, "/eth2/{x:0>8}/custom/ssz_snappy", .{index});
@@ -1237,7 +1237,7 @@ test "managed runtime complete local intent rejects invalid last topic atomicall
     const identify = node.core.service.identify.?.local;
     const demand = node.core.demand;
     const g = &node.core.service.gossipsub.inner;
-    const topic = g.state.registry.findTopic(block_topic).?;
+    const topic = g.overlay.findTopic(block_topic).?;
     const params = g.scores.topic_params[topic];
     desired.update.local.metadata.attnets[0] = 1;
     desired.subscriptions = &[_]gossip.local_intent.Subscription{
@@ -1249,8 +1249,8 @@ test "managed runtime complete local intent rejects invalid last topic atomicall
     try std.testing.expectEqualDeep(identify, node.core.service.identify.?.local);
     try std.testing.expectEqualDeep(demand, node.core.demand);
     try std.testing.expectEqualDeep(params, g.scores.topic_params[topic]);
-    try std.testing.expect(g.state.registry.subscribed(topic));
-    try std.testing.expectEqual(@as(?u16, topic), g.state.registry.findTopic(block_topic));
+    try std.testing.expect(g.overlay.subscribed(topic));
+    try std.testing.expectEqual(@as(?u16, topic), g.overlay.findTopic(block_topic));
 }
 
 fn intentFor(node: *const runtime.NetworkCore) runtime.LocalIntent {
@@ -1292,7 +1292,7 @@ test "managed runtime local intent demand candidate sequence and stopped refusal
         try std.testing.expectEqualDeep(identify, node.core.service.identify.?.local);
         try std.testing.expectEqualDeep(t.Demand{}, node.core.demand);
         try std.testing.expectEqual(revision, g.scores.revision);
-        try std.testing.expect(g.state.registry.findTopic(desired.subscriptions[0].name) == null);
+        try std.testing.expect(g.overlay.findTopic(desired.subscriptions[0].name) == null);
         node.shutdown(node.last_now);
         try std.testing.expectError(error.Stopped, node.applyIntent(&desired, node.last_now));
         try before.expectUnchanged(&node);
@@ -1318,11 +1318,11 @@ test "managed runtime local intent topic demand no-op preserves Status schedulin
     var desired = intentFor(&node);
     desired.subscriptions = &.{.{ .name = name, .params = .{ .weight = 2 } }};
     try std.testing.expect(try node.applyIntent(&desired, node.last_now));
-    const row = g.state.registry.findTopic(name).?;
+    const row = g.overlay.findTopic(name).?;
     g.scores.invalid(0, row);
     const counters = g.scores.topics[row];
     const revision = g.scores.revision;
-    const retained = g.state.registry.rows[row].retire_after_ms;
+    const retained = g.overlay.rows[row].retire_after_ms;
     try std.testing.expect(!try node.applyIntent(&desired, node.last_now));
     try std.testing.expectEqual(revision, g.scores.revision);
     desired.demand = .{ .attnets = 1, .expires_at_slot = 100 };
@@ -1330,15 +1330,15 @@ test "managed runtime local intent topic demand no-op preserves Status schedulin
     try std.testing.expect(!try node.applyIntent(&desired, node.last_now));
     try std.testing.expectEqualDeep(desired.demand, node.core.demand);
     try std.testing.expectEqualDeep(counters, g.scores.topics[row]);
-    try std.testing.expectEqual(retained, g.state.registry.rows[row].retire_after_ms);
+    try std.testing.expectEqual(retained, g.overlay.rows[row].retire_after_ms);
     try std.testing.expectEqualDeep(schedule, node.core.control.schedules[0]);
     try before.expectUnchanged(&node);
     desired.subscriptions = &.{};
     try std.testing.expect(try node.applyIntent(&desired, node.last_now));
-    try std.testing.expect(!g.state.registry.subscribed(row));
-    const deadline = g.state.registry.rows[row].retire_after_ms;
+    try std.testing.expect(!g.overlay.subscribed(row));
+    const deadline = g.overlay.rows[row].retire_after_ms;
     try std.testing.expect(!try node.applyIntent(&desired, .{ .mono_ms = node.last_now.mono_ms + 1, .unix_s = node.last_now.unix_s }));
-    try std.testing.expectEqual(deadline, g.state.registry.rows[row].retire_after_ms);
+    try std.testing.expectEqual(deadline, g.overlay.rows[row].retire_after_ms);
     try std.testing.expectEqual(calls, node.reservations.allocation_calls);
 }
 
@@ -1392,14 +1392,14 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
     for (0..3000) |_| {
         _ = try pair.pump();
         if (pair.a.last_now.mono_ms - start > 10_000) break;
-        const ns = &gb.state.registry.namespace.?;
+        const ns = &gb.overlay.namespace.?;
         if (pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1 and ns.subscribed(0, ns.lookup(active).?.ordinal) and ns.subscribed(0, ns.lookup(bpo).?.ordinal) and gb.state.peers[0].outStream() != null and pair.a.core.service.gossipsub.inner.state.peers[0].outStream() != null) {
             connected = true;
             break;
         }
     }
     try std.testing.expect(connected);
-    try std.testing.expect(gb.state.registry.findTopic(active) == null);
+    try std.testing.expect(gb.overlay.findTopic(active) == null);
     const calls = pair.b.reservations.allocation_calls;
     for ([_]*runtime.LocalIntent{ &a_intent, &b_intent }) |intent| {
         intent.update.local.fork.fork = .fulu;
@@ -1411,9 +1411,9 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
     b_intent.subscriptions = &.{.{ .name = active, .params = .{ .weight = 7 } }};
     try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
     try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
-    const activated = gb.state.registry.findTopic(active).?;
+    const activated = gb.overlay.findTopic(active).?;
     try std.testing.expectEqual(@as(f64, 7), gb.scores.topic_params[activated].weight);
-    try std.testing.expectEqual(@as(usize, 1), gb.state.registry.subscribers(activated).count());
+    try std.testing.expectEqual(@as(usize, 1), gb.overlay.subscribers(activated).count());
     const publication = try pair.b.publishGossipWithOptions(active, "0123456789", .{ .allow_zero_peers = false }, pair.b.last_now);
     try std.testing.expectEqual(@as(usize, 1), publication.queued);
     var announced = false;
@@ -1455,7 +1455,7 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
         if (announced and withdrawn and pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1) break;
     }
     try std.testing.expect(announced and withdrawn);
-    const borrowed_topic = gb.state.registry.findTopic(bpo).?;
+    const borrowed_topic = gb.overlay.findTopic(bpo).?;
     try std.testing.expectEqual(@as(f64, 9), gb.scores.topic_params[borrowed_topic].weight);
     const peer = pair.a.core.catalog.find(&pair.b.peerId()).?;
     var request: [24]u8 = @splat(0);
@@ -1571,11 +1571,11 @@ test "managed runtime local intent three boundaries fit and all-column overlap r
     try std.testing.expectEqualDeep(old_demand, node.core.demand);
     try std.testing.expectEqual(revision, g.scores.revision);
     var count: usize = 0;
-    for (g.state.registry.rows) |row| if (row.subscribed) {
+    for (g.overlay.rows) |row| if (row.subscribed) {
         count += 1;
     };
     try std.testing.expectEqual(@as(usize, 423), count);
-    try std.testing.expect(g.state.registry.findTopic("/eth2/05060708/data_column_sidecar_127/ssz_snappy") == null);
+    try std.testing.expect(g.overlay.findTopic("/eth2/05060708/data_column_sidecar_127/ssz_snappy") == null);
 }
 
 test "application transport borrow authenticates while remote Status remains unavailable" {
