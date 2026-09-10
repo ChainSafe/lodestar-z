@@ -122,6 +122,7 @@ pub fn state(env: napi.Env, value: *const t.Snapshot, session: u64) !Value {
     try put(object, "samplingGroups", try groups(env, value.sampling_groups));
     try put(object, "direct", try env.getBoolean(value.direct));
     try put(object, "score", try env.createDouble(value.score));
+    try put(object, "scoreAtMs", try env.createBigintUint64(value.score_at_ms));
     inline for (.{ .{ "statusAtMs", "status_at_ms" }, .{ "metadataAtMs", "metadata_at_ms" }, .{ "connectedAtMs", "connected_at_ms" }, .{ "banUntilMs", "ban_until_ms" }, .{ "goodbyeUntilMs", "goodbye_until_ms" } }) |pair|
         try put(object, pair[0], try env.createBigintUint64(@field(value, pair[1])));
     return object;

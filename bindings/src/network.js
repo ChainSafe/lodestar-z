@@ -45,6 +45,7 @@ class NativeRuntime {
   applyIntent(intent, slot) { return this.#native.applyIntent(intent, slot); }
   getIdentity() { return this.#native.getIdentity(); }
   getPeers() { return this.#native.getPeers(); }
+  getGossipDiagnostics(cursor = 0) { return this.#native.getGossipDiagnostics(cursor); }
   connect(peerId, addresses, timeoutMs) { return this.#native.connect(peerId, addresses, timeoutMs); }
   disconnect(peerId) { return this.#native.disconnect(peerId); }
   reStatusPeers(peerIds) { return this.#native.reStatusPeers(peerIds); }

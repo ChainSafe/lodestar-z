@@ -75,6 +75,7 @@ pub const Snapshot = struct {
     connected_at_ms: u64,
     direct: bool,
     score: f64,
+    score_at_ms: u64 = 0,
     ban_until_ms: u64,
     goodbye_until_ms: u64,
 };

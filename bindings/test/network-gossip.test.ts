@@ -197,6 +197,27 @@ test.each([
       },
       {timeout: 5000}
     );
+    const page = await pair.right.getGossipDiagnostics();
+    expect(page.ownerSequence).toBeGreaterThan(0n);
+    expect(page.observedUnixMs).toBeGreaterThanOrEqual(BigInt(before - 1000));
+    expect(page.observedMonoMs).toBeGreaterThan(0n);
+    expect(page.nextCursor).toBeNull();
+    expect(page.topics).toHaveLength(1);
+    expect(page.topics[0]).toMatchObject({subscribed: true, topic: TOPIC});
+    expect(page.peers).toHaveLength(1);
+    const scored = page.peers[0];
+    expect(scored.identity).toEqual(pair.identity.peerId);
+    expect(scored.connected).toBe(true);
+    expect(scored.outboundReady).toBe(true);
+    expect(Number.isFinite(scored.score)).toBe(true);
+    if (verdict === "reject") {
+      expect(scored.topics[0].invalidMessageDeliveries).toBeGreaterThan(0);
+      expect(scored.topics[0].weights.p4).toBeLessThan(0);
+    }
+    scored.identity.fill(0);
+    scored.ip.fill(0);
+    scored.topics.length = 0;
+    expect((await pair.right.getGossipDiagnostics()).peers[0].identity).toEqual(pair.identity.peerId);
     const counter = {
       accept: "reportsAppliedAccept",
       ignore: "reportsAppliedIgnore",
@@ -688,3 +709,24 @@ test("gossip session restart cannot report against a replacement cell with the s
     await Promise.all([second.left.close(), second.right.close()]);
   }
 }, 15000);
+
+test("gossip diagnostics validate cursors and share bounded snapshot admission", async () => {
+  const config = applicationConfig();
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  try {
+    await runtime.ready;
+    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    for (const cursor of [-1, 0.5, 513, Number.NaN]) {
+      expect(() => runtime.getGossipDiagnostics(cursor)).toThrow();
+    }
+    const snapshots = [runtime.getGossipDiagnostics(), runtime.getPeers()];
+    expect(() => runtime.getGossipDiagnostics()).toThrow("NetworkCommandFull");
+    const [page] = await Promise.all(snapshots);
+    expect(page).toMatchObject({nextCursor: null, peers: []});
+    await expect(runtime.getGossipDiagnostics(512)).rejects.toThrow("InvalidDiagnosticsCursor");
+    expect(runtime.diagnostics().operationOccupied).toBe(0);
+  } finally {
+    await runtime.close();
+  }
+  expect(() => runtime.getGossipDiagnostics()).toThrow("NetworkClosed");
+});
