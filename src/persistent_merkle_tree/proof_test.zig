@@ -408,7 +408,7 @@ test "single proof through chunked_leaf" {
 }
 
 // Compact multiproof descending through a `.chunked_leaf`: exercises the
-// opaque-materialization path in nodeToCompactMultiProof, which the plain
+// opaque-materialization path in createCompactMultiProof, which the plain
 // `compact multiproof` test never reaches.
 test "compact multiproof through chunked_leaf" {
     const K: usize = ChunkedLeaf.K;
