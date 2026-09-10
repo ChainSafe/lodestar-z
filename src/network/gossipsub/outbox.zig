@@ -234,6 +234,7 @@ pub const Outbox = struct {
 
     pub fn subscriptions(self: *Outbox, rows: []const @import("overlay.zig").Row, now: u64) void {
         assert(rows.len == constants.topics_cap);
+        if (self.subscription_dirty.count() == 0) return;
         for (0..constants.topics_cap) |_| {
             const index = self.subscription_cursor;
             if (self.subscription_dirty.isSet(index)) {
