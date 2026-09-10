@@ -81,7 +81,7 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 0), f.g.overlay.mesh(f.topic).count());
     try std.testing.expect(f.g.sessions.rows[0].io.tx.pending_prunes.isSet(f.topic));
-    try std.testing.expectEqual(@as(?u64, 30_001), f.g.sessions.rows[0].io.deadlines(&f.g.options).values[@intFromEnum(@import("peer_io.zig").TimeoutReason.prunes)]);
+    try std.testing.expectEqual(@as(?u64, context.now + f.g.options.pressure_timeout_ms), f.g.sessions.rows[0].io.deadlines(&f.g.options).values[@intFromEnum(@import("peer_io.zig").TimeoutReason.prunes)]);
 }
 
 test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
