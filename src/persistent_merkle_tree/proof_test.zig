@@ -351,3 +351,44 @@ test "single proof through partial chunked_leaf" {
         try testing.expectEqualSlices(u8, &expected_root, &rebuilt_root);
     }
 }
+
+test "memory_safety: compact multiproof reconstruction should reclaim partial nodes on pool exhaustion" {
+    var leaves = [_][32]u8{
+        [_]u8{1} ** 32,
+        [_]u8{2} ** 32,
+    };
+    // The descriptor is a branch with two leaf children.
+    const descriptor = [_]u8{0b0110_0000};
+
+    // One free slot fails on the right leaf; two fail on the parent branch.
+    for ([_]usize{ 1, 2 }) |available_slots| {
+        var pool = try Node.Pool.init(.{
+            .page_allocator = std.testing.allocator,
+            .allocator = std.testing.allocator,
+            .pool_size = 8,
+        });
+        defer pool.deinit();
+
+        var capacity_fill_nodes: std.ArrayList(Node.Id) = .empty;
+        defer capacity_fill_nodes.deinit(std.testing.allocator);
+
+        while (pool.createLeafFromUint(0)) |id| {
+            try capacity_fill_nodes.append(std.testing.allocator, id);
+        } else |err| switch (err) {
+            error.PoolExhausted => {},
+        }
+        for (0..available_slots) |_| {
+            pool.unref(capacity_fill_nodes.pop().?);
+        }
+
+        const baseline = pool.getNodesInUse();
+        try std.testing.expectError(
+            error.PoolExhausted,
+            proof.createNodeFromCompactMultiProof(&pool, &leaves, &descriptor),
+        );
+
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+
+        for (capacity_fill_nodes.items) |id| pool.unref(id);
+    }
+}
