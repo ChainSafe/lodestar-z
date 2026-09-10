@@ -2,12 +2,31 @@ import crypto from "node:crypto";
 import {Worker} from "node:worker_threads";
 import {describe, expect, it} from "vitest";
 import {PublicKey, SecretKey, Signature, verify} from "../src/blst.js";
+import bindings from "../src/index.js";
 import {pubkeyCache} from "../src/pubkeys.js";
 
+const peerManagerConfig = {
+  custodyRequirement: 4,
+  disablePeerScoring: false,
+  gossipsubNegativeScoreWeight: 0.001,
+  gossipsubPositiveScoreWeight: 0.001,
+  initialForkName: "deneb",
+  maxPeers: 15,
+  negativeGossipScoreIgnoreThreshold: -1000,
+  numberOfCustodyGroups: 128,
+  pingIntervalInboundMs: 15000,
+  pingIntervalOutboundMs: 20000,
+  samplesPerSlot: 8,
+  slotsPerEpoch: 32,
+  statusInboundGracePeriodMs: 15000,
+  statusIntervalMs: 300000,
+  targetGroupPeers: 6,
+  targetPeers: 10,
+};
+
 /**
- * Tests that the per-context instance data (blst InstanceData) and
- * refcounted shared state (pool, pubkeys, config) survive a worker
- * thread loading and unloading the bindings.
+ * Tests that per-environment state and refcounted shared state
+ * (pool, pubkeys, config) survive a worker loading and unloading the bindings.
  *
  * Before the cleanup-hook + refcount refactor, a worker's env teardown
  * would have wiped shared module globals, corrupting the main thread.
@@ -96,10 +115,33 @@ describe("worker isolation", () => {
     expect(pubkeyCache.size).toBe(1);
     expect(pubkeyCache.getOrThrow(0).toBytes()).toEqual(expected);
   });
+
+  it("isolates peer manager state between the main thread and workers", async () => {
+    bindings.peerManager.init(peerManagerConfig);
+    try {
+      bindings.peerManager.onConnectionOpen("main-peer", "inbound");
+
+      const workerCount = await runWorker<number>(`
+        import {parentPort} from "node:worker_threads";
+        import bindings from ${JSON.stringify(bindingsModulePath)};
+
+        bindings.peerManager.init(${JSON.stringify(peerManagerConfig)});
+        bindings.peerManager.onConnectionOpen("worker-peer", "inbound");
+        const count = bindings.peerManager.getConnectedPeerCount();
+        parentPort.postMessage(count);
+      `);
+
+      expect(workerCount).toBe(1);
+      expect(bindings.peerManager.getConnectedPeers()).toEqual(["main-peer"]);
+    } finally {
+      bindings.peerManager.close();
+    }
+  });
 });
 
 const pubkeysModulePath = new URL("../src/pubkeys.js", import.meta.url).href;
 const blstModulePath = new URL("../src/blst.js", import.meta.url).href;
+const bindingsModulePath = new URL("../src/index.js", import.meta.url).href;
 
 function runBlstWorker(): Promise<string> {
   return runWorker(`

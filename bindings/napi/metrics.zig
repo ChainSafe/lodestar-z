@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const js = @import("zapi:zapi").js;
 const state_transition = @import("state_transition");
+const peer_manager = @import("peer_manager");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -11,10 +12,14 @@ else
 
 var initialized: bool = false;
 
-/// JS: metrics.init() → void
+/// JS: metrics.init()
+/// Initializes the metric registries so subsequent recordings are live; until
+/// called, all metrics are noop. Safe to call more than once.
 pub fn init() !void {
     if (initialized) return;
     try state_transition.metrics.init(allocator, js.io(), .{});
+    errdefer state_transition.metrics.state_transition.deinit();
+    try peer_manager.metrics.init(allocator, js.io(), .{});
     initialized = true;
 }
 
@@ -24,11 +29,13 @@ pub fn scrapeMetrics() !js.String {
     defer aw.deinit();
 
     try state_transition.metrics.write(&aw.writer);
+    try peer_manager.metrics.write(&aw.writer);
     return js.String.from(aw.written());
 }
 
 pub fn deinit() void {
     if (!initialized) return;
     state_transition.metrics.state_transition.deinit();
+    peer_manager.metrics.deinit();
     initialized = false;
 }
