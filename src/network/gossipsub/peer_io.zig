@@ -62,6 +62,12 @@ pub const PeerIo = struct {
     iwant_ids_sent: u16 = 0,
     idontwant_recv: u16 = 0,
 
+    pub fn startSession(self: *PeerIo) void {
+        assert(self.large_slot == null);
+        self.tx.startSession();
+        self.* = .{ .tx = self.tx, .body = self.body, .unread = self.unread, .rx_ready = false };
+    }
+
     pub fn feedUnread(self: *PeerIo, body: []u8, limit: usize, now_ms: u64) frame.Error!struct { consumed: usize, complete: bool } {
         assert(limit > 0 and limit <= self.unread_end - self.unread_start);
         const result = try self.reader.feed(self.unread[self.unread_start..][0..limit], body);

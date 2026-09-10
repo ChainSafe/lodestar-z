@@ -181,7 +181,7 @@ pub const Snapshot = struct {
         for (g.sessions.rows, 0..) |*row, index| {
             if (!row.active) continue;
             var breakdown: gossip.score.Breakdown = undefined;
-            const score = g.peers.scores.snapshotWeights(row.logical.index, now_ms, &breakdown);
+            const score = g.peers.snapshotWeights(row.logical, now_ms, &breakdown);
             self.scores.observe(score, &g.peers.scores.params);
             self.scores.observeWeights(&breakdown, &score_kinds);
             for (&meshes, &self.scores.mesh_scores) |*mesh, *range| {

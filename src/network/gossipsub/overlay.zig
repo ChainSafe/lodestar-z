@@ -316,7 +316,7 @@ pub const Overlay = struct {
     }
 
     fn score(context: *const Context, peer: u16) f64 {
-        const snapshot = context.snapshot orelse return context.peers.scores.score(context.sessions.rows[peer].logical.index, context.now);
+        const snapshot = context.snapshot orelse return context.peers.score(context.sessions.rows[peer].logical, context.now);
         if (snapshot[peer].generation != context.sessions.peerGeneration(peer)) return -score_mod.counter_max;
         return snapshot[peer].value;
     }
@@ -449,7 +449,7 @@ pub const Overlay = struct {
         }
         if (context.sessions.rows[peer].io.tx.pruneExpired(context.now, context.options.pressure_timeout_ms) or context.sessions.rows[peer].io.tx.pending_prunes.isSet(topic)) return;
         if (!self.subscribed(topic) or context.peers.rows[row.logical.index].direct or blocked or
-            context.peers.scores.score(row.logical.index, context.now) < 0 or
+            context.peers.score(row.logical, context.now) < 0 or
             (!self.mesh(topic).isSet(peer) and self.mesh(topic).count() >= c.mesh_d_high and !outbound(context, peer)))
         {
             self.prune(context, topic, peer, c.prune_backoff_ms);

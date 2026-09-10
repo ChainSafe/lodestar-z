@@ -37,6 +37,7 @@ pub const Sessions = struct {
     }
 
     pub fn initLayout(a: std.mem.Allocator, options: *const @import("options.zig").Options, layout: *const @import("layout.zig").Layout) !Sessions {
+        assert(std.meta.eql(layout.*, @import("layout.zig").Layout.init(options)));
         const rows = try a.alloc(Session, layout.sessions);
         errdefer a.free(rows);
         const per_peer = layout.session_buffer_bytes;
@@ -54,6 +55,11 @@ pub const Sessions = struct {
         return .{ .rows = rows, .io_arena = arena, .receive_pool = receive_pool, .deliveries = deliveries };
     }
 
+    pub fn metadataBytes(layout: *const @import("layout.zig").Layout) usize {
+        return @as(usize, layout.sessions) * @sizeOf(Session) + @sizeOf(DeliveryPool) +
+            DeliveryPool.backingBytes(layout.deliveries) + ReceivePool.metadataBytes(layout.receive_frames);
+    }
+
     pub fn deinit(self: *Sessions, a: std.mem.Allocator) void {
         self.deliveries.deinit(a);
         a.destroy(self.deliveries);
@@ -67,18 +73,7 @@ pub const Sessions = struct {
     pub fn addPeer(self: *Sessions, conn: Handle, version: Version) ?SessionRef {
         const index = self.freePeer() orelse return null;
         const peer = &self.rows[index];
-        assert(peer.io.tx.data.count == 0 and peer.io.large_slot == null);
-        peer.active = true;
-        peer.generation += 1;
-        peer.conn = conn;
-        peer.version = version;
-        peer.inbound_version = .v1_0;
-        peer.in_stream = null;
-        peer.outbound = .{ .waiting = 0 };
-        peer.failures = 0;
-        peer.needs_service = false;
-        peer.dont_send_head = 0;
-        peer.dont_send_len = 0;
+        peer.start(conn, version);
         return .{ .index = @intCast(index), .generation = peer.generation };
     }
 
@@ -218,4 +213,47 @@ test "sessions suppresses ids per peer until monotonic expiry" {
     sessions.suppress(peer.index, id, 0, 10);
     try std.testing.expect(!sessions.suppresses(peer.index, id, 10));
     try std.testing.expect(sessions.suppresses(peer.index, id, 0));
+}
+
+test "gossip session reuse clears protocol state while stream cancellation retains intent and token history" {
+    const a = std.testing.allocator;
+    var sessions = try Sessions.init(a, 1);
+    defer sessions.deinit(a);
+    var store = try @import("message_store.zig").Store.init(a, 1, 4096);
+    defer store.deinit(a);
+    const conn: Handle = .{ .index = 0, .generation = 1 };
+    const first = sessions.addPeer(conn, .v1_2).?;
+    const peer = &sessions.rows[first.index];
+    const id: MessageId = @splat(1);
+    peer.suppress(id, 1, 100);
+    peer.failures = 5;
+    peer.io.ihave_recv = 10;
+    peer.io.write_first = true;
+    peer.io.tx.control_burst = 4;
+    peer.io.tx.subscriptionChanged(0, 1);
+    peer.io.tx.deferPrune(1, 1);
+    const token = peer.io.tx.injectFrame("frame", false, .iwant, 1).?;
+    const high_water = peer.io.tx.control.bytes_high_water;
+    peer.io.tx.drops[0] = 3;
+    peer.io.tx.cancelStream(&store);
+    try std.testing.expect(peer.io.tx.subscription_dirty.isSet(0));
+    try std.testing.expect(peer.io.tx.pending_prunes.isSet(1));
+    try std.testing.expectEqual(@as(u8, 4), peer.io.tx.control_burst);
+    try std.testing.expect(peer.suppresses(id, 2));
+    sessions.removePeer(first.index);
+    const next = sessions.addPeer(conn, .v1_1).?;
+    try std.testing.expectEqual(first.index, next.index);
+    try std.testing.expect(next.generation > first.generation);
+    try std.testing.expect(!sessions.matches(first));
+    try std.testing.expect(!peer.suppresses(id, 2));
+    try std.testing.expectEqual(@as(u8, 0), peer.failures);
+    try std.testing.expectEqual(@as(u16, 0), peer.io.ihave_recv);
+    try std.testing.expect(!peer.io.write_first);
+    try std.testing.expectEqual(@as(u8, 0), peer.io.tx.control_burst);
+    try std.testing.expectEqual(@as(usize, 0), peer.io.tx.subscription_dirty.count());
+    try std.testing.expectEqual(@as(usize, 0), peer.io.tx.pending_prunes.count());
+    try std.testing.expectEqual(high_water, peer.io.tx.control.bytes_high_water);
+    try std.testing.expectEqual(@as(u64, 3), peer.io.tx.drops[0]);
+    try std.testing.expect(peer.io.tx.injectFrame("next", false, .iwant, 2).? > token);
+    peer.io.tx.cancelStream(&store);
 }

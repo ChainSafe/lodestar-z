@@ -268,7 +268,7 @@ test "gossipsub prunes a peer whose messages are rejected" {
 
     // the server's score for the client is now negative and the heartbeat prunes it
     const client_index = setup.server.sessions.findPeer(setup.handles.server).?;
-    try std.testing.expect(setup.server.peers.scores.score(client_index, setup.pair.now.mono_ms) < 0);
+    try std.testing.expect(setup.server.peers.score(.{ .index = client_index, .generation = setup.server.peers.rows[client_index].generation }, setup.pair.now.mono_ms) < 0);
     setup.pair.advance(constants_heartbeat + 100);
     rounds = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
@@ -306,9 +306,9 @@ test "gossipsub credits first delivery only after the host accepts" {
 
     // receiving the message must not credit the sender; only the host's accept does
     const client_index = setup.server.sessions.findPeer(setup.handles.server).?;
-    const before = setup.server.peers.scores.score(client_index, setup.pair.now.mono_ms);
+    const before = setup.server.peers.score(.{ .index = client_index, .generation = setup.server.peers.rows[client_index].generation }, setup.pair.now.mono_ms);
     _ = setup.server.report(handle.?, .accept, setup.pair.now);
-    const after = setup.server.peers.scores.score(client_index, setup.pair.now.mono_ms);
+    const after = setup.server.peers.score(.{ .index = client_index, .generation = setup.server.peers.rows[client_index].generation }, setup.pair.now.mono_ms);
     try std.testing.expect(after > before);
 }
 
@@ -625,7 +625,7 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
     }
     try std.testing.expect(received);
     const cached = setup.client.messages.history.get(&setup.client.messages.store, id).?;
-    try std.testing.expectEqual(@as(u8, 1), cached.counts[0]);
+    try std.testing.expectEqual(@as(u8, 1), setup.client.messages.history.countsRow(cached)[0]);
 }
 
 test "gossipsub holds multiple messages and unread RPCs under zero event pressure" {

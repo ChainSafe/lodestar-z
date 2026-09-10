@@ -59,7 +59,7 @@ test "gossip recovery refusal restores promise slots and identity pins before re
     try std.testing.expectEqual(@as(usize, 0), g.recovery.batch_len);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[row.logical.index].pins);
     try std.testing.expect(row.io.tx.submit(&.{ .graft = name }, 1) != null);
-    row.io.tx.reset(&g.messages.store);
+    row.io.tx.cancelStream(&g.messages.store);
     try std.testing.expectEqual(@as(usize, 2), try g.recovery.requestBatch(&g.peers, &row.io.tx, &ids, row.logical, row.conn, g.overlay.rng.random(), 2));
     try std.testing.expectEqual(@as(u32, 1), g.peers.rows[row.logical.index].pins);
     g.cancelWrites(peer);

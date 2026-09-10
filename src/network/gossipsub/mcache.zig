@@ -94,7 +94,6 @@ pub const SeenCache = struct {
     index: Index,
     ids: []MessageId,
     added_ms: []u64,
-    capacity: usize,
     ttl_ms: u64,
     head: usize = 0,
     tail: usize = 0,
@@ -112,9 +111,12 @@ pub const SeenCache = struct {
             .index = index,
             .ids = ids,
             .added_ms = added_ms,
-            .capacity = capacity,
             .ttl_ms = ttl_ms,
         };
+    }
+
+    pub fn backingBytes(capacity: usize) usize {
+        return capacity * (@sizeOf(MessageId) + @sizeOf(u64)) + indexCapacity(capacity) * @sizeOf(u32);
     }
 
     pub fn deinit(self: *SeenCache, allocator: Allocator) void {
@@ -133,12 +135,12 @@ pub const SeenCache = struct {
     pub fn add(self: *SeenCache, id: MessageId, now_ms: u64) bool {
         self.pruneExpired(now_ms);
         if (self.contains(id, now_ms)) return false;
-        if (self.count == self.capacity) self.evictOldest();
+        if (self.count == self.ids.len) self.evictOldest();
         const slot = self.head;
         self.ids[slot] = id;
         self.added_ms[slot] = now_ms;
         self.index.insert(id, @intCast(slot));
-        self.head = (self.head + 1) % self.capacity;
+        self.head = (self.head + 1) % self.ids.len;
         self.count += 1;
         return true;
     }
@@ -146,7 +148,7 @@ pub const SeenCache = struct {
     fn evictOldest(self: *SeenCache) void {
         assert(self.count > 0);
         self.index.remove(self.ids[self.tail]);
-        self.tail = (self.tail + 1) % self.capacity;
+        self.tail = (self.tail + 1) % self.ids.len;
         self.count -= 1;
     }
 
@@ -164,7 +166,6 @@ pub const HistoryEntry = struct {
     prev: u32 = empty_slot,
     message: storage.Handle = undefined,
     born_epoch: u64 = 0,
-    counts: []u8,
 };
 pub const History = struct {
     generations: []u64,
@@ -194,9 +195,15 @@ pub const History = struct {
         errdefer a.free(counts);
         @memset(counts, 0);
         const index = try Index.init(a, capacity, ids);
-        for (entries, 0..) |*e, i| e.* = .{ .next = if (i + 1 == capacity) empty_slot else @intCast(i + 1), .counts = counts[i * retained ..][0..retained] };
+        for (entries, 0..) |*e, i| e.* = .{ .next = if (i + 1 == capacity) empty_slot else @intCast(i + 1) };
         return .{ .entries = entries, .ids = ids, .index = index, .generations = generations, .counts = counts };
     }
+    pub fn backingBytes(capacity: usize, retained: usize) usize {
+        return capacity * (@sizeOf(HistoryEntry) + @sizeOf(MessageId) + retained) +
+            retained * @sizeOf(u64) + indexCapacity(capacity) * @sizeOf(u32);
+    }
+
+    /// Frees backing storage during joint History/Store destruction. Live eviction uses remove.
     pub fn deinit(self: *History, a: Allocator) void {
         a.free(self.counts);
         a.free(self.generations);
@@ -237,17 +244,16 @@ pub const History = struct {
     }
     pub fn put(self: *History, store: *storage.Store, h: storage.Handle, epoch: u64) void {
         if (self.tail != empty_slot) assert(self.entries[self.tail].born_epoch <= epoch);
-        const message = store.get(h).?;
-        if (message.history) return;
-        const id = message.id;
+        const payload = store.get(h).?;
+        if (payload.history) return;
+        const id = payload.id;
         if (self.index.find(id)) |old| self.remove(store, old);
         if (self.count == self.entries.len) _ = self.evictOldest(store);
         const slot = self.free;
         assert(slot != empty_slot);
         self.free = self.entries[slot].next;
-        const counts = self.entries[slot].counts;
-        @memset(counts, 0);
-        self.entries[slot] = .{ .message = h, .prev = self.tail, .counts = counts, .born_epoch = epoch };
+        @memset(self.countsRow(slot), 0);
+        self.entries[slot] = .{ .message = h, .prev = self.tail, .born_epoch = epoch };
         if (self.tail != empty_slot) self.entries[self.tail].next = slot else self.head = slot;
         self.tail = slot;
         self.ids[slot] = id;
@@ -255,28 +261,39 @@ pub const History = struct {
         self.count += 1;
         store.retainHistory(h);
     }
-    pub fn get(self: *History, store: *const storage.Store, id: MessageId) ?*HistoryEntry {
+    /// The slot remains valid until the next history mutation in this owner call.
+    pub fn get(self: *const History, store: *const storage.Store, id: MessageId) ?u32 {
         const slot = self.index.find(id) orelse return null;
         const e = &self.entries[slot];
         assert(store.get(e.message) != null);
-        return e;
+        return slot;
     }
+
+    pub fn message(self: *const History, slot: u32) storage.Handle {
+        return self.entries[slot].message;
+    }
+
+    pub fn countsRow(self: *const History, slot: u32) []u8 {
+        assert(slot < self.entries.len);
+        return self.counts[@as(usize, slot) * self.generations.len ..][0..self.generations.len];
+    }
+
     /// Called only with a canonical admitted identity. Older references never reset a column.
     pub fn bindPeer(self: *History, peer: PeerRef) void {
         assert(peer.index < self.generations.len and peer.generation != 0);
         if (peer.generation <= self.generations[peer.index]) return;
-        for (self.entries) |*entry| entry.counts[peer.index] = 0;
+        for (0..self.entries.len) |slot| self.countsRow(@intCast(slot))[peer.index] = 0;
         self.generations[peer.index] = peer.generation;
     }
-    pub fn iwantAllowed(self: *const History, e: *const HistoryEntry, peer: PeerRef, max: u8) bool {
+    pub fn iwantAllowed(self: *const History, slot: u32, peer: PeerRef, max: u8) bool {
         if (peer.index >= self.generations.len or peer.generation == 0) return false;
-        return self.generations[peer.index] == peer.generation and e.counts[peer.index] < max;
+        return self.generations[peer.index] == peer.generation and self.countsRow(slot)[peer.index] < max;
     }
-    pub fn sent(self: *const History, e: *HistoryEntry, peer: PeerRef) void {
+    pub fn sent(self: *const History, slot: u32, peer: PeerRef) void {
         if (peer.index >= self.generations.len or peer.generation == 0) return;
         if (self.generations[peer.index] != peer.generation) return;
-        assert(e.counts[peer.index] < 255);
-        e.counts[peer.index] += 1;
+        assert(self.countsRow(slot)[peer.index] < 255);
+        self.countsRow(slot)[peer.index] += 1;
     }
     pub fn evictOldest(self: *History, store: *storage.Store) bool {
         if (self.count == 0) return false;
@@ -369,7 +386,7 @@ test "gossip history indexed replacement keeps FIFO age and independent TX reten
     history.put(&store, replacement, 1);
     store.seal(replacement);
     try std.testing.expectEqual(@as(usize, 2), history.count);
-    try std.testing.expectEqual(replacement, history.get(&store, a).?.message);
+    try std.testing.expectEqual(replacement, history.message(history.get(&store, a).?));
     try std.testing.expect(!store.get(first).?.history);
     history.age(&store, constants.mcache_len);
     try std.testing.expect(history.get(&store, b) == null);
@@ -397,16 +414,16 @@ test "gossip ID index repairs a full admitted collision cluster" {
 test "gossip policy recovery permits more than sixteen distinct recipients" {
     var history = try History.init(std.testing.allocator, 2);
     defer history.deinit(std.testing.allocator);
-    const entry = &history.entries[0];
+    const slot: u32 = 0;
     for (0..32) |i| {
         const peer: PeerRef = .{ .index = @intCast(i), .generation = 1 };
         history.bindPeer(peer);
-        try std.testing.expect(history.iwantAllowed(entry, peer, 3));
-        for (0..3) |_| history.sent(entry, peer);
-        try std.testing.expect(!history.iwantAllowed(entry, peer, 3));
+        try std.testing.expect(history.iwantAllowed(slot, peer, 3));
+        for (0..3) |_| history.sent(slot, peer);
+        try std.testing.expect(!history.iwantAllowed(slot, peer, 3));
     }
     history.bindPeer(.{ .index = 0, .generation = 2 });
-    try std.testing.expect(history.iwantAllowed(entry, .{ .index = 0, .generation = 2 }, 3));
+    try std.testing.expect(history.iwantAllowed(slot, .{ .index = 0, .generation = 2 }, 3));
 }
 
 test "gossip history entries keep peer generations outside message rows" {
@@ -416,15 +433,15 @@ test "gossip history entries keep peer generations outside message rows" {
 test "gossip history stale peer cannot restore retransmission allowance" {
     var history = try History.init(std.testing.allocator, 2);
     defer history.deinit(std.testing.allocator);
-    const entry = &history.entries[0];
+    const slot: u32 = 0;
     const current: PeerRef = .{ .index = 0, .generation = (@as(u64, 1) << 40) + 2 };
     const stale: PeerRef = .{ .index = 0, .generation = current.generation - 1 };
     history.bindPeer(current);
-    for (0..3) |_| history.sent(entry, current);
-    try std.testing.expect(!history.iwantAllowed(entry, stale, 3));
+    for (0..3) |_| history.sent(slot, current);
+    try std.testing.expect(!history.iwantAllowed(slot, stale, 3));
     history.bindPeer(stale);
-    history.sent(entry, stale);
-    try std.testing.expect(!history.iwantAllowed(entry, current, 3));
+    history.sent(slot, stale);
+    try std.testing.expect(!history.iwantAllowed(slot, current, 3));
 }
 
 test "gossip history replacement resets message retransmission counts" {
@@ -443,7 +460,7 @@ test "gossip history replacement resets message retransmission counts" {
     history.put(&store, replacement, 0);
     store.seal(replacement);
     try std.testing.expect(history.iwantAllowed(history.get(&store, id).?, peer, 3));
-    try std.testing.expectEqual(@as(u8, 0), history.get(&store, id).?.counts[peer.index]);
+    try std.testing.expectEqual(@as(u8, 0), history.countsRow(history.get(&store, id).?)[peer.index]);
     try std.testing.expectEqual(@as(usize, 1), store.used_entries);
 }
 
@@ -454,25 +471,25 @@ test "gossip history canonical identity replacement clears only its bounded peer
     const other: PeerRef = .{ .index = 1, .generation = 1 };
     history.bindPeer(peer);
     history.bindPeer(other);
-    for (history.entries) |*entry| {
-        for (0..3) |_| history.sent(entry, peer);
-        history.sent(entry, other);
+    for (0..history.entries.len) |i| {
+        for (0..3) |_| history.sent(@intCast(i), peer);
+        history.sent(@intCast(i), other);
     }
     history.bindPeer(peer);
-    for (history.entries) |*entry| try std.testing.expect(!history.iwantAllowed(entry, peer, 3));
+    for (0..history.entries.len) |i| try std.testing.expect(!history.iwantAllowed(@intCast(i), peer, 3));
     const replacement: PeerRef = .{ .index = 0, .generation = std.math.maxInt(u64) };
     history.bindPeer(replacement);
-    for (history.entries) |*entry| {
-        try std.testing.expect(history.iwantAllowed(entry, replacement, 3));
-        try std.testing.expect(!history.iwantAllowed(entry, peer, 3));
-        try std.testing.expectEqual(@as(u8, 0), entry.counts[0]);
-        try std.testing.expectEqual(@as(u8, 1), entry.counts[1]);
-        for (0..3) |_| history.sent(entry, replacement);
+    for (0..history.entries.len) |i| {
+        try std.testing.expect(history.iwantAllowed(@intCast(i), replacement, 3));
+        try std.testing.expect(!history.iwantAllowed(@intCast(i), peer, 3));
+        try std.testing.expectEqual(@as(u8, 0), history.countsRow(@intCast(i))[0]);
+        try std.testing.expectEqual(@as(u8, 1), history.countsRow(@intCast(i))[1]);
+        for (0..3) |_| history.sent(@intCast(i), replacement);
     }
     history.bindPeer(peer);
-    for (history.entries) |*entry| {
-        history.sent(entry, peer);
-        try std.testing.expect(!history.iwantAllowed(entry, replacement, 3));
+    for (0..history.entries.len) |i| {
+        history.sent(@intCast(i), peer);
+        try std.testing.expect(!history.iwantAllowed(@intCast(i), replacement, 3));
     }
 }
 
@@ -481,9 +498,9 @@ test "history resolved retained capacity bounds counters and stale peers" {
     defer history.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 4), history.generations.len);
     try std.testing.expectEqual(@as(usize, 8), history.counts.len);
-    try std.testing.expectEqual(@as(usize, 4), history.entries[0].counts.len);
-    try std.testing.expect(!history.iwantAllowed(&history.entries[0], .{ .index = 4, .generation = 1 }, 3));
-    history.sent(&history.entries[0], .{ .index = 4, .generation = 1 });
+    try std.testing.expectEqual(@as(usize, 4), history.countsRow(0).len);
+    try std.testing.expect(!history.iwantAllowed(0, .{ .index = 4, .generation = 1 }, 3));
+    history.sent(0, .{ .index = 4, .generation = 1 });
 }
 
 test "gossip failed admission preserves history pinned by transmit queues" {

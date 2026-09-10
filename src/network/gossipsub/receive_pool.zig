@@ -21,6 +21,7 @@ pub const ReceivePool = struct {
     }
 
     pub fn deinit(self: *ReceivePool, allocator: std.mem.Allocator) void {
+        for (self.slots) |slot| std.debug.assert(!slot.used);
         allocator.free(self.slots);
         allocator.free(self.bytes);
         self.* = undefined;
@@ -95,7 +96,9 @@ test "receive pool partial initialization unwinds" {
     try std.testing.expectError(error.InvalidLimits, ReceivePool.init(std.testing.allocator, 1, 2 * constants.GOSSIP_MAX_SIZE + 1));
     var maximum = try ReceivePool.init(std.testing.allocator, 1, 2 * constants.GOSSIP_MAX_SIZE);
     defer maximum.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 2 * constants.GOSSIP_MAX_SIZE), maximum.buffer(maximum.claim().?).?.len);
+    const lease = maximum.claim().?;
+    try std.testing.expectEqual(@as(usize, 2 * constants.GOSSIP_MAX_SIZE), maximum.buffer(lease).?.len);
+    try std.testing.expect(maximum.release(lease));
     try std.testing.checkAllAllocationFailures(std.testing.allocator, initFailure, .{});
 }
 

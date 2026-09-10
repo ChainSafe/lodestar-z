@@ -76,11 +76,8 @@ pub const Completion = union(enum) {
 
 pub const ControlQueue = struct {
     bytes: []u8,
-    lengths: [control_frames]u32 = undefined,
-    tokens: [control_frames]u64 = undefined,
-    // Native encoders queue one item per RPC; preserve its kind through partial writes.
-    kinds: [control_frames]?ItemKind = @splat(null),
-    enqueued_ms: [control_frames]u64 = undefined,
+    frames: [control_frames]Frame = undefined,
+
     head: usize = 0,
     count: usize = 0,
     read_at: usize = 0,
@@ -89,6 +86,13 @@ pub const ControlQueue = struct {
     bytes_high_water: usize = 0,
     frames_high_water: usize = 0,
 
+    const Frame = struct {
+        remaining: u32,
+        token: u64,
+        kind: ?ItemKind,
+        enqueued_ms: u64,
+    };
+
     pub fn append(self: *ControlQueue, bytes: []const u8, token: u64, kind: ?ItemKind, now_ms: u64) QueueResult {
         if (self.count == control_frames or bytes.len > self.bytes.len - self.used) return .full;
         assert(bytes.len > 0);
@@ -96,10 +100,7 @@ pub const ControlQueue = struct {
         @memcpy(self.bytes[self.write_at..][0..n], bytes[0..n]);
         @memcpy(self.bytes[0 .. bytes.len - n], bytes[n..]);
         const slot = (self.head + self.count) % control_frames;
-        self.lengths[slot] = @intCast(bytes.len);
-        self.tokens[slot] = token;
-        self.kinds[slot] = kind;
-        self.enqueued_ms[slot] = now_ms;
+        self.frames[slot] = .{ .remaining = @intCast(bytes.len), .token = token, .kind = kind, .enqueued_ms = now_ms };
         self.count += 1;
         self.used += bytes.len;
         self.bytes_high_water = @max(self.bytes_high_water, self.used);
@@ -109,15 +110,15 @@ pub const ControlQueue = struct {
     }
     pub fn segment(self: *const ControlQueue) []const u8 {
         if (self.count == 0) return &.{};
-        return self.bytes[self.read_at..][0..@min(self.lengths[self.head], self.bytes.len - self.read_at)];
+        return self.bytes[self.read_at..][0..@min(self.frames[self.head].remaining, self.bytes.len - self.read_at)];
     }
     pub fn advance(self: *ControlQueue, len: usize) ?ControlReceipt {
         assert(len > 0 and len <= self.segment().len);
-        self.lengths[self.head] -= @intCast(len);
+        self.frames[self.head].remaining -= @intCast(len);
         self.used -= len;
         self.read_at = (self.read_at + len) % self.bytes.len;
-        if (self.lengths[self.head] != 0) return null;
-        const receipt: ControlReceipt = .{ .token = self.tokens[self.head], .kind = self.kinds[self.head] };
+        if (self.frames[self.head].remaining != 0) return null;
+        const receipt: ControlReceipt = .{ .token = self.frames[self.head].token, .kind = self.frames[self.head].kind };
         self.head = (self.head + 1) % control_frames;
         self.count -= 1;
         return receipt;
@@ -307,12 +308,29 @@ pub const Outbox = struct {
     pub fn oldest(self: *const Outbox) ?u64 {
         var first: ?u64 = null;
         if (self.data.count > 0) first = self.data.first().?.enqueued_ms;
-        if (self.control.count > 0) first = @min(first orelse std.math.maxInt(u64), self.control.enqueued_ms[self.control.head]);
-        if (self.critical.count > 0) first = @min(first orelse std.math.maxInt(u64), self.critical.enqueued_ms[self.critical.head]);
+        if (self.control.count > 0) first = @min(first orelse std.math.maxInt(u64), self.control.frames[self.control.head].enqueued_ms);
+        if (self.critical.count > 0) first = @min(first orelse std.math.maxInt(u64), self.critical.frames[self.critical.head].enqueued_ms);
         return first;
     }
 
-    pub fn reset(self: *Outbox, store: *storage.Store) void {
+    pub fn startSession(self: *Outbox) void {
+        assert(!self.pending() and self.data.count == 0);
+        // Receipt tokens can still identify sent recovery promises on the same transport.
+        self.* = .{
+            .control = self.control,
+            .critical = self.critical,
+            .data = self.data,
+            .sequence = self.sequence,
+            .drops = self.drops,
+            .pressure_log_due_ms = self.pressure_log_due_ms,
+            .last_drop = self.last_drop,
+            .ready = false,
+        };
+        self.control.reset();
+        self.critical.reset();
+    }
+
+    pub fn cancelStream(self: *Outbox, store: *storage.Store) void {
         self.data.reset(store);
         self.pressure_pending = false;
         self.active = .none;
@@ -400,7 +418,7 @@ test "gossip critical capacity and data queue pressure are independent and relea
     try std.testing.expect(!io.inject("x", 0));
     try std.testing.expect(io.appendControl("critical", true, null, 0) != null);
     store.releaseHistory(h);
-    io.reset(&store);
+    io.cancelStream(&store);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
     try std.testing.expectEqual(@as(usize, 1), store.free_pages);
     try std.testing.expectEqual(@as(u64, 1), io.drops[@intFromEnum(DropReason.data_descriptors)]);
@@ -417,7 +435,7 @@ test "gossip queues a full validation burst in order and preserves byte bounds" 
     var deliveries = try delivery.Pool.init(std.testing.allocator, 1, data_capacity);
     defer deliveries.deinit(std.testing.allocator);
     var io: Outbox = .{ .data = .{ .pool = &deliveries }, .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical } };
-    defer io.reset(&store);
+    defer io.cancelStream(&store);
     var expected: [4096]u8 = undefined;
     var writer = protobuf.Writer.init(&expected);
     for (0..burst) |i| {
@@ -478,7 +496,7 @@ test "metrics control kinds survive partial writes ring reuse and refused frames
     _ = io.appendControl("abc", false, .prune, 1).?;
     _ = io.segment(&store);
     _ = io.advance(&store, 1);
-    io.reset(&store);
+    io.cancelStream(&store);
     try std.testing.expectEqual(@as(u64, control_frames), metrics.sent_items[@intFromEnum(ItemKind.prune)]);
 }
 
