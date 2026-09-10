@@ -539,19 +539,6 @@ pub const EpochTransitionCache = struct {
             balances.deinit(allocator);
         }
     }
-
-    /// Ensure rewards/penalties arrays match the current validator count.
-    /// This is only used in benchmark tests where we want to reuse the cache across steps.
-    pub fn syncRewardPenaltyLengths(self: *EpochTransitionCache, io: std.Io, validator_count: usize) !void {
-        try _reused_lock.lock(io);
-        defer _reused_lock.unlock(io);
-
-        const reused_cache = _reused_cache orelse return error.ReusedEpochTransitionCacheUnavailable;
-        try reused_cache.rewards.resize(reused_cache.allocator, validator_count);
-        try reused_cache.penalties.resize(reused_cache.allocator, validator_count);
-        self.rewards = reused_cache.rewards.items;
-        self.penalties = reused_cache.penalties.items;
-    }
 };
 
 test {
