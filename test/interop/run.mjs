@@ -111,6 +111,7 @@ async function exercise(version, binary, zigDials = false) {
     }
     if (process.argv[3] === "--fin-only") return {earlyRetirement: true};
     await Promise.all([zig.command("subscribe", {topic: TOPIC}), js.command("subscribe", {topic: TOPIC})]);
+    await waitFor(async () => (await js.command("snapshot", {topic: TOPIC})).subscribers > 0);
     await js.command("publish", {seed: 0x6d2b79f5, size: 65537, topic: TOPIC});
     await delivered(zig, 65537, 0x6d2b79f5);
     await waitFor(async () => (await zig.command("snapshot")).remoteSubscriptions > 0);
