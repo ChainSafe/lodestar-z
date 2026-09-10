@@ -64,7 +64,7 @@ test "topic policy incoming lengths precede decode work arena store and validati
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     try std.testing.expect(g.subscribe(name));
-    const context: @import("messages.zig").Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options };
+    const context: @import("messages.zig").Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
     const source: @import("messages.zig").Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = g.sessions.ref(peer.index), .connection = g.sessions.rows[peer.index].conn };
     var used: usize = 0;
     var peer_work: usize = g.options.decompress_per_peer_bytes;
@@ -253,7 +253,7 @@ test "topic policy remembered ordinals remain independent of retained validation
     try std.testing.expect(g.subscribe(name));
     const old = g.overlay.findTopic(name).?;
     const generation = g.overlay.rows[old].generation;
-    const context: @import("messages.zig").Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options };
+    const context: @import("messages.zig").Context = .{ .overlay = g.overlay, .peers = &g.peers, .options = &g.options, .epoch = g.cycle.epoch };
     const source: @import("messages.zig").Source = .{ .peer = g.sessions.rows[peer.index].logical, .session = g.sessions.ref(peer.index), .connection = g.sessions.rows[peer.index].conn };
     var work: usize = 10000;
     var peer_work: usize = g.options.decompress_per_peer_bytes;

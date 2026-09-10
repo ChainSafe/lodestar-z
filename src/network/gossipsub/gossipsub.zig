@@ -355,7 +355,7 @@ pub const Gossipsub = struct {
         const recipients = self.overlay.publicationRecipients(&context, topic, options.flood);
         if (recipients.count() == 0 and !options.allow_zero_peers) return error.NoPeersSubscribedToTopic;
         const clen = snappy.raw.compress(ssz, self.msg_scratch) catch return error.CompressFailed;
-        const h = self.messages.publish(id, topic_str, self.msg_scratch[0..clen], now_ms) orelse return error.ResourceExhausted;
+        const h = self.messages.publish(id, topic_str, self.msg_scratch[0..clen], now_ms, self.cycle.epoch) orelse return error.ResourceExhausted;
         self.resolvePromises(id, null);
         const result = self.deliver(&recipients, h, null, now_ms);
         self.counters.messages_published += 1;
@@ -367,7 +367,7 @@ pub const Gossipsub = struct {
     }
 
     fn messageContext(self: *Gossipsub) @import("messages.zig").Context {
-        return .{ .overlay = self.overlay, .peers = &self.peers, .options = &self.options };
+        return .{ .overlay = self.overlay, .peers = &self.peers, .options = &self.options, .epoch = self.cycle.epoch };
     }
 
     /// Event slices remain valid until the next pump, including after report or publish.
@@ -463,7 +463,7 @@ pub const Gossipsub = struct {
     }
 
     pub fn nextWakeup(self: *const Gossipsub, now: Now) u64 {
-        if (self.cycle.remaining > 0) return now.mono_ms;
+        if (self.cycle.isActive()) return now.mono_ms;
         var deadline = if (self.heartbeat_at == 0) now.mono_ms else self.heartbeat_at;
         if (self.messages.nextDeadline()) |d| deadline = @min(deadline, d);
         if (self.recovery.nextExpiry()) |expiry| deadline = @min(deadline, expiry);
@@ -599,11 +599,10 @@ pub const Gossipsub = struct {
     fn heartbeat(self: *Gossipsub, now: Now) void {
         for (self.sessions.rows) |*peer| peer.io.resetHeartbeat();
         self.peers.refresh(now.mono_ms);
-        if (self.cycle.remaining > 0) return;
+        if (self.cycle.isActive()) return;
         const opportunistic = self.opportunistic_at != 0 and now.mono_ms >= self.opportunistic_at;
         if (self.opportunistic_at == 0 or opportunistic) self.opportunistic_at = now.mono_ms +| self.options.opportunistic_graft_interval_ms;
         self.cycle.begin(self.sessions, &self.peers.scores, now.mono_ms, opportunistic);
-        self.messages.beginCycle();
     }
 
     fn maintainTopics(self: *Gossipsub, now: Now) void {
@@ -622,12 +621,12 @@ pub const Gossipsub = struct {
             serviced += 1;
             if (serviced == self.options.topics_per_pump) break;
         }
-        if (self.cycle.remaining == 0) self.messages.finishCycle();
+        if (self.cycle.complete()) |epoch| self.messages.history.age(&self.messages.store, epoch);
     }
 
     fn emitGossip(self: *Gossipsub, topic: u16, context: *const overlay_mod.Context) void {
         const topic_str = self.overlay.topicString(topic);
-        const ids = self.messages.gossipIds(topic_str);
+        const ids = self.messages.gossipIds(topic_str, self.cycle.epoch);
         const count = ids.len;
         if (count == 0) return;
         const n = @min(count, constants.gossip_ids_max);
@@ -1060,7 +1059,7 @@ test "gossipsub pending validation survives history churn and report publish eve
         var bytes: [8]u8 = undefined;
         std.mem.writeInt(u64, &bytes, i, .little);
         _ = try g.publish(topic, &bytes, .{ .mono_ms = 2, .unix_s = 1 });
-        g.messages.history.shift(&g.messages.store);
+        @import("test_support.zig").ageHistory(&g);
     }
     try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, peer.index, "pending", 3, &events));
     try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(event.handle, .ignore, .{ .mono_ms = 4, .unix_s = 1 }));
@@ -1237,7 +1236,7 @@ test "gossipsub legal maximum host acceptance forwards retained pages through ac
     const message = setup.server.messages.validation.entries[handle.index].state.pending.message;
     try std.testing.expectEqual(ReportOutcome{ .applied = .accept }, setup.server.report(handle, .accept, setup.pair.now));
     try std.testing.expectEqual(@as(u32, 1), setup.server.messages.store.get(message).?.tx);
-    for (0..constants.mcache_len) |_| setup.server.messages.history.shift(&setup.server.messages.store);
+    for (0..constants.mcache_len) |_| @import("test_support.zig").ageHistory(&setup.server);
     try std.testing.expect(!setup.server.messages.store.get(message).?.history);
     var received = false;
     for (0..2000) |_| {
@@ -1559,7 +1558,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[advertised].io.tx.control.count);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.tx.control.count);
     g.maintainTopics(.{ .mono_ms = 3, .unix_s = 0 });
-    try std.testing.expectEqual(@as(usize, 0), g.cycle.remaining);
+    try std.testing.expect(!g.cycle.isActive());
     for (g.sessions.rows) |*peer| peer.io.tx.reset(&g.messages.store);
     g.last_now_ms = 701;
     g.heartbeat(.{ .mono_ms = 701, .unix_s = 0 });
@@ -1662,7 +1661,7 @@ test "gossipsub history queue refusal and authenticated reconnect preserve retra
     const logical_peer = g.logical(first.index);
     const id: MessageId = @splat(9);
     const message = g.messages.store.put(id, "t", "payload").?;
-    g.messages.history.put(&g.messages.store, message);
+    g.messages.history.put(&g.messages.store, message, g.cycle.epoch);
     g.messages.store.seal(message);
     var bytes: [64]u8 = undefined;
     var writer = protobuf.Writer.init(&bytes);
@@ -2139,7 +2138,7 @@ test "gossip advertisements sample the whole burst independently for each recipi
     for (g.sessions.rows) |*peer| peer.io.tx.reset(&g.messages.store);
     g.overlay.rows[t].fanout = .initEmpty();
     const context = g.overlayContext(1);
-    g.cycle.takeSnapshot(context.sessions, &context.peers.scores, context.now);
+    g.cycle.begin(context.sessions, &context.peers.scores, context.now, false);
     var snapshot_context = context;
     snapshot_context.snapshot = &g.cycle.scores;
     g.emitGossip(t, &snapshot_context);
