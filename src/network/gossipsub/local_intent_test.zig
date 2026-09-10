@@ -89,7 +89,7 @@ test "local intent separate validation control score backoff and generation pins
     try g.configureTopic(name, &.{});
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const logical = g.state.peers[peer.index].logical;
-    const io = &g.io.peers[peer.index];
+    const io = &g.state.peers[peer.index].io;
     const desired = [_]local.Subscription{.{ .name = next, .params = .{ .weight = 2 } }};
     const message = g.store.put([_]u8{1} ** 20, name, "payload").?;
     const handle = g.validation.admit(&g.store, &g.peers, message, logical, 0, now.mono_ms);
@@ -146,7 +146,7 @@ test "local intent history survives former row reuse and real retransmission des
     const read = try @import("snappy").raw.uncompress(g.store.segment(retained, g.store.cursor(retained)), &payload);
     try std.testing.expectEqualStrings("history payload", payload[0..read]);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const io = &g.io.peers[peer.index];
+    const io = &g.state.peers[peer.index].io;
     const cached = g.mcache.get(&g.store, id).?;
     try std.testing.expect(g.mcache.iwantAllowed(cached, g.state.peers[peer.index].logical, @import("constants.zig").gossip_retransmission));
     try std.testing.expectEqual(.queued, io.queueData(&g.store, retained, g.options.tx_peer_bytes, now.mono_ms));

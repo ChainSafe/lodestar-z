@@ -13,57 +13,32 @@ pub const Version = enum(u8) { v1_0, v1_1, v1_2 };
 
 pub const PeerHandle = struct { index: u16, generation: u64 };
 
-/// One gossip peer, keyed by its transport connection. Live subscriptions and mesh
-/// membership reside in the topic table as per-topic peer sets. Configured
-/// namespace subscriptions belong to Gossipsub and outlive inactive topic rows. The peer row
-/// holds the connection, protocol version, the two directional streams, and the
-/// bounded set of message ids the peer has asked us not to send.
-const Peer = struct {
-    logical: @import("peers.zig").Ref = undefined,
-    active: bool = false,
-    generation: u64 = 0,
-    conn: Handle = undefined,
-    version: Version = .v1_0,
-    inbound_version: Version = .v1_0,
-    out_stream: ?StreamHandle = null,
-    in_stream: ?StreamHandle = null,
-    dont_send: [constants.dont_send_cap]MessageId = undefined,
-    dont_send_until: [constants.dont_send_cap]u64 = undefined,
-    dont_send_head: u8 = 0,
-    dont_send_len: u8 = 0,
-
-    fn suppresses(self: *const Peer, id: MessageId, now: u64) bool {
-        for (0..self.dont_send_len) |offset| {
-            const at = (@as(usize, self.dont_send_head) + constants.dont_send_cap - 1 - offset) %
-                constants.dont_send_cap;
-            if (now < self.dont_send_until[at] and std.mem.eql(u8, &self.dont_send[at], &id)) return true;
-        }
-        return false;
-    }
-
-    fn suppress(self: *Peer, id: MessageId, now: u64, ttl: u64) void {
-        if (self.suppresses(id, now)) return;
-        self.dont_send[self.dont_send_head] = id;
-        self.dont_send_until[self.dont_send_head] = now +| ttl;
-        self.dont_send_head = @intCast((self.dont_send_head + 1) % constants.dont_send_cap);
-        if (self.dont_send_len < constants.dont_send_cap) self.dont_send_len += 1;
-    }
-};
+const Session = @import("peer_session.zig").Session;
 
 pub const State = struct {
-    peers: []Peer,
+    peers: []Session,
+    io_arena: []u8,
     registry: @import("registry.zig").Registry = .{},
 
     pub fn init(a: std.mem.Allocator, capacity: u16) !State {
-        if (capacity == 0 or capacity > constants.peers_cap) return error.InvalidLimits;
-        const rows = try a.alloc(Peer, capacity);
-        @memset(rows, .{});
-        return .{ .peers = rows };
+        return initOptions(a, &.{ .connected_capacity = capacity });
+    }
+
+    pub fn initOptions(a: std.mem.Allocator, options: *const @import("options.zig").Options) !State {
+        if (options.connected_capacity == 0 or options.connected_capacity > constants.peers_cap) return error.InvalidLimits;
+        const PeerIo = @import("peer_io.zig").PeerIo;
+        const rows = try a.alloc(Session, options.connected_capacity);
+        errdefer a.free(rows);
+        const per_peer = PeerIo.bufferBytes(options);
+        const arena = try a.alloc(u8, rows.len * per_peer);
+        for (rows, 0..) |*row, i| row.* = .{ .io = PeerIo.init(arena[i * per_peer ..][0..per_peer], options) };
+        return .{ .peers = rows, .io_arena = arena };
     }
 
     pub fn deinit(self: *State, a: std.mem.Allocator) void {
         self.registry.deinit(a);
         a.free(self.peers);
+        a.free(self.io_arena);
     }
 
     // Peers ------------------------------------------------------------------
@@ -71,12 +46,18 @@ pub const State = struct {
     pub fn addPeer(self: *State, conn: Handle, version: Version) ?PeerHandle {
         const index = self.freePeer() orelse return null;
         const peer = &self.peers[index];
-        peer.* = .{
-            .active = true,
-            .generation = peer.generation + 1,
-            .conn = conn,
-            .version = version,
-        };
+        assert(peer.io.data_count == 0 and peer.io.large_slot == null);
+        peer.active = true;
+        peer.generation += 1;
+        peer.conn = conn;
+        peer.version = version;
+        peer.inbound_version = .v1_0;
+        peer.in_stream = null;
+        peer.outbound = .{ .waiting = 0 };
+        peer.failures = 0;
+        peer.needs_service = false;
+        peer.dont_send_head = 0;
+        peer.dont_send_len = 0;
         return .{ .index = @intCast(index), .generation = peer.generation };
     }
 
@@ -90,6 +71,8 @@ pub const State = struct {
             topic.fanout.unset(index);
         }
         self.peers[index].active = false;
+        self.peers[index].outbound = .{ .waiting = 0 };
+        self.peers[index].in_stream = null;
     }
 
     pub fn findPeer(self: *State, conn: Handle) ?u16 {
@@ -120,12 +103,12 @@ pub const State = struct {
 
     pub fn setStreams(self: *State, index: u16, out: ?StreamHandle, in: ?StreamHandle) void {
         assert(self.peers[index].active);
-        if (out) |stream| self.peers[index].out_stream = stream;
+        if (out) |stream| self.peers[index].outbound = .{ .live = stream };
         if (in) |stream| self.peers[index].in_stream = stream;
     }
 
     pub fn outStream(self: *const State, index: u16) ?StreamHandle {
-        return self.peers[index].out_stream;
+        return self.peers[index].outStream();
     }
 
     pub fn suppress(self: *State, index: u16, id: MessageId, now: u64, ttl: u64) void {

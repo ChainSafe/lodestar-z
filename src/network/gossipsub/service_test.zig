@@ -194,7 +194,7 @@ test "gossipsub replacement resets a partial frame and keeps directional version
     const index = setup.server.handler.inner.state.findPeer(setup.handles.server).?;
     const first = try propose(&setup.pair, setup.handles.client, "/meshsub/1.1.0", &.{ 0x80, 0x01, 0x08 });
     for (0..8) |_| try setup.pumpOnce();
-    try std.testing.expectEqual(@as(?usize, 128), setup.server.handler.inner.io.peers[index].reader.declaredLen());
+    try std.testing.expectEqual(@as(?usize, 128), setup.server.handler.inner.state.peers[index].io.reader.declaredLen());
     try std.testing.expectEqual(@import("state.zig").Version.v1_2, setup.server.handler.inner.state.peerVersion(index));
     try std.testing.expectEqual(@import("state.zig").Version.v1_1, setup.server.handler.inner.state.peers[index].inbound_version);
     var bytes: [160]u8 = undefined;
@@ -211,7 +211,7 @@ test "gossipsub replacement resets a partial frame and keeps directional version
         }
     }
     try std.testing.expect(received);
-    try std.testing.expectEqual(@as(?usize, null), setup.server.handler.inner.io.peers[index].reader.declaredLen());
+    try std.testing.expectEqual(@as(?usize, null), setup.server.handler.inner.state.peers[index].io.reader.declaredLen());
     try std.testing.expectError(error.StreamStopped, setup.pair.client.write(first, "x", false));
 }
 
@@ -308,7 +308,7 @@ test "gossipsub service detects an idle remote stop and retries without fabricat
     const first = setup.client.handler.inner.state.outStream(client_index).?;
     const remote = setup.server.handler.inner.state.peers[server_index].in_stream.?;
     try std.testing.expectEqual(first.id, remote.id);
-    const io = &setup.client.handler.inner.io.peers[client_index];
+    const io = &setup.client.handler.inner.state.peers[client_index].io;
     try std.testing.expect(!io.pending());
     setup.pair.server.closeStream(remote, 0);
     for (0..4) |_| try setup.pumpOnce();
@@ -373,7 +373,7 @@ fn standaloneAllocationPrefix(allocator: std.mem.Allocator) !void {
     const resolved = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
     var service = try Service.init(allocator, .{ .gossipsub = resolved.core.service.gossipsub, .negotiations_max = 2 });
     defer service.deinit();
-    try std.testing.expectEqual(@as(usize, 12), service.handler.streams.len);
+    try std.testing.expectEqual(@as(usize, 12), service.handler.inner.state.peers.len);
     try std.testing.expectEqual(@as(usize, 2), service.router.negotiator.entries.len);
 }
 

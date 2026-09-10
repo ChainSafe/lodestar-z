@@ -136,23 +136,12 @@ pub const Pool = struct {
     arena: []u8,
 
     pub fn init(a: std.mem.Allocator, options: *const @import("options.zig").Options) !Pool {
-        const per_peer = options.control_bytes + options.critical_bytes + options.body_buffer_bytes + constants.read_scratch_len;
+        const per_peer = PeerIo.bufferBytes(options);
         const arena = try a.alloc(u8, @as(usize, options.connected_capacity) * per_peer);
         errdefer a.free(arena);
         const peers = try a.alloc(PeerIo, options.connected_capacity);
         errdefer a.free(peers);
-        for (peers, 0..) |*peer, i| {
-            const base = i * per_peer;
-            const critical = base + options.control_bytes;
-            const body = critical + options.critical_bytes;
-            const unread = body + options.body_buffer_bytes;
-            peer.* = .{
-                .control = .{ .bytes = arena[base..critical] },
-                .critical = .{ .bytes = arena[critical..body] },
-                .body = arena[body..unread],
-                .unread = arena[unread..][0..constants.read_scratch_len],
-            };
-        }
+        for (peers, 0..) |*peer, i| peer.* = PeerIo.init(arena[i * per_peer ..][0..per_peer], options);
         return .{ .peers = peers, .arena = arena };
     }
     pub fn deinit(self: *Pool, a: std.mem.Allocator) void {
@@ -163,6 +152,18 @@ pub const Pool = struct {
 };
 
 pub const PeerIo = struct {
+    pub fn bufferBytes(options: *const @import("options.zig").Options) usize {
+        return options.control_bytes + options.critical_bytes + options.body_buffer_bytes + constants.read_scratch_len;
+    }
+
+    pub fn init(bytes: []u8, options: *const @import("options.zig").Options) PeerIo {
+        assert(bytes.len == bufferBytes(options));
+        const critical = options.control_bytes;
+        const body = critical + options.critical_bytes;
+        const unread = body + options.body_buffer_bytes;
+        return .{ .control = .{ .bytes = bytes[0..critical] }, .critical = .{ .bytes = bytes[critical..body] }, .body = bytes[body..unread], .unread = bytes[unread..] };
+    }
+
     calls_pump: usize = 0,
     write_first: bool = false,
     control: ControlQueue,

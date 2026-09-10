@@ -119,7 +119,8 @@ pub const Snapshot = struct {
         self.closed_by_client = core.control.counters.closed_by_client;
         self.peer_events = core.control.counters.events;
         self.dial = core.dial_queue.counters;
-        for (g.io.peers) |*io| {
+        for (g.state.peers) |*session| {
+            const io = &session.io;
             for (&self.gossip_queue_drops, io.drops) |*total, value| total.* +|= value;
         }
         self.target = core.catalog.options.target_peers;

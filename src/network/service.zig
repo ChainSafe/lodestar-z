@@ -212,7 +212,7 @@ pub const Service = struct {
         if (self.identify) |*identify| identify.transportEvents(engine, events);
         for (events) |event| {
             if (self.applications != .active or (!self.automatic_gossip_admission and event == .connected)) continue;
-            self.gossipsub.transportEvents(engine, &.{event}, now);
+            self.gossipsub.transportEvents(&self.router, engine, &.{event}, now);
         }
         var outcomes: [routing.outcomes_per_pump]routing.Outcome = undefined;
         const count = self.router.pump(engine, now, &outcomes);

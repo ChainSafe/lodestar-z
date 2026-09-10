@@ -19,7 +19,6 @@ pub const Context = struct {
     state: *state_mod.State,
     peers: *peers_mod.Peers,
     scores: *score_mod.PeerScore,
-    io: []io_mod.PeerIo,
     now: u64,
     heartbeat_ms: u64,
     pressure_ms: u64,
@@ -327,7 +326,7 @@ pub const Mesh = struct {
         var count: usize = 0;
         for (0..context.state.peers.len) |index| {
             const peer: u16 = @intCast(index);
-            if (members.isSet(peer) or context.state.peers[peer].out_stream == null) continue;
+            if (members.isSet(peer) or context.state.peers[peer].outStream() == null) continue;
             if (!self.eligible(context, topic, peer, context.scores.params.publish_threshold)) continue;
             candidate_peers[count] = peer;
             count += 1;
@@ -383,7 +382,7 @@ fn queue(context: *const Context, topic: u16, peer: u16, prune_s: ?u64) bool {
         writer.varint(protobuf.graftRpcSize(name));
         protobuf.writeGraftRpc(&writer, name);
     }
-    return context.io[peer].appendControl(writer.written(), true, if (prune_s != null) .prune else .graft, context.now) != null;
+    return context.state.peers[peer].io.appendControl(writer.written(), true, if (prune_s != null) .prune else .graft, context.now) != null;
 }
 
 const Fixture = struct {
@@ -403,7 +402,7 @@ const Fixture = struct {
         return .{ .g = g, .topic = topic };
     }
     fn context(self: *Fixture, now: u64) Context {
-        return .{ .state = self.g.state, .peers = &self.g.peers, .scores = &self.g.scores, .io = self.g.io.peers, .now = now, .heartbeat_ms = 700, .pressure_ms = 30_000, .use_snapshot = true };
+        return .{ .state = self.g.state, .peers = &self.g.peers, .scores = &self.g.scores, .now = now, .heartbeat_ms = 700, .pressure_ms = 30_000, .use_snapshot = true };
     }
 };
 
@@ -447,15 +446,15 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     const bytes = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 0);
-    try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, null, 1) != null);
+    try std.testing.expect(f.g.state.peers[0].io.appendControl(bytes, true, null, 1) != null);
     f.g.mesh_policy.takeSnapshot(&context);
     f.g.mesh_policy.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 0), f.g.state.registry.mesh(f.topic).count());
-    f.g.io.peers[0].resetTx(&f.g.store);
+    f.g.state.peers[0].io.resetTx(&f.g.store);
     f.g.mesh_policy.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 1), f.g.state.registry.mesh(f.topic).count());
-    f.g.io.peers[0].resetTx(&f.g.store);
-    try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, null, 2) != null);
+    f.g.state.peers[0].io.resetTx(&f.g.store);
+    try std.testing.expect(f.g.state.peers[0].io.appendControl(bytes, true, null, 2) != null);
     try std.testing.expect(f.g.scores.setAppScore(0, -1));
     f.g.mesh_policy.takeSnapshot(&context);
     f.g.mesh_policy.maintain(&context, f.topic);
@@ -482,7 +481,7 @@ test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
     try std.testing.expect(high_selected);
     f.g.state.registry.setSubscribed(f.topic, false);
     for (f.g.state.peers) |*row| if (row.active) {
-        row.out_stream = .{ .conn = row.conn, .id = 2, .slot = 0 };
+        row.outbound = .{ .live = .{ .conn = row.conn, .id = 2, .slot = 0 } };
     };
     const fanout = f.g.mesh_policy.fanout(&context, f.topic, true);
     try std.testing.expectEqual(@as(usize, c.mesh_d), fanout.count());
@@ -500,7 +499,7 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     const bytes = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
     defer std.testing.allocator.free(bytes);
     @memset(bytes, 0);
-    try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, null, 1) != null);
+    try std.testing.expect(f.g.state.peers[0].io.appendControl(bytes, true, null, 1) != null);
     f.g.last_now_ms = 1;
     const name = f.g.state.registry.topicString(f.topic);
     try std.testing.expect(f.g.unsubscribe(name));
@@ -515,7 +514,7 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     f.g.mesh_policy.onGraft(&context, f.topic, 0);
     try std.testing.expect(!f.g.state.registry.mesh(f.topic).isSet(0));
     try std.testing.expectEqual(@as(?u64, 1), f.g.mesh_policy.pending_since[0]);
-    f.g.io.peers[0].resetTx(&f.g.store);
+    f.g.state.peers[0].io.resetTx(&f.g.store);
     f.g.mesh_policy.takeSnapshot(&context);
     f.g.mesh_policy.maintain(&context, f.topic);
     try std.testing.expect(!f.g.state.registry.mesh(f.topic).isSet(0));
@@ -525,9 +524,9 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     var writer = protobuf.Writer.init(&expected);
     writer.varint(protobuf.pruneRpcSize(name, c.prune_backoff_ms / 1000));
     protobuf.writePruneRpc(&writer, name, c.prune_backoff_ms / 1000);
-    const sent = f.g.io.peers[0].segment(&f.g.store);
+    const sent = f.g.state.peers[0].io.segment(&f.g.store);
     try std.testing.expectEqualSlices(u8, writer.written(), sent);
-    _ = f.g.io.peers[0].advance(&f.g.store, sent.len);
+    _ = f.g.state.peers[0].io.advance(&f.g.store, sent.len);
     context.now = 71_002;
     f.g.mesh_policy.onGraft(&context, f.topic, 0);
     try std.testing.expect(f.g.state.registry.mesh(f.topic).isSet(0));
@@ -549,14 +548,14 @@ test "gossip policy delayed PRUNE preserves the effective remote backoff" {
         const bytes = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
         defer std.testing.allocator.free(bytes);
         @memset(bytes, 0);
-        try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, null, 1) != null);
+        try std.testing.expect(f.g.state.peers[0].io.appendControl(bytes, true, null, 1) != null);
         f.g.mesh_policy.prune(&context, f.topic, 0, 1_000);
         context.now = queued_at;
         f.g.mesh_policy.takeSnapshot(&context);
         f.g.mesh_policy.maintain(&context, f.topic);
         try std.testing.expect(f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
         try std.testing.expectEqual(@as(u64, 1_001), f.g.peers.backoff(logical, f.topic).until);
-        f.g.io.peers[0].resetTx(&f.g.store);
+        f.g.state.peers[0].io.resetTx(&f.g.store);
         f.g.mesh_policy.maintain(&context, f.topic);
         try std.testing.expect(!f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
         const expired = queued_at >= 1_001;
@@ -568,9 +567,9 @@ test "gossip policy delayed PRUNE preserves the effective remote backoff" {
         const name = f.g.state.registry.topicString(f.topic);
         writer.varint(protobuf.pruneRpcSize(name, seconds));
         protobuf.writePruneRpc(&writer, name, seconds);
-        const sent = f.g.io.peers[0].segment(&f.g.store);
+        const sent = f.g.state.peers[0].io.segment(&f.g.store);
         try std.testing.expectEqualSlices(u8, writer.written(), sent);
-        _ = f.g.io.peers[0].advance(&f.g.store, sent.len);
+        _ = f.g.state.peers[0].io.advance(&f.g.store, sent.len);
         context.now = queued_at + seconds * 1000 - 1;
         f.g.mesh_policy.maintain(&context, f.topic);
         try std.testing.expect(!f.g.state.registry.mesh(f.topic).isSet(0));
@@ -615,7 +614,7 @@ test "gossip policy review I3 shuffle budget holds at empty singleton and capaci
 }
 
 fn maintainFastHeartbeat(g: *@import("gossipsub.zig").Gossipsub, topic: u16, now: u64) void {
-    g.mesh_policy.maintain(&.{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .io = g.io.peers, .now = now, .heartbeat_ms = 1, .pressure_ms = g.options.pressure_timeout_ms }, topic);
+    g.mesh_policy.maintain(&.{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .now = now, .heartbeat_ms = 1, .pressure_ms = g.options.pressure_timeout_ms }, topic);
 }
 
 test "gossip policy final review positive remainder respects rounded remote PRUNE deadline" {
@@ -630,23 +629,23 @@ test "gossip policy final review positive remainder respects rounded remote PRUN
     const full = try std.testing.allocator.alloc(u8, g.options.critical_bytes);
     defer std.testing.allocator.free(full);
     @memset(full, 0);
-    try std.testing.expect(g.io.peers[peer].appendControl(full, true, null, 1) != null);
-    g.mesh_policy.prune(&.{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .io = g.io.peers, .now = 1, .heartbeat_ms = 1, .pressure_ms = g.options.pressure_timeout_ms }, topic, peer, 1000);
+    try std.testing.expect(g.state.peers[peer].io.appendControl(full, true, null, 1) != null);
+    g.mesh_policy.prune(&.{ .state = g.state, .peers = &g.peers, .scores = &g.scores, .now = 1, .heartbeat_ms = 1, .pressure_ms = g.options.pressure_timeout_ms }, topic, peer, 1000);
     maintainFastHeartbeat(&g, topic, 1000);
     try std.testing.expect(g.mesh_policy.pending_prunes[topic].isSet(peer));
     try std.testing.expectEqual(@as(u64, 1001), g.peers.backoff(logical, topic).until);
     try std.testing.expectEqual(@as(?u64, 1), g.mesh_policy.pending_since[peer]);
     try std.testing.expectEqual(@as(u64, 1), g.peers.backoff(logical, topic).pruned_at);
-    g.io.peers[peer].resetTx(&g.store);
+    g.state.peers[peer].io.resetTx(&g.store);
     maintainFastHeartbeat(&g, topic, 1000);
     try std.testing.expect(!g.mesh_policy.pending_prunes[topic].isSet(peer));
     var expected: [128]u8 = undefined;
     var writer = protobuf.Writer.init(&expected);
     writer.varint(protobuf.pruneRpcSize(name, 1));
     protobuf.writePruneRpc(&writer, name, 1);
-    const sent = g.io.peers[peer].segment(&g.store);
+    const sent = g.state.peers[peer].io.segment(&g.store);
     try std.testing.expectEqualSlices(u8, writer.written(), sent);
-    _ = g.io.peers[peer].advance(&g.store, sent.len);
+    _ = g.state.peers[peer].io.advance(&g.store, sent.len);
     maintainFastHeartbeat(&g, topic, 1003);
     try std.testing.expect(!g.state.registry.mesh(topic).isSet(peer));
     try std.testing.expectEqual(@as(u64, 2000), g.peers.backoff(logical, topic).until);

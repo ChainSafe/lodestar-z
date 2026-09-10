@@ -57,7 +57,7 @@ pub const Service = struct {
         for (activity) |conn| self.handler.connectionActivity(conn);
         const router = &self.router;
         router.transportEvents(engine, events, now);
-        self.handler.transportEvents(engine, events, now);
+        self.handler.transportEvents(router, engine, events, now);
         var outcomes: [outcomes_per_pump]routing.Outcome = undefined;
         const count = router.pump(engine, now, &outcomes);
         for (outcomes[0..count]) |outcome| self.handler.negotiationResult(engine, outcome, now);

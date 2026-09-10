@@ -197,11 +197,9 @@ pub const Core = struct {
         const dial = self.dial_queue.memoryPlan().allocated_bytes;
         const request = self.service.reqresp.memoryPlan();
         const gossip_plan = self.service.gossipsub.inner.memoryPlan();
-        const gossip_stream = @TypeOf(self.service.gossipsub.streams[0]);
         const negotiation = @TypeOf(self.service.router.negotiator.entries[0]);
         const service_bytes = request.total_bytes - request.facade_bytes +
             gossip_plan.total_bytes - @sizeOf(gossip.Gossipsub) +
-            self.service.gossipsub.streams.len * @sizeOf(gossip_stream) +
             self.service.router.negotiator.entries.len * @sizeOf(negotiation) +
             if (self.service.identify) |*identify| identify.allocatedBytes() else @as(usize, 0);
         const scratch = self.snapshot_scratch.len * @sizeOf(t.Snapshot);
@@ -306,6 +304,7 @@ pub const Core = struct {
                                 old,
                             );
                             self.service.gossipsub.transportEvents(
+                                &self.service.router,
                                 engine,
                                 &.{.{ .closed = .{
                                     .conn = old,

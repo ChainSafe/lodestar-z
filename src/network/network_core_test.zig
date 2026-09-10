@@ -1393,7 +1393,7 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
         _ = try pair.pump();
         if (pair.a.last_now.mono_ms - start > 10_000) break;
         const ns = &gb.state.registry.namespace.?;
-        if (pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1 and ns.subscribed(0, ns.lookup(active).?.ordinal) and ns.subscribed(0, ns.lookup(bpo).?.ordinal) and gb.state.peers[0].out_stream != null and pair.a.core.service.gossipsub.inner.state.peers[0].out_stream != null) {
+        if (pair.a.peerCounts().relevant == 1 and pair.b.peerCounts().relevant == 1 and ns.subscribed(0, ns.lookup(active).?.ordinal) and ns.subscribed(0, ns.lookup(bpo).?.ordinal) and gb.state.peers[0].outStream() != null and pair.a.core.service.gossipsub.inner.state.peers[0].outStream() != null) {
             connected = true;
             break;
         }
