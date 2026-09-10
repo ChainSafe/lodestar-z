@@ -12,21 +12,21 @@ test "publication refusal retry duplicate and exact expiry preserve admission" {
     try std.testing.expect(!g.seen.contains(id, 10));
     try std.testing.expectEqual(@as(usize, 0), g.mcache.count);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const t = g.state.findTopic(topic).?;
-    g.state.setSubscription(t, peer.index, true);
+    const t = g.state.registry.findTopic(topic).?;
+    g.state.registry.setSubscription(t, peer.index, true);
     g.markDirect(g.state.peers[peer.index].conn);
     const admitted = try g.publishWithOptions(topic, "local", .{ .allow_zero_peers = false }, .{ .mono_ms = 11, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .unavailable = 1 }, admitted);
     const retained = g.mcache.get(&g.store, id).?.message;
     const tx_before = g.store.get(retained).?.tx;
     const seen_at = g.seen.added_ms[g.seen.tail];
-    const fanout_at = g.state.topics[t].fanout_last_ms;
+    const fanout_at = g.state.registry.rows[t].fanout_last_ms;
     try std.testing.expectError(error.Duplicate, g.publish(topic, "local", .{ .mono_ms = 20, .unix_s = 0 }));
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .duplicate = true }, try g.publishWithOptions(topic, "local", .{ .ignore_duplicate = true }, .{ .mono_ms = 110, .unix_s = 0 }));
     try std.testing.expectEqual(retained, g.mcache.get(&g.store, id).?.message);
     try std.testing.expectEqual(tx_before, g.store.get(retained).?.tx);
     try std.testing.expectEqual(seen_at, g.seen.added_ms[g.seen.tail]);
-    try std.testing.expectEqual(fanout_at, g.state.topics[t].fanout_last_ms);
+    try std.testing.expectEqual(fanout_at, g.state.registry.rows[t].fanout_last_ms);
     try std.testing.expectEqual(@as(u64, 1), g.counters.messages_published);
     _ = try g.publish(topic, "local", .{ .mono_ms = 111, .unix_s = 0 });
     try std.testing.expectEqual(@as(u64, 2), g.counters.messages_published);
@@ -36,11 +36,11 @@ test "publication recipient policy tops up without graft and accounts unique sha
     var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 16, .retained_capacity = 32, .retained_outbound_reserve = 1 });
     defer g.deinit();
     try std.testing.expect(g.subscribe(topic));
-    const t = g.state.findTopic(topic).?;
+    const t = g.state.registry.findTopic(topic).?;
     for (0..12) |index| {
         const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
         const peer = support.addPeer(&g, conn, .v1_2).?;
-        g.state.setSubscription(t, peer.index, true);
+        g.state.registry.setSubscription(t, peer.index, true);
         g.state.peers[peer.index].out_stream = .{ .conn = conn, .id = 2, .slot = 0 };
     }
     g.markDirect(g.state.peers[0].conn);
@@ -48,14 +48,14 @@ test "publication recipient policy tops up without graft and accounts unique sha
     try std.testing.expect(g.setPeerScore(g.state.peers[10].conn, g.options.score_params.publish_threshold - 1));
     try std.testing.expect(g.setPeerScore(g.state.peers[9].conn, g.options.score_params.publish_threshold));
     g.mesh_policy.retire.set(11);
-    g.state.mesh(t).set(1);
-    g.state.mesh(t).set(10);
-    g.state.mesh(t).set(11);
+    g.state.registry.mesh(t).set(1);
+    g.state.registry.mesh(t).set(10);
+    g.state.registry.mesh(t).set(11);
     g.state.peers[1].out_stream = null;
     g.state.peers[9].out_stream = null;
     const outcome = try g.publish(topic, "short mesh", .{ .mono_ms = 1, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 9, .queued = 8, .unavailable = 1 }, outcome);
-    try std.testing.expectEqual(@as(usize, 3), g.state.mesh(t).count());
+    try std.testing.expectEqual(@as(usize, 3), g.state.registry.mesh(t).count());
     const id = topic_mod.validMessageId(topic, "short mesh", .{});
     const h = g.mcache.get(&g.store, id).?.message;
     try std.testing.expectEqual(@as(usize, 1), g.store.used_entries);
@@ -121,21 +121,21 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
     var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 16, .retained_capacity = 32, .retained_outbound_reserve = 1 });
     defer g.deinit();
     try std.testing.expect(g.subscribe(topic));
-    const t = g.state.findTopic(topic).?;
+    const t = g.state.registry.findTopic(topic).?;
     for (0..10) |index| {
         const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
         const p = support.addPeer(&g, conn, .v1_2).?;
-        g.state.setSubscription(t, p.index, true);
+        g.state.registry.setSubscription(t, p.index, true);
         g.state.peers[p.index].out_stream = .{ .conn = conn, .id = 2, .slot = 0 };
     }
     const first = try g.publish(topic, "empty mesh", .{ .mono_ms = 1, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 8, .queued = 8 }, first);
-    const fanout = g.state.fanout(t).*;
+    const fanout = g.state.registry.fanout(t).*;
     try std.testing.expectEqual(@as(usize, 8), fanout.count());
-    try std.testing.expectEqual(@as(usize, 0), g.state.mesh(t).count());
+    try std.testing.expectEqual(@as(usize, 0), g.state.registry.mesh(t).count());
     _ = try g.publish(topic, "reuse fanout", .{ .mono_ms = 2, .unix_s = 0 });
-    try std.testing.expectEqual(fanout, g.state.fanout(t).*);
-    for (0..8) |index| g.state.mesh(t).set(index);
+    try std.testing.expectEqual(fanout, g.state.registry.fanout(t).*);
+    for (0..8) |index| g.state.registry.mesh(t).set(index);
     for (g.io.peers) |*io| io.resetTx(&g.store);
     const full = try g.publish(topic, "full mesh", .{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 8, .queued = 8 }, full);

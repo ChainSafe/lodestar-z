@@ -50,28 +50,9 @@ const Peer = struct {
     }
 };
 
-const Topic = struct {
-    retire_after_ms: ?u64 = null,
-    generation: u64 = 0,
-    active: bool = false,
-    subscribed: bool = false,
-    name: [topic_mod.name_max_len]u8 = undefined,
-    name_len: u8 = 0,
-    string: [topic_mod.topic_max_len]u8 = undefined,
-    string_len: u8 = 0,
-    subscribers: PeerSet = PeerSet.initEmpty(),
-    mesh: PeerSet = PeerSet.initEmpty(),
-    fanout: PeerSet = PeerSet.initEmpty(),
-    fanout_last_ms: u64 = 0,
-
-    fn topicString(self: *const Topic) []const u8 {
-        return self.string[0..self.string_len];
-    }
-};
-
 pub const State = struct {
     peers: []Peer,
-    topics: [constants.topics_cap]Topic = [_]Topic{.{}} ** constants.topics_cap,
+    registry: @import("registry.zig").Registry = .{},
 
     pub fn init(a: std.mem.Allocator, capacity: u16) !State {
         if (capacity == 0 or capacity > constants.peers_cap) return error.InvalidLimits;
@@ -81,6 +62,7 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State, a: std.mem.Allocator) void {
+        self.registry.deinit(a);
         a.free(self.peers);
     }
 
@@ -101,7 +83,7 @@ pub const State = struct {
     pub fn removePeer(self: *State, index: u16) void {
         assert(index < self.peers.len);
         if (!self.peers[index].active) return;
-        for (&self.topics) |*topic| {
+        for (&self.registry.rows) |*topic| {
             if (!topic.active) continue;
             topic.subscribers.unset(index);
             topic.mesh.unset(index);
@@ -161,82 +143,6 @@ pub const State = struct {
         }
         return null;
     }
-
-    // Topics -----------------------------------------------------------------
-
-    pub fn internTopic(self: *State, topic_str: []const u8) ?u16 {
-        if (topic_str.len > topic_mod.topic_max_len) return null;
-        var copied_bytes: [topic_mod.topic_max_len]u8 = undefined;
-        const copied = copied_bytes[0..topic_str.len];
-        @memcpy(copied, topic_str);
-        _ = topic_mod.parse(copied) orelse return null;
-        if (self.findTopic(copied)) |index| return index;
-        const index = self.freeTopic() orelse return null;
-        self.assignTopic(@intCast(index), copied, self.topics[index].generation);
-        return @intCast(index);
-    }
-
-    pub fn assignTopic(self: *State, index: u16, copied: []const u8, generation: u64) void {
-        assert(copied.len <= topic_mod.topic_max_len);
-        const parsed = topic_mod.parse(copied).?;
-        const topic = &self.topics[index];
-        assert(topic.generation == generation and generation != std.math.maxInt(u64));
-        assert(!topic.active);
-        topic.* = .{ .active = true, .generation = generation + 1 };
-        @memcpy(topic.name[0..parsed.name.len], parsed.name);
-        topic.name_len = @intCast(parsed.name.len);
-        @memcpy(topic.string[0..copied.len], copied);
-        topic.string_len = @intCast(copied.len);
-    }
-
-    pub fn findTopic(self: *State, topic_str: []const u8) ?u16 {
-        for (&self.topics, 0..) |*topic, index| {
-            if (!topic.active) continue;
-            if (std.mem.eql(u8, topic.topicString(), topic_str)) return @intCast(index);
-        }
-        return null;
-    }
-
-    pub fn topicString(self: *const State, index: u16) []const u8 {
-        return self.topics[index].topicString();
-    }
-
-    pub fn setSubscribed(self: *State, index: u16, on: bool) void {
-        assert(self.topics[index].active);
-        self.topics[index].subscribed = on;
-    }
-
-    pub fn subscribed(self: *const State, index: u16) bool {
-        return self.topics[index].active and self.topics[index].subscribed;
-    }
-
-    pub fn setSubscription(self: *State, topic: u16, peer: u16, on: bool) void {
-        assert(self.topics[topic].active);
-        if (on) self.topics[topic].subscribers.set(peer) else {
-            self.topics[topic].subscribers.unset(peer);
-            self.topics[topic].mesh.unset(peer);
-            self.topics[topic].fanout.unset(peer);
-        }
-    }
-
-    pub fn subscribers(self: *const State, topic: u16) *const PeerSet {
-        return &self.topics[topic].subscribers;
-    }
-
-    pub fn mesh(self: *State, topic: u16) *PeerSet {
-        return &self.topics[topic].mesh;
-    }
-
-    pub fn fanout(self: *State, topic: u16) *PeerSet {
-        return &self.topics[topic].fanout;
-    }
-
-    fn freeTopic(self: *State) ?usize {
-        for (&self.topics, 0..) |*topic, index| {
-            if (!topic.active and topic.generation != std.math.maxInt(u64)) return index;
-        }
-        return null;
-    }
 };
 
 test "state tracks peers, topics, subscriptions, and mesh membership" {
@@ -252,19 +158,19 @@ test "state tracks peers, topics, subscriptions, and mesh membership" {
     const digest = topic_mod.ForkDigest{ 0x6a, 0x95, 0xa1, 0xa9 };
     var buf: [topic_mod.topic_max_len]u8 = undefined;
     const topic_str = topic_mod.build(digest, "beacon_block", &buf);
-    const topic = state.internTopic(topic_str).?;
-    try std.testing.expectEqual(@as(?u16, topic), state.internTopic(topic_str)); // interns once
-    state.setSubscribed(topic, true);
-    try std.testing.expect(state.subscribed(topic));
+    const topic = state.registry.internVacant(topic_str).?;
+    try std.testing.expectEqual(@as(?u16, topic), state.registry.internVacant(topic_str)); // interns once
+    state.registry.setSubscribed(topic, true);
+    try std.testing.expect(state.registry.subscribed(topic));
 
-    state.setSubscription(topic, peer.index, true);
-    try std.testing.expect(state.subscribers(topic).isSet(peer.index));
-    state.mesh(topic).set(peer.index);
-    try std.testing.expect(state.mesh(topic).isSet(peer.index));
+    state.registry.setSubscription(topic, peer.index, true);
+    try std.testing.expect(state.registry.subscribers(topic).isSet(peer.index));
+    state.registry.mesh(topic).set(peer.index);
+    try std.testing.expect(state.registry.mesh(topic).isSet(peer.index));
 
     state.removePeer(peer.index);
-    try std.testing.expect(!state.subscribers(topic).isSet(peer.index));
-    try std.testing.expect(!state.mesh(topic).isSet(peer.index));
+    try std.testing.expect(!state.registry.subscribers(topic).isSet(peer.index));
+    try std.testing.expect(!state.registry.mesh(topic).isSet(peer.index));
     try std.testing.expectEqual(@as(?u16, null), state.findPeer(conn));
 }
 
@@ -290,9 +196,9 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
     var buffer: [topic_mod.topic_max_len]u8 = undefined;
     for (0..3) |fork| {
         if (fork == 2) {
-            for (&state.topics, 0..) |*topic, index| {
-                if (topic.active and std.mem.startsWith(u8, state.topicString(@intCast(index)), "/eth2/00000000/")) {
-                    try std.testing.expect(gossip.unsubscribe(state.topicString(@intCast(index))));
+            for (&state.registry.rows, 0..) |*topic, index| {
+                if (topic.active and std.mem.startsWith(u8, state.registry.topicString(@intCast(index)), "/eth2/00000000/")) {
+                    try std.testing.expect(gossip.unsubscribe(state.registry.topicString(@intCast(index))));
                 }
             }
         }
@@ -310,27 +216,27 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
             try std.testing.expect(gossip.subscribe(topic_mod.build(digest, n, &buffer)));
         }
     }
-    try std.testing.expect(state.findTopic("/eth2/00000000/beacon_block/ssz_snappy") == null);
-    try std.testing.expect(state.findTopic("/eth2/01000000/beacon_block/ssz_snappy") != null);
-    try std.testing.expect(state.findTopic("/eth2/02000000/beacon_block/ssz_snappy") != null);
+    try std.testing.expect(state.registry.findTopic("/eth2/00000000/beacon_block/ssz_snappy") == null);
+    try std.testing.expect(state.registry.findTopic("/eth2/01000000/beacon_block/ssz_snappy") != null);
+    try std.testing.expect(state.registry.findTopic("/eth2/02000000/beacon_block/ssz_snappy") != null);
 }
 
 test "gossip state intern snapshots an aliased retiring topic string" {
     var state = try State.init(std.testing.allocator, 1);
     defer state.deinit(std.testing.allocator);
     const oversized = [_]u8{'x'} ** (topic_mod.topic_max_len + 1);
-    try std.testing.expectEqual(@as(?u16, null), state.internTopic(&oversized));
-    try std.testing.expectEqual(@as(?u16, null), state.internTopic("invalid"));
+    try std.testing.expectEqual(@as(?u16, null), state.registry.internVacant(&oversized));
+    try std.testing.expectEqual(@as(?u16, null), state.registry.internVacant("invalid"));
     const original = "/eth2/00000000/a/ssz_snappy/b/ssz_snappy";
     const shorter = "/eth2/00000000/a/ssz_snappy";
-    try std.testing.expectEqual(@as(?u16, 0), state.internTopic(original));
-    const input = state.topicString(0)[0..shorter.len];
-    state.topics[0].active = false;
-    try std.testing.expectEqual(@as(?u16, 0), state.internTopic(input));
-    try std.testing.expectEqualStrings(shorter, state.topicString(0));
-    try std.testing.expectEqual(@as(u64, 2), state.topics[0].generation);
+    try std.testing.expectEqual(@as(?u16, 0), state.registry.internVacant(original));
+    const input = state.registry.topicString(0)[0..shorter.len];
+    state.registry.rows[0].active = false;
+    try std.testing.expectEqual(@as(?u16, 0), state.registry.internVacant(input));
+    try std.testing.expectEqualStrings(shorter, state.registry.topicString(0));
+    try std.testing.expectEqual(@as(u64, 2), state.registry.rows[0].generation);
     const maximum = "/eth2/00000000/sync_committee_contribution_and_proof/ssz_snappy";
     try std.testing.expectEqual(topic_mod.topic_max_len, maximum.len);
-    try std.testing.expectEqual(@as(?u16, 1), state.internTopic(maximum));
-    try std.testing.expectEqualStrings(maximum, state.topicString(1));
+    try std.testing.expectEqual(@as(?u16, 1), state.registry.internVacant(maximum));
+    try std.testing.expectEqualStrings(maximum, state.registry.topicString(1));
 }

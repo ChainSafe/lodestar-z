@@ -15,6 +15,8 @@ pub const Pins = struct {
 pub const Assignment = struct {
     bytes: [topic.topic_max_len]u8,
     len: u8,
+    name_len: u8,
+    ordinal: u16,
     params: score.TopicParams,
     row: ?u16,
     generation: u64,

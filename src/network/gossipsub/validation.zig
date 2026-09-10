@@ -83,8 +83,8 @@ pub const Validation = struct {
 
     pub fn receive(self: *Validation, context: *const Context, workspace: *const Workspace, peer: u16, msg: protobuf.Message, now: u64) Received {
         const rule = if (context.namespace) |ns| (ns.lookup(msg.topic) orelse return .ignored).rule else null;
-        const topic = context.state.findTopic(msg.topic) orelse return .ignored;
-        if (!context.state.subscribed(topic)) return .ignored;
+        const topic = context.state.registry.findTopic(msg.topic) orelse return .ignored;
+        if (!context.state.registry.subscribed(topic)) return .ignored;
         if (msg.signed) return invalid(context, peer, topic, .signed);
         const header = admission.inspect(&msg);
         if (header == .rejected) return invalid(context, peer, topic, if (msg.data.len > @import("constants.zig").maxCompressedLen(@import("constants.zig").MAX_PAYLOAD_SIZE)) .compressed_size else .ssz_size);
@@ -149,8 +149,8 @@ pub const Validation = struct {
     fn commit(self: *Validation, context: *const Context, workspace: *const Workspace, peer: u16, topic: u16, msg: protobuf.Message, id: topic_mod.MessageId, written: usize, now: u64) Received {
         const message = context.history.admitPayload(context.store, id, msg.topic, msg.data) orelse return .{ .blocked = .storage };
         const handle = self.admit(context.store, context.peers, message, context.state.peers[peer].logical, topic, now);
-        self.entries[handle.index].source_eligible = context.state.mesh(topic).isSet(peer);
-        self.entries[handle.index].topic_generation = context.state.topics[topic].generation;
+        self.entries[handle.index].source_eligible = context.state.registry.mesh(topic).isSet(peer);
+        self.entries[handle.index].topic_generation = context.state.registry.rows[topic].generation;
         context.store.seal(message);
         const room = workspace.arena[workspace.used.*..];
         @memcpy(room[written..][0..msg.topic.len], msg.topic);
@@ -164,11 +164,11 @@ pub const Validation = struct {
     pub fn report(self: *Validation, context: *const Context, handle: Handle, verdict: Verdict, now: u64) Report {
         if (self.inspect(context.store, context.peers, handle, now)) |outcome| return .{ .outcome = outcome };
         const entry = &self.entries[handle.index];
-        assert(context.state.topics[entry.topic].generation == entry.topic_generation);
+        assert(context.state.registry.rows[entry.topic].generation == entry.topic_generation);
         var result: Report = .{ .outcome = .{ .applied = verdict } };
         if (verdict == .accept) {
             context.history.put(context.store, entry.message);
-            if (context.state.subscribed(entry.topic)) result.forward = .{ .message = entry.message, .source = entry.source, .topic = entry.topic };
+            if (context.state.registry.subscribed(entry.topic)) result.forward = .{ .message = entry.message, .source = entry.source, .topic = entry.topic };
         }
         if (verdict != .ignore) {
             assert(context.peers.matches(entry.source));
@@ -309,7 +309,7 @@ pub const Validation = struct {
 
 fn recordDuplicate(context: *const Context, entry: *Entry, peer: u16, topic: u16, now: u64) void {
     const ref = context.state.peers[peer].logical;
-    const eligible = context.state.mesh(topic).isSet(peer) and now -| entry.admitted_ms <= context.scores.topic_params[topic].mesh_delivery_window_ms;
+    const eligible = context.state.registry.mesh(topic).isSet(peer) and now -| entry.admitted_ms <= context.scores.topic_params[topic].mesh_delivery_window_ms;
     if (!Validation.duplicate(entry, context.peers, ref, eligible) or entry.state != .resolved) return;
     if (entry.verdict == .reject) {
         context.scores.invalid(ref.index, topic);
