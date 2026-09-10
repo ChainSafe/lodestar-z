@@ -13,11 +13,16 @@ pub const Version = enum(u8) { v1_0, v1_1, v1_2 };
 
 pub const SessionRef = struct { index: u16, generation: u64 };
 
+const ReceivePool = @import("receive_pool.zig").ReceivePool;
+const PeerIo = @import("peer_io.zig").PeerIo;
+
 const Session = @import("peer_session.zig").Session;
 
 pub const Sessions = struct {
     rows: []Session,
+    cursor: usize = 0,
     io_arena: []u8,
+    receive_pool: ReceivePool,
 
     pub fn init(a: std.mem.Allocator, capacity: u16) !Sessions {
         return initOptions(a, &.{ .connected_capacity = capacity });
@@ -25,16 +30,18 @@ pub const Sessions = struct {
 
     pub fn initOptions(a: std.mem.Allocator, options: *const @import("options.zig").Options) !Sessions {
         if (options.connected_capacity == 0 or options.connected_capacity > constants.peers_cap) return error.InvalidLimits;
-        const PeerIo = @import("peer_io.zig").PeerIo;
         const rows = try a.alloc(Session, options.connected_capacity);
         errdefer a.free(rows);
         const per_peer = PeerIo.bufferBytes(options);
         const arena = try a.alloc(u8, rows.len * per_peer);
+        errdefer a.free(arena);
+        const receive_pool = try ReceivePool.init(a, options.large_pool_count, options.large_message_bytes);
         for (rows, 0..) |*row, i| row.* = .{ .io = PeerIo.init(arena[i * per_peer ..][0..per_peer], options) };
-        return .{ .rows = rows, .io_arena = arena };
+        return .{ .rows = rows, .io_arena = arena, .receive_pool = receive_pool };
     }
 
     pub fn deinit(self: *Sessions, a: std.mem.Allocator) void {
+        self.receive_pool.deinit(a);
         a.free(self.rows);
         a.free(self.io_arena);
     }
@@ -62,6 +69,7 @@ pub const Sessions = struct {
     pub fn removePeer(self: *Sessions, index: u16) void {
         assert(index < self.rows.len);
         if (!self.rows[index].active) return;
+        assert(self.rows[index].io.large_slot == null and !self.rows[index].io.pending());
         self.rows[index].active = false;
         self.rows[index].outbound = .{ .waiting = 0 };
         self.rows[index].in_stream = null;
@@ -88,15 +96,21 @@ pub const Sessions = struct {
         return self.rows[index].generation;
     }
 
-    /// Whether `index` still holds the same peer as when `generation` was taken.
-    pub fn peerMatches(self: *const Sessions, index: u16, generation: u64) bool {
-        return index < self.rows.len and self.rows[index].active and self.rows[index].generation == generation;
+    pub fn ref(self: *const Sessions, index: u16) SessionRef {
+        assert(self.rows[index].active);
+        return .{ .index = index, .generation = self.rows[index].generation };
+    }
+
+    pub fn matches(self: *const Sessions, session: SessionRef) bool {
+        return session.index < self.rows.len and self.rows[session.index].active and self.rows[session.index].generation == session.generation;
     }
 
     pub fn setStreams(self: *Sessions, index: u16, out: ?StreamHandle, in: ?StreamHandle) void {
         assert(self.rows[index].active);
         if (out) |stream| self.rows[index].outbound = .{ .live = stream };
         if (in) |stream| self.rows[index].in_stream = stream;
+        self.rows[index].io.rx_ready = in != null;
+        self.rows[index].io.tx_ready = out != null;
     }
 
     pub fn outStream(self: *const Sessions, index: u16) ?StreamHandle {
@@ -110,6 +124,49 @@ pub const Sessions = struct {
 
     pub fn suppresses(self: *const Sessions, index: u16, id: MessageId, now: u64) bool {
         return self.rows[index].active and self.rows[index].suppresses(id, now);
+    }
+
+    pub fn receiveHandoff(self: *Sessions, index: u16, bytes: []const u8, fin: bool) bool {
+        const io = &self.rows[index].io;
+        if (bytes.len > io.unread.len - io.unread_end) return false;
+        @memcpy(io.unread[io.unread_end..][0..bytes.len], bytes);
+        io.unread_end += bytes.len;
+        io.fin_seen = fin;
+        io.rx_ready = true;
+        return true;
+    }
+
+    pub fn frameBody(self: *Sessions, io: *PeerIo) ?[]u8 {
+        if (io.large_slot) |lease| return self.receive_pool.buffer(lease).?;
+        const declared = io.reader.declaredLen() orelse return io.body;
+        if (declared <= io.body.len) return io.body;
+        const lease = self.receive_pool.claim() orelse return null;
+        io.large_slot = lease;
+        return self.receive_pool.buffer(lease).?;
+    }
+
+    pub fn releaseFrame(self: *Sessions, peer_io: *PeerIo) bool {
+        if (peer_io.large_slot) |lease| {
+            const released = self.receive_pool.release(lease);
+            assert(released);
+            peer_io.large_slot = null;
+            return true;
+        }
+        return false;
+    }
+
+    pub fn connectionActivity(self: *Sessions, conn: Handle) void {
+        const index = self.findPeer(conn) orelse return;
+        self.rows[index].needs_service = true;
+        self.rows[index].io.rx_ready = true;
+        self.rows[index].io.tx_ready = true;
+    }
+
+    pub fn resetRx(self: *Sessions, index: u16) bool {
+        const io = &self.rows[index].io;
+        const released = self.releaseFrame(io);
+        io.resetRx();
+        return released;
     }
 
     fn freePeer(self: *Sessions) ?usize {

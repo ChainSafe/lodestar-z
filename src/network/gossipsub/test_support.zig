@@ -17,3 +17,14 @@ pub fn addPeer(g: *gossip.Gossipsub, conn: engine.Handle, version: sessions.Vers
         else => null,
     };
 }
+
+pub fn driver(g: *gossip.Gossipsub) @import("session_driver.zig").Driver {
+    return .{ .inner = g };
+}
+
+pub fn pump(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now, events: []gossip.Event) usize {
+    var router = @import("../router.zig").Router.init(std.testing.allocator, .{ .negotiations_max = 1, .reqresp = false }) catch @panic("test router allocation failed");
+    defer router.deinit();
+    const io = driver(g);
+    return io.pumpReady(&router, transport, now, events);
+}

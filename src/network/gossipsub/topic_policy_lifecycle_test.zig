@@ -122,11 +122,11 @@ test "topic policy physical close clears bits while same connection stream repla
     const index = pair.server.sessions.findPeer(pair.handles.server).?;
     const ns = &pair.server.overlay.namespace.?;
     try std.testing.expect(ns.subscribed(index, 0));
-    pair.server.resetInbound(&pair.pair.server, index);
-    pair.server.resetOutbound(&pair.pair.server, index);
+    @import("test_support.zig").driver(&pair.server).resetInbound(&pair.pair.server, index);
+    @import("test_support.zig").driver(&pair.server).resetOutbound(&pair.pair.server, index);
     try std.testing.expect(ns.subscribed(index, 0));
-    pair.server.replaceInbound(&pair.pair.server, index, pair.server_send, .v1_1);
-    pair.server.replaceOutbound(&pair.pair.server, index, pair.server_send, .v1_1);
+    @import("test_support.zig").driver(&pair.server).replaceInbound(&pair.pair.server, index, pair.server_send, .v1_1);
+    @import("test_support.zig").driver(&pair.server).replaceOutbound(&pair.pair.server, index, pair.server_send, .v1_1);
     try std.testing.expect(ns.subscribed(index, 0));
     var stale = pair.handles.server;
     stale.generation += 1;
