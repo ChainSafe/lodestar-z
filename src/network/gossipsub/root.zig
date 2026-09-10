@@ -56,4 +56,5 @@ test {
     _ = @import("publication_test.zig");
     _ = @import("service_test.zig");
     _ = @import("simulation_test.zig");
+    _ = @import("scheduled_test.zig");
 }
