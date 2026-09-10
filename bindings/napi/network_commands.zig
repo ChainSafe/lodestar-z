@@ -222,7 +222,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             operation.count = try core.completeSnapshots(self.stores.?.snapshots[store.?]);
             operation.counts = core.peerCounts();
         },
-        .getGossipDiagnostics => try n.gossipsub.diagnostics.capture(&core.core.service.gossipsub.inner, input.diagnostics_cursor, timestamp, &self.stores.?.gossip_diagnostics[store.?]),
+        .getGossipDiagnostics => try n.gossipsub.diagnostics.capture(core.core.service.gossipsub.inner, input.diagnostics_cursor, timestamp, &self.stores.?.gossip_diagnostics[store.?]),
         .getDirectPeers => operation.count = try core.directPeers(&self.stores.?.direct[store.?]),
         .removeDirectPeer => operation.boolean = core.removeDirectPeer(&input.peer),
         .addDirectPeer => try core.addDirectPeer(&input.peer, input.addresses[0..input.address_count], timestamp),

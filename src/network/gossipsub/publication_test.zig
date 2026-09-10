@@ -48,9 +48,9 @@ test "publication recipient policy tops up without graft and accounts unique sha
     try std.testing.expect(g.setPeerScore(g.sessions.rows[10].conn, g.options.score_params.publish_threshold - 1));
     try std.testing.expect(g.setPeerScore(g.sessions.rows[9].conn, g.options.score_params.publish_threshold));
     g.overlay.retire.set(11);
-    g.overlay.mesh(t).set(1);
-    g.overlay.mesh(t).set(10);
-    g.overlay.mesh(t).set(11);
+    g.overlay.rows[t].mesh.set(1);
+    g.overlay.rows[t].mesh.set(10);
+    g.overlay.rows[t].mesh.set(11);
     g.sessions.rows[1].outbound = .{ .waiting = 0 };
     g.sessions.rows[9].outbound = .{ .waiting = 0 };
     const outcome = try g.publish(topic, "short mesh", .{ .mono_ms = 1, .unix_s = 0 });
@@ -136,7 +136,7 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
     try std.testing.expectEqual(@as(usize, 0), g.overlay.mesh(t).count());
     _ = try g.publish(topic, "reuse fanout", .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expectEqual(fanout, g.overlay.fanoutMembers(t).*);
-    for (0..8) |index| g.overlay.mesh(t).set(index);
+    for (0..8) |index| g.overlay.rows[t].mesh.set(index);
     for (g.sessions.rows) |*peer| peer.io.resetTx(&g.messages.store);
     const full = try g.publish(topic, "full mesh", .{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 8, .queued = 8 }, full);

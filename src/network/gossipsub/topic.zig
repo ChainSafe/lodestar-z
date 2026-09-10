@@ -11,6 +11,8 @@ pub const digest_hex_len: usize = 8;
 pub const name_max_len: usize = "sync_committee_contribution_and_proof".len;
 pub const topic_max_len: usize = prefix.len + digest_hex_len + 1 + name_max_len + suffix.len;
 
+pub const Ref = struct { index: u16, generation: u64 };
+
 pub const ForkDigest = [4]u8;
 
 pub const Parsed = struct {

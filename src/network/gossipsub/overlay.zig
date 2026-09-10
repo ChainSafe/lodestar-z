@@ -242,7 +242,7 @@ pub const Overlay = struct {
         topic.string_len = @intCast(copied.len);
     }
 
-    pub fn findTopic(self: *Overlay, topic_str: []const u8) ?u16 {
+    pub fn findTopic(self: *const Overlay, topic_str: []const u8) ?u16 {
         for (&self.rows, 0..) |*topic, index| {
             if (!topic.active) continue;
             if (std.mem.eql(u8, topic.topicString(), topic_str)) return @intCast(index);
@@ -250,13 +250,21 @@ pub const Overlay = struct {
         return null;
     }
 
-    pub fn topicString(self: *const Overlay, index: u16) []const u8 {
-        return self.rows[index].topicString();
+    pub fn ref(self: *const Overlay, index: u16) @import("topic.zig").Ref {
+        assert(self.rows[index].active);
+        return .{ .index = index, .generation = self.rows[index].generation };
     }
 
-    pub fn setSubscribed(self: *Overlay, index: u16, on: bool) void {
-        assert(self.rows[index].active);
-        self.rows[index].subscribed = on;
+    pub fn matches(self: *const Overlay, topic: @import("topic.zig").Ref) bool {
+        return topic.index < self.rows.len and self.rows[topic.index].active and self.rows[topic.index].generation == topic.generation;
+    }
+
+    pub fn inMesh(self: *const Overlay, topic: u16, session: u16) bool {
+        return self.rows[topic].mesh.isSet(session);
+    }
+
+    pub fn topicString(self: *const Overlay, index: u16) []const u8 {
+        return self.rows[index].topicString();
     }
 
     pub fn subscribed(self: *const Overlay, index: u16) bool {
@@ -276,11 +284,11 @@ pub const Overlay = struct {
         return &self.rows[topic].subscribers;
     }
 
-    pub fn mesh(self: *Overlay, topic: u16) *PeerSet {
+    pub fn mesh(self: *const Overlay, topic: u16) *const PeerSet {
         return &self.rows[topic].mesh;
     }
 
-    pub fn fanoutMembers(self: *Overlay, topic: u16) *PeerSet {
+    pub fn fanoutMembers(self: *const Overlay, topic: u16) *const PeerSet {
         return &self.rows[topic].fanout;
     }
 
@@ -326,7 +334,7 @@ pub const Overlay = struct {
 
     pub fn maintain(self: *Overlay, context: *const Context, topic: u16) void {
         self.flushPrunes(context, topic);
-        const members = self.mesh(topic);
+        const members = &self.rows[topic].mesh;
         var it = members.iterator(.{});
         while (it.next()) |index| {
             const peer: u16 = @intCast(index);
@@ -374,7 +382,7 @@ pub const Overlay = struct {
     }
 
     fn graft(self: *Overlay, context: *const Context, topic: u16, peer: u16) bool {
-        const members = self.mesh(topic);
+        const members = &self.rows[topic].mesh;
         if (members.isSet(peer) or !self.graftEligible(context, topic, peer)) return false;
         if (!self.queue(context, topic, peer, null)) return false;
         members.set(peer);
@@ -466,7 +474,7 @@ pub const Overlay = struct {
         }
         if (self.mesh(topic).isSet(peer)) return;
         self.setSubscription(context, topic, peer, true);
-        self.mesh(topic).set(peer);
+        self.rows[topic].mesh.set(peer);
         context.peers.scores.graft(row.logical.index, topic, context.now);
         self.logChange(context, topic, peer, "mesh_graft_received", 0);
     }
@@ -520,7 +528,7 @@ pub const Overlay = struct {
     }
 
     pub fn opportunistic(self: *Overlay, context: *const Context, topic: u16) void {
-        const members = self.mesh(topic);
+        const members = &self.rows[topic].mesh;
         if (members.count() < c.mesh_d) return;
         var ordered: [c.peers_cap]u16 = undefined;
         var n: usize = 0;

@@ -834,25 +834,25 @@ test "managed runtime topic policy copies values and rejects atomically" {
     try node.configureTopic(&text, &params);
     params.weight = 3;
     text[6] = '0';
-    const owner = &node.core.service.gossipsub.inner;
-    try std.testing.expectEqual(@as(f64, 2), owner.scores.topic_params[0].weight);
+    const owner = node.core.service.gossipsub.inner;
+    try std.testing.expectEqual(@as(f64, 2), owner.peers.scores.topic_params[0].weight);
     try std.testing.expectEqualStrings("/eth2/ABCDEF00/custom/name/ssz_snappy", owner.overlay.topicString(0));
-    const revision = owner.scores.revision;
+    const revision = owner.peers.scores.revision;
     try std.testing.expectError(error.InvalidLimits, node.configureTopic(&text, &.{ .weight = std.math.nan(f64) }));
     try std.testing.expectError(error.InvalidTopic, node.configureTopic("bad", &.{}));
-    try std.testing.expectEqual(revision, owner.scores.revision);
+    try std.testing.expectEqual(revision, owner.peers.scores.revision);
     try std.testing.expectEqual(@as(u64, 1), owner.overlay.rows[0].generation);
     for (0..@import("gossipsub/constants.zig").topics_cap) |index| {
         var name: [@import("gossipsub/topic.zig").topic_max_len]u8 = undefined;
         const topic = try std.fmt.bufPrint(&name, "/eth2/{x:0>8}/custom/ssz_snappy", .{index});
         try std.testing.expect(node.subscribe(topic));
     }
-    const full_revision = owner.scores.revision;
+    const full_revision = owner.peers.scores.revision;
     try std.testing.expectError(error.TopicCapacity, node.configureTopic("/eth2/ffffffff/custom/ssz_snappy", &.{}));
-    try std.testing.expectEqual(full_revision, owner.scores.revision);
+    try std.testing.expectEqual(full_revision, owner.peers.scores.revision);
     node.shutdown(node.last_now);
     try std.testing.expectError(error.Stopped, node.configureTopic("bad", &.{}));
-    try std.testing.expectEqual(full_revision, owner.scores.revision);
+    try std.testing.expectEqual(full_revision, owner.peers.scores.revision);
     try std.testing.expectEqual(calls, node.reservations.allocation_calls);
 }
 
@@ -1236,7 +1236,7 @@ test "managed runtime complete local intent rejects invalid last topic atomicall
     const before = ActivationSnapshot.capture(&node);
     const identify = node.core.service.identify.?.local;
     const demand = node.core.demand;
-    const g = &node.core.service.gossipsub.inner;
+    const g = node.core.service.gossipsub.inner;
     const topic = g.overlay.findTopic(block_topic).?;
     const params = g.peers.scores.topic_params[topic];
     desired.update.local.metadata.attnets[0] = 1;
@@ -1274,7 +1274,7 @@ test "managed runtime local intent demand candidate sequence and stopped refusal
         defer node.deinit(std.testing.io);
         const before = ActivationSnapshot.capture(&node);
         const identify = node.core.service.identify.?.local;
-        const g = &node.core.service.gossipsub.inner;
+        const g = node.core.service.gossipsub.inner;
         const revision = g.peers.scores.revision;
         var desired = intentFor(&node);
         desired.subscriptions = &.{.{ .name = "/eth2/01020304/beacon_block/ssz_snappy", .params = .{ .weight = 2 } }};
@@ -1307,7 +1307,7 @@ test "managed runtime local intent topic demand no-op preserves Status schedulin
     var node: runtime.NetworkCore = undefined;
     try node.init(std.testing.allocator, std.testing.io, opts);
     defer node.deinit(std.testing.io);
-    const g = &node.core.service.gossipsub.inner;
+    const g = node.core.service.gossipsub.inner;
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     const before = ActivationSnapshot.capture(&node);
     const calls = node.reservations.allocation_calls;
@@ -1387,7 +1387,7 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
     try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
     try pair.a.addDirectPeer(&pair.b.peerId(), &.{pair.b.localAddress()}, pair.a.last_now);
     const start = pair.a.last_now.mono_ms;
-    const gb = &pair.b.core.service.gossipsub.inner;
+    const gb = pair.b.core.service.gossipsub.inner;
     var connected = false;
     for (0..3000) |_| {
         _ = try pair.pump();
@@ -1412,7 +1412,7 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
     try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
     try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
     const activated = gb.overlay.findTopic(active).?;
-    try std.testing.expectEqual(@as(f64, 7), gb.scores.topic_params[activated].weight);
+    try std.testing.expectEqual(@as(f64, 7), gb.peers.scores.topic_params[activated].weight);
     try std.testing.expectEqual(@as(usize, 1), gb.overlay.subscribers(activated).count());
     const publication = try pair.b.publishGossipWithOptions(active, "0123456789", .{ .allow_zero_peers = false }, pair.b.last_now);
     try std.testing.expectEqual(@as(usize, 1), publication.queued);
@@ -1456,7 +1456,7 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
     }
     try std.testing.expect(announced and withdrawn);
     const borrowed_topic = gb.overlay.findTopic(bpo).?;
-    try std.testing.expectEqual(@as(f64, 9), gb.scores.topic_params[borrowed_topic].weight);
+    try std.testing.expectEqual(@as(f64, 9), gb.peers.scores.topic_params[borrowed_topic].weight);
     const peer = pair.a.core.catalog.find(&pair.b.peerId()).?;
     var request: [24]u8 = @splat(0);
     request[8] = 1;
@@ -1478,12 +1478,12 @@ test "managed runtime local intent fork BPO announcements remembered peer and ev
             got_request = true;
         };
         for (pair.b_gossip[0..result.b.counts.gossipsub]) |event| if (event == .message) {
-            try std.testing.expectEqual(@as(f64, 9), gb.scores.topic_params[borrowed_topic].weight);
+            try std.testing.expectEqual(@as(f64, 9), gb.peers.scores.topic_params[borrowed_topic].weight);
             try intentBorrowUpdate(&pair.b, &b_intent);
             try std.testing.expectEqualStrings(bpo, event.message.topic);
             try std.testing.expectEqualStrings("borrowed gossip", event.message.bytes);
             _ = pair.b.reportValidation(event.message.handle, .reject, pair.b.last_now);
-            try std.testing.expect(gb.scores.retainsTopic(borrowed_topic));
+            try std.testing.expect(gb.peers.scores.retainsTopic(borrowed_topic));
             got_message = true;
         };
         if (got_request and got_message) break;
@@ -1558,7 +1558,7 @@ test "managed runtime local intent three boundaries fit and all-column overlap r
     desired.update.local.metadata.attnets[0] = 1;
     try std.testing.expect(try node.applyIntent(&desired, node.last_now));
     const before = ActivationSnapshot.capture(&node);
-    const g = &node.core.service.gossipsub.inner;
+    const g = node.core.service.gossipsub.inner;
     const revision = g.peers.scores.revision;
     const old_demand = node.core.demand;
     try union_topics.fill(128);

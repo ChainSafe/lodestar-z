@@ -21,7 +21,7 @@ pub fn emit(peer: *Peer, id: u32) !void {
     for (peer.service.gossipsub.inner.sessions.rows) |entry| {
         if (!entry.active) continue;
         if (entry.in_stream != null) inbound_version = @tagName(entry.inbound_version);
-        if (entry.out_stream != null) outbound_version = @tagName(entry.version);
+        if (entry.outStream() != null) outbound_version = @tagName(entry.version);
     }
     try control.emit(peer.allocator, .{
         .id = id,

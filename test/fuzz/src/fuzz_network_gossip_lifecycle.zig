@@ -33,7 +33,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
                 var id: gossip.MessageId = @splat(0);
                 std.mem.writeInt(u64, id[0..8], step + 1, .little);
                 if (messages.history.admitPayload(store, id, "/eth2/01020304/beacon_block/ssz_snappy", payload[0 .. 1 + @as(usize, at) * 1024])) |message| {
-                    handles[at] = validation.admit(store, &peers, message, source, 0, now);
+                    handles[at] = validation.admit(store, &peers, message, source, .{ .index = 0, .generation = 1 }, now);
                     store.seal(message);
                 }
             },

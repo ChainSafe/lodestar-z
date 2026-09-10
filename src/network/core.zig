@@ -112,7 +112,7 @@ pub const Core = struct {
 
     /// Returns copied observations without reconciliation, score refresh or event publication.
     pub fn diagnostics(self: *const Core) Diagnostics {
-        const g = &self.service.gossipsub.inner;
+        const g = self.service.gossipsub.inner;
         return .{
             .policy = self.counters,
             .connected = self.catalog.connectedCount(),
@@ -199,7 +199,7 @@ pub const Core = struct {
         const gossip_plan = self.service.gossipsub.inner.memoryPlan();
         const negotiation = @TypeOf(self.service.router.negotiator.entries[0]);
         const service_bytes = request.total_bytes - request.facade_bytes +
-            gossip_plan.total_bytes - @sizeOf(gossip.Gossipsub) +
+            gossip_plan.total_bytes +
             self.service.router.negotiator.entries.len * @sizeOf(negotiation) +
             if (self.service.identify) |*identify| identify.allocatedBytes() else @as(usize, 0);
         const scratch = self.snapshot_scratch.len * @sizeOf(t.Snapshot);
