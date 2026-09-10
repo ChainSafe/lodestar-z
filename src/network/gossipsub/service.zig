@@ -22,7 +22,7 @@ pub const Options = struct {
 
 pub const InitError = routing.Error || gossipsub_mod.InitError;
 
-const Handler = @import("handler.zig").Handler;
+const Handler = @import("session_driver.zig").Driver;
 
 pub const Service = struct {
     router: routing.Router,

@@ -13,8 +13,8 @@ pub const sessions = @import("sessions.zig");
 pub const frame = @import("frame.zig");
 pub const score = @import("score.zig");
 pub const gossipsub = @import("gossipsub.zig");
-pub const handler = @import("handler.zig");
-pub const Handler = handler.Handler;
+pub const session_driver = @import("session_driver.zig");
+pub const Handler = session_driver.Driver;
 pub const service = @import("service.zig");
 
 pub const Gossipsub = gossipsub.Gossipsub;
@@ -51,8 +51,9 @@ test {
     _ = score;
     _ = gossipsub;
     _ = service;
-    _ = handler;
+    _ = session_driver;
     _ = @import("gossipsub_test.zig");
     _ = @import("publication_test.zig");
     _ = @import("service_test.zig");
+    _ = @import("simulation_test.zig");
 }

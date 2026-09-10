@@ -164,6 +164,26 @@ pub const Pool = struct {
     }
 };
 
+pub const TimeoutReason = enum { subscriptions, receive_pressure, receive_frame, send_queue, send_progress };
+pub const Deadlines = struct {
+    values: [5]?u64 = @splat(null),
+
+    pub fn next(self: *const Deadlines) ?u64 {
+        var result: ?u64 = null;
+        for (self.values) |value| if (value) |deadline| {
+            result = @min(result orelse deadline, deadline);
+        };
+        return result;
+    }
+
+    pub fn expired(self: *const Deadlines, now_ms: u64) ?TimeoutReason {
+        for (self.values, 0..) |value, index| if (value) |deadline| {
+            if (now_ms >= deadline) return @enumFromInt(index);
+        };
+        return null;
+    }
+};
+
 pub const PeerIo = struct {
     pub fn bufferBytes(options: *const @import("options.zig").Options) usize {
         return options.control_bytes + options.critical_bytes + options.body_buffer_bytes + constants.read_scratch_len;
@@ -345,6 +365,23 @@ pub const PeerIo = struct {
         }
         return null;
     }
+    pub fn deadlines(self: *const PeerIo, options: *const @import("options.zig").Options) Deadlines {
+        var result: Deadlines = .{};
+        if (self.subscription_since) |since| result.values[@intFromEnum(TimeoutReason.subscriptions)] = since +| options.pressure_timeout_ms;
+        if (self.pressure_since) |since| result.values[@intFromEnum(TimeoutReason.receive_pressure)] = since +| options.pressure_timeout_ms;
+        if (self.frame_since) |since| {
+            result.values[@intFromEnum(TimeoutReason.receive_frame)] = if (self.pressure_since == null)
+                @min(since +| options.pressure_timeout_ms, self.progress_ms +| options.large_frame_timeout_ms)
+            else
+                since +| options.pressure_timeout_ms;
+        }
+        if (self.oldestTx()) |since| {
+            result.values[@intFromEnum(TimeoutReason.send_queue)] = since +| options.tx_timeout_ms;
+            if (self.tx_progress_ms) |progress| result.values[@intFromEnum(TimeoutReason.send_progress)] = progress +| options.large_frame_timeout_ms;
+        }
+        return result;
+    }
+
     pub fn oldestTx(self: *const PeerIo) ?u64 {
         var oldest: ?u64 = null;
         if (self.data_count > 0) oldest = self.data[self.data_head].enqueued_ms;
@@ -551,4 +588,26 @@ test "gossip control high water survives partial write refusal and reset" {
     queue.reset();
     try std.testing.expectEqual(@as(usize, 3), queue.bytes_high_water);
     try std.testing.expectEqual(@as(usize, 0), queue.count);
+}
+
+test "gossip deadlines track pressure and progress through partial frame reset" {
+    var pool = try Pool.init(std.testing.allocator, &.{ .connected_capacity = 1 });
+    defer pool.deinit(std.testing.allocator);
+    const io = &pool.peers[0];
+    const options: @import("options.zig").Options = .{ .pressure_timeout_ms = 100, .large_frame_timeout_ms = 50, .tx_timeout_ms = 100 };
+    io.frame_since = 0;
+    io.progress_ms = 20;
+    try std.testing.expectEqual(@as(?u64, 70), io.deadlines(&options).next());
+    io.pressure_since = 30;
+    try std.testing.expect(io.deadlines(&options).expired(70) == null);
+    try std.testing.expectEqual(@as(?u64, 100), io.deadlines(&options).next());
+    try std.testing.expectEqual(TimeoutReason.receive_frame, io.deadlines(&options).expired(100).?);
+    io.resetRx();
+    try std.testing.expect(io.deadlines(&options).next() == null);
+    _ = io.appendControl("abc", false, .iwant, 0).?;
+    io.tx_progress_ms = 20;
+    try std.testing.expectEqual(TimeoutReason.send_progress, io.deadlines(&options).expired(70).?);
+    io.tx_progress_ms = 50;
+    try std.testing.expectEqual(@as(?u64, 100), io.deadlines(&options).next());
+    try std.testing.expectEqual(TimeoutReason.send_queue, io.deadlines(&options).expired(100).?);
 }

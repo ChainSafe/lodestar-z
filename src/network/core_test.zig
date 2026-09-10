@@ -878,7 +878,7 @@ test "core coverage authenticated custody differs from gossip delivery and inval
     _ = setup.client.snapshots(&snapshots);
     const connection = snapshots[0].connection.?;
     const index = setup.client.service.gossipsub.inner.sessions.findPeer(connection).?;
-    setup.client.service.gossipsub.inner.resetOutbound(&setup.pair.client, index);
+    setup.client.service.gossipsub.resetOutbound(&setup.pair.client, index);
     try std.testing.expect(!setup.client.service.gossipsub.deliveryAvailable(connection));
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
