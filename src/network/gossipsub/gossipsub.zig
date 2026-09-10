@@ -609,7 +609,7 @@ pub const Gossipsub = struct {
                 var w = protobuf.Writer.init(&buf);
                 w.varint(protobuf.subscriptionSize(t.string[0..t.string_len]));
                 protobuf.writeSubscription(&w, t.subscribed, t.string[0..t.string_len]);
-                if (io.appendControl(w.written(), true, self.last_now_ms) == null) return;
+                if (io.appendControl(w.written(), true, .subscription, self.last_now_ms) == null) return;
                 io.subscription_dirty.unset(topic);
             }
             io.subscription_cursor = (topic + 1) % constants.topics_cap;
@@ -1056,7 +1056,7 @@ pub const Gossipsub = struct {
         const recipients = self.mesh_policy.gossipRecipients(&context, topic, self.options.gossip_factor);
         var it = recipients.iterator(.{});
         while (it.next()) |peer| {
-            if (!self.io.peers[peer].append(rpc, self.last_now_ms)) self.counters.send_dropped += 1;
+            if (self.io.peers[peer].appendControl(rpc, false, .ihave, self.last_now_ms) == null) self.counters.send_dropped += 1;
         }
     }
 
@@ -1369,7 +1369,7 @@ pub const Gossipsub = struct {
         writer.varint(protobuf.iwantRpcSize(count, constants.message_id_length));
         protobuf.beginIwantRpc(&writer, count, constants.message_id_length);
         for (wanted[0..count]) |id| protobuf.writeIwantId(&writer, &id);
-        if (io.appendControl(writer.written(), false, now.mono_ms)) |token| {
+        if (io.appendControl(writer.written(), false, .iwant, now.mono_ms)) |token| {
             for (wanted[0..count]) |id| self.addPromise(id, index, token);
             io.iwant_ids_sent += @intCast(count);
             self.counters.iwant_sent += 1;
@@ -1413,7 +1413,7 @@ pub const Gossipsub = struct {
             const peer_index: u16 = @intCast(peer);
             if (peer_index == source) continue;
             if (self.state.peerVersion(peer_index) != .v1_2) continue;
-            if (!self.io.peers[peer_index].append(rpc, self.last_now_ms)) self.counters.send_dropped += 1;
+            if (self.io.peers[peer_index].appendControl(rpc, false, .idontwant, self.last_now_ms) == null) self.counters.send_dropped += 1;
         }
     }
 
@@ -1505,13 +1505,10 @@ pub const Gossipsub = struct {
             self.budget.output -= written;
             io.tx_progress_ms = now.mono_ms;
             const free = self.store.free_pages;
-            const was_data = io.active == .data;
+            const sent_kind = io.sendingKind();
             self.rpc_metrics.sent_bytes +|= written;
             if (io.advance(&self.store, written)) |token| self.controlSent(index, token, now.mono_ms);
-            if (io.active == .none) {
-                self.rpc_metrics.sent_frames +|= 1;
-                self.rpc_metrics.sent_messages +|= @intFromBool(was_data);
-            }
+            if (io.active == .none) self.rpc_metrics.observeSent(sent_kind);
             if (self.store.free_pages != free) self.wakeStorage();
         }
     }
@@ -1570,14 +1567,19 @@ test "gossipsub metrics distinguish partial writes from complete publication RPC
     try std.testing.expect(setup.client.subscribe(name));
     try std.testing.expect(setup.server.subscribe(name));
     for (0..20) |_| try setup.pumpOnce();
+    setup.pair.advance(1000);
+    for (0..128) |_| try setup.pumpOnce();
     const before = setup.client.rpc_metrics;
+    const ItemKind = std.meta.Tag(protobuf.Item);
+    try std.testing.expect(before.sent_items[@intFromEnum(ItemKind.subscription)] > 0);
+    try std.testing.expect(before.sent_items[@intFromEnum(ItemKind.graft)] + setup.server.rpc_metrics.sent_items[@intFromEnum(ItemKind.graft)] > 0);
     setup.client.options.output_per_peer = 1;
     const result = try setup.client.publish(name, "payload", setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), result.queued);
     try setup.pumpOnce();
     try std.testing.expectEqual(before.sent_bytes + 1, setup.client.rpc_metrics.sent_bytes);
     try std.testing.expectEqual(before.sent_frames, setup.client.rpc_metrics.sent_frames);
-    try std.testing.expectEqual(@as(u64, 0), setup.client.rpc_metrics.sent_messages);
+    try std.testing.expectEqual(@as(u64, 0), setup.client.rpc_metrics.sent_items[@intFromEnum(std.meta.Tag(protobuf.Item).message)]);
     var received = false;
     for (0..1000) |_| {
         try setup.pumpOnce();
@@ -1588,10 +1590,19 @@ test "gossipsub metrics distinguish partial writes from complete publication RPC
         if (received) break;
     }
     try std.testing.expect(received);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.rpc_metrics.sent_messages);
+    try std.testing.expectEqual(@as(u64, 1), setup.client.rpc_metrics.sent_items[@intFromEnum(std.meta.Tag(protobuf.Item).message)]);
     try std.testing.expectEqual(@as(u64, 1), setup.server.topic_metrics.get(name).prevalidation);
     try std.testing.expect(setup.client.rpc_metrics.sent_bytes > before.sent_bytes + 1);
     try std.testing.expectEqual(setup.client.rpc_metrics.sent_bytes, setup.server.rpc_metrics.received_bytes);
+    try std.testing.expect(setup.client.unsubscribe(name));
+    for (0..1000) |_| {
+        try setup.pumpOnce();
+        if (setup.server.rpc_metrics.items[@intFromEnum(ItemKind.prune)] > 0 and
+            setup.server.rpc_metrics.items[@intFromEnum(ItemKind.subscription)] > 1) break;
+    }
+    try std.testing.expectEqual(@as(u64, 1), setup.client.rpc_metrics.sent_items[@intFromEnum(ItemKind.prune)]);
+    try std.testing.expectEqual(@as(u64, 2), setup.client.rpc_metrics.sent_items[@intFromEnum(ItemKind.subscription)]);
+    try std.testing.expectEqual(@as(u64, 1), setup.server.rpc_metrics.items[@intFromEnum(ItemKind.prune)]);
 }
 
 fn testMessage(g: *Gossipsub, peer: u16, text: []const u8, now_ms: u64, events: []Event) !?usize {
@@ -2367,7 +2378,7 @@ test "gossip diagnostics tracks queued age and preserves peaks after owner relea
     g.store.retainHistory(message);
     g.store.seal(message);
     try std.testing.expectEqual(peer_io_mod.QueueResult.queued, io.queueData(&g.store, message, 10, 7));
-    try std.testing.expect(io.appendControl("ctrl", true, 9) != null);
+    try std.testing.expect(io.appendControl("ctrl", true, null, 9) != null);
     g.last_now_ms = 20;
     const snapshot = g.resourceSnapshot();
     try std.testing.expectEqual(@as(?u64, 13), snapshot.oldest_tx_age_ms);
@@ -2468,7 +2479,7 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const p = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const io = &g.io.peers[p.index];
-    const token = io.appendControl("control", false, 1).?;
+    const token = io.appendControl("control", false, null, 1).?;
     g.recovery.add(&g.peers, [_]u8{1} ** 20, g.logical(p.index), conn, token);
     g.recovery.controlSent(.{ .index = 0, .generation = 2 }, token, 12_000, 5);
     g.controlSent(p.index, token + 1, 5);

@@ -5,6 +5,7 @@ const frame = @import("frame.zig");
 const constants = @import("constants.zig");
 const topic = @import("topic.zig");
 const assert = std.debug.assert;
+const ItemKind = std.meta.Tag(protobuf.Item);
 pub const data_capacity = 512;
 pub const control_frames = 128;
 pub const QueueResult = enum { queued, full };
@@ -15,6 +16,8 @@ pub const ControlQueue = struct {
     bytes: []u8,
     lengths: [control_frames]u32 = undefined,
     tokens: [control_frames]u64 = undefined,
+    // Native encoders queue one item per RPC; preserve its kind through partial writes.
+    kinds: [control_frames]?ItemKind = @splat(null),
     enqueued_ms: [control_frames]u64 = undefined,
     head: usize = 0,
     count: usize = 0,
@@ -33,6 +36,7 @@ pub const ControlQueue = struct {
         const slot = (self.head + self.count) % control_frames;
         self.lengths[slot] = @intCast(bytes.len);
         self.tokens[slot] = token;
+        self.kinds[slot] = null;
         self.enqueued_ms[slot] = now_ms;
         self.count += 1;
         self.used += bytes.len;
@@ -230,9 +234,9 @@ pub const PeerIo = struct {
         self.idontwant_recv = 0;
     }
     pub fn append(self: *PeerIo, bytes: []const u8, now_ms: u64) bool {
-        return self.appendControl(bytes, false, now_ms) != null;
+        return self.appendControl(bytes, false, null, now_ms) != null;
     }
-    pub fn appendControl(self: *PeerIo, bytes: []const u8, critical: bool, now_ms: u64) ?u64 {
+    pub fn appendControl(self: *PeerIo, bytes: []const u8, critical: bool, kind: ?ItemKind, now_ms: u64) ?u64 {
         if (self.sequence == std.math.maxInt(u64)) {
             self.dropped(.token_exhausted);
             return null;
@@ -247,8 +251,18 @@ pub const PeerIo = struct {
             return null;
         }
         self.sequence = token;
+        queue.kinds[(queue.head + queue.count - 1) % control_frames] = kind;
         self.tx_ready = true;
         return token;
+    }
+
+    pub fn sendingKind(self: *const PeerIo) ?ItemKind {
+        return switch (self.active) {
+            .none => null,
+            .data => .message,
+            .critical => self.critical.kinds[self.critical.head],
+            .control => self.control.kinds[self.control.head],
+        };
     }
     pub fn queueData(self: *PeerIo, store: *storage.Store, h: storage.Handle, byte_limit: usize, now_ms: u64) QueueResult {
         const e = store.get(h).?;
@@ -397,7 +411,7 @@ test "gossip transmit retains pages and never interleaves control into partial d
     out[n] = io.segment(&store)[0];
     n += 1;
     _ = io.advance(&store, 1);
-    const token = io.appendControl("\x01x", true, 0).?;
+    const token = io.appendControl("\x01x", true, null, 0).?;
     for (0..127) |_| {
         const segment = io.segment(&store);
         if (segment.len == 0) break;
@@ -432,7 +446,7 @@ test "gossip critical capacity and data queue pressure are independent and relea
     try std.testing.expectEqual(@as(usize, data_capacity), io.data_descriptors_high_water);
     try std.testing.expect(io.append("12345678", 0));
     try std.testing.expect(!io.append("x", 0));
-    try std.testing.expect(io.appendControl("critical", true, 0) != null);
+    try std.testing.expect(io.appendControl("critical", true, null, 0) != null);
     store.releaseHistory(h);
     io.resetTx(&store);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
@@ -480,6 +494,39 @@ test "gossip queues a full validation burst in order and preserves byte bounds" 
     try std.testing.expectEqual(@as(usize, burst), store.free_pages);
     try std.testing.expectEqual(@as(u64, 1), io.drops[@intFromEnum(DropReason.data_bytes)]);
     try std.testing.expectEqual(@as(u64, 0), io.drops[@intFromEnum(DropReason.data_descriptors)]);
+}
+
+test "metrics control kinds survive partial writes ring reuse and refused frames" {
+    var store = try storage.Store.init(std.testing.allocator, 1, 4096);
+    defer store.deinit(std.testing.allocator);
+    var normal: [4]u8 = undefined;
+    var critical: [4]u8 = undefined;
+    var body: [1]u8 = undefined;
+    var unread: [1]u8 = undefined;
+    var io: PeerIo = .{ .control = .{ .bytes = &normal }, .critical = .{ .bytes = &critical }, .body = &body, .unread = &unread };
+    var metrics: @import("metrics.zig").Rpc = .{};
+    const kinds = [_]ItemKind{ .subscription, .ihave, .iwant, .graft, .prune, .idontwant };
+    for (0..control_frames * kinds.len) |index| {
+        const kind = kinds[index % kinds.len];
+        const token = io.appendControl("abc", false, kind, 1).?;
+        try std.testing.expect(io.appendControl("ab", false, .prune, 1) == null);
+        for (0..3) |byte| {
+            _ = io.segment(&store);
+            try std.testing.expectEqual(kind, io.sendingKind().?);
+            const sent_kind = io.sendingKind();
+            const receipt = io.advance(&store, 1);
+            if (byte < 2) try std.testing.expect(receipt == null) else try std.testing.expectEqual(token, receipt.?);
+            if (io.active == .none) metrics.observeSent(sent_kind);
+            try std.testing.expectEqual(index + @intFromBool(byte == 2), metrics.sent_frames);
+        }
+    }
+    for (kinds) |kind| try std.testing.expectEqual(@as(u64, control_frames), metrics.sent_items[@intFromEnum(kind)]);
+    try std.testing.expectEqual(@as(u64, control_frames * 5), metrics.control_frames_sent);
+    _ = io.appendControl("abc", false, .prune, 1).?;
+    _ = io.segment(&store);
+    _ = io.advance(&store, 1);
+    io.resetTx(&store);
+    try std.testing.expectEqual(@as(u64, control_frames), metrics.sent_items[@intFromEnum(ItemKind.prune)]);
 }
 
 test "gossip control high water survives partial write refusal and reset" {

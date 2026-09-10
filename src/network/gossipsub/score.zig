@@ -52,9 +52,52 @@ const TopicCounters = struct {
     invalid: f64 = 0,
 };
 
+pub const TopicWeights = struct {
+    p1: f64 = 0,
+    p2: f64 = 0,
+    p3: f64 = 0,
+    p3b: f64 = 0,
+    p4: f64 = 0,
+
+    pub fn total(self: *const TopicWeights) f64 {
+        return self.p1 + self.p2 + self.p3 + self.p3b + self.p4;
+    }
+};
+
+pub const GlobalWeights = struct { p5: f64 = 0, p6: f64 = 0, p7: f64 = 0 };
+pub const Penalties = struct { graft_backoff: u64 = 0, broken_promise: u64 = 0, message_deficit: u64 = 0, invalid_message: u64 = 0 };
+pub const Breakdown = struct {
+    topics: [constants.topics_cap]TopicWeights = @splat(.{}),
+    global: GlobalWeights = .{},
+};
+
+pub const CacheDelta = struct {
+    pub const bounds = [_]f64{ 10, 100, 1000 };
+    buckets: [bounds.len + 1]u64 = @splat(0),
+    count: u64 = 0,
+    sum: f64 = 0,
+
+    fn observe(self: *CacheDelta, value: f64) void {
+        assert(std.math.isFinite(value) and value >= 0);
+        if (self.count == std.math.maxInt(u64)) return;
+        var index: usize = bounds.len;
+        for (bounds, 0..) |bound, i| if (value <= bound) {
+            index = i;
+            break;
+        };
+        self.buckets[index] += 1;
+        self.count += 1;
+        self.sum += value;
+        assert(std.math.isFinite(self.sum));
+    }
+};
+
 pub const PeerScore = struct {
     revision: u64 = 0,
     calculations: u64 = 0,
+    calls: u64 = 0,
+    cache_delta: CacheDelta = .{},
+    penalties: Penalties = .{},
     topic_visits: u64 = 0,
     params: Params,
     topics: []TopicCounters,
@@ -115,6 +158,7 @@ pub const PeerScore = struct {
     pub fn resetPeer(self: *PeerScore, peer: u16) void {
         self.revision +|= 1;
         self.dirty[peer] = true;
+        self.cached_at[peer] = null;
         const base = @as(usize, peer) * constants.topics_cap;
         @memset(self.topics[base..][0..constants.topics_cap], .{});
         self.app_score[peer] = 0;
@@ -138,6 +182,7 @@ pub const PeerScore = struct {
         {
             const deficit = params.mesh_delivery_threshold - counters.mesh_deliveries;
             counters.mesh_failures = @min(counter_max, counters.mesh_failures + deficit * deficit);
+            self.penalties.message_deficit +|= 1;
         }
         counters.in_mesh = false;
     }
@@ -170,6 +215,7 @@ pub const PeerScore = struct {
     pub fn invalid(self: *PeerScore, peer: u16, topic: u16) void {
         const c = self.tc(peer, topic);
         c.invalid = @min(counter_max, c.invalid + 1);
+        self.penalties.invalid_message +|= 1;
     }
 
     pub fn penalize(self: *PeerScore, peer: u16, amount: f64) void {
@@ -190,12 +236,14 @@ pub const PeerScore = struct {
 
     pub fn score(self: *PeerScore, peer: u16, now_ms: u64) f64 {
         assert(peer < self.app_score.len);
+        self.calls +|= 1;
         if (!self.dirty[peer] and self.cached_at[peer] != null and now_ms >= self.cached_at[peer].? and
             (self.cached_until[peer] == null or now_ms < self.cached_until[peer].?) and
             self.cached_ip[peer] == self.ip_count[peer]) return self.cached[peer];
         self.calculations +|= 1;
         self.topic_visits +|= constants.topics_cap;
-        const result = self.evaluate(peer, now_ms);
+        const result = self.evaluate(peer, now_ms, null);
+        if (self.cached_at[peer] != null) self.cache_delta.observe(@abs(result.total - self.cached[peer]));
         self.dirty[peer] = false;
         self.cached_at[peer] = now_ms;
         self.cached_until[peer] = result.next_change;
@@ -206,10 +254,15 @@ pub const PeerScore = struct {
 
     /// Evaluates current counters without changing decay, cache validity or policy metrics.
     pub fn snapshot(self: *const PeerScore, peer: u16, now_ms: u64) f64 {
-        return self.evaluate(peer, now_ms).total;
+        return self.evaluate(peer, now_ms, null).total;
     }
 
-    fn evaluate(self: *const PeerScore, peer: u16, now_ms: u64) struct { total: f64, next_change: ?u64 } {
+    pub fn snapshotWeights(self: *const PeerScore, peer: u16, now_ms: u64, out: *Breakdown) f64 {
+        out.* = .{};
+        return self.evaluate(peer, now_ms, out).total;
+    }
+
+    fn evaluate(self: *const PeerScore, peer: u16, now_ms: u64, out: ?*Breakdown) struct { total: f64, next_change: ?u64 } {
         assert(peer < self.app_score.len);
         var next_change: ?u64 = null;
         var total: f64 = 0;
@@ -219,14 +272,14 @@ pub const PeerScore = struct {
             const counters = &self.topics[@as(usize, peer) * constants.topics_cap + topic];
             if (!counters.in_mesh and counters.first_deliveries == 0 and
                 counters.mesh_failures == 0 and counters.invalid == 0) continue;
-            var topic_score: f64 = 0;
+            var weights: TopicWeights = .{};
             const elapsed: u64 = if (counters.in_mesh) now_ms -| counters.graft_ms else 0;
             if (counters.in_mesh) {
                 const p1 = @min(
                     @as(f64, @floatFromInt(elapsed / params.time_in_mesh_quantum_ms)),
                     params.time_in_mesh_cap,
                 );
-                topic_score += params.time_in_mesh_weight * p1;
+                weights.p1 = params.time_in_mesh_weight * p1;
                 if (params.weight != 0 and params.time_in_mesh_weight != 0 and p1 < params.time_in_mesh_cap) {
                     const remaining = params.time_in_mesh_quantum_ms - elapsed % params.time_in_mesh_quantum_ms;
                     const start = @max(now_ms, counters.graft_ms);
@@ -243,28 +296,33 @@ pub const PeerScore = struct {
                     next_change = @min(next_change orelse next, next);
                 }
             }
-            topic_score += params.first_delivery_weight *
+            weights.p2 = params.first_delivery_weight *
                 @min(counters.first_deliveries, params.first_delivery_cap);
             if (counters.in_mesh and elapsed > params.mesh_delivery_activation_ms and
                 counters.mesh_deliveries < params.mesh_delivery_threshold)
             {
                 const deficit = params.mesh_delivery_threshold - counters.mesh_deliveries;
-                topic_score += params.mesh_delivery_weight * deficit * deficit;
+                weights.p3 = params.mesh_delivery_weight * deficit * deficit;
             }
-            topic_score += params.mesh_failure_weight * counters.mesh_failures;
-            topic_score += params.invalid_weight * counters.invalid * counters.invalid;
-            total += params.weight * topic_score;
+            weights.p3b = params.mesh_failure_weight * counters.mesh_failures;
+            weights.p4 = params.invalid_weight * counters.invalid * counters.invalid;
+            total += params.weight * weights.total();
+            if (out) |details| details.topics[topic] = weights;
         }
         if (self.params.topic_cap > 0 and total > self.params.topic_cap) {
             total = self.params.topic_cap;
         }
-        total += self.params.app_weight * self.app_score[peer];
+        var global: GlobalWeights = .{ .p5 = self.params.app_weight * self.app_score[peer] };
+        total += global.p5;
         if (self.behaviour[peer] > self.params.behaviour_threshold) {
             const excess = self.behaviour[peer] - self.params.behaviour_threshold;
-            total += self.params.behaviour_weight * excess * excess;
+            global.p7 = self.params.behaviour_weight * excess * excess;
+            total += global.p7;
         }
         const excess_ip: f64 = @floatFromInt(self.ip_count[peer] -| self.params.ip_colocation_threshold);
-        total += self.params.ip_colocation_weight * excess_ip * excess_ip;
+        global.p6 = self.params.ip_colocation_weight * excess_ip * excess_ip;
+        total += global.p6;
+        if (out) |details| details.global = global;
         assert(std.math.isFinite(total));
         return .{ .total = total, .next_change = next_change };
     }
@@ -782,4 +840,54 @@ test "metrics score snapshots preserve cache state and match policy evaluation" 
     try std.testing.expectEqual(next, scores.cached_until[0]);
     try std.testing.expect(scores.dirty[0]);
     try std.testing.expectEqual(value, scores.score(0, 50000));
+}
+
+test "metrics score weights use policy thresholds and snapshots do not count as cache calls" {
+    var scores = try PeerScore.initCapacity(std.testing.allocator, .{
+        .app_weight = 2,
+        .ip_colocation_weight = -3,
+        .ip_colocation_threshold = 1,
+        .behaviour_weight = -2,
+        .behaviour_threshold = 1,
+        .topic_cap = 10,
+        .topic = .{ .weight = 2, .time_in_mesh_weight = 1, .time_in_mesh_cap = 2, .first_delivery_weight = 3, .mesh_delivery_weight = -5, .mesh_delivery_threshold = 3, .mesh_delivery_activation_ms = 1000, .mesh_failure_weight = -7, .invalid_weight = -11 },
+    }, 1);
+    defer scores.deinit(std.testing.allocator);
+    scores.graft(0, 0, 0);
+    scores.deliver(0, 0);
+    scores.invalid(0, 0);
+    scores.tc(0, 0).mesh_failures = 1;
+    scores.penalize(0, 3);
+    try std.testing.expect(scores.setAppScore(0, 3));
+    scores.ip_count[0] = 3;
+    var details: Breakdown = undefined;
+    const value = scores.snapshotWeights(0, 2000, &details);
+    try std.testing.expectEqualDeep(TopicWeights{ .p1 = 2, .p2 = 3, .p3 = -20, .p3b = -7, .p4 = -11 }, details.topics[0]);
+    try std.testing.expectEqualDeep(GlobalWeights{ .p5 = 6, .p6 = -12, .p7 = -8 }, details.global);
+    try std.testing.expectEqual(@as(f64, -80), value);
+    try std.testing.expectEqual(@as(u64, 0), scores.calls);
+    try std.testing.expectEqual(value, scores.score(0, 2000));
+    try std.testing.expectEqual(value, scores.score(0, 2000));
+    try std.testing.expectEqual(@as(u64, 2), scores.calls);
+    try std.testing.expectEqual(@as(u64, 1), scores.calculations);
+    try std.testing.expectEqual(@as(u64, 0), scores.cache_delta.count);
+    try std.testing.expect(scores.setAppScore(0, 13));
+    try std.testing.expectEqual(value + 20, scores.score(0, 2000));
+    try std.testing.expectEqual(@as(f64, 20), scores.cache_delta.sum);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 1, 0, 0 }, &scores.cache_delta.buckets);
+    scores.resetPeer(0);
+    _ = scores.score(0, 2000);
+    try std.testing.expectEqual(@as(u64, 1), scores.cache_delta.count);
+    _ = scores.snapshotWeights(0, 2000, &details);
+    try std.testing.expectEqualDeep(TopicWeights{}, details.topics[0]);
+    scores.topic_params[0].first_delivery_weight = 100;
+    scores.deliver(0, 0);
+    const capped = scores.snapshotWeights(0, 2000, &details);
+    try std.testing.expectEqual(@as(f64, 100), details.topics[0].p2);
+    try std.testing.expectEqual(@as(f64, 10) + details.global.p6, capped);
+    scores.graft(0, 0, 0);
+    scores.prune(0, 0, 5000);
+    scores.prune(0, 0, 5000);
+    try std.testing.expectEqual(@as(u64, 1), scores.penalties.message_deficit);
+    try std.testing.expectEqual(@as(u64, 1), scores.penalties.invalid_message);
 }

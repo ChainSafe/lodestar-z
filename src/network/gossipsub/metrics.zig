@@ -73,7 +73,8 @@ pub const Rpc = struct {
     received_bytes: u64 = 0,
     sent_bytes: u64 = 0,
     sent_frames: u64 = 0,
-    sent_messages: u64 = 0,
+    sent_items: [std.meta.fields(ItemKind).len]u64 = @splat(0),
+    control_frames_sent: u64 = 0,
     control_frames_received: u64 = 0,
     graylist_dropped: u64 = 0,
     items: [std.meta.fields(ItemKind).len]u64 = @splat(0),
@@ -84,6 +85,17 @@ pub const Rpc = struct {
 
     pub fn ignoreIhave(self: *Rpc, reason: IhaveIgnore) void {
         self.ihave_ignored[@intFromEnum(reason)] +|= 1;
+    }
+
+    pub fn observeSent(self: *Rpc, kind: ?ItemKind) void {
+        self.sent_frames +|= 1;
+        if (kind) |item| {
+            self.sent_items[@intFromEnum(item)] +|= 1;
+            switch (item) {
+                .subscription, .message => {},
+                else => self.control_frames_sent +|= 1,
+            }
+        }
     }
 
     pub fn observeItem(self: *Rpc, item: Item, had_control: *bool) void {
@@ -103,7 +115,7 @@ pub const Rpc = struct {
             .{ "gossipsub_rpc_recv_bytes_total", "received_bytes", "RPC stream bytes consumed by the frame decoder, including length prefixes and partial frames" },
             .{ "gossipsub_rpc_sent_bytes_total", "sent_bytes", "RPC stream bytes accepted by QUIC, including length prefixes and partial frames" },
             .{ "gossipsub_rpc_sent_count_total", "sent_frames", "Complete RPC frames accepted by QUIC" },
-            .{ "gossipsub_rpc_sent_message_total", "sent_messages", "Complete publication RPCs accepted by QUIC" },
+            .{ "gossipsub_rpc_sent_control_total", "control_frames_sent", "Complete control RPCs accepted by QUIC" },
             .{ "gossipsub_rpc_recv_control_total", "control_frames_received", "Received RPC frames with at least one decoded control item" },
             .{ "gossipsub_rpc_rcv_not_accepted_total", "graylist_dropped", "Received RPCs discarded by the graylist threshold" },
             .{ "gossipsub_iwant_rcv_dont_have_msgids_total", "iwant_unknown", "Examined valid IWANT IDs absent from message history" },
@@ -112,6 +124,8 @@ pub const Rpc = struct {
         }) |metric| try prom.scalar(w, metric[0], .counter, metric[2], @field(self, metric[1]));
         inline for (std.meta.fields(ItemKind)) |field|
             try prom.scalar(w, "gossipsub_rpc_recv_" ++ field.name ++ "_total", .counter, "Decoded RPC " ++ field.name ++ " items, counted once before handling", self.items[field.value]);
+        inline for (std.meta.fields(ItemKind)) |field|
+            try prom.scalar(w, "gossipsub_rpc_sent_" ++ field.name ++ "_total", .counter, "RPC " ++ field.name ++ " items in complete frames accepted by QUIC", self.sent_items[field.value]);
         try prom.family(w, "gossipsub_ihave_rcv_ignored_total", .counter, "IHAVE items producing no request at an admission boundary");
         inline for (std.meta.fields(IhaveIgnore)) |field|
             try prom.sample(w, "gossipsub_ihave_rcv_ignored_total", "reason", field.name, self.ihave_ignored[field.value]);
