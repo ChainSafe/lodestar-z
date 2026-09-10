@@ -355,6 +355,12 @@ pub const PeerScore = struct {
     pub fn configureTopic(self: *PeerScore, topic: u16, params: TopicParams) error{InvalidLimits}!void {
         assert(topic < constants.topics_cap);
         try validateTopic(params);
+        self.applyValidatedTopic(topic, params);
+    }
+
+    /// Params must pass validateTopic before entering a prepared owner transaction.
+    pub fn applyValidatedTopic(self: *PeerScore, topic: u16, params: TopicParams) void {
+        assert(topic < constants.topics_cap);
         if (std.meta.eql(self.topic_params[topic], params)) return;
         self.revision +|= 1;
         self.topic_params[topic] = params;

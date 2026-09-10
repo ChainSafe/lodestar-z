@@ -170,8 +170,8 @@ test "gossipsub peers exchange subscriptions over the mesh streams" {
     try std.testing.expect(server_saw);
 
     // each side now records the other as a subscriber of the topic
-    const server_topic = setup.server.state.findTopic(beacon_block).?;
-    try std.testing.expect(setup.server.state.subscribers(server_topic).count() == 1);
+    const server_topic = setup.server.state.registry.findTopic(beacon_block).?;
+    try std.testing.expect(setup.server.state.registry.subscribers(server_topic).count() == 1);
 }
 
 test "gossipsub forms a mesh through the heartbeat" {
@@ -190,10 +190,10 @@ test "gossipsub forms a mesh through the heartbeat" {
     rounds = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
 
-    const client_topic = setup.client.state.findTopic(beacon_block).?;
-    const server_topic = setup.server.state.findTopic(beacon_block).?;
-    try std.testing.expectEqual(@as(usize, 1), setup.client.state.mesh(client_topic).count());
-    try std.testing.expectEqual(@as(usize, 1), setup.server.state.mesh(server_topic).count());
+    const client_topic = setup.client.state.registry.findTopic(beacon_block).?;
+    const server_topic = setup.server.state.registry.findTopic(beacon_block).?;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.state.registry.mesh(client_topic).count());
+    try std.testing.expectEqual(@as(usize, 1), setup.server.state.registry.mesh(server_topic).count());
 }
 
 test "gossipsub delivers a published message to a mesh peer" {
@@ -272,8 +272,8 @@ test "gossipsub prunes a peer whose messages are rejected" {
     setup.pair.advance(constants_heartbeat + 100);
     rounds = 0;
     while (rounds < 10) : (rounds += 1) try setup.pumpOnce();
-    const server_topic = setup.server.state.findTopic(beacon_block).?;
-    try std.testing.expectEqual(@as(usize, 0), setup.server.state.mesh(server_topic).count());
+    const server_topic = setup.server.state.registry.findTopic(beacon_block).?;
+    try std.testing.expectEqual(@as(usize, 0), setup.server.state.registry.mesh(server_topic).count());
 }
 
 test "gossipsub credits first delivery only after the host accepts" {
@@ -476,7 +476,7 @@ test "gossipsub queues incompressible 64 KiB publish" {
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(topic));
-    g.state.mesh(g.state.findTopic(topic).?).set(peer.index);
+    g.state.registry.mesh(g.state.registry.findTopic(topic).?).set(peer.index);
     var payload: [65536]u8 = undefined;
     var rng = std.Random.DefaultPrng.init(42);
     rng.random().bytes(&payload);
@@ -601,11 +601,11 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
     var rng = std.Random.DefaultPrng.init(73);
     rng.random().bytes(payload);
     const destination = setup.client.state.findPeer(setup.handles.client).?;
-    const topic_index = setup.client.state.findTopic(test_topic).?;
-    setup.client.state.setSubscription(topic_index, destination, false);
+    const topic_index = setup.client.state.registry.findTopic(test_topic).?;
+    setup.client.state.registry.setSubscription(topic_index, destination, false);
     const result = try setup.client.publish(test_topic, payload, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), result.queued);
-    setup.client.state.setSubscription(topic_index, destination, true);
+    setup.client.state.registry.setSubscription(topic_index, destination, true);
     const id = topic_mod.validMessageId(test_topic, payload, .{});
     const pb = @import("protobuf.zig");
     var buf: [64]u8 = undefined;
@@ -768,7 +768,7 @@ test "gossipsub frame and TX absolute residence survive steady byte progress" {
     for (0..4) |_| try setup.pumpOnce();
     try std.testing.expect(setup.server.io.peers[server_peer].large_slot != null);
     try std.testing.expect(setup.client.subscribe(test_topic));
-    setup.client.state.mesh(setup.client.state.findTopic(test_topic).?).set(client_peer);
+    setup.client.state.registry.mesh(setup.client.state.registry.findTopic(test_topic).?).set(client_peer);
     _ = try setup.client.publish(test_topic, "held transmit payload", setup.pair.now);
     for (0..4) |_| try setup.pumpOnce();
     const began = setup.pair.now.mono_ms;

@@ -11,7 +11,7 @@ const Set = state_mod.PeerSet;
 const Snapshot = struct { generation: u64 = 0, score: f64 = 0 };
 
 fn logChange(context: *const Context, topic: u16, peer: u16, comptime event: []const u8, backoff_ms: u64) void {
-    const row = &context.state.topics[topic];
+    const row = &context.state.registry.rows[topic];
     const conn = context.state.peers[peer].conn;
     std.log.scoped(.network_mesh).debug(event ++ " connection={d}:{d} topic={s} backoff_ms={d}", .{ conn.index, conn.generation, row.string[0..row.string_len], backoff_ms });
 }
@@ -57,12 +57,12 @@ pub const Mesh = struct {
     fn eligible(self: *const Mesh, context: *const Context, topic: u16, peer: u16, threshold: f64) bool {
         const row = &context.state.peers[peer];
         if (!row.active or context.peers.rows[row.logical.index].direct or self.retire.isSet(peer)) return false;
-        return context.state.subscribers(topic).isSet(peer) and self.score(context, peer) >= threshold;
+        return context.state.registry.subscribers(topic).isSet(peer) and self.score(context, peer) >= threshold;
     }
 
     fn graftEligible(self: *const Mesh, context: *const Context, topic: u16, peer: u16) bool {
         if (!self.eligible(context, topic, peer, 0) or self.pending_prunes[topic].isSet(peer)) return false;
-        return !context.peers.backedOff(context.state.peers[peer].logical, topic, context.state.topics[topic].generation, context.now -| (c.backoff_slack_heartbeats * context.heartbeat_ms));
+        return !context.peers.backedOff(context.state.peers[peer].logical, topic, context.state.registry.rows[topic].generation, context.now -| (c.backoff_slack_heartbeats * context.heartbeat_ms));
     }
 
     fn outbound(context: *const Context, peer: u16) bool {
@@ -80,13 +80,13 @@ pub const Mesh = struct {
 
     pub fn maintain(self: *Mesh, context: *const Context, topic: u16) void {
         self.flushPrunes(context, topic);
-        const members = context.state.mesh(topic);
+        const members = context.state.registry.mesh(topic);
         var it = members.iterator(.{});
         while (it.next()) |index| {
             const peer: u16 = @intCast(index);
             if (!self.eligible(context, topic, peer, 0)) self.prune(context, topic, peer, c.prune_backoff_ms);
         }
-        if (!context.state.subscribed(topic)) return;
+        if (!context.state.registry.subscribed(topic)) return;
         var candidate_peers: [c.peers_cap]u16 = undefined;
         const n = self.candidates(context, topic, &candidate_peers, true, 0);
         self.shuffle(candidate_peers[0..n]);
@@ -118,7 +118,7 @@ pub const Mesh = struct {
         var count: usize = 0;
         for (0..context.state.peers.len) |index| {
             const peer: u16 = @intCast(index);
-            if (context.state.mesh(topic).isSet(peer)) continue;
+            if (context.state.registry.mesh(topic).isSet(peer)) continue;
             if (!self.eligible(context, topic, peer, threshold)) continue;
             if (graft_only and !self.graftEligible(context, topic, peer)) continue;
             out[count] = peer;
@@ -128,7 +128,7 @@ pub const Mesh = struct {
     }
 
     fn graft(self: *Mesh, context: *const Context, topic: u16, peer: u16) bool {
-        const members = context.state.mesh(topic);
+        const members = context.state.registry.mesh(topic);
         if (members.isSet(peer) or !self.graftEligible(context, topic, peer)) return false;
         if (!queue(context, topic, peer, null)) return false;
         members.set(peer);
@@ -138,14 +138,14 @@ pub const Mesh = struct {
     }
 
     pub fn prune(self: *Mesh, context: *const Context, topic: u16, peer: u16, backoff_ms: u64) void {
-        if (context.state.mesh(topic).isSet(peer)) {
+        if (context.state.registry.mesh(topic).isSet(peer)) {
             logChange(context, topic, peer, "mesh_prune_local", backoff_ms);
-            context.state.mesh(topic).unset(peer);
+            context.state.registry.mesh(topic).unset(peer);
             context.scores.prune(context.state.peers[peer].logical.index, topic, context.now);
         }
         const row = &context.state.peers[peer];
         if (!row.active) return;
-        context.peers.addBackoff(row.logical, topic, context.state.topics[topic].generation, context.now, backoff_ms);
+        context.peers.addBackoff(row.logical, topic, context.state.registry.rows[topic].generation, context.now, backoff_ms);
         if (queue(context, topic, peer, backoff_ms / 1000)) {
             self.clearPending(topic, peer);
         } else {
@@ -169,7 +169,7 @@ pub const Mesh = struct {
             const backoff_ms = if (remaining_ms == 0) c.prune_backoff_ms else remaining_ms;
             const seconds = backoff_ms / 1000 + @intFromBool(backoff_ms % 1000 != 0);
             if (queue(context, topic, peer, seconds)) {
-                if (remaining_ms == 0) context.peers.addBackoff(logical, topic, context.state.topics[topic].generation, context.now, backoff_ms);
+                if (remaining_ms == 0) context.peers.addBackoff(logical, topic, context.state.registry.rows[topic].generation, context.now, backoff_ms);
                 entry.until = @max(entry.until, context.now +| (seconds *| 1000));
                 self.clearPending(topic, peer);
             } else if (context.now -| self.pending_since[peer].? >= context.pressure_ms) self.retire.set(peer);
@@ -203,7 +203,7 @@ pub const Mesh = struct {
     pub fn onGraft(self: *Mesh, context: *const Context, topic: u16, peer: u16) void {
         const row = &context.state.peers[peer];
         const backoff = context.peers.backoff(row.logical, topic);
-        const blocked = backoff.topic_generation == context.state.topics[topic].generation and context.now < backoff.until;
+        const blocked = backoff.topic_generation == context.state.registry.rows[topic].generation and context.now < backoff.until;
         if (blocked) {
             context.scores.penalize(row.logical.index, 1);
             context.scores.penalties.graft_backoff +|= 1;
@@ -213,16 +213,16 @@ pub const Mesh = struct {
             }
         }
         if (self.retire.isSet(peer) or self.pending_prunes[topic].isSet(peer)) return;
-        if (!context.state.subscribed(topic) or context.peers.rows[row.logical.index].direct or blocked or
+        if (!context.state.registry.subscribed(topic) or context.peers.rows[row.logical.index].direct or blocked or
             context.scores.score(row.logical.index, context.now) < 0 or
-            (!context.state.mesh(topic).isSet(peer) and context.state.mesh(topic).count() >= c.mesh_d_high and !outbound(context, peer)))
+            (!context.state.registry.mesh(topic).isSet(peer) and context.state.registry.mesh(topic).count() >= c.mesh_d_high and !outbound(context, peer)))
         {
             self.prune(context, topic, peer, c.prune_backoff_ms);
             return;
         }
-        if (context.state.mesh(topic).isSet(peer)) return;
-        context.state.setSubscription(topic, peer, true);
-        context.state.mesh(topic).set(peer);
+        if (context.state.registry.mesh(topic).isSet(peer)) return;
+        context.state.registry.setSubscription(topic, peer, true);
+        context.state.registry.mesh(topic).set(peer);
         context.scores.graft(row.logical.index, topic, context.now);
         logChange(context, topic, peer, "mesh_graft_received", 0);
     }
@@ -230,15 +230,15 @@ pub const Mesh = struct {
     pub fn onPrune(self: *Mesh, context: *const Context, topic: u16, peer: u16, backoff_ms: u64) void {
         _ = self;
         logChange(context, topic, peer, "mesh_prune_received", backoff_ms);
-        context.state.mesh(topic).unset(peer);
+        context.state.registry.mesh(topic).unset(peer);
         context.scores.prune(context.state.peers[peer].logical.index, topic, context.now);
-        context.peers.addBackoff(context.state.peers[peer].logical, topic, context.state.topics[topic].generation, context.now, backoff_ms);
+        context.peers.addBackoff(context.state.peers[peer].logical, topic, context.state.registry.rows[topic].generation, context.now, backoff_ms);
     }
 
     fn trim(self: *Mesh, context: *const Context, topic: u16) void {
         var ordered: [c.peers_cap]u16 = undefined;
         var count: usize = 0;
-        var it = context.state.mesh(topic).iterator(.{});
+        var it = context.state.registry.mesh(topic).iterator(.{});
         while (it.next()) |peer| {
             ordered[count] = @intCast(peer);
             count += 1;
@@ -260,7 +260,7 @@ pub const Mesh = struct {
             survivors.set(peer);
         }
         for (ordered[0..count]) |peer| if (!survivors.isSet(peer)) self.prune(context, topic, peer, c.prune_backoff_ms);
-        assert(context.state.mesh(topic).count() == c.mesh_d);
+        assert(context.state.registry.mesh(topic).count() == c.mesh_d);
     }
 
     fn sort(self: *const Mesh, context: *const Context, members: []u16) void {
@@ -278,7 +278,7 @@ pub const Mesh = struct {
     }
 
     pub fn opportunistic(self: *Mesh, context: *const Context, topic: u16) void {
-        const members = context.state.mesh(topic);
+        const members = context.state.registry.mesh(topic);
         if (members.count() < c.mesh_d) return;
         var ordered: [c.peers_cap]u16 = undefined;
         var n: usize = 0;
@@ -307,7 +307,7 @@ pub const Mesh = struct {
                 if (self.eligible(context, topic, @intCast(index), threshold)) result.set(index);
             }
         } else {
-            var it = context.state.mesh(topic).iterator(.{});
+            var it = context.state.registry.mesh(topic).iterator(.{});
             while (it.next()) |index| {
                 if (self.eligible(context, topic, @intCast(index), threshold)) result.set(index);
             }
@@ -316,7 +316,7 @@ pub const Mesh = struct {
             } else self.fillPublication(context, topic, &result);
         }
         for (context.state.peers, 0..) |*row, index| {
-            if (row.active and !self.retire.isSet(index) and context.peers.rows[row.logical.index].direct and context.state.subscribers(topic).isSet(index)) result.set(index);
+            if (row.active and !self.retire.isSet(index) and context.peers.rows[row.logical.index].direct and context.state.registry.subscribers(topic).isSet(index)) result.set(index);
         }
         return result;
     }
@@ -340,7 +340,7 @@ pub const Mesh = struct {
     }
 
     pub fn fanout(self: *Mesh, context: *const Context, topic: u16, publishing: bool) *Set {
-        const row = &context.state.topics[topic];
+        const row = &context.state.registry.rows[topic];
         if (!publishing and context.now -| row.fanout_last_ms >= c.fanout_ttl_ms) {
             row.fanout = .initEmpty();
             return &row.fanout;
@@ -360,7 +360,7 @@ pub const Mesh = struct {
         const count = self.candidates(context, topic, &candidates_buf, false, context.scores.params.gossip_threshold);
         var n: usize = 0;
         for (candidates_buf[0..count]) |peer| {
-            if (context.state.fanout(topic).isSet(peer)) continue;
+            if (context.state.registry.fanout(topic).isSet(peer)) continue;
             candidates_buf[n] = peer;
             n += 1;
         }
@@ -375,7 +375,7 @@ pub const Mesh = struct {
 fn queue(context: *const Context, topic: u16, peer: u16, prune_s: ?u64) bool {
     var bytes: [32 + topic_mod.topic_max_len]u8 = undefined;
     var writer = protobuf.Writer.init(&bytes);
-    const name = context.state.topicString(topic);
+    const name = context.state.registry.topicString(topic);
     if (prune_s) |seconds| {
         writer.varint(protobuf.pruneRpcSize(name, seconds));
         protobuf.writePruneRpc(&writer, name, seconds);
@@ -395,10 +395,10 @@ const Fixture = struct {
         errdefer g.deinit();
         const name = "/eth2/01020304/beacon_block/ssz_snappy";
         assert(g.subscribe(name));
-        const topic = g.state.findTopic(name).?;
+        const topic = g.state.registry.findTopic(name).?;
         for (0..count) |index| {
             const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(index), .generation = 1 }, .v1_2).?;
-            g.state.setSubscription(topic, peer.index, true);
+            g.state.registry.setSubscription(topic, peer.index, true);
         }
         return .{ .g = g, .topic = topic };
     }
@@ -411,7 +411,7 @@ test "gossip policy mesh trimming preserves highest scores and outbound quota" {
     var f = try Fixture.init(16);
     defer f.g.deinit();
     for (0..16) |peer| {
-        f.g.state.mesh(f.topic).set(peer);
+        f.g.state.registry.mesh(f.topic).set(peer);
         f.g.scores.graft(@intCast(peer), f.topic, 1);
         if (peer < 4) try std.testing.expect(f.g.scores.setAppScore(@intCast(peer), 100));
     }
@@ -420,24 +420,24 @@ test "gossip policy mesh trimming preserves highest scores and outbound quota" {
     const context = f.context(2);
     f.g.mesh_policy.takeSnapshot(&context);
     f.g.mesh_policy.maintain(&context, f.topic);
-    try std.testing.expectEqual(@as(usize, c.mesh_d), f.g.state.mesh(f.topic).count());
-    for (0..4) |peer| try std.testing.expect(f.g.state.mesh(f.topic).isSet(peer));
-    try std.testing.expect(f.g.state.mesh(f.topic).isSet(14));
-    try std.testing.expect(f.g.state.mesh(f.topic).isSet(15));
+    try std.testing.expectEqual(@as(usize, c.mesh_d), f.g.state.registry.mesh(f.topic).count());
+    for (0..4) |peer| try std.testing.expect(f.g.state.registry.mesh(f.topic).isSet(peer));
+    try std.testing.expect(f.g.state.registry.mesh(f.topic).isSet(14));
+    try std.testing.expect(f.g.state.registry.mesh(f.topic).isSet(15));
 }
 
 test "gossip policy outbound repair applies inside mesh degree limits" {
     var f = try Fixture.init(10);
     defer f.g.deinit();
-    for (0..8) |peer| f.g.state.mesh(f.topic).set(peer);
+    for (0..8) |peer| f.g.state.registry.mesh(f.topic).set(peer);
     f.g.peers.rows[f.g.state.peers[8].logical.index].direction = .outbound;
     f.g.peers.rows[f.g.state.peers[9].logical.index].direction = .outbound;
     const context = f.context(2);
     f.g.mesh_policy.takeSnapshot(&context);
     f.g.mesh_policy.maintain(&context, f.topic);
-    try std.testing.expectEqual(@as(usize, 10), f.g.state.mesh(f.topic).count());
-    try std.testing.expect(f.g.state.mesh(f.topic).isSet(8));
-    try std.testing.expect(f.g.state.mesh(f.topic).isSet(9));
+    try std.testing.expectEqual(@as(usize, 10), f.g.state.registry.mesh(f.topic).count());
+    try std.testing.expect(f.g.state.registry.mesh(f.topic).isSet(8));
+    try std.testing.expect(f.g.state.registry.mesh(f.topic).isSet(9));
 }
 
 test "gossip policy mesh queue pressure preserves required action ownership" {
@@ -450,16 +450,16 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, null, 1) != null);
     f.g.mesh_policy.takeSnapshot(&context);
     f.g.mesh_policy.maintain(&context, f.topic);
-    try std.testing.expectEqual(@as(usize, 0), f.g.state.mesh(f.topic).count());
+    try std.testing.expectEqual(@as(usize, 0), f.g.state.registry.mesh(f.topic).count());
     f.g.io.peers[0].resetTx(&f.g.store);
     f.g.mesh_policy.maintain(&context, f.topic);
-    try std.testing.expectEqual(@as(usize, 1), f.g.state.mesh(f.topic).count());
+    try std.testing.expectEqual(@as(usize, 1), f.g.state.registry.mesh(f.topic).count());
     f.g.io.peers[0].resetTx(&f.g.store);
     try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, null, 2) != null);
     try std.testing.expect(f.g.scores.setAppScore(0, -1));
     f.g.mesh_policy.takeSnapshot(&context);
     f.g.mesh_policy.maintain(&context, f.topic);
-    try std.testing.expectEqual(@as(usize, 0), f.g.state.mesh(f.topic).count());
+    try std.testing.expectEqual(@as(usize, 0), f.g.state.registry.mesh(f.topic).count());
     try std.testing.expect(f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
     f.g.mesh_policy.expireActions(30_002, 30_000);
     try std.testing.expect(f.g.mesh_policy.retire.isSet(0));
@@ -480,7 +480,7 @@ test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
         high_selected = true;
     };
     try std.testing.expect(high_selected);
-    f.g.state.setSubscribed(f.topic, false);
+    f.g.state.registry.setSubscribed(f.topic, false);
     for (f.g.state.peers) |*row| if (row.active) {
         row.out_stream = .{ .conn = row.conn, .id = 2, .slot = 0 };
     };
@@ -502,7 +502,7 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     @memset(bytes, 0);
     try std.testing.expect(f.g.io.peers[0].appendControl(bytes, true, null, 1) != null);
     f.g.last_now_ms = 1;
-    const name = f.g.state.topicString(f.topic);
+    const name = f.g.state.registry.topicString(f.topic);
     try std.testing.expect(f.g.unsubscribe(name));
     try std.testing.expect(f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
     context.now = 2;
@@ -513,12 +513,12 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     f.g.last_now_ms = context.now;
     try std.testing.expect(f.g.subscribe(name));
     f.g.mesh_policy.onGraft(&context, f.topic, 0);
-    try std.testing.expect(!f.g.state.mesh(f.topic).isSet(0));
+    try std.testing.expect(!f.g.state.registry.mesh(f.topic).isSet(0));
     try std.testing.expectEqual(@as(?u64, 1), f.g.mesh_policy.pending_since[0]);
     f.g.io.peers[0].resetTx(&f.g.store);
     f.g.mesh_policy.takeSnapshot(&context);
     f.g.mesh_policy.maintain(&context, f.topic);
-    try std.testing.expect(!f.g.state.mesh(f.topic).isSet(0));
+    try std.testing.expect(!f.g.state.registry.mesh(f.topic).isSet(0));
     try std.testing.expect(!f.g.mesh_policy.pending_prunes[f.topic].isSet(0));
     try std.testing.expectEqual(@as(?u64, null), f.g.mesh_policy.pending_since[0]);
     var expected: [32 + topic_mod.topic_max_len]u8 = undefined;
@@ -530,14 +530,14 @@ test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until que
     _ = f.g.io.peers[0].advance(&f.g.store, sent.len);
     context.now = 71_002;
     f.g.mesh_policy.onGraft(&context, f.topic, 0);
-    try std.testing.expect(f.g.state.mesh(f.topic).isSet(0));
+    try std.testing.expect(f.g.state.registry.mesh(f.topic).isSet(0));
     f.g.mesh_policy.expireActions(context.now, 30_000);
     try std.testing.expect(!f.g.mesh_policy.retire.isSet(0));
-    f.g.state.mesh(f.topic).unset(0);
+    f.g.state.registry.mesh(f.topic).unset(0);
     f.g.scores.prune(f.g.state.peers[0].logical.index, f.topic, context.now);
     f.g.mesh_policy.retire.set(0);
     f.g.mesh_policy.onGraft(&context, f.topic, 0);
-    try std.testing.expect(!f.g.state.mesh(f.topic).isSet(0));
+    try std.testing.expect(!f.g.state.registry.mesh(f.topic).isSet(0));
 }
 
 test "gossip policy delayed PRUNE preserves the effective remote backoff" {
@@ -565,7 +565,7 @@ test "gossip policy delayed PRUNE preserves the effective remote backoff" {
         try std.testing.expectEqual(local_until, f.g.peers.backoff(logical, f.topic).until);
         var expected: [32 + topic_mod.topic_max_len]u8 = undefined;
         var writer = protobuf.Writer.init(&expected);
-        const name = f.g.state.topicString(f.topic);
+        const name = f.g.state.registry.topicString(f.topic);
         writer.varint(protobuf.pruneRpcSize(name, seconds));
         protobuf.writePruneRpc(&writer, name, seconds);
         const sent = f.g.io.peers[0].segment(&f.g.store);
@@ -573,10 +573,10 @@ test "gossip policy delayed PRUNE preserves the effective remote backoff" {
         _ = f.g.io.peers[0].advance(&f.g.store, sent.len);
         context.now = queued_at + seconds * 1000 - 1;
         f.g.mesh_policy.maintain(&context, f.topic);
-        try std.testing.expect(!f.g.state.mesh(f.topic).isSet(0));
+        try std.testing.expect(!f.g.state.registry.mesh(f.topic).isSet(0));
         context.now = local_until + c.backoff_slack_heartbeats * context.heartbeat_ms;
         f.g.mesh_policy.maintain(&context, f.topic);
-        try std.testing.expect(f.g.state.mesh(f.topic).isSet(0));
+        try std.testing.expect(f.g.state.registry.mesh(f.topic).isSet(0));
     }
 }
 
@@ -623,9 +623,9 @@ test "gossip policy final review positive remainder respects rounded remote PRUN
     defer g.deinit();
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(name));
-    const topic = g.state.findTopic(name).?;
+    const topic = g.state.registry.findTopic(name).?;
     const peer = g.addPeer(.{ .index = 0, .generation = 1 }, .v1_2, &.{ .identity = .{ .bytes = [_]u8{1} ** 39 }, .address = .unspecified, .direction = .inbound }, .{ .mono_ms = 1, .unix_s = 0 }).admitted.index;
-    g.state.setSubscription(topic, peer, true);
+    g.state.registry.setSubscription(topic, peer, true);
     const logical = g.state.peers[peer].logical;
     const full = try std.testing.allocator.alloc(u8, g.options.critical_bytes);
     defer std.testing.allocator.free(full);
@@ -648,11 +648,11 @@ test "gossip policy final review positive remainder respects rounded remote PRUN
     try std.testing.expectEqualSlices(u8, writer.written(), sent);
     _ = g.io.peers[peer].advance(&g.store, sent.len);
     maintainFastHeartbeat(&g, topic, 1003);
-    try std.testing.expect(!g.state.mesh(topic).isSet(peer));
+    try std.testing.expect(!g.state.registry.mesh(topic).isSet(peer));
     try std.testing.expectEqual(@as(u64, 2000), g.peers.backoff(logical, topic).until);
     try std.testing.expectEqual(@as(u64, 1), g.peers.backoff(logical, topic).pruned_at);
     maintainFastHeartbeat(&g, topic, 2001);
-    try std.testing.expect(!g.state.mesh(topic).isSet(peer));
+    try std.testing.expect(!g.state.registry.mesh(topic).isSet(peer));
     maintainFastHeartbeat(&g, topic, 2002);
-    try std.testing.expect(g.state.mesh(topic).isSet(peer));
+    try std.testing.expect(g.state.registry.mesh(topic).isSet(peer));
 }

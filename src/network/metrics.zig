@@ -140,7 +140,7 @@ pub const Snapshot = struct {
         var mesh_peers = gossip.state.PeerSet.initEmpty();
         var meshes: [score_metrics.kind_count]gossip.state.PeerSet = @splat(.initEmpty());
         var score_kinds: score_metrics.TopicKinds = @splat(null);
-        for (&g.state.topics, 0..) |*row, topic_index| {
+        for (&g.state.registry.rows, 0..) |*row, topic_index| {
             if (!row.active) continue;
             mesh_peers.setUnion(row.mesh);
             const parsed = gossip.topic.parse(row.string[0..row.string_len]) orelse continue;
@@ -149,7 +149,7 @@ pub const Snapshot = struct {
             score_kinds[topic_index] = kind;
             meshes[kind].setUnion(row.mesh);
             var configured = std.mem.eql(u8, &parsed.digest, &core.local.fork.digest);
-            if (g.namespace) |*namespace| for (namespace.boundaries) |*boundary| {
+            if (g.state.registry.namespace) |*namespace| for (namespace.boundaries) |*boundary| {
                 if (std.mem.eql(u8, &parsed.digest, &boundary.digest)) {
                     configured = true;
                     break;
