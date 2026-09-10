@@ -440,61 +440,48 @@ pub fn createCompactMultiProof(
     return nodeToCompactMultiProof(allocator, pool, root, bitlist, 0, &temporary_roots);
 }
 
-/// Pointer to track position in bitlist and leaves during reconstruction
-const MultiProofPointer = struct {
-    bit_index: usize,
-    leaf_index: usize,
-};
-
-/// Recursively build a node from a bitlist and leaves
-fn compactMultiProofToNode(
-    pool: *Node.Pool,
-    bitlist: []const bool,
-    leaves: [][32]u8,
-    pointer: *MultiProofPointer,
-) Node.Error!Node.Id {
-    if (bitlist[pointer.bit_index]) {
-        pointer.bit_index += 1;
-        const leaf = try pool.createLeaf(&leaves[pointer.leaf_index]);
-        pointer.leaf_index += 1;
-        return leaf;
-    }
-
-    pointer.bit_index += 1;
-    const left = try compactMultiProofToNode(pool, bitlist, leaves, pointer);
-    errdefer pool.unref(left);
-
-    const right = try compactMultiProofToNode(pool, bitlist, leaves, pointer);
-    errdefer pool.unref(right);
-
-    return pool.createBranch(left, right);
-}
-
 /// Creates a node from a compact multiproof, rejecting paths beyond `max_depth`.
 pub fn createNodeFromCompactMultiProof(
     pool: *Node.Pool,
     leaves: [][32]u8,
     descriptor: []const u8,
 ) (Node.Error || Error)!Node.Id {
-    var arena = std.heap.ArenaAllocator.init(pool.allocator);
-    defer arena.deinit();
-    const temp_allocator = arena.allocator();
+    const bit_length = try validateDescriptor(descriptor);
+    if (leaves.len != bit_length / 2 + 1) return error.InvalidWitnessLength;
 
-    const bitlist = try descriptorToBitlist(temp_allocator, descriptor);
+    var left_roots: [max_depth]?Node.Id = @splat(null);
+    var depth: usize = 0;
+    errdefer for (left_roots[0..depth]) |left| {
+        if (left) |id| pool.unref(id);
+    };
 
-    if (leaves.len == 0) {
-        return error.InvalidWitnessLength;
+    var leaf_index: usize = 0;
+    for (0..bit_length) |bit_index| {
+        if (!getBit(descriptor, bit_index)) {
+            std.debug.assert(depth < max_depth);
+            left_roots[depth] = null;
+            depth += 1;
+            continue;
+        }
+
+        var current = try pool.createLeaf(&leaves[leaf_index]);
+        errdefer pool.unref(current);
+        leaf_index += 1;
+        while (depth > 0) {
+            const left = left_roots[depth - 1] orelse break;
+            current = try pool.createBranch(left, current);
+            left_roots[depth - 1] = null;
+            depth -= 1;
+        }
+        if (depth == 0) {
+            std.debug.assert(bit_index + 1 == bit_length);
+            std.debug.assert(leaf_index == leaves.len);
+            try pool.ref(current);
+            return current;
+        }
+        left_roots[depth - 1] = current;
     }
-    if (bitlist.len != leaves.len * 2 - 1) {
-        return error.InvalidWitnessLength;
-    }
-
-    var pointer = MultiProofPointer{ .bit_index = 0, .leaf_index = 0 };
-    const node = try compactMultiProofToNode(pool, bitlist, leaves, &pointer);
-    errdefer pool.unref(node);
-
-    try pool.ref(node);
-    return node;
+    unreachable;
 }
 
 test {

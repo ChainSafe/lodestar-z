@@ -526,3 +526,37 @@ test "memory_safety: compact multiproof reconstruction should reclaim partial no
         for (capacity_fill_nodes.items) |id| pool.unref(id);
     }
 }
+
+test "compact multiproof reconstruction needs no allocator scratch" {
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var pool = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = failing.allocator(), .pool_size = 256 });
+    defer pool.deinit();
+    var descriptor_bytes: [(2 * max_depth + 8) / 8]u8 = undefined;
+    var leaves: [max_depth + 1][32]u8 = @splat(makeLeaf(7));
+    for ([_]bool{ true, false }) |left| {
+        const descriptor = spineDescriptor(max_depth, left, &descriptor_bytes);
+        const baseline = pool.getNodesInUse();
+        const root = try proof.createNodeFromCompactMultiProof(&pool, &leaves, descriptor);
+        pool.unref(root);
+        try testing.expectEqual(baseline, pool.getNodesInUse());
+        try testing.expect(!failing.has_induced_failure);
+    }
+}
+
+test "memory_safety: iterative proof reconstruction releases every unfinished frontier" {
+    const depth = 5;
+    var descriptor_bytes: [(2 * depth + 8) / 8]u8 = undefined;
+    var leaves: [depth + 1][32]u8 = @splat(makeLeaf(9));
+    for ([_]bool{ true, false }) |left| {
+        const descriptor = spineDescriptor(depth, left, &descriptor_bytes);
+        for (0..2 * depth + 1) |capacity| {
+            var pool = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = testing.allocator, .pool_size = @intCast(capacity) });
+            defer pool.deinit();
+            const baseline = pool.getNodesInUse();
+            try testing.expectError(error.PoolExhausted, proof.createNodeFromCompactMultiProof(&pool, &leaves, descriptor));
+            try testing.expectEqual(baseline, pool.getNodesInUse());
+            for (0..capacity) |_| _ = try pool.createLeafFromUint(0);
+            try testing.expectError(error.PoolExhausted, pool.createLeafFromUint(0));
+        }
+    }
+}
