@@ -408,7 +408,7 @@ test "single proof through chunked_leaf" {
 }
 
 // Compact multiproof descending through a `.chunked_leaf`: exercises the
-// opaque-materialization path in nodeToCompactMultiProof, which the plain
+// opaque-materialization path in createCompactMultiProof, which the plain
 // `compact multiproof` test never reaches.
 test "compact multiproof through chunked_leaf" {
     const K: usize = ChunkedLeaf.K;
@@ -525,4 +525,57 @@ test "memory_safety: compact multiproof reconstruction should reclaim partial no
 
         for (capacity_fill_nodes.items) |id| pool.unref(id);
     }
+}
+
+test "compact multiproof generation allocates only the output for plain nodes" {
+    var pool = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = testing.allocator, .pool_size = 256 });
+    defer pool.deinit();
+    var next_value: u8 = 1;
+    const root = try buildFullTree(&pool, 5, &next_value);
+    defer pool.unref(root);
+    const before = root.getRoot(&pool).*;
+    const baseline = pool.getNodesInUse();
+    for (descriptor_test_cases) |case| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+        const leaves = try proof.createCompactMultiProof(failing.allocator(), &pool, root, case.input);
+        defer failing.allocator().free(leaves);
+        try testing.expectEqual(@as(usize, 1), failing.alloc_index);
+        try testing.expectEqual(baseline, pool.getNodesInUse());
+        try testing.expectEqualSlices(u8, &before, root.getRoot(&pool));
+    }
+}
+
+test "memory_safety: compact multiproof output OOM preserves source nodes" {
+    var pool = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = testing.allocator, .pool_size = 16 });
+    defer pool.deinit();
+    const root = try pool.createLeafFromUint(42);
+    defer pool.unref(root);
+    const baseline = pool.getNodesInUse();
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, proof.createCompactMultiProof(failing.allocator(), &pool, root, &.{0x80}));
+    try testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "memory_safety: streamed proof generation cleans up opaque materialization on OOM" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = ChunkedLeaf.K * 6 });
+    defer pool.deinit();
+    var chunks: [ChunkedLeaf.K][32]u8 align(64) = undefined;
+    fillChunks(&chunks, ChunkedLeaf.K);
+    const root = try pool.createChunkedLeaf(&chunks, ChunkedLeaf.K);
+    defer pool.unref(root);
+    const descriptor = try proof.computeDescriptor(allocator, &.{Gindex.fromDepth(ChunkedLeaf.k_log2, 0)});
+    defer allocator.free(descriptor);
+    try testing.checkAllAllocationFailures(allocator, struct {
+        fn run(output_allocator: std.mem.Allocator, source_pool: *Node.Pool, source: Node.Id, input: []const u8) !void {
+            const baseline = source_pool.getNodesInUse();
+            const original_allocator = source_pool.allocator;
+            source_pool.allocator = output_allocator;
+            defer source_pool.allocator = original_allocator;
+            defer std.debug.assert(baseline == source_pool.getNodesInUse());
+            const leaves = try proof.createCompactMultiProof(output_allocator, source_pool, source, input);
+            defer output_allocator.free(leaves);
+            try testing.expectEqual(@as(usize, ChunkedLeaf.k_log2 + 1), leaves.len);
+        }
+    }.run, .{ &pool, root, descriptor });
 }

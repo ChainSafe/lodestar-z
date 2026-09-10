@@ -383,42 +383,6 @@ fn validateDescriptor(descriptor: []const u8) Error!usize {
     return error.InvalidWitnessLength;
 }
 
-/// Recursively extract leaves from node using bitlist
-fn nodeToCompactMultiProof(
-    allocator: Allocator,
-    pool: *Node.Pool,
-    node_id: Node.Id,
-    bitlist: []const bool,
-    bit_index: usize,
-    temporary_roots: *std.ArrayListUnmanaged(Node.Id),
-) (Node.Error || Error)![][32]u8 {
-    // If bit is 1, this node is a leaf in the proof
-    if (bitlist[bit_index]) {
-        const leaves = try allocator.alloc([32]u8, 1);
-        leaves[0] = node_id.getRoot(pool).*;
-        return leaves;
-    }
-
-    // Materialize opaque (container_struct/chunked_leaf) nodes lazily so we can navigate
-    // into their children. The temporary root is owned by `temporary_roots`
-    // and unref'd when the outer caller exits.
-    const current = try materializeIfOpaque(allocator, pool, node_id, temporary_roots);
-
-    // Otherwise, recurse into children
-    const left_id = try current.getLeft(pool);
-    const left = try nodeToCompactMultiProof(allocator, pool, left_id, bitlist, bit_index + 1, temporary_roots);
-    defer allocator.free(left);
-
-    const right_id = try current.getRight(pool);
-    const right = try nodeToCompactMultiProof(allocator, pool, right_id, bitlist, bit_index + left.len * 2, temporary_roots);
-    defer allocator.free(right);
-
-    const result = try allocator.alloc([32]u8, left.len + right.len);
-    @memcpy(result[0..left.len], left);
-    @memcpy(result[left.len..], right);
-    return result;
-}
-
 /// Creates a compact multiproof for the given descriptor.
 pub fn createCompactMultiProof(
     allocator: Allocator,
@@ -426,18 +390,41 @@ pub fn createCompactMultiProof(
     root: Node.Id,
     descriptor: []const u8,
 ) (Node.Error || Error)![][32]u8 {
-    const bitlist = try descriptorToBitlist(allocator, descriptor);
-    defer allocator.free(bitlist);
+    const bit_length = try validateDescriptor(descriptor);
+    const leaves = try allocator.alloc([32]u8, bit_length / 2 + 1);
+    errdefer allocator.free(leaves);
 
     var temporary_roots: std.ArrayListUnmanaged(Node.Id) = .empty;
     defer {
-        for (temporary_roots.items) |temp_root| {
-            pool.unref(temp_root);
-        }
+        for (temporary_roots.items) |temp_root| pool.unref(temp_root);
         temporary_roots.deinit(allocator);
     }
 
-    return nodeToCompactMultiProof(allocator, pool, root, bitlist, 0, &temporary_roots);
+    var pending: [max_depth]Node.Id = undefined;
+    var pending_count: usize = 0;
+    var current = root;
+    var leaf_index: usize = 0;
+    for (0..bit_length) |bit_index| {
+        if (getBit(descriptor, bit_index)) {
+            leaves[leaf_index] = current.getRoot(pool).*;
+            leaf_index += 1;
+            if (pending_count == 0) {
+                std.debug.assert(bit_index + 1 == bit_length);
+                break;
+            }
+            pending_count -= 1;
+            current = pending[pending_count];
+        } else {
+            current = try materializeIfOpaque(allocator, pool, current, &temporary_roots);
+            std.debug.assert(pending_count < max_depth);
+            pending[pending_count] = try current.getRight(pool);
+            pending_count += 1;
+            current = try current.getLeft(pool);
+        }
+    }
+    std.debug.assert(leaf_index == leaves.len);
+    std.debug.assert(pending_count == 0);
+    return leaves;
 }
 
 /// Pointer to track position in bitlist and leaves during reconstruction
