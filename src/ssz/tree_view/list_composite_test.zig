@@ -867,18 +867,22 @@ test "memory_safety: getAllReadonlyValues should deinit completed prefix and cur
     var view = try ListType.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
-    // Fail the second element's second field after its first field and the prefix own memory.
-    var failing = std.testing.FailingAllocator.init(allocator, .{
-        .fail_index = 8,
-        .resize_fail_index = 0,
-    });
-
-    try std.testing.expectError(
-        error.OutOfMemory,
-        view.getAllReadonlyValues(failing.allocator()),
-    );
-    // The completed prefix and current partially converted value must not leak.
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    var backing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+    var saw_operation_oom = false;
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
+        fn run(
+            output_allocator: std.mem.Allocator,
+            input: *ListType.TreeView,
+            saw_oom: *bool,
+        ) !void {
+            errdefer saw_oom.* = true;
+            const values = try input.getAllReadonlyValues(output_allocator);
+            defer output_allocator.free(values);
+            defer for (values) |*value| Element.deinit(output_allocator, value);
+            try std.testing.expectEqual(@as(usize, 2), values.len);
+        }
+    }.run, .{ view, &saw_operation_oom });
+    try std.testing.expect(saw_operation_oom);
 }
 
 test "memory_safety: iterator nextValue should deinit current value on conversion OOM" {
@@ -908,16 +912,23 @@ test "memory_safety: iterator nextValue should deinit current value on conversio
     var view = try ListType.TreeView.init(allocator, &pool, root);
     defer view.deinit();
 
-    var iterator = view.iteratorReadonly(0);
-    // Fail the second field after the first field owns an allocation.
-    var failing = std.testing.FailingAllocator.init(allocator, .{
-        .fail_index = 2,
-        .resize_fail_index = 0,
-    });
-
-    try std.testing.expectError(error.OutOfMemory, iterator.nextValue(failing.allocator()));
-    // The current partially converted value must not leak.
-    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    var backing = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+    var saw_operation_oom = false;
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
+        fn run(
+            output_allocator: std.mem.Allocator,
+            input: *ListType.TreeView,
+            saw_oom: *bool,
+        ) !void {
+            var iterator = input.iteratorReadonly(0);
+            errdefer saw_oom.* = true;
+            var value = try iterator.nextValue(output_allocator);
+            defer Element.deinit(output_allocator, &value);
+            try std.testing.expectEqualSlices(u8, &.{1}, value.first.items);
+            try std.testing.expectEqualSlices(u8, &.{2}, value.second.items);
+        }
+    }.run, .{ view, &saw_operation_oom });
+    try std.testing.expect(saw_operation_oom);
 }
 
 // std.testing.allocator can't see pool-slot leaks, so check getNodesInUse() against a baseline.
