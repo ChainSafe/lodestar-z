@@ -29,8 +29,6 @@ pub const outcomes_per_pump: usize = 16;
 
 pub const InitError = gossipsub_mod.InitError;
 
-pub const retry_min_ms = @import("peer_session.zig").retry_min_ms;
-pub const retry_max_ms = @import("peer_session.zig").retry_max_ms;
 pub const openings_per_pump: usize = 16;
 
 pub const Driver = struct {
@@ -102,17 +100,23 @@ pub const Driver = struct {
         return self.inner.resourceSnapshot();
     }
 
-    /// Hosts inspect this after each connected event and service pump. Refused or locally retired
-    /// gossip relationships retain reqresp access.
-    /// Retry peerConnected with the same live handle after capacity returns or its duplicate closes.
-    /// Hosts schedule retries at most once per second per connection, bounded by transport capacity.
-    pub fn admitted(self: *Driver, conn: Handle) bool {
+    pub fn admitted(self: *const Driver, conn: Handle) bool {
         return self.inner.sessions.findPeer(conn) != null;
     }
 
+    pub const Delivery = enum { unavailable, pending, available };
+
+    pub fn deliveryStatus(self: *const Driver, conn: Handle) Delivery {
+        const index = self.inner.sessions.findPeer(conn) orelse return .unavailable;
+        return switch (self.inner.sessions.rows[index].outbound) {
+            .none, .closing => .unavailable,
+            .pending, .negotiating => .pending,
+            .live => .available,
+        };
+    }
+
     pub fn deliveryAvailable(self: *const Driver, conn: Handle) bool {
-        const index = self.inner.sessions.findPeer(conn) orelse return false;
-        return self.inner.sessions.rows[index].outStream() != null;
+        return self.deliveryStatus(conn) == .available;
     }
 
     pub fn peerConnected(self: *Driver, engine: *Engine, conn: Handle, now: Now) Admission {
@@ -120,13 +124,12 @@ pub const Driver = struct {
         const identity = engine.peerId(conn) orelse return .unauthenticated;
         const address = engine.peerAddress(conn) orelse return .unauthenticated;
         const direction = engine.direction(conn) orelse return .unauthenticated;
-        const result = self.inner.addPeer(conn, .v1_2, &.{ .identity = identity, .address = address, .direction = direction }, now);
-        const peer = switch (result) {
-            .admitted => |peer| peer,
+        const result = self.inner.addPeer(conn, .v1_0, &.{ .identity = identity, .address = address, .direction = direction }, now);
+        switch (result) {
+            .admitted => {},
             .duplicate => return .duplicate,
             .capacity => return .capacity,
-        };
-        self.inner.sessions.rows[peer.index].outbound = .{ .waiting = now.mono_ms };
+        }
         return .admitted;
     }
 
@@ -143,7 +146,7 @@ pub const Driver = struct {
                 _ = self.peerConnected(engine, connected.conn, now);
             },
             .path_changed => |changed| self.inner.peers.migrate(changed.conn, changed.peer),
-            .stream_closed => |closed| self.streamClosed(engine, closed.stream, now),
+            .stream_closed => |closed| self.streamClosed(engine, closed.stream),
             .closed => |closed| {
                 const index = self.inner.sessions.findPeer(closed.conn) orelse continue;
                 self.retirePeer(router, engine, index);
@@ -158,29 +161,36 @@ pub const Driver = struct {
         outcome: routing.Outcome,
         now: Now,
     ) void {
+        self.inner.last_now_ms = @max(self.inner.last_now_ms, now.mono_ms);
         const index = self.inner.sessions.findPeer(outcome.stream.conn) orelse {
             engine.closeStream(outcome.stream, 0);
             return;
         };
         const session = &self.inner.sessions.rows[index];
-        switch (outcome.result) {
-            .ready => self.inner.counters.negotiation_ready += 1,
-            .rejected => self.inner.counters.negotiation_rejected += 1,
-            .failed => self.inner.counters.negotiation_failed += 1,
+        if (session.outbound == .closing) {
+            engine.closeStream(outcome.stream, 0);
+            return;
         }
-        if (outcome.result != .ready) std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_failed connection={d}:{d} stream={d} direction={s} reason={s} attempts={d}", .{ outcome.stream.conn.index, outcome.stream.conn.generation, outcome.stream.id, @tagName(outcome.direction), if (outcome.result == .failed) @tagName(outcome.result.failed) else "rejected", session.failures });
         if (outcome.direction == .outbound) {
             const pending = switch (session.outbound) {
                 .negotiating => |stream| stream,
                 else => return,
             };
             if (!std.meta.eql(pending, outcome.stream)) return;
+        }
+        switch (outcome.result) {
+            .ready => self.inner.counters.negotiation_ready += 1,
+            .rejected => self.inner.counters.negotiation_rejected += 1,
+            .failed => self.inner.counters.negotiation_failed += 1,
+        }
+        if (outcome.result != .ready) std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_failed connection={d}:{d} stream={d} direction={s} reason={s}", .{ outcome.stream.conn.index, outcome.stream.conn.generation, outcome.stream.id, @tagName(outcome.direction), if (outcome.result == .failed) @tagName(outcome.result.failed) else "rejected" });
+        if (outcome.direction == .outbound) {
             switch (outcome.result) {
                 .ready => |selection| {
                     if (selection.leftover.len != 0) {
                         std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_leftover connection={d}:{d} stream={d} bytes={d} fin={any}", .{ outcome.stream.conn.index, outcome.stream.conn.generation, outcome.stream.id, selection.leftover.len, selection.fin });
                         engine.closeStream(outcome.stream, 0);
-                        self.retry(index, now);
+                        self.resetOutbound(engine, index);
                         return;
                     }
                     self.replaceOutbound(
@@ -190,7 +200,7 @@ pub const Driver = struct {
                         selection.protocol.meshsub,
                     );
                 },
-                else => self.retry(index, now),
+                else => self.resetOutbound(engine, index),
             }
         } else switch (outcome.result) {
             .ready => |selection| {
@@ -213,15 +223,10 @@ pub const Driver = struct {
     }
 
     pub fn nextWakeup(self: *const Driver, now: Now, event_capacity: usize) ?u64 {
-        var next = self.nextIoWakeup(now, event_capacity);
+        const next = self.nextIoWakeup(now, event_capacity);
         for (self.inner.sessions.rows) |*session| {
             if (!session.active) continue;
-            if (session.needs_service) return now.mono_ms;
-            switch (session.outbound) {
-                .waiting => |deadline| next = @min(next orelse deadline, @max(now.mono_ms, deadline)),
-                .live => {},
-                .negotiating => {},
-            }
+            if (session.needs_service or session.outbound == .pending or session.outbound == .closing) return now.mono_ms;
         }
         return next;
     }
@@ -252,12 +257,13 @@ pub const Driver = struct {
                         continue;
                     };
                 },
-                .waiting => |deadline| if (now.mono_ms >= deadline) {
+                .pending => {
                     self.openOutbound(router, engine, index, now);
                     openings += 1;
                     if (openings == openings_per_pump) break;
                 },
-                .negotiating => {},
+                .closing => self.retirePeer(router, engine, index),
+                .none, .negotiating => {},
             }
         }
         return self.pumpReady(router, engine, now, out);
@@ -272,28 +278,24 @@ pub const Driver = struct {
     ) void {
         const conn = self.inner.sessions.rows[index].conn;
         const stream = router.beginMeshsub(engine, conn, now) catch |err| {
-            self.inner.counters.negotiation_deferred += 1;
-            std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_deferred connection={d}:{d} reason={s} attempts={d}", .{ conn.index, conn.generation, @errorName(err), self.inner.sessions.rows[index].failures });
-            self.retry(index, now);
+            self.inner.counters.negotiation_refused += 1;
+            std.log.scoped(.network_gossip_errors).debug("gossip_negotiation_refused connection={d}:{d} reason={s}", .{ conn.index, conn.generation, @errorName(err) });
+            self.resetOutbound(engine, index);
             return;
         };
         self.inner.counters.negotiation_started += 1;
-        self.inner.sessions.rows[index].outbound = .{ .negotiating = stream };
+        self.inner.sessions.setOutbound(index, .{ .negotiating = stream });
     }
 
-    fn retry(self: *Driver, index: u16, now: Now) void {
-        self.inner.sessions.rows[index].retry(now.mono_ms);
-    }
-
-    fn streamClosed(self: *Driver, engine: *Engine, stream: StreamHandle, now: Now) void {
+    fn streamClosed(self: *Driver, engine: *Engine, stream: StreamHandle) void {
         const index = self.inner.sessions.findPeer(stream.conn) orelse return;
         const session = &self.inner.sessions.rows[index];
         switch (session.outbound) {
             .live => |live| if (std.meta.eql(live, stream)) {
                 self.resetOutbound(engine, index);
             },
-            .negotiating => |pending| if (std.meta.eql(pending, stream)) self.retry(index, now),
-            .waiting => {},
+            .negotiating => |pending| if (std.meta.eql(pending, stream)) self.resetOutbound(engine, index),
+            .none, .pending, .closing => {},
         }
         // Read-side FIN can be reported with buffered payload. The framing owner
         // drains it before resetting; a reset is observed by its next read.
@@ -312,8 +314,8 @@ pub const Driver = struct {
         if (self.inner.sessions.rows[index].outStream()) |stream| {
             std.log.scoped(.network_gossip).debug("gossip_stream_reset direction=outbound connection={d}:{d} stream={d}", .{ stream.conn.index, stream.conn.generation, stream.id });
             engine.closeStream(stream, 0);
-            self.inner.sessions.rows[index].retry(self.inner.last_now_ms);
         }
+        self.inner.sessions.setOutbound(index, .none);
         self.inner.cancelWrites(self.inner.sessions.ref(index));
     }
 
@@ -331,6 +333,7 @@ pub const Driver = struct {
         self.inner.sessions.rows[index].inbound_version = version;
         self.inner.sessions.rows[index].in_stream = stream;
         self.inner.sessions.rows[index].io.rx_ready = true;
+        if (self.inner.sessions.rows[index].outbound == .none) self.inner.sessions.setOutbound(index, .pending);
     }
 
     pub fn replaceOutbound(
@@ -343,23 +346,27 @@ pub const Driver = struct {
         if (self.inner.sessions.rows[index].outStream()) |prior| {
             if (std.meta.eql(prior, stream)) return;
         }
-        self.resetOutbound(engine, index);
+        if (self.inner.sessions.rows[index].outStream()) |prior| engine.closeStream(prior, 0);
+        self.inner.cancelWrites(self.inner.sessions.ref(index));
         self.inner.sessions.setVersion(index, version);
-        self.inner.sessions.rows[index].outbound = .{ .live = stream };
-        self.inner.sessions.rows[index].failures = 0;
+        self.inner.sessions.setOutbound(index, .{ .live = stream });
         self.inner.sendSubscriptions(index);
     }
 
     pub fn retirePeer(self: *const Driver, router: *routing.Router, engine: *Engine, index: u16) void {
         const peer = &self.inner.sessions.rows[index];
+        if (peer.outbound == .closing) std.log.scoped(.network_gossip_errors).debug("gossip_relationship_closed connection={d}:{d} reason={s} critical_frames={d} critical_bytes={d}", .{ peer.conn.index, peer.conn.generation, @tagName(peer.io.tx.last_drop), peer.io.tx.critical.count, peer.io.tx.critical.used });
         if (peer.outbound == .negotiating) {
             const stream = peer.outbound.negotiating;
             std.log.scoped(.network_gossip).debug("gossip_negotiation_cancelled connection={d}:{d} stream={d} reason=peer_retired", .{ stream.conn.index, stream.conn.generation, stream.id });
             router.cancel(engine, stream);
-            peer.outbound = .{ .waiting = 0 };
+            self.inner.sessions.setOutbound(index, .none);
         }
         if (peer.in_stream) |stream| engine.closeStream(stream, 0);
-        if (peer.outStream()) |stream| engine.closeStream(stream, 0);
+        switch (peer.outbound) {
+            .live, .closing => |stream| engine.closeStream(stream, 0),
+            else => {},
+        }
         self.inner.connectionClosed(peer.conn);
     }
 
@@ -495,6 +502,11 @@ pub const Driver = struct {
             const index = self.inner.sessions.cursor;
             self.inner.sessions.cursor = (index + 1) % self.inner.sessions.rows.len;
             if (!self.inner.sessions.rows[index].active) continue;
+            if (self.inner.sessions.rows[index].outbound == .closing) {
+                self.logSendPressure(@intCast(index), now.mono_ms);
+                self.retirePeer(router, engine, @intCast(index));
+                continue;
+            }
             if (first_serviced == null) first_serviced = index;
             const io = &self.inner.sessions.rows[index].io;
             var peer = Credits.peer(&self.inner.options);
@@ -505,6 +517,7 @@ pub const Driver = struct {
             }
             if (!write_first and io.tx.ready) self.flush(engine, @intCast(index), io, turn, &peer);
             self.logSendPressure(@intCast(index), now.mono_ms);
+            if (self.inner.sessions.rows[index].outbound == .closing) self.retirePeer(router, engine, @intCast(index));
             serviced += 1;
             if (serviced == self.inner.options.peers_per_pump) break;
         }
@@ -557,6 +570,7 @@ pub const Driver = struct {
         for (self.inner.sessions.rows, 0..) |*peer, i| {
             const io = &peer.io;
             if (!self.inner.sessions.rows[i].active) continue;
+            if (peer.outbound == .closing) return now.mono_ms;
             if (self.inner.sessions.rows[i].in_stream != null and
                 ((io.rx_ready and io.blocked != .events) or (io.blocked == .events and event_capacity > 0))) return now.mono_ms;
             if (self.inner.sessions.rows[i].outStream() != null and io.tx.ready and
@@ -575,10 +589,6 @@ pub const Driver = struct {
                 const reason = io.deadlines(&g.options).expired(now_ms) orelse break;
                 self.logIoTimeout(@intCast(index), @tagName(reason), now_ms);
                 switch (reason) {
-                    .prunes => {
-                        self.retirePeer(router, engine, @intCast(index));
-                        break;
-                    },
                     .subscriptions => {
                         g.counters.local_pressure_resets += 1;
                         g.counters.subscription_timeouts += 1;

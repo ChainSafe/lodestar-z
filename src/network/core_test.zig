@@ -489,7 +489,7 @@ test "core native local control capacity defers with future wakeup and no peer p
     setup.client.shutdown(&setup.pair.client, setup.pair.now);
 }
 
-test "core native gossip refusal retries selected connection once a second without score feedback" {
+test "core retains explicit direct connections without periodically resurrecting gossip" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -497,29 +497,26 @@ test "core native gossip refusal retries selected connection once a second witho
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
     const selected = snapshots[0];
-    const other = try setup.pair.dial();
-    try setup.pair.pump();
-    var transport: [32]Engine.Event = undefined;
-    _ = setup.pair.events(&setup.pair.client, &transport);
-    _ = setup.pair.events(&setup.pair.server, &transport);
-    setup.client.service.gossipsub.inner.connectionClosed(selected.connection.?);
-    try std.testing.expectEqual(
-        gossip.Handler.Admission.admitted,
-        setup.client.service.gossipsub.peerConnected(&setup.pair.client, other, setup.pair.now),
-    );
-    setup.pair.advance(1_000);
-    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
-    try std.testing.expect(!setup.client.service.gossipsub.admitted(selected.connection.?));
-    _ = setup.client.snapshots(&snapshots);
-    try std.testing.expect(snapshots[0].relevant);
-    try std.testing.expectEqual(@as(f64, 0), snapshots[0].score);
-    setup.client.service.gossipsub.inner.connectionClosed(other);
-    setup.pair.advance(999);
-    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
-    try std.testing.expect(!setup.client.service.gossipsub.admitted(selected.connection.?));
-    setup.pair.advance(1);
-    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
-    try std.testing.expect(setup.client.service.gossipsub.admitted(selected.connection.?));
+    const conn = selected.connection.?;
+    try std.testing.expect(setup.client.catalog.setDirect(selected.peer, true));
+    var remote: [4]t.Snapshot = undefined;
+    _ = setup.server.snapshots(&remote);
+    try std.testing.expect(setup.server.catalog.setDirect(remote[0].peer, true));
+    const driver = &setup.client.service.gossipsub;
+    driver.retirePeer(&setup.client.service.router, &setup.pair.client, driver.inner.sessions.findPeer(conn).?);
+    const started = driver.counters().negotiation_started;
+    for (0..4) |_| {
+        setup.pair.advance(1_000);
+        setup.client.reStatusPeers(setup.pair.now);
+        for (0..16) |_| try setup.step(0);
+        try std.testing.expect(!driver.admitted(conn));
+        const snapshot = setup.client.catalog.get(selected.peer).?;
+        try std.testing.expect(snapshot.relevant);
+        try std.testing.expect(snapshot.disconnect_reason == null);
+        try std.testing.expectEqual(@as(f64, 0), snapshot.score);
+    }
+    try std.testing.expectEqual(started, driver.counters().negotiation_started);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.selection.deficits.outbound);
 }
 
 test "core direct removal clears both pins and gossip score reads have no feedback" {
@@ -876,13 +873,13 @@ test "core coverage authenticated custody differs from gossip delivery and inval
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
+    try std.testing.expect(setup.client.catalog.setDirect(snapshots[0].peer, true));
     const connection = snapshots[0].connection.?;
     const index = setup.client.service.gossipsub.inner.sessions.findPeer(connection).?;
     setup.client.service.gossipsub.resetOutbound(&setup.pair.client, index);
     try std.testing.expect(!setup.client.service.gossipsub.deliveryAvailable(connection));
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
-    setup.client.service.gossipsub.inner.sessions.rows[index].outbound = .{ .waiting = setup.pair.now.mono_ms +| 30_000 };
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
@@ -1398,12 +1395,18 @@ test "core sampling delivery follows real outbound stream retirement replacement
     try std.testing.expectEqual(snapshot.custody_groups, setup.client.catalog.get(snapshot.peer).?.custody_groups);
     handler.negotiationResult(&setup.pair.client, .{ .stream = old_stream, .direction = .outbound, .owner = .meshsub, .result = .{ .ready = .{ .protocol = .{ .meshsub = .v1_2 }, .leftover = &.{}, .fin = false } } }, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 8), setup.client.coverageDeficits().groups);
-    _ = try waitSampling(&setup);
-    const replacement_stream = handler.inner.sessions.rows[index].outbound.live;
+    for (0..16) |_| try setup.step(1);
+    setup.pair.advance(60_000);
+    for (0..16) |_| try setup.step(1);
+    _ = try setup.pair.dial();
+    const replacement = try waitSampling(&setup);
+    try std.testing.expect(!std.meta.eql(snapshot.connection, replacement.connection));
+    const replacement_index = handler.inner.sessions.findPeer(replacement.connection.?).?;
+    const replacement_stream = handler.inner.sessions.rows[replacement_index].outbound.live;
     try std.testing.expect(!std.meta.eql(old_stream, replacement_stream));
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     handler.transportEvents(&setup.client.service.router, &setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);
-    try std.testing.expect(handler.deliveryAvailable(snapshot.connection.?));
+    try std.testing.expect(handler.deliveryAvailable(replacement.connection.?));
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(snapshot.custody_groups, setup.client.catalog.get(snapshot.peer).?.custody_groups);
     setup.client.shutdown(&setup.pair.client, setup.pair.now);
@@ -1435,4 +1438,31 @@ test "core sampling demand rejects atomically trims fork bound and expires exclu
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 101, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     try std.testing.expectEqualDeep(t.Demand{}, setup.client.demand);
+}
+
+test "core replaces failed gossip below target without a reputation penalty or admission timer" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&snapshots);
+    const snapshot = snapshots[0];
+    const conn = snapshot.connection.?;
+    const driver = &setup.client.service.gossipsub;
+    const index = driver.inner.sessions.findPeer(conn).?;
+    const started = driver.counters().negotiation_started;
+    try std.testing.expect(driver.deliveryAvailable(conn));
+    try std.testing.expectEqual(@as(u16, 1), setup.client.selection.retained_count);
+    driver.resetOutbound(&setup.pair.client, index);
+    try std.testing.expectEqual(setup.pair.now.mono_ms, setup.client.nextWakeup(setup.pair.now, 0, 0, 0, 0).?);
+    setup.client.reconcile(setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.selection.retained_count);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.selection.deficits.outbound);
+    const after = setup.client.catalog.get(snapshot.peer).?;
+    try std.testing.expectEqual(t.DisconnectReason.gossip_unavailable, after.disconnect_reason.?);
+    try std.testing.expectEqual(snapshot.score, after.score);
+    try std.testing.expectEqual(@as(u64, 0), after.ban_until_ms);
+    setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+    try std.testing.expectEqual(started, driver.counters().negotiation_started);
 }

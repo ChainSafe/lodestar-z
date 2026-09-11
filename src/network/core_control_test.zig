@@ -92,9 +92,6 @@ test "core native stalled fork transition only wakes for eligible work" {
     const conn = snapshots[0].connection.?;
     try std.testing.expect(snapshots[0].relevant);
     try std.testing.expect(setup.client.service.gossipsub.admitted(conn));
-    const gossip_due = setup.client.control.schedules[peer.index].gossip_retry_ms;
-    try std.testing.expect(gossip_due > setup.pair.now.mono_ms);
-    try std.testing.expectEqual(gossip_due, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
     const updated: t.LocalState = .{
         .fork = .{ .fork = .fulu, .digest = @splat(1) },
         .status = .{ .fork_digest = @splat(1), .earliest_available_slot = 0 },
@@ -106,7 +103,6 @@ test "core native stalled fork transition only wakes for eligible work" {
         _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     }
     try std.testing.expect(!setup.client.catalog.get(peer).?.relevant);
-    try std.testing.expect(gossip_due < setup.pair.now.mono_ms);
     try std.testing.expect(setup.client.service.gossipsub.admitted(conn));
     var active: usize = 0;
     for (setup.client.control.operations) |op| if (op.request != null and !op.cancelled) {
@@ -121,13 +117,7 @@ test "core native stalled fork transition only wakes for eligible work" {
     try setup.server.updateFork(&updated, setup.pair.now);
     for (0..80) |_| try setup.step(0);
     try std.testing.expect(setup.client.catalog.get(peer).?.relevant);
-    const resumed = setup.client.control.schedules[peer.index].gossip_retry_ms;
-    try std.testing.expectEqual(setup.pair.now.mono_ms + 1_000, resumed);
-    try std.testing.expectEqual(resumed, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
-    setup.pair.advance(1_000);
-    try std.testing.expectEqual(setup.pair.now.mono_ms, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
-    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
-    try std.testing.expectEqual(setup.pair.now.mono_ms + 1_000, setup.client.control.schedules[peer.index].gossip_retry_ms);
+    try std.testing.expect(setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).? > setup.pair.now.mono_ms);
 }
 
 test "core native host fork transition cancels old maintenance without reviving closing peers" {
@@ -437,7 +427,7 @@ test "core native application response borrows survive same turn hard close" {
     );
 }
 
-test "core native inbound meshsub before Status never creates managed gossip relevance" {
+test "core native gossip admission precedes Status without establishing managed relevance" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -464,7 +454,7 @@ test "core native inbound meshsub before Status never creates managed gossip rel
     var snapshots: [4]t.Snapshot = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.server.snapshots(&snapshots));
     try std.testing.expect(!snapshots[0].relevant);
-    try std.testing.expect(!setup.server.service.gossipsub.admitted(snapshots[0].connection.?));
+    try std.testing.expect(setup.server.service.gossipsub.admitted(snapshots[0].connection.?));
     try std.testing.expectEqual(@as(f64, 0), snapshots[0].score);
     try std.testing.expectEqual(@as(u16, 0), setup.server.peerCounts().relevant);
 }
@@ -658,7 +648,6 @@ test "core control irrelevant metadata cannot create an ineligible wakeup" {
     try std.testing.expect(setup.client.catalog.invalidateStatus(peer, conn));
     const row = &setup.client.control.schedules[peer.index];
     row.metadata_pending = true;
-    row.gossip_retry_ms = 0;
     row.status_due_ms = setup.pair.now.mono_ms + 100;
     row.ping_due_ms = setup.pair.now.mono_ms + 200;
     const started = setup.client.control.counters.started;
@@ -670,7 +659,7 @@ test "core control irrelevant metadata cannot create an ineligible wakeup" {
     try std.testing.expectEqual(started + 1, setup.client.control.counters.started);
 }
 
-test "core control initial gossip admission wakes alongside active request" {
+test "core control does not schedule gossip admission alongside active request" {
     var setup: Setup = .{};
     try setup.init(&.{});
     defer setup.deinit();
@@ -682,10 +671,8 @@ test "core control initial gossip admission wakes alongside active request" {
     setup.client.reStatusPeers(setup.pair.now);
     setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
     const started = setup.client.control.counters.started;
-    row.gossip_retry_ms = 0;
-    try std.testing.expectEqual(setup.pair.now.mono_ms, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
+    try std.testing.expect(setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now) == null);
     setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
-    try std.testing.expectEqual(setup.pair.now.mono_ms + 1000, row.gossip_retry_ms);
     try std.testing.expectEqual(started, setup.client.control.counters.started);
     try std.testing.expect(setup.client.disconnect(peer, .host, setup.pair.now));
     const deadline = row.closing.?.deadline_ms;

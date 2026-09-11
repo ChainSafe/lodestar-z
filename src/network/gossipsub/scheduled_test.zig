@@ -150,7 +150,15 @@ test "gossip scheduler converges through pressure loss stream replacement and se
         try std.testing.expect(sim.nodes[1].handler.unsubscribe(name));
         try sim.until(start + 1100);
         try std.testing.expect(sim.nodes[1].handler.subscribe(name));
+        const sender = sim.nodes[0].handler.inner.sessions;
+        const sender_index = sender.findPeer(sim.connections[0]).?;
+        const attempts = sim.nodes[0].handler.counters().negotiation_started;
+        try std.testing.expect(sender.rows[sender_index].outbound == .none);
+        sim.nodes[1].handler.resetOutbound(&sim.pair.server, index);
+        const offered = try sim.nodes[1].router.beginMeshsub(&sim.pair.server, sim.connections[1], sim.pair.now);
+        receiver.setOutbound(index, .{ .negotiating = offered });
         try sim.until(start + 2400);
+        try std.testing.expectEqual(attempts + 1, sim.nodes[0].handler.counters().negotiation_started);
         try std.testing.expect(!std.meta.eql(old_stream, receiver.rows[index].in_stream.?));
         for (sim.received[0..4]) |received| try std.testing.expect(received);
 

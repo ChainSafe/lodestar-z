@@ -46,7 +46,6 @@ const Schedule = struct {
     status_due_ms: u64 = 0,
     ping_due_ms: u64 = 0,
     retry_ms: u64 = 0,
-    gossip_retry_ms: u64 = 0,
     metadata_pending: bool = false,
     desired_sequence: u64 = 0,
     closing: ?struct { reason: t.DisconnectReason, deadline_ms: u64, sent: bool = false } = null,
@@ -65,7 +64,6 @@ pub const Control = struct {
         identify_failures: [@typeInfo(@import("../identify/root.zig").Failure).@"enum".fields.len]u64 = @splat(0),
         started: u64 = 0,
         deferred: u64 = 0,
-        gossip_refused: u64 = 0,
         closed: [@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
         closed_by_client: [client.count][@typeInfo(t.DisconnectReason).@"enum".fields.len]u64 = @splat(@splat(0)),
         events: @import("control_metrics.zig").Counters = .{},
@@ -253,8 +251,6 @@ pub const Control = struct {
             row.transition_until_ms = now.mono_ms +| self.options.progress_timeout_ms;
             row.status_due_ms = now.mono_ms;
             row.retry_ms = 0;
-            // Gossip admission resumes in maintain only after fresh Status restores relevance.
-            row.gossip_retry_ms = 0;
             row.metadata_pending = true;
             for (self.operations) |*op| if (op.request) |request| {
                 if (!std.meta.eql(op.peer, peer) or !std.meta.eql(op.conn, row.conn)) continue;
@@ -270,7 +266,7 @@ pub const Control = struct {
     }
     fn goodbyeReason(reason: t.DisconnectReason) u64 {
         return switch (reason) {
-            .host, .shutdown, .duplicate, .capacity, .remote_goodbye, .count_pruning => 1,
+            .host, .shutdown, .duplicate, .capacity, .remote_goodbye, .count_pruning, .gossip_unavailable => 1,
             .incompatible_fork, .future_head, .finalized_mismatch, .missing_availability => 2,
             .transport_closed,
             .invalid_status,
@@ -354,12 +350,6 @@ pub const Control = struct {
             if (decision.close) {
                 self.close(service, catalog, engine, peer, row.conn, row.closing.?.reason, now);
                 continue;
-            }
-            if (decision.gossip) {
-                const admission = service.gossipsub.peerConnected(engine, row.conn, now);
-                if (admission != .admitted) self.counters.gossip_refused +|= 1;
-                if (snapshot.direct) service.gossipsub.markDirect(row.conn);
-                row.gossip_retry_ms = now.mono_ms +| 1_000;
             }
             row.identify_enabled = service.identify != null;
             if (snapshot.relevant and row.closing == null and row.identify_enabled and row.identify_state == .pending and now.mono_ms >= row.identify_retry_ms) {
@@ -740,7 +730,6 @@ pub const Control = struct {
 
 const Decision = struct {
     request: ?enum { status, metadata, ping, goodbye } = null,
-    gossip: bool = false,
     close: bool = false,
     deadline_ms: ?u64 = null,
 
@@ -764,8 +753,6 @@ fn decide(row: *const Schedule, relevant: bool, active_request: bool, now: u64) 
     }
     if (relevant) {
         if (row.identify_enabled and row.identify_state == .pending) decision.wake(row.identify_retry_ms, now);
-        decision.wake(row.gossip_retry_ms, now);
-        decision.gossip = now >= row.gossip_retry_ms;
     }
     if (active_request) return decision;
     const request_due = if (relevant and row.metadata_pending) 0 else @min(row.status_due_ms, row.ping_due_ms);

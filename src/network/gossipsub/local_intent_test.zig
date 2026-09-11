@@ -107,9 +107,7 @@ test "local intent separate validation control score backoff and generation pins
     g.overlay.rows[0].fanout.set(peer.index);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     g.overlay.rows[0].fanout.unset(peer.index);
-    g.sessions.rows[peer.index].io.tx.pending_prunes.set(0);
-    try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
-    g.sessions.rows[peer.index].io.tx.pending_prunes.unset(0);
+
     g.peers.scores.invalid(logical.index, 0);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     g.overlay.rows[0].retire_after_ms = now.mono_ms;

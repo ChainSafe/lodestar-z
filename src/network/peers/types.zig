@@ -55,6 +55,7 @@ pub const DisconnectReason = enum {
     reputation,
     banned,
     count_pruning,
+    gossip_unavailable,
     health_error,
 };
 pub const Snapshot = struct {

@@ -24,7 +24,7 @@ pub const Options = struct {
     /// Absolute per-frame residence from queue admission through transmission.
     tx_timeout_ms: u64 = 30_000,
     control_bytes: usize = 28 * 1024,
-    critical_bytes: usize = 4 * 1024,
+    critical_bytes: usize = @import("outbox.zig").critical_bytes,
     tx_peer_bytes: usize = 16 * 1024 * 1024,
     peers_per_pump: usize = 32,
     topics_per_pump: usize = 4,
@@ -79,7 +79,7 @@ pub fn validate(o: *const Options) (error{InvalidLimits} || @import("topic_polic
     try range(o.large_pool_count, 1, 16);
     try range(o.body_buffer_bytes, 1, constants.GOSSIP_MAX_SIZE);
     try range(o.control_bytes, 1, 65536);
-    try range(o.critical_bytes, 32 + topic_mod.topic_max_len, 65536);
+    try range(o.critical_bytes, 32 + topic_mod.topic_max_len, @import("outbox.zig").critical_bytes);
     try range(o.tx_peer_bytes, compressed, 1024 * 1024 * 1024);
     try range(o.topics_per_pump, 1, constants.topics_cap);
     try range(o.peers_per_pump, 1, constants.peers_cap);

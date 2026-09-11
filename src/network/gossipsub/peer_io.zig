@@ -5,7 +5,7 @@ const constants = @import("constants.zig");
 const assert = std.debug.assert;
 const Outbox = @import("outbox.zig").Outbox;
 
-pub const TimeoutReason = enum { subscriptions, receive_pressure, receive_frame, send_queue, send_progress, prunes };
+pub const TimeoutReason = enum { subscriptions, receive_pressure, receive_frame, send_queue, send_progress };
 pub const Deadlines = struct {
     values: [@typeInfo(TimeoutReason).@"enum".fields.len]?u64 = @splat(null),
 
@@ -94,7 +94,6 @@ pub const PeerIo = struct {
     }
     pub fn deadlines(self: *const PeerIo, options: *const @import("options.zig").Options) Deadlines {
         var result: Deadlines = .{};
-        if (self.tx.prune_since) |since| result.values[@intFromEnum(TimeoutReason.prunes)] = since +| options.pressure_timeout_ms;
         if (self.tx.subscription_since) |since| result.values[@intFromEnum(TimeoutReason.subscriptions)] = since +| options.pressure_timeout_ms;
         if (self.pressure_since) |since| result.values[@intFromEnum(TimeoutReason.receive_pressure)] = since +| options.pressure_timeout_ms;
         if (self.frame_since) |since| {
