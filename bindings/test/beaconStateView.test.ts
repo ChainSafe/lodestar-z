@@ -9,6 +9,18 @@ import {getFirstEraFilePath} from "./eraFiles.ts";
 const MAINNET_PUBKEY_CACHE_LIMIT = 2_000_000;
 const SYNTHETIC_VALIDATOR_COUNT = 16;
 
+function expectSyncCommitteeCache(cache: {
+  validatorIndices: Uint32Array;
+  validatorIndexMap: Map<number, number[]>;
+}): void {
+  expect(cache.validatorIndices).toBeInstanceOf(Uint32Array);
+  expect(cache.validatorIndices.length).toBeGreaterThan(0);
+  expect(cache.validatorIndexMap).toBeInstanceOf(Map);
+
+  const firstValidatorIndex = cache.validatorIndices[0];
+  expect(cache.validatorIndexMap.get(firstValidatorIndex)).toContain(0);
+}
+
 describe("BeaconStateView", () => {
   let state: InstanceType<typeof bindings.BeaconStateView>;
   let stateBytes: Uint8Array;
@@ -477,15 +489,16 @@ describe("BeaconStateView", () => {
   });
 
   describe("sync committee cache", () => {
-    it("currentSyncCommitteeIndexed should have validatorIndices", () => {
-      const indexed = state.currentSyncCommitteeIndexed;
-      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
-      expect(indexed.validatorIndices.length).toBeGreaterThan(0);
+    it("currentSyncCommitteeIndexed should return cache", () => {
+      expectSyncCommitteeCache(state.currentSyncCommitteeIndexed);
     });
 
     it("getIndexedSyncCommitteeAtEpoch should return cache", () => {
-      const indexed = state.getIndexedSyncCommitteeAtEpoch(state.epoch);
-      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
+      expectSyncCommitteeCache(state.getIndexedSyncCommitteeAtEpoch(state.epoch));
+    });
+
+    it("getIndexedSyncCommittee should return cache", () => {
+      expectSyncCommitteeCache(state.getIndexedSyncCommittee(state.slot));
     });
 
     it("syncProposerReward should be a non-negative number", () => {
