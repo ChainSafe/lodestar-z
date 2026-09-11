@@ -1,6 +1,7 @@
 pub const RunnerKind = enum {
     epoch_processing,
     fork,
+    fork_choice,
     finality,
     merkle_proof,
     operations,
