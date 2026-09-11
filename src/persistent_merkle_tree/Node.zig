@@ -848,6 +848,29 @@ pub const Id = enum(u32) {
         return chunkedLeafPtr(pool.nodes.items(.payload), idx);
     }
 
+    /// Writes one chunk and invalidates the leaf's cached root without allocating.
+    /// Requires reference count zero; `valid_chunks` must preserve or grow the length.
+    /// `write` must not retain the chunk pointer or access the pool.
+    pub fn editChunkedLeaf(
+        node_id: Id,
+        pool: *Pool,
+        intra_chunk: u16,
+        valid_chunks: u16,
+        comptime T: type,
+        index: usize,
+        value: *const T,
+        comptime write: fn (*[32]u8, usize, *const T) void,
+    ) Error!void {
+        std.debug.assert(intra_chunk < valid_chunks);
+        std.debug.assert(valid_chunks <= ChunkedLeaf.K);
+        const storage = try node_id.getChunkedLeafPtr(pool);
+        std.debug.assert(storage.len <= valid_chunks);
+
+        write(&storage.chunks[intra_chunk], index, value);
+        storage.len = valid_chunks;
+        pool.nodes.items(.root)[@intFromEnum(node_id)] = lazy_sentinel;
+    }
+
     pub fn setChunkedLeafChunk(node_id: Id, pool: *Pool, intra_index: u16, chunk: *const [32]u8) Error!Id {
         std.debug.assert(intra_index < ChunkedLeaf.K);
 
