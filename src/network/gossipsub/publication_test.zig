@@ -16,7 +16,7 @@ test "publication refusal retry duplicate and exact expiry preserve admission" {
     g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, peer.index, true);
     g.markDirect(g.sessions.rows[peer.index].conn);
     const admitted = try g.publishWithOptions(topic, "local", .{ .allow_zero_peers = false }, .{ .mono_ms = 11, .unix_s = 0 });
-    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .unavailable = 1 }, admitted);
+    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, admitted);
     const retained = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
     const tx_before = g.messages.store.get(retained).?.tx;
     const seen_at = g.messages.seen.added_ms[g.messages.seen.tail];
@@ -48,14 +48,14 @@ test "publication recipient policy tops up without graft and accounts unique sha
     try std.testing.expect(g.setPeerScore(g.sessions.rows[10].conn, g.options.score_params.publish_threshold - 1));
     try std.testing.expect(g.setPeerScore(g.sessions.rows[9].conn, g.options.score_params.publish_threshold));
     g.options.pressure_timeout_ms = 1;
-    g.sessions.rows[11].io.tx.deferPrune(t, 0);
+    g.sessions.setOutbound(11, .{ .closing = g.sessions.rows[11].outStream().? });
     g.overlay.rows[t].mesh.set(1);
     g.overlay.rows[t].mesh.set(10);
     g.overlay.rows[t].mesh.set(11);
-    g.sessions.rows[1].outbound = .{ .waiting = 0 };
-    g.sessions.rows[9].outbound = .{ .waiting = 0 };
+    g.sessions.rows[1].outbound = .none;
+    g.sessions.rows[9].outbound = .none;
     const outcome = try g.publish(topic, "short mesh", .{ .mono_ms = 1, .unix_s = 0 });
-    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 9, .queued = 8, .unavailable = 1 }, outcome);
+    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 8, .queued = 8 }, outcome);
     try std.testing.expectEqual(@as(usize, 3), g.overlay.mesh(t).count());
     const id = topic_mod.validMessageId(topic, "short mesh", .{});
     const h = g.messages.history.message(g.messages.history.get(&g.messages.store, id).?);
@@ -70,10 +70,10 @@ test "publication recipient policy tops up without graft and accounts unique sha
         } else try std.testing.expectEqual(@as(usize, 0), io.tx.data.count);
         io.tx.cancelStream(&g.messages.store);
     }
-    g.sessions.rows[2].outbound = .{ .waiting = 0 };
+    g.sessions.rows[2].outbound = .none;
     for (0..@import("outbox.zig").data_capacity) |_| try std.testing.expectEqual(.queued, g.sessions.rows[3].io.tx.queueData(&g.messages.store, h, g.options.tx_peer_bytes, 2));
     const flood = try g.publishWithOptions(topic, "flood", .{ .flood = true }, .{ .mono_ms = 2, .unix_s = 0 });
-    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 10, .queued = 6, .pressured = 1, .unavailable = 3 }, flood);
+    try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 7, .queued = 6, .pressured = 1 }, flood);
 }
 
 test "publication failed history admission retains payloads and recovery attribution" {

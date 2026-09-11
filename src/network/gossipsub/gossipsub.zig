@@ -141,7 +141,7 @@ pub const Gossipsub = struct {
         negotiation_ready: u64 = 0,
         negotiation_rejected: u64 = 0,
         negotiation_failed: u64 = 0,
-        negotiation_deferred: u64 = 0,
+        negotiation_refused: u64 = 0,
     };
 
     pub fn init(allocator: Allocator, options: Options) InitError!Gossipsub {
@@ -282,7 +282,6 @@ pub const Gossipsub = struct {
         if (admitted.admitted.penalty_evicted) self.counters.retained_penalty_evictions += 1;
         const ref = admitted.admitted.peer;
         self.sessions.rows[handle.index].logical = ref;
-        self.sendSubscriptions(handle.index);
         return .{ .admitted = handle };
     }
 
@@ -397,7 +396,7 @@ pub const Gossipsub = struct {
         var it = recipients.iterator(.{});
         while (it.next()) |peer| {
             const index: u16 = @intCast(peer);
-            if (!self.sessions.rows[index].active or self.sessions.rows[index].io.tx.pruneExpired(self.last_now_ms, self.options.pressure_timeout_ms)) continue;
+            if (!self.sessions.rows[index].active or self.sessions.rows[index].outbound == .closing) continue;
             if (source) |p| {
                 if (std.meta.eql(p, self.logical(index)) or self.sessions.suppresses(index, id, now_ms)) continue;
             }
@@ -461,6 +460,7 @@ pub const Gossipsub = struct {
         const now = turn.now;
         const index = session.index;
         const io = &self.sessions.rows[index].io;
+        if (self.sessions.rows[index].outbound == .closing) return .done;
         switch (item) {
             .subscription => |sub| {
                 if (io.subscriptions < constants.max_subscriptions_per_rpc) {
@@ -479,7 +479,7 @@ pub const Gossipsub = struct {
                 }
             },
             else => {
-                if (io.controls < constants.max_control_per_rpc) {
+                if (self.sessions.rows[index].outStream() != null and io.controls < constants.max_control_per_rpc) {
                     io.controls += 1;
                     switch (item) {
                         .ihave => |ihave| self.onIhave(index, ihave, now),
@@ -820,7 +820,7 @@ pub const Gossipsub = struct {
         while (it.next()) |peer| {
             const peer_index: u16 = @intCast(peer);
             if (peer_index == source) continue;
-            if (self.sessions.peerVersion(peer_index) != .v1_2) continue;
+            if (self.sessions.rows[peer_index].outStream() == null or self.sessions.peerVersion(peer_index) != .v1_2) continue;
             if (self.sessions.rows[peer_index].io.tx.submit(&.{ .idontwant = &.{id} }, self.last_now_ms) == null) self.counters.send_dropped += 1;
         }
     }

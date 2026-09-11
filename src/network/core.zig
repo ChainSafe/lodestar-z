@@ -68,7 +68,7 @@ pub const Core = struct {
     catalog_revision: ?u64 = null,
     candidates_revision: ?u64 = null,
     score_revision: u64 = 0,
-    delivery_ready: std.StaticBitSet(4096) = .initEmpty(),
+    delivery_revision: u64 = 0,
     reconciliation_deadline: ?u64 = null,
     reconciliation_now: Now = .{ .mono_ms = 0, .unix_s = 0 },
     custody_pending: bool = false,
@@ -82,6 +82,7 @@ pub const Core = struct {
 
     pub const Counters = struct {
         rejected: u64 = 0,
+        gossip_refused: u64 = 0,
         displaced: u64 = 0,
         policy_disconnects: u64 = 0,
         custody_hashes: u64 = 0,
@@ -90,7 +91,6 @@ pub const Core = struct {
         candidate_syncs: u64 = 0,
         candidate_rows: u64 = 0,
         candidate_lookup_rows: u64 = 0,
-        availability_rows: u64 = 0,
         candidate_selections: u64 = 0,
     };
     pub const PeerCounts = struct { connected: u16, relevant: u16, outbound_relevant: u16 };
@@ -321,6 +321,9 @@ pub const Core = struct {
                             admission.peer,
                             self.dial_queue.isDirect(&identity),
                         );
+                        const admission_result = self.service.gossipsub.peerConnected(engine, connected.conn, now);
+                        if (admission_result != .admitted) self.counters.gossip_refused +|= 1;
+                        if (self.dial_queue.isDirect(&identity)) self.service.gossipsub.markDirect(connected.conn);
                         self.dial_queue.accepted(&identity, connected.conn, now.mono_ms);
                     },
                     else => {
@@ -380,18 +383,6 @@ pub const Core = struct {
             return;
         }
     }
-    fn observeDelivery(self: *Core) void {
-        var ready: @TypeOf(self.delivery_ready) = .initEmpty();
-        if (self.demand.attnets != 0 or self.demand.syncnets != 0 or self.demand.wanted().groups.count() != 0) {
-            for (self.catalog.rows, 0..) |row, index| {
-                self.counters.availability_rows +|= 1;
-                const conn = row.connection orelse continue;
-                if (row.closing_reason == null and self.service.gossipsub.deliveryAvailable(conn)) ready.set(index);
-            }
-        }
-        if (!ready.eql(self.delivery_ready)) self.policy_dirty = true;
-        self.delivery_ready = ready;
-    }
     /// Reconciles at the supplied clock without pumping protocols or borrowing an Engine.
     /// Health only ranks removals. Once pruned, changing health alone cannot remove
     /// a retained peer while count, coverage and protection remain unchanged.
@@ -401,11 +392,11 @@ pub const Core = struct {
         self.catalog.refresh(now.mono_ms);
         const expired = if (self.reconciliation_deadline) |due| now.mono_ms >= due else false;
         if (expired) self.candidates_revision = null;
-        self.observeDelivery();
         if (self.policyChanged() or expired) {
             self.refreshSelection(now);
             self.catalog_revision = self.catalog.revision;
             self.score_revision = self.service.gossipsub.inner.peers.scores.revision;
+            self.delivery_revision = self.service.gossipsub.inner.sessions.delivery_revision;
             self.reconciliation_deadline = self.catalog.nextDeadline(now.mono_ms);
             if (self.metadata_deadline) |due| self.reconciliation_deadline = @min(self.reconciliation_deadline orelse due, due);
             self.dial_queue.selection_dirty = true;
@@ -418,7 +409,8 @@ pub const Core = struct {
     }
     fn policyChanged(self: *const Core) bool {
         const score_revision = self.service.gossipsub.inner.peers.scores.revision;
-        return self.policy_dirty or self.catalog_revision != self.catalog.revision or
+        const delivery_revision = self.service.gossipsub.inner.sessions.delivery_revision;
+        return self.policy_dirty or self.delivery_revision != delivery_revision or delivery_revision == std.math.maxInt(u64) or self.catalog_revision != self.catalog.revision or
             self.score_revision != score_revision or self.catalog.revision == std.math.maxInt(u64) or
             score_revision == std.math.maxInt(u64);
     }
@@ -435,7 +427,6 @@ pub const Core = struct {
         dial_capacity: usize,
     ) ?u64 {
         if (self.stopped) return self.peerWakeup(now, peer_capacity);
-        self.observeDelivery();
         if (self.quiescing) {
             var due = self.service.nextWakeupOutputs(now, .{ .application = 0, .control = 32, .gossipsub = 0, .identify = 8 });
             for ([_]?u64{ self.control.nextWakeup(&self.catalog, now), self.peerWakeup(now, peer_capacity) }) |next| if (next) |deadline| {
@@ -534,13 +525,18 @@ pub const Core = struct {
                 if (!std.mem.eql(u8, &status.fork_digest, &self.local.fork.digest)) input.reject = .incompatible_fork;
                 if (self.local.fork.fork.gte(.fulu) and status.earliest_available_slot == null) input.reject = .missing_availability;
             }
+            const delivery = self.service.gossipsub.deliveryStatus(conn);
+            if (delivery == .unavailable) {
+                input.outbound = false;
+                if (snapshot.relevant and !snapshot.direct and input.reject == null) input.reject = .gossip_unavailable;
+            }
             if (!snapshot.relevant or input.reject != null) continue;
             const metadata = snapshot.metadata orelse continue;
             peers.control_wire.validateMetadata(&metadata, self.local.fork) catch continue;
             const deadline = snapshot.metadata_at_ms +| self.metadata_freshness_ms;
             if (now.mono_ms >= deadline) continue;
             self.metadata_deadline = @min(self.metadata_deadline orelse deadline, deadline);
-            if (self.service.gossipsub.deliveryAvailable(conn)) {
+            if (delivery == .available) {
                 input.coverage.attnets = std.mem.readInt(u64, &metadata.attnets, .little);
                 input.coverage.syncnets = @intCast(metadata.syncnets);
                 input.coverage.groups = snapshot.sampling_groups orelse .initEmpty();
@@ -640,7 +636,10 @@ pub const Core = struct {
         try self.dial_queue.enqueue(identity, addresses, true, now.mono_ms);
         self.syncIdentity(identity, now);
         self.policy_dirty = true;
-        if (self.catalog.find(identity)) |peer| _ = self.catalog.setDirect(peer, true);
+        if (self.catalog.find(identity)) |peer| {
+            _ = self.catalog.setDirect(peer, true);
+            if (self.catalog.get(peer).?.connection) |conn| self.service.gossipsub.markDirect(conn);
+        }
     }
     pub fn directPeers(self: *const Core, out: []t.PeerId) error{OutputTooSmall}!usize {
         return self.dial_queue.directPeers(out);

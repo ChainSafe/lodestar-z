@@ -29,6 +29,7 @@ const Node = struct {
             .direction = .outbound,
         }, .{ .mono_ms = 0, .unix_s = 0 }).admitted;
         core.sessions.setStreams(session.index, .{ .conn = .{ .index = 0, .generation = 1 }, .id = 0, .slot = 0 }, .{ .conn = .{ .index = 0, .generation = 1 }, .id = 1, .slot = 1 });
+        core.sendSubscriptions(session.index);
         return .{ .core = core, .session = session };
     }
 

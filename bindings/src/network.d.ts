@@ -456,6 +456,7 @@ export type NativeDisconnectReason =
   | "reputation"
   | "banned"
   | "count_pruning"
+  | "gossip_unavailable"
   | "health_error";
 export interface NativePeerRef {
   index: number;

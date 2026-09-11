@@ -4,14 +4,11 @@ const Handle = @import("../quic/engine.zig").Handle;
 const StreamHandle = @import("../quic/engine.zig").StreamHandle;
 const MessageId = @import("topic.zig").MessageId;
 const Version = @import("sessions.zig").Version;
-pub const retry_min_ms: u64 = 1000;
-pub const retry_max_ms: u64 = 30000;
-pub const Outbound = union(enum) { waiting: u64, negotiating: StreamHandle, live: StreamHandle };
+pub const Outbound = union(enum) { none, pending, negotiating: StreamHandle, live: StreamHandle, closing: StreamHandle };
 
 pub const Session = struct {
     io: @import("peer_io.zig").PeerIo,
-    outbound: Outbound = .{ .waiting = 0 },
-    failures: u8 = 0,
+    outbound: Outbound = .none,
     needs_service: bool = false,
     logical: @import("peer_book.zig").Ref = undefined,
     active: bool = false,
@@ -28,7 +25,7 @@ pub const Session = struct {
     pub fn start(self: *Session, conn: Handle, version: Version) void {
         std.debug.assert(!self.active and self.generation < std.math.maxInt(u64));
         self.io.startSession();
-        self.* = .{ .io = self.io, .generation = self.generation + 1, .conn = conn, .version = version, .active = true };
+        self.* = .{ .io = self.io, .generation = self.generation + 1, .conn = conn, .version = version, .active = true, .outbound = .pending };
     }
 
     pub fn suppresses(self: *const Session, id: MessageId, now: u64) bool {
@@ -52,12 +49,5 @@ pub const Session = struct {
             .live => |stream| stream,
             else => null,
         };
-    }
-
-    pub fn retry(self: *Session, now_ms: u64) void {
-        const delay = @min(retry_max_ms, retry_min_ms << @as(u6, @intCast(self.failures)));
-        self.failures = @min(self.failures + 1, 5);
-        self.outbound = .{ .waiting = now_ms +| delay };
-        self.needs_service = true;
     }
 };

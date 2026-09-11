@@ -12,10 +12,13 @@ pub fn addPeer(g: *gossip.Gossipsub, conn: engine.Handle, version: sessions.Vers
     };
     std.mem.writeInt(u64, metadata.identity.bytes[0..8], conn.generation, .little);
     std.mem.writeInt(u16, metadata.identity.bytes[8..10], conn.index, .little);
-    return switch (g.addPeer(conn, version, &metadata, .{ .mono_ms = g.last_now_ms, .unix_s = 0 })) {
+    const peer = switch (g.addPeer(conn, version, &metadata, .{ .mono_ms = g.last_now_ms, .unix_s = 0 })) {
         .admitted => |peer| peer,
-        else => null,
+        else => return null,
     };
+    g.sessions.setOutbound(peer.index, .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } });
+    g.sendSubscriptions(peer.index);
+    return peer;
 }
 
 pub fn driver(g: *gossip.Gossipsub) @import("session_driver.zig").Driver {

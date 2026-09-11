@@ -252,7 +252,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
             got = true;
         };
         if (got) break;
-        // Native QUIC and the one-second direct-admission retry use elapsed time.
+        // QUIC retransmission requires elapsed time.
         try std.testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     if (!published or !got) std.debug.print("gossip published={} received={} subscriptions={} direct={}\n", .{ published, got, a.core.service.gossipsub.inner.resourceSnapshot().remote_subscriptions, a.core.service.gossipsub.inner.peers.rows[0].direct });

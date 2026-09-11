@@ -80,8 +80,8 @@ test "gossip policy mesh queue pressure preserves required action ownership" {
     f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
     f.g.overlay.maintain(&context, f.topic);
     try std.testing.expectEqual(@as(usize, 0), f.g.overlay.mesh(f.topic).count());
-    try std.testing.expect(f.g.sessions.rows[0].io.tx.pending_prunes.isSet(f.topic));
-    try std.testing.expectEqual(@as(?u64, context.now + f.g.options.pressure_timeout_ms), f.g.sessions.rows[0].io.deadlines(&f.g.options).values[@intFromEnum(@import("peer_io.zig").TimeoutReason.prunes)]);
+    try std.testing.expect(f.g.sessions.rows[0].outbound == .closing);
+    try std.testing.expect(!f.g.overlay.gossipRecipients(&context, f.topic, 1).isSet(0));
 }
 
 test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
@@ -111,91 +111,25 @@ test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
     try std.testing.expectEqual(@as(usize, 0), fanout.count());
 }
 
-test "gossip policy review I2 pending PRUNE gates resubscription GRAFT until queue recovery" {
+test "gossip PRUNE exhaustion ends eligibility even after queue capacity returns" {
     var f = try Fixture.init(1);
     defer f.g.deinit();
     var context = f.context(1);
     f.g.overlay.onGraft(&context, f.topic, 0);
-    const bytes = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
-    defer std.testing.allocator.free(bytes);
-    @memset(bytes, 0);
-    try std.testing.expect(f.g.sessions.rows[0].io.tx.injectFrame(bytes, true, null, 1) != null);
-    f.g.last_now_ms = 1;
-    const name = f.g.overlay.topicString(f.topic);
-    try std.testing.expect(f.g.unsubscribe(name));
-    try std.testing.expect(f.g.sessions.rows[0].io.tx.pending_prunes.isSet(f.topic));
-    context.now = 2;
-    f.g.overlay.onGraft(&context, f.topic, 0);
-    try std.testing.expectEqual(@as(f64, 2), f.g.peers.scores.rows[f.g.sessions.rows[0].logical.index].behaviour);
-    try std.testing.expectEqual(@as(u64, 2), f.g.peers.scores.penalties.graft_backoff);
-    context.now = 11_001;
-    f.g.last_now_ms = context.now;
-    try std.testing.expect(f.g.subscribe(name));
+    const io = &f.g.sessions.rows[0].io;
+    const full = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
+    defer std.testing.allocator.free(full);
+    @memset(full, 0);
+    try std.testing.expect(io.tx.injectFrame(full, true, null, 1) != null);
+    try std.testing.expect(f.g.unsubscribe(f.g.overlay.topicString(f.topic)));
+    try std.testing.expect(f.g.sessions.rows[0].outbound == .closing);
+    try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
+    io.tx.cancelStream(&f.g.messages.store);
+    context.now = c.prune_backoff_ms * 2;
+    try std.testing.expect(f.g.subscribe(f.g.overlay.topicString(f.topic)));
     f.g.overlay.onGraft(&context, f.topic, 0);
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
-    try std.testing.expectEqual(@as(?u64, 1), f.g.sessions.rows[0].io.tx.prune_since);
-    f.g.sessions.rows[0].io.tx.cancelStream(&f.g.messages.store);
-    f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
-    f.g.overlay.maintain(&context, f.topic);
-    try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
-    try std.testing.expect(!f.g.sessions.rows[0].io.tx.pending_prunes.isSet(f.topic));
-    try std.testing.expectEqual(@as(?u64, null), f.g.sessions.rows[0].io.tx.prune_since);
-    var expected: [32 + topic_mod.topic_max_len]u8 = undefined;
-    var writer = protobuf.Writer.init(&expected);
-    writer.varint(protobuf.pruneRpcSize(name, c.prune_backoff_ms / 1000));
-    protobuf.writePruneRpc(&writer, name, c.prune_backoff_ms / 1000);
-    const sent = f.g.sessions.rows[0].io.tx.segment(&f.g.messages.store);
-    try std.testing.expectEqualSlices(u8, writer.written(), sent);
-    _ = f.g.sessions.rows[0].io.tx.advance(&f.g.messages.store, sent.len);
-    context.now = 71_002;
-    f.g.overlay.onGraft(&context, f.topic, 0);
-    try std.testing.expect(f.g.overlay.mesh(f.topic).isSet(0));
-    try std.testing.expect(!f.g.sessions.rows[0].io.tx.pruneExpired(context.now, f.g.options.pressure_timeout_ms));
-    f.g.overlay.rows[f.topic].mesh.unset(0);
-    f.g.peers.scores.prune(f.g.sessions.rows[0].logical.index, f.topic, context.now);
-    f.g.sessions.rows[0].io.tx.deferPrune(f.topic, 0);
-    f.g.overlay.onGraft(&context, f.topic, 0);
-    try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
-}
-
-test "gossip policy delayed PRUNE preserves the effective remote backoff" {
-    for ([_]u64{ 501, 2_001 }) |queued_at| {
-        var f = try Fixture.init(1);
-        defer f.g.deinit();
-        var context = f.context(1);
-        const logical = f.g.sessions.rows[0].logical;
-        const bytes = try std.testing.allocator.alloc(u8, f.g.options.critical_bytes);
-        defer std.testing.allocator.free(bytes);
-        @memset(bytes, 0);
-        try std.testing.expect(f.g.sessions.rows[0].io.tx.injectFrame(bytes, true, null, 1) != null);
-        f.g.overlay.prune(&context, f.topic, 0, 1_000);
-        context.now = queued_at;
-        f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
-        f.g.overlay.maintain(&context, f.topic);
-        try std.testing.expect(f.g.sessions.rows[0].io.tx.pending_prunes.isSet(f.topic));
-        try std.testing.expectEqual(@as(u64, 1_001), f.g.peers.backoff(logical, f.topic).until);
-        f.g.sessions.rows[0].io.tx.cancelStream(&f.g.messages.store);
-        f.g.overlay.maintain(&context, f.topic);
-        try std.testing.expect(!f.g.sessions.rows[0].io.tx.pending_prunes.isSet(f.topic));
-        const expired = queued_at >= 1_001;
-        const seconds: u64 = if (expired) c.prune_backoff_ms / 1000 else 1;
-        const local_until = queued_at + seconds * 1000;
-        try std.testing.expectEqual(local_until, f.g.peers.backoff(logical, f.topic).until);
-        var expected: [32 + topic_mod.topic_max_len]u8 = undefined;
-        var writer = protobuf.Writer.init(&expected);
-        const name = f.g.overlay.topicString(f.topic);
-        writer.varint(protobuf.pruneRpcSize(name, seconds));
-        protobuf.writePruneRpc(&writer, name, seconds);
-        const sent = f.g.sessions.rows[0].io.tx.segment(&f.g.messages.store);
-        try std.testing.expectEqualSlices(u8, writer.written(), sent);
-        _ = f.g.sessions.rows[0].io.tx.advance(&f.g.messages.store, sent.len);
-        context.now = queued_at + seconds * 1000 - 1;
-        f.g.overlay.maintain(&context, f.topic);
-        try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(0));
-        context.now = local_until + c.backoff_slack_heartbeats * context.options.heartbeat_interval_ms;
-        f.g.overlay.maintain(&context, f.topic);
-        try std.testing.expect(f.g.overlay.mesh(f.topic).isSet(0));
-    }
+    try std.testing.expect(!io.tx.pending());
 }
 
 test "gossip policy review I3 bounded shuffle consumes one draw per swap" {
@@ -209,49 +143,6 @@ test "gossip policy review I3 bounded shuffle consumes one draw per swap" {
     const recipients = f.g.overlay.gossipRecipients(&context, f.topic, 1);
     try std.testing.expectEqual(@as(usize, 3), recipients.count());
     try std.testing.expectEqualSlices(u64, &expected.s, &f.g.overlay.rng.s);
-}
-
-fn maintainFastHeartbeat(g: *@import("gossipsub.zig").Gossipsub, topic: u16, now: u64) void {
-    g.overlay.maintain(&.{ .sessions = g.sessions, .peers = &g.peers, .now = now, .options = &g.options }, topic);
-}
-
-test "gossip policy final review positive remainder respects rounded remote PRUNE deadline" {
-    var g = try @import("gossipsub.zig").Gossipsub.init(std.testing.allocator, .{ .random_seed = 17, .heartbeat_interval_ms = 1 });
-    defer g.deinit();
-    const name = "/eth2/01020304/beacon_block/ssz_snappy";
-    try std.testing.expect(g.subscribe(name));
-    const topic = g.overlay.findTopic(name).?;
-    const peer = g.addPeer(.{ .index = 0, .generation = 1 }, .v1_2, &.{ .identity = .{ .bytes = [_]u8{1} ** 39 }, .address = .unspecified, .direction = .inbound }, .{ .mono_ms = 1, .unix_s = 0 }).admitted.index;
-    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), topic, peer, true);
-    const logical = g.sessions.rows[peer].logical;
-    const full = try std.testing.allocator.alloc(u8, g.options.critical_bytes);
-    defer std.testing.allocator.free(full);
-    @memset(full, 0);
-    try std.testing.expect(g.sessions.rows[peer].io.tx.injectFrame(full, true, null, 1) != null);
-    g.overlay.prune(&.{ .sessions = g.sessions, .peers = &g.peers, .now = 1, .options = &g.options }, topic, peer, 1000);
-    maintainFastHeartbeat(&g, topic, 1000);
-    try std.testing.expect(g.sessions.rows[peer].io.tx.pending_prunes.isSet(topic));
-    try std.testing.expectEqual(@as(u64, 1001), g.peers.backoff(logical, topic).until);
-    try std.testing.expectEqual(@as(?u64, 1), g.sessions.rows[peer].io.tx.prune_since);
-    try std.testing.expectEqual(@as(u64, 1), g.peers.backoff(logical, topic).pruned_at);
-    g.sessions.rows[peer].io.tx.cancelStream(&g.messages.store);
-    maintainFastHeartbeat(&g, topic, 1000);
-    try std.testing.expect(!g.sessions.rows[peer].io.tx.pending_prunes.isSet(topic));
-    var expected: [128]u8 = undefined;
-    var writer = protobuf.Writer.init(&expected);
-    writer.varint(protobuf.pruneRpcSize(name, 1));
-    protobuf.writePruneRpc(&writer, name, 1);
-    const sent = g.sessions.rows[peer].io.tx.segment(&g.messages.store);
-    try std.testing.expectEqualSlices(u8, writer.written(), sent);
-    _ = g.sessions.rows[peer].io.tx.advance(&g.messages.store, sent.len);
-    maintainFastHeartbeat(&g, topic, 1003);
-    try std.testing.expect(!g.overlay.mesh(topic).isSet(peer));
-    try std.testing.expectEqual(@as(u64, 2000), g.peers.backoff(logical, topic).until);
-    try std.testing.expectEqual(@as(u64, 1), g.peers.backoff(logical, topic).pruned_at);
-    maintainFastHeartbeat(&g, topic, 2001);
-    try std.testing.expect(!g.overlay.mesh(topic).isSet(peer));
-    maintainFastHeartbeat(&g, topic, 2002);
-    try std.testing.expect(g.overlay.mesh(topic).isSet(peer));
 }
 
 test "overlay unsubscribe and disconnect retire membership and score together" {
@@ -275,7 +166,6 @@ test "overlay unsubscribe and disconnect retire membership and score together" {
     try std.testing.expect(!f.g.overlay.subscribers(f.topic).isSet(1));
     try std.testing.expect(!f.g.overlay.mesh(f.topic).isSet(1));
     try std.testing.expect(!f.g.peers.scores.topics[@as(usize, second) * c.topics_cap + f.topic].in_mesh);
-    try std.testing.expectEqual(@as(usize, 0), f.g.sessions.rows[1].io.tx.pending_prunes.count());
 }
 
 test "gossip policy topic capacity supports two full fork subnet sets" {

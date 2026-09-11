@@ -8,6 +8,8 @@ const ItemKind = std.meta.Tag(protobuf.Item);
 const delivery = @import("delivery.zig");
 pub const data_capacity = delivery.per_peer_limit;
 pub const control_frames = 128;
+pub const critical_frames = 2 * constants.topics_cap;
+pub const critical_bytes = critical_frames * (32 + topic.topic_max_len);
 pub const QueueResult = enum { queued, full };
 pub const DropReason = enum { data_descriptors, data_pool, data_bytes, control_frames, control_bytes, critical_frames, critical_bytes, token_exhausted };
 pub const drop_reason_count = @typeInfo(DropReason).@"enum".fields.len;
@@ -74,65 +76,70 @@ pub const Completion = union(enum) {
     }
 };
 
-pub const ControlQueue = struct {
-    bytes: []u8,
-    frames: [control_frames]Frame = undefined,
+pub const ControlQueue = FrameQueue(control_frames);
 
-    head: usize = 0,
-    count: usize = 0,
-    read_at: usize = 0,
-    write_at: usize = 0,
-    used: usize = 0,
-    bytes_high_water: usize = 0,
-    frames_high_water: usize = 0,
+fn FrameQueue(comptime capacity: usize) type {
+    return struct {
+        const Queue = @This();
+        bytes: []u8,
+        frames: [capacity]Frame = undefined,
 
-    const Frame = struct {
-        remaining: u32,
-        token: u64,
-        kind: ?ItemKind,
-        enqueued_ms: u64,
+        head: usize = 0,
+        count: usize = 0,
+        read_at: usize = 0,
+        write_at: usize = 0,
+        used: usize = 0,
+        bytes_high_water: usize = 0,
+        frames_high_water: usize = 0,
+
+        const Frame = struct {
+            remaining: u32,
+            token: u64,
+            kind: ?ItemKind,
+            enqueued_ms: u64,
+        };
+
+        pub fn append(self: *Queue, bytes: []const u8, token: u64, kind: ?ItemKind, now_ms: u64) QueueResult {
+            if (self.count == capacity or bytes.len > self.bytes.len - self.used) return .full;
+            assert(bytes.len > 0);
+            const n = @min(bytes.len, self.bytes.len - self.write_at);
+            @memcpy(self.bytes[self.write_at..][0..n], bytes[0..n]);
+            @memcpy(self.bytes[0 .. bytes.len - n], bytes[n..]);
+            const slot = (self.head + self.count) % capacity;
+            self.frames[slot] = .{ .remaining = @intCast(bytes.len), .token = token, .kind = kind, .enqueued_ms = now_ms };
+            self.count += 1;
+            self.used += bytes.len;
+            self.bytes_high_water = @max(self.bytes_high_water, self.used);
+            self.frames_high_water = @max(self.frames_high_water, self.count);
+            self.write_at = (self.write_at + bytes.len) % self.bytes.len;
+            return .queued;
+        }
+        pub fn segment(self: *const Queue) []const u8 {
+            if (self.count == 0) return &.{};
+            return self.bytes[self.read_at..][0..@min(self.frames[self.head].remaining, self.bytes.len - self.read_at)];
+        }
+        pub fn advance(self: *Queue, len: usize) ?ControlReceipt {
+            assert(len > 0 and len <= self.segment().len);
+            self.frames[self.head].remaining -= @intCast(len);
+            self.used -= len;
+            self.read_at = (self.read_at + len) % self.bytes.len;
+            if (self.frames[self.head].remaining != 0) return null;
+            const receipt: ControlReceipt = .{ .token = self.frames[self.head].token, .kind = self.frames[self.head].kind };
+            self.head = (self.head + 1) % capacity;
+            self.count -= 1;
+            return receipt;
+        }
+        pub fn reset(self: *Queue) void {
+            self.* = .{ .bytes = self.bytes, .bytes_high_water = self.bytes_high_water, .frames_high_water = self.frames_high_water };
+        }
     };
-
-    pub fn append(self: *ControlQueue, bytes: []const u8, token: u64, kind: ?ItemKind, now_ms: u64) QueueResult {
-        if (self.count == control_frames or bytes.len > self.bytes.len - self.used) return .full;
-        assert(bytes.len > 0);
-        const n = @min(bytes.len, self.bytes.len - self.write_at);
-        @memcpy(self.bytes[self.write_at..][0..n], bytes[0..n]);
-        @memcpy(self.bytes[0 .. bytes.len - n], bytes[n..]);
-        const slot = (self.head + self.count) % control_frames;
-        self.frames[slot] = .{ .remaining = @intCast(bytes.len), .token = token, .kind = kind, .enqueued_ms = now_ms };
-        self.count += 1;
-        self.used += bytes.len;
-        self.bytes_high_water = @max(self.bytes_high_water, self.used);
-        self.frames_high_water = @max(self.frames_high_water, self.count);
-        self.write_at = (self.write_at + bytes.len) % self.bytes.len;
-        return .queued;
-    }
-    pub fn segment(self: *const ControlQueue) []const u8 {
-        if (self.count == 0) return &.{};
-        return self.bytes[self.read_at..][0..@min(self.frames[self.head].remaining, self.bytes.len - self.read_at)];
-    }
-    pub fn advance(self: *ControlQueue, len: usize) ?ControlReceipt {
-        assert(len > 0 and len <= self.segment().len);
-        self.frames[self.head].remaining -= @intCast(len);
-        self.used -= len;
-        self.read_at = (self.read_at + len) % self.bytes.len;
-        if (self.frames[self.head].remaining != 0) return null;
-        const receipt: ControlReceipt = .{ .token = self.frames[self.head].token, .kind = self.frames[self.head].kind };
-        self.head = (self.head + 1) % control_frames;
-        self.count -= 1;
-        return receipt;
-    }
-    pub fn reset(self: *ControlQueue) void {
-        self.* = .{ .bytes = self.bytes, .bytes_high_water = self.bytes_high_water, .frames_high_water = self.frames_high_water };
-    }
-};
+}
 
 pub const encodePrefix = storage.encodePrefix;
 
 pub const Outbox = struct {
     control: ControlQueue,
-    critical: ControlQueue,
+    critical: FrameQueue(critical_frames),
     data: delivery.Queue,
     active: enum { none, critical, control, data } = .none,
     control_burst: u8 = 0,
@@ -142,8 +149,6 @@ pub const Outbox = struct {
     subscription_since: ?u64 = null,
     subscription_dirty: std.StaticBitSet(constants.topics_cap) = .initEmpty(),
     subscription_cursor: usize = 0,
-    pending_prunes: std.StaticBitSet(constants.topics_cap) = .initEmpty(),
-    prune_since: ?u64 = null,
     drops: [drop_reason_count]u64 = @splat(0),
     pressure_pending: bool = false,
     pressure_log_due_ms: u64 = 0,
@@ -180,28 +185,6 @@ pub const Outbox = struct {
         return true;
     }
 
-    pub fn deferPrune(self: *Outbox, index: usize, now: u64) void {
-        self.pending_prunes.set(index);
-        self.prune_since = self.prune_since orelse now;
-    }
-
-    pub fn pruneQueued(self: *Outbox, index: usize) void {
-        self.pending_prunes.unset(index);
-        if (self.pending_prunes.count() == 0) self.prune_since = null;
-    }
-
-    pub fn forgetIntent(self: *Outbox) void {
-        self.subscription_dirty = .initEmpty();
-        self.subscription_since = null;
-        self.pending_prunes = .initEmpty();
-        self.prune_since = null;
-    }
-
-    pub fn pruneExpired(self: *const Outbox, now: u64, timeout: u64) bool {
-        if (self.prune_since) |since| if (now >= since +| timeout) return true;
-        return false;
-    }
-
     pub fn submit(self: *Outbox, control: *const Control, now_ms: u64) ?u64 {
         var bytes: [32 + topic.topic_max_len + constants.gossip_ids_max * (constants.message_id_length + 2)]u8 = undefined;
         const critical = switch (control.*) {
@@ -230,12 +213,12 @@ pub const Outbox = struct {
             return null;
         }
         const token = self.sequence + 1;
-        const queue = if (critical) &self.critical else &self.control;
-        if (queue.append(bytes, token, kind, now_ms) == .full) {
-            self.dropped(if (queue.count == control_frames)
-                (if (critical) .critical_frames else .control_frames)
+        const result = if (critical) self.critical.append(bytes, token, kind, now_ms) else self.control.append(bytes, token, kind, now_ms);
+        if (result == .full) {
+            self.dropped(if (critical)
+                (if (self.critical.count == critical_frames) .critical_frames else .critical_bytes)
             else
-                (if (critical) .critical_bytes else .control_bytes));
+                (if (self.control.count == control_frames) .control_frames else .control_bytes));
             return null;
         }
         self.sequence = token;
@@ -286,8 +269,8 @@ pub const Outbox = struct {
         switch (self.active) {
             .none => unreachable,
             .critical, .control => {
-                const q = if (self.active == .critical) &self.critical else &self.control;
-                if (q.advance(len)) |receipt| {
+                const completion = if (self.active == .critical) self.critical.advance(len) else self.control.advance(len);
+                if (completion) |receipt| {
                     self.active = .none;
                     self.progress_ms = null;
                     self.control_burst +|= 1;
@@ -331,6 +314,10 @@ pub const Outbox = struct {
     }
 
     pub fn cancelStream(self: *Outbox, store: *storage.Store) void {
+        self.subscription_dirty = .initEmpty();
+        self.subscription_since = null;
+        self.subscription_cursor = 0;
+        self.control_burst = 0;
         self.data.reset(store);
         self.pressure_pending = false;
         self.active = .none;
@@ -565,4 +552,29 @@ test "gossip typed controls preserve maximum ID lists and completion kinds" {
         try std.testing.expectEqual(expected, completion.?.itemKind().?);
         try std.testing.expect(!outbox.pending());
     }
+}
+
+test "gossip critical queue holds a full subscription snapshot and full PRUNE burst" {
+    var sessions = try @import("sessions.zig").Sessions.init(std.testing.allocator, 1);
+    defer sessions.deinit(std.testing.allocator);
+    const tx = &sessions.rows[0].io.tx;
+    const name = "/eth2/01020304/sync_committee_contribution_and_proof/ssz_snappy";
+    try std.testing.expectEqual(topic.topic_max_len, name.len);
+    for (0..constants.topics_cap) |_| {
+        try std.testing.expect(tx.submit(&.{ .subscription = .{ .topic = name, .subscribed = true } }, 1) != null);
+    }
+    for (0..constants.topics_cap) |_| {
+        try std.testing.expect(tx.submit(&.{ .prune = .{ .topic = name, .backoff_s = std.math.maxInt(u64) } }, 2) != null);
+    }
+    try std.testing.expectEqual(critical_frames, tx.critical.count);
+    try std.testing.expect(tx.submit(&.{ .prune = .{ .topic = name, .backoff_s = 60 } }, 3) == null);
+    try std.testing.expectEqual(@as(u64, 1), tx.drops[@intFromEnum(DropReason.critical_frames)]);
+    for (0..critical_frames) |_| {
+        const first = tx.critical.segment();
+        try std.testing.expect(tx.critical.advance(1) == null);
+        const rest = tx.critical.segment();
+        try std.testing.expectEqual(first.len - 1, rest.len);
+        try std.testing.expect(tx.critical.advance(rest.len) != null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), tx.critical.used);
 }
