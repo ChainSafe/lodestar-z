@@ -16,7 +16,7 @@ const ValidatorMonitor = @This();
 
 allocator: Allocator,
 /// Unordered list of validators that require additional monitoring.
-validators: std.AutoArrayHashMapUnmanaged(ValidatorIndex, void),
+validators: std.array_hash_map.Auto(ValidatorIndex, void),
 /// Prevents registering statuses for the same epoch twice.
 /// processEpoch() may be run more than once for the same epoch.
 last_registered_status_epoch: ?Epoch,
