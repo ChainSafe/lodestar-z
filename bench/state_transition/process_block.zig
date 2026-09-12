@@ -541,6 +541,7 @@ fn runBenchmark(
         io,
         cached_state,
         block_slot,
+        null,
     );
     try cached_state.state.commit();
     try state_transition.buildSlashingsCacheFromStateIfNeeded(allocator, cached_state.state, &cached_state.slashings_cache);

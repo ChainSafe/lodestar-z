@@ -392,6 +392,8 @@ declare const bindings: {
   metrics: {
     init: () => void;
     scrapeMetrics: () => string;
+    registerLocalValidator: (index: number) => void;
+    unregisterLocalValidator: (index: number) => void;
   };
   BeaconStateView: typeof BeaconStateView;
 };
