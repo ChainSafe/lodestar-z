@@ -407,3 +407,35 @@ test "BitListType - tree.zeros" {
         try std.testing.expectEqualSlices(u8, &expected_root, tree_node.getRoot(&pool));
     }
 }
+
+test "memory_safety: BitList JSON rejection frees scratch once" {
+    const Bits = BitListType(8);
+    const cases = .{
+        .{ "\"0xzz\"", error.InvalidCharacter },
+        .{ "\"0x00\"", error.noPaddingBit },
+        .{ "\"0x8002\"", error.tooLarge },
+        .{ "\"0x000001\"", error.invalidLength },
+    };
+    inline for (cases) |case| {
+        var scanner = std.json.Scanner.initCompleteInput(std.testing.allocator, case[0]);
+        defer scanner.deinit();
+        var out = Bits.default_value;
+        defer Bits.deinit(std.testing.allocator, &out);
+        try std.testing.expectError(case[1], Bits.deserializeFromJson(std.testing.allocator, &scanner, &out));
+    }
+}
+
+test "memory_safety: BitList JSON allocation failures release scratch" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const Bits = BitListType(8);
+            var scanner = std.json.Scanner.initCompleteInput(std.testing.allocator, "\"0xff01\"");
+            defer scanner.deinit();
+            var out = Bits.default_value;
+            defer Bits.deinit(allocator, &out);
+            try Bits.deserializeFromJson(allocator, &scanner, &out);
+            try std.testing.expectEqual(@as(usize, 8), out.bit_len);
+            try std.testing.expectEqualSlices(u8, &.{0xff}, out.data.items);
+        }
+    }.run, .{});
+}
