@@ -5,7 +5,6 @@ const hexToBytes = @import("hex").hexToBytes;
 const hexByteLen = @import("hex").hexByteLen;
 const hexLenFromBytes = @import("hex").hexLenFromBytes;
 const bytesToHex = @import("hex").bytesToHex;
-const merkleize = @import("hashing").merkleize;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const getZeroHash = @import("hashing").getZeroHash;
@@ -34,6 +33,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
         pub const max_size: usize = Element.fixed_size * limit;
         pub const max_chunk_count: usize = std.math.divCeil(usize, max_size, 32) catch unreachable;
         pub const chunk_depth: Depth = maxChunksToDepth(max_chunk_count);
+        const GenericList = @import("list.zig").FixedListType(Element, limit, .{});
 
         pub const default_value: Type = Type.empty;
 
@@ -55,17 +55,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
             return (value.items.len + 31) / 32;
         }
 
-        pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            const chunks = try allocator.alloc([32]u8, (chunkCount(value) + 1) / 2 * 2);
-            defer allocator.free(chunks);
-
-            @memset(chunks, [_]u8{0} ** 32);
-
-            _ = serializeIntoBytes(value, @ptrCast(chunks));
-
-            try merkleize(@ptrCast(chunks), chunk_depth, out);
-            mixInLength(value.items.len, out);
-        }
+        pub const hashTreeRoot = GenericList.hashTreeRoot;
 
         /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
         pub fn clone(allocator: std.mem.Allocator, value: *const Type, out: *Type) !void {
@@ -106,18 +96,7 @@ pub fn ByteListType(comptime _limit: comptime_int) type {
                 return data.len;
             }
 
-            pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
-                const len = try length(data);
-                const chunk_count = (len + 31) / 32;
-                const chunks = try allocator.alloc([32]u8, (chunk_count + 1) / 2 * 2);
-                defer allocator.free(chunks);
-
-                @memset(chunks, [_]u8{0} ** 32);
-                @memcpy(@as([]u8, @ptrCast(chunks))[0..data.len], data);
-
-                try merkleize(@ptrCast(chunks), chunk_depth, out);
-                mixInLength(len, out);
-            }
+            pub const hashTreeRoot = GenericList.serialized.hashTreeRoot;
         };
 
         pub const tree = struct {

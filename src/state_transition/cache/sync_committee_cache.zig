@@ -45,6 +45,8 @@ pub const SyncCommitteeCache = union(enum) {
 
     pub fn initValidatorIndices(allocator: Allocator, indices: []const ValidatorIndex) !SyncCommitteeCache {
         const cloned_indices = try allocator.alloc(ValidatorIndex, indices.len);
+        errdefer allocator.free(cloned_indices);
+
         std.mem.copyForwards(ValidatorIndex, cloned_indices, indices);
         const cache = try SyncCommitteeCacheAltair.initValidatorIndices(allocator, cloned_indices);
         return SyncCommitteeCache{ .altair = cache };
@@ -195,4 +197,8 @@ test computeSyncCommitteeIndices {
         &[_]ValidatorIndex{0} ** preset.SYNC_COMMITTEE_SIZE,
         &out,
     );
+}
+
+test {
+    _ = @import("sync_committee_cache_test.zig");
 }

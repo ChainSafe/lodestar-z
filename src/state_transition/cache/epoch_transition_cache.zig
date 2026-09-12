@@ -488,13 +488,8 @@ pub const EpochTransitionCache = struct {
             try indices_eligible_for_activation.append(allocator, activation.validator_index);
         }
 
-        // Indices are ascending; validator-indexed penalties need a length of the last index plus one.
-        const slashing_penalties_length: usize = if (indices_to_slash.items.len == 0)
-            0
-        else
-            @intCast(indices_to_slash.items[indices_to_slash.items.len - 1] + 1);
         // Resizing to zero clears the previous epoch's length while retaining capacity.
-        try reused_cache.slashing_penalties.resize(reused_cache.allocator, slashing_penalties_length);
+        try reused_cache.slashing_penalties.resize(reused_cache.allocator, indices_to_slash.items.len);
 
         return .{
             .prev_epoch = prev_epoch,
@@ -543,19 +538,6 @@ pub const EpochTransitionCache = struct {
         if (self.balances) |*balances| {
             balances.deinit(allocator);
         }
-    }
-
-    /// Ensure rewards/penalties arrays match the current validator count.
-    /// This is only used in benchmark tests where we want to reuse the cache across steps.
-    pub fn syncRewardPenaltyLengths(self: *EpochTransitionCache, io: std.Io, validator_count: usize) !void {
-        try _reused_lock.lock(io);
-        defer _reused_lock.unlock(io);
-
-        const reused_cache = _reused_cache orelse return error.ReusedEpochTransitionCacheUnavailable;
-        try reused_cache.rewards.resize(reused_cache.allocator, validator_count);
-        try reused_cache.penalties.resize(reused_cache.allocator, validator_count);
-        self.rewards = reused_cache.rewards.items;
-        self.penalties = reused_cache.penalties.items;
     }
 };
 

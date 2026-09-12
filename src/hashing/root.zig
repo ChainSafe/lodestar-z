@@ -12,6 +12,7 @@ pub const getZeroHash = zero_hash.getZeroHash;
 
 const merkleize_ = @import("merkleize.zig");
 pub const merkleize = merkleize_.merkleize;
+pub const MerkleAccumulator = @import("merkle_accumulator.zig").MerkleAccumulator;
 pub const mixInLength = merkleize_.mixInLength;
 pub const maxChunksToDepth = merkleize_.maxChunksToDepth;
 

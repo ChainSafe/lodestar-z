@@ -30,14 +30,13 @@ pub fn processRewardsAndPenalties(
     const balances = try state.balancesSlice(allocator);
     errdefer allocator.free(balances);
 
+    for (rewards, penalties, balances) |reward, penalty, *balance| {
+        balance.* = (try std.math.add(u64, balance.*, reward)) -| penalty;
+    }
     if (slashing_penalties) |slashings| {
-        for (rewards, penalties, balances, 0..) |reward, penalty, *balance, i| {
-            const slashing: u64 = if (i < slashings.len) slashings[i] else 0;
-            balance.* = (try std.math.add(u64, balance.*, reward)) -| penalty -| slashing;
-        }
-    } else {
-        for (rewards, penalties, balances) |reward, penalty, *balance| {
-            balance.* = (try std.math.add(u64, balance.*, reward)) -| penalty;
+        std.debug.assert(slashings.len == cache.indices_to_slash.items.len);
+        for (cache.indices_to_slash.items, slashings) |index, slashing| {
+            balances[index] -|= slashing;
         }
     }
 

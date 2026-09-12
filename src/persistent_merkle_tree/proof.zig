@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const GindexUint = @import("hashing").GindexUint;
+const max_depth = @import("hashing").max_depth;
 const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
 
@@ -14,6 +15,8 @@ pub const Error = error{
     InvalidGindex,
     /// Witness list length does not match the gindex path length.
     InvalidWitnessLength,
+    /// A proof branch path exceeds the supported tree depth.
+    InvalidProofDepth,
 };
 
 pub const ProofType = enum {
@@ -261,171 +264,68 @@ pub const Proof = union(ProofType) {
     }
 };
 
-/// Convert gindex to bitstring
-fn convertGindexToBitstring(allocator: Allocator, gindex: Gindex) ![]const u8 {
-    const value = @intFromEnum(gindex);
-    if (value < 1) return error.InvalidGindex;
-
-    return std.fmt.allocPrint(allocator, "{b}", .{value});
-}
-
-/// Compute proof bitstrings (path and branch) for a gindex bitstring
-/// Matches computeProofBitstrings from util.ts
-fn computeProofBitstrings(allocator: Allocator, bitstring: []const u8) !struct { path: std.StringHashMap(void), branch: std.StringHashMap(void) } {
-    var path = std.StringHashMap(void).init(allocator);
-    errdefer path.deinit();
-    var branch = std.StringHashMap(void).init(allocator);
-    errdefer branch.deinit();
-
-    var g = bitstring;
-    while (g.len > 1) {
-        // Add current to path
-        const path_key = try allocator.dupe(u8, g);
-        try path.put(path_key, {});
-
-        // Get last bit and parent (remove last bit)
-        const last_bit = g[g.len - 1];
-        const parent = g[0 .. g.len - 1];
-
-        const sibling_bit: u8 = if (last_bit == '0') '1' else '0';
-        const sibling = try allocator.alloc(u8, parent.len + 1);
-        @memcpy(sibling[0..parent.len], parent);
-        sibling[parent.len] = sibling_bit;
-        try branch.put(sibling, {});
-
-        // Move to parent
-        g = parent;
-    }
-
-    return .{ .path = path, .branch = branch };
-}
-
-/// Add string to HashMap (Set) if not already present
-fn addToSet(set: *std.StringHashMap(void), allocator: Allocator, value: []const u8) !void {
-    if (!set.contains(value)) {
-        const key = try allocator.dupe(u8, value);
-        try set.put(key, {});
-    }
-}
-
-/// Free all keys in a HashMap and deinit
-fn freeSetKeys(set: *std.StringHashMap(void), allocator: Allocator) void {
-    var iter = set.keyIterator();
-    while (iter.next()) |key| {
-        allocator.free(key.*);
-    }
-    set.deinit();
-}
-
-/// Compute descriptor from gindices
-/// See https://github.com/ethereum/consensus-specs/blob/dev/ssz/merkle-proofs.md
+/// Compute a packed descriptor from generalized indices.
 pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
-    if (gindices.len == 0) return &[_]u8{};
-
-    var proof_bitstrings = std.StringHashMap(void).init(allocator);
-    defer freeSetKeys(&proof_bitstrings, allocator);
-
-    var path_bitstrings = std.StringHashMap(void).init(allocator);
-    defer freeSetKeys(&path_bitstrings, allocator);
-
-    // Collect all proof and path bitstrings
+    if (gindices.len == 0) return &.{};
+    const max_entries = try std.math.mul(usize, gindices.len, @bitSizeOf(GindexUint));
+    // Leave capacity headroom for the hash maps' u32 bucket counts.
+    if (max_entries > std.math.maxInt(u32) / 4) return error.InvalidLength;
     for (gindices) |gindex| {
-        const leaf_bitstring = try convertGindexToBitstring(allocator, gindex);
-        defer allocator.free(leaf_bitstring);
-
-        try addToSet(&proof_bitstrings, allocator, leaf_bitstring);
-
-        var proof_result = try computeProofBitstrings(allocator, leaf_bitstring);
-        defer freeSetKeys(&proof_result.path, allocator);
-        defer freeSetKeys(&proof_result.branch, allocator);
-
-        // Remove leaf from path
-        if (proof_result.path.fetchRemove(leaf_bitstring)) |removed| {
-            allocator.free(removed.key);
-        }
-
-        // Add path indices to path_bitstrings
-        var path_iter = proof_result.path.keyIterator();
-        while (path_iter.next()) |key| {
-            try addToSet(&path_bitstrings, allocator, key.*);
-        }
-
-        // Add branch indices to proof_bitstrings
-        var branch_iter = proof_result.branch.keyIterator();
-        while (branch_iter.next()) |key| {
-            try addToSet(&proof_bitstrings, allocator, key.*);
-        }
+        if (@intFromEnum(gindex) == 0) return error.InvalidGindex;
     }
 
-    // Remove all path bitstrings from proof bitstrings
-    var path_iter = path_bitstrings.keyIterator();
-    while (path_iter.next()) |key| {
-        if (proof_bitstrings.fetchRemove(key.*)) |removed| {
-            allocator.free(removed.key);
+    var proof_indices = std.AutoHashMap(GindexUint, void).init(allocator);
+    defer proof_indices.deinit();
+    var path_indices = std.AutoHashMap(GindexUint, void).init(allocator);
+    defer path_indices.deinit();
+
+    for (gindices) |gindex| {
+        var current = @intFromEnum(gindex);
+        try proof_indices.put(current, {});
+        // A gindex encodes left/right edges after its leading 1. Flip the last edge
+        // to select the sibling, then discard that edge to ascend to the parent.
+        for (0..gindex.pathLen()) |_| {
+            try proof_indices.put(current ^ 1, {});
+            current >>= 1;
+            if (current > 1) try path_indices.put(current, {});
         }
+        std.debug.assert(current == root_gindex_value);
     }
 
-    // Sort bitstrings lexicographically
-    var sorted_list: std.ArrayList([]const u8) = .empty;
-    defer sorted_list.deinit(allocator);
+    var paths = path_indices.keyIterator();
+    while (paths.next()) |path| _ = proof_indices.remove(path.*);
+    std.debug.assert(proof_indices.count() <= max_entries);
 
-    var proof_iter = proof_bitstrings.keyIterator();
-    while (proof_iter.next()) |key| {
-        try sorted_list.append(allocator, key.*);
-    }
+    const sorted = try allocator.alloc(GindexUint, proof_indices.count());
+    defer allocator.free(sorted);
+    var indices = proof_indices.keyIterator();
+    for (sorted) |*index| index.* = indices.next().?.*;
+    std.debug.assert(indices.next() == null);
 
-    const bitstringLessThan = struct {
-        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.order(u8, a, b) == .lt;
+    std.sort.pdq(GindexUint, sorted, {}, struct {
+        fn lessThan(_: void, a: GindexUint, b: GindexUint) bool {
+            // Align leading bits to compare paths lexically, with shorter prefixes first.
+            const a_aligned = a << @intCast(@clz(a));
+            const b_aligned = b << @intCast(@clz(b));
+            return if (a_aligned == b_aligned) a < b else a_aligned < b_aligned;
         }
-    }.lessThan;
+    }.lessThan);
 
-    std.sort.pdq([]const u8, sorted_list.items, {}, bitstringLessThan);
-
-    // Convert gindex bitstrings into descriptor bitstring
-    var descriptor_bitstring: std.ArrayList(u8) = .empty;
-    defer descriptor_bitstring.deinit(allocator);
-
-    for (sorted_list.items) |gindex_bitstring| {
-        // Find the rightmost '1' bit
-        var i: usize = 0;
-        while (i < gindex_bitstring.len) : (i += 1) {
-            const rev_idx = gindex_bitstring.len - 1 - i;
-            if (gindex_bitstring[rev_idx] == '1') {
-                for (0..i) |_| {
-                    try descriptor_bitstring.append(allocator, '0');
-                }
-                try descriptor_bitstring.append(allocator, '1');
-                break;
-            }
-        }
+    var bit_count: usize = 0;
+    for (sorted) |index| {
+        bit_count = try std.math.add(usize, bit_count, @as(usize, @ctz(index)) + 1);
     }
+    const byte_count = (try std.math.add(usize, bit_count, 7)) / 8;
+    const descriptor = try allocator.alloc(u8, byte_count);
+    @memset(descriptor, 0);
 
-    // Byte-align by padding with zeros
-    const remainder = descriptor_bitstring.items.len % 8;
-    if (remainder != 0) {
-        const padding = 8 - remainder;
-        for (0..padding) |_| {
-            try descriptor_bitstring.append(allocator, '0');
-        }
+    var bit_index: usize = 0;
+    for (sorted) |index| {
+        bit_index += @ctz(index);
+        descriptor[bit_index / 8] |= @as(u8, 0x80) >> @intCast(bit_index % 8);
+        bit_index += 1;
     }
-
-    // Convert bitstring to bytes
-    const byte_len = descriptor_bitstring.items.len / 8;
-    var descriptor = try allocator.alloc(u8, byte_len);
-    errdefer allocator.free(descriptor);
-
-    for (0..byte_len) |i| {
-        var byte: u8 = 0;
-        for (0..8) |bit_idx| {
-            const char = descriptor_bitstring.items[i * 8 + bit_idx];
-            if (char == '1') {
-                byte |= @as(u8, 0x80) >> @intCast(bit_idx);
-            }
-        }
-        descriptor[i] = byte;
-    }
-
+    std.debug.assert(bit_index == bit_count);
     return descriptor;
 }
 
@@ -437,38 +337,46 @@ fn getBit(bitlist: []const u8, bit_index: usize) bool {
     return (byte & (@as(u8, 0x80) >> bit_idx)) != 0;
 }
 
-/// Convert descriptor bytes to bitlist
+/// Converts a canonical descriptor to a bitlist after validating its shape and depth.
+/// Returns `InvalidProofDepth` before allocation if a path exceeds `max_depth` branches.
 pub fn descriptorToBitlist(allocator: Allocator, descriptor: []const u8) ![]bool {
-    var bools: std.ArrayList(bool) = .empty;
-    errdefer bools.deinit(allocator);
+    const bit_length = try validateDescriptor(descriptor);
+    const bools = try allocator.alloc(bool, bit_length);
+    for (bools, 0..) |*bit, i| bit.* = getBit(descriptor, i);
+    return bools;
+}
 
-    const max_bit_length = descriptor.len * 8;
-    var count0: usize = 0;
-    var count1: usize = 0;
+fn validateDescriptor(descriptor: []const u8) Error!usize {
+    const max_bit_length = std.math.mul(usize, descriptor.len, 8) catch return error.InvalidWitnessLength;
+    var right_pending: [max_depth]bool = undefined;
+    var depth: usize = 0;
 
     var i: usize = 0;
     while (i < max_bit_length) : (i += 1) {
-        const bit = getBit(descriptor, i);
-        try bools.append(allocator, bit);
-
-        if (bit) {
-            count1 += 1;
-        } else {
-            count0 += 1;
+        if (!getBit(descriptor, i)) {
+            if (depth == max_depth) return error.InvalidProofDepth;
+            right_pending[depth] = true;
+            depth += 1;
+            continue;
         }
 
-        if (count1 > count0) {
-            i += 1;
-            // Verify remaining bits are all zero (padding)
-            if (i + 7 < max_bit_length) {
-                return error.InvalidWitnessLength;
+        while (depth > 0) {
+            if (right_pending[depth - 1]) {
+                right_pending[depth - 1] = false;
+                break;
             }
-            while (i < max_bit_length) : (i += 1) {
-                if (getBit(descriptor, i)) {
+            depth -= 1;
+        }
+
+        if (depth == 0) {
+            const bit_length = i + 1;
+            if (max_bit_length - bit_length > 7) return error.InvalidWitnessLength;
+            for (bit_length..max_bit_length) |padding_index| {
+                if (getBit(descriptor, padding_index)) {
                     return error.InvalidWitnessLength;
                 }
             }
-            return bools.toOwnedSlice(allocator);
+            return bit_length;
         }
     }
 
@@ -562,7 +470,7 @@ fn compactMultiProofToNode(
     return pool.createBranch(left, right);
 }
 
-/// Create a Node from a compact multiproof
+/// Creates a node from a compact multiproof, rejecting paths beyond `max_depth`.
 pub fn createNodeFromCompactMultiProof(
     pool: *Node.Pool,
     leaves: [][32]u8,

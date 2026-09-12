@@ -10,6 +10,8 @@ const testing = std.testing;
 const Node = @import("persistent_merkle_tree").Node;
 const TransitionOpts = @import("state_transition.zig").TransitionOpts;
 const stateTransition = @import("state_transition.zig").stateTransition;
+const metrics = @import("metrics.zig");
+const FAR_FUTURE_EPOCH = @import("constants").FAR_FUTURE_EPOCH;
 
 const preset = @import("preset").preset;
 const constants = @import("constants");
@@ -110,6 +112,101 @@ test "state transition - a rejected block leaves the pre-state unchanged" {
     const after = (try test_state.cached_state.state.hashTreeRoot()).*;
     try testing.expectEqualSlices(u8, &before, &after);
     try testing.expectEqual(before_slot, try test_state.cached_state.state.slot());
+}
+
+/// Value of the first sample line `<name> <value>` in a Prometheus text scrape.
+fn metricValue(output: []const u8, name: []const u8) ?u64 {
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, name) and line.len > name.len and line[name.len] == ' ') {
+            return std.fmt.parseInt(u64, line[name.len + 1 ..], 10) catch null;
+        }
+    }
+    return null;
+}
+
+test "state transition - records per-block and per-epoch metrics" {
+    const allocator = std.testing.allocator;
+    try metrics.init(allocator, std.testing.io, .{});
+    defer metrics.deinit();
+
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 180_000 });
+    defer pool.deinit();
+    defer deinitReusedEpochTransitionCache(std.testing.io);
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var electra_block = types.electra.SignedBeaconBlock.default_value;
+    try generateElectraBlock(allocator, test_state.cached_state, &electra_block);
+    defer types.electra.SignedBeaconBlock.deinit(allocator, &electra_block);
+
+    // Give the epoch transition something to report: validator 0 needs an
+    // effective balance update, validator 1 is below the ejection balance,
+    // and validator 2 is waiting for the activation queue.
+    const state = test_state.cached_state.state.castToFork(.electra);
+    var balances = try state.balances();
+    try balances.set(0, 20_000_000_000);
+    var validators = try state.validators();
+    var to_eject = try validators.get(1);
+    try to_eject.set("effective_balance", 16_000_000_000);
+    var to_queue = try validators.get(2);
+    try to_queue.set("activation_eligibility_epoch", FAR_FUTURE_EPOCH);
+    // The fixture starts with full participation. The block's attestation targets the
+    // epoch that the transition rotates into previous_epoch_participation, so clear the
+    // current one to make those attesters newly seen.
+    var current_participation = try state.currentEpochParticipation();
+    for (0..try state.validatorsCount()) |i| {
+        try current_participation.set(i, 0);
+    }
+    try test_state.cached_state.state.commit();
+
+    const signed_beacon_block = AnySignedBeaconBlock{ .full_electra = &electra_block };
+    const post_state = try stateTransition(
+        allocator,
+        std.testing.io,
+        test_state.cached_state,
+        signed_beacon_block,
+        .{ .verify_signatures = false, .verify_proposer = false, .verify_state_root = false },
+        null,
+    );
+    defer {
+        post_state.deinit();
+        allocator.destroy(post_state);
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try metrics.write(&aw.writer);
+    const out = aw.written();
+
+    // One clone of the pre-state, which has been cloned once afterwards.
+    try testing.expectEqual(@as(?u64, 1), metricValue(out, "lodestar_stfn_state_cloned_count_count"));
+    try testing.expectEqual(@as(?u64, 1), metricValue(out, "lodestar_stfn_state_cloned_count_sum"));
+    // The block sits in the next epoch, so exactly one epoch transition was committed.
+    try testing.expectEqual(@as(?u64, 1), metricValue(out, "lodestar_stfn_epoch_transition_commit_seconds_count"));
+    // Epoch gauges come from the transition cache built before process_registry_updates.
+    try testing.expectEqual(@as(?u64, 1), metricValue(out, "lodestar_stfn_validators_in_activation_queue"));
+    try testing.expectEqual(@as(?u64, 1), metricValue(out, "lodestar_stfn_validators_in_exit_queue"));
+    try testing.expect(metricValue(out, "lodestar_stfn_effective_balance_updates_count").? >= 1);
+    // Per-block gauges describe the block just processed.
+    const attestation_count: u64 = @intCast(electra_block.message.body.attestations.items.len);
+    try testing.expectEqual(@as(?u64, attestation_count), metricValue(out, "lodestar_stfn_attestations_per_block_total"));
+    try testing.expect(metricValue(out, "lodestar_stfn_new_seen_attesters_per_block_total").? > 0);
+    try testing.expect(metricValue(out, "lodestar_stfn_new_seen_attesters_effective_balance_per_block_total").? > 0);
+    const proposer_rewards = post_state.getProposerRewards();
+    try testing.expectEqual(
+        @as(?u64, proposer_rewards.attestations),
+        metricValue(out, "lodestar_stfn_proposer_rewards_total{type=\"attestation\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, proposer_rewards.sync_aggregate),
+        metricValue(out, "lodestar_stfn_proposer_rewards_total{type=\"sync_aggregate\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, proposer_rewards.slashing),
+        metricValue(out, "lodestar_stfn_proposer_rewards_total{type=\"slashing\"}"),
+    );
 }
 
 test "proposer rewards should report only new attestation participation and reset on clone" {

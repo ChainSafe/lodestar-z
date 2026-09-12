@@ -1302,6 +1302,7 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
         post_state.deinit();
         allocator.destroy(post_state);
     }
+    st.metrics.state_transition.pre_state_cloned_count.observe(cached_state.cloned_count);
 
     try st.processSlots(
         allocator,
