@@ -289,7 +289,7 @@ pub fn deinit() void {
 test "exports the expected metric names" {
     const allocator = std.testing.allocator;
     try init(allocator, std.testing.io, .{});
-    defer deinit(); 
+    defer deinit();
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
