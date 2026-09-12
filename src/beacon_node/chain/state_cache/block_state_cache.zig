@@ -794,21 +794,17 @@ test "BlockStateCache add - insert/prune/duplicate paths free the owned state ex
 }
 
 test "BlockStateCache init releases its reservations on OOM at every allocation point" {
-    // init's allocations are the map ensureTotalCapacity, the slab alloc, and the free-array alloc; a
-    // failure at any of them must free what was already reserved (the testing allocator flags a leak
-    // otherwise). The sweep loops fail_index until success, covering every allocation point.
-    var fail_index: usize = 0;
-    while (true) : (fail_index += 1) {
-        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
-        if (BlockStateCache.init(failing.allocator(), .{ .max_states = 4 })) |cache| {
-            var c = cache;
-            c.deinit();
-            break;
-        } else |err| {
-            try testing.expectEqual(error.OutOfMemory, err);
+    var saw_operation_oom = false;
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, saw_oom: *bool) !void {
+            errdefer |err| {
+                saw_oom.* = err == error.OutOfMemory;
+            }
+            var cache = try BlockStateCache.init(allocator, .{ .max_states = 4 });
+            defer cache.deinit();
         }
-    }
-    try testing.expect(fail_index > 0); // sanity: init does allocate, so the sweep hit OOM at least once
+    }.run, .{&saw_operation_oom});
+    try std.testing.expect(saw_operation_oom);
 }
 
 // scanReadStats reads arithmetic: each resident state is read `read_counts[i]` times; never-read
