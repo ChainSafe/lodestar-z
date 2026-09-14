@@ -38,6 +38,7 @@ supported caller supplies a current hostile path.
 | Build and release provenance | [`build.zig.zon`](../../build.zig.zon) and [`pnpm-lock.yaml`](../../pnpm-lock.yaml) pin dependency inputs. [`publish-bindings.yml`](../../.github/workflows/publish-bindings.yml) pins actions, builds ReleaseSafe artifacts, and publishes them with npm provenance. |
 | Merkle hashing and proof depth | [`Node.Id.getRoot`](../../src/persistent_merkle_tree/Node.zig) hashes lazy branches with a bounded postorder stack and a pool-capacity visit limit; native callers must supply acyclic paths within `max_depth`. Opaque container callbacks retain their own hashing behavior. [`proof.descriptorToBitlist`](../../src/persistent_merkle_tree/proof.zig) checks binary-tree shape, trailing padding, and `max_depth` before allocating the decoded bitlist. Proof reconstruction uses this validation before allocating tree nodes, so excessive paths return `InvalidProofDepth`. |
 | BitList hashing workspace | [`BitListType`](../../src/ssz/type/bit_list.zig) bounds value and serialized hashing scratch with `MerkleAccumulator`. Serialized hashing validates the SSZ delimiter and limit before accumulation, removes the delimiter, and mixes in the bit length. |
+| BitList JSON cleanup | [`BitListType.deserializeFromJson`](../../src/ssz/type/bit_list.zig) releases its temporary decoded bytes exactly once on success and error. Current repository callers are Zig SSZ composition and test utilities; no N-API JSON decoding entry point is exported. |
 
 ## Host integration contracts
 
