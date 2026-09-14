@@ -25,10 +25,12 @@ pub const send_burst_max: u32 = 256;
 pub const work_per_step_max: u16 = 4096;
 pub const timeout_ms_max: u64 = 24 * 60 * 60 * 1000;
 pub const local_cid_length: usize = 16;
+pub const initial_dcid_length_min: usize = 8;
 pub const cid_length_max: usize = 20;
 pub const path_events_per_call_max: u8 = 8;
 
 comptime {
+    std.debug.assert(initial_dcid_length_min <= local_cid_length);
     std.debug.assert(local_cid_length <= cid_length_max);
     std.debug.assert(client_initial_min <= recv_udp_payload_max);
     std.debug.assert(client_initial_min <= send_udp_payload_max);
