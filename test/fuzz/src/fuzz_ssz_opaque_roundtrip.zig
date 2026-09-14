@@ -89,10 +89,8 @@ fn fuzzListRoundtrip(comptime ListT: type, allocator: std.mem.Allocator, data: [
     assert(data.len / ListT.Element.fixed_size <= ListT.limit);
 
     var expected_root: [32]u8 = undefined;
-    ListT.serialized.hashTreeRoot(allocator, data, &expected_root) catch |err| switch (err) {
-        error.OutOfMemory => return,
-        else => panicUnexpected("hashing opaque list input bytes", err),
-    };
+    ListT.serialized.hashTreeRoot(allocator, data, &expected_root) catch |err|
+        panicUnexpected("hashing opaque list input bytes", err);
     assert(std.mem.eql(u8, node.getRoot(&pool), &expected_root));
 
     // tree -> bytes round-trips back to the input.

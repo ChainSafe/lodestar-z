@@ -12,7 +12,6 @@ const stateBytes = await reader.readSerializedState();
 await reader.close();
 const requiredPubkeyCapacity = getPubkeyCacheCapacityForState(stateBytes);
 
-bindings.pool.ensureCapacity(10_000_000);
 let loadedPkix = false;
 try {
   bindings.pubkeys.load("./mainnet.pkix", requiredPubkeyCapacity);

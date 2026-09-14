@@ -23,7 +23,6 @@ const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
 const stateBytes = await reader.readSerializedState();
 await reader.close();
 
-bindings.pool.ensureCapacity(10_000_000);
 bindings.pubkeys.ensureCapacity(getSerializedFuluValidatorCount(stateBytes));
 
 const seedState = bindings.BeaconStateView.createFromBytes(stateBytes);

@@ -123,9 +123,7 @@ pub fn getExpectedWithdrawals(
             var validator: types.phase0.Validator.Type = undefined;
             try validators.getValue(undefined, withdrawal.validator_index, &validator);
 
-            const total_withdrawn_gop = try withdrawal_balances.getOrPut(withdrawal.validator_index);
-
-            const total_withdrawn: u64 = if (total_withdrawn_gop.found_existing) total_withdrawn_gop.value_ptr.* else 0;
+            const total_withdrawn: u64 = @intCast(withdrawal_balances.get(withdrawal.validator_index) orelse 0);
             const balance = try balances.get(withdrawal.validator_index) - total_withdrawn;
 
             if (validator.exit_epoch == c.FAR_FUTURE_EPOCH and
@@ -154,12 +152,12 @@ pub fn getExpectedWithdrawals(
     // Just run a bounded loop max iterating over all withdrawals
     // however breaks out once we have MAX_WITHDRAWALS_PER_PAYLOAD
     var n: usize = 0;
-    while (n < bound) : (n += 1) {
+    while (n < bound) {
         // Get next validator in turn
         const validator_index = (next_withdrawal_validator_index + n) % validators_count;
+        n += 1;
         var validator = try validators.get(validator_index);
-        const withdraw_balance_gop = try withdrawal_balances.getOrPut(validator_index);
-        const withdraw_balance: u64 = if (withdraw_balance_gop.found_existing) withdraw_balance_gop.value_ptr.* else 0;
+        const withdraw_balance: u64 = @intCast(withdrawal_balances.get(validator_index) orelse 0);
         const val_balance = try balances.get(validator_index);
         const balance = if (comptime fork.gte(.electra))
             // Deduct partially withdrawn balance already queued above
@@ -213,44 +211,56 @@ pub fn getExpectedWithdrawals(
         }
     }
 
-    try state.setNextWithdrawalIndex(withdrawal_index);
-
     withdrawals_result.sampled_validators = n;
     withdrawals_result.processed_partial_withdrawals_count = processed_partial_withdrawals_count;
 }
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 
-test "process withdrawals - sanity" {
+test "process withdrawals should count every swept validator including the one filling the payload" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
+    const validator_count = 256;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
-    defer test_state.deinit();
+    for ([_]usize{ 0, preset.MAX_WITHDRAWALS_PER_PAYLOAD - 1, preset.MAX_WITHDRAWALS_PER_PAYLOAD }) |withdrawal_count| {
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
+        defer test_state.deinit();
+        const state = test_state.cached_state.state.castToFork(.electra);
+        var validators = try state.validators();
+        const withdrawal_credentials = [_]u8{1} ++ [_]u8{0} ** 31;
+        for (1..withdrawal_count + 1) |i| {
+            var validator = try validators.get(i);
+            try validator.setValue("withdrawal_credentials", &withdrawal_credentials);
+            try validator.set("withdrawable_epoch", 0);
+        }
 
-    var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
-    var withdrawals_result = WithdrawalsResult{
-        .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
-    };
-    var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
-    defer withdrawal_balances.deinit();
+        var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
+        var withdrawals_result = WithdrawalsResult{
+            .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
+        };
+        var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
+        defer withdrawal_balances.deinit();
 
-    var root: Root = undefined;
-    try types.capella.Withdrawals.hashTreeRoot(allocator, &withdrawals_result.withdrawals, &root);
+        try getExpectedWithdrawals(
+            .electra,
+            test_state.cached_state.epoch_cache,
+            state,
+            &withdrawals_result,
+            &withdrawal_balances,
+        );
+        const expected_sampled = if (withdrawal_count == preset.MAX_WITHDRAWALS_PER_PAYLOAD)
+            withdrawal_count + 1
+        else
+            @min(validator_count, preset.MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP);
+        try std.testing.expectEqual(expected_sampled, withdrawals_result.sampled_validators);
+        try std.testing.expectEqual(withdrawal_count, withdrawals_result.withdrawals.items.len);
+        for (withdrawals_result.withdrawals.items, 1..) |withdrawal, validator_index| {
+            try std.testing.expectEqual(validator_index, withdrawal.validator_index);
+        }
 
-    try getExpectedWithdrawals(
-        .electra,
-        test_state.cached_state.epoch_cache,
-        test_state.cached_state.state.castToFork(.electra),
-        &withdrawals_result,
-        &withdrawal_balances,
-    );
-    try processWithdrawals(
-        .electra,
-        allocator,
-        test_state.cached_state.state.castToFork(.electra),
-        withdrawals_result,
-        root,
-    );
+        var root: Root = undefined;
+        try types.capella.Withdrawals.hashTreeRoot(allocator, &withdrawals_result.withdrawals, &root);
+        try processWithdrawals(.electra, allocator, state, withdrawals_result, root);
+    }
 }

@@ -93,6 +93,17 @@ export enum ForkName {
   gloas = "gloas",
 }
 
+export enum ForkSeq {
+  phase0 = 0,
+  altair = 1,
+  bellatrix = 2,
+  capella = 3,
+  deneb = 4,
+  electra = 5,
+  fulu = 6,
+  gloas = 7,
+}
+
 interface SyncCommittee {
   pubkeys: Uint8Array[];
   aggregatePubkey: Uint8Array;
@@ -187,9 +198,11 @@ export type VoluntaryExitValidity =
 export declare class BeaconStateView {
   static createFromBytes(bytes: Uint8Array): BeaconStateView;
 
+  release(): void;
   slot: number;
   fork: Fork;
   forkName: ForkName;
+  forkSeq: ForkSeq;
   epoch: number;
   genesisTime: number;
   genesisValidatorsRoot: Uint8Array;
@@ -366,13 +379,10 @@ export declare class BeaconStateView {
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
-  stateTransition(signedBlockBytes: Uint8Array, options?: TransitionOpts): BeaconStateView;
+  stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
 declare const bindings: {
-  pool: {
-    ensureCapacity: (capacity: number) => void;
-  };
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
@@ -382,6 +392,8 @@ declare const bindings: {
   metrics: {
     init: () => void;
     scrapeMetrics: () => string;
+    registerLocalValidator: (index: number) => void;
+    unregisterLocalValidator: (index: number) => void;
   };
   BeaconStateView: typeof BeaconStateView;
 };

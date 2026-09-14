@@ -42,8 +42,13 @@ pub fn open(allocator: std.mem.Allocator, io: std.Io, config: c.BeaconConfig, pa
 
     const pool = try allocator.create(Node.Pool);
     errdefer allocator.destroy(pool);
-    pool.* = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    pool.* = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 10_000_000,
+    });
     errdefer pool.deinit();
+
     return .{
         .config = config,
         .file = file,

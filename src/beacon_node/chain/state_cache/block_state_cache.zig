@@ -421,7 +421,7 @@ const BlockHarness = struct {
 
         h.allocator = allocator;
         h.io = std.testing.io;
-        h.pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 * 8 });
+        h.pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 180_000 });
         errdefer h.pool.deinit();
 
         h.factory = try TestStateFactory.init(allocator, &h.pool);
@@ -762,7 +762,7 @@ fn cloneDistinct(seed: *CachedBeaconState, alloc: Allocator, slot: u64) !*Cached
 test "BlockStateCache add - insert/prune/duplicate paths free the owned state exactly once" {
     const seed_alloc = testing.allocator;
     const io = std.testing.io;
-    const pool_size = 256 * 64;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = seed_alloc, .allocator = seed_alloc, .pool_size = pool_size });
     defer pool.deinit();
 

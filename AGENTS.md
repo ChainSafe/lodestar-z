@@ -21,6 +21,10 @@
   trust boundary, native dependency, persistence path or format, shared mutable cache or pool,
   externally influenced native input, or supported integration. Update the normative threat model
   only when the security contract changes; otherwise update the implementation map.
+- **Test file layout:** a module holds at most one `test` block. A single inline test is fine;
+  a second one means the tests move to a sibling `<module>_test.zig`, wired from the module with
+  `test { _ = @import("<module>_test.zig"); }`. Never mark a declaration `pub` only to relocate a
+  test. `zig build test:tidy` enforces this.
 - **Incremental commits:** after review starts, do not force-push unless a maintainer requests it.
 - **Communication style:** do not use em dashes. Keep communication succinct and human-friendly.
 
@@ -89,6 +93,9 @@ zig fmt --check .
 
 # Format Zig files
 zig fmt .
+
+# Run repo-wide lint rules that `zig fmt` cannot express
+zig build test:tidy
 
 # Run all unit tests
 zig build test
@@ -301,6 +308,35 @@ Zig code must make allocator and ownership boundaries explicit:
 - Build and run binding tests for changes under `bindings/` or exported native APIs.
 - Fuzz parsers, deserializers, and cryptographic boundaries when introducing new input shapes.
 
+### Test file layout
+
+Keep tests beside the code they cover without letting them crowd it out.
+
+- A module holds at most one `test` block. One inline test is a usage example and stays put; a
+  second one makes it a suite, and suites live in a sibling `<module>_test.zig`. A module is
+  therefore either inline (one test) or extracted (only the wiring block), never both.
+- Name the test file after its module in snake_case. `slot_math.zig` pairs with
+  `slot_math_test.zig`, and `Node.zig` pairs with `node_test.zig`.
+- Wire the import from the module under test, not from the package `root.zig`:
+
+```zig
+// slot_math.zig
+test {
+    _ = @import("slot_math_test.zig");
+}
+```
+
+  Keeping the import local means the pairing survives moving or deleting the module, and no
+  package root has to be updated.
+- Move only the tests. Leave the test bodies unchanged and rebuild the prelude they relied on in
+  the new file as imports and aliases.
+- Private test helpers move with the tests they serve.
+- Do not widen a declaration to `pub` only to relocate a test. Tests that exercise private
+  internals stay inline.
+- Prefix memory safety regression test names with `memory_safety: ` and keep them in the sibling
+  test file for the module they cover.
+- Tests covering a whole package belong in `root_test.zig`, wired from the package `root.zig`.
+
 ## Pull request guidelines
 
 ### Branches and commits
@@ -318,6 +354,48 @@ Create branches from `main`. Use Conventional Commit messages:
 Keep commits focused. After review begins, add incremental commits rather than rewriting history
 unless a maintainer asks otherwise.
 
+### Titles and descriptions
+
+Title: conventional-commit prefix, then an imperative subject of about four words, lowercase, no
+period. `refactor: extract tests to _test.zig`.
+
+Description: use the Lodestar template and scale the detail to the change.
+
+```markdown
+**Motivation**
+
+The problem, at whatever length it needs. Quote the error or log, link the issue or discussion.
+
+**Description**
+
+One sentence saying what this does.
+
+- Change, named by identifier
+  - detail
+
+TODO:
+- follow-up, if any
+
+**AI Assistance Disclosure**
+
+One line.
+```
+
+- Motivation is never empty. It states the problem at whatever length the problem needs, and
+  links the issue, review comment, or discussion it came from.
+- Quote the evidence: the error, the log, the command output, in a code block. Long output goes in
+  a `<details>` block.
+- Description length tracks the diff. A one-line fix gets a sentence; a larger change can use
+  bullets, tables, or short subsections to explain behavior and relevant evidence.
+- Bullets name concrete changes by identifier in backticks.
+- Use tables or short subsections when they make before/after behavior, tradeoffs, or validation
+  easier to review. Use text or code blocks instead of screenshots of text.
+- Put the main rationale in Motivation. Include design constraints and validation evidence in
+  Description when they help reviewers assess the change; link CI instead of repeating routine output.
+- Do not list example files to illustrate a point.
+- Code blocks are for real output or a before/after of an interface, never for explaining a
+  concept.
+
 ### AI assistance disclosure
 
 Disclose AI assistance in the PR description, following Lodestar's convention. State whether the
@@ -326,12 +404,13 @@ implementation was primarily AI-authored or whether AI was used only for codebas
 ### Pre-push checklist
 
 1. `zig fmt --check .`
-2. Run relevant tests, never run slow `zig build test` unless changes touch spec logic
-3. Relevant spec tests for consensus, SSZ, or BLS changes
-4. `pnpm lint` for binding source changes
-5. Rebuild bindings and run `pnpm test` for binding or NAPI changes
-6. Confirm no generated test source or build output was edited manually
-7. Confirm both ownership cleanup and error paths are covered
+2. `zig build test:tidy`
+3. Run relevant tests, never run slow `zig build test` unless changes touch spec logic
+4. Relevant spec tests for consensus, SSZ, or BLS changes
+5. `pnpm lint` for binding source changes
+6. Rebuild bindings and run `pnpm test` for binding or NAPI changes
+7. Confirm no generated test source or build output was edited manually
+8. Confirm both ownership cleanup and error paths are covered
 
 ## Common tasks
 

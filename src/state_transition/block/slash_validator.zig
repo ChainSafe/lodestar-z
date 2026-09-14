@@ -6,6 +6,7 @@ const c = @import("constants");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
@@ -20,6 +21,7 @@ pub fn slashValidator(
     config: *const BeaconConfig,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
+    proposer_rewards: *ProposerRewards,
     slashings_cache: *SlashingsCache,
     slashed_index: ValidatorIndex,
     whistle_blower_index: ?ValidatorIndex,
@@ -82,12 +84,10 @@ pub fn slashValidator(
     if (whistle_blower_index) |_whistle_blower_index| {
         try increaseBalance(fork, state, proposer_index, proposer_reward);
         try increaseBalance(fork, state, _whistle_blower_index, whistleblower_reward - proposer_reward);
-        // TODO: implement RewardCache
-        // state.proposer_rewards.slashing += proposer_reward;
+        proposer_rewards.slashing += proposer_reward;
     } else {
         try increaseBalance(fork, state, proposer_index, whistleblower_reward);
-        // TODO: implement RewardCache
-        // state.proposerRewards.slashing += whistleblowerReward;
+        proposer_rewards.slashing += whistleblower_reward;
     }
 
     if (fork.gte(.altair)) {

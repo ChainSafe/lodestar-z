@@ -30,13 +30,20 @@ test "innerShuffleList roundtrip matches reference vector" {
 
 test "innerShuffleList generic over u64" {
     var input: [100]u64 = undefined;
-    for (0..input.len) |i| input[i] = i;
+    for (0..input.len) |i| input[i] = if (i % 2 == 0) std.math.maxInt(u64) - i else i;
+    var actual = input;
     var seed: [SEED_SIZE]u8 = undefined;
     for (0..SEED_SIZE) |i| seed[i] = @intCast(i * 7 % 256);
 
-    try shuffle.shuffleList(u64, input[0..], seed[0..], 90);
-    try shuffle.unshuffleList(u64, input[0..], seed[0..], 90);
-    for (0..input.len) |i| try std.testing.expectEqual(@as(u64, i), input[i]);
+    var reference = try shuffle.ComputeShuffledIndex.init(std.testing.allocator, &seed, input.len, 90);
+    defer reference.deinit();
+
+    try shuffle.shuffleList(u64, &actual, &seed, 90);
+    for (input, 0..) |value, i| {
+        try std.testing.expectEqual(value, actual[try reference.get(@intCast(i))]);
+    }
+    try shuffle.unshuffleList(u64, &actual, &seed, 90);
+    try std.testing.expectEqualSlices(u64, &input, &actual);
 }
 
 test "unshuffleList matches spec test vector" {

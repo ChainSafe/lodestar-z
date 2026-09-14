@@ -214,6 +214,9 @@ fn loadValidators(
     const seed_count = try seed_validators.length();
     const new_count = new_validators_bytes.len / types.phase0.Validator.fixed_size;
     const min_count = @min(seed_count, new_count);
+    if (seed_state_validators_bytes) |bytes| {
+        if (bytes.len / types.phase0.Validator.fixed_size < min_count) return error.InvalidSize;
+    }
 
     var migrated_validators = try seed_validators.clone(.{ .transfer_cache = false });
     errdefer migrated_validators.deinit();
@@ -573,7 +576,7 @@ test "loadState scenarios" {
     };
 
     inline for (cases) |case| {
-        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8192 });
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 750_000 });
         defer pool.deinit();
 
         const state_ptr = try gen.generateElectraState(allocator, &pool, chain_config, 64);
@@ -790,7 +793,7 @@ test "diff helpers cases" {
 
 test "loadValidators/loadInactivityScores: rejection scenarios" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 180_000 });
     defer pool.deinit();
 
     const gen = @import("test_utils/generate_state.zig");

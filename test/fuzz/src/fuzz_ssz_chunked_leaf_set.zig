@@ -134,10 +134,8 @@ fn fuzzListOps(
                 }).*;
 
                 var ref_root: [32]u8 = undefined;
-                ListT.hashTreeRoot(allocator, &reference, &ref_root) catch |err| switch (err) {
-                    error.OutOfMemory => return,
-                    else => panicUnexpected("hashing chunked list reference", err),
-                };
+                ListT.hashTreeRoot(allocator, &reference, &ref_root) catch |err|
+                    panicUnexpected("hashing chunked list reference", err);
                 assert(std.mem.eql(u8, &ref_root, &view_root));
                 committed_len = reference.items.len;
                 @memcpy(committed[0..committed_len], reference.items);
@@ -296,10 +294,8 @@ fn assertListMatches(
     assert(std.mem.eql(ListT.Element.Type, filled, reference.items));
 
     var expected_root: [32]u8 = undefined;
-    ListT.hashTreeRoot(view.allocator, reference, &expected_root) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => panicUnexpected("hashing chunked list oracle values", err),
-    };
+    ListT.hashTreeRoot(view.allocator, reference, &expected_root) catch |err|
+        panicUnexpected("hashing chunked list oracle values", err);
     const actual_root = view.hashTreeRoot() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => panicUnexpected("hashing chunked list oracle view", err),

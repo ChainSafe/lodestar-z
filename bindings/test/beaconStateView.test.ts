@@ -2,12 +2,24 @@ import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import {computeEpochAtSlot} from "@lodestar/state-transition";
 import {type phase0, ssz} from "@lodestar/types";
-import {beforeAll, describe, expect, it} from "vitest";
+import {afterAll, beforeAll, describe, expect, it} from "vitest";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
 
 const MAINNET_PUBKEY_CACHE_LIMIT = 2_000_000;
 const SYNTHETIC_VALIDATOR_COUNT = 16;
+
+function expectSyncCommitteeCache(cache: {
+  validatorIndices: Uint32Array;
+  validatorIndexMap: Map<number, number[]>;
+}): void {
+  expect(cache.validatorIndices).toBeInstanceOf(Uint32Array);
+  expect(cache.validatorIndices.length).toBeGreaterThan(0);
+  expect(cache.validatorIndexMap).toBeInstanceOf(Map);
+
+  const firstValidatorIndex = cache.validatorIndices[0];
+  expect(cache.validatorIndexMap.get(firstValidatorIndex)).toContain(0);
+}
 
 describe("BeaconStateView", () => {
   let state: InstanceType<typeof bindings.BeaconStateView>;
@@ -140,7 +152,6 @@ describe("BeaconStateView", () => {
     global.gc?.();
 
     // Phase 2: Create native BeaconStateView
-    bindings.pool.ensureCapacity(10_000_000);
     try {
       bindings.pubkeys.load("./mainnet.pkix", MAINNET_PUBKEY_CACHE_LIMIT);
     } catch (_e) {
@@ -149,6 +160,8 @@ describe("BeaconStateView", () => {
     }
     state = bindings.BeaconStateView.createFromBytes(stateBytes);
   }, 120_000); // 2 minute timeout for loading era file
+
+  afterAll(() => state?.release());
 
   describe("basic properties", () => {
     it("slot should match lodestar", () => {
@@ -311,6 +324,11 @@ describe("BeaconStateView", () => {
       bellatrixView = bindings.BeaconStateView.createFromBytes(ssz.bellatrix.BeaconState.serialize(bellatrixState));
     });
 
+    afterAll(() => {
+      phase0View?.release();
+      bellatrixView?.release();
+    });
+
     it("should true on post-merge state without reading the block", () => {
       // body is empty — binding short-circuits before touching it.
       expect(state.isExecutionEnabled({body: {}})).toBe(true);
@@ -471,15 +489,16 @@ describe("BeaconStateView", () => {
   });
 
   describe("sync committee cache", () => {
-    it("currentSyncCommitteeIndexed should have validatorIndices", () => {
-      const indexed = state.currentSyncCommitteeIndexed;
-      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
-      expect(indexed.validatorIndices.length).toBeGreaterThan(0);
+    it("currentSyncCommitteeIndexed should return cache", () => {
+      expectSyncCommitteeCache(state.currentSyncCommitteeIndexed);
     });
 
     it("getIndexedSyncCommitteeAtEpoch should return cache", () => {
-      const indexed = state.getIndexedSyncCommitteeAtEpoch(state.epoch);
-      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
+      expectSyncCommitteeCache(state.getIndexedSyncCommitteeAtEpoch(state.epoch));
+    });
+
+    it("getIndexedSyncCommittee should return cache", () => {
+      expectSyncCommitteeCache(state.getIndexedSyncCommittee(state.slot));
     });
 
     it("syncProposerReward should be a non-negative number", () => {
@@ -488,6 +507,17 @@ describe("BeaconStateView", () => {
   });
 
   describe("serialization", () => {
+    it("release should release state and be idempotent", () => {
+      const releasable = bindings.BeaconStateView.createFromBytes(
+        ssz.phase0.BeaconState.serialize(ssz.phase0.BeaconState.defaultValue())
+      );
+
+      releasable.release();
+
+      expect(() => releasable.slot).toThrow("InvalidState");
+      expect(() => releasable.release()).not.toThrow();
+    });
+
     it("serialize should produce bytes matching original", () => {
       const serialized = state.serialize();
       expect(serialized.length).toBe(stateBytes.length);
@@ -647,21 +677,42 @@ describe("BeaconStateView", () => {
     it("processSlots should advance state by 1 slot", () => {
       const originalSlot = state.slot;
       const newState = state.processSlots(originalSlot + 1);
-
-      expect(newState.slot).toBe(originalSlot + 1);
+      try {
+        expect(newState.slot).toBe(originalSlot + 1);
+      } finally {
+        newState.release();
+      }
     });
 
     it("processSlots with dontTransferCache: false should still transfer cache", () => {
       const originalSlot = state.slot;
       const newState = state.processSlots(originalSlot + 1, {dontTransferCache: false});
-
-      expect(newState.slot).toBe(originalSlot + 1);
-      expect(newState.createdWithTransferCache).toBe(true);
+      try {
+        expect(newState.slot).toBe(originalSlot + 1);
+        expect(newState.createdWithTransferCache).toBe(true);
+      } finally {
+        newState.release();
+      }
     });
   });
 
-  describe("stateTransition parseOptions", () => {
+  describe("stateTransition", () => {
     const dummyBlockBytes = new Uint8Array(0);
+
+    it("deserializes a blinded block with the selected block type", () => {
+      const signedBlock = ssz.fulu.SignedBlindedBeaconBlock.defaultValue();
+      signedBlock.message.slot = state.slot + 1;
+      signedBlock.message.proposerIndex = state.getBeaconProposer(signedBlock.message.slot);
+      const signedBlockBytes = ssz.fulu.SignedBlindedBeaconBlock.serialize(signedBlock);
+
+      expect(() =>
+        state.stateTransition(signedBlockBytes, true, {
+          verifyProposer: false,
+          verifySignatures: false,
+          verifyStateRoot: false,
+        })
+      ).toThrow("BlockParentRootMismatch");
+    });
 
     it("rejects invalid opts", () => {
       const invalidOpts = [
@@ -671,13 +722,13 @@ describe("BeaconStateView", () => {
         {dataAvailabilityStatus: "available"}, // TS enum value is "Available"
       ];
       for (const opts of invalidOpts) {
-        expect(() => state.stateTransition(dummyBlockBytes, opts)).toThrow();
+        expect(() => state.stateTransition(dummyBlockBytes, false, opts)).toThrow();
       }
     });
 
     // TODO: remove once Zig models DataAvailabilityStatus.NotRequired
     it("rejects gloas-only NotRequired", () => {
-      expect(() => state.stateTransition(dummyBlockBytes, {dataAvailabilityStatus: "NotRequired"})).toThrow();
+      expect(() => state.stateTransition(dummyBlockBytes, false, {dataAvailabilityStatus: "NotRequired"})).toThrow();
     });
   });
 
