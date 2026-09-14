@@ -37,6 +37,23 @@ test "managed runtime validates capacities and current application fork before a
     try std.testing.expectError(error.UnknownFork, node.init(failing.allocator(), std.testing.io, opts));
 }
 
+test "managed runtime metrics copy peer processing work without advancing it" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, options(&key));
+    defer node.deinit(std.testing.io);
+    node.core.reconcile(node.last_now);
+    const peer_work = node.core.counters;
+    const dial_work = node.core.dial_queue.counters;
+    try std.testing.expect(peer_work.catalog_deadline_rows > 0);
+    var snapshot: @import("metrics.zig").Snapshot = .{};
+    snapshot.collect(&node, node.last_now.mono_ms);
+    try std.testing.expectEqualDeep(peer_work, snapshot.peer_work);
+    try std.testing.expectEqualDeep(dial_work, snapshot.dial);
+    try std.testing.expectEqualDeep(peer_work, node.core.counters);
+    try std.testing.expectEqualDeep(dial_work, node.core.dial_queue.counters);
+}
+
 test "managed runtime local transaction sequences no-op schedule and rollback" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var opts = options(&key);

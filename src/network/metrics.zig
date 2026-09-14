@@ -44,6 +44,7 @@ pub const Snapshot = struct {
     scores: score_metrics.Snapshot = .{},
     peer_policy: @import("metrics_peer_policy.zig").Snapshot = .{},
     peer_population: @import("metrics_peers.zig").Snapshot = .{},
+    peer_work: @import("core.zig").Core.Counters = .{},
     connections: @import("quic/metrics.zig").Counters = .{},
     transport_resources: ?@import("quic/engine.zig").Engine.Resources = null,
     dial_resources: ?@import("peers/dial_queue.zig").DialQueue.Resources = null,
@@ -123,6 +124,7 @@ pub const Snapshot = struct {
         self.identify_failures = core.control.counters.identify_failures;
         self.closed_by_client = core.control.counters.closed_by_client;
         self.peer_events = core.control.counters.events;
+        self.peer_work = core.counters;
         self.dial = core.dial_queue.counters;
         for (g.sessions.rows) |*session| {
             const io = &session.io;
@@ -265,6 +267,7 @@ pub const Snapshot = struct {
         try self.peer_population.write(w);
         try self.peer_events.write(w);
         try self.peer_policy.write(w);
+        try self.writePeerProcessing(w);
         try self.connections.write(w);
         try self.writePeeringProgress(w);
         try scalar(w, "lodestar_discovery_total_dial_attempts", .counter, "Started native QUIC dials", self.runtime.dial_started);
@@ -314,6 +317,14 @@ pub const Snapshot = struct {
         }
         try family(w, "lodestar_native_peer_goodbyes_total", .counter, "Received Ethereum Goodbye reasons; unknown wire codes share one label");
         inline for (@typeInfo(goodbye.Reason).@"enum".fields) |reason| try sample(w, "lodestar_native_peer_goodbyes_total", "reason", reason.name, self.peer_events.goodbyes[reason.value]);
+    }
+
+    fn writePeerProcessing(self: *const Snapshot, w: *Writer) Writer.Error!void {
+        try family(w, "lodestar_native_peer_processing_total", .counter, "Peer policy processing work by bounded operation");
+        inline for (.{ "selections", "selection_rows", "candidate_syncs", "candidate_rows", "candidate_lookup_rows", "catalog_deadline_rows", "candidate_selections" }) |operation| {
+            try sample(w, "lodestar_native_peer_processing_total", "operation", operation, @field(self.peer_work, operation));
+        }
+        try sample(w, "lodestar_native_peer_processing_total", "operation", "dial_sync_lookup_rows", self.dial.sync_lookup_rows);
     }
 
     fn writePeeringProgress(self: *const Snapshot, w: *Writer) Writer.Error!void {
@@ -449,7 +460,7 @@ pub const Snapshot = struct {
             .{ "gossipsub_msg_publish_bytes_total", "published_bytes", "Compressed publication bytes summed over successfully queued peer copies" },
             .{ "gossipsub_msg_received_prevalidation_total", "prevalidation", "Decoded publication items before admission, including deferred and refused items" },
             .{ "gossipsub_ihave_rcv_msgids_total", "ihave_ids", "Examined valid IHAVE IDs within processing limits" },
-            .{ "gossipsub_ihave_rcv_not_seen_msgids_total", "ihave_unseen", "Examined IHAVE IDs absent from seen and pending validation caches" },
+            .{ "gossipsub_ihave_rcv_not_seen_msgids_total", "ihave_unseen", "Unique eligible IHAVE IDs selected for an IWANT attempt after deduplication, outstanding-request and known-message filtering" },
             .{ "gossipsub_iwant_rcv_msgids_total", "iwant_ids", "Examined valid unsuppressed IWANT IDs present in message history" },
             .{ "gossipsub_msg_forward_count_total", "forwarded" },
             .{ "gossipsub_msg_forward_peers_total", "forwarded_peers" },
@@ -489,6 +500,11 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing_time.observe(100);
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing_time.observe(300);
     snapshot.requests.withheld_ms_total = 1500;
+    snapshot.peer_work.candidate_syncs = 2;
+    snapshot.peer_work.candidate_rows = 32;
+    snapshot.peer_work.candidate_lookup_rows = 8;
+    snapshot.peer_work.catalog_deadline_rows = 64;
+    snapshot.dial.sync_lookup_rows = 96;
     for (&snapshot.scores.weights) |*ranges| for (ranges) |*range| {
         range.observe(-1e40);
         range.observe(1e40);
@@ -528,6 +544,12 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_goodbyes_total{reason=\"too_many_peers\"} 11\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_gossip_queue_drops_total{reason=\"data_bytes\"} 17\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_discovery_candidate_rejections_total{reason=\"incompatible_fork\"} 19\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_processing_total{operation=\"candidate_syncs\"} 2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_processing_total{operation=\"candidate_rows\"} 32\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_processing_total{operation=\"candidate_lookup_rows\"} 8\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_processing_total{operation=\"catalog_deadline_rows\"} 64\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_processing_total{operation=\"dial_sync_lookup_rows\"} 96\n") != null);
+    try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, output, "lodestar_native_peer_processing_total{operation="));
     snapshot.gossip_recent = 7;
     snapshot.stop();
     try std.testing.expectEqual(@as(usize, 0), snapshot.gossip_recent);
@@ -535,5 +557,7 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     try std.testing.expectEqual(std.math.maxInt(u64), snapshot.runtime.dial_started);
     try std.testing.expectEqual(@as(u64, 1), snapshot.lookup_time.count);
     try std.testing.expectEqual(@as(u64, 1), snapshot.dial_time[1].count);
+    try std.testing.expectEqual(@as(u64, 64), snapshot.peer_work.catalog_deadline_rows);
+    try std.testing.expectEqual(@as(u64, 96), snapshot.dial.sync_lookup_rows);
     try std.testing.expect(snapshot.discovery_candidate_idle_ms == null);
 }

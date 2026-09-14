@@ -98,6 +98,7 @@ pub const Core = struct {
         candidate_syncs: u64 = 0,
         candidate_rows: u64 = 0,
         candidate_lookup_rows: u64 = 0,
+        catalog_deadline_rows: u64 = 0,
         candidate_selections: u64 = 0,
     };
     pub const PeerCounts = struct { connected: u16, relevant: u16, outbound_relevant: u16 };
@@ -352,33 +353,38 @@ pub const Core = struct {
             else => {},
         }
     }
-    fn refreshCandidates(self: *Core, now: Now) void {
+    fn refreshCandidates(self: *Core, now: Now, catalog_deadline: ?u64) void {
         if (self.candidates_revision == self.catalog.revision and self.catalog.revision != std.math.maxInt(u64)) return;
         self.counters.candidate_syncs +|= 1;
         self.counters.candidate_rows +|= self.catalog.rows.len;
         const count = self.catalog.snapshots(self.snapshot_scratch);
-        for (self.snapshot_scratch[0..count]) |*snapshot| self.syncCandidate(snapshot, now);
+        for (self.snapshot_scratch[0..count]) |*snapshot| self.syncCandidate(snapshot, now, catalog_deadline);
         self.candidates_revision = self.catalog.revision;
     }
-    fn syncCandidate(self: *Core, snapshot: *const t.Snapshot, now: Now) void {
-        if (snapshot.connection != null) {
-            self.dial_queue.syncConnection(&snapshot.identity, true, now.mono_ms);
-        } else {
-            self.dial_queue.disconnected(&snapshot.identity, snapshot.connected_at_ms, snapshot.disconnect_reason orelse .transport_closed, now.mono_ms);
-        }
-        if (snapshot.relevant) self.dial_queue.relevant(&snapshot.identity, snapshot.status_at_ms);
-        if (snapshot.ban_until_ms > now.mono_ms or snapshot.score <= -50 or snapshot.goodbye_until_ms > now.mono_ms) {
-            const due = @max(self.catalog.nextDeadline(now.mono_ms) orelse now.mono_ms +| 1_000, snapshot.goodbye_until_ms);
-            self.dial_queue.deferPeer(&snapshot.identity, due);
-        }
+    fn candidateBlocked(snapshot: *const t.Snapshot, now_ms: u64) bool {
+        return snapshot.ban_until_ms > now_ms or snapshot.score <= -50 or snapshot.goodbye_until_ms > now_ms;
+    }
+    fn syncCandidate(self: *Core, snapshot: *const t.Snapshot, now: Now, catalog_deadline: ?u64) void {
+        const eligible_at_ms: ?u64 = if (candidateBlocked(snapshot, now.mono_ms))
+            @max(catalog_deadline orelse now.mono_ms +| 1_000, snapshot.goodbye_until_ms)
+        else
+            null;
+        self.dial_queue.synchronize(snapshot, now.mono_ms, eligible_at_ms);
+    }
+    fn catalogDeadline(self: *Core, now_ms: u64) ?u64 {
+        self.counters.catalog_deadline_rows +|= self.catalog.rows.len;
+        return self.catalog.nextDeadline(now_ms);
     }
     fn syncIdentity(self: *Core, identity: *const t.PeerId, now: Now) void {
         for (self.catalog.rows, 0..) |*row, index| {
-            self.counters.candidate_lookup_rows +|= 1;
             if (!row.occupied or !row.identity.eql(identity)) continue;
-            self.syncCandidate(&self.catalog.get(.{ .index = @intCast(index), .generation = row.generation }).?, now);
+            self.counters.candidate_lookup_rows +|= index + 1;
+            const snapshot = self.catalog.get(.{ .index = @intCast(index), .generation = row.generation }).?;
+            const deadline = if (candidateBlocked(&snapshot, now.mono_ms)) self.catalogDeadline(now.mono_ms) else null;
+            self.syncCandidate(&snapshot, now, deadline);
             return;
         }
+        self.counters.candidate_lookup_rows +|= self.catalog.rows.len;
     }
     /// Reconciles at the supplied clock without pumping protocols or borrowing an Engine.
     /// Health only ranks removals. Once pruned, changing health alone cannot remove
@@ -393,11 +399,12 @@ pub const Core = struct {
             self.refreshSelection(now);
             const revision = self.currentSelectionRevision();
             self.selection_revision = if (revision.cacheable()) revision else null;
-            self.reconciliation_deadline = self.catalog.nextDeadline(now.mono_ms);
+            const catalog_deadline = self.catalogDeadline(now.mono_ms);
+            self.reconciliation_deadline = catalog_deadline;
             if (self.metadata_deadline) |due| self.reconciliation_deadline = @min(self.reconciliation_deadline orelse due, due);
             self.dial_queue.selection_dirty = true;
+            self.refreshCandidates(now, catalog_deadline);
         }
-        self.refreshCandidates(now);
         if (self.dial_queue.selection_dirty or (if (self.dial_queue.selection_deadline) |due| now.mono_ms >= due else false)) {
             self.counters.candidate_selections +|= 1;
             self.dial_queue.configureSelection(&self.selection.deficits.missing, self.selection.retained_count < self.catalog.options.target_peers or self.selection.deficits.outbound > 0, &self.local.fork, now.mono_ms);

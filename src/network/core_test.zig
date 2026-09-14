@@ -1072,6 +1072,55 @@ test "core reconciliation idle and candidate batch work" {
     try std.testing.expect(after.candidate_syncs - c.candidate_syncs <= 1);
 }
 
+test "core reconciliation scans retained deadlines once and accounts for candidate lookups" {
+    var opts = options();
+    opts.peers.capacity = 32;
+    opts.dial.capacity = 16;
+    var setup: Setup = .{};
+    try setup.initOwnersWithOptions(&.{}, opts);
+    defer setup.deinit();
+    const core = &setup.client;
+    const now = setup.pair.now;
+    const candidates = opts.dial.capacity / 2;
+    for (0..opts.peers.capacity) |i| {
+        const identity: t.PeerId = .{ .bytes = @splat(@intCast(i + 1)) };
+        const conn: t.Handle = .{ .index = 0, .generation = @intCast(i + 1) };
+        const peer = core.catalog.admit(&identity, &core.local_identity, conn, &.{ .direction = .outbound, .endpoint = support.server_address, .now_ms = now.mono_ms }).admitted.peer;
+        try std.testing.expectEqual(.ban, core.catalog.report(peer, .fatal, now.mono_ms).?);
+        try std.testing.expect(core.catalog.disconnect(peer, conn, .banned, now.mono_ms));
+        if (i < candidates) try core.dial_queue.enqueue(&identity, &.{support.server_address}, true, now.mono_ms);
+    }
+    const lookup_rows: u64 = @as(u64, candidates) * (candidates + 1) / 2 +
+        @as(u64, opts.peers.capacity - candidates) * opts.dial.capacity;
+    core.reconcile(now);
+    try std.testing.expectEqual(@as(u64, opts.peers.capacity), core.counters.catalog_deadline_rows);
+    try std.testing.expectEqual(@as(u64, opts.peers.capacity), core.counters.candidate_rows);
+    try std.testing.expectEqual(lookup_rows, core.dial_queue.counters.sync_lookup_rows);
+    const due = now.mono_ms + @import("peers/reputation.zig").ban_cooldown_ms;
+    for (core.dial_queue.rows[0..candidates]) |row| try std.testing.expectEqual(due, row.eligible_at_ms);
+    const before = core.counters;
+    const dial_before = core.dial_queue.counters;
+    core.reconcile(now);
+    try std.testing.expectEqualDeep(before, core.counters);
+    try std.testing.expectEqualDeep(dial_before, core.dial_queue.counters);
+
+    const retained = core.catalog.get(.{ .index = 0, .generation = 1 }).?;
+    try std.testing.expectEqual(.ban, core.catalog.report(retained.peer, .fatal, now.mono_ms).?);
+    core.reconcile(now);
+    try std.testing.expectEqual(@as(u64, opts.peers.capacity), core.counters.catalog_deadline_rows - before.catalog_deadline_rows);
+    try std.testing.expectEqual(@as(u64, opts.peers.capacity), core.counters.candidate_rows - before.candidate_rows);
+    try std.testing.expectEqual(lookup_rows, core.dial_queue.counters.sync_lookup_rows - dial_before.sync_lookup_rows);
+
+    const offline = core.catalog.get(.{ .index = opts.peers.capacity - 1, .generation = 1 }).?;
+    const sync_before = core.counters;
+    const lookup_before = core.dial_queue.counters.sync_lookup_rows;
+    try core.connect(&offline.identity, &.{support.server_address}, now);
+    try std.testing.expectEqual(@as(u64, opts.peers.capacity), core.counters.candidate_lookup_rows - sync_before.candidate_lookup_rows);
+    try std.testing.expectEqual(@as(u64, opts.peers.capacity), core.counters.catalog_deadline_rows - sync_before.catalog_deadline_rows);
+    try std.testing.expectEqual(@as(u64, candidates + 1), core.dial_queue.counters.sync_lookup_rows - lookup_before);
+    try std.testing.expectEqual(due, core.dial_queue.rows[candidates].eligible_at_ms);
+}
+
 test "core reconciliation raw mutators deadlines and read getters invalidate once" {
     var setup: Setup = .{};
     const local: t.LocalState = .{ .fork = .{ .fork = .altair }, .metadata = .{ .syncnets = 1 } };

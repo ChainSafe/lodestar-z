@@ -692,3 +692,104 @@ test "gossip recent attribution survives validation slot reuse and duplicate pre
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[g.sessions.rows[source.index].logical.index].pins);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[g.sessions.rows[duplicate.index].logical.index].pins);
 }
+
+test "gossipsub IHAVE work preflight defers without consuming the advertisement" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    var bytes: [4096]u8 = undefined;
+    var writer = protobuf.Writer.init(&bytes);
+    protobuf.beginIhaveRpc(&writer, name, 128, constants.message_id_length);
+    const id: MessageId = @splat(7);
+    for (0..128) |_| protobuf.writeIhaveId(&writer, &id);
+    const io = &g.sessions.rows[session.index].io;
+    io.rpc = protobuf.RpcReader.init(writer.written());
+    const driver = support.driver(&g);
+    var turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 1, .unix_s = 0 }, &.{}, &.{}, &.{});
+    var peer = Credits.peer(&g.options);
+    turn.budget.work = 0;
+    for (0..2) |_| {
+        try std.testing.expectEqual(Progress.credits, try driver.processRpc(session.index, &turn, &peer));
+        try std.testing.expectEqual(@as(u16, 0), io.ihave_recv);
+        try std.testing.expectEqual(@as(u16, 0), io.controls);
+        try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
+        try std.testing.expectEqual(@as(u64, 0), g.topic_metrics.get(name).ihave_ids);
+        try std.testing.expect(!turn.large_used);
+    }
+    try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.items[@intFromEnum(std.meta.Tag(protobuf.Item).ihave)]);
+    const cost = g.ihaveWork(io.item.?.ihave.body.len);
+    try std.testing.expect(cost > writer.len);
+    turn.budget.work = cost;
+    peer.work = cost - 1;
+    try std.testing.expectEqual(Progress.credits, try driver.processRpc(session.index, &turn, &peer));
+    try std.testing.expectEqual(cost, turn.budget.work);
+    try std.testing.expectEqual(@as(u16, 0), io.ihave_recv);
+    peer.work = cost;
+    try std.testing.expectEqual(Progress.done, try driver.processRpc(session.index, &turn, &peer));
+    try std.testing.expectEqual(@as(usize, 0), turn.budget.work);
+    try std.testing.expectEqual(@as(usize, 0), peer.work);
+    try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
+    try std.testing.expectEqual(@as(u16, 1), io.controls);
+    try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
+    try std.testing.expectEqual(@as(u64, 128), g.topic_metrics.get(name).ihave_ids);
+    try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).ihave_unseen);
+    io.rpc = protobuf.RpcReader.init(writer.written());
+    turn = @import("turn.zig").Turn.init(&g.options, turn.now, &.{}, &.{}, &.{});
+    peer = Credits.peer(&g.options);
+    try std.testing.expectEqual(Progress.done, try driver.processRpc(session.index, &turn, &peer));
+    try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
+    try std.testing.expectEqual(@as(u64, 256), g.topic_metrics.get(name).ihave_ids);
+    try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).ihave_unseen);
+}
+
+test "gossipsub IHAVE maximum advertisement shares oversized allowance with data and makes progress" {
+    const small = try @import("../configuration.zig").resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
+    var options = small.core.service.gossipsub;
+    options.work_per_pump = 1;
+    options.decompress_per_peer_bytes = 1;
+    var g = try Gossipsub.init(std.testing.allocator, options);
+    defer g.deinit();
+    const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    const bytes = try std.testing.allocator.alloc(u8, 128 * 1024);
+    defer std.testing.allocator.free(bytes);
+    var writer = protobuf.Writer.init(bytes);
+    protobuf.beginIhaveRpc(&writer, name, constants.max_ihave_ids_per_heartbeat, constants.message_id_length);
+    const id: MessageId = @splat(7);
+    for (0..constants.max_ihave_ids_per_heartbeat) |_| protobuf.writeIhaveId(&writer, &id);
+    var compressed: [64]u8 = undefined;
+    const len = try snappy.raw.compress("payload", &compressed);
+    protobuf.writeMessage(&writer, compressed[0..len], name);
+    protobuf.beginIhaveRpc(&writer, name, 1, constants.message_id_length);
+    protobuf.writeIhaveId(&writer, &id);
+    const io = &g.sessions.rows[session.index].io;
+    io.rpc = protobuf.RpcReader.init(writer.written());
+    const driver = support.driver(&g);
+    var events: [1]Event = undefined;
+    var scratch: [64]u8 = undefined;
+    var turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 1, .unix_s = 0 }, &events, g.decompressed, &scratch);
+    var peer = Credits.peer(&g.options);
+    try std.testing.expectEqual(Progress.credits, try driver.processRpc(session.index, &turn, &peer));
+    try std.testing.expect(turn.large_used);
+    try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
+    try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
+    try std.testing.expectEqual(@as(u64, 5000), g.topic_metrics.get(name).ihave_ids);
+    try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).ihave_unseen);
+    try std.testing.expectEqual(@as(usize, 0), turn.count);
+    turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 2, .unix_s = 0 }, &events, g.decompressed, &scratch);
+    peer = Credits.peer(&g.options);
+    try std.testing.expectEqual(Progress.credits, try driver.processRpc(session.index, &turn, &peer));
+    try std.testing.expectEqual(@as(usize, 1), turn.count);
+    try std.testing.expectEqualStrings("payload", events[0].message.bytes);
+    try std.testing.expect(turn.large_used);
+    try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
+    turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 3, .unix_s = 0 }, &.{}, &.{}, &.{});
+    peer = Credits.peer(&g.options);
+    try std.testing.expectEqual(Progress.done, try driver.processRpc(session.index, &turn, &peer));
+    try std.testing.expect(turn.large_used);
+    try std.testing.expectEqual(@as(u16, 2), io.ihave_recv);
+    try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
+}

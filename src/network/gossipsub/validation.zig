@@ -1,4 +1,5 @@
 const std = @import("std");
+const mcache = @import("mcache.zig");
 const storage = @import("message_store.zig");
 const topic_mod = @import("topic.zig");
 const assert = std.debug.assert;
@@ -40,6 +41,7 @@ pub const Attribution = struct {
 pub const Validation = struct {
     entries: []Entry,
     recent: []Attribution,
+    index: mcache.IdIndex(Attribution),
     recent_cursor: usize = 0,
     delivery_evictions: u64 = 0,
     cursor: usize = 0,
@@ -55,11 +57,13 @@ pub const Validation = struct {
         const recent = try a.alloc(Attribution, attributionCapacity(capacity));
         errdefer a.free(recent);
         @memset(recent, .{});
-        return .{ .entries = entries, .recent = recent, .timeout_ms = timeout_ms, .tombstone_ms = tombstone_ms };
+        const index = try mcache.IdIndex(Attribution).init(a, recent);
+        return .{ .entries = entries, .recent = recent, .index = index, .timeout_ms = timeout_ms, .tombstone_ms = tombstone_ms };
     }
 
     pub fn deinit(self: *Validation, a: std.mem.Allocator, store: *storage.Store, peers: *Peers) void {
         self.clear(store, peers);
+        self.index.deinit(a);
         a.free(self.recent);
         a.free(self.entries);
         self.* = undefined;
@@ -76,10 +80,12 @@ pub const Validation = struct {
             releaseAttribution(record, peers);
             record.state = .free;
         }
+        self.index.clear();
     }
 
     pub fn backingBytes(capacity: usize) usize {
-        return capacity * @sizeOf(Entry) + attributionCapacity(capacity) * @sizeOf(Attribution);
+        return capacity * @sizeOf(Entry) + attributionCapacity(capacity) * @sizeOf(Attribution) +
+            mcache.indexCapacity(attributionCapacity(capacity)) * @sizeOf(u32);
     }
 
     pub fn attributionCapacity(capacity: usize) usize {
@@ -114,14 +120,17 @@ pub const Validation = struct {
             if (self.previous) |index| if (index != self.record) {
                 const prior = &owner.recent[index];
                 assert(!prior.reserved and prior.state == .resolved and std.mem.eql(u8, &prior.id, &id));
+                owner.index.remove(prior.id);
                 releaseAttribution(prior, peers);
                 prior.state = .free;
             };
             if (record.pinned and now < record.until and !std.mem.eql(u8, &record.id, &id)) owner.delivery_evictions +|= 1;
+            if (record.state != .free) owner.index.remove(record.id);
             releaseAttribution(record, peers);
             const handle: Handle = .{ .index = self.index, .generation = entry.generation + 1 };
             peers.retain(source);
             record.* = .{ .handle = handle, .state = .pending, .id = id, .source = source, .topic = topic, .admitted_ms = now, .pinned = true };
+            owner.index.insert(id, self.record);
             entry.* = .{ .generation = handle.generation, .state = .{ .pending = .{ .message = message, .delivery = self.record, .deadline = now +| owner.timeout_ms } } };
             store.retainValidation(message);
             self.owner = null;
@@ -133,14 +142,13 @@ pub const Validation = struct {
     /// outcomes. Cancellation leaves them intact if payload admission fails.
     /// Commit or cancel in the same owner call, before another validation mutation.
     pub fn reserve(self: *Validation, id: topic_mod.MessageId) ?Reservation {
-        var previous_record: ?u32 = null;
-        for (self.recent, 0..) |*record, index| {
-            if (record.state == .free or !std.mem.eql(u8, &record.id, &id)) continue;
+        const previous_record = self.index.find(id);
+        if (previous_record) |index| {
+            const record = &self.recent[index];
+            assert(record.state != .free);
             if (record.reserved or record.state == .pending) return null;
             const previous = &self.entries[record.handle.index];
             if (previous.generation == record.handle.generation and previous.generation < std.math.maxInt(u64)) self.cursor = record.handle.index;
-            previous_record = @intCast(index);
-            break;
         }
         for (0..self.entries.len) |_| {
             const index = self.cursor;
@@ -175,11 +183,11 @@ pub const Validation = struct {
     }
 
     pub fn find(self: *Validation, id: topic_mod.MessageId, now: u64) ?*Attribution {
-        for (self.recent) |*e| {
-            if (e.state == .free or (e.state == .resolved and now >= e.until)) continue;
-            if (std.mem.eql(u8, &e.id, &id)) return e;
-        }
-        return null;
+        const slot = self.index.find(id) orelse return null;
+        const record = &self.recent[slot];
+        assert(record.state != .free);
+        if (record.state == .resolved and now >= record.until) return null;
+        return record;
     }
 
     pub fn duplicate(e: *Attribution, peers: *Peers, peer: PeerRef, eligible: bool) bool {
@@ -222,6 +230,7 @@ pub const Validation = struct {
         for (self.entries) |*e| self.expireEntry(store, peers, e, now);
         for (self.recent) |*record| {
             if (record.state != .resolved or now < record.until) continue;
+            self.index.remove(record.id);
             releaseAttribution(record, peers);
             record.state = .free;
         }
@@ -232,6 +241,7 @@ pub const Validation = struct {
         const pending = e.state.pending;
         const record = &self.recent[pending.delivery];
         std.log.scoped(.network_gossip).debug("validation_expired message_id={x} topic_index={d} generation={d} elapsed_ms={d}", .{ record.id, record.topic.index, e.generation, now -| record.admitted_ms });
+        self.index.remove(record.id);
         releaseAttribution(record, peers);
         record.state = .free;
         e.state = .{ .expired = pending.deadline +| self.tombstone_ms };
@@ -331,12 +341,16 @@ test "gossip validation reservation rollback preserves attribution and prior out
     const handle = handle_reservation.commit(&store, &peers, message, source, .{ .index = 0, .generation = 1 }, 0);
     store.seal(message);
     v.finish(&store, handle, .reject, 1);
+    const indexed = v.index.find(id).?;
     var reservation = v.reserve(id).?;
+    try std.testing.expectEqual(indexed, v.index.find(id).?);
+    try std.testing.expectEqual(Verdict.reject, v.find(id, 2).?.verdict);
     try std.testing.expect(!v.available());
     try std.testing.expect(v.reserve(@splat(2)) == null);
     reservation.cancel();
     reservation.cancel();
     try std.testing.expect(v.available());
+    try std.testing.expectEqual(indexed, v.index.find(id).?);
     try std.testing.expectEqual(Verdict.reject, v.find(id, 2).?.verdict);
     try std.testing.expectEqual(Outcome.already_resolved, v.inspect(&store, &peers, handle, 2).?);
     try std.testing.expectEqual(@as(u64, 0), v.delivery_evictions);
@@ -366,4 +380,57 @@ test "gossip validation destruction releases pending payloads and resolved attri
     try std.testing.expectEqual(@as(u32, 0), peers.rows[source.index].pins);
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
     try std.testing.expectEqual(store.next.len, store.free_pages);
+}
+
+test "gossip validation index bounds sparse lookups and follows replacement expiry and clear" {
+    const a = std.testing.allocator;
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 100, .retained_capacity = 2, .retained_outbound_reserve = 1 });
+    defer peers.deinit(a);
+    peers.rows[0] = .{ .occupied = true, .generation = 1 };
+    const source: PeerRef = .{ .index = 0, .generation = 1 };
+    var store = try storage.Store.init(a, 1, storage.page_bytes);
+    defer store.deinit(a);
+    var v = try Validation.init(a, 8192, 10, 20);
+    defer v.deinit(a, &store, &peers);
+    try std.testing.expectEqual(@as(usize, 32768), v.recent.len);
+    try std.testing.expectEqual(@as(usize, 0), v.index.probe_limit);
+    const first: topic_mod.MessageId = @splat(0);
+    var second = first;
+    second[19] = 1;
+    for ([_]topic_mod.MessageId{ first, second }) |id| {
+        v.recent_cursor = 0;
+        const message = store.put(id, "topic", "payload").?;
+        var reservation = v.reserve(id).?;
+        try std.testing.expect(v.index.find(id) == null);
+        const handle = reservation.commit(&store, &peers, message, source, .{ .index = 0, .generation = 1 }, 0);
+        store.seal(message);
+        v.finish(&store, handle, .reject, 1);
+        try std.testing.expectEqual(@as(usize, 1), v.index.probe_limit);
+        try std.testing.expectEqual(Verdict.reject, v.find(id, 2).?.verdict);
+    }
+    try std.testing.expect(v.find(first, 2) == null);
+    try std.testing.expectEqual(@as(u64, 1), v.delivery_evictions);
+    try std.testing.expect(v.find(second, 21) == null);
+    try std.testing.expect(v.index.find(second) != null);
+    var retry = v.reserve(second).?;
+    retry.cancel();
+    try std.testing.expect(v.index.find(second) != null);
+    v.expire(&store, &peers, 21);
+    try std.testing.expect(v.index.find(second) == null);
+    try std.testing.expectEqual(@as(u32, 0), peers.rows[0].pins);
+    for (0..2) |i| {
+        const message = store.put(first, "topic", "payload").?;
+        var reservation = v.reserve(first).?;
+        const handle = reservation.commit(&store, &peers, message, source, .{ .index = 0, .generation = 1 }, 30);
+        store.seal(message);
+        try std.testing.expectEqual(handle, v.find(first, 30).?.handle);
+        if (i == 0) {
+            v.expire(&store, &peers, 40);
+            try std.testing.expect(v.index.find(first) == null);
+        } else v.clear(&store, &peers);
+    }
+    try std.testing.expectEqual(@as(usize, 0), v.index.probe_limit);
+    try std.testing.expect(v.find(first, 40) == null);
+    try std.testing.expectEqual(@as(usize, 0), store.used_entries);
+    try std.testing.expectEqual(@as(u32, 0), peers.rows[0].pins);
 }

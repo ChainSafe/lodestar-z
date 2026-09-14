@@ -64,7 +64,10 @@ pub const Workspace = struct {
     event_available: bool,
 
     pub fn charge(workspace: *const Workspace, options: *const Options, compressed: usize, decoded: usize) bool {
-        const cost = compressed * 2 + decoded * 2;
+        return workspace.chargeWork(options, compressed * 2 + decoded * 2);
+    }
+
+    pub fn chargeWork(workspace: *const Workspace, options: *const Options, cost: usize) bool {
         if (cost <= workspace.work.* and cost <= workspace.peer_work.*) {
             workspace.work.* -= cost;
             workspace.peer_work.* -= cost;
