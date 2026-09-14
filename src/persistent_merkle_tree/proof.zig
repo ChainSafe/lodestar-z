@@ -391,8 +391,9 @@ pub fn createCompactMultiProof(
     descriptor: []const u8,
 ) (Node.Error || Error)![][32]u8 {
     const bit_length = try validateDescriptor(descriptor);
-    const leaves = try allocator.alloc([32]u8, bit_length / 2 + 1);
-    errdefer allocator.free(leaves);
+    // Grow only for visited witnesses; a descriptor can request paths absent from the source.
+    var leaves: std.ArrayList([32]u8) = .empty;
+    errdefer leaves.deinit(allocator);
 
     var temporary_roots: std.ArrayListUnmanaged(Node.Id) = .empty;
     defer {
@@ -403,11 +404,9 @@ pub fn createCompactMultiProof(
     var pending: [max_depth]Node.Id = undefined;
     var pending_count: usize = 0;
     var current = root;
-    var leaf_index: usize = 0;
     for (0..bit_length) |bit_index| {
         if (getBit(descriptor, bit_index)) {
-            leaves[leaf_index] = current.getRoot(pool).*;
-            leaf_index += 1;
+            try leaves.append(allocator, current.getRoot(pool).*);
             if (pending_count == 0) {
                 std.debug.assert(bit_index + 1 == bit_length);
                 break;
@@ -422,9 +421,9 @@ pub fn createCompactMultiProof(
             current = try current.getLeft(pool);
         }
     }
-    std.debug.assert(leaf_index == leaves.len);
+    std.debug.assert(leaves.items.len == bit_length / 2 + 1);
     std.debug.assert(pending_count == 0);
-    return leaves;
+    return leaves.toOwnedSlice(allocator);
 }
 
 /// Pointer to track position in bitlist and leaves during reconstruction
