@@ -505,6 +505,8 @@ pub const Engine = struct {
             return self.negotiateVersion(&header, out);
         }
         if (header.packet_type != .initial) return drop(&self.counters.dropped_unroutable);
+        // RFC 9000 section 7.2 requires at least eight bytes for a new connection's DCID.
+        if (header.dcid.len < limits.initial_dcid_length_min) return drop(&self.counters.dropped_unroutable);
         if (self.registry.handshaking >= self.limits.handshaking_max) {
             return drop(&self.counters.dropped_full);
         }
