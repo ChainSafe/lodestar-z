@@ -652,17 +652,20 @@ test("archive headers reject uncompressed bytes before extraction", async () => 
   );
 });
 
-test("bounded child capture retains final stdout and stderr before close", async () => {
+test("bounded child capture drains final stdout and stderr after exit", async () => {
   const {runBoundedCommand} = await import("../../scripts/bounded_child.mjs");
   const result = await runBoundedCommand(
     process.execPath,
-    ["--eval", 'process.stdout.write("stdout-final"); process.stderr.write("stderr-final");'],
+    [
+      "--eval",
+      'process.stdout.write("stdout-final".repeat(10000)); process.stderr.write("stderr-final".repeat(10000));',
+    ],
     process.cwd(),
-    {maxOutputBytes: 1024, timeoutMs: 1000}
+    {maxOutputBytes: 256 * 1024, timeoutMs: 1000}
   );
   assert.equal(result.exitCode, 0);
-  assert.equal(result.stdout, "stdout-final");
-  assert.equal(result.stderr, "stderr-final");
+  assert.equal(result.stdout, "stdout-final".repeat(10000));
+  assert.equal(result.stderr, "stderr-final".repeat(10000));
 });
 
 test("bounded child capture kills a descendant after its leader exits with inherited output", async () => {
@@ -722,19 +725,12 @@ test("bounded child capture handles a reader error and cleans the owned child", 
   const pidPath = join(root, "pid");
   await writeFile(
     preload,
-    'const fs = require("node:fs");\n' +
-      "const original = fs.createReadStream;\n" +
-      "fs.createReadStream = (path, options) => {\n" +
-      "  const stream = original(path, options);\n" +
-      '  if (String(path).includes("lodestar-package-command-")) {\n' +
-      "    const originalOn = stream.on;\n" +
-      "    stream.on = function(event, listener) {\n" +
-      "      const result = originalOn.call(this, event, listener);\n" +
-      '      if (event === "data") setTimeout(() => { stream.emit("error", Object.assign(new Error("reader failed"), {code: "EIO"})); stream.destroy(); }, 100);\n' +
-      "      return result;\n" +
-      "    };\n" +
-      "  }\n" +
-      "  return stream;\n" +
+    'const cp = require("node:child_process");\n' +
+      "const original = cp.spawn;\n" +
+      "cp.spawn = (...args) => {\n" +
+      "  const child = original(...args);\n" +
+      '  setTimeout(() => child.stdout.destroy(Object.assign(new Error("reader failed"), {code: "EIO"})), 100);\n' +
+      "  return child;\n" +
       "};\n" +
       'require("node:module").syncBuiltinESMExports();\n'
   );
@@ -749,7 +745,6 @@ test("bounded child capture handles a reader error and cleans the owned child", 
       "} catch (error) { failure = error; }\n" +
       "process.stdout.write(JSON.stringify({code: failure?.code, record: failure?.commandRecord ?? null}));\n"
   );
-  const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith("lodestar-package-command-")));
   let pid;
   try {
     const result = await command(process.execPath, ["--require", preload, runner], root);
@@ -757,12 +752,9 @@ test("bounded child capture handles a reader error and cleans the owned child", 
     const failure = JSON.parse(result.stdout);
     assert.equal(failure.code, "EIO");
     assert.equal(failure.record.cwd, root);
+    assert.equal(failure.record.signal, "SIGKILL");
     pid = Number(await readFile(pidPath, "utf8"));
     await waitForProcessExit(pid);
-    const after = (await readdir(tmpdir())).filter(
-      (name) => name.startsWith("lodestar-package-command-") && !before.has(name)
-    );
-    assert.deepEqual(after, []);
   } finally {
     if (
       !Number.isSafeInteger(pid) &&
@@ -816,12 +808,11 @@ test("bounded child capture retains failed command output and status", async () 
   assert.equal(failure.commandRecord.stderr, "failed-err");
 });
 
-test("bounded child capture times out, kills the process, and removes FIFO storage", async () => {
+test("bounded child capture times out and kills the process", async () => {
   const {runBoundedCommand} = await import("../../scripts/bounded_child.mjs");
   const root = await mkdtemp(join(tmpdir(), "lodestar-package-timeout-"));
   temporaryDirectories.push(root);
   const pidPath = join(root, "pid");
-  const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith("lodestar-package-command-")));
   let failure;
   try {
     await runBoundedCommand(
@@ -841,15 +832,10 @@ test("bounded child capture times out, kills the process, and removes FIFO stora
   assert.equal(failure.commandRecord.signal, "SIGKILL");
   const pid = Number(await readFile(pidPath, "utf8"));
   assert.throws(() => process.kill(pid, 0), {code: "ESRCH"});
-  const after = (await readdir(tmpdir())).filter(
-    (name) => name.startsWith("lodestar-package-command-") && !before.has(name)
-  );
-  assert.deepEqual(after, []);
 });
 
-test("bounded child capture cleans FIFO storage when the child cannot spawn", async () => {
+test("bounded child capture retains spawn failure evidence", async () => {
   const {runBoundedCommand} = await import("../../scripts/bounded_child.mjs");
-  const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith("lodestar-package-command-")));
   let failure;
   try {
     await runBoundedCommand("lodestar-package-command-that-does-not-exist", [], process.cwd(), {
@@ -862,8 +848,4 @@ test("bounded child capture cleans FIFO storage when the child cannot spawn", as
   assert.equal(failure.code, "ENOENT");
   assert.deepEqual(failure.commandRecord.argv, ["lodestar-package-command-that-does-not-exist"]);
   assert.equal(failure.commandRecord.cwd, process.cwd());
-  const after = (await readdir(tmpdir())).filter(
-    (name) => name.startsWith("lodestar-package-command-") && !before.has(name)
-  );
-  assert.deepEqual(after, []);
 });
