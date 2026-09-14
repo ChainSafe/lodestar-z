@@ -133,6 +133,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
                         .verify_proposer = true,
                         .verify_signatures = true,
                     },
+                    null,
                 );
 
                 if (result) |res| {
