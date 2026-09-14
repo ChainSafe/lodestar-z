@@ -286,6 +286,9 @@ stockTest(
   async () => {
     const {runtime, peer, id, config} = await connected();
     try {
+      const {waitFor} = await import("../../test/interop/child.mjs");
+      await waitFor(async () => (await runtime.getPeers()).counts.relevant === 1);
+      expect((await peer.command("stats")).control.status).toBe(1);
       await expect(runtime.request(id, BLOCKS, new Uint8Array(32), {expectedChunks: 2}).next()).rejects.toMatchObject({
         code: "NetworkRequestRejected",
         reason: "invalid_request_options",
@@ -315,8 +318,8 @@ stockTest(
       const identity = await runtime.getIdentity();
       expect((await peer.command("ping", {address: multiaddr(identity.localMultiaddr).toString()})).length).toBe(8);
       await runtime.reStatusPeers([id]);
-      const {waitFor} = await import("../../test/interop/child.mjs");
       await waitFor(async () => (await peer.command("stats")).control.status >= 2);
+      expect((await runtime.getPeers()).peers[0].metadata?.sequenceNumber).toBe(1n);
       await Promise.all(streams.map((stream) => stream.return?.()));
       const commands = Array.from({length: 32}, () => runtime.getIdentity());
       expect(() => runtime.request(id, BLOCKS, new Uint8Array(32))).toThrow("NetworkCommandFull");

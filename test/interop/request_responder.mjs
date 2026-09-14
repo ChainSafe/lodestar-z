@@ -11,24 +11,21 @@ const {quic} = await load("@chainsafe/libp2p-quic");
 const {privateKeyFromRaw} = await load("@libp2p/crypto/keys");
 const {identify} = await load("@libp2p/identify");
 const {multiaddr} = await load("@multiformats/multiaddr");
+const {gossipsub, StrictNoSign} = await load("@libp2p/gossipsub");
+const {compressSync, uncompressSync} = await load("snappy");
 const gossipMode = process.argv[4] === "gossip";
 const gossipMessages = [];
 const gossipTopics = new Set();
-let gossipService;
-if (gossipMode) {
-  const {gossipsub, StrictNoSign} = await load("@libp2p/gossipsub");
-  const {compressSync, uncompressSync} = await load("snappy");
-  gossipService = gossipsub({
-    allowPublishToZeroTopicPeers: false,
-    dataTransform: {
-      inboundTransform: (_topic, data) => uncompressSync(data),
-      outboundTransform: (_topic, data) => compressSync(data),
-    },
-    floodPublish: true,
-    globalSignaturePolicy: StrictNoSign,
-    msgIdFn: (message) => messageId(message.topic, message.data),
-  });
-}
+const gossipService = gossipsub({
+  allowPublishToZeroTopicPeers: false,
+  dataTransform: {
+    inboundTransform: (_topic, data) => uncompressSync(data),
+    outboundTransform: (_topic, data) => compressSync(data),
+  },
+  floodPublish: true,
+  globalSignaturePolicy: StrictNoSign,
+  msgIdFn: (message) => messageId(message.topic, message.data),
+});
 const secret = new Uint8Array(32);
 secret[31] = 62;
 const blockProtocol = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
@@ -41,11 +38,12 @@ let active = 0;
 let lastRequest = "";
 const held = new Set();
 const control = {ping: 0, status: 0};
+const metadataSequence = 1n;
 const node = await createLibp2p({
   addresses: {listen: ["/ip4/127.0.0.1/udp/0/quic-v1"]},
   connectionGater: {denyDialMultiaddr: async (address) => !address.toString().startsWith("/ip4/127.0.0.1/")},
   privateKey: privateKeyFromRaw(secret),
-  services: {identify: identify({runOnConnectionOpen: false}), ...(gossipService ? {pubsub: gossipService} : {})},
+  services: {identify: identify({runOnConnectionOpen: false}), pubsub: gossipService},
   start: false,
   transports: [quic()],
 });
@@ -57,19 +55,23 @@ async function respondControl(stream) {
     const protocol = stream.protocol;
     const metadata = protocol.includes("/metadata/");
     if (metadata) await readEmptyRequest(stream);
-    const request = metadata ? null : await readPayload(stream);
+    else await readPayload(stream);
     let bytes;
     if (protocol.includes("/status/")) {
       control.status++;
       bytes = status;
     } else if (protocol.includes("/ping/")) {
       control.ping++;
-      bytes = request.bytes;
+      bytes = Buffer.alloc(8);
+      bytes.writeBigUInt64LE(metadataSequence);
     } else if (protocol.includes("/metadata/3/")) {
       bytes = Buffer.alloc(25);
+      bytes.writeBigUInt64LE(metadataSequence);
       bytes.writeBigUInt64LE(1n, 17);
-    } else if (metadata) bytes = Buffer.alloc(17);
-    else bytes = Buffer.alloc(0);
+    } else if (metadata) {
+      bytes = Buffer.alloc(17);
+      bytes.writeBigUInt64LE(metadataSequence);
+    } else bytes = Buffer.alloc(0);
     await sendFragments(stream, Buffer.concat([Buffer.from([0]), encodePayload(bytes)]), AbortSignal.timeout(5000));
     await stream.close({signal: AbortSignal.timeout(5000)});
   } catch (error) {
@@ -155,6 +157,7 @@ for await (const line of boundedLines(process.stdin)) {
       response = {
         address: node.getMultiaddrs()[0].toString(),
         peer: Buffer.from(node.peerId.toMultihash().bytes).toString("hex"),
+        protocols: node.getProtocols(),
         versions: {libp2p: await version("libp2p"), quic: await version("@chainsafe/libp2p-quic")},
       };
     else if (command.op === "gossipSubscribe") {
@@ -198,7 +201,7 @@ for await (const line of boundedLines(process.stdin)) {
         signal: AbortSignal.timeout(5000),
       });
       const ping = Buffer.alloc(8);
-      ping.writeBigUInt64LE(1n);
+      ping.writeBigUInt64LE(metadataSequence);
       await sendFragments(stream, encodePayload(ping), AbortSignal.timeout(5000));
       await stream.close({signal: AbortSignal.timeout(5000)});
       const reply = await readPayload(stream, true);
