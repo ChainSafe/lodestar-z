@@ -41,7 +41,8 @@ test "UDP admits one borrowed datagram at a time" {
 }
 
 test "UDP rejects oversized sends before I/O" {
-    var adapter = Udp.init(.{ .handle = undefined, .address = .{ .ip4 = .loopback(0) } });
+    var adapter = try Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer adapter.close(std.testing.io);
     const oversized = [_]u8{0x44} ** (constants.packet_size_max + 1);
     try std.testing.expectError(
         error.DatagramTooLarge,

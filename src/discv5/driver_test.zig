@@ -23,7 +23,8 @@ const net = std.Io.net;
 
 test "driver rejects invalid polling and missing expiry storage" {
     var core: Engine = undefined;
-    var adapter = Udp.init(.{ .handle = undefined, .address = .{ .ip4 = .loopback(0) } });
+    var adapter = try Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
+    defer adapter.close(std.testing.io);
     try std.testing.expectError(
         error.InvalidPollInterval,
         Driver.initWithConfig(&core, &adapter, .{ .poll_interval_ms = 0 }),

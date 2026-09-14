@@ -57,9 +57,7 @@ test "UDP receive times out without traffic" {
 }
 
 test "UDP rejects oversized sends before I/O" {
-    const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-    const socket = try loopback.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
-    var transport = udp_mod.Udp.init(socket);
+    var transport = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer transport.close(std.testing.io);
     const oversized = [_]u8{0x44} ** (constants.datagram_size_max + 1);
     const destination = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9_001 } };

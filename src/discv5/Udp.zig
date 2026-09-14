@@ -51,10 +51,6 @@ pub fn bind(io: std.Io, addresses: Bindings) sockets_mod.BindError!Udp {
     return .{ .sockets = try sockets_mod.Sockets.bind(io, addresses) };
 }
 
-pub fn init(socket: net.Socket) Udp {
-    return .{ .sockets = sockets_mod.Sockets.init(socket) };
-}
-
 pub fn close(self: *const Udp, io: std.Io) void {
     self.sockets.close(io);
 }
