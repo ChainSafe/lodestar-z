@@ -6,32 +6,13 @@ const BeaconConfig = @import("BeaconConfig.zig");
 const Epoch = ct.primitive.Epoch.Type;
 const ForkDigest = ct.primitive.ForkDigest.Type;
 
-pub const BlobParameters = struct {
-    epoch: Epoch,
-    max_blobs_per_block: u64,
-};
-
-pub fn getBlobParameters(config: *const BeaconConfig, epoch: Epoch) BlobParameters {
-    var best: ?BlobParameters = null;
-    for (config.chain.BLOB_SCHEDULE) |entry| {
-        if (epoch < entry.EPOCH) continue;
-        if (best == null or entry.EPOCH > best.?.epoch) {
-            best = .{ .epoch = entry.EPOCH, .max_blobs_per_block = entry.MAX_BLOBS_PER_BLOCK };
-        }
-    }
-    return best orelse .{
-        .epoch = config.chain.ELECTRA_FORK_EPOCH,
-        .max_blobs_per_block = config.chain.MAX_BLOBS_PER_BLOCK_ELECTRA,
-    };
-}
-
 pub fn computeForkDigest(config: *const BeaconConfig, epoch: Epoch) ForkDigest {
     const version = config.forkInfoAtEpoch(epoch).version;
     var base: [32]u8 = undefined;
     BeaconConfig.computeForkDataRoot(version, config.genesis_validator_root, &base);
     var digest: ForkDigest = base[0..4].*;
     if (epoch < config.chain.FULU_FORK_EPOCH) return digest;
-    const params = getBlobParameters(config, epoch);
+    const params = config.getBlobParameters(epoch);
     var material: [16]u8 = undefined;
     std.mem.writeInt(u64, material[0..8], params.epoch, .little);
     std.mem.writeInt(u64, material[8..16], params.max_blobs_per_block, .little);
@@ -73,37 +54,36 @@ test "computeForkDigest reproduces the mainnet digests before Fulu" {
     );
 }
 
-test "computeForkDigest masks Fulu digests with the blob schedule" {
-    const mainnet = @import("./networks/mainnet.zig");
-    const config = BeaconConfig.init(mainnet.chain_config, mainnet_genesis_validators_root);
-    const chain = config.chain;
-    const fulu_epoch = chain.FULU_FORK_EPOCH;
-    const at_fork = computeForkDigest(&config, fulu_epoch);
-    const before_fork = computeForkDigest(&config, fulu_epoch - 1);
-    try std.testing.expect(!std.mem.eql(u8, &at_fork, &before_fork));
-
-    const params = getBlobParameters(&config, fulu_epoch);
-    try std.testing.expectEqual(chain.ELECTRA_FORK_EPOCH, params.epoch);
-    try std.testing.expectEqual(chain.MAX_BLOBS_PER_BLOCK_ELECTRA, params.max_blobs_per_block);
-
-    var base: [32]u8 = undefined;
-    BeaconConfig.computeForkDataRoot(
-        config.forkInfoAtEpoch(fulu_epoch).version,
-        config.genesis_validator_root,
-        &base,
-    );
-    var material: [16]u8 = undefined;
-    std.mem.writeInt(u64, material[0..8], params.epoch, .little);
-    std.mem.writeInt(u64, material[8..16], params.max_blobs_per_block, .little);
-    var mask: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(&material, &mask, .{});
-    var expected: [4]u8 = base[0..4].*;
-    for (&expected, mask[0..4]) |*byte, m| byte.* ^= m;
-    try std.testing.expectEqual(expected, at_fork);
-
-    const first_bpo = chain.BLOB_SCHEDULE[0];
-    const at_bpo = computeForkDigest(&config, first_bpo.EPOCH);
-    try std.testing.expect(!std.mem.eql(u8, &at_bpo, &at_fork));
-    try std.testing.expectEqual(first_bpo.MAX_BLOBS_PER_BLOCK, getBlobParameters(&config, first_bpo.EPOCH).max_blobs_per_block);
-    try std.testing.expectEqual(at_bpo, computeForkDigest(&config, first_bpo.EPOCH + 100));
+// Vectors: https://github.com/ChainSafe/lodestar/blob/feed9165804fbb476a79e5db1c4ddff096b1ce4e/packages/config/test/unit/forkDigest.test.ts
+test "computeForkDigest matches Fulu and BPO consensus vectors" {
+    var chain = @import("./networks/mainnet.zig").chain_config;
+    chain.ALTAIR_FORK_EPOCH = 0;
+    chain.BELLATRIX_FORK_EPOCH = 0;
+    chain.CAPELLA_FORK_EPOCH = 0;
+    chain.DENEB_FORK_EPOCH = 0;
+    chain.ELECTRA_FORK_EPOCH = 9;
+    chain.FULU_FORK_EPOCH = 100;
+    chain.FULU_FORK_VERSION = .{ 6, 0, 0, 0 };
+    chain.BLOB_SCHEDULE = &.{
+        .{ .EPOCH = 9, .MAX_BLOBS_PER_BLOCK = 9 },
+        .{ .EPOCH = 100, .MAX_BLOBS_PER_BLOCK = 100 },
+        .{ .EPOCH = 150, .MAX_BLOBS_PER_BLOCK = 175 },
+        .{ .EPOCH = 200, .MAX_BLOBS_PER_BLOCK = 200 },
+        .{ .EPOCH = 250, .MAX_BLOBS_PER_BLOCK = 275 },
+        .{ .EPOCH = 300, .MAX_BLOBS_PER_BLOCK = 300 },
+    };
+    const config = BeaconConfig.init(chain, @splat(0));
+    const cases = [_]struct { epoch: Epoch, digest: ForkDigest }{
+        .{ .epoch = 100, .digest = .{ 0xdf, 0x67, 0x55, 0x7b } },
+        .{ .epoch = 101, .digest = .{ 0xdf, 0x67, 0x55, 0x7b } },
+        .{ .epoch = 150, .digest = .{ 0x8a, 0xb3, 0x8b, 0x59 } },
+        .{ .epoch = 199, .digest = .{ 0x8a, 0xb3, 0x8b, 0x59 } },
+        .{ .epoch = 200, .digest = .{ 0xd9, 0xb8, 0x14, 0x38 } },
+        .{ .epoch = 201, .digest = .{ 0xd9, 0xb8, 0x14, 0x38 } },
+        .{ .epoch = 250, .digest = .{ 0x4e, 0xf3, 0x2a, 0x62 } },
+        .{ .epoch = 299, .digest = .{ 0x4e, 0xf3, 0x2a, 0x62 } },
+        .{ .epoch = 300, .digest = .{ 0xca, 0x10, 0x0d, 0x64 } },
+        .{ .epoch = 301, .digest = .{ 0xca, 0x10, 0x0d, 0x64 } },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.digest, computeForkDigest(&config, case.epoch));
 }
