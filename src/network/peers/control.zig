@@ -208,7 +208,7 @@ pub const Control = struct {
                 _ = service.reqresp.cancel(request);
             }
         };
-        service.reqresp.inner.cleanupPending(engine, &service.router);
+        service.reqresp.cleanupPending(engine, &service.router);
         if (self.schedule(peer, conn)) |row| {
             self.counters.events.disconnected[@intFromEnum(row.direction)] +|= 1;
             row.peer = null;
@@ -430,17 +430,7 @@ pub const Control = struct {
         const snapshot = catalog.get(peer).?;
         const kind = client.fromIdentify(&snapshot.identify);
         self.cancelConnection(service, engine, peer, conn);
-        service.gossipsub.transportEvents(
-            &service.router,
-            engine,
-            &.{.{ .closed = .{
-                .conn = conn,
-                .peer_id = null,
-                .direction = .inbound,
-                .reason = .host,
-            } }},
-            now,
-        );
+        service.gossipsub.retireConnection(&service.router, engine, conn, now);
         _ = catalog.disconnect(peer, conn, reason, now.mono_ms);
         self.counters.closed[@intFromEnum(reason)] +|= 1;
         self.counters.closed_by_client[@intFromEnum(kind)][@intFromEnum(reason)] +|= 1;
@@ -635,7 +625,7 @@ pub const Control = struct {
                 },
                 .done, .failed => {
                     if (matched) self.complete(catalog, op, event, now);
-                    service.reqresp.inner.cleanupPending(engine, &service.router);
+                    service.reqresp.cleanupPending(engine, &service.router);
                     op.request = null;
                 },
                 else => {},

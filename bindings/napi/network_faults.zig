@@ -2,9 +2,8 @@ const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const gossip = @import("network").gossipsub;
 pub const enabled = @import("network_runtime_options").network_runtime_test_failures;
-pub const Stage = enum(u8) { none, runtime_alloc, owner_alloc, application_stores, application_snapshot_0, application_snapshot_1, application_lane, gossip_table, gossip_publication, gossip_copy, incoming_table, incoming_input, incoming_response, incoming_result_0, incoming_result_1, incoming_result_2, incoming_result_3, incoming_result_4, incoming_result_5, incoming_result_6, incoming_result_7, incoming_result_8, operation_copy, ready_promise, close_promise, copy_error_ref, requested_ref, cancelled_ref, failed_ref, promise_holder, wake, wake_signal, notify, hook, spawn, entropy, key, enr, core, wake_attach, identity_copy, startup_copy, close_copy, drain_copy };
-pub const Scenario = enum(u8) { none, entry, key_ready, before_ready, observations, gossip, drain_publish, application_peer_lane, request_queued, request_negotiation, request_copy_close, request_copy_closed, incoming_copy_close, incoming_copy_closed, incoming_ack_close, incoming_response_close, incoming_observe, incoming_hold, incoming_prepare_refs, incoming_prepare_buffer, incoming_prepare_deferred, incoming_terminal_before, incoming_terminal_after, gossip_copy_close, gossip_copy_close_fail, gossip_copy_closed, gossip_copy_expire, gossip_copy_expired, gossip_second_copy_fail, gossip_owner_hold, gossip_owner_held };
-pub const DrainPublication = enum { idle, requested, published };
+pub const Stage = enum(u8) { none, runtime_alloc, owner_alloc, application_stores, application_snapshot_0, application_snapshot_1, application_lane, gossip_table, gossip_publication, gossip_copy, incoming_table, incoming_input, incoming_response, operation_copy, ready_promise, close_promise, copy_error_ref, requested_ref, cancelled_ref, failed_ref, promise_holder, wake, wake_signal, notify, hook, spawn, entropy, key, enr, core, wake_attach, identity_copy, startup_copy, close_copy, drain_copy };
+pub const Scenario = enum(u8) { none, before_ready, gossip, application_peer_lane, request_queued, request_negotiation, request_copy_close, request_copy_closed, incoming_copy_close, incoming_copy_closed, incoming_ack_close, incoming_response_close, incoming_observe, incoming_hold, incoming_prepare_buffer, incoming_prepare_deferred, incoming_terminal_before, incoming_terminal_after, gossip_copy_close, gossip_copy_close_fail, gossip_copy_closed, gossip_copy_expire, gossip_copy_expired, gossip_second_copy_fail, gossip_owner_hold, gossip_owner_held };
 var selected = std.atomic.Value(Stage).init(.none);
 var scenario = std.atomic.Value(Scenario).init(.none);
 pub var reached = std.atomic.Value(Scenario).init(.none);
@@ -51,33 +50,6 @@ pub fn captureGossip(owner: *const gossip.Gossipsub, context: *const @import("ne
     }
 }
 
-pub fn publishDuringDrain(runtime: *@import("network_runtime.zig").Runtime) !void {
-    if (comptime !enabled) return;
-    runtime.lock();
-    if (runtime.test_scenario != .drain_publish or runtime.test_drain_publication != .idle) {
-        runtime.unlock();
-        return;
-    }
-    runtime.test_drain_publication = .requested;
-    runtime.wake.?.signal() catch |err| {
-        runtime.unlock();
-        return err;
-    };
-    runtime.unlock();
-    for (0..500) |_| {
-        runtime.lock();
-        const published = runtime.test_drain_publication == .published;
-        const stopped = runtime.stop or runtime.quiescent;
-        runtime.unlock();
-        if (published) return;
-        if (stopped) return error.NetworkClosed;
-        var wait_fd = std.c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
-        const result = std.c.poll(@ptrCast(&wait_fd), 1, 10);
-        if (result < 0 and std.c.errno(result) != .INTR) return error.NetworkWakeFailed;
-    }
-    return error.NetworkTestPublicationTimeout;
-}
-
 pub fn check(stage: Stage) !void {
     if (comptime !enabled) return;
     if (selected.cmpxchgStrong(stage, .none, .acq_rel, .acquire) == null) return error.InjectedNetworkFailure;
@@ -92,15 +64,15 @@ pub fn takeScenario() Scenario {
 }
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     if (comptime !enabled) return;
-    try exports.setNamedProperty("networkTestFail", try env.createFunction("networkTestFail", 1, fail, null));
-    try exports.setNamedProperty("networkTestStats", try env.createFunction("networkTestStats", 0, stats, null));
-    try exports.setNamedProperty("networkTestScenario", try env.createFunction("networkTestScenario", 1, selectScenario, null));
-    try exports.setNamedProperty("networkTestStage", try env.createFunction("networkTestStage", 0, getStage, null));
-    try exports.setNamedProperty("networkTestRequest", try env.createFunction("networkTestRequest", 0, getRequest, null));
+    try @import("network_js.zig").put(exports, "networkTestFail", try env.createFunction("networkTestFail", 1, fail, null));
+    try @import("network_js.zig").put(exports, "networkTestStats", try env.createFunction("networkTestStats", 0, stats, null));
+    try @import("network_js.zig").put(exports, "networkTestScenario", try env.createFunction("networkTestScenario", 1, selectScenario, null));
+    try @import("network_js.zig").put(exports, "networkTestStage", try env.createFunction("networkTestStage", 0, getStage, null));
+    try @import("network_js.zig").put(exports, "networkTestRequest", try env.createFunction("networkTestRequest", 0, getRequest, null));
     try @import("network_gossip_faults.zig").register(env, exports);
     try @import("network_incoming_faults.zig").register(env, exports);
     try @import("network_incoming_phase_faults.zig").register(env, exports);
-    try exports.setNamedProperty("networkTestGossip", try env.createFunction("networkTestGossip", 0, getGossip, null));
+    try @import("network_js.zig").put(exports, "networkTestGossip", try env.createFunction("networkTestGossip", 0, getGossip, null));
 }
 fn selectScenario(env: napi.Env, info: napi.CallbackInfo(1)) !napi.Value {
     const arg = info.getArg(0) orelse return error.InvalidNetworkConfig;
@@ -125,40 +97,37 @@ fn scalarFields(env: napi.Env, value: anytype) !napi.Value {
             .float => try env.createDouble(@field(value, field.name)),
             else => null,
         };
-        if (copied) |item| try object.setNamedProperty(field.name ++ "\x00", item);
+        if (copied) |item| try @import("network_js.zig").put(object, field.name ++ "\x00", item);
     }
     return object;
 }
-fn copyBytes(env: napi.Env, value: []const u8) !napi.Value {
-    const buffer = try env.createArrayBufferCopy(value, null);
-    return env.createTypedarray(.uint8, value.len, buffer, 0);
-}
+const copyBytes = @import("network_js.zig").bytes;
 fn getGossip(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     std.Io.Threaded.mutexLock(&gossip_mutex);
     const snapshot = gossip_snapshot;
     std.Io.Threaded.mutexUnlock(&gossip_mutex);
     const value = snapshot orelse return error.InvalidNetworkConfig;
     const object = try env.createObject();
-    try object.setNamedProperty("options", try scalarFields(env, &value.options));
-    try object.setNamedProperty("score", try scalarFields(env, &value.score));
-    try object.setNamedProperty("topic", try scalarFields(env, &value.topic));
-    try object.setNamedProperty("phase0Digest", if (value.options.message_id_policy.phase0_digest) |digest| try copyBytes(env, &digest) else try env.getNull());
+    try @import("network_js.zig").put(object, "options", try scalarFields(env, &value.options));
+    try @import("network_js.zig").put(object, "score", try scalarFields(env, &value.score));
+    try @import("network_js.zig").put(object, "topic", try scalarFields(env, &value.topic));
+    try @import("network_js.zig").put(object, "phase0Digest", if (value.options.message_id_policy.phase0_digest) |digest| try copyBytes(env, &digest) else try env.getNull());
     const allowlist = try env.createArrayWithLength(value.allowlist_len);
-    for (value.allowlist[0..value.allowlist_len], 0..) |address, i| try allowlist.setElement(@intCast(i), try copyBytes(env, &address));
-    try object.setNamedProperty("ipAllowlist", allowlist);
-    try object.setNamedProperty("minimumSamplingGroups", try env.createUint32(value.minimum_sampling_groups));
-    try object.setNamedProperty("topicCount", try env.createUint32(value.topic_count));
-    try object.setNamedProperty("topicSubscriptionBytes", try env.createDouble(@floatFromInt(value.topic_subscription_bytes)));
+    for (value.allowlist[0..value.allowlist_len], 0..) |address, i| try @import("network_js.zig").element(allowlist, @intCast(i), try copyBytes(env, &address));
+    try @import("network_js.zig").put(object, "ipAllowlist", allowlist);
+    try @import("network_js.zig").put(object, "minimumSamplingGroups", try env.createUint32(value.minimum_sampling_groups));
+    try @import("network_js.zig").put(object, "topicCount", try env.createUint32(value.topic_count));
+    try @import("network_js.zig").put(object, "topicSubscriptionBytes", try env.createDouble(@floatFromInt(value.topic_subscription_bytes)));
     const boundaries = try env.createArrayWithLength(value.topic_boundary_count);
     for (value.topic_boundaries[0..value.topic_boundary_count], 0..) |*boundary, i| {
         const copied = try env.createObject();
-        try copied.setNamedProperty("digest", try copyBytes(env, &boundary.digest));
+        try @import("network_js.zig").put(copied, "digest", try copyBytes(env, &boundary.digest));
         const rules = try env.createArrayWithLength(gossip.topic_policy.kind_count);
-        for (boundary.rules, 0..) |rule, k| try rules.setElement(@intCast(k), try scalarFields(env, &rule));
-        try copied.setNamedProperty("rules", rules);
-        try boundaries.setElement(@intCast(i), copied);
+        for (boundary.rules, 0..) |rule, k| try @import("network_js.zig").element(rules, @intCast(k), try scalarFields(env, &rule));
+        try @import("network_js.zig").put(copied, "rules", rules);
+        try @import("network_js.zig").element(boundaries, @intCast(i), copied);
     }
-    try object.setNamedProperty("topicPolicy", if (value.topic_boundary_count == 0) try env.getNull() else boundaries);
+    try @import("network_js.zig").put(object, "topicPolicy", if (value.topic_boundary_count == 0) try env.getNull() else boundaries);
     return object;
 }
 fn fail(env: napi.Env, info: napi.CallbackInfo(1)) !napi.Value {
@@ -171,9 +140,9 @@ fn fail(env: napi.Env, info: napi.CallbackInfo(1)) !napi.Value {
 }
 fn stats(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     const out = try env.createObject();
-    try out.setNamedProperty("runtimes", try env.createUint32(runtimes.load(.acquire)));
-    try out.setNamedProperty("notifications", try env.createUint32(notifications.load(.acquire)));
-    try out.setNamedProperty("owners", try env.createUint32(owners.load(.acquire)));
+    try @import("network_js.zig").put(out, "runtimes", try env.createUint32(runtimes.load(.acquire)));
+    try @import("network_js.zig").put(out, "notifications", try env.createUint32(notifications.load(.acquire)));
+    try @import("network_js.zig").put(out, "owners", try env.createUint32(owners.load(.acquire)));
     return out;
 }
 
@@ -220,8 +189,8 @@ fn getRequest(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     const value = request_snapshot;
     std.Io.Threaded.mutexUnlock(&request_mutex);
     const object = try scalarFields(env, &value);
-    inline for (.{ "nativeOwned", "negotiatorMatched", "copying", "coreLive", "quiescent" }) |name| try object.setNamedProperty(name, try env.getBoolean(@field(value, name)));
-    try object.setNamedProperty("phase", if (value.phase) |phase| try env.createStringUtf8(@tagName(phase)) else try env.getNull());
+    inline for (.{ "nativeOwned", "negotiatorMatched", "copying", "coreLive", "quiescent" }) |name| try @import("network_js.zig").put(object, name, try env.getBoolean(@field(value, name)));
+    try @import("network_js.zig").put(object, "phase", if (value.phase) |phase| try env.createStringUtf8(@tagName(phase)) else try env.getNull());
     return object;
 }
 pub fn requestBarrier(runtime: *Runtime, token: requests.Token, stage: Scenario) !void {
@@ -241,8 +210,8 @@ pub fn requestBarrier(runtime: *Runtime, token: requests.Token, stage: Scenario)
         std.debug.assert(cell.state == .native and cell.native != null);
         const handle = cell.native.?;
         const service = &runtime.heavy.?.core.core.service;
-        std.debug.assert(handle.direction == .outbound and handle.index < service.reqresp.inner.outbound.len);
-        const client = &service.reqresp.inner.outbound[handle.index];
+        std.debug.assert(handle.direction == .outbound and handle.index < service.reqresp.outbound.len);
+        const client = &service.reqresp.outbound[handle.index];
         std.debug.assert(std.meta.eql(client.handle(handle.index), handle));
         std.debug.assert(client.state == .negotiating and client.negotiation_owned);
         snapshot.phase = client.requestPhase();

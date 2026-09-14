@@ -1,7 +1,7 @@
 import {expect, it} from "vitest";
 import bindings from "../src/bindings.js";
-import {type NativeRuntimeConfig, createNativeNetworkRuntime} from "../src/network.js";
-import {discoveryConfig, networkConfig, topicBoundary} from "./utils/network.js";
+import {type NativeRuntimeConfig, createNativeNetworkApplicationRuntime} from "../src/network.js";
+import {applicationConfig, discoveryConfig, topicBoundary} from "./utils/network.js";
 
 const cases: readonly [string, (config: NativeRuntimeConfig) => void, string][] = [
   [
@@ -197,10 +197,10 @@ const cases: readonly [string, (config: NativeRuntimeConfig) => void, string][] 
 ];
 
 it.each(cases)("rejects %s before acquiring native thread or socket ownership", (_name, mutate, code) => {
-  const config = networkConfig();
+  const config = applicationConfig();
   mutate(config);
   const before: unknown = typeof bindings.networkTestStats === "function" ? bindings.networkTestStats() : null;
-  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow(code);
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow(code);
   if (before) expect(bindings.networkTestStats()).toEqual(before);
 });
 
@@ -208,16 +208,13 @@ it("rejects a noncanonical bootstrap encoding during ordinary owner startup", as
   const config = discoveryConfig();
   if (!config.discovery) throw new Error("Missing discovery config");
   config.discovery.bootstrapEnrs = [Uint8Array.of(0xf8, 0x00)];
-  const runtime = createNativeNetworkRuntime(config, () => undefined);
-  await expect(runtime.ready).rejects.toThrow("InvalidRecord");
-  expect(await runtime.close()).toEqual({reason: "failed"});
-  expect(runtime.diagnostics().terminalErrorCode).toBe("InvalidRecord");
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidRecord");
 });
 
 it("accepts explicit host wire policy and zero IDONTWANT threshold", async () => {
-  const config = networkConfig();
+  const config = applicationConfig();
   Object.assign(config.gossipPolicy, {idontwantMinDataSize: 0, iwantFollowupMs: 12000n});
-  const runtime = createNativeNetworkRuntime(config, () => undefined);
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   try {
     await runtime.ready;
   } finally {
@@ -239,19 +236,19 @@ it.each([
   ["negative threshold", {idontwantMinDataSize: -1}, "InvalidNetworkInteger"],
   ["large threshold", {idontwantMinDataSize: 20 * 1024 * 1024}, "InvalidNetworkInteger"],
 ] as const)("rejects %s wire policy before startup", (_name, fields, code) => {
-  const config = networkConfig();
+  const config = applicationConfig();
   Object.assign(config.gossipPolicy, fields);
   for (const [key, value] of Object.entries(fields))
     if (value === undefined) Reflect.deleteProperty(config.gossipPolicy, key);
   const before: unknown = typeof bindings.networkTestStats === "function" ? bindings.networkTestStats() : null;
-  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow(code);
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow(code);
   if (before) expect(bindings.networkTestStats()).toEqual(before);
 });
 
 it("accepts a complete configured topic namespace at ordinary startup", async () => {
-  const config = networkConfig();
+  const config = applicationConfig();
   Object.assign(config, {topicPolicy: [topicBoundary()]});
-  const runtime = createNativeNetworkRuntime(config, () => undefined);
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   try {
     await runtime.ready;
   } finally {
@@ -259,10 +256,10 @@ it("accepts a complete configured topic namespace at ordinary startup", async ()
   }
 });
 
-it("requires an explicit nullable topic namespace", () => {
-  const config = networkConfig();
+it("requires an explicit topic namespace", () => {
+  const config = applicationConfig();
   Reflect.deleteProperty(config, "topicPolicy");
-  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
 });
 
 const namespaceCases: readonly [string, (boundary: ReturnType<typeof topicBoundary>) => unknown, string][] = [
@@ -379,29 +376,29 @@ const namespaceCases: readonly [string, (boundary: ReturnType<typeof topicBounda
 ];
 
 it.each(namespaceCases)("rejects topic namespace %s before startup", (_label, mutate, expected) => {
-  const config = networkConfig();
+  const config = applicationConfig();
   Object.assign(config, {topicPolicy: mutate(topicBoundary())});
-  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow(expected);
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow(expected);
 });
 
 it.each(["count", "sszMin", "sszMax"] as const)("rejects noninteger topic rule %s values", (key) => {
   for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Infinity, 1n]) {
-    const config = networkConfig();
+    const config = applicationConfig();
     const boundary = topicBoundary();
     Object.assign(boundary.rules.beacon_block, {[key]: value});
     config.topicPolicy = [boundary];
-    expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
+    expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
   }
 });
 
 it("accepts 64 unique topic boundaries and copies byte views", async () => {
-  const config = networkConfig();
+  const config = applicationConfig();
   config.topicPolicy = Array.from({length: 64}, (_, i) => {
     const b = topicBoundary();
     b.digest = Uint8Array.of(255, i, 2, 3, 4, 255).subarray(1, 5);
     return b;
   });
-  const runtime = createNativeNetworkRuntime(config, () => undefined);
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   for (const b of config.topicPolicy) b.digest.fill(0);
   try {
     await runtime.ready;
@@ -411,17 +408,17 @@ it("accepts 64 unique topic boundaries and copies byte views", async () => {
 });
 
 it("rejects sparse topic arrays even when inherited entries supply values", async () => {
-  const config = networkConfig();
+  const config = applicationConfig();
   const sparse = [topicBoundary()];
   const inherited: Record<number, ReturnType<typeof topicBoundary>> = Object.create(Array.prototype);
   inherited[0] = sparse[0];
   Reflect.deleteProperty(sparse, "0");
   Object.setPrototypeOf(sparse, inherited);
   config.topicPolicy = sparse;
-  let runtime: ReturnType<typeof createNativeNetworkRuntime> | undefined;
+  let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | undefined;
   try {
     expect(() => {
-      runtime = createNativeNetworkRuntime(config, () => undefined);
+      runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
     }).toThrow("InvalidNetworkConfig");
   } finally {
     if (runtime) {
@@ -432,12 +429,12 @@ it("rejects sparse topic arrays even when inherited entries supply values", asyn
 });
 
 it("requires explicit minimum sampling groups before owner startup", async () => {
-  const config = networkConfig();
+  const config = applicationConfig();
   Reflect.deleteProperty(config.local.fork, "minimumSamplingGroups");
-  let runtime: ReturnType<typeof createNativeNetworkRuntime> | undefined;
+  let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | undefined;
   try {
     expect(() => {
-      runtime = createNativeNetworkRuntime(config, () => undefined);
+      runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
     }).toThrow("InvalidNetworkInteger");
   } finally {
     if (runtime) {
@@ -448,9 +445,9 @@ it("requires explicit minimum sampling groups before owner startup", async () =>
 });
 
 it("accepts host minimum sampling groups at ordinary startup", async () => {
-  const config = networkConfig();
+  const config = applicationConfig();
   Object.assign(config.local.fork, {custodyGroups: 128, minimumSamplingGroups: 8});
-  const runtime = createNativeNetworkRuntime(config, () => undefined);
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   try {
     await runtime.ready;
   } finally {
@@ -470,19 +467,19 @@ it.each([
   Number.MAX_SAFE_INTEGER + 1,
   129,
 ])("rejects malformed minimum sampling groups %s", (value) => {
-  const config = networkConfig();
+  const config = applicationConfig();
   Object.assign(config.local.fork, {minimumSamplingGroups: value});
-  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
 });
 
 it("rejects minimum sampling groups above the active group bound", () => {
-  const config = networkConfig();
+  const config = applicationConfig();
   Object.assign(config.local.fork, {minimumSamplingGroups: 2});
-  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
 });
 
 it("rejects unknown fork context fields", () => {
-  const config = networkConfig();
+  const config = applicationConfig();
   Object.assign(config.local.fork, {samplingGroups: 0});
-  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
 });

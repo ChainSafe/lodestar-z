@@ -1,7 +1,7 @@
 import {expect, it} from "vitest";
 import type {IpEndpoint} from "../src/network.js";
-import {createNativeNetworkApplicationRuntime, createNativeNetworkRuntime} from "../src/network.js";
-import {applicationConfig, discoveryConfig, networkConfig} from "./utils/network.js";
+import {createNativeNetworkApplicationRuntime} from "../src/network.js";
+import {applicationConfig, discoveryConfig} from "./utils/network.js";
 
 const ip4: IpEndpoint = {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0};
 const ip6: IpEndpoint = {address: Uint8Array.from({length: 16}, (_, i) => Number(i === 15)), family: 6, port: 0};
@@ -9,12 +9,12 @@ const ip6: IpEndpoint = {address: Uint8Array.from({length: 16}, (_, i) => Number
 it.each(
   [[], [ip4, ip4], [ip6, ip6], [ip4, ip6, ip4], Array<IpEndpoint>(2)].map((bind) => ({bind}))
 )("rejects malformed listener sets before starting an owner: %j", ({bind}) => {
-  const config = networkConfig();
+  const config = applicationConfig();
   config.bind = bind;
-  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
   config.bind = ip4;
   config.discovery = {...discoveryConfig().discovery, bind};
-  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
 });
 
 it.each(
@@ -42,7 +42,5 @@ it("rejects advertising IPv6 through IPv4-only discovery and unwinds startup", a
   config.bind = [ip4, ip6];
   config.discovery.advertisement.ip6 = ip6.address;
   config.discovery.advertisement.quic6 = 9001;
-  const runtime = createNativeNetworkRuntime(config, () => undefined);
-  await expect(runtime.ready).rejects.toThrow("InvalidAdvertisement");
-  await runtime.close();
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidAdvertisement");
 });

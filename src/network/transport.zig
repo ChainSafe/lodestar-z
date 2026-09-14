@@ -105,7 +105,7 @@ pub const Transport = struct {
 
     pub fn nextTimeoutMs(self: *const Transport, now: types.Now) ?u64 {
         assert(self.engine.registry.slots.len > 0);
-        return self.driver.nextTimeoutMs(@constCast(&self.engine), now);
+        return self.driver.nextTimeoutMs(&self.engine, now);
     }
 
     pub fn dial(
@@ -127,28 +127,15 @@ pub const Transport = struct {
         return self.driver.dial(io, &self.engine, &self.udp, address, expected);
     }
 
+    /// Keeps completed native work/notifications on Driver or optional keylog failure.
     pub fn step(
         self: *Transport,
         io: std.Io,
         events: []engine_mod.Event,
         activity: []engine_mod.Handle,
         options: driver_mod.StepOptions,
-    ) StepError!driver_mod.StepResult {
-        assert(self.engine.registry.slots.len > 0);
-        // Legacy error-union callers cannot receive progress alongside a logging error.
-        try self.drainKeylog(io);
-        return self.driver.step(io, &self.engine, &self.udp, events, activity, options);
-    }
-
-    /// Keeps completed native work/notifications on Driver or optional keylog failure.
-    pub fn stepProgress(
-        self: *Transport,
-        io: std.Io,
-        events: []engine_mod.Event,
-        activity: []engine_mod.Handle,
-        options: driver_mod.StepOptions,
     ) ProgressResult {
-        const result = self.driver.stepProgress(io, &self.engine, &self.udp, events, activity, options);
+        const result = self.driver.step(io, &self.engine, &self.udp, events, activity, options);
         if (result.failure) |err| return .{ .progress = result.progress, .failure = err };
         self.drainKeylog(io) catch |err| return .{ .progress = result.progress, .failure = err };
         return .{ .progress = result.progress };
@@ -156,10 +143,9 @@ pub const Transport = struct {
 
     fn drainKeylog(self: *Transport, io: std.Io) error{KeylogWriteFailed}!void {
         const file = self.keylog orelse return;
-        const view = self.engine.driverView();
         var lines: [tls.keylog_capacity]u8 = undefined;
-        for (view.activeIndices()) |index| {
-            const length = view.takeKeylog(index, &lines);
+        for (self.engine.activeIndices()) |index| {
+            const length = self.engine.takeKeylog(index, &lines);
             if (length == 0) continue;
             file.writePositionalAll(io, lines[0..length], self.keylog_offset) catch {
                 file.close(io);

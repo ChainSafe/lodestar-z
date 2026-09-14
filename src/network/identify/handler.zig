@@ -86,17 +86,15 @@ pub const Handler = struct {
 
     pub fn bind(self: *Handler, engine: *const engine_mod.Engine) void {
         if (self.local != null) return;
-        var local = codec.Local.init(&engine.tls.local_peer_id, self.agent.slice(), self.protocol_version.slice(), self.addresses[0..self.address_count]) catch unreachable;
-        if (self.address_count == 0) {
-            var addresses: [2]@import("../types.zig").Address = undefined;
-            var count: usize = 0;
-            for (engine.local) |address| if (address) |value| {
-                addresses[count] = value;
-                count += 1;
-            };
-            local.setAddresses(addresses[0..count]) catch {};
-        }
-        self.local = local;
+        var bound: [2]types.Address = undefined;
+        var count: usize = 0;
+        for (engine.local) |address| if (address) |value| {
+            if (!value.isUsable()) continue;
+            bound[count] = value;
+            count += 1;
+        };
+        const addresses = if (self.address_count == 0) bound[0..count] else self.addresses[0..self.address_count];
+        self.local = codec.Local.init(&engine.tls.local_peer_id, self.agent.slice(), self.protocol_version.slice(), addresses) catch unreachable;
     }
 
     pub fn start(self: *Handler, router: *routing.Router, engine: *engine_mod.Engine, peer: PeerRef, conn: engine_mod.Handle, now: types.Now) StartError!void {

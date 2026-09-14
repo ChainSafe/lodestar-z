@@ -178,15 +178,10 @@ export interface NativeRuntimeDiagnostics {
   terminalErrorCode: string | null;
   session: bigint;
   currentSlot: bigint;
-  clockRevision: bigint;
   ownerTurns: bigint;
   lastMonotonicMs: bigint;
   peerCount: number;
   readyPeerCount: number;
-  queuedEvents: number;
-  queueCapacity: number;
-  queueHighWater: number;
-  observationsDropped: bigint;
   operationalFailures: bigint;
   operationCapacity: number;
   operationOccupied: number;
@@ -227,18 +222,6 @@ export interface NativeRuntimeDiagnostics {
   bridgeRequestedBytes: number;
 }
 
-export type NativeRuntimeEvent =
-  | {type: "peerReady"; peerIndex: number; peerGeneration: bigint; peerId: Uint8Array}
-  | {type: "peerUpdated"; peerIndex: number; peerGeneration: bigint; peerId: Uint8Array}
-  | {type: "peerClosed"; peerIndex: number; peerGeneration: bigint; peerId: Uint8Array; reason: string}
-  | {type: "operationalError"; code: string; count: bigint};
-
-export interface NativeDrainBatch {
-  events: NativeRuntimeEvent[];
-  more: boolean;
-  dropped: bigint;
-}
-
 export interface NativeRuntimeCloseResult {
   reason: "requested" | "startupCancelled" | "failed";
 }
@@ -264,25 +247,8 @@ export interface NativeLogBatch {
   truncated: bigint;
 }
 
-export interface NativeNetworkRuntime {
-  /** Drain at most 32 copied records. Available after close; logging never invokes JavaScript. */
-  drainLogs(maxRecords?: number): NativeLogBatch;
-  /** Defaults to info. Debug remains available in ReleaseSafe builds. */
-  setLogLevel(level: NativeLogLevel): void;
-  /** Prometheus text from an owner snapshot refreshed at most once per second. Counters survive close. */
-  getMetrics(): string;
-  readonly ready: Promise<NativeIdentity>;
-  readonly closed: Promise<NativeRuntimeCloseResult>;
-  readonly state: NativeRuntimeState;
-  setCurrentSlot(slot: bigint): bigint;
-  diagnostics(): NativeRuntimeDiagnostics;
-  drain(maxEvents: number): NativeDrainBatch;
-  close(): Promise<NativeRuntimeCloseResult>;
-}
-
-export function createNativeNetworkRuntime(config: NativeRuntimeConfig, onReadable: () => void): NativeNetworkRuntime;
-
 export interface NativeResources {
+  /** Retained peer records, at most 512. */
   peerCapacity: number;
   targetPeers: number;
   maxPeers: number;
@@ -394,7 +360,6 @@ export interface NativeNetworkApplicationRuntime {
   readonly ready: Promise<NativeIdentity>;
   readonly state: NativeRuntimeState;
   diagnostics(): NativeRuntimeDiagnostics;
-  drain(maxEvents: number): NativeDrainBatch;
   applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
   getIdentity(): Promise<NativeIdentitySnapshot>;
   getGossipDiagnostics(cursor?: number): Promise<NativeGossipDiagnosticsPage>;
@@ -594,12 +559,13 @@ export interface NativeIncomingRequest {
   readonly connection: NativeConnection;
   readonly protocol: string;
   readonly data: Uint8Array;
-  readonly closed: Promise<NativeIncomingResult>;
+  /** Resolves once native ownership and pending responses have retired. */
+  readonly closed: Promise<void>;
   respond(data: Uint8Array, context: NativeForkEntry | null): Promise<void>;
-  finish(): Promise<NativeIncomingResult>;
-  fail(status: number, message: Uint8Array): Promise<NativeIncomingResult>;
+  finish(): Promise<void>;
+  fail(status: number, message: Uint8Array): Promise<void>;
   /** Applies cancellation at the owner's next servicing opportunity; intervening native completion remains authoritative. */
-  cancel(): Promise<NativeIncomingResult>;
+  cancel(): Promise<void>;
 }
 
 export type NativeIncomingFailure =
@@ -610,11 +576,6 @@ export type NativeIncomingFailure =
   | "connection_closed"
   | "stream_closed"
   | "transport";
-
-export type NativeIncomingResult =
-  | {reason: "served"; chunks: number}
-  | {reason: "failed"; failure: NativeIncomingFailure; chunks: number}
-  | {reason: "closed"; chunks: number};
 
 /** Operational request errors. Malformed arguments and allocation failures retain their existing specific errors. */
 export type NativeIncomingError = Error &

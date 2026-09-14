@@ -7,26 +7,11 @@ class NativeRuntime {
   #closed;
   #onReadable;
 
-  constructor(config, onReadable, application = false) {
+  constructor(config, onReadable) {
     if (typeof onReadable !== "function") throw new Error("InvalidNetworkConfig");
     this.#native = new bindings.NativeNetworkRuntime();
     this.#onReadable = onReadable;
-    const promises = this.#native[application ? "prepare" : "start"](config, NativeRuntime.#notifier(new WeakRef(this)));
-    if (!application) this.setCurrentSlot = (slot) => this.#native.setCurrentSlot(slot);
-    if (application) {
-      this.drainGossip = () => this.#native.drainGossip();
-      this.reportGossip = (handle, verdict) => this.#native.reportGossip(handle, verdict);
-      this.publishGossip = (topic, data, options) => this.#native.publishGossip(topic, data, options);
-      this.takeIncomingRequest = () => {
-        const descriptor = this.#native.takeIncomingRequest();
-        if (descriptor === null) return null;
-        try { return new NativeIncoming(this.#native, descriptor); }
-        catch (error) {
-          this.#native.incomingTerminal(descriptor.handle, 2, undefined, undefined);
-          throw error;
-        }
-      };
-    }
+    const promises = this.#native.prepare(config, NativeRuntime.#notifier(new WeakRef(this)));
     this.ready = promises.ready;
     this.#closed = promises.closed;
   }
@@ -41,7 +26,6 @@ class NativeRuntime {
   getMetrics() { return this.#native.getMetrics(); }
   drainLogs(maxRecords = 32) { return this.#native.drainLogs(maxRecords); }
   setLogLevel(level) { this.#native.setLogLevel(level); }
-  drain(maxEvents) { return this.#native.drain(maxEvents); }
   applyIntent(intent, slot) { return this.#native.applyIntent(intent, slot); }
   getIdentity() { return this.#native.getIdentity(); }
   getPeers() { return this.#native.getPeers(); }
@@ -54,6 +38,18 @@ class NativeRuntime {
   getDirectPeers() { return this.#native.getDirectPeers(); }
   reportPeer(peerId, action) { return this.#native.reportPeer(peerId, action); }
   drainPeers(maxEvents) { return this.#native.drainPeers(maxEvents); }
+  drainGossip() { return this.#native.drainGossip(); }
+  reportGossip(handle, verdict) { return this.#native.reportGossip(handle, verdict); }
+  publishGossip(topic, data, options) { return this.#native.publishGossip(topic, data, options); }
+  takeIncomingRequest() {
+    const descriptor = this.#native.takeIncomingRequest();
+    if (descriptor === null) return null;
+    try { return new NativeIncoming(this.#native, descriptor); }
+    catch (error) {
+      this.#native.incomingTerminal(descriptor.handle, 2, undefined, undefined);
+      throw error;
+    }
+  }
   request(peerId, protocol, data, options) {
     return new NativeRequest(this.#native, this.#native.requestStart(peerId, protocol, data, options));
   }
@@ -63,10 +59,6 @@ class NativeRuntime {
   }
 }
 
-export function createNativeNetworkRuntime(config, onReadable) {
-  return new NativeRuntime(config, onReadable);
-}
-
 export function createNativeNetworkApplicationRuntime(config, onReadable) {
-  return new NativeRuntime(config, onReadable, true);
+  return new NativeRuntime(config, onReadable);
 }

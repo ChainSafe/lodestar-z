@@ -311,8 +311,7 @@ pub const NetworkCore = struct {
         try self.core.connectUntil(identity, addresses, now, deadline_ms);
     }
     pub fn cancelConnect(self: *NetworkCore, identity: *const t.PeerId, now: Now) void {
-        self.core.dial_queue.cancelConnect(&self.transport.engine, identity, now.mono_ms);
-        self.core.policy_dirty = true;
+        self.core.cancelConnect(&self.transport.engine, identity, now);
     }
     pub fn addDirectPeer(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now) !void {
         try self.core.addDirectPeer(identity, addresses, now);
@@ -354,22 +353,22 @@ pub const NetworkCore = struct {
         return self.core.sendReqRespRequest(&self.transport.engine, conn, protocol, request, sink, options, now);
     }
     pub fn consume(self: *NetworkCore, request: rr.RequestHandle, now: Now) bool {
-        return self.core.consume(request, now);
+        return self.core.service.reqresp.consume(request, now);
     }
     pub fn respond(self: *NetworkCore, request: rr.RequestHandle, bytes: []const u8, context: ?rr.ForkEntry, now: Now) !void {
-        try self.core.respond(request, bytes, context, now);
+        try self.core.service.reqresp.respond(request, bytes, context, now);
     }
     pub fn respondError(self: *NetworkCore, request: rr.RequestHandle, code: u8, message: []const u8, now: Now) !void {
-        try self.core.respondError(request, code, message, now);
+        try self.core.service.reqresp.respondError(request, code, message, now);
     }
     pub fn finish(self: *NetworkCore, request: rr.RequestHandle, now: Now) bool {
-        return self.core.finish(request, now);
+        return self.core.service.reqresp.finish(request, now);
     }
     pub fn cancel(self: *NetworkCore, request: rr.RequestHandle) bool {
-        return self.core.cancel(request);
+        return self.core.service.reqresp.cancel(request);
     }
     pub fn errorMessage(self: *const NetworkCore, request: rr.RequestHandle) []const u8 {
-        return self.core.errorMessage(request);
+        return self.core.service.reqresp.errorMessage(request);
     }
     /// Copies topic bytes and scalar policy without publishing or invalidating event borrows.
     pub fn configureTopic(self: *NetworkCore, topic: []const u8, params: *const gossip.score.TopicParams) (gossip.Gossipsub.ConfigureTopicError || error{Stopped})!void {
@@ -390,7 +389,7 @@ pub const NetworkCore = struct {
         return self.core.unsubscribe(topic);
     }
     pub fn reportValidation(self: *NetworkCore, handle: gossip.ValidationHandle, verdict: gossip.Verdict, now: Now) gossip.ReportOutcome {
-        return self.core.reportValidation(handle, verdict, now);
+        return self.core.service.gossipsub.inner.report(handle, verdict, now);
     }
     /// Borrows the last step's authenticated transport events until the next step.
     pub fn transportEvents(self: *const NetworkCore) []const engine.Event {
@@ -467,7 +466,7 @@ pub const NetworkCore = struct {
         local.metadata.seq_number = self.core.local.metadata.seq_number;
         try peers.control_wire.copyLocal(&local, &local);
         try validateSchedule(&local, schedule);
-        const request = &self.core.service.reqresp.inner;
+        const request = &self.core.service.reqresp;
         try validateForkTable(request.forks[0..request.fork_count], &local.fork);
         const identify_local = try self.prepareIdentifyLocal(endpoints, capabilities);
         const metadata_changed = !std.meta.eql(local.metadata, self.core.local.metadata);
@@ -528,10 +527,7 @@ pub const NetworkCore = struct {
         try self.publishLocal(&prepared);
         if (prepared.changed) self.commitLocal(&prepared, now);
         if (topics_changed) self.core.service.gossipsub.inner.commitSubscriptions(self.local_intent_workspace);
-        if (demand_changed) {
-            self.core.demand = demand;
-            self.core.policy_dirty = true;
-        }
+        if (demand_changed) self.core.commitDemand(&demand);
         std.log.scoped(.network_core).debug("intent_applied local_changed={any} topics_changed={any} demand_changed={any} subscriptions={d} fork={s} digest={x}", .{ prepared.changed, topics_changed, demand_changed, intent.subscriptions.len, @tagName(prepared.local.fork.fork), prepared.local.fork.digest });
         return true;
     }
@@ -583,7 +579,7 @@ pub const NetworkCore = struct {
             self.counters.readiness_interruptions +|= @intFromBool(result.readiness.interrupted);
             self.counters.readiness_failures +|= @intFromBool(result.readiness.failure != null);
         }
-        const progress = self.transport.stepProgress(io, self.native_events, self.activity, .{ .wait_max_ms = receive_wait });
+        const progress = self.transport.step(io, self.native_events, self.activity, .{ .wait_max_ms = receive_wait });
         result.transport = progress.progress;
         self.native_event_count = result.transport.events;
         result.failure = result.readiness.failure orelse progress.failure;

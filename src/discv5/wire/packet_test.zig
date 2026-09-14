@@ -115,17 +115,15 @@ test "authentication failure does not publish plaintext" {
     var decode_scratch: packet.DecodeScratch = .{};
     const decoded = try packet.decode(encoded, &recipient_id, &decode_scratch);
     var decrypt_scratch: packet.DecryptScratch = .{};
-    @memset(&decrypt_scratch.plaintext, 0xa5);
-    const before = decrypt_scratch.plaintext;
 
     try std.testing.expectError(
         packet.Error.DecryptionFailed,
         packet.decrypt(&decoded, &wrong_key, &decrypt_scratch),
     );
-    try std.testing.expectEqualSlices(u8, &before, &decrypt_scratch.plaintext);
+    try std.testing.expectEqualStrings("secret", try packet.decrypt(&decoded, &key, &decrypt_scratch));
 }
 
-test "invalid framing does not publish decoded header" {
+test "packet decode recovers after invalid framing" {
     const recipient_id = [_]u8{0x11} ** constants.node_id_size;
     const masking_iv = [_]u8{0x22} ** constants.masking_iv_size;
     const request_nonce = [_]u8{0x33} ** constants.nonce_size;
@@ -140,14 +138,14 @@ test "invalid framing does not publish decoded header" {
     }, null);
     raw[constants.masking_iv_size] ^= 1;
     var decode_scratch: packet.DecodeScratch = .{};
-    @memset(&decode_scratch.header, 0xa5);
-    const before = decode_scratch.header;
 
     try std.testing.expectError(
         packet.Error.InvalidProtocolId,
         packet.decode(&raw, &recipient_id, &decode_scratch),
     );
-    try std.testing.expectEqualSlices(u8, &before, &decode_scratch.header);
+    raw[constants.masking_iv_size] ^= 1;
+    const valid = try packet.decode(&raw, &recipient_id, &decode_scratch);
+    try std.testing.expectEqual(@as(u64, 7), valid.form.whoareyou.enr_sequence);
 }
 
 test "packet size and handshake bounds fail before output mutation" {

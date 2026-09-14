@@ -1,23 +1,23 @@
 import assert from "node:assert/strict";
 import {createSocket} from "node:dgram";
 import {setTimeout as delay} from "node:timers/promises";
-import {createNativeNetworkRuntime} from "../../src/network.js";
+import {createNativeNetworkApplicationRuntime} from "../../src/network.js";
 import bindings from "../../src/bindings.js";
-import {networkConfig} from "../utils/network.ts";
+import {applicationConfig} from "../utils/network.ts";
 
 const mode = process.argv[2];
 if (mode === "callback") {
-  bindings.networkTestScenario("observations");
+  bindings.networkTestScenario("application_peer_lane");
   let calls = 0;
   const thrown = new Promise((resolve) => process.once("uncaughtException", resolve));
-  const runtime = createNativeNetworkRuntime(networkConfig(), () => {
+  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => {
     calls++;
     throw new Error("ordinary-readable-failure");
   });
   await runtime.ready;
   assert.equal((await thrown).message, "ordinary-readable-failure");
-  assert.equal(runtime.diagnostics().queuedEvents, 64);
-  assert.equal(runtime.drain(1).events.length, 1);
+  assert.equal(runtime.diagnostics().peerLaneOccupied, 64);
+  assert.equal(runtime.drainPeers(1).events.length, 1);
   const closing = runtime.close();
   assert.equal(runtime.close(), closing);
   assert.equal((await closing).reason, "requested");
@@ -25,13 +25,13 @@ if (mode === "callback") {
   assert.equal(calls, 1);
   console.log("callback-closed");
 } else if (mode === "exit") {
-  const runtime = createNativeNetworkRuntime(networkConfig(), () => undefined);
+  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
   await runtime.ready;
   console.log("ready-exit");
 } else if (mode === "gc") {
-  const survivor = createNativeNetworkRuntime(networkConfig(), () => undefined);
+  const survivor = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
   await survivor.ready;
-  let abandoned = createNativeNetworkRuntime(networkConfig(), () => undefined);
+  let abandoned = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
   const identity = await abandoned.ready;
   const weak = new WeakRef(abandoned);
   abandoned = null;
@@ -48,14 +48,14 @@ if (mode === "callback") {
     socket.bind(identity.localEndpoint.port, "127.0.0.1", resolve);
   });
   socket.close();
-  assert.equal(survivor.setCurrentSlot(101n), 1n);
+  assert.equal((await survivor.getIdentity()).peerId.length, 39);
   await survivor.close();
   console.log("gc-rebound");
 }
 else if (mode === "promises") {
   let weak;
   const ready = (() => {
-    const runtime = createNativeNetworkRuntime(networkConfig(), () => undefined);
+    const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
     weak = new WeakRef(runtime);
     return runtime.ready.then(() => "ready", (error) => error.message);
   })();
@@ -66,7 +66,7 @@ else if (mode === "promises") {
   }
   assert.equal(weak.deref(), undefined);
   assert(["ready", "AbortError"].includes(await Promise.race([ready, delay(5000, undefined, {ref: false}).then(() => "timeout")])));
-  let runtime = createNativeNetworkRuntime(networkConfig(), () => undefined);
+  let runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
   await runtime.ready;
   const closing = runtime.close();
   runtime = null;

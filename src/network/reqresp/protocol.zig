@@ -265,12 +265,6 @@ pub fn requestMaxControl() usize {
     return longest;
 }
 
-pub fn responseMaxAll() usize {
-    comptime var longest: usize = 0;
-    inline for (table) |bounds| longest = @max(longest, bounds.response_max);
-    return longest;
-}
-
 comptime {
     assert(Protocol.count == 18);
     for (table) |bounds| {

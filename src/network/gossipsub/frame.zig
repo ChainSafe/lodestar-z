@@ -23,15 +23,14 @@ pub fn writeFrame(out: []u8, body: []const u8) []const u8 {
 pub const Result = struct { consumed: usize, frame: ?[]const u8 };
 
 /// A resumable length-prefixed frame reader. Stream bytes are fed in; body bytes
-/// accumulate into a caller-provided buffer so the engine can grow it for a rare
-/// large frame. State survives a `BufferTooSmall` so the caller re-feeds the
-/// remaining input into a bigger body buffer.
+/// accumulate into caller-owned storage. When the declared length exceeds that
+/// storage, only the prefix is consumed; the caller retains the remaining input
+/// until a sufficiently large receive buffer is available.
 pub const Reader = struct {
     prefix: [constants_varint_max]u8 = undefined,
     prefix_len: u8 = 0,
     declared: ?usize = null,
     filled: usize = 0,
-    discarding: bool = false,
 
     const constants_varint_max = 10;
 
@@ -39,16 +38,6 @@ pub const Reader = struct {
     /// caller can size the body buffer before feeding more.
     pub fn declaredLen(self: *const Reader) ?usize {
         return self.declared;
-    }
-
-    /// Discards the current frame's body in sync with the stream, for a frame
-    /// the caller cannot hold. The stream stays framed for the next message.
-    pub fn discard(self: *Reader) void {
-        self.discarding = true;
-    }
-
-    pub fn isDiscarding(self: *const Reader) bool {
-        return self.discarding;
     }
 
     pub fn feed(self: *Reader, input: []const u8, body: []u8) Error!Result {
@@ -74,12 +63,6 @@ pub const Reader = struct {
         const declared = self.declared.?;
         const want = declared - self.filled;
         const take = @min(want, input.len - pos);
-        if (self.discarding) {
-            self.filled += take;
-            pos += take;
-            if (self.filled == declared) self.reset();
-            return .{ .consumed = pos, .frame = null };
-        }
         // The body buffer is too small for this frame; the caller grows it and
         // re-feeds. The prefix is already consumed, so no bytes are lost.
         if (declared > body.len) return .{ .consumed = pos, .frame = null };
@@ -97,7 +80,6 @@ pub const Reader = struct {
         self.declared = null;
         self.prefix_len = 0;
         self.filled = 0;
-        self.discarding = false;
     }
 };
 

@@ -17,12 +17,9 @@ pub const Config = struct {
     blob_schedule: []const BlobLimit,
     host_integer_max: ?u64 = null,
 };
-pub const Range = struct { start: u64, count: u64, end_exclusive: u64 };
 pub const Inspection = struct {
-    raw_cost: u128,
     charged_cost: u128,
     chunks_max: u32,
-    range: ?Range = null,
 };
 pub const InspectError = error{ MalformedSsz, InvalidRequest, HostIntegerRange, UnsupportedBounds };
 pub const schedule_max = 64;
@@ -71,7 +68,6 @@ pub const Policy = struct {
         if (bytes.len < bounds.request_min or bytes.len > bounds.request_max) return error.MalformedSsz;
         var cost: u128 = 1;
         var ceiling: u128 = bounds.chunks_max;
-        var range: ?Range = null;
         switch (which) {
             .blocks_by_range_v2, .blob_sidecars_by_range_v1, .data_column_sidecars_by_range_v1, .light_client_updates_by_range_v1 => {
                 const start = scalar(bytes, 0);
@@ -87,7 +83,6 @@ pub const Policy = struct {
                 const effective = @min(count, limit);
                 const end = std.math.add(u64, start, effective) catch return error.InvalidRequest;
                 try self.host(end);
-                range = .{ .start = start, .count = effective, .end_exclusive = end };
                 cost = count;
                 ceiling = effective;
                 if (which == .blob_sidecars_by_range_v1) {
@@ -155,7 +150,7 @@ pub const Policy = struct {
         else
             bounds.chunks_max;
         if (ceiling > supported) return error.UnsupportedBounds;
-        return .{ .raw_cost = cost, .charged_cost = @max(1, cost), .chunks_max = @intCast(ceiling), .range = range };
+        return .{ .charged_cost = @max(1, cost), .chunks_max = @intCast(ceiling) };
     }
 
     fn columns(self: *const Policy, bytes: []const u8) InspectError!u64 {

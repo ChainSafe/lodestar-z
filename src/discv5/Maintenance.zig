@@ -29,12 +29,12 @@ const Pending = struct {
     kind: enum { ping, enr } = .ping,
     attempts: u8 = 0,
     ready_ms: u64,
-    bootstrap: bool = false,
+    origin: enum { stale, bootstrap, replacement } = .stale,
 };
 
 const Maintenance = @This();
 config: Config,
-ip_mode: @import("udp").Mode = .dual,
+ip_mode: @import("udp").Mode,
 bootstrap: []const enr.Record,
 candidates: *Lookup.Candidates,
 lookup: Lookup = undefined,
@@ -56,19 +56,20 @@ pub fn init(
     bootstrap: []const enr.Record,
     now_ms: u64,
     config: Config,
+    ip_mode: @import("udp").Mode,
 ) Error!void {
     if (bootstrap.len > bootstrap_max) return Error.TooManyBootstraps;
     inline for (std.meta.fields(Config)) |field| {
         if (@field(config, field.name) == 0) return Error.InvalidConfig;
     }
     for (bootstrap) |*record| {
-        const address = record.endpoint() orelse return Error.InvalidBootstrap;
-        if (!address.isUsable()) return Error.InvalidBootstrap;
+        _ = record.endpoint() orelse return Error.InvalidBootstrap;
     }
     const probe_due_ms = now_ms +| config.probe_interval_ms;
     const refresh_due_ms = now_ms +| config.refresh_interval_ms;
     self.* = .{
         .config = config,
+        .ip_mode = ip_mode,
         .bootstrap = bootstrap,
         .candidates = candidates,
         .probe_due_ms = probe_due_ms,
@@ -79,8 +80,12 @@ pub fn init(
     };
 }
 
-pub fn nextDeadlineMs(self: *const Maintenance) ?u64 {
-    return self.next_start_ms;
+pub fn nextDeadlineMs(self: *const Maintenance, core: *const Engine) ?u64 {
+    const next = self.next_start_ms orelse return null;
+    if (self.pending == null) if (core.routing.revalidationTarget()) |entry| {
+        if (self.ip_mode.supports(entry.peer.address) and !core.isPeerBusy(&entry.peer.node_id)) return 0;
+    };
+    return next;
 }
 
 /// Starts at most one call. The host sends the returned packet, forwards owned events and
@@ -93,7 +98,7 @@ pub fn startNext(
     now_ms: u64,
     entropy: *const Engine.StartEntropy,
 ) Error!?Lookup.Started {
-    if (now_ms < (self.next_start_ms orelse return null)) return null;
+    if (now_ms < (self.nextDeadlineMs(core) orelse return null)) return null;
     self.next_start_ms = now_ms +| self.config.retry_interval_ms;
     self.observeGrowth(core, now_ms);
     if (self.lookup_active and self.lookup.isFinished()) self.lookup_active = false;
@@ -209,6 +214,26 @@ pub fn onFailure(
         if (pending.handle) |owned| {
             if (std.meta.eql(handle, owned)) {
                 _ = core.cancelCall(handle);
+                if (pending.origin == .replacement and pending.kind == .ping) {
+                    if (reason == .local) {
+                        pending.handle = null;
+                        pending.attempts = 0;
+                        pending.ready_ms = now_ms +| self.config.retry_interval_ms;
+                        self.next_start_ms = pending.ready_ms;
+                        return true;
+                    }
+                    if (core.peerRecord(&pending.entry.peer.node_id)) |entry| {
+                        if (entry.last_verified_ms == pending.entry.last_verified_ms) {
+                            _ = core.routing.resolveRevalidation(&entry.peer.node_id, false, now_ms) catch |err| switch (err) {
+                                error.NoPendingRevalidation => {},
+                                else => unreachable,
+                            };
+                        }
+                    }
+                    self.pending = null;
+                    self.next_start_ms = now_ms;
+                    return true;
+                }
                 if (reason == .expired and pending.kind == .ping) {
                     if (pending.attempts < probe_attempts_max) {
                         pending.handle = null;
@@ -249,9 +274,15 @@ fn selectProbe(self: *Maintenance, core: *Engine, now_ms: u64) void {
     if (self.pending) |pending| {
         if (pending.handle != null) return;
         if (!core.isPeerBusy(&pending.entry.peer.node_id)) return;
-        if (pending.bootstrap) self.bootstrap_due_ms = now_ms;
+        if (pending.origin == .bootstrap) self.bootstrap_due_ms = now_ms;
         self.pending = null;
         self.probe_due_ms = @min(self.probe_due_ms, now_ms);
+    }
+    if (core.routing.revalidationTarget()) |entry| {
+        if (self.ip_mode.supports(entry.peer.address) and !core.isPeerBusy(&entry.peer.node_id)) {
+            self.pending = .{ .entry = entry, .ready_ms = now_ms, .origin = .replacement };
+            return;
+        }
     }
     if (self.bootstrap.len > 0 and now_ms >= self.bootstrap_due_ms and
         (core.peerCount() == 0 or now_ms -| self.last_growth_ms >= self.config.discovery_stall_ms))
@@ -267,7 +298,7 @@ fn selectProbe(self: *Maintenance, core: *Engine, now_ms: u64) void {
                 .peer = .{ .node_id = record.node_id, .address = address },
                 .record = record,
                 .last_verified_ms = 0,
-            }, .ready_ms = now_ms, .bootstrap = true };
+            }, .ready_ms = now_ms, .origin = .bootstrap };
             return;
         }
         self.bootstrap_due_ms = now_ms +| self.config.retry_interval_ms;
@@ -297,7 +328,7 @@ fn onProbeResponse(
             std.debug.assert(response.matched.response == .pong);
             const record = response.record orelse pending.entry.record;
             _ = core.confirmPeer(&response.peer, &record, now_ms) catch {};
-            if (pending.bootstrap) self.refresh_due_ms = now_ms;
+            if (pending.origin == .bootstrap) self.refresh_due_ms = now_ms;
             self.observeGrowth(core, now_ms);
             const known = core.peerRecord(&response.peer.node_id);
             const sequence = if (known) |entry| entry.record.sequence else record.sequence;

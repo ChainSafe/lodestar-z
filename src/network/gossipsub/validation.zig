@@ -154,11 +154,6 @@ pub const Validation = struct {
         return null;
     }
 
-    pub fn admit(self: *Validation, store: *storage.Store, peers: *Peers, message: storage.Handle, source: PeerRef, topic: topic_mod.Ref, now: u64) Handle {
-        var reservation = self.reserve(store.get(message).?.id).?;
-        return reservation.commit(store, peers, message, source, topic, now);
-    }
-
     fn reserveAttribution(self: *Validation) u32 {
         for (0..self.recent.len) |_| {
             const index = self.recent_cursor;
@@ -262,7 +257,7 @@ fn releaseAttribution(e: *Attribution, peers: *Peers) void {
 }
 
 test "gossip validation expires without pump and resolves exactly once" {
-    var peers = try Peers.init(std.testing.allocator, 100);
+    var peers = try Peers.init(std.testing.allocator, &.{ .retained_score_ms = 100 });
     defer peers.deinit(std.testing.allocator);
     peers.rows[0] = .{ .occupied = true, .generation = 1 };
     var store = try storage.Store.init(std.testing.allocator, 2, 8192);
@@ -270,7 +265,8 @@ test "gossip validation expires without pump and resolves exactly once" {
     var v = try Validation.init(std.testing.allocator, 1, 10, 20);
     defer v.deinit(std.testing.allocator, &store, &peers);
     const m = store.put([_]u8{1} ** 20, "t", "body").?;
-    const h = v.admit(&store, &peers, m, .{ .index = 0, .generation = 1 }, .{ .index = 0, .generation = 1 }, 100);
+    var h_reservation = v.reserve(store.get(m).?.id).?;
+    const h = h_reservation.commit(&store, &peers, m, .{ .index = 0, .generation = 1 }, .{ .index = 0, .generation = 1 }, 100);
     store.seal(m);
     try std.testing.expect(v.inspect(&store, &peers, h, 109) == null);
     try std.testing.expectEqual(Outcome.expired, v.inspect(&store, &peers, h, 110).?);
@@ -278,7 +274,8 @@ test "gossip validation expires without pump and resolves exactly once" {
     try std.testing.expectEqual(Outcome.stale_handle, v.inspect(&store, &peers, h, 130).?);
     const m2 = store.put([_]u8{2} ** 20, "t", "body").?;
     peers.rows[0].generation = 2;
-    const h2 = v.admit(&store, &peers, m2, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 1 }, 130);
+    var h2_reservation = v.reserve(store.get(m2).?.id).?;
+    const h2 = h2_reservation.commit(&store, &peers, m2, .{ .index = 0, .generation = 2 }, .{ .index = 0, .generation = 1 }, 130);
     store.seal(m2);
     try std.testing.expectEqual(Outcome.stale_handle, v.inspect(&store, &peers, h, 130).?);
     v.finish(&store, h2, .ignore, 131);
@@ -286,7 +283,7 @@ test "gossip validation expires without pump and resolves exactly once" {
 }
 
 test "gossip validation readmission skips exhausted generation without hiding pending ID" {
-    var peers = try Peers.init(std.testing.allocator, 100);
+    var peers = try Peers.init(std.testing.allocator, &.{ .retained_score_ms = 100 });
     defer peers.deinit(std.testing.allocator);
     peers.rows[0] = .{ .occupied = true, .generation = 1 };
     var store = try storage.Store.init(std.testing.allocator, 2, 8192);
@@ -297,11 +294,13 @@ test "gossip validation readmission skips exhausted generation without hiding pe
     const id = [_]u8{1} ** 20;
     const source: PeerRef = .{ .index = 0, .generation = 1 };
     const first = store.put(id, "t", "body").?;
-    const old = v.admit(&store, &peers, first, source, .{ .index = 0, .generation = 1 }, 100);
+    var old_reservation = v.reserve(store.get(first).?.id).?;
+    const old = old_reservation.commit(&store, &peers, first, source, .{ .index = 0, .generation = 1 }, 100);
     store.seal(first);
     v.finish(&store, old, .ignore, 101);
     const second = store.put(id, "t", "body").?;
-    const current = v.admit(&store, &peers, second, source, .{ .index = 0, .generation = 1 }, 102);
+    var current_reservation = v.reserve(store.get(second).?.id).?;
+    const current = current_reservation.commit(&store, &peers, second, source, .{ .index = 0, .generation = 1 }, 102);
     store.seal(second);
     try std.testing.expectEqual(std.math.maxInt(u64), old.generation);
     try std.testing.expectEqual(@as(u64, 1), current.generation);
@@ -318,7 +317,7 @@ test "gossip validation readmission skips exhausted generation without hiding pe
 
 test "gossip validation reservation rollback preserves attribution and prior outcome" {
     const a = std.testing.allocator;
-    var peers = try Peers.initCapacity(a, 100, 2, 1);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 100, .retained_capacity = 2, .retained_outbound_reserve = 1 });
     defer peers.deinit(a);
     peers.rows[0] = .{ .occupied = true, .generation = 1 };
     const source: PeerRef = .{ .index = 0, .generation = 1 };
@@ -328,7 +327,8 @@ test "gossip validation reservation rollback preserves attribution and prior out
     defer v.deinit(a, &store, &peers);
     const id = [_]u8{1} ** 20;
     const message = store.put(id, "topic", "payload").?;
-    const handle = v.admit(&store, &peers, message, source, .{ .index = 0, .generation = 1 }, 0);
+    var handle_reservation = v.reserve(store.get(message).?.id).?;
+    const handle = handle_reservation.commit(&store, &peers, message, source, .{ .index = 0, .generation = 1 }, 0);
     store.seal(message);
     v.finish(&store, handle, .reject, 1);
     var reservation = v.reserve(id).?;
@@ -345,7 +345,7 @@ test "gossip validation reservation rollback preserves attribution and prior out
 
 test "gossip validation destruction releases pending payloads and resolved attribution pins" {
     const a = std.testing.allocator;
-    var peers = try Peers.initCapacity(a, 100, 2, 1);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 100, .retained_capacity = 2, .retained_outbound_reserve = 1 });
     defer peers.deinit(a);
     const source = peers.admit(.{ .index = 0, .generation = 1 }, &.{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;
     var store = try storage.Store.init(a, 2, 8192);
@@ -355,7 +355,8 @@ test "gossip validation destruction releases pending payloads and resolved attri
         defer v.deinit(a, &store, &peers);
         for (0..2) |i| {
             const message = store.put(@splat(@intCast(i)), "topic", "payload").?;
-            const handle = v.admit(&store, &peers, message, source, .{ .index = 0, .generation = 1 }, 0);
+            var handle_reservation = v.reserve(store.get(message).?.id).?;
+            const handle = handle_reservation.commit(&store, &peers, message, source, .{ .index = 0, .generation = 1 }, 0);
             store.seal(message);
             if (i == 0) v.finish(&store, handle, .accept, 1);
         }

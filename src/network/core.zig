@@ -51,6 +51,16 @@ pub const DiscoveryNeed = struct {
         return .{ .general = self.general, .attnets = self.attnets, .syncnets = self.syncnets, .custody = self.custody, .expires_ms = expires_ms };
     }
 };
+const SelectionRevision = struct {
+    catalog: u64,
+    scores: u64,
+    delivery: u64,
+
+    fn cacheable(self: *const SelectionRevision) bool {
+        return self.catalog != std.math.maxInt(u64) and self.scores != std.math.maxInt(u64) and self.delivery != std.math.maxInt(u64);
+    }
+};
+
 pub const Core = struct {
     allocator: std.mem.Allocator,
     service: service_mod.Service,
@@ -64,11 +74,8 @@ pub const Core = struct {
     selection: policy.Result = .{},
     demand: t.Demand = .{},
     current_slot: u64 = 0,
-    policy_dirty: bool = true,
-    catalog_revision: ?u64 = null,
+    selection_revision: ?SelectionRevision = null,
     candidates_revision: ?u64 = null,
-    score_revision: u64 = 0,
-    delivery_revision: u64 = 0,
     reconciliation_deadline: ?u64 = null,
     reconciliation_now: Now = .{ .mono_ms = 0, .unix_s = 0 },
     custody_pending: bool = false,
@@ -120,8 +127,8 @@ pub const Core = struct {
             .control = self.control.counters,
             .control_resources = self.control.resourceSnapshot(),
             .dialing = self.dial_queue.resourceSnapshot(),
-            .reqresp = self.service.reqresp.inner.counters,
-            .reqresp_resources = self.service.reqresp.inner.resourceSnapshot(),
+            .reqresp = self.service.reqresp.counters,
+            .reqresp_resources = self.service.reqresp.resourceSnapshot(),
             .gossip = g.counters,
             .gossip_resources = g.resourceSnapshot(),
             .score_calculations = g.peers.scores.calculations,
@@ -238,14 +245,14 @@ pub const Core = struct {
         self.current_slot = slot;
         if (slot >= self.demand.expires_at_slot and !std.meta.eql(self.demand, t.Demand{})) {
             self.demand = .{};
-            self.policy_dirty = true;
+            self.selection_revision = null;
         }
         self.catalog.refresh(now.mono_ms);
         if (!self.quiescing) self.dial_queue.expire(engine, now.mono_ms);
         for (events) |event| self.transportEvent(engine, event, now);
         var controls: [32]rr.Event = undefined;
         var identify_results: [8]@import("identify/root.zig").Result = undefined;
-        const counts = self.service.processOutputs(engine, events, activity, now, .{ .application = application, .control = &controls, .gossipsub = gossip_events, .identify = &identify_results });
+        const counts = self.service.process(engine, events, activity, now, .{ .application = application, .control = &controls, .gossipsub = gossip_events, .identify = &identify_results });
         self.control.identifyResults(&self.catalog, identify_results[0..counts.identify]);
         self.control.events(
             &self.service,
@@ -303,17 +310,7 @@ pub const Core = struct {
                                 admission.peer,
                                 old,
                             );
-                            self.service.gossipsub.transportEvents(
-                                &self.service.router,
-                                engine,
-                                &.{.{ .closed = .{
-                                    .conn = old,
-                                    .peer_id = identity,
-                                    .direction = direction,
-                                    .reason = .host,
-                                } }},
-                                now,
-                            );
+                            self.service.gossipsub.retireConnection(&self.service.router, engine, old, now);
                             _ = engine.close(old, 0);
                         }
                         self.control.connected(admission.peer, connected.conn, direction, now);
@@ -323,7 +320,7 @@ pub const Core = struct {
                         );
                         const admission_result = self.service.gossipsub.peerConnected(engine, connected.conn, now);
                         if (admission_result != .admitted) self.counters.gossip_refused +|= 1;
-                        if (self.dial_queue.isDirect(&identity)) self.service.gossipsub.markDirect(connected.conn);
+                        if (self.dial_queue.isDirect(&identity)) self.service.gossipsub.inner.markDirect(connected.conn);
                         self.dial_queue.accepted(&identity, connected.conn, now.mono_ms);
                     },
                     else => {
@@ -336,7 +333,7 @@ pub const Core = struct {
             .closed => |closed| {
                 _ = self.dial_queue.dialClosed(closed.conn, now.mono_ms);
                 if (self.control.peerFor(closed.conn)) |peer| {
-                    const goodbye = self.service.reqresp.inner.closingGoodbye(engine, closed.conn, now);
+                    const goodbye = self.service.reqresp.closingGoodbye(engine, closed.conn, now);
                     if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, now, true);
                     const snapshot = self.catalog.get(peer).?;
                     const reason = snapshot.disconnect_reason orelse if (goodbye != null) t.DisconnectReason.remote_goodbye else .transport_closed;
@@ -394,9 +391,8 @@ pub const Core = struct {
         if (expired) self.candidates_revision = null;
         if (self.policyChanged() or expired) {
             self.refreshSelection(now);
-            self.catalog_revision = self.catalog.revision;
-            self.score_revision = self.service.gossipsub.inner.peers.scores.revision;
-            self.delivery_revision = self.service.gossipsub.inner.sessions.delivery_revision;
+            const revision = self.currentSelectionRevision();
+            self.selection_revision = if (revision.cacheable()) revision else null;
             self.reconciliation_deadline = self.catalog.nextDeadline(now.mono_ms);
             if (self.metadata_deadline) |due| self.reconciliation_deadline = @min(self.reconciliation_deadline orelse due, due);
             self.dial_queue.selection_dirty = true;
@@ -407,12 +403,11 @@ pub const Core = struct {
             self.dial_queue.configureSelection(&self.selection.deficits.missing, self.selection.retained_count < self.catalog.options.target_peers or self.selection.deficits.outbound > 0, &self.local.fork, now.mono_ms);
         }
     }
+    fn currentSelectionRevision(self: *const Core) SelectionRevision {
+        return .{ .catalog = self.catalog.revision, .scores = self.service.gossipsub.inner.peers.scores.revision, .delivery = self.service.gossipsub.inner.sessions.delivery_revision };
+    }
     fn policyChanged(self: *const Core) bool {
-        const score_revision = self.service.gossipsub.inner.peers.scores.revision;
-        const delivery_revision = self.service.gossipsub.inner.sessions.delivery_revision;
-        return self.policy_dirty or self.delivery_revision != delivery_revision or delivery_revision == std.math.maxInt(u64) or self.catalog_revision != self.catalog.revision or
-            self.score_revision != score_revision or self.catalog.revision == std.math.maxInt(u64) or
-            score_revision == std.math.maxInt(u64);
+        return !std.meta.eql(self.selection_revision, self.currentSelectionRevision());
     }
     fn updateNativeRoom(self: *Core, engine: *const engine_mod.Engine) void {
         const ceiling = @min(self.catalog.options.max_peers, engine.limits.connections_max);
@@ -428,13 +423,13 @@ pub const Core = struct {
     ) ?u64 {
         if (self.stopped) return self.peerWakeup(now, peer_capacity);
         if (self.quiescing) {
-            var due = self.service.nextWakeupOutputs(now, .{ .application = 0, .control = 32, .gossipsub = 0, .identify = 8 });
+            var due = self.service.nextWakeup(now, .{ .application = 0, .control = 32, .gossipsub = 0, .identify = 8 });
             for ([_]?u64{ self.control.nextWakeup(&self.catalog, now), self.peerWakeup(now, peer_capacity) }) |next| if (next) |deadline| {
                 due = @min(due orelse deadline, deadline);
             };
             return due;
         }
-        var due = self.service.nextWakeupOutputs(now, .{ .application = application_capacity, .control = 32, .gossipsub = gossip_capacity, .identify = 8 });
+        var due = self.service.nextWakeup(now, .{ .application = application_capacity, .control = 32, .gossipsub = gossip_capacity, .identify = 8 });
         for ([_]?u64{
             self.control.nextWakeup(&self.catalog, now),
             self.dial_queue.nextWakeup(now.mono_ms, @min(dial_capacity, self.dialRoom())),
@@ -457,8 +452,12 @@ pub const Core = struct {
         if (self.stopped) return error.Stopped;
         try demand.validate(&self.local.fork, self.catalog.options.max_peers);
         if (std.meta.eql(self.demand, demand.*)) return;
+        self.commitDemand(demand);
+    }
+    /// Requires demand validated against the local fork before publication.
+    pub fn commitDemand(self: *Core, demand: *const t.Demand) void {
         self.demand = demand.*;
-        self.policy_dirty = true;
+        self.selection_revision = null;
     }
     /// Reconciles mutations at the last explicit reconcile/process/dial clock.
     pub fn coverageDeficits(self: *Core) policy.Deficits {
@@ -546,7 +545,6 @@ pub const Core = struct {
         for (self.policy_scratch[0..input_count], 0..) |input, i| if (self.selection.reasons[i]) |reason| {
             if (self.disconnect(input.peer, reason, now)) self.counters.policy_disconnects +|= 1;
         };
-        self.policy_dirty = false;
     }
     fn dialRoom(self: *const Core) u16 {
         const attempts = self.dial_queue.attempts();
@@ -557,13 +555,13 @@ pub const Core = struct {
         var local = self.local;
         local.status = status.*;
         try peers.control_wire.copyLocal(&self.local, &local);
-        self.policy_dirty = true;
+        self.selection_revision = null;
     }
     pub fn updateMetadata(self: *Core, metadata: *const t.Metadata) !void {
         var local = self.local;
         local.metadata = metadata.*;
         try peers.control_wire.copyLocal(&self.local, &local);
-        self.policy_dirty = true;
+        self.selection_revision = null;
     }
     pub fn updateFork(self: *Core, local: *const t.LocalState, now: Now) !void {
         var copied: t.LocalState = undefined;
@@ -578,12 +576,12 @@ pub const Core = struct {
             self.control.forkUpdated(&self.service, &self.catalog, self.local.fork, now);
         }
         self.local = local.*;
-        self.service.reqresp.inner.setRequestFork(local.fork.fork);
+        self.service.reqresp.setRequestFork(local.fork.fork);
         for (self.local.fork.custody_groups..128) |index| self.demand.group_targets[index] = 0;
         var budget: u16 = 0;
         _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
         _ = self.dial_queue.advanceCustody(&self.local.fork, now.mono_ms, &budget);
-        self.policy_dirty = true;
+        self.selection_revision = null;
     }
     pub fn reStatusPeer(self: *Core, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
         if (self.stopped) return false;
@@ -600,7 +598,7 @@ pub const Core = struct {
     ) ?t.ReputationDecision {
         self.reconciliation_now = now;
         const decision = self.catalog.report(peer, action, now.mono_ms) orelse return null;
-        self.policy_dirty = true;
+        self.selection_revision = null;
         if (decision != .none) _ = self.disconnect(
             peer,
             if (decision == .ban) .banned else .reputation,
@@ -622,7 +620,11 @@ pub const Core = struct {
         if (identity.eql(&self.local_identity)) return error.SelfDial;
         try self.dial_queue.enqueueUntil(identity, addresses, false, now.mono_ms, deadline_ms);
         self.syncIdentity(identity, now);
-        self.policy_dirty = true;
+        self.selection_revision = null;
+    }
+    pub fn cancelConnect(self: *Core, engine: *engine_mod.Engine, identity: *const t.PeerId, now: Now) void {
+        self.dial_queue.cancelConnect(engine, identity, now.mono_ms);
+        self.selection_revision = null;
     }
     pub fn addDirectPeer(
         self: *Core,
@@ -635,10 +637,10 @@ pub const Core = struct {
         if (identity.eql(&self.local_identity)) return error.SelfDial;
         try self.dial_queue.enqueue(identity, addresses, true, now.mono_ms);
         self.syncIdentity(identity, now);
-        self.policy_dirty = true;
+        self.selection_revision = null;
         if (self.catalog.find(identity)) |peer| {
             _ = self.catalog.setDirect(peer, true);
-            if (self.catalog.get(peer).?.connection) |conn| self.service.gossipsub.markDirect(conn);
+            if (self.catalog.get(peer).?.connection) |conn| self.service.gossipsub.inner.markDirect(conn);
         }
     }
     pub fn directPeers(self: *const Core, out: []t.PeerId) error{OutputTooSmall}!usize {
@@ -646,7 +648,7 @@ pub const Core = struct {
     }
     pub fn removeDirectPeer(self: *Core, identity: *const t.PeerId) bool {
         if (!self.dial_queue.removeDirect(identity)) return false;
-        self.policy_dirty = true;
+        self.selection_revision = null;
         self.service.gossipsub.inner.unmarkDirect(identity);
         if (self.catalog.find(identity)) |peer| _ = self.catalog.setDirect(peer, false);
         return true;
@@ -659,7 +661,7 @@ pub const Core = struct {
         self.control.close(&self.service, &self.catalog, engine, peer, connection, .host, now);
         self.dial_queue.cancelConnect(engine, &snapshot.identity, now.mono_ms);
         self.dial_queue.disconnected(&snapshot.identity, snapshot.connected_at_ms, .host, now.mono_ms);
-        self.policy_dirty = true;
+        self.selection_revision = null;
         return true;
     }
     pub fn disconnect(self: *Core, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
@@ -730,40 +732,11 @@ pub const Core = struct {
         if (protocol.isControl()) return error.ControlProtocol;
         return self.service.request(engine, conn, protocol, bytes, sink, options, now);
     }
-    pub fn consume(self: *Core, request: rr.RequestHandle, now: Now) bool {
-        return self.service.reqresp.consume(request, now);
-    }
-    pub fn respond(
-        self: *Core,
-        request: rr.RequestHandle,
-        bytes: []const u8,
-        context: ?rr.ForkEntry,
-        now: Now,
-    ) !void {
-        try self.service.reqresp.respond(request, bytes, context, now);
-    }
-    pub fn respondError(
-        self: *Core,
-        request: rr.RequestHandle,
-        code: u8,
-        message: []const u8,
-        now: Now,
-    ) !void {
-        try self.service.reqresp.respondError(request, code, message, now);
-    }
-    pub fn finish(self: *Core, request: rr.RequestHandle, now: Now) bool {
-        return self.service.reqresp.finish(request, now);
-    }
-    pub fn cancel(self: *Core, request: rr.RequestHandle) bool {
-        return self.service.reqresp.cancel(request);
-    }
-    pub fn errorMessage(self: *const Core, request: rr.RequestHandle) []const u8 {
-        return self.service.reqresp.errorMessage(request);
-    }
+
     /// Copies host-calculated parameters. Preserves outstanding Service event borrows.
     pub fn configureTopic(self: *Core, topic: []const u8, params: *const gossip.score.TopicParams) (gossip.Gossipsub.ConfigureTopicError || error{Stopped})!void {
         if (self.stopped or self.quiescing) return error.Stopped;
-        try self.service.gossipsub.configureTopic(topic, params);
+        try self.service.gossipsub.inner.configureTopic(topic, params);
     }
 
     pub fn publishGossip(
@@ -778,23 +751,16 @@ pub const Core = struct {
 
     pub fn publishGossipWithOptions(self: *Core, topic: []const u8, bytes: []const u8, options: gossip.Gossipsub.PublishOptions, now: Now) !gossip.Gossipsub.PublishOutcome {
         if (self.stopped or self.quiescing) return error.Stopped;
-        return self.service.gossipsub.publishWithOptions(topic, bytes, options, now);
+        return self.service.gossipsub.inner.publishWithOptions(topic, bytes, options, now);
     }
     pub fn subscribe(self: *Core, topic: []const u8) bool {
         if (self.stopped or self.quiescing) return false;
-        return self.service.gossipsub.subscribe(topic);
+        return self.service.gossipsub.inner.subscribe(topic);
     }
     pub fn unsubscribe(self: *Core, topic: []const u8) bool {
-        return self.service.gossipsub.unsubscribe(topic);
+        return self.service.gossipsub.inner.unsubscribe(topic);
     }
-    pub fn reportValidation(
-        self: *Core,
-        handle: gossip.ValidationHandle,
-        verdict: gossip.Verdict,
-        now: Now,
-    ) gossip.ReportOutcome {
-        return self.service.gossipsub.report(handle, verdict, now);
-    }
+
     pub fn beginGracefulClose(self: *Core, now: Now) void {
         if (self.stopped or self.quiescing) return;
         self.quiescing = true;
@@ -811,7 +777,7 @@ pub const Core = struct {
         if (self.stopped) return;
         self.stopped = true;
         if (self.service.identify) |*identify| identify.shutdown(&self.service.router, engine);
-        self.service.reqresp.shutdown(&self.service.router, engine);
+        self.service.reqresp.shutdown(engine, &self.service.router);
         self.service.router.negotiator.shutdown(engine);
         const count = self.catalog.snapshots(self.snapshot_scratch);
         for (self.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {

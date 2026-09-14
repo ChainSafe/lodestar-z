@@ -34,7 +34,7 @@ try {
       if (!weak.deref()) break;
     }
     assert.equal(weak.deref(), undefined);
-    assert.deepEqual(await closed, {reason: "closed", chunks: 0});
+    assert.equal(await closed, undefined);
   } else if (mode === "object-gc") {
     const weak = new WeakRef(incoming);
     incoming = null;
@@ -44,21 +44,21 @@ try {
       if (!weak.deref()) break;
     }
     assert.equal(weak.deref(), undefined);
-    assert.deepEqual(await closed, {reason: "failed", failure: "cancelled", chunks: 0});
+    assert.equal(await closed, undefined);
   } else if (mode === "held-ack") {
     const ack = incoming.respond(new Uint8Array(10 * 1024 * 1024), context).then(() => "sent", (error) => error.code);
     await right.close();
     assert(["sent", "NetworkClosed"].includes(await ack));
-    assert.equal((await closed).reason, "closed");
+    assert.equal(await closed, undefined);
   } else if (mode === "notifier") {
     await incoming.finish();
-    assert.deepEqual(await closed, {reason: "served", chunks: 0});
+    assert.equal(await closed, undefined);
     await delay(10);
     assert(thrown > 0);
     assert(warnings > 0);
   } else if (mode === "held-closed") {
     await right.close();
-    assert.deepEqual(await closed, {reason: "closed", chunks: 0});
+    assert.equal(await closed, undefined);
     assert.equal(incoming.cancel(), closed);
     assert.equal(right.diagnostics().incoming.responseBytes, 0);
     assert.equal(right.diagnostics().incoming.requestBytes, 0);

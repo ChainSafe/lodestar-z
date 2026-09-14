@@ -4,28 +4,13 @@ const napi = @import("zapi:zapi").napi;
 const rr = n.reqresp;
 const Runtime = @import("network_runtime.zig").Runtime;
 
-pub const Budget = struct {
-    limit: usize = 0,
-    used: usize = 0,
-
-    pub fn reserve(self: *Budget, amount: usize) !void {
-        std.debug.assert(self.used <= self.limit);
-        if (amount > self.limit - self.used) return error.NetworkBridgeFull;
-        self.used += amount;
-    }
-    pub fn release(self: *Budget, amount: usize) void {
-        std.debug.assert(amount <= self.used);
-        self.used -= amount;
-    }
-};
+const Budget = @import("network_budget.zig").Budget;
 pub const Token = struct { index: u8, generation: u64 };
 pub const State = enum { free, queued, copying, serving, response_preparing, response_queued, response_native, terminal };
 pub const Failure = enum { timeout, host_timeout, quota_timeout, cancelled, connection_closed, stream_closed, transport };
-pub const Terminal = union(enum) { served, failed: Failure, closed };
 pub const Rejection = enum { invalid_context, unknown_fork, chunk_too_large, chunk_too_small, too_many_chunks, invalid_error };
 pub const Ack = union(enum) { sent, rejected: Rejection, failed: Failure, closed };
 pub const Action = enum { none, finish, fail, cancel, submitted };
-pub const ResultRefs = [9]?napi.Ref;
 pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
@@ -42,11 +27,8 @@ pub const Cell = struct {
     copying: bool = false,
     exposed: bool = false,
     closed: ?napi.Deferred = null,
-    results: ResultRefs = @splat(null),
-    next_results: ResultRefs = @splat(null),
     pending: ?napi.Deferred = null,
     ack: ?Ack = null,
-    terminal: ?Terminal = null,
     chunks: u32 = 0,
     action: Action = .none,
     error_status: u8 = 0,
@@ -101,7 +83,7 @@ pub const Table = struct {
         std.debug.assert(len >= protocol.info().request_min and len <= protocol.info().request_max);
         const amount = try std.math.add(usize, try std.math.mul(usize, len, 2), protocol.info().response_max);
         var selected: ?Token = null;
-        for (self.cells, 0..) |cell, i| {
+        for (self.cells, 0..) |*cell, i| {
             if (cell.state != .free or cell.generation == std.math.maxInt(u64)) continue;
             selected = .{ .index = @intCast(i), .generation = cell.generation + 1 };
             break;
@@ -152,8 +134,6 @@ pub const Table = struct {
     pub fn retire(self: *Table, token: Token) void {
         const cell = self.get(token).?;
         std.debug.assert(!cell.native and !cell.copying);
-        for (cell.results) |ref| std.debug.assert(ref == null);
-        for (cell.next_results) |ref| std.debug.assert(ref == null);
         cell.state = .terminal;
         self.releasePayload(cell);
         cell.* = .{ .generation = cell.generation };
@@ -162,8 +142,8 @@ pub const Table = struct {
     pub fn oldest(self: *Table) ?Token {
         var selected: ?Token = null;
         var sequence: u64 = std.math.maxInt(u64);
-        for (self.cells, 0..) |cell, i| {
-            if (cell.state != .queued or cell.terminal != null) continue;
+        for (self.cells, 0..) |*cell, i| {
+            if (cell.state != .queued or !cell.native) continue;
             if (selected == null or cell.sequence < sequence) {
                 selected = .{ .index = @intCast(i), .generation = cell.generation };
                 sequence = cell.sequence;
@@ -185,7 +165,7 @@ pub const Table = struct {
         return result;
     }
     pub fn obligated(self: *const Table) bool {
-        for (self.cells) |cell| if (cell.closed != null or cell.pending != null) return true;
+        for (self.cells) |*cell| if (cell.closed != null or cell.pending != null) return true;
         return false;
     }
 };
@@ -236,7 +216,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
         if (cell.state == .response_queued and submissions < 4) {
             submissions += 1;
             core.respond(cell.handle, cell.response, cell.context, now) catch |err| {
-                if (awaitingTerminal(&core.core.service.reqresp.inner, cell.handle, err)) continue;
+                if (awaitingTerminal(&core.core.service.reqresp, cell.handle, err)) continue;
                 cell.ack = .{ .rejected = try rejection(err) };
                 table.releaseResponse(cell);
                 cell.state = .serving;
@@ -252,7 +232,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
             },
             .fail => {
                 core.respondError(cell.handle, cell.error_status, cell.error_message[0..cell.error_len], now) catch |err| {
-                    if (awaitingTerminal(&core.core.service.reqresp.inner, cell.handle, err)) continue;
+                    if (awaitingTerminal(&core.core.service.reqresp, cell.handle, err)) continue;
                     return err;
                 };
                 cell.action = .submitted;
@@ -288,18 +268,20 @@ pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
             },
             .served => |served| {
                 if (served.chunks != cell.chunks) return error.InvalidIncomingAcknowledgement;
-                cell.terminal = .served;
                 cell.native = false;
             },
             .failed => |failed| {
-                cell.terminal = .{ .failed = try failure(failed.reason) };
+                const reason = try failure(failed.reason);
+                if (cell.pending != null and cell.ack == null and !runtime.stop) cell.ack = .{ .failed = reason };
                 cell.native = false;
             },
             else => unreachable,
         }
         if (!cell.native) {
-            if (runtime.stop) cell.terminal = .closed;
-            if (cell.pending != null and cell.ack == null) cell.ack = if (cell.terminal.? == .closed) .closed else .{ .failed = cell.terminal.?.failed };
+            if (cell.pending != null and cell.ack == null) {
+                std.debug.assert(runtime.stop);
+                cell.ack = .closed;
+            }
             if (cell.state != .response_preparing) cell.state = .terminal;
             table.releasePayload(cell);
             if (!cell.exposed and !cell.copying) table.retire(.{ .index = @intCast(i), .generation = cell.generation });
@@ -338,7 +320,6 @@ pub fn closeLocked(runtime: *Runtime) void {
     if (runtime.incoming) |*table| for (table.cells, 0..) |*cell, i| {
         if (cell.state == .free) continue;
         cell.native = false;
-        if (cell.terminal == null) cell.terminal = .closed;
         if (cell.pending != null and cell.ack == null) cell.ack = .closed;
         if (cell.state != .response_preparing) cell.state = .terminal;
         table.releasePayload(cell);

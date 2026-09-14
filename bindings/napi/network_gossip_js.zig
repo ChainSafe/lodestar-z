@@ -7,16 +7,11 @@ const app = @import("network_application_config.zig");
 const r = @import("network_runtime.zig");
 const g = @import("network_gossip.zig");
 const faults = @import("network_faults.zig");
-const projection = @import("network_peer_projection.zig");
+const element = @import("network_js.zig").element;
 const Runtime = r.Runtime;
 
-fn put(object: Value, comptime name: [:0]const u8, value: Value) !void {
-    try object.defineProperties(&.{.{ .utf8name = name.ptr, .name = null, .method = null, .getter = null, .setter = null, .value = value.value, .attributes = napi.c.napi_default_jsproperty, .data = null }});
-}
-fn bytes(env: napi.Env, data: []const u8) !Value {
-    const buffer = try env.createArrayBufferCopy(data, null);
-    return env.createTypedarray(.uint8, data.len, buffer, 0);
-}
+const put = @import("network_js.zig").put;
+const bytes = @import("network_js.zig").bytes;
 pub fn drain(runtime: *Runtime) !Value {
     runtime.retain();
     defer runtime.release();
@@ -25,9 +20,9 @@ pub fn drain(runtime: *Runtime) !Value {
         runtime.unlock();
         return err;
     };
-    if (!runtime.application or (!runtime.active and !runtime.quiescent)) {
+    if (!runtime.active and !runtime.quiescent) {
         runtime.unlock();
-        return if (runtime.application) error.NetworkNotActive else error.NetworkClosed;
+        return error.NetworkNotActive;
     }
     const table = &runtime.gossip.?;
     const batch = if (runtime.quiescent) g.Batch{} else table.claim(mono_ms);
@@ -38,7 +33,7 @@ pub fn drain(runtime: *Runtime) !Value {
         runtime.lock();
         table.finish(&batch, success);
         if (runtime.quiescent) table.trim() else if (!reported_more and table.oldest() != null) {
-            runtime.observation_rearm = true;
+            runtime.readable_rearm = true;
             runtime.signalLocked();
         }
         runtime.unlock();
@@ -46,7 +41,7 @@ pub fn drain(runtime: *Runtime) !Value {
     const env = runtime.env;
     const array = try env.createArrayWithLength(batch.len);
     for (batch.tokens[0..batch.len], 0..) |token, i| {
-        try projection.element(array, i, try descriptor(runtime, token, &table.cells[token.index], i));
+        try element(array, i, try descriptor(runtime, token, &table.cells[token.index], i));
     }
     const object = try env.createObject();
     try put(object, "messages", array);
@@ -91,7 +86,6 @@ fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell, ordinal: u
 pub fn report(runtime: *Runtime, value: Value, verdict_value: Value) !Value {
     runtime.retain();
     defer runtime.release();
-    if (!runtime.application) return error.NetworkClosed;
     try cfg.completeObject(value, &.{ "session", "index", "generation" });
     const session = try cfg.bigint(try cfg.get(value, "session"));
     const index = try cfg.integer(try cfg.get(value, "index"), 9007199254740991);
@@ -126,7 +120,7 @@ fn optionsFor(value: Value) !n.gossipsub.Gossipsub.PublishOptions {
 pub fn publish(runtime: *Runtime, topic: Value, data: Value, options: Value) !Value {
     const token = try runtime.reserveCommand(.publishGossip);
     errdefer runtime.abortCommand(token);
-    const operation = &runtime.operations[token.index];
+    const operation = &runtime.table.cells[token.index];
     const input = &operation.input;
     input.topic_len = @intCast(try app.text(topic, &input.topic));
     input.publish_options = try optionsFor(options);

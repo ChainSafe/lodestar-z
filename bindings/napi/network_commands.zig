@@ -4,8 +4,8 @@ test "application admission reserves 32 commands and at most 16 connects" {
     var table: Table = .{};
     for (0..16) |_| _ = try table.reserve(.connect);
     try std.testing.expectError(error.NetworkCommandFull, table.reserve(.connect));
-    for (0..16) |_| _ = try table.reserve(.small);
-    try std.testing.expectError(error.NetworkCommandFull, table.reserve(.small));
+    for (0..16) |_| _ = try table.reserve(.getIdentity);
+    try std.testing.expectError(error.NetworkCommandFull, table.reserve(.getIdentity));
 }
 
 pub const capacity = 32;
@@ -14,7 +14,23 @@ pub const turn_max = 4;
 pub const Kind = enum { small, connect, intent, snapshot, targets };
 pub const State = enum { free, preparing, queued, executing, waiting, terminal, copying };
 pub const Token = struct { index: u8, generation: u64 };
-pub const Cell = struct { state: State = .free, generation: u64 = 0, kind: Kind = .small, store: ?u8 = null, order: u64 = 0 };
+pub const Cell = struct {
+    state: State = .free,
+    generation: u64 = 0,
+    kind: Kind = .small,
+    store: ?u8 = null,
+    order: u64 = 0,
+    input: Input = .{ .command = .getIdentity },
+    deferred: ?@import("zapi:zapi").napi.Deferred = null,
+    failure: ?anyerror = null,
+    sequence: u64 = 0,
+    boolean: bool = false,
+    deadline: u64 = 0,
+    identity: @import("network_runtime.zig").Identity = undefined,
+    count: usize = 0,
+    counts: n.Core.PeerCounts = undefined,
+    publication: n.gossipsub.Gossipsub.PublishOutcome = .{},
+};
 pub const Table = struct {
     cells: [capacity]Cell = @splat(.{}),
     stores: [3][2]bool = @splat(@splat(false)),
@@ -39,14 +55,16 @@ pub const Table = struct {
             else => null,
         };
     }
-    pub fn reserve(self: *Table, kind: Kind) !Token {
-        return self.reserveInner(kind) catch |err| {
+    pub fn reserve(self: *Table, command: Command) !Token {
+        const kind = storageKind(command);
+        return self.reserveInner(command) catch |err| {
             self.refusals +|= 1;
             self.kind_refusals[@intFromEnum(kind)] +|= 1;
             return err;
         };
     }
-    fn reserveInner(self: *Table, kind: Kind) !Token {
+    fn reserveInner(self: *Table, command: Command) !Token {
+        const kind = storageKind(command);
         if (kind == .connect and self.connects == connect_max) return error.NetworkCommandFull;
         var store: ?u8 = null;
         if (storeKind(kind)) |which| {
@@ -61,13 +79,13 @@ pub const Table = struct {
             const generation = std.math.add(u64, cell.generation, 1) catch return error.NetworkSequenceExhausted;
             const order = std.math.add(u64, self.admission_sequence, 1) catch return error.NetworkSequenceExhausted;
             self.admission_sequence = order;
-            cell.* = .{ .state = .preparing, .generation = generation, .kind = kind, .store = store, .order = order };
+            cell.* = .{ .state = .preparing, .generation = generation, .kind = kind, .store = store, .order = order, .input = .{ .command = command } };
             if (storeKind(kind)) |which| self.stores[which][store.?] = true;
             self.connects += @intFromBool(kind == .connect);
             self.occupied += 1;
             self.high_water = @max(self.high_water, self.occupied);
             var count: u8 = 0;
-            for (self.cells) |entry| if (entry.state != .free and entry.kind == kind) {
+            for (&self.cells) |*entry| if (entry.state != .free and entry.kind == kind) {
                 count += 1;
             };
             self.kind_high_water[@intFromEnum(kind)] = @max(self.kind_high_water[@intFromEnum(kind)], count);
@@ -78,7 +96,7 @@ pub const Table = struct {
     pub fn nextQueued(self: *Table) ?Token {
         var selected: ?Token = null;
         var order: u64 = std.math.maxInt(u64);
-        for (self.cells, 0..) |cell, i| {
+        for (&self.cells, 0..) |*cell, i| {
             if (cell.state == .queued and (selected == null or cell.order < order)) {
                 selected = .{ .index = @intCast(i), .generation = cell.generation };
                 order = cell.order;
@@ -102,16 +120,16 @@ pub const Table = struct {
 
 test "typed reservations unwind and identities never wrap" {
     var table: Table = .{};
-    const first = try table.reserve(.intent);
-    _ = try table.reserve(.intent);
-    try std.testing.expectError(error.NetworkCommandFull, table.reserve(.intent));
+    const first = try table.reserve(.applyIntent);
+    _ = try table.reserve(.applyIntent);
+    try std.testing.expectError(error.NetworkCommandFull, table.reserve(.applyIntent));
     try std.testing.expectEqual(@as(u8, 2), table.occupied);
     table.retire(first);
-    const next = try table.reserve(.intent);
+    const next = try table.reserve(.applyIntent);
     try std.testing.expectEqual(first.generation + 1, next.generation);
     table.retire(next);
     table.cells[0].generation = std.math.maxInt(u64);
-    try std.testing.expectError(error.NetworkSequenceExhausted, table.reserve(.small));
+    try std.testing.expectError(error.NetworkSequenceExhausted, table.reserve(.getIdentity));
     table.sequence = std.math.maxInt(u64);
     try std.testing.expectError(error.NetworkSequenceExhausted, table.advance());
 }
@@ -160,23 +178,23 @@ pub fn executeCommands(self: *Runtime, timestamp: n.Now) !void {
         const i = token.index;
         const cell = self.table.get(token);
         cell.state = .executing;
-        self.operations[i].sequence = self.table.advance() catch |err| {
+        self.table.cells[i].sequence = self.table.advance() catch |err| {
             self.unlock();
             return err;
         };
         self.unlock();
         executeOne(self, i, timestamp) catch |err| {
-            std.log.scoped(.network_bridge).debug("command_failed command={s} operation={d}:{d} sequence={d} reason={s}", .{ @tagName(self.operations[i].input.command), token.index, token.generation, self.operations[i].sequence, @errorName(err) });
-            self.operations[i].failure = err;
+            std.log.scoped(.network_bridge).debug("command_failed command={s} operation={d}:{d} sequence={d} reason={s}", .{ @tagName(self.table.cells[i].input.command), token.index, token.generation, self.table.cells[i].sequence, @errorName(err) });
+            self.table.cells[i].failure = err;
         };
-        if (self.operations[i].input.command == .request) {
-            if (self.operations[i].failure) |err| return err;
+        if (self.table.cells[i].input.command == .request) {
+            if (self.table.cells[i].failure) |err| return err;
             self.abortCommand(token);
             continue;
         }
         self.lock();
         if (cell.state == .executing) {
-            if (self.stop and self.operations[i].input.command != .publishGossip) self.operations[i].failure = self.startup_error orelse error.NetworkClosed;
+            if (self.stop and self.table.cells[i].input.command != .publishGossip) self.table.cells[i].failure = self.startup_error orelse error.NetworkClosed;
             cell.state = .terminal;
         }
         if (cell.state == .terminal) self.pingLocked();
@@ -184,7 +202,7 @@ pub fn executeCommands(self: *Runtime, timestamp: n.Now) !void {
     }
 }
 fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
-    const operation = &self.operations[index];
+    const operation = &self.table.cells[index];
     const input = &operation.input;
     const core = &self.heavy.?.core;
     const store = self.table.cells[index].store;
@@ -217,7 +235,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             if (!self.stop) self.diag.state = .running;
             self.unlock();
         },
-        .getIdentity => operation.identity = try self.readIdentity(),
+        .getIdentity => operation.identity = try self.heavy.?.readIdentity(),
         .getPeers => {
             operation.count = try core.completeSnapshots(self.stores.?.snapshots[store.?]);
             operation.counts = core.peerCounts();
@@ -239,8 +257,8 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
                 core.cancelConnect(&input.peer, timestamp);
                 self.lock();
                 for (&self.table.cells, 0..) |*cell, i| {
-                    if (cell.state != .waiting or !self.operations[i].input.peer.eql(&input.peer)) continue;
-                    self.operations[i].failure = error.NetworkConnectCancelled;
+                    if (cell.state != .waiting or !self.table.cells[i].input.peer.eql(&input.peer)) continue;
+                    self.table.cells[i].failure = error.NetworkConnectCancelled;
                     cell.state = .terminal;
                 }
                 self.unlock();
@@ -266,14 +284,14 @@ pub fn completeConnects(self: *Runtime, timestamp: n.Now) void {
     self.lock();
     defer self.unlock();
     if (self.stop) return;
-    if (latchConnects(&self.table, &self.operations, events, timestamp)) self.pingLocked();
+    if (latchConnects(&self.table, events, timestamp)) self.pingLocked();
 }
 
-pub fn latchConnects(table: *Table, operations: *[32]@import("network_runtime.zig").Operation, events: []const n.Event, timestamp: n.Now) bool {
+pub fn latchConnects(table: *Table, events: []const n.Event, timestamp: n.Now) bool {
     var terminal = false;
     for (&table.cells, 0..) |*cell, i| {
         if (cell.state != .waiting) continue;
-        const operation = &operations[i];
+        const operation = &table.cells[i];
         var connected = false;
         for (events) |event| if (event == .connected and event.connected.peer_id.eql(&operation.input.peer)) {
             connected = true;
@@ -290,9 +308,9 @@ pub fn waitLimit(self: *Runtime, timestamp: n.Now) u32 {
     self.lock();
     defer self.unlock();
     var limit: u64 = 100;
-    for (self.table.cells, 0..) |cell, i| {
+    for (&self.table.cells, 0..) |*cell, i| {
         if (cell.state == .queued) return 0;
-        if (cell.state == .waiting) limit = @min(limit, self.operations[i].deadline -| timestamp.mono_ms);
+        if (cell.state == .waiting) limit = @min(limit, self.table.cells[i].deadline -| timestamp.mono_ms);
     }
     if (self.gossip) |*gossip| limit = gossip.waitLimit(timestamp.mono_ms, limit);
     if (self.closing_deadline) |deadline| limit = @min(limit, deadline -| timestamp.mono_ms);

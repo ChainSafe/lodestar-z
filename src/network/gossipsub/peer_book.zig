@@ -43,15 +43,7 @@ pub const PeerBook = struct {
     retention_ms: u64,
     reserved: u16,
 
-    pub fn init(a: std.mem.Allocator, retention_ms: u64) !PeerBook {
-        return initCapacity(a, retention_ms, capacity, outbound_reserve);
-    }
-
-    pub fn initCapacity(a: std.mem.Allocator, retention_ms: u64, count: u16, reserved: u16) !PeerBook {
-        return initOptions(a, &.{ .retained_score_ms = retention_ms, .retained_capacity = count, .retained_outbound_reserve = reserved });
-    }
-
-    pub fn initOptions(a: std.mem.Allocator, options: *const @import("options.zig").Options) !PeerBook {
+    pub fn init(a: std.mem.Allocator, options: *const @import("options.zig").Options) !PeerBook {
         const retention_ms = options.retained_score_ms;
         const count = options.retained_capacity;
         const reserved = options.retained_outbound_reserve;
@@ -64,7 +56,7 @@ pub const PeerBook = struct {
         const backoffs = try a.alloc(Backoff, @as(usize, count) * constants.topics_cap);
         errdefer a.free(backoffs);
         @memset(backoffs, .{});
-        const scores = try @import("score.zig").PeerScore.initCapacity(a, options.score_params, count);
+        const scores = try @import("score.zig").PeerScore.init(a, options.score_params, count);
         var book: PeerBook = .{ .rows = rows, .backoffs = backoffs, .scores = scores, .retention_ms = retention_ms, .reserved = reserved };
         @memcpy(book.ip_allowlist[0..options.ip_allowlist.len], options.ip_allowlist);
         book.ip_allowlist_len = @intCast(options.ip_allowlist.len);
@@ -272,7 +264,7 @@ pub fn normalize(address: types.Address) Ip {
 }
 
 test "gossip policy peers retain identity and reserve outbound recovery under negative churn" {
-    var peers = try PeerBook.init(std.testing.allocator, 10_000);
+    var peers = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 10_000 });
     defer peers.deinit(std.testing.allocator);
     var metadata: Metadata = .{ .identity = undefined, .address = .unspecified, .direction = .inbound };
     for (0..capacity) |i| {
@@ -305,7 +297,7 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
 }
 
 test "gossip policy IP colocation normalizes ports mapping and current path generation" {
-    var peers = try PeerBook.init(std.testing.allocator, 100);
+    var peers = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 100 });
     defer peers.deinit(std.testing.allocator);
     const first_conn: Handle = .{ .index = 0, .generation = 1 };
     const first: Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } }, .direction = .inbound };
@@ -326,7 +318,7 @@ test "gossip policy IP colocation normalizes ports mapping and current path gene
 }
 
 test "gossip policy identity generation exhaustion cannot revive stale references" {
-    var peers = try PeerBook.init(std.testing.allocator, 100);
+    var peers = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 100 });
     defer peers.deinit(std.testing.allocator);
     peers.rows[0].generation = std.math.maxInt(u64);
     const metadata: Metadata = .{ .identity = .{ .bytes = [_]u8{1} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
@@ -341,7 +333,7 @@ test "gossip policy identity generation exhaustion cannot revive stale reference
 }
 
 test "gossip policy review I1 live backoff prevents immediate inbound eviction" {
-    var peers = try PeerBook.init(std.testing.allocator, 100_000);
+    var peers = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 100_000 });
     defer peers.deinit(std.testing.allocator);
     var metadata: Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
     const connection: Handle = .{ .index = 0, .generation = 1 };
@@ -379,7 +371,7 @@ test "gossip policy review I1 live backoff prevents immediate inbound eviction" 
 }
 
 test "peer book retains reputation across pinned reconnect and clears it on expiry" {
-    var book = try PeerBook.initCapacity(std.testing.allocator, 10, 2, 1);
+    var book = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 10, .retained_capacity = 2, .retained_outbound_reserve = 1 });
     defer book.deinit(std.testing.allocator);
     const metadata: Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound };
     const first = book.admit(.{ .index = 0, .generation = 1 }, &metadata, 0).admitted.peer;
@@ -407,7 +399,7 @@ test "peer book retains reputation across pinned reconnect and clears it on expi
 }
 
 fn allocateBook(a: std.mem.Allocator) !void {
-    var book = try PeerBook.initCapacity(a, 10, 2, 1);
+    var book = try PeerBook.init(a, &.{ .retained_score_ms = 10, .retained_capacity = 2, .retained_outbound_reserve = 1 });
     defer book.deinit(a);
 }
 
@@ -416,7 +408,7 @@ test "peer book releases identity and reputation allocations on partial initiali
 }
 
 test "gossip score snapshots follow population migration and identity reuse without policy reads" {
-    var book = try PeerBook.initOptions(std.testing.allocator, &.{ .retained_capacity = 2, .retained_outbound_reserve = 0, .retained_score_ms = 10, .score_params = .{ .ip_colocation_weight = -5, .ip_colocation_threshold = 1 } });
+    var book = try PeerBook.init(std.testing.allocator, &.{ .retained_capacity = 2, .retained_outbound_reserve = 0, .retained_score_ms = 10, .score_params = .{ .ip_colocation_weight = -5, .ip_colocation_threshold = 1 } });
     defer book.deinit(std.testing.allocator);
     var metadata: Metadata = .{ .identity = .{ .bytes = @splat(1) }, .address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 1 } }, .direction = .inbound };
     const conn: Handle = .{ .index = 0, .generation = 1 };

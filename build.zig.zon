@@ -239,6 +239,7 @@
         },
         .network_wire = .{
             .root_source_file = "src/network/wire/root.zig",
+            .imports = .{.udp},
         },
         .network = .{
             .root_source_file = "src/network/root.zig",

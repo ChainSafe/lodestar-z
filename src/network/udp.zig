@@ -6,23 +6,14 @@ const net = std.Io.net;
 const sockets_mod = @import("udp");
 pub const Bindings = sockets_mod.Bindings;
 
-pub const Handle = struct {
-    generation: u64,
-};
-
 pub const Datagram = struct {
-    handle: Handle,
     from: types.Address,
     bytes: []u8,
 };
 
 pub const ReceiveTimeoutError = sockets_mod.ReceiveError || error{
-    AdmissionUnavailable,
     DatagramTooLarge,
-    GenerationExhausted,
 };
-
-pub const ReleaseError = error{StaleDatagram};
 
 pub const SendError = net.Socket.SendError || error{DatagramTooLarge};
 
@@ -37,16 +28,12 @@ pub const Counters = struct {
 pub const Udp = struct {
     counters: Counters = .{},
     sockets: sockets_mod.Sockets,
-    buffer: [constants.datagram_size_max]u8 = undefined,
-    admitted: ?u64 = null,
-    next_generation: u64 = 1,
 
     pub fn bind(io: std.Io, addresses: Bindings) sockets_mod.BindError!Udp {
         return .{ .sockets = try sockets_mod.Sockets.bind(io, addresses) };
     }
 
     pub fn close(self: *const Udp, io: std.Io) void {
-        std.debug.assert(self.admitted == null);
         self.sockets.close(io);
     }
 
@@ -65,36 +52,22 @@ pub const Udp = struct {
     pub fn receiveTimeout(
         self: *Udp,
         io: std.Io,
+        buffer: *[constants.datagram_size_max]u8,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!Datagram {
-        if (self.admitted != null) return error.AdmissionUnavailable;
-        const incoming = try self.sockets.receiveTimeout(io, &self.buffer, timeout);
+        const incoming = try self.sockets.receiveTimeout(io, buffer, timeout);
         self.counters.received_datagrams +|= 1;
         if (incoming.flags.trunc) {
-            std.log.scoped(.network_quic).debug("datagram_refused reason=oversize capacity={d}", .{self.buffer.len});
+            std.log.scoped(.network_quic).debug("datagram_refused reason=oversize capacity={d}", .{buffer.len});
             self.counters.truncated_datagrams +|= 1;
             return error.DatagramTooLarge;
         }
         self.counters.received_bytes +|= incoming.data.len;
-        const successor = std.math.add(u64, self.next_generation, 1) catch
-            return error.GenerationExhausted;
-        std.debug.assert(incoming.data.len <= self.buffer.len);
-        const generation = self.next_generation;
-        self.next_generation = successor;
-        self.admitted = generation;
+        std.debug.assert(incoming.data.len <= buffer.len);
         return .{
-            .handle = .{ .generation = generation },
             .from = fromNetwork(incoming.from),
-            .bytes = self.buffer[0..incoming.data.len],
+            .bytes = buffer[0..incoming.data.len],
         };
-    }
-
-    pub fn release(self: *Udp, handle: Handle) ReleaseError!void {
-        std.debug.assert(handle.generation > 0);
-        const admitted = self.admitted orelse return error.StaleDatagram;
-        if (admitted != handle.generation) return error.StaleDatagram;
-        self.admitted = null;
-        std.debug.assert(self.next_generation > handle.generation);
     }
 
     pub fn send(
@@ -146,35 +119,8 @@ pub const Udp = struct {
     }
 };
 
-pub fn fromNetwork(address: net.IpAddress) types.Address {
-    return switch (address) {
-        .ip4 => |value| .{ .ip4 = .{ .octets = value.bytes, .port = value.port } },
-        .ip6 => |value| if (isMappedIp4(value.bytes))
-            .{ .ip4 = .{ .octets = value.bytes[12..16].*, .port = value.port } }
-        else
-            .{ .ip6 = .{
-                .octets = value.bytes,
-                .port = value.port,
-                .interface = value.interface.index,
-            } },
-    };
-}
-
-pub fn toNetwork(address: types.Address) net.IpAddress {
-    return switch (address) {
-        .ip4 => |value| .{ .ip4 = .{ .bytes = value.octets, .port = value.port } },
-        .ip6 => |value| .{ .ip6 = .{
-            .bytes = value.octets,
-            .port = value.port,
-            .flow = 0,
-            .interface = .{ .index = value.interface },
-        } },
-    };
-}
-
-fn isMappedIp4(ip: [16]u8) bool {
-    return std.mem.eql(u8, ip[0..10], &([_]u8{0} ** 10)) and ip[10] == 0xff and ip[11] == 0xff;
-}
+pub const fromNetwork = types.Address.fromNetwork;
+pub const toNetwork = types.Address.toNetwork;
 
 comptime {
     std.debug.assert(@sizeOf(Udp) <= 2 * 1_024);

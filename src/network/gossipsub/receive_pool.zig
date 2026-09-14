@@ -2,85 +2,64 @@ const std = @import("std");
 
 const constants = @import("constants.zig");
 
-pub const Lease = struct { index: u8, generation: u64 };
-const Slot = struct { generation: u64 = 0, used: bool = false };
+pub const Slot = u8;
 
 pub const ReceivePool = struct {
     bytes: []u8,
-    slots: []Slot,
+    occupied: std.StaticBitSet(16) = .initEmpty(),
+    count: u8,
     frame_bytes: usize,
 
     pub fn init(allocator: std.mem.Allocator, count: usize, frame_bytes: usize) !ReceivePool {
         if (count == 0 or count > 16 or frame_bytes == 0 or frame_bytes > 2 * constants.GOSSIP_MAX_SIZE) return error.InvalidLimits;
         const bytes = try allocator.alloc(u8, count * frame_bytes);
-        errdefer allocator.free(bytes);
-        const slots = try allocator.alloc(Slot, count);
-        errdefer allocator.free(slots);
-        @memset(slots, .{});
-        return .{ .bytes = bytes, .slots = slots, .frame_bytes = frame_bytes };
+        return .{ .bytes = bytes, .count = @intCast(count), .frame_bytes = frame_bytes };
     }
 
     pub fn deinit(self: *ReceivePool, allocator: std.mem.Allocator) void {
-        for (self.slots) |slot| std.debug.assert(!slot.used);
-        allocator.free(self.slots);
+        std.debug.assert(self.occupied.count() == 0);
         allocator.free(self.bytes);
         self.* = undefined;
     }
 
-    pub fn metadataBytes(count: usize) usize {
-        return count * @sizeOf(Slot);
-    }
-
     pub fn available(self: *const ReceivePool) usize {
-        var count: usize = 0;
-        for (self.slots) |slot| if (!slot.used and slot.generation < std.math.maxInt(u64)) {
-            count += 1;
-        };
-        return count;
+        return self.count - self.occupied.count();
     }
 
-    pub fn claim(self: *ReceivePool) ?Lease {
-        for (self.slots, 0..) |*slot, index| {
-            if (slot.used or slot.generation == std.math.maxInt(u64)) continue;
-            slot.generation += 1;
-            slot.used = true;
-            return .{ .index = @intCast(index), .generation = slot.generation };
+    pub fn claim(self: *ReceivePool) ?Slot {
+        for (0..self.count) |index| {
+            if (self.occupied.isSet(index)) continue;
+            self.occupied.set(index);
+            return @intCast(index);
         }
         return null;
     }
 
-    pub fn buffer(self: *ReceivePool, lease: Lease) ?[]u8 {
-        if (!self.matches(lease)) return null;
-        const base = @as(usize, lease.index) * self.frame_bytes;
+    pub fn buffer(self: *ReceivePool, slot: Slot) []u8 {
+        std.debug.assert(slot < self.count and self.occupied.isSet(slot));
+        const base = @as(usize, slot) * self.frame_bytes;
         return self.bytes[base..][0..self.frame_bytes];
     }
 
-    pub fn release(self: *ReceivePool, lease: Lease) bool {
-        if (!self.matches(lease)) return false;
-        self.slots[lease.index].used = false;
-        return true;
-    }
-
-    fn matches(self: *const ReceivePool, lease: Lease) bool {
-        if (lease.index >= self.slots.len) return false;
-        const slot = self.slots[lease.index];
-        return slot.used and slot.generation == lease.generation;
+    pub fn release(self: *ReceivePool, slot: Slot) void {
+        std.debug.assert(slot < self.count and self.occupied.isSet(slot));
+        self.occupied.unset(slot);
     }
 };
 
-test "receive pool exhaustion release and late lease do not alias a new frame" {
+test "receive pool exhaustion and release reuse owned storage" {
     var pool = try ReceivePool.init(std.testing.allocator, 1, 64);
     defer pool.deinit(std.testing.allocator);
     const first = pool.claim().?;
-    @memset(pool.buffer(first).?, 7);
+    @memset(pool.buffer(first), 7);
     try std.testing.expect(pool.claim() == null);
-    try std.testing.expect(pool.release(first));
+    pool.release(first);
     const second = pool.claim().?;
-    try std.testing.expect(pool.buffer(first) == null);
-    try std.testing.expect(!pool.release(first));
+    try std.testing.expectEqual(first, second);
     try std.testing.expect(pool.claim() == null);
-    try std.testing.expectEqual(@as(usize, 64), pool.buffer(second).?.len);
-    try std.testing.expect(pool.release(second));
+    try std.testing.expectEqual(@as(usize, 64), pool.buffer(second).len);
+    pool.release(second);
+    try std.testing.expectEqual(@as(usize, 1), pool.available());
 }
 
 fn initFailure(allocator: std.mem.Allocator) !void {
@@ -97,21 +76,7 @@ test "receive pool partial initialization unwinds" {
     var maximum = try ReceivePool.init(std.testing.allocator, 1, 2 * constants.GOSSIP_MAX_SIZE);
     defer maximum.deinit(std.testing.allocator);
     const lease = maximum.claim().?;
-    try std.testing.expectEqual(@as(usize, 2 * constants.GOSSIP_MAX_SIZE), maximum.buffer(lease).?.len);
-    try std.testing.expect(maximum.release(lease));
+    try std.testing.expectEqual(@as(usize, 2 * constants.GOSSIP_MAX_SIZE), maximum.buffer(lease).len);
+    maximum.release(lease);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, initFailure, .{});
-}
-
-test "receive pool rejects invalid leases and retires exhausted generations" {
-    var pool = try ReceivePool.init(std.testing.allocator, 1, 64);
-    defer pool.deinit(std.testing.allocator);
-    try std.testing.expect(!pool.release(.{ .index = 1, .generation = 1 }));
-    try std.testing.expect(pool.buffer(.{ .index = 0, .generation = 0 }) == null);
-    pool.slots[0].generation = std.math.maxInt(u64) - 1;
-    const last = pool.claim().?;
-    try std.testing.expectEqual(std.math.maxInt(u64), last.generation);
-    try std.testing.expect(pool.release(last));
-    try std.testing.expectEqual(@as(usize, 0), pool.available());
-    try std.testing.expect(pool.claim() == null);
-    try std.testing.expect(!pool.release(last));
 }

@@ -24,8 +24,6 @@ pub const Row = struct {
     generation: u64 = 0,
     active: bool = false,
     subscribed: bool = false,
-    name: [topic_mod.name_max_len]u8 = undefined,
-    name_len: u8 = 0,
     string: [topic_mod.topic_max_len]u8 = undefined,
     string_len: u8 = 0,
     subscribers: PeerSet = PeerSet.initEmpty(),
@@ -170,7 +168,6 @@ pub const Overlay = struct {
             const match = self.namespace.?.lookup(subscription.name) orelse return error.InvalidTopic;
             try score_mod.validateTopic(subscription.params);
             const entry = &workspace.entries[i];
-            entry.name_len = @intCast(subscription.name.len - topic_mod.prefix.len - topic_mod.digest_hex_len - 1 - topic_mod.suffix.len);
             entry.ordinal = match.ordinal;
             entry.len = @intCast(subscription.name.len);
             @memcpy(entry.bytes[0..entry.len], subscription.name);
@@ -219,7 +216,7 @@ pub const Overlay = struct {
             if (!entry.existing) {
                 context.peers.scores.resetTopic(index);
                 row.active = false;
-                self.assignTopic(index, entry.name(), entry.generation, entry.name_len);
+                self.assignTopic(index, entry.name(), entry.generation);
                 self.namespace.?.initializeSubscribers(entry.ordinal, &row.subscribers);
             }
             context.peers.scores.applyValidatedTopic(index, entry.params);
@@ -234,22 +231,19 @@ pub const Overlay = struct {
         var copied_bytes: [topic_mod.topic_max_len]u8 = undefined;
         const copied = copied_bytes[0..topic_str.len];
         @memcpy(copied, topic_str);
-        const parsed = topic_mod.parse(copied) orelse return null;
+        _ = topic_mod.parse(copied) orelse return null;
         if (self.findTopic(copied)) |index| return index;
         const index = self.freeTopic() orelse return null;
-        self.assignTopic(@intCast(index), copied, self.rows[index].generation, @intCast(parsed.name.len));
+        self.assignTopic(@intCast(index), copied, self.rows[index].generation);
         return @intCast(index);
     }
 
-    pub fn assignTopic(self: *Overlay, index: u16, copied: []const u8, generation: u64, name_len: u8) void {
+    pub fn assignTopic(self: *Overlay, index: u16, copied: []const u8, generation: u64) void {
         assert(copied.len <= topic_mod.topic_max_len);
-        const name = copied[topic_mod.prefix.len + topic_mod.digest_hex_len + 1 ..][0..name_len];
         const topic = &self.rows[index];
         assert(topic.generation == generation and generation != std.math.maxInt(u64));
         assert(!topic.active);
         topic.* = .{ .active = true, .generation = generation + 1 };
-        @memcpy(topic.name[0..name_len], name);
-        topic.name_len = @intCast(name_len);
         @memcpy(topic.string[0..copied.len], copied);
         topic.string_len = @intCast(copied.len);
     }

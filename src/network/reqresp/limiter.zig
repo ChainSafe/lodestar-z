@@ -110,13 +110,6 @@ pub const Limiter = struct {
         return true;
     }
 
-    pub fn peerAvailable(self: *Limiter, peer: Handle, which: Protocol, now_ms: u64) u32 {
-        if (!self.matches(peer)) return 0;
-        const bucket = self.bucketFor(peer.index, which);
-        refill(bucket, self.quotas[@intFromEnum(which)], now_ms);
-        return bucket.tokens;
-    }
-
     pub fn nextToken(self: *Limiter, peer: Handle, which: Protocol, now_ms: u64) ?u64 {
         if (!self.matches(peer)) return null;
         const bucket = self.bucketFor(peer.index, which);

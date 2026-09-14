@@ -123,7 +123,7 @@ test "engine survives an undecryptable packet routed to a live slot" {
     const before_errors = pair.client.counters.recv_errors;
     const before_accepted = pair.client.counters.accepted;
     var response: [constants.datagram_size_max]u8 = undefined;
-    const outcome = pair.client.driverView().receive(
+    const outcome = pair.client.receive(
         &garbage,
         &server_address,
         pair.now,
@@ -150,7 +150,7 @@ test "engine routes a replayed client Initial to the existing connection" {
     @memcpy(replay[0..pair.first_initial_len], pair.first_initial[0..pair.first_initial_len]);
 
     var response: [constants.datagram_size_max]u8 = undefined;
-    const outcome = pair.server.driverView().receive(
+    const outcome = pair.server.receive(
         replay[0..pair.first_initial_len],
         &client_address,
         pair.now,
@@ -162,7 +162,7 @@ test "engine routes a replayed client Initial to the existing connection" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
-    try std.testing.expectEqual(@as(usize, 1), pair.server.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.activeIndices().len);
 }
 
 test "engine activity marks the slots that received datagrams" {
@@ -173,20 +173,20 @@ test "engine activity marks the slots that received datagrams" {
 
     var taken: [4]engine_mod.Handle = undefined;
     var drains: usize = 0;
-    while (drains < 8 and pair.client.driverView().takeActivity(&taken) > 0) : (drains += 1) {}
-    try std.testing.expect(!pair.client.driverView().activityPending());
+    while (drains < 8 and pair.client.takeActivity(&taken) > 0) : (drains += 1) {}
+    try std.testing.expect(!pair.client.activityPending());
 
     const stream = try pair.server.openStream(handles.server);
     _ = try pair.server.write(stream, "x", false);
     const moved = try pair.transfer(&pair.server, &pair.client, server_address, false);
     try std.testing.expect(moved);
 
-    try std.testing.expect(pair.client.driverView().activityPending());
-    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().takeActivity(taken[0..0]));
-    try std.testing.expectEqual(@as(usize, 1), pair.client.driverView().takeActivity(&taken));
+    try std.testing.expect(pair.client.activityPending());
+    try std.testing.expectEqual(@as(usize, 0), pair.client.takeActivity(taken[0..0]));
+    try std.testing.expectEqual(@as(usize, 1), pair.client.takeActivity(&taken));
     try std.testing.expectEqual(handles.client, taken[0]);
-    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().takeActivity(&taken));
-    try std.testing.expect(!pair.client.driverView().activityPending());
+    try std.testing.expectEqual(@as(usize, 0), pair.client.takeActivity(&taken));
+    try std.testing.expect(!pair.client.activityPending());
 }
 
 test "engine feeds an unrouted short header from a known peer to its slot" {
@@ -202,7 +202,7 @@ test "engine feeds an unrouted short header from a known peer to its slot" {
     const before_unroutable = pair.client.counters.dropped_unroutable;
     const before_touched = pair.client.counters.accepted + pair.client.counters.recv_errors;
     var response: [constants.datagram_size_max]u8 = undefined;
-    const outcome = pair.client.driverView().receive(
+    const outcome = pair.client.receive(
         &reset,
         &server_address,
         pair.now,
@@ -222,7 +222,7 @@ test "engine feeds an unrouted short header from a known peer to its slot" {
     const stranger = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 9 }, .port = 4_009 } };
     try std.testing.expectEqual(
         engine_mod.ReceiveOutcome.dropped,
-        pair.client.driverView().receive(
+        pair.client.receive(
             &reset,
             &stranger,
             pair.now,

@@ -24,13 +24,7 @@ pub fn init() @This() {
     return .{};
 }
 
-pub fn start(self: *@This(), config: js.Value, callback: js.Value) !js.Value {
-    return self.acquire(config, callback, false);
-}
 pub fn prepare(self: *@This(), config: js.Value, callback: js.Value) !js.Value {
-    return self.acquire(config, callback, true);
-}
-fn acquire(self: *@This(), config: js.Value, callback: js.Value, application: bool) !js.Value {
     if (self.started) return error.NetworkAlreadyStarted;
     self.started = true;
     if (self.stopped) return error.NetworkClosed;
@@ -47,13 +41,9 @@ fn acquire(self: *@This(), config: js.Value, callback: js.Value, application: bo
     try faults.check(.owner_alloc);
     runtime.heavy = try r.allocator.create(r.Owner);
     runtime.heavy.?.* = .{};
-    if (application) {
-        runtime.heavy.?.application = undefined;
-        try @import("network_application_config.zig").parse(config.val, &runtime.heavy.?.config, &runtime.heavy.?.application.?);
-    } else try cfg.parse(config.val, &runtime.heavy.?.config);
+    try application_cfg.parse(config.val, &runtime.heavy.?.config, &runtime.heavy.?.application);
     if (self.stopped) return error.NetworkClosed;
-    runtime.application = application;
-    if (runtime.heavy.?.application) |*app| try prepareApplicationStorage(runtime, app);
+    try prepareApplicationStorage(runtime, &runtime.heavy.?.application);
     runtime.slot = runtime.heavy.?.config.slot;
     runtime.diag.currentSlot = runtime.slot;
     try faults.check(.wake);
@@ -84,11 +74,11 @@ fn acquire(self: *@This(), config: js.Value, callback: js.Value, application: bo
     const holder = try env.createObject();
     try put(holder, "ready", runtime.ready_deferred.?.getPromise());
     try put(holder, "closed", runtime.close_deferred.?.getPromise());
-    if (application) try runtime.initializeOwner();
+    try @import("network_owner.zig").initialize(runtime);
     try faults.check(.spawn);
     faults.count(&faults.owners, true);
     errdefer faults.count(&faults.owners, false);
-    runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, Runtime.run, .{runtime});
+    runtime.thread = try std.Thread.spawn(.{ .stack_size = std.Thread.SpawnConfig.default_stack_size }, @import("network_owner.zig").run, .{runtime});
     self.runtime = runtime;
     return .{ .val = holder };
 }
@@ -103,9 +93,8 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const gossip_capacity: usize = @min(1024, resolved.core.service.gossipsub.validation_capacity);
     const bridge = gossip_capacity * @sizeOf(gossip.Cell) + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
     if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
-    runtime.requests = try requests.Table.init(r.allocator, request_capacity, app.resources.bridgeBudgetBytes - bridge);
+    runtime.requests = try requests.Table.init(r.allocator, request_capacity, &runtime.payload_budget);
     runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge;
-    runtime.requests.?.shared = &runtime.payload_budget;
     try faults.check(.incoming_table);
     runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
     try faults.check(.gossip_table);
@@ -177,7 +166,7 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
     if (idle) runtime.notify.unref(env) catch {};
     settleClose(env, runtime);
     runtime.lock();
-    const readable = !runtime.disposed and !runtime.quiescent and (runtime.queue.len > 0 or (runtime.lane != null and runtime.lane.?.len > 0) or (runtime.incoming != null and runtime.incoming.?.oldest() != null) or (runtime.gossip != null and runtime.gossip.?.oldest() != null));
+    const readable = !runtime.disposed and !runtime.quiescent and ((runtime.lane != null and runtime.lane.?.len > 0) or (runtime.incoming != null and runtime.incoming.?.oldest() != null) or (runtime.gossip != null and runtime.gossip.?.oldest() != null));
     runtime.unlock();
     if (readable) _ = env.callFunction(callback, env.getUndefined() catch return, .{}) catch return;
 }
@@ -218,11 +207,6 @@ pub fn getState(self: *@This()) !js.Value {
     const state = (try self.owner()).snapshot().state;
     return .{ .val = try js.env().createStringUtf8(@tagName(state)) };
 }
-pub fn setCurrentSlot(self: *@This(), value: js.Value) !js.Value {
-    const slot = try cfg.bigint(value.val);
-    const revision = try (try self.owner()).setSlot(slot);
-    return .{ .val = try js.env().createBigintUint64(revision) };
-}
 pub fn close(self: *@This()) void {
     self.stopped = true;
     if (self.runtime) |runtime| {
@@ -231,46 +215,18 @@ pub fn close(self: *@This()) void {
         runtime.unlock();
         if (ref_notify) runtime.notify.ref(runtime.env) catch {};
         runtime.lock();
-        runtime.graceful = runtime.application and !runtime.disposed;
+        runtime.graceful = !runtime.disposed;
         runtime.unlock();
         runtime.requestStop();
     }
 }
 
-fn put(object: Value, name: [:0]const u8, value: Value) !void {
-    try object.defineProperties(&.{.{
-        .utf8name = name.ptr,
-        .name = null,
-        .method = null,
-        .getter = null,
-        .setter = null,
-        .value = value.value,
-        .attributes = napi.c.napi_default_jsproperty,
-        .data = null,
-    }});
-}
+const put = @import("network_js.zig").put;
+const element = @import("network_js.zig").element;
+const bytes = @import("network_js.zig").bytes;
+const endpoint = @import("network_js.zig").endpoint;
 fn text(value: []const u8) !Value {
     return js.env().createStringUtf8(value);
-}
-fn bytes(env: napi.Env, value: []const u8) !Value {
-    const buffer = try env.createArrayBufferCopy(value, null);
-    return env.createTypedarray(.uint8, value.len, buffer, 0);
-}
-fn endpoint(env: napi.Env, value: @import("network").Address) !Value {
-    const object = try env.createObject();
-    switch (value) {
-        .ip4 => |ip| {
-            try put(object, "family", try env.createUint32(4));
-            try put(object, "address", try bytes(env, &ip.octets));
-            try put(object, "port", try env.createUint32(ip.port));
-        },
-        .ip6 => |ip| {
-            try put(object, "family", try env.createUint32(6));
-            try put(object, "address", try bytes(env, &ip.octets));
-            try put(object, "port", try env.createUint32(ip.port));
-        },
-    }
-    return object;
 }
 fn identity(env: napi.Env, value: *const r.Identity, session: u64) !Value {
     try faults.check(.identity_copy);
@@ -281,7 +237,7 @@ fn identity(env: napi.Env, value: *const r.Identity, session: u64) !Value {
     const endpoints = try env.createArrayWithLength(@intFromBool(value.endpoints[0] != null) + @as(u32, @intFromBool(value.endpoints[1] != null)));
     var endpoint_index: u32 = 0;
     for (value.endpoints) |address| if (address) |bound| {
-        try endpoints.setElement(endpoint_index, try endpoint(env, bound));
+        try element(endpoints, endpoint_index, try endpoint(env, bound));
         endpoint_index += 1;
     };
     try put(object, "localEndpoints", endpoints);
@@ -317,10 +273,10 @@ pub fn diagnostics(self: *@This()) !js.Value {
     const object = try js.env().createObject();
     try put(object, "state", try text(@tagName(snapshot.state)));
     try put(object, "terminalErrorCode", if (snapshot.terminal_error) |err| try text(@errorName(err)) else try js.env().getNull());
-    inline for (.{ "session", "currentSlot", "clockRevision", "ownerTurns", "lastMonotonicMs", "observationsDropped", "operationalFailures" }) |name| {
+    inline for (.{ "session", "currentSlot", "ownerTurns", "lastMonotonicMs", "operationalFailures" }) |name| {
         try put(object, name, try js.env().createBigintUint64(@field(snapshot, name)));
     }
-    inline for (.{ "peerCount", "readyPeerCount", "queuedEvents", "queueCapacity", "queueHighWater", "nativeRequestedBytes", "bridgeRequestedBytes" }) |name| {
+    inline for (.{ "peerCount", "readyPeerCount", "nativeRequestedBytes", "bridgeRequestedBytes" }) |name| {
         try put(object, name, try js.env().createDouble(@floatFromInt(@field(snapshot, name))));
     }
     inline for (.{ "operationRefusals", "ownerSequence", "connectRefusals", "intentRefusals", "snapshotRefusals", "targetListRefusals" }) |name| try put(object, name, try js.env().createBigintUint64(@field(snapshot, name)));
@@ -333,54 +289,6 @@ pub fn diagnostics(self: *@This()) !js.Value {
     try put(object, "incoming", try incoming_js.diagnostics(js.env(), &snapshot.incoming));
     return .{ .val = object };
 }
-fn diagnosticPeer(object: Value, value: r.Observation.Peer) !void {
-    try put(object, "peerIndex", try js.env().createUint32(value.index));
-    try put(object, "peerGeneration", try js.env().createBigintUint64(value.generation));
-    try put(object, "peerId", try bytes(js.env(), &value.identity.bytes));
-}
-fn observation(value: r.Observation) !Value {
-    const object = try js.env().createObject();
-    try put(object, "type", try text(@tagName(value)));
-    switch (value) {
-        .peerReady, .peerUpdated => |p| try diagnosticPeer(object, p),
-        .peerClosed => |closed| {
-            try diagnosticPeer(object, closed.peer);
-            try put(object, "reason", try text(@tagName(closed.reason)));
-        },
-        .operationalError => |err| {
-            try put(object, "code", try text(@errorName(err.code)));
-            try put(object, "count", try js.env().createBigintUint64(err.count));
-        },
-    }
-    return object;
-}
-pub fn drain(self: *@This(), limit: js.Value) !js.Value {
-    const max = cfg.integer(limit.val, 32) catch return error.InvalidDrainLimit;
-    if (max == 0) return error.InvalidDrainLimit;
-    const runtime = try self.owner();
-    var events: [32]r.Observation = undefined;
-    runtime.lock();
-    const count = runtime.queue.peek(events[0..@intCast(max)]);
-    const dropped = runtime.queue.dropped;
-    runtime.unlock();
-    const array = try js.env().createArrayWithLength(count);
-    for (events[0..count], 0..) |event, i| {
-        var key: [11]u8 = undefined;
-        try put(array, try std.fmt.bufPrintZ(&key, "{d}", .{i}), try observation(event));
-    }
-    try faults.check(.drain_copy);
-    const object = try js.env().createObject();
-    try put(object, "events", array);
-    try put(object, "dropped", try js.env().createBigintUint64(dropped));
-    runtime.lock();
-    const more = runtime.queue.len > count or runtime.queue.pending_error != null;
-    runtime.unlock();
-    try faults.publishDuringDrain(runtime);
-    try put(object, "more", try js.env().getBoolean(more));
-    runtime.commitDrain(count, more);
-    return .{ .val = object };
-}
-
 const commands = @import("network_commands.zig");
 const application_cfg = @import("network_application_config.zig");
 const projection = @import("network_peer_projection.zig");
@@ -406,7 +314,7 @@ fn submit(self: *@This(), comptime command: commands.Command, args: []const Valu
     const runtime = try self.owner();
     const token = try runtime.reserveCommand(command);
     errdefer runtime.abortCommand(token);
-    const operation = &runtime.operations[token.index];
+    const operation = &runtime.table.cells[token.index];
     const store = runtime.table.cells[token.index].store;
     switch (command) {
         .applyIntent => {
@@ -489,7 +397,7 @@ fn settleOperations(env: napi.Env, runtime: *Runtime) void {
         cell.state = .copying;
         const token: commands.Token = .{ .index = @intCast(i), .generation = cell.generation };
         runtime.unlock();
-        const operation = &runtime.operations[i];
+        const operation = &runtime.table.cells[i];
         if (operation.deferred) |deferred| {
             if (operation.failure) |err| {
                 deferred.reject((if (operation.input.command == .publishGossip) gossip_js.publishError(env, err) else makeError(env, err)) catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
@@ -502,18 +410,13 @@ fn settleOperations(env: napi.Env, runtime: *Runtime) void {
                 };
                 deferred.resolve(value) catch unreachable;
             }
-        } else if (operation.failure) |err| {
-            runtime.lock();
-            runtime.queue.recordFailure(err);
-            runtime.diag.operationalFailures +|= 1;
-            runtime.unlock();
         }
         runtime.abortCommand(token);
     }
 }
 fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
     try faults.check(.operation_copy);
-    const operation = &runtime.operations[index];
+    const operation = &runtime.table.cells[index];
     const store = runtime.table.cells[index].store;
     const object = switch (operation.input.command) {
         .publishGossip => return gossip_js.publishResult(env, operation.publication),
@@ -531,7 +434,7 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
         },
         .getPeers => {
             const peers = try env.createArrayWithLength(operation.count);
-            for (runtime.stores.?.snapshots[store.?][0..operation.count], 0..) |*row, i| try projection.element(peers, i, try projection.state(env, row, runtime.diag.session));
+            for (runtime.stores.?.snapshots[store.?][0..operation.count], 0..) |*row, i| try element(peers, i, try projection.state(env, row, runtime.diag.session));
             try put(object, "peers", peers);
             try put(object, "occupiedCount", try env.createDouble(@floatFromInt(operation.count)));
             try put(object, "capacity", try env.createUint32(runtime.peer_capacity));
@@ -543,7 +446,7 @@ fn copyOperation(env: napi.Env, runtime: *Runtime, index: usize) !Value {
         },
         .getDirectPeers => {
             const identities = try env.createArrayWithLength(operation.count);
-            for (runtime.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try projection.element(identities, i, try bytes(env, &peer.bytes));
+            for (runtime.stores.?.direct[store.?][0..operation.count], 0..) |*peer, i| try element(identities, i, try bytes(env, &peer.bytes));
             try put(object, "identities", identities);
         },
         else => {},
@@ -554,7 +457,6 @@ pub fn drainPeers(self: *@This(), limit: js.Value) !js.Value {
     const max = cfg.integer(limit.val, 64) catch return error.InvalidDrainLimit;
     if (max == 0) return error.InvalidDrainLimit;
     const runtime = try self.owner();
-    if (!runtime.application) return error.NetworkClosed;
     runtime.retain();
     defer runtime.release();
     var events: [64]projection.Entry = undefined;
@@ -566,16 +468,17 @@ pub fn drainPeers(self: *@This(), limit: js.Value) !js.Value {
     runtime.unlock();
     const env = js.env();
     const array = try env.createArrayWithLength(count);
-    for (events[0..count], 0..) |*event, i| try projection.element(array, i, try projection.observation(env, event, runtime.diag.session));
+    for (events[0..count], 0..) |*event, i| try element(array, i, try projection.observation(env, event, runtime.diag.session));
     const object = try env.createObject();
     try put(object, "events", array);
     try put(object, "ownerSequence", try env.createBigintUint64(sequence));
     try put(object, "more", try env.getBoolean(more));
     try put(object, "updatesReplaceState", try env.getBoolean(true));
+    try faults.check(.drain_copy);
     runtime.lock();
     if (lane) |storage| {
         storage.commit(count);
-        if (!more and storage.len > 0 and !runtime.quiescent) runtime.observation_rearm = true;
+        if (!more and storage.len > 0 and !runtime.quiescent) runtime.readable_rearm = true;
         if (!runtime.quiescent) runtime.signalLocked();
     }
     runtime.unlock();

@@ -67,7 +67,7 @@ test "message decoder rejects trailing fields and bytes" {
     );
 }
 
-test "FINDNODE validates every distance before publishing scratch" {
+test "FINDNODE rejects any invalid distance and scratch remains reusable" {
     var encoded: [64]u8 = undefined;
     encoded[0] = 0x03;
     var writer = rlp.Writer.init(encoded[1..]);
@@ -80,14 +80,14 @@ test "FINDNODE validates every distance before publishing scratch" {
     writer.finishList(outer);
     const encoded_length = writer.bytes().len + 1;
     var scratch: message.DecodeScratch = .{};
-    @memset(&scratch.distances, 0xa5a5);
-    const before = scratch.distances;
 
     try std.testing.expectError(
         message.Error.InvalidMessage,
         message.Message.decode(encoded[0..encoded_length], &scratch),
     );
-    try std.testing.expectEqualSlices(u16, &before, &scratch.distances);
+    const valid: message.Message = .{ .find_node = .{ .request_id = try .init(&.{1}), .distances = &.{ 2, 3 } } };
+    const decoded = try message.Message.decode(try valid.encode(&encoded), &scratch);
+    try std.testing.expectEqualSlices(u16, &.{ 2, 3 }, decoded.find_node.distances);
 }
 
 test "NODES enforces the bounded ENR count" {

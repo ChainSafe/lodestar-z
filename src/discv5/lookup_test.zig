@@ -552,3 +552,36 @@ test "IPv6 lookup selects the reachable endpoint before importing dual-stack see
     try std.testing.expectEqual(@as(usize, 1), lookup.candidateCount());
     try std.testing.expectEqualDeep(seed.record.endpointFor(.ip6).?, candidates[0].peer.address);
 }
+
+test "dual lookup chooses a relay-eligible endpoint before rejecting a signed record" {
+    const remote_key = try keyPair(9);
+    const public_key = crypto.compressedPublicKey(&remote_key);
+    const ip4: [4]u8 = .{ 10, 0, 0, 1 };
+    const ip6: [16]u8 = .{ 0x26, 0x06, 0x47, 0 } ++ .{0} ** 11 ++ .{1};
+    const remote = try enr.Record.createFields(&remote_key, 1, &.{
+        .{ .key = "id", .value = .{ .bytes = "v4" } },
+        .{ .key = "ip", .value = .{ .bytes = &ip4 } },
+        .{ .key = "ip6", .value = .{ .bytes = &ip6 } },
+        .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
+        .{ .key = "udp", .value = .{ .uint = 9000 } },
+        .{ .key = "udp6", .value = .{ .uint = 9000 } },
+    });
+    for ([_]@import("udp").Mode{ .ip4, .ip6, .dual }) |mode| {
+        var core = try initEngine();
+        defer core.deinit(std.testing.allocator);
+        var seed = fakeEntry(1);
+        if (mode != .ip4) seed.peer.address = test_support.address6(ip6, 9001);
+        seed.record = fakeRecord(seed.peer.node_id, seed.peer.address, 1);
+        installSession(&core, seed.peer, 0x55);
+        var candidates: Lookup.Candidates = undefined;
+        var lookup: Lookup = undefined;
+        try lookup.init(&candidates, core.localRecord().node_id, remote.node_id, &.{seed}, mode);
+        defer lookup.cancel(&core);
+        var output: [1280]u8 = undefined;
+        const id = try message.RequestId.init(&.{1});
+        const started = (try lookup.startNext(&core, &output, id, 1, &sealEntropy(1))).?;
+        try completeNodes(&core, &lookup, started, id, &.{remote}, 2);
+        try std.testing.expectEqual(@as(usize, if (mode == .ip4) 1 else 2), lookup.candidateCount());
+        if (mode != .ip4) try std.testing.expectEqualDeep(remote.endpointFor(.ip6).?, candidates[1].peer.address);
+    }
+}

@@ -14,14 +14,15 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     var memory: [384 * 1024]u8 = undefined;
     var arena = std.heap.FixedBufferAllocator.init(&memory);
     const a = arena.allocator();
-    var peers = Peers.initCapacity(a, 20, 4, 1) catch unreachable;
+    var peers = Peers.init(a, &.{ .retained_score_ms = 20, .retained_capacity = 4, .retained_outbound_reserve = 1 }) catch unreachable;
     defer peers.deinit(a);
-    var messages = Messages.init(a, &.{ .mcache_capacity = 4, .validation_capacity = 2, .seen_capacity = 8, .retained_capacity = 4, .mcache_arena_bytes = 12288, .validation_timeout_ms = 10, .validation_tombstone_ms = 20 }) catch unreachable;
+    const options: @import("network").gossipsub.Options = .{ .mcache_capacity = 4, .validation_capacity = 2, .seen_capacity = 8, .retained_capacity = 4, .mcache_arena_bytes = 12288, .validation_timeout_ms = 10, .validation_tombstone_ms = 20 };
+    var messages = Messages.init(a, &options) catch unreachable;
     defer messages.deinit(a, &peers);
     const source = peers.admit(.{ .index = 0, .generation = 1 }, &.{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;
     const duplicate = peers.admit(.{ .index = 1, .generation = 1 }, &.{ .identity = .{ .bytes = @splat(2) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;
     var handles: [16]gossip.ValidationHandle = @splat(.{ .index = 0, .generation = 0 });
-    var deliveries = gossip.delivery.Pool.init(a, 3, 1) catch unreachable;
+    var deliveries = gossip.delivery.Pool.init(a, 3, gossip.delivery.Pool.capacity(3, 1)) catch unreachable;
     defer deliveries.deinit(a);
     var queues: [3]gossip.delivery.Queue = @splat(.{ .pool = &deliveries });
     defer for (&queues) |*queue| queue.reset(&messages.store);

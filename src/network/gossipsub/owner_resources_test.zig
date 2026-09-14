@@ -1,0 +1,192 @@
+const std = @import("std");
+const gossip = @import("gossipsub.zig");
+const Gossipsub = gossip.Gossipsub;
+const Event = gossip.Event;
+const ValidationHandle = gossip.ValidationHandle;
+const Allocator = std.mem.Allocator;
+const constants = @import("constants.zig");
+const topic_mod = @import("topic.zig");
+const peers_mod = @import("peer_book.zig");
+const storage = @import("message_store.zig");
+const engine_mod = @import("../quic/engine.zig");
+const Handle = engine_mod.Handle;
+const Now = @import("../types.zig").Now;
+const support = @import("test_support.zig");
+const testMessage = support.message;
+
+test "gossipsub rejects incompatible memory plans and cleans partial startup allocations" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .large_message_bytes = 65536 }));
+    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .decompressed_arena_bytes = 4096 }));
+    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .large_pool_count = 256 }));
+    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .fields_per_pump = 1 }));
+    try std.testing.checkAllAllocationFailures(a, testStartup, .{});
+}
+fn testStartup(a: Allocator) !void {
+    var g = try Gossipsub.init(a, .{ .random_seed = 1, .seen_capacity = 1, .mcache_capacity = 1, .validation_capacity = 1, .body_buffer_bytes = 1, .control_bytes = 1, .critical_bytes = 32 + topic_mod.topic_max_len, .large_pool_count = 1 });
+    defer g.deinit();
+    const plan = g.memoryPlan();
+    try std.testing.expectEqual(@as(usize, 4096), plan.page_bytes);
+    try std.testing.expectEqual(g.messages.store.bytes.len, plan.retained_bytes);
+    try std.testing.expectEqual(plan.total_bytes, plan.retained_bytes + plan.frame_bytes + plan.event_bytes + plan.compression_bytes + plan.peer_buffer_bytes + plan.metadata_bytes);
+}
+
+test "gossipsub resource snapshot starts empty" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const snapshot = g.resourceSnapshot();
+    try std.testing.expectEqual(@as(usize, 0), snapshot.admitted_peers);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.queued_descriptors);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.store_entries);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.pending_validations);
+}
+
+test "gossip resolved capacities allocate owner rows and reject stale ceiling handles" {
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    try std.testing.expectEqual(@as(usize, 2), g.sessions.rows.len);
+    try std.testing.expectEqual(@as(usize, 4), g.peers.rows.len);
+    try std.testing.expectEqual(@as(usize, 4), g.peers.scores.rows.len);
+    try std.testing.expect(!g.sessions.matches(.{ .index = 2, .generation = 0 }));
+    try std.testing.expect(!g.peers.matches(.{ .index = 4, .generation = 0 }));
+    try std.testing.expectEqual(ledger.bytes, g.memoryPlan().total_bytes - @sizeOf(Gossipsub));
+    g.deinit();
+    try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
+}
+
+test "gossip default owner memory reconciles requested allocations" {
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    {
+        var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1 });
+        defer g.deinit();
+        const plan = g.memoryPlan();
+        try std.testing.expectEqual(ledger.bytes, plan.total_bytes - @sizeOf(Gossipsub));
+    }
+    try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
+}
+
+test "gossip diagnostics tracks queued age and preserves peaks after owner release" {
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var g = try Gossipsub.init(ledger.allocator(), .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    defer g.deinit();
+    const calls = ledger.allocation_calls;
+    const conn: Handle = .{ .index = 0, .generation = 1 };
+    const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    const io = &g.sessions.rows[peer.index].io;
+    io.tx.cancelStream(&g.messages.store);
+    const message = g.messages.store.put([_]u8{1} ** 20, "t", "abc").?;
+    g.messages.store.retainHistory(message);
+    g.messages.store.seal(message);
+    try std.testing.expectEqual(@import("outbox.zig").QueueResult.queued, io.tx.queueData(&g.messages.store, message, 10, 7));
+    try std.testing.expect(io.tx.injectFrame("ctrl", true, null, 9) != null);
+    g.last_now_ms = 20;
+    const snapshot = g.resourceSnapshot();
+    try std.testing.expectEqual(@as(?u64, 13), snapshot.oldest_tx_age_ms);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.queued_bytes);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.data_bytes_per_row_high_water);
+    try std.testing.expectEqual(@as(usize, 4), snapshot.critical_bytes);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.held_tx_retains);
+    try std.testing.expectEqualDeep(snapshot, g.resourceSnapshot());
+    g.connectionClosed(conn);
+    g.messages.store.releaseHistory(message);
+    const released = g.resourceSnapshot();
+    try std.testing.expectEqual(@as(?u64, null), released.oldest_tx_age_ms);
+    try std.testing.expectEqual(@as(usize, 0), released.queued_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.held_tx_retains);
+    try std.testing.expectEqual(@as(usize, 3), released.data_bytes_per_row_high_water);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.queued_bytes);
+    try std.testing.expectEqual(calls, ledger.allocation_calls);
+}
+
+test "gossip lifecycle sequence preserves ownership under pressure reconnect and late verdicts" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 91, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1, .validation_capacity = 2, .mcache_capacity = 4, .seen_capacity = 8, .mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + storage.page_bytes, .validation_timeout_ms = 100, .validation_tombstone_ms = 200 });
+    defer g.deinit();
+    var rng = std.Random.DefaultPrng.init(17);
+    var conn: Handle = .{ .index = 0, .generation = 1 };
+    var source = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    const metadata: peers_mod.Metadata = .{ .identity = g.peers.rows[g.sessions.rows[source.index].logical.index].identity, .address = .unspecified, .direction = .inbound };
+    g.markDirect(conn);
+    g.sessions.rows[source.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
+    if (g.overlay.findTopic(name)) |topic| g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), topic, source.index, true);
+    var handles: [8]?ValidationHandle = @splat(null);
+    for (0..512) |step| {
+        const now: Now = .{ .mono_ms = step * 17 + 1, .unix_s = 0 };
+        g.last_now_ms = now.mono_ms;
+        const value = rng.random().uintLessThan(u8, 8);
+        const payload = [_]u8{'a' + value};
+        switch (rng.random().uintLessThan(u8, 9)) {
+            0, 1 => {
+                var events: [1]Event = undefined;
+                if (try testMessage(&g, source.index, &payload, now.mono_ms, &events)) |count| {
+                    if (count == 1) handles[value] = events[0].message.handle;
+                }
+            },
+            2 => if (handles[value]) |handle| {
+                _ = g.report(handle, @enumFromInt(rng.random().uintLessThan(u8, 3)), now);
+            },
+            3 => {
+                _ = g.publish(name, &payload, now) catch |err| switch (err) {
+                    error.Duplicate, error.ResourceExhausted => Gossipsub.PublishOutcome{},
+                    else => return err,
+                };
+            },
+            4 => g.messages.expire(&g.peers, now.mono_ms),
+            5 => {
+                g.connectionClosed(conn);
+                conn.generation += 1;
+                source = g.addPeer(conn, &metadata, now).admitted;
+                g.markDirect(conn);
+                g.sessions.rows[source.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
+                if (g.overlay.findTopic(name)) |topic| g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), topic, source.index, true);
+            },
+            6 => {
+                const subscribed = if (g.overlay.findTopic(name)) |topic| g.overlay.subscribed(topic) else false;
+                if (subscribed) {
+                    try std.testing.expect(g.unsubscribe(name));
+                } else try std.testing.expect(g.subscribe(name));
+            },
+            7 => {
+                support.heartbeat(&g, now);
+                g.finishPump(now);
+            },
+            8 => for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store),
+            else => unreachable,
+        }
+        var pending: usize = 0;
+        var occupied_pages: usize = 0;
+        for (g.messages.store.entries, 0..) |*entry, index| {
+            if (!entry.active) continue;
+            try std.testing.expect(!entry.provisional);
+            occupied_pages += storage.Store.pagesFor(entry.len);
+            var validations: usize = 0;
+            for (g.messages.validation.entries) |*slot| if (slot.state == .pending and slot.state.pending.message.index == index) {
+                try std.testing.expectEqual(entry.generation, slot.state.pending.message.generation);
+                validations += 1;
+            };
+            try std.testing.expectEqual(@as(usize, @intFromBool(entry.validation)), validations);
+            pending += validations;
+            const history = g.messages.history.get(&g.messages.store, entry.id);
+            try std.testing.expectEqual(entry.history, if (history) |record| g.messages.history.message(record).index == index and g.messages.history.message(record).generation == entry.generation else false);
+            var retained: u32 = 0;
+            for (g.sessions.rows) |*peer| retained += @intCast(peer.io.tx.data.retains(.{ .index = @intCast(index), .generation = entry.generation }));
+            try std.testing.expectEqual(entry.tx, retained);
+        }
+        try std.testing.expectEqual(g.messages.store.next.len, occupied_pages + g.messages.store.free_pages);
+        var records_pending: usize = 0;
+        var pins: [4]u32 = @splat(0);
+        for (g.messages.validation.recent) |*record| {
+            records_pending += @intFromBool(record.state == .pending);
+            if (!record.pinned) continue;
+            try std.testing.expect(g.peers.matches(record.source));
+            pins[record.source.index] += 1;
+            for (record.duplicates[0..record.duplicate_len]) |*duplicate| {
+                try std.testing.expect(g.peers.matches(duplicate.peer));
+                pins[duplicate.peer.index] += 1;
+            }
+        }
+        try std.testing.expectEqual(pending, records_pending);
+        for (g.peers.rows, pins) |*peer, expected| try std.testing.expectEqual(expected, peer.pins);
+    }
+}

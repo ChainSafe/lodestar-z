@@ -1,4 +1,5 @@
 const std = @import("std");
+const support = @import("test_support.zig");
 const driver_mod = @import("driver.zig");
 const engine_mod = @import("quic/engine.zig");
 const keys = @import("wire/keys.zig");
@@ -46,8 +47,8 @@ test "transport moves a bulk payload over loopback sockets with batched sends" {
     var connected = false;
     var rounds: usize = 0;
     while (rounds < 200 and !connected) : (rounds += 1) {
-        const dialed = try dialer.step(std.testing.io, &dialer_events, &activity, step_options);
-        _ = try listener.step(std.testing.io, &listener_events, &activity, step_options);
+        const dialed = try support.step(&dialer, std.testing.io, &dialer_events, &activity, step_options);
+        _ = try support.step(&listener, std.testing.io, &listener_events, &activity, step_options);
         for (dialer_events[0..dialed.events]) |event| {
             if (event == .connected) connected = true;
         }
@@ -68,11 +69,11 @@ test "transport moves a bulk payload over loopback sockets with batched sends" {
         if (written < payload_len) {
             written += try writeSome(&dialer.engine, stream, payload[written..]);
         }
-        const sent = try dialer.step(std.testing.io, &dialer_events, &activity, step_options);
+        const sent = try support.step(&dialer, std.testing.io, &dialer_events, &activity, step_options);
         try std.testing.expectEqual(@as(u32, 0), sent.send_failures);
         datagrams_sent += sent.datagrams_sent;
         send_calls += sent.send_calls;
-        const got = try listener.step(std.testing.io, &listener_events, &activity, step_options);
+        const got = try support.step(&listener, std.testing.io, &listener_events, &activity, step_options);
         for (listener_events[0..got.events]) |event| {
             if (event == .stream_opened) inbound = event.stream_opened;
         }
@@ -116,15 +117,15 @@ test "transport appends TLS key material to the configured keylog file" {
     var connected = false;
     var rounds: usize = 0;
     while (rounds < 200 and !connected) : (rounds += 1) {
-        const dialed = try dialer.step(std.testing.io, &dialer_events, &activity, step_options);
-        _ = try listener.step(std.testing.io, &listener_events, &activity, step_options);
+        const dialed = try support.step(&dialer, std.testing.io, &dialer_events, &activity, step_options);
+        _ = try support.step(&listener, std.testing.io, &listener_events, &activity, step_options);
         for (dialer_events[0..dialed.events]) |event| {
             if (event == .connected) connected = true;
         }
     }
     try std.testing.expect(connected);
     try std.testing.expect(dialer.keylog != null);
-    _ = try dialer.step(std.testing.io, &dialer_events, &activity, .{ .wait_max_ms = 0 });
+    _ = try support.step(&dialer, std.testing.io, &dialer_events, &activity, .{ .wait_max_ms = 0 });
     const written = try tmp.dir.statFile(std.testing.io, "keys.log", .{});
     try std.testing.expect(written.size > 0);
     try std.testing.expectEqual(written.size, dialer.keylog_offset);
@@ -134,8 +135,8 @@ fn failKeylog(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const 
     return error.NoSpaceLeft;
 }
 
-test "transport keylog failure preserves legacy and progress lifecycle delivery" {
-    for ([_]bool{ false, true }) |preserve_progress| {
+test "transport keylog failure preserves completed lifecycle delivery" {
+    {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var path: [80]u8 = undefined;
@@ -159,18 +160,12 @@ test "transport keylog failure preserves legacy and progress lifecycle delivery"
         const failed_io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
         var events: [8]engine_mod.Event = undefined;
         var activity: [128]engine_mod.Handle = undefined;
-        if (preserve_progress) {
-            const result = node.stepProgress(failed_io, &events, &activity, .{ .wait_max_ms = 0 });
-            try std.testing.expectEqual(error.KeylogWriteFailed, result.failure.?);
-            try std.testing.expectEqual(@as(usize, 1), result.progress.events);
-            try std.testing.expect(events[0] == .closed);
-        } else {
-            try std.testing.expectError(error.KeylogWriteFailed, node.step(failed_io, &events, &activity, .{ .wait_max_ms = 0 }));
-            const next = try node.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
-            try std.testing.expectEqual(@as(usize, 1), next.events);
-            try std.testing.expect(events[0] == .closed);
-        }
-        const next = try node.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+        const result = node.step(failed_io, &events, &activity, .{ .wait_max_ms = 0 });
+        try std.testing.expectEqual(error.KeylogWriteFailed, result.failure.?);
+        try std.testing.expectEqual(@as(usize, 1), result.progress.events);
+        try std.testing.expect(events[0] == .closed);
+
+        const next = try support.step(&node, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
         try std.testing.expectEqual(@as(usize, 0), next.events);
         try std.testing.expectEqual(@as(u16, 0), node.engine.registry.active_len);
     }
@@ -201,7 +196,7 @@ test "transport refuses to dial a multiaddr without a peer id" {
 
     const target = multiaddr.Multiaddr{ .address = dialer.localAddress() };
     try std.testing.expectError(error.MissingPeerId, dialer.dial(std.testing.io, &target));
-    try std.testing.expectEqual(@as(usize, 0), dialer.engine.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), dialer.engine.activeIndices().len);
 }
 
 test "dual-stack transport authenticates both families through one connection budget" {
@@ -231,13 +226,13 @@ test "dual-stack transport authenticates both families through one connection bu
         var events: [8]engine_mod.Event = undefined;
         var activity: [2]engine_mod.Handle = undefined;
         for (0..400) |_| {
-            const result = try hub.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
+            const result = try support.step(&hub, std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
             for (events[0..result.events]) |event| if (event == .connected) {
                 const peer = hub.engine.peerAddress(event.connected.conn).?;
                 connected[if (peer == .ip4) @as(usize, 0) else 1] = true;
             };
-            _ = try peer4.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
-            _ = try peer6.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
+            _ = try support.step(&peer4, std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
+            _ = try support.step(&peer6, std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
             if (connected[0] and connected[1]) break;
         }
         try std.testing.expect(connected[0] and connected[1]);

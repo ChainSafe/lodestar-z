@@ -18,15 +18,6 @@ pub const Certificate = struct {
 
     pub fn create(host: *const keys.KeyPair, now_unix: i64, serial: [8]u8) Error!Certificate {
         const host_key = host.publicKey();
-        return createWith(&host_key, host, now_unix, serial);
-    }
-
-    pub fn createWith(
-        host_key: *const keys.PublicKey,
-        signer: *const keys.KeyPair,
-        now_unix: i64,
-        serial: [8]u8,
-    ) Error!Certificate {
         const key = try generateP256();
         errdefer c.EVP_PKEY_free(key);
 
@@ -38,7 +29,7 @@ pub const Certificate = struct {
         if (c.X509_set_pubkey(x509, key) != 1) return error.OpenSslFailed;
         try setEmptyNames(x509);
         try setValidity(x509, now_unix);
-        try addExtension(x509, key, host_key, signer);
+        try addExtension(x509, key, &host_key, host);
         if (c.X509_sign(x509, key, c.EVP_sha256()) <= 0) return error.SignFailed;
         return .{ .key = key, .x509 = x509 };
     }

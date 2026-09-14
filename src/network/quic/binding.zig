@@ -172,19 +172,16 @@ pub const SockAddr = struct {
                 if (self.len < @sizeOf(std.posix.sockaddr.in6)) return null;
                 const in6 = self.storage.in6;
                 const port = std.mem.bigToNative(u16, in6.port);
-                if (isMappedIp4(in6.addr)) {
-                    return .{ .ip4 = .{ .octets = in6.addr[12..16].*, .port = port } };
-                }
-                return .{ .ip6 = .{ .octets = in6.addr, .port = port, .interface = in6.scope_id } };
+                return types.Address.fromNetwork(.{ .ip6 = .{
+                    .bytes = in6.addr,
+                    .port = port,
+                    .interface = .{ .index = in6.scope_id },
+                } });
             },
             else => return null,
         }
     }
 };
-
-fn isMappedIp4(bytes: [16]u8) bool {
-    return std.mem.allEqual(u8, bytes[0..10], 0) and bytes[10] == 0xff and bytes[11] == 0xff;
-}
 
 pub const Cid = struct {
     bytes: [limits.cid_length_max]u8 = undefined,

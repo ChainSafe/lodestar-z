@@ -33,18 +33,8 @@ pub const Sessions = struct {
         self.delivery_revision +|= 1;
     }
 
-    pub fn init(a: std.mem.Allocator, capacity: u16) !Sessions {
-        return initOptions(a, &.{ .connected_capacity = capacity });
-    }
-
-    pub fn initOptions(a: std.mem.Allocator, options: *const @import("options.zig").Options) !Sessions {
-        if (options.connected_capacity == 0 or options.connected_capacity > constants.peers_cap) return error.InvalidLimits;
+    pub fn init(a: std.mem.Allocator, options: *const @import("options.zig").Options) !Sessions {
         const layout = @import("layout.zig").Layout.init(options);
-        return initLayout(a, options, &layout);
-    }
-
-    pub fn initLayout(a: std.mem.Allocator, options: *const @import("options.zig").Options, layout: *const @import("layout.zig").Layout) !Sessions {
-        assert(std.meta.eql(layout.*, @import("layout.zig").Layout.init(options)));
         const rows = try a.alloc(Session, layout.sessions);
         errdefer a.free(rows);
         const per_peer = layout.session_buffer_bytes;
@@ -57,14 +47,14 @@ pub const Sessions = struct {
         }
         const deliveries = try a.create(DeliveryPool);
         errdefer a.destroy(deliveries);
-        deliveries.* = try DeliveryPool.initCapacity(a, rows.len, layout.deliveries);
+        deliveries.* = try DeliveryPool.init(a, rows.len, layout.deliveries);
         for (rows, 0..) |*row, i| row.* = .{ .io = PeerIo.init(arena[i * per_peer ..][0..per_peer], options, deliveries) };
         return .{ .rows = rows, .io_arena = arena, .receive_pool = receive_pool, .deliveries = deliveries };
     }
 
     pub fn metadataBytes(layout: *const @import("layout.zig").Layout) usize {
         return @as(usize, layout.sessions) * @sizeOf(Session) + @sizeOf(DeliveryPool) +
-            DeliveryPool.backingBytes(layout.deliveries) + ReceivePool.metadataBytes(layout.receive_frames);
+            DeliveryPool.backingBytes(layout.deliveries);
     }
 
     pub fn deinit(self: *Sessions, a: std.mem.Allocator) void {
@@ -77,10 +67,10 @@ pub const Sessions = struct {
 
     // Peers ------------------------------------------------------------------
 
-    pub fn addPeer(self: *Sessions, conn: Handle, version: Version) ?SessionRef {
+    pub fn addPeer(self: *Sessions, conn: Handle) ?SessionRef {
         const index = self.freePeer() orelse return null;
         const peer = &self.rows[index];
-        peer.start(conn, version);
+        peer.start(conn);
         self.delivery_revision +|= 1;
         return .{ .index = @intCast(index), .generation = peer.generation };
     }
@@ -101,16 +91,6 @@ pub const Sessions = struct {
         return null;
     }
 
-    pub fn peerVersion(self: *const Sessions, index: u16) Version {
-        assert(self.rows[index].active);
-        return self.rows[index].version;
-    }
-
-    pub fn setVersion(self: *Sessions, index: u16, version: Version) void {
-        assert(self.rows[index].active);
-        self.rows[index].version = version;
-    }
-
     pub fn peerGeneration(self: *const Sessions, index: u16) u64 {
         return self.rows[index].generation;
     }
@@ -122,14 +102,6 @@ pub const Sessions = struct {
 
     pub fn matches(self: *const Sessions, session: SessionRef) bool {
         return session.index < self.rows.len and self.rows[session.index].active and self.rows[session.index].generation == session.generation;
-    }
-
-    pub fn setStreams(self: *Sessions, index: u16, out: ?StreamHandle, in: ?StreamHandle) void {
-        assert(self.rows[index].active);
-        if (out) |stream| self.setOutbound(index, .{ .live = stream });
-        if (in) |stream| self.rows[index].in_stream = stream;
-        self.rows[index].io.rx_ready = in != null;
-        self.rows[index].io.tx.ready = out != null;
     }
 
     pub fn outStream(self: *const Sessions, index: u16) ?StreamHandle {
@@ -156,18 +128,17 @@ pub const Sessions = struct {
     }
 
     pub fn frameBody(self: *Sessions, io: *PeerIo) ?[]u8 {
-        if (io.large_slot) |lease| return self.receive_pool.buffer(lease).?;
+        if (io.large_slot) |lease| return self.receive_pool.buffer(lease);
         const declared = io.reader.declaredLen() orelse return io.body;
         if (declared <= io.body.len) return io.body;
         const lease = self.receive_pool.claim() orelse return null;
         io.large_slot = lease;
-        return self.receive_pool.buffer(lease).?;
+        return self.receive_pool.buffer(lease);
     }
 
     pub fn releaseFrame(self: *Sessions, peer_io: *PeerIo) bool {
         if (peer_io.large_slot) |lease| {
-            const released = self.receive_pool.release(lease);
-            assert(released);
+            self.receive_pool.release(lease);
             peer_io.large_slot = null;
             return true;
         }
@@ -199,12 +170,11 @@ pub const Sessions = struct {
 test "session slots track connection generations" {
     var sessions = try std.testing.allocator.create(Sessions);
     defer std.testing.allocator.destroy(sessions);
-    sessions.* = try Sessions.init(std.testing.allocator, constants.peers_cap);
+    sessions.* = try @import("test_support.zig").sessions(std.testing.allocator, constants.peers_cap);
     defer sessions.deinit(std.testing.allocator);
     const conn = Handle{ .index = 3, .generation = 1 };
-    const peer = sessions.addPeer(conn, .v1_2).?;
+    const peer = sessions.addPeer(conn).?;
     try std.testing.expectEqual(@as(?u16, peer.index), sessions.findPeer(conn));
-    try std.testing.expectEqual(Version.v1_2, sessions.peerVersion(peer.index));
 
     sessions.removePeer(peer.index);
     try std.testing.expectEqual(@as(?u16, null), sessions.findPeer(conn));
@@ -213,9 +183,9 @@ test "session slots track connection generations" {
 test "sessions suppresses ids per peer until monotonic expiry" {
     var sessions = try std.testing.allocator.create(Sessions);
     defer std.testing.allocator.destroy(sessions);
-    sessions.* = try Sessions.init(std.testing.allocator, constants.peers_cap);
+    sessions.* = try @import("test_support.zig").sessions(std.testing.allocator, constants.peers_cap);
     defer sessions.deinit(std.testing.allocator);
-    const peer = sessions.addPeer(.{ .index = 1, .generation = 1 }, .v1_2).?;
+    const peer = sessions.addPeer(.{ .index = 1, .generation = 1 }).?;
     const id = [_]u8{7} ** 20;
     try std.testing.expect(!sessions.suppresses(peer.index, id, 0));
     sessions.suppress(peer.index, id, 0, 10);
@@ -225,12 +195,12 @@ test "sessions suppresses ids per peer until monotonic expiry" {
 
 test "gossip stream cancellation discards unsent work and session reuse preserves receipt identity" {
     const a = std.testing.allocator;
-    var sessions = try Sessions.init(a, 1);
+    var sessions = try @import("test_support.zig").sessions(a, 1);
     defer sessions.deinit(a);
     var store = try @import("message_store.zig").Store.init(a, 1, 4096);
     defer store.deinit(a);
     const conn: Handle = .{ .index = 0, .generation = 1 };
-    const first = sessions.addPeer(conn, .v1_2).?;
+    const first = sessions.addPeer(conn).?;
     const peer = &sessions.rows[first.index];
     const id: MessageId = @splat(1);
     peer.suppress(id, 1, 100);
@@ -246,7 +216,7 @@ test "gossip stream cancellation discards unsent work and session reuse preserve
     try std.testing.expectEqual(@as(u8, 0), peer.io.tx.control_burst);
     try std.testing.expect(peer.suppresses(id, 2));
     sessions.removePeer(first.index);
-    const next = sessions.addPeer(conn, .v1_1).?;
+    const next = sessions.addPeer(conn).?;
     try std.testing.expectEqual(first.index, next.index);
     try std.testing.expect(next.generation > first.generation);
     try std.testing.expect(!sessions.matches(first));

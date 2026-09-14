@@ -89,14 +89,9 @@ pub const Messages = struct {
 
     pub fn init(a: std.mem.Allocator, options: *const Options) !Messages {
         const layout = @import("layout.zig").Layout.init(options);
-        return initLayout(a, options, &layout);
-    }
-
-    pub fn initLayout(a: std.mem.Allocator, options: *const Options, layout: *const @import("layout.zig").Layout) !Messages {
-        assert(std.meta.eql(layout.*, @import("layout.zig").Layout.init(options)));
         var store = try storage.Store.init(a, layout.payload_entries, layout.payload_bytes);
         errdefer store.deinit(a);
-        var history = try mcache.History.initCapacity(a, layout.history, layout.retained);
+        var history = try mcache.History.init(a, layout.history, layout.retained);
         errdefer history.deinit(a);
         var seen = try mcache.SeenCache.init(a, layout.seen, options.seen_ttl_ms);
         errdefer seen.deinit(a);

@@ -73,11 +73,7 @@ pub const Pair = struct {
     }
 
     pub fn sendOne(self: *Pair, engine: *Engine, index: u16, out: []u8) ?[]u8 {
-        const count = engine.driverView().sendBatch(index, self.now, &self.batch);
-        if (count == 0) return null;
-        const first = self.batch.sent[0].bytes;
-        @memcpy(out[0..first.len], first);
-        return out[0..first.len];
+        return (engine.sendOne(index, self.now, out) orelse return null).bytes;
     }
 
     pub fn nextEntropy(self: *Pair) [limits.local_cid_length]u8 {
@@ -109,8 +105,8 @@ pub const Pair = struct {
             const source = self.client_source;
             var moved = try self.transfer(&self.client, &self.server, source, self.drop_to_server);
             moved = try self.transfer(&self.server, &self.client, server_address, false) or moved;
-            self.client.driverView().tick(self.now);
-            self.server.driverView().tick(self.now);
+            self.client.tick(self.now);
+            self.server.tick(self.now);
             if (!moved) return;
         }
         return error.PumpDidNotSettle;
@@ -125,10 +121,10 @@ pub const Pair = struct {
     ) !bool {
         var moved = false;
         var index: u16 = 0;
-        while (index < from.driverView().slotCount()) : (index += 1) {
+        while (index < from.registry.slots.len) : (index += 1) {
             var budget: u32 = 0;
             while (budget < limits.send_burst_max) {
-                const count = from.driverView().sendBatch(index, self.now, &self.batch);
+                const count = sendBatch(from, index, self.now, &self.batch);
                 if (count == 0) break;
                 budget += count;
                 moved = true;
@@ -141,7 +137,7 @@ pub const Pair = struct {
                     if (drop) continue;
                     if (self.drop_to_address) |blocked| if (sent.to.eql(blocked)) continue;
                     var response: [constants.datagram_size_max]u8 = undefined;
-                    _ = to.driverView().receive(
+                    _ = to.receive(
                         datagram,
                         &from_address,
                         self.now,
@@ -156,7 +152,7 @@ pub const Pair = struct {
     }
 
     pub fn events(_: *Pair, engine: *Engine, storage: []Event) []Event {
-        engine.driverView().releaseReported();
+        engine.releaseReported();
         return storage[0..engine.pollEvents(storage)];
     }
 };
@@ -237,4 +233,18 @@ pub fn expectStreamClosed(event: Event, stream: engine_mod.StreamHandle) !?u64 {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+pub fn sendBatch(engine: *Engine, index: u16, now: Now, batch: *engine_mod.SendBatch) u8 {
+    var count: u8 = 0;
+    while (count < constants.send_batch_max) : (count += 1) {
+        batch.sent[count] = engine.sendOne(index, now, &batch.buffers[count]) orelse break;
+    }
+    return count;
+}
+
+pub fn step(transport: *transport_mod.Transport, io: std.Io, events: []Event, activity: []engine_mod.Handle, options: @import("driver.zig").StepOptions) transport_mod.StepError!@import("driver.zig").StepResult {
+    const result = transport.step(io, events, activity, options);
+    if (result.failure) |err| return err;
+    return result.progress;
 }

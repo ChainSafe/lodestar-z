@@ -278,8 +278,7 @@ fn crawl(
         .refresh_interval_ms = 15_000,
         .bootstrap_interval_ms = 15_000,
         .discovery_stall_ms = 15_000,
-    });
-    maintenance.ip_mode = transport.udp.sockets.mode();
+    }, transport.udp.sockets.mode());
     defer maintenance.cancel(transport.core);
     var cursor: discv5.lookup_driver.Cursor = .{};
     var statistics: CrawlStatistics = .{};

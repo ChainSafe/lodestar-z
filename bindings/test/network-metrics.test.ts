@@ -1,7 +1,7 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test, vi} from "vitest";
-import {createNativeNetworkRuntime} from "../src/network.js";
-import {networkConfig} from "./utils/network.js";
+import {createNativeNetworkApplicationRuntime} from "../src/network.js";
+import {applicationConfig, localIntent} from "./utils/network.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 function samples(text: string): Map<string, number> {
@@ -26,11 +26,13 @@ function samples(text: string): Map<string, number> {
 }
 
 test("metrics are available through startup and remain readable after close", async () => {
-  const runtime = createNativeNetworkRuntime(networkConfig(), () => undefined);
+  const config = applicationConfig();
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   try {
     expect(samples(runtime.getMetrics()).get("libp2p_peers")).toBe(0);
     expect(samples(runtime.getMetrics()).get("lodestar_peer_connection_seconds_count")).toBe(0);
     await runtime.ready;
+    await runtime.applyIntent(localIntent(config), config.initialSlot);
     await vi.waitFor(() => expect(samples(runtime.getMetrics()).get("lodestar_native_network_running")).toBe(1));
     const metrics = samples(runtime.getMetrics());
     for (const kind of ["subscription", "message", "control", "ihave", "iwant", "graft", "prune", "idontwant"]) {

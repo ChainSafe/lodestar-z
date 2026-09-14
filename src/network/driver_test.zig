@@ -1,4 +1,5 @@
 const std = @import("std");
+const constants = @import("constants.zig");
 const driver_mod = @import("driver.zig");
 const engine_mod = @import("quic/engine.zig");
 const limits = @import("quic/limits.zig");
@@ -22,8 +23,8 @@ fn writeSome(engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, bytes:
 
 fn stepBoth(a: *Node, b: *Node, events_a: []engine_mod.Event, events_b: []engine_mod.Event) !struct { a: usize, b: usize } {
     var activity: [4]engine_mod.Handle = undefined;
-    const ra = try a.transport.step(std.testing.io, events_a, &activity, step_options);
-    const rb = try b.transport.step(std.testing.io, events_b, &activity, step_options);
+    const ra = try support.step(&a.transport, std.testing.io, events_a, &activity, step_options);
+    const rb = try support.step(&b.transport, std.testing.io, events_b, &activity, step_options);
     try std.testing.expectEqual(@as(u32, 0), ra.send_failures);
     try std.testing.expectEqual(@as(u32, 0), rb.send_failures);
     return .{ .a = ra.events, .b = rb.events };
@@ -37,7 +38,7 @@ test "driver bounds an idle step by the requested wait" {
     var events: [4]engine_mod.Event = undefined;
     var activity: [4]engine_mod.Handle = undefined;
     const started = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
-    const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 5 });
+    const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 5 });
     const elapsed = std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - started;
     try std.testing.expect(elapsed < 200);
     try std.testing.expectEqual(@as(usize, 0), result.events);
@@ -45,7 +46,7 @@ test "driver bounds an idle step by the requested wait" {
     try std.testing.expect(!result.activity_pending);
     try std.testing.expect(node.transport.nextTimeoutMs(result.now) == null);
 
-    const floored = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    const floored = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(u32, 0), floored.datagrams_received);
 }
 
@@ -73,13 +74,13 @@ test "driver reports activity for the connections that received datagrams" {
     var rounds: usize = 0;
     while (rounds < 50 and (reported == 0 or deferred == 0)) : (rounds += 1) {
         if (stream) |open| _ = try writeSome(&client.transport.engine, open, "ping", false);
-        _ = try server.transport.step(std.testing.io, &server_events, &activity, step_options);
+        _ = try support.step(&server.transport, std.testing.io, &server_events, &activity, step_options);
         const narrow =
-            try client.transport.step(std.testing.io, client_events[0..0], none[0..0], step_options);
+            try support.step(&client.transport, std.testing.io, client_events[0..0], none[0..0], step_options);
         try std.testing.expectEqual(@as(usize, 0), narrow.activity);
         if (narrow.activity_pending) deferred += 1;
         const wide =
-            try client.transport.step(std.testing.io, &client_events, &activity, step_options);
+            try support.step(&client.transport, std.testing.io, &client_events, &activity, step_options);
         for (activity[0..wide.activity]) |seen| try std.testing.expectEqual(handle, seen);
         if (wide.activity > 0) try std.testing.expect(!wide.activity_pending);
         reported += wide.activity;
@@ -94,9 +95,9 @@ test "driver reports activity for the connections that received datagrams" {
     var quiet = false;
     var idle: usize = 0;
     while (idle < 50 and !quiet) : (idle += 1) {
-        _ = try server.transport.step(std.testing.io, &server_events, &activity, step_options);
+        _ = try support.step(&server.transport, std.testing.io, &server_events, &activity, step_options);
         const result =
-            try client.transport.step(std.testing.io, &client_events, &activity, step_options);
+            try support.step(&client.transport, std.testing.io, &client_events, &activity, step_options);
         for (activity[0..result.activity]) |seen| try std.testing.expectEqual(handle, seen);
         if (result.datagrams_accepted > 0) continue;
         if (result.activity > 0) continue;
@@ -124,7 +125,7 @@ test "driver counts a hostile oversized datagram and keeps stepping" {
     var errors: u32 = 0;
     var rounds: usize = 0;
     while (rounds < 50 and errors == 0) : (rounds += 1) {
-        const result = try node.transport.step(std.testing.io, &events, &activity, step_options);
+        const result = try support.step(&node.transport, std.testing.io, &events, &activity, step_options);
         try std.testing.expectEqual(@as(u32, 0), result.datagrams_accepted);
         try std.testing.expectEqual(@as(u32, 0), result.datagrams_received);
         try std.testing.expectEqual(@as(usize, 0), result.events);
@@ -132,7 +133,7 @@ test "driver counts a hostile oversized datagram and keeps stepping" {
     }
     try std.testing.expectEqual(@as(u32, 1), errors);
 
-    const after = try node.transport.step(std.testing.io, &events, &activity, step_options);
+    const after = try support.step(&node.transport, std.testing.io, &events, &activity, step_options);
     try std.testing.expectEqual(@as(u32, 0), after.receive_errors);
     try std.testing.expectEqual(@as(u32, 0), after.datagrams_accepted);
 }
@@ -153,7 +154,7 @@ test "driver keeps batching past a counted receive error" {
 
     var events: [4]engine_mod.Event = undefined;
     var activity: [4]engine_mod.Handle = undefined;
-    const result = try node.transport.step(std.testing.io, &events, &activity, step_options);
+    const result = try support.step(&node.transport, std.testing.io, &events, &activity, step_options);
     try std.testing.expect(result.receive_errors >= 2);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_received);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_accepted);
@@ -178,7 +179,7 @@ test "driver surfaces a send failure to an unreachable destination" {
 
     var events: [4]engine_mod.Event = undefined;
     var activity: [4]engine_mod.Handle = undefined;
-    const result = try node.transport.step(std.testing.io, &events, &activity, step_options);
+    const result = try support.step(&node.transport, std.testing.io, &events, &activity, step_options);
     try std.testing.expectEqual(@as(u32, 1), result.send_failures);
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_sent);
     try std.testing.expectEqual(@as(usize, 1), result.events);
@@ -310,7 +311,7 @@ test "driver retains a future datagram and drops stale owner generations" {
     var events: [4]engine_mod.Event = undefined;
     var activity: [4]engine_mod.Handle = undefined;
     for (0..3) |_| {
-        const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+        const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
         try std.testing.expectEqual(@as(u32, 0), result.datagrams_sent);
         try std.testing.expectEqual(@as(usize, 1), node.transport.driver.pending.count);
         try std.testing.expectEqualSlices(u8, &bytes, node.transport.driver.pending.ready(handle.index, future).?.bytes);
@@ -324,7 +325,7 @@ test "driver retains a future datagram and drops stale owner generations" {
     );
     try std.testing.expectEqual(handle.index, replacement.index);
     try std.testing.expect(handle.generation != replacement.generation);
-    _ = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    _ = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
     if (node.transport.driver.pending.owner(handle.index)) |owner| {
         try std.testing.expectEqual(replacement, owner);
     }
@@ -337,6 +338,7 @@ test "driver serves busy connections fairly under one aggregate send allowance" 
     node.transport.engine.limits.send_per_step_max = 1;
     node.transport.engine.limits.work_per_step_max = 4;
     const loopback = net.IpAddress{ .ip4 = .loopback(0) };
+    var receive_buffer: [constants.datagram_size_max]u8 = undefined;
     var sink = try udp_mod.Udp.bind(std.testing.io, .single(loopback));
     defer sink.close(std.testing.io);
     const destination = sink.localAddress();
@@ -354,13 +356,12 @@ test "driver serves busy connections fairly under one aggregate send allowance" 
     var events: [8]engine_mod.Event = undefined;
     var activity: [8]engine_mod.Handle = undefined;
     for (0..3) |index| {
-        const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+        const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
         try std.testing.expectEqual(@as(u32, 1), result.datagrams_sent);
         try std.testing.expect(result.work_processed <= 4);
         try std.testing.expect(result.work_pending);
         try std.testing.expectEqual(@as(?u64, 0), node.transport.nextTimeoutMs(result.now));
-        const datagram = try sink.receiveTimeout(std.testing.io, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } });
-        defer sink.release(datagram.handle) catch unreachable;
+        const datagram = try sink.receiveTimeout(std.testing.io, &receive_buffer, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } });
         try std.testing.expectEqualSlices(u8, &.{@intCast(index + 1)}, datagram.bytes);
     }
     try std.testing.expectEqual(@as(usize, 0), node.transport.driver.pending.count);
@@ -393,7 +394,7 @@ test "driver next wakeup includes retained output with nanosecond precision" {
         now,
         [_]u8{44} ** limits.local_cid_length,
     );
-    const drained = try node.transport.step(std.testing.io, &.{}, &.{}, .{ .wait_max_ms = 0 });
+    const drained = try support.step(&node.transport, std.testing.io, &.{}, &.{}, .{ .wait_max_ms = 0 });
     now = drained.now;
     var bytes = [_]u8{1};
     try node.transport.driver.pending.put(handle, .{
@@ -412,6 +413,7 @@ test "driver isolates a failing destination from a healthy ready batch owner" {
     defer node.deinit();
     node.transport.engine.limits.send_per_step_max = 2;
     node.transport.engine.limits.work_per_step_max = 8;
+    var receive_buffer: [constants.datagram_size_max]u8 = undefined;
     var sink = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sink.close(std.testing.io);
     const healthy_address = sink.localAddress();
@@ -437,8 +439,8 @@ test "driver isolates a failing destination from a healthy ready batch owner" {
     try node.transport.driver.pending.put(failing, .{ .bytes = &payload, .to = failing_address });
     var events: [4]engine_mod.Event = undefined;
     var activity: [4]engine_mod.Handle = undefined;
-    const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
-    try std.testing.expectEqual(@as(?engine_mod.Handle, healthy), node.transport.engine.driverView().sendOwner(healthy.index));
+    const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    try std.testing.expectEqual(@as(?engine_mod.Handle, healthy), node.transport.engine.sendOwner(healthy.index));
     try std.testing.expectEqual(@as(u32, 1), result.send_failures);
     try std.testing.expectEqual(@as(u32, 1), result.datagrams_sent);
     try std.testing.expectEqual(@as(u32, 2), result.send_calls);
@@ -448,11 +450,10 @@ test "driver isolates a failing destination from a healthy ready batch owner" {
     try std.testing.expectEqual(failing, events[0].closed.conn);
     try std.testing.expect(events[0].closed.reason == .send_failed);
     {
-        const received = try sink.receiveTimeout(std.testing.io, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } });
-        defer sink.release(received.handle) catch unreachable;
+        const received = try sink.receiveTimeout(std.testing.io, &receive_buffer, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } });
         try std.testing.expectEqualSlices(u8, &payload, received.bytes);
     }
-    try std.testing.expectError(error.Timeout, sink.receiveTimeout(std.testing.io, .{ .duration = .{ .raw = .zero, .clock = .awake } }));
+    try std.testing.expectError(error.Timeout, sink.receiveTimeout(std.testing.io, &receive_buffer, .{ .duration = .{ .raw = .zero, .clock = .awake } }));
 }
 
 test "driver reports receive work exhaustion without active connections" {
@@ -466,14 +467,14 @@ test "driver reports receive work exhaustion without active connections" {
     for (0..3) |_| try source.send(std.testing.io, &destination, &.{0});
     var events: [4]engine_mod.Event = undefined;
     var activity: [4]engine_mod.Handle = undefined;
-    const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(u32, 2), result.datagrams_received);
     try std.testing.expectEqual(@as(u32, 2), result.datagrams_dropped);
     try std.testing.expectEqual(@as(u32, 2), result.work_processed);
-    try std.testing.expectEqual(@as(usize, 0), node.transport.engine.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), node.transport.engine.activeIndices().len);
     try std.testing.expect(result.work_pending);
     try std.testing.expectEqual(@as(?u64, 0), node.transport.nextTimeoutMs(result.now));
-    const drained = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    const drained = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(u32, 1), drained.datagrams_received);
     try std.testing.expectEqual(@as(u32, 1), drained.datagrams_dropped);
     try std.testing.expect(!drained.work_pending);
@@ -502,7 +503,7 @@ test "driver finishes a quiet connection scan across small work limited turns" {
     var sent: u32 = 0;
     var quiescent = false;
     for (0..16) |_| {
-        const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+        const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
         try std.testing.expect(result.work_processed <= 2);
         sent += result.datagrams_sent;
         if (!result.work_pending) {
@@ -520,8 +521,8 @@ fn quietConnectedNodes(client: *Node, server: *Node) !void {
     var events: [8]engine_mod.Event = undefined;
     var activity: [8]engine_mod.Handle = undefined;
     for (0..128) |_| {
-        const a = try client.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
-        const b = try server.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
+        const a = try support.step(&client.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
+        const b = try support.step(&server.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
         const a_timeout = client.transport.nextTimeoutMs(a.now);
         const b_timeout = server.transport.nextTimeoutMs(b.now);
         if (!a.work_pending and !b.work_pending and a.datagrams_sent == 0 and b.datagrams_sent == 0 and
@@ -582,7 +583,7 @@ test "driver progress failure retains real send receive work and exactly one lif
     const now = try driver_mod.currentTime(std.testing.io);
     _ = try node.transport.engine.dial(&destination, node.transport.peerId(), now, @splat(36));
     const failed = try node.transport.engine.dial(&destination, node.transport.peerId(), now, @splat(37));
-    node.transport.engine.driverView().failSend(failed.index);
+    node.transport.engine.failSend(failed.index);
     try sink.sockets.primary().send(std.testing.io, &node.transport.udp.sockets.primary().address, "invalid");
     var vtable = std.testing.io.vtable.*;
     vtable.batchAwaitConcurrent = ProgressFault.receive;
@@ -590,39 +591,16 @@ test "driver progress failure retains real send receive work and exactly one lif
     ProgressFault.calls = 0;
     var events: [4]engine_mod.Event = undefined;
     var activity: [4]engine_mod.Handle = undefined;
-    const result = node.transport.stepProgress(io, &events, &activity, .{ .wait_max_ms = 0 });
+    const result = node.transport.step(io, &events, &activity, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(error.Canceled, result.failure.?);
     try std.testing.expectEqual(@as(u32, 1), result.progress.datagrams_received);
     try std.testing.expect(result.progress.datagrams_sent > 0);
     try std.testing.expect(result.progress.work_processed > 0);
     try std.testing.expectEqual(@as(usize, 1), result.progress.events);
     try std.testing.expectEqual(failed, events[0].closed.conn);
-    try std.testing.expect(node.transport.udp.admitted == null);
     try std.testing.expectEqual(@as(u8, 0), node.transport.driver.batch_len);
-    const next = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
+    const next = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(usize, 0), next.events);
-}
-
-test "driver legacy failure leaves lifecycle events for later delivery" {
-    var node: Node = .{};
-    try node.init(38);
-    defer node.deinit();
-    const now = try driver_mod.currentTime(std.testing.io);
-    const failed = try node.transport.engine.dial(&support.server_address, node.transport.peerId(), now, @splat(38));
-    node.transport.engine.driverView().failSend(failed.index);
-    var vtable = std.testing.io.vtable.*;
-    vtable.batchAwaitConcurrent = ProgressFault.receive;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    ProgressFault.calls = 1;
-    var events: [4]engine_mod.Event = undefined;
-    var activity: [4]engine_mod.Handle = undefined;
-    try std.testing.expectError(error.Canceled, node.transport.step(io, &events, &activity, .{ .wait_max_ms = 0 }));
-    try std.testing.expect(node.transport.engine.eventsPending());
-    const result = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
-    try std.testing.expectEqual(@as(usize, 1), result.events);
-    try std.testing.expectEqual(failed, events[0].closed.conn);
-    const repeated = try node.transport.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
-    try std.testing.expectEqual(@as(usize, 0), repeated.events);
 }
 
 test "driver progress early clock failure does not begin or publish a turn" {
@@ -631,18 +609,18 @@ test "driver progress early clock failure does not begin or publish a turn" {
     defer node.deinit();
     const now = try driver_mod.currentTime(std.testing.io);
     const failed = try node.transport.engine.dial(&support.server_address, node.transport.peerId(), now, @splat(39));
-    node.transport.engine.driverView().failSend(failed.index);
+    node.transport.engine.failSend(failed.index);
     var vtable = std.testing.io.vtable.*;
     vtable.now = ProgressFault.clock;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     var events: [4]engine_mod.Event = undefined;
-    const result = node.transport.stepProgress(io, &events, &.{}, .{ .wait_max_ms = 0 });
+    const result = node.transport.step(io, &events, &.{}, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
     try std.testing.expectEqual(@as(u64, 0), result.progress.now.mono_ms);
     try std.testing.expectEqual(@as(usize, 0), result.progress.events);
     try std.testing.expectEqual(@as(u32, 0), result.progress.work_processed);
     try std.testing.expect(node.transport.engine.eventsPending());
-    const next = node.transport.stepProgress(std.testing.io, &events, &.{}, .{ .wait_max_ms = 0 });
+    const next = node.transport.step(std.testing.io, &events, &.{}, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(usize, 1), next.progress.events);
     try std.testing.expectEqual(failed, events[0].closed.conn);
 }
@@ -659,29 +637,28 @@ const ProgressFault = struct {
     }
 };
 
-test "driver progress counts admitted datagram when the following clock read fails" {
+test "driver progress counts received datagram when the following clock read fails" {
     var node: Node = .{};
     try node.init(40);
     defer node.deinit();
     try node.transport.udp.sockets.primary().send(std.testing.io, &node.transport.udp.sockets.primary().address, "invalid");
     var vtable = std.testing.io.vtable.*;
-    vtable.now = AdmissionClockFault.clock;
+    vtable.now = ReceiveClockFault.clock;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    AdmissionClockFault.udp = &node.transport.udp;
-    defer AdmissionClockFault.udp = null;
-    const result = node.transport.stepProgress(io, &.{}, &.{}, .{ .wait_max_ms = 0 });
+    ReceiveClockFault.udp = &node.transport.udp;
+    defer ReceiveClockFault.udp = null;
+    const result = node.transport.step(io, &.{}, &.{}, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
     try std.testing.expectEqual(@as(u32, 1), result.progress.datagrams_received);
     try std.testing.expectEqual(@as(u32, 1), result.progress.work_processed);
     try std.testing.expectEqual(@as(u32, 0), result.progress.datagrams_dropped);
     try std.testing.expect(result.progress.now.mono_ms > 0);
-    try std.testing.expect(node.transport.udp.admitted == null);
 }
 
-const AdmissionClockFault = struct {
+const ReceiveClockFault = struct {
     threadlocal var udp: ?*const udp_mod.Udp = null;
     fn clock(userdata: ?*anyopaque, value: std.Io.Clock) std.Io.Timestamp {
-        if (udp.?.admitted != null) return .{ .nanoseconds = -1 };
+        if (udp.?.counters.received_datagrams > 0) return .{ .nanoseconds = -1 };
         return std.testing.io.vtable.now(userdata, value);
     }
 };

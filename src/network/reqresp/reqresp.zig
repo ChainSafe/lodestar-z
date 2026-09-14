@@ -43,6 +43,31 @@ pub const ForkEntry = struct {
     fork: config.ForkSeq,
 };
 
+pub const AdmissionOptions = struct {
+    policy: request_policy.Config,
+    limits: admission_mod.Options,
+
+    pub fn defaults(configuration: *const request_policy.Config, identities: u16, inbound_max: u16) error{InvalidPolicy}!AdmissionOptions {
+        const policy = try request_policy.Policy.init(configuration);
+        var quotas: admission_mod.Options = undefined;
+        quotas.identities = identities;
+        for (0..config.ForkSeq.count) |i| {
+            quotas.peer[i] = policy.defaultQuotas(@enumFromInt(i));
+            quotas.global[i] = limiter_mod.defaultQuotas();
+            for (0..Protocol.count) |j| {
+                const which: Protocol = @enumFromInt(j);
+                if (which.isControl()) quotas.global[i][j].tokens = @max(quotas.peer[i][j].tokens, inbound_max);
+            }
+        }
+        return .{ .policy = configuration.*, .limits = quotas };
+    }
+};
+
+const Admission = struct {
+    policy: request_policy.Policy,
+    limiter: admission_mod.Limiter,
+};
+
 pub const Options = struct {
     peers: u16 = limits.connections_max_default,
     outbound_max: u16 = constants.outbound_max_default,
@@ -56,15 +81,27 @@ pub const Options = struct {
     inbound_application_per_peer_max: u8 = 0,
     progress_timeout_ms: u64 = constants.progress_timeout_ms_default,
     forks: []const ForkEntry,
-    request_policy: ?request_policy.Config = null,
     request_fork: config.ForkSeq = .phase0,
-    admission: ?admission_mod.Options = null,
+    admission: ?AdmissionOptions = null,
     quotas: ?limiter_mod.Quotas = null,
     /// Defaults reserve one inbound-capacity control wave; bulk quotas stay per protocol.
     global_quotas: ?limiter_mod.Quotas = null,
     host_timeout_ms: u64 = 60_000,
     quota_timeout_ms: u64 = 60_000,
     work_per_pump_max: u16 = 32,
+};
+
+const Settings = struct {
+    peers: u16,
+    outbound_control_reserved: u16,
+    inbound_control_reserved: u16,
+    outbound_per_peer_max: u8,
+    inbound_per_peer_max: u8,
+    inbound_application_per_peer_max: u8,
+    progress_timeout_ms: u64,
+    host_timeout_ms: u64,
+    quota_timeout_ms: u64,
+    work_per_pump_max: u16,
 };
 
 pub const AbsoluteTimeouts = struct {
@@ -114,7 +151,9 @@ pub const Event = union(enum) {
     over_limit: struct { peer: Handle, protocol: Protocol },
 };
 
-pub const PartitionedCounts = struct { application: usize, control: usize };
+pub const Outputs = struct { application: []Event = &.{}, control: []Event = &.{} };
+pub const OutputCounts = struct { application: usize, control: usize };
+pub const Capacities = struct { application: usize = 0, control: usize = 0 };
 
 pub const InitError = limiter_mod.InitError || error{InvalidPolicy};
 
@@ -139,7 +178,6 @@ pub const AcceptError = error{
     InvalidHandoff,
     SlotsExhausted,
     PeerSlotsExhausted,
-    SinkTooSmall,
     UnknownProtocol,
 };
 
@@ -196,13 +234,13 @@ pub const MemoryPlan = struct {
 
 pub const ReqResp = struct {
     allocator: std.mem.Allocator,
-    options: Options,
+    options: Settings,
     outbound: []Client,
     inbound: []Server,
     arena: []u8,
+    request_sinks: []u8,
     limiter: limiter_mod.Limiter,
-    policy: ?request_policy.Policy,
-    admission: ?admission_mod.Limiter,
+    admission: ?Admission,
     request_fork: config.ForkSeq,
     over_limit: [over_limit_queue_max]OverLimit = undefined,
     over_limit_head: u8 = 0,
@@ -214,7 +252,6 @@ pub const ReqResp = struct {
     forks: [64]ForkEntry = undefined,
     fork_count: u8 = 0,
     work_cursor: usize = 0,
-    event_cursor: usize = 0,
     application_event_cursor: usize = 0,
     control_event_cursor: usize = 0,
     scan_remaining: usize = 0,
@@ -261,9 +298,10 @@ pub const ReqResp = struct {
     }
 
     pub fn validateOptions(options: Options) InitError!struct { peer: limiter_mod.Quotas, global: limiter_mod.Quotas } {
-        if ((options.request_policy == null) != (options.admission == null)) return error.InvalidOptions;
-        if (options.request_policy) |*policy| _ = try request_policy.Policy.init(policy);
-        if (options.admission) |*admission| try admission_mod.Limiter.validate(admission);
+        if (options.admission) |*admission| {
+            _ = try request_policy.Policy.init(&admission.policy);
+            try admission_mod.Limiter.validate(&admission.limits);
+        }
         if (options.outbound_max == 0 or options.outbound_max > constants.slots_ceiling) {
             return error.InvalidOptions;
         }
@@ -304,9 +342,11 @@ pub const ReqResp = struct {
 
     pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
         const quotas = try validateOptions(options);
-        const policy = if (options.request_policy) |*value| try request_policy.Policy.init(value) else null;
-        var admission = if (options.admission) |value| try admission_mod.Limiter.init(allocator, value) else null;
-        errdefer if (admission) |*owner| owner.deinit(allocator);
+        var admission: ?Admission = if (options.admission) |*value| .{
+            .policy = try request_policy.Policy.init(&value.policy),
+            .limiter = try admission_mod.Limiter.init(allocator, value.limits),
+        } else null;
+        errdefer if (admission) |*owner| owner.limiter.deinit(allocator);
 
         const outbound = try allocator.alloc(Client, options.outbound_max);
         errdefer allocator.free(outbound);
@@ -314,6 +354,11 @@ pub const ReqResp = struct {
         const inbound = try allocator.alloc(Server, options.inbound_max);
         errdefer allocator.free(inbound);
         @memset(inbound, .{});
+
+        const request_sink_bytes = @as(usize, options.inbound_max - options.inbound_control_reserved) * protocol_mod.requestMaxAll() +
+            @as(usize, options.inbound_control_reserved) * protocol_mod.requestMaxControl();
+        const request_sinks = try allocator.alloc(u8, request_sink_bytes);
+        errdefer allocator.free(request_sinks);
 
         const total = @as(usize, options.outbound_max) + options.inbound_max;
         const arena = try allocator.alloc(u8, total * (scratch_length + read_buffer_length));
@@ -331,19 +376,25 @@ pub const ReqResp = struct {
         );
         errdefer buckets.deinit(allocator);
 
-        var resolved_options = options;
-        resolved_options.forks = &.{};
-        resolved_options.request_policy = null;
-        resolved_options.quotas = quotas.peer;
-        resolved_options.global_quotas = quotas.global;
         var result: ReqResp = .{
             .allocator = allocator,
-            .options = resolved_options,
+            .options = .{
+                .peers = options.peers,
+                .outbound_control_reserved = options.outbound_control_reserved,
+                .inbound_control_reserved = options.inbound_control_reserved,
+                .outbound_per_peer_max = options.outbound_per_peer_max,
+                .inbound_per_peer_max = options.inbound_per_peer_max,
+                .inbound_application_per_peer_max = options.inbound_application_per_peer_max,
+                .progress_timeout_ms = options.progress_timeout_ms,
+                .host_timeout_ms = options.host_timeout_ms,
+                .quota_timeout_ms = options.quota_timeout_ms,
+                .work_per_pump_max = options.work_per_pump_max,
+            },
             .outbound = outbound,
             .inbound = inbound,
             .arena = arena,
+            .request_sinks = request_sinks,
             .limiter = buckets,
-            .policy = policy,
             .admission = admission,
             .request_fork = options.request_fork,
             .fork_count = @intCast(options.forks.len),
@@ -354,8 +405,9 @@ pub const ReqResp = struct {
 
     /// Call shutdown first, or destroy the attached transport and Router before deinit.
     pub fn deinit(self: *ReqResp) void {
-        if (self.admission) |*owner| owner.deinit(self.allocator);
+        if (self.admission) |*owner| owner.limiter.deinit(self.allocator);
         self.limiter.deinit(self.allocator);
+        self.allocator.free(self.request_sinks);
         self.allocator.free(self.arena);
         self.allocator.free(self.inbound);
         self.allocator.free(self.outbound);
@@ -411,16 +463,15 @@ pub const ReqResp = struct {
         return Client.negotiated(self, outcome, now);
     }
 
-    /// The request sink stays exclusive through served/failed delivery.
+    /// Borrows request bytes from the owned inbound slot through served/failed delivery.
     pub fn accept(
         self: *ReqResp,
         engine: *Engine,
         stream: StreamHandle,
         ready: routing.Selection,
-        request_sink: []u8,
         now: Now,
     ) AcceptError!RequestHandle {
-        return Server.accept(self, engine, stream, ready, request_sink, now);
+        return Server.accept(self, engine, stream, ready, now);
     }
 
     /// Response bytes stay immutable through chunk_sent or terminal delivery.
@@ -520,43 +571,35 @@ pub const ReqResp = struct {
         const slot_bytes = self.outbound.len * @sizeOf(Client) + self.inbound.len * @sizeOf(Server);
         const limiter_bytes = self.limiter.buckets.len * @sizeOf(limiter_mod.Bucket) +
             self.limiter.generations.len * @sizeOf(?u32);
-        const admission_bytes = if (self.admission) |*owner| owner.memoryPlan().allocated_bytes else 0;
+        const admission_bytes = if (self.admission) |*owner| owner.limiter.memoryPlan().allocated_bytes else 0;
         return .{
             .facade_bytes = @sizeOf(ReqResp),
             .slot_bytes = slot_bytes,
             .io_bytes = self.arena.len,
             .limiter_bytes = limiter_bytes,
             .admission_bytes = admission_bytes,
-            .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + limiter_bytes + admission_bytes,
+            .request_sink_bytes = self.request_sinks.len,
+            .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + limiter_bytes + admission_bytes + self.request_sinks.len,
         };
     }
 
     /// Monotonic milliseconds; zero capacity suppresses event-only wakeups.
     /// Router negotiation and transport deadlines remain separate.
-    pub fn nextWakeup(self: *ReqResp, now: Now, event_capacity: usize) ?u64 {
-        return self.nextWakeupPartitioned(now, event_capacity, event_capacity);
-    }
-
-    pub fn nextWakeupPartitioned(
-        self: *ReqResp,
-        now: Now,
-        application_capacity: usize,
-        control_capacity: usize,
-    ) ?u64 {
+    pub fn nextWakeup(self: *ReqResp, now: Now, capacities: Capacities) ?u64 {
         for (0..self.over_limit_len) |offset| {
             const item = self.over_limit[(self.over_limit_head + offset) % over_limit_queue_max];
             const capacity = if (item.protocol.isControl())
-                control_capacity
+                capacities.control
             else
-                application_capacity;
+                capacities.application;
             if (capacity > 0) return now.mono_ms;
         }
         var due: ?u64 = null;
         for (self.outbound) |*slot| {
             const capacity = if (slot.protocol.isControl())
-                control_capacity
+                capacities.control
             else
-                application_capacity;
+                capacities.application;
             if (slot.needs_service or slot.close_pending or slot.state == .reported or
                 (capacity > 0 and (slot.pending_event != null or slot.terminal != null)))
             {
@@ -566,9 +609,9 @@ pub const ReqResp = struct {
         }
         for (self.inbound) |*slot| {
             const capacity = if (slot.protocol.isControl())
-                control_capacity
+                capacities.control
             else
-                application_capacity;
+                capacities.application;
             if (slot.needs_service or slot.close_pending or slot.state == .reported or
                 (capacity > 0 and (slot.pending_event != null or slot.terminal != null)))
             {
@@ -593,29 +636,32 @@ pub const ReqResp = struct {
         if (engine.limits.connections_max > self.options.peers) return error.InvalidCapacity;
     }
 
-    pub fn availableInbound(self: *ReqResp) ?u16 {
-        return self.claim(self.inbound);
+    pub fn inboundSink(self: *ReqResp, index: u16) []u8 {
+        assert(index < self.inbound.len);
+        const reserved = self.options.inbound_control_reserved;
+        const control_size = protocol_mod.requestMaxControl();
+        const bulk_size = protocol_mod.requestMaxAll();
+        const offset = if (index < reserved) @as(usize, index) * control_size else @as(usize, reserved) * control_size + @as(usize, index - reserved) * bulk_size;
+        const size = if (index < reserved) control_size else bulk_size;
+        return self.request_sinks[offset..][0..size];
     }
 
     pub fn availableInboundFor(self: *ReqResp, which: Protocol) ?u16 {
         const start: usize = if (which.isControl()) 0 else self.options.inbound_control_reserved;
-        const offset = self.claim(self.inbound[start..]) orelse return null;
+        const offset = claim(self.inbound[start..]) orelse return null;
         return @intCast(start + offset);
     }
 
     pub fn availableOutboundFor(self: *ReqResp, which: Protocol) ?u16 {
-        return self.claimProtocol(self.outbound, which, self.options.outbound_control_reserved);
-    }
-
-    fn claimProtocol(self: *ReqResp, slots: anytype, which: Protocol, reserved: u16) ?u16 {
+        const reserved = self.options.outbound_control_reserved;
         if (!which.isControl() and reserved > 0) {
             var ordinary: usize = 0;
-            for (slots) |*slot| {
+            for (self.outbound) |*slot| {
                 if (slot.state != .free and !slot.protocol.isControl()) ordinary += 1;
             }
-            if (ordinary >= slots.len - reserved) return null;
+            if (ordinary >= self.outbound.len - reserved) return null;
         }
-        return self.claim(slots);
+        return claim(self.outbound);
     }
 
     /// Latches one terminal result. Call cleanupPending before the next Router pump.
@@ -658,29 +704,11 @@ pub const ReqResp = struct {
         self.cleanup(engine, router, self.inbound, false);
     }
 
-    pub fn pump(
-        self: *ReqResp,
-        engine: *Engine,
-        router: *routing.Router,
-        now: Now,
-        events: []Event,
-    ) usize {
-        self.advance(engine, router, now);
-        return self.drain(now, events, null, &self.event_cursor);
-    }
-
-    pub fn pumpPartitioned(
-        self: *ReqResp,
-        engine: *Engine,
-        router: *routing.Router,
-        now: Now,
-        application: []Event,
-        control: []Event,
-    ) PartitionedCounts {
+    pub fn pump(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now, outputs: Outputs) OutputCounts {
         self.advance(engine, router, now);
         return .{
-            .application = self.drain(now, application, false, &self.application_event_cursor),
-            .control = self.drain(now, control, true, &self.control_event_cursor),
+            .application = self.drain(now, outputs.application, false, &self.application_event_cursor),
+            .control = self.drain(now, outputs.control, true, &self.control_event_cursor),
         };
     }
 
@@ -712,7 +740,7 @@ pub const ReqResp = struct {
         self.cleanup(engine, router, self.inbound, false);
     }
 
-    fn drain(self: *ReqResp, now: Now, events: []Event, control: ?bool, cursor: *usize) usize {
+    fn drain(self: *ReqResp, now: Now, events: []Event, control: bool, cursor: *usize) usize {
         const total = self.outbound.len + self.inbound.len;
         var count: usize = 0;
         for (0..total + 1) |_| {
@@ -733,16 +761,16 @@ pub const ReqResp = struct {
         return count;
     }
 
-    fn deliverMatching(slot: anytype, now: Now, control: ?bool) ?Event {
-        if (control) |wanted| if (slot.protocol.isControl() != wanted) return null;
+    fn deliverMatching(slot: anytype, now: Now, control: bool) ?Event {
+        if (slot.protocol.isControl() != control) return null;
         return deliver(slot, now);
     }
 
-    fn takeOverLimit(self: *ReqResp, control: ?bool) ?Event {
+    fn takeOverLimit(self: *ReqResp, control: bool) ?Event {
         for (0..self.over_limit_len) |offset| {
             const index = (self.over_limit_head + offset) % over_limit_queue_max;
             const item = self.over_limit[index];
-            if (control) |wanted| if (item.protocol.isControl() != wanted) continue;
+            if (item.protocol.isControl() != control) continue;
             if (offset == 0) {
                 self.over_limit_head = @intCast((self.over_limit_head + 1) % over_limit_queue_max);
             } else {
@@ -895,8 +923,7 @@ pub const ReqResp = struct {
         return slot;
     }
 
-    pub fn claim(self: *ReqResp, slots: anytype) ?u16 {
-        _ = self;
+    fn claim(slots: anytype) ?u16 {
         for (slots, 0..) |*slot, position| {
             if (slot.state == .free and slot.generation < std.math.maxInt(u32)) return @intCast(
                 position,
@@ -977,4 +1004,21 @@ comptime {
     assert(scratch_length >= codec.frame_scratch_max);
     assert(@sizeOf(Client) <= 2 * 1024);
     assert(@sizeOf(Server) <= 2 * 1024);
+}
+
+test "reqresp typed reserved sinks keep full control waves and exclude bulk" {
+    var requests = try ReqResp.init(std.testing.allocator, .{ .forks = &.{}, .inbound_max = 4, .inbound_control_reserved = 2, .inbound_per_peer_max = 4 });
+    defer requests.deinit();
+    try std.testing.expectEqual(2 * protocol_mod.requestMaxAll() + 2 * protocol_mod.requestMaxControl(), requests.request_sinks.len);
+    try std.testing.expectEqual(@as(?u16, 2), requests.availableInboundFor(.blocks_by_range_v2));
+    for (0..4) |i| {
+        const index = requests.availableInboundFor(.ping_v1).?;
+        try std.testing.expectEqual(@as(u16, @intCast(i)), index);
+        requests.inbound[index].state = .receiving_request;
+        requests.inbound[index].protocol = .ping_v1;
+    }
+    try std.testing.expectEqual(@as(?u16, null), requests.availableInboundFor(.ping_v1));
+    requests.inbound[0].state = .free;
+    try std.testing.expectEqual(@as(?u16, null), requests.availableInboundFor(.blocks_by_range_v2));
+    try std.testing.expectEqual(@as(?u16, 0), requests.availableInboundFor(.ping_v1));
 }

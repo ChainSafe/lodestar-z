@@ -27,12 +27,12 @@ fn publish(value: *const Snapshot) void {
     std.Io.Threaded.mutexUnlock(&mutex);
 }
 fn capture(runtime: *const Runtime, cell: *const incoming.Cell) Snapshot {
-    return .{ .nativeOwned = cell.native, .copying = cell.copying, .quiescent = runtime.quiescent, .acknowledged = cell.ack != null and cell.ack.? == .sent, .requestBytes = cell.input.len, .responseBytes = cell.response.len, .reservedBytes = cell.reservation, .nativeInbound = if (runtime.heavy) |heavy| heavy.core.core.service.reqresp.inner.active().inbound else 0 };
+    return .{ .nativeOwned = cell.native, .copying = cell.copying, .quiescent = runtime.quiescent, .acknowledged = cell.ack != null and cell.ack.? == .sent, .requestBytes = cell.input.len, .responseBytes = cell.response.len, .reservedBytes = cell.reservation, .nativeInbound = if (runtime.heavy) |heavy| heavy.core.core.service.reqresp.active().inbound else 0 };
 }
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     if (comptime !faults.enabled) return;
-    try exports.setNamedProperty("networkTestIncoming", try env.createFunction("networkTestIncoming", 0, get, null));
-    try exports.setNamedProperty("networkTestIncomingRelease", try env.createFunction("networkTestIncomingRelease", 0, release, null));
+    try @import("network_js.zig").put(exports, "networkTestIncoming", try env.createFunction("networkTestIncoming", 0, get, null));
+    try @import("network_js.zig").put(exports, "networkTestIncomingRelease", try env.createFunction("networkTestIncomingRelease", 0, release, null));
 }
 fn get(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     std.Io.Threaded.mutexLock(&mutex);
@@ -40,7 +40,7 @@ fn get(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     std.Io.Threaded.mutexUnlock(&mutex);
     const object = try env.createObject();
     inline for (@typeInfo(Snapshot).@"struct".fields) |field| {
-        try object.setNamedProperty(field.name ++ "\x00", if (field.type == bool) try env.getBoolean(@field(value, field.name)) else try env.createDouble(@floatFromInt(@field(value, field.name))));
+        try @import("network_js.zig").put(object, field.name ++ "\x00", if (field.type == bool) try env.getBoolean(@field(value, field.name)) else try env.createDouble(@floatFromInt(@field(value, field.name))));
     }
     return object;
 }
@@ -53,7 +53,7 @@ pub fn turnLocked(runtime: *Runtime, now: @import("network").Now) void {
     if (runtime.test_scenario == .incoming_observe) {
         for (runtime.incoming.?.cells) |*cell| {
             if (cell.state != .response_native) continue;
-            const native = &runtime.heavy.?.core.core.service.reqresp.inner.inbound[cell.handle.index];
+            const native = &runtime.heavy.?.core.core.service.reqresp.inbound[cell.handle.index];
             std.debug.assert(std.meta.eql(native.handle(cell.handle.index), cell.handle));
             var value = capture(runtime, cell);
             value.nativeBorrowed = native.pending_ssz.ptr == cell.response.ptr and native.pending_ssz.len == cell.response.len;
@@ -71,7 +71,7 @@ pub fn turnLocked(runtime: *Runtime, now: @import("network").Now) void {
         runtime.test_scenario = .none;
         runtime.pingLocked();
     } else {
-        const value: Snapshot = .{ .nativeInbound = runtime.heavy.?.core.core.service.reqresp.inner.active().inbound };
+        const value: Snapshot = .{ .nativeInbound = runtime.heavy.?.core.core.service.reqresp.active().inbound };
         publish(&value);
     }
 }

@@ -8,7 +8,7 @@ test "engine notifications deliver a later close during sustained earlier stream
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
     const victim = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now, pair.nextEntropy());
-    pair.server.driverView().failSend(victim.index);
+    pair.server.failSend(victim.index);
     var one: [1]engine.Event = undefined;
     var delivered = false;
     for (0..8) |turn| {
@@ -30,7 +30,7 @@ test "engine notifications deliver a later close during sustained earlier stream
                 else => return error.UnexpectedEvent,
             }
             try pair.pump();
-            pair.server.driverView().releaseReported();
+            pair.server.releaseReported();
         }
         if (turn >= 1) try std.testing.expect(delivered);
     }
@@ -49,12 +49,12 @@ test "engine notifications deliver later native activity during sustained earlie
     newcomer.entropy = 100;
     const pending_dial = try newcomer.dial();
     var bytes: [1452]u8 = undefined;
-    const initial = newcomer.client.driverView().sendOne(pending_dial.index, newcomer.now, &bytes).?;
+    const initial = newcomer.client.sendOne(pending_dial.index, newcomer.now, &bytes).?;
     var saved_initial: [1452]u8 = undefined;
     @memcpy(saved_initial[0..initial.bytes.len], initial.bytes);
     const source = engine.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4003 } };
     var response: [1452]u8 = undefined;
-    const victim = pair.server.driverView().receive(bytes[0..initial.bytes.len], &source, pair.now, pair.nextPool(), &response).accepted;
+    const victim = pair.server.receive(bytes[0..initial.bytes.len], &source, pair.now, pair.nextPool(), &response).accepted;
     try std.testing.expect(victim.index != handles.server.index);
     pair.drop_to_address = source;
     const stream = try pair.client.openStream(handles.client);
@@ -63,8 +63,8 @@ test "engine notifications deliver later native activity during sustained earlie
     for (0..32) |turn| {
         _ = try pair.client.write(stream, "x", false);
         try pair.pump();
-        try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().takeActivity(&.{}));
-        try std.testing.expectEqual(@as(usize, 1), pair.server.driverView().takeActivity(&activity));
+        try std.testing.expectEqual(@as(usize, 0), pair.server.takeActivity(&.{}));
+        try std.testing.expectEqual(@as(usize, 1), pair.server.takeActivity(&activity));
         if (std.meta.eql(activity[0], victim)) {
             try std.testing.expect(!delivered);
             delivered = true;
@@ -73,12 +73,12 @@ test "engine notifications deliver later native activity during sustained earlie
     }
     try std.testing.expect(!pair.server.registry.activity[victim.index]);
     try std.testing.expect(pair.server.abandon(victim));
-    _ = pair.server.driverView().takeActivity(&activity);
-    try std.testing.expect(!pair.server.driverView().activityPending());
-    const replacement = pair.server.driverView().receive(saved_initial[0..initial.bytes.len], &source, pair.now, pair.nextPool(), &response).accepted;
+    _ = pair.server.takeActivity(&activity);
+    try std.testing.expect(!pair.server.activityPending());
+    const replacement = pair.server.receive(saved_initial[0..initial.bytes.len], &source, pair.now, pair.nextPool(), &response).accepted;
     try std.testing.expectEqual(victim.index, replacement.index);
     try std.testing.expect(victim.generation != replacement.generation);
-    try std.testing.expectEqual(@as(usize, 1), pair.server.driverView().takeActivity(&activity));
+    try std.testing.expectEqual(@as(usize, 1), pair.server.takeActivity(&activity));
     try std.testing.expectEqual(replacement, activity[0]);
 }
 
@@ -139,31 +139,31 @@ test "engine notifications preserve generations through active swaps retirement 
     var owners: [3]engine.Handle = undefined;
     for (&owners) |*owner| {
         owner.* = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now, pair.nextEntropy());
-        pair.server.driverView().failSend(owner.index);
+        pair.server.failSend(owner.index);
     }
     var one: [1]engine.Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), pair.server.pollEvents(&.{}));
     try std.testing.expect(pair.server.eventsPending());
     try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
     _ = try support.expectClosed(one[0], owners[0], .outbound, null);
-    pair.server.driverView().releaseReported();
+    pair.server.releaseReported();
     try std.testing.expectEqual(owners[2].index, pair.server.registry.active[1]);
     const replacement = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now, pair.nextEntropy());
     try std.testing.expectEqual(owners[0].index, replacement.index);
     try std.testing.expect(replacement.generation != owners[0].generation);
-    pair.server.driverView().failSend(replacement.index);
+    pair.server.failSend(replacement.index);
     const expected = [_]engine.Handle{ owners[1], owners[2], replacement };
     for (expected) |owner| {
         try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
         _ = try support.expectClosed(one[0], owner, .outbound, null);
-        pair.server.driverView().releaseReported();
+        pair.server.releaseReported();
     }
     try std.testing.expectEqual(@as(u16, 1), pair.server.registry.active_len);
     try std.testing.expectEqual(@as(usize, 0), pair.server.pollEvents(&one));
     var activity: [4]engine.Handle = undefined;
-    const count = pair.server.driverView().takeActivity(&activity);
+    const count = pair.server.takeActivity(&activity);
     for (activity[0..count]) |owner| try std.testing.expectEqual(@as(u16, 0), owner.index);
-    try std.testing.expect(!pair.server.driverView().activityPending());
+    try std.testing.expect(!pair.server.activityPending());
 }
 
 test "engine notifications preserve lifecycle order across one-event polls" {
@@ -172,7 +172,7 @@ test "engine notifications preserve lifecycle order across one-event polls" {
     defer pair.deinit();
     const client = try pair.dial();
     try pair.pump();
-    const server = pair.server.driverView().sendOwner(0).?;
+    const server = pair.server.sendOwner(0).?;
     const rebound = engine.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4003 } };
     pair.client_source = rebound;
     const outgoing = try pair.client.openStream(client);
@@ -188,11 +188,11 @@ test "engine notifications preserve lifecycle order across one-event polls" {
     try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
     const incoming = try support.expectStreamOpened(one[0], server);
     pair.server.closeStream(incoming, 1);
-    pair.server.driverView().failSend(server.index);
+    pair.server.failSend(server.index);
     try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
     _ = try support.expectStreamClosed(one[0], incoming);
     try std.testing.expectEqual(@as(usize, 1), pair.server.pollEvents(&one));
     _ = try support.expectClosed(one[0], server, .inbound, &pair.client_ctx);
-    pair.server.driverView().releaseReported();
+    pair.server.releaseReported();
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.active_len);
 }

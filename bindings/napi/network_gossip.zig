@@ -2,7 +2,7 @@ const std = @import("std");
 const n = @import("network");
 const native = n.gossipsub;
 const Runtime = @import("network_runtime.zig").Runtime;
-const Budget = @import("network_incoming.zig").Budget;
+const Budget = @import("network_budget.zig").Budget;
 const assert = std.debug.assert;
 pub const batch_max = 64;
 pub const batch_bytes = 16 * 1024 * 1024;
@@ -94,7 +94,7 @@ pub const Table = struct {
         assert(len <= payload_max);
         const amount = try std.math.mul(usize, len, 2);
         var selected: ?Token = null;
-        for (self.cells, 0..) |cell, i| {
+        for (self.cells, 0..) |*cell, i| {
             if (cell.state != .free or cell.generation == std.math.maxInt(u64)) continue;
             selected = .{ .index = @intCast(i), .generation = cell.generation + 1 };
             break;
@@ -132,9 +132,6 @@ pub const Table = struct {
         self.releaseBytes(amount);
         self.diag.publicationBytes -= amount;
     }
-    pub fn allocate(self: *Table, token: Token, input: []const u8) !void {
-        self.install(token, try self.backing.dupe(u8, input));
-    }
     pub fn install(self: *Table, token: Token, copy: []u8) void {
         const cell = self.get(token).?;
         assert(cell.state == .capturing and cell.reservation == copy.len * 2);
@@ -157,7 +154,7 @@ pub const Table = struct {
     pub fn oldest(self: *const Table) ?Token {
         var selected: ?Token = null;
         var order: u64 = std.math.maxInt(u64);
-        for (self.cells, 0..) |cell, i| {
+        for (self.cells, 0..) |*cell, i| {
             if (cell.state != .queued or cell.retired) continue;
             if (selected == null or cell.order < order) {
                 selected = .{ .index = @intCast(i), .generation = cell.generation };
@@ -234,7 +231,7 @@ pub const Table = struct {
     }
     pub fn waitLimit(self: *const Table, now: u64, limit: u64) u64 {
         var result = limit;
-        for (self.cells) |cell| {
+        for (self.cells) |*cell| {
             if (cell.retired or cell.state == .free or cell.state == .capturing) continue;
             if (cell.state == .verdict_pending) return 0;
             result = @min(result, cell.deadline -| now);
@@ -243,7 +240,7 @@ pub const Table = struct {
     }
     pub fn snapshot(self: *const Table) Diagnostics {
         var result = self.diag;
-        for (self.cells) |cell| {
+        for (self.cells) |*cell| {
             result.queued += @intFromBool(cell.state == .queued and !cell.retired);
             result.pendingVerdicts += @intFromBool(cell.state == .verdict_pending);
             result.payloadBytes += cell.input.len;

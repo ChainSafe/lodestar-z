@@ -98,8 +98,8 @@ pub const HandshakeAuthdataArgs = struct {
     enr: []const u8,
 };
 
-/// Unmasks and validates the framing. The result borrows `raw` for the ciphertext and `scratch`
-/// for the header, and both stay valid until the next decode into that scratch.
+/// Input must not overlap scratch. The result borrows raw and scratch until either is reused.
+/// Every call may overwrite scratch, including calls that fail.
 pub fn decode(
     raw: []const u8,
     recipient_id: *const types.NodeId,
@@ -123,25 +123,24 @@ pub fn decode(
     const message_offset = constants.masking_iv_size + header_size;
     if (message_offset > raw.len) return Error.InvalidPacket;
 
-    var header: [constants.header_size_max]u8 = undefined;
+    const header = &scratch.header;
     @memcpy(header[0..header_size], raw[constants.masking_iv_size..message_offset]);
     aesCtr(recipient_id[0..constants.masking_iv_size], &masking_iv, header[0..header_size]);
     const authdata = header[constants.static_header_size..header_size];
     const ciphertext = raw[message_offset..];
     try validateForm(static_header.flag, authdata, ciphertext.len, raw.len);
 
-    @memcpy(scratch.header[0..header_size], header[0..header_size]);
-    const stable_authdata = scratch.header[constants.static_header_size..header_size];
     return .{
         .masking_iv = masking_iv,
         .header = scratch.header[0..header_size],
         .static_header = static_header,
         .ciphertext = ciphertext,
-        .form = parseForm(static_header.flag, stable_authdata),
+        .form = parseForm(static_header.flag, authdata),
     };
 }
 
-/// Returns plaintext that borrows `scratch` and is overwritten by the next call.
+/// Packet storage must not overlap scratch. Only success publishes authenticated plaintext.
+/// Every call may overwrite scratch and invalidates previously returned plaintext.
 pub fn decrypt(
     packet: *const Packet,
     read_key: *const [16]u8,
@@ -159,18 +158,17 @@ pub fn decrypt(
     @memcpy(associated_data[constants.masking_iv_size..], packet.header);
     const ciphertext = packet.ciphertext[0..plaintext_length];
     const tag = packet.ciphertext[plaintext_length..][0..constants.gcm_tag_size].*;
-    var plaintext: [constants.ordinary_plaintext_size_max]u8 = undefined;
-    defer std.crypto.secureZero(u8, &plaintext);
+    const plaintext = scratch.plaintext[0..plaintext_length];
+    errdefer std.crypto.secureZero(u8, plaintext);
     Aes128Gcm.decrypt(
-        plaintext[0..plaintext_length],
+        plaintext,
         ciphertext,
         tag,
         associated_data,
         packet.static_header.nonce,
         read_key.*,
     ) catch return Error.DecryptionFailed;
-    @memcpy(scratch.plaintext[0..plaintext_length], plaintext[0..plaintext_length]);
-    return scratch.plaintext[0..plaintext_length];
+    return plaintext;
 }
 
 pub fn encodeOrdinary(out: []u8, args: OrdinaryArgs) Error![]u8 {

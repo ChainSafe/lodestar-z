@@ -178,10 +178,7 @@ pub const History = struct {
     free: u32 = 0,
     count: usize = 0,
 
-    pub fn init(a: Allocator, capacity: usize) !History {
-        return initCapacity(a, capacity, @import("peer_book.zig").capacity);
-    }
-    pub fn initCapacity(a: Allocator, capacity: usize, retained: u16) !History {
+    pub fn init(a: Allocator, capacity: usize, retained: u16) !History {
         if (retained == 0 or retained > @import("peer_book.zig").capacity) return error.InvalidLimits;
         if (capacity == 0 or capacity > 65536) return error.InvalidLimits;
         const entries = try a.alloc(HistoryEntry, capacity);
@@ -370,7 +367,7 @@ test "gossip seen TTL applies to duplicate only traffic" {
 test "gossip history indexed replacement keeps FIFO age and independent TX retention" {
     var store = try storage.Store.init(std.testing.allocator, 4, 16384);
     defer store.deinit(std.testing.allocator);
-    var history = try History.init(std.testing.allocator, 2);
+    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap);
     defer history.deinit(std.testing.allocator);
     const a = [_]u8{1} ** 20;
     const b = [_]u8{2} ** 20;
@@ -412,7 +409,7 @@ test "gossip ID index repairs a full admitted collision cluster" {
 }
 
 test "gossip policy recovery permits more than sixteen distinct recipients" {
-    var history = try History.init(std.testing.allocator, 2);
+    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap);
     defer history.deinit(std.testing.allocator);
     const slot: u32 = 0;
     for (0..32) |i| {
@@ -431,7 +428,7 @@ test "gossip history entries keep peer generations outside message rows" {
 }
 
 test "gossip history stale peer cannot restore retransmission allowance" {
-    var history = try History.init(std.testing.allocator, 2);
+    var history = try History.init(std.testing.allocator, 2, constants.retained_peers_cap);
     defer history.deinit(std.testing.allocator);
     const slot: u32 = 0;
     const current: PeerRef = .{ .index = 0, .generation = (@as(u64, 1) << 40) + 2 };
@@ -447,7 +444,7 @@ test "gossip history stale peer cannot restore retransmission allowance" {
 test "gossip history replacement resets message retransmission counts" {
     var store = try storage.Store.init(std.testing.allocator, 4, 16384);
     defer store.deinit(std.testing.allocator);
-    var history = try History.init(std.testing.allocator, 1);
+    var history = try History.init(std.testing.allocator, 1, constants.retained_peers_cap);
     defer history.deinit(std.testing.allocator);
     const id: MessageId = @splat(1);
     const first = store.put(id, "t", "first").?;
@@ -465,7 +462,7 @@ test "gossip history replacement resets message retransmission counts" {
 }
 
 test "gossip history canonical identity replacement clears only its bounded peer column" {
-    var history = try History.init(std.testing.allocator, 3);
+    var history = try History.init(std.testing.allocator, 3, constants.retained_peers_cap);
     defer history.deinit(std.testing.allocator);
     const peer: PeerRef = .{ .index = 0, .generation = (@as(u64, 1) << 40) + 1 };
     const other: PeerRef = .{ .index = 1, .generation = 1 };
@@ -494,7 +491,7 @@ test "gossip history canonical identity replacement clears only its bounded peer
 }
 
 test "history resolved retained capacity bounds counters and stale peers" {
-    var history = try History.initCapacity(std.testing.allocator, 2, 4);
+    var history = try History.init(std.testing.allocator, 2, 4);
     defer history.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 4), history.generations.len);
     try std.testing.expectEqual(@as(usize, 8), history.counts.len);
@@ -507,7 +504,7 @@ test "gossip failed admission preserves history pinned by transmit queues" {
     const a = std.testing.allocator;
     var store = try storage.Store.init(a, 3, storage.page_bytes * 2);
     defer store.deinit(a);
-    var history = try History.initCapacity(a, 2, 2);
+    var history = try History.init(a, 2, 2);
     defer history.deinit(a);
     var handles: [2]storage.Handle = undefined;
     for (&handles, 0..) |*handle, i| {
@@ -533,7 +530,7 @@ test "gossip history emits three windows and defers arrivals during a cycle" {
     const a = std.testing.allocator;
     var store = try storage.Store.init(a, 3, 3 * storage.page_bytes);
     defer store.deinit(a);
-    var history = try History.initCapacity(a, 3, 2);
+    var history = try History.init(a, 3, 2);
     defer history.deinit(a);
     const first = store.put(@splat(1), "topic", "first").?;
     history.put(&store, first, 0);

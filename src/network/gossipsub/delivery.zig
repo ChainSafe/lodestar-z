@@ -63,11 +63,7 @@ pub const Pool = struct {
         return peers * per_peer_reserve + @min(peers * (per_peer_limit - per_peer_reserve), @max(per_peer_limit - per_peer_reserve, validations * constants.mesh_d));
     }
 
-    pub fn init(a: std.mem.Allocator, peers: usize, validations: usize) !Pool {
-        return initCapacity(a, peers, capacity(peers, validations));
-    }
-
-    pub fn initCapacity(a: std.mem.Allocator, peers: usize, count: usize) !Pool {
+    pub fn init(a: std.mem.Allocator, peers: usize, count: usize) !Pool {
         assert(peers > 0 and peers <= constants.peers_cap);
         assert(count >= peers * per_peer_reserve and count <= peers * per_peer_limit);
         const slots = try a.alloc(Slot, count);
@@ -176,7 +172,7 @@ pub const Queue = struct {
 
 test "gossip shared deliveries preserve every peer reserve under global pressure" {
     const a = std.testing.allocator;
-    var pool = try Pool.init(a, 3, 1);
+    var pool = try Pool.init(a, 3, Pool.capacity(3, 1));
     defer pool.deinit(a);
     var store = try storage.Store.init(a, 1, storage.page_bytes);
     defer store.deinit(a);
@@ -204,7 +200,7 @@ test "gossip shared deliveries preserve every peer reserve under global pressure
 
 test "gossip delivery byte refusal acquires no descriptor or payload retain" {
     const a = std.testing.allocator;
-    var pool = try Pool.init(a, 1, 1);
+    var pool = try Pool.init(a, 1, Pool.capacity(1, 1));
     defer pool.deinit(a);
     var store = try storage.Store.init(a, 1, storage.page_bytes);
     defer store.deinit(a);

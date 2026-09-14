@@ -2,14 +2,11 @@ const std = @import("std");
 const engine_mod = @import("engine.zig");
 const keys = @import("../wire/keys.zig");
 const support = @import("../test_support.zig");
-const tls = @import("../tls/context.zig");
 
-const Engine = engine_mod.Engine;
 const Event = engine_mod.Event;
 const Pair = support.Pair;
 const client_address = support.client_address;
 const server_address = support.server_address;
-const now_unix = support.now_unix;
 const connectPair = support.connectPair;
 const expectConnected = support.expectConnected;
 const expectClosed = support.expectClosed;
@@ -155,13 +152,9 @@ test "engine rejects a forged certificate with tls_failed" {
     const server_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{2}));
     const other = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{9}));
     const server_public = server_key.publicKey();
-    const forged_ctx = try tls.Context.initWith(&server_public, &other, now_unix, [_]u8{7} ** 8);
-    pair.server.deinit();
-    pair.server = try Engine.init(std.testing.allocator, .{
-        .tls = forged_ctx,
-        .local = .{ server_address, null },
-        .seed = 0,
-    });
+    const context = &pair.server.tls;
+    try @import("../tls/test_support.zig").forgeHostSignature(&context.certificate, &server_public, &other);
+    try std.testing.expectEqual(@as(c_int, 1), @import("binding.zig").c.SSL_CTX_use_certificate(context.ssl_ctx, context.certificate.x509));
 
     const handle = try pair.dial();
     try pair.pump();
@@ -232,11 +225,11 @@ test "engine reclaims slots across many connection lifetimes" {
         _ = pair.events(&pair.server, &storage);
     }
 
-    try std.testing.expectEqual(@as(usize, 1), pair.client.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 1), pair.client.activeIndices().len);
     _ = pair.events(&pair.client, &storage);
     _ = pair.events(&pair.server, &storage);
-    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().activeIndices().len);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
     for (pair.client.registry.slots) |*slot| try std.testing.expect(slot.conn == null);
@@ -254,7 +247,7 @@ test "engine abandon frees a closed slot whose event was never reported" {
     try std.testing.expect(pair.client.eventsPending());
 
     try std.testing.expect(pair.client.abandon(handles.client));
-    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
     try std.testing.expect(!pair.client.eventsPending());
 
     var storage: [8]Event = undefined;
@@ -275,11 +268,11 @@ test "engine abandon frees a closed slot after its event was reported" {
     const events = pair.events(&pair.client, &storage);
     try std.testing.expectEqual(@as(usize, 1), events.len);
     _ = try expectClosed(events[0], handles.client, .outbound, &pair.server_ctx);
-    try std.testing.expectEqual(@as(usize, 1), pair.client.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 1), pair.client.activeIndices().len);
     try std.testing.expect(!pair.client.eventsPending());
 
     try std.testing.expect(pair.client.abandon(handles.client));
-    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
     try std.testing.expect(!pair.client.abandon(handles.client));
     try std.testing.expect(pair.client.peerId(handles.client) == null);
 }
@@ -311,7 +304,7 @@ test "engine polling twice keeps handles from the first call valid" {
     try std.testing.expectEqualStrings("one", buffer[0..final.len]);
     try std.testing.expect(pair.server.peerId(handles.server) != null);
 
-    pair.server.driverView().releaseReported();
+    pair.server.releaseReported();
     try std.testing.expect(pair.server.peerId(handles.server) == null);
     try std.testing.expectError(error.StaleHandle, pair.server.read(inbound, &buffer));
 }
@@ -332,10 +325,10 @@ test "engine abandon frees a dialing slot without an event" {
     defer pair.deinit();
 
     const handle = try pair.dial();
-    try std.testing.expectEqual(@as(usize, 1), pair.client.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 1), pair.client.activeIndices().len);
 
     try std.testing.expect(pair.client.abandon(handle));
-    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
     try std.testing.expect(!pair.client.abandon(handle));
 
     var storage: [8]Event = undefined;

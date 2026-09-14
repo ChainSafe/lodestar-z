@@ -8,20 +8,17 @@ pub const constants = @import("constants.zig");
 pub const protobuf = @import("protobuf.zig");
 pub const topic_policy = @import("topic_policy.zig");
 pub const topic = @import("topic.zig");
-pub const topics = @import("topics.zig");
 pub const mcache = @import("mcache.zig");
 pub const sessions = @import("sessions.zig");
 pub const frame = @import("frame.zig");
 pub const score = @import("score.zig");
 pub const gossipsub = @import("gossipsub.zig");
 pub const session_driver = @import("session_driver.zig");
-pub const Handler = session_driver.Driver;
-pub const service = @import("service.zig");
+pub const Driver = session_driver.Driver;
 
 pub const Gossipsub = gossipsub.Gossipsub;
 pub const Options = gossipsub.Options;
 pub const Event = gossipsub.Event;
-pub const Service = service.Service;
 pub const MessageId = gossipsub.MessageId;
 pub const ValidationHandle = gossipsub.ValidationHandle;
 pub const ReportOutcome = gossipsub.ReportOutcome;
@@ -29,6 +26,9 @@ pub const Verdict = gossipsub.Verdict;
 pub const ResourceSnapshot = gossipsub.ResourceSnapshot;
 
 test {
+    _ = @import("owner_messages_test.zig");
+    _ = @import("owner_policy_test.zig");
+    _ = @import("owner_resources_test.zig");
     _ = @import("resource_test.zig");
     _ = diagnostics;
     _ = @import("local_intent_test.zig");
@@ -47,13 +47,11 @@ test {
     _ = constants;
     _ = protobuf;
     _ = topic;
-    _ = topics;
     _ = mcache;
     _ = sessions;
     _ = frame;
     _ = score;
     _ = gossipsub;
-    _ = service;
     _ = session_driver;
     _ = @import("gossipsub_test.zig");
     _ = @import("publication_test.zig");

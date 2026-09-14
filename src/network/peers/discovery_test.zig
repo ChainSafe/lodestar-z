@@ -311,13 +311,13 @@ test "peer discovery consumes actual response and expiry alongside failure befor
         const response = progress.event == .response;
         if (response) {
             progress.failure = error.DestinationUnreachable;
-            progress.failure_stage = .maintenance;
+            progress.failure_stage = .process;
         }
         const consumed = controller.consume(&progress, expiries[0..progress.calls_expired], &output);
         if (response) {
             try std.testing.expectEqual(error.DestinationUnreachable, consumed.failure.?);
-            try std.testing.expectEqual(d.Driver.FailureStage.maintenance, consumed.failure_stage);
-            try std.testing.expectEqual(@as(u64, 1), controller.counters.maintenance_failures);
+            try std.testing.expectEqual(d.Driver.FailureStage.process, consumed.failure_stage);
+            try std.testing.expectEqual(@as(u64, 1), controller.counters.processing_failures);
             try std.testing.expectEqual(@as(usize, 1), consumed.candidates);
             candidate = output[0];
             break;

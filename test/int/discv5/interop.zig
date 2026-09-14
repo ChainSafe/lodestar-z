@@ -20,7 +20,7 @@ pub fn main(init: std.process.Init) !void {
     if (address != .ip4 or address.ip4.octets[0] != 127) return error.NonLoopbackEndpoint;
     const peer = discv5.types.Endpoint{ .node_id = remote.node_id, .address = address };
 
-    var udp = try discv5.Udp.bind(io, try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0"));
+    var udp = try discv5.Udp.bind(io, .{ .ip4 = .loopback(0) });
     defer udp.close(io);
     var key = try discv5.identity.crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
     defer std.crypto.secureZero(u8, std.mem.asBytes(&key));

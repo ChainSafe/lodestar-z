@@ -120,11 +120,7 @@ pub const PeerScore = struct {
         return count * (@sizeOf(PeerState) + constants.topics_cap * @sizeOf(TopicCounters));
     }
 
-    pub fn init(allocator: Allocator, params: Params) (Allocator.Error || error{InvalidLimits})!PeerScore {
-        return initCapacity(allocator, params, peer_capacity);
-    }
-
-    pub fn initCapacity(allocator: Allocator, params: Params, count: u16) (Allocator.Error || error{InvalidLimits})!PeerScore {
+    pub fn init(allocator: Allocator, params: Params, count: u16) (Allocator.Error || error{InvalidLimits})!PeerScore {
         if (count == 0 or count > peer_capacity) return error.InvalidLimits;
         try validateParams(params);
         const cells = @as(usize, count) * constants.topics_cap;
@@ -474,7 +470,7 @@ fn decayed(value: f64, decay: f64, intervals: u64, zero: f64) f64 {
 }
 
 fn testScores(a: Allocator, params: Params, count: u16) !PeerScore {
-    const scores = try PeerScore.initCapacity(a, params, count);
+    const scores = try PeerScore.init(a, params, count);
     for (scores.rows) |*row| row.connected = true;
     return scores;
 }

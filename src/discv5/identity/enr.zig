@@ -146,13 +146,21 @@ pub const Record = struct {
     }
 
     pub fn endpointFor(self: *const Record, mode: @import("udp").Mode) ?types.Address {
-        if (mode != .ip6) if (self.ip4) |ip| if (self.udp) |port| {
-            return .{ .ip4 = .{ .octets = ip, .port = port } };
-        };
-        if (mode != .ip4) if (self.ip6) |ip| if (self.udp6 orelse self.udp) |port| {
-            return .{ .ip6 = .{ .octets = ip, .port = port } };
+        for (self.endpoints()) |candidate| if (candidate) |address| {
+            if (mode.supports(address) and address.isUsable()) return address;
         };
         return null;
+    }
+
+    pub fn endpoints(self: *const Record) [2]?types.Address {
+        var result: [2]?types.Address = .{ null, null };
+        if (self.ip4) |ip| if (self.udp) |port| {
+            result[0] = .{ .ip4 = .{ .octets = ip, .port = port } };
+        };
+        if (self.ip6) |ip| if (self.udp6 orelse self.udp) |port| {
+            result[1] = .{ .ip6 = .{ .octets = ip, .port = port } };
+        };
+        return result;
     }
 };
 

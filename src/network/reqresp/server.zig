@@ -177,9 +177,9 @@ pub const Server = struct {
                     slot.io.decoder.payload()
                 else
                     &.{};
-                if (owner.policy) |*policy| {
+                if (owner.admission) |*admission| {
                     owner.counters.inspected +|= 1;
-                    const inspected = policy.inspect(slot.protocol, payload, slot.request_fork) catch {
+                    const inspected = admission.policy.inspect(slot.protocol, payload, slot.request_fork) catch {
                         owner.counters.malformed +|= 1;
                         _ = takeAdmission(owner, engine, slot, 1, now);
                         Server.rejectRequest(owner, slot, now);
@@ -216,7 +216,7 @@ pub const Server = struct {
 
     fn takeAdmission(owner: *ReqResp, engine: *Engine, slot: *Server, cost: u128, now: Now) bool {
         const identity = engine.peerId(slot.conn) orelse return false;
-        const decision = owner.admission.?.take(&identity, slot.protocol, cost, slot.request_fork, now.mono_ms);
+        const decision = owner.admission.?.limiter.take(&identity, slot.protocol, cost, slot.request_fork, now.mono_ms);
         switch (decision) {
             .allowed => {
                 owner.counters.charged_work +|= cost;
@@ -367,7 +367,6 @@ pub const Server = struct {
         engine: *Engine,
         stream: StreamHandle,
         ready: routing.Selection,
-        request_sink: []u8,
         now: Now,
     ) AcceptError!RequestHandle {
         try owner.attach(engine);
@@ -379,12 +378,13 @@ pub const Server = struct {
             else => return error.UnknownProtocol,
         };
         const bounds = which.info();
-        if (request_sink.len < bounds.request_max) return error.SinkTooSmall;
         if (owner.inboundCount(stream.conn, null) >= owner.options.inbound_per_peer_max) {
             return error.PeerSlotsExhausted;
         }
         const index = owner.availableInboundFor(which) orelse return error.SlotsExhausted;
         const slot = &owner.inbound[index];
+        const request_sink = owner.inboundSink(index);
+        assert(request_sink.len >= bounds.request_max);
         if (!which.isControl() and owner.options.inbound_application_per_peer_max > 0 and
             owner.inboundApplicationCount(stream.conn) >= owner.options.inbound_application_per_peer_max)
             return error.PeerSlotsExhausted;

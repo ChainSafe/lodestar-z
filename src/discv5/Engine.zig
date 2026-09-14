@@ -36,14 +36,8 @@ pub const StartResult = struct {
     packet_length: u16,
 };
 
-pub const RevalidationStart = struct {
-    peer: types.Endpoint,
-    call: StartResult,
-};
-
 pub const TickResult = struct {
     calls: usize,
-    maintenance_calls: usize,
     challenges: usize,
     sessions: usize,
 };
@@ -210,61 +204,13 @@ pub fn startCall(
 ) Error!StartResult {
     if (!std.mem.eql(u8, &peer.node_id, &remote_record.node_id))
         return Error.InvalidRemoteRecord;
-    return self.beginCall(
-        out,
-        peer,
-        &remote_record.public_key,
-        request,
-        now_ms,
-        entropy,
-        .caller,
-    );
-}
-
-/// Sends a PING to the incumbent that the routing table wants checked, if there is one. The
-/// result never reaches the host.
-pub fn startRevalidation(
-    self: *Engine,
-    out: []u8,
-    request_id: message.RequestId,
-    now_ms: u64,
-    entropy: *const StartEntropy,
-) Error!?RevalidationStart {
-    const target = self.routing.revalidationTarget() orelse return null;
-    const request = message.Message{ .ping = .{
-        .request_id = request_id,
-        .enr_sequence = self.channel.local_record.sequence,
-    } };
-    const call = try self.beginCall(
-        out,
-        target.peer,
-        &target.record.public_key,
-        &request,
-        now_ms,
-        entropy,
-        .routing_revalidation,
-    );
-    return .{ .peer = target.peer, .call = call };
-}
-
-fn beginCall(
-    self: *Engine,
-    out: []u8,
-    peer: types.Endpoint,
-    remote_public_key: *const [33]u8,
-    request: *const message.Message,
-    now_ms: u64,
-    entropy: *const StartEntropy,
-    owner: CallTable.Owner,
-) Error!StartResult {
     const deadline_ms = try deadline(now_ms, self.config.request_timeout_ms);
     const handle = self.calls.begin(
         peer,
-        remote_public_key,
+        &remote_record.public_key,
         request,
         deadline_ms,
         try self.channel.requestCapacity(peer),
-        owner,
     ) catch |err| switch (err) {
         // The request would fit an established session but not a handshake packet.
         CallTable.Error.RequestTooLarge => return if (self.channel.hasSession(peer))
@@ -394,37 +340,16 @@ fn process(
     };
 }
 
-/// Expires calls, challenges, and sessions. Caller-owned expiries are compacted to the front
-/// of `expired_calls`, and maintenance expiries are resolved here.
+/// Expires calls, challenges, and sessions. Every call expiry is returned to its host owner.
 pub fn tick(
     self: *Engine,
     now_ms: u64,
     expired_calls: []CallTable.Expired,
 ) TickResult {
     const expired_count = self.calls.expire(now_ms, expired_calls);
-    var caller_count: usize = 0;
-    var maintenance_count: usize = 0;
-    for (expired_calls[0..expired_count]) |expired| switch (expired.owner) {
-        .caller => {
-            expired_calls[caller_count] = expired;
-            caller_count += 1;
-        },
-        .routing_revalidation => {
-            _ = self.routing.resolveRevalidation(
-                &expired.peer.node_id,
-                false,
-                now_ms,
-            ) catch |err| switch (err) {
-                RoutingTable.Error.NoPendingRevalidation => {},
-                else => unreachable,
-            };
-            maintenance_count += 1;
-        },
-    };
     const expired = self.channel.expire(now_ms);
     return .{
-        .calls = caller_count,
-        .maintenance_calls = maintenance_count,
+        .calls = expired_count,
         .challenges = expired.challenges,
         .sessions = expired.sessions,
     };
@@ -458,10 +383,6 @@ pub fn closestNodes(
     out: []RoutingTable.Entry,
 ) []RoutingTable.Entry {
     return self.routing.closest(target, out);
-}
-
-pub fn hasPendingRevalidation(self: *const Engine) bool {
-    return self.routing.revalidationTarget() != null;
 }
 
 fn receiveAuthenticated(
@@ -520,15 +441,14 @@ fn recoverCall(
         args.now_ms,
     )) orelse return Error.UnexpectedChallenge;
     const peer = self.calls.endpoint(handle) orelse unreachable;
-    const owner = self.calls.callOwner(handle) orelse unreachable;
     const packet_length = self.recoverAcceptedCall(out, handle, peer, whoareyou, args) catch |err| {
         const cancelled = self.calls.cancel(handle);
         std.debug.assert(cancelled);
-        return .{ .accepted = .{ .event = if (owner == .caller) .{ .failed = .{
+        return .{ .accepted = .{ .event = .{ .failed = .{
             .handle = handle,
             .peer = peer,
             .reason = err,
-        } } else .none } };
+        } } } };
     };
     return .{ .accepted = .{ .packet_length = packet_length } };
 }
@@ -609,11 +529,6 @@ fn dispatchResponse(
         scratch.node_ids[0..parsed_records.len],
         nonce,
     );
-    if (match_result.owner == .routing_revalidation) {
-        std.debug.assert(match_result.matched.terminal);
-        std.debug.assert(match_result.matched.response == .pong);
-        return .none;
-    }
     var matched = match_result.matched;
     const node_records = if (parsed_records.len == 0)
         parsed_records

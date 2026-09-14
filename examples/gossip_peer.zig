@@ -108,7 +108,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     };
     var node: network.Transport = .{};
     const key = keys.KeyPair.generate(io);
-    try node.init(allocator, io, .{ .host = &key, .bind = bind });
+    try node.init(allocator, io, .{ .host = &key, .bind = .single(bind) });
     defer node.deinit(io);
 
     var gossip_seed: [8]u8 = undefined;
@@ -120,7 +120,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         .forks = &.{},
     } });
     defer service.deinit();
-    defer service.reqresp.shutdown(&service.router, &node.engine);
+    defer service.reqresp.shutdown(&node.engine, &service.router);
     const conn = try node.dial(io, &target);
 
     var events: [16]engine_mod.Event = undefined;
@@ -135,9 +135,10 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     var steps: u32 = 0;
     while (steps < steps_max and received < options.blocks) : (steps += 1) {
         const now = try network.driver.currentTime(io);
-        const due = service.nextWakeup(now, request_events.len, gossip_events.len);
+        const due = service.nextWakeup(now, .{ .control = request_events.len, .gossipsub = gossip_events.len });
         const wait_ms: u32 = @intCast(@min(network.constants.poll_interval_ms, if (due) |deadline| deadline -| now.mono_ms else network.constants.poll_interval_ms));
-        const result = try node.step(io, &events, &activity, .{ .wait_max_ms = wait_ms });
+        const stepped = node.step(io, &events, &activity, .{ .wait_max_ms = wait_ms });
+        const result = stepped.progress;
         for (events[0..result.events]) |event| switch (event) {
             .connected => |c| {
                 var text: [peer_id.text_length_max]u8 = undefined;
@@ -155,28 +156,29 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             else => {},
         };
         if (!subscribed and beacon_block.len > 0) {
-            _ = service.gossipsub.subscribe(beacon_block);
+            _ = service.gossipsub.inner.subscribe(beacon_block);
             subscribed = true;
         }
         const transport_events = events[0..result.events];
-        const counts = service.process(&node.engine, transport_events, activity[0..result.activity], result.now, &request_events, &gossip_events);
-        try serveRequests(&service, request_events[0..counts.reqresp], result.now);
+        const counts = service.process(&node.engine, transport_events, activity[0..result.activity], result.now, .{ .control = &request_events, .gossipsub = &gossip_events });
+        try serveRequests(&service, request_events[0..counts.control], result.now);
         for (gossip_events[0..counts.gossipsub]) |event| switch (event) {
             .message => |m| {
                 printBlock(allocator, m.bytes, fork) catch |err| {
                     std.debug.print("decode failed: {s}\n", .{@errorName(err)});
                 };
-                _ = service.gossipsub.report(m.handle, .ignore, result.now);
+                _ = service.gossipsub.inner.report(m.handle, .ignore, result.now);
                 received += 1;
             },
             .subscription_change => |change| {
                 std.debug.print("peer subscribed={} {s}\n", .{ change.subscribed, change.topic });
             },
         };
+        if (stepped.failure) |err| return err;
     }
     if (received == 0) return error.NoBlock;
     _ = node.engine.close(conn, 0);
-    _ = try node.step(io, &events, &activity, .{});
+    if (node.step(io, &events, &activity, .{}).failure) |err| return err;
 }
 
 fn serveRequests(service: *Service, events: []const network.reqresp.Event, now: network.Now) !void {

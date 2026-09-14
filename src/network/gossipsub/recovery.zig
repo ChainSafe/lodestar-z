@@ -254,7 +254,7 @@ pub const Recovery = struct {
 
 test "recovery receipts bind connection generation and token and release only cancelled pins" {
     const allocator = std.testing.allocator;
-    var peers = try Peers.initCapacity(allocator, 10_000, 2, 1);
+    var peers = try Peers.init(allocator, &.{ .retained_score_ms = 10_000, .retained_capacity = 2, .retained_outbound_reserve = 1 });
     defer peers.deinit(allocator);
     var recovery = try Recovery.init(allocator);
     defer recovery.deinit(allocator, &peers);
@@ -290,7 +290,7 @@ test "recovery receipts bind connection generation and token and release only ca
 
 test "recovery capacity resolves every matching attribution and deinit releases remaining pins" {
     const allocator = std.testing.allocator;
-    var peers = try Peers.initCapacity(allocator, 10_000, 2, 1);
+    var peers = try Peers.init(allocator, &.{ .retained_score_ms = 10_000, .retained_capacity = 2, .retained_outbound_reserve = 1 });
     defer peers.deinit(allocator);
     const connection: Handle = .{ .index = 0, .generation = 1 };
     const metadata: @import("peer_book.zig").Metadata = .{
@@ -314,7 +314,7 @@ test "recovery capacity resolves every matching attribution and deinit releases 
 
 test "recovery metrics distinguish incoming delivery from queued and locally resolved requests" {
     const allocator = std.testing.allocator;
-    var peers = try Peers.initCapacity(allocator, 10_000, 2, 1);
+    var peers = try Peers.init(allocator, &.{ .retained_score_ms = 10_000, .retained_capacity = 2, .retained_outbound_reserve = 1 });
     defer peers.deinit(allocator);
     var recovery = try Recovery.init(allocator);
     defer recovery.deinit(allocator, &peers);
@@ -352,7 +352,7 @@ test "recovery metrics distinguish incoming delivery from queued and locally res
 
 test "recovery batches pin identity once and score one randomly selected promise" {
     const a = std.testing.allocator;
-    var peers = try Peers.initCapacity(a, 10000, 2, 1);
+    var peers = try Peers.init(a, &.{ .retained_score_ms = 10000, .retained_capacity = 2, .retained_outbound_reserve = 1 });
     defer peers.deinit(a);
     var recovery = try Recovery.init(a);
     defer recovery.deinit(a, &peers);

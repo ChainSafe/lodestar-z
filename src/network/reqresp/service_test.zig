@@ -3,103 +3,24 @@ const ct = @import("consensus_types");
 const limiter = @import("limiter.zig");
 const protocol = @import("protocol.zig");
 const reqresp = @import("reqresp.zig");
-const service = @import("service.zig");
 const engine_mod = @import("../quic/engine.zig");
-const support = @import("../test_support.zig");
-const harness = @import("reqresp_test.zig");
+const harness = @import("test_pair.zig");
 
 const Event = reqresp.Event;
 const Protocol = protocol.Protocol;
-const Service = service.Service;
-const deneb_digest = harness.deneb_digest;
-const fulu_digest = harness.fulu_digest;
 const statusBytes = harness.statusBytes;
 
-const forks = [_]reqresp.ForkEntry{
-    .{ .digest = deneb_digest, .fork = .deneb },
-    .{ .digest = fulu_digest, .fork = .fulu },
-};
+const Pair = harness.Pair;
 
-const ServicePair = struct {
-    pair: support.Pair = .{},
-    client: Service = undefined,
-    server: Service = undefined,
-    handles: struct { client: engine_mod.Handle, server: engine_mod.Handle } = undefined,
-    sinks: []u8 = &.{},
-    client_events: [16]Event = undefined,
-    client_count: usize = 0,
-    server_events: [16]Event = undefined,
-    server_count: usize = 0,
-
-    fn options(quotas: ?limiter.Quotas) service.Options {
-        return .{ .reqresp = .{
-            .outbound_max = 4,
-            .inbound_max = 4,
-            .inbound_per_peer_max = 4,
-            .progress_timeout_ms = 10_000,
-            .forks = &forks,
-            .quotas = quotas,
-        } };
-    }
-
-    fn init(self: *ServicePair, quotas: ?limiter.Quotas) !void {
-        try self.pair.init(.{}, .{});
-        errdefer self.pair.deinit();
-        self.client = try Service.init(std.testing.allocator, options(quotas));
-        errdefer self.client.deinit();
-        self.server = try Service.init(std.testing.allocator, options(quotas));
-        errdefer self.server.deinit();
-        self.sinks = try std.testing.allocator.alloc(u8, 4 * protocol.requestMaxAll());
-        const handles = try support.connectPair(&self.pair);
-        self.handles = .{ .client = handles.client, .server = handles.server };
-    }
-
-    fn deinit(self: *ServicePair) void {
-        self.client.shutdown(&self.pair.client);
-        self.server.shutdown(&self.pair.server);
-        std.testing.allocator.free(self.sinks);
-        self.server.deinit();
-        self.client.deinit();
-        self.pair.deinit();
-    }
-
-    fn sink(self: *ServicePair, index: usize) []u8 {
-        const size = protocol.requestMaxAll();
-        return self.sinks[index * size ..][0..size];
-    }
-
-    fn pumpOnce(self: *ServicePair) !void {
-        try self.pair.pump();
-        const now = self.pair.now;
-        var server_storage: [16]engine_mod.Event = undefined;
-        const server_ev = self.pair.events(&self.pair.server, &server_storage);
-        var activity: [128]engine_mod.Handle = undefined;
-        const server_active = self.pair.server.driverView().takeActivity(&activity);
-        self.server_count = self.server.process(&self.pair.server, server_ev, activity[0..server_active], now, &self.server_events);
-        var client_storage: [16]engine_mod.Event = undefined;
-        const client_ev = self.pair.events(&self.pair.client, &client_storage);
-        const client_active = self.pair.client.driverView().takeActivity(&activity);
-        self.client_count = self.client.process(&self.pair.client, client_ev, activity[0..client_active], now, &self.client_events);
-        try self.pair.pump();
-    }
-
-    fn clientEvents(self: *const ServicePair) []const Event {
-        return self.client_events[0..self.client_count];
-    }
-
-    fn serverEvents(self: *const ServicePair) []const Event {
-        return self.server_events[0..self.server_count];
-    }
-};
-
-fn roundTrip(setup: *ServicePair, seed: u8) !void {
+fn roundTrip(setup: *Pair, seed: u8) !void {
     const request_ssz = statusBytes(seed);
+    var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
     _ = try setup.client.request(
         &setup.pair.client,
         setup.handles.client,
         .status_v1,
         &request_ssz,
-        setup.sink(0),
+        &sink,
         .{},
         setup.pair.now,
     );
@@ -111,15 +32,15 @@ fn roundTrip(setup: *ServicePair, seed: u8) !void {
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
                 try std.testing.expectEqual(Protocol.status_v1, incoming.protocol);
-                try setup.server.handler.respond(incoming.request, &reply, null, setup.pair.now);
+                try setup.server.reqresp.respond(incoming.request, &reply, null, setup.pair.now);
             },
-            .chunk_sent => |sent| try std.testing.expect(setup.server.handler.finish(sent.request, setup.pair.now)),
+            .chunk_sent => |sent| try std.testing.expect(setup.server.reqresp.finish(sent.request, setup.pair.now)),
             else => {},
         };
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &reply, chunk.bytes);
-                try std.testing.expect(setup.client.handler.consume(chunk.request, setup.pair.now));
+                try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now));
             },
             .done => done = true,
             .failed => return error.TestUnexpectedResult,
@@ -130,40 +51,41 @@ fn roundTrip(setup: *ServicePair, seed: u8) !void {
 }
 
 test "service round trips a status request through the collapsed host loop" {
-    var setup: ServicePair = .{};
-    try setup.init(null);
+    var setup: Pair = .{};
+    try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
     defer setup.deinit();
 
     try roundTrip(&setup, 5);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.handler.active().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.handler.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.reqresp.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
 }
 
 test "service reclaims inbound sinks across more requests than it has slots" {
     var quotas = limiter.defaultQuotas();
     quotas[@intFromEnum(Protocol.status_v1)] = .{ .tokens = 1_000, .period_ms = 1_000 };
-    var setup: ServicePair = .{};
-    try setup.init(quotas);
+    var setup: Pair = .{};
+    try setup.init(.{ .outbound_max = 4, .inbound_max = 4, .quotas = quotas }, .{ .outbound_max = 4, .inbound_max = 4, .quotas = quotas });
     defer setup.deinit();
 
     var seed: u8 = 0;
     while (seed < 12) : (seed += 1) try roundTrip(&setup, seed);
-    try std.testing.expectEqual(@as(u64, 12), setup.server.handler.counters().requests_served);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.handler.active().inbound);
+    try std.testing.expectEqual(@as(u64, 12), setup.server.reqresp.counters.requests_served);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
 }
 
 test "service fails in-flight requests when the connection closes" {
-    var setup: ServicePair = .{};
-    try setup.init(null);
+    var setup: Pair = .{};
+    try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
     defer setup.deinit();
 
     const request_ssz = statusBytes(1);
+    var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
     _ = try setup.client.request(
         &setup.pair.client,
         setup.handles.client,
         .status_v1,
         &request_ssz,
-        setup.sink(0),
+        &sink,
         .{},
         setup.pair.now,
     );
@@ -192,29 +114,30 @@ test "service fails in-flight requests when the connection closes" {
     }
     try std.testing.expect(client_failed);
     try std.testing.expect(server_failed);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.handler.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
 }
 
-test "service wakeup includes earlier Router negotiation and cancels before Router service" {
-    var setup: ServicePair = .{};
-    try setup.init(null);
+test "service control wakeup includes earlier Router negotiation after application quiescence" {
+    var setup: Pair = .{};
+    try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
     defer setup.deinit();
+    setup.client.quiesceApplications();
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
     const handle = try setup.client.request(&setup.pair.client, setup.handles.client, .ping_v1, &bytes, &sink, .{ .progress_timeout_ms = 60_000 }, setup.pair.now);
-    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &.{});
-    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms + 10_000), setup.client.nextWakeup(setup.pair.now, 0));
-    try std.testing.expect(setup.client.handler.cancel(handle));
-    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &.{});
-    try std.testing.expectEqual(@as(?u64, null), setup.client.nextWakeup(setup.pair.now, 0));
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &.{} }).control;
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms + 10_000), setup.client.nextWakeup(setup.pair.now, .{ .control = 0 }));
+    try std.testing.expect(setup.client.reqresp.cancel(handle));
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &.{} }).control;
+    try std.testing.expectEqual(@as(?u64, null), setup.client.nextWakeup(setup.pair.now, .{ .control = 0 }));
     var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &events));
+    try std.testing.expectEqual(@as(usize, 1), setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &events }).control);
     try std.testing.expect(events[0].failed.reason == .cancelled);
 }
 
 test "service preserves drained native activity across a partial request sweep" {
-    var setup: ServicePair = .{};
-    try setup.init(null);
+    var setup: Pair = .{};
+    try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
     defer setup.deinit();
     const bytes = [_]u8{9} ** 8;
     var sink: [8]u8 = undefined;
@@ -228,23 +151,23 @@ test "service preserves drained native activity across a partial request sweep" 
         if (incoming != null) break;
     }
     try std.testing.expect(incoming != null);
-    const stream = setup.server.handler.inner.inbound[incoming.?.index].stream;
-    setup.client.handler.inner.options.work_per_pump_max = 1;
-    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &.{});
+    const stream = setup.server.reqresp.inbound[incoming.?.index].stream;
+    setup.client.reqresp.options.work_per_pump_max = 1;
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &.{} }).control;
     const codec = @import("codec.zig");
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
     try std.testing.expectEqual(encoded.len, try setup.pair.server.write(stream, encoded, false));
     try setup.pair.pump();
     var activity: [128]engine_mod.Handle = undefined;
-    const active = setup.pair.client.driverView().takeActivity(&activity);
+    const active = setup.pair.client.takeActivity(&activity);
     try std.testing.expect(active > 0);
     var events: [1]Event = undefined;
-    _ = setup.client.process(&setup.pair.client, &.{}, activity[0..active], setup.pair.now, &events);
+    _ = setup.client.process(&setup.pair.client, &.{}, activity[0..active], setup.pair.now, .{ .control = &events }).control;
     var received = false;
     for (0..10) |_| {
-        try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.client.nextWakeup(setup.pair.now, 1));
-        const count = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, &events);
+        try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.client.nextWakeup(setup.pair.now, .{ .control = 1 }));
+        const count = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &events }).control;
         if (count == 1) {
             try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
             received = true;
