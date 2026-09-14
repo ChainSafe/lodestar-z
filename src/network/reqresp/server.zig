@@ -13,8 +13,6 @@ const protocol = @import("protocol.zig");
 const Protocol = protocol.Protocol;
 const Now = types.Now;
 const routing = @import("../router.zig");
-const RequestOptions = reqresp.RequestOptions;
-const RequestError = reqresp.RequestError;
 const AcceptError = reqresp.AcceptError;
 const RespondError = reqresp.RespondError;
 
@@ -322,8 +320,6 @@ pub const Server = struct {
             slot.progress_ms = now.mono_ms;
             return;
         }
-        slot.pending_ssz = &.{};
-        slot.io.writer = undefined;
         slot.state = .chunk_sent;
         slot.progress_ms = now.mono_ms;
         slot.pending_event = .{ .chunk_sent = .{

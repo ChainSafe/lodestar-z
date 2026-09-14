@@ -4,7 +4,7 @@
 //! `CallTable`, `RoutingTable`, `ResponsePlan`, and `Udp`, which depend on nothing but those
 //! three. `Channel` builds on the session store, `Engine` on the channel and the tables, `Lookup`
 //! on the engine, and `Driver` and `lookup_driver` on everything beneath them. Each file imports
-//! only layers below it. The design is described in docs/architecture/discv5.md.
+//! only layers below it.
 
 pub const CallTable = @import("CallTable.zig");
 pub const Channel = @import("Channel.zig");
