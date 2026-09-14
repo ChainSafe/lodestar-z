@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
-import {resolve} from "node:path";
-import {pathToFileURL} from "node:url";
 import {boundedLines} from "./bounded_lines.mjs";
 import {encodePayload, messageId, payload, readPayload, sendFragments, summary} from "./codec.mjs";
 import {readEmptyRequest} from "./managed_control.mjs";
 import {stockPackages} from "./stock_packages.mjs";
 
-const {load, version} = stockPackages(process.argv[2]);
+const {load, version, responseDecoder} = stockPackages(process.argv[2]);
 const {createLibp2p} = await load("libp2p");
 const {quic} = await load("@chainsafe/libp2p-quic");
 const {privateKeyFromRaw} = await load("@libp2p/crypto/keys");
@@ -209,9 +207,7 @@ for await (const line of boundedLines(process.stdin)) {
     } else if (command.op === "request") {
       command.address ??= multiaddr(Buffer.from(command.addressBytes, "hex")).toString();
       assert(/^\/ip4\/127\.0\.0\.1\/udp\/[0-9]+\/quic-v1\/p2p\/[A-Za-z0-9]+$/.test(command.address));
-      const {responseDecode} = await import(
-        pathToFileURL(resolve(process.argv[2], "packages/reqresp/lib/encoders/responseDecode.js")).href
-      );
+      const {responseDecode} = await responseDecoder();
       const stream = await node.dialProtocol(multiaddr(command.address), blockProtocol, {
         signal: AbortSignal.timeout(5000),
       });

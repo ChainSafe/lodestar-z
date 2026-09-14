@@ -88,6 +88,7 @@
     "@libp2p/ping": "3.1.13",
     "@lodestar/config": "^1.39.1",
     "@lodestar/era": "^1.39.1",
+    "@lodestar/reqresp": "1.46.0",
     "@lodestar/state-transition": "^1.39.1",
     "@lodestar/types": "^1.39.1",
     "@multiformats/multiaddr": "13.0.3",
