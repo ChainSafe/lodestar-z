@@ -38,11 +38,7 @@ pub const Limiter = struct {
     global_quotas: Quotas,
     global: [Protocol.count]Bucket,
 
-    pub fn init(allocator: std.mem.Allocator, peers: u16, quotas: ?Quotas) InitError!Limiter {
-        return initWithGlobal(allocator, peers, quotas, null);
-    }
-
-    pub fn initWithGlobal(
+    pub fn init(
         allocator: std.mem.Allocator,
         peers: u16,
         quotas: ?Quotas,

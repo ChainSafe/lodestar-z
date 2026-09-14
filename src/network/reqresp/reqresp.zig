@@ -11,7 +11,6 @@ const limits = @import("../quic/limits.zig");
 const negotiate = @import("../negotiate.zig");
 const Client = @import("client.zig").Client;
 const Server = @import("server.zig").Server;
-const RequestIO = @import("request_io.zig").RequestIO;
 const routing = @import("../router.zig");
 const types = @import("../types.zig");
 
@@ -368,7 +367,7 @@ pub const ReqResp = struct {
         for (inbound) |*slot| cursor = assignBuffers(slot, arena, cursor);
         assert(cursor == arena.len);
 
-        var buckets = try limiter_mod.Limiter.initWithGlobal(
+        var buckets = try limiter_mod.Limiter.init(
             allocator,
             options.peers,
             quotas.peer,

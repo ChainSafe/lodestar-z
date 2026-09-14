@@ -16,8 +16,6 @@ const Now = types.Now;
 const routing = @import("../router.zig");
 const RequestOptions = reqresp.RequestOptions;
 const RequestError = reqresp.RequestError;
-const AcceptError = reqresp.AcceptError;
-const RespondError = reqresp.RespondError;
 
 const ReqResp = reqresp.ReqResp;
 const RequestHandle = reqresp.RequestHandle;

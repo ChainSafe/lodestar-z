@@ -66,7 +66,7 @@ test "limiter joint quotas reject atomically and generation reuse resets only pe
     quotas[@intFromEnum(Protocol.ping_v1)] = .{ .tokens = 2, .period_ms = 10_000 };
     var global = quotas;
     global[@intFromEnum(Protocol.ping_v1)].tokens = 1;
-    var buckets = try Limiter.initWithGlobal(std.testing.allocator, 2, quotas, global);
+    var buckets = try Limiter.init(std.testing.allocator, 2, quotas, global);
     defer buckets.deinit(std.testing.allocator);
     const a = @import("../quic/api.zig").Handle{ .index = 0, .generation = 1 };
     const b = @import("../quic/api.zig").Handle{ .index = 1, .generation = 1 };
@@ -85,19 +85,19 @@ test "limiter joint quotas reject atomically and generation reuse resets only pe
 }
 
 test "limiter rejects invalid capacities and quota policy" {
-    try std.testing.expectError(error.InvalidOptions, Limiter.init(std.testing.allocator, 1025, null));
-    try std.testing.expectError(error.InvalidOptions, Limiter.init(std.testing.allocator, 0, null));
+    try std.testing.expectError(error.InvalidOptions, Limiter.init(std.testing.allocator, 1025, null, null));
+    try std.testing.expectError(error.InvalidOptions, Limiter.init(std.testing.allocator, 0, null, null));
     var quotas = limiter.defaultQuotas();
     quotas[0].tokens = 0;
-    try std.testing.expectError(error.InvalidQuota, Limiter.init(std.testing.allocator, 1, quotas));
+    try std.testing.expectError(error.InvalidQuota, Limiter.init(std.testing.allocator, 1, quotas, null));
     quotas[0] = .{ .tokens = 1, .period_ms = 0 };
-    try std.testing.expectError(error.InvalidQuota, Limiter.init(std.testing.allocator, 1, quotas));
+    try std.testing.expectError(error.InvalidQuota, Limiter.init(std.testing.allocator, 1, quotas, null));
 }
 
 fn peerLimiter(peers: u16, quotas: ?limiter.Quotas) !Limiter {
     var global = limiter.defaultQuotas();
     for (&global) |*quota| quota.tokens = 1_000_000;
-    var buckets = try Limiter.initWithGlobal(std.testing.allocator, peers, quotas, global);
+    var buckets = try Limiter.init(std.testing.allocator, peers, quotas, global);
     for (0..peers) |index| buckets.bind(.{ .index = @intCast(index), .generation = 1 }, 0);
     return buckets;
 }
@@ -107,7 +107,7 @@ test "limiter peer rejection preserves aggregate credit and wide refill saturate
     quotas[0] = .{ .tokens = 1, .period_ms = 1000 };
     var aggregate = quotas;
     aggregate[0].tokens = 2;
-    var buckets = try Limiter.initWithGlobal(std.testing.allocator, 2, quotas, aggregate);
+    var buckets = try Limiter.init(std.testing.allocator, 2, quotas, aggregate);
     defer buckets.deinit(std.testing.allocator);
     const a = @import("../quic/api.zig").Handle{ .index = 0, .generation = 1 };
     const b = @import("../quic/api.zig").Handle{ .index = 1, .generation = 1 };
@@ -117,7 +117,7 @@ test "limiter peer rejection preserves aggregate credit and wide refill saturate
     try std.testing.expect(!buckets.take(a, .status_v1, 1, 0));
     try std.testing.expect(buckets.take(b, .status_v1, 1, 0));
     quotas[0] = .{ .tokens = std.math.maxInt(u32), .period_ms = std.math.maxInt(u64) };
-    var wide = try Limiter.init(std.testing.allocator, 1, quotas);
+    var wide = try Limiter.init(std.testing.allocator, 1, quotas, null);
     defer wide.deinit(std.testing.allocator);
     wide.bind(a, 0);
     try std.testing.expect(wide.take(a, .status_v1, std.math.maxInt(u32), 0));

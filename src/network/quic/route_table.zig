@@ -101,20 +101,6 @@ pub const RouteTable = struct {
         }
     }
 
-    pub fn removeAll(self: *RouteTable, index: u16) void {
-        assert(self.count <= self.entries.len);
-        var position: usize = 0;
-        while (position < self.entries.len) {
-            const entry = &self.entries[position];
-            if (entry.used and entry.index == index) {
-                self.evict(position);
-                continue;
-            }
-            position += 1;
-        }
-        assert(self.count <= self.entries.len);
-    }
-
     fn evict(self: *RouteTable, at: usize) void {
         assert(self.entries[at].used);
         assert(self.count > 0);

@@ -29,7 +29,7 @@ test "route table inserts, finds, and removes routes" {
     table.remove(&first, 7);
     try std.testing.expectEqual(@as(?u16, null), table.find(&first));
     try std.testing.expectEqual(@as(?u16, 7), table.find(&second));
-    table.removeAll(7);
+    table.remove(&second, 7);
     try std.testing.expectEqual(@as(?u16, null), table.find(&second));
     try std.testing.expectEqual(@as(usize, 0), table.count);
 }
@@ -53,7 +53,7 @@ test "route table keeps colliding routes findable across removals" {
         const expected: ?u16 = if (value % 2 == 0) null else value / 2;
         try std.testing.expectEqual(expected, table.find(&cidFor(value)));
     }
-    table.removeAll(3);
+    table.remove(&cidFor(7), 3);
     try std.testing.expectEqual(@as(?u16, null), table.find(&cidFor(7)));
     try std.testing.expectEqual(@as(?u16, 4), table.find(&cidFor(9)));
 }
@@ -65,7 +65,8 @@ test "route table refuses inserts past half its capacity" {
     try table.insert(&cidFor(1), 0);
     try table.insert(&cidFor(2), 0);
     try std.testing.expectError(error.Full, table.insert(&cidFor(3), 0));
-    table.removeAll(0);
+    table.remove(&cidFor(1), 0);
+    table.remove(&cidFor(2), 0);
     try table.insert(&cidFor(3), 0);
     try std.testing.expectEqual(@as(?u16, 0), table.find(&cidFor(3)));
     try std.testing.expectEqual(@as(?u16, null), table.find(&Cid{}));

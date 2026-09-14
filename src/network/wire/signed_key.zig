@@ -1,4 +1,3 @@
-const std = @import("std");
 const keys = @import("keys.zig");
 
 pub const prefix = "libp2p-tls-handshake:";
