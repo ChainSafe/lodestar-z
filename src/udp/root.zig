@@ -51,13 +51,6 @@ pub const Sockets = struct {
         return result;
     }
 
-    /// Takes ownership of a socket created by the same Io provider used for I/O and close.
-    pub fn init(socket: net.Socket) Sockets {
-        var result: Sockets = .{};
-        result.values[index(socket.address)] = socket;
-        return result;
-    }
-
     pub fn close(self: *const Sockets, io: std.Io) void {
         for (self.values) |socket| if (socket) |value| value.close(io);
     }
