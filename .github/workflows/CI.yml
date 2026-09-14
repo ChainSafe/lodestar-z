@@ -111,6 +111,7 @@ jobs:
           cmake --version
           zig build test:network_wire
           zig build test:network
+          zig build test:network_runtime
           zig build check:network-tools
 
       - name: Build benchmarks
@@ -144,6 +145,47 @@ jobs:
           node --test test/interop/*.test.mjs
           pnpm test:network-interop
           pnpm test:network-managed-interop
+
+  network-bindings-lifecycle:
+    name: Network bindings lifecycle (${{ matrix.preset }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [mainnet, minimal]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install pinned stock fixture
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          node --test test/interop/stock_packages.test.mjs
+      - name: Build instrumented bindings and independent native peer
+        run: |
+          zig build test:network_runtime -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
+          zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -Dnetwork_runtime_options.network_runtime_test_failures=true
+          zig build build-exe:network_interop_peer -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
+      - name: Run lifecycle and loopback binding suites
+        env:
+          NODE_OPTIONS: --expose-gc
+          LODESTAR_Z_NETWORK_TEST_FAILURES: "1"
+          LODESTAR_Z_NETWORK_STOCK_HOST: installed
+          LODESTAR_Z_NETWORK_NATIVE_PEER: ${{ github.workspace }}/zig-out/bin/network_interop_peer
+        run: |
+          pnpm exec vitest run bindings/test/network*.test.ts --reporter=default --reporter=json --outputFile=network-binding-results.json
+          node test/interop/check_network_binding_results.mjs network-binding-results.json
 
   discv5-interop:
     name: DiscV5 geth interoperability
