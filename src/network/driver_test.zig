@@ -116,7 +116,7 @@ test "driver counts a hostile oversized datagram and keeps stepping" {
     defer stranger.close(std.testing.io);
 
     const oversized = [_]u8{0x5a} ** 2_000;
-    const destination = udp_mod.toNetwork(node.transport.udp.localAddress(), node.transport.udp.family);
+    const destination = udp_mod.toNetwork(node.transport.udp.localAddress());
     try stranger.send(std.testing.io, &destination, &oversized);
 
     var events: [4]engine_mod.Event = undefined;
@@ -147,7 +147,7 @@ test "driver keeps batching past a counted receive error" {
     defer stranger.close(std.testing.io);
 
     const oversized = [_]u8{0x5a} ** 2_000;
-    const destination = udp_mod.toNetwork(node.transport.udp.localAddress(), node.transport.udp.family);
+    const destination = udp_mod.toNetwork(node.transport.udp.localAddress());
     var sent: usize = 0;
     while (sent < 3) : (sent += 1) try stranger.send(std.testing.io, &destination, &oversized);
 
@@ -164,8 +164,8 @@ test "driver surfaces a send failure to an unreachable destination" {
     try node.init(4);
     defer node.deinit();
 
-    const unreachable_peer = types.Address{ .ip6 = .{
-        .octets = [_]u8{0} ** 15 ++ [_]u8{1},
+    const unreachable_peer = types.Address{ .ip4 = .{
+        .octets = @splat(255),
         .port = 4_001,
     } };
     const now = try driver_mod.currentTime(std.testing.io);
@@ -337,7 +337,7 @@ test "driver serves busy connections fairly under one aggregate send allowance" 
     node.transport.engine.limits.send_per_step_max = 1;
     node.transport.engine.limits.work_per_step_max = 4;
     const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-    var sink = try udp_mod.Udp.bind(std.testing.io, loopback);
+    var sink = try udp_mod.Udp.bind(std.testing.io, .single(loopback));
     defer sink.close(std.testing.io);
     const destination = sink.localAddress();
     const now = try driver_mod.currentTime(std.testing.io);
@@ -415,8 +415,8 @@ test "driver isolates a failing destination from a healthy ready batch owner" {
     var sink = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sink.close(std.testing.io);
     const healthy_address = sink.localAddress();
-    const failing_address = types.Address{ .ip6 = .{
-        .octets = [_]u8{0} ** 15 ++ [_]u8{1},
+    const failing_address = types.Address{ .ip4 = .{
+        .octets = @splat(255),
         .port = 4001,
     } };
     const now = try driver_mod.currentTime(std.testing.io);
@@ -583,7 +583,7 @@ test "driver progress failure retains real send receive work and exactly one lif
     _ = try node.transport.engine.dial(&destination, node.transport.peerId(), now, @splat(36));
     const failed = try node.transport.engine.dial(&destination, node.transport.peerId(), now, @splat(37));
     node.transport.engine.driverView().failSend(failed.index);
-    try sink.socket.send(std.testing.io, &node.transport.udp.socket.address, "invalid");
+    try sink.sockets.primary().send(std.testing.io, &node.transport.udp.sockets.primary().address, "invalid");
     var vtable = std.testing.io.vtable.*;
     vtable.batchAwaitConcurrent = ProgressFault.receive;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
@@ -663,7 +663,7 @@ test "driver progress counts admitted datagram when the following clock read fai
     var node: Node = .{};
     try node.init(40);
     defer node.deinit();
-    try node.transport.udp.socket.send(std.testing.io, &node.transport.udp.socket.address, "invalid");
+    try node.transport.udp.sockets.primary().send(std.testing.io, &node.transport.udp.sockets.primary().address, "invalid");
     var vtable = std.testing.io.vtable.*;
     vtable.now = AdmissionClockFault.clock;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };

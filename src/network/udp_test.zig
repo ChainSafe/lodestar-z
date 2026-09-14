@@ -12,9 +12,9 @@ fn oneSecond() std.Io.Timeout {
 
 test "UDP admits one mutable datagram at a time" {
     const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-    var receiver = try udp_mod.Udp.bind(std.testing.io, loopback);
+    var receiver = try udp_mod.Udp.bind(std.testing.io, .single(loopback));
     defer receiver.close(std.testing.io);
-    var sender = try udp_mod.Udp.bind(std.testing.io, loopback);
+    var sender = try udp_mod.Udp.bind(std.testing.io, .single(loopback));
     defer sender.close(std.testing.io);
     try std.testing.expect(receiver.localAddress().port() != 0);
 
@@ -33,7 +33,7 @@ test "UDP admits one mutable datagram at a time" {
     var raw_sender = try loopback.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer raw_sender.close(std.testing.io);
     const oversized = [_]u8{0x55} ** (constants.datagram_size_max + 1);
-    const destination = udp_mod.toNetwork(receiver.localAddress(), receiver.family);
+    const destination = udp_mod.toNetwork(receiver.localAddress());
     try raw_sender.send(std.testing.io, &destination, &oversized);
     try std.testing.expectError(error.DatagramTooLarge, receiver.receiveTimeout(std.testing.io, oneSecond()));
 
@@ -50,7 +50,7 @@ test "UDP admits one mutable datagram at a time" {
 
 test "UDP receive times out without traffic" {
     const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-    var receiver = try udp_mod.Udp.bind(std.testing.io, loopback);
+    var receiver = try udp_mod.Udp.bind(std.testing.io, .single(loopback));
     defer receiver.close(std.testing.io);
     const short = std.Io.Timeout{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } };
     try std.testing.expectError(error.Timeout, receiver.receiveTimeout(std.testing.io, short));
@@ -79,25 +79,9 @@ test "UDP address conversion normalizes mapped IPv4" {
     const address = udp_mod.fromNetwork(mapped);
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 7 }, &address.ip4.octets);
     try std.testing.expectEqual(@as(u16, 4_001), address.port());
-    const back = udp_mod.toNetwork(address, .ip4);
+    const back = udp_mod.toNetwork(address);
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 7 }, &back.ip4.bytes);
     try std.testing.expectEqual(@as(u16, 4_001), back.ip4.port);
-}
-
-test "UDP address conversion maps IPv4 destinations onto IPv6 sockets" {
-    const ip4 = types.Address{ .ip4 = .{ .octets = .{ 10, 0, 0, 7 }, .port = 4_001 } };
-    const mapped = udp_mod.toNetwork(ip4, .ip6);
-    try std.testing.expectEqualSlices(
-        u8,
-        &([_]u8{0} ** 10 ++ [_]u8{ 0xff, 0xff, 10, 0, 0, 7 }),
-        &mapped.ip6.bytes,
-    );
-    try std.testing.expectEqual(@as(u16, 4_001), mapped.ip6.port);
-    try std.testing.expectEqual(@as(u32, 0), mapped.ip6.interface.index);
-
-    const plain = udp_mod.toNetwork(ip4, .ip4);
-    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 7 }, &plain.ip4.bytes);
-    try std.testing.expectEqual(@as(u16, 4_001), plain.ip4.port);
 }
 
 test "UDP metrics count successful batch prefixes when a later send fails" {
@@ -121,4 +105,73 @@ test "UDP metrics count successful batch prefixes when a later send fails" {
     }));
     try std.testing.expectEqual(@as(u64, 1), socket.counters.sent_datagrams);
     try std.testing.expectEqual(@as(u64, 5), socket.counters.sent_bytes);
+}
+
+test "dual-stack UDP shares one receive lease and services both families fairly" {
+    var target = try udp_mod.Udp.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    defer target.close(std.testing.io);
+    const local = target.localAddresses();
+    try std.testing.expect(local[0].? == .ip4 and local[1].? == .ip6);
+    var payload = [_]u8{ 1, 2, 3 };
+    const batch = [_]types.Sent{
+        .{ .to = local[0].?, .bytes = payload[0..1] },
+        .{ .to = local[1].?, .bytes = payload[1..2] },
+        .{ .to = local[0].?, .bytes = payload[2..3] },
+    };
+    try target.sendMany(std.testing.io, &batch);
+    for ([_]u8{ 1, 2, 3 }, 0..) |expected, i| {
+        const message = try target.receiveTimeout(std.testing.io, oneSecond());
+        try std.testing.expectEqualSlices(u8, &.{expected}, message.bytes);
+        try std.testing.expectEqual(i == 1, message.from == .ip6);
+        try std.testing.expectError(error.AdmissionUnavailable, target.receiveTimeout(std.testing.io, oneSecond()));
+        try target.release(message.handle);
+    }
+    try std.testing.expectEqual(@as(u64, 3), target.counters.sent_datagrams);
+    try std.testing.expectEqual(target.counters.sent_datagrams, target.counters.received_datagrams);
+}
+
+test "dual-stack UDP binds the same wildcard port and rolls back partial binding" {
+    const bindings: udp_mod.Bindings = blk: {
+        var ipv6 = try udp_mod.Udp.bind(std.testing.io, .{ .ip6 = .{ .bytes = @splat(0), .port = 0 } });
+        defer ipv6.close(std.testing.io);
+        const port = ipv6.localAddress().port();
+        const pair: udp_mod.Bindings = .{ .dual = .{
+            .ip4 = .{ .bytes = @splat(0), .port = port },
+            .ip6 = .{ .bytes = @splat(0), .port = port },
+        } };
+        try std.testing.expectError(error.AddressInUse, udp_mod.Udp.bind(std.testing.io, pair));
+        var ipv4 = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .{ .bytes = @splat(0), .port = port } });
+        defer ipv4.close(std.testing.io);
+        break :blk pair;
+    };
+    var both = try udp_mod.Udp.bind(std.testing.io, bindings);
+    defer both.close(std.testing.io);
+    for (both.localAddresses()) |address| try std.testing.expectEqual(bindings.dual.ip4.port, address.?.port());
+}
+
+test "dual-stack UDP waits without consuming a second datagram and cancels an indefinite wait" {
+    var target = try udp_mod.Udp.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+    defer target.close(std.testing.io);
+    const Worker = struct {
+        fn send(addresses: [2]?types.Address) !void {
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
+            var sender = try udp_mod.Udp.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
+            defer sender.close(std.testing.io);
+            for (addresses) |address| try sender.send(std.testing.io, &address.?, "ready");
+        }
+        fn receive(receiver: *udp_mod.Udp) udp_mod.ReceiveTimeoutError!void {
+            _ = try receiver.receiveTimeout(std.testing.io, .none);
+        }
+    };
+    var sender = try std.testing.io.concurrent(Worker.send, .{target.localAddresses()});
+    defer _ = sender.cancel(std.testing.io) catch {};
+    for (0..2) |_| {
+        const packet = try target.receiveTimeout(std.testing.io, oneSecond());
+        try std.testing.expectEqualSlices(u8, "ready", packet.bytes);
+        try target.release(packet.handle);
+    }
+    try sender.await(std.testing.io);
+    var receiver = try std.testing.io.concurrent(Worker.receive, .{&target});
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
+    try std.testing.expectError(error.Canceled, receiver.cancel(std.testing.io));
 }

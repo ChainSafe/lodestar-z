@@ -28,6 +28,7 @@ pub const StreamError = error{
 };
 
 pub const DialError = error{
+    AddressFamilyUnsupported,
     TableFull,
     DialLimit,
     OpenFailed,

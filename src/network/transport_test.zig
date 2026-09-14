@@ -203,3 +203,47 @@ test "transport refuses to dial a multiaddr without a peer id" {
     try std.testing.expectError(error.MissingPeerId, dialer.dial(std.testing.io, &target));
     try std.testing.expectEqual(@as(usize, 0), dialer.engine.driverView().activeIndices().len);
 }
+
+test "dual-stack transport authenticates both families through one connection budget" {
+    for ([_]bool{ false, true }) |inbound| {
+        const hub_key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{101}));
+        const key4 = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{102}));
+        const key6 = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{103}));
+        const limits: engine_mod.Limits = .{ .connections_max = 2, .handshaking_max = 2, .dialing_max = 2, .outbound_max = 2 };
+        var hub: Transport = .{};
+        try hub.init(std.testing.allocator, std.testing.io, .{ .host = &hub_key, .bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } }, .limits = limits });
+        defer hub.deinit(std.testing.io);
+        var peer4: Transport = .{};
+        try peer4.init(std.testing.allocator, std.testing.io, .{ .host = &key4, .bind = .{ .ip4 = .loopback(0) }, .limits = limits });
+        defer peer4.deinit(std.testing.io);
+        var peer6: Transport = .{};
+        try peer6.init(std.testing.allocator, std.testing.io, .{ .host = &key6, .bind = .{ .ip6 = .loopback(0) }, .limits = limits });
+        defer peer6.deinit(std.testing.io);
+        const addresses = hub.udp.localAddresses();
+        if (inbound) {
+            _ = try peer4.dialPeer(std.testing.io, addresses[0].?, hub.peerId());
+            _ = try peer6.dialPeer(std.testing.io, addresses[1].?, hub.peerId());
+        } else {
+            _ = try hub.dialPeer(std.testing.io, peer4.localAddress(), peer4.peerId());
+            _ = try hub.dialPeer(std.testing.io, peer6.localAddress(), peer6.peerId());
+        }
+        var connected: [2]bool = .{ false, false };
+        var events: [8]engine_mod.Event = undefined;
+        var activity: [2]engine_mod.Handle = undefined;
+        for (0..400) |_| {
+            const result = try hub.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
+            for (events[0..result.events]) |event| if (event == .connected) {
+                const peer = hub.engine.peerAddress(event.connected.conn).?;
+                connected[if (peer == .ip4) @as(usize, 0) else 1] = true;
+            };
+            _ = try peer4.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
+            _ = try peer6.step(std.testing.io, &events, &activity, .{ .wait_max_ms = 1 });
+            if (connected[0] and connected[1]) break;
+        }
+        try std.testing.expect(connected[0] and connected[1]);
+        try std.testing.expectEqual(@as(usize, 2), hub.engine.registry.active_len);
+        try std.testing.expectEqual(@as(usize, 2), hub.engine.registry.slots.len);
+        try std.testing.expectError(error.DestinationUnreachable, peer4.dialPeer(std.testing.io, addresses[1].?, hub.peerId()));
+        if (!inbound) try std.testing.expectError(error.DialLimit, hub.dialPeer(std.testing.io, peer4.localAddress(), peer4.peerId()));
+    }
+}

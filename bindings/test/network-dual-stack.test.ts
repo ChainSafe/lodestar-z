@@ -1,0 +1,48 @@
+import {expect, it} from "vitest";
+import type {IpEndpoint} from "../src/network.js";
+import {createNativeNetworkApplicationRuntime, createNativeNetworkRuntime} from "../src/network.js";
+import {applicationConfig, discoveryConfig, networkConfig} from "./utils/network.js";
+
+const ip4: IpEndpoint = {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0};
+const ip6: IpEndpoint = {address: Uint8Array.from({length: 16}, (_, i) => Number(i === 15)), family: 6, port: 0};
+
+it.each(
+  [[], [ip4, ip4], [ip6, ip6], [ip4, ip6, ip4], Array<IpEndpoint>(2)].map((bind) => ({bind}))
+)("rejects malformed listener sets before starting an owner: %j", ({bind}) => {
+  const config = networkConfig();
+  config.bind = bind;
+  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
+  config.bind = ip4;
+  config.discovery = {...discoveryConfig().discovery, bind};
+  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow("InvalidNetworkConfig");
+});
+
+it.each(
+  [ip4, ip6, [ip4], [ip6], [ip4, ip6], [ip6, ip4]].map((bind) => ({bind}))
+)("owns and reports every configured listener: %j", async ({bind}) => {
+  const config = applicationConfig();
+  config.bind = bind;
+  const values = Array.isArray(bind) ? bind : [bind];
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  try {
+    const identity = await runtime.ready;
+    const expected = values.map((endpoint) => endpoint.family).sort();
+    expect(identity.localEndpoints.map((endpoint) => endpoint.family)).toEqual(expected);
+    for (const endpoint of identity.localEndpoints) expect(endpoint.port).toBeGreaterThan(0);
+    expect(identity.localEndpoint).toEqual(identity.localEndpoints[0]);
+    identity.localEndpoints[0].address.fill(255);
+    expect((await runtime.getIdentity()).localEndpoints[0].address).not.toEqual(identity.localEndpoints[0].address);
+  } finally {
+    await runtime.close();
+  }
+});
+
+it("rejects advertising IPv6 through IPv4-only discovery and unwinds startup", async () => {
+  const config = discoveryConfig();
+  config.bind = [ip4, ip6];
+  config.discovery.advertisement.ip6 = ip6.address;
+  config.discovery.advertisement.quic6 = 9001;
+  const runtime = createNativeNetworkRuntime(config, () => undefined);
+  await expect(runtime.ready).rejects.toThrow("InvalidAdvertisement");
+  await runtime.close();
+});

@@ -55,7 +55,7 @@ export interface NativeForkEntry {
 }
 
 export interface NativeDiscoveryConfig {
-  bind: IpEndpoint;
+  bind: IpEndpoint | readonly IpEndpoint[];
   sequenceNumber: bigint;
   bootstrapEnrs: readonly Uint8Array[];
   advertisement: AdvertisedEndpoints | null;
@@ -145,7 +145,7 @@ export interface NativeTopicBoundary {
 export interface NativeRuntimeConfig {
   profile: "small" | "beaconNode";
   identitySecretKey: Uint8Array;
-  bind: IpEndpoint;
+  bind: IpEndpoint | readonly IpEndpoint[];
   local: NativeLocalState;
   forkSchedule: NativeForkSchedule;
   requestForks: readonly NativeForkEntry[];
@@ -160,6 +160,7 @@ export interface NativeIdentity {
   session: bigint;
   peerId: Uint8Array;
   localEndpoint: IpEndpoint;
+  localEndpoints: readonly IpEndpoint[];
   localMultiaddr: Uint8Array;
   localEnr: Uint8Array | null;
   metadata: NetworkMetadata;

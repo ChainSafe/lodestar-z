@@ -42,7 +42,7 @@ pub const Pair = struct {
         self.client = Engine.init(std.testing.allocator, .{
             .tls = self.client_ctx,
             .limits = client_limits,
-            .local = client_address,
+            .local = .{ client_address, null },
             .seed = 1,
         }) catch |err| {
             self.server_ctx.deinit();
@@ -52,7 +52,7 @@ pub const Pair = struct {
         self.server = Engine.init(std.testing.allocator, .{
             .tls = self.server_ctx,
             .limits = server_limits,
-            .local = server_address,
+            .local = .{ server_address, null },
             .seed = 2,
         }) catch |err| {
             self.client.deinit();

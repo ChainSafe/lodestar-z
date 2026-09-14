@@ -56,7 +56,7 @@ const cases: readonly [string, (config: NativeRuntimeConfig) => void, string][] 
   [
     "IPv4 bytes for IPv6 endpoint",
     (c) => {
-      c.bind.family = 6;
+      Object.assign(c.bind, {family: 6});
     },
     "InvalidNetworkBytes",
   ],
@@ -70,7 +70,7 @@ const cases: readonly [string, (config: NativeRuntimeConfig) => void, string][] 
   [
     "unsafe numeric port",
     (c) => {
-      c.bind.port = Number.MAX_SAFE_INTEGER + 1;
+      Object.assign(c.bind, {port: Number.MAX_SAFE_INTEGER + 1});
     },
     "InvalidNetworkInteger",
   ],

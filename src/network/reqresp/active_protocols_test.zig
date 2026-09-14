@@ -503,7 +503,7 @@ fn changeClientIdentity(setup: *harness.ReqRespPair, seed: u8) !void {
     const replacement = Engine.init(std.testing.allocator, .{
         .tls = ctx,
         .limits = .{},
-        .local = support.client_address,
+        .local = .{ support.client_address, null },
         .seed = seed,
     }) catch |err| {
         var failed_context = ctx;

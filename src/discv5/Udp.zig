@@ -1,4 +1,4 @@
-//! A Udp adapter wraps one socket and one borrowed receive slot. The caller serializes every
+//! A Udp adapter wraps a socket set and one borrowed receive slot. The caller serializes every
 //! method and releases each datagram before receiving the next.
 
 const std = @import("std");
@@ -6,6 +6,9 @@ const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 
 const net = std.Io.net;
+const sockets_mod = @import("udp");
+pub const Bindings = sockets_mod.Bindings;
+pub const Mode = sockets_mod.Mode;
 
 pub const Handle = struct {
     generation: u64,
@@ -17,13 +20,13 @@ pub const Datagram = struct {
     bytes: []const u8,
 };
 
-pub const ReceiveError = net.Socket.ReceiveError || error{
+pub const ReceiveError = sockets_mod.ReceiveError || error{
     AdmissionUnavailable,
     DatagramTooLarge,
     GenerationExhausted,
 };
 
-pub const ReceiveTimeoutError = net.Socket.ReceiveTimeoutError || error{
+pub const ReceiveTimeoutError = sockets_mod.ReceiveError || error{
     AdmissionUnavailable,
     DatagramTooLarge,
     GenerationExhausted,
@@ -39,31 +42,30 @@ pub const SendError = net.Socket.SendError || error{
 
 const Udp = @This();
 
-socket: net.Socket,
+sockets: sockets_mod.Sockets,
 buffer: [constants.packet_size_max]u8 = undefined,
 admitted: ?u64 = null,
 next_generation: u64 = 1,
 
-pub fn bind(io: std.Io, address: net.IpAddress) net.IpAddress.BindError!Udp {
-    const socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
-    return .{ .socket = socket };
+pub fn bind(io: std.Io, addresses: Bindings) sockets_mod.BindError!Udp {
+    return .{ .sockets = try sockets_mod.Sockets.bind(io, addresses) };
 }
 
 pub fn init(socket: net.Socket) Udp {
-    return .{ .socket = socket };
+    return .{ .sockets = sockets_mod.Sockets.init(socket) };
 }
 
 pub fn close(self: *const Udp, io: std.Io) void {
-    self.socket.close(io);
+    self.sockets.close(io);
 }
 
 pub fn localAddress(self: *const Udp) types.Address {
-    return fromNetwork(self.socket.address);
+    return fromNetwork(self.sockets.primary().address);
 }
 
 pub fn receive(self: *Udp, io: std.Io) ReceiveError!Datagram {
     if (self.admitted != null) return error.AdmissionUnavailable;
-    const incoming = try self.socket.receive(io, &self.buffer);
+    const incoming = try self.sockets.receiveTimeout(io, &self.buffer, .none);
     return self.admit(incoming);
 }
 
@@ -73,7 +75,7 @@ pub fn receiveTimeout(
     timeout: std.Io.Timeout,
 ) ReceiveTimeoutError!Datagram {
     if (self.admitted != null) return error.AdmissionUnavailable;
-    const incoming = try self.socket.receiveTimeout(io, &self.buffer, timeout);
+    const incoming = try self.sockets.receiveTimeout(io, &self.buffer, timeout);
     return self.admit(incoming);
 }
 
@@ -107,7 +109,8 @@ pub fn send(
 ) SendError!void {
     if (bytes.len > constants.packet_size_max) return error.DatagramTooLarge;
     const address = toNetwork(destination);
-    return self.socket.send(io, &address, bytes);
+    const socket = self.sockets.get(address) orelse return error.AddressFamilyUnsupported;
+    return socket.send(io, &address, bytes);
 }
 
 /// Normalizes IPv4-mapped IPv6 sources to IPv4 so both forms share one session key.

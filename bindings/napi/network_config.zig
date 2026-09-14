@@ -11,12 +11,12 @@ const bootstrap_max = d.Maintenance.bootstrap_max;
 pub const Config = struct {
     profile: n.configuration.Profile,
     secret: [32]u8,
-    bind: std.Io.net.IpAddress,
+    bind: n.udp.Bindings,
     local: t.LocalState,
     schedule: n.network_core.ForkSchedule,
     forks: [64]n.reqresp.ForkEntry,
     fork_count: u8,
-    discovery_bind: ?std.Io.net.IpAddress,
+    discovery_bind: ?n.udp.Bindings,
     discovery_sequence: u64,
     advertisement: ?n.network_core.AdvertisementEndpoints,
     bootstrap: [bootstrap_max]struct { bytes: [enr_max]u8, len: u16 },
@@ -127,6 +127,20 @@ pub fn parse(value: Value, out: *Config) !void {
     try parseCommon(value, out);
 }
 
+pub fn bindings(value: Value) !n.udp.Bindings {
+    if (!try value.isArray()) return .single(try endpoint(value));
+    const count = try array(value, 2);
+    if (count == 0) return error.InvalidNetworkConfig;
+    const first = try endpoint(try value.getElement(0));
+    if (count == 1) return .single(first);
+    const second = try endpoint(try value.getElement(1));
+    if (std.meta.activeTag(first) == std.meta.activeTag(second)) return error.InvalidNetworkConfig;
+    return .{ .dual = .{
+        .ip4 = if (first == .ip4) first.ip4 else second.ip4,
+        .ip6 = if (first == .ip6) first.ip6 else second.ip6,
+    } };
+}
+
 pub fn parseCommon(value: Value, out: *Config) !void {
     out.* = .{
         .profile = .small,
@@ -155,7 +169,7 @@ pub fn parseCommon(value: Value, out: *Config) !void {
     const name = try profile.getValueStringUtf8(&buf);
     out.profile = if (std.mem.eql(u8, name, "small")) .small else if (std.mem.eql(u8, name, "beaconNode")) .beacon_node else return error.InvalidNetworkConfig;
     out.secret = try fixed(32, try get(value, "identitySecretKey"));
-    out.bind = try endpoint(try get(value, "bind"));
+    out.bind = try bindings(try get(value, "bind"));
     out.slot = try bigint(try get(value, "initialSlot"));
     try parseLocal(try get(value, "local"), &out.local);
     try parseSchedule(try get(value, "forkSchedule"), &out.schedule);
@@ -172,7 +186,7 @@ pub fn parseCommon(value: Value, out: *Config) !void {
     const discovery = try get(value, "discovery");
     if (try discovery.typeof() != .null) {
         try object(discovery, &.{ "bind", "sequenceNumber", "bootstrapEnrs", "advertisement" });
-        out.discovery_bind = try endpoint(try get(discovery, "bind"));
+        out.discovery_bind = try bindings(try get(discovery, "bind"));
         out.discovery_sequence = try bigint(try get(discovery, "sequenceNumber"));
         const bootstrap = try get(discovery, "bootstrapEnrs");
         out.bootstrap_count = @intCast(try array(bootstrap, bootstrap_max));

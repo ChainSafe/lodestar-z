@@ -150,14 +150,14 @@ pub const Slot = struct {
         assert(self.conn == null);
     }
 
-    pub fn recv(self: *Slot, datagram: []u8, from: *const binding.SockAddr) Error!void {
+    pub fn recv(self: *Slot, datagram: []u8, from: *const binding.SockAddr, to: *const binding.SockAddr) Error!void {
         assert(self.conn != null);
         assert(from.len > 0);
         var info = c.quiche_recv_info{
             .from = @ptrCast(@constCast(from.any())),
             .from_len = from.len,
-            .to = @ptrCast(@constCast(self.local_sockaddr.any())),
-            .to_len = self.local_sockaddr.len,
+            .to = @ptrCast(@constCast(to.any())),
+            .to_len = to.len,
         };
         _ = try binding.check(c.quiche_conn_recv(self.conn.?, datagram.ptr, datagram.len, &info));
     }

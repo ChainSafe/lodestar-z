@@ -771,7 +771,7 @@ test "maintenance skips unsupported IPv6 bootstrap and still probes IPv4" {
     var controller: Maintenance = undefined;
     try controller.init(&candidates, &.{ ipv6, remote }, 0, testConfig());
     defer controller.cancel(&core);
-    controller.ipv6_enabled = false;
+    controller.ip_mode = .ip4;
     var out: [1280]u8 = undefined;
     const started = (try controller.startNext(&core, &out, try message.RequestId.init(&.{1}), 0, &sealEntropy(1))).?;
     try std.testing.expectEqual(peer, started.peer);

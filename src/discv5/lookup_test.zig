@@ -48,12 +48,7 @@ test "lookup uses the call table for bounded parallel queries" {
     }
     var operation: Lookup = undefined;
     var operation_candidates: Lookup.Candidates = undefined;
-    try operation.init(
-        &operation_candidates,
-        core.localRecord().node_id,
-        [_]u8{0} ** 32,
-        &seeds,
-    );
+    try operation.init(&operation_candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds, .dual);
 
     var packet_buffer: [1_280]u8 = undefined;
     var started: [4]Lookup.Started = undefined;
@@ -131,7 +126,7 @@ test "lookup skips the busy closest peer and retries it after release" {
     );
     var operation: Lookup = undefined;
     var candidates: Lookup.Candidates = undefined;
-    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds);
+    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds, .dual);
     defer operation.cancel(&core);
 
     for (2..4) |id| {
@@ -172,12 +167,7 @@ test "lookup rejects relayed private and low-port candidates" {
     installSession(&core, seed.peer, 0x55);
     var operation: Lookup = undefined;
     var operation_candidates: Lookup.Candidates = undefined;
-    try operation.init(
-        &operation_candidates,
-        core.localRecord().node_id,
-        [_]u8{0} ** 32,
-        &.{seed},
-    );
+    try operation.init(&operation_candidates, core.localRecord().node_id, [_]u8{0} ** 32, &.{seed}, .dual);
 
     var packet_buffer: [1_280]u8 = undefined;
     const request_id = try message.RequestId.init(&.{1});
@@ -226,12 +216,7 @@ test "lookup stops after the closest sixteen successful peers" {
     }
     var operation: Lookup = undefined;
     var operation_candidates: Lookup.Candidates = undefined;
-    try operation.init(
-        &operation_candidates,
-        core.localRecord().node_id,
-        [_]u8{0} ** 32,
-        &seeds,
-    );
+    try operation.init(&operation_candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds, .dual);
 
     var packet_buffer: [1_280]u8 = undefined;
     var farther_id = [_]u8{0xff} ** 32;
@@ -291,7 +276,7 @@ test "filtered lookup continues past sixteen unrelated successes and prioritizes
     }
     var operation: Lookup = undefined;
     var candidates: Lookup.Candidates = undefined;
-    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds);
+    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds, .dual);
     defer operation.cancel(&core);
     const wanted = nodeId(40);
     operation.filter = .{ .context = &wanted, .matches = matchesNode };
@@ -323,7 +308,7 @@ test "filtered lookup stops at its query budget after retiring pending calls" {
     for (&seeds) |*seed| installSession(&core, seed.peer, 0x55);
     var operation: Lookup = undefined;
     var candidates: Lookup.Candidates = undefined;
-    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds);
+    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds, .dual);
     defer operation.cancel(&core);
     const wanted = nodeId(40);
     operation.filter = .{ .context = &wanted, .matches = matchesNode };
@@ -345,12 +330,7 @@ test "lookup initialization cleans up after an invalid seed" {
     seed.record.node_id = nodeId(2);
     var operation: Lookup = undefined;
     var operation_candidates: Lookup.Candidates = undefined;
-    try std.testing.expectError(Lookup.Error.InvalidSeed, operation.init(
-        &operation_candidates,
-        [_]u8{0} ** 32,
-        [_]u8{0xff} ** 32,
-        &.{seed},
-    ));
+    try std.testing.expectError(Lookup.Error.InvalidSeed, operation.init(&operation_candidates, [_]u8{0} ** 32, [_]u8{0xff} ** 32, &.{seed}, .dual));
 }
 
 test "empty lookup finishes without creating a call" {
@@ -358,12 +338,7 @@ test "empty lookup finishes without creating a call" {
     defer core.deinit(std.testing.allocator);
     var operation: Lookup = undefined;
     var operation_candidates: Lookup.Candidates = undefined;
-    try operation.init(
-        &operation_candidates,
-        core.localRecord().node_id,
-        [_]u8{0} ** 32,
-        &.{},
-    );
+    try operation.init(&operation_candidates, core.localRecord().node_id, [_]u8{0} ** 32, &.{}, .dual);
     var packet_buffer: [1_280]u8 = undefined;
     try std.testing.expect((try operation.startNext(
         &core,
@@ -384,7 +359,7 @@ test "lookup reports candidate budget exhaustion after dropping a closer peer" {
     var operation: Lookup = undefined;
     var candidates: Lookup.Candidates = undefined;
     const seed = budgetEntry(272);
-    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &.{seed});
+    try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &.{seed}, .dual);
     var packet_buffer: [1_280]u8 = undefined;
 
     for (0..272) |index| {
@@ -522,7 +497,7 @@ test "lookup confirmed result retains global IPv6 provenance over private IPv4 r
     installSession(&core, source, 0x55);
     var candidates: Lookup.Candidates = undefined;
     var operation: Lookup = undefined;
-    try operation.init(&candidates, core.localRecord().node_id, record.node_id, &.{core.peerRecord(&record.node_id).?});
+    try operation.init(&candidates, core.localRecord().node_id, record.node_id, &.{core.peerRecord(&record.node_id).?}, .dual);
     defer operation.cancel(&core);
     var output: [1280]u8 = undefined;
     const request_id = try message.RequestId.init(&.{1});
@@ -551,9 +526,8 @@ test "lookup skips unreachable IPv6 candidates without consuming call capacity" 
         for (seeds) |seed| installSession(&core, seed.peer, 0x55);
         var operation: Lookup = undefined;
         var candidates: Lookup.Candidates = undefined;
-        try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds);
+        try operation.init(&candidates, core.localRecord().node_id, [_]u8{0} ** 32, &seeds, if (enabled) .dual else .ip4);
         defer operation.cancel(&core);
-        operation.ipv6_enabled = enabled;
         var packet: [1280]u8 = undefined;
         var count: usize = 0;
         for (0..3) |index| {
@@ -566,4 +540,15 @@ test "lookup skips unreachable IPv6 candidates without consuming call capacity" 
         try std.testing.expectEqual(@as(usize, 0), core.calls.count());
         try std.testing.expect(operation.isFinished());
     }
+}
+
+test "IPv6 lookup selects the reachable endpoint before importing dual-stack seeds" {
+    var seed = fakeEntry(1);
+    seed.record.ip6 = .{ 0x20, 1 } ++ .{0} ** 13 ++ .{1};
+    seed.record.udp6 = 9001;
+    var candidates: Lookup.Candidates = undefined;
+    var lookup: Lookup = undefined;
+    try lookup.init(&candidates, @splat(0), @splat(1), &.{seed}, .ip6);
+    try std.testing.expectEqual(@as(usize, 1), lookup.candidateCount());
+    try std.testing.expectEqualDeep(seed.record.endpointFor(.ip6).?, candidates[0].peer.address);
 }

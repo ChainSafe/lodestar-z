@@ -22,9 +22,9 @@ test "lookup driver rotates priority under one-call contention" {
     var b: Lookup = undefined;
     var candidates_a: Lookup.Candidates = undefined;
     var candidates_b: Lookup.Candidates = undefined;
-    try a.init(&candidates_a, network.core.localRecord().node_id, [_]u8{0} ** 32, &seeds_a);
+    try a.init(&candidates_a, network.core.localRecord().node_id, [_]u8{0} ** 32, &seeds_a, .dual);
     defer a.cancel(&network.core);
-    try b.init(&candidates_b, network.core.localRecord().node_id, [_]u8{0} ** 32, &seeds_b);
+    try b.init(&candidates_b, network.core.localRecord().node_id, [_]u8{0} ** 32, &seeds_b, .dual);
     defer b.cancel(&network.core);
     const operations = [_]*Lookup{ &a, &b };
     var cursor = lookup_driver.Cursor{};
@@ -67,7 +67,7 @@ test "lookup driver preserves response and unrelated expiry after refill failure
     const seeds = [_]RoutingTable.Entry{ network.seed(1), network.seed(2) };
     var operation: Lookup = undefined;
     var candidates: Lookup.Candidates = undefined;
-    try operation.init(&candidates, network.core.localRecord().node_id, [_]u8{0} ** 32, &seeds);
+    try operation.init(&candidates, network.core.localRecord().node_id, [_]u8{0} ** 32, &seeds, .dual);
     defer operation.cancel(&network.core);
     const request_id = try message.RequestId.init(&.{1});
     var buffer: [1_280]u8 = undefined;
@@ -107,7 +107,7 @@ test "lookup driver consumes expiry before reporting a driver fault" {
     const seeds = [_]RoutingTable.Entry{ network.seed(1), network.seed(2) };
     var operation: Lookup = undefined;
     var candidates: Lookup.Candidates = undefined;
-    try operation.init(&candidates, network.core.localRecord().node_id, [_]u8{0} ** 32, &seeds);
+    try operation.init(&candidates, network.core.localRecord().node_id, [_]u8{0} ** 32, &seeds, .dual);
     defer operation.cancel(&network.core);
     var buffer: [1_280]u8 = undefined;
     const started = (try operation.startNext(
@@ -148,7 +148,7 @@ test "lookup driver consumes only owned failed-call events" {
     var candidates: Lookup.Candidates = undefined;
     var expired: [1]CallTable.Expired = undefined;
     var cursor = lookup_driver.Cursor{};
-    try operation.init(&candidates, network.core.localRecord().node_id, [_]u8{0} ** 32, &.{seed});
+    try operation.init(&candidates, network.core.localRecord().node_id, [_]u8{0} ** 32, &.{seed}, .dual);
     defer operation.cancel(&network.core);
 
     for (0..2) |round| {
@@ -204,9 +204,9 @@ const Network = struct {
 
     fn init(self: *Network, call_capacity: usize) !void {
         const loopback = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
-        self.local = try Udp.bind(std.testing.io, loopback);
+        self.local = try Udp.bind(std.testing.io, .single(loopback));
         errdefer self.local.close(std.testing.io);
-        self.remote = try Udp.bind(std.testing.io, loopback);
+        self.remote = try Udp.bind(std.testing.io, .single(loopback));
         errdefer self.remote.close(std.testing.io);
         const key = try test_support.keyPair(0x11);
         const record = try enr.Record.create(&key, 1, self.local.localAddress());

@@ -3,6 +3,8 @@ const constants = @import("constants.zig");
 const types = @import("types.zig");
 
 const net = std.Io.net;
+const sockets_mod = @import("udp");
+pub const Bindings = sockets_mod.Bindings;
 
 pub const Handle = struct {
     generation: u64,
@@ -14,7 +16,7 @@ pub const Datagram = struct {
     bytes: []u8,
 };
 
-pub const ReceiveTimeoutError = net.Socket.ReceiveTimeoutError || error{
+pub const ReceiveTimeoutError = sockets_mod.ReceiveError || error{
     AdmissionUnavailable,
     DatagramTooLarge,
     GenerationExhausted,
@@ -23,8 +25,6 @@ pub const ReceiveTimeoutError = net.Socket.ReceiveTimeoutError || error{
 pub const ReleaseError = error{StaleDatagram};
 
 pub const SendError = net.Socket.SendError || error{DatagramTooLarge};
-
-pub const Family = enum { ip4, ip6 };
 
 pub const Counters = struct {
     received_bytes: u64 = 0,
@@ -36,32 +36,34 @@ pub const Counters = struct {
 
 pub const Udp = struct {
     counters: Counters = .{},
-    socket: net.Socket,
-    family: Family,
+    sockets: sockets_mod.Sockets,
     buffer: [constants.datagram_size_max]u8 = undefined,
     admitted: ?u64 = null,
     next_generation: u64 = 1,
 
-    pub fn bind(io: std.Io, address: net.IpAddress) net.IpAddress.BindError!Udp {
-        const socket = try address.bind(io, .{ .mode = .dgram, .protocol = .udp });
-        std.debug.assert(familyOf(socket.address) == familyOf(address));
-        std.debug.assert(socket.address.getPort() != 0 or address.getPort() == 0);
-        return .{ .socket = socket, .family = familyOf(socket.address) };
+    pub fn bind(io: std.Io, addresses: Bindings) sockets_mod.BindError!Udp {
+        return .{ .sockets = try sockets_mod.Sockets.bind(io, addresses) };
     }
 
     pub fn init(socket: net.Socket) Udp {
-        return .{ .socket = socket, .family = familyOf(socket.address) };
+        return .{ .sockets = sockets_mod.Sockets.init(socket) };
     }
 
     pub fn close(self: *const Udp, io: std.Io) void {
         std.debug.assert(self.admitted == null);
-        self.socket.close(io);
+        self.sockets.close(io);
     }
 
     pub fn localAddress(self: *const Udp) types.Address {
-        const address = fromNetwork(self.socket.address);
-        std.debug.assert(self.family == .ip6 or address == .ip4);
-        return address;
+        return fromNetwork(self.sockets.primary().address);
+    }
+
+    pub fn localAddresses(self: *const Udp) [2]?types.Address {
+        var result: [2]?types.Address = .{ null, null };
+        for (self.sockets.values, 0..) |socket, i| if (socket) |value| {
+            result[i] = fromNetwork(value.address);
+        };
+        return result;
     }
 
     pub fn receiveTimeout(
@@ -70,7 +72,7 @@ pub const Udp = struct {
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!Datagram {
         if (self.admitted != null) return error.AdmissionUnavailable;
-        const incoming = try self.socket.receiveTimeout(io, &self.buffer, timeout);
+        const incoming = try self.sockets.receiveTimeout(io, &self.buffer, timeout);
         self.counters.received_datagrams +|= 1;
         if (incoming.flags.trunc) {
             std.log.scoped(.network_quic).debug("datagram_refused reason=oversize capacity={d}", .{self.buffer.len});
@@ -107,8 +109,9 @@ pub const Udp = struct {
     ) SendError!void {
         std.debug.assert(bytes.len > 0);
         if (bytes.len > constants.datagram_size_max) return error.DatagramTooLarge;
-        const address = toNetwork(destination.*, self.family);
-        try self.socket.send(io, &address, bytes);
+        const address = toNetwork(destination.*);
+        const socket = self.sockets.get(address) orelse return error.AddressFamilyUnsupported;
+        try socket.send(io, &address, bytes);
         self.counters.sent_bytes +|= bytes.len;
         self.counters.sent_datagrams +|= 1;
     }
@@ -120,41 +123,32 @@ pub const Udp = struct {
         var messages: [constants.send_batch_max]net.OutgoingMessage = undefined;
         for (batch, 0..) |sent, position| {
             if (sent.bytes.len > constants.datagram_size_max) return error.DatagramTooLarge;
-            addresses[position] = toNetwork(sent.to, self.family);
+            addresses[position] = toNetwork(sent.to);
             messages[position] = .{
                 .address = &addresses[position],
                 .data_ptr = sent.bytes.ptr,
                 .data_len = sent.bytes.len,
             };
         }
-        // Socket.sendMany discards the successful prefix on error. Count that prefix too.
-        const failure, const count = io.vtable.netSend(io.userdata, self.socket.handle, messages[0..batch.len], .{});
-        std.debug.assert(count <= batch.len);
-        for (messages[0..count]) |message| {
-            self.counters.sent_bytes +|= message.data_len;
-            self.counters.sent_datagrams +|= 1;
-        }
-        if (count != batch.len) return failure.?;
-        for (messages[0..batch.len], batch) |message, sent| {
-            if (message.data_len != sent.bytes.len) return error.MessageOversize;
+        var begin: usize = 0;
+        while (begin < batch.len) {
+            const socket = self.sockets.get(addresses[begin]) orelse return error.AddressFamilyUnsupported;
+            var end = begin + 1;
+            while (end < batch.len and std.meta.activeTag(addresses[end]) == std.meta.activeTag(addresses[begin])) : (end += 1) {}
+            const failure, const count = io.vtable.netSend(io.userdata, socket.handle, messages[begin..end], .{});
+            std.debug.assert(count <= end - begin);
+            for (messages[begin..][0..count]) |message| {
+                self.counters.sent_bytes +|= message.data_len;
+                self.counters.sent_datagrams +|= 1;
+            }
+            if (count != end - begin) return failure.?;
+            for (messages[begin..end], batch[begin..end]) |message, sent| {
+                if (message.data_len != sent.bytes.len) return error.MessageOversize;
+            }
+            begin = end;
         }
     }
 };
-
-fn familyOf(address: net.IpAddress) Family {
-    return switch (address) {
-        .ip4 => .ip4,
-        .ip6 => .ip6,
-    };
-}
-
-fn mappedIp4(octets: [4]u8) [16]u8 {
-    var bytes = [_]u8{0} ** 16;
-    bytes[10] = 0xff;
-    bytes[11] = 0xff;
-    @memcpy(bytes[12..16], &octets);
-    return bytes;
-}
 
 pub fn fromNetwork(address: net.IpAddress) types.Address {
     return switch (address) {
@@ -170,14 +164,9 @@ pub fn fromNetwork(address: net.IpAddress) types.Address {
     };
 }
 
-pub fn toNetwork(address: types.Address, family: Family) net.IpAddress {
+pub fn toNetwork(address: types.Address) net.IpAddress {
     return switch (address) {
-        .ip4 => |value| if (family == .ip6) .{ .ip6 = .{
-            .bytes = mappedIp4(value.octets),
-            .port = value.port,
-            .flow = 0,
-            .interface = .{ .index = 0 },
-        } } else .{ .ip4 = .{ .bytes = value.octets, .port = value.port } },
+        .ip4 => |value| .{ .ip4 = .{ .bytes = value.octets, .port = value.port } },
         .ip6 => |value| .{ .ip6 = .{
             .bytes = value.octets,
             .port = value.port,

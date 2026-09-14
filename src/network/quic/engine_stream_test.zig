@@ -21,7 +21,7 @@ test "engine stream errors leak no quiche or openssl member" {
             for (leaked) |name| std.debug.assert(!std.mem.eql(u8, member.name, name));
         }
         std.debug.assert(@typeInfo(engine_mod.StreamError).error_set.?.len == 8);
-        std.debug.assert(@typeInfo(engine_mod.DialError).error_set.?.len == 3);
+        std.debug.assert(@typeInfo(engine_mod.DialError).error_set.?.len == 4);
         for (@typeInfo(binding.Error).error_set.?) |member| {
             std.debug.assert(!std.mem.eql(u8, member.name, "Done"));
         }

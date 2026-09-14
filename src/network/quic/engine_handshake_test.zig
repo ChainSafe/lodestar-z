@@ -234,7 +234,7 @@ fn standaloneEngine(seed: u8, engine_limits: engine_mod.Limits) !Engine {
     return Engine.init(std.testing.allocator, .{
         .tls = ctx,
         .limits = engine_limits,
-        .local = client_address,
+        .local = .{ client_address, null },
         .seed = seed,
     });
 }

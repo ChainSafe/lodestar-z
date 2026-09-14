@@ -77,7 +77,7 @@ queries_started: u16,
 capacity_drops: u32,
 finish_reason: ?FinishReason,
 filter: ?Filter = null,
-ipv6_enabled: bool = true,
+ip_mode: @import("udp").Mode = .dual,
 query_limit: u16 = candidate_capacity,
 
 /// Borrows `candidates` for the life of the lookup and allocates nothing.
@@ -87,10 +87,12 @@ pub fn init(
     local_id: types.NodeId,
     target: types.NodeId,
     seeds: []const RoutingTable.Entry,
+    ip_mode: @import("udp").Mode,
 ) Error!void {
     if (seeds.len > result_max) return Error.TooManySeeds;
     self.* = .{
         .local_id = local_id,
+        .ip_mode = ip_mode,
         .target = target,
         .candidates = candidates,
         .candidate_count = 0,
@@ -274,7 +276,9 @@ fn addSeed(self: *Lookup, seed: *const RoutingTable.Entry) Error!void {
         return Error.InvalidSeed;
     if (std.mem.eql(u8, &seed.peer.node_id, &self.local_id)) return;
     if (self.findCandidate(&seed.peer.node_id) != null) return;
-    self.appendCandidate(seed.peer, &seed.record);
+    var peer = seed.peer;
+    if (!self.ip_mode.supports(peer.address)) peer.address = seed.record.endpointFor(self.ip_mode) orelse return;
+    self.appendCandidate(peer, &seed.record);
 }
 
 fn addDiscovered(
@@ -283,7 +287,7 @@ fn addDiscovered(
     source: types.Address,
 ) void {
     if (std.mem.eql(u8, &record.node_id, &self.local_id)) return;
-    const address = record.endpoint() orelse return;
+    const address = record.endpointFor(self.ip_mode) orelse return;
     if (address.port() < discovered_port_min or
         !RoutingTable.relayAllowed(source, address)) return;
     if (self.findCandidate(&record.node_id)) |index| {
@@ -322,7 +326,7 @@ fn nextCandidateIndex(self: *const Lookup, core: ?*const Engine) ?usize {
     var selected: ?usize = null;
     for (self.activeCandidates(), 0..) |*candidate, index| {
         if (candidate.state != .unqueried) continue;
-        if (!self.ipv6_enabled and candidate.peer.address == .ip6) continue;
+        if (!self.ip_mode.supports(candidate.peer.address)) continue;
         if (boundary) |node_id| {
             if (!types.xorCloser(&candidate.peer.node_id, &node_id, &self.target))
                 continue;

@@ -12,7 +12,7 @@ const assert = std.debug.assert;
 
 pub const Options = struct {
     host: *const keys.KeyPair,
-    bind: std.Io.net.IpAddress,
+    bind: udp_mod.Bindings,
     limits: engine_mod.Limits = .{},
     keylog_path: ?[]const u8 = null,
 };
@@ -66,7 +66,7 @@ pub const Transport = struct {
         target.engine = try engine_mod.Engine.init(allocator, .{
             .tls = context,
             .limits = engine_limits,
-            .local = target.udp.localAddress(),
+            .local = target.udp.localAddresses(),
             .seed = std.mem.readInt(u64, &seed_bytes, .little),
         });
         context_owned = false;
