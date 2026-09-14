@@ -87,7 +87,15 @@ pub const Handler = struct {
     pub fn bind(self: *Handler, engine: *const engine_mod.Engine) void {
         if (self.local != null) return;
         var local = codec.Local.init(&engine.tls.local_peer_id, self.agent.slice(), self.protocol_version.slice(), self.addresses[0..self.address_count]) catch unreachable;
-        if (self.address_count == 0) local.setAddresses(&.{engine.local}) catch {};
+        if (self.address_count == 0) {
+            var addresses: [2]@import("../types.zig").Address = undefined;
+            var count: usize = 0;
+            for (engine.local) |address| if (address) |value| {
+                addresses[count] = value;
+                count += 1;
+            };
+            local.setAddresses(addresses[0..count]) catch {};
+        }
         self.local = local;
     }
 

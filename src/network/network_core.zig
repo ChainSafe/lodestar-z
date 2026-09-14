@@ -39,7 +39,7 @@ pub const LocalIntent = struct {
 };
 pub const DiscoveryOptions = struct {
     advertisement: ?AdvertisementEndpoints = null,
-    bind: std.Io.net.IpAddress,
+    bind: @import("udp.zig").Bindings,
     sequence: u64 = 1,
     bootstrap: []const d.identity.enr.Record = &.{},
     engine: d.Engine.Config = .{},
@@ -57,7 +57,7 @@ pub const Options = struct {
 pub const ManagedOptions = struct {
     wait_mode: wait.Mode = .portable,
     host: *const @import("wire/keys.zig").KeyPair,
-    bind: std.Io.net.IpAddress,
+    bind: @import("udp.zig").Bindings,
     configuration: @import("configuration.zig").Request,
     local: t.LocalState,
     schedule: ForkSchedule = .{},
@@ -125,11 +125,12 @@ const DiscoveryOwners = struct {
     coordinator: peers.Discovery,
     endpoints: AdvertisementEndpoints,
 
-    fn init(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io, options: DiscoveryOptions, host: *const @import("wire/keys.zig").KeyPair, local: *const t.LocalState, schedule: ForkSchedule, quic: t.Address, now: Now) !void {
+    fn init(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io, options: DiscoveryOptions, host: *const @import("wire/keys.zig").KeyPair, local: *const t.LocalState, schedule: ForkSchedule, quic: [2]?t.Address, now: Now) !void {
         self.udp = try d.Udp.bind(io, options.bind);
         errdefer self.udp.close(io);
-        self.endpoints = options.advertisement orelse try defaultEndpoints(quic, self.udp.localAddress());
+        self.endpoints = options.advertisement orelse try defaultEndpoints(quic, &self.udp.sockets);
         try validateEndpoints(self.endpoints);
+        try validateEndpointFamilies(self.endpoints, quic, &self.udp.sockets);
         const advertisement = advertisementFor(local, schedule, self.endpoints);
         const record = try peers.enr.build(&host.inner, options.sequence, &advertisement, &local.fork);
         try peers.enr.requireIdentity(&record, &t.PeerId.fromPublicKey(&host.publicKey()));
@@ -137,7 +138,7 @@ const DiscoveryOwners = struct {
         errdefer self.engine.deinit(allocator);
         self.driver = try d.Driver.initWithConfig(&self.engine, &self.udp, .{ .poll_interval_ms = poll_wait_max_ms });
         var coordinator_options = options.coordinator;
-        coordinator_options.quic_ipv6_enabled = quic == .ip6;
+        coordinator_options.quic_mode = if (quic[0] == null) .ip6 else if (quic[1] == null) .ip4 else .dual;
         self.coordinator = try peers.Discovery.init(allocator, &self.driver, &local.fork, options.bootstrap, now.mono_ms, coordinator_options);
     }
     fn deinit(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io) void {
@@ -207,7 +208,7 @@ pub const NetworkCore = struct {
         if (options.discovery) |discovery_options| {
             const owned = try allocator.create(DiscoveryOwners);
             errdefer allocator.destroy(owned);
-            try owned.init(allocator, io, discovery_options, options.transport.host, &local, options.schedule, self.transport.localAddress(), self.last_now);
+            try owned.init(allocator, io, discovery_options, options.transport.host, &local, options.schedule, self.transport.udp.localAddresses(), self.last_now);
             self.discovery = owned;
         }
         errdefer if (self.discovery) |owned| {
@@ -458,7 +459,10 @@ pub const NetworkCore = struct {
         const capabilities = update.capabilities;
         try self.core.service.router.validateCapabilities(capabilities);
         if ((endpoints == null) != (self.discovery == null)) return error.InvalidAdvertisement;
-        if (endpoints) |value| try validateEndpoints(value);
+        if (endpoints) |value| {
+            try validateEndpoints(value);
+            try validateEndpointFamilies(value, self.transport.udp.localAddresses(), &self.discovery.?.udp.sockets);
+        }
         var local = update.local;
         local.metadata.seq_number = self.core.local.metadata.seq_number;
         try peers.control_wire.copyLocal(&local, &local);
@@ -540,8 +544,9 @@ pub const NetworkCore = struct {
             if (self.core.stopped) return error.Stopped;
             if (self.wait_mode != .native_poll or !wait.supported) return error.UnsupportedWait;
             if (comptime wait.supported) {
-                if (fd < 0 or fd == self.transport.udp.socket.handle or
-                    (self.discovery != null and fd == self.discovery.?.udp.socket.handle)) return error.InvalidWakeSource;
+                if (fd < 0) return error.InvalidWakeSource;
+                for (self.transport.udp.sockets.handles()) |socket| if (socket == fd) return error.InvalidWakeSource;
+                if (self.discovery) |owned| for (owned.udp.sockets.handles()) |socket| if (socket == fd) return error.InvalidWakeSource;
             }
         }
         self.host_wake = descriptor;
@@ -567,8 +572,8 @@ pub const NetworkCore = struct {
         if (self.wait_mode == .native_poll) {
             if (comptime wait.supported) {
                 result.readiness = wait.poll(io, .{
-                    .quic = self.transport.udp.socket.handle,
-                    .discovery = if (!self.core.quiescing and self.discovery != null) self.discovery.?.udp.socket.handle else null,
+                    .quic = self.transport.udp.sockets.handles(),
+                    .discovery = if (!self.core.quiescing and self.discovery != null) self.discovery.?.udp.sockets.handles() else .{ null, null },
                     .host = self.host_wake,
                 }, bounded_wait);
             } else result.readiness.failure = error.UnsupportedWait;
@@ -686,29 +691,34 @@ fn validateEndpoints(endpoints: AdvertisementEndpoints) error{InvalidAdvertiseme
         if (!peers.discovery.relayAllowed(source, .{ .ip6 = .{ .octets = ip, .port = d.Lookup.discovered_port_min } })) return error.InvalidAdvertisement;
     }
 }
-fn defaultEndpoints(quic: t.Address, udp: d.types.Address) error{InvalidAdvertisement}!AdvertisementEndpoints {
+fn validateEndpointFamilies(endpoints: AdvertisementEndpoints, quic: [2]?t.Address, udp: *const @import("udp").Sockets) error{InvalidAdvertisement}!void {
+    if ((endpoints.quic != null and quic[0] == null) or (endpoints.quic6 != null and quic[1] == null) or
+        (endpoints.udp != null and udp.values[0] == null) or (endpoints.ip6 != null and (endpoints.udp6 orelse endpoints.udp) != null and udp.values[1] == null)) return error.InvalidAdvertisement;
+}
+
+fn defaultEndpoints(quic: [2]?t.Address, udp: *const @import("udp").Sockets) error{InvalidAdvertisement}!AdvertisementEndpoints {
     var endpoints: AdvertisementEndpoints = .{};
-    switch (quic) {
-        .ip4 => |value| {
-            endpoints.ip4 = value.octets;
-            endpoints.quic = value.port;
+    for (quic) |address| if (address) |value| switch (value) {
+        .ip4 => |ip| {
+            endpoints.ip4 = ip.octets;
+            endpoints.quic = ip.port;
         },
-        .ip6 => |value| {
-            endpoints.ip6 = value.octets;
-            endpoints.quic6 = value.port;
+        .ip6 => |ip| {
+            endpoints.ip6 = ip.octets;
+            endpoints.quic6 = ip.port;
         },
-    }
-    switch (udp) {
-        .ip4 => |value| {
-            if (endpoints.ip4) |ip| if (!std.mem.eql(u8, &ip, &value.octets)) return error.InvalidAdvertisement;
-            endpoints.ip4 = value.octets;
-            endpoints.udp = value.port;
+    };
+    for (udp.values) |socket| if (socket) |value| switch (value.address) {
+        .ip4 => |ip| {
+            if (endpoints.ip4) |advertised| if (!std.mem.eql(u8, &advertised, &ip.bytes)) return error.InvalidAdvertisement;
+            endpoints.ip4 = ip.bytes;
+            endpoints.udp = ip.port;
         },
-        .ip6 => |value| {
-            if (endpoints.ip6) |ip| if (!std.mem.eql(u8, &ip, &value.octets)) return error.InvalidAdvertisement;
-            endpoints.ip6 = value.octets;
-            endpoints.udp6 = value.port;
+        .ip6 => |ip| {
+            if (endpoints.ip6) |advertised| if (!std.mem.eql(u8, &advertised, &ip.bytes)) return error.InvalidAdvertisement;
+            endpoints.ip6 = ip.bytes;
+            endpoints.udp6 = ip.port;
         },
-    }
+    };
     return endpoints;
 }

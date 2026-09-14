@@ -142,10 +142,14 @@ pub const Record = struct {
     /// Prefers the IPv4 endpoint. An IPv6 record uses `udp6` and falls back to `udp`, as the
     /// spec allows.
     pub fn endpoint(self: *const Record) ?types.Address {
-        if (self.ip4) |ip| if (self.udp) |port| {
+        return self.endpointFor(.dual);
+    }
+
+    pub fn endpointFor(self: *const Record, mode: @import("udp").Mode) ?types.Address {
+        if (mode != .ip6) if (self.ip4) |ip| if (self.udp) |port| {
             return .{ .ip4 = .{ .octets = ip, .port = port } };
         };
-        if (self.ip6) |ip| if (self.udp6 orelse self.udp) |port| {
+        if (mode != .ip4) if (self.ip6) |ip| if (self.udp6 orelse self.udp) |port| {
             return .{ .ip6 = .{ .octets = ip, .port = port } };
         };
         return null;

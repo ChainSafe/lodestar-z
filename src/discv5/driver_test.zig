@@ -23,7 +23,7 @@ const net = std.Io.net;
 
 test "driver rejects invalid polling and missing expiry storage" {
     var core: Engine = undefined;
-    var adapter = Udp.init(undefined);
+    var adapter = Udp.init(.{ .handle = undefined, .address = .{ .ip4 = .loopback(0) } });
     try std.testing.expectError(
         error.InvalidPollInterval,
         Driver.initWithConfig(&core, &adapter, .{ .poll_interval_ms = 0 }),
@@ -67,7 +67,7 @@ test "driver bounds failed revalidation retries while continuing receive and lat
     defer pair.deinit();
     try pair.fillBucket();
     const now_ms = try Driver.monotonicMilliseconds(std.testing.io);
-    RevalidationFault.active = .{ .socket = pair.udp_a.socket.handle, .now_ms = now_ms };
+    RevalidationFault.active = .{ .socket = pair.udp_a.sockets.primary().handle, .now_ms = now_ms };
     defer RevalidationFault.active = .{};
     var vtable = std.testing.io.vtable.*;
     vtable.netSend = RevalidationFault.send;
@@ -75,7 +75,7 @@ test "driver bounds failed revalidation retries while continuing receive and lat
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     var expired: [4]CallTable.Expired = undefined;
     const oversized = [_]u8{0xff} ** 1_281;
-    try pair.udp_b.socket.send(std.testing.io, &pair.udp_a.socket.address, &oversized);
+    try pair.udp_b.sockets.primary().send(std.testing.io, &pair.udp_a.sockets.primary().address, &oversized);
     const failed = try pair.driver_a.stepUntil(io, &expired, now_ms);
     try std.testing.expectEqual(error.Unexpected, failed.failure.?);
     try std.testing.expectEqual(Driver.FailureStage.maintenance, failed.failure_stage);
@@ -290,12 +290,7 @@ test "driver completes a caller-owned lookup across multiple peers" {
     const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
     var operation: Lookup = undefined;
     var operation_candidates: Lookup.Candidates = undefined;
-    try operation.init(
-        &operation_candidates,
-        network.record_a.node_id,
-        network.record_c.node_id,
-        seeds,
-    );
+    try operation.init(&operation_candidates, network.record_a.node_id, network.record_c.node_id, seeds, .dual);
 
     var cursor: lookup_driver.Cursor = .{};
     var expired: [4]CallTable.Expired = undefined;
@@ -366,12 +361,7 @@ test "lookup expiry is consumed without hiding an unrelated call expiry" {
     const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
     var operation: Lookup = undefined;
     var operation_candidates: Lookup.Candidates = undefined;
-    try operation.init(
-        &operation_candidates,
-        network.record_a.node_id,
-        network.record_c.node_id,
-        seeds,
-    );
+    try operation.init(&operation_candidates, network.record_a.node_id, network.record_c.node_id, seeds, .dual);
 
     defer operation.cancel(&network.node_a);
     _ = (try operation.startNext(
@@ -423,12 +413,7 @@ test "lookup step preserves an unrelated response event" {
     const seeds = network.node_a.closestNodes(&network.record_c.node_id, &seed_buffer);
     var operation: Lookup = undefined;
     var operation_candidates: Lookup.Candidates = undefined;
-    try operation.init(
-        &operation_candidates,
-        network.record_a.node_id,
-        network.record_c.node_id,
-        seeds,
-    );
+    try operation.init(&operation_candidates, network.record_a.node_id, network.record_c.node_id, seeds, .dual);
     defer operation.cancel(&network.node_a);
 
     const result = try lookup_driver.step(
@@ -467,6 +452,7 @@ test "two caller-owned lookups share one driver" {
         network.record_a.node_id,
         network.record_b.node_id,
         seeds_b,
+        .dual,
     );
     defer operation_b.cancel(&network.node_a);
     var seeds_c_buffer: [Lookup.result_max]RoutingTable.Entry = undefined;
@@ -481,6 +467,7 @@ test "two caller-owned lookups share one driver" {
         network.record_a.node_id,
         network.record_c.node_id,
         seeds_c,
+        .dual,
     );
     defer operation_c.cancel(&network.node_a);
 
@@ -534,9 +521,9 @@ const Pair = struct {
 
     fn init(self: *Pair, request_timeout_ms: u64, install_session: bool) !void {
         const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-        self.udp_a = try Udp.bind(std.testing.io, loopback);
+        self.udp_a = try Udp.bind(std.testing.io, .single(loopback));
         errdefer self.udp_a.close(std.testing.io);
-        self.udp_b = try Udp.bind(std.testing.io, loopback);
+        self.udp_b = try Udp.bind(std.testing.io, .single(loopback));
         errdefer self.udp_b.close(std.testing.io);
 
         const key_a = try keyPair(0x11);
@@ -641,11 +628,11 @@ const LookupNetwork = struct {
 
     fn init(self: *LookupNetwork, request_timeout_ms: u64) !void {
         const loopback = net.IpAddress{ .ip4 = .loopback(0) };
-        self.udp_a = try Udp.bind(std.testing.io, loopback);
+        self.udp_a = try Udp.bind(std.testing.io, .single(loopback));
         errdefer self.udp_a.close(std.testing.io);
-        self.udp_b = try Udp.bind(std.testing.io, loopback);
+        self.udp_b = try Udp.bind(std.testing.io, .single(loopback));
         errdefer self.udp_b.close(std.testing.io);
-        self.udp_c = try Udp.bind(std.testing.io, loopback);
+        self.udp_c = try Udp.bind(std.testing.io, .single(loopback));
         errdefer self.udp_c.close(std.testing.io);
 
         const key_a = try keyPair(0x11);
@@ -720,9 +707,9 @@ test "driver reports truncation alongside already produced expiries" {
         0,
         &test_support.sealEntropy(0x33),
     );
-    const destination = pair.udp_a.socket.address;
+    const destination = pair.udp_a.sockets.primary().address;
     const oversized = [_]u8{0xff} ** 1_281;
-    try pair.udp_b.socket.send(std.testing.io, &destination, &oversized);
+    try pair.udp_b.sockets.primary().send(std.testing.io, &destination, &oversized);
     var expired: [4]CallTable.Expired = undefined;
     const result = try pair.driver_a.step(std.testing.io, &expired);
     try std.testing.expectEqual(@as(?Driver.Error, null), result.failure);

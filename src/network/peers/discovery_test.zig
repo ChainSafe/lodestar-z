@@ -37,7 +37,7 @@ fn referralCase(rejection: ?discovery.Rejection) !void {
     try controller.request(if (rejection == .demand) .{ .syncnets = 1 } else .{ .general = true }, now);
     const seed = a.engine.peerRecord(&b_peer.node_id).?;
     var lookup: d.Lookup = undefined;
-    try lookup.init(&controller.storage.foreground, a.engine.localRecord().node_id, c_peer.node_id, &.{seed});
+    try lookup.init(&controller.storage.foreground, a.engine.localRecord().node_id, c_peer.node_id, &.{seed}, .dual);
     controller.lookup = lookup;
     var output: [16]adapter.Candidate = undefined;
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
@@ -173,7 +173,10 @@ const Node = struct {
         return self.initAddress(scalar, quic, .{ .ip4 = .loopback(0) }, null);
     }
     fn initAddress(self: *Node, scalar: u8, quic: ?u16, bind_address: std.Io.net.IpAddress, alternate_ip4: ?[4]u8) !void {
-        self.udp = try d.Udp.bind(std.testing.io, bind_address);
+        return self.initBindings(scalar, quic, .single(bind_address), alternate_ip4);
+    }
+    fn initBindings(self: *Node, scalar: u8, quic: ?u16, bindings: d.Udp.Bindings, alternate_ip4: ?[4]u8) !void {
+        self.udp = try d.Udp.bind(std.testing.io, bindings);
         errdefer self.udp.close(std.testing.io);
         const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{scalar}));
         const local = adapter.LocalAdvertisement{
@@ -182,12 +185,9 @@ const Node = struct {
                 .ip4 => |value| value.octets,
                 .ip6 => alternate_ip4,
             },
-            .ip6 = switch (self.udp.localAddress()) {
-                .ip4 => null,
-                .ip6 => |value| value.octets,
-            },
+            .ip6 = if (self.udp.sockets.values[1]) |socket| socket.address.ip6.bytes else null,
             .udp = if (self.udp.localAddress() == .ip4) self.udp.localAddress().port() else if (alternate_ip4 != null) @as(u16, 9000) else null,
-            .udp6 = if (self.udp.localAddress() == .ip6) self.udp.localAddress().port() else null,
+            .udp6 = if (self.udp.sockets.values[1]) |socket| socket.address.getPort() else null,
             .quic = quic,
         };
         const record = try adapter.build(&key, 1, &local, &context);
@@ -472,7 +472,7 @@ test "peer discovery fork and subnet filtering plus output pressure preserve con
         const now = try d.Driver.monotonicMilliseconds(std.testing.io);
         var fork = context;
         if (mode == 0) fork.digest[0] = 9;
-        var controller = try discovery.Discovery.init(std.testing.allocator, &a.driver, &fork, &.{b.engine.localRecord().*}, now, .{ .quic_ipv6_enabled = mode != 4 });
+        var controller = try discovery.Discovery.init(std.testing.allocator, &a.driver, &fork, &.{b.engine.localRecord().*}, now, .{ .quic_mode = if (mode == 4) .ip4 else .dual });
         defer controller.deinit();
         try controller.request(if (mode == 1) .{ .syncnets = 1 } else .{ .general = true }, now);
         var output: [1]adapter.Candidate = undefined;
@@ -612,4 +612,57 @@ test "peer discovery foreground retains authenticated IPv6 source over alternate
         controller.cancel();
         try std.testing.expectEqual(@as(usize, 0), a.engine.calls.count());
     }
+}
+
+test "dual-stack discovery confirms both families in one routing table" {
+    var hub: Node = undefined;
+    try hub.initBindings(91, null, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } }, null);
+    defer hub.deinit();
+    var ipv4: Node = undefined;
+    try ipv4.init(92, null);
+    defer ipv4.deinit();
+    var ipv6: Node = undefined;
+    try ipv6.initAddress(93, null, .{ .ip6 = .loopback(0) }, null);
+    defer ipv6.deinit();
+    const now = try d.Driver.monotonicMilliseconds(std.testing.io);
+    var controller = try discovery.Discovery.init(std.testing.allocator, &hub.driver, &context, &.{ ipv4.engine.localRecord().*, ipv6.engine.localRecord().* }, now, .{ .maintenance = .{ .bootstrap_interval_ms = 1, .discovery_stall_ms = 1, .retry_interval_ms = 1 } });
+    defer controller.deinit();
+    var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
+    for (0..400) |_| {
+        const tick = try d.Driver.monotonicMilliseconds(std.testing.io);
+        const result = try controller.step(std.testing.io, tick, tick, &.{});
+        if (result.failure) |err| return err;
+        for ([_]*Node{ &ipv4, &ipv6 }) |node| {
+            const remote = try node.driver.stepUntil(std.testing.io, &expiries, tick);
+            if (remote.failure) |err| return err;
+        }
+        if (hub.engine.peerCount() == 2) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 2), hub.engine.peerCount());
+    try std.testing.expect(hub.engine.peerRecord(&ipv4.engine.localRecord().node_id).?.peer.address == .ip4);
+    try std.testing.expect(hub.engine.peerRecord(&ipv6.engine.localRecord().node_id).?.peer.address == .ip6);
+}
+
+test "IPv6-only discovery bootstraps a dual-stack record over IPv6" {
+    var node: Node = undefined;
+    try node.initAddress(94, null, .{ .ip6 = .loopback(0) }, null);
+    defer node.deinit();
+    var seed: Node = undefined;
+    try seed.initAddress(95, null, .{ .ip6 = .loopback(0) }, .{ 127, 0, 0, 1 });
+    defer seed.deinit();
+    const now = try d.Driver.monotonicMilliseconds(std.testing.io);
+    var controller = try discovery.Discovery.init(std.testing.allocator, &node.driver, &context, &.{seed.engine.localRecord().*}, now, .{});
+    defer controller.deinit();
+    var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
+    for (0..100) |_| {
+        const tick = try d.Driver.monotonicMilliseconds(std.testing.io);
+        const result = try controller.step(std.testing.io, tick, tick, &.{});
+        if (result.failure) |err| return err;
+        const response = try seed.driver.stepUntil(std.testing.io, &expiries, tick);
+        if (response.failure) |err| return err;
+        if (node.engine.peerCount() == 1) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(node.engine.peerRecord(&seed.engine.localRecord().node_id).?.peer.address == .ip6);
 }

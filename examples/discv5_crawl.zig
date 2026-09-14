@@ -104,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
 
     const bind_address = try net.IpAddress.parseLiteral(args[1]);
     const advertised_address = discv5.Udp.fromNetwork(try net.IpAddress.parseLiteral(args[2]));
-    var udp = try discv5.Udp.bind(io, bind_address);
+    var udp = try discv5.Udp.bind(io, .single(bind_address));
     defer udp.close(io);
     const bound_address = udp.localAddress();
     if (std.meta.activeTag(bound_address) != std.meta.activeTag(advertised_address))
@@ -375,12 +375,7 @@ fn startLookups(
         var seeds_buffer: [discv5.Lookup.result_max]discv5.RoutingTable.Entry = undefined;
         const seeds = core.closestNodes(&target, &seeds_buffer);
         if (seeds.len == 0) return;
-        try slot.operation.init(
-            storage,
-            core.localRecord().node_id,
-            target,
-            seeds,
-        );
+        try slot.operation.init(storage, core.localRecord().node_id, target, seeds, .dual);
         slot.active = true;
         launched.* += 1;
     }

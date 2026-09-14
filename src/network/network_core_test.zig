@@ -410,9 +410,9 @@ test "managed runtime explicit advertisement is independent atomic and required 
     try std.testing.expect(try node.updateLocalWithEndpoints(&local, .{}, privileged, now));
     try std.testing.expectEqual(@as(u16, 443), node.advertisementEndpoints().?.quic.?);
     const ipv6: runtime.AdvertisementEndpoints = .{ .ip6 = .{0} ** 15 ++ .{1}, .udp6 = 19000, .quic6 = 19001 };
-    try std.testing.expect(try node.updateLocalWithEndpoints(&local, .{}, ipv6, now));
-    try std.testing.expect(node.localRecord().?.ip4 == null);
-    try std.testing.expectEqual(ipv6.ip6, node.localRecord().?.ip6);
+    const previous = node.localRecord().?.*;
+    try std.testing.expectError(error.InvalidAdvertisement, node.updateLocalWithEndpoints(&local, .{}, ipv6, now));
+    try std.testing.expectEqualSlices(u8, previous.slice(), node.localRecord().?.slice());
 }
 
 const ReceiveFault = struct {
@@ -485,11 +485,11 @@ test "managed runtime socket faults preserve the other owner and local dial refu
     var vtable = std.testing.io.vtable.*;
     vtable.batchAwaitConcurrent = ReceiveFault.receive;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    for ([_]std.Io.net.Socket.Handle{ node.transport.udp.socket.handle, node.discovery.?.udp.socket.handle }) |socket| {
+    for ([_]std.Io.net.Socket.Handle{ node.transport.udp.sockets.primary().handle, node.discovery.?.udp.sockets.primary().handle }) |socket| {
         ReceiveFault.active = .{ .socket = socket };
         const result = node.step(io, now, 0, .{}, 1000);
         try std.testing.expectEqual(error.Canceled, result.failure.?);
-        if (socket == node.discovery.?.udp.socket.handle) {
+        if (socket == node.discovery.?.udp.sockets.primary().handle) {
             try std.testing.expectEqual(@import("discv5").Driver.FailureStage.receive, result.discovery.failure_stage);
             try std.testing.expectEqual(@as(u64, 1), node.discovery.?.coordinator.counters.receive_failures);
         }
@@ -538,7 +538,7 @@ fn failureAndReplacement(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void
     var vtable = std.testing.io.vtable.*;
     vtable.batchAwaitConcurrent = ReceiveFault.receive;
     const faulty_io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    ReceiveFault.active = .{ .socket = a.transport.udp.socket.handle };
+    ReceiveFault.active = .{ .socket = a.transport.udp.sockets.primary().handle };
     const deadline = a.core.control.schedules[target.?.index].closing.?.deadline_ms;
     var after_deadline = now;
     after_deadline.mono_ms = deadline;
@@ -673,7 +673,7 @@ test "managed runtime native readiness wakes for either delayed protocol socket"
             const settled = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 0);
             try std.testing.expect(settled.failure == null);
         }
-        const target = if (source == 0) node.transport.udp.socket else node.discovery.?.udp.socket;
+        const target = if (source == 0) node.transport.udp.sockets.primary() else node.discovery.?.udp.sockets.primary();
         const generation = if (source == 0) node.transport.udp.next_generation else node.discovery.?.udp.next_generation;
         const task = try std.Thread.spawn(.{}, delayedRuntimeDatagram, .{ sender, target.address });
         defer task.join();
@@ -702,8 +702,8 @@ test "managed runtime native host wake validates rollback detaches and preserves
     defer host.close(std.testing.io);
     try node.setHostWake(host.handle);
     try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(-1));
-    try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(node.transport.udp.socket.handle));
-    try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(node.discovery.?.udp.socket.handle));
+    try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(node.transport.udp.sockets.primary().handle));
+    try std.testing.expectError(error.InvalidWakeSource, node.setHostWake(node.discovery.?.udp.sockets.primary().handle));
     _ = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 0);
     const sender = try std.Thread.spawn(.{}, delayedRuntimeDatagram, .{ host, host.address });
     defer sender.join();
@@ -754,8 +754,8 @@ test "managed runtime native wait source failure retains completed protocol prog
     defer _ = std.c.close(pipe[0]);
     try node.setHostWake(pipe[0]);
     try std.testing.expectEqual(@as(c_int, 0), std.c.close(pipe[1]));
-    try node.transport.udp.socket.send(std.testing.io, &node.transport.udp.socket.address, "invalid");
-    try node.transport.udp.socket.send(std.testing.io, &node.discovery.?.udp.socket.address, "invalid");
+    try node.transport.udp.sockets.primary().send(std.testing.io, &node.transport.udp.sockets.primary().address, "invalid");
+    try node.transport.udp.sockets.primary().send(std.testing.io, &node.discovery.?.udp.sockets.primary().address, "invalid");
     const allocations = node.reservations.allocation_calls;
     const result = node.step(std.testing.io, try @import("driver.zig").currentTime(std.testing.io), 0, .{}, 100);
     try std.testing.expectEqual(error.WaitSourceClosed, result.failure.?);
@@ -1651,4 +1651,24 @@ test "application complete snapshot includes all 512 occupied disconnected rows"
         try std.testing.expect(row.connection == null and row.ban_until_ms > 0);
     }
     try std.testing.expectError(error.OutputTooSmall, node.completeSnapshots(snapshots[0..511]));
+}
+
+test "dual-stack runtime signs both bound discovery and QUIC endpoints" {
+    const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{25}));
+    var opts = options(&key);
+    opts.transport.bind = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
+    opts.discovery = .{ .bind = opts.transport.bind };
+    var node: runtime.NetworkCore = undefined;
+    try node.init(std.testing.allocator, std.testing.io, opts);
+    defer node.deinit(std.testing.io);
+    const record = node.localRecord().?;
+    const quic = node.transport.udp.localAddresses();
+    const decoded = try @import("peers/enr.zig").decode(record, &opts.local.fork);
+    try std.testing.expectEqual(@as(u8, 2), decoded.address_count);
+    try std.testing.expectEqualDeep(quic[0].?, decoded.addresses[0]);
+    try std.testing.expectEqualDeep(quic[1].?, decoded.addresses[1]);
+    try std.testing.expectEqual(node.discovery.?.udp.sockets.values[0].?.address.getPort(), record.udp.?);
+    try std.testing.expectEqual(node.discovery.?.udp.sockets.values[1].?.address.getPort(), record.udp6.?);
+    try std.testing.expectEqualSlices(u8, &quic[0].?.ip4.octets, &record.ip4.?);
+    try std.testing.expectEqualSlices(u8, &quic[1].?.ip6.octets, &record.ip6.?);
 }

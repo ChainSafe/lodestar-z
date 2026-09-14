@@ -159,7 +159,7 @@ test "engine rejects a forged certificate with tls_failed" {
     pair.server.deinit();
     pair.server = try Engine.init(std.testing.allocator, .{
         .tls = forged_ctx,
-        .local = server_address,
+        .local = .{ server_address, null },
         .seed = 0,
     });
 

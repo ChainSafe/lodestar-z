@@ -14,7 +14,7 @@ test "native wait retains independent and simultaneous datagrams with actual zer
     defer second.close(std.testing.io);
     const host = try socket();
     defer host.close(std.testing.io);
-    const sources: wait.Sources = .{ .quic = first.handle, .discovery = second.handle, .host = host.handle };
+    const sources: wait.Sources = .{ .quic = .{ first.handle, null }, .discovery = .{ second.handle, null }, .host = host.handle };
     const empty = wait.poll(std.testing.io, sources, 0);
     try std.testing.expect(empty.failure == null);
     try std.testing.expectEqual(@as(u32, 0), empty.timeout_ms);
@@ -52,7 +52,7 @@ test "native wait delayed wake preserves payload on each source" {
     for ([_]net.Socket{ first, second, host }, 0..) |target, index| {
         const sender = try std.Thread.spawn(.{}, delayedSend, .{ host, target.address });
         defer sender.join();
-        const result = wait.poll(std.testing.io, .{ .quic = first.handle, .discovery = second.handle, .host = host.handle }, 1000);
+        const result = wait.poll(std.testing.io, .{ .quic = .{ first.handle, null }, .discovery = .{ second.handle, null }, .host = host.handle }, 1000);
         try std.testing.expect(result.failure == null);
         try std.testing.expectEqual(index == 0, result.quic);
         try std.testing.expectEqual(index == 1, result.discovery);
@@ -77,12 +77,12 @@ test "native wait cancellation checkpoints preserve readiness after completion" 
     vtable.checkCancel = Cancellation.check;
     var cancellation: Cancellation = .{ .cancel_at = 1 };
     const io: std.Io = .{ .userdata = &cancellation, .vtable = &vtable };
-    const before = wait.poll(io, .{ .quic = target.handle }, 100);
+    const before = wait.poll(io, .{ .quic = .{ target.handle, null } }, 100);
     try std.testing.expectEqual(error.Canceled, before.failure.?);
     try std.testing.expect(!before.quic);
     try std.testing.expectEqual(@as(u32, 0), before.timeout_ms);
     cancellation = .{ .cancel_at = 2 };
-    const after = wait.poll(io, .{ .quic = target.handle }, 100);
+    const after = wait.poll(io, .{ .quic = .{ target.handle, null } }, 100);
     try std.testing.expectEqual(error.Canceled, after.failure.?);
     try std.testing.expect(after.quic);
     var buffer: [8]u8 = undefined;
@@ -114,7 +114,7 @@ test "native wait signal interruption returns without retrying" {
     defer std.posix.sigaction(.USR1, &old, null);
     const sender = try std.Thread.spawn(.{}, sendSignal, .{std.c.pthread_self()});
     defer sender.join();
-    const result = wait.poll(std.testing.io, .{ .quic = target.handle }, 1000);
+    const result = wait.poll(std.testing.io, .{ .quic = .{ target.handle, null } }, 1000);
     try std.testing.expect(result.failure == null);
     try std.testing.expect(result.interrupted);
     try std.testing.expect(!result.quic);
@@ -125,4 +125,29 @@ fn signalHandler(_: std.posix.SIG) callconv(.c) void {}
 fn sendSignal(thread: std.c.pthread_t) void {
     std.testing.io.sleep(.fromMilliseconds(10), .awake) catch unreachable;
     std.debug.assert(std.c.pthread_kill(thread, .USR1) == 0);
+}
+
+test "dual-stack native wait observes all four protocol sockets and host wake without consuming data" {
+    if (!wait.supported) return error.SkipZigTest;
+    const bindings: @import("udp").Bindings = .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } };
+    const quic = try @import("udp").Sockets.bind(std.testing.io, bindings);
+    defer quic.close(std.testing.io);
+    const discovery = try @import("udp").Sockets.bind(std.testing.io, bindings);
+    defer discovery.close(std.testing.io);
+    const host = try socket();
+    defer host.close(std.testing.io);
+    const sources: wait.Sources = .{ .quic = quic.handles(), .discovery = discovery.handles(), .host = host.handle };
+    const sockets = quic.values ++ discovery.values ++ [_]?net.Socket{host};
+    for (sockets, 0..) |item, index| {
+        const target = item.?;
+        try target.send(std.testing.io, &target.address, "ready");
+        const result = wait.poll(std.testing.io, sources, 100);
+        try std.testing.expect(result.failure == null);
+        try std.testing.expectEqual(index < 2, result.quic);
+        try std.testing.expectEqual(index >= 2 and index < 4, result.discovery);
+        try std.testing.expectEqual(index == 4, result.host);
+        var buffer: [8]u8 = undefined;
+        const message = try target.receiveTimeout(std.testing.io, &buffer, .{ .duration = .{ .raw = .zero, .clock = .awake } });
+        try std.testing.expectEqualStrings("ready", message.data);
+    }
 }

@@ -27,7 +27,7 @@ pub const Counters = struct {
 };
 pub const LookupTime = @import("../metrics_histogram.zig").Histogram(&.{ 1000, 5000, 10000, 30000, 60000, 120000 });
 pub const Options = struct {
-    quic_ipv6_enabled: bool = true,
+    quic_mode: d.Udp.Mode = .dual,
     query_interval_ms: u64 = 1_000,
     local_retry_ms: u64 = 1_000,
     maintenance: d.Maintenance.Config = .{},
@@ -108,7 +108,7 @@ pub const Discovery = struct {
         for (bootstrap, 0..) |*record, index| storage.bootstrap[index] = try d.identity.enr.Record.init(record.slice());
         var maintenance: d.Maintenance = undefined;
         try maintenance.init(&storage.background, storage.bootstrap[0..bootstrap.len], now_ms, options.maintenance);
-        maintenance.ipv6_enabled = driver.udp.localAddress() == .ip6;
+        maintenance.ip_mode = driver.udp.sockets.mode();
         return .{ .allocator = allocator, .driver = driver, .storage = storage, .maintenance = maintenance, .context = context.*, .options = options, .query_due_ms = now_ms };
     }
 
@@ -214,9 +214,8 @@ pub const Discovery = struct {
             var seeds: [d.Lookup.result_max]d.RoutingTable.Entry = undefined;
             const closest = self.driver.core.closestNodes(&target, &seeds);
             var lookup: d.Lookup = undefined;
-            try lookup.init(&self.storage.foreground, self.driver.core.localRecord().node_id, target, closest);
+            try lookup.init(&self.storage.foreground, self.driver.core.localRecord().node_id, target, closest, self.driver.udp.sockets.mode());
             lookup.filter = .{ .context = &self.context, .matches = matchesNetwork };
-            lookup.ipv6_enabled = self.driver.udp.localAddress() == .ip6;
             lookup.query_limit = queries_max;
             self.lookup = lookup;
             self.lookup_started_ms = now_ms;
@@ -364,7 +363,7 @@ pub const Discovery = struct {
         var count: u8 = 0;
         var supported: u8 = 0;
         for (candidate.addresses[0..candidate.address_count]) |address| {
-            if (!self.options.quic_ipv6_enabled and address == .ip6) continue;
+            if (!self.options.quic_mode.supports(address)) continue;
             supported += 1;
             if (!relayAllowed(source, address)) continue;
             candidate.addresses[count] = address;

@@ -230,15 +230,19 @@
             .root_source_file = "src/beacon_node/root.zig",
             .imports = .{ .consensus_types, .state_transition, .persistent_merkle_tree, .testing_allocators, .metrics, .hex, .time },
         },
+        .udp = .{
+            .root_source_file = "src/udp/root.zig",
+        },
         .discv5 = .{
             .root_source_file = "src/discv5/root.zig",
+            .imports = .{.udp},
         },
         .network_wire = .{
             .root_source_file = "src/network/wire/root.zig",
         },
         .network = .{
             .root_source_file = "src/network/root.zig",
-            .imports = .{ "quiche_zig:quiche", .consensus_types, .config, .constants, .preset, .ssz, .snappy, .discv5 },
+            .imports = .{ "quiche_zig:quiche", .consensus_types, .config, .constants, .preset, .ssz, .snappy, .discv5, .udp },
         },
     },
     .executables = .{

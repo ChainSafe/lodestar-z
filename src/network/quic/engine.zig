@@ -169,7 +169,7 @@ pub const DriverView = struct {
 pub const Options = struct {
     tls: tls.Context,
     limits: Limits = .{},
-    local: Address,
+    local: [2]?Address,
     seed: u64,
 };
 
@@ -178,7 +178,7 @@ pub const Engine = struct {
     tls: tls.Context,
     config: binding.Config,
     limits: Limits,
-    local: Address,
+    local: [2]?Address,
     registry: @import("registry.zig").Registry,
     connection_window: u64,
     stream_window: u64,
@@ -226,6 +226,9 @@ pub const Engine = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, options: Options) Error!Engine {
+        std.debug.assert(options.local[0] != null or options.local[1] != null);
+        if (options.local[0]) |address| std.debug.assert(address == .ip4);
+        if (options.local[1]) |address| std.debug.assert(address == .ip6);
         const wanted = options.limits;
         const outbound_max = try validateLimits(wanted);
 
@@ -309,13 +312,14 @@ pub const Engine = struct {
         assert(self.registry.dialing <= self.registry.outbound);
         if (self.registry.dialing >= self.limits.dialing_max) return error.DialLimit;
         if (self.registry.outbound >= self.outbound_max) return error.DialLimit;
+        const local = self.localFor(peer.*) orelse return error.AddressFamilyUnsupported;
         const index = self.registry.claim() orelse return error.TableFull;
         self.host_work_pending = true;
         assert(index < self.registry.slots.len);
         const slot = &self.registry.slots[index];
         slot.open(&self.tls, &self.config, .{
             .direction = .outbound,
-            .local = self.local,
+            .local = local,
             .peer = peer.*,
             .scid = entropy,
             .expected_peer_id = expected,
@@ -555,6 +559,7 @@ pub const Engine = struct {
         entropy: *EntropyPool,
         out: []u8,
     ) ReceiveOutcome {
+        const local = self.localFor(from.*) orelse return drop(&self.counters.dropped_unroutable);
         const header = binding.headerInfo(datagram) catch
             return drop(&self.counters.dropped_unroutable);
         if (self.registry.findRoute(&header.dcid)) |index| {
@@ -594,7 +599,7 @@ pub const Engine = struct {
         const slot = &self.registry.slots[index];
         slot.open(&self.tls, &self.config, .{
             .direction = .inbound,
-            .local = self.local,
+            .local = local,
             .peer = from.*,
             .scid = scid,
             .expected_peer_id = null,
@@ -792,6 +797,15 @@ pub const Engine = struct {
         return .dropped;
     }
 
+    fn localFor(self: *const Engine, peer: Address) ?Address {
+        return self.local[
+            switch (peer) {
+                .ip4 => @as(usize, 0),
+                .ip6 => 1,
+            }
+        ];
+    }
+
     fn feed(self: *Engine, index: u16, datagram: []u8, from: *const Address) void {
         assert(index < self.registry.slots.len);
         assert(datagram.len > 0);
@@ -801,7 +815,8 @@ pub const Engine = struct {
         const was_established = slot.state == .established;
         const source = binding.SockAddr.fromAddress(from.*);
         var received = true;
-        if (slot.recv(datagram, &source)) |_| {
+        const destination = binding.SockAddr.fromAddress(self.localFor(from.*).?);
+        if (slot.recv(datagram, &source, &destination)) |_| {
             self.counters.accepted += 1;
             self.registry.activity[index] = true;
         } else |_| {

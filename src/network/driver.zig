@@ -94,7 +94,10 @@ pub const Driver = struct {
         expected: peer_id.PeerId,
     ) DialError!engine_mod.Handle {
         const now = try currentTime(io);
-        const handle = try engine.dial(&peer, expected, now, try entropy(io));
+        const handle = engine.dial(&peer, expected, now, try entropy(io)) catch |err| switch (err) {
+            error.AddressFamilyUnsupported => return error.DestinationUnreachable,
+            else => return err,
+        };
         errdefer {
             self.pending.remove(handle.index);
             _ = engine.abandon(handle);
