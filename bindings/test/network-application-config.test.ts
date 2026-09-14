@@ -11,6 +11,24 @@ test.each(["resources", "requestPolicy", "identify", "capabilities", "topicPolic
 });
 
 test.each([
+  ["peerCapacity", 512],
+  ["targetPeers", 256],
+  ["maxPeers", 256],
+  ["minOutbound", 256],
+  ["outboundReserve", 512],
+  ["connectionCapacity", 256],
+  ["handshakingCapacity", 256],
+  ["dialingCapacity", 256],
+  ["receiveBudgetBytes", Number.MAX_SAFE_INTEGER],
+  ["nativeBudgetBytes", 1024 ** 3],
+  ["bridgeBudgetBytes", 1024 ** 3],
+] as const)("rejects %s above its resource maximum", (field, maximum) => {
+  const config = applicationConfig();
+  config.resources[field] = maximum + 1;
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
+});
+
+test.each([
   0,
   -1,
   1.5,

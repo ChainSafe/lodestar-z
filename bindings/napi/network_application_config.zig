@@ -57,6 +57,20 @@ pub const Resources = struct {
     bridgeBudgetBytes: usize,
 };
 
+const resource_maxima: Resources = .{
+    .peerCapacity = n.gossipsub.constants.retained_peers_cap,
+    .targetPeers = 256,
+    .maxPeers = 256,
+    .minOutbound = 256,
+    .outboundReserve = n.gossipsub.constants.retained_peers_cap,
+    .connectionCapacity = 256,
+    .handshakingCapacity = 256,
+    .dialingCapacity = 256,
+    .receiveBudgetBytes = 9007199254740991,
+    .nativeBudgetBytes = 1024 * 1024 * 1024,
+    .bridgeBudgetBytes = 1024 * 1024 * 1024,
+};
+
 pub fn text(value: Value, out: []u8) !usize {
     if (try value.typeof() != .string) return error.InvalidNetworkConfig;
     const napi = @import("zapi:zapi").napi;
@@ -109,7 +123,7 @@ pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
     const resources = try cfg.get(value, "resources");
     try cfg.completeObject(resources, &.{ "peerCapacity", "targetPeers", "maxPeers", "minOutbound", "outboundReserve", "connectionCapacity", "handshakingCapacity", "dialingCapacity", "receiveBudgetBytes", "nativeBudgetBytes", "bridgeBudgetBytes" });
     inline for (@typeInfo(Resources).@"struct".fields) |field| {
-        const max: u64 = if (std.mem.eql(u8, field.name, "receiveBudgetBytes")) 9007199254740991 else if (std.mem.endsWith(u8, field.name, "Bytes")) 1024 * 1024 * 1024 else if (std.mem.eql(u8, field.name, "peerCapacity") or std.mem.eql(u8, field.name, "outboundReserve")) n.gossipsub.constants.retained_peers_cap else 256;
+        const max: u64 = @field(resource_maxima, field.name);
         @field(out.resources, field.name) = @intCast(try cfg.integer(try cfg.get(resources, field.name), max));
     }
     if (out.resources.nativeBudgetBytes == 0 or out.resources.bridgeBudgetBytes == 0) return error.InvalidNetworkInteger;
