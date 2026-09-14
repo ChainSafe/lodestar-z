@@ -37,10 +37,6 @@ pub const SyncCommittee = js.Object(struct {
 
 pub const IndexedSyncCommittee = js.Object(struct {
     validatorIndices: js.Uint32Array,
-});
-
-pub const IndexedSyncCommitteeWithMap = js.Object(struct {
-    validatorIndices: js.Uint32Array,
     validatorIndexMap: js.Value,
 });
 
