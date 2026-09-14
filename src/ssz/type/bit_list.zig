@@ -276,14 +276,19 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         }
 
         pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            if (value.bit_len > limit) return error.tooLarge;
-            std.debug.assert(value.data.items.len == (value.bit_len + 7) / 8);
+            const data = value.data.items;
+            std.debug.assert(value.bit_len <= limit);
+            std.debug.assert(data.len == (std.math.divCeil(usize, value.bit_len, 8) catch unreachable));
+
+            const full_chunk_count = data.len / 32;
             var accumulator = MerkleAccumulator.init(chunk_depth);
-            for (0..chunkCount(value)) |i| {
+            for (0..full_chunk_count) |i| {
+                try accumulator.append(data[i * 32 ..][0..32]);
+            }
+            const tail = data[full_chunk_count * 32 ..];
+            if (tail.len != 0) {
                 var chunk: [32]u8 = @splat(0);
-                const start = i * 32;
-                const len = @min(32, value.data.items.len - start);
-                @memcpy(chunk[0..len], value.data.items[start..][0..len]);
+                @memcpy(chunk[0..tail.len], tail);
                 try accumulator.append(&chunk);
             }
             try accumulator.finish(out);
@@ -400,16 +405,19 @@ pub fn BitListType(comptime _limit: comptime_int) type {
 
             pub fn hashTreeRoot(_: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 const parsed = try parse(data);
-                const byte_len = (parsed.bit_len + 7) / 8;
-                const chunk_count = (parsed.bit_len + 255) / 256;
+                // A 32-byte final chunk can still contain the delimiter.
+                const full_chunk_count = parsed.bit_len / 256;
                 var accumulator = MerkleAccumulator.init(chunk_depth);
-                for (0..chunk_count) |i| {
+                for (0..full_chunk_count) |i| {
+                    try accumulator.append(data[i * 32 ..][0..32]);
+                }
+                const tail_bit_len = parsed.bit_len % 256;
+                if (tail_bit_len != 0) {
                     var chunk: [32]u8 = @splat(0);
-                    const start = i * 32;
-                    const len = @min(32, byte_len - start);
-                    @memcpy(chunk[0..len], data[start..][0..len]);
-                    if (i + 1 == chunk_count and parsed.bit_len % 8 != 0) {
-                        chunk[len - 1] ^= @as(u8, 1) << parsed.padding_bit_index;
+                    const tail_byte_len = (tail_bit_len + 7) / 8;
+                    @memcpy(chunk[0..tail_byte_len], data[full_chunk_count * 32 ..][0..tail_byte_len]);
+                    if (tail_bit_len % 8 != 0) {
+                        chunk[tail_byte_len - 1] ^= @as(u8, 1) << parsed.padding_bit_index;
                     }
                     try accumulator.append(&chunk);
                 }

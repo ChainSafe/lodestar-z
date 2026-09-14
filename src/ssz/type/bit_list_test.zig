@@ -445,7 +445,13 @@ test "BitList hashing streams chunk and batch boundaries without allocation" {
     const Bits = BitListType(65 * 256 + 7);
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
-    for ([_]usize{ 0, 1, 7, 8, 9, 255, 256, 257, 63 * 256, 64 * 256, 64 * 256 + 1, Bits.limit }) |len| {
+    for ([_]usize{
+        0,        1,            7,        8,            9,
+        247,      248,          249,      255,          256,
+        257,      511,          512,      513,          63 * 256 - 1,
+        63 * 256, 64 * 256 - 1, 64 * 256, 64 * 256 + 1, 65 * 256 - 1,
+        65 * 256, Bits.limit,
+    }) |len| {
         var value = try Bits.Type.fromBitLen(allocator, len);
         defer value.deinit(allocator);
         for (0..len) |i| try value.setAssumeCapacity(i, i % 3 == 0);
