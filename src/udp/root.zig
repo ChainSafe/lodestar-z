@@ -142,7 +142,9 @@ fn bind6(io: std.Io, ip: net.Ip6Address) BindError!net.Socket {
     errdefer _ = p.system.close(fd);
     if (builtin.os.tag == .macos and std.c.fcntl(fd, p.F.SETFD, @as(c_int, p.FD_CLOEXEC)) < 0) return error.Unexpected;
     const enabled: c_int = 1;
-    if (p.errno(p.system.setsockopt(fd, p.IPPROTO.IPV6, p.IPV6.V6ONLY, @ptrCast(&enabled), @sizeOf(c_int))) != .SUCCESS) return error.OptionUnsupported;
+    // Zig 0.16 omits Darwin IPV6 constants from std.posix.
+    const ipv6_only = if (builtin.os.tag == .macos) 27 else p.IPV6.V6ONLY;
+    if (p.errno(p.system.setsockopt(fd, p.IPPROTO.IPV6, ipv6_only, @ptrCast(&enabled), @sizeOf(c_int))) != .SUCCESS) return error.OptionUnsupported;
     var address: p.sockaddr.in6 = .{ .port = std.mem.nativeToBig(u16, ip.port), .addr = ip.bytes, .flowinfo = ip.flow, .scope_id = ip.interface.index };
     const bound = p.system.bind(fd, @ptrCast(&address), @sizeOf(@TypeOf(address)));
     if (p.errno(bound) != .SUCCESS) return socketError(p.errno(bound));
