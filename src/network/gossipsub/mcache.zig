@@ -16,76 +16,94 @@ fn hashId(id: MessageId) usize {
     return std.mem.readInt(u64, id[0..8], .little);
 }
 
-/// An open-addressed id-to-index table with backward-shift deletion, shared by
-/// both caches. Capacity is a power of two so the mask is cheap.
-const Index = struct {
-    slots: []u32,
-    ids: []MessageId,
-    mask: usize,
+/// Borrows stable keys from MessageId values or records with an `id` field.
+/// Remove membership before overwriting a key. Backward-shift deletion can only
+/// reduce displacement, so the insertion high-water bound also bounds misses.
+pub fn IdIndex(comptime Entry: type) type {
+    return struct {
+        const Self = @This();
+        slots: []u32,
+        entries: []Entry,
+        mask: usize,
+        probe_limit: usize = 0,
 
-    fn init(allocator: Allocator, capacity: usize, ids: []MessageId) Allocator.Error!Index {
-        const table_len = indexCapacity(capacity);
-        const slots = try allocator.alloc(u32, table_len);
-        @memset(slots, empty_slot);
-        return .{ .slots = slots, .ids = ids, .mask = table_len - 1 };
-    }
-
-    fn deinit(self: *Index, allocator: Allocator) void {
-        allocator.free(self.slots);
-    }
-
-    fn find(self: *const Index, id: MessageId) ?u32 {
-        var pos = hashId(id) & self.mask;
-        for (0..self.slots.len) |_| {
-            if (self.slots[pos] == empty_slot) return null;
-            if (std.mem.eql(u8, &self.ids[self.slots[pos]], &id)) return self.slots[pos];
-            pos = (pos + 1) & self.mask;
+        pub fn init(allocator: Allocator, entries: []Entry) Allocator.Error!Self {
+            const table_len = indexCapacity(entries.len);
+            const slots = try allocator.alloc(u32, table_len);
+            @memset(slots, empty_slot);
+            return .{ .slots = slots, .entries = entries, .mask = table_len - 1 };
         }
-        unreachable;
-    }
 
-    fn insert(self: *Index, id: MessageId, entry: u32) void {
-        assert(entry < self.ids.len);
-        var pos = hashId(id) & self.mask;
-        for (0..self.slots.len) |_| {
-            if (self.slots[pos] == empty_slot) {
-                self.slots[pos] = entry;
-                return;
-            }
-            pos = (pos + 1) & self.mask;
+        pub fn deinit(self: *Self, allocator: Allocator) void {
+            allocator.free(self.slots);
         }
-        unreachable;
-    }
 
-    fn remove(self: *Index, id: MessageId) void {
-        var pos = hashId(id) & self.mask;
-        var found = false;
-        for (0..self.slots.len) |_| {
-            if (self.slots[pos] == empty_slot) return;
-            if (std.mem.eql(u8, &self.ids[self.slots[pos]], &id)) {
-                found = true;
-                break;
-            }
-            pos = (pos + 1) & self.mask;
+        pub fn clear(self: *Self) void {
+            @memset(self.slots, empty_slot);
+            self.probe_limit = 0;
         }
-        assert(found);
-        var hole = pos;
-        pos = (pos + 1) & self.mask;
-        for (0..self.slots.len) |_| {
-            if (self.slots[pos] == empty_slot) {
-                self.slots[hole] = empty_slot;
-                return;
-            }
-            const home = hashId(self.ids[self.slots[pos]]) & self.mask;
-            if ((pos -% home) & self.mask >= (pos -% hole) & self.mask) {
-                self.slots[hole] = self.slots[pos];
-                hole = pos;
-            }
-            pos = (pos + 1) & self.mask;
+
+        fn key(self: *const Self, entry: u32) *const MessageId {
+            if (Entry == MessageId) return &self.entries[entry];
+            return &self.entries[entry].id;
         }
-        unreachable;
-    }
-};
+
+        pub fn find(self: *const Self, id: MessageId) ?u32 {
+            var pos = hashId(id) & self.mask;
+            for (0..self.probe_limit) |_| {
+                if (self.slots[pos] == empty_slot) return null;
+                if (std.mem.eql(u8, self.key(self.slots[pos]), &id)) return self.slots[pos];
+                pos = (pos + 1) & self.mask;
+            }
+            return null;
+        }
+
+        pub fn insert(self: *Self, id: MessageId, entry: u32) void {
+            assert(entry < self.entries.len and std.mem.eql(u8, self.key(entry), &id));
+            var pos = hashId(id) & self.mask;
+            for (0..self.slots.len) |distance| {
+                if (self.slots[pos] == empty_slot) {
+                    self.slots[pos] = entry;
+                    self.probe_limit = @max(self.probe_limit, distance + 1);
+                    return;
+                }
+                pos = (pos + 1) & self.mask;
+            }
+            unreachable;
+        }
+
+        pub fn remove(self: *Self, id: MessageId) void {
+            var pos = hashId(id) & self.mask;
+            var found = false;
+            for (0..self.probe_limit) |_| {
+                if (self.slots[pos] == empty_slot) return;
+                if (std.mem.eql(u8, self.key(self.slots[pos]), &id)) {
+                    found = true;
+                    break;
+                }
+                pos = (pos + 1) & self.mask;
+            }
+            if (!found) return;
+            var hole = pos;
+            pos = (pos + 1) & self.mask;
+            for (0..self.slots.len) |_| {
+                if (self.slots[pos] == empty_slot) {
+                    self.slots[hole] = empty_slot;
+                    return;
+                }
+                const home = hashId(self.key(self.slots[pos]).*) & self.mask;
+                if ((pos -% home) & self.mask >= (pos -% hole) & self.mask) {
+                    self.slots[hole] = self.slots[pos];
+                    hole = pos;
+                }
+                pos = (pos + 1) & self.mask;
+            }
+            unreachable;
+        }
+    };
+}
+
+const Index = IdIndex(MessageId);
 
 /// A fixed-capacity FIFO set of message ids with a TTL, used to drop duplicates.
 /// The oldest ids evict first, which is also TTL order since entries are added
@@ -105,7 +123,7 @@ pub const SeenCache = struct {
         errdefer allocator.free(ids);
         const added_ms = try allocator.alloc(u64, capacity);
         errdefer allocator.free(added_ms);
-        var index = try Index.init(allocator, capacity, ids);
+        var index = try Index.init(allocator, ids);
         errdefer index.deinit(allocator);
         return .{
             .index = index,
@@ -191,7 +209,7 @@ pub const History = struct {
         const counts = try a.alloc(u8, capacity * retained);
         errdefer a.free(counts);
         @memset(counts, 0);
-        const index = try Index.init(a, capacity, ids);
+        const index = try Index.init(a, ids);
         for (entries, 0..) |*e, i| e.* = .{ .next = if (i + 1 == capacity) empty_slot else @intCast(i + 1) };
         return .{ .entries = entries, .ids = ids, .index = index, .generations = generations, .counts = counts };
     }
@@ -394,18 +412,33 @@ test "gossip history indexed replacement keeps FIFO age and independent TX reten
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
 }
 
-test "gossip ID index repairs a full admitted collision cluster" {
+test "gossip ID index bounds sparse misses and repairs wrapped collision clusters" {
     var ids: [64]MessageId = undefined;
-    var index = try Index.init(std.testing.allocator, ids.len, &ids);
+    var index = try Index.init(std.testing.allocator, &ids);
     defer index.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), index.probe_limit);
+    try std.testing.expect(index.find(@splat(0)) == null);
     for (&ids, 0..) |*id, i| {
-        id.* = [_]u8{0} ** 20;
+        id.* = @splat(0);
+        id[0] = 127;
         id[19] = @intCast(i);
         index.insert(id.*, @intCast(i));
+        try std.testing.expectEqual(i + 1, index.probe_limit);
     }
-    index.remove(ids[0]);
-    for (1..ids.len) |i| try std.testing.expectEqual(@as(?u32, @intCast(i)), index.find(ids[i]));
+    var present = std.StaticBitSet(64).initFull();
+    for ([_]usize{ 0, 32, 63, 1, 31, 62 }) |removed| {
+        index.remove(ids[removed]);
+        present.unset(removed);
+        try std.testing.expectEqual(ids.len, index.probe_limit);
+        for (ids, 0..) |id, i| try std.testing.expectEqual(if (present.isSet(i)) @as(?u32, @intCast(i)) else null, index.find(id));
+    }
+    index.clear();
+    try std.testing.expectEqual(@as(usize, 0), index.probe_limit);
+    for (ids) |id| try std.testing.expect(index.find(id) == null);
+    index.insert(ids[63], 63);
+    try std.testing.expectEqual(@as(usize, 1), index.probe_limit);
     try std.testing.expect(index.find(ids[0]) == null);
+    try std.testing.expectEqual(@as(?u32, 63), index.find(ids[63]));
 }
 
 test "gossip policy recovery permits more than sixteen distinct recipients" {

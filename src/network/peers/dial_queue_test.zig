@@ -4,6 +4,64 @@ const t = @import("types.zig");
 const a = std.testing.allocator;
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 1234 } };
 
+fn peerSnapshot(peer: *const t.PeerId, conn: ?t.Handle) t.Snapshot {
+    return .{
+        .peer = .{ .index = 0, .generation = 1 },
+        .identity = peer.*,
+        .connection = conn,
+        .direction = .outbound,
+        .endpoint = address,
+        .relevant = false,
+        .status = null,
+        .metadata = null,
+        .status_at_ms = 0,
+        .metadata_at_ms = 0,
+        .connected_at_ms = 0,
+        .direct = false,
+        .score = 0,
+        .ban_until_ms = 0,
+        .goodbye_until_ms = 0,
+    };
+}
+
+test "peer dial synchronization resolves connection history and deferral with one lookup" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 8, .seed = 4 });
+    defer q.deinit(a);
+    for (0..q.rows.len) |i| {
+        const peer: t.PeerId = .{ .bytes = @splat(@intCast(i + 1)) };
+        try q.enqueue(&peer, &.{address}, true, 0);
+    }
+    const peer = q.rows[q.rows.len - 1].peer;
+    var snapshot = peerSnapshot(&peer, .{ .index = 0, .generation = 1 });
+    snapshot.relevant = true;
+    snapshot.status_at_ms = 100;
+    q.synchronize(&snapshot, 100, 30_000);
+    const row = &q.rows[q.rows.len - 1];
+    try std.testing.expect(row.connected);
+    try std.testing.expectEqual(@as(u64, 30_000), row.eligible_at_ms);
+    try std.testing.expectEqual(@as(u64, 100 + mod.history_retention_ms), row.history_until_ms);
+    try std.testing.expectEqual(@as(u64, q.rows.len), q.counters.sync_lookup_rows);
+
+    snapshot.connection = null;
+    snapshot.relevant = false;
+    snapshot.disconnect_reason = .health_timeout;
+    q.synchronize(&snapshot, 200, 60_000);
+    try std.testing.expect(!row.connected);
+    try std.testing.expectEqual(@as(u8, 1), row.failures);
+    try std.testing.expectEqual(@as(u64, 1), q.counters.connection_backoffs);
+    try std.testing.expectEqual(@as(u64, 60_000), row.eligible_at_ms);
+    try std.testing.expectEqual(@as(u64, 200 + mod.history_retention_ms), row.history_until_ms);
+    try std.testing.expectEqual(@as(u64, 2 * q.rows.len), q.counters.sync_lookup_rows);
+    const random = q.random;
+    q.synchronize(&snapshot, 300, 60_000);
+    try std.testing.expectEqualDeep(random, q.random);
+    try std.testing.expectEqual(@as(u8, 1), row.failures);
+    try std.testing.expectEqual(@as(u64, 60_000), row.eligible_at_ms);
+    try std.testing.expectEqual(@as(u64, 200 + mod.history_retention_ms), row.history_until_ms);
+    try std.testing.expectEqual(@as(u64, 1), q.counters.connection_backoffs);
+    try std.testing.expectEqual(@as(u64, 3 * q.rows.len), q.counters.sync_lookup_rows);
+}
+
 test "peer dial metrics count each completed attempt once and exclude local deferrals" {
     var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
     defer q.deinit(a);
@@ -588,7 +646,7 @@ test "peer retained attempt does not hide canonical connection closure" {
     expected.connected = false;
     q.connection(&peer, false, 20);
     try std.testing.expectEqualDeep(expected, q.rows[0]);
-    q.syncConnection(&peer, false, 20);
+    q.synchronize(&peerSnapshot(&peer, null), 20, null);
     try std.testing.expectEqualDeep(expected, q.rows[0]);
     try std.testing.expect(!q.dialStarted(token, attempt));
     try std.testing.expect(!q.dialFailed(token, 20));

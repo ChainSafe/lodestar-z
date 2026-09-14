@@ -16,6 +16,7 @@ pub const Counters = struct {
     published_bytes: u64 = 0,
     prevalidation: u64 = 0,
     ihave_ids: u64 = 0,
+    /// Unique unknown IDs selected for an IWANT attempt, excluding pending requests.
     ihave_unseen: u64 = 0,
     iwant_ids: u64 = 0,
     published_peers: u64 = 0,

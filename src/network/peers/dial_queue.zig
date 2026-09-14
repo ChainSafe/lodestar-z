@@ -74,6 +74,7 @@ pub const DialQueue = struct {
         manual_expired: u64 = 0,
         manual_cancelled: u64 = 0,
         connection_backoffs: u64 = 0,
+        sync_lookup_rows: u64 = 0,
     };
 
     pub const Resources = struct {
@@ -310,12 +311,6 @@ pub const DialQueue = struct {
         }
         return null;
     }
-    /// Only selected relevant authenticated success renews automatic history retention.
-    pub fn relevant(self: *DialQueue, peer: *const t.PeerId, now_ms: u64) void {
-        for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
-            row.history_until_ms = @max(row.history_until_ms, now_ms +| history_retention_ms);
-        };
-    }
     pub fn hostDemand(self: *const DialQueue) u16 {
         var count: u16 = 0;
         for (self.rows) |row| if (row.occupied and (row.direct or row.manual_until_ms != 0) and !row.connected) {
@@ -368,12 +363,16 @@ pub const DialQueue = struct {
     }
     pub fn connection(self: *DialQueue, peer: *const t.PeerId, connected: bool, now_ms: u64) void {
         for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
-            row.connected = connected;
-            if (row.conn != null) return;
-            row.attempt = false;
-            row.conn = null;
-            row.eligible_at_ms = @max(row.eligible_at_ms, now_ms +| 1_000);
+            setConnection(row, connected, now_ms);
+            return;
         };
+    }
+    fn setConnection(row: *Row, connected: bool, now_ms: u64) void {
+        row.connected = connected;
+        if (row.conn != null) return;
+        row.attempt = false;
+        row.conn = null;
+        row.eligible_at_ms = @max(row.eligible_at_ms, now_ms +| 1_000);
     }
     pub fn accepted(
         self: *DialQueue,
@@ -396,7 +395,7 @@ pub const DialQueue = struct {
                 self.durations[0].observe(now_ms -| row.attempt_started_ms);
             }
             row.conn = null;
-            self.connection(peer, true, now_ms);
+            setConnection(row, true, now_ms);
             if (!row.automatic and !row.direct) row.occupied = false;
             return;
         }
@@ -405,18 +404,22 @@ pub const DialQueue = struct {
     pub fn disconnected(self: *DialQueue, peer: *const t.PeerId, connected_at_ms: u64, reason: t.DisconnectReason, now_ms: u64) void {
         for (self.rows) |*row| {
             if (!row.occupied or !row.connected or !row.peer.eql(peer)) continue;
-            self.connection(peer, false, now_ms);
-            const lifetime = now_ms -| connected_at_ms;
-            const unhealthy = reason == .health_timeout or reason == .health_error;
-            if (lifetime >= stable_connection_ms and !unhealthy) row.failures = 0;
-            row.failures = @min(row.failures +| 1, 7);
-            const delay = @min(@as(u64, 5_000) << @intCast(row.failures - 1), 300_000);
-            row.eligible_at_ms = @max(row.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
-            row.history_until_ms = @max(row.history_until_ms, now_ms +| history_retention_ms);
-            self.counters.connection_backoffs +|= 1;
-            std.log.scoped(.network_peers).debug("dial_backoff peer={f} reason={s} failures={d} connected_ms={d} retry_ms={d}", .{ @import("../logging.zig").peer(peer), @tagName(reason), row.failures, lifetime, row.eligible_at_ms -| now_ms });
+            self.disconnectedRow(row, connected_at_ms, reason, now_ms);
             return;
         }
+    }
+    fn disconnectedRow(self: *DialQueue, row: *Row, connected_at_ms: u64, reason: t.DisconnectReason, now_ms: u64) void {
+        std.debug.assert(row.connected);
+        setConnection(row, false, now_ms);
+        const lifetime = now_ms -| connected_at_ms;
+        const unhealthy = reason == .health_timeout or reason == .health_error;
+        if (lifetime >= stable_connection_ms and !unhealthy) row.failures = 0;
+        row.failures = @min(row.failures +| 1, 7);
+        const delay = @min(@as(u64, 5_000) << @intCast(row.failures - 1), 300_000);
+        row.eligible_at_ms = @max(row.eligible_at_ms, now_ms +| delay +| (self.random.random().int(u16) % 1_001));
+        row.history_until_ms = @max(row.history_until_ms, now_ms +| history_retention_ms);
+        self.counters.connection_backoffs +|= 1;
+        std.log.scoped(.network_peers).debug("dial_backoff peer={f} reason={s} failures={d} connected_ms={d} retry_ms={d}", .{ @import("../logging.zig").peer(&row.peer), @tagName(reason), row.failures, lifetime, row.eligible_at_ms -| now_ms });
     }
 
     pub fn cancelConnect(self: *DialQueue, engine: *@import("../quic/engine.zig").Engine, peer: *const t.PeerId, now_ms: u64) void {
@@ -454,17 +457,20 @@ pub const DialQueue = struct {
         }
     }
 
-    pub fn syncConnection(
-        self: *DialQueue,
-        peer: *const t.PeerId,
-        connected: bool,
-        now_ms: u64,
-    ) void {
-        for (self.rows) |row| {
-            if (!row.occupied or !row.peer.eql(peer)) continue;
-            if (row.connected != connected) self.connection(peer, connected, now_ms);
+    pub fn synchronize(self: *DialQueue, snapshot: *const t.Snapshot, now_ms: u64, eligible_at_ms: ?u64) void {
+        for (self.rows, 0..) |*row, index| {
+            if (!row.occupied or !row.peer.eql(&snapshot.identity)) continue;
+            self.counters.sync_lookup_rows +|= index + 1;
+            if (snapshot.connection != null) {
+                if (!row.connected) setConnection(row, true, now_ms);
+            } else if (row.connected) {
+                self.disconnectedRow(row, snapshot.connected_at_ms, snapshot.disconnect_reason orelse .transport_closed, now_ms);
+            }
+            if (snapshot.relevant) row.history_until_ms = @max(row.history_until_ms, snapshot.status_at_ms +| history_retention_ms);
+            if (eligible_at_ms) |due| row.eligible_at_ms = @max(row.eligible_at_ms, due);
             return;
         }
+        self.counters.sync_lookup_rows +|= self.rows.len;
     }
     pub fn deferPeer(self: *DialQueue, peer: *const t.PeerId, eligible_at_ms: u64) void {
         for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {

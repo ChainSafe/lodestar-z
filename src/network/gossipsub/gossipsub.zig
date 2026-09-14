@@ -473,15 +473,19 @@ pub const Gossipsub = struct {
             },
             else => {
                 if (self.sessions.rows[index].outStream() != null and io.controls < constants.max_control_per_rpc) {
-                    io.controls += 1;
                     switch (item) {
-                        .ihave => |ihave| self.onIhave(index, ihave, now),
+                        .ihave => |ihave| {
+                            const workspace = turn.workspace(peer);
+                            if (!workspace.chargeWork(&self.options, self.ihaveWork(ihave.body.len))) return .credits;
+                            self.onIhave(index, ihave, now);
+                        },
                         .iwant => |iwant| self.onIwant(index, iwant),
                         .graft => |name| self.onGraft(index, name, now),
                         .prune => |prune| self.onPrune(index, prune, now),
                         .idontwant => |ids| self.onIdontwant(index, ids),
                         else => unreachable,
                     }
+                    io.controls += 1;
                 }
             },
         }
@@ -731,6 +735,24 @@ pub const Gossipsub = struct {
         }
     }
 
+    pub fn ihaveWork(self: *const Gossipsub, body_len: usize) usize {
+        return ihaveWorkBound(body_len, self.messages.seen.index.probe_limit + self.messages.validation.index.probe_limit, self.recovery.batch_len, self.recovery.len);
+    }
+
+    pub fn ihaveWorkBound(body_len: usize, probes: usize, batches: usize, requests: usize) usize {
+        const ids: usize = @min(constants.max_ihave_ids_per_heartbeat, body_len / (constants.message_id_length + 2));
+        const selected: usize = @min(ids, constants.gossip_ids_max);
+        const fields: usize = @min(body_len / 2 + 1, 8193);
+        const header_work = constants.topics_cap * (topic_mod.topic_max_len + @sizeOf(score_mod.TopicParams) + @sizeOf(score_mod.TopicCounters) + @sizeOf(score_mod.TopicWeights)) +
+            @as(usize, peers_mod.capacity) * @sizeOf(peers_mod.Row) + @sizeOf(peers_mod.PeerBook);
+        // Each protobuf field consumes at least two bytes and at most two
+        // ten-byte varints. Include a score refresh, IP population and topic
+        // lookup; ID lookups include a slot read and key comparison.
+        return header_work + 20 * fields +
+            Recovery.selectionWork(ids, batches, requests) + ids * probes * (@sizeOf(MessageId) + @sizeOf(u32)) +
+            Recovery.selectionWork(selected, batches, requests) + selected * 256;
+    }
+
     fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
         if (self.belowGossip(index, now.mono_ms)) {
             self.rpc_metrics.ignoreIhave(.low_score);
@@ -753,44 +775,35 @@ pub const Gossipsub = struct {
             return;
         }
         const metrics = self.topic_metrics.get(ihave.topic);
-        var wanted: [constants.gossip_ids_max]MessageId = undefined;
-        var candidates: [constants.gossip_ids_max]MessageId = undefined;
+        comptime assert(constants.max_ihave_ids_per_heartbeat * @sizeOf(MessageId) <= constants.GOSSIP_MAX_SIZE);
+        const candidates = std.mem.bytesAsSlice(MessageId, self.msg_scratch[0 .. constants.max_ihave_ids_per_heartbeat * @sizeOf(MessageId)]);
         var count: usize = 0;
-        var examined: usize = 0;
         var it = ihave.ids();
-        const limit = @min(wanted.len, id_budget, self.recovery.available());
-        while (examined < constants.max_ihave_ids_per_heartbeat and count < limit) {
-            var batch: usize = 0;
-            while (batch < candidates.len and examined < constants.max_ihave_ids_per_heartbeat) {
-                const id_bytes = (it.next() catch return) orelse break;
-                examined += 1;
-                if (id_bytes.len != constants.message_id_length) continue;
-                const id: MessageId = id_bytes[0..constants.message_id_length].*;
-                metrics.ihave_ids +|= 1;
-                if (!self.messages.wants(id, now.mono_ms)) continue;
-                metrics.ihave_unseen +|= 1;
-                candidates[batch] = id;
-                batch += 1;
-            }
-            if (batch == 0) break;
-            const eligible = self.recovery.select(self.logical(index), candidates[0..batch]) catch {
-                self.rpc_metrics.ignoreIhave(.peer_capacity);
-                return;
-            };
-            for (candidates[0..eligible]) |id| {
-                if (count == limit) break;
-                if (for (wanted[0..count]) |selected| {
-                    if (std.mem.eql(u8, &selected, &id)) break true;
-                } else false) continue;
-                wanted[count] = id;
-                count += 1;
-            }
+        for (0..constants.max_ihave_ids_per_heartbeat) |_| {
+            const id_bytes = (it.next() catch return) orelse break;
+            if (id_bytes.len != constants.message_id_length) continue;
+            metrics.ihave_ids +|= 1;
+            candidates[count] = id_bytes[0..constants.message_id_length].*;
+            count += 1;
+        }
+        const selected = self.recovery.filterPending(self.logical(index), candidates[0..count]) catch {
+            self.rpc_metrics.ignoreIhave(.peer_capacity);
+            return;
+        };
+        const limit = @min(constants.gossip_ids_max, id_budget, selected.capacity);
+        count = 0;
+        for (candidates[0..selected.count]) |id| {
+            if (count == limit) break;
+            if (!self.messages.wants(id, now.mono_ms)) continue;
+            metrics.ihave_unseen +|= 1;
+            candidates[count] = id;
+            count += 1;
         }
         if (count == 0) {
             self.rpc_metrics.ignoreIhave(.no_new_ids);
             return;
         }
-        count = self.recovery.requestBatch(&self.peers, &io.tx, wanted[0..count], self.logical(index), self.sessions.rows[index].conn, self.overlay.rng.random(), now.mono_ms) catch |err| {
+        count = self.recovery.requestBatch(&self.peers, &io.tx, candidates[0..count], self.logical(index), self.sessions.rows[index].conn, self.overlay.rng.random(), now.mono_ms) catch |err| {
             switch (err) {
                 error.PeerCapacity => self.rpc_metrics.ignoreIhave(.peer_capacity),
                 error.NoNewIds => self.rpc_metrics.ignoreIhave(.no_new_ids),

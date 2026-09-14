@@ -63,8 +63,16 @@ pub const Recovery = struct {
         return self.requests.len - self.len;
     }
 
+    pub const Selection = struct { count: usize, capacity: usize };
+
     pub fn select(self: *const Recovery, peer: PeerRef, ids: []MessageId) error{PeerCapacity}!usize {
         assert(ids.len <= constants.gossip_ids_max);
+        const selected = try self.filterPending(peer, ids);
+        return @min(selected.count, selected.capacity);
+    }
+
+    pub fn filterPending(self: *const Recovery, peer: PeerRef, ids: []MessageId) error{PeerCapacity}!Selection {
+        assert(ids.len <= constants.max_ihave_ids_per_heartbeat);
         std.sort.heap(MessageId, ids, {}, lessThan);
         var unique: usize = 0;
         for (ids) |id| {
@@ -72,7 +80,7 @@ pub const Recovery = struct {
             ids[unique] = id;
             unique += 1;
         }
-        var requested = std.StaticBitSet(constants.gossip_ids_max).initEmpty();
+        var requested = std.StaticBitSet(constants.max_ihave_ids_per_heartbeat).initEmpty();
         var pending: usize = 0;
         for (self.batches[0..self.batch_len]) |batch| {
             if (!std.meta.eql(batch.peer, peer)) continue;
@@ -89,12 +97,22 @@ pub const Recovery = struct {
         const capacity = @min(self.available(), promises_per_peer - pending);
         var count: usize = 0;
         for (ids[0..unique], 0..) |id, index| {
-            if (count == capacity) break;
             if (requested.isSet(index)) continue;
             ids[count] = id;
             count += 1;
         }
-        return count;
+        return .{ .count = count, .capacity = capacity };
+    }
+
+    pub fn selectionWork(ids: usize, batches: usize, requests: usize) usize {
+        assert(ids <= constants.max_ihave_ids_per_heartbeat and batches <= constants.promises_cap and requests <= constants.promises_cap);
+        const levels = std.math.log2_int_ceil(usize, @max(ids, 2));
+        // Heap construction and removal visit at most 3n/2 paths. Each level
+        // compares two ID pairs and swaps three IDs. Include deduplication,
+        // compaction, binary-search comparisons and the batch/bitset scans.
+        return 16 * ids * (levels + 1) * @sizeOf(MessageId) +
+            requests * (levels + 1) * 2 * @sizeOf(MessageId) +
+            batches * @sizeOf(Batch) + @sizeOf(std.StaticBitSet(constants.max_ihave_ids_per_heartbeat));
     }
 
     fn lessThan(_: void, left: MessageId, right: MessageId) bool {

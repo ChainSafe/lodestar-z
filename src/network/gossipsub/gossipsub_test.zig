@@ -243,18 +243,28 @@ fn expectControlFloodBounded(control_tag: u8) !void {
     for (0..20) |_| try setup.pumpOnce();
     const peer = setup.server.gossipsub.inner.sessions.findPeer(setup.handles.server).?;
     const before = setup.server.gossipsub.inner.counters.rpcs_received;
+    const now = setup.pair.now.mono_ms;
+    const controls_per_rpc = 4096;
+    const io = &setup.server.gossipsub.inner.sessions.rows[peer].io;
     var rpc: [8195]u8 = undefined;
     var writer = @import("protobuf.zig").Writer.init(&rpc);
     writer.bytes(&.{ 0x1a, 0x80, 0x40 });
-    for (0..4096) |_| writer.bytes(&.{ control_tag, 0 });
+    for (0..controls_per_rpc) |_| writer.bytes(&.{ control_tag, 0 });
     var framed: [8197]u8 = undefined;
     const wire = @import("frame.zig").writeFrame(&framed, writer.written());
-    for (0..17) |_| {
+    for (0..17) |rpc_index| {
         try std.testing.expectEqual(
             wire.len,
             try setup.pair.client.write(setup.clientStream(), wire, false),
         );
-        for (0..4) |_| try setup.pumpOnce();
+        for (0..controls_per_rpc + 4) |_| {
+            try setup.pumpOnce();
+            if (setup.server.gossipsub.inner.counters.rpcs_received == before + rpc_index + 1 and io.rpc == null) break;
+        }
+        try std.testing.expectEqual(before + rpc_index + 1, setup.server.gossipsub.inner.counters.rpcs_received);
+        try std.testing.expect(io.rpc == null);
+        try std.testing.expectEqual(@as(u16, controls_per_rpc), io.controls);
+        try std.testing.expectEqual(now, setup.pair.now.mono_ms);
     }
     try std.testing.expectEqual(before + 17, setup.server.gossipsub.inner.counters.rpcs_received);
     const count = if (control_tag == 0x0a)

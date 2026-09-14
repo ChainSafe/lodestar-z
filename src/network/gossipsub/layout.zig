@@ -81,7 +81,10 @@ pub const Layout = struct {
             .data_descriptors_per_peer = delivery.per_peer_limit,
             .data_descriptors_total = self.deliveries,
             .data_descriptors_reserved_per_peer = delivery.per_peer_reserve,
-            .legal_atomic_work_bytes = 2 * constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + 2 * constants.MAX_PAYLOAD_SIZE,
+            .legal_atomic_work_bytes = @max(
+                2 * constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + 2 * constants.MAX_PAYLOAD_SIZE,
+                @import("gossipsub.zig").Gossipsub.ihaveWorkBound(constants.GOSSIP_MAX_SIZE, self.seen + validation.Validation.attributionCapacity(self.validations), constants.promises_cap, constants.promises_cap),
+            ),
             .page_bytes = storage.page_bytes,
             .rounding_per_message_max = storage.page_bytes - 1,
             .frame_bytes = frames,
