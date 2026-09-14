@@ -192,6 +192,19 @@ test "state transition - records per-block and per-epoch metrics" {
     try testing.expectEqual(@as(?u64, attestation_count), metricValue(out, "lodestar_stfn_attestations_per_block_total"));
     try testing.expect(metricValue(out, "lodestar_stfn_new_seen_attesters_per_block_total").? > 0);
     try testing.expect(metricValue(out, "lodestar_stfn_new_seen_attesters_effective_balance_per_block_total").? > 0);
+    const proposer_rewards = post_state.getProposerRewards();
+    try testing.expectEqual(
+        @as(?u64, proposer_rewards.attestations),
+        metricValue(out, "lodestar_stfn_proposer_rewards_total{type=\"attestation\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, proposer_rewards.sync_aggregate),
+        metricValue(out, "lodestar_stfn_proposer_rewards_total{type=\"sync_aggregate\"}"),
+    );
+    try testing.expectEqual(
+        @as(?u64, proposer_rewards.slashing),
+        metricValue(out, "lodestar_stfn_proposer_rewards_total{type=\"slashing\"}"),
+    );
 }
 
 test "proposer rewards should report only new attestation participation and reset on clone" {

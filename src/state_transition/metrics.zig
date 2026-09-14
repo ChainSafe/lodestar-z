@@ -41,7 +41,7 @@ pub const ProposerRewardKind = enum {
 
 const HashTreeRootLabel = struct { source: StateHashTreeRootSource };
 const EpochTransitionStepLabel = struct { step: EpochTransitionStepKind };
-const ProposerRewardLabel = struct { kind: ProposerRewardKind };
+const ProposerRewardLabel = struct { type: ProposerRewardKind };
 
 const Metrics = struct {
     epoch_transition: EpochTransition,
