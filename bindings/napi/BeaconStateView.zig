@@ -17,6 +17,7 @@ const pubkey = @import("./pubkeys.zig");
 const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
+const validator_monitor = @import("./validator_monitor.zig");
 
 /// Allocator used for all BeaconStateView instances.
 var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -587,47 +588,10 @@ pub fn nextSyncCommittee(self: *const BeaconStateView) !js_types.SyncCommittee {
     return js_types.wrap(js_types.SyncCommittee, try sszValueToNapiValue(env, ct.altair.SyncCommittee, &result));
 }
 
-pub fn currentSyncCommitteeIndexed(self: *const BeaconStateView) !js_types.IndexedSyncCommitteeWithMap {
-    const env = js.env();
+pub fn currentSyncCommitteeIndexed(self: *const BeaconStateView) !js_types.IndexedSyncCommittee {
     const cached_state = try self.requireState();
     const sync_committee_cache = cached_state.epoch_cache.current_sync_committee_indexed.get();
-    const validator_indices = sync_committee_cache.getValidatorIndices();
-    const validator_index_map = sync_committee_cache.getValidatorIndexMap();
-
-    const obj = try env.createObject();
-    try obj.setNamedProperty(
-        "validatorIndices",
-        try numberSliceToNapiValue(
-            env,
-            u64,
-            validator_indices,
-            .{ .typed_array = .uint32 },
-        ),
-    );
-
-    const global = try env.getGlobal();
-    const map_ctor = try global.getNamedProperty("Map");
-    const map = try env.newInstance(map_ctor, .{});
-    const set_fn = try map.getNamedProperty("set");
-
-    var iterator = validator_index_map.iterator();
-    while (iterator.next()) |entry| {
-        const idx = entry.key_ptr.*;
-        const positions = entry.value_ptr;
-
-        const key_value_napi = try env.createInt64(@intCast(idx));
-        const positions_napi = try numberSliceToNapiValue(
-            env,
-            u32,
-            positions.items,
-            .{ .typed_array = .uint32 },
-        );
-
-        _ = try env.callFunction(set_fn, map, .{ key_value_napi, positions_napi });
-    }
-
-    try obj.setNamedProperty("validatorIndexMap", map);
-    return .{ .val = obj };
+    return indexedSyncCommitteeToNapi(sync_committee_cache);
 }
 
 pub fn syncProposerReward(self: *const BeaconStateView) !js.Number {
@@ -637,39 +601,58 @@ pub fn syncProposerReward(self: *const BeaconStateView) !js.Number {
 }
 
 /// Get the indexed sync committee at a given epoch.
-/// Returns: object with validatorIndices (Uint32Array)
 pub fn getIndexedSyncCommitteeAtEpoch(self: *const BeaconStateView, epoch_arg: js.Number) !js_types.IndexedSyncCommittee {
-    const env = js.env();
     const cached_state = try self.requireState();
     const epoch_value: u64 = @intCast(try epoch_arg.toI64());
 
     const sync_committee = cached_state.epoch_cache.getIndexedSyncCommitteeAtEpoch(epoch_value) catch {
         return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for requested epoch");
     };
-
-    const obj = try env.createObject();
-    try obj.setNamedProperty(
-        "validatorIndices",
-        try numberSliceToNapiValue(env, u64, sync_committee.getValidatorIndices(), .{ .typed_array = .uint32 }),
-    );
-    return .{ .val = obj };
+    return indexedSyncCommitteeToNapi(&sync_committee);
 }
 
 /// Get the indexed sync committee for a given slot (uses slot+1 offset for duty lookups).
 pub fn getIndexedSyncCommittee(self: *const BeaconStateView, slot_arg: js.Number) !js_types.IndexedSyncCommittee {
-    const env = js.env();
     const cached_state = try self.requireState();
     const slot_value: u64 = @intCast(try slot_arg.toI64());
 
     const sync_committee = cached_state.epoch_cache.getIndexedSyncCommittee(slot_value) catch {
         return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for requested slot");
     };
+    return indexedSyncCommitteeToNapi(&sync_committee);
+}
 
+fn indexedSyncCommitteeToNapi(sync_committee: anytype) !js_types.IndexedSyncCommittee {
+    const env = js.env();
     const obj = try env.createObject();
     try obj.setNamedProperty(
         "validatorIndices",
-        try numberSliceToNapiValue(env, u64, sync_committee.getValidatorIndices(), .{ .typed_array = .uint32 }),
+        try numberSliceToNapiValue(
+            env,
+            u64,
+            sync_committee.getValidatorIndices(),
+            .{ .typed_array = .uint32 },
+        ),
     );
+
+    const global = try env.getGlobal();
+    const map_ctor = try global.getNamedProperty("Map");
+    const map = try env.newInstance(map_ctor, .{});
+    const set_fn = try map.getNamedProperty("set");
+
+    var iterator = sync_committee.getValidatorIndexMap().iterator();
+    while (iterator.next()) |entry| {
+        const key = try env.createInt64(@intCast(entry.key_ptr.*));
+        const positions = try numberSliceToNapiValue(
+            env,
+            u32,
+            entry.value_ptr.items,
+            .{ .typed_array = .uint32 },
+        );
+        _ = try env.callFunction(set_fn, map, .{ key, positions });
+    }
+
+    try obj.setNamedProperty("validatorIndexMap", map);
     return .{ .val = obj };
 }
 
@@ -1303,7 +1286,14 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
     }
     st.metrics.state_transition.pre_state_cloned_count.observe(cached_state.cloned_count);
 
-    try st.processSlots(allocator, js.io(), post_state, slot_value);
+    try st.processSlots(
+        allocator,
+        js.io(),
+        post_state,
+        slot_value,
+        validator_monitor.get(),
+    );
+
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
@@ -1339,7 +1329,14 @@ pub fn stateTransition(
     const signed_block = try AnySignedBeaconBlock.deserialize(allocator, block_type, fork_seq, bytes);
     defer signed_block.deinit(allocator);
 
-    const post_state = try st.stateTransition(allocator, js.io(), cached_state, signed_block, opts);
+    const post_state = try st.stateTransition(
+        allocator,
+        js.io(),
+        cached_state,
+        signed_block,
+        opts,
+        validator_monitor.get(),
+    );
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
