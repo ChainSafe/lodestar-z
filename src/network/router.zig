@@ -82,7 +82,7 @@ pub const Router = struct {
 
     pub fn init(allocator: std.mem.Allocator, options: Options) Error!Router {
         try validateOptions(options);
-        var negotiator = try negotiate.Negotiator.initWithOptions(allocator, .{
+        var negotiator = try negotiate.Negotiator.init(allocator, .{
             .negotiations_max = options.negotiations_max,
             .outbound_control_reserved = options.outbound_control_reserved,
         });
@@ -168,10 +168,9 @@ pub const Router = struct {
         now: types.Now,
     ) Error!engine_mod.StreamHandle {
         if (!self.active_capabilities.request.contains(protocol)) return error.ProtocolDisabled;
-        if (protocol == .reqresp and protocol.reqresp.isControl()) {
-            return self.negotiator.beginOutboundControl(engine, conn, protocol.reqresp, now);
-        }
-        return self.negotiator.beginOutbound(engine, conn, protocol.id(), now);
+        return self.negotiator.beginOutbound(engine, conn, &.{protocol.id()}, now, .{
+            .control = protocol == .reqresp and protocol.reqresp.isControl(),
+        });
     }
 
     pub fn beginReqRespTimed(
@@ -183,7 +182,7 @@ pub const Router = struct {
         timeout_ms: u64,
     ) Error!engine_mod.StreamHandle {
         if (!self.active_capabilities.request.contains(.{ .reqresp = protocol })) return error.ProtocolDisabled;
-        return self.negotiator.beginOutboundTimed(engine, conn, protocol, now, timeout_ms);
+        return self.negotiator.beginOutbound(engine, conn, &.{protocol.id()}, now, .{ .control = protocol.isControl(), .timeout_ms = timeout_ms });
     }
 
     pub fn beginMeshsub(
@@ -193,12 +192,7 @@ pub const Router = struct {
         now: types.Now,
     ) Error!engine_mod.StreamHandle {
         if (self.meshsub_count == 0) return error.ProtocolDisabled;
-        return self.negotiator.beginOutboundCandidates(
-            engine,
-            conn,
-            self.meshsub_candidates[0..self.meshsub_count],
-            now,
-        );
+        return self.negotiator.beginOutbound(engine, conn, self.meshsub_candidates[0..self.meshsub_count], now, .{});
     }
 
     pub fn transportEvents(

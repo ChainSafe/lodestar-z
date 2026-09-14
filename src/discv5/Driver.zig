@@ -12,7 +12,7 @@ const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 
-pub const Error = Engine.Error || Udp.ReceiveTimeoutError || Udp.ReleaseError ||
+pub const Error = Engine.Error || Udp.ReceiveTimeoutError ||
     Udp.SendError || std.Io.RandomSecureError || error{
     ClockOutOfRange,
     DestinationUnreachable,
@@ -23,8 +23,7 @@ pub const Error = Engine.Error || Udp.ReceiveTimeoutError || Udp.ReleaseError ||
 pub const Config = struct {
     poll_interval_ms: u32 = 100,
 };
-pub const maintenance_retry_ms: u64 = 1_000;
-pub const FailureStage = enum { coordinator, clock, maintenance, receive, process };
+pub const FailureStage = enum { coordinator, clock, receive, process };
 
 pub const DatagramResult = union(enum) {
     timeout,
@@ -34,11 +33,9 @@ pub const DatagramResult = union(enum) {
 
 /// These counters exist for observability. Nothing in `step` depends on them.
 pub const Progress = struct {
-    maintenance_expired: usize = 0,
     challenges_expired: usize = 0,
     sessions_expired: usize = 0,
     standard_responses: u8 = 0,
-    maintenance_started: bool = false,
 };
 
 pub const StepResult = struct {
@@ -62,10 +59,10 @@ const Driver = @This();
 core: *Engine,
 udp: *Udp,
 config: Config,
-maintenance_retry_at_ms: u64 = 0,
 scratch: Engine.Scratch = .{},
 response: ResponsePlan = .{},
 output: [constants.packet_size_max]u8 = undefined,
+receive_buffer: [constants.packet_size_max]u8 = undefined,
 
 pub fn init(core: *Engine, adapter: *Udp) Driver {
     return .{ .core = core, .udp = adapter, .config = .{} };
@@ -147,7 +144,7 @@ pub fn transmit(
     };
 }
 
-/// Runs one poll. It expires state, may start a revalidation, waits up to the poll interval
+/// Runs one poll. It expires state, waits up to the poll interval
 /// for one datagram, processes it, and drains any standard response. The returned event
 /// borrows driver scratch and stays valid until the next step.
 pub fn step(
@@ -182,18 +179,15 @@ fn runStep(
     result: *StepResult,
 ) Error!void {
     try self.advance(io, expired_calls, result);
-    self.maintain(io, result);
 
     const datagram = self.receiveDatagram(io, wake_ms, result) catch |err| {
         recordFailure(result, err, .receive);
         return;
     };
-    defer if (datagram) |admitted| self.udp.release(admitted.handle) catch unreachable;
     try self.advance(io, expired_calls, result);
     if (datagram) |admitted| self.processDatagram(io, admitted, result) catch |err| {
         recordFailure(result, err, .process);
     };
-    self.maintain(io, result);
 }
 
 fn advance(
@@ -206,19 +200,8 @@ fn advance(
     const available = expired_calls[result.calls_expired..];
     const expired = self.core.tick(result.now_ms, available);
     result.calls_expired += expired.calls;
-    result.progress.maintenance_expired += expired.maintenance_calls;
     result.progress.challenges_expired += expired.challenges;
     result.progress.sessions_expired += expired.sessions;
-}
-
-fn maintain(self: *Driver, io: std.Io, result: *StepResult) void {
-    if (result.progress.maintenance_started or result.now_ms < self.maintenance_retry_at_ms) return;
-    result.progress.maintenance_started = self.startMaintenance(io, result.now_ms) catch |err| {
-        self.maintenance_retry_at_ms = result.now_ms +| maintenance_retry_ms;
-        recordFailure(result, err, .maintenance);
-        std.log.scoped(.network_discovery).debug("revalidation_deferred reason={s} retry_ms={d}", .{ @errorName(err), maintenance_retry_ms });
-        return;
-    };
 }
 
 fn recordFailure(result: *StepResult, err: Error, stage: FailureStage) void {
@@ -234,7 +217,7 @@ fn receiveDatagram(self: *Driver, io: std.Io, wake_ms: u64, result: *StepResult)
         .raw = .fromMilliseconds(wait_ms),
         .clock = .awake,
     } };
-    return self.udp.receiveTimeout(io, timeout) catch |err| switch (err) {
+    return self.udp.receiveTimeout(io, &self.receive_buffer, timeout) catch |err| switch (err) {
         error.Timeout => null,
         error.DatagramTooLarge => blk: {
             result.datagram = .{ .rejected = .oversized_datagram };
@@ -302,32 +285,6 @@ fn handleEvent(
     }
     std.debug.assert(self.response.complete());
     return .none;
-}
-
-fn startMaintenance(self: *Driver, io: std.Io, now_ms: u64) Error!bool {
-    if (!self.core.hasPendingRevalidation()) return false;
-    const request_id = try requestId(io);
-    var entropy = try startEntropy(io);
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
-    const started = self.core.startRevalidation(
-        &self.output,
-        request_id,
-        now_ms,
-        &entropy,
-    ) catch |err| switch (err) {
-        CallTable.Error.PeerBusy, CallTable.Error.TableFull => return false,
-        else => return err,
-    } orelse return false;
-    self.transmit(
-        io,
-        started.peer.address,
-        self.output[0..started.call.packet_length],
-    ) catch |err| {
-        const cancelled = self.core.cancelCall(started.call.handle);
-        std.debug.assert(cancelled);
-        return err;
-    };
-    return true;
 }
 
 pub fn monotonicMilliseconds(io: std.Io) Error!u64 {

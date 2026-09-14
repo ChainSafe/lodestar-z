@@ -1,7 +1,7 @@
 const std = @import("std");
 const rr = @import("network").reqresp;
 const incoming = @import("network_incoming.zig");
-const Budget = incoming.Budget;
+const Budget = @import("network_budget.zig").Budget;
 const Table = incoming.Table;
 const Cell = incoming.Cell;
 
@@ -34,13 +34,13 @@ test "incoming response allocation stays borrowed through real quota withholding
     const harness = rr.testing;
     var quotas = rr.limiter.defaultQuotas();
     quotas[@intFromEnum(rr.Protocol.blocks_by_root_v2)] = .{ .tokens = 1, .period_ms = 3000 };
-    var pair: harness.ReqRespPair = .{};
+    var pair: harness.Pair = .{};
     try pair.init(.{}, .{ .quotas = quotas, .quota_timeout_ms = 1000 });
     defer pair.deinit();
     var budget: Budget = .{ .limit = 2 * (64 + rr.Protocol.blocks_by_root_v2.info().response_max) };
     var table = try Table.init(std.testing.allocator, 2, &budget);
     defer {
-        pair.server.shutdown(&pair.pair.server, &pair.server_neg);
+        pair.server.reqresp.shutdown(&pair.pair.server, &pair.server.router);
         for (table.cells, 0..) |*cell, i| {
             if (cell.state == .free) continue;
             cell.native = false;
@@ -52,24 +52,24 @@ test "incoming response allocation stays borrowed through real quota withholding
     const response_max = rr.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, 2 * response_max);
     defer {
-        pair.client.shutdown(&pair.pair.client, &pair.client_neg);
+        pair.client.reqresp.shutdown(&pair.pair.client, &pair.client.router);
         std.testing.allocator.free(sinks);
     }
-    for (0..2) |i| _ = try pair.client.request(&pair.pair.client, &pair.client_neg, pair.handles.client, .blocks_by_root_v2, &query, sinks[i * response_max ..][0..response_max], .{}, pair.pair.now);
+    for (0..2) |i| _ = try pair.client.reqresp.request(&pair.pair.client, &pair.client.router, pair.handles.client, .blocks_by_root_v2, &query, sinks[i * response_max ..][0..response_max], .{}, pair.pair.now);
     try submitWithheld(&pair, &table);
-    try std.testing.expectEqual(@as(usize, 1), pair.server.resourceSnapshot().withheld_chunks);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.reqresp.resourceSnapshot().withheld_chunks);
     var withheld: ?*Cell = null;
     for (table.cells) |*cell| if (cell.response.len > 0) {
         withheld = cell;
     };
     const cell = withheld.?;
-    const native = &pair.server.inbound[cell.handle.index];
+    const native = &pair.server.reqresp.inbound[cell.handle.index];
     try std.testing.expectEqual(native.pending_ssz.ptr, cell.response.ptr);
     try std.testing.expectEqual(@as(usize, 4000), table.snapshot().responseBytes);
     const deadline = native.withheld_since_ms.? + 1000;
     pair.pair.advance(deadline - pair.pair.now.mono_ms - 1);
     try pair.pumpOnce();
-    try std.testing.expectEqual(@as(usize, 1), pair.server.resourceSnapshot().withheld_chunks);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.reqresp.resourceSnapshot().withheld_chunks);
     try std.testing.expectEqual(native.pending_ssz.ptr, cell.response.ptr);
     pair.pair.advance(1);
     var terminal_seen = false;
@@ -94,8 +94,7 @@ test "incoming and outbound reservations cannot each spend the aggregate remaind
     const outbound_amount = 32 + 2 * protocol.info().response_max;
     const inbound_amount = 64 + protocol.info().response_max;
     var budget: Budget = .{ .limit = outbound_amount + inbound_amount - 1 };
-    var outgoing = try @import("network_requests.zig").Table.init(std.testing.allocator, 1, budget.limit);
-    outgoing.shared = &budget;
+    var outgoing = try @import("network_requests.zig").Table.init(std.testing.allocator, 1, &budget);
     defer outgoing.deinit();
     var inbound = try Table.init(std.testing.allocator, 1, &budget);
     defer inbound.deinit();
@@ -110,7 +109,7 @@ test "incoming and outbound reservations cannot each spend the aggregate remaind
     try std.testing.expectEqual(@as(usize, 0), budget.used);
 }
 
-fn submitWithheld(pair: *rr.testing.ReqRespPair, table: *Table) !void {
+fn submitWithheld(pair: *rr.testing.Pair, table: *Table) !void {
     var admitted: usize = 0;
     var acknowledged: usize = 0;
     for (0..30) |_| {
@@ -125,7 +124,7 @@ fn submitWithheld(pair: *rr.testing.ReqRespPair, table: *Table) !void {
                 cell.state = .response_native;
                 cell.response = try std.testing.allocator.alloc(u8, 4000);
                 @memset(cell.response, 71);
-                try pair.server.respond(request.request, cell.response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.pair.now);
+                try pair.server.reqresp.respond(request.request, cell.response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.pair.now);
                 admitted += 1;
             },
             .chunk_sent => |sent| {
@@ -146,16 +145,16 @@ fn submitWithheld(pair: *rr.testing.ReqRespPair, table: *Table) !void {
 }
 
 test "incoming submission recognizes a genuine native terminal awaiting output capacity" {
-    var pair: rr.testing.ReqRespPair = .{};
+    var pair: rr.testing.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const sink = try std.testing.allocator.alloc(u8, rr.Protocol.blocks_by_root_v2.info().response_max);
     defer {
-        pair.client.shutdown(&pair.pair.client, &pair.client_neg);
+        pair.client.reqresp.shutdown(&pair.pair.client, &pair.client.router);
         std.testing.allocator.free(sink);
     }
     const query = [_]u8{0} ** 32;
-    _ = try pair.client.request(&pair.pair.client, &pair.client_neg, pair.handles.client, .blocks_by_root_v2, &query, sink, .{}, pair.pair.now);
+    _ = try pair.client.reqresp.request(&pair.pair.client, &pair.client.router, pair.handles.client, .blocks_by_root_v2, &query, sink, .{}, pair.pair.now);
     var handle: ?rr.RequestHandle = null;
     for (0..20) |_| {
         try pair.pumpOnce();
@@ -165,21 +164,21 @@ test "incoming submission recognizes a genuine native terminal awaiting output c
         if (handle != null) break;
     }
     const request = handle.?;
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.server, request, error.Busy));
-    try std.testing.expect(pair.server.cancel(request));
+    try std.testing.expect(!incoming.awaitingTerminal(&pair.server.reqresp, request, error.Busy));
+    try std.testing.expect(pair.server.reqresp.cancel(request));
     pair.server_event_capacity = 0;
     try pair.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), pair.serverEvents().len);
     const response = [_]u8{0} ** 4000;
-    try std.testing.expectError(error.Busy, pair.server.respond(request, &response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.pair.now));
-    try std.testing.expect(incoming.awaitingTerminal(&pair.server, request, error.Busy));
+    try std.testing.expectError(error.Busy, pair.server.reqresp.respond(request, &response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.pair.now));
+    try std.testing.expect(incoming.awaitingTerminal(&pair.server.reqresp, request, error.Busy));
     var stale = request;
     stale.generation += 1;
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.server, stale, error.Busy));
+    try std.testing.expect(!incoming.awaitingTerminal(&pair.server.reqresp, stale, error.Busy));
     stale = request;
     stale.direction = .outbound;
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.server, stale, error.Busy));
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.server, request, error.StaleHandle));
+    try std.testing.expect(!incoming.awaitingTerminal(&pair.server.reqresp, stale, error.Busy));
+    try std.testing.expect(!incoming.awaitingTerminal(&pair.server.reqresp, request, error.StaleHandle));
     pair.server_event_capacity = 16;
     try pair.pumpOnce();
     var terminal = false;

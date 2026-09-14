@@ -82,8 +82,8 @@ test "engine finds a connection by peer id until its slot is released" {
         _ = pair.events(&pair.client, &storage);
         _ = pair.events(&pair.server, &storage);
     }
-    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().activeIndices().len);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
     try std.testing.expect(pair.client.findByPeerId(&server_id) == null);
     try std.testing.expect(pair.server.findByPeerId(&client_id) == null);
 }
@@ -102,8 +102,8 @@ test "engine reconnects with the same TLS contexts" {
         _ = pair.events(&pair.client, &storage);
         _ = pair.events(&pair.server, &storage);
     }
-    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().activeIndices().len);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
 
     const second = try pair.dial();
     try pair.pump();
@@ -135,7 +135,7 @@ test "engine reports connection metadata through handles" {
     pair.advance(250);
     const age = pair.client.connectionAgeMs(handles.client, pair.now).?;
     try std.testing.expectEqual(@as(u64, 250), age);
-    try std.testing.expectEqual(pair.client.connectionWindow() / 2, pair.client.streamWindow());
+    try std.testing.expectEqual(pair.client.memoryPlan().connection_window_bytes / 2, pair.client.memoryPlan().stream_window_bytes);
 
     const stale = engine_mod.Handle{
         .index = handles.client.index,
@@ -146,21 +146,23 @@ test "engine reports connection metadata through handles" {
     try std.testing.expect(pair.client.connectionAgeMs(stale, pair.now) == null);
 }
 
-test "engine clamps receive windows to the total budget" {
+test "engine receive windows stay within the configured budget" {
     var few = try standaloneEngine(4, .{ .connections_max = 4, .handshaking_max = 4 });
     defer few.deinit();
-    try std.testing.expectEqual(limits.connection_window_max, few.connectionWindow());
-    try std.testing.expectEqual(limits.connection_window_max / 2, few.streamWindow());
+    try std.testing.expectEqual(limits.connection_window_max, few.memoryPlan().connection_window_bytes);
+    try std.testing.expectEqual(limits.connection_window_max / 2, few.memoryPlan().stream_window_bytes);
 
-    var many = try standaloneEngine(5, .{ .connections_max = 1_024 });
+    try std.testing.expectError(error.InvalidLimits, standaloneEngine(5, .{ .connections_max = 1_024 }));
+    try std.testing.expectError(error.InvalidLimits, standaloneEngine(5, .{ .receive_budget_bytes = 1 }));
+    var many = try standaloneEngine(5, .{ .connections_max = 1_024, .receive_budget_bytes = 1_024 * limits.connection_window_min });
     defer many.deinit();
-    try std.testing.expectEqual(limits.connection_window_min, many.connectionWindow());
-    try std.testing.expectEqual(limits.connection_window_min / 2, many.streamWindow());
+    try std.testing.expectEqual(limits.connection_window_min, many.memoryPlan().connection_window_bytes);
+    try std.testing.expectEqual(limits.connection_window_min / 2, many.memoryPlan().stream_window_bytes);
 
     var standard = try standaloneEngine(6, .{});
     defer standard.deinit();
-    try std.testing.expectEqual(@as(u64, 4 * 1_024 * 1_024), standard.connectionWindow());
-    try std.testing.expectEqual(@as(u64, 2 * 1_024 * 1_024), standard.streamWindow());
+    try std.testing.expectEqual(@as(u64, 4 * 1_024 * 1_024), standard.memoryPlan().connection_window_bytes);
+    try std.testing.expectEqual(@as(u64, 2 * 1_024 * 1_024), standard.memoryPlan().stream_window_bytes);
 }
 
 test "engine reports connection stats for live handles only" {
@@ -193,15 +195,15 @@ test "engine captures TLS key material per connection only when keylog is enable
     const handles = try connectPair(&pair);
 
     var lines: [tls.keylog_capacity]u8 = undefined;
-    const length = pair.client.driverView().takeKeylog(handles.client.index, &lines);
+    const length = pair.client.takeKeylog(handles.client.index, &lines);
     try std.testing.expect(length > 0);
     try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "CLIENT_TRAFFIC_SECRET_0") != null);
     try std.testing.expect(std.mem.indexOf(u8, lines[0..length], "SERVER_TRAFFIC_SECRET_0") != null);
-    try std.testing.expectEqual(@as(usize, 0), pair.client.driverView().takeKeylog(handles.client.index, &lines));
+    try std.testing.expectEqual(@as(usize, 0), pair.client.takeKeylog(handles.client.index, &lines));
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.slots[handles.client.index].handshake.keylog_dropped);
 
     try std.testing.expectEqual(@as(usize, 0), pair.server.registry.keylog_arena.len);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().takeKeylog(handles.server.index, &lines));
+    try std.testing.expectEqual(@as(usize, 0), pair.server.takeKeylog(handles.server.index, &lines));
     try std.testing.expect(pair.server.registry.slots[handles.server.index].handshake.keylog_dropped > 0);
 }
 

@@ -2,15 +2,10 @@ const std = @import("std");
 const napi = @import("zapi:zapi").napi;
 const d = @import("network").gossipsub.diagnostics;
 const Value = napi.Value;
-const projection = @import("network_peer_projection.zig");
+const element = @import("network_js.zig").element;
 
-fn put(object: Value, comptime name: [:0]const u8, value: Value) !void {
-    try object.defineProperties(&.{.{ .utf8name = name.ptr, .name = null, .method = null, .getter = null, .setter = null, .value = value.value, .attributes = napi.c.napi_default_jsproperty, .data = null }});
-}
-fn bytes(env: napi.Env, value: []const u8) !Value {
-    const buffer = try env.createArrayBufferCopy(value, null);
-    return env.createTypedarray(.uint8, value.len, buffer, 0);
-}
+const put = @import("network_js.zig").put;
+const bytes = @import("network_js.zig").bytes;
 fn weights(env: napi.Env, value: anytype) !Value {
     const object = try env.createObject();
     inline for (std.meta.fields(@TypeOf(value.*))) |field| try put(object, field.name, try env.createDouble(@field(value, field.name)));
@@ -30,7 +25,7 @@ pub fn copy(env: napi.Env, page: *const d.Page) !Value {
         try put(row, "subscribed", try env.getBoolean(topic.subscribed));
         try put(row, "weight", try env.createDouble(topic.weight));
         try put(row, "meshDeliveryActivationMs", try env.createBigintUint64(topic.mesh_activation_ms));
-        try projection.element(topics, i, row);
+        try element(topics, i, row);
     }
     try put(object, "topics", topics);
     const peers = try env.createArrayWithLength(page.peer_count);
@@ -58,10 +53,10 @@ pub fn copy(env: napi.Env, page: *const d.Page) !Value {
             try put(stats, "meshFailurePenalty", try env.createDouble(entry.counters.mesh_failures));
             try put(stats, "invalidMessageDeliveries", try env.createDouble(entry.counters.invalid));
             try put(stats, "weights", try weights(env, &entry.weights));
-            try projection.element(scores, j, stats);
+            try element(scores, j, stats);
         }
         try put(row, "topics", scores);
-        try projection.element(peers, i, row);
+        try element(peers, i, row);
     }
     try put(object, "peers", peers);
     return object;

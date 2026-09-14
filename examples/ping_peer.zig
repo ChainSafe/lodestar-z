@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn initNode(node: *network.Transport, allocator: std.mem.Allocator, io: std.Io, bind: std.Io.net.IpAddress) !void {
     const key = keys.KeyPair.generate(io);
-    try node.init(allocator, io, .{ .host = &key, .bind = bind });
+    try node.init(allocator, io, .{ .host = &key, .bind = .single(bind) });
 }
 
 const Session = struct {
@@ -49,7 +49,7 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
     var node: network.Transport = .{};
     try initNode(&node, allocator, io, try std.Io.net.IpAddress.parseIp4(host, port));
     defer node.deinit(io);
-    var negotiator = try negotiate.Negotiator.init(allocator, negotiations_max);
+    var negotiator = try negotiate.Negotiator.init(allocator, .{ .negotiations_max = negotiations_max });
     defer negotiator.deinit();
 
     const local = node.localMultiaddr();
@@ -61,7 +61,8 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
     var activity: [8]engine_mod.Handle = undefined;
     var outcomes: [8]negotiate.Outcome = undefined;
     while (true) {
-        const result = try node.step(io, &events, &activity, .{});
+        const stepped = node.step(io, &events, &activity, .{});
+        const result = stepped.progress;
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| printPeer("connected", &connected.peer_id),
             .closed => |closed| {
@@ -80,6 +81,7 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
                 }
             },
         };
+        if (stepped.failure) |err| return err;
         const ready = negotiator.pump(&node.engine, result.now, &outcomes);
         for (outcomes[0..ready]) |outcome| switch (outcome.result) {
             .ready => |accepted| {
@@ -139,7 +141,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     var node: network.Transport = .{};
     try initNode(&node, allocator, io, bind);
     defer node.deinit(io);
-    var negotiator = try negotiate.Negotiator.init(allocator, 1);
+    var negotiator = try negotiate.Negotiator.init(allocator, .{ .negotiations_max = 1 });
     defer negotiator.deinit();
 
     const handle = try node.dial(io, &target);
@@ -156,11 +158,12 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
     var outcomes: [1]negotiate.Outcome = undefined;
     var steps: u32 = 0;
     while (steps < dial_steps_max and state != .done) : (steps += 1) {
-        const result = try node.step(io, &events, &activity, .{});
+        const stepped = node.step(io, &events, &activity, .{});
+        const result = stepped.progress;
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| {
                 printPeer("connected", &connected.peer_id);
-                stream = try negotiator.beginOutbound(&node.engine, handle, ping_protocol, result.now);
+                stream = try negotiator.beginOutbound(&node.engine, handle, &.{ping_protocol}, result.now, .{});
                 state = .negotiating;
             },
             .closed => |closed| {
@@ -171,6 +174,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
             .path_changed => |changed| std.debug.print("path changed port={d}\n", .{changed.peer.port()}),
             .stream_closed => {},
         };
+        if (stepped.failure) |err| return err;
         if (state == .negotiating) {
             if (negotiator.pump(&node.engine, result.now, &outcomes) == 1) switch (outcomes[0].result) {
                 .ready => |accepted| {
@@ -206,7 +210,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
         }
     }
     if (state != .done) return error.Timeout;
-    _ = try node.step(io, &events, &activity, .{});
+    if (node.step(io, &events, &activity, .{}).failure) |err| return err;
 }
 
 fn printPeer(label: []const u8, id: *const peer_id.PeerId) void {

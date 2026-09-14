@@ -53,12 +53,7 @@ pub const Local = struct {
         if (addresses.len > 8) return error.OccurrenceLimit;
         var copied = self.addresses;
         for (addresses, 0..) |address, i| {
-            if (address.port() == 0) return error.InvalidAddress;
-            const wildcard = switch (address) {
-                .ip4 => |ip| std.mem.allEqual(u8, &ip.octets, 0),
-                .ip6 => |ip| std.mem.allEqual(u8, &ip.octets, 0),
-            };
-            if (wildcard) return error.InvalidAddress;
+            if (!address.isUsable()) return error.InvalidAddress;
             const encoded = (multiaddr.Multiaddr{ .address = address }).encode(&copied[i].bytes) catch return error.InvalidAddress;
             copied[i].len = @intCast(encoded.len);
         }

@@ -8,8 +8,8 @@ fn step(pair: *support.Pair, service: *service_mod.Service, server: bool, result
     const engine = if (server) &pair.server else &pair.client;
     var events: [64]engine_mod.Event = undefined;
     var activity: [128]engine_mod.Handle = undefined;
-    const count = engine.driverView().takeActivity(&activity);
-    return service.processOutputs(engine, pair.events(engine, &events), activity[0..count], pair.now, .{ .identify = results }).identify;
+    const count = engine.takeActivity(&activity);
+    return service.process(engine, pair.events(engine, &events), activity[0..count], pair.now, .{ .identify = results }).identify;
 }
 
 fn options(agent: []const u8) service_mod.Options {

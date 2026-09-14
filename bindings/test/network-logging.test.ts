@@ -1,9 +1,14 @@
+import {execFileSync} from "node:child_process";
 import {expect, test} from "vitest";
-import {type NativeLogRecord, type NativeNetworkRuntime, createNativeNetworkRuntime} from "../src/network.js";
-import {networkConfig} from "./utils/network.js";
+import {
+  type NativeLogRecord,
+  type NativeNetworkApplicationRuntime,
+  createNativeNetworkApplicationRuntime,
+} from "../src/network.js";
+import {applicationConfig} from "./utils/network.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
-function drain(runtime: Pick<NativeNetworkRuntime, "drainLogs">): NativeLogRecord[] {
+function drain(runtime: Pick<NativeNetworkApplicationRuntime, "drainLogs">): NativeLogRecord[] {
   const records: NativeLogRecord[] = [];
   for (let i = 0; i < 4; i++) {
     const batch = runtime.drainLogs(32);
@@ -14,8 +19,8 @@ function drain(runtime: Pick<NativeNetworkRuntime, "drainLogs">): NativeLogRecor
 }
 
 test("native std.log captures lifecycle, timestamps and isolated sessions through close", async () => {
-  const left = createNativeNetworkRuntime(networkConfig(), () => undefined);
-  const right = createNativeNetworkRuntime(networkConfig(), () => undefined);
+  const left = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
+  const right = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
   try {
     const identities = await Promise.all([left.ready, right.ready]);
     await Promise.all([left.close(), right.close()]);
@@ -29,7 +34,7 @@ test("native std.log captures lifecycle, timestamps and isolated sessions throug
         expect(() => runtime.drainLogs()).toThrow("InjectedNetworkFailure");
       }
       const records = drain(runtime);
-      expect(records.some((r) => r.message.startsWith("owner_initializing "))).toBe(true);
+      expect(records.some((r) => r.message.startsWith("owner_initializing"))).toBe(true);
       expect(records.some((r) => r.message.startsWith("owner_ready "))).toBe(true);
       expect(records.some((r) => r.message.startsWith("owner_stopped reason=requested "))).toBe(true);
       let sequence = 0n;
@@ -94,7 +99,7 @@ test("ReleaseSafe debug logs correlate real requests without draining request da
 }, 20000);
 
 test("native logging rejects malformed controls and honors off", async () => {
-  const runtime = createNativeNetworkRuntime(networkConfig(), () => undefined);
+  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
   try {
     await runtime.ready;
     for (const level of ["debug-extra", "info-extra", "error-extra", "", "trace", "DEBUG", "debug\0", null, 0]) {
@@ -110,4 +115,13 @@ test("native logging rejects malformed controls and honors off", async () => {
   } finally {
     await runtime.close();
   }
+});
+
+test("log projection cannot invoke prototype setters or reenter the drain", () => {
+  expect(
+    execFileSync(process.execPath, ["--import", "tsx", "bindings/test/fixtures/network-log-prototype.mjs"], {
+      encoding: "utf8",
+      timeout: 15000,
+    }).trim()
+  ).toBe("ok");
 });

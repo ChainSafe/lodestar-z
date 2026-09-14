@@ -8,13 +8,8 @@ const r = @import("network_runtime.zig");
 const requests = @import("network_requests.zig");
 const Runtime = r.Runtime;
 
-fn put(object: Value, comptime name: [:0]const u8, value: Value) !void {
-    try object.defineProperties(&.{.{ .utf8name = name.ptr, .name = null, .method = null, .getter = null, .setter = null, .value = value.value, .attributes = napi.c.napi_default_jsproperty, .data = null }});
-}
-fn bytes(env: napi.Env, data: []const u8) !Value {
-    const buffer = try env.createArrayBufferCopy(data, null);
-    return env.createTypedarray(.uint8, data.len, buffer, 0);
-}
+const put = @import("network_js.zig").put;
+const bytes = @import("network_js.zig").bytes;
 fn errorValue(env: napi.Env, comptime code: [:0]const u8) !Value {
     const name = try env.createStringUtf8(code);
     return env.createError(name, name);
@@ -37,7 +32,7 @@ fn tokenFor(runtime: *Runtime, value: Value) !requests.Token {
     const session = try cfg.bigint(try cfg.get(value, "session"));
     const index = try cfg.integer(try cfg.get(value, "index"), 31);
     const generation = try cfg.bigint(try cfg.get(value, "generation"));
-    if (session != runtime.diag.session or !runtime.application) return error.InvalidRequestHandle;
+    if (session != runtime.diag.session) return error.InvalidRequestHandle;
     return .{ .index = @intCast(index), .generation = generation };
 }
 fn optionsFor(value: Value) !n.reqresp.RequestOptions {
@@ -105,7 +100,7 @@ pub fn start(runtime: *Runtime, peer: Value, protocol: Value, data: Value, optio
     runtime.lock();
     defer runtime.unlock();
     if (runtime.stop or runtime.quiescent) return error.NetworkClosed;
-    runtime.operations[command.index].input.request = token;
+    runtime.table.cells[command.index].input.request = token;
     cell.state = .queued;
     runtime.table.get(command).state = .queued;
     runtime.signalLocked();
@@ -157,7 +152,6 @@ pub fn retire(runtime: *Runtime, handle: Value, abandoned: bool) !Value {
     runtime.lock();
     cell.retirement = deferred;
     cell.retiring = true;
-    cell.abandoned = abandoned;
     cell.cancel = true;
     runtime.signalLocked();
     runtime.pingLocked();
@@ -275,7 +269,6 @@ pub fn settle(env: napi.Env, runtime: *Runtime) void {
         if (failed_copy) {
             cell.cancel = true;
             cell.retiring = true;
-            cell.abandoned = true;
             cell.chunk = null;
         }
         runtime.requests.?.releasePayload(cell);

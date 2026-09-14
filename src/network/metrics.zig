@@ -100,11 +100,11 @@ pub const Snapshot = struct {
         self.transport_resources = owner.transport.engine.resourceSnapshot();
         self.dial_resources = core.dial_queue.resourceSnapshot();
         self.dial_time = core.dial_queue.durations;
-        self.requests = core.service.reqresp.inner.counters;
+        self.requests = core.service.reqresp.counters;
         self.udp = owner.transport.udp.counters;
-        self.outgoing_error_reasons = core.service.reqresp.inner.outgoing_error_reasons;
+        self.outgoing_error_reasons = core.service.reqresp.outgoing_error_reasons;
         self.validation_time = g.validation_time;
-        self.protocols = core.service.reqresp.inner.protocol_counters;
+        self.protocols = core.service.reqresp.protocol_counters;
         self.gossip_counts = g.counters;
         self.gossip_topics = g.topic_metrics;
         self.gossip_rpc = g.rpc_metrics;
@@ -237,6 +237,7 @@ pub const Snapshot = struct {
         self.gossip_resources = null;
         self.gossip_seen = 0;
         self.gossip_history = 0;
+        self.gossip_recent = 0;
         self.discovery_sessions = 0;
         self.discovery_peers = 0;
         self.discovery_lookups = 0;
@@ -527,7 +528,9 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_goodbyes_total{reason=\"too_many_peers\"} 11\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_gossip_queue_drops_total{reason=\"data_bytes\"} 17\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_discovery_candidate_rejections_total{reason=\"incompatible_fork\"} 19\n") != null);
+    snapshot.gossip_recent = 7;
     snapshot.stop();
+    try std.testing.expectEqual(@as(usize, 0), snapshot.gossip_recent);
     try std.testing.expectEqual(@as(usize, 0), snapshot.topic_count);
     try std.testing.expectEqual(std.math.maxInt(u64), snapshot.runtime.dial_started);
     try std.testing.expectEqual(@as(u64, 1), snapshot.lookup_time.count);

@@ -63,6 +63,7 @@ pub const Driver = struct {
     batch: engine_mod.SendBatch = .{},
     batch_len: u8 = 0,
     output: [constants.datagram_size_max]u8 = undefined,
+    receive_buffer: [constants.datagram_size_max]u8 = undefined,
 
     pub fn init(allocator: std.mem.Allocator, connections: u16) std.mem.Allocator.Error!Driver {
         return .{ .pending = try schedule.Queue.init(allocator, connections) };
@@ -73,11 +74,10 @@ pub const Driver = struct {
         self.* = undefined;
     }
 
-    pub fn nextTimeoutMs(self: *const Driver, engine: *Engine, now: engine_mod.Now) ?u64 {
+    pub fn nextTimeoutMs(self: *const Driver, engine: *const Engine, now: engine_mod.Now) ?u64 {
         if (self.immediate_work) return 0;
-        const view = engine.driverView();
-        if (view.hostWorkPending() or view.activityPending()) return 0;
-        var next = view.nextTimeoutMs(now);
+        if (engine.hostWorkPending() or engine.activityPending()) return 0;
+        var next = engine.nextTimeoutMs(now);
         if (self.pending.nextDeadline()) |deadline| {
             const remaining = schedule.remainingMs(deadline, now.nanos());
             next = @min(next orelse remaining, remaining);
@@ -115,24 +115,9 @@ pub const Driver = struct {
         return handle;
     }
 
-    pub fn step(
-        self: *Driver,
-        io: std.Io,
-        engine: *Engine,
-        udp: *Udp,
-        events: []engine_mod.Event,
-        activity: []engine_mod.Handle,
-        options: StepOptions,
-    ) StepError!StepResult {
-        var result = StepResult{ .now = try currentTime(io) };
-        try self.run(io, engine, udp, &result, options);
-        self.publish(engine, events, activity, &result);
-        return result;
-    }
-
-    /// Publishes completed work on failure, after receive leases and sends unwind.
+    /// Publishes completed work on failure, after pending sends unwind.
     /// A failure to read the initial clock leaves the turn and pending events untouched.
-    pub fn stepProgress(
+    pub fn step(
         self: *Driver,
         io: std.Io,
         engine: *Engine,
@@ -163,17 +148,16 @@ pub const Driver = struct {
             _ = self.flush(io, engine, udp, result);
             self.immediate_work = true;
         }
-        const view = engine.driverView();
-        view.releaseReported();
-        const active_count = view.activeIndices().len;
-        const host_work = view.takeHostWork();
+        engine.releaseReported();
+        const active_count = engine.activeIndices().len;
+        const host_work = engine.takeHostWork();
         if (host_work or self.scan_connections != active_count or self.idle_connections >= active_count) {
             self.idle_connections = 0;
         }
         self.scan_connections = active_count;
         for (self.pending.entries, 0..) |*entry, index| {
             if (entry.handle) |owner| {
-                const current = view.sendOwner(owner.index);
+                const current = engine.sendOwner(owner.index);
                 if (current == null or !std.meta.eql(current.?, owner)) self.pending.remove(@intCast(index));
             }
         }
@@ -196,10 +180,9 @@ pub const Driver = struct {
                 .dropped => continue,
                 .datagram => |datagram| datagram,
             };
-            defer udp.release(admitted.handle) catch unreachable;
             result.datagrams_received += 1;
             result.now = try currentTime(io);
-            switch (view.receive(admitted.bytes, &admitted.from, result.now, &self.pool, &self.output)) {
+            switch (engine.receive(admitted.bytes, &admitted.from, result.now, &self.pool, &self.output)) {
                 .accepted => {
                     result.datagrams_accepted += 1;
                     self.idle_connections = 0;
@@ -228,8 +211,8 @@ pub const Driver = struct {
     fn publish(self: *Driver, engine: *Engine, events: []engine_mod.Event, activity: []engine_mod.Handle, result: *StepResult) void {
         result.events = engine.pollEvents(events);
         result.events_pending = engine.eventsPending();
-        result.activity = engine.driverView().takeActivity(activity);
-        result.activity_pending = engine.driverView().activityPending();
+        result.activity = engine.takeActivity(activity);
+        result.activity_pending = engine.activityPending();
         result.work_pending = self.immediate_work;
         result.scheduled_datagrams = self.pending.count;
         assert(result.events <= events.len);
@@ -246,7 +229,7 @@ pub const Driver = struct {
         visits: *u32,
         work_stop: u32,
     ) StepError!void {
-        const active = engine.driverView().activeIndices();
+        const active = engine.activeIndices();
         if (active.len == 0) return;
         if (self.scan_connections != active.len) {
             self.scan_connections = active.len;
@@ -273,9 +256,8 @@ pub const Driver = struct {
         turn: *schedule.Turn,
         result: *StepResult,
     ) StepError!bool {
-        const view = engine.driverView();
-        if (tick) view.tickOne(index, result.now);
-        const owner = view.sendOwner(index) orelse {
+        if (tick) engine.tickOne(index, result.now);
+        const owner = engine.sendOwner(index) orelse {
             self.pending.remove(index);
             return false;
         };
@@ -284,7 +266,7 @@ pub const Driver = struct {
         }
         var generated = false;
         if (self.pending.owner(index) == null) {
-            const sent = view.sendOne(index, result.now, &self.output) orelse return false;
+            const sent = engine.sendOne(index, result.now, &self.output) orelse return false;
             self.pending.put(owner, sent) catch unreachable;
             generated = true;
             result.now = try currentTime(io);
@@ -292,14 +274,14 @@ pub const Driver = struct {
         const ready = self.pending.ready(index, result.now.nanos()) orelse return generated;
         assert(turn.canSend());
         // The socket reports only batch-level failure, so a batch must have one owner.
-        if (self.batch_len > 0 and !std.meta.eql(self.batch.owners[0], owner)) {
+        if (self.batch_len > 0 and !std.meta.eql(self.batch.owner, owner)) {
             _ = self.flush(io, engine, udp, result);
         }
         const at = self.batch_len;
         @memcpy(self.batch.buffers[at][0..ready.bytes.len], ready.bytes);
         self.batch.sent[at] = ready;
         self.batch.sent[at].bytes = self.batch.buffers[at][0..ready.bytes.len];
-        self.batch.owners[at] = owner;
+        self.batch.owner = owner;
         self.batch_len += 1;
         self.pending.remove(index);
         turn.recordSend();
@@ -311,13 +293,12 @@ pub const Driver = struct {
         const count = self.batch_len;
         if (count == 0) return null;
         defer self.batch_len = 0;
-        const owner = self.batch.owners[0];
-        for (self.batch.owners[1..count]) |other| assert(std.meta.eql(owner, other));
+        const owner = self.batch.owner;
         result.send_calls += 1;
         sendMany(io, udp, self.batch.sent[0..count]) catch |err| {
-            if (engine.driverView().sendOwner(owner.index)) |current| {
+            if (engine.sendOwner(owner.index)) |current| {
                 if (std.meta.eql(current, owner)) {
-                    engine.driverView().failSend(owner.index);
+                    engine.failSend(owner.index);
                     self.pending.remove(owner.index);
                     result.send_failures += 1;
                 }
@@ -337,7 +318,7 @@ pub const Driver = struct {
         wait_ms: ?u32,
     ) StepError!Received {
         const timeout = receiveTimeout(wait_ms, self.nextTimeoutMs(engine, result.now));
-        const datagram = udp.receiveTimeout(io, timeout) catch |err| switch (err) {
+        const datagram = udp.receiveTimeout(io, &self.receive_buffer, timeout) catch |err| switch (err) {
             error.Timeout => return .timeout,
             error.DatagramTooLarge,
             error.PortUnreachable,

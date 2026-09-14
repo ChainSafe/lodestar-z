@@ -94,7 +94,7 @@ pub const Counters = struct {
 pub const SendBatch = struct {
     buffers: [constants.send_batch_max][constants.datagram_size_max]u8 = undefined,
     sent: [constants.send_batch_max]Sent = undefined,
-    owners: [constants.send_batch_max]Handle = undefined,
+    owner: Handle = undefined,
 };
 
 pub const ReceiveOutcome = union(enum) {

@@ -21,9 +21,9 @@ const Setup = struct {
     fn init(self: *Setup, negotiations_max: u16) !void {
         try self.pair.init(.{}, .{});
         errdefer self.pair.deinit();
-        self.dialer = try Negotiator.init(std.testing.allocator, negotiations_max);
+        self.dialer = try Negotiator.init(std.testing.allocator, .{ .negotiations_max = negotiations_max });
         errdefer self.dialer.deinit();
-        self.listener = try Negotiator.init(std.testing.allocator, negotiations_max);
+        self.listener = try Negotiator.init(std.testing.allocator, .{ .negotiations_max = negotiations_max });
         const handles = try connectPair(&self.pair);
         self.handles = .{ .client = handles.client, .server = handles.server };
     }
@@ -65,7 +65,7 @@ test "negotiator selects a shared protocol on both sides and hands over usable s
     try setup.init(4);
     defer setup.deinit();
 
-    const stream = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
+    const stream = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{});
     try std.testing.expectEqual(@as(usize, 1), setup.dialer.active());
     const outcomes = try setup.run(16);
     const accepted = outcomes.dialer orelse return error.TestUnexpectedResult;
@@ -93,7 +93,7 @@ test "negotiator reports rejection to the dialer and a closed stream to the list
     try setup.init(4);
     defer setup.deinit();
 
-    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, "/missing/1.0.0", setup.pair.now);
+    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{"/missing/1.0.0"}, setup.pair.now, .{});
     const outcomes = try setup.run(16);
     const rejected = outcomes.dialer orelse return error.TestUnexpectedResult;
     try std.testing.expect(rejected.result == .rejected);
@@ -120,7 +120,7 @@ test "negotiator expires a stalled negotiation" {
     try setup.init(4);
     defer setup.deinit();
 
-    const stream = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
+    const stream = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{});
     setup.pair.advance(negotiate.negotiate_timeout_ms);
     var outcomes: [4]Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.dialer.pump(&setup.pair.client, setup.pair.now, &outcomes));
@@ -153,21 +153,21 @@ test "negotiator refuses to track more negotiations than its table holds" {
     try setup.init(2);
     defer setup.deinit();
 
-    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
-    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
+    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{});
+    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{});
     try std.testing.expectError(
         error.NegotiationTableFull,
-        setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now),
+        setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{}),
     );
     try std.testing.expectEqual(@as(usize, 2), setup.dialer.active());
-    try std.testing.expectError(error.InvalidLimits, Negotiator.init(std.testing.allocator, 0));
+    try std.testing.expectError(error.InvalidLimits, Negotiator.init(std.testing.allocator, .{ .negotiations_max = 0 }));
 }
 
 test "negotiator falls back on the same stream to meshsub v1.1" {
     var setup: Setup = .{};
     try setup.init(4);
     defer setup.deinit();
-    const stream = try setup.dialer.beginOutboundCandidates(&setup.pair.client, setup.handles.client, &.{ "/meshsub/1.2.0", "/meshsub/1.1.0" }, setup.pair.now);
+    const stream = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ "/meshsub/1.2.0", "/meshsub/1.1.0" }, setup.pair.now, .{});
     var accepted = false;
     for (0..16) |_| {
         var out: [4]Outcome = undefined;
@@ -193,7 +193,7 @@ test "negotiator expires with no outcome capacity and reports later" {
     var setup: Setup = .{};
     try setup.init(1);
     defer setup.deinit();
-    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
+    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{});
     setup.pair.advance(negotiate.negotiate_timeout_ms);
     try std.testing.expectEqual(@as(usize, 0), setup.dialer.pump(&setup.pair.client, setup.pair.now, &.{}));
     try std.testing.expectEqual(@as(usize, 0), setup.dialer.active());
@@ -228,24 +228,24 @@ test "negotiator cancellation releases pending outcomes and checks full stream i
     var setup: Setup = .{};
     try setup.init(1);
     defer setup.deinit();
-    const stream = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
+    const stream = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{});
     setup.pair.advance(negotiate.negotiate_timeout_ms);
     _ = setup.dialer.pump(&setup.pair.client, setup.pair.now, &.{});
     var stale = stream;
     stale.conn.generation +%= 1;
     setup.dialer.cancel(&setup.pair.client, stale);
-    try std.testing.expectError(error.NegotiationTableFull, setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now));
+    try std.testing.expectError(error.NegotiationTableFull, setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{}));
     setup.dialer.cancel(&setup.pair.client, stream);
     var outcomes: [1]Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 0), setup.dialer.pump(&setup.pair.client, setup.pair.now, &outcomes));
-    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
+    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{});
 }
 
 test "negotiator preserves coalesced acceptance payload and FIN for the dialer" {
     var setup: Setup = .{};
     try setup.init(1);
     defer setup.deinit();
-    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, ping, setup.pair.now);
+    _ = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{});
     var outcomes: [1]Outcome = undefined;
     _ = setup.dialer.pump(&setup.pair.client, setup.pair.now, &outcomes);
     try setup.pair.pump();
@@ -269,7 +269,7 @@ test "negotiator preserves coalesced acceptance payload and FIN for the dialer" 
 }
 
 test "negotiator capabilities snapshot owns temporary descriptors in stable entries" {
-    var listener = try Negotiator.init(std.testing.allocator, 2);
+    var listener = try Negotiator.init(std.testing.allocator, .{ .negotiations_max = 2 });
     defer listener.deinit();
     var offered = [_][]const u8{ping};
     try listener.acceptInbound(.{ .conn = .{ .index = 0, .generation = 1 }, .id = 0, .slot = 0 }, &offered, .{ .mono_ms = 1, .unix_s = 1 });
@@ -278,7 +278,7 @@ test "negotiator capabilities snapshot owns temporary descriptors in stable entr
 }
 
 test "negotiator capabilities offer bounds reject before claiming a slot" {
-    var listener = try Negotiator.init(std.testing.allocator, 1);
+    var listener = try Negotiator.init(std.testing.allocator, .{ .negotiations_max = 1 });
     defer listener.deinit();
     const stream: engine_mod.StreamHandle = .{ .conn = .{ .index = 0, .generation = 1 }, .id = 0, .slot = 0 };
     const now: @import("types.zig").Now = .{ .mono_ms = 1, .unix_s = 1 };

@@ -1,12 +1,13 @@
 const std = @import("std");
 const net = std.Io.net;
 const assert = std.debug.assert;
+pub const Address = @import("address.zig").Address;
 
 pub const Mode = enum {
     ip4,
     ip6,
     dual,
-    pub fn supports(self: Mode, address: anytype) bool {
+    pub fn supports(self: Mode, address: Address) bool {
         return switch (address) {
             .ip4 => self != .ip6,
             .ip6 => self != .ip4,
@@ -83,16 +84,17 @@ pub const Sockets = struct {
         const deadline = timeout.toDeadline(io);
         if (try self.receiveReady(io, buffer)) |message| return message;
         if (deadline.toDurationFromNow(io)) |duration| if (duration.raw.nanoseconds <= 0) return error.Timeout;
-        const Ready = union(enum) { ip4: ReceiveError!void, ip6: ReceiveError!void };
-        var completions: [2]Ready = undefined;
-        var select: std.Io.Select(Ready) = .init(io, &completions);
-        defer select.cancelDiscard();
-        try select.concurrent(.ip4, waitReadable, .{ io, self.values[0].?, deadline });
-        try select.concurrent(.ip6, waitReadable, .{ io, self.values[1].?, deadline });
-        switch (try select.await()) {
-            inline else => |result| try result,
+        {
+            const Ready = union(enum) { ip4: ReceiveError!void, ip6: ReceiveError!void };
+            var completions: [2]Ready = undefined;
+            var select: std.Io.Select(Ready) = .init(io, &completions);
+            defer select.cancelDiscard();
+            try select.concurrent(.ip4, waitReadable, .{ io, self.values[0].?, deadline });
+            try select.concurrent(.ip6, waitReadable, .{ io, self.values[1].?, deadline });
+            switch (try select.await()) {
+                inline else => |result| try result,
+            }
         }
-        select.cancelDiscard();
         return (try self.receiveReady(io, buffer)) orelse error.Timeout;
     }
 

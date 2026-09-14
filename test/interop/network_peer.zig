@@ -43,7 +43,8 @@ pub const Peer = struct {
         var activity: [4]Engine.Handle = undefined;
         var requests: [16]network.reqresp.Event = undefined;
         var messages: [16]Gossip.Event = undefined;
-        const result = try self.transport.step(self.io, &events, &activity, .{ .wait_max_ms = 1 });
+        const stepped = self.transport.step(self.io, &events, &activity, .{ .wait_max_ms = 1 });
+        const result = stepped.progress;
         self.now = result.now;
         self.now.mono_ms += self.clock_offset;
         if (self.held_since) |since| if (self.now.mono_ms -| since >= 10_000) return error.FinHoldTimeout;
@@ -64,7 +65,7 @@ pub const Peer = struct {
         };
         var controls: [16]network.reqresp.Event = undefined;
         var identified: [4]network.identify.Result = undefined;
-        const counts = self.service.processOutputs(&self.transport.engine, events[0..result.events], activity[0..result.activity], self.now, .{ .application = &requests, .control = &controls, .gossipsub = messages[0..self.event_capacity], .identify = &identified });
+        const counts = self.service.process(&self.transport.engine, events[0..result.events], activity[0..result.activity], self.now, .{ .application = &requests, .control = &controls, .gossipsub = messages[0..self.event_capacity], .identify = &identified });
         for (requests[0..counts.application]) |event| try self.requestEvent(event);
         for (controls[0..counts.control]) |event| try self.requestEvent(event);
         for (identified[0..counts.identify]) |*completion| switch (completion.outcome) {
@@ -75,11 +76,12 @@ pub const Peer = struct {
             .message => |m| {
                 self.emitted += 1;
                 try control.emit(self.allocator, .{ .event = "message", .topic = m.topic, .length = m.bytes.len, .sha256 = hash(m.bytes), .messageId = std.fmt.bytesToHex(m.id, .lower) });
-                const report = self.service.gossipsub.report(m.handle, .accept, self.now);
+                const report = self.service.gossipsub.inner.report(m.handle, .accept, self.now);
                 std.debug.assert(report == .applied);
             },
             .subscription_change => |s| try control.emit(self.allocator, .{ .event = "subscription", .topic = s.topic, .subscribed = s.subscribed }),
         };
+        if (stepped.failure) |err| return err;
     }
 
     fn requestEvent(self: *Peer, event: network.reqresp.Event) !void {
@@ -184,14 +186,14 @@ pub const Peer = struct {
             const identify = if (self.service.identify) |*value| value else return error.IdentifyDisabled;
             try identify.start(&self.service.router, &self.transport.engine, .{ .index = 0, .generation = conn.generation }, conn, self.now);
         } else if (std.mem.eql(u8, c.op, "subscribe")) {
-            if (!self.service.gossipsub.subscribe(c.topic orelse topic)) return error.SubscriptionFailed;
+            if (!self.service.gossipsub.inner.subscribe(c.topic orelse topic)) return error.SubscriptionFailed;
         } else if (std.mem.eql(u8, c.op, "publish")) {
             const size = c.size orelse 65537;
             if (size > max_payload) return error.MessageTooLarge;
             const bytes = try self.allocator.alloc(u8, size);
             defer self.allocator.free(bytes);
             generate(bytes, c.seed orelse 0x6d2b79f5);
-            const outcome = try self.service.gossipsub.publish(c.topic orelse topic, bytes, self.now);
+            const outcome = try self.service.gossipsub.inner.publish(c.topic orelse topic, bytes, self.now);
             return control.emit(self.allocator, .{ .id = c.id, .ok = true, .queued = outcome.queued, .pressured = outcome.pressured });
         } else if (std.mem.eql(u8, c.op, "request")) {
             if (self.outbound) return error.Busy;
@@ -279,6 +281,6 @@ pub fn main(init: std.process.Init) !void {
     try peer.transport.init(a, init.io, .{ .host = &key, .bind = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2, .outbound_max = 3 } });
     defer peer.transport.deinit(init.io);
     defer if (peer.service.identify) |*identify| identify.shutdown(&peer.service.router, &peer.transport.engine);
-    defer peer.service.reqresp.shutdown(&peer.service.router, &peer.transport.engine);
+    defer peer.service.reqresp.shutdown(&peer.transport.engine, &peer.service.router);
     try control.run(peer);
 }

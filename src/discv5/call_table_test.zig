@@ -154,7 +154,6 @@ test "expiry is bounded by caller output and removes exact generations" {
     var expired: [1]CallTable.Expired = undefined;
     try std.testing.expectEqual(@as(usize, 1), table.expire(10, &expired));
     try std.testing.expectEqual(first, expired[0].handle);
-    try std.testing.expectEqual(CallTable.Owner.caller, expired[0].owner);
     try std.testing.expectEqual(@as(usize, 1), table.count());
     try std.testing.expectEqual(@as(usize, 1), table.expire(10, &expired));
     try std.testing.expectEqual(@as(usize, 0), table.count());
@@ -289,7 +288,6 @@ fn begin(
         request,
         deadline_ms,
         constants.ordinary_plaintext_size_max,
-        .caller,
     );
 }
 

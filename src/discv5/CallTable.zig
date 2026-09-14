@@ -42,12 +42,6 @@ pub const Response = union(enum) {
     talk_response: message.TalkResponse,
 };
 
-/// Results of routing revalidation stay inside the engine and never reach the caller.
-pub const Owner = enum {
-    caller,
-    routing_revalidation,
-};
-
 pub const Matched = struct {
     handle: Handle,
     response: Response,
@@ -59,13 +53,11 @@ pub const AcceptedNodes = std.StaticBitSet(types.findnode_result_max);
 pub const MatchResult = struct {
     matched: Matched,
     accepted_nodes: AcceptedNodes = AcceptedNodes.initEmpty(),
-    owner: Owner,
 };
 
 pub const Expired = struct {
     handle: Handle,
     peer: types.Endpoint,
-    owner: Owner,
 };
 
 const NodesState = struct {
@@ -88,7 +80,6 @@ const Entry = struct {
     peer: types.Endpoint,
     request_id: message.RequestId,
     expected: Expected,
-    owner: Owner,
     request: [constants.ordinary_plaintext_size_max]u8,
     request_length: u16,
     sent_nonce: [constants.nonce_size]u8 = undefined,
@@ -135,7 +126,6 @@ pub fn begin(
     request: *const message.Message,
     deadline_ms: u64,
     request_capacity: usize,
-    owner: Owner,
 ) Error!Handle {
     if (self.findNode(&peer.node_id) != null) return Error.PeerBusy;
     const expected = try expectedResponse(request);
@@ -152,7 +142,6 @@ pub fn begin(
         .peer = peer,
         .request_id = request.requestId(),
         .expected = expected,
-        .owner = owner,
         .request = undefined,
         .request_length = @intCast(request_bytes.len),
         .deadline_ms = deadline_ms,
@@ -181,11 +170,6 @@ pub fn endpoint(self: *const CallTable, handle: Handle) ?types.Endpoint {
 
 pub fn isPeerBusy(self: *const CallTable, node_id: *const types.NodeId) bool {
     return self.findNode(node_id) != null;
-}
-
-pub fn callOwner(self: *const CallTable, handle: Handle) ?Owner {
-    const entry = self.get(handle) orelse return null;
-    return entry.owner;
 }
 
 pub fn nextDeadlineMs(self: *const CallTable) ?u64 {
@@ -309,7 +293,6 @@ pub fn expire(self: *CallTable, now_ms: u64, out: []Expired) usize {
                 .generation = entry.generation,
             },
             .peer = entry.peer,
-            .owner = entry.owner,
         };
         expired_count += 1;
         clearEntry(slot);
@@ -363,7 +346,6 @@ fn acceptNodes(
             .terminal = terminal,
         },
         .accepted_nodes = accepted_nodes,
-        .owner = self.entries[index].?.owner,
     };
     if (terminal) clearEntry(&self.entries[index]);
     return result;
@@ -375,13 +357,12 @@ fn complete(
     handle: Handle,
     response: Response,
 ) MatchResult {
-    const owner = self.entries[index].?.owner;
     clearEntry(&self.entries[index]);
     return .{ .matched = .{
         .handle = handle,
         .response = response,
         .terminal = true,
-    }, .owner = owner };
+    } };
 }
 
 fn availableIndex(self: *const CallTable) Error!usize {

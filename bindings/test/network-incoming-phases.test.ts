@@ -6,13 +6,10 @@ import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 interface PhaseSnapshot {
   preparing: boolean;
   heavyFreed: boolean;
-  currentRefs: number;
-  nextRefs: number;
   responseBytes: number;
   deferred: boolean;
   copiedFirstByte: number;
   rollback: boolean;
-  rollbackNextRefs: number;
   rollbackReserved: number;
   bufferReleased: boolean;
   deferredRetired: boolean;
@@ -42,8 +39,6 @@ const hooks = bindings as unknown as {
 const instrumented = test.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1");
 
 instrumented.each([
-  ["refs", false],
-  ["refs", true],
   ["buffer", false],
   ["buffer", true],
   ["deferred", false],
@@ -58,7 +53,7 @@ instrumented.each([
         .next()
         .catch(() => undefined);
       const incoming = await takeIncoming(pair.right);
-      if (fault) hooks.networkTestFail(phase === "refs" ? "incoming_result_4" : "operation_copy");
+      if (fault) hooks.networkTestFail("operation_copy");
       await expect(
         incoming.respond(new Uint8Array(4000).fill(71), pair.rightConfig.requestForks[0])
       ).rejects.toMatchObject({
@@ -66,21 +61,18 @@ instrumented.each([
       });
       console.log(JSON.stringify({phase, snapshot: hooks.networkTestIncomingPhase()}));
       expect(hooks.networkTestIncomingPhase()).toMatchObject({
-        bufferReleased: phase !== "refs" || !fault,
+        bufferReleased: true,
         copiedFirstByte: phase === "deferred" ? 71 : 0,
-        currentRefs: 9,
         deferred: phase === "deferred",
         deferredRetired: phase === "deferred" || !fault,
         heavyFreed: true,
-        nextRefs: phase === "refs" ? 3 : 9,
         pendingPublished: false,
         preparing: true,
-        responseBytes: phase === "refs" ? 0 : 4000,
+        responseBytes: 4000,
         rollback: true,
-        rollbackNextRefs: 0,
         rollbackReserved: 0,
       });
-      expect(await incoming.closed).toEqual({chunks: 0, reason: "closed"});
+      expect(await incoming.closed).toBeUndefined();
       expect(pair.right.diagnostics()).toMatchObject({
         copyingPins: 0,
         incoming: {
@@ -152,11 +144,7 @@ instrumented.each([
         stepTerminal: phase === "after" && action === "finish",
       });
       expect(completed.stepWriting || completed.stepFinishing).toBe(phase === "after" && action === "fail");
-      expect(outcome).toEqual(
-        phase === "after" && action === "finish"
-          ? {chunks: 1, reason: "served"}
-          : {chunks: 1, failure: "cancelled", reason: "failed"}
-      );
+      expect(outcome).toBeUndefined();
       expect(pair.right.diagnostics().incoming).toMatchObject({
         closedPromises: 0,
         occupied: 0,
@@ -192,7 +180,7 @@ instrumented.each(["finish", "fail"] as const)(
       expect(incoming.cancel()).toBe(closed);
       hooks.networkTestIncomingRelease();
       await pair.right.getIdentity();
-      expect(await closed).toEqual({chunks: 0, reason: "served"});
+      expect(await closed).toBeUndefined();
       expect(pair.right.diagnostics().incoming.occupied).toBe(0);
     } finally {
       hooks.networkTestIncomingRelease();
@@ -219,7 +207,7 @@ async function checkReplacement(incoming: NativeIncomingRequest, session: bigint
     );
     await ack;
     expect((await read).value?.data).toEqual(new Uint8Array(4000).fill(29));
-    expect(await next.finish()).toEqual({chunks: 1, reason: "served"});
+    expect(await next.finish()).toBeUndefined();
     expect((await stream.next()).done).toBe(true);
   } finally {
     await Promise.all([replacement.left.close(), replacement.right.close()]);

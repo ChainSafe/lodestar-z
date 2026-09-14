@@ -62,7 +62,6 @@ test "lookup driver preserves response and unrelated expiry after refill failure
         &request,
         0,
         1_000,
-        .caller,
     );
     const seeds = [_]RoutingTable.Entry{ network.seed(1), network.seed(2) };
     var operation: Lookup = undefined;
@@ -118,20 +117,27 @@ test "lookup driver consumes expiry before reporting a driver fault" {
         &test_support.sealEntropy(1),
     )).?;
     network.core.calls.entries[started.call.handle.index].?.deadline_ms = 0;
-    network.local.next_generation = std.math.maxInt(u64);
+    const Fault = struct {
+        fn receive(_: ?*anyopaque, _: *std.Io.Batch, _: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+            return error.Canceled;
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.batchAwaitConcurrent = Fault.receive;
+    const failed_io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     try network.remote.send(std.testing.io, network.local.localAddress(), &.{0xff});
     var expired: [1]CallTable.Expired = undefined;
     var cursor = lookup_driver.Cursor{};
 
     const result = try lookup_driver.step(
         &network.driver,
-        std.testing.io,
+        failed_io,
         &.{&operation},
         &cursor,
         &expired,
     );
-    try std.testing.expectEqual(error.GenerationExhausted, result.failure.?);
-    try std.testing.expectEqual(error.GenerationExhausted, result.driver.failure.?);
+    try std.testing.expectEqual(error.Canceled, result.failure.?);
+    try std.testing.expectEqual(error.Canceled, result.driver.failure.?);
     try std.testing.expectEqual(@as(u16, 1), result.progress.failures);
     try std.testing.expectEqual(@as(usize, 0), result.driver.calls_expired);
     try std.testing.expectEqual(@as(usize, 0), operation.waitingCount());

@@ -114,3 +114,17 @@ test
   }
   expect(bindings.networkTestStats()).toEqual({notifications: 0, owners: 0, runtimes: 0});
 });
+
+test("retained peer capacity matches the native gossip ceiling", async () => {
+  const config = applicationConfig();
+  config.resources.peerCapacity = 513;
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
+  config.resources.peerCapacity = 512;
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  try {
+    await runtime.ready;
+    expect(runtime.diagnostics().resolvedCapacities).toMatchObject({gossipRetainedCapacity: 512, peerCapacity: 512});
+  } finally {
+    await runtime.close();
+  }
+});

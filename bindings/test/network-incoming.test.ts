@@ -88,7 +88,7 @@ test("incoming copied metadata and acknowledged multiple contexts preserve wire 
     const done = stream.next();
     expect(incoming.finish()).toBe(incoming.closed);
     expect(incoming.fail(139, new Uint8Array())).toBe(incoming.closed);
-    expect(await incoming.closed).toEqual({chunks: 2, reason: "served"});
+    expect(await incoming.closed).toBeUndefined();
     expect(await done).toEqual({done: true, value: undefined});
     await expect(incoming.respond(payload, null)).rejects.toMatchObject({code: "NetworkIncomingClosed"});
     expect(pair.right.diagnostics().incoming).toMatchObject({
@@ -119,7 +119,7 @@ test.each([1, 2, 3, 139])("incoming error status %s preserves exact encoded byte
     });
     const incoming = await takeIncoming(pair.right);
     expect(incoming.fail(status, new TextEncoder().encode("limité 超"))).toBe(incoming.closed);
-    expect(await incoming.closed).toEqual({chunks: 0, reason: "served"});
+    expect(await incoming.closed).toBeUndefined();
     await rejection;
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
@@ -145,7 +145,7 @@ test("incoming invalid context keeps the serving slot and empty finish reaches w
       reason: "chunk_too_small",
     });
     expect(incoming.finish()).toBe(incoming.closed);
-    expect(await incoming.closed).toEqual({chunks: 0, reason: "served"});
+    expect(await incoming.closed).toBeUndefined();
     expect(await pending).toEqual({done: true, value: undefined});
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
@@ -220,7 +220,7 @@ test("incoming chunk ceiling rejects an extra response without losing finish", a
       reason: "too_many_chunks",
     });
     // Consuming the final chunk closes the client stream; finish the server first.
-    expect(await incoming.finish()).toEqual({chunks: 1, reason: "served"});
+    expect(await incoming.finish()).toBeUndefined();
     expect((await stream.next()).done).toBe(true);
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
@@ -265,7 +265,7 @@ instrumented.each(["incoming_ack_close", "incoming_response_close"])(
       if (scenario === "incoming_ack_close") await ack;
       else await expect(ack).rejects.toMatchObject({code: "NetworkClosed"});
       const result = await incoming.closed;
-      expect(result).toEqual({chunks: scenario === "incoming_ack_close" ? 1 : 0, reason: "closed"});
+      expect(result).toBeUndefined();
       expect(hooks.networkTestIncoming()).toMatchObject({
         acknowledged: scenario === "incoming_ack_close",
         nativeOwned: true,
@@ -293,7 +293,7 @@ instrumented.each([false, true])(
       else {
         const incoming = await takeIncoming(pair.right);
         expect(incoming.data).toEqual(new Uint8Array(32).fill(19));
-        expect(await incoming.closed).toEqual({chunks: 0, reason: "closed"});
+        expect(await incoming.closed).toBeUndefined();
       }
       expect(hooks.networkTestIncoming()).toMatchObject({
         copying: true,
@@ -409,7 +409,7 @@ instrumented(
       hooks.networkTestIncomingRelease();
       await pair.right.getIdentity();
       expect(await Promise.all(held.map((incoming) => incoming.closed))).toEqual(
-        Array.from({length: 6}, () => ({chunks: 0, reason: "served"}))
+        Array.from({length: 6}, () => undefined)
       );
       expect(pair.right.diagnostics().incoming.occupied).toBe(0);
     } finally {
@@ -526,16 +526,12 @@ test("incoming exact byte admission includes fixed metadata and shares outbound 
 
 interface IncomingHandle {
   session: bigint;
-  direction: string;
   index: number;
   generation: bigint;
-  nativeIndex: number;
-  nativeGeneration: number;
-  connection: {index: number; generation: number};
 }
 interface IncomingDescriptor {
   handle: IncomingHandle;
-  closed: Promise<import("../src/network.js").NativeIncomingResult>;
+  closed: Promise<void>;
 }
 interface DirectIncomingBridge {
   prepare(
@@ -554,7 +550,7 @@ interface DirectIncomingBridge {
   close(): void;
 }
 
-test("incoming complete handles isolate direction, connection and replacement generations", async () => {
+test("incoming tokens isolate sessions and replacement generations", async () => {
   const {default: exports} = await import("../src/bindings.js");
   const {NativeNetworkRuntime} = exports as unknown as {NativeNetworkRuntime: new () => DirectIncomingBridge};
   const config = applicationConfig();
@@ -592,12 +588,7 @@ test("incoming complete handles isolate direction, connection and replacement ge
       if (!incoming) throw Error("missing incoming descriptor");
       const descriptor = incoming as IncomingDescriptor;
       const handle = descriptor.handle;
-      for (const invalid of [
-        {...handle, direction: "outbound"},
-        {...handle, session: handle.session + 1n},
-        {...handle, nativeGeneration: handle.nativeGeneration + 1},
-        {...handle, connection: {...handle.connection, generation: handle.connection.generation + 1}},
-      ])
+      for (const invalid of [{...handle, session: handle.session + 1n}])
         expect(() => native.incomingTerminal(invalid, 2, undefined, undefined)).toThrow("InvalidIncomingHandle");
       expect(() => native.requestPull(handle)).toThrow();
       if (previous) {
@@ -610,7 +601,7 @@ test("incoming complete handles isolate direction, connection and replacement ge
         expect((await pending).done).toBe(false);
       }
       native.incomingTerminal(handle, 0, undefined, undefined);
-      expect(await descriptor.closed).toEqual({chunks: previous ? 1 : 0, reason: "served"});
+      expect(await descriptor.closed).toBeUndefined();
       const done = previous ? stream.next() : pending;
       expect((await done).done).toBe(true);
       previous = handle;
@@ -620,33 +611,6 @@ test("incoming complete handles isolate direction, connection and replacement ge
     await Promise.all([client.close(), closed]);
   }
 }, 15000);
-
-instrumented.each(Array.from({length: 9}, (_, i) => `incoming_result_${i}`))(
-  "incoming prepared result prefix %s rolls back before publication",
-  async (stage) => {
-    const hooks = await faults();
-    const pair = await incomingPair();
-    try {
-      const pending = pair.left
-        .request(pair.remote.peerId, BLOCKS, new Uint8Array(32), {responseTimeoutMs: 100})
-        .next()
-        .catch(() => undefined);
-      hooks.networkTestFail(stage);
-      await expect(takeIncoming(pair.right)).rejects.toThrow("InjectedNetworkFailure");
-      await pair.right.close();
-      await pending;
-      expect(pair.right.diagnostics().incoming).toMatchObject({
-        occupied: 0,
-        requestBytes: 0,
-        reservedBytes: 0,
-        responseBytes: 0,
-      });
-    } finally {
-      await Promise.all([pair.left.close(), pair.right.close()]);
-    }
-  },
-  15000
-);
 
 instrumented(
   "incoming cancellation retires a real stalled native response with all command cells occupied",
@@ -686,7 +650,7 @@ instrumented(
       expect(pair.right.diagnostics().operationOccupied).toBe(32);
       expect(incoming.cancel()).toBe(incoming.closed);
       expect(incoming.finish()).toBe(incoming.closed);
-      expect(await incoming.closed).toEqual({chunks: 1, failure: "cancelled", reason: "failed"});
+      expect(await incoming.closed).toBeUndefined();
       expect(await pending).toMatchObject({code: "NetworkIncomingFailed", failure: "cancelled"});
       await Promise.all(commands);
       expect(pair.right.diagnostics().incoming).toMatchObject({occupied: 0, reservedBytes: 0, responseBytes: 0});
@@ -696,40 +660,6 @@ instrumented(
     }
   },
   20000
-);
-
-instrumented.each(Array.from({length: 9}, (_, i) => `incoming_result_${i}`))(
-  "incoming next result prefix %s preserves the current result and serving owner",
-  async (stage) => {
-    const hooks = await faults();
-    const pair = await incomingPair();
-    try {
-      const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
-      const pending = stream.next();
-      void pending.catch(() => undefined);
-      const incoming = await takeIncoming(pair.right);
-      hooks.networkTestFail(stage);
-      await expect(incoming.respond(new Uint8Array(4000), pair.rightConfig.requestForks[0])).rejects.toThrow(
-        "InjectedNetworkFailure"
-      );
-      expect(pair.right.diagnostics().incoming).toMatchObject({
-        chunksWritten: 0n,
-        closedPromises: 1,
-        occupied: 1,
-        pendingResponses: 0,
-        reservedBytes: 10 * 1024 * 1024,
-        responseBytes: 0,
-      });
-      await incoming.respond(new Uint8Array(4000), pair.rightConfig.requestForks[0]);
-      expect((await pending).done).toBe(false);
-      expect(await incoming.finish()).toEqual({chunks: 1, reason: "served"});
-      expect((await stream.next()).done).toBe(true);
-      expect(pair.right.diagnostics().incoming).toMatchObject({occupied: 0, reservedBytes: 0, responseBytes: 0});
-    } finally {
-      await Promise.all([pair.left.close(), pair.right.close()]);
-    }
-  },
-  15000
 );
 
 instrumented("incoming table allocation failure unwinds startup before publication", async () => {

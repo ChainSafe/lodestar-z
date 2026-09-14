@@ -15,7 +15,7 @@ test "gossip validation finishes without allocation while shared deliveries are 
     for (0..3) |i| {
         const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(i), .generation = 1 };
         const session = support.addPeer(&g, conn, .v1_2).?;
-        g.sessions.rows[session.index].outbound = .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } };
+        g.sessions.rows[session.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
         g.overlay.rows[topic].mesh.set(i);
         const count: usize = if (i == 0) delivery.per_peer_limit else delivery.per_peer_reserve;
         for (0..count) |_| try std.testing.expectEqual(.queued, g.sessions.rows[i].io.tx.queueData(&g.messages.store, message, g.options.tx_peer_bytes, 0));

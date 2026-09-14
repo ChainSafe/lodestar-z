@@ -78,7 +78,7 @@ pub fn afterStep(runtime: *Runtime) void {
 
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     if (comptime !faults.enabled) return;
-    try exports.setNamedProperty("networkTestGossipRelease", try env.createFunction("networkTestGossipRelease", 0, release, null));
+    try @import("network_js.zig").put(exports, "networkTestGossipRelease", try env.createFunction("networkTestGossipRelease", 0, release, null));
 }
 fn release(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     released.store(true, .release);

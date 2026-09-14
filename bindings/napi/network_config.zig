@@ -122,11 +122,6 @@ pub fn endpoint(value: Value) !std.Io.net.IpAddress {
     };
 }
 
-pub fn parse(value: Value, out: *Config) !void {
-    try object(value, &.{ "profile", "identitySecretKey", "bind", "local", "forkSchedule", "requestForks", "discovery", "initialSlot", "gossipPolicy", "topicPolicy" });
-    try parseCommon(value, out);
-}
-
 pub fn bindings(value: Value) !n.udp.Bindings {
     if (!try value.isArray()) return .single(try endpoint(value));
     const count = try array(value, 2);
@@ -141,7 +136,7 @@ pub fn bindings(value: Value) !n.udp.Bindings {
     } };
 }
 
-pub fn parseCommon(value: Value, out: *Config) !void {
+pub fn parse(value: Value, out: *Config) !void {
     out.* = .{
         .profile = .small,
         .secret = @splat(0),

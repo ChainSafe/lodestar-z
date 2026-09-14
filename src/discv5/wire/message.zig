@@ -1,5 +1,5 @@
-//! Decoding an RPC message never touches scratch until the whole message has been validated, so
-//! a rejected message cannot publish partial state.
+//! Decode input and scratch must not overlap. Results borrow both until reuse.
+//! Every decode may overwrite scratch, including a rejected message.
 
 const std = @import("std");
 const constants = @import("constants.zig");
@@ -221,8 +221,6 @@ fn decodeFindNode(data: []const u8, scratch: *DecodeScratch) Error!FindNode {
     var list = try readMessageList(data);
     const request_id = try readRequestId(&list);
     var distances = try readList(&list);
-    // The first pass validates every item before the second pass writes to scratch.
-    const encoded_distances = distances;
     var seen = std.StaticBitSet(types.distance_count).initEmpty();
     var distances_count: usize = 0;
     while (!distances.atEnd()) {
@@ -231,22 +229,11 @@ fn decodeFindNode(data: []const u8, scratch: *DecodeScratch) Error!FindNode {
         const index: usize = @intCast(distance);
         if (seen.isSet(index)) continue;
         seen.set(index);
+        scratch.distances[distances_count] = @intCast(distance);
         distances_count += 1;
     }
     try expectEnd(&list);
 
-    distances = encoded_distances;
-    seen = std.StaticBitSet(types.distance_count).initEmpty();
-    var stored: usize = 0;
-    while (!distances.atEnd()) {
-        const distance = try readUint(&distances);
-        const index: usize = @intCast(distance);
-        if (seen.isSet(index)) continue;
-        seen.set(index);
-        scratch.distances[stored] = @intCast(distance);
-        stored += 1;
-    }
-    std.debug.assert(stored == distances_count);
     return .{ .request_id = request_id, .distances = scratch.distances[0..distances_count] };
 }
 
@@ -255,21 +242,14 @@ fn decodeNodes(data: []const u8, scratch: *DecodeScratch) Error!Nodes {
     const request_id = try readRequestId(&list);
     const total = try readUint(&list);
     var enrs = try readList(&list);
-    // The first pass validates every item before the second pass writes to scratch.
-    const encoded_enrs = enrs;
     var enrs_count: usize = 0;
     while (!enrs.atEnd()) {
-        _ = enrs.readRawItem() catch return Error.InvalidEncoding;
         if (enrs_count == types.findnode_result_max) return Error.InvalidMessage;
+        scratch.enrs[enrs_count] = enrs.readRawItem() catch return Error.InvalidEncoding;
         enrs_count += 1;
     }
     try expectEnd(&list);
 
-    enrs = encoded_enrs;
-    for (scratch.enrs[0..enrs_count]) |*enr| {
-        enr.* = enrs.readRawItem() catch unreachable;
-    }
-    std.debug.assert(enrs.atEnd());
     return .{ .request_id = request_id, .total = total, .enrs = scratch.enrs[0..enrs_count] };
 }
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const n = @import("network");
 const napi = @import("zapi:zapi").napi;
 const rr = n.reqresp;
+const Budget = @import("network_budget.zig").Budget;
 pub fn forkLabel(fork: ?@FieldType(rr.ForkEntry, "fork")) ?[]const u8 {
     return if (fork) |value| @tagName(value) else null;
 }
@@ -25,8 +26,6 @@ pub const Cell = struct {
     state: State = .free,
     generation: u64 = 0,
     peer: n.PeerId = undefined,
-    peer_ref: ?n.peers.types.PeerRef = null,
-    connection: ?n.quic.engine.Handle = null,
     protocol: rr.Protocol = .blocks_by_root_v2,
     options: rr.RequestOptions = .{},
     input: []u8 = &.{},
@@ -40,7 +39,6 @@ pub const Cell = struct {
     consume: bool = false,
     cancel: bool = false,
     retiring: bool = false,
-    abandoned: bool = false,
     peer_message: [rr.codec.error_message_max]u8 = undefined,
     peer_message_len: u16 = 0,
     pull: ?napi.Deferred = null,
@@ -67,11 +65,10 @@ pub const Diagnostics = struct {
 pub const Table = struct {
     cells: []Cell = &.{},
     backing: std.mem.Allocator,
-    budget: usize,
-    shared: ?*@import("network_incoming.zig").Budget = null,
+    budget: *Budget,
     diag: Diagnostics = .{},
 
-    pub fn init(backing: std.mem.Allocator, capacity: usize, budget: usize) !Table {
+    pub fn init(backing: std.mem.Allocator, capacity: usize, budget: *Budget) !Table {
         std.debug.assert(capacity <= 32);
         const cells = try backing.alloc(Cell, capacity);
         @memset(cells, .{});
@@ -99,11 +96,7 @@ pub const Table = struct {
             self.diag.requestFull +|= 1;
             return error.NetworkRequestFull;
         };
-        if (amount > self.budget - self.diag.reservedBytes) {
-            self.diag.bridgeFull +|= 1;
-            return error.NetworkBridgeFull;
-        }
-        if (self.shared) |shared| shared.reserve(amount) catch |err| {
+        self.budget.reserve(amount) catch |err| {
             self.diag.bridgeFull +|= 1;
             return err;
         };
@@ -130,7 +123,7 @@ pub const Table = struct {
         if (cell.chunk != null) return;
         self.backing.free(cell.sink);
         cell.sink = &.{};
-        if (self.shared) |shared| shared.release(cell.reservation);
+        self.budget.release(cell.reservation);
         self.diag.reservedBytes -= cell.reservation;
         cell.reservation = 0;
     }
@@ -191,8 +184,6 @@ pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
         const core = &runtime.heavy.?.core;
         const peer = core.core.catalog.find(&cell.peer);
         if (peer) |ref| {
-            cell.peer_ref = ref;
-            cell.connection = core.core.catalog.get(ref).?.connection;
             cell.native = core.sendReqRespRequest(ref, cell.protocol, cell.input, cell.sink, cell.options, now) catch |err| blk: {
                 cell.terminal = .{ .rejected = try rejection(err) };
                 break :blk null;
@@ -300,7 +291,8 @@ pub fn closeLocked(runtime: *Runtime) void {
 test "request reservations are exact and stale generations cannot release replacements" {
     const protocol = rr.Protocol.blocks_by_root_v2;
     const amount = 32 + 2 * protocol.info().response_max;
-    var table = try Table.init(std.testing.allocator, 1, amount);
+    var budget: Budget = .{ .limit = amount };
+    var table = try Table.init(std.testing.allocator, 1, &budget);
     defer table.deinit();
     const first = try table.reserve(protocol, 32);
     try table.allocate(first, 32);
@@ -314,7 +306,7 @@ test "request reservations are exact and stale generations cannot release replac
     try std.testing.expectEqual(first.generation + 1, replacement.generation);
     try std.testing.expect(table.get(first) == null);
     table.retire(replacement);
-    table.budget = amount - 1;
+    budget.limit = amount - 1;
     try std.testing.expectError(error.NetworkBridgeFull, table.reserve(protocol, 32));
     try std.testing.expectEqual(@as(usize, 0), table.snapshot().reservedBytes);
     table.cells[0].generation = std.math.maxInt(u64);
@@ -325,7 +317,8 @@ test "request allocation prefixes release through retirement and terminal chunks
     const protocol = rr.Protocol.blocks_by_root_v2;
     const amount = 32 + 2 * protocol.info().response_max;
     for (0..2) |fail_index| {
-        var table = try Table.init(std.testing.allocator, 1, amount);
+        var budget: Budget = .{ .limit = amount };
+        var table = try Table.init(std.testing.allocator, 1, &budget);
         defer table.deinit();
         const token = try table.reserve(protocol, 32);
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
@@ -335,7 +328,8 @@ test "request allocation prefixes release through retirement and terminal chunks
         table.backing = std.testing.allocator;
         try std.testing.expectEqual(@as(usize, 0), table.snapshot().reservedBytes);
     }
-    var table = try Table.init(std.testing.allocator, 1, amount);
+    var budget: Budget = .{ .limit = amount };
+    var table = try Table.init(std.testing.allocator, 1, &budget);
     defer table.deinit();
     const token = try table.reserve(protocol, 32);
     try table.allocate(token, 32);

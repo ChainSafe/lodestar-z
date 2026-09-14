@@ -23,12 +23,14 @@ const Node = struct {
         });
         errdefer core.deinit();
         try std.testing.expect(core.subscribe(name));
-        const session = core.addPeer(.{ .index = 0, .generation = 1 }, .v1_2, &.{
+        const session = core.addPeer(.{ .index = 0, .generation = 1 }, &.{
             .identity = .{ .bytes = @splat(identity) },
             .address = .unspecified,
             .direction = .outbound,
         }, .{ .mono_ms = 0, .unix_s = 0 }).admitted;
-        core.sessions.setStreams(session.index, .{ .conn = .{ .index = 0, .generation = 1 }, .id = 0, .slot = 0 }, .{ .conn = .{ .index = 0, .generation = 1 }, .id = 1, .slot = 1 });
+        core.sessions.setOutbound(session.index, .{ .live = .{ .stream = .{ .conn = .{ .index = 0, .generation = 1 }, .id = 0, .slot = 0 }, .version = .v1_2 } });
+        core.sessions.rows[session.index].in_stream = .{ .conn = .{ .index = 0, .generation = 1 }, .id = 1, .slot = 1 };
+        core.sessions.rows[session.index].io.rx_ready = true;
         core.sendSubscriptions(session.index);
         return .{ .core = core, .session = session };
     }
@@ -134,7 +136,7 @@ test "gossip simulation ignores decoded items and write receipts from a retired 
     defer node.core.deinit();
     const old = node.session;
     node.core.connectionClosed(node.core.sessions.rows[old.index].conn);
-    node.session = node.core.addPeer(.{ .index = 0, .generation = 2 }, .v1_2, &.{ .identity = .{ .bytes = @splat(2) }, .address = .unspecified, .direction = .outbound }, .{ .mono_ms = 1, .unix_s = 0 }).admitted;
+    node.session = node.core.addPeer(.{ .index = 0, .generation = 2 }, &.{ .identity = .{ .bytes = @splat(2) }, .address = .unspecified, .direction = .outbound }, .{ .mono_ms = 1, .unix_s = 0 }).admitted;
     try std.testing.expect(old.generation != node.session.generation);
     const now: Now = .{ .mono_ms = 2, .unix_s = 0 };
     try node.begin(now);

@@ -287,9 +287,11 @@ fn addDiscovered(
     source: types.Address,
 ) void {
     if (std.mem.eql(u8, &record.node_id, &self.local_id)) return;
-    const address = record.endpointFor(self.ip_mode) orelse return;
-    if (address.port() < discovered_port_min or
-        !RoutingTable.relayAllowed(source, address)) return;
+    const address = for (record.endpoints()) |candidate| {
+        const address = candidate orelse continue;
+        if (self.ip_mode.supports(address) and address.port() >= discovered_port_min and
+            RoutingTable.relayAllowed(source, address)) break address;
+    } else return;
     if (self.findCandidate(&record.node_id)) |index| {
         const candidate = &self.candidates[index];
         if (candidate.state == .unqueried and

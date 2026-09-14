@@ -101,7 +101,7 @@ test "gossip policy adaptive gossip randomizes recipients and fanout expires" {
     try std.testing.expect(high_selected);
     f.g.overlay.setLocal(&context, f.topic, false);
     for (f.g.sessions.rows) |*row| if (row.active) {
-        row.outbound = .{ .live = .{ .conn = row.conn, .id = 2, .slot = 0 } };
+        row.outbound = .{ .live = .{ .stream = .{ .conn = row.conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     };
     const fanout = f.g.overlay.maintainFanout(&context, f.topic, true);
     try std.testing.expectEqual(@as(usize, c.mesh_d), fanout.count());
@@ -169,7 +169,6 @@ test "overlay unsubscribe and disconnect retire membership and score together" {
 }
 
 test "gossip policy topic capacity supports two full fork subnet sets" {
-    const names = @import("topics.zig");
     var gossip = try @import("gossipsub.zig").Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
     defer gossip.deinit();
     const overlay = gossip.overlay;
@@ -184,17 +183,14 @@ test "gossip policy topic capacity supports two full fork subnet sets" {
             }
         }
         const digest: topic_mod.ForkDigest = .{ @intCast(fork), 0, 0, 0 };
-        for (0..names.attestation_subnet_count) |subnet| {
-            try std.testing.expect(gossip.subscribe(topic_mod.build(digest, names.attestationSubnet(subnet, &name), &buffer)));
+        for ([_]topic_mod.Kind{ .beacon_attestation, .data_column_sidecar, .sync_committee }) |kind| {
+            for (0..kind.countMax()) |subnet| {
+                const formatted = try std.fmt.bufPrint(&name, "{s}_{d}", .{ @tagName(kind), subnet });
+                try std.testing.expect(gossip.subscribe(topic_mod.build(digest, formatted, &buffer)));
+            }
         }
-        for (0..128) |subnet| {
-            try std.testing.expect(gossip.subscribe(topic_mod.build(digest, names.dataColumnSubnet(subnet, &name), &buffer)));
-        }
-        for (0..names.sync_committee_subnet_count) |subnet| {
-            try std.testing.expect(gossip.subscribe(topic_mod.build(digest, names.syncCommitteeSubnet(subnet, &name), &buffer)));
-        }
-        for ([_][]const u8{ names.beacon_block, names.beacon_aggregate_and_proof, names.voluntary_exit, names.proposer_slashing, names.attester_slashing, names.bls_to_execution_change, names.sync_committee_contribution_and_proof, names.light_client_finality_update, names.light_client_optimistic_update }) |n| {
-            try std.testing.expect(gossip.subscribe(topic_mod.build(digest, n, &buffer)));
+        for (std.enums.values(topic_mod.Kind)) |kind| {
+            if (kind.countMax() == 1) try std.testing.expect(gossip.subscribe(topic_mod.build(digest, @tagName(kind), &buffer)));
         }
     }
     try std.testing.expect(overlay.findTopic("/eth2/00000000/beacon_block/ssz_snappy") == null);

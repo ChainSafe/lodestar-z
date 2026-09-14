@@ -7,30 +7,7 @@ const assert = std.debug.assert;
 pub const boundary_max = 64;
 pub const topics_per_boundary_max = 333;
 pub const topic_max = boundary_max * topics_per_boundary_max;
-pub const Kind = enum(u8) {
-    beacon_block,
-    beacon_aggregate_and_proof,
-    beacon_attestation,
-    proposer_slashing,
-    attester_slashing,
-    voluntary_exit,
-    sync_committee_contribution_and_proof,
-    sync_committee,
-    light_client_finality_update,
-    light_client_optimistic_update,
-    bls_to_execution_change,
-    blob_sidecar,
-    data_column_sidecar,
-
-    pub fn countMax(self: Kind) u16 {
-        return switch (self) {
-            .beacon_attestation => 64,
-            .sync_committee => 4,
-            .blob_sidecar, .data_column_sidecar => 128,
-            else => 1,
-        };
-    }
-};
+pub const Kind = topic.Kind;
 pub const kind_count = @typeInfo(Kind).@"enum".fields.len;
 pub const Rule = struct { count: u16 = 0, ssz_min: u32 = 0, ssz_max: u32 = 0 };
 pub const Boundary = struct { digest: [4]u8, rules: [kind_count]Rule = @splat(.{}) };
@@ -115,33 +92,13 @@ pub const Namespace = struct {
     }
 
     pub fn lookup(self: *const Namespace, name: []const u8) ?Match {
-        if (name.len > topic.topic_max_len) return null;
-        const parsed = topic.parse(name) orelse return null;
-        const hex = std.fmt.bytesToHex(parsed.digest, .lower);
-        if (!std.mem.eql(u8, &hex, name[topic.prefix.len..][0..8])) return null;
+        const parsed = topic.parseCanonical(name) orelse return null;
+        const k = @intFromEnum(parsed.name.kind);
         for (self.boundaries, self.offsets) |*boundary, *starts| {
             if (!std.mem.eql(u8, &boundary.digest, &parsed.digest)) continue;
-            inline for (@typeInfo(Kind).@"enum".fields) |field| {
-                const kind: Kind = @enumFromInt(field.value);
-                const k = field.value;
-                const rule = boundary.rules[k];
-                if (rule.count > 0) {
-                    if (kind.countMax() == 1) {
-                        if (std.mem.eql(u8, parsed.name, field.name)) return .{ .ordinal = starts[k], .rule = rule };
-                    } else if (std.mem.startsWith(u8, parsed.name, field.name ++ "_")) {
-                        const decimal = parsed.name[field.name.len + 1 ..];
-                        if (decimal.len == 0 or decimal.len > 3 or (decimal.len > 1 and decimal[0] == '0')) return null;
-                        var subnet: u16 = 0;
-                        for (decimal) |byte| {
-                            if (byte < '0' or byte > '9') return null;
-                            subnet = subnet * 10 + byte - '0';
-                        }
-                        if (subnet >= rule.count) return null;
-                        return .{ .ordinal = starts[k] + subnet, .rule = rule };
-                    }
-                }
-            }
-            return null;
+            const rule = boundary.rules[k];
+            if (parsed.name.subnet >= rule.count) return null;
+            return .{ .ordinal = starts[k] + parsed.name.subnet, .rule = rule };
         }
         return null;
     }

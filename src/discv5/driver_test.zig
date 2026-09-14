@@ -5,6 +5,7 @@ const Driver = @import("Driver.zig");
 const Engine = @import("Engine.zig");
 const enr = @import("identity/enr.zig");
 const Lookup = @import("Lookup.zig");
+const Maintenance = @import("Maintenance.zig");
 const lookup_driver = @import("lookup_driver.zig");
 const message = @import("wire/message.zig");
 const RoutingTable = @import("RoutingTable.zig");
@@ -36,119 +37,78 @@ test "driver rejects invalid polling and missing expiry storage" {
     );
 }
 
-test "driver retains a routing incumbent that answers revalidation" {
+test "maintenance retains a routing incumbent that answers through the driver" {
     var pair: Pair = undefined;
     try pair.init(1_000, true);
     defer pair.deinit();
     try pair.fillBucket();
-
+    const now_ms = try Driver.monotonicMilliseconds(std.testing.io);
+    var candidates: Lookup.Candidates = undefined;
+    var controller: Maintenance = undefined;
+    try controller.init(&candidates, &.{}, now_ms, .{}, .ip4);
+    defer controller.cancel(&pair.node_a);
+    try std.testing.expectEqual(@as(?u64, 0), controller.nextDeadlineMs(&pair.node_a));
+    var out: [1_280]u8 = undefined;
+    const started = (try controller.startNext(&pair.node_a, &out, try .init(&.{1}), now_ms, &test_support.sealEntropy(10))).?;
+    try pair.driver_a.transmit(std.testing.io, started.peer.address, out[0..started.call.packet_length]);
     var expired: [4]CallTable.Expired = undefined;
-    const started = try pair.driver_a.step(std.testing.io, &expired);
-    try std.testing.expect(started.progress.maintenance_started);
-    try std.testing.expectEqual(@as(usize, 0), started.calls_expired);
-    try std.testing.expectEqual(@as(usize, 0), started.progress.maintenance_expired);
-
     const answered = try pair.driver_b.step(std.testing.io, &expired);
     try std.testing.expectEqual(@as(u8, 1), answered.progress.standard_responses);
-    try std.testing.expect(answered.event == .none);
-
     const completed = try pair.driver_a.step(std.testing.io, &expired);
-    try std.testing.expect(completed.event == .none);
-    try std.testing.expectEqual(@as(usize, 0), completed.calls_expired);
-    try std.testing.expectEqual(@as(usize, 0), completed.progress.maintenance_expired);
+    try std.testing.expect(completed.event == .response);
+    try std.testing.expect(try controller.onEvent(&pair.node_a, &completed.event, completed.now_ms));
     try std.testing.expectEqual(@as(usize, 0), pair.node_a.routing.pendingCount());
     try std.testing.expect(pair.node_a.routing.contains(&pair.record_b.node_id));
     try std.testing.expect(!pair.node_a.routing.contains(&pair.candidate_id));
     try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
 }
 
-test "driver bounds failed revalidation retries while continuing receive and later recovers" {
+test "maintenance bounds local replacement probe retries without blocking driver receive" {
     var pair: Pair = undefined;
     try pair.init(1_000, true);
     defer pair.deinit();
     try pair.fillBucket();
-    const now_ms = try Driver.monotonicMilliseconds(std.testing.io);
-    RevalidationFault.active = .{ .socket = pair.udp_a.sockets.primary().handle, .now_ms = now_ms };
-    defer RevalidationFault.active = .{};
-    var vtable = std.testing.io.vtable.*;
-    vtable.netSend = RevalidationFault.send;
-    vtable.now = RevalidationFault.now;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    var expired: [4]CallTable.Expired = undefined;
-    const oversized = [_]u8{0xff} ** 1_281;
-    try pair.udp_b.sockets.primary().send(std.testing.io, &pair.udp_a.sockets.primary().address, &oversized);
-    const failed = try pair.driver_a.stepUntil(io, &expired, now_ms);
-    try std.testing.expectEqual(error.Unexpected, failed.failure.?);
-    try std.testing.expectEqual(Driver.FailureStage.maintenance, failed.failure_stage);
-    try std.testing.expectEqual(types.RejectReason.oversized_datagram, failed.datagram.rejected);
+    var candidates: Lookup.Candidates = undefined;
+    var controller: Maintenance = undefined;
+    try controller.init(&candidates, &.{}, 0, .{}, .ip4);
+    defer controller.cancel(&pair.node_a);
+    var out: [1_280]u8 = undefined;
+    const started = (try controller.startNext(&pair.node_a, &out, try .init(&.{1}), 0, &test_support.sealEntropy(10))).?;
+    try std.testing.expect(controller.onFailure(&pair.node_a, started.call.handle, 0, .local));
     try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
     try std.testing.expectEqual(@as(usize, 1), pair.node_a.routing.pendingCount());
-    try std.testing.expectEqual(@as(usize, 1), RevalidationFault.active.sends);
-    for (0..32) |_| {
-        const deferred = try pair.driver_a.stepUntil(io, &expired, now_ms);
-        try std.testing.expect(deferred.failure == null);
-    }
-    try std.testing.expectEqual(@as(usize, 1), RevalidationFault.active.sends);
-    RevalidationFault.active.now_ms += Driver.maintenance_retry_ms - 1;
-    _ = try pair.driver_a.stepUntil(io, &expired, now_ms);
-    try std.testing.expectEqual(@as(usize, 1), RevalidationFault.active.sends);
-    RevalidationFault.active.now_ms += 1;
-    _ = try pair.driver_a.stepUntil(io, &expired, now_ms);
-    try std.testing.expectEqual(@as(usize, 2), RevalidationFault.active.sends);
-    RevalidationFault.active.socket = null;
-    RevalidationFault.active.now_ms += Driver.maintenance_retry_ms;
-    const resumed = try pair.driver_a.stepUntil(io, &expired, now_ms);
-    try std.testing.expect(resumed.failure == null);
-    try std.testing.expect(resumed.progress.maintenance_started);
-    const answered = try pair.driver_b.step(std.testing.io, &expired);
-    try std.testing.expect(answered.failure == null);
-    const completed = try pair.driver_a.stepUntil(io, &expired, now_ms);
-    try std.testing.expect(completed.failure == null);
-    try std.testing.expectEqual(@as(usize, 0), pair.node_a.routing.pendingCount());
-    try std.testing.expect(pair.node_a.routing.contains(&pair.record_b.node_id));
+    for (0..32) |_| try std.testing.expect((try controller.startNext(&pair.node_a, &out, try .init(&.{2}), 999, &test_support.sealEntropy(11))) == null);
+    const oversized = [_]u8{0xff} ** 1_281;
+    try pair.udp_b.sockets.primary().send(std.testing.io, &pair.udp_a.sockets.primary().address, &oversized);
+    var expired: [4]CallTable.Expired = undefined;
+    const received = try pair.driver_a.step(std.testing.io, &expired);
+    try std.testing.expectEqual(types.RejectReason.oversized_datagram, received.datagram.rejected);
+    try std.testing.expect(received.failure == null);
+    try std.testing.expect((try controller.startNext(&pair.node_a, &out, try .init(&.{2}), 1_000, &test_support.sealEntropy(11))) != null);
 }
 
-const RevalidationFault = struct {
-    socket: ?net.Socket.Handle = null,
-    now_ms: u64 = 0,
-    sends: usize = 0,
-    threadlocal var active: RevalidationFault = .{};
-
-    fn send(userdata: ?*anyopaque, socket: net.Socket.Handle, messages: []net.OutgoingMessage, flags: net.SendFlags) struct { ?net.Socket.SendError, usize } {
-        if (socket == active.socket) {
-            active.sends += 1;
-            return .{ error.Unexpected, 0 };
-        }
-        return std.testing.io.vtable.netSend(userdata, socket, messages, flags);
+test "maintenance replaces an expired incumbent but preserves later authenticated liveness" {
+    for ([_]bool{ false, true }) |authenticated_later| {
+        var pair: Pair = undefined;
+        try pair.init(1, true);
+        defer pair.deinit();
+        try pair.fillBucket();
+        var candidates: Lookup.Candidates = undefined;
+        var controller: Maintenance = undefined;
+        try controller.init(&candidates, &.{}, 0, .{}, .ip4);
+        defer controller.cancel(&pair.node_a);
+        var out: [1_280]u8 = undefined;
+        const started = (try controller.startNext(&pair.node_a, &out, try .init(&.{1}), 0, &test_support.sealEntropy(10))).?;
+        if (authenticated_later) _ = try pair.node_a.confirmPeer(&started.peer, &pair.record_b, std.math.maxInt(u64));
+        var expired: [4]CallTable.Expired = undefined;
+        const result = pair.node_a.tick(1, &expired);
+        try std.testing.expectEqual(@as(usize, 1), result.calls);
+        try std.testing.expect(controller.onFailure(&pair.node_a, expired[0].handle, 1, .expired));
+        try std.testing.expectEqual(@as(usize, 0), pair.node_a.routing.pendingCount());
+        try std.testing.expectEqual(authenticated_later, pair.node_a.routing.contains(&pair.record_b.node_id));
+        try std.testing.expectEqual(!authenticated_later, pair.node_a.routing.contains(&pair.candidate_id));
+        try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
     }
-
-    fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
-        return .{ .nanoseconds = @as(i96, active.now_ms) * std.time.ns_per_ms };
-    }
-};
-
-test "driver replaces a routing incumbent when revalidation expires" {
-    var pair: Pair = undefined;
-    try pair.init(1, true);
-    defer pair.deinit();
-    try pair.fillBucket();
-
-    var output: [1_280]u8 = undefined;
-    _ = (try pair.node_a.startRevalidation(
-        &output,
-        try message.RequestId.init(&.{0x42}),
-        0,
-        &test_support.sealEntropy(10),
-    )).?;
-    var expired: [4]CallTable.Expired = undefined;
-    const result = try pair.driver_a.step(std.testing.io, &expired);
-    try std.testing.expect(!result.progress.maintenance_started);
-    try std.testing.expectEqual(@as(usize, 0), result.calls_expired);
-    try std.testing.expectEqual(@as(usize, 1), result.progress.maintenance_expired);
-    try std.testing.expectEqual(@as(usize, 0), pair.node_a.routing.pendingCount());
-    try std.testing.expect(!pair.node_a.routing.contains(&pair.record_b.node_id));
-    try std.testing.expect(pair.node_a.routing.contains(&pair.candidate_id));
-    try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
 }
 
 test "driver completes a cold call through challenge and handshake" {

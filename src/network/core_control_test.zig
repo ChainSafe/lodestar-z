@@ -27,7 +27,7 @@ test "core records a buffered Goodbye before transport cancellation and preserve
         var ready = false;
         for (0..40) |_| {
             try setup.step(0);
-            for (setup.server.service.reqresp.inner.inbound) |slot| if (slot.state == .receiving_request and slot.protocol == .goodbye_v1) {
+            for (setup.server.service.reqresp.inbound) |slot| if (slot.state == .receiving_request and slot.protocol == .goodbye_v1) {
                 ready = true;
             };
             if (ready) break;
@@ -50,7 +50,7 @@ test "core records a buffered Goodbye before transport cancellation and preserve
         try std.testing.expectEqual(if (local_ban) t.DisconnectReason.banned else .remote_goodbye, closed[0].closed.reason);
         try std.testing.expect(snapshot.goodbye_until_ms >= setup.pair.now.mono_ms + 300_000);
         try std.testing.expectEqual(@as(u64, 1), setup.server.control.counters.events.goodbyes[@intFromEnum(@import("peers/goodbye.zig").Reason.too_many_peers)]);
-        try std.testing.expectEqual(@as(u64, 1), setup.server.service.reqresp.inner.counters.goodbyes_recovered_on_close);
+        try std.testing.expectEqual(@as(u64, 1), setup.server.service.reqresp.counters.goodbyes_recovered_on_close);
     }
 }
 
@@ -64,7 +64,7 @@ test "core local head and metadata updates preserve periodic status scheduling" 
     const peer = snapshots[0].peer;
     try std.testing.expect(snapshots[0].relevant);
     const due = setup.client.control.schedules[peer.index].status_due_ms;
-    const started = setup.client.service.reqresp.inner.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
+    const started = setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
     for (0..3) |_| {
         var local = setup.client.local;
         local.status.head_slot += 1;
@@ -72,12 +72,12 @@ test "core local head and metadata updates preserve periodic status scheduling" 
         setup.client.commitLocal(&local, setup.pair.now);
         for (0..40) |_| try setup.step(1);
         try std.testing.expectEqual(due, setup.client.control.schedules[peer.index].status_due_ms);
-        try std.testing.expectEqual(started, setup.client.service.reqresp.inner.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
+        try std.testing.expectEqual(started, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
     }
     setup.pair.advance(1);
     setup.client.reStatusPeers(setup.pair.now);
     for (0..40) |_| try setup.step(1);
-    try std.testing.expectEqual(started + 1, setup.client.service.reqresp.inner.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
+    try std.testing.expectEqual(started + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
     try std.testing.expect(setup.client.control.schedules[peer.index].status_due_ms > due);
 }
 
@@ -109,7 +109,7 @@ test "core native stalled fork transition only wakes for eligible work" {
         active += 1;
     };
     try std.testing.expect(active > 0);
-    const service_due = setup.client.service.nextWakeupPartitioned(setup.pair.now, 0, 32, 0).?;
+    const service_due = setup.client.service.nextWakeup(setup.pair.now, .{ .application = 0, .control = 32, .gossipsub = 0 }).?;
     try std.testing.expect(service_due > setup.pair.now.mono_ms);
     try std.testing.expect(setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now) == null);
     const core_due = setup.client.nextWakeup(setup.pair.now, 0, 0, 0, 0).?;
@@ -209,20 +209,20 @@ fn previousStatus(setup: *Setup) !void {
         var events: [32]Engine.Event = undefined;
         _ = setup.server.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &events), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
         var out: [1]rr.Event = undefined;
-        const count = setup.client.service.processPartitioned(&setup.pair.client, setup.pair.events(&setup.pair.client, &events), &.{}, setup.pair.now, &.{}, &out, &.{});
+        const count = setup.client.service.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &events), &.{}, setup.pair.now, .{ .application = &.{}, .control = &out, .gossipsub = &.{} });
         for (out[0..count.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualDeep(handle, chunk.request);
-                try std.testing.expect(setup.client.consume(handle, setup.pair.now));
+                try std.testing.expect(setup.client.service.reqresp.consume(handle, setup.pair.now));
             },
             .done => {
                 done = true;
             },
             .request => |request| {
-                try setup.client.respond(request.request, &.{ 1, 0, 0, 0, 0, 0, 0, 0 }, null, setup.pair.now);
+                try setup.client.service.reqresp.respond(request.request, &.{ 1, 0, 0, 0, 0, 0, 0, 0 }, null, setup.pair.now);
             },
             .chunk_sent => |sent| {
-                _ = setup.client.finish(sent.request, setup.pair.now);
+                _ = setup.client.service.reqresp.finish(sent.request, setup.pair.now);
             },
             else => {},
         };
@@ -287,17 +287,17 @@ test "core control native Fulu serves older schemas but old Status cannot establ
             ), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
             if (protocol == .goodbye_v1) {
                 for (setup.server.control.responses) |response| if (response.request) |inbound| {
-                    const owner = setup.server.service.reqresp.inner.inboundSlot(inbound).?;
+                    const owner = setup.server.service.reqresp.inboundSlot(inbound).?;
                     if (owner.protocol != .goodbye_v1 or !owner.io.writing) continue;
                     try std.testing.expectEqualSlices(u8, &goodbye_reply, response.bytes[0..8]);
                     goodbye_writer = true;
                 };
             }
             var output: [1]rr.Event = undefined;
-            const counts = setup.client.service.processPartitioned(&setup.pair.client, setup.pair.events(
+            const counts = setup.client.service.process(&setup.pair.client, setup.pair.events(
                 &setup.pair.client,
                 &transport,
-            ), &.{}, setup.pair.now, &.{}, &output, &.{});
+            ), &.{}, setup.pair.now, .{ .application = &.{}, .control = &output, .gossipsub = &.{} });
             if (counts.control == 0) continue;
             switch (output[0]) {
                 .chunk => |chunk| {
@@ -306,16 +306,16 @@ test "core control native Fulu serves older schemas but old Status cannot establ
                     if (protocol == .goodbye_v1) {
                         try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, chunk.bytes[0..8], .little));
                     }
-                    try std.testing.expect(setup.client.consume(request, setup.pair.now));
+                    try std.testing.expect(setup.client.service.reqresp.consume(request, setup.pair.now));
                     chunks += 1;
                 },
                 .done => terminal = true,
                 .request => |incoming| {
                     try std.testing.expectEqual(rr.Protocol.goodbye_v1, incoming.protocol);
-                    try setup.client.respond(incoming.request, &goodbye_reply, null, setup.pair.now);
+                    try setup.client.service.reqresp.respond(incoming.request, &goodbye_reply, null, setup.pair.now);
                 },
                 .chunk_sent => |sent| {
-                    try std.testing.expect(setup.client.finish(sent.request, setup.pair.now));
+                    try std.testing.expect(setup.client.service.reqresp.finish(sent.request, setup.pair.now));
                 },
                 .served => {},
                 else => return error.UnexpectedControlResult,
@@ -380,10 +380,10 @@ test "core native application response borrows survive same turn hard close" {
         ), &.{}, setup.pair.now, 100, &.{}, &output, &.{});
         if (server.application == 1) switch (output[0]) {
             .request => |incoming| {
-                try setup.server.respond(incoming.request, &response, .{ .digest = @splat(0), .fork = .phase0 }, setup.pair.now);
+                try setup.server.service.reqresp.respond(incoming.request, &response, .{ .digest = @splat(0), .fork = .phase0 }, setup.pair.now);
             },
             .chunk_sent => |chunk| {
-                _ = setup.server.finish(chunk.request, setup.pair.now);
+                _ = setup.server.service.reqresp.finish(chunk.request, setup.pair.now);
                 sent = true;
             },
             else => {},
@@ -401,7 +401,7 @@ test "core native application response borrows survive same turn hard close" {
         if (client.application == 1 and output[0] == .chunk) {
             try std.testing.expectEqualDeep(request, output[0].chunk.request);
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
-            try std.testing.expect(setup.client.consume(request, setup.pair.now));
+            try std.testing.expect(setup.client.service.reqresp.consume(request, setup.pair.now));
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
             received = true;
             break;
@@ -410,7 +410,7 @@ test "core native application response borrows survive same turn hard close" {
     try std.testing.expect(received);
     try std.testing.expectError(
         error.StaleHandle,
-        setup.server.respondError(
+        setup.server.service.reqresp.respondError(
             .{ .index = 65535, .generation = 42, .direction = .inbound },
             2,
             "busy",
@@ -419,7 +419,7 @@ test "core native application response borrows survive same turn hard close" {
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        setup.client.errorMessage(.{
+        setup.client.service.reqresp.errorMessage(.{
             .index = 65535,
             .generation = 42,
             .direction = .outbound,
@@ -446,10 +446,10 @@ test "core native gossip admission precedes Status without establishing managed 
             &setup.pair.server,
             &transport,
         ), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
-        _ = setup.client.service.processPartitioned(&setup.pair.client, setup.pair.events(
+        _ = setup.client.service.process(&setup.pair.client, setup.pair.events(
             &setup.pair.client,
             &transport,
-        ), &.{}, setup.pair.now, &.{}, &.{}, &.{});
+        ), &.{}, setup.pair.now, .{ .application = &.{}, .control = &.{}, .gossipsub = &.{} });
     }
     var snapshots: [4]t.Snapshot = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.server.snapshots(&snapshots));
@@ -541,20 +541,20 @@ test "core native inbound application per peer cap protects control from extra r
     try std.testing.expectEqual(@as(usize, 8), count);
     _ = setup.server.snapshots(&snapshots);
     const server_conn = snapshots[0].connection.?;
-    try std.testing.expect(setup.server.cancel(first.?));
-    setup.server.service.reqresp.inner.cleanupPending(
+    try std.testing.expect(setup.server.service.reqresp.cancel(first.?));
+    setup.server.service.reqresp.cleanupPending(
         &setup.pair.server,
         &setup.server.service.router,
     );
     try std.testing.expectEqual(
         @as(u16, 8),
-        setup.server.service.reqresp.inner.inboundApplicationCount(server_conn),
+        setup.server.service.reqresp.inboundApplicationCount(server_conn),
     );
     var stale = server_conn;
     stale.generation += 1;
     try std.testing.expectEqual(
         @as(u16, 0),
-        setup.server.service.reqresp.inner.inboundApplicationCount(stale),
+        setup.server.service.reqresp.inboundApplicationCount(stale),
     );
 }
 
@@ -584,7 +584,7 @@ test "core native immutable Status writer survives local update" {
     for (0..40) |_| {
         try setup.step(0);
         for (setup.server.control.responses) |response| if (response.request) |request| {
-            const slot = setup.server.service.reqresp.inner.inboundSlot(request).?;
+            const slot = setup.server.service.reqresp.inboundSlot(request).?;
             if (slot.protocol != .status_v1) continue;
             try std.testing.expect(slot.io.writing);
             try setup.server.updateStatus(&.{ .head_slot = 80 });
@@ -624,7 +624,7 @@ test "core control native Goodbye maps shutdown incompatibility and fault wire r
             var transport: [32]Engine.Event = undefined;
             _ = setup.client.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
             var control: [1]rr.Event = undefined;
-            const counts = setup.server.service.processPartitioned(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), &.{}, setup.pair.now, &.{}, &control, &.{});
+            const counts = setup.server.service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), &.{}, setup.pair.now, .{ .application = &.{}, .control = &control, .gossipsub = &.{} });
             if (counts.control == 0) continue;
             try std.testing.expectEqual(rr.Protocol.goodbye_v1, control[0].request.protocol);
             try std.testing.expectEqual(@as(usize, 8), control[0].request.bytes.len);
@@ -744,13 +744,13 @@ test "core control capabilities pre-Fulu Metadata3 serves configured custody cou
         var events: [32]Engine.Event = undefined;
         _ = setup.server.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &events), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
         var out: [1]rr.Event = undefined;
-        const counts = setup.client.service.processPartitioned(&setup.pair.client, setup.pair.events(&setup.pair.client, &events), &.{}, setup.pair.now, &.{}, &out, &.{});
+        const counts = setup.client.service.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &events), &.{}, setup.pair.now, .{ .application = &.{}, .control = &out, .gossipsub = &.{} });
         for (out[0..counts.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualDeep(request, chunk.request);
                 const metadata = try wire.decodeMetadata(.metadata_v3, chunk.bytes, local.fork);
                 try std.testing.expectEqual(local.metadata.custody_group_count, metadata.custody_group_count);
-                try std.testing.expect(setup.client.consume(request, setup.pair.now));
+                try std.testing.expect(setup.client.service.reqresp.consume(request, setup.pair.now));
                 received = true;
             },
             .done => done = true,
@@ -932,10 +932,10 @@ test "core native application response borrows survive immediate public close" {
         ), &.{}, setup.pair.now, 100, &.{}, &output, &.{});
         if (server.application == 1) switch (output[0]) {
             .request => |incoming| {
-                try setup.server.respond(incoming.request, &response, .{ .digest = @splat(0), .fork = .phase0 }, setup.pair.now);
+                try setup.server.service.reqresp.respond(incoming.request, &response, .{ .digest = @splat(0), .fork = .phase0 }, setup.pair.now);
             },
             .chunk_sent => |chunk| {
-                _ = setup.server.finish(chunk.request, setup.pair.now);
+                _ = setup.server.service.reqresp.finish(chunk.request, setup.pair.now);
             },
             else => {},
         };
@@ -948,7 +948,7 @@ test "core native application response borrows survive immediate public close" {
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
             try std.testing.expect(setup.client.closePeer(&setup.pair.client, peer, snapshots[0].connection.?, setup.pair.now));
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
-            try std.testing.expect(setup.client.consume(request, setup.pair.now));
+            try std.testing.expect(setup.client.service.reqresp.consume(request, setup.pair.now));
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
             received = true;
             break;
@@ -971,7 +971,7 @@ test "application graceful quiescence sends shutdown Goodbye and suppresses admi
         var transport: [32]Engine.Event = undefined;
         _ = setup.client.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
         var control: [1]rr.Event = undefined;
-        const counts = setup.server.service.processPartitioned(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), &.{}, setup.pair.now, &.{}, &control, &.{});
+        const counts = setup.server.service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), &.{}, setup.pair.now, .{ .application = &.{}, .control = &control, .gossipsub = &.{} });
         if (counts.control == 0) continue;
         try std.testing.expectEqual(rr.Protocol.goodbye_v1, control[0].request.protocol);
         try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, control[0].request.bytes[0..8], .little));
@@ -989,13 +989,13 @@ fn expectQuiescentGoodbye(setup: *Setup, admitted: u64) !void {
         var gossip: [8]@import("gossipsub/root.zig").Event = undefined;
         const counts_local = setup.client.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{}, setup.pair.now, 100, &.{}, &.{}, &gossip);
         for (gossip[0..counts_local.gossipsub]) |event| try std.testing.expect(event != .message);
-        try std.testing.expectEqual(@as(u64, 0), setup.client.service.gossipsub.counters().messages_received);
-        try std.testing.expectEqual(admitted, setup.client.service.reqresp.counters().admitted);
-        for (setup.client.service.reqresp.inner.inbound) |slot| {
+        try std.testing.expectEqual(@as(u64, 0), setup.client.service.gossipsub.inner.counters.messages_received);
+        try std.testing.expectEqual(admitted, setup.client.service.reqresp.counters.admitted);
+        for (setup.client.service.reqresp.inbound) |slot| {
             if (slot.state != .free and !slot.protocol.isControl()) try std.testing.expect(slot.pending_event == null);
         }
         var control: [8]rr.Event = undefined;
-        const counts = setup.server.service.processPartitioned(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), &.{}, setup.pair.now, &.{}, &control, &.{});
+        const counts = setup.server.service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), &.{}, setup.pair.now, .{ .application = &.{}, .control = &control, .gossipsub = &.{} });
         for (control[0..counts.control]) |event| {
             if (event != .request or event.request.protocol != .goodbye_v1) continue;
             try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, event.request.bytes[0..8], .little));
@@ -1010,9 +1010,9 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
     const multistream = @import("wire/multistream.zig");
     var setup: Setup = .{};
     var opts = @import("core_test.zig").options();
-    opts.service.reqresp.request_policy = @import("reqresp/request_policy_test.zig").fixture();
+
     const quotas = @import("reqresp/admission_test.zig").quotas(1000, 1000);
-    opts.service.reqresp.admission = .{ .identities = 4, .peer = quotas, .global = quotas };
+    opts.service.reqresp.admission = .{ .policy = @import("reqresp/request_policy_test.zig").fixture(), .limits = .{ .identities = 4, .peer = quotas, .global = quotas } };
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();
     _ = try setup.pair.dial();
@@ -1034,7 +1034,7 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
             if (entry.state == .negotiating and entry.role == .listener and entry.stream.id == stream.id) held = true;
         }
     } else {
-        for (setup.client.service.reqresp.inner.inbound) |slot| {
+        for (setup.client.service.reqresp.inbound) |slot| {
             if (slot.state != .free and slot.protocol == .blocks_by_root_v2 and (slot.state == .receiving_request or mode == .borrowed) and slot.io.decoder.isDone()) held = true;
         }
     }
@@ -1047,7 +1047,7 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
         borrowed = application[0].request.bytes;
         try std.testing.expectEqualSlices(u8, &([_]u8{7} ** 32), borrowed);
     }
-    const admitted = setup.client.service.reqresp.counters().admitted;
+    const admitted = setup.client.service.reqresp.counters.admitted;
     setup.client.beginGracefulClose(setup.pair.now);
     if (mode == .borrowed) {
         try std.testing.expectEqualSlices(u8, &([_]u8{7} ** 32), borrowed);
@@ -1100,7 +1100,7 @@ fn quiescenceGossip(hold_selection: bool) !void {
     const frame = writer.written();
     if (!hold_selection) try std.testing.expectEqual(frame.len - 1, try setup.pair.server.write(stream, frame[0 .. frame.len - 1], false));
     for (0..10) |_| try setup.step(0);
-    try std.testing.expectEqual(@as(usize, 0), setup.client.service.gossipsub.resourceSnapshot().pending_validations);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.service.gossipsub.inner.resourceSnapshot().pending_validations);
     setup.client.beginGracefulClose(setup.pair.now);
     if (hold_selection) {
         var proposal_bytes: [64]u8 = undefined;
@@ -1110,7 +1110,7 @@ fn quiescenceGossip(hold_selection: bool) !void {
     const remaining = if (hold_selection) frame else frame[frame.len - 1 ..];
     try std.testing.expectEqual(remaining.len, try setup.pair.server.write(stream, remaining, false));
     try expectQuiescentGoodbye(&setup, 0);
-    try std.testing.expectEqual(@as(usize, 0), setup.client.service.gossipsub.resourceSnapshot().pending_validations);
+    try std.testing.expectEqual(@as(usize, 0), setup.client.service.gossipsub.inner.resourceSnapshot().pending_validations);
 }
 
 test "application quiescence rejects a partial message on an existing gossip stream" {

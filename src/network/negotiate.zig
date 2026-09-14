@@ -78,12 +78,7 @@ pub const Options = struct {
 pub const Negotiator = struct {
     allocator: std.mem.Allocator,
     entries: []Entry,
-    timeout_ms: u64 = negotiate_timeout_ms,
     outbound_control_reserved: u16 = 0,
-
-    pub fn init(allocator: std.mem.Allocator, negotiations_max: u16) Error!Negotiator {
-        return initWithOptions(allocator, .{ .negotiations_max = negotiations_max });
-    }
 
     pub fn validateOptions(options: Options) Error!void {
         const negotiations_max = options.negotiations_max;
@@ -93,7 +88,7 @@ pub const Negotiator = struct {
         }
     }
 
-    pub fn initWithOptions(allocator: std.mem.Allocator, options: Options) Error!Negotiator {
+    pub fn init(allocator: std.mem.Allocator, options: Options) Error!Negotiator {
         try validateOptions(options);
         const negotiations_max = options.negotiations_max;
         const entries = try allocator.alloc(Entry, negotiations_max);
@@ -119,58 +114,17 @@ pub const Negotiator = struct {
         return count;
     }
 
+    /// Copies the bounded offer list; protocol strings must outlive negotiation.
     pub fn beginOutbound(
         self: *Negotiator,
         engine: *Engine,
         conn: Handle,
-        protocol: []const u8,
-        now: types.Now,
-    ) Error!StreamHandle {
-        return self.beginOutboundCandidates(engine, conn, &.{protocol}, now);
-    }
-
-    pub fn beginOutboundControl(
-        self: *Negotiator,
-        engine: *Engine,
-        conn: Handle,
-        protocol: @import("reqresp/protocol.zig").Protocol,
-        now: types.Now,
-    ) Error!StreamHandle {
-        if (!protocol.isControl()) return error.InvalidLimits;
-        return self.beginCandidates(engine, conn, &.{protocol.id()}, now, true, self.timeout_ms);
-    }
-
-    pub fn beginOutboundTimed(
-        self: *Negotiator,
-        engine: *Engine,
-        conn: Handle,
-        protocol: @import("reqresp/protocol.zig").Protocol,
-        now: types.Now,
-        timeout_ms: u64,
-    ) Error!StreamHandle {
-        return self.beginCandidates(engine, conn, &.{protocol.id()}, now, protocol.isControl(), timeout_ms);
-    }
-
-    /// Copies the bounded offer list; protocol strings must outlive negotiation.
-    pub fn beginOutboundCandidates(
-        self: *Negotiator,
-        engine: *Engine,
-        conn: Handle,
         protocols: []const []const u8,
         now: types.Now,
+        options: struct { control: bool = false, timeout_ms: u64 = negotiate_timeout_ms },
     ) Error!StreamHandle {
-        return self.beginCandidates(engine, conn, protocols, now, false, self.timeout_ms);
-    }
-
-    fn beginCandidates(
-        self: *Negotiator,
-        engine: *Engine,
-        conn: Handle,
-        protocols: []const []const u8,
-        now: types.Now,
-        control: bool,
-        timeout_ms: u64,
-    ) Error!StreamHandle {
+        const timeout_ms = options.timeout_ms;
+        const control = options.control;
         if (timeout_ms == 0) return error.InvalidLimits;
         if (protocols.len == 0 or protocols.len > candidates_max) return error.InvalidLimits;
         for (protocols) |protocol| _ = try multistream.Dialer.init(protocol);
@@ -210,7 +164,7 @@ pub const Negotiator = struct {
         assert(entry.state == .free);
         entry.stream = stream;
         entry.started_ms = now.mono_ms;
-        entry.timeout_ms = self.timeout_ms;
+        entry.timeout_ms = negotiate_timeout_ms;
         entry.control = false;
         @memcpy(entry.supported[0..supported.len], supported);
         entry.role = .{ .listener = multistream.Listener.init(entry.supported[0..supported.len]) };
@@ -438,9 +392,9 @@ test "negotiation timed entry owns exact expiry below and above the default" {
         try pair.init(.{}, .{});
         defer pair.deinit();
         const handles = try support.connectPair(&pair);
-        var negotiator = try Negotiator.init(std.testing.allocator, 2);
+        var negotiator = try Negotiator.init(std.testing.allocator, .{ .negotiations_max = 2 });
         defer negotiator.deinit();
-        const stream = try negotiator.beginOutboundTimed(&pair.client, handles.client, .ping_v1, pair.now, duration);
+        const stream = try negotiator.beginOutbound(&pair.client, handles.client, &.{@import("reqresp/protocol.zig").Protocol.ping_v1.id()}, pair.now, .{ .control = true, .timeout_ms = duration });
         const due = pair.now.mono_ms + duration;
         var outcomes: [1]Outcome = undefined;
         try std.testing.expectEqual(@as(usize, 0), negotiator.pump(&pair.client, pair.now, &outcomes));

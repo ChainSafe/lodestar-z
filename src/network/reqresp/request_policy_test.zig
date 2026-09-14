@@ -33,7 +33,7 @@ test "reqresp request admission policy range work and schedule boundaries" {
     put(&bytes, 0, 99);
     put(&bytes, 8, 2);
     const bpo = try policy.inspect(.blob_sidecars_by_range_v1, bytes[0..16], .fulu);
-    try std.testing.expectEqual(@as(u128, 2), bpo.raw_cost);
+    try std.testing.expectEqual(@as(u128, 2), bpo.charged_cost);
     try std.testing.expectEqual(@as(u32, 15), bpo.chunks_max);
     put(&bytes, 0, 0);
     put(&bytes, 8, 1024);
@@ -41,14 +41,14 @@ test "reqresp request admission policy range work and schedule boundaries" {
         put(&bytes, 16, step);
         const historical = try policy.inspect(.blocks_by_range_v2, bytes[0..24], .fulu);
         try std.testing.expectEqual(@as(u32, 1024), historical.chunks_max);
-        try std.testing.expectEqual(@as(u128, 1024), historical.raw_cost);
+        try std.testing.expectEqual(@as(u128, 1024), historical.charged_cost);
     }
     try std.testing.expectEqual(@as(u32, 128), policy.defaultQuotas(.fulu)[@intFromEnum(Protocol.blocks_by_range_v2)].tokens);
     for ([_]u64{ 1, 128, 129, std.math.maxInt(u64) }) |count| {
         put(&bytes, 0, 10);
         put(&bytes, 8, count);
         const result = try policy.inspect(.blocks_by_range_v2, bytes[0..24], .fulu);
-        try std.testing.expectEqual(@as(u128, count), result.raw_cost);
+        try std.testing.expectEqual(@as(u128, count), result.charged_cost);
         try std.testing.expectEqual(@as(u32, @intCast(@min(count, 128))), result.chunks_max);
     }
     put(&bytes, 0, std.math.maxInt(u64));
@@ -81,10 +81,9 @@ test "reqresp request admission policy multi BPO range includes pre Deneb and ex
     put(&bytes, 0, 8);
     put(&bytes, 8, 32);
     const result = try policy.inspect(.blob_sidecars_by_range_v1, &bytes, .fulu);
-    try std.testing.expectEqual(@as(u128, 32), result.raw_cost);
+    try std.testing.expectEqual(@as(u128, 32), result.charged_cost);
     try std.testing.expectEqual(@as(u128, 32), result.charged_cost);
     try std.testing.expectEqual(@as(u32, 270), result.chunks_max);
-    try std.testing.expectEqualDeep(p.Range{ .start = 8, .count = 32, .end_exclusive = 40 }, result.range.?);
 }
 
 test "reqresp request admission policy canonical roots offsets occurrences and capacities" {
@@ -113,7 +112,7 @@ test "reqresp request admission policy canonical roots offsets occurrences and c
     put(&bytes, 52, std.math.maxInt(u64));
     offset(&bytes, 92, 36);
     const duplicate = try policy.inspect(.data_column_sidecars_by_root_v1, bytes[0..96], .fulu);
-    try std.testing.expectEqual(@as(u128, 2), duplicate.raw_cost);
+    try std.testing.expectEqual(@as(u128, 2), duplicate.charged_cost);
     for ([_]u32{ 0, 1, 6, 100, 0xffff_fffc }) |bad| {
         offset(&bytes, 0, bad);
         try std.testing.expectError(error.MalformedSsz, policy.inspect(.data_column_sidecars_by_root_v1, bytes[0..96], .fulu));
@@ -132,7 +131,7 @@ test "reqresp request admission policy canonical roots offsets occurrences and c
     put(&bytes, 20, std.math.maxInt(u64));
     put(&bytes, 28, std.math.maxInt(u64));
     const wide = try policy.inspect(.data_column_sidecars_by_range_v1, bytes[0..36], .fulu);
-    try std.testing.expectEqual(@as(u128, std.math.maxInt(u64)) * 2, wide.raw_cost);
+    try std.testing.expectEqual(@as(u128, std.math.maxInt(u64)) * 2, wide.charged_cost);
     try std.testing.expectEqual(@as(u32, 256), wide.chunks_max);
     try std.testing.expectEqual(@as(u128, 1), (try policy.inspect(.data_column_sidecars_by_range_v1, bytes[0..20], .fulu)).charged_cost);
     try std.testing.expectError(error.MalformedSsz, policy.inspect(.data_column_sidecars_by_range_v1, bytes[0..21], .fulu));

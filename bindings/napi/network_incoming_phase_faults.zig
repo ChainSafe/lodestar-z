@@ -3,18 +3,15 @@ const napi = @import("zapi:zapi").napi;
 const faults = @import("network_faults.zig");
 const incoming = @import("network_incoming.zig");
 const Runtime = @import("network_runtime.zig").Runtime;
-pub const Preparation = enum { refs, buffer, deferred };
+pub const Preparation = enum { buffer, deferred };
 pub const TerminalProof = struct { session: u64, handle: @import("network").reqresp.RequestHandle };
 const Snapshot = struct {
     preparing: bool = false,
     heavyFreed: bool = false,
-    currentRefs: usize = 0,
-    nextRefs: usize = 0,
     responseBytes: usize = 0,
     deferred: bool = false,
     copiedFirstByte: u8 = 0,
     rollback: bool = false,
-    rollbackNextRefs: usize = 0,
     rollbackReserved: usize = 0,
     bufferReleased: bool = false,
     deferredRetired: bool = false,
@@ -45,7 +42,7 @@ pub fn reset() void {
 }
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     if (comptime !faults.enabled) return;
-    try exports.setNamedProperty("networkTestIncomingPhase", try env.createFunction("networkTestIncomingPhase", 0, get, null));
+    try @import("network_js.zig").put(exports, "networkTestIncomingPhase", try env.createFunction("networkTestIncomingPhase", 0, get, null));
 }
 fn get(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     std.Io.Threaded.mutexLock(&mutex);
@@ -53,17 +50,12 @@ fn get(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     std.Io.Threaded.mutexUnlock(&mutex);
     const object = try env.createObject();
     inline for (@typeInfo(Snapshot).@"struct".fields) |field| {
-        try object.setNamedProperty(field.name ++ "\x00", if (field.type == bool) try env.getBoolean(@field(value, field.name)) else try env.createDouble(@floatFromInt(@field(value, field.name))));
+        try @import("network_js.zig").put(object, field.name ++ "\x00", if (field.type == bool) try env.getBoolean(@field(value, field.name)) else try env.createDouble(@floatFromInt(@field(value, field.name))));
     }
     return object;
 }
 fn preparationScenario(scenario: faults.Scenario) bool {
-    return scenario == .incoming_prepare_refs or scenario == .incoming_prepare_buffer or scenario == .incoming_prepare_deferred;
-}
-fn refCount(refs: *const incoming.ResultRefs) usize {
-    var count: usize = 0;
-    for (refs) |ref| count += @intFromBool(ref != null);
-    return count;
+    return scenario == .incoming_prepare_buffer or scenario == .incoming_prepare_deferred;
 }
 fn waitTick() !void {
     var fd = std.c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
@@ -73,7 +65,6 @@ fn waitTick() !void {
 pub fn preparing(runtime: *Runtime, cell: *const incoming.Cell, phase: Preparation, buffer: []const u8, deferred: ?napi.Deferred) !void {
     if (comptime !faults.enabled) return;
     const selected: faults.Scenario = switch (phase) {
-        .refs => .incoming_prepare_refs,
         .buffer => .incoming_prepare_buffer,
         .deferred => .incoming_prepare_deferred,
     };
@@ -89,7 +80,7 @@ pub fn preparing(runtime: *Runtime, cell: *const incoming.Cell, phase: Preparati
         if (closed) {
             std.debug.assert(runtime.heavy == null and !cell.native and cell.state == .response_preparing);
             std.Io.Threaded.mutexLock(&mutex);
-            snapshot = .{ .preparing = true, .heavyFreed = true, .currentRefs = refCount(&cell.results), .nextRefs = refCount(&cell.next_results), .responseBytes = buffer.len, .deferred = deferred != null, .copiedFirstByte = if (phase == .deferred and buffer.len > 0) buffer[0] else 0 };
+            snapshot = .{ .preparing = true, .heavyFreed = true, .responseBytes = buffer.len, .deferred = deferred != null, .copiedFirstByte = if (phase == .deferred and buffer.len > 0) buffer[0] else 0 };
             std.Io.Threaded.mutexUnlock(&mutex);
         }
         runtime.unlock();
@@ -120,7 +111,6 @@ pub fn rollbackLocked(runtime: *Runtime, cell: *const incoming.Cell) void {
     std.Io.Threaded.mutexLock(&mutex);
     defer std.Io.Threaded.mutexUnlock(&mutex);
     snapshot.rollback = true;
-    snapshot.rollbackNextRefs = refCount(&cell.next_results);
     snapshot.rollbackReserved = cell.reservation;
     snapshot.pendingPublished = cell.pending != null;
 }
@@ -136,7 +126,7 @@ pub fn terminalBarrier(runtime: *Runtime, accepted: bool) !?TerminalProof {
         runtime.unlock();
         return null;
     };
-    const native = runtime.heavy.?.core.core.service.reqresp.inner.inboundSlot(cell.handle).?;
+    const native = runtime.heavy.?.core.core.service.reqresp.inboundSlot(cell.handle).?;
     std.debug.assert(native.terminal == null and native.chunks == cell.chunks);
     if (accepted) std.debug.assert(native.state == .finishing or (native.state == .writing_chunk and native.close_after_write)) else std.debug.assert(native.state == .serving);
     std.Io.Threaded.mutexLock(&mutex);
@@ -171,7 +161,7 @@ pub fn afterStep(runtime: *Runtime, proof: *const TerminalProof, events: []const
     for (runtime.incoming.?.cells) |*cell| {
         if (!cell.native or !std.meta.eql(cell.handle, proof.handle)) continue;
         std.debug.assert(cell.action == .cancel);
-        const native = runtime.heavy.?.core.core.service.reqresp.inner.inboundSlot(cell.handle);
+        const native = runtime.heavy.?.core.core.service.reqresp.inboundSlot(cell.handle);
         std.Io.Threaded.mutexLock(&mutex);
         defer std.Io.Threaded.mutexUnlock(&mutex);
         std.debug.assert(!snapshot.stepObserved);

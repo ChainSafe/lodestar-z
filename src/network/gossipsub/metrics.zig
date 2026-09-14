@@ -4,28 +4,7 @@ const topic = @import("topic.zig");
 const Item = @import("protobuf.zig").Item;
 const ItemKind = std.meta.Tag(Item);
 
-pub const Topic = struct {
-    kind: policy.Kind,
-    subnet: u16 = 0,
-
-    pub fn parse(name: []const u8) ?Topic {
-        if (name.len > topic.name_max_len) return null;
-        inline for (@typeInfo(policy.Kind).@"enum".fields) |field| {
-            const kind: policy.Kind = @enumFromInt(field.value);
-            if (comptime kind.countMax() == 1) {
-                if (std.mem.eql(u8, name, field.name)) return .{ .kind = kind };
-            } else if (std.mem.startsWith(u8, name, field.name ++ "_")) {
-                const suffix = name[field.name.len + 1 ..];
-                if (suffix.len == 0 or suffix.len > 3 or (suffix.len > 1 and suffix[0] == '0')) return null;
-                for (suffix) |char| if (!std.ascii.isDigit(char)) return null;
-                const subnet = std.fmt.parseInt(u16, suffix, 10) catch return null;
-                if (subnet >= kind.countMax()) return null;
-                return .{ .kind = kind, .subnet = subnet };
-            }
-        }
-        return null;
-    }
-};
+pub const Topic = topic.Name;
 
 pub const ValidationTime = @import("../metrics_histogram.zig").Histogram(&.{ 10, 30, 100, 300, 1000, 3000, 10000 });
 

@@ -2,7 +2,7 @@ const std = @import("std");
 const p = @import("topic_policy.zig");
 const gossip = @import("gossipsub.zig");
 const Gossipsub = gossip.Gossipsub;
-const GossipPair = @import("gossipsub_test.zig").GossipPair;
+const Pair = @import("test_pair.zig").Pair;
 const validation = @import("validation.zig");
 const support = @import("test_support.zig");
 const name = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -27,22 +27,22 @@ fn live(g: *const Gossipsub) usize {
 }
 
 test "topic policy remembers real inactive subscriptions without event pressure then delivers" {
-    var pair: GossipPair = .{};
+    var pair: Pair = .{};
     try pair.initOpts(.{ .random_seed = 1 }, options(&.{boundary()}));
     defer pair.deinit();
     pair.server_event_capacity = 0;
-    try std.testing.expect(pair.client.subscribe(name));
-    try std.testing.expect(pair.client.subscribe(unknown));
+    try std.testing.expect(pair.client.gossipsub.inner.subscribe(name));
+    try std.testing.expect(pair.client.gossipsub.inner.subscribe(unknown));
     for (0..20) |_| try pair.pumpOnce();
-    try std.testing.expectEqual(@as(usize, 0), live(&pair.server));
+    try std.testing.expectEqual(@as(usize, 0), live(pair.server.gossipsub.inner));
     try std.testing.expectEqual(@as(usize, 0), pair.server_count);
-    try std.testing.expectEqual(@as(u64, 0), pair.server.counters.local_pressure_resets);
-    try pair.server.configureTopic(name, &.{ .weight = 2 });
-    const t = pair.server.overlay.findTopic(name).?;
-    try std.testing.expectEqual(@as(usize, 1), pair.server.overlay.subscribers(t).count());
-    try std.testing.expect(pair.server.subscribe(name));
+    try std.testing.expectEqual(@as(u64, 0), pair.server.gossipsub.inner.counters.local_pressure_resets);
+    try pair.server.gossipsub.inner.configureTopic(name, &.{ .weight = 2 });
+    const t = pair.server.gossipsub.inner.overlay.findTopic(name).?;
+    try std.testing.expectEqual(@as(usize, 1), pair.server.gossipsub.inner.overlay.subscribers(t).count());
+    try std.testing.expect(pair.server.gossipsub.inner.subscribe(name));
     pair.server_event_capacity = 16;
-    const result = try pair.server.publishWithOptions(name, "0123456789", .{ .allow_zero_peers = false }, pair.pair.now);
+    const result = try pair.server.gossipsub.inner.publishWithOptions(name, "0123456789", .{ .allow_zero_peers = false }, pair.pair.now);
     try std.testing.expectEqual(@as(usize, 1), result.queued);
     var delivered = false;
     for (0..20) |_| {
@@ -53,10 +53,10 @@ test "topic policy remembers real inactive subscriptions without event pressure 
         };
     }
     try std.testing.expect(delivered);
-    try std.testing.expect(pair.client.unsubscribe(name));
+    try std.testing.expect(pair.client.gossipsub.inner.unsubscribe(name));
     for (0..20) |_| try pair.pumpOnce();
-    try std.testing.expectEqual(@as(usize, 0), pair.server.overlay.subscribers(t).count());
-    try std.testing.expect(!pair.server.overlay.namespace.?.subscribed(0, 0));
+    try std.testing.expectEqual(@as(usize, 0), pair.server.gossipsub.inner.overlay.subscribers(t).count());
+    try std.testing.expect(!pair.server.gossipsub.inner.overlay.namespace.?.subscribed(0, 0));
 }
 
 test "topic policy incoming lengths precede decode work arena store and validation admission" {
@@ -115,67 +115,72 @@ test "topic policy local publication enforces both size bounds before state" {
 }
 
 test "topic policy physical close clears bits while same connection stream replacement preserves them" {
-    var pair: GossipPair = .{};
+    var pair: Pair = .{};
     try pair.initOpts(.{ .random_seed = 1 }, options(&.{boundary()}));
     defer pair.deinit();
-    try std.testing.expect(pair.client.subscribe(name));
+    try std.testing.expect(pair.client.gossipsub.inner.subscribe(name));
     for (0..20) |_| try pair.pumpOnce();
-    const index = pair.server.sessions.findPeer(pair.handles.server).?;
-    const ns = &pair.server.overlay.namespace.?;
+    const index = pair.server.gossipsub.inner.sessions.findPeer(pair.handles.server).?;
+    const ns = &pair.server.gossipsub.inner.overlay.namespace.?;
     try std.testing.expect(ns.subscribed(index, 0));
-    @import("test_support.zig").driver(&pair.server).resetInbound(&pair.pair.server, index);
-    @import("test_support.zig").driver(&pair.server).resetOutbound(&pair.pair.server, index);
+    @import("test_support.zig").driver(pair.server.gossipsub.inner).resetInbound(&pair.pair.server, index);
+    @import("test_support.zig").driver(pair.server.gossipsub.inner).resetOutbound(&pair.pair.server, index);
     try std.testing.expect(ns.subscribed(index, 0));
-    @import("test_support.zig").driver(&pair.server).replaceInbound(&pair.pair.server, index, pair.server_send, .v1_1);
-    @import("test_support.zig").driver(&pair.server).replaceOutbound(&pair.pair.server, index, pair.server_send, .v1_1);
+    for (0..20) |_| try pair.pumpOnce();
+    const client_index = pair.client.gossipsub.inner.sessions.findPeer(pair.handles.client).?;
+    const replacement_stream = try pair.client.router.beginOutbound(&pair.pair.client, pair.handles.client, .{ .meshsub = .v1_1 }, pair.pair.now);
+    pair.client.gossipsub.inner.sessions.setOutbound(client_index, .{ .negotiating = replacement_stream });
+    for (0..20) |_| try pair.pumpOnce();
+    try std.testing.expect(pair.server.gossipsub.inner.sessions.rows[index].in_stream != null);
+    try std.testing.expect(pair.server.gossipsub.inner.sessions.rows[index].outbound == .live);
     try std.testing.expect(ns.subscribed(index, 0));
     var stale = pair.handles.server;
     stale.generation += 1;
-    pair.server.connectionClosed(stale);
+    pair.server.gossipsub.inner.connectionClosed(stale);
     try std.testing.expect(ns.subscribed(index, 0));
-    const other = support.addPeer(&pair.server, .{ .index = 77, .generation = 1 }, .v1_2).?;
+    const other = support.addPeer(pair.server.gossipsub.inner, .{ .index = 77, .generation = 1 }, .v1_2).?;
     ns.setSubscription(other.index, 0, true);
-    pair.server.connectionClosed(pair.handles.server);
+    pair.server.gossipsub.inner.connectionClosed(pair.handles.server);
     try std.testing.expect(!ns.subscribed(index, 0));
     try std.testing.expect(ns.subscribed(other.index, 0));
-    const replacement = support.addPeer(&pair.server, stale, .v1_2).?;
+    const replacement = support.addPeer(pair.server.gossipsub.inner, stale, .v1_2).?;
     try std.testing.expectEqual(index, replacement.index);
     try std.testing.expect(!ns.subscribed(index, 0));
-    try std.testing.expect(pair.server.subscribe(name));
-    const t = pair.server.overlay.findTopic(name).?;
-    try std.testing.expect(!pair.server.overlay.subscribers(t).isSet(index));
-    try std.testing.expect(pair.server.overlay.subscribers(t).isSet(other.index));
+    try std.testing.expect(pair.server.gossipsub.inner.subscribe(name));
+    const t = pair.server.gossipsub.inner.overlay.findTopic(name).?;
+    try std.testing.expect(!pair.server.gossipsub.inner.overlay.subscribers(t).isSet(index));
+    try std.testing.expect(pair.server.gossipsub.inner.overlay.subscribers(t).isSet(other.index));
 }
 
 test "topic policy real wire receives only bounded SSZ and keeps borrowed payloads stable" {
-    var pair: GossipPair = .{};
+    var pair: Pair = .{};
     try pair.initOpts(.{ .random_seed = 1 }, options(&.{boundary()}));
     defer pair.deinit();
-    try std.testing.expect(pair.server.subscribe(name));
-    try std.testing.expect(pair.client.subscribe(name));
+    try std.testing.expect(pair.server.gossipsub.inner.subscribe(name));
+    try std.testing.expect(pair.client.gossipsub.inner.subscribe(name));
     for (0..20) |_| try pair.pumpOnce();
     var seen: usize = 0;
     const payload: [21]u8 = @splat('z');
     for ([_]usize{ 9, 10, 20, 21 }) |size| {
-        const result = try pair.client.publish(name, payload[0..size], pair.pair.now);
+        const result = try pair.client.gossipsub.inner.publish(name, payload[0..size], pair.pair.now);
         try std.testing.expectEqual(@as(usize, 1), result.queued);
         for (0..20) |_| {
             try pair.pumpOnce();
             for (pair.serverEvents()) |event| if (event == .message) {
                 try std.testing.expect(size == 10 or size == 20);
                 seen += 1;
-                const entry = pair.server.messages.validation.attribution(event.message.handle);
+                const entry = pair.server.gossipsub.inner.messages.validation.attribution(event.message.handle);
                 try std.testing.expectEqual(entry.admitted_ms, event.message.admitted_ms);
-                try std.testing.expectEqual(pair.server.messages.validation.entries[event.message.handle.index].state.pending.deadline, event.message.deadline);
-                try std.testing.expect(event.message.identity.eql(&pair.server.peers.rows[entry.source.index].identity));
+                try std.testing.expectEqual(pair.server.gossipsub.inner.messages.validation.entries[event.message.handle.index].state.pending.deadline, event.message.deadline);
+                try std.testing.expect(event.message.identity.eql(&pair.server.gossipsub.inner.peers.rows[entry.source.index].identity));
                 try std.testing.expectEqualSlices(u8, payload[0..size], event.message.bytes);
-                try pair.server.configureTopic(event.message.topic, &.{ .weight = 2 });
+                try pair.server.gossipsub.inner.configureTopic(event.message.topic, &.{ .weight = 2 });
                 var local: [10]u8 = @splat('x');
                 local[0] = @intCast(size);
-                _ = try pair.server.publish(event.message.topic, &local, pair.pair.now);
+                _ = try pair.server.gossipsub.inner.publish(event.message.topic, &local, pair.pair.now);
                 try std.testing.expectEqualStrings(name, event.message.topic);
                 try std.testing.expectEqualSlices(u8, payload[0..size], event.message.bytes);
-                try std.testing.expectEqual(gossip.ReportOutcome{ .applied = .ignore }, pair.server.report(event.message.handle, .ignore, pair.pair.now));
+                try std.testing.expectEqual(gossip.ReportOutcome{ .applied = .ignore }, pair.server.gossipsub.inner.report(event.message.handle, .ignore, pair.pair.now));
             };
         }
     }

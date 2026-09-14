@@ -92,7 +92,8 @@ test "local intent separate validation control score backoff and generation pins
     const io = &g.sessions.rows[peer.index].io;
     const desired = [_]local.Subscription{.{ .name = next, .params = .{ .weight = 2 } }};
     const message = g.messages.store.put([_]u8{1} ** 20, name, "payload").?;
-    const handle = g.messages.validation.admit(&g.messages.store, &g.peers, message, logical, .{ .index = 0, .generation = 1 }, now.mono_ms);
+    var reservation = g.messages.validation.reserve(g.messages.store.get(message).?.id).?;
+    const handle = reservation.commit(&g.messages.store, &g.peers, message, logical, .{ .index = 0, .generation = 1 }, now.mono_ms);
     g.messages.store.seal(message);
     try std.testing.expectError(error.TopicCapacity, apply(&g, w, &desired));
     g.messages.validation.finish(&g.messages.store, handle, .ignore, now.mono_ms);

@@ -3,23 +3,11 @@ const rr = @import("reqresp.zig");
 const protocol = @import("protocol.zig");
 const routing = @import("../router.zig");
 const support = @import("../test_support.zig");
-const service_mod = @import("service.zig");
+const service_mod = @import("../service.zig");
 const engine_mod = @import("../quic/engine.zig");
 const reservedOptions = @import("control_capacity_test.zig").reservedOptions;
 
-const Counts = struct { application: usize, control: usize };
-fn drain(
-    requests: *rr.ReqResp,
-    pair: *support.Pair,
-    router: *routing.Router,
-    application: []rr.Event,
-    control: []rr.Event,
-) Counts {
-    const counts = requests.pumpPartitioned(&pair.client, router, pair.now, application, control);
-    return .{ .application = counts.application, .control = counts.control };
-}
-
-test "reqresp partitioned drain retains blocked terminals and skips mixed over-limit head" {
+test "reqresp drain retains blocked terminals and skips mixed over-limit head" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
@@ -81,57 +69,57 @@ test "reqresp partitioned drain retains blocked terminals and skips mixed over-l
     try std.testing.expect(requests.cancel(application));
     try std.testing.expect(requests.cancel(control));
     try std.testing.expectEqual(
-        Counts{ .application = 0, .control = 0 },
-        drain(&requests, &pair, &router, &.{}, &.{}),
+        rr.OutputCounts{ .application = 0, .control = 0 },
+        requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &.{} }),
     );
     try std.testing.expectEqual(0, router.negotiator.active());
     var output: [1]rr.Event = undefined;
-    try std.testing.expectEqual(1, drain(&requests, &pair, &router, &.{}, &output).control);
+    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &output }).control);
     try std.testing.expectEqual(control, output[0].failed.request);
-    try std.testing.expectEqual(1, drain(&requests, &pair, &router, &.{}, &output).control);
+    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &output }).control);
     try std.testing.expectEqual(control_second, output[0].failed.request);
-    try std.testing.expectEqual(1, drain(&requests, &pair, &router, &output, &.{}).application);
+    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &output, .control = &.{} }).application);
     try std.testing.expectEqual(application, output[0].failed.request);
-    try std.testing.expectEqual(1, drain(&requests, &pair, &router, &output, &.{}).application);
+    try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &output, .control = &.{} }).application);
     try std.testing.expectEqual(application_second, output[0].failed.request);
-    _ = drain(&requests, &pair, &router, &.{}, &.{});
+    _ = requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &.{} });
     try std.testing.expectEqual(0, requests.active().outbound);
     requests.pushOverLimit(.{ .peer = handles.client, .protocol = .blocks_by_root_v2 });
     requests.pushOverLimit(.{ .peer = handles.client, .protocol = .ping_v1 });
     requests.pushOverLimit(.{ .peer = handles.client, .protocol = .blocks_by_range_v2 });
     requests.pushOverLimit(.{ .peer = handles.client, .protocol = .metadata_v1 });
     for ([_]protocol.Protocol{ .ping_v1, .metadata_v1 }) |which| {
-        try std.testing.expectEqual(1, drain(&requests, &pair, &router, &.{}, &output).control);
+        try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &output }).control);
         try std.testing.expectEqual(which, output[0].over_limit.protocol);
     }
     try std.testing.expectEqual(2, requests.over_limit_len);
-    try std.testing.expectEqual(null, requests.nextWakeupPartitioned(pair.now, 0, 1));
-    try std.testing.expectEqual(pair.now.mono_ms, requests.nextWakeupPartitioned(pair.now, 1, 0));
+    try std.testing.expectEqual(null, requests.nextWakeup(pair.now, .{ .application = 0, .control = 1 }));
+    try std.testing.expectEqual(pair.now.mono_ms, requests.nextWakeup(pair.now, .{ .application = 1, .control = 0 }));
     for ([_]protocol.Protocol{ .blocks_by_root_v2, .blocks_by_range_v2 }) |which| {
-        try std.testing.expectEqual(1, drain(&requests, &pair, &router, &output, &.{}).application);
+        try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &output, .control = &.{} }).application);
         try std.testing.expectEqual(which, output[0].over_limit.protocol);
     }
     try std.testing.expectEqual(0, requests.over_limit_len);
 }
 
-test "reqresp partitioned service retains request and chunk bytes through control progress" {
+test "reqresp service retains request and chunk bytes through control progress" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
     var options = reservedOptions();
     options.forks = &.{.{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }};
-    var client = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options });
+    var client = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
     defer client.deinit();
-    var server = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options });
+    var server = try service_mod.Service.init(std.testing.allocator, .{ .reqresp = options, .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1 } });
     defer server.deinit();
-    defer server.shutdown(&pair.server);
+    defer server.reqresp.shutdown(&pair.server, &server.router);
     const sink = try std.testing.allocator.alloc(
         u8,
         protocol.Protocol.blocks_by_root_v2.info().response_max,
     );
     defer {
-        client.shutdown(&pair.client);
+        client.reqresp.shutdown(&pair.client, &client.router);
         std.testing.allocator.free(sink);
     }
     const root = [_]u8{0xa5} ** 32;
@@ -161,39 +149,25 @@ test "reqresp partitioned service retains request and chunk bytes through contro
     var output: [1]rr.Event = undefined;
     for (0..24) |_| {
         try pair.pump();
-        const client_active = pair.client.driverView().takeActivity(&activity);
-        const received = client.processPartitioned(
-            &pair.client,
-            pair.events(&pair.client, &transport),
-            activity[0..client_active],
-            pair.now,
-            &.{},
-            &output,
-        );
+        const client_active = pair.client.takeActivity(&activity);
+        const received = client.process(&pair.client, pair.events(&pair.client, &transport), activity[0..client_active], pair.now, .{ .application = &.{}, .control = &output });
         for (output[0..received.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping_bytes, chunk.bytes);
-                try std.testing.expect(client.handler.consume(chunk.request, pair.now));
+                try std.testing.expect(client.reqresp.consume(chunk.request, pair.now));
                 got_pong = true;
             },
             .failed => return error.TestUnexpectedResult,
             else => {},
         };
-        const server_active = pair.server.driverView().takeActivity(&activity);
-        const incoming = server.processPartitioned(
-            &pair.server,
-            pair.events(&pair.server, &transport),
-            activity[0..server_active],
-            pair.now,
-            &.{},
-            &output,
-        );
+        const server_active = pair.server.takeActivity(&activity);
+        const incoming = server.process(&pair.server, pair.events(&pair.server, &transport), activity[0..server_active], pair.now, .{ .application = &.{}, .control = &output });
         for (output[0..incoming.control]) |event| switch (event) {
             .request => |request| {
                 try std.testing.expectEqual(protocol.Protocol.ping_v1, request.protocol);
-                try server.handler.respond(request.request, &ping_bytes, null, pair.now);
+                try server.reqresp.respond(request.request, &ping_bytes, null, pair.now);
             },
-            .chunk_sent => |sent| _ = server.handler.finish(sent.request, pair.now),
+            .chunk_sent => |sent| _ = server.reqresp.finish(sent.request, pair.now),
             .failed => return error.TestUnexpectedResult,
             else => {},
         };
@@ -201,71 +175,43 @@ test "reqresp partitioned service retains request and chunk bytes through contro
     try std.testing.expect(got_pong);
     try std.testing.expectEqual(
         1,
-        server.pumpPartitioned(
-            &pair.server,
-            pair.now,
-            &output,
-            &.{},
-        ).application,
+        server.reqresp.pump(&pair.server, &server.router, pair.now, .{ .application = &output, .control = &.{} }).application,
     );
     const request = output[0].request;
     try std.testing.expectEqualSlices(u8, &root, request.bytes);
     const block = [_]u8{0x5a} ** @import("consensus_types").deneb.SignedBeaconBlock.min_size;
-    try server.handler.respond(request.request, &block, .{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }, pair.now);
+    try server.reqresp.respond(request.request, &block, .{ .digest = .{ 1, 2, 3, 4 }, .fork = .deneb }, pair.now);
     for (0..16) |_| {
         try pair.pump();
-        const client_active = pair.client.driverView().takeActivity(&activity);
-        _ = client.processPartitioned(
-            &pair.client,
-            pair.events(&pair.client, &transport),
-            activity[0..client_active],
-            pair.now,
-            &.{},
-            &output,
-        );
-        const server_active = pair.server.driverView().takeActivity(&activity);
-        const count = server.process(
-            &pair.server,
-            pair.events(&pair.server, &transport),
-            activity[0..server_active],
-            pair.now,
-            &output,
-        );
+        const client_active = pair.client.takeActivity(&activity);
+        _ = client.process(&pair.client, pair.events(&pair.client, &transport), activity[0..client_active], pair.now, .{ .application = &.{}, .control = &output });
+        const server_active = pair.server.takeActivity(&activity);
+        const count = server.process(&pair.server, pair.events(&pair.server, &transport), activity[0..server_active], pair.now, .{ .control = &output }).control;
         for (output[0..count]) |event| {
-            if (event == .chunk_sent) _ = server.handler.finish(event.chunk_sent.request, pair.now);
+            if (event == .chunk_sent) _ = server.reqresp.finish(event.chunk_sent.request, pair.now);
         }
     }
-    try std.testing.expect(client.handler.inner.outbound[app.index].pending_event != null);
+    try std.testing.expect(client.reqresp.outbound[app.index].pending_event != null);
     try std.testing.expectEqualSlices(u8, &block, sink[0..block.len]);
     try std.testing.expectEqual(
         pair.now.mono_ms + 60_000,
-        client.handler.inner.nextWakeupPartitioned(pair.now, 0, 1),
+        client.reqresp.nextWakeup(pair.now, .{ .application = 0, .control = 1 }),
     );
     try std.testing.expectEqual(
         pair.now.mono_ms,
-        client.handler.inner.nextWakeupPartitioned(pair.now, 1, 0),
+        client.reqresp.nextWakeup(pair.now, .{ .application = 1, .control = 0 }),
     );
-    try std.testing.expect(client.handler.cancel(app));
-    _ = client.pumpPartitioned(&pair.client, pair.now, &.{}, &.{});
+    try std.testing.expect(client.reqresp.cancel(app));
+    _ = client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &.{}, .control = &.{} });
     try std.testing.expectEqual(
         1,
-        client.pumpPartitioned(
-            &pair.client,
-            pair.now,
-            &output,
-            &.{},
-        ).application,
+        client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &output, .control = &.{} }).application,
     );
     try std.testing.expectEqualSlices(u8, &block, output[0].chunk.bytes);
     try std.testing.expectEqual(app, output[0].chunk.request);
     try std.testing.expectEqual(
         1,
-        client.pumpPartitioned(
-            &pair.client,
-            pair.now,
-            &output,
-            &.{},
-        ).application,
+        client.reqresp.pump(&pair.client, &client.router, pair.now, .{ .application = &output, .control = &.{} }).application,
     );
     try std.testing.expectEqual(app, output[0].failed.request);
 }

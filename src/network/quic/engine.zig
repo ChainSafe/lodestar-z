@@ -38,134 +38,6 @@ const Stream = struct {
     id: u64,
 };
 
-pub const DriverView = struct {
-    engine: *Engine,
-
-    pub fn receive(
-        self: DriverView,
-        datagram: []u8,
-        from: *const Address,
-        now: Now,
-        entropy: *EntropyPool,
-        out: []u8,
-    ) ReceiveOutcome {
-        assert(datagram.len <= out.len);
-        assert(self.engine.registry.slots.len > 0);
-        return self.engine.receive(datagram, from, now, entropy, out);
-    }
-
-    pub fn tick(self: DriverView, now: Now) void {
-        self.engine.tick(now);
-    }
-
-    pub fn hostWorkPending(self: DriverView) bool {
-        return self.engine.host_work_pending;
-    }
-
-    pub fn takeHostWork(self: DriverView) bool {
-        const pending = self.engine.host_work_pending;
-        self.engine.host_work_pending = false;
-        return pending;
-    }
-
-    pub fn slotCount(self: DriverView) u16 {
-        const engine = self.engine;
-        assert(engine.registry.slots.len > 0);
-        assert(engine.registry.slots.len <= limits.connections_max_ceiling);
-        return @intCast(engine.registry.slots.len);
-    }
-
-    pub fn nextTimeoutMs(self: DriverView, now: Now) ?u64 {
-        return self.engine.nextTimeoutMs(now);
-    }
-
-    pub fn sendOne(self: DriverView, index: u16, now: Now, out: []u8) ?Sent {
-        return self.engine.send(index, now, out);
-    }
-
-    pub fn sendOwner(self: DriverView, index: u16) ?Handle {
-        if (index >= self.engine.registry.slots.len) return null;
-        const slot = &self.engine.registry.slots[index];
-        if (slot.state == .free or slot.state == .closed) return null;
-        return .{ .index = index, .generation = slot.generation };
-    }
-
-    pub fn tickOne(self: DriverView, index: u16, now: Now) void {
-        self.engine.tickOne(index, now);
-    }
-
-    pub fn sendBatch(self: DriverView, index: u16, now: Now, batch: *SendBatch) u8 {
-        assert(index < self.engine.registry.slots.len);
-        var count: u8 = 0;
-        while (count < constants.send_batch_max) : (count += 1) {
-            const sent = self.engine.send(index, now, &batch.buffers[count]) orelse break;
-            batch.sent[count] = sent;
-        }
-        assert(count <= constants.send_batch_max);
-        return count;
-    }
-
-    pub fn takeKeylog(self: DriverView, index: u16, out: []u8) usize {
-        assert(index < self.engine.registry.slots.len);
-        assert(out.len >= tls.keylog_capacity);
-        const slot = &self.engine.registry.slots[index];
-        if (slot.state == .free) return 0;
-        return slot.takeKeylog(out);
-    }
-
-    pub fn failSend(self: DriverView, index: u16) void {
-        assert(index < self.engine.registry.slots.len);
-        const slot = &self.engine.registry.slots[index];
-        assert(slot.state != .free);
-        if (slot.state == .closed) return;
-        self.engine.markClosed(index, .send_failed);
-    }
-
-    pub fn activeIndices(self: DriverView) []const u16 {
-        const engine = self.engine;
-        assert(engine.registry.active.len == engine.registry.slots.len);
-        assert(engine.registry.active_len <= engine.registry.active.len);
-        return engine.registry.active[0..engine.registry.active_len];
-    }
-
-    pub fn releaseReported(self: DriverView) void {
-        const engine = self.engine;
-        assert(engine.registry.active_len <= engine.registry.active.len);
-        assert(engine.registry.active.len == engine.registry.slots.len);
-        engine.releaseReported();
-    }
-
-    pub fn takeActivity(self: DriverView, out: []Handle) usize {
-        const engine = self.engine;
-        assert(engine.registry.activity.len == engine.registry.slots.len);
-        assert(engine.registry.active_len <= engine.registry.active.len);
-        assert(engine.activity_cursor < engine.registry.slots.len);
-        var count: usize = 0;
-        for (0..engine.registry.slots.len) |_| {
-            if (count == out.len) break;
-            const index = engine.activity_cursor;
-            engine.activity_cursor = @intCast((@as(usize, index) + 1) % engine.registry.slots.len);
-            const slot = &engine.registry.slots[index];
-            if (slot.state == .free or !engine.registry.activity[index]) continue;
-            out[count] = .{ .index = index, .generation = slot.generation };
-            engine.registry.activity[index] = false;
-            count += 1;
-        }
-        assert(count <= out.len);
-        return count;
-    }
-
-    pub fn activityPending(self: DriverView) bool {
-        const engine = self.engine;
-        assert(engine.registry.activity.len == engine.registry.slots.len);
-        assert(engine.registry.active_len <= engine.registry.active.len);
-        for (engine.registry.active[0..engine.registry.active_len]) |index| {
-            if (engine.registry.activity[index]) return true;
-        }
-        return false;
-    }
-};
-
 pub const Options = struct {
     tls: tls.Context,
     limits: Limits = .{},
@@ -209,7 +81,8 @@ pub const Engine = struct {
             return error.InvalidLimits;
         }
         if (wanted.handshaking_per_source_max == 0) return error.InvalidLimits;
-        if (wanted.receive_budget_bytes == 0) return error.InvalidLimits;
+        const minimum_receive_budget = @as(u64, wanted.connections_max) * limits.connection_window_min;
+        if (wanted.receive_budget_bytes < minimum_receive_budget) return error.InvalidLimits;
         if (wanted.send_per_step_max == 0 or wanted.send_per_step_max > limits.send_burst_max) return error.InvalidLimits;
         if (wanted.receive_per_step_max == 0 or wanted.receive_per_step_max > constants.receive_batch_max) return error.InvalidLimits;
         if (wanted.work_per_step_max < 2 or wanted.work_per_step_max > limits.work_per_step_max) return error.InvalidLimits;
@@ -232,9 +105,8 @@ pub const Engine = struct {
         const wanted = options.limits;
         const outbound_max = try validateLimits(wanted);
 
-        const connection_window = std.math.clamp(
+        const connection_window = @min(
             wanted.receive_budget_bytes / wanted.connections_max,
-            limits.connection_window_min,
             limits.connection_window_max,
         );
         const stream_window = connection_window / 2;
@@ -269,10 +141,71 @@ pub const Engine = struct {
         self.* = undefined;
     }
 
-    pub fn driverView(self: *Engine) DriverView {
-        assert(self.registry.slots.len > 0);
-        assert(self.registry.active_len <= self.registry.slots.len);
-        return .{ .engine = self };
+    pub fn hostWorkPending(self: *const Engine) bool {
+        return self.host_work_pending;
+    }
+
+    pub fn takeHostWork(self: *Engine) bool {
+        const pending = self.host_work_pending;
+        self.host_work_pending = false;
+        return pending;
+    }
+
+    pub fn sendOwner(self: *const Engine, index: u16) ?Handle {
+        if (index >= self.registry.slots.len) return null;
+        const slot = &self.registry.slots[index];
+        if (slot.state == .free or slot.state == .closed) return null;
+        return .{ .index = index, .generation = slot.generation };
+    }
+
+    pub fn takeKeylog(self: *Engine, index: u16, out: []u8) usize {
+        assert(index < self.registry.slots.len);
+        assert(out.len >= tls.keylog_capacity);
+        const slot = &self.registry.slots[index];
+        if (slot.state == .free) return 0;
+        return slot.takeKeylog(out);
+    }
+
+    pub fn failSend(self: *Engine, index: u16) void {
+        assert(index < self.registry.slots.len);
+        const slot = &self.registry.slots[index];
+        assert(slot.state != .free);
+        if (slot.state == .closed) return;
+        self.markClosed(index, .send_failed);
+    }
+
+    pub fn activeIndices(self: *const Engine) []const u16 {
+        assert(self.registry.active.len == self.registry.slots.len);
+        assert(self.registry.active_len <= self.registry.active.len);
+        return self.registry.active[0..self.registry.active_len];
+    }
+
+    pub fn takeActivity(self: *Engine, out: []Handle) usize {
+        assert(self.registry.activity.len == self.registry.slots.len);
+        assert(self.registry.active_len <= self.registry.active.len);
+        assert(self.activity_cursor < self.registry.slots.len);
+        var count: usize = 0;
+        for (0..self.registry.slots.len) |_| {
+            if (count == out.len) break;
+            const index = self.activity_cursor;
+            self.activity_cursor = @intCast((@as(usize, index) + 1) % self.registry.slots.len);
+            const slot = &self.registry.slots[index];
+            if (slot.state == .free or !self.registry.activity[index]) continue;
+            out[count] = .{ .index = index, .generation = slot.generation };
+            self.registry.activity[index] = false;
+            count += 1;
+        }
+        assert(count <= out.len);
+        return count;
+    }
+
+    pub fn activityPending(self: *const Engine) bool {
+        assert(self.registry.activity.len == self.registry.slots.len);
+        assert(self.registry.active_len <= self.registry.active.len);
+        for (self.registry.active[0..self.registry.active_len]) |index| {
+            if (self.registry.activity[index]) return true;
+        }
+        return false;
     }
 
     pub fn memoryPlan(self: *const Engine) api.MemoryPlan {
@@ -287,18 +220,6 @@ pub const Engine = struct {
             .scheduled_storage_bytes = @as(u64, count) * @sizeOf(@import("schedule.zig").Entry),
             .native_pacing_supported = binding.native_pacing_supported,
         };
-    }
-
-    pub fn connectionWindow(self: *const Engine) u64 {
-        assert(self.connection_window >= limits.connection_window_min);
-        assert(self.connection_window <= limits.connection_window_max);
-        return self.connection_window;
-    }
-
-    pub fn streamWindow(self: *const Engine) u64 {
-        assert(self.stream_window > 0);
-        assert(self.stream_window <= self.connection_window);
-        return self.stream_window;
     }
 
     pub fn dial(
@@ -551,7 +472,7 @@ pub const Engine = struct {
         return false;
     }
 
-    fn receive(
+    pub fn receive(
         self: *Engine,
         datagram: []u8,
         from: *const Address,
@@ -559,6 +480,8 @@ pub const Engine = struct {
         entropy: *EntropyPool,
         out: []u8,
     ) ReceiveOutcome {
+        assert(datagram.len <= out.len);
+        assert(self.registry.slots.len > 0);
         const local = self.localFor(from.*) orelse return drop(&self.counters.dropped_unroutable);
         const header = binding.headerInfo(datagram) catch
             return drop(&self.counters.dropped_unroutable);
@@ -643,11 +566,11 @@ pub const Engine = struct {
         return .{ .version_negotiation = out[0..length] };
     }
 
-    fn tick(self: *Engine, now: Now) void {
+    pub fn tick(self: *Engine, now: Now) void {
         for (self.registry.active[0..self.registry.active_len]) |index| self.tickOne(index, now);
     }
 
-    fn tickOne(self: *Engine, index: u16, now: Now) void {
+    pub fn tickOne(self: *Engine, index: u16, now: Now) void {
         const slot = &self.registry.slots[index];
         assert(slot.state != .free);
         if (slot.state == .closed) return;
@@ -678,7 +601,7 @@ pub const Engine = struct {
         self.observePath(index);
     }
 
-    fn nextTimeoutMs(self: *const Engine, now: Now) ?u64 {
+    pub fn nextTimeoutMs(self: *const Engine, now: Now) ?u64 {
         assert(self.registry.active_len <= self.registry.active.len);
         if (self.eventsPending()) return 0;
         var earliest: ?u64 = null;
@@ -700,7 +623,7 @@ pub const Engine = struct {
         return earliest;
     }
 
-    fn send(self: *Engine, index: u16, now: Now, out: []u8) ?Sent {
+    pub fn sendOne(self: *Engine, index: u16, now: Now, out: []u8) ?Sent {
         if (index >= self.registry.slots.len) return null;
         const slot = &self.registry.slots[index];
         if (slot.state == .free or slot.state == .closed) return null;
@@ -713,7 +636,7 @@ pub const Engine = struct {
         return sent;
     }
 
-    fn releaseReported(self: *Engine) void {
+    pub fn releaseReported(self: *Engine) void {
         assert(self.registry.active_len <= self.registry.active.len);
         var cursor: u16 = 0;
         while (cursor < self.registry.active_len) {

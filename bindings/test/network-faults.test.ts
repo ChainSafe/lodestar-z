@@ -2,8 +2,8 @@ import {execFileSync} from "node:child_process";
 import {setTimeout as delay} from "node:timers/promises";
 import {describe, expect, it} from "vitest";
 import bindings from "../src/bindings.js";
-import {createNativeNetworkRuntime} from "../src/network.js";
-import {discoveryConfig, networkConfig, topicBoundary} from "./utils/network.js";
+import {createNativeNetworkApplicationRuntime} from "../src/network.js";
+import {applicationConfig, discoveryConfig, topicBoundary} from "./utils/network.js";
 
 async function collected() {
   for (let i = 0; i < 100; i++) {
@@ -31,25 +31,22 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     "spawn",
   ])("unwinds synchronous %s", async (stage) => {
     bindings.networkTestFail(stage);
-    expect(() => createNativeNetworkRuntime(networkConfig(), () => undefined)).toThrow("InjectedNetworkFailure");
+    expect(() => createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)).toThrow(
+      "InjectedNetworkFailure"
+    );
     await collected();
   });
 
   it.each(["entropy", "key", "core", "wake_attach"])("unwinds owner %s", async (stage) => {
     bindings.networkTestFail(stage);
-    let runtime: ReturnType<typeof createNativeNetworkRuntime> | null = createNativeNetworkRuntime(
-      networkConfig(),
-      () => undefined
+    expect(() => createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)).toThrow(
+      "InjectedNetworkFailure"
     );
-    await expect(runtime.ready).rejects.toThrow("InjectedNetworkFailure");
-    expect(await runtime.close()).toEqual({reason: "failed"});
-    expect(runtime.diagnostics().terminalErrorCode).toBe("InjectedNetworkFailure");
-    runtime = null;
     await collected();
   });
 
   it("unwinds an ENR acquisition with a canonical signed bootstrap", async () => {
-    let source: ReturnType<typeof createNativeNetworkRuntime> | null = createNativeNetworkRuntime(
+    let source: ReturnType<typeof createNativeNetworkApplicationRuntime> | null = createNativeNetworkApplicationRuntime(
       discoveryConfig(),
       () => undefined
     );
@@ -63,23 +60,14 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     if (!config.discovery) throw new Error("Missing discovery config");
     config.discovery.bootstrapEnrs = [enr];
     bindings.networkTestFail("enr");
-    let runtime: ReturnType<typeof createNativeNetworkRuntime> | null = createNativeNetworkRuntime(
-      config,
-      () => undefined
-    );
-    await expect(runtime.ready).rejects.toThrow("InjectedNetworkFailure");
-    expect(await runtime.close()).toEqual({reason: "failed"});
-    expect(runtime.diagnostics().terminalErrorCode).toBe("InjectedNetworkFailure");
-    runtime = null;
+    expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InjectedNetworkFailure");
     await collected();
   });
 
   it.each(["startup_copy", "identity_copy"])("settles ready and closes after %s", async (stage) => {
     bindings.networkTestFail(stage);
-    let runtime: ReturnType<typeof createNativeNetworkRuntime> | null = createNativeNetworkRuntime(
-      networkConfig(),
-      () => undefined
-    );
+    let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | null =
+      createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
     await expect(runtime.ready).rejects.toThrow("InjectedNetworkFailure");
     expect(await runtime.close()).toEqual({reason: "failed"});
     runtime = null;
@@ -87,10 +75,8 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
   });
 
   it("retries a terminal scalar copy once after physical join", async () => {
-    let runtime: ReturnType<typeof createNativeNetworkRuntime> | null = createNativeNetworkRuntime(
-      networkConfig(),
-      () => undefined
-    );
+    let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | null =
+      createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
     await runtime.ready;
     bindings.networkTestFail("close_copy");
     expect(await runtime.close()).toEqual({reason: "requested"});
@@ -99,29 +85,31 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
   });
 
   it("keeps spawned instance credits until stopped owners are joined", async () => {
-    const runtimes = Array.from({length: 4}, () => createNativeNetworkRuntime(networkConfig(), () => undefined));
+    const runtimes = Array.from({length: 4}, () =>
+      createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)
+    );
     const readiness = runtimes.map((runtime) => runtime.ready.catch((error: Error) => error.message));
     const closing = runtimes.map((runtime) => runtime.close());
     try {
       const wait = new Int32Array(new SharedArrayBuffer(4));
       for (let i = 0; i < 500 && bindings.networkTestStats().owners !== 0; i++) Atomics.wait(wait, 0, 0, 10);
       expect(bindings.networkTestStats().owners).toBe(0);
-      expect(() => createNativeNetworkRuntime(networkConfig(), () => undefined)).toThrow("NetworkInstanceLimit");
+      expect(() => createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)).toThrow(
+        "NetworkInstanceLimit"
+      );
     } finally {
       await Promise.all(readiness);
       await Promise.all(closing);
     }
-    const replacement = createNativeNetworkRuntime(networkConfig(), () => undefined);
+    const replacement = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
     await replacement.ready;
     await replacement.close();
   });
 
-  it.each(["entry", "key_ready", "before_ready"])("cancels a held actual owner at %s", async (stage) => {
+  it.each(["before_ready"])("cancels a held actual owner at %s", async (stage) => {
     bindings.networkTestScenario(stage);
-    let runtime: ReturnType<typeof createNativeNetworkRuntime> | null = createNativeNetworkRuntime(
-      networkConfig(),
-      () => undefined
-    );
+    let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | null =
+      createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
     let settlements = 0;
     const ready = runtime.ready.then(
       () => {
@@ -152,10 +140,8 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
 
   it("preserves a committed wake failure when held startup is cancelled", async () => {
     bindings.networkTestScenario("before_ready");
-    let runtime: ReturnType<typeof createNativeNetworkRuntime> | null = createNativeNetworkRuntime(
-      networkConfig(),
-      () => undefined
-    );
+    let runtime: ReturnType<typeof createNativeNetworkApplicationRuntime> | null =
+      createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
     const ready = runtime.ready.catch((error: Error) => error.message);
     try {
       for (let i = 0; i < 500 && bindings.networkTestStage() !== "before_ready"; i++) await delay(10);
@@ -165,96 +151,6 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
       expect(await ready).toBe("NetworkWakeFailed");
       expect(await closing).toEqual({reason: "failed"});
       expect(runtime.diagnostics()).toMatchObject({state: "failed", terminalErrorCode: "NetworkWakeFailed"});
-    } finally {
-      await runtime.close();
-      runtime = null;
-      await collected();
-    }
-  });
-
-  it.each([false, true])("settles lifecycle with saturated observations, drain=%s", async (drain) => {
-    bindings.networkTestScenario("observations");
-    let notifications = 0;
-    let runtime: ReturnType<typeof createNativeNetworkRuntime> | null = createNativeNetworkRuntime(
-      networkConfig(),
-      () => {
-        notifications++;
-      }
-    );
-    try {
-      const identity = await runtime.ready;
-      const saturated = runtime.diagnostics();
-      expect(saturated).toMatchObject({
-        observationsDropped: 3n,
-        queueCapacity: 64,
-        queueHighWater: 64,
-        queuedEvents: 64,
-      });
-      await delay(200);
-      expect(notifications).toBe(1);
-      expect(runtime.diagnostics().bridgeRequestedBytes).toBe(saturated.bridgeRequestedBytes);
-      expect(runtime.diagnostics().ownerTurns).toBeGreaterThan(saturated.ownerTurns);
-      if (drain) {
-        bindings.networkTestFail("drain_copy");
-        expect(() => runtime?.drain(1)).toThrow("InjectedNetworkFailure");
-        expect(runtime.diagnostics().queuedEvents).toBe(64);
-        const first = runtime.drain(1);
-        const events = [...first.events, ...runtime.drain(32).events, ...runtime.drain(32).events];
-        expect(first.more).toBe(true);
-        expect(events).toHaveLength(65);
-        for (let i = 0; i < 64; i++) {
-          expect(events[i]).toEqual({
-            peerGeneration: (1n << 64n) - 1n - BigInt(i),
-            peerId: identity.peerId,
-            peerIndex: i,
-            type: "peerReady",
-          });
-        }
-        expect(events[64]).toEqual({code: "InjectedNetworkFailure", count: 2n, type: "operationalError"});
-        expect(runtime.drain(32)).toEqual({dropped: 3n, events: [], more: false});
-      }
-      const closing = runtime.close();
-      expect(runtime.close()).toBe(closing);
-      expect(runtime.close()).toBe(closing);
-      expect(await closing).toEqual({reason: "requested"});
-      await delay(50);
-      expect(notifications).toBe(1);
-    } finally {
-      await runtime.close();
-      runtime = null;
-      await collected();
-    }
-  });
-
-  it("notifies retained owner publication after drain snapshots no more work", async () => {
-    bindings.networkTestScenario("drain_publish");
-    let notifications = 0;
-    let runtime: ReturnType<typeof createNativeNetworkRuntime> | null = createNativeNetworkRuntime(
-      networkConfig(),
-      () => {
-        notifications++;
-      }
-    );
-    try {
-      const identity = await runtime.ready;
-      expect(notifications).toBe(1);
-      const first = runtime.drain(32);
-      expect(first).toEqual({
-        dropped: 0n,
-        events: [{peerGeneration: 1n, peerId: identity.peerId, peerIndex: 0, type: "peerReady"}],
-        more: false,
-      });
-      expect(runtime.diagnostics().queuedEvents).toBe(1);
-      for (let i = 0; i < 100 && notifications < 2; i++) await delay(10);
-      expect(notifications).toBe(2);
-      await delay(100);
-      expect(notifications).toBe(2);
-      expect(runtime.drain(32)).toEqual({
-        dropped: 0n,
-        events: [{peerGeneration: 1n, peerId: identity.peerId, peerIndex: 0, type: "peerUpdated"}],
-        more: false,
-      });
-      expect(runtime.diagnostics().queuedEvents).toBe(0);
     } finally {
       await runtime.close();
       runtime = null;
@@ -279,7 +175,7 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
   it.each([
     16829, 1462,
   ])("forwards immutable gossip policy with host threshold %i into the actual resolved owner", async (idontwantMinDataSize) => {
-    const config = networkConfig();
+    const config = applicationConfig();
     config.gossipPolicy = {
       gossipFactor: 0.3,
       heartbeatIntervalMs: 1100n,
@@ -331,7 +227,7 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
       validationTombstoneMs: 32000n,
     };
     bindings.networkTestScenario("gossip");
-    const runtime = createNativeNetworkRuntime(config, () => undefined);
+    const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
     config.gossipPolicy.phase0Digest?.fill(0);
     config.gossipPolicy.ipAllowlist[0].fill(0);
     config.gossipPolicy.score.decayIntervalMs = 12000n;
@@ -401,11 +297,11 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     }
   });
   it("copies the host sampling minimum into the actual local context", async () => {
-    const config = networkConfig();
+    const config = applicationConfig();
     config.local.fork.custodyGroups = 128;
     config.local.fork.minimumSamplingGroups = 8;
     bindings.networkTestScenario("gossip");
-    const runtime = createNativeNetworkRuntime(config, () => undefined);
+    const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
     config.local.fork.minimumSamplingGroups = 0;
     try {
       await runtime.ready;
@@ -415,11 +311,11 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     }
   });
   it("forwards immutable topic namespace into the actual native owner", async () => {
-    const config = networkConfig();
+    const config = applicationConfig();
     const boundary = topicBoundary();
     config.topicPolicy = [boundary];
     bindings.networkTestScenario("gossip");
-    const runtime = createNativeNetworkRuntime(config, () => undefined);
+    const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
     boundary.digest.fill(0);
     boundary.rules.beacon_attestation.count = 1;
     boundary.rules.beacon_block.sszMax = 1;

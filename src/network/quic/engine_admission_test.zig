@@ -31,7 +31,7 @@ test "engine consults the admission predicate before opening an inbound slot" {
     _ = try pair.dial();
     try pair.pump();
     try std.testing.expect(pair.server.counters.dropped_rejected >= 1);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
 
     blocked = 0;
@@ -43,7 +43,7 @@ test "engine consults the admission predicate before opening an inbound slot" {
         if (event == .connected) connected = true;
     }
     try std.testing.expect(connected);
-    try std.testing.expectEqual(@as(usize, 1), pair.server.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.activeIndices().len);
 }
 
 fn countCalls(context: ?*anyopaque, _: *const types.Address) bool {
@@ -72,7 +72,7 @@ test "engine consults the admission predicate once per new Initial and never for
     var replay: [constants.datagram_size_max]u8 = undefined;
     @memcpy(replay[0..pair.first_initial_len], pair.first_initial[0..pair.first_initial_len]);
     var response: [constants.datagram_size_max]u8 = undefined;
-    _ = pair.server.driverView().receive(
+    _ = pair.server.receive(
         replay[0..pair.first_initial_len],
         &client_address,
         pair.now,
@@ -154,7 +154,7 @@ test "engine caps inbound handshakes per source address" {
     while (attempt < limits.handshaking_per_source_max + 1) : (attempt += 1) {
         const initial = try dialInitial(&pair, &packet);
         try std.testing.expect(initial.len >= limits.client_initial_min);
-        const outcome = pair.server.driverView().receive(
+        const outcome = pair.server.receive(
             initial,
             &client_address,
             pair.now,
@@ -173,7 +173,7 @@ test "engine caps inbound handshakes per source address" {
 
     const elsewhere = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 2 }, .port = 4_001 } };
     const other = try dialInitial(&pair, &packet);
-    const foreign = pair.server.driverView().receive(
+    const foreign = pair.server.receive(
         other,
         &elsewhere,
         pair.now,
@@ -200,7 +200,7 @@ test "engine drops an inbound Initial when the entropy pool is stale" {
     var response: [constants.datagram_size_max]u8 = undefined;
     try std.testing.expectEqual(
         engine_mod.ReceiveOutcome.dropped,
-        pair.server.driverView().receive(
+        pair.server.receive(
             initial,
             &client_address,
             pair.now,
@@ -211,7 +211,7 @@ test "engine drops an inbound Initial when the entropy pool is stale" {
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_no_entropy);
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
 
-    try std.testing.expectEqual(@as(usize, 0), pair.server.driverView().activeIndices().len);
+    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
 }
 
 test "engine drops version negotiation packets instead of reflecting them" {
@@ -230,7 +230,7 @@ test "engine drops version negotiation packets instead of reflecting them" {
     const before = pair.server.counters.dropped_unroutable;
     try std.testing.expectEqual(
         engine_mod.ReceiveOutcome.dropped,
-        pair.server.driverView().receive(
+        pair.server.receive(
             &packet,
             &client_address,
             pair.now,
@@ -259,7 +259,7 @@ test "engine answers unsupported versions and drops unroutable packets" {
     @memset(initial[15..19], 0xbb);
     initial[19] = 0x00;
     var response: [constants.datagram_size_max]u8 = undefined;
-    const outcome = pair.server.driverView().receive(
+    const outcome = pair.server.receive(
         &initial,
         &client_address,
         pair.now,
@@ -273,7 +273,7 @@ test "engine answers unsupported versions and drops unroutable packets" {
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.version_negotiations);
 
     var short = [_]u8{0x40} ++ [_]u8{0xcc} ** limits.local_cid_length ++ [_]u8{0} ** 20;
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.driverView().receive(
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(
         &short,
         &client_address,
         pair.now,
@@ -283,7 +283,7 @@ test "engine answers unsupported versions and drops unroutable packets" {
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_unroutable);
 
     var tiny = [_]u8{ 0xc3, 0, 0, 0, 1, 0x08 } ++ [_]u8{0xaa} ** 8 ++ [_]u8{0x04} ++ [_]u8{0xbb} ** 4 ++ [_]u8{0x00};
-    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.driverView().receive(
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(
         &tiny,
         &client_address,
         pair.now,
@@ -299,7 +299,7 @@ test "engine wakeup includes host handshake deadline before native timeout" {
     try pair.init(.{ .handshake_timeout_ms = 1 }, .{});
     defer pair.deinit();
     _ = try pair.dial();
-    const deadline = pair.client.driverView().nextTimeoutMs(pair.now);
+    const deadline = pair.client.nextTimeoutMs(pair.now);
     try std.testing.expect(deadline != null);
     try std.testing.expect(deadline.? <= 1);
 }
@@ -332,16 +332,16 @@ test "engine retains a live routed stream across unrelated slot churn" {
     try std.testing.expectEqual(handles.client, pair.client.findByPeerId(&pair.server_ctx.local_peer_id).?);
 }
 
-test "engine resolved memory plan reports clamped receive windows and scheduled storage" {
+test "engine resolved memory plan reports budgeted receive windows and scheduled storage" {
     var pair: Pair = .{};
-    try pair.init(.{ .connections_max = 1024 }, .{});
+    try pair.init(.{ .connections_max = 1024, .receive_budget_bytes = 1024 * limits.connection_window_min }, .{});
     defer pair.deinit();
     const plan = pair.client.memoryPlan();
     try std.testing.expectEqual(@as(u64, 1024 * 1024 * 1024), plan.receive_window_bytes);
     try std.testing.expectEqual(@as(u16, 1024), plan.scheduled_datagrams);
     try std.testing.expectEqual(@as(u64, 1024 * constants.datagram_size_max), plan.scheduled_payload_bytes);
     try std.testing.expect(plan.scheduled_storage_bytes >= plan.scheduled_payload_bytes);
-    try std.testing.expect(plan.receive_window_bytes > plan.requested_receive_window_bytes);
+    try std.testing.expect(plan.receive_window_bytes <= plan.requested_receive_window_bytes);
 }
 
 test "engine rejects native timeout overflow and zero scheduling limits" {
@@ -365,10 +365,10 @@ test "engine wakeup includes keepalive and uses the supplied current time" {
     try pair.init(.{ .keep_alive_ms = 7 }, .{});
     defer pair.deinit();
     _ = try connectPair(&pair);
-    const before = pair.client.driverView().nextTimeoutMs(pair.now).?;
+    const before = pair.client.nextTimeoutMs(pair.now).?;
     try std.testing.expect(before <= 7);
     pair.advance(7);
-    try std.testing.expectEqual(@as(?u64, 0), pair.client.driverView().nextTimeoutMs(pair.now));
+    try std.testing.expectEqual(@as(?u64, 0), pair.client.nextTimeoutMs(pair.now));
 }
 
 test "engine outgoing descriptor preserves native monotonic pacing timestamp" {
@@ -380,7 +380,7 @@ test "engine outgoing descriptor preserves native monotonic pacing timestamp" {
     const before = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     const handle = try pair.dial();
     var batch: engine_mod.SendBatch = .{};
-    const count = pair.client.driverView().sendBatch(handle.index, pair.now, &batch);
+    const count = support.sendBatch(&pair.client, handle.index, pair.now, &batch);
     const after = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     try std.testing.expect(count > 0);
     try std.testing.expect(batch.sent[0].transmit_at_ns >= before);

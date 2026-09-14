@@ -90,9 +90,9 @@ export function networkConfig(): NativeRuntimeConfig {
   };
 }
 
-export function discoveryConfig(): NativeRuntimeConfig & {discovery: NativeDiscoveryConfig} {
+export function discoveryConfig(): NativeApplicationConfig & {discovery: NativeDiscoveryConfig} {
   return {
-    ...networkConfig(),
+    ...applicationConfig(),
     discovery: {
       advertisement: {ip4: Uint8Array.of(127, 0, 0, 1), quic: 443, udp: 40404},
       bind: {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0},

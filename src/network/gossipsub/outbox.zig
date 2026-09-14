@@ -555,7 +555,7 @@ test "gossip typed controls preserve maximum ID lists and completion kinds" {
 }
 
 test "gossip critical queue holds a full subscription snapshot and full PRUNE burst" {
-    var sessions = try @import("sessions.zig").Sessions.init(std.testing.allocator, 1);
+    var sessions = try @import("test_support.zig").sessions(std.testing.allocator, 1);
     defer sessions.deinit(std.testing.allocator);
     const tx = &sessions.rows[0].io.tx;
     const name = "/eth2/01020304/sync_committee_contribution_and_proof/ssz_snappy";

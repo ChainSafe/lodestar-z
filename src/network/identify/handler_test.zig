@@ -23,25 +23,25 @@ test "identify service completes both directions with zero application output an
     for (0..32) |_| {
         var events: [64]engine.Event = undefined;
         var activity: [128]engine.Handle = undefined;
-        const ca = pair.client.driverView().takeActivity(&activity);
-        _ = client.processOutputs(&pair.client, pair.events(&pair.client, &events), activity[0..ca], pair.now, .{});
+        const ca = pair.client.takeActivity(&activity);
+        _ = client.process(&pair.client, pair.events(&pair.client, &events), activity[0..ca], pair.now, .{});
         try pair.pump();
-        const sa = pair.server.driverView().takeActivity(&activity);
-        _ = server.processOutputs(&pair.server, pair.events(&pair.server, &events), activity[0..sa], pair.now, .{});
+        const sa = pair.server.takeActivity(&activity);
+        _ = server.process(&pair.server, pair.events(&pair.server, &events), activity[0..sa], pair.now, .{});
         try pair.pump();
     }
     try std.testing.expect(client.identify.?.nextWakeup(pair.now, 0) == null);
-    if (client.nextWakeupOutputs(pair.now, .{})) |due| try std.testing.expect(due > pair.now.mono_ms);
+    if (client.nextWakeup(pair.now, .{})) |due| try std.testing.expect(due > pair.now.mono_ms);
     try std.testing.expectEqual(pair.now.mono_ms, client.identify.?.nextWakeup(pair.now, 1).?);
     var results: [1]identify.Result = undefined;
-    var counts = client.processOutputs(&pair.client, &.{}, &.{}, pair.now, .{ .identify = &results });
+    var counts = client.process(&pair.client, &.{}, &.{}, pair.now, .{ .identify = &results });
     try std.testing.expectEqual(@as(usize, 1), counts.identify);
     try std.testing.expectEqual(.success, std.meta.activeTag(results[0].outcome));
     try std.testing.expectEqualStrings("server", results[0].outcome.success.agent.?.slice());
-    counts = server.processOutputs(&pair.server, &.{}, &.{}, pair.now, .{ .identify = &results });
+    counts = server.process(&pair.server, &.{}, &.{}, pair.now, .{ .identify = &results });
     try std.testing.expectEqual(@as(usize, 1), counts.identify);
     try std.testing.expectEqualStrings("client", results[0].outcome.success.agent.?.slice());
-    counts = client.processOutputs(&pair.client, &.{}, &.{}, pair.now, .{ .identify = &results });
+    counts = client.process(&pair.client, &.{}, &.{}, pair.now, .{ .identify = &results });
     try std.testing.expectEqual(@as(usize, 0), counts.identify);
     try client.identify.?.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     client.identify.?.shutdown(&client.router, &pair.client);
@@ -111,7 +111,7 @@ test "identify deadline includes stalled negotiation and retained completion doe
     try client.identify.?.start(&client.router, &pair.client, .{ .index = 0, .generation = 1 }, handles.client, pair.now);
     _ = pair.client.close(handles.client, 0);
     var events: [64]engine.Event = undefined;
-    _ = client.processOutputs(&pair.client, pair.events(&pair.client, &events), &.{}, pair.now, .{ .identify = &results });
+    _ = client.process(&pair.client, pair.events(&pair.client, &events), &.{}, pair.now, .{ .identify = &results });
     // Engine emits close on its next service turn; shutdown also releases a negotiating stream.
     client.identify.?.shutdown(&client.router, &pair.client);
     _ = client.identify.?.pump(&client.router, &pair.client, pair.now, &results);
@@ -141,16 +141,16 @@ test "identify saturation leaves reserved Ping negotiation usable" {
         var events: [64]engine.Event = undefined;
         var activity: [128]engine.Handle = undefined;
         var requests: [4]rr.Event = undefined;
-        const ca = pair.client.driverView().takeActivity(&activity);
-        const cc = client.processOutputs(&pair.client, pair.events(&pair.client, &events), activity[0..ca], pair.now, .{ .control = &requests });
+        const ca = pair.client.takeActivity(&activity);
+        const cc = client.process(&pair.client, pair.events(&pair.client, &events), activity[0..ca], pair.now, .{ .control = &requests });
         for (requests[0..cc.control]) |event| if (event == .chunk) {
             try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
             try std.testing.expect(client.reqresp.consume(event.chunk.request, pair.now));
             received = true;
         };
         try pair.pump();
-        const sa = pair.server.driverView().takeActivity(&activity);
-        const sc = server.processOutputs(&pair.server, pair.events(&pair.server, &events), activity[0..sa], pair.now, .{ .control = &requests });
+        const sa = pair.server.takeActivity(&activity);
+        const sc = server.process(&pair.server, pair.events(&pair.server, &events), activity[0..sa], pair.now, .{ .control = &requests });
         for (requests[0..sc.control]) |event| switch (event) {
             .request => |request| try server.reqresp.respond(request.request, &ping, null, pair.now),
             .chunk_sent => |sent| _ = server.reqresp.finish(sent.request, pair.now),
@@ -161,4 +161,20 @@ test "identify saturation leaves reserved Ping negotiation usable" {
     try std.testing.expect(received);
     try std.testing.expect(client.identify.?.nextWakeup(pair.now, 0) == null);
     try std.testing.expectEqual(pair.now.mono_ms, client.identify.?.nextWakeup(pair.now, 1).?);
+}
+
+test "identify advertises each usable bound address despite another wildcard family" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    var handler = try identify.Handler.init(std.testing.allocator, .{});
+    defer handler.deinit();
+    const address: @import("../types.zig").Address = .{ .ip6 = .{ .octets = @import("std").Io.net.Ip6Address.loopback(9000).bytes, .port = 9000 } };
+    pair.client.local = .{ .{ .ip4 = .{ .octets = @splat(0), .port = 9000 } }, address };
+    handler.bind(&pair.client);
+    try std.testing.expectEqual(@as(u8, 1), handler.local.?.address_count);
+    var encoded: [@import("../wire/multiaddr.zig").binary_length_max]u8 = undefined;
+    const expected = try (@import("../wire/multiaddr.zig").Multiaddr{ .address = address }).encode(&encoded);
+    const retained = handler.local.?.addresses[0];
+    try std.testing.expectEqualSlices(u8, expected, retained.bytes[0..retained.len]);
 }

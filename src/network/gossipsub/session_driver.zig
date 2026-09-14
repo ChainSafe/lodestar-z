@@ -19,13 +19,9 @@ const TransportEvent = engine_mod.Event;
 const Now = types.Now;
 const Gossipsub = gossipsub_mod.Gossipsub;
 const Event = gossipsub_mod.Event;
-const ValidationHandle = gossipsub_mod.ValidationHandle;
-const Verdict = gossipsub_mod.Verdict;
 const Turn = @import("turn.zig").Turn;
 const Credits = @import("turn.zig").Credits;
 const Progress = @import("turn.zig").Progress;
-
-pub const outcomes_per_pump: usize = 16;
 
 pub const InitError = gossipsub_mod.InitError;
 
@@ -55,51 +51,6 @@ pub const Driver = struct {
         }
     }
 
-    pub fn subscribe(self: *Driver, topic: []const u8) bool {
-        return self.inner.subscribe(topic);
-    }
-
-    pub fn configureTopic(self: *Driver, topic: []const u8, params: *const @import("score.zig").TopicParams) Gossipsub.ConfigureTopicError!void {
-        return self.inner.configureTopic(topic, params);
-    }
-
-    pub fn unsubscribe(self: *Driver, topic: []const u8) bool {
-        return self.inner.unsubscribe(topic);
-    }
-
-    pub fn publish(
-        self: *Driver,
-        topic: []const u8,
-        ssz: []const u8,
-        now: Now,
-    ) Gossipsub.PublishError!Gossipsub.PublishOutcome {
-        return self.publishWithOptions(topic, ssz, .{}, now);
-    }
-
-    pub fn publishWithOptions(self: *Driver, topic: []const u8, ssz: []const u8, options: Gossipsub.PublishOptions, now: Now) Gossipsub.PublishError!Gossipsub.PublishOutcome {
-        return self.inner.publishWithOptions(topic, ssz, options, now);
-    }
-
-    pub fn report(self: *Driver, handle: ValidationHandle, verdict: Verdict, now: Now) gossipsub_mod.ReportOutcome {
-        return self.inner.report(handle, verdict, now);
-    }
-
-    pub fn setPeerScore(self: *Driver, conn: Handle, value: f64) bool {
-        return self.inner.setPeerScore(conn, value);
-    }
-
-    pub fn markDirect(self: *Driver, conn: Handle) void {
-        self.inner.markDirect(conn);
-    }
-
-    pub fn counters(self: *const Driver) Gossipsub.Counters {
-        return self.inner.counters;
-    }
-
-    pub fn resourceSnapshot(self: *const Driver) gossipsub_mod.ResourceSnapshot {
-        return self.inner.resourceSnapshot();
-    }
-
     pub fn admitted(self: *const Driver, conn: Handle) bool {
         return self.inner.sessions.findPeer(conn) != null;
     }
@@ -124,7 +75,7 @@ pub const Driver = struct {
         const identity = engine.peerId(conn) orelse return .unauthenticated;
         const address = engine.peerAddress(conn) orelse return .unauthenticated;
         const direction = engine.direction(conn) orelse return .unauthenticated;
-        const result = self.inner.addPeer(conn, .v1_0, &.{ .identity = identity, .address = address, .direction = direction }, now);
+        const result = self.inner.addPeer(conn, &.{ .identity = identity, .address = address, .direction = direction }, now);
         switch (result) {
             .admitted => {},
             .duplicate => return .duplicate,
@@ -147,12 +98,15 @@ pub const Driver = struct {
             },
             .path_changed => |changed| self.inner.peers.migrate(changed.conn, changed.peer),
             .stream_closed => |closed| self.streamClosed(engine, closed.stream),
-            .closed => |closed| {
-                const index = self.inner.sessions.findPeer(closed.conn) orelse continue;
-                self.retirePeer(router, engine, index);
-            },
+            .closed => |closed| self.retireConnection(router, engine, closed.conn, now),
             else => {},
         };
+    }
+
+    pub fn retireConnection(self: *Driver, router: *routing.Router, engine: *Engine, conn: Handle, now: Now) void {
+        self.inner.last_now_ms = @max(self.inner.last_now_ms, now.mono_ms);
+        const index = self.inner.sessions.findPeer(conn) orelse return;
+        self.retirePeer(router, engine, index);
     }
 
     pub fn negotiationResult(
@@ -208,7 +162,6 @@ pub const Driver = struct {
                     engine,
                     index,
                     outcome.stream,
-                    selection.protocol.meshsub,
                 );
                 if (!self.inner.sessions.receiveHandoff(index, selection.leftover, selection.fin)) {
                     self.resetInbound(engine, index);
@@ -250,9 +203,9 @@ pub const Driver = struct {
             session.needs_service = false;
             examined += 1;
             switch (session.outbound) {
-                .live => |stream| {
+                .live => |live| {
                     // Observe idle STOP_SENDING without a write or a host-work hint.
-                    _ = engine.streamCapacity(stream) catch {
+                    _ = engine.streamCapacity(live.stream) catch {
                         self.resetOutbound(engine, index);
                         continue;
                     };
@@ -291,7 +244,7 @@ pub const Driver = struct {
         const index = self.inner.sessions.findPeer(stream.conn) orelse return;
         const session = &self.inner.sessions.rows[index];
         switch (session.outbound) {
-            .live => |live| if (std.meta.eql(live, stream)) {
+            .live => |live| if (std.meta.eql(live.stream, stream)) {
                 self.resetOutbound(engine, index);
             },
             .negotiating => |pending| if (std.meta.eql(pending, stream)) self.resetOutbound(engine, index),
@@ -324,13 +277,11 @@ pub const Driver = struct {
         engine: *Engine,
         index: u16,
         stream: StreamHandle,
-        version: Version,
     ) void {
         if (self.inner.sessions.rows[index].in_stream) |prior| {
             if (std.meta.eql(prior, stream)) return;
         }
         self.resetInbound(engine, index);
-        self.inner.sessions.rows[index].inbound_version = version;
         self.inner.sessions.rows[index].in_stream = stream;
         self.inner.sessions.rows[index].io.rx_ready = true;
         if (self.inner.sessions.rows[index].outbound == .none) self.inner.sessions.setOutbound(index, .pending);
@@ -348,8 +299,7 @@ pub const Driver = struct {
         }
         if (self.inner.sessions.rows[index].outStream()) |prior| engine.closeStream(prior, 0);
         self.inner.cancelWrites(self.inner.sessions.ref(index));
-        self.inner.sessions.setVersion(index, version);
-        self.inner.sessions.setOutbound(index, .{ .live = stream });
+        self.inner.sessions.setOutbound(index, .{ .live = .{ .stream = stream, .version = version } });
         self.inner.sendSubscriptions(index);
     }
 
@@ -364,7 +314,8 @@ pub const Driver = struct {
         }
         if (peer.in_stream) |stream| engine.closeStream(stream, 0);
         switch (peer.outbound) {
-            .live, .closing => |stream| engine.closeStream(stream, 0),
+            .live => |live| engine.closeStream(live.stream, 0),
+            .closing => |stream| engine.closeStream(stream, 0),
             else => {},
         }
         self.inner.connectionClosed(peer.conn);

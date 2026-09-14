@@ -135,11 +135,6 @@ pub const Decoder = struct {
         return self.context_bytes;
     }
 
-    pub fn declaredLength(self: *const Decoder) usize {
-        assert(self.phase != .result and self.phase != .context and self.phase != .awaiting_context and self.phase != .varint);
-        return self.length;
-    }
-
     pub fn payload(self: *const Decoder) []const u8 {
         assert(self.phase == .done);
         assert(self.written == self.length);

@@ -17,10 +17,10 @@ test "maintenance probes a quiet partial table on its explicit timer and retries
     _ = try core.confirmPeer(&peer, &remote, 0);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{}, 0, testConfig());
+    try controller.init(&candidates, &.{}, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
-    try std.testing.expectEqual(@as(?u64, 10), controller.nextDeadlineMs());
+    try std.testing.expectEqual(@as(?u64, 10), controller.nextDeadlineMs(&core));
     try std.testing.expect((try controller.startNext(
         &core,
         &out,
@@ -41,7 +41,7 @@ test "maintenance probes a quiet partial table on its explicit timer and retries
     const tick = core.tick(110, &expired);
     try std.testing.expectEqual(@as(usize, 1), tick.calls);
     try std.testing.expect(controller.onFailure(&core, expired[0].handle, 110, .expired));
-    try std.testing.expectEqual(@as(?u64, 115), controller.nextDeadlineMs());
+    try std.testing.expectEqual(@as(?u64, 115), controller.nextDeadlineMs(&core));
     const retry = (try controller.startNext(
         &core,
         &out,
@@ -63,7 +63,7 @@ test "maintenance preserves unrelated failures and local send failure retains pe
     _ = try core.confirmPeer(&peer, &remote, 0);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{}, 0, testConfig());
+    try controller.init(&candidates, &.{}, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
     const first = (try controller.startNext(
@@ -119,7 +119,7 @@ test "maintenance retrieves a newer self ENR from authenticated PONG through FIN
     test_support.installSession(&core, peer, 0x55);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{}, 0, testConfig());
+    try controller.init(&candidates, &.{}, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
     const ping_id = try message.RequestId.init(&.{1});
@@ -160,7 +160,7 @@ test "maintenance rotates bucket refresh lookups and bootstrap recovers stalled 
     config.refresh_interval_ms = 10;
     config.bootstrap_interval_ms = 20;
     config.discovery_stall_ms = 30;
-    try controller.init(&candidates, &.{bootstrap}, 0, config);
+    try controller.init(&candidates, &.{bootstrap}, 0, config, .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
     try std.testing.expect((try controller.startNext(
@@ -261,7 +261,7 @@ test "maintenance ENR refresh rejects an advertised endpoint that did not authen
     test_support.installSession(&core, peer, 0x55);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{}, 0, testConfig());
+    try controller.init(&candidates, &.{}, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
     const ping_id = try message.RequestId.init(&.{1});
@@ -291,12 +291,12 @@ test "maintenance configuration and bootstrap work stay bounded" {
     config.retry_interval_ms = 0;
     try std.testing.expectError(
         Maintenance.Error.InvalidConfig,
-        controller.init(&candidates, &.{}, 0, config),
+        controller.init(&candidates, &.{}, 0, config, .dual),
     );
     var seeds: [Maintenance.bootstrap_max + 1]enr.Record = undefined;
     try std.testing.expectError(
         Maintenance.Error.TooManyBootstraps,
-        controller.init(&candidates, &seeds, 0, testConfig()),
+        controller.init(&candidates, &seeds, 0, testConfig(), .dual),
     );
     const invalid = test_support.fakeRecord(
         [_]u8{2} ** 32,
@@ -305,21 +305,21 @@ test "maintenance configuration and bootstrap work stay bounded" {
     );
     try std.testing.expectError(
         Maintenance.Error.InvalidBootstrap,
-        controller.init(&candidates, &.{invalid}, 0, testConfig()),
+        controller.init(&candidates, &.{invalid}, 0, testConfig(), .dual),
     );
     var core = try initEngine();
     defer core.deinit(std.testing.allocator);
     const bootstrap = try record(2, 1);
-    try controller.init(&candidates, &.{bootstrap}, 0, testConfig());
+    try controller.init(&candidates, &.{bootstrap}, 0, testConfig(), .dual);
     var out: [1_280]u8 = undefined;
     const started = (try start(&controller, &core, &out, 1, 0)).?;
     try std.testing.expectEqual(bootstrap.node_id, started.peer.node_id);
     controller.cancel(&core);
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
-    try std.testing.expect(controller.nextDeadlineMs() == null);
+    try std.testing.expect(controller.nextDeadlineMs(&core) == null);
     try std.testing.expect((try start(&controller, &core, &out, 2, 1)) == null);
-    try controller.init(&candidates, &.{}, std.math.maxInt(u64), testConfig());
-    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), controller.nextDeadlineMs());
+    try controller.init(&candidates, &.{}, std.math.maxInt(u64), testConfig(), .dual);
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), controller.nextDeadlineMs(&core));
 }
 
 test "maintenance preserves unrelated events and does not monopolize a busy peer" {
@@ -333,7 +333,7 @@ test "maintenance preserves unrelated events and does not monopolize a busy peer
     _ = try core.confirmPeer(&second_peer, &second_record, 0);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{}, 0, testConfig());
+    try controller.init(&candidates, &.{}, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
     const request = message.Message{ .ping = .{
@@ -385,12 +385,12 @@ test "maintenance backs off on shared call capacity without dropping a live oper
     var controller: Maintenance = undefined;
     var config = testConfig();
     config.refresh_interval_ms = 10;
-    try controller.init(&candidates, &.{}, 0, config);
+    try controller.init(&candidates, &.{}, 0, config, .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
     const active = (try start(&controller, &core, &out, 1, 10)).?;
     try std.testing.expect((try start(&controller, &core, &out, 2, 10)) == null);
-    try std.testing.expectEqual(@as(?u64, 15), controller.nextDeadlineMs());
+    try std.testing.expectEqual(@as(?u64, 15), controller.nextDeadlineMs(&core));
     try std.testing.expectEqual(@as(usize, 1), core.calls.count());
     try std.testing.expect(controller.onFailure(&core, active.call.handle, 11, .local));
     try std.testing.expect((try start(&controller, &core, &out, 3, 11)) != null);
@@ -404,7 +404,7 @@ test "maintenance bootstrap authentication seeds a bounded periodic lookup" {
     test_support.installSession(&core, peer, 0x55);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{bootstrap}, 0, testConfig());
+    try controller.init(&candidates, &.{bootstrap}, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
     const request_id = try message.RequestId.init(&.{1});
@@ -440,7 +440,7 @@ test "maintenance owns at most one probe and three lookup calls" {
     var controller: Maintenance = undefined;
     var config = testConfig();
     config.refresh_interval_ms = 10;
-    try controller.init(&candidates, &.{}, 0, config);
+    try controller.init(&candidates, &.{}, 0, config, .dual);
     var out: [1_280]u8 = undefined;
     for (1..5) |id| {
         try std.testing.expect((try start(&controller, &core, &out, @intCast(id), 10)) != null);
@@ -496,7 +496,7 @@ test "maintenance observes unrelated authenticated PONG without consuming the ca
     test_support.installSession(&core, peer, 0x55);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{}, 0, testConfig());
+    try controller.init(&candidates, &.{}, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
     const request_id = try message.RequestId.init(&.{1});
@@ -512,7 +512,7 @@ test "maintenance observes unrelated authenticated PONG without consuming the ca
         .recipient_port = 9_001,
     } };
     try std.testing.expect(!try observeResponse(&core, &controller, &original, &pong, 1, 20));
-    try std.testing.expectEqual(@as(?u64, 1), controller.nextDeadlineMs());
+    try std.testing.expectEqual(@as(?u64, 1), controller.nextDeadlineMs(&core));
     try std.testing.expectEqual(@as(usize, 0), core.calls.count());
     const fetch = (try start(&controller, &core, &out, 2, 1)).?;
     var scratch: message.DecodeScratch = .{};
@@ -552,7 +552,7 @@ test "maintenance bootstrap skips a busy first seed" {
     defer _ = core.cancelCall(occupied.handle);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &seeds, 0, testConfig());
+    try controller.init(&candidates, &seeds, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     const next = try start(&controller, &core, &out, 1, 0);
     try std.testing.expect(next != null);
@@ -583,11 +583,11 @@ test "maintenance retries fully busy bootstraps without reserving a seed" {
     defer _ = core.cancelCall(occupied[0].handle);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &seeds, 0, testConfig());
+    try controller.init(&candidates, &seeds, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     try std.testing.expect((try start(&controller, &core, &out, 1, 0)) == null);
     try std.testing.expect(controller.pending == null);
-    try std.testing.expectEqual(@as(?u64, 5), controller.nextDeadlineMs());
+    try std.testing.expectEqual(@as(?u64, 5), controller.nextDeadlineMs(&core));
     try std.testing.expect(core.cancelCall(occupied[1].handle));
     const next = (try start(&controller, &core, &out, 2, 5)).?;
     try std.testing.expectEqual(seeds[1].node_id, next.peer.node_id);
@@ -602,7 +602,7 @@ test "maintenance PONG hints preserve occupied and cancelled controller state" {
     test_support.installSession(&core, peer, 0x55);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{bootstrap}, 0, testConfig());
+    try controller.init(&candidates, &.{bootstrap}, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
     _ = (try start(&controller, &core, &out, 1, 0)).?;
@@ -635,7 +635,7 @@ test "maintenance PONG hints preserve occupied and cancelled controller state" {
             controller.cancel(&core);
         } else {
             try std.testing.expect(controller.pending == null);
-            try std.testing.expect(controller.nextDeadlineMs() == null);
+            try std.testing.expect(controller.nextDeadlineMs(&core) == null);
         }
     }
 }
@@ -652,7 +652,7 @@ test "maintenance ignores unrelated PONG hints from an unconfirmed endpoint" {
     test_support.installSession(&core, moved_peer, 0x55);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{}, 0, testConfig());
+    try controller.init(&candidates, &.{}, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
     const request_id = try message.RequestId.init(&.{1});
@@ -668,7 +668,7 @@ test "maintenance ignores unrelated PONG hints from an unconfirmed endpoint" {
         .recipient_port = 9_001,
     } };
     try std.testing.expect(!try observeResponse(&core, &controller, &moved, &pong, 1, 20));
-    try std.testing.expectEqual(@as(?u64, 10), controller.nextDeadlineMs());
+    try std.testing.expectEqual(@as(?u64, 10), controller.nextDeadlineMs(&core));
     try std.testing.expect(controller.pending == null);
     try std.testing.expectEqual(original_peer, core.peerRecord(&original.node_id).?.peer);
 }
@@ -698,7 +698,7 @@ test "maintenance abandons an unstarted bootstrap that becomes busy after capaci
     const seeds = [_]enr.Record{ try record(2, 1), try record(3, 1) };
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &seeds, 0, testConfig());
+    try controller.init(&candidates, &seeds, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     try std.testing.expect((try start(&controller, &core, &out, 1, 0)) == null);
     try std.testing.expectEqual(seeds[0].node_id, controller.pending.?.entry.peer.node_id);
@@ -733,7 +733,7 @@ test "maintenance drops an unstarted ENR hint when a caller reuses the peer" {
     test_support.installSession(&core, peer, 0x55);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{}, 0, testConfig());
+    try controller.init(&candidates, &.{}, 0, testConfig(), .dual);
     defer controller.cancel(&core);
     var out: [1_280]u8 = undefined;
     const request_id = try message.RequestId.init(&.{1});
@@ -769,11 +769,33 @@ test "maintenance skips unsupported IPv6 bootstrap and still probes IPv4" {
     test_support.installSession(&core, peer, 0x55);
     var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{ ipv6, remote }, 0, testConfig());
+    try controller.init(&candidates, &.{ ipv6, remote }, 0, testConfig(), .ip4);
     defer controller.cancel(&core);
-    controller.ip_mode = .ip4;
     var out: [1280]u8 = undefined;
     const started = (try controller.startNext(&core, &out, try message.RequestId.init(&.{1}), 0, &sealEntropy(1))).?;
     try std.testing.expectEqual(peer, started.peer);
     try std.testing.expectEqual(@as(usize, 1), core.calls.count());
+}
+
+test "IPv6 maintenance accepts signed dual bootstrap with unspecified IPv4" {
+    const key = try test_support.keyPair(9);
+    const public_key = @import("identity/crypto.zig").compressedPublicKey(&key);
+    const ip6: [16]u8 = .{ 0x26, 0x06, 0x47, 0 } ++ .{0} ** 11 ++ .{1};
+    const bootstrap = try enr.Record.createFields(&key, 1, &.{
+        .{ .key = "id", .value = .{ .bytes = "v4" } },
+        .{ .key = "ip", .value = .{ .bytes = &.{ 0, 0, 0, 0 } } },
+        .{ .key = "ip6", .value = .{ .bytes = &ip6 } },
+        .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
+        .{ .key = "udp", .value = .{ .uint = 9000 } },
+        .{ .key = "udp6", .value = .{ .uint = 9000 } },
+    });
+    var core = try initEngine();
+    defer core.deinit(std.testing.allocator);
+    var candidates: Lookup.Candidates = undefined;
+    var controller: Maintenance = undefined;
+    try controller.init(&candidates, &.{bootstrap}, 0, testConfig(), .ip6);
+    defer controller.cancel(&core);
+    var output: [1280]u8 = undefined;
+    const started = (try controller.startNext(&core, &output, try message.RequestId.init(&.{1}), 0, &sealEntropy(1))).?;
+    try std.testing.expectEqualDeep(bootstrap.endpointFor(.ip6).?, started.peer.address);
 }

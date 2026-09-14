@@ -41,7 +41,7 @@ test "publication recipient policy tops up without graft and accounts unique sha
         const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
         const peer = support.addPeer(&g, conn, .v1_2).?;
         g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, peer.index, true);
-        g.sessions.rows[peer.index].outbound = .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } };
+        g.sessions.rows[peer.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     }
     g.markDirect(g.sessions.rows[0].conn);
     try std.testing.expect(g.setPeerScore(g.sessions.rows[0].conn, -10_000));
@@ -128,7 +128,7 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
         const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
         const p = support.addPeer(&g, conn, .v1_2).?;
         g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, p.index, true);
-        g.sessions.rows[p.index].outbound = .{ .live = .{ .conn = conn, .id = 2, .slot = 0 } };
+        g.sessions.rows[p.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     }
     const first = try g.publish(topic, "empty mesh", .{ .mono_ms = 1, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 8, .queued = 8 }, first);
@@ -145,16 +145,16 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
 }
 
 test "publication local IDONTWANT cannot suppress exact bytes over QUIC" {
-    var pair: @import("gossipsub_test.zig").GossipPair = .{};
+    var pair: @import("test_pair.zig").Pair = .{};
     try pair.init();
     defer pair.deinit();
-    try std.testing.expect(pair.client.subscribe(topic));
-    try std.testing.expect(pair.server.subscribe(topic));
+    try std.testing.expect(pair.client.gossipsub.inner.subscribe(topic));
+    try std.testing.expect(pair.server.gossipsub.inner.subscribe(topic));
     for (0..20) |_| try pair.pumpOnce();
-    const destination = pair.client.sessions.findPeer(pair.handles.client).?;
+    const destination = pair.client.gossipsub.inner.sessions.findPeer(pair.handles.client).?;
     const id = topic_mod.validMessageId(topic, "originated wire bytes", .{});
-    pair.client.sessions.suppress(destination, id, pair.pair.now.mono_ms, 60_000);
-    const outcome = try pair.client.publishWithOptions(topic, "originated wire bytes", .{ .allow_zero_peers = false }, pair.pair.now);
+    pair.client.gossipsub.inner.sessions.suppress(destination, id, pair.pair.now.mono_ms, 60_000);
+    const outcome = try pair.client.gossipsub.inner.publishWithOptions(topic, "originated wire bytes", .{ .allow_zero_peers = false }, pair.pair.now);
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, outcome);
     var received: usize = 0;
     for (0..30) |_| {

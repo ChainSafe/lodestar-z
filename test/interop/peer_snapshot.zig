@@ -4,10 +4,10 @@ const Peer = @import("network_peer.zig").Peer;
 
 pub fn emit(peer: *Peer, id: u32) !void {
     const reqresp = peer.service.reqresp.active();
-    const gossip = peer.service.gossipsub.resourceSnapshot();
+    const gossip = peer.service.gossipsub.inner.resourceSnapshot();
     const transport = peer.transport.engine.counters;
     var streams: usize = 0;
-    for (peer.transport.engine.driverView().activeIndices()) |index| {
+    for (peer.transport.engine.activeIndices()) |index| {
         for (peer.transport.engine.registry.slots[index].table.entries) |entry| {
             if (entry.claimed) streams += 1;
         }
@@ -16,23 +16,23 @@ pub fn emit(peer: *Peer, id: u32) !void {
     for (peer.service.router.negotiator.entries) |entry| {
         if (entry.state != .free) negotiations += 1;
     }
-    var inbound_version: ?[]const u8 = null;
+    var has_inbound = false;
     var outbound_version: ?[]const u8 = null;
     for (peer.service.gossipsub.inner.sessions.rows) |entry| {
         if (!entry.active) continue;
-        if (entry.in_stream != null) inbound_version = @tagName(entry.inbound_version);
-        if (entry.outStream() != null) outbound_version = @tagName(entry.version);
+        if (entry.in_stream != null) has_inbound = true;
+        if (entry.outbound == .live) outbound_version = @tagName(entry.outbound.live.version);
     }
     try control.emit(peer.allocator, .{
         .id = id,
         .ok = true,
-        .connections = peer.transport.engine.driverView().activeIndices().len,
+        .connections = peer.transport.engine.activeIndices().len,
         .accepted = transport.accepted,
         .streams = streams,
         .heldFin = peer.held_finish != null,
         .finishCalls = peer.finish_calls,
         .negotiations = negotiations,
-        .inboundVersion = inbound_version,
+        .hasInboundStream = has_inbound,
         .outboundVersion = outbound_version,
         .rpcsReceived = peer.service.gossipsub.inner.counters.rpcs_received,
         .duplicates = peer.service.gossipsub.inner.counters.duplicates,

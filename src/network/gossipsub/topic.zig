@@ -11,6 +11,63 @@ pub const digest_hex_len: usize = 8;
 pub const name_max_len: usize = "sync_committee_contribution_and_proof".len;
 pub const topic_max_len: usize = prefix.len + digest_hex_len + 1 + name_max_len + suffix.len;
 
+pub const Kind = enum(u8) {
+    beacon_block,
+    beacon_aggregate_and_proof,
+    beacon_attestation,
+    proposer_slashing,
+    attester_slashing,
+    voluntary_exit,
+    sync_committee_contribution_and_proof,
+    sync_committee,
+    light_client_finality_update,
+    light_client_optimistic_update,
+    bls_to_execution_change,
+    blob_sidecar,
+    data_column_sidecar,
+
+    pub fn countMax(self: Kind) u16 {
+        return switch (self) {
+            .beacon_attestation => 64,
+            .sync_committee => 4,
+            .blob_sidecar, .data_column_sidecar => 128,
+            else => 1,
+        };
+    }
+};
+
+pub const Name = struct {
+    kind: Kind,
+    subnet: u16 = 0,
+
+    pub fn parse(name: []const u8) ?Name {
+        if (name.len > name_max_len) return null;
+        inline for (@typeInfo(Kind).@"enum".fields) |field| {
+            const kind: Kind = @enumFromInt(field.value);
+            if (comptime kind.countMax() == 1) {
+                if (std.mem.eql(u8, name, field.name)) return .{ .kind = kind };
+            } else if (std.mem.startsWith(u8, name, field.name ++ "_")) {
+                const decimal = name[field.name.len + 1 ..];
+                if (decimal.len == 0 or decimal.len > 3 or (decimal.len > 1 and decimal[0] == '0')) return null;
+                for (decimal) |char| if (!std.ascii.isDigit(char)) return null;
+                const subnet = std.fmt.parseInt(u16, decimal, 10) catch return null;
+                if (subnet >= kind.countMax()) return null;
+                return .{ .kind = kind, .subnet = subnet };
+            }
+        }
+        return null;
+    }
+};
+
+pub const Canonical = struct { digest: ForkDigest, name: Name };
+
+pub fn parseCanonical(wire: []const u8) ?Canonical {
+    const parsed = parse(wire) orelse return null;
+    const hex = std.fmt.bytesToHex(parsed.digest, .lower);
+    if (!std.mem.eql(u8, &hex, wire[prefix.len..][0..digest_hex_len])) return null;
+    return .{ .digest = parsed.digest, .name = Name.parse(parsed.name) orelse return null };
+}
+
 pub const Ref = struct { index: u16, generation: u64 };
 
 pub const ForkDigest = [4]u8;

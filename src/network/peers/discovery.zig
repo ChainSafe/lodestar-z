@@ -20,7 +20,6 @@ pub const Counters = struct {
     candidates_published: u64 = 0,
     query_timeouts: u64 = 0,
     query_failures: u64 = 0,
-    maintenance_failures: u64 = 0,
     receive_failures: u64 = 0,
     processing_failures: u64 = 0,
     coordinator_failures: u64 = 0,
@@ -107,8 +106,7 @@ pub const Discovery = struct {
 
         for (bootstrap, 0..) |*record, index| storage.bootstrap[index] = try d.identity.enr.Record.init(record.slice());
         var maintenance: d.Maintenance = undefined;
-        try maintenance.init(&storage.background, storage.bootstrap[0..bootstrap.len], now_ms, options.maintenance);
-        maintenance.ip_mode = driver.udp.sockets.mode();
+        try maintenance.init(&storage.background, storage.bootstrap[0..bootstrap.len], now_ms, options.maintenance, driver.udp.sockets.mode());
         return .{ .allocator = allocator, .driver = driver, .storage = storage, .maintenance = maintenance, .context = context.*, .options = options, .query_due_ms = now_ms };
     }
 
@@ -139,7 +137,7 @@ pub const Discovery = struct {
     pub fn nextWakeup(self: *const Discovery, now_ms: u64) ?u64 {
         if (self.stopped) return null;
         var next = self.driver.core.nextDeadlineMs() orelse std.math.maxInt(u64);
-        if (self.maintenance.nextDeadlineMs()) |deadline| next = @min(next, @max(deadline, self.resource_retry_ms));
+        if (self.maintenance.nextDeadlineMs(self.driver.core)) |deadline| next = @min(next, @max(deadline, self.resource_retry_ms));
         if (self.lookup) |*lookup| {
             if (lookup.waitingCount() < d.Lookup.parallelism) next = @min(next, @max(self.refill_due_ms, self.resource_retry_ms));
         } else if (self.demand.active(now_ms)) next = @min(next, @max(self.query_due_ms, self.resource_retry_ms));
@@ -169,7 +167,6 @@ pub const Discovery = struct {
         var result = Result{ .failure = progress.failure, .failure_stage = progress.failure_stage };
         if (self.stopped) return result;
         if (progress.failure != null) switch (progress.failure_stage) {
-            .maintenance => self.counters.maintenance_failures +|= 1,
             .receive => self.counters.receive_failures +|= 1,
             .process => self.counters.processing_failures +|= 1,
             .clock, .coordinator => self.counters.coordinator_failures +|= 1,
@@ -223,7 +220,7 @@ pub const Discovery = struct {
             self.counters.lookups_started +|= 1;
             std.log.scoped(.network_discovery).debug("lookup_started target={x} seeds={d}", .{ target, closest.len });
         }
-        if (self.maintenance.nextDeadlineMs()) |deadline| if (now_ms >= deadline) {
+        if (self.maintenance.nextDeadlineMs(self.driver.core)) |deadline| if (now_ms >= deadline) {
             try self.start(io, now_ms, true, result);
         };
         if (self.lookup == null or now_ms < self.refill_due_ms) return;

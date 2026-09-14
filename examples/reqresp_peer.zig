@@ -150,7 +150,7 @@ const Session = struct {
     allocator: std.mem.Allocator,
     options: Options,
     engine: *engine_mod.Engine,
-    svc: *reqresp.Service,
+    svc: *network.Service,
     conn: engine_mod.Handle,
     sink: []u8,
     now: network.types.Now = .{ .mono_ms = 0, .unix_s = 0 },
@@ -192,12 +192,12 @@ const Session = struct {
         switch (event) {
             .chunk => |chunk| {
                 try self.onChunk(chunk.bytes, chunk.fork);
-                _ = self.svc.handler.consume(chunk.request, self.now);
+                _ = self.svc.reqresp.consume(chunk.request, self.now);
             },
             .done => |done| try self.advance(done.chunks),
             .failed => |failed| try self.onFailure(failed.request, failed.reason),
             .request => |req| try self.serve(req.request, req.protocol, req.bytes),
-            .chunk_sent => |sent| _ = self.svc.handler.finish(sent.request, self.now),
+            .chunk_sent => |sent| _ = self.svc.reqresp.finish(sent.request, self.now),
             .served, .over_limit => {},
         }
     }
@@ -262,7 +262,7 @@ const Session = struct {
             return self.send(fallback.?);
         }
         if (reason == .peer_error) {
-            const message = self.svc.handler.errorMessage(request);
+            const message = self.svc.reqresp.errorMessage(request);
             const code = reason.peer_error.code;
             std.debug.print("peer error code={d} message={s}\n", .{ code, message });
         }
@@ -288,16 +288,16 @@ const Session = struct {
             .goodbye_v1 => {
                 const reason = std.mem.readInt(u64, bytes[0..8], .little);
                 std.debug.print("goodbye reason={d}\n", .{reason});
-                _ = self.svc.handler.finish(request, self.now);
+                _ = self.svc.reqresp.finish(request, self.now);
                 return;
             },
-            else => return self.svc.handler.respondError(request, 3, "unavailable", self.now),
+            else => return self.svc.reqresp.respondError(request, 3, "unavailable", self.now),
         }
         const response: []const u8 = switch (which) {
             .status_v1, .status_v2 => self.encode(which, &self.response_ssz[request.index]),
             else => zeros[0..which.info().response_max],
         };
-        try self.svc.handler.respond(request, response, null, self.now);
+        try self.svc.reqresp.respond(request, response, null, self.now);
     }
 };
 
@@ -319,20 +319,22 @@ fn dial(
     };
     var node: network.Transport = .{};
     const key = keys.KeyPair.generate(io);
-    try node.init(allocator, io, .{ .host = &key, .bind = bind });
+    try node.init(allocator, io, .{ .host = &key, .bind = .single(bind) });
     defer node.deinit(io);
 
     const sink = try allocator.alloc(u8, Protocol.blocks_by_range_v2.info().response_max);
     defer allocator.free(sink);
 
     var table: [forks_max]reqresp.ForkEntry = undefined;
-    var svc = try reqresp.Service.init(allocator, .{ .reqresp = .{
+    var gossip_seed: u64 = undefined;
+    io.random(std.mem.asBytes(&gossip_seed));
+    var svc = try network.Service.init(allocator, .{ .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = gossip_seed }, .reqresp = .{
         .forks = forkTable(options.network.config, &table),
         .inbound_max = inbound_max,
         .inbound_per_peer_max = inbound_max,
     } });
     defer svc.deinit();
-    defer svc.shutdown(&node.engine);
+    defer svc.reqresp.shutdown(&node.engine, &svc.router);
 
     var session = Session{
         .allocator = allocator,
@@ -348,12 +350,14 @@ fn dial(
     var events: [16]engine_mod.Event = undefined;
     var activity: [8]engine_mod.Handle = undefined;
     var rr_events: [8]reqresp.Event = undefined;
+    var control_events: [8]reqresp.Event = undefined;
     var steps: u32 = 0;
     while (steps < steps_max and !session.finished) : (steps += 1) {
         const now = try network.driver.currentTime(io);
-        const due = svc.nextWakeup(now, rr_events.len);
+        const due = svc.nextWakeup(now, .{ .application = rr_events.len, .control = control_events.len });
         const wait_ms: u32 = @intCast(@min(network.constants.poll_interval_ms, if (due) |deadline| deadline -| now.mono_ms else network.constants.poll_interval_ms));
-        const result = try node.step(io, &events, &activity, .{ .wait_max_ms = wait_ms });
+        const stepped = node.step(io, &events, &activity, .{ .wait_max_ms = wait_ms });
+        const result = stepped.progress;
         session.now = result.now;
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| {
@@ -370,10 +374,12 @@ fn dial(
             },
             else => {},
         };
-        const count = svc.process(&node.engine, events[0..result.events], activity[0..result.activity], result.now, &rr_events);
-        for (rr_events[0..count]) |event| try session.handle(event);
+        const count = svc.process(&node.engine, events[0..result.events], activity[0..result.activity], result.now, .{ .application = &rr_events, .control = &control_events });
+        for (rr_events[0..count.application]) |event| try session.handle(event);
+        for (control_events[0..count.control]) |event| try session.handle(event);
+        if (stepped.failure) |err| return err;
     }
     if (!session.finished) return error.Timeout;
     _ = node.engine.close(session.conn, 0);
-    _ = try node.step(io, &events, &activity, .{});
+    if (node.step(io, &events, &activity, .{}).failure) |err| return err;
 }

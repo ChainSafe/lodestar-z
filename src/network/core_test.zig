@@ -110,7 +110,7 @@ pub const Setup = struct {
         try self.pair.pump();
         var events: [32]Engine.Event = undefined;
         var activity: [4]Engine.Handle = undefined;
-        var count = self.pair.server.driverView().takeActivity(&activity);
+        var count = self.pair.server.takeActivity(&activity);
         _ = self.server.process(
             &self.pair.server,
             self.pair.events(&self.pair.server, &events),
@@ -121,7 +121,7 @@ pub const Setup = struct {
             &.{},
             &.{},
         );
-        count = self.pair.client.driverView().takeActivity(&activity);
+        count = self.pair.client.takeActivity(&activity);
         _ = self.client.process(
             &self.pair.client,
             self.pair.events(&self.pair.client, &events),
@@ -200,7 +200,7 @@ test "core native immutable metadata response survives local update during pendi
     for (0..40) |_| {
         try setup.step(0);
         for (setup.server.control.responses) |response| if (response.request) |request| {
-            const slot = setup.server.service.reqresp.inner.inboundSlot(request).?;
+            const slot = setup.server.service.reqresp.inboundSlot(request).?;
             if (slot.protocol != .metadata_v1) continue;
             try std.testing.expect(slot.io.writing);
             const changed: t.Metadata = .{ .seq_number = 5, .attnets = @splat(9) };
@@ -278,7 +278,7 @@ test "core native control distinguishes RPC errors timeouts and local retries" {
         var injected = false;
         for (setup.client.control.operations) |operation| if (operation.request) |request| {
             if (operation.protocol != .status_v1) continue;
-            const service = &setup.client.service.reqresp.inner;
+            const service = &setup.client.service.reqresp;
             const slot = service.outboundSlot(request).?;
             service.fail(slot, request.index, case.failure, &setup.pair.client);
             injected = true;
@@ -460,7 +460,7 @@ test "core native saturated app requests retain partitioned borrows while contro
             request.bytes,
         );
         delivered += 1;
-        _ = setup.server.cancel(request.request);
+        _ = setup.server.service.reqresp.cancel(request.request);
     }
     try std.testing.expectEqual(@as(usize, 8), delivered);
 }
@@ -504,7 +504,7 @@ test "core retains explicit direct connections without periodically resurrecting
     try std.testing.expect(setup.server.catalog.setDirect(remote[0].peer, true));
     const driver = &setup.client.service.gossipsub;
     driver.retirePeer(&setup.client.service.router, &setup.pair.client, driver.inner.sessions.findPeer(conn).?);
-    const started = driver.counters().negotiation_started;
+    const started = driver.inner.counters.negotiation_started;
     for (0..4) |_| {
         setup.pair.advance(1_000);
         setup.client.reStatusPeers(setup.pair.now);
@@ -515,7 +515,7 @@ test "core retains explicit direct connections without periodically resurrecting
         try std.testing.expect(snapshot.disconnect_reason == null);
         try std.testing.expectEqual(@as(f64, 0), snapshot.score);
     }
-    try std.testing.expectEqual(started, driver.counters().negotiation_started);
+    try std.testing.expectEqual(started, driver.inner.counters.negotiation_started);
     try std.testing.expectEqual(@as(u16, 1), setup.client.selection.deficits.outbound);
 }
 
@@ -532,7 +532,7 @@ test "core direct removal clears both pins and gossip score reads have no feedba
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(snapshots[0].direct);
     const conn = snapshots[0].connection.?;
-    try std.testing.expect(setup.client.service.gossipsub.setPeerScore(conn, -3));
+    try std.testing.expect(setup.client.service.gossipsub.inner.setPeerScore(conn, -3));
     const before = setup.client.gossipScore(snapshots[0].peer, setup.pair.now).?;
     try std.testing.expect(std.math.isFinite(before));
     _ = setup.client.reportPeer(snapshots[0].peer, .high_tolerance, setup.pair.now);
@@ -587,7 +587,7 @@ test "core native preserves gossip events under one output and caller validation
         var transport: [32]Engine.Event = undefined;
         var activity: [4]Engine.Handle = undefined;
         var messages: [1]gossip.Event = undefined;
-        const active = setup.pair.server.driverView().takeActivity(&activity);
+        const active = setup.pair.server.takeActivity(&activity);
         const counts = setup.server.process(&setup.pair.server, setup.pair.events(
             &setup.pair.server,
             &transport,
@@ -597,7 +597,7 @@ test "core native preserves gossip events under one output and caller validation
             try std.testing.expectEqualStrings(payload, message.bytes);
             try std.testing.expectEqual(
                 gossip.ReportOutcome{ .applied = .accept },
-                setup.server.reportValidation(message.handle, .accept, setup.pair.now),
+                setup.server.service.gossipsub.inner.report(message.handle, .accept, setup.pair.now),
             );
             try std.testing.expectEqualStrings(payload, message.bytes);
             received += 1;
@@ -1236,7 +1236,7 @@ test "core native immediate close preserves direct membership and rejects stale 
         try std.testing.expectEqual(@as(u16, 0), setup.client.peerCounts().relevant);
         try std.testing.expect(setup.client.catalog.get(captured.peer).?.connection == null);
         try std.testing.expect(!setup.client.dial_queue.rows[0].connected);
-        try std.testing.expect(setup.client.policy_dirty);
+        try std.testing.expect(setup.client.selection_revision == null);
         try std.testing.expectError(error.StaleHandle, setup.pair.client.openStream(captured.connection.?));
         const sink = try std.testing.allocator.alloc(u8, rr.Protocol.blocks_by_root_v2.info().response_max);
         defer std.testing.allocator.free(sink);
@@ -1387,7 +1387,7 @@ test "core sampling delivery follows real outbound stream retirement replacement
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     const handler = &setup.client.service.gossipsub;
     const index = handler.inner.sessions.findPeer(snapshot.connection.?).?;
-    const old_stream = handler.inner.sessions.rows[index].outbound.live;
+    const old_stream = handler.inner.sessions.rows[index].outbound.live.stream;
     setup.pair.client.closeStream(old_stream, 0);
     handler.transportEvents(&setup.client.service.router, &setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);
     try std.testing.expect(!handler.deliveryAvailable(snapshot.connection.?));
@@ -1402,7 +1402,7 @@ test "core sampling delivery follows real outbound stream retirement replacement
     const replacement = try waitSampling(&setup);
     try std.testing.expect(!std.meta.eql(snapshot.connection, replacement.connection));
     const replacement_index = handler.inner.sessions.findPeer(replacement.connection.?).?;
-    const replacement_stream = handler.inner.sessions.rows[replacement_index].outbound.live;
+    const replacement_stream = handler.inner.sessions.rows[replacement_index].outbound.live.stream;
     try std.testing.expect(!std.meta.eql(old_stream, replacement_stream));
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     handler.transportEvents(&setup.client.service.router, &setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);
@@ -1451,7 +1451,7 @@ test "core replaces failed gossip below target without a reputation penalty or a
     const conn = snapshot.connection.?;
     const driver = &setup.client.service.gossipsub;
     const index = driver.inner.sessions.findPeer(conn).?;
-    const started = driver.counters().negotiation_started;
+    const started = driver.inner.counters.negotiation_started;
     try std.testing.expect(driver.deliveryAvailable(conn));
     try std.testing.expectEqual(@as(u16, 1), setup.client.selection.retained_count);
     driver.resetOutbound(&setup.pair.client, index);
@@ -1464,5 +1464,5 @@ test "core replaces failed gossip below target without a reputation penalty or a
     try std.testing.expectEqual(snapshot.score, after.score);
     try std.testing.expectEqual(@as(u64, 0), after.ban_until_ms);
     setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
-    try std.testing.expectEqual(started, driver.counters().negotiation_started);
+    try std.testing.expectEqual(started, driver.inner.counters.negotiation_started);
 }

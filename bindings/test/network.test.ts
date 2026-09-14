@@ -1,21 +1,21 @@
 import {execFileSync} from "node:child_process";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {expect, it} from "vitest";
-import {createNativeNetworkRuntime} from "../src/network.js";
-import {networkConfig} from "./utils/network.js";
+import {createNativeNetworkApplicationRuntime} from "../src/network.js";
+import {applicationConfig, localIntent} from "./utils/network.js";
 
 it("owns a real native socket and releases it on idempotent close", async () => {
-  const config = networkConfig();
+  const config = applicationConfig();
   const expectedPeerId = privateKeyFromRaw(config.identitySecretKey).publicKey.toMultihash().bytes;
-  const runtime = createNativeNetworkRuntime(config, () => undefined);
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   const terminal = runtime.closed;
   try {
     const identity = await runtime.ready;
     expect(identity.peerId).toEqual(expectedPeerId);
     expect(identity.localEndpoint.port).toBeGreaterThan(0);
-    expect(runtime.state).toBe("running");
+    expect(runtime.state).toBe("prepared");
     expect(runtime.diagnostics().nativeRequestedBytes).toBeGreaterThan(0);
-    expect(runtime.setCurrentSlot(101n)).toBeGreaterThan(0n);
+    expect((await runtime.applyIntent(localIntent(config), 101n)).slot).toBe(101n);
     const closing = runtime.close();
     expect(terminal).toBe(closing);
     expect(runtime.close()).toBe(closing);
@@ -35,10 +35,11 @@ it("owns a real native socket and releases it on idempotent close", async () => 
   }
 }, 20000);
 
-it("copies inputs before returning and accepts exact slot revisions", async () => {
-  const config = networkConfig();
+it("copies inputs before returning and advances the clock only through intents", async () => {
+  const config = applicationConfig();
   const expected = privateKeyFromRaw(config.identitySecretKey).publicKey.toMultihash().bytes;
-  const runtime = createNativeNetworkRuntime(config, () => undefined);
+  const intent = localIntent(config);
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   config.identitySecretKey.fill(0);
   config.bind.address.fill(0);
   config.local.status.forkDigest.fill(99);
@@ -47,108 +48,111 @@ it("copies inputs before returning and accepts exact slot revisions", async () =
   try {
     const identity = await runtime.ready;
     expect(identity.peerId).toEqual(expected);
-    for (let i = 1; i <= 10000; i++) expect(runtime.setCurrentSlot(100n + BigInt(i))).toBe(BigInt(i));
-    expect(() => runtime.setCurrentSlot(100n)).toThrow("ClockRegression");
-    expect(() => runtime.setCurrentSlot(-1n)).toThrow("InvalidNetworkInteger");
-    expect(() => runtime.setCurrentSlot(1n << 64n)).toThrow("InvalidNetworkInteger");
-    expect(runtime.setCurrentSlot((1n << 64n) - 1n)).toBe(10001n);
+    expect(await runtime.applyIntent(intent, 101n)).toMatchObject({slot: 101n});
+    await expect(runtime.applyIntent(intent, 100n)).rejects.toThrow("ClockRegression");
+    expect(() => runtime.applyIntent(intent, -1n)).toThrow("InvalidNetworkInteger");
+    expect(() => runtime.applyIntent(intent, 1n << 64n)).toThrow("InvalidNetworkInteger");
     expect(identity.peerId).toEqual(expected);
   } finally {
     await runtime.close();
   }
-  expect(() => runtime.setCurrentSlot((1n << 64n) - 1n)).toThrow("NetworkClosed");
+  expect(() => runtime.applyIntent(intent, 102n)).toThrow("NetworkClosed");
 }, 20000);
 
 it.each([
   [
     "key length",
-    (c: ReturnType<typeof networkConfig>) => {
+    (c: ReturnType<typeof applicationConfig>) => {
       c.identitySecretKey = new Uint8Array(31);
     },
     "InvalidNetworkBytes",
   ],
   [
     "fractional port",
-    (c: ReturnType<typeof networkConfig>) => {
+    (c: ReturnType<typeof applicationConfig>) => {
       c.bind.port = 0.5;
     },
     "InvalidNetworkInteger",
   ],
   [
     "infinite score",
-    (c: ReturnType<typeof networkConfig>) => {
+    (c: ReturnType<typeof applicationConfig>) => {
       c.gossipPolicy.score.appWeight = Number.POSITIVE_INFINITY;
     },
     "InvalidNetworkConfig",
   ],
   [
     "unknown timer",
-    (c: ReturnType<typeof networkConfig>) => {
+    (c: ReturnType<typeof applicationConfig>) => {
       Object.assign(c.gossipPolicy, {unknown: 1});
     },
     "InvalidNetworkConfig",
   ],
   [
     "missing timer",
-    (c: ReturnType<typeof networkConfig>) => {
+    (c: ReturnType<typeof applicationConfig>) => {
       Reflect.deleteProperty(c.gossipPolicy, "txTimeoutMs");
     },
     "InvalidNetworkInteger",
   ],
   [
     "negative bigint",
-    (c: ReturnType<typeof networkConfig>) => {
+    (c: ReturnType<typeof applicationConfig>) => {
       c.initialSlot = -1n;
     },
     "InvalidNetworkInteger",
   ],
   [
     "overflow bigint",
-    (c: ReturnType<typeof networkConfig>) => {
+    (c: ReturnType<typeof applicationConfig>) => {
       c.initialSlot = 1n << 64n;
     },
     "InvalidNetworkInteger",
   ],
   [
     "reserved syncnet",
-    (c: ReturnType<typeof networkConfig>) => {
+    (c: ReturnType<typeof applicationConfig>) => {
       c.local.metadata.syncnets = 16;
     },
     "InvalidNetworkInteger",
   ],
   [
     "duplicate fork",
-    (c: ReturnType<typeof networkConfig>) => {
+    (c: ReturnType<typeof applicationConfig>) => {
       c.requestForks = [...c.requestForks, c.requestForks[0]];
     },
     "InvalidNetworkConfig",
   ],
 ] as const)("rejects %s before startup", (_name, mutate, code) => {
-  const config = networkConfig();
+  const config = applicationConfig();
   mutate(config);
-  expect(() => createNativeNetworkRuntime(config, () => undefined)).toThrow(code);
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow(code);
 });
 
 it("reserves only four active owners and releases capacity on close", async () => {
-  const runtimes = Array.from({length: 4}, () => createNativeNetworkRuntime(networkConfig(), () => undefined));
+  const runtimes = Array.from({length: 4}, () =>
+    createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)
+  );
   try {
     await Promise.all(runtimes.map((runtime) => runtime.ready));
-    expect(() => createNativeNetworkRuntime(networkConfig(), () => undefined)).toThrow("NetworkInstanceLimit");
+    expect(() => createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined)).toThrow(
+      "NetworkInstanceLimit"
+    );
     await runtimes[0].close();
-    const replacement = createNativeNetworkRuntime(networkConfig(), () => undefined);
+    const replacement = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
     try {
       await replacement.ready;
     } finally {
       await replacement.close();
     }
-    expect(runtimes[1].setCurrentSlot(102n)).toBe(1n);
+    expect((await runtimes[1].getIdentity()).peerId).toHaveLength(39);
   } finally {
     await Promise.all(runtimes.map((runtime) => runtime.close()));
   }
 }, 30000);
 
 it("settles immediate close coherently whichever startup outcome wins", async () => {
-  const runtime = createNativeNetworkRuntime(networkConfig(), () => undefined);
+  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
   let settlements = 0;
   const ready = runtime.ready.then(
     () => {
@@ -170,14 +174,14 @@ it("settles immediate close coherently whichever startup outcome wins", async ()
 }, 20000);
 
 it("rejects every invalid drain limit", async () => {
-  const runtime = createNativeNetworkRuntime(networkConfig(), () => undefined);
+  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
   try {
     await runtime.ready;
-    for (const limit of [0, -1, 0.5, 33, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(() => runtime.drain(limit)).toThrow("InvalidDrainLimit");
+    for (const limit of [0, -1, 0.5, 65, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => runtime.drainPeers(limit)).toThrow("InvalidDrainLimit");
     }
-    expect(runtime.drain(1)).toEqual({dropped: 0n, events: [], more: false});
-    expect(runtime.drain(32)).toEqual({dropped: 0n, events: [], more: false});
+    expect(runtime.drainPeers(1)).toMatchObject({events: [], more: false});
+    expect(runtime.drainPeers(32)).toMatchObject({events: [], more: false});
   } finally {
     await runtime.close();
   }
@@ -193,7 +197,7 @@ it.each(["gc", "exit", "promises"])("finishes bounded %s subprocess lifecycle", 
 
 it("survives abrupt teardown of a second Node environment", async () => {
   const {Worker} = await import("node:worker_threads");
-  const runtime = createNativeNetworkRuntime(networkConfig(), () => undefined);
+  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
   const worker = new Worker(new URL("./fixtures/network-worker.mjs", import.meta.url));
   try {
     await runtime.ready;
@@ -202,7 +206,7 @@ it("survives abrupt teardown of a second Node environment", async () => {
       worker.once("error", reject);
     });
     await worker.terminate();
-    expect(runtime.setCurrentSlot(101n)).toBe(1n);
+    expect((await runtime.getIdentity()).peerId).toHaveLength(39);
     execFileSync(
       process.execPath,
       [
@@ -218,21 +222,21 @@ it("survives abrupt teardown of a second Node environment", async () => {
   }
 }, 20000);
 
-it("gates raw reentrant start and close before config getters execute", async () => {
+it("gates raw reentrant prepare and close before config getters execute", async () => {
   const {default: addon} = await import("../src/bindings.js");
   const raw = new addon.NativeNetworkRuntime();
-  const config = networkConfig();
+  const config = applicationConfig();
   Object.defineProperty(config, "profile", {
     enumerable: true,
     get() {
-      expect(() => raw.start(networkConfig(), () => undefined)).toThrow("NetworkAlreadyStarted");
+      expect(() => raw.prepare(applicationConfig(), () => undefined)).toThrow("NetworkAlreadyStarted");
       raw.close();
       return "small";
     },
   });
-  expect(() => raw.start(config, () => undefined)).toThrow("NetworkClosed");
-  expect(() => raw.start(networkConfig(), () => undefined)).toThrow("NetworkAlreadyStarted");
-  const runtime = createNativeNetworkRuntime(networkConfig(), () => undefined);
+  expect(() => raw.prepare(config, () => undefined)).toThrow("NetworkClosed");
+  expect(() => raw.prepare(applicationConfig(), () => undefined)).toThrow("NetworkAlreadyStarted");
+  const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
   try {
     await runtime.ready;
   } finally {
@@ -241,24 +245,24 @@ it("gates raw reentrant start and close before config getters execute", async ()
 }, 20000);
 
 it("initializes signed discovery without waiting for bootstrap reachability", async () => {
-  const config = networkConfig();
+  const config = applicationConfig();
   config.discovery = {
     advertisement: {ip4: Uint8Array.of(127, 0, 0, 1), quic: 443, udp: 40404},
     bind: {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0},
     bootstrapEnrs: [],
     sequenceNumber: 7n,
   };
-  const first = createNativeNetworkRuntime(config, () => undefined);
+  const first = createNativeNetworkApplicationRuntime(config, () => undefined);
   try {
     const identity = await first.ready;
     expect(identity.localEnr).toBeInstanceOf(Uint8Array);
     const enr = identity.localEnr;
     if (!enr) throw new Error("Missing ENR");
     expect(Buffer.from(enr).includes(Buffer.from([0x84, 0x71, 0x75, 0x69, 0x63, 0x82, 0x01, 0xbb]))).toBe(true);
-    const secondConfig = networkConfig();
+    const secondConfig = applicationConfig();
     secondConfig.identitySecretKey[31] = 2;
     secondConfig.discovery = {...config.discovery, bootstrapEnrs: [enr.slice()]};
-    const second = createNativeNetworkRuntime(secondConfig, () => undefined);
+    const second = createNativeNetworkApplicationRuntime(secondConfig, () => undefined);
     secondConfig.discovery.bootstrapEnrs[0].fill(0);
     try {
       const secondIdentity = await second.ready;
@@ -266,20 +270,18 @@ it("initializes signed discovery without waiting for bootstrap reachability", as
     } finally {
       await second.close();
     }
-    const bad = networkConfig();
+    const bad = applicationConfig();
     const corrupt = enr.slice();
     corrupt[6] ^= 1;
     bad.discovery = {...config.discovery, bootstrapEnrs: [corrupt]};
-    const rejected = createNativeNetworkRuntime(bad, () => undefined);
-    await expect(rejected.ready).rejects.toThrow("InvalidSignature");
-    expect(await rejected.close()).toEqual({reason: "failed"});
+    expect(() => createNativeNetworkApplicationRuntime(bad, () => undefined)).toThrow("InvalidSignature");
   } finally {
     await first.close();
   }
 }, 20000);
 
 it("fails wildcard discovery advertisement omissions cleanly", async () => {
-  const config = networkConfig();
+  const config = applicationConfig();
   config.bind.address.fill(0);
   config.discovery = {
     advertisement: null,
@@ -287,16 +289,14 @@ it("fails wildcard discovery advertisement omissions cleanly", async () => {
     bootstrapEnrs: [],
     sequenceNumber: 1n,
   };
-  const runtime = createNativeNetworkRuntime(config, () => undefined);
-  await expect(runtime.ready).rejects.toThrow("InvalidAdvertisement");
-  expect(await runtime.close()).toEqual({reason: "failed"});
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidAdvertisement");
 }, 20000);
 
 it("publishes copied peer observations without repeating unread notifications", async () => {
   const {Child} = await import("../../test/interop/child.mjs");
   const {multiaddr} = await import("@multiformats/multiaddr");
   const {setTimeout: delay} = await import("node:timers/promises");
-  const config = networkConfig();
+  const config = applicationConfig();
   config.initialSlot = 0x08070605n;
   config.local.status.headSlot = config.initialSlot;
   config.local.status.finalizedEpoch = 0x01020304n;
@@ -307,13 +307,14 @@ it("publishes copied peer observations without repeating unread notifications", 
   const pending = new Promise<void>((resolve) => {
     readable = resolve;
   });
-  const runtime = createNativeNetworkRuntime(config, () => {
+  const runtime = createNativeNetworkApplicationRuntime(config, () => {
     notifications++;
     readable();
   });
   const remote = new Child("native-runtime-peer", process.execPath, ["test/interop/libp2p_peer.mjs", "v12", "managed"]);
   try {
     const identity = await runtime.ready;
+    await runtime.applyIntent(localIntent(config), config.initialSlot);
     const address = multiaddr(identity.localMultiaddr).toString();
     await remote.command("dial", {address});
     await remote.command("control", {address, protocol: "/eth2/beacon_chain/req/status/1/ssz_snappy"});
@@ -330,12 +331,12 @@ it("publishes copied peer observations without repeating unread notifications", 
     expect(notifications).toBe(before);
     const {default: addon} = await import("../src/bindings.js");
     if (typeof addon.networkTestFail === "function") {
-      const queued = runtime.diagnostics().queuedEvents;
+      const queued = runtime.diagnostics().peerLaneOccupied;
       addon.networkTestFail("drain_copy");
-      expect(() => runtime.drain(32)).toThrow("InjectedNetworkFailure");
-      expect(runtime.diagnostics().queuedEvents).toBeGreaterThanOrEqual(queued);
+      expect(() => runtime.drainPeers(32)).toThrow("InjectedNetworkFailure");
+      expect(runtime.diagnostics().peerLaneOccupied).toBeGreaterThanOrEqual(queued);
     }
-    const batch = runtime.drain(32);
+    const batch = runtime.drainPeers(32);
     expect(Object.getOwnPropertyDescriptor(batch, "events")).toMatchObject({
       configurable: true,
       enumerable: true,
@@ -344,14 +345,14 @@ it("publishes copied peer observations without repeating unread notifications", 
     });
     expect(Object.getOwnPropertyDescriptor(batch.events, "0")?.value).toBe(batch.events[0]);
     expect(Object.getOwnPropertyDescriptor(batch.events[0], "type")?.value).toBe(batch.events[0].type);
-    const ready = batch.events.find((event) => event.type === "peerReady");
+    const ready = batch.events.find((event) => event.type === "ready");
     expect(ready).toBeDefined();
-    if (!ready || ready.type !== "peerReady") throw new Error("Missing peerReady");
-    expect(ready.peerGeneration).toBeGreaterThan(0n);
-    expect(ready.peerId.length).toBe(39);
-    const retained = ready.peerId.slice();
+    if (!ready || ready.type !== "ready") throw new Error("Missing peerReady");
+    expect(ready.state.peer.generation).toBeGreaterThan(0n);
+    expect(ready.state.identity.length).toBe(39);
+    const retained = ready.state.identity.slice();
     await runtime.close();
-    expect(ready.peerId).toEqual(retained);
+    expect(ready.state.identity).toEqual(retained);
   } finally {
     await remote.stop();
     await runtime.close();

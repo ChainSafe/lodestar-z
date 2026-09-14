@@ -26,7 +26,7 @@ pub const Config = struct {
         base.core.dial.engine_dialing_max = r.dialingCapacity;
         base.core.dial.concurrent_max = @min(base.core.dial.concurrent_max, r.dialingCapacity);
         base.core.service.reqresp.peers = r.connectionCapacity;
-        base.core.service.reqresp.request_policy = self.request;
+        base.core.service.reqresp.admission = try n.reqresp.reqresp.AdmissionOptions.defaults(&self.request, base.core.peers.capacity, base.core.service.reqresp.inbound_max);
         base.core.service.gossipsub = common.gossip;
         base.core.service.gossipsub.random_seed = seed;
         base.core.service.gossipsub.connected_capacity = r.maxPeers;
@@ -103,13 +103,13 @@ pub fn validateCapabilities(active: n.capabilities.Directional, local: *const n.
 }
 pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
     try cfg.completeObject(value, &.{ "profile", "identitySecretKey", "bind", "local", "forkSchedule", "requestForks", "discovery", "initialSlot", "gossipPolicy", "topicPolicy", "resources", "requestPolicy", "identify", "capabilities" });
-    try cfg.parseCommon(value, common);
+    try cfg.parse(value, common);
     errdefer common.wipe();
     if (common.topic_boundary_count == 0) return error.TopicPolicyRequired;
     const resources = try cfg.get(value, "resources");
     try cfg.completeObject(resources, &.{ "peerCapacity", "targetPeers", "maxPeers", "minOutbound", "outboundReserve", "connectionCapacity", "handshakingCapacity", "dialingCapacity", "receiveBudgetBytes", "nativeBudgetBytes", "bridgeBudgetBytes" });
     inline for (@typeInfo(Resources).@"struct".fields) |field| {
-        const max: u64 = if (std.mem.eql(u8, field.name, "receiveBudgetBytes")) 9007199254740991 else if (std.mem.endsWith(u8, field.name, "Bytes")) 1024 * 1024 * 1024 else if (std.mem.eql(u8, field.name, "peerCapacity") or std.mem.eql(u8, field.name, "outboundReserve")) 4096 else 256;
+        const max: u64 = if (std.mem.eql(u8, field.name, "receiveBudgetBytes")) 9007199254740991 else if (std.mem.endsWith(u8, field.name, "Bytes")) 1024 * 1024 * 1024 else if (std.mem.eql(u8, field.name, "peerCapacity") or std.mem.eql(u8, field.name, "outboundReserve")) n.gossipsub.constants.retained_peers_cap else 256;
         @field(out.resources, field.name) = @intCast(try cfg.integer(try cfg.get(resources, field.name), max));
     }
     if (out.resources.nativeBudgetBytes == 0 or out.resources.bridgeBudgetBytes == 0) return error.InvalidNetworkInteger;

@@ -50,8 +50,9 @@ test "verify round trips our own certificate and catches a foreign signer" {
     const host_key = host.publicKey();
     try std.testing.expect(own_id.eql(&peer_id.PeerId.fromPublicKey(&host_key)));
 
-    var forged = try cert.Certificate.createWith(&host_key, &other, now_unix, .{ 2, 2, 2, 2, 2, 2, 2, 2 });
+    var forged = try cert.Certificate.create(&host, now_unix, .{ 2, 2, 2, 2, 2, 2, 2, 2 });
     defer forged.deinit();
+    try @import("test_support.zig").forgeHostSignature(&forged, &host_key, &other);
     try std.testing.expectError(error.HostSignatureInvalid, verify.verifyDer(try forged.der(&buffer), now_unix));
 }
 

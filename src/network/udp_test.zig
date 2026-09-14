@@ -10,7 +10,8 @@ fn oneSecond() std.Io.Timeout {
     return .{ .duration = .{ .raw = .fromMilliseconds(1_000), .clock = .awake } };
 }
 
-test "UDP admits one mutable datagram at a time" {
+test "UDP receives into caller storage and recovers after truncation" {
+    var buffer: [constants.datagram_size_max]u8 = undefined;
     const loopback = net.IpAddress{ .ip4 = .loopback(0) };
     var receiver = try udp_mod.Udp.bind(std.testing.io, .single(loopback));
     defer receiver.close(std.testing.io);
@@ -21,26 +22,22 @@ test "UDP admits one mutable datagram at a time" {
     const payload = [_]u8{0x44} ** limits.client_initial_min;
     const receiver_address = receiver.localAddress();
     try sender.send(std.testing.io, &receiver_address, &payload);
-    const first = try receiver.receiveTimeout(std.testing.io, oneSecond());
+    const first = try receiver.receiveTimeout(std.testing.io, &buffer, oneSecond());
     try std.testing.expectEqualSlices(u8, &payload, first.bytes);
+    try std.testing.expect(first.bytes.ptr == &buffer);
     first.bytes[0] = 0x00;
     try std.testing.expectEqual(sender.localAddress().port(), first.from.port());
-    try std.testing.expectError(error.AdmissionUnavailable, receiver.receiveTimeout(std.testing.io, oneSecond()));
-    try std.testing.expectError(error.StaleDatagram, receiver.release(.{ .generation = first.handle.generation + 1 }));
-    try receiver.release(first.handle);
-    try std.testing.expectError(error.StaleDatagram, receiver.release(first.handle));
 
     var raw_sender = try loopback.bind(std.testing.io, .{ .mode = .dgram, .protocol = .udp });
     defer raw_sender.close(std.testing.io);
     const oversized = [_]u8{0x55} ** (constants.datagram_size_max + 1);
     const destination = udp_mod.toNetwork(receiver.localAddress());
     try raw_sender.send(std.testing.io, &destination, &oversized);
-    try std.testing.expectError(error.DatagramTooLarge, receiver.receiveTimeout(std.testing.io, oneSecond()));
+    try std.testing.expectError(error.DatagramTooLarge, receiver.receiveTimeout(std.testing.io, &buffer, oneSecond()));
 
     try sender.send(std.testing.io, &receiver_address, &payload);
-    const second = try receiver.receiveTimeout(std.testing.io, oneSecond());
-    try std.testing.expect(second.handle.generation > first.handle.generation);
-    try receiver.release(second.handle);
+    const second = try receiver.receiveTimeout(std.testing.io, &buffer, oneSecond());
+    try std.testing.expectEqualSlices(u8, &payload, second.bytes);
     try std.testing.expectEqual(@as(u64, 2), sender.counters.sent_datagrams);
     try std.testing.expectEqual(@as(u64, 3), receiver.counters.received_datagrams);
     try std.testing.expectEqual(@as(u64, 2 * payload.len), sender.counters.sent_bytes);
@@ -49,11 +46,12 @@ test "UDP admits one mutable datagram at a time" {
 }
 
 test "UDP receive times out without traffic" {
+    var buffer: [constants.datagram_size_max]u8 = undefined;
     const loopback = net.IpAddress{ .ip4 = .loopback(0) };
     var receiver = try udp_mod.Udp.bind(std.testing.io, .single(loopback));
     defer receiver.close(std.testing.io);
     const short = std.Io.Timeout{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } };
-    try std.testing.expectError(error.Timeout, receiver.receiveTimeout(std.testing.io, short));
+    try std.testing.expectError(error.Timeout, receiver.receiveTimeout(std.testing.io, &buffer, short));
 }
 
 test "UDP rejects oversized sends before I/O" {
@@ -105,7 +103,8 @@ test "UDP metrics count successful batch prefixes when a later send fails" {
     try std.testing.expectEqual(@as(u64, 5), socket.counters.sent_bytes);
 }
 
-test "dual-stack UDP shares one receive lease and services both families fairly" {
+test "dual-stack UDP services both families fairly" {
+    var buffer: [constants.datagram_size_max]u8 = undefined;
     var target = try udp_mod.Udp.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
     defer target.close(std.testing.io);
     const local = target.localAddresses();
@@ -118,11 +117,9 @@ test "dual-stack UDP shares one receive lease and services both families fairly"
     };
     try target.sendMany(std.testing.io, &batch);
     for ([_]u8{ 1, 2, 3 }, 0..) |expected, i| {
-        const message = try target.receiveTimeout(std.testing.io, oneSecond());
+        const message = try target.receiveTimeout(std.testing.io, &buffer, oneSecond());
         try std.testing.expectEqualSlices(u8, &.{expected}, message.bytes);
         try std.testing.expectEqual(i == 1, message.from == .ip6);
-        try std.testing.expectError(error.AdmissionUnavailable, target.receiveTimeout(std.testing.io, oneSecond()));
-        try target.release(message.handle);
     }
     try std.testing.expectEqual(@as(u64, 3), target.counters.sent_datagrams);
     try std.testing.expectEqual(target.counters.sent_datagrams, target.counters.received_datagrams);
@@ -148,6 +145,7 @@ test "dual-stack UDP binds explicit addresses on the same port and rolls back pa
 }
 
 test "dual-stack UDP waits without consuming a second datagram and cancels an indefinite wait" {
+    var buffer: [constants.datagram_size_max]u8 = undefined;
     var target = try udp_mod.Udp.bind(std.testing.io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = .loopback(0) } });
     defer target.close(std.testing.io);
     const Worker = struct {
@@ -158,15 +156,15 @@ test "dual-stack UDP waits without consuming a second datagram and cancels an in
             for (addresses) |address| try sender.send(std.testing.io, &address.?, "ready");
         }
         fn receive(receiver: *udp_mod.Udp) udp_mod.ReceiveTimeoutError!void {
-            _ = try receiver.receiveTimeout(std.testing.io, .none);
+            var receive_buffer: [constants.datagram_size_max]u8 = undefined;
+            _ = try receiver.receiveTimeout(std.testing.io, &receive_buffer, .none);
         }
     };
     var sender = try std.testing.io.concurrent(Worker.send, .{target.localAddresses()});
     defer _ = sender.cancel(std.testing.io) catch {};
     for (0..2) |_| {
-        const packet = try target.receiveTimeout(std.testing.io, oneSecond());
+        const packet = try target.receiveTimeout(std.testing.io, &buffer, oneSecond());
         try std.testing.expectEqualSlices(u8, "ready", packet.bytes);
-        try target.release(packet.handle);
     }
     try sender.await(std.testing.io);
     var receiver = try std.testing.io.concurrent(Worker.receive, .{&target});

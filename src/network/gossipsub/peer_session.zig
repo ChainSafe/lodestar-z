@@ -4,7 +4,7 @@ const Handle = @import("../quic/engine.zig").Handle;
 const StreamHandle = @import("../quic/engine.zig").StreamHandle;
 const MessageId = @import("topic.zig").MessageId;
 const Version = @import("sessions.zig").Version;
-pub const Outbound = union(enum) { none, pending, negotiating: StreamHandle, live: StreamHandle, closing: StreamHandle };
+pub const Outbound = union(enum) { none, pending, negotiating: StreamHandle, live: struct { stream: StreamHandle, version: Version }, closing: StreamHandle };
 
 pub const Session = struct {
     io: @import("peer_io.zig").PeerIo,
@@ -14,18 +14,16 @@ pub const Session = struct {
     active: bool = false,
     generation: u64 = 0,
     conn: Handle = undefined,
-    version: Version = .v1_0,
-    inbound_version: Version = .v1_0,
     in_stream: ?StreamHandle = null,
     dont_send: [constants.dont_send_cap]MessageId = undefined,
     dont_send_until: [constants.dont_send_cap]u64 = undefined,
     dont_send_head: u8 = 0,
     dont_send_len: u8 = 0,
 
-    pub fn start(self: *Session, conn: Handle, version: Version) void {
+    pub fn start(self: *Session, conn: Handle) void {
         std.debug.assert(!self.active and self.generation < std.math.maxInt(u64));
         self.io.startSession();
-        self.* = .{ .io = self.io, .generation = self.generation + 1, .conn = conn, .version = version, .active = true, .outbound = .pending };
+        self.* = .{ .io = self.io, .generation = self.generation + 1, .conn = conn, .active = true, .outbound = .pending };
     }
 
     pub fn suppresses(self: *const Session, id: MessageId, now: u64) bool {
@@ -46,7 +44,7 @@ pub const Session = struct {
     }
     pub fn outStream(self: *const Session) ?StreamHandle {
         return switch (self.outbound) {
-            .live => |stream| stream,
+            .live => |live| live.stream,
             else => null,
         };
     }

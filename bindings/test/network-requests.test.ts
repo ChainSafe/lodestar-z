@@ -443,7 +443,7 @@ stockTest(
   20000
 );
 
-test("application request byte admission is exact and raw runtimes expose zero capacity", async () => {
+test("application request byte admission is exact", async () => {
   const config = applicationConfig();
   const probe = createNativeNetworkApplicationRuntime(config, () => undefined);
   await probe.ready;
@@ -469,15 +469,6 @@ test("application request byte admission is exact and raw runtimes expose zero c
     } finally {
       await runtime.close();
     }
-  }
-  const {createNativeNetworkRuntime} = await import("../src/network.js");
-  const {networkConfig} = await import("./utils/network.js");
-  const raw = createNativeNetworkRuntime(networkConfig(), () => undefined);
-  try {
-    await raw.ready;
-    expect(raw.diagnostics().requests).toMatchObject({capacity: 0, occupied: 0, reservedBytes: 0});
-  } finally {
-    await raw.close();
   }
 });
 

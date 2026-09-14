@@ -35,30 +35,7 @@ pub fn xorCloser(
     return false;
 }
 
-pub const Address = union(enum) {
-    ip4: struct {
-        octets: [4]u8,
-        port: u16,
-    },
-    ip6: struct {
-        octets: [16]u8,
-        port: u16,
-        /// The IPv6 scope ID, which is part of endpoint identity.
-        interface: u32 = 0,
-    },
-
-    pub fn port(self: Address) u16 {
-        return switch (self) {
-            inline else => |value| value.port,
-        };
-    }
-
-    pub fn isUsable(self: Address) bool {
-        return switch (self) {
-            inline else => |value| value.port != 0 and !std.mem.allEqual(u8, &value.octets, 0),
-        };
-    }
-};
+pub const Address = @import("udp").Address;
 
 pub const Endpoint = struct {
     node_id: NodeId,

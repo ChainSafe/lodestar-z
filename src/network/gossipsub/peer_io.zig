@@ -52,7 +52,7 @@ pub const PeerIo = struct {
     messages: usize = 0,
     controls: usize = 0,
     fin_seen: bool = false,
-    large_slot: ?@import("receive_pool.zig").Lease = null,
+    large_slot: ?@import("receive_pool.zig").Slot = null,
     progress_ms: u64 = 0,
     frame_since: ?u64 = null,
     pressure_since: ?u64 = null,
@@ -125,7 +125,7 @@ pub const PeerIo = struct {
 };
 
 test "gossip deadlines track pressure and progress through partial frame reset" {
-    var pool = try @import("sessions.zig").Sessions.init(std.testing.allocator, 1);
+    var pool = try @import("test_support.zig").sessions(std.testing.allocator, 1);
     defer pool.deinit(std.testing.allocator);
     const io = &pool.rows[0].io;
     const options: @import("options.zig").Options = .{ .pressure_timeout_ms = 100, .large_frame_timeout_ms = 50, .tx_timeout_ms = 100 };

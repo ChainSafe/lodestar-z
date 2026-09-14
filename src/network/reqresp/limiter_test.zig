@@ -16,10 +16,10 @@ test "limiter grants the quota then refuses until the period refills it" {
     try std.testing.expect(buckets.take(.{ .index = 3, .generation = 1 }, .ping_v1, 1, 0));
     try std.testing.expect(buckets.take(.{ .index = 2, .generation = 1 }, .status_v1, 1, 0));
 
-    try std.testing.expectEqual(@as(u32, 1), buckets.peerAvailable(.{ .index = 2, .generation = 1 }, .ping_v1, 5_000));
+    try std.testing.expectEqual(@as(u32, 1), credit(&buckets, .{ .index = 2, .generation = 1 }, .ping_v1, 5_000));
     try std.testing.expect(buckets.take(.{ .index = 2, .generation = 1 }, .ping_v1, 1, 5_000));
     try std.testing.expect(!buckets.take(.{ .index = 2, .generation = 1 }, .ping_v1, 1, 5_000));
-    try std.testing.expectEqual(@as(u32, 2), buckets.peerAvailable(.{ .index = 2, .generation = 1 }, .ping_v1, 1_000_000));
+    try std.testing.expectEqual(@as(u32, 2), credit(&buckets, .{ .index = 2, .generation = 1 }, .ping_v1, 1_000_000));
     try std.testing.expect(!buckets.take(.{ .index = 2, .generation = 1 }, .ping_v1, 3, 1_000_000));
 }
 
@@ -29,10 +29,10 @@ test "limiter accumulates fractional refill instead of dropping it" {
     try std.testing.expect(buckets.take(.{ .index = 0, .generation = 1 }, .ping_v1, 2, 0));
     var now: u64 = 0;
     var refilled: u32 = 0;
-    while (now < 6_000) : (now += 1_000) refilled = buckets.peerAvailable(.{ .index = 0, .generation = 1 }, .ping_v1, now);
+    while (now < 6_000) : (now += 1_000) refilled = credit(&buckets, .{ .index = 0, .generation = 1 }, .ping_v1, now);
     try std.testing.expectEqual(@as(u32, 1), refilled);
-    try std.testing.expectEqual(@as(u32, 1), buckets.peerAvailable(.{ .index = 0, .generation = 1 }, .ping_v1, 9_999));
-    try std.testing.expectEqual(@as(u32, 2), buckets.peerAvailable(.{ .index = 0, .generation = 1 }, .ping_v1, 10_000));
+    try std.testing.expectEqual(@as(u32, 1), credit(&buckets, .{ .index = 0, .generation = 1 }, .ping_v1, 9_999));
+    try std.testing.expectEqual(@as(u32, 2), credit(&buckets, .{ .index = 0, .generation = 1 }, .ping_v1, 10_000));
 }
 
 test "limiter overrides quotas, resets peers, and weighs requests" {
@@ -46,10 +46,10 @@ test "limiter overrides quotas, resets peers, and weighs requests" {
     try std.testing.expect(buckets.take(.{ .index = 1, .generation = 1 }, .blocks_by_range_v2, 1, 100));
     buckets.bind(.{ .index = 1, .generation = 2 }, 100);
     try std.testing.expect(buckets.take(.{ .index = 1, .generation = 2 }, .blocks_by_range_v2, 3, 100));
-    try std.testing.expectEqual(@as(u32, 0), buckets.peerAvailable(.{ .index = 1, .generation = 2 }, .blocks_by_range_v2, 100));
-    try std.testing.expectEqual(@as(u32, 1), buckets.peerAvailable(.{ .index = 1, .generation = 2 }, .blocks_by_range_v2, 10_100));
-    try std.testing.expectEqual(@as(u32, 3), buckets.peerAvailable(.{ .index = 0, .generation = 1 }, .blocks_by_range_v2, 0));
-    try std.testing.expectEqual(@as(u32, 5), buckets.peerAvailable(.{ .index = 0, .generation = 1 }, .status_v1, 0));
+    try std.testing.expectEqual(@as(u32, 0), credit(&buckets, .{ .index = 1, .generation = 2 }, .blocks_by_range_v2, 100));
+    try std.testing.expectEqual(@as(u32, 1), credit(&buckets, .{ .index = 1, .generation = 2 }, .blocks_by_range_v2, 10_100));
+    try std.testing.expectEqual(@as(u32, 3), credit(&buckets, .{ .index = 0, .generation = 1 }, .blocks_by_range_v2, 0));
+    try std.testing.expectEqual(@as(u32, 5), credit(&buckets, .{ .index = 0, .generation = 1 }, .status_v1, 0));
     try std.testing.expectEqual(@as(u32, 128), limiter.defaultQuotas()[@intFromEnum(Protocol.blocks_by_range_v2)].tokens);
 }
 
@@ -74,11 +74,11 @@ test "limiter joint quotas reject atomically and generation reuse resets only pe
     buckets.bind(b, 0);
     try std.testing.expect(buckets.take(a, .ping_v1, 1, 0));
     try std.testing.expect(!buckets.take(b, .ping_v1, 1, 0));
-    try std.testing.expectEqual(@as(u32, 2), buckets.peerAvailable(b, .ping_v1, 0));
+    try std.testing.expectEqual(@as(u32, 2), credit(&buckets, b, .ping_v1, 0));
     const reused = @import("../quic/api.zig").Handle{ .index = 0, .generation = 2 };
     buckets.bind(reused, 0);
     try std.testing.expect(!buckets.take(a, .ping_v1, 1, 0));
-    try std.testing.expectEqual(@as(u32, 2), buckets.peerAvailable(reused, .ping_v1, 0));
+    try std.testing.expectEqual(@as(u32, 2), credit(&buckets, reused, .ping_v1, 0));
     try std.testing.expect(!buckets.take(reused, .ping_v1, 1, 0));
     try std.testing.expectEqual(@as(?u64, 10_000), buckets.nextToken(reused, .ping_v1, 0));
     try std.testing.expect(buckets.take(reused, .ping_v1, 1, 10_000));
@@ -132,7 +132,6 @@ test "reqresp default aggregate admits one control wave and keeps bulk limits" {
     defer rr.deinit();
     const controls = [_]Protocol{ .status_v1, .status_v2, .ping_v1, .metadata_v1, .metadata_v2, .metadata_v3, .goodbye_v1 };
     for (0..65) |index| rr.limiter.bind(.{ .index = @intCast(index), .generation = 1 }, 0);
-    try std.testing.expectEqual(rr.limiter.global_quotas, rr.options.global_quotas.?);
     for (controls) |which| {
         try std.testing.expectEqual(limiter.defaultQuotas()[@intFromEnum(which)].period_ms, rr.limiter.global_quotas[@intFromEnum(which)].period_ms);
         for (0..64) |index| try std.testing.expect(rr.limiter.take(.{ .index = @intCast(index), .generation = 1 }, which, 1, 0));
@@ -146,4 +145,10 @@ test "reqresp default aggregate admits one control wave and keeps bulk limits" {
     var overridden = try reqresp.ReqResp.init(std.testing.allocator, .{ .forks = &.{}, .global_quotas = explicit });
     defer overridden.deinit();
     try std.testing.expectEqual(explicit, overridden.limiter.global_quotas);
+}
+
+fn credit(buckets: *Limiter, peer: @import("../quic/api.zig").Handle, which: Protocol, now_ms: u64) u32 {
+    _ = buckets.nextToken(peer, which, now_ms);
+    std.debug.assert(buckets.matches(peer));
+    return buckets.buckets[@as(usize, peer.index) * Protocol.count + @intFromEnum(which)].tokens;
 }
