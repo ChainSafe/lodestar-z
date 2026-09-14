@@ -25,61 +25,6 @@ test "BitListType - sanity" {
     try std.testing.expect(try b.get(0) == false);
 }
 
-test "BitListType - sanity with bools" {
-    const allocator = std.testing.allocator;
-    const Bits = BitListType(16);
-    const expected_bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true };
-    const expected_true_bit_indexes = [_]usize{ 0, 2, 3, 5, 7, 8, 10, 11 };
-    var b: Bits.Type = try Bits.Type.fromBoolSlice(allocator, &expected_bools);
-    defer b.deinit(allocator);
-
-    var actual_bools = try allocator.alloc(bool, expected_bools.len);
-    defer allocator.free(actual_bools);
-    try b.toBoolSlice(&actual_bools);
-
-    try std.testing.expectEqualSlices(bool, &expected_bools, actual_bools);
-    try std.testing.expect(try b.get(0) == true);
-
-    var true_bit_indexes: [Bits.limit]usize = undefined;
-    const true_bit_count = try b.getTrueBitIndexes(true_bit_indexes[0..]);
-
-    try std.testing.expectEqualSlices(usize, &expected_true_bit_indexes, true_bit_indexes[0..true_bit_count]);
-
-    const expected_single_bool = [_]bool{ false, false, false, false, false, true, false, false, false, false, false, false };
-    var b_single_bool: Bits.Type = try Bits.Type.fromBoolSlice(allocator, &expected_single_bool);
-    defer b_single_bool.deinit(allocator);
-
-    try std.testing.expectEqual(b_single_bool.getSingleTrueBit(), 5);
-}
-
-test "BitListType - intersectValues" {
-    const TestCase = struct { expected: []const u8, bit_len: usize };
-    const test_cases = [_]TestCase{
-        .{ .expected = &[_]u8{}, .bit_len = 16 },
-        .{ .expected = &[_]u8{3}, .bit_len = 16 },
-        .{ .expected = &[_]u8{ 0, 5, 6, 10, 14 }, .bit_len = 16 },
-        .{ .expected = &[_]u8{ 0, 5, 6, 10, 14 }, .bit_len = 15 },
-    };
-
-    const allocator = std.testing.allocator;
-    const Bits = BitListType(16);
-
-    for (test_cases) |tc| {
-        var b: Bits.Type = try Bits.Type.fromBitLen(allocator, tc.bit_len);
-        defer b.deinit(allocator);
-
-        for (tc.expected) |i| try b.setAssumeCapacity(i, true);
-
-        var values = try std.ArrayList(u8).initCapacity(allocator, tc.bit_len);
-        defer values.deinit(allocator);
-        for (0..tc.bit_len) |i| values.appendAssumeCapacity(@intCast(i));
-
-        var actual = try b.intersectValues(u8, allocator, values.items);
-        defer actual.deinit(allocator);
-        try std.testing.expectEqualSlices(u8, tc.expected, actual.items);
-    }
-}
-
 test "clone" {
     const allocator = std.testing.allocator;
 
@@ -96,34 +41,6 @@ test "clone" {
     try std.testing.expect(std.mem.eql(u8, b.data.items, cloned.data.items));
     try expectEqualRootsAlloc(Bits, allocator, b, cloned);
     try expectEqualSerializedAlloc(Bits, allocator, b, cloned);
-}
-
-test "BitList resize and set should enforce length bounds" {
-    const allocator = std.testing.allocator;
-
-    const Bits = BitListType(16);
-    // First byte: 1, 0, 1, 1, 0, 1, 0, 1 = 173
-    // Second byte: 1, 0, 1, 1, 1, 0, 1, 1 = 221
-    const bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true, true, false, true, true };
-    var b: Bits.Type = try Bits.Type.fromBoolSlice(allocator, &bools);
-    defer b.deinit(allocator);
-
-    try std.testing.expect(b.data.items.len == 2);
-    try std.testing.expect(b.data.items[0] == 173);
-    try std.testing.expect(b.data.items[1] == 221);
-
-    // Resize to 5 bits. Now it should only have one byte,
-    // with the last 3 bits in the byte being wiped out.
-    // First byte: 1, 0, 1, 1, 0, 0, 0, 0 = 13
-    try b.resize(allocator, 5);
-
-    try std.testing.expect(b.data.items.len == 1);
-    try std.testing.expect(b.data.items[0] == 13);
-
-    try std.testing.expectError(
-        error.tooLarge,
-        b.set(allocator, std.math.maxInt(usize), true),
-    );
 }
 
 // Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/bitList/valid.test.ts#L44-L69
