@@ -12,17 +12,18 @@ import {
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {afterEach, test} from "node:test";
 import {promisify} from "node:util";
-import {runBoundedCommand} from "./bounded_child.mjs";
-import {collectFiles, sha256} from "./lodestar_package_io.mjs";
+import {runBoundedCommand} from "../../scripts/bounded_child.mjs";
+import {collectFiles, sha256} from "../../scripts/lodestar_package_io.mjs";
 
 const exec = promisify(execFile);
-const tool = new URL("lodestar_package.mjs", import.meta.url);
+const tool = new URL("../../scripts/lodestar_package.mjs", import.meta.url);
 const temporaryDirectories = [];
 
 function fixtureCommand(program, args, cwd) {
@@ -49,6 +50,35 @@ async function command(program, args, cwd, options = {}) {
 async function missing(path) {
   await assert.rejects(access(path), {code: "ENOENT"});
 }
+
+test("install rejects overlapping evidence before creating files or reading the archive", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lodestar-preflight-test-"));
+  temporaryDirectories.push(root);
+  const host = join(root, "host");
+  await mkdir(host);
+  const result = await command(
+    process.execPath,
+    [
+      tool.pathname,
+      "install",
+      "--host-dir",
+      host,
+      "--manifest",
+      join(root, "missing-manifest.json"),
+      "--evidence-dir",
+      join(host, "missing-parent", "evidence"),
+      "--release-dir",
+      join(root, "release"),
+      "--active-link",
+      join(root, "current"),
+    ],
+    root
+  );
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.stderr, /OverlappingReleasePaths/);
+  assert.deepEqual(await readdir(host), []);
+  await missing(join(root, "release"));
+});
 
 async function waitForProcessExit(pid) {
   for (let attempt = 0; attempt < 50; attempt++) {
@@ -87,8 +117,7 @@ async function fixture({extraFiles = {}, networkSource} = {}) {
   await writeFile(join(nativeDir, "bindings", "src", "index.d.ts"), "export declare const fixture: true;\n");
   await writeFile(
     join(nativeDir, "bindings", "src", "network.js"),
-    networkSource ??
-      "export const createNativeNetworkApplicationRuntime = () => {};\nexport const createNativeNetworkRuntime = () => {};\n"
+    networkSource ?? "export const createNativeNetworkApplicationRuntime = () => {};\n"
   );
   for (const [path, source] of Object.entries(extraFiles)) {
     await writeFile(join(nativeDir, path), source);
@@ -222,6 +251,9 @@ test("install and verify use a relocated archive without the native checkout", a
     hostDir
   );
   assert.equal(baseline.exitCode, 0, JSON.stringify(baseline));
+  const baselineRoot = await realpath(join(hostDir, "node_modules", "@chainsafe", "lodestar-z"));
+  const baselineFiles = await collectFiles(baselineRoot);
+  await symlink(hostDir, join(root, "current"), "dir");
   const deployed = join(root, "deployed");
   await mkdir(deployed);
   const deployedArchive = join(deployed, "lodestar-z.tgz");
@@ -241,13 +273,20 @@ test("install and verify use a relocated archive without the native checkout", a
       `${deployedArchive}.json`,
       "--evidence-dir",
       evidenceDir,
+      "--release-dir",
+      join(root, "release"),
+      "--active-link",
+      join(root, "current"),
     ],
     root
   );
   assert.equal(installed.exitCode, 0, JSON.stringify(installed));
+  assert.equal(await realpath(join(root, "current")), join(root, "release"));
+  assert.equal(await realpath(join(hostDir, "node_modules", "@chainsafe", "lodestar-z")), baselineRoot);
+  assert.deepEqual(await collectFiles(baselineRoot), baselineFiles);
   const verified = await command(
     process.execPath,
-    [tool.pathname, "verify", "--host-dir", hostDir, "--manifest", `${deployedArchive}.json`],
+    [tool.pathname, "verify", "--host-dir", join(root, "current"), "--manifest", `${deployedArchive}.json`],
     root
   );
   assert.equal(verified.exitCode, 0, JSON.stringify(verified));
@@ -262,7 +301,7 @@ test("install and verify use a relocated archive without the native checkout", a
   await writeFile(installedNetworkPath, `${installedNetworkSource}\nexport const basename = true;\n`);
   const divergentExports = await command(
     process.execPath,
-    [tool.pathname, "verify", "--host-dir", hostDir, "--manifest", `${deployedArchive}.json`],
+    [tool.pathname, "verify", "--host-dir", join(root, "current"), "--manifest", `${deployedArchive}.json`],
     root
   );
   assert.equal(divergentExports.exitCode, 1);
@@ -272,11 +311,12 @@ test("install and verify use a relocated archive without the native checkout", a
   await writeFile(join(result.installed.packageRoot, "bindings", "src", "index.js"), "export const changed = true;\n");
   const divergent = await command(
     process.execPath,
-    [tool.pathname, "verify", "--host-dir", hostDir, "--manifest", `${deployedArchive}.json`],
+    [tool.pathname, "verify", "--host-dir", join(root, "current"), "--manifest", `${deployedArchive}.json`],
     root
   );
   assert.equal(divergent.exitCode, 1);
   assert.equal(JSON.parse(divergent.stderr).error.code, "InstalledPackageMismatch");
+  assert.deepEqual(await collectFiles(baselineRoot), baselineFiles);
 });
 
 test("install persists and emits a structured pnpm failure record", async () => {
@@ -311,26 +351,47 @@ test("install persists and emits a structured pnpm failure record", async () => 
     hostDir
   );
   assert.equal(baseline.exitCode, 0, JSON.stringify(baseline));
+  const priorRoot = await realpath(join(hostDir, "node_modules", "@chainsafe", "lodestar-z"));
+  const priorFiles = await collectFiles(priorRoot);
+  const lockHash = await sha256(join(hostDir, "node_modules/.pnpm/lock.yaml"));
+  await symlink(hostDir, join(root, "current"), "dir");
   const bin = join(root, "bin");
   await mkdir(bin);
   const pnpm = join(bin, "pnpm");
   await writeFile(
     pnpm,
-    '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "10.24.0\\n"; exit 0; fi\nprintf "install-out"\nprintf "install-err" >&2\nexit 23\n'
+    '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "10.24.0\\n"; exit 0; fi\nprintf "mutated" > node_modules/.pnpm/lock.yaml\nprintf "mutated" > node_modules/@chainsafe/lodestar-z/bindings/src/index.js\nprintf "install-out"\nprintf "install-err" >&2\nexit 23\n'
   );
   await chmod(pnpm, 0o755);
   const evidenceDir = join(root, "failed-install");
 
   const installed = await command(
     process.execPath,
-    [tool.pathname, "install", "--host-dir", hostDir, "--manifest", `${out}.json`, "--evidence-dir", evidenceDir],
+    [
+      tool.pathname,
+      "install",
+      "--host-dir",
+      hostDir,
+      "--manifest",
+      `${out}.json`,
+      "--evidence-dir",
+      evidenceDir,
+      "--release-dir",
+      join(root, "release"),
+      "--active-link",
+      join(root, "current"),
+    ],
     root,
     {env: {...process.env, PATH: `${bin}:${process.env.PATH}`}}
   );
   assert.equal(installed.exitCode, 1);
+  await missing(join(root, "release"));
+  assert.equal(await realpath(join(root, "current")), hostDir);
+  assert.deepEqual(await collectFiles(priorRoot), priorFiles);
+  assert.equal(await sha256(join(hostDir, "node_modules/.pnpm/lock.yaml")), lockHash);
   const cliFailure = JSON.parse(installed.stderr).error;
   assert.equal(cliFailure.code, "PackageInstallFailed");
-  assert.equal(cliFailure.commandRecord.cwd, hostDir);
+  assert.equal(cliFailure.commandRecord.cwd, join(root, "release"));
   assert.equal(cliFailure.commandRecord.exitCode, 23);
   assert.equal(cliFailure.commandRecord.stdout, "install-out");
   assert.equal(cliFailure.commandRecord.stderr, "install-err");
@@ -341,10 +402,11 @@ test("install persists and emits a structured pnpm failure record", async () => 
     "--offline",
     "--ignore-scripts",
     "--lockfile=false",
+    "--package-import-method=copy",
     "--pnpmfile",
     join(evidenceDir, "lodestar-package-hook.cjs"),
   ]);
-  assert.equal(saved.attempts[0].command.cwd, hostDir);
+  assert.equal(saved.attempts[0].command.cwd, join(root, "release"));
   assert.equal(saved.attempts[0].command.exitCode, 23);
   assert.equal(saved.attempts[0].command.signal, null);
   assert.equal(saved.attempts[0].command.stderr, "install-err");
@@ -392,7 +454,7 @@ test("install rejects external-star ambiguity before host mutation", async () =>
   await writeFile(
     join(nativeDir, "bindings", "src", "network.js"),
     "export const createNativeNetworkApplicationRuntime = () => {};\n" +
-      "export const createNativeNetworkRuntime = () => {};\n" +
+      "" +
       'export * from "node:path";\n' +
       'export * from "./join-conflict.js";\n'
   );
@@ -417,7 +479,20 @@ test("install rejects external-star ambiguity before host mutation", async () =>
   const evidenceDir = join(root, "rejected-install");
   const installed = await command(
     process.execPath,
-    [tool.pathname, "install", "--host-dir", hostDir, "--manifest", badManifest, "--evidence-dir", evidenceDir],
+    [
+      tool.pathname,
+      "install",
+      "--host-dir",
+      hostDir,
+      "--manifest",
+      badManifest,
+      "--evidence-dir",
+      evidenceDir,
+      "--release-dir",
+      join(root, "release"),
+      "--active-link",
+      join(root, "current"),
+    ],
     root
   );
   assert.equal(installed.exitCode, 1);
@@ -501,7 +576,7 @@ test("pack rejects a named re-exported network test hook", async () => {
   const {nativeDir, out, buildRecord} = await fixture({
     extraFiles: {"bindings/src/hooks.js": "export const networkTestHook = true;\n"},
     networkSource:
-      'export const createNativeNetworkApplicationRuntime = () => {};\nexport const createNativeNetworkRuntime = () => {};\nexport {networkTestHook} from "./hooks.js";\n',
+      'export const createNativeNetworkApplicationRuntime = () => {};\nexport {networkTestHook} from "./hooks.js";\n',
   });
   const packed = await command(
     process.execPath,
@@ -522,7 +597,7 @@ test("pack rejects an export-star test hook without evaluating archived modules"
     join(nativeDir, "bindings", "src", "network.js"),
     `process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(marker)}, "yes");\n` +
       "export const createNativeNetworkApplicationRuntime = () => {};\n" +
-      "export const createNativeNetworkRuntime = () => {};\n" +
+      "" +
       'export * from "./hooks.js";\n'
   );
   await fixtureCommand("git", ["add", "."], nativeDir);
@@ -550,7 +625,7 @@ test("bounded inventory rejects a file by size before opening it for hashing", a
   const path = join(root, "over-limit");
   await writeFile(path, "xx");
   await chmod(path, 0);
-  const {collectFiles} = await import("./lodestar_package_io.mjs");
+  const {collectFiles} = await import("../../scripts/lodestar_package_io.mjs");
   await assert.rejects(collectFiles(root, {maxBytes: 1, maxDirectories: 2, maxFiles: 2}), {
     code: "PackageSourceByteBound",
   });
@@ -565,8 +640,8 @@ test("archive headers reject uncompressed bytes before extraction", async () => 
   const archive = join(root, "package.tgz");
   const archived = await command("tar", ["-czf", archive, "-C", source, "package/over-limit"], root);
   assert.equal(archived.exitCode, 0, JSON.stringify(archived));
-  const {inspectArchive} = await import("./lodestar_package_archive.mjs");
-  const {runBoundedCommand} = await import("./bounded_child.mjs");
+  const {inspectArchive} = await import("../../scripts/lodestar_package_archive.mjs");
+  const {runBoundedCommand} = await import("../../scripts/bounded_child.mjs");
   const runCommand = (program, args, cwd, {allowFailure = false} = {}) =>
     runBoundedCommand(program, args, cwd, {allowFailure, maxOutputBytes: 1024 * 1024, timeoutMs: 5000});
   await assert.rejects(
@@ -578,7 +653,7 @@ test("archive headers reject uncompressed bytes before extraction", async () => 
 });
 
 test("bounded child capture retains final stdout and stderr before close", async () => {
-  const {runBoundedCommand} = await import("./bounded_child.mjs");
+  const {runBoundedCommand} = await import("../../scripts/bounded_child.mjs");
   const result = await runBoundedCommand(
     process.execPath,
     ["--eval", 'process.stdout.write("stdout-final"); process.stderr.write("stderr-final");'],
@@ -591,7 +666,7 @@ test("bounded child capture retains final stdout and stderr before close", async
 });
 
 test("bounded child capture kills a descendant after its leader exits with inherited output", async () => {
-  const {runBoundedCommand} = await import("./bounded_child.mjs");
+  const {runBoundedCommand} = await import("../../scripts/bounded_child.mjs");
   let descendantPid;
   try {
     await assert.rejects(
@@ -619,7 +694,7 @@ test("bounded child capture kills a descendant after its leader exits with inher
 });
 
 test("bounded child capture kills a descendant that closes inherited output", async () => {
-  const {runBoundedCommand} = await import("./bounded_child.mjs");
+  const {runBoundedCommand} = await import("../../scripts/bounded_child.mjs");
   let descendantPid;
   try {
     const result = await runBoundedCommand(
@@ -665,7 +740,7 @@ test("bounded child capture handles a reader error and cleans the owned child", 
   );
   await writeFile(
     runner,
-    `import {runBoundedCommand} from ${JSON.stringify(new URL("./bounded_child.mjs", import.meta.url).href)};\n` +
+    `import {runBoundedCommand} from ${JSON.stringify(new URL("../../scripts/bounded_child.mjs", import.meta.url).href)};\n` +
       "let failure;\n" +
       "try {\n" +
       `  await runBoundedCommand(process.execPath, ["--eval", ${JSON.stringify(
@@ -703,7 +778,7 @@ test("bounded child capture handles a reader error and cleans the owned child", 
 });
 
 test("bounded child capture rejects combined output beyond the byte limit", async () => {
-  const {runBoundedCommand} = await import("./bounded_child.mjs");
+  const {runBoundedCommand} = await import("../../scripts/bounded_child.mjs");
   let failure;
   try {
     await runBoundedCommand(
@@ -722,7 +797,7 @@ test("bounded child capture rejects combined output beyond the byte limit", asyn
 });
 
 test("bounded child capture retains failed command output and status", async () => {
-  const {runBoundedCommand} = await import("./bounded_child.mjs");
+  const {runBoundedCommand} = await import("../../scripts/bounded_child.mjs");
   let failure;
   try {
     await runBoundedCommand(
@@ -742,7 +817,7 @@ test("bounded child capture retains failed command output and status", async () 
 });
 
 test("bounded child capture times out, kills the process, and removes FIFO storage", async () => {
-  const {runBoundedCommand} = await import("./bounded_child.mjs");
+  const {runBoundedCommand} = await import("../../scripts/bounded_child.mjs");
   const root = await mkdtemp(join(tmpdir(), "lodestar-package-timeout-"));
   temporaryDirectories.push(root);
   const pidPath = join(root, "pid");
@@ -773,7 +848,7 @@ test("bounded child capture times out, kills the process, and removes FIFO stora
 });
 
 test("bounded child capture cleans FIFO storage when the child cannot spawn", async () => {
-  const {runBoundedCommand} = await import("./bounded_child.mjs");
+  const {runBoundedCommand} = await import("../../scripts/bounded_child.mjs");
   const before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith("lodestar-package-command-")));
   let failure;
   try {

@@ -15,8 +15,8 @@ AFL_OUT="${FUZZ_DIR}/afl-out"
 ssz_targets=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists ssz_chunked_leaf_set)
 bls_targets=(bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig)
 discv5_targets=(discv5_wire)
-network_targets=(network_wire network_reqresp network_gossip network_managed network_identify)
-targets=("${ssz_targets[@]}" "${bls_targets[@]}" "${discv5_targets[@]}" "${network_targets[@]}")
+source "${FUZZ_DIR}/network-targets.sh"
+targets=("${ssz_targets[@]}" "${bls_targets[@]}" "${discv5_targets[@]}" "${NETWORK_TARGETS[@]}")
 
 if [ $# -ge 1 ]; then
     targets=("$1")

@@ -111,6 +111,7 @@ jobs:
           cmake --version
           zig build test:network_wire
           zig build test:network
+          zig build check:network-tools
 
       - name: Build benchmarks
         run: |
@@ -471,7 +472,7 @@ jobs:
       - name: Replay and smoke bounded network parsers with safety checks
         run: |
           cd test/fuzz
-          zig build build-network_reqresp build-network_gossip build-network_managed -Doptimize=ReleaseSafe
+          zig build build-network -Doptimize=ReleaseSafe
           ./smoke-network.sh
 
   bindings-test:
