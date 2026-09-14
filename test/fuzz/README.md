@@ -192,10 +192,14 @@ rename the output files to replace colons with underscores before committing:
 
 1. Create `src/fuzz_<name>.zig` exporting `zig_fuzz_init` and
    `zig_fuzz_test` with `callconv(.c)`.
-2. Add the name to the `fuzzers` array in `build.zig`. If the target links
+2. For network targets, add one row to `network-targets.tsv`: target name, corpus suffix,
+   maximum input bytes, and native linkage (`none` or `snappy`). Build, smoke, campaign, and
+   crash replay read this inventory. `zig build build-network -Doptimize=ReleaseSafe` builds
+   every network target used by `./smoke-network.sh`.
+   For other targets, add the name to `base_fuzzers` in `build.zig`. If the target links
    against blst (i.e. it uses BLS operations), set extra_libs if you're facing similar situation that bls has: e.g., `.extra_libs = &.{dep_blst.artifact("blst")}`.
 3. Create `corpus/<name>-initial/` with hand-crafted seed files.
-4. Add the target to `replay-crashes.sh` target list.
+4. For targets outside the network inventory, add the target to the campaign and replay lists.
 
 ## On MacOs
 

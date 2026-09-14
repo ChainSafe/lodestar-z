@@ -1,37 +1,33 @@
 #!/bin/bash
 set -euo pipefail
-
 FUZZ_DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN_DIR="${FUZZ_DIR}/zig-out/bin"
-CORPUS_DIR="${FUZZ_DIR}/corpus"
-TARGETS=(network_reqresp network_gossip network_gossip_lifecycle network_managed)
-
+source "${FUZZ_DIR}/network-targets.sh"
+TARGETS=("${NETWORK_TARGETS[@]}")
+if test "$#" -gt 0; then TARGETS=("$@"); fi
 for target in "${TARGETS[@]}"; do
-    bin="${BIN_DIR}/fuzz-${target}"
-    corpus="${CORPUS_DIR}/${target}-initial"
+    test -n "${NETWORK_CORPUS[$target]:-}"
+    bin="${FUZZ_DIR}/zig-out/bin/fuzz-${target}"
+    corpus="${FUZZ_DIR}/corpus/${target}-${NETWORK_CORPUS[$target]}"
     test -x "$bin"
     test -d "$corpus"
-    found=0
+    count=0
     for seed in "$corpus"/*; do
         test -f "$seed" || continue
-        found=1
+        count=$((count + 1))
+        test "$count" -le 4096
         __AFL_DEFER_FORKSRV=1 "$bin" < "$seed" >/dev/null
     done
-    test "$found" -eq 1
-    rm -rf "/tmp/lodestar-z-afl-${target}"
-    log="/tmp/lodestar-z-afl-${target}.log"
-    input_max=131072
-    if test "$target" = network_managed; then input_max=302; fi
-    if test "$target" = network_gossip_lifecycle; then input_max=512; fi
-    if ! AFL_SKIP_CPUFREQ=1 afl-fuzz -i "$corpus" -o "/tmp/lodestar-z-afl-${target}" -V 3 -G "$input_max" -- "$bin" >"$log" 2>&1; then
-        cat "$log" >&2
+    test "$count" -gt 0
+    output="$(mktemp -d "/tmp/lodestar-z-afl-${target}-XXXXXX")"
+    if ! AFL_SKIP_CPUFREQ=1 AFL_NO_UI=1 afl-fuzz -i "$corpus" -o "$output" -V 3 -G "${NETWORK_INPUT_MAX[$target]}" -- "$bin" >"$output.log" 2>&1; then
+        cat "$output.log" >&2
         exit 1
     fi
-    for finding in /tmp/lodestar-z-afl-${target}/default/{crashes,hangs}/id:*; do
+    for finding in "$output"/default/{crashes,hangs}/id:*; do
         if test -f "$finding"; then
             echo "Unexpected AFL finding: $finding" >&2
             exit 1
         fi
     done
-    echo "$target: seeds replayed; three-second AFL smoke passed"
+    echo "$target: $count seeds replayed; three-second AFL smoke passed; evidence $output.log"
 done

@@ -10,7 +10,7 @@ LOGS_DIR="${FUZZ_DIR}/logs"
 SSZ_TARGETS=(ssz_basic ssz_bitlist ssz_bitvector ssz_bytelist ssz_containers ssz_lists ssz_chunked_leaf_set)
 BLS_TARGETS=(bls_public_key bls_signature bls_aggregate_pk bls_aggregate_sig)
 DISCV5_TARGETS=(discv5_wire)
-NETWORK_TARGETS=(network_wire network_reqresp network_gossip network_managed network_identify)
+source "${FUZZ_DIR}/network-targets.sh"
 ALL_TARGETS=("${SSZ_TARGETS[@]}" "${BLS_TARGETS[@]}" "${DISCV5_TARGETS[@]}" "${NETWORK_TARGETS[@]}")
 
 usage() {
@@ -101,13 +101,15 @@ run_round() {
     for target in "${TARGETS[@]}"; do
         local input_dir="${CORPUS_DIR}/${target}-cmin"
         if [ ! -d "$input_dir" ] || [ -z "$(ls -A "$input_dir" 2>/dev/null)" ]; then
-            input_dir="${CORPUS_DIR}/${target}-initial"
+            input_dir="${CORPUS_DIR}/${target}-${NETWORK_CORPUS[$target]:-initial}"
         fi
 
         local output_dir="${AFL_OUT}/${target}/round-${round}"
         mkdir -p "$output_dir"
 
-        afl-fuzz \
+        local extra_args=()
+        if [[ -n "${NETWORK_INPUT_MAX[$target]:-}" ]]; then extra_args=(-G "${NETWORK_INPUT_MAX[$target]}"); fi
+        afl-fuzz "${extra_args[@]}" \
             -i "$input_dir" \
             -o "$output_dir" \
             -V "$ROUND_DURATION" \

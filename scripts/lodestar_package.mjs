@@ -1,5 +1,5 @@
 import {randomBytes} from "node:crypto";
-import {copyFile, mkdir, realpath, rename, rm, stat, writeFile} from "node:fs/promises";
+import {mkdir, realpath, rename, rm, stat, writeFile} from "node:fs/promises";
 import {basename, dirname, join, relative, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {isDeepStrictEqual} from "node:util";
@@ -24,6 +24,7 @@ import {
   readJson,
   sha256,
 } from "./lodestar_package_io.mjs";
+import {activateRelease, copyRelease, prepareRelease} from "./lodestar_package_release.mjs";
 
 const COMMAND_TIMEOUT_MS = 20 * 60 * 1000;
 const MAX_PACKAGE_EXPORTS = 64;
@@ -88,7 +89,7 @@ function structuredError(error) {
 function parseOptions(argv) {
   const command = argv[0];
   const allowed = {
-    install: new Set(["--host-dir", "--manifest", "--evidence-dir"]),
+    install: new Set(["--host-dir", "--manifest", "--evidence-dir", "--release-dir", "--active-link"]),
     pack: new Set(["--native-dir", "--out", "--build-record"]),
     verify: new Set(["--host-dir", "--manifest"]),
   }[command];
@@ -205,18 +206,15 @@ function assertSameInventory(expected, actual, code) {
 }
 
 async function hostManifestPaths(hostDir) {
-  const tracked = await runCommand("git", ["ls-files", "package.json", "packages/*/package.json"], hostDir, {
-    allowFailure: true,
-  });
-  if (tracked.exitCode === 0 && tracked.stdout.trim() !== "") {
-    const paths = tracked.stdout
-      .trim()
-      .split("\n")
-      .map((path) => join(hostDir, path));
-    if (paths.length > MAX_FILES) fail("HostManifestBound");
-    return paths;
+  const paths = [join(hostDir, "package.json")];
+  const packages = join(hostDir, "packages");
+  if (!(await exists(packages))) return paths;
+  for (const entry of await readDirectoryEntries(packages, MAX_FILES, "HostManifestBound")) {
+    const path = join(packages, entry.name, "package.json");
+    if (entry.isDirectory() && (await exists(path))) paths.push(path);
   }
-  return [join(hostDir, "package.json")];
+  if (paths.length > MAX_FILES) fail("HostManifestBound");
+  return paths;
 }
 
 async function snapshotPaths(paths) {
@@ -429,91 +427,19 @@ async function installedGraph(hostDir, manifests) {
   return {nodes, normalized};
 }
 
-function currentTarget() {
-  if (process.platform === "linux" && process.arch === "x64") {
-    const report = process.report?.getReport?.();
-    return `x86_64-unknown-linux-${report?.header?.glibcVersionRuntime ? "gnu" : "musl"}`;
-  }
-  if (process.platform === "linux" && process.arch === "arm64") {
-    const report = process.report?.getReport?.();
-    return `aarch64-unknown-linux-${report?.header?.glibcVersionRuntime ? "gnu" : "musl"}`;
-  }
-  if (process.platform === "darwin" && process.arch === "x64") return "x86_64-apple-darwin";
-  if (process.platform === "darwin" && process.arch === "arm64") return "aarch64-apple-darwin";
-  fail("UnsupportedBaselineTarget", `${process.platform}/${process.arch}`);
-}
-
-async function copyInventory(root, destination) {
-  const files = await collectFiles(root);
-  for (const file of files) {
-    const target = join(destination, file.path);
-    await mkdir(dirname(target), {recursive: true});
-    await copyFile(join(root, file.path), target);
-  }
-  return files;
-}
-
-async function capturePriorInstallation(hostDir, manifests, evidenceDir) {
-  const parents = await resolutionParents(hostDir, manifests);
-  const rootResolved = await resolveFromParents(hostDir, parents, {".": {}}, {load: false});
-  const rootSuccessful = rootResolved.resolutions.filter((row) => row.resolved !== undefined);
-  if (rootSuccessful.length === 0) fail("PriorPackageResolutionFailed", JSON.stringify(rootResolved.resolutions));
-  const initialRoot = await packageRootForResolved(rootSuccessful[0].resolved);
-  const installedManifest = await readJson(join(initialRoot, "package.json"), "installed baseline package.json");
-  const baselineExports = installedManifest.exports?.["./pubkeys"] === undefined ? {".": {}} : {"./pubkeys": {}};
-  const resolved = await resolveFromParents(hostDir, parents, baselineExports, {load: false});
-  const successful = resolved.resolutions.filter((row) => row.resolved !== undefined);
-  if (successful.length === 0) fail("PriorPackageResolutionFailed", JSON.stringify(resolved.resolutions));
-  const roots = [];
-  for (const row of successful) roots.push(await packageRootForResolved(row.resolved));
-  const packageRoots = [...new Set(roots)];
-  if (packageRoots.length !== 1) fail("SplitPriorPackageIdentity", JSON.stringify(packageRoots));
-  const packageRoot = packageRoots[0];
-  const wrapperDestination = join(evidenceDir, "prior-installation", "wrapper");
-  const wrapperFiles = await copyInventory(packageRoot, wrapperDestination);
-  const localAddon = join(packageRoot, "zig-out/lib/bindings.node");
-  let selectedAddon;
-  let platformFiles = [];
-  if (await exists(localAddon)) {
-    const info = await stat(localAddon);
-    selectedAddon = {bytes: info.size, path: localAddon, sha256: await sha256(localAddon), target: "local"};
-  } else {
-    const target = currentTarget();
-    const packageName = `@chainsafe/lodestar-z-${target}`;
-    const resolverPath = join(packageRoot, "bindings/src/bindings.js");
-    const resolution = await runCommand(
-      process.execPath,
-      [
-        "--input-type=module",
-        "--eval",
-        `import {createRequire} from "node:module"; process.stdout.write(createRequire(${JSON.stringify(
-          resolverPath
-        )}).resolve(${JSON.stringify(packageName)}));`,
-      ],
-      hostDir
-    );
-    const addonPath = resolution.stdout;
-    const info = await stat(addonPath);
-    selectedAddon = {
-      bytes: info.size,
-      packageName,
-      path: addonPath,
-      resolution,
-      sha256: await sha256(addonPath),
-      target,
-    };
-    const platformRoot = dirname(addonPath);
-    platformFiles = await copyInventory(platformRoot, join(evidenceDir, "prior-installation", "platform"));
-  }
-  return {packageRoot, parents, platformFiles, resolutions: resolved, selectedAddon, wrapperFiles};
-}
-
-async function install(hostDir, manifestPath, evidenceDir) {
+async function install(hostDir, manifestPath, evidenceDir, releaseDir, activeLink) {
   if (!(await exists(hostDir))) fail("MissingPath", hostDir);
-  if (await exists(evidenceDir)) fail("EvidenceDirectoryExists", evidenceDir);
-  await mkdir(evidenceDir, {recursive: true});
+  const release = await prepareRelease(hostDir, releaseDir, activeLink, evidenceDir);
+  let published = false;
   try {
-    return await installWithEvidence(hostDir, manifestPath, evidenceDir);
+    const archiveState = await verifyManifestArchive(manifestPath, runCommand);
+    const copied = await copyRelease(release);
+    const evidence = await installWithEvidence(release.directory, manifestPath, evidenceDir, archiveState);
+    evidence.release = {...release, copied};
+    await writeFile(join(evidenceDir, "install-evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`, {flag: "wx"});
+    await activateRelease(release);
+    published = true;
+    return evidence;
   } catch (error) {
     const failurePath = join(evidenceDir, "install-failure.json");
     if (!(await exists(failurePath))) {
@@ -524,18 +450,18 @@ async function install(hostDir, manifestPath, evidenceDir) {
       );
     }
     throw error;
+  } finally {
+    if (!published) await rm(release.directory, {force: true, recursive: true});
   }
 }
 
-async function installWithEvidence(hostDir, manifestPath, evidenceDir) {
-  const archiveState = await verifyManifestArchive(manifestPath, runCommand);
+async function installWithEvidence(hostDir, manifestPath, evidenceDir, archiveState) {
   const manifests = await hostManifestPaths(hostDir);
   const immutablePaths = [...manifests, join(hostDir, "pnpm-workspace.yaml"), join(hostDir, "pnpm-lock.yaml")];
   const internalLock = join(hostDir, "node_modules/.pnpm/lock.yaml");
   if (!(await exists(internalLock))) fail("MissingInternalLockBaseline", internalLock);
   const beforeFiles = await snapshotPaths([...immutablePaths, internalLock]);
   const beforeGraph = await installedGraph(hostDir, manifests);
-  const priorInstallation = await capturePriorInstallation(hostDir, manifests, evidenceDir);
   const version = await runCommand("pnpm", ["--version"], hostDir);
   const hostPackage = await readJson(join(hostDir, "package.json"), "host package.json");
   const selectedVersion = /^pnpm@([^+]+)(?:\+.*)?$/.exec(hostPackage.packageManager ?? "")?.[1];
@@ -557,7 +483,7 @@ module.exports = {hooks: {readPackage(pkg) {
 `;
   await writeFile(hookPath, hook, {flag: "wx"});
   const majorVersion = Number.parseInt(selectedVersion.split(".")[0], 10);
-  const installArgs = ["install", "--offline", "--ignore-scripts", "--lockfile=false"];
+  const installArgs = ["install", "--offline", "--ignore-scripts", "--lockfile=false", "--package-import-method=copy"];
   if (majorVersion >= 11) installArgs.push("--no-optimistic-repeat-install", "--no-prefer-frozen-lockfile");
   installArgs.push("--pnpmfile", hookPath);
   let command;
@@ -638,11 +564,9 @@ module.exports = {hooks: {readPackage(pkg) {
     manifestPath,
     manifestSha256: archiveState.manifestSha256,
     packageManager: {attempts, version: selectedVersion, versionCommand: version},
-    priorInstallation,
     schemaVersion: 1,
     verification,
   };
-  await writeFile(join(evidenceDir, "install-evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`, {flag: "wx"});
   return evidence;
 }
 
@@ -654,7 +578,13 @@ async function main() {
     return;
   }
   if (command === "install") {
-    const evidence = await install(options["--host-dir"], options["--manifest"], options["--evidence-dir"]);
+    const evidence = await install(
+      options["--host-dir"],
+      options["--manifest"],
+      options["--evidence-dir"],
+      options["--release-dir"],
+      options["--active-link"]
+    );
     process.stdout.write(`${JSON.stringify(evidence.verification)}\n`);
     return;
   }

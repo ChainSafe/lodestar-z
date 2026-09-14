@@ -25,7 +25,7 @@ export const MAX_WRAPPER_BYTES = 1024 * 1024;
 const MAX_MODULES = 64;
 const MAX_MODULE_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_IMPORT_EDGES = 256;
-const TOOL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const TOOL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const HASH_PATTERN = /^[0-9a-f]{64}$/;
 export const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 export const EXPECTED_PACKAGE_EXPORTS = [
@@ -38,7 +38,7 @@ export const EXPECTED_PACKAGE_EXPORTS = [
   "./shuffle",
   "./state-transition",
 ];
-export const EXPECTED_NETWORK_EXPORTS = ["createNativeNetworkApplicationRuntime", "createNativeNetworkRuntime"];
+export const EXPECTED_NETWORK_EXPORTS = ["createNativeNetworkApplicationRuntime"];
 
 export function validateBuildRecord(record) {
   if (!record || typeof record !== "object" || Array.isArray(record)) fail("InvalidBuildRecord");

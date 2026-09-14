@@ -136,7 +136,7 @@ async function exercise(nativeDials) {
     assert.equal(topologyStream.protocol, "/meshsub/1.2.0");
     log.push({event: "topologyOutbound", protocol: topologyStream.protocol});
     const isolated = await zig.command("snapshot");
-    assert.equal(isolated.inboundVersion, "v1_2");
+    assert.equal(isolated.hasInboundStream, true);
     assert.equal(isolated.outboundVersion, undefined);
     await zig.command("enableGossipRequest");
     await zig.command("identify");

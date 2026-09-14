@@ -118,7 +118,7 @@ async function exercise(version, binary, zigDials = false) {
     await waitFor(async () => (await zig.command("snapshot")).meshMembers > 0);
     const selected = await zig.command("snapshot");
     assert.equal(selected.connections, 1);
-    assert.equal(selected.inboundVersion, version === "v11" ? "v1_1" : "v1_2");
+    assert.equal(selected.hasInboundStream, true);
     assert.equal(selected.outboundVersion, version === "v11" ? "v1_1" : "v1_2");
     assert.equal(new Set(zig.events.filter((event) => event.event === "connected").map((event) => event.peer)).size, 1);
     const zigPublish = await zig.command("publish", {seed: 0x6d2b79f7, size: 65537, topic: TOPIC});

@@ -53,14 +53,14 @@ pub fn build(b: *std.Build) void {
 
     const Fuzzer = struct {
         name: []const u8,
+        corpus_suffix: []const u8 = "cmin",
         extra_libs: []const *std.Build.Step.Compile = &.{},
         extra_args: []const []const u8 = &.{},
 
         /// Returns the corpus directory path for this fuzzer.
         /// Change the suffix to switch between -cmin and -initial.
         fn corpus(self: @This(), bb: *std.Build) []const u8 {
-            const suffix = if (std.mem.eql(u8, self.name, "network_reqresp") or std.mem.eql(u8, self.name, "network_gossip") or std.mem.eql(u8, self.name, "network_gossip_lifecycle") or std.mem.eql(u8, self.name, "network_managed") or std.mem.eql(u8, self.name, "network_identify") or std.mem.eql(u8, self.name, "network_topic_policy")) "initial" else "cmin";
-            return bb.fmt("corpus/{s}-{s}", .{ self.name, suffix });
+            return bb.fmt("corpus/{s}-{s}", .{ self.name, self.corpus_suffix });
         }
 
         fn source(self: @This(), bb: *std.Build) []const u8 {
@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) void {
         }
     };
 
-    const fuzzers = &[_]Fuzzer{
+    const base_fuzzers = &[_]Fuzzer{
         .{ .name = "ssz_basic" },
         .{ .name = "ssz_bitlist" },
         .{ .name = "ssz_bitvector" },
@@ -83,16 +83,31 @@ pub fn build(b: *std.Build) void {
         .{ .name = "bls_aggregate_pk", .extra_libs = &.{dep_blst.artifact("blst")} },
         .{ .name = "bls_aggregate_sig", .extra_libs = &.{dep_blst.artifact("blst")} },
         .{ .name = "discv5_wire" },
-        .{ .name = "network_wire" },
-        .{ .name = "network_managed" },
-        .{ .name = "network_identify" },
-        .{ .name = "network_topic_policy" },
-        .{ .name = "network_reqresp", .extra_libs = &.{dep_snappy.artifact("snappy")}, .extra_args = &.{ "-lc++", "-lc++abi", "-lunwind" } },
-        .{ .name = "network_gossip_lifecycle" },
-        .{ .name = "network_gossip", .extra_libs = &.{dep_snappy.artifact("snappy")}, .extra_args = &.{ "-lc++", "-lc++abi", "-lunwind" } },
     };
 
-    inline for (fuzzers) |fuzzer| {
+    var fuzzers: std.ArrayList(Fuzzer) = .empty;
+    fuzzers.appendSlice(b.allocator, base_fuzzers) catch @panic("out of memory");
+    const snappy_libs = [_]*std.Build.Step.Compile{dep_snappy.artifact("snappy")};
+    var rows = std.mem.tokenizeScalar(u8, @embedFile("network-targets.tsv"), '\n');
+    while (rows.next()) |row| {
+        var fields = std.mem.tokenizeAny(u8, row, " \t");
+        const name = fields.next().?;
+        const corpus = fields.next().?;
+        _ = std.fmt.parseInt(u32, fields.next().?, 10) catch @panic("invalid network fuzz input bound");
+        const link = fields.next().?;
+        std.debug.assert(fields.next() == null);
+        const snappy = std.mem.eql(u8, link, "snappy");
+        std.debug.assert(snappy or std.mem.eql(u8, link, "none"));
+        fuzzers.append(b.allocator, .{
+            .name = name,
+            .corpus_suffix = corpus,
+            .extra_libs = if (snappy) &snappy_libs else &.{},
+            .extra_args = if (snappy) &.{ "-lc++", "-lc++abi", "-lunwind" } else &.{},
+        }) catch @panic("out of memory");
+    }
+    const build_network = b.step("build-network", "Build every network harness from network-targets.tsv");
+
+    for (fuzzers.items) |fuzzer| {
         const run_step = b.step(
             b.fmt("run-{s}", .{fuzzer.name}),
             b.fmt("Run {s} with afl-fuzz", .{fuzzer.name}),
@@ -152,5 +167,6 @@ pub fn build(b: *std.Build) void {
             b.fmt("Build {s} AFL harness", .{fuzzer.name}),
         );
         build_step.dependOn(&install.step);
+        if (std.mem.startsWith(u8, fuzzer.name, "network_")) build_network.dependOn(&install.step);
     }
 }

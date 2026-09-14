@@ -7,11 +7,11 @@
     "@chainsafe/biomejs-config/esm"
   ],
   "files": {
-    "includes": ["bindings/**/*.ts", "test/interop/**/*.mjs"]
+    "includes": ["bindings/**/*.ts", "test/interop/**/*.mjs", "scripts/**/*.mjs"]
   },
   "overrides": [
     {
-      "includes": ["test/interop/**/*.mjs"],
+      "includes": ["test/interop/**/*.mjs", "scripts/**/*.mjs"],
       "linter": {
         "rules": {
           "suspicious": {
