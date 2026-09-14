@@ -484,6 +484,7 @@
         .fork_choice = .{ .root_module = .fork_choice },
         .clock = .{ .root_module = .clock },
         .beacon_node = .{ .root_module = .beacon_node },
+        .udp = .{ .root_module = .udp },
         .discv5 = .{ .root_module = .discv5 },
         .network_wire = .{ .root_module = .network_wire },
         .network = .{ .root_module = .network },

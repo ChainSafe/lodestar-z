@@ -55,6 +55,7 @@ export interface NativeForkEntry {
 }
 
 export interface NativeDiscoveryConfig {
+  /** IPv6 socket options use OS defaults; listener addresses and ports must not overlap. */
   bind: IpEndpoint | readonly IpEndpoint[];
   sequenceNumber: bigint;
   bootstrapEnrs: readonly Uint8Array[];
@@ -145,6 +146,7 @@ export interface NativeTopicBoundary {
 export interface NativeRuntimeConfig {
   profile: "small" | "beaconNode";
   identitySecretKey: Uint8Array;
+  /** IPv6 socket options use OS defaults; listener addresses and ports must not overlap. */
   bind: IpEndpoint | readonly IpEndpoint[];
   local: NativeLocalState;
   forkSchedule: NativeForkSchedule;
