@@ -130,17 +130,17 @@ test "dual-stack UDP shares one receive lease and services both families fairly"
     try std.testing.expectEqual(target.counters.sent_datagrams, target.counters.received_datagrams);
 }
 
-test "dual-stack UDP binds the same wildcard port and rolls back partial binding" {
+test "dual-stack UDP binds explicit addresses on the same port and rolls back partial binding" {
     const bindings: udp_mod.Bindings = blk: {
-        var ipv6 = try udp_mod.Udp.bind(std.testing.io, .{ .ip6 = .{ .bytes = @splat(0), .port = 0 } });
+        var ipv6 = try udp_mod.Udp.bind(std.testing.io, .{ .ip6 = .loopback(0) });
         defer ipv6.close(std.testing.io);
         const port = ipv6.localAddress().port();
         const pair: udp_mod.Bindings = .{ .dual = .{
-            .ip4 = .{ .bytes = @splat(0), .port = port },
-            .ip6 = .{ .bytes = @splat(0), .port = port },
+            .ip4 = .loopback(port),
+            .ip6 = .loopback(port),
         } };
         try std.testing.expectError(error.AddressInUse, udp_mod.Udp.bind(std.testing.io, pair));
-        var ipv4 = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .{ .bytes = @splat(0), .port = port } });
+        var ipv4 = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(port) });
         defer ipv4.close(std.testing.io);
         break :blk pair;
     };

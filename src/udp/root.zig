@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const net = std.Io.net;
 const assert = std.debug.assert;
 
@@ -28,29 +27,31 @@ pub const Bindings = union(enum) {
     }
 };
 
-pub const BindError = net.IpAddress.BindError || error{AccessDenied};
+pub const BindError = net.IpAddress.BindError;
 pub const ReceiveError = net.Socket.ReceiveTimeoutError;
 
-/// Owns at most one socket per address family.
+/// Owns at most one socket per configured address family. The caller serializes
+/// receives and close, and does not receive directly from the owned sockets.
 pub const Sockets = struct {
     values: [2]?net.Socket = .{ null, null },
     cursor: u1 = 0,
 
+    /// Uses the provider's IPv6 defaults. Overlapping wildcard binds may fail.
     pub fn bind(io: std.Io, addresses: Bindings) BindError!Sockets {
         var result: Sockets = .{};
         errdefer result.close(io);
         switch (addresses) {
             .ip4 => |ip| result.values[0] = try (net.IpAddress{ .ip4 = ip }).bind(io, .{ .mode = .dgram, .protocol = .udp }),
-            .ip6 => |ip| result.values[1] = try bind6(io, ip),
+            .ip6 => |ip| result.values[1] = try (net.IpAddress{ .ip6 = ip }).bind(io, .{ .mode = .dgram, .protocol = .udp }),
             .dual => |ips| {
                 result.values[0] = try (net.IpAddress{ .ip4 = ips.ip4 }).bind(io, .{ .mode = .dgram, .protocol = .udp });
-                result.values[1] = try bind6(io, ips.ip6);
+                result.values[1] = try (net.IpAddress{ .ip6 = ips.ip6 }).bind(io, .{ .mode = .dgram, .protocol = .udp });
             },
         }
         return result;
     }
 
-    /// Takes ownership. An IPv6 socket must have IPV6_V6ONLY enabled.
+    /// Takes ownership of a socket created by the same Io provider used for I/O and close.
     pub fn init(socket: net.Socket) Sockets {
         var result: Sockets = .{};
         result.values[index(socket.address)] = socket;
@@ -74,41 +75,35 @@ pub const Sockets = struct {
         return self.values[index(address)];
     }
 
-    pub fn handles(self: *const Sockets) [2]?i32 {
-        var result: [2]?i32 = .{ null, null };
+    pub fn handles(self: *const Sockets) [2]?net.Socket.Handle {
+        var result: [2]?net.Socket.Handle = .{ null, null };
         for (self.values, 0..) |socket, i| if (socket) |value| {
             result[i] = value.handle;
         };
         return result;
     }
 
+    /// Blocking on both sockets requires two units of Io concurrency. Ready reads
+    /// use no tasks. The returned data borrows buffer until the caller reuses it.
     pub fn receiveTimeout(self: *Sockets, io: std.Io, buffer: []u8, timeout: std.Io.Timeout) ReceiveError!net.IncomingMessage {
         if (self.values[0] == null or self.values[1] == null) return self.primary().receiveTimeout(io, buffer, timeout);
         const deadline = timeout.toDeadline(io);
         if (try self.receiveReady(io, buffer)) |message| return message;
         if (deadline.toDurationFromNow(io)) |duration| if (duration.raw.nanoseconds <= 0) return error.Timeout;
-        var storage: [2]std.Io.Operation.Storage = undefined;
-        var messages: [2]net.IncomingMessage = @splat(.init);
-        var probes: [2][1]u8 = undefined;
-        var batch: std.Io.Batch = .init(&storage);
-        defer batch.cancel(io);
-        // Peek leaves both datagrams queued, even if both waits complete before cancellation.
-        for (self.values, 0..) |socket, i| batch.addAt(@intCast(i), .{ .net_receive = .{
-            .socket_handle = socket.?.handle,
-            .message_buffer = messages[i .. i + 1],
-            .data_buffer = &probes[i],
-            .flags = .{ .peek = true },
-        } });
-        try batch.awaitConcurrent(io, deadline);
-        batch.cancel(io);
-        for (0..2) |_| {
-            const completion = batch.next() orelse break;
-            if (completion.result.net_receive[0]) |err| return err;
+        const Ready = union(enum) { ip4: ReceiveError!void, ip6: ReceiveError!void };
+        var completions: [2]Ready = undefined;
+        var select: std.Io.Select(Ready) = .init(io, &completions);
+        defer select.cancelDiscard();
+        try select.concurrent(.ip4, waitReadable, .{ io, self.values[0].?, deadline });
+        try select.concurrent(.ip6, waitReadable, .{ io, self.values[1].?, deadline });
+        switch (try select.await()) {
+            inline else => |result| try result,
         }
+        select.cancelDiscard();
         return (try self.receiveReady(io, buffer)) orelse error.Timeout;
     }
 
-    fn receiveReady(self: *Sockets, io: std.Io, buffer: []u8) ReceiveError!?net.IncomingMessage {
+    pub fn receiveReady(self: *Sockets, io: std.Io, buffer: []u8) ReceiveError!?net.IncomingMessage {
         for (0..2) |_| {
             const at = self.cursor;
             self.cursor +%= 1;
@@ -129,43 +124,16 @@ fn index(address: net.IpAddress) u1 {
     };
 }
 
-// Zig 0.16's Threaded.netBindIpPosix writes zero for ip6_only=true. Set V6ONLY
-// before bind so wildcard listeners can share a port independently of OS defaults.
-fn bind6(io: std.Io, ip: net.Ip6Address) BindError!net.Socket {
-    if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.OptionUnsupported;
-    try io.checkCancel();
-    const p = std.posix;
-    const flags = p.SOCK.DGRAM | if (builtin.os.tag == .linux) p.SOCK.CLOEXEC else 0;
-    const rc = p.system.socket(p.AF.INET6, flags, p.IPPROTO.UDP);
-    if (p.errno(rc) != .SUCCESS) return socketError(p.errno(rc));
-    const fd: p.fd_t = @intCast(rc);
-    errdefer _ = p.system.close(fd);
-    if (builtin.os.tag == .macos and std.c.fcntl(fd, p.F.SETFD, @as(c_int, p.FD_CLOEXEC)) < 0) return error.Unexpected;
-    const enabled: c_int = 1;
-    // Zig 0.16 omits Darwin IPV6 constants from std.posix.
-    const ipv6_only = if (builtin.os.tag == .macos) 27 else p.IPV6.V6ONLY;
-    if (p.errno(p.system.setsockopt(fd, p.IPPROTO.IPV6, ipv6_only, @ptrCast(&enabled), @sizeOf(c_int))) != .SUCCESS) return error.OptionUnsupported;
-    var address: p.sockaddr.in6 = .{ .port = std.mem.nativeToBig(u16, ip.port), .addr = ip.bytes, .flowinfo = ip.flow, .scope_id = ip.interface.index };
-    const bound = p.system.bind(fd, @ptrCast(&address), @sizeOf(@TypeOf(address)));
-    if (p.errno(bound) != .SUCCESS) return socketError(p.errno(bound));
-    var length: p.socklen_t = @sizeOf(@TypeOf(address));
-    if (p.errno(p.system.getsockname(fd, @ptrCast(&address), &length)) != .SUCCESS) return error.Unexpected;
-    assert(length == @sizeOf(@TypeOf(address)));
-    try io.checkCancel();
-    return .{ .handle = fd, .address = .{ .ip6 = .{ .bytes = address.addr, .port = std.mem.bigToNative(u16, address.port), .flow = address.flowinfo, .interface = .{ .index = address.scope_id } } } };
+fn waitReadable(io: std.Io, socket: net.Socket, timeout: std.Io.Timeout) ReceiveError!void {
+    var message: [1]net.IncomingMessage = .{.init};
+    var probe: [1]u8 = undefined;
+    // Both tasks may finish before cancellation. Peeking keeps every datagram in
+    // its socket until the serialized receiver lends the caller's buffer to it.
+    const failure, const count = socket.receiveManyTimeout(io, &message, &probe, .{ .peek = true }, timeout);
+    if (failure) |err| return err;
+    assert(count == 1);
 }
 
-fn socketError(err: std.posix.E) BindError {
-    return switch (err) {
-        .ACCES, .PERM => error.AccessDenied,
-        .ADDRINUSE => error.AddressInUse,
-        .ADDRNOTAVAIL => error.AddressUnavailable,
-        .AFNOSUPPORT => error.AddressFamilyUnsupported,
-        .PROTONOSUPPORT => error.ProtocolUnsupportedByAddressFamily,
-        .MFILE => error.ProcessFdQuotaExceeded,
-        .NFILE => error.SystemFdQuotaExceeded,
-        .NOBUFS, .NOMEM => error.SystemResources,
-        .NETDOWN => error.NetworkDown,
-        else => error.Unexpected,
-    };
+test {
+    _ = @import("root_test.zig");
 }
