@@ -47,7 +47,6 @@ const Schedule = struct {
     ping_due_ms: u64 = 0,
     retry_ms: u64 = 0,
     metadata_pending: bool = false,
-    desired_sequence: u64 = 0,
     closing: ?struct { reason: t.DisconnectReason, deadline_ms: u64, sent: bool = false } = null,
 };
 pub const Control = struct {
@@ -487,7 +486,6 @@ pub const Control = struct {
                 return;
             }
         }
-        row.desired_sequence = @max(row.desired_sequence, seq);
         row.metadata_pending = true;
     }
     pub fn events(
@@ -670,8 +668,8 @@ pub const Control = struct {
                     _ = self.disconnect(catalog, op.peer, op.conn, .invalid_metadata, now);
                     return;
                 };
-                if (catalog.updateMetadata(op.peer, op.conn, &metadata, now.mono_ms))
-                    row.metadata_pending = metadata.seq_number < row.desired_sequence;
+                _ = catalog.updateMetadata(op.peer, op.conn, &metadata, now.mono_ms);
+                row.metadata_pending = false;
             },
             else => {},
         }
@@ -698,9 +696,6 @@ pub const Control = struct {
                 if (op.protocol == .ping_v1 or op.protocol == .metadata_v1 or
                     op.protocol == .metadata_v2 or op.protocol == .metadata_v3)
                     row.ping_due_ms = now.mono_ms +| self.pingInterval(snapshot.direction);
-                if (row.metadata_pending and (op.protocol == .metadata_v1 or
-                    op.protocol == .metadata_v2 or op.protocol == .metadata_v3))
-                    row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
             },
             else => unreachable,
         }
@@ -748,15 +743,12 @@ fn decide(row: *const Schedule, relevant: bool, active_request: bool, now: u64) 
     const request_due = if (relevant and row.metadata_pending) 0 else @min(row.status_due_ms, row.ping_due_ms);
     decision.wake(@max(request_due, row.retry_ms), now);
     if (now < row.retry_ms) return decision;
-    const status_due = now >= row.status_due_ms;
-    decision.request = if (!relevant and status_due)
+    decision.request = if (now >= row.status_due_ms)
         .status
     else if (relevant and row.metadata_pending)
         .metadata
     else if (now >= row.ping_due_ms)
         .ping
-    else if (status_due)
-        .status
     else
         null;
     return decision;
