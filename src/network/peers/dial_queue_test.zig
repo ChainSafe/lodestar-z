@@ -215,7 +215,8 @@ test "peer dial queue bounded pressure generation exhaustion and zero output do 
     try std.testing.expect(q.isDirect(&first));
     _ = q.removeDirect(&first);
     try std.testing.expect(!q.isDirect(&first));
-    try std.testing.expect(q.remove(&first));
+    q.accepted(&first, .{ .index = 0, .generation = 1 }, 1);
+    try std.testing.expect(!q.rows[token.index].occupied);
     q.rows[token.index].generation = std.math.maxInt(u64);
     try std.testing.expectError(error.Capacity, q.enqueue(&third, &.{address}, false, 0));
 }
@@ -256,10 +257,6 @@ test "peer dial queue polling and failure without native owner preserve started 
     try std.testing.expectEqual(@as(usize, 0), q.poll(10_000, &out));
     try std.testing.expectEqualDeep(conn, q.rows[0].conn.?);
     try std.testing.expect(q.rows[0].attempt);
-    try std.testing.expect(!q.remove(&peer));
-    q.connection(&peer, true, 10_000);
-    try std.testing.expect(q.rows[0].connected);
-    try std.testing.expectEqualDeep(conn, q.rows[0].conn.?);
     q.accepted(&peer, .{ .index = 1, .generation = 0 }, 10_000);
     try std.testing.expectEqualDeep(conn, q.rows[0].conn.?);
     try std.testing.expect(q.rows[0].connected);
@@ -280,7 +277,7 @@ test "peer dial queue review cooldown cannot extend a lost acknowledgement lease
     var out: [1]mod.DialIntent = undefined;
     _ = q.poll(0, &out);
     const expired = out[0].token;
-    q.deferPeer(&peer, 1_800_000);
+    q.synchronize(&peerSnapshot(&peer, null), 0, 1_800_000);
     try std.testing.expectEqual(@as(?u64, 10_000), q.nextWakeup(0, 0));
     q.expire(null, 10_000);
     try std.testing.expect(!q.dialFailed(expired, 10_000));
@@ -687,12 +684,18 @@ test "peer retained attempt does not hide canonical connection closure" {
     try std.testing.expect(q.dialStarted(token, attempt));
     q.accepted(&peer, .{ .index = 1, .generation = 7 }, 10);
     try std.testing.expect(q.rows[0].connected);
-    var expected = q.rows[0];
-    expected.connected = false;
-    q.connection(&peer, false, 20);
-    try std.testing.expectEqualDeep(expected, q.rows[0]);
-    q.synchronize(&peerSnapshot(&peer, null), 20, null);
-    try std.testing.expectEqualDeep(expected, q.rows[0]);
+    const lease = q.rows[0].lease_expires_at_ms;
+    var snapshot = peerSnapshot(&peer, null);
+    snapshot.connected_at_ms = 10;
+    q.synchronize(&snapshot, 20, null);
+    try std.testing.expect(!q.rows[0].connected);
+    try std.testing.expect(q.rows[0].attempt);
+    try std.testing.expectEqual(attempt, q.rows[0].conn.?);
+    try std.testing.expectEqual(lease, q.rows[0].lease_expires_at_ms);
+    try std.testing.expectEqual(@as(u64, 1), q.counters.connection_backoffs);
+    const disconnected = q.rows[0];
+    q.synchronize(&snapshot, 20, null);
+    try std.testing.expectEqualDeep(disconnected, q.rows[0]);
     try std.testing.expect(!q.dialStarted(token, attempt));
     try std.testing.expect(!q.dialFailed(token, 20));
     try std.testing.expect(q.dialClosed(attempt, 30));
@@ -701,7 +704,7 @@ test "peer retained attempt does not hide canonical connection closure" {
     try std.testing.expect(q.rows[0].conn == null);
     try std.testing.expect(q.rows[0].direct);
     const due = q.nextWakeup(30, 1).?;
-    try std.testing.expect(due >= 1030 and due <= 2030);
+    try std.testing.expect(due >= 5020 and due <= 6020);
     try std.testing.expectEqual(@as(usize, 0), q.poll(due - 1, &intents));
     try std.testing.expectEqual(@as(usize, 1), q.poll(due, &intents));
     try std.testing.expectEqual(token.index, intents[0].token.index);
