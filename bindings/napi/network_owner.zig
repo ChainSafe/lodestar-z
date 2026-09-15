@@ -65,7 +65,7 @@ pub fn initialize(self: *Runtime) !void {
         .wait_mode = .native_poll,
         .host = &self.heavy.?.key,
         .bind = self.heavy.?.config.bind,
-        .configuration = try self.heavy.?.application.resolve(&self.heavy.?.config, seed),
+        .configuration = try self.heavy.?.application.buildRequest(&self.heavy.?.config, seed),
         .local = self.heavy.?.config.local,
         .schedule = self.heavy.?.config.schedule,
         .discovery = if (self.heavy.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.heavy.?.config.discovery_sequence, .advertisement = self.heavy.?.config.advertisement, .bootstrap = self.heavy.?.records[0..self.heavy.?.config.bootstrap_count] } else null,

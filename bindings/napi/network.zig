@@ -86,7 +86,7 @@ pub fn prepare(self: *@This(), config: js.Value, callback: js.Value) !js.Value {
 fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Config) !void {
     runtime.peer_capacity = app.resources.peerCapacity;
     runtime.max_peers = app.resources.maxPeers;
-    const resolved = try n.configuration.resolve(try app.resolve(&runtime.heavy.?.config, 1));
+    const resolved = try n.configuration.resolve(try app.buildRequest(&runtime.heavy.?.config, 1));
     const limits = resolved.core.service.reqresp;
     const request_capacity: usize = @min(32, limits.outbound_max - limits.outbound_control_reserved);
     const incoming_capacity: usize = @min(32, limits.inbound_max - limits.inbound_control_reserved);

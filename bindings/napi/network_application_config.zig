@@ -14,7 +14,7 @@ pub const Config = struct {
     version_len: u8,
     capabilities: n.capabilities.Directional,
 
-    pub fn resolve(self: *const Config, common: *const cfg.Config, seed: u64) !n.configuration.Request {
+    pub fn buildRequest(self: *const Config, common: *const cfg.Config, seed: u64) !n.configuration.Request {
         var base = try n.configuration.resolve(.{ .profile = common.profile, .seed = seed, .forks = common.forks[0..common.fork_count] });
         const r = &self.resources;
         if (r.nativeBudgetBytes <= @sizeOf(n.NetworkCore)) return error.NetworkNativeBudgetExceeded;
@@ -38,9 +38,7 @@ pub const Config = struct {
         base.core.service.router.capabilities = self.capabilities;
         base.core.service.identify.?.agent = self.agent[0..self.agent_len];
         base.core.service.identify.?.protocol_version = self.version[0..self.version_len];
-        const request: n.configuration.Request = .{ .profile = common.profile, .seed = seed, .forks = common.forks[0..common.fork_count], .limits = base.limits, .peers = base.core.peers, .dial = base.core.dial, .reqresp = base.core.service.reqresp, .gossip = base.core.service.gossipsub, .router = base.core.service.router, .identify = base.core.service.identify, .control = base.core.control, .byte_limit = r.nativeBudgetBytes - @sizeOf(n.NetworkCore) };
-        _ = try n.configuration.resolve(request);
-        return request;
+        return .{ .profile = common.profile, .seed = seed, .forks = common.forks[0..common.fork_count], .limits = base.limits, .peers = base.core.peers, .dial = base.core.dial, .reqresp = base.core.service.reqresp, .gossip = base.core.service.gossipsub, .router = base.core.service.router, .identify = base.core.service.identify, .control = base.core.control, .byte_limit = r.nativeBudgetBytes - @sizeOf(n.NetworkCore) };
     }
 };
 pub const Resources = struct {
@@ -149,7 +147,6 @@ pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
     out.version_len = @intCast(try text(try cfg.get(identify, "protocolVersion"), &out.version));
     out.capabilities = try capabilities(try cfg.get(value, "capabilities"));
     try validateCapabilities(out.capabilities, &common.local);
-    _ = try out.resolve(common, 1);
 }
 
 pub const Intent = struct {
