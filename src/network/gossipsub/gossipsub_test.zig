@@ -243,6 +243,8 @@ fn expectControlFloodBounded(control_tag: u8) !void {
     for (0..20) |_| try setup.pumpOnce();
     const peer = setup.server.gossipsub.inner.sessions.findPeer(setup.handles.server).?;
     const before = setup.server.gossipsub.inner.counters.rpcs_received;
+    const item: std.meta.Tag(@import("protobuf.zig").Item) = if (control_tag == 0x0a) .ihave else .idontwant;
+    const items_before = setup.server.gossipsub.inner.rpc_metrics.items[@intFromEnum(item)];
     const now = setup.pair.now.mono_ms;
     const controls_per_rpc = 4096;
     const io = &setup.server.gossipsub.inner.sessions.rows[peer].io;
@@ -263,7 +265,7 @@ fn expectControlFloodBounded(control_tag: u8) !void {
         }
         try std.testing.expectEqual(before + rpc_index + 1, setup.server.gossipsub.inner.counters.rpcs_received);
         try std.testing.expect(io.rpc == null);
-        try std.testing.expectEqual(@as(u16, controls_per_rpc), io.controls);
+        try std.testing.expectEqual(items_before + (rpc_index + 1) * controls_per_rpc, setup.server.gossipsub.inner.rpc_metrics.items[@intFromEnum(item)]);
         try std.testing.expectEqual(now, setup.pair.now.mono_ms);
     }
     try std.testing.expectEqual(before + 17, setup.server.gossipsub.inner.counters.rpcs_received);

@@ -30,12 +30,12 @@ test "gossipsub IHAVE security ignores unknown and unsubscribed topics through R
         protobuf.beginIhaveRpc(&writer, name, 1, constants.message_id_length);
         protobuf.writeIhaveId(&writer, &([_]u8{7} ** 20));
         const io = &g.sessions.rows[peer.index].io;
-        io.rpc = protobuf.RpcReader.init(writer.written());
-        io.rpc_had_control = false;
+        io.startRpc(writer.written());
         var items: usize = 128;
         var count: usize = 0;
         try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &.{}, &count, &items));
         try std.testing.expectEqual(@as(usize, @intFromBool(std.mem.eql(u8, name, subscribed))), g.recovery.len);
+        try std.testing.expect(!g.sessions.finishFrame(io));
     }
 }
 

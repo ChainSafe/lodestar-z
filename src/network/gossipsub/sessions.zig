@@ -78,7 +78,7 @@ pub const Sessions = struct {
     pub fn removePeer(self: *Sessions, index: u16) void {
         assert(index < self.rows.len);
         if (!self.rows[index].active) return;
-        assert(self.rows[index].io.large_slot == null and !self.rows[index].io.tx.pending());
+        assert(self.rows[index].io.large_slot == null and self.rows[index].io.rpc == null and !self.rows[index].io.tx.pending());
         self.setOutbound(index, .none);
         self.rows[index].active = false;
         self.rows[index].in_stream = null;
@@ -128,6 +128,7 @@ pub const Sessions = struct {
     }
 
     pub fn frameBody(self: *Sessions, io: *PeerIo) ?[]u8 {
+        assert(io.rpc == null);
         if (io.large_slot) |lease| return self.receive_pool.buffer(lease);
         const declared = io.reader.declaredLen() orelse return io.body;
         if (declared <= io.body.len) return io.body;
@@ -136,7 +137,8 @@ pub const Sessions = struct {
         return self.receive_pool.buffer(lease);
     }
 
-    pub fn releaseFrame(self: *Sessions, peer_io: *PeerIo) bool {
+    pub fn finishFrame(self: *Sessions, peer_io: *PeerIo) bool {
+        peer_io.finishFrame();
         if (peer_io.large_slot) |lease| {
             self.receive_pool.release(lease);
             peer_io.large_slot = null;
@@ -154,8 +156,11 @@ pub const Sessions = struct {
 
     pub fn resetRx(self: *Sessions, index: u16) bool {
         const io = &self.rows[index].io;
-        const released = self.releaseFrame(io);
-        io.resetRx();
+        const released = self.finishFrame(io);
+        io.unread_start = 0;
+        io.unread_end = 0;
+        io.fin_seen = false;
+        io.rx_ready = false;
         return released;
     }
 

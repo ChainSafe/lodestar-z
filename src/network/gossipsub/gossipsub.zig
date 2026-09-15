@@ -452,27 +452,20 @@ pub const Gossipsub = struct {
         if (!self.sessions.matches(session)) return .done;
         const now = turn.now;
         const index = session.index;
-        const io = &self.sessions.rows[index].io;
         if (self.sessions.rows[index].outbound == .closing) return .done;
         switch (item) {
             .subscription => |sub| {
-                if (io.subscriptions < constants.max_subscriptions_per_rpc) {
-                    if (self.options.observe_subscriptions and self.validTopic(sub.topic) and self.overlay.findTopic(sub.topic) != null and (turn.count == turn.events.len or turn.arena.len - turn.used < sub.topic.len)) {
-                        return .events;
-                    }
-                    self.onSubscription(index, sub, turn);
-                    io.subscriptions += 1;
+                if (self.options.observe_subscriptions and self.validTopic(sub.topic) and self.overlay.findTopic(sub.topic) != null and (turn.count == turn.events.len or turn.arena.len - turn.used < sub.topic.len)) {
+                    return .events;
                 }
+                self.onSubscription(index, sub, turn);
             },
             .message => |msg| {
-                if (io.messages < constants.max_publish_per_rpc) {
-                    const result = self.onMessage(index, msg, turn, peer);
-                    if (result != .done) return result;
-                    io.messages += 1;
-                }
+                const result = self.onMessage(index, msg, turn, peer);
+                if (result != .done) return result;
             },
             else => {
-                if (self.sessions.rows[index].outStream() != null and io.controls < constants.max_control_per_rpc) {
+                if (self.sessions.rows[index].outStream() != null) {
                     switch (item) {
                         .ihave => |ihave| {
                             const workspace = turn.workspace(peer);
@@ -485,7 +478,6 @@ pub const Gossipsub = struct {
                         .idontwant => |ids| self.onIdontwant(index, ids),
                         else => unreachable,
                     }
-                    io.controls += 1;
                 }
             },
         }
