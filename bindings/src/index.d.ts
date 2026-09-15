@@ -45,8 +45,8 @@ interface ExecutionPayloadHeader {
   blockHash: Uint8Array;
   transactionsRoot: Uint8Array;
   withdrawalsRoot?: Uint8Array; // capella+
-  blobGasUsed?: number; // deneb+
-  excessBlobGas?: number; // deneb+
+  blobGasUsed?: bigint; // deneb+
+  excessBlobGas?: bigint; // deneb+
 }
 
 /*
@@ -56,6 +56,7 @@ interface ExecutionPayloadHeader {
  */
 interface BeaconBlockLike {
   body: {
+    randaoReveal: Uint8Array;
     executionPayload?: {
       parentHash: Uint8Array;
       feeRecipient: Uint8Array;
@@ -197,8 +198,12 @@ export type VoluntaryExitValidity =
 
 export declare class BeaconStateView {
   /** Requires state bytes with trusted provenance; SSZ decoding does not authenticate them. */
-  static createFromBytes(bytes: Uint8Array): BeaconStateView;
+  static createFromBytes(bytes: Uint8Array, setup?: StateTransition): BeaconStateView;
 
+  /**
+   * Idempotently release this view. Subsequent state access throws InvalidState.
+   * An already-running native call retains its resources until that call returns.
+   */
   release(): void;
   slot: number;
   fork: Fork;
@@ -261,8 +266,8 @@ export declare class BeaconStateView {
   getPreviousShuffling(): EpochShuffling;
   getCurrentShuffling(): EpochShuffling;
   getNextShuffling(): EpochShuffling;
-  getBeaconCommittee(): number[];
-  getBeaconCommitteeCountPerSlot(): number;
+  getBeaconCommittee(slot: number, index: number): number[];
+  getBeaconCommitteeCountPerSlot(epoch: number): number;
   previousDecisionRoot: string;
   currentDecisionRoot: string;
   nextDecisionRoot: string;
@@ -345,7 +350,7 @@ export declare class BeaconStateView {
     processedValidatorSweepCount: number;
   };
 
-  /** On phase0, serialize this call with other STF operations and cache teardown across workers. */
+  /** On phase0, serialize this call with other STF operations and cache teardown within this thread. */
   computeUnrealizedCheckpoints(): {
     justifiedCheckpoint: Checkpoint;
     finalizedCheckpoint: Checkpoint;
@@ -380,10 +385,15 @@ export declare class BeaconStateView {
   hashTreeRoot(): Uint8Array;
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
-  /** Serialize this call with other STF operations and cache teardown across workers. */
+  /** Serialize this call with other STF operations and cache teardown within this thread. */
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
-  /** Serialize this call with other STF operations and cache teardown across workers. */
+  /** Serialize this call with other STF operations and cache teardown within this thread. */
   stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
+}
+
+export declare class StateTransition {
+  constructor(chainConfig: object, genesisValidatorsRoot: Uint8Array);
+  createFromBytes(bytes: Uint8Array): BeaconStateView;
 }
 
 declare const bindings: {
@@ -391,16 +401,17 @@ declare const bindings: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
   stateTransition: {
-    /** Callers must exclude STF operations across all workers until teardown returns. */
+    /** Callers must exclude STF operations in this thread until teardown returns. */
     deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
-    init: () => void;
+    init: (options?: {historical?: boolean}) => void;
     scrapeMetrics: () => string;
     registerLocalValidator: (index: number) => void;
     unregisterLocalValidator: (index: number) => void;
   };
   BeaconStateView: typeof BeaconStateView;
+  StateTransition: typeof StateTransition;
 };
 
 export default bindings;

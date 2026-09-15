@@ -5,12 +5,12 @@ const m = @import("metrics");
 const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
 
 /// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
-pub var state_transition = m.initializeNoop(Metrics);
+pub threadlocal var state_transition = m.initializeNoop(Metrics);
 
 /// Validator monitor metrics.
 ///
 /// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
-pub var validator_monitor = m.initializeNoop(ValidatorMonitorMetrics);
+pub threadlocal var validator_monitor = m.initializeNoop(ValidatorMonitorMetrics);
 
 pub const StateCloneSource = enum {
     state_transition,
@@ -91,6 +91,7 @@ const Metrics = struct {
         self.epoch_transition_step.deinit();
         self.state_hash_tree_root.deinit();
         self.proposer_rewards.deinit();
+        self.* = m.initializeNoop(Metrics);
     }
 };
 
