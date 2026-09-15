@@ -6,9 +6,18 @@ import {status2} from "./managed_wire.mjs";
 import {stockPackages} from "./stock_packages.mjs";
 
 const hostRoot = process.argv[3];
-assert(hostRoot, "pass the pinned Lodestar host root as the second argument");
+assert(hostRoot, "pass installed or the pinned Lodestar host root as the second argument");
 const {load, version} = stockPackages(hostRoot);
-const packages = ["libp2p", "@libp2p/identify", "@libp2p/gossipsub", "@libp2p/crypto", "@chainsafe/libp2p-quic"];
+const packages = [
+  "libp2p",
+  "@libp2p/identify",
+  "@libp2p/gossipsub",
+  "@libp2p/crypto",
+  "@libp2p/peer-id",
+  "@chainsafe/libp2p-quic",
+  "@multiformats/multiaddr",
+  "snappy",
+];
 const versions = Object.fromEntries(await Promise.all(packages.map(async (name) => [name, await version(name)])));
 const {createLibp2p} = await load("libp2p");
 const {identify} = await load("@libp2p/identify");
@@ -173,4 +182,10 @@ async function exercise(nativeDials) {
 }
 const outcomes = [];
 for (const nativeDials of [false, true]) outcomes.push(await exercise(nativeDials));
-console.log(JSON.stringify({hostRoot: resolve(hostRoot), ok: true, outcomes, versions}, null, 2));
+console.log(
+  JSON.stringify(
+    {hostRoot: hostRoot === "installed" ? hostRoot : resolve(hostRoot), ok: true, outcomes, versions},
+    null,
+    2
+  )
+);

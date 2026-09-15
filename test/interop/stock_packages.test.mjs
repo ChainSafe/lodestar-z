@@ -15,13 +15,17 @@ test("installed stock fixture resolves pinned peers and the Lodestar response de
     ["libp2p", "createLibp2p"],
     ["@chainsafe/libp2p-quic", "quic"],
     ["@libp2p/crypto/keys", "privateKeyFromRaw"],
+    ["@libp2p/crypto/keys", "publicKeyFromProtobuf"],
     ["@libp2p/identify", "identify"],
+    ["@libp2p/peer-id", "peerIdFromPublicKey"],
     ["@libp2p/gossipsub", "gossipsub"],
     ["@multiformats/multiaddr", "multiaddr"],
     ["snappy", "compressSync"],
+    ["snappy", "uncompressSync"],
   ]) {
     assert.equal(typeof (await packages.load(name))[exported], "function", `${name} ${exported}`);
   }
+  assert.equal((await packages.load("@libp2p/gossipsub")).StrictNoSign, "StrictNoSign");
   assert.equal(typeof (await packages.responseDecoder()).responseDecode, "function");
 });
 

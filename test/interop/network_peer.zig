@@ -180,6 +180,13 @@ pub const Peer = struct {
             }
             try self.service.router.validateCapabilities(active);
             self.service.router.setCapabilities(active);
+            if (std.mem.eql(u8, c.op, "enableGossipRequest")) {
+                const sessions = self.service.gossipsub.inner.sessions;
+                // Restoring capabilities does not retry a previously refused outbound stream.
+                for (sessions.rows, 0..) |*session, index| {
+                    if (session.active and session.outbound == .none) sessions.setOutbound(@intCast(index), .pending);
+                }
+            }
         } else if (std.mem.eql(u8, c.op, "identify")) {
             if (!self.status_accepted) return error.StatusRequired;
             const conn = self.conn orelse return error.NoConnection;
@@ -229,8 +236,9 @@ pub const Peer = struct {
             if (turns > 1024) return error.TurnBound;
             for (0..turns) |_| try self.pump();
         } else if (std.mem.eql(u8, c.op, "respond")) {
-            self.response_size = c.size orelse max_payload;
-            if (self.response_size > max_payload) return error.MessageTooLarge;
+            const size = c.size orelse max_payload;
+            if (size > max_payload) return error.MessageTooLarge;
+            self.response_size = size;
             self.response_seed = c.seed orelse 0x6d2b79f5;
         } else if (std.mem.eql(u8, c.op, "disconnect")) {
             if (self.conn) |conn| {

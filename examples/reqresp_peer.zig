@@ -122,6 +122,45 @@ fn parseStatus(bytes: []const u8) !StatusV2.Type {
     return status;
 }
 
+test "Status default start slot checks epoch bounds before updating peer state" {
+    const last_epoch = std.math.maxInt(u64) / slots_per_epoch;
+    inline for (.{ Protocol.status_v1, Protocol.status_v2 }) |protocol| {
+        var session: Session = .{
+            .allocator = std.testing.allocator,
+            .options = .{ .target = "" },
+            .engine = undefined,
+            .svc = undefined,
+            .conn = undefined,
+            .sink = &.{},
+            .current = protocol,
+        };
+        var status = std.mem.zeroes(StatusV2.Type);
+        var bytes: [StatusV2.fixed_size]u8 = undefined;
+        const wire = bytes[0..protocol.info().response_max];
+        for ([_]u64{ 0, 1, last_epoch }) |epoch| {
+            session.options.start_slot = null;
+            status.finalized_epoch = epoch;
+            _ = StatusV2.serializeIntoBytes(&status, &bytes);
+            try session.onChunk(wire, null);
+            try std.testing.expectEqual(epoch * slots_per_epoch, session.options.start_slot.?);
+            try std.testing.expectEqual(epoch, session.peer_status.?.finalized_epoch);
+        }
+        const accepted = session.peer_status.?;
+        for ([_]u64{ last_epoch + 1, std.math.maxInt(u64) }) |epoch| {
+            session.options.start_slot = null;
+            status.finalized_epoch = epoch;
+            _ = StatusV2.serializeIntoBytes(&status, &bytes);
+            try std.testing.expectError(error.InvalidPeerStatus, session.onChunk(wire, null));
+            try std.testing.expectEqual(null, session.options.start_slot);
+            try std.testing.expectEqualDeep(accepted, session.peer_status.?);
+        }
+        session.options.start_slot = 17;
+        try session.onChunk(wire, null);
+        try std.testing.expectEqual(@as(?u64, 17), session.options.start_slot);
+        try std.testing.expectEqual(std.math.maxInt(u64), session.peer_status.?.finalized_epoch);
+    }
+}
+
 fn printStatus(status: *const StatusV2.Type) void {
     std.debug.print("peer status digest=0x{s} finalized={d}/0x{s} head={d}/0x{s} earliest={d}\n", .{
         &hex(status.fork_digest),
@@ -207,11 +246,10 @@ const Session = struct {
         switch (current) {
             .status_v1, .status_v2 => {
                 const status = try parseStatus(bytes);
+                const start_slot = self.options.start_slot orelse std.math.mul(u64, status.finalized_epoch, slots_per_epoch) catch return error.InvalidPeerStatus;
                 self.peer_status = status;
+                self.options.start_slot = start_slot;
                 printStatus(&status);
-                if (self.options.start_slot == null) {
-                    self.options.start_slot = status.finalized_epoch * slots_per_epoch;
-                }
             },
             .ping_v1 => {
                 std.debug.print("pong seq={d}\n", .{std.mem.readInt(u64, bytes[0..8], .little)});

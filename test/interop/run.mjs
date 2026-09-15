@@ -79,6 +79,7 @@ async function exercise(version, binary, zigDials = false) {
     const zigPing = zig.events.find((event) => event.event === "chunk" && event.length === 8);
     assert.equal(zigPing.sha256, jsPing.sha256);
     if (version === "v12") {
+      await assert.rejects(zig.command("respond", {seed: 1, size: MAX + 1}), /MessageTooLarge/);
       const zigFinBefore = (await zig.command("snapshot")).finishCalls;
       await zig.command("holdFin", {paused: true});
       let jsLarge;
