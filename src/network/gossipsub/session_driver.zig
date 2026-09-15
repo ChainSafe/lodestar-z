@@ -337,10 +337,7 @@ pub const Driver = struct {
                     return;
                 };
                 if (done != .done) return;
-                io.rpc = null;
-                io.frame_since = null;
-                io.pressure_since = null;
-                if (self.inner.sessions.releaseFrame(io)) self.inner.wakeStorage();
+                if (self.inner.sessions.finishFrame(io)) self.inner.wakeStorage();
             }
             if (io.unread_start < io.unread_end) {
                 if (peer.input == 0 or turn.budget.input == 0) return;
@@ -481,21 +478,22 @@ pub const Driver = struct {
     pub fn processRpc(self: *const Driver, index: u16, turn: *Turn, peer: *Credits) protobuf.Error!Progress {
         const now = turn.now;
         const io = &self.inner.sessions.rows[index].io;
+        const rpc = &io.rpc.?;
         if (self.inner.ignoreRpc(index, now)) return .done;
         for (0..self.inner.options.items_per_peer) |_| {
             if (peer.items == 0 or turn.budget.items == 0) return .credits;
             peer.items -= 1;
             turn.budget.items -= 1;
-            if (io.item == null) {
+            if (rpc.item == null) {
                 const available = @min(turn.budget.fields, peer.fields);
                 var fields = available;
-                const step = try io.rpc.?.step(&fields);
+                const step = try rpc.reader.step(&fields);
                 turn.budget.fields -= available - fields;
                 peer.fields -= available - fields;
                 switch (step) {
                     .item => |item| {
-                        io.item = item;
-                        self.inner.rpc_metrics.observeItem(item, &io.rpc_had_control);
+                        rpc.item = item;
+                        self.inner.rpc_metrics.observeItem(item, &rpc.had_control);
                         if (item == .message) self.inner.topic_metrics.get(item.message.topic).prevalidation +|= 1;
                     },
                     .end => return .done,
@@ -503,14 +501,14 @@ pub const Driver = struct {
                     .skipped => continue,
                 }
             }
-            const result = self.inner.receiveItem(self.inner.sessions.ref(index), io.item.?, turn, peer);
+            const result = if (rpc.permitsItem()) self.inner.receiveItem(self.inner.sessions.ref(index), rpc.item.?, turn, peer) else .done;
             switch (result) {
                 .events => self.inner.pressure(index, .events, now.mono_ms),
                 .storage => self.inner.pressure(index, .storage, now.mono_ms),
                 .done, .credits => {},
             }
             if (result != .done) return result;
-            io.item = null;
+            rpc.consumeItem();
             io.pressure_since = null;
         }
         return .credits;

@@ -33,7 +33,7 @@ test "gossip turn separates credit exhaustion from host pressure and preserves e
         protobuf.writeMessage(&writer, compressed[0..len], name);
     }
     const io = &g.sessions.rows[session.index].io;
-    io.rpc = protobuf.RpcReader.init(writer.written());
+    io.startRpc(writer.written());
     const driver = @import("test_support.zig").driver(&g);
     var events: [2]Event = undefined;
     var turn = g.beginPump(.{ .mono_ms = 1, .unix_s = 0 }, &events);
@@ -89,7 +89,7 @@ test "gossipsub metrics count a deferred RPC item only once" {
     var bytes: [256]u8 = undefined;
     var writer = protobuf.Writer.init(&bytes);
     protobuf.writeMessage(&writer, compressed[0..n], name);
-    g.sessions.rows[peer.index].io.rpc = protobuf.RpcReader.init(writer.written());
+    g.sessions.rows[peer.index].io.startRpc(writer.written());
     var count: usize = 0;
     var items: usize = 128;
     for (0..2) |_| try std.testing.expect(!try @import("test_support.zig").processRpc(&g, peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &.{}, &count, &items));
@@ -363,15 +363,14 @@ test "gossipsub rotates the legal atomic allowance past a duplicate flood" {
     g.sessions.rows[first.index].io.rx_ready = true;
     g.sessions.rows[second.index].in_stream = stream2;
     g.sessions.rows[second.index].io.rx_ready = true;
-    g.sessions.rows[first.index].io.rpc = protobuf.RpcReader.init(w1.written());
-    g.sessions.rows[second.index].io.rpc = protobuf.RpcReader.init(w2.written());
+    g.sessions.rows[first.index].io.startRpc(w1.written());
+    g.sessions.rows[second.index].io.startRpc(w2.written());
     var events: [2]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now, &events));
     try std.testing.expectEqualStrings("one", events[0].message.bytes);
     g.sessions.rows[first.index].in_stream = stream1;
     g.sessions.rows[first.index].io.rx_ready = true;
-    g.sessions.rows[first.index].io.rx_ready = true;
-    g.sessions.rows[first.index].io.rpc = protobuf.RpcReader.init(w1.written());
+    g.sessions.rows[first.index].io.startRpc(w1.written());
     try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), @import("test_support.zig").driver(&g).nextIoWakeup(pair.now, 2));
     try std.testing.expectEqual(@as(usize, 1), @import("test_support.zig").pump(&g, &pair.server, pair.now, &events));
     try std.testing.expectEqualStrings("two", events[0].message.bytes);
@@ -429,7 +428,7 @@ test "gossip independent RPC enumerates every receive split through admission" {
         g.last_now_ms = now.mono_ms;
         g.messages.validation.expire(&g.messages.store, &g.peers, now.mono_ms);
         const io = &g.sessions.rows[peer.index].io;
-        io.resetRx();
+        try std.testing.expect(!g.sessions.resetRx(peer.index));
         var events: [2]Event = undefined;
         var count: usize = 0;
         var consumed: usize = 0;
@@ -444,8 +443,7 @@ test "gossip independent RPC enumerates every receive split through admission" {
                 if (result.complete) {
                     try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, now, &events, &count, &items));
                     try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, now, &events, &count, &items));
-                    io.rpc = null;
-                    io.frame_since = null;
+                    try std.testing.expect(!g.sessions.finishFrame(io));
                 }
             }
         }
@@ -455,7 +453,7 @@ test "gossip independent RPC enumerates every receive split through admission" {
             try std.testing.expectEqualSlices(u8, &expected[i], event.message.bytes);
             try std.testing.expect(g.report(event.message.handle, .ignore, now) == .applied);
         }
-        try std.testing.expect(io.rpc == null and io.item == null and io.reader.declaredLen() == null);
+        try std.testing.expect(io.rpc == null and io.reader.declaredLen() == null);
         try std.testing.expectEqual(io.unread_end, io.unread_start);
         const snapshot = g.resourceSnapshot();
         try std.testing.expectEqual(@as(usize, 0), snapshot.pending_validations);
@@ -705,7 +703,7 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     const id: MessageId = @splat(7);
     for (0..128) |_| protobuf.writeIhaveId(&writer, &id);
     const io = &g.sessions.rows[session.index].io;
-    io.rpc = protobuf.RpcReader.init(writer.written());
+    io.startRpc(writer.written());
     const driver = support.driver(&g);
     var turn = @import("turn.zig").Turn.init(&g.options, .{ .mono_ms = 1, .unix_s = 0 }, &.{}, &.{}, &.{});
     var peer = Credits.peer(&g.options);
@@ -713,13 +711,13 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     for (0..2) |_| {
         try std.testing.expectEqual(Progress.credits, try driver.processRpc(session.index, &turn, &peer));
         try std.testing.expectEqual(@as(u16, 0), io.ihave_recv);
-        try std.testing.expectEqual(@as(u16, 0), io.controls);
+        try std.testing.expectEqual(@as(u16, 0), io.rpc.?.controls);
         try std.testing.expectEqual(@as(usize, 0), g.recovery.len);
         try std.testing.expectEqual(@as(u64, 0), g.topic_metrics.get(name).ihave_ids);
         try std.testing.expect(!turn.large_used);
     }
     try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.items[@intFromEnum(std.meta.Tag(protobuf.Item).ihave)]);
-    const cost = g.ihaveWork(io.item.?.ihave.body.len);
+    const cost = g.ihaveWork(io.rpc.?.item.?.ihave.body.len);
     try std.testing.expect(cost > writer.len);
     turn.budget.work = cost;
     peer.work = cost - 1;
@@ -731,11 +729,12 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
     try std.testing.expectEqual(@as(usize, 0), turn.budget.work);
     try std.testing.expectEqual(@as(usize, 0), peer.work);
     try std.testing.expectEqual(@as(u16, 1), io.ihave_recv);
-    try std.testing.expectEqual(@as(u16, 1), io.controls);
+    try std.testing.expectEqual(@as(u16, 1), io.rpc.?.controls);
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
     try std.testing.expectEqual(@as(u64, 128), g.topic_metrics.get(name).ihave_ids);
     try std.testing.expectEqual(@as(u64, 1), g.topic_metrics.get(name).ihave_unseen);
-    io.rpc = protobuf.RpcReader.init(writer.written());
+    try std.testing.expect(!g.sessions.finishFrame(io));
+    io.startRpc(writer.written());
     turn = @import("turn.zig").Turn.init(&g.options, turn.now, &.{}, &.{}, &.{});
     peer = Credits.peer(&g.options);
     try std.testing.expectEqual(Progress.done, try driver.processRpc(session.index, &turn, &peer));
@@ -766,7 +765,7 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     protobuf.beginIhaveRpc(&writer, name, 1, constants.message_id_length);
     protobuf.writeIhaveId(&writer, &id);
     const io = &g.sessions.rows[session.index].io;
-    io.rpc = protobuf.RpcReader.init(writer.written());
+    io.startRpc(writer.written());
     const driver = support.driver(&g);
     var events: [1]Event = undefined;
     var scratch: [64]u8 = undefined;

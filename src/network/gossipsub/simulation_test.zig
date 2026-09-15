@@ -64,10 +64,7 @@ const Node = struct {
             .subscription_change => {},
         };
         if (done) {
-            io.rpc = null;
-            io.frame_since = null;
-            io.pressure_since = null;
-            if (self.core.sessions.releaseFrame(io)) self.core.wakeStorage();
+            if (self.core.sessions.finishFrame(io)) self.core.wakeStorage();
         }
     }
 
