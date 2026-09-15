@@ -5,7 +5,7 @@ const hexToBytes = @import("hex").hexToBytes;
 const bytesToHex = @import("hex").bytesToHex;
 const hexByteLen = @import("hex").hexByteLen;
 const hexLenFromBytes = @import("hex").hexLenFromBytes;
-const merkleize = @import("hashing").merkleize;
+const MerkleAccumulator = @import("hashing").MerkleAccumulator;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const getZeroHash = @import("hashing").getZeroHash;
@@ -275,14 +275,23 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             return (value.bit_len + 255) / 256;
         }
 
-        pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            const chunks = try allocator.alloc([32]u8, (chunkCount(value) + 1) / 2 * 2);
-            defer allocator.free(chunks);
+        pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
+            const data = value.data.items;
+            std.debug.assert(value.bit_len <= limit);
+            std.debug.assert(data.len == (std.math.divCeil(usize, value.bit_len, 8) catch unreachable));
 
-            @memset(chunks, [_]u8{0} ** 32);
-            @memcpy(@as([]u8, @ptrCast(chunks))[0..value.data.items.len], value.data.items);
-
-            try merkleize(@ptrCast(chunks), chunk_depth, out);
+            const full_chunk_count = data.len / 32;
+            var accumulator = MerkleAccumulator.init(chunk_depth);
+            for (0..full_chunk_count) |i| {
+                try accumulator.append(data[i * 32 ..][0..32]);
+            }
+            const tail = data[full_chunk_count * 32 ..];
+            if (tail.len != 0) {
+                var chunk: [32]u8 = @splat(0);
+                @memcpy(chunk[0..tail.len], tail);
+                try accumulator.append(&chunk);
+            }
+            try accumulator.finish(out);
             mixInLength(value.bit_len, out);
         }
 
@@ -394,23 +403,25 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                 return (try parse(data)).bit_len;
             }
 
-            pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
+            pub fn hashTreeRoot(_: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 const parsed = try parse(data);
-                const chunk_count = (parsed.bit_len + 255) / 256;
-                const chunks = try allocator.alloc([32]u8, (chunk_count + 1) / 2 * 2);
-                defer allocator.free(chunks);
-
-                @memset(chunks, [_]u8{0} ** 32);
-                if (parsed.bit_len % 8 == 0) {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0 .. data.len - 1], data[0 .. data.len - 1]);
-                } else {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0..data.len], data);
-                    // remove padding bit
-                    @as([]u8, @ptrCast(chunks))[data.len - 1] ^=
-                        @as(u8, 1) << parsed.padding_bit_index;
+                // A 32-byte final chunk can still contain the delimiter.
+                const full_chunk_count = parsed.bit_len / 256;
+                var accumulator = MerkleAccumulator.init(chunk_depth);
+                for (0..full_chunk_count) |i| {
+                    try accumulator.append(data[i * 32 ..][0..32]);
                 }
-
-                try merkleize(@ptrCast(chunks), chunk_depth, out);
+                const tail_bit_len = parsed.bit_len % 256;
+                if (tail_bit_len != 0) {
+                    var chunk: [32]u8 = @splat(0);
+                    const tail_byte_len = (tail_bit_len + 7) / 8;
+                    @memcpy(chunk[0..tail_byte_len], data[full_chunk_count * 32 ..][0..tail_byte_len]);
+                    if (tail_bit_len % 8 != 0) {
+                        chunk[tail_byte_len - 1] ^= @as(u8, 1) << parsed.padding_bit_index;
+                    }
+                    try accumulator.append(&chunk);
+                }
+                try accumulator.finish(out);
                 mixInLength(parsed.bit_len, out);
             }
         };
