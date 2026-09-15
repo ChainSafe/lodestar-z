@@ -4,7 +4,7 @@ import {quic} from "@chainsafe/libp2p-quic";
 import {multiaddr} from "@multiformats/multiaddr";
 import {createLibp2p} from "libp2p";
 import {Child} from "./child.mjs";
-import {encodePayload, readPayload, sendFragments} from "./codec.mjs";
+import {encodePayload, payload, readPayload, sendFragments, summary} from "./codec.mjs";
 import {stockPackages} from "./stock_packages.mjs";
 
 test("installed stock fixture resolves pinned peers and the Lodestar response decoder", async () => {
@@ -27,6 +27,65 @@ test("installed stock fixture resolves pinned peers and the Lodestar response de
   }
   assert.equal((await packages.load("@libp2p/gossipsub")).StrictNoSign, "StrictNoSign");
   assert.equal(typeof (await packages.responseDecoder()).responseDecode, "function");
+});
+
+test("rejected stock scenarios preserve subsequent response bytes, context and count", async () => {
+  const peer = new Child("stock-scenario", process.execPath, ["test/interop/request_responder.mjs", "installed"]);
+  let client;
+  try {
+    client = await createLibp2p({transports: [quic()]});
+    const ready = await peer.command("ready");
+    const expected = {count: 2, digest: "05060708", length: 2048, scenario: "chunks"};
+    await peer.command("scenario", expected);
+    const {responseDecode} = await stockPackages("installed").responseDecoder();
+    for (const rejected of [
+      {count: 0, length: -1, scenario: "empty"},
+      {count: 5, length: 1024, scenario: "chunks"},
+      {count: 1.5, scenario: "peer-error"},
+      {count: 1, digest: "0102", scenario: "chunks"},
+    ]) {
+      await assert.rejects(peer.command("scenario", rejected), /AssertionError/);
+      const signal = AbortSignal.timeout(5000);
+      const stream = await client.dialProtocol(
+        multiaddr(ready.address),
+        "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
+        {signal}
+      );
+      const abort = () => stream.abort(signal.reason);
+      signal.addEventListener("abort", abort, {once: true});
+      try {
+        await sendFragments(stream, encodePayload(Buffer.alloc(32)), signal);
+        await stream.close({signal});
+        const chunks = [];
+        const protocol = {
+          contextBytes: {
+            config: {
+              forkDigest2ForkBoundary(bytes) {
+                assert.equal(Buffer.from(bytes).toString("hex"), expected.digest);
+                return {fork: "deneb"};
+              },
+            },
+            type: 1,
+          },
+          encoding: "ssz_snappy",
+          responseSizes: () => ({maxSize: expected.length, minSize: expected.length}),
+          version: 2,
+        };
+        for await (const chunk of responseDecode(protocol, stream, {signal})) {
+          assert(chunks.length < expected.count);
+          chunks.push(summary(chunk.data));
+        }
+        assert.deepEqual(chunks, [summary(payload(expected.length, 71)), summary(payload(expected.length, 72))]);
+      } finally {
+        signal.removeEventListener("abort", abort);
+        stream.abort(Error("fixture scenario check finished"));
+      }
+    }
+  } finally {
+    await Promise.allSettled([client?.stop(), peer.stop()]).then((results) => {
+      for (const result of results) if (result.status === "rejected") throw result.reason;
+    });
+  }
 });
 
 for (const mode of ["", "gossip"]) {
