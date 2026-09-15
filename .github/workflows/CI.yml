@@ -145,6 +145,7 @@ jobs:
           node --test test/interop/*.test.mjs
           pnpm test:network-interop
           pnpm test:network-managed-interop
+          pnpm test:network-identify-interop
 
   network-bindings-lifecycle:
     name: Network bindings lifecycle (${{ matrix.preset }})
@@ -174,6 +175,7 @@ jobs:
           node --test test/interop/stock_packages.test.mjs
       - name: Build instrumented bindings and independent native peer
         run: |
+          zig build test:reqresp_peer_bounds -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
           zig build test:network_runtime -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
           zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -Dnetwork_runtime_options.network_runtime_test_failures=true
           zig build build-exe:network_interop_peer -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}

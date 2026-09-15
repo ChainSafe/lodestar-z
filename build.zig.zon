@@ -460,6 +460,12 @@
         },
     },
     .tests = .{
+        .reqresp_peer_bounds = .{
+            .root_module = .{
+                .root_source_file = "examples/reqresp_peer.zig",
+                .imports = .{ .network, .consensus_types, .config, .constants, .fork_types, .preset },
+            },
+        },
         .network_runtime = .{
             .root_module = .{
                 .root_source_file = "bindings/napi/network_runtime.zig",
