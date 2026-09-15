@@ -65,12 +65,6 @@ pub const Recovery = struct {
 
     pub const Selection = struct { count: usize, capacity: usize };
 
-    pub fn select(self: *const Recovery, peer: PeerRef, ids: []MessageId) error{PeerCapacity}!usize {
-        assert(ids.len <= constants.gossip_ids_max);
-        const selected = try self.filterPending(peer, ids);
-        return @min(selected.count, selected.capacity);
-    }
-
     pub fn filterPending(self: *const Recovery, peer: PeerRef, ids: []MessageId) error{PeerCapacity}!Selection {
         assert(ids.len <= constants.max_ihave_ids_per_heartbeat);
         std.sort.heap(MessageId, ids, {}, lessThan);
@@ -127,17 +121,16 @@ pub const Recovery = struct {
         return constants.promises_cap * (@sizeOf(Request) + @sizeOf(Batch));
     }
 
-    pub fn requestBatch(self: *Recovery, peers: *Peers, outbox: *@import("outbox.zig").Outbox, ids: []MessageId, peer: PeerRef, connection: Handle, random: std.Random, now: u64) error{ PeerCapacity, NoNewIds, OutboxFull }!usize {
-        const count = try self.select(peer, ids);
-        if (count == 0) return error.NoNewIds;
+    /// Commit a nonempty subset admitted by filterPending, without intervening recovery mutation.
+    pub fn requestBatch(self: *Recovery, peers: *Peers, outbox: *@import("outbox.zig").Outbox, ids: []const MessageId, peer: PeerRef, connection: Handle, random: std.Random, now: u64) error{OutboxFull}!void {
+        assert(ids.len > 0 and ids.len <= constants.gossip_ids_max and ids.len <= self.available());
         const index = self.batch_len;
-        self.addBatch(peers, ids[0..count], peer, connection, 0, random.uintLessThan(usize, count));
-        const token = outbox.submit(&.{ .iwant = ids[0..count] }, now) orelse {
+        self.addBatch(peers, ids, peer, connection, 0, random.uintLessThan(usize, ids.len));
+        const token = outbox.submit(&.{ .iwant = ids }, now) orelse {
             self.remove(peers, index);
             return error.OutboxFull;
         };
         self.batches[index].token = token;
-        return count;
     }
 
     pub fn add(self: *Recovery, peers: *Peers, id: MessageId, peer: PeerRef, connection: Handle, token: u64) void {

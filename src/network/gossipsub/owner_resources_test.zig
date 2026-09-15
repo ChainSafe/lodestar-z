@@ -109,7 +109,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
     const metadata: peers_mod.Metadata = .{ .identity = g.peers.rows[g.sessions.rows[source.index].logical.index].identity, .address = .unspecified, .direction = .inbound };
     g.markDirect(conn);
     g.sessions.rows[source.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
-    if (g.overlay.findTopic(name)) |topic| g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), topic, source.index, true);
+    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), source.index, name, true);
     var handles: [8]?ValidationHandle = @splat(null);
     for (0..512) |step| {
         const now: Now = .{ .mono_ms = step * 17 + 1, .unix_s = 0 };
@@ -139,7 +139,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
                 source = g.addPeer(conn, &metadata, now).admitted;
                 g.markDirect(conn);
                 g.sessions.rows[source.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
-                if (g.overlay.findTopic(name)) |topic| g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), topic, source.index, true);
+                _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), source.index, name, true);
             },
             6 => {
                 const subscribed = if (g.overlay.findTopic(name)) |topic| g.overlay.subscribed(topic) else false;

@@ -13,7 +13,7 @@ test "publication refusal retry duplicate and exact expiry preserve admission" {
     try std.testing.expectEqual(@as(usize, 0), g.messages.history.count);
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
     const t = g.overlay.findTopic(topic).?;
-    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, peer.index, true);
+    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, topic, true);
     g.markDirect(g.sessions.rows[peer.index].conn);
     const admitted = try g.publishWithOptions(topic, "local", .{ .allow_zero_peers = false }, .{ .mono_ms = 11, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, admitted);
@@ -40,7 +40,7 @@ test "publication recipient policy tops up without graft and accounts unique sha
     for (0..12) |index| {
         const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
         const peer = support.addPeer(&g, conn, .v1_2).?;
-        g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, peer.index, true);
+        _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, topic, true);
         g.sessions.rows[peer.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     }
     g.markDirect(g.sessions.rows[0].conn);
@@ -127,7 +127,7 @@ test "publication empty subscribed mesh reuses bounded fanout and full mesh excl
     for (0..10) |index| {
         const conn: @import("../quic/engine.zig").Handle = .{ .index = @intCast(index), .generation = 1 };
         const p = support.addPeer(&g, conn, .v1_2).?;
-        g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, p.index, true);
+        _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), p.index, topic, true);
         g.sessions.rows[p.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     }
     const first = try g.publish(topic, "empty mesh", .{ .mono_ms = 1, .unix_s = 0 });

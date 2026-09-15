@@ -81,7 +81,7 @@ test "gossip policy GRAFT rejects negative peers and excludes direct peers" {
     try std.testing.expectEqual(@as(usize, 0), g.overlay.mesh(topic).count());
     try std.testing.expect(g.setPeerScore(conn, 0));
     g.markDirect(conn);
-    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), topic, peer.index, true);
+    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, g.overlay.topicString(topic), true);
     var context = g.overlayContext(100_000);
     context.snapshot = &g.cycle.scores;
     g.overlay.maintain(&context, topic);
@@ -154,7 +154,7 @@ test "gossip policy duplicate connections preserve one logical owner and direct 
     try std.testing.expectEqual(@as(?u16, first.index), g.sessions.findPeer(conn));
     const topic = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(topic));
-    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), g.overlay.findTopic(topic).?, first.index, true);
+    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), first.index, topic, true);
     g.markDirect(conn);
     try std.testing.expect(g.setPeerScore(conn, -100_000));
     g.sessions.rows[first.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
@@ -208,7 +208,7 @@ test "gossip policy topic retirement bounds arbitrarily slow active score decay"
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(name));
     const topic = g.overlay.findTopic(name).?;
-    g.peers.scores.deliver(g.sessions.rows[peer.index].logical.index, topic);
+    g.peers.scores.deliverEligible(g.sessions.rows[peer.index].logical.index, topic, false);
     try std.testing.expect(g.unsubscribe(name));
     g.overlay.flushSubscriptions(&g.sessions.rows[peer.index].io.tx, g.last_now_ms);
     g.last_now_ms = 11;
@@ -254,12 +254,12 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     defer g.deinit();
     const first_name = "/eth2/01020304/beacon_block/ssz_snappy";
     const second_name = "/eth2/01020304/beacon_aggregate_and_proof/ssz_snappy";
-    const first = g.overlay.internTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), first_name).?;
+    _ = g.overlay.internTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), first_name).?;
     const second = g.overlay.internTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), second_name).?;
     for (0..9) |i| {
         const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
-        g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), first, peer.index, true);
-        g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), second, peer.index, true);
+        _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, first_name, true);
+        _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, second_name, true);
         g.sessions.rows[peer.index].outbound = .{ .live = .{ .stream = .{ .conn = g.sessions.rows[peer.index].conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     }
     const start: Now = .{ .mono_ms = 1, .unix_s = 0 };
@@ -447,7 +447,7 @@ test "publication subscribed fanout expires through owner maintenance" {
     const name = "/eth2/01020304/beacon_block/ssz_snappy";
     try std.testing.expect(g.subscribe(name));
     const t = g.overlay.findTopic(name).?;
-    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, p.index, true);
+    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), p.index, name, true);
     g.sessions.rows[p.index].outbound = .{ .live = .{ .stream = .{ .conn = conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     _ = try g.publish(name, "fanout expiry", .{ .mono_ms = 0, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
@@ -457,11 +457,11 @@ test "publication subscribed fanout expires through owner maintenance" {
     support.heartbeat(&g, .{ .mono_ms = 60_000, .unix_s = 0 });
     g.finishPump(.{ .mono_ms = 60_000, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 0), g.overlay.fanoutMembers(t).count());
-    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, p.index, false);
+    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), p.index, name, false);
     g.sessions.rows[p.index].io.tx.cancelStream(&g.messages.store);
     const next_conn: Handle = .{ .index = 1, .generation = 1 };
     const next = @import("test_support.zig").addPeer(&g, next_conn, .v1_2).?;
-    g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, next.index, true);
+    _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), next.index, name, true);
     g.sessions.rows[next.index].outbound = .{ .live = .{ .stream = .{ .conn = next_conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     const result = try g.publish(name, "fresh fanout", .{ .mono_ms = 60_001, .unix_s = 0 });
     try std.testing.expectEqual(Gossipsub.PublishOutcome{ .selected = 1, .queued = 1 }, result);
@@ -529,7 +529,7 @@ test "gossip advertisements sample the whole burst independently for each recipi
     const t = g.overlay.internTopic(&g.overlayContext(g.last_now_ms), &g.messages.topicPins(), name).?;
     for (0..2) |i| {
         const peer = @import("test_support.zig").addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
-        g.overlay.setSubscription(&g.overlayContext(g.last_now_ms), t, peer.index, true);
+        _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), peer.index, name, true);
         g.sessions.rows[peer.index].outbound = .{ .live = .{ .stream = .{ .conn = g.sessions.rows[peer.index].conn, .id = 2, .slot = 0 }, .version = .v1_2 } };
     }
     for (0..512) |i| {

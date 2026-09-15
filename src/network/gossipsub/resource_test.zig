@@ -54,13 +54,16 @@ test "gossip recovery refusal restores promise slots and identity pins before re
     try std.testing.expect(row.io.tx.inject(bytes, 0));
     const available = g.recovery.available();
     var ids: [2]gossip.MessageId = .{ @splat(1), @splat(2) };
+    _ = try g.recovery.filterPending(row.logical, &ids);
     try std.testing.expectError(error.OutboxFull, g.recovery.requestBatch(&g.peers, &row.io.tx, &ids, row.logical, row.conn, g.overlay.rng.random(), 1));
     try std.testing.expectEqual(available, g.recovery.available());
     try std.testing.expectEqual(@as(usize, 0), g.recovery.batch_len);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[row.logical.index].pins);
     try std.testing.expect(row.io.tx.submit(&.{ .graft = name }, 1) != null);
     row.io.tx.cancelStream(&g.messages.store);
-    try std.testing.expectEqual(@as(usize, 2), try g.recovery.requestBatch(&g.peers, &row.io.tx, &ids, row.logical, row.conn, g.overlay.rng.random(), 2));
+    _ = try g.recovery.filterPending(row.logical, &ids);
+    try g.recovery.requestBatch(&g.peers, &row.io.tx, &ids, row.logical, row.conn, g.overlay.rng.random(), 2);
+    try std.testing.expectEqual(@as(usize, 2), g.recovery.len);
     try std.testing.expectEqual(@as(u32, 1), g.peers.rows[row.logical.index].pins);
     g.cancelWrites(peer);
     try std.testing.expectEqual(available, g.recovery.available());

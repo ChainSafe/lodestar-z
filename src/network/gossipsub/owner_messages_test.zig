@@ -258,6 +258,43 @@ test "gossipsub IHAVE pending and duplicate prefixes do not hide new tail IDs" {
     try std.testing.expectEqual(constants.gossip_ids_max + 2, g.recovery.len);
 }
 
+test "gossipsub IHAVE samples eligible IDs across the advertisement independently per peer" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .connected_capacity = 2, .retained_capacity = 4, .retained_outbound_reserve = 1 });
+    defer g.deinit();
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    var bytes: [16384]u8 = undefined;
+    var writer = protobuf.Writer.init(&bytes);
+    for (0..512) |i| {
+        var id: MessageId = @splat(0);
+        std.mem.writeInt(u16, id[0..2], @intCast(i), .big);
+        writer.bytesField(2, &id);
+        if (i < 16) _ = g.messages.seen.add(id, 0);
+    }
+    for (0..2) |i| {
+        const peer = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+        support.control(&g, peer.index, .{ .ihave = .{ .topic = name, .body = writer.written() } }, .{ .mono_ms = 1, .unix_s = 0 });
+    }
+    try std.testing.expectEqual(@as(usize, 2), g.recovery.batch_len);
+    var selected: [2]std.StaticBitSet(512) = @splat(.initEmpty());
+    for (g.recovery.batches[0..2], 0..) |batch, peer| {
+        try std.testing.expectEqual(@as(u16, constants.gossip_ids_max), batch.count);
+        var slot = batch.head;
+        var high = false;
+        for (0..batch.count) |_| {
+            const request = &g.recovery.requests[slot];
+            const id = std.mem.readInt(u16, request.id[0..2], .big);
+            try std.testing.expect(id >= 16 and id < 512 and !selected[peer].isSet(id));
+            selected[peer].set(id);
+            high = high or id >= 256;
+            slot = request.next;
+        }
+        try std.testing.expect(high);
+    }
+    try std.testing.expect(!selected[0].eql(selected[1]));
+    try std.testing.expectEqual(@as(u64, 2 * constants.gossip_ids_max), g.topic_metrics.get(name).ihave_unseen);
+}
+
 test "gossipsub IHAVE security bounds one identity and deduplicates queued requests" {
     var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .iwant_followup_ms = 12000 });
     defer g.deinit();

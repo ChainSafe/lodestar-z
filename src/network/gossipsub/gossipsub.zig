@@ -739,10 +739,11 @@ pub const Gossipsub = struct {
             @as(usize, peers_mod.capacity) * @sizeOf(peers_mod.Row) + @sizeOf(peers_mod.PeerBook);
         // Each protobuf field consumes at least two bytes and at most two
         // ten-byte varints. Include a score refresh, IP population and topic
-        // lookup; ID lookups include a slot read and key comparison.
+        // lookup; ID lookups include a slot read and key comparison. Selected
+        // IDs include one bounded sampling swap, promise admission and encoding.
         return header_work + 20 * fields +
             Recovery.selectionWork(ids, batches, requests) + ids * probes * (@sizeOf(MessageId) + @sizeOf(u32)) +
-            Recovery.selectionWork(selected, batches, requests) + selected * 256;
+            selected * 384;
     }
 
     fn onIhave(self: *Gossipsub, index: u16, ihave: protobuf.IHave, now: Now) void {
@@ -785,9 +786,7 @@ pub const Gossipsub = struct {
         const limit = @min(constants.gossip_ids_max, id_budget, selected.capacity);
         count = 0;
         for (candidates[0..selected.count]) |id| {
-            if (count == limit) break;
             if (!self.messages.wants(id, now.mono_ms)) continue;
-            metrics.ihave_unseen +|= 1;
             candidates[count] = id;
             count += 1;
         }
@@ -795,15 +794,17 @@ pub const Gossipsub = struct {
             self.rpc_metrics.ignoreIhave(.no_new_ids);
             return;
         }
-        count = self.recovery.requestBatch(&self.peers, &io.tx, candidates[0..count], self.logical(index), self.sessions.rows[index].conn, self.overlay.rng.random(), now.mono_ms) catch |err| {
-            switch (err) {
-                error.PeerCapacity => self.rpc_metrics.ignoreIhave(.peer_capacity),
-                error.NoNewIds => self.rpc_metrics.ignoreIhave(.no_new_ids),
-                error.OutboxFull => self.counters.send_dropped += 1,
-            }
+        const requested = @min(count, limit);
+        for (0..requested) |i| {
+            const chosen = i + @as(usize, @intCast(self.overlay.rng.random().uintLessThanBiased(u64, @intCast(count - i))));
+            std.mem.swap(MessageId, &candidates[i], &candidates[chosen]);
+        }
+        metrics.ihave_unseen +|= requested;
+        self.recovery.requestBatch(&self.peers, &io.tx, candidates[0..requested], self.logical(index), self.sessions.rows[index].conn, self.overlay.rng.random(), now.mono_ms) catch {
+            self.counters.send_dropped += 1;
             return;
         };
-        io.iwant_ids_sent += @intCast(count);
+        io.iwant_ids_sent += @intCast(requested);
         self.counters.iwant_sent += 1;
     }
 

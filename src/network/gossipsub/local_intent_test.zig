@@ -202,7 +202,7 @@ fn cachedRetirement(complete_intent: bool) !void {
         try std.testing.expect(g.unsubscribe(name));
         const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
         const logical = g.sessions.rows[peer.index].logical.index;
-        if (negative) g.peers.scores.invalid(logical, 0) else g.peers.scores.deliver(logical, 0);
+        if (negative) g.peers.scores.invalid(logical, 0) else g.peers.scores.deliverEligible(logical, 0, false);
         const expected: f64 = if (negative) -100 else 1;
         try std.testing.expectEqual(expected, g.peers.score(g.sessions.rows[peer.index].logical, now.mono_ms));
         try std.testing.expect(!g.peers.scores.rows[logical].dirty);
