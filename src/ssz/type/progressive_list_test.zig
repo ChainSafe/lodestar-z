@@ -180,32 +180,33 @@ test "memory_safety: variable progressive list byte deserialization preserves ou
     defer std.testing.allocator.free(bytes);
     _ = List.serializeIntoBytes(&source, bytes);
 
-    var saw_failure = false;
-    var saw_success = false;
-    for (0..16) |fail_after| {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var out: List.Type = .empty;
-        defer List.deinit(failing.allocator(), &out);
-        var sentinel: ?Bits.Type = try Bits.Type.fromBitLen(failing.allocator(), 5);
-        errdefer if (sentinel) |*value| value.deinit(failing.allocator());
-        try sentinel.?.setAssumeCapacity(4, true);
-        try out.append(failing.allocator(), sentinel.?);
-        sentinel = null;
+    var saw_operation_oom = false;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            serialized: []const u8,
+            source_value: *const List.Type,
+            saw_oom: *bool,
+        ) !void {
+            var out: List.Type = .empty;
+            defer List.deinit(allocator, &out);
+            var sentinel: ?Bits.Type = try Bits.Type.fromBitLen(allocator, 5);
+            errdefer if (sentinel) |*value| value.deinit(allocator);
+            try sentinel.?.setAssumeCapacity(4, true);
+            try out.append(allocator, sentinel.?);
+            sentinel = null;
 
-        failing.fail_index = failing.alloc_index + fail_after;
-        List.deserializeFromBytes(failing.allocator(), bytes, &out) catch |err| {
-            try std.testing.expectEqual(error.OutOfMemory, err);
-            try std.testing.expectEqual(@as(usize, 1), out.items.len);
-            try std.testing.expectEqual(@as(usize, 5), out.items[0].bit_len);
-            try std.testing.expect(try out.items[0].get(4));
-            saw_failure = true;
-            continue;
-        };
-        try std.testing.expect(List.equals(&source, &out));
-        saw_success = true;
-    }
-    try std.testing.expect(saw_failure);
-    try std.testing.expect(saw_success);
+            errdefer saw_oom.* = true;
+            List.deserializeFromBytes(allocator, serialized, &out) catch |err| {
+                try std.testing.expectEqual(@as(usize, 1), out.items.len);
+                try std.testing.expectEqual(@as(usize, 5), out.items[0].bit_len);
+                try std.testing.expect(try out.items[0].get(4));
+                return err;
+            };
+            try std.testing.expect(List.equals(source_value, &out));
+        }
+    }.run, .{ bytes, &source, &saw_operation_oom });
+    try std.testing.expect(saw_operation_oom);
 }
 
 test "memory_safety: variable progressive list tree.toValue preserves out on OOM" {
@@ -229,30 +230,32 @@ test "memory_safety: variable progressive list tree.toValue preserves out on OOM
     const root = try List.tree.fromValue(&pool, &source);
     defer pool.unref(root);
 
-    var saw_failure = false;
-    var saw_success = false;
-    for (0..24) |fail_after| {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var out: List.Type = .empty;
-        defer List.deinit(failing.allocator(), &out);
-        var sentinel: ?Bits.Type = try Bits.Type.fromBitLen(failing.allocator(), 5);
-        errdefer if (sentinel) |*value| value.deinit(failing.allocator());
-        try sentinel.?.setAssumeCapacity(4, true);
-        try out.append(failing.allocator(), sentinel.?);
-        sentinel = null;
+    var saw_operation_oom = false;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            input_pool: *Node.Pool,
+            input_root: Node.Id,
+            source_value: *const List.Type,
+            saw_oom: *bool,
+        ) !void {
+            var out: List.Type = .empty;
+            defer List.deinit(allocator, &out);
+            var sentinel: ?Bits.Type = try Bits.Type.fromBitLen(allocator, 5);
+            errdefer if (sentinel) |*value| value.deinit(allocator);
+            try sentinel.?.setAssumeCapacity(4, true);
+            try out.append(allocator, sentinel.?);
+            sentinel = null;
 
-        failing.fail_index = failing.alloc_index + fail_after;
-        List.tree.toValue(failing.allocator(), root, &pool, &out) catch |err| {
-            try std.testing.expectEqual(error.OutOfMemory, err);
-            try std.testing.expectEqual(@as(usize, 1), out.items.len);
-            try std.testing.expectEqual(@as(usize, 5), out.items[0].bit_len);
-            try std.testing.expect(try out.items[0].get(4));
-            saw_failure = true;
-            continue;
-        };
-        try std.testing.expect(List.equals(&source, &out));
-        saw_success = true;
-    }
-    try std.testing.expect(saw_failure);
-    try std.testing.expect(saw_success);
+            errdefer saw_oom.* = true;
+            List.tree.toValue(allocator, input_root, input_pool, &out) catch |err| {
+                try std.testing.expectEqual(@as(usize, 1), out.items.len);
+                try std.testing.expectEqual(@as(usize, 5), out.items[0].bit_len);
+                try std.testing.expect(try out.items[0].get(4));
+                return err;
+            };
+            try std.testing.expect(List.equals(source_value, &out));
+        }
+    }.run, .{ &pool, root, &source, &saw_operation_oom });
+    try std.testing.expect(saw_operation_oom);
 }

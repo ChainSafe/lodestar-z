@@ -145,17 +145,23 @@ const StopAtSlotListener = struct {
     }
 };
 
-test "init returns OutOfMemory when allocation fails" {
+test "init should clean up on allocation failure" {
     const cfg: Clock.ClockConfig = .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 12_000,
         .slots_per_epoch = 32,
     };
-    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(cfg, 0) };
-
-    var clock: Clock = undefined;
-    try testing.expectError(error.OutOfMemory, clock.init(failing.allocator(), fake.io(), cfg));
+    var saw_operation_oom = false;
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, config: Clock.ClockConfig, saw_oom: *bool) !void {
+            var fake: FakeClockIo = .{ .ms = slot_math.slotStartMs(config, 0) };
+            var clock: Clock = undefined;
+            errdefer saw_oom.* = true;
+            try clock.init(allocator, fake.io(), config);
+            defer clock.deinit();
+        }
+    }.run, .{ cfg, &saw_operation_oom });
+    try std.testing.expect(saw_operation_oom);
 }
 
 test "every listener receives every slot, in order, exactly once" {

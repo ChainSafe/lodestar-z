@@ -1477,7 +1477,7 @@ test "FixedListType chunked serialization preserves mixed zero subtrees without 
     try std.testing.expect(!failing.has_induced_failure);
 }
 
-test "memory_safety: VariableList clone should keep destination deinit-safe when the second child OOMs" {
+test "memory_safety: VariableList clone should keep destination deinit-safe on allocation failure" {
     const Bytes = ByteListType(8);
     const ListType = VariableListType(Bytes, 2);
 
@@ -1488,23 +1488,22 @@ test "memory_safety: VariableList clone should keep destination deinit-safe when
     try source.append(std.testing.allocator, Bytes.default_value);
     try source.items[1].append(std.testing.allocator, 2);
 
-    var failing = DoubleFreeDetectAllocator.init(std.testing.allocator, 2);
-    defer failing.deinit();
-    const allocator = failing.allocator();
+    var backing = DoubleFreeDetectAllocator.init(std.testing.allocator, std.math.maxInt(usize));
+    defer backing.deinit();
 
-    {
-        var cloned = ListType.default_value;
-        defer ListType.deinit(allocator, &cloned);
-
-        try std.testing.expectError(
-            error.OutOfMemory,
-            ListType.clone(allocator, &source, &cloned),
-        );
-    }
-
-    // The unvisited destination element must not be deinitialized as garbage.
-    try std.testing.expect(!failing.double_free);
-    try std.testing.expectEqual(@as(usize, 0), failing.live.count());
+    var saw_operation_oom = false;
+    try std.testing.checkAllAllocationFailures(backing.allocator(), struct {
+        fn run(allocator: std.mem.Allocator, input: *const ListType.Type, saw_oom: *bool) !void {
+            var cloned = ListType.default_value;
+            defer ListType.deinit(allocator, &cloned);
+            errdefer saw_oom.* = true;
+            try ListType.clone(allocator, input, &cloned);
+            try std.testing.expect(ListType.equals(input, &cloned));
+        }
+    }.run, .{ &source, &saw_operation_oom });
+    try std.testing.expect(saw_operation_oom);
+    try std.testing.expect(!backing.double_free);
+    try std.testing.expectEqual(@as(usize, 0), backing.live.count());
 }
 
 test "memory_safety: VariableList deserializeFromBytes should free offsets on malformed later offset" {
