@@ -304,6 +304,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                         state,
                         withdrawals_result,
                         payload_withdrawals_root,
+                        null,
                     );
                 },
             }
