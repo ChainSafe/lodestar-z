@@ -8,6 +8,15 @@ const SyncCommitteeCache = @import("sync_committee_cache.zig").SyncCommitteeCach
 const EpochCache = @import("epoch_cache.zig").EpochCache;
 const SyncCommitteeCacheRc = @import("sync_committee_cache.zig").SyncCommitteeCacheRc;
 
+const testing = std.testing;
+const config = @import("config");
+const preset = @import("preset").preset;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
+const PubkeyCache = @import("pubkey_cache.zig").PubkeyCache;
+const getConfig = @import("../test_utils/generate_state.zig").getConfig;
+const seed = @import("../utils/seed.zig");
+const chain_config = if (@import("preset").active_preset == .mainnet) config.mainnet.chain_config else config.minimal.chain_config;
+
 test "memory_safety: setSyncCommitteesIndexed should release each cache once on allocation failure" {
     const allocator = std.testing.allocator;
     const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
@@ -202,4 +211,99 @@ test "memory_safety: afterProcessEpoch should preserve shuffling state when deci
     try std.testing.expectEqual(previous_decision_root, epoch_cache.previous_decision_root);
     try std.testing.expectEqual(current_decision_root, epoch_cache.current_decision_root);
     try std.testing.expectEqual(next_decision_root, epoch_cache.next_decision_root);
+}
+
+test "next epoch proposers defer sampling, preserve failure, and cache per clone" {
+    const allocator = testing.allocator;
+    const State = ct.deneb.BeaconState;
+    const value = try allocator.create(State.Type);
+    defer allocator.destroy(value);
+    value.* = State.default_value;
+    defer State.deinit(allocator, value);
+    value.slot = preset.SLOTS_PER_EPOCH;
+    for (0..64) |_| {
+        var validator = ct.phase0.Validator.default_value;
+        validator.effective_balance = preset.MAX_EFFECTIVE_BALANCE;
+        validator.exit_epoch = std.math.maxInt(u64);
+        try value.validators.append(allocator, validator);
+        try value.balances.append(allocator, validator.effective_balance);
+        try value.previous_epoch_participation.append(allocator, 0);
+        try value.current_epoch_participation.append(allocator, 0);
+        try value.inactivity_scores.append(allocator, 0);
+    }
+
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 345_000 });
+    defer pool.deinit();
+    var state = try AnyBeaconState.fromValue(allocator, &pool, .deneb, value);
+    defer state.deinit();
+    var pubkey_cache = PubkeyCache.init(allocator, testing.io);
+    defer pubkey_cache.deinit();
+    const beacon_config = config.BeaconConfig.init(
+        getConfig(chain_config, .electra, 2),
+        value.genesis_validators_root,
+    );
+    const cache = try EpochCache.createFromState(allocator, testing.io, &state, .{
+        .config = &beacon_config,
+        .pubkey_cache = &pubkey_cache,
+    }, .{ .skip_sync_committee_cache = true, .skip_sync_pubkeys = true });
+    defer cache.deinit();
+    try testing.expect(cache.proposers_next_epoch.? == .seed);
+
+    var expected_seed: [32]u8 = undefined;
+    try seed.getSeed(.deneb, state.castToFork(.deneb), 2, @import("constants").DOMAIN_BEACON_PROPOSER, &expected_seed);
+    var expected: [preset.SLOTS_PER_EPOCH]u64 = undefined;
+    try seed.computeProposers(.electra, allocator, expected_seed, 2, cache.next_shuffling.get().active_indices, cache.effective_balance_increments.get(), &expected);
+    var before_fork: [preset.SLOTS_PER_EPOCH]u64 = undefined;
+    try seed.computeProposers(.deneb, allocator, expected_seed, 2, cache.next_shuffling.get().active_indices, cache.effective_balance_increments.get(), &before_fork);
+    try testing.expect(!std.mem.eql(u64, &before_fork, &expected));
+
+    const cloned = try cache.clone(allocator);
+    defer cloned.deinit();
+    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    cloned.allocator = failing.allocator();
+    defer cloned.allocator = allocator;
+    try testing.expectError(error.OutOfMemory, cloned.getBeaconProposersNextEpoch());
+    try testing.expect(cloned.proposers_next_epoch.? == .seed);
+    cloned.allocator = allocator;
+    try testing.expectEqualSlices(u64, &expected, (try cloned.getBeaconProposersNextEpoch()).?);
+    try testing.expect(cache.proposers_next_epoch.? == .seed);
+
+    cloned.allocator = failing.allocator();
+    try testing.expectEqualSlices(u64, &expected, (try cloned.getBeaconProposersNextEpoch()).?);
+    try testing.expectEqual(expected[0], try cloned.getBeaconProposer(2 * preset.SLOTS_PER_EPOCH));
+}
+
+test "next epoch proposers preserve absent pre-Fulu duties and Fulu lookahead" {
+    const allocator = testing.allocator;
+    inline for (.{ config.ForkSeq.phase0, config.ForkSeq.fulu }) |fork| {
+        const State = @field(ct, @tagName(fork)).BeaconState;
+        const value = try allocator.create(State.Type);
+        defer allocator.destroy(value);
+        value.* = State.default_value;
+        defer State.deinit(allocator, value);
+        if (fork == .fulu) {
+            for (&value.proposer_lookahead, 0..) |*index, i| index.* = @intCast(i);
+        }
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 345_000 });
+        defer pool.deinit();
+        var state = try AnyBeaconState.fromValue(allocator, &pool, fork, value);
+        defer state.deinit();
+        var pubkey_cache = PubkeyCache.init(allocator, testing.io);
+        defer pubkey_cache.deinit();
+        const beacon_config = config.BeaconConfig.init(getConfig(chain_config, fork, 0), value.genesis_validators_root);
+        const cache = try EpochCache.createFromState(allocator, testing.io, &state, .{
+            .config = &beacon_config,
+            .pubkey_cache = &pubkey_cache,
+        }, .{ .skip_sync_committee_cache = true, .skip_sync_pubkeys = true });
+        defer cache.deinit();
+        if (fork == .phase0) {
+            try testing.expectEqual(null, try cache.getBeaconProposersNextEpoch());
+            try testing.expectError(error.NullNextProposersPreFulu, cache.getBeaconProposer(preset.SLOTS_PER_EPOCH));
+        } else {
+            var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+            cache.allocator = failing.allocator();
+            defer cache.allocator = allocator;
+            try testing.expectEqualSlices(u64, value.proposer_lookahead[preset.SLOTS_PER_EPOCH .. 2 * preset.SLOTS_PER_EPOCH], (try cache.getBeaconProposersNextEpoch()).?);
+        }
+    }
 }

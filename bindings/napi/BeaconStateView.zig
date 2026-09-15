@@ -546,7 +546,7 @@ pub fn currentProposers(self: *const BeaconStateView) !js.Array {
 pub fn nextProposers(self: *const BeaconStateView) !?js.Array {
     const env = js.env();
     const cached_state = try self.requireState();
-    if (cached_state.epoch_cache.proposers_next_epoch) |*proposers| {
+    if (try cached_state.epoch_cache.getBeaconProposersNextEpoch()) |proposers| {
         return .{ .val = try numberSliceToNapiValue(env, u64, proposers, .{}) };
     }
     return null;

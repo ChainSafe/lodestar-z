@@ -17,7 +17,7 @@ const Node = @import("persistent_merkle_tree").Node;
 pub fn processBlockHeader(
     comptime fork: ForkSeq,
     allocator: Allocator,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *BeaconState(fork),
     comptime block_type: BlockType,
     block: *const BeaconBlock(block_type, fork),

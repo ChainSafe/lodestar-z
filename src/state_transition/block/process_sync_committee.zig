@@ -28,7 +28,7 @@ pub fn processSyncAggregate(
     allocator: Allocator,
     io: std.Io,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *BeaconState(fork),
     proposer_rewards: *ProposerRewards,
     sync_aggregate: *const SyncAggregate,
