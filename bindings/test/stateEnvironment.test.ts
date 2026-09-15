@@ -85,12 +85,16 @@ describe("state environment ownership", () => {
   it("isolates worker configuration and metrics from the main environment", {timeout: 20_000}, async () => {
     const {state} = createState();
     bindings.metrics.init();
+    bindings.metrics.registerLocalValidator(1);
     const metrics = bindings.metrics.scrapeMetrics();
     const expectedRoot = state.processSlots(state.slot + 1).hashTreeRoot();
     const beforeWorker = bindings.metrics.scrapeMetrics();
+    expect(beforeWorker).toMatch(/validator_monitor_prev_epoch_on_chain_balance [1-9]\d*/);
     const root = await runWorker<Uint8Array>(`
       bindings.config.set(stfConfig, new Uint8Array(32));
       bindings.metrics.init();
+      bindings.metrics.registerLocalValidator(2);
+      bindings.metrics.registerLocalValidator(3);
       const state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()));
       const root = state.processSlots(state.slot + 1).hashTreeRoot();
       bindings.config.set({...stfConfig, FULU_FORK_EPOCH: Infinity}, new Uint8Array(32).fill(1));
@@ -101,6 +105,7 @@ describe("state environment ownership", () => {
     expect(state.getVoluntaryExitValidity(signedExit(), true)).toBe("valid");
     expect(state.processSlots(state.slot + 1).hashTreeRoot()).toEqual(expectedRoot);
     expect(metrics).toContain("stfn_epoch_transition");
+    bindings.metrics.unregisterLocalValidator(1);
   });
 
   it("runs simultaneous epoch transitions in independent workers", {timeout: 20_000}, async () => {

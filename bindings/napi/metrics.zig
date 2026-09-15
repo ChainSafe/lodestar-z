@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const js = @import("zapi:zapi").js;
 const state_transition = @import("state_transition");
+const validator_monitor = @import("./validator_monitor.zig");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -32,6 +33,25 @@ pub fn init(options: ?js.Value) !void {
     historical = use_historical_prefix;
 }
 
+/// JS: metrics.registerLocalValidator(index) → void
+///
+/// Adds a validator index to the environment's validator monitor so that
+/// metrics are recorded for it on every epoch transition.
+pub fn registerLocalValidator(index: js.Number) !void {
+    const value = try index.toI64();
+    if (value < 0) return error.InvalidValidatorIndex;
+    try validator_monitor.get().registerLocalValidator(@intCast(value));
+}
+
+/// JS: metrics.unregisterLocalValidator(index) → void
+///
+/// Prunes a validator index from the environment's validator monitor.
+pub fn unregisterLocalValidator(index: js.Number) !void {
+    const value = try index.toI64();
+    if (value < 0) return error.InvalidValidatorIndex;
+    validator_monitor.get().unregisterLocalValidator(@intCast(value));
+}
+
 /// JS: metrics.scrapeMetrics() → string
 pub fn scrapeMetrics() !js.String {
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -42,7 +62,8 @@ pub fn scrapeMetrics() !js.String {
 }
 
 pub fn deinit() void {
+    validator_monitor.deinit();
     if (historical == null) return;
-    state_transition.metrics.state_transition.deinit();
+    state_transition.metrics.deinit();
     historical = null;
 }

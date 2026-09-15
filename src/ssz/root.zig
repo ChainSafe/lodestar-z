@@ -69,7 +69,6 @@ test {
     _ = types;
     _ = tree_view;
     _ = hasher;
-    _ = @import("memory_safety_test.zig");
     _ = @import("root_test.zig");
     testing.refAllDecls(@This());
 }

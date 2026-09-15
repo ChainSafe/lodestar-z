@@ -1,3 +1,5 @@
+//! Configuration snapshots share one application-wide validator-index to pubkey mapping.
+
 const js = @import("zapi:zapi").js;
 const snapshot = @import("./config_snapshot.zig");
 const BeaconStateView = @import("./BeaconStateView.zig");

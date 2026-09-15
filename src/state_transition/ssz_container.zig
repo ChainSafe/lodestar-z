@@ -50,3 +50,7 @@ pub fn deserializeContainerOverrideFieldsWithRanges(
 
     return try ContainerST.TreeView.init(allocator, pool, root);
 }
+
+test {
+    _ = @import("ssz_container_test.zig");
+}

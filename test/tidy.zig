@@ -60,12 +60,6 @@ const inline_test_allowlist = [_][]const u8{
     "src/state_transition/utils/epoch_shuffling.zig",
 };
 
-/// Test files that cover a whole module rather than one sibling module. These
-/// are wired from the package `root.zig` instead of from a paired file.
-const module_wide_test_files = [_][]const u8{
-    "memory_safety_test.zig",
-};
-
 /// Files that nothing imports on purpose. Entry points reached by the build
 /// system rather than by an `@import`, so the dead-file rule cannot see them.
 const unimported_file_allowlist = [_][]const u8{
@@ -356,13 +350,6 @@ fn isTestFile(basename: []const u8) bool {
     return std.mem.endsWith(u8, basename, "_test.zig");
 }
 
-fn isModuleWide(basename: []const u8) bool {
-    for (module_wide_test_files) |name| {
-        if (std.mem.eql(u8, basename, name)) return true;
-    }
-    return false;
-}
-
 fn inScope(scope: []const []const u8, path: []const u8) bool {
     for (scope) |prefix| {
         if (std.mem.startsWith(u8, path, prefix)) return true;
@@ -433,19 +420,6 @@ fn tidyTestFileWiring(gpa: Allocator, files: []const File, errors: *Errors) !voi
         }
         if (!wired) {
             errors.addOrphanTestFile(file.path);
-            continue;
-        }
-
-        if (isModuleWide(file.basename)) {
-            // Module-wide files belong to the package, so the package root wires them.
-            const root_path = try pairedModule(gpa, file.dir, "root", .snake);
-            const root = findFile(files, root_path) orelse {
-                errors.addUnpairedTestFile(file.path, root_path);
-                continue;
-            };
-            if (!root.wiresTests(file.basename)) {
-                errors.addTestFileWiredElsewhere(file.path, root_path);
-            }
             continue;
         }
 

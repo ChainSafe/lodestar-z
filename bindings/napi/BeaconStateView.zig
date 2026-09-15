@@ -19,6 +19,7 @@ const pubkey = @import("./pubkeys.zig");
 const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
+const validator_monitor = @import("./validator_monitor.zig");
 
 pub const js_meta = js.class(.{ .properties = .{
     .slot = js.prop(.{ .get = true, .set = false }),
@@ -145,6 +146,7 @@ fn stateBytesFork(beacon_config: *const c.BeaconConfig, bytes: []const u8) !c.Fo
 // -------------------------
 // Class Methods
 // -------------------------
+/// Requires state bytes with trusted provenance; SSZ decoding does not authenticate them.
 pub fn createFromBytes(bytes: js.Uint8Array, setup: ?*const StateTransition) !BeaconStateView {
     const config_rc = if (setup) |value| value.config_rc else config.state.current orelse return error.ConfigNotInitialized;
     const byte_slice = try bytes.toSlice();
@@ -1459,8 +1461,16 @@ pub fn processSlots(self: *BeaconStateView, slot_arg: js.Number, options: ?js.Va
         post_state.deinit();
         allocator.destroy(post_state);
     }
+    st.metrics.state_transition.pre_state_cloned_count.observe(cached_state.cloned_count);
 
-    try st.processSlots(allocator, js.io(), post_state, slot_value, .{});
+    try st.processSlots(
+        allocator,
+        js.io(),
+        post_state,
+        slot_value,
+        validator_monitor.get(),
+    );
+
     return .{
         .cached_state = post_state,
         .pool_rc = self.pool_rc.?.ref(),
@@ -1503,7 +1513,14 @@ pub fn stateTransition(
     const signed_block = try AnySignedBeaconBlock.deserialize(allocator, block_type, fork_seq, bytes);
     defer signed_block.deinit(allocator);
 
-    const post_state = try st.stateTransition(allocator, js.io(), cached_state, signed_block, opts);
+    const post_state = try st.stateTransition(
+        allocator,
+        js.io(),
+        cached_state,
+        signed_block,
+        opts,
+        validator_monitor.get(),
+    );
     return .{
         .cached_state = post_state,
         .pool_rc = self.pool_rc.?.ref(),

@@ -197,6 +197,7 @@ export type VoluntaryExitValidity =
   | "invalid_signature";
 
 export declare class BeaconStateView {
+  /** Requires state bytes with trusted provenance; SSZ decoding does not authenticate them. */
   static createFromBytes(bytes: Uint8Array, setup?: StateTransition): BeaconStateView;
 
   /**
@@ -349,6 +350,7 @@ export declare class BeaconStateView {
     processedValidatorSweepCount: number;
   };
 
+  /** On phase0, serialize this call with other STF operations and cache teardown within this thread. */
   computeUnrealizedCheckpoints(): {
     justifiedCheckpoint: Checkpoint;
     finalizedCheckpoint: Checkpoint;
@@ -383,7 +385,9 @@ export declare class BeaconStateView {
   hashTreeRoot(): Uint8Array;
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
+  /** Serialize this call with other STF operations and cache teardown within this thread. */
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
+  /** Serialize this call with other STF operations and cache teardown within this thread. */
   stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
@@ -397,11 +401,14 @@ declare const bindings: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
   stateTransition: {
+    /** Callers must exclude STF operations in this thread until teardown returns. */
     deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
     init: (options?: {historical?: boolean}) => void;
     scrapeMetrics: () => string;
+    registerLocalValidator: (index: number) => void;
+    unregisterLocalValidator: (index: number) => void;
   };
   BeaconStateView: typeof BeaconStateView;
   StateTransition: typeof StateTransition;

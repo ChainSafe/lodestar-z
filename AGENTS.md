@@ -13,14 +13,13 @@
 - **No `any`:** avoid `any` and `as any`; use proper types or a justified Biome suppression.
 - **Follow existing patterns** before introducing new abstractions.
 - **Security reviews:** first surface candidate security-objective violations, then use
-  `THREAT_MODEL.md` and `docs/security/IMPLEMENTATION_MAP.md` to classify them. The model is not an
-  allowlist. Downgrade a candidate only after verifying the applicable trust assumption against the
-  current or planned call path. If code and documentation conflict, report the code behavior and the
-  documentation gap.
-- **Security-model maintenance:** review both security documents when a change adds or alters a
-  trust boundary, native dependency, persistence path or format, shared mutable cache or pool,
-  externally influenced native input, or supported integration. Update the normative threat model
-  only when the security contract changes; otherwise update the implementation map.
+  `THREAT_MODEL.md` to classify them. The model is not an allowlist. Downgrade a candidate only after
+  verifying the applicable trust assumption against the current or planned call path. If code and
+  documentation conflict, report the code behavior and the documentation gap.
+- **Security documentation:** update `THREAT_MODEL.md` only when a change alters a security
+  objective, trust assumption, trust boundary, or supported caller obligation. Document enduring API
+  preconditions beside the owning declaration or module. Implementation changes that preserve these
+  contracts require no security-documentation update.
 - **Test file layout:** a module holds at most one `test` block. A single inline test is fine;
   a second one means the tests move to a sibling `<module>_test.zig`, wired from the module with
   `test { _ = @import("<module>_test.zig"); }`. Never mark a declaration `pub` only to relocate a
@@ -333,8 +332,9 @@ test {
 - Private test helpers move with the tests they serve.
 - Do not widen a declaration to `pub` only to relocate a test. Tests that exercise private
   internals stay inline.
-- A test file covering a whole module rather than one sibling module stays wired from the package
-  `root.zig`.
+- Prefix memory safety regression test names with `memory_safety: ` and keep them in the sibling
+  test file for the module they cover.
+- Tests covering a whole package belong in `root_test.zig`, wired from the package `root.zig`.
 
 ## Pull request guidelines
 
@@ -352,6 +352,48 @@ Create branches from `main`. Use Conventional Commit messages:
 
 Keep commits focused. After review begins, add incremental commits rather than rewriting history
 unless a maintainer asks otherwise.
+
+### Titles and descriptions
+
+Title: conventional-commit prefix, then an imperative subject of about four words, lowercase, no
+period. `refactor: extract tests to _test.zig`.
+
+Description: use the Lodestar template and scale the detail to the change.
+
+```markdown
+**Motivation**
+
+The problem, at whatever length it needs. Quote the error or log, link the issue or discussion.
+
+**Description**
+
+One sentence saying what this does.
+
+- Change, named by identifier
+  - detail
+
+TODO:
+- follow-up, if any
+
+**AI Assistance Disclosure**
+
+One line.
+```
+
+- Motivation is never empty. It states the problem at whatever length the problem needs, and
+  links the issue, review comment, or discussion it came from.
+- Quote the evidence: the error, the log, the command output, in a code block. Long output goes in
+  a `<details>` block.
+- Description length tracks the diff. A one-line fix gets a sentence; a larger change can use
+  bullets, tables, or short subsections to explain behavior and relevant evidence.
+- Bullets name concrete changes by identifier in backticks.
+- Use tables or short subsections when they make before/after behavior, tradeoffs, or validation
+  easier to review. Use text or code blocks instead of screenshots of text.
+- Put the main rationale in Motivation. Include design constraints and validation evidence in
+  Description when they help reviewers assess the change; link CI instead of repeating routine output.
+- Do not list example files to illustrate a point.
+- Code blocks are for real output or a before/after of an interface, never for explaining a
+  concept.
 
 ### AI assistance disclosure
 

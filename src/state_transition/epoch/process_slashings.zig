@@ -23,9 +23,7 @@ pub fn processSlashings(
     if (cache.indices_to_slash.items.len == 0) {
         return empty_penalties;
     }
-    if (!update_balance) {
-        @memset(slashing_penalties, 0);
-    }
+    std.debug.assert(slashing_penalties.len == cache.indices_to_slash.items.len);
     const total_balance_by_increment = cache.total_active_stake_by_increment;
     const proportional_slashing_multiplier: u64 =
         if (comptime fork == .phase0)
@@ -46,7 +44,7 @@ pub fn processSlashings(
     const max_increment = comptime max_effective / EFFECTIVE_BALANCE_INCREMENT + 1;
     var penalties_by_effective_balance_increment: [max_increment]?u64 = .{null} ** max_increment;
 
-    for (cache.indices_to_slash.items) |index| {
+    for (cache.indices_to_slash.items, 0..) |index, penalty_index| {
         const effective_balance_increment = effective_balance_increments[index];
         const penalty: u64 = if (penalties_by_effective_balance_increment[effective_balance_increment]) |penalty| penalty else blk: {
             const p = if (comptime fork.gte(.electra))
@@ -59,7 +57,7 @@ pub fn processSlashings(
         if (update_balance) {
             try decreaseBalance(fork, state, index, penalty);
         } else {
-            slashing_penalties[index] = penalty;
+            slashing_penalties[penalty_index] = penalty;
         }
     }
 
@@ -81,22 +79,6 @@ pub fn getTotalSlashingsByIncrement(
     return total_slashings_by_increment;
 }
 
-const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
-
-test "processSlashings - sanity" {
-    const allocator = std.testing.allocator;
-    const pool_size = 200_000;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);
-    defer test_state.deinit();
-
-    _ = try processSlashings(
-        .electra,
-        test_state.cached_state.epoch_cache,
-        test_state.cached_state.state.castToFork(.electra),
-        test_state.epoch_transition_cache,
-        true,
-    );
+test {
+    _ = @import("./process_slashings_test.zig");
 }

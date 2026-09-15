@@ -44,3 +44,7 @@ pub fn upgradeStateToDeneb(
     capella_state.deinit();
     return state;
 }
+
+test {
+    _ = @import("upgrade_state_to_deneb_test.zig");
+}

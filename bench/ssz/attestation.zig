@@ -75,6 +75,8 @@ const HashAttestation = struct {
     attestation: *Attestation.Type,
     pub fn run(self: *HashAttestation, allocator: std.mem.Allocator) void {
         var scratch = ssz.Hasher(Attestation).init(allocator) catch unreachable;
+        defer scratch.deinit(allocator);
+
         var out: [32]u8 = undefined;
         ssz.Hasher(Attestation).hash(&scratch, self.attestation, &out) catch unreachable;
     }
@@ -162,6 +164,8 @@ pub fn main(init: std.process.Init) !void {
     try bench.addParam("hash attestation", &hash_attestation, .{});
 
     var scratch = ssz.Hasher(Attestation).init(allocator) catch unreachable;
+    defer scratch.deinit(allocator);
+
     var root: [32]u8 = undefined;
     ssz.Hasher(Attestation).hash(&scratch, attestation, &root) catch unreachable;
 

@@ -274,3 +274,34 @@ test "ByteVectorType - default_root" {
     const node_96 = try ByteVector96.tree.default(&pool);
     try std.testing.expectEqualSlices(u8, &ByteVector96.default_root, node_96.getRoot(&pool));
 }
+
+test "memory_safety: ByteVector tree.deserializeFromBytes should reclaim partial leaves on pool exhaustion" {
+    const VectorType = ByteVectorType(64);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1 });
+    defer pool.deinit();
+
+    const baseline = pool.getNodesInUse();
+    const bytes = [_]u8{0} ** VectorType.fixed_size;
+
+    try std.testing.expectError(
+        error.PoolExhausted,
+        VectorType.tree.deserializeFromBytes(&pool, &bytes),
+    );
+    // The first leaf must not remain in the pool after the second leaf allocation fails.
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "memory_safety: ByteVector tree.fromValue should reclaim leaves when the pool is exhausted" {
+    const VectorType = ByteVectorType(64);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 2 });
+    defer pool.deinit();
+
+    const baseline = pool.getNodesInUse();
+
+    try std.testing.expectError(
+        error.PoolExhausted,
+        VectorType.tree.fromValue(&pool, &VectorType.default_value),
+    );
+    // The two leaves must not remain in the pool after parent construction fails.
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}

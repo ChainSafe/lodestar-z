@@ -6,6 +6,7 @@ pub const processSlots = @import("state_transition.zig").processSlots;
 pub const TransitionOpts = @import("state_transition.zig").TransitionOpts;
 
 pub const metrics = @import("metrics.zig");
+pub const ValidatorMonitor = @import("ValidatorMonitor.zig");
 
 pub const RefCount = @import("./utils/ref_count.zig").RefCount;
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
@@ -122,7 +123,6 @@ const weak_subjectivity = @import("weak_subjectivity.zig");
 pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatestWeakSubjectivityCheckpointEpoch;
 
 test {
-    _ = @import("memory_safety_test.zig");
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
     testing.refAllDecls(state_transition);

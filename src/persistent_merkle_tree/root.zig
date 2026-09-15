@@ -18,5 +18,4 @@ test {
     _ = @import("Node.zig");
     _ = @import("proof.zig");
     _ = @import("View.zig");
-    _ = @import("memory_safety_test.zig");
 }
