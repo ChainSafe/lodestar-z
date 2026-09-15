@@ -1,5 +1,4 @@
 const std = @import("std");
-const connection = @import("connection.zig");
 const constants = @import("../constants.zig");
 const limits = @import("limits.zig");
 const peer_id = @import("../wire/peer_id.zig");
@@ -11,8 +10,7 @@ pub const ShutdownDirection = types.ShutdownDirection;
 pub const CloseReason = types.CloseReason;
 pub const Read = types.Read;
 pub const Address = types.Address;
-pub const Stats = connection.Stats;
-pub const Sent = connection.Sent;
+pub const Sent = types.Sent;
 
 pub const Error = std.mem.Allocator.Error || error{InvalidLimits};
 
@@ -130,6 +128,5 @@ pub const MemoryPlan = struct {
     scheduled_storage_bytes: u64,
     ready_batch_datagrams: u8 = constants.send_batch_max,
     ready_batch_storage_bytes: u64 = @sizeOf(SendBatch),
-    udp_receive_storage_bytes: u64 = @sizeOf(@import("../udp.zig").Udp),
     native_pacing_supported: bool,
 };

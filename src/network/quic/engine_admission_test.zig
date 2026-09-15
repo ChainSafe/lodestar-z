@@ -329,7 +329,7 @@ test "engine retains a live routed stream across unrelated slot churn" {
     var bytes: [4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 4), (try pair.server.read(inbound, &bytes)).len);
     try std.testing.expectEqualStrings("live", &bytes);
-    try std.testing.expectEqual(handles.client, pair.client.findByPeerId(&pair.server_ctx.local_peer_id).?);
+    try std.testing.expect(pair.client.peerId(handles.client).?.eql(&pair.server_ctx.local_peer_id));
 }
 
 test "engine resolved memory plan reports budgeted receive windows and scheduled storage" {
