@@ -165,6 +165,30 @@ test "core native two owners establish relevance and fetch initial metadata with
     }
 }
 
+test "core publishes the authenticated endpoint after QUIC rebinding" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..60) |_| try setup.step(1);
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.server.snapshots(&snapshots));
+    const before = snapshots[0];
+    try std.testing.expect(before.relevant);
+    const rebound: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4003 } };
+    setup.pair.client_source = rebound;
+    setup.client.reStatusPeers(setup.pair.now);
+    for (0..60) |_| try setup.step(0);
+    try std.testing.expectEqual(@as(u64, 1), setup.pair.server.counters.path_changes);
+    try std.testing.expectEqual(rebound, setup.pair.server.peerAddress(before.connection.?).?);
+    const after = setup.server.catalog.get(before.peer).?;
+    try std.testing.expectEqual(before.connection, after.connection);
+    try std.testing.expectEqual(rebound, after.endpoint);
+    var event: [1]t.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.server.catalog.pollEvents(&event));
+    try std.testing.expectEqual(before.peer, event[0].updated.peer);
+    try std.testing.expectEqual(rebound, event[0].updated.endpoint);
+}
+
 test "core native ping coalesces metadata and confirms unchanged freshness then periodic Status" {
     var setup: Setup = .{};
     try setup.init(&.{});

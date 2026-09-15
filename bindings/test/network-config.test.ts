@@ -68,6 +68,54 @@ const cases: readonly [string, (config: NativeRuntimeConfig) => void, string][] 
     "InvalidNetworkConfig",
   ],
   [
+    "mapped IPv6 listener",
+    (c) => {
+      c.bind = {address: Uint8Array.of(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 127, 0, 0, 1), family: 6, port: 0};
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "mapped IPv6 dual listener",
+    (c) => {
+      c.bind = [
+        {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0},
+        {address: Uint8Array.of(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 127, 0, 0, 1), family: 6, port: 0},
+      ];
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "mapped IPv6 discovery listener",
+    (c) => {
+      c.discovery = {
+        ...discoveryConfig().discovery,
+        bind: {address: Uint8Array.of(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 127, 0, 0, 1), family: 6, port: 0},
+      };
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
+    "mapped IPv6 advertisement with IPv6 listeners",
+    (c) => {
+      const bind = {
+        address: Uint8Array.of(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1),
+        family: 6 as const,
+        port: 0,
+      };
+      c.bind = bind;
+      c.discovery = {
+        ...discoveryConfig().discovery,
+        advertisement: {
+          ip6: Uint8Array.of(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 127, 0, 0, 1),
+          quic6: 9001,
+          udp6: 9000,
+        },
+        bind,
+      };
+    },
+    "InvalidNetworkConfig",
+  ],
+  [
     "unsafe numeric port",
     (c) => {
       Object.assign(c.bind, {port: Number.MAX_SAFE_INTEGER + 1});

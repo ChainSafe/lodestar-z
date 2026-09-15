@@ -164,22 +164,20 @@ pub fn upsertVerified(
     try validateEntry(&self.local_id, peer, record);
     const index = bucketIndex(types.logDistance(&self.local_id, &peer.node_id));
     if (self.findInBucket(index, &peer.node_id)) |position| {
+        const updated = try self.refreshEntry(index, &self.entries[bucketOffset(index) + position], peer, record);
         if (self.pending[index]) |candidate| {
             if (std.mem.eql(u8, &candidate.replace_id, &peer.node_id)) {
                 self.pending[index] = null;
             }
         }
-        return self.updateExisting(index, position, peer, record, now_ms);
+        self.touch(index, position, now_ms);
+        return if (updated) .updated else .refreshed;
     }
     if (self.pending[index]) |*candidate| {
         if (!std.mem.eql(u8, &candidate.entry.peer.node_id, &peer.node_id)) {
             return .pending_busy;
         }
-        if (record.sequence > candidate.entry.record.sequence) {
-            try self.requireAddressCapacity(index, peer.address, &peer.node_id);
-            candidate.entry.peer = peer.*;
-            candidate.entry.record = record.*;
-        }
+        _ = try self.refreshEntry(index, &candidate.entry, peer, record);
         candidate.entry.last_verified_ms = now_ms;
         return .{ .pending = candidate.replace_id };
     }
@@ -295,23 +293,22 @@ pub fn closest(
     return bounded[0..length];
 }
 
-fn updateExisting(
+fn refreshEntry(
     self: *RoutingTable,
     bucket_index: usize,
-    position: usize,
+    entry: *Entry,
     peer: *const types.Endpoint,
     record: *const enr.Record,
-    now_ms: u64,
-) Error!PutResult {
-    const offset = bucketOffset(bucket_index) + position;
-    const previous_sequence = self.entries[offset].record.sequence;
-    if (record.sequence > previous_sequence) {
+) Error!bool {
+    const updated = record.sequence > entry.record.sequence;
+    const retained = if (updated) record else &entry.record;
+    // Signed revisions govern membership; authenticated traffic selects the live endpoint.
+    if (recordHasAddress(retained, peer.address) and !entry.peer.address.eql(peer.address)) {
         try self.requireAddressCapacity(bucket_index, peer.address, &peer.node_id);
-        self.entries[offset].peer = peer.*;
-        self.entries[offset].record = record.*;
+        entry.peer = peer.*;
     }
-    self.touch(bucket_index, position, now_ms);
-    return if (record.sequence > previous_sequence) .updated else .refreshed;
+    if (updated) entry.record = record.*;
+    return updated;
 }
 
 fn touch(
@@ -493,9 +490,7 @@ fn classifyIp4(ip: [4]u8) AddressClass {
 fn classifyIp6(ip: [16]u8) AddressClass {
     if (std.mem.allEqual(u8, &ip, 0) or ip[0] == 0xff) return .invalid;
     if (std.mem.allEqual(u8, ip[0..15], 0) and ip[15] == 1) return .loopback;
-    if (std.mem.allEqual(u8, ip[0..10], 0) and ip[10] == 0xff and ip[11] == 0xff) {
-        return classifyIp4(ip[12..16].*);
-    }
+    if (types.Address.isIp4Mapped(ip)) return .invalid;
     if (std.mem.allEqual(u8, ip[0..12], 0)) return .invalid;
     if (ip[0] == 0xfe and ip[1] & 0xc0 == 0x80) return .link_local;
     if (ip[0] & 0xfe == 0xfc or

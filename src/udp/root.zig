@@ -39,6 +39,12 @@ pub const Sockets = struct {
 
     /// Uses the provider's IPv6 defaults. Overlapping wildcard binds may fail.
     pub fn bind(io: std.Io, addresses: Bindings) BindError!Sockets {
+        const ip6 = switch (addresses) {
+            .ip4 => null,
+            .ip6 => |ip| ip,
+            .dual => |ips| ips.ip6,
+        };
+        if (ip6) |ip| if (Address.isIp4Mapped(ip.bytes)) return error.AddressFamilyUnsupported;
         var result: Sockets = .{};
         errdefer result.close(io);
         switch (addresses) {

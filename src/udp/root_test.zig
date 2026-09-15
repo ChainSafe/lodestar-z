@@ -8,6 +8,23 @@ fn timeout(milliseconds: i64) std.Io.Timeout {
     return .{ .duration = .{ .raw = .fromMilliseconds(milliseconds), .clock = .awake } };
 }
 
+test "UDP rejects mapped IPv6 listeners before any provider acquisition" {
+    const Provider = struct {
+        fn bind(_: ?*anyopaque, _: *const net.IpAddress, _: net.IpAddress.BindOptions) net.IpAddress.BindError!net.Socket {
+            return error.NetworkDown;
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.netBindIp = Provider.bind;
+    const io: std.Io = .{ .userdata = null, .vtable = &vtable };
+    const mapped: net.Ip6Address = .{ .bytes = .{0} ** 10 ++ .{ 0xff, 0xff, 127, 0, 0, 1 }, .port = 0 };
+    try std.testing.expectError(error.AddressFamilyUnsupported, udp.Sockets.bind(io, .{ .ip6 = mapped }));
+    try std.testing.expectError(error.AddressFamilyUnsupported, udp.Sockets.bind(io, .{ .dual = .{ .ip4 = .loopback(0), .ip6 = mapped } }));
+    const received = udp.Address.fromNetwork(.{ .ip6 = mapped });
+    try std.testing.expectEqualDeep(udp.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 0 } }, received);
+    try std.testing.expect(!(udp.Address{ .ip6 = .{ .octets = mapped.bytes, .port = 9000 } }).isUsable());
+}
+
 test "UDP delegates both families to the supplied bind provider" {
     const Provider = struct {
         fn bind(_: ?*anyopaque, _: *const net.IpAddress, options: net.IpAddress.BindOptions) net.IpAddress.BindError!net.Socket {

@@ -258,6 +258,30 @@ test "ENR generic fields preserve signed extensions and exact record boundary" {
     try std.testing.expectError(error.InvalidRecord, enr.Record.createFields(&key, 7, &.{ fields[0], fields[0], fields[1] }));
 }
 
+test "ENR mapped IPv6 remains signed content but is not an operational endpoint" {
+    const key = try crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{1}));
+    const public_key = crypto.compressedPublicKey(&key);
+    const mapped = [_]u8{0} ** 10 ++ [_]u8{ 0xff, 0xff, 192, 0, 2, 1 };
+    const fields = [_]enr.Field{
+        .{ .key = "id", .value = .{ .bytes = "v4" } },
+        .{ .key = "ip", .value = .{ .bytes = &.{ 192, 0, 2, 2 } } },
+        .{ .key = "ip6", .value = .{ .bytes = &mapped } },
+        .{ .key = "secp256k1", .value = .{ .bytes = &public_key } },
+        .{ .key = "udp", .value = .{ .uint = 9000 } },
+        .{ .key = "udp6", .value = .{ .uint = 9001 } },
+    };
+    const record = try enr.Record.createFields(&key, 7, &fields);
+    const parsed = try enr.Record.init(record.slice());
+    try std.testing.expectEqualSlices(u8, record.slice(), parsed.slice());
+    try std.testing.expectEqualSlices(u8, &mapped, (try parsed.fieldBytes("ip6")).?);
+    try std.testing.expectEqual(try record.contentHash(), try parsed.contentHash());
+    try std.testing.expectEqualDeep(types.Address{ .ip4 = .{ .octets = .{ 192, 0, 2, 2 }, .port = 9000 } }, parsed.endpointFor(.dual).?);
+    try std.testing.expectEqual(null, parsed.endpoints()[1]);
+    try std.testing.expectEqual(null, parsed.endpointFor(.ip6));
+    const no_fallback = try enr.Record.createFields(&key, 7, &.{ fields[0], fields[2], fields[3], fields[4], fields[5] });
+    try std.testing.expectEqual(null, no_fallback.endpoint());
+}
+
 test "ENR generic raw extensions validate nested canonical RLP before signing" {
     const key = try crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{2}));
     const public_key = crypto.compressedPublicKey(&key);

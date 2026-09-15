@@ -240,6 +240,99 @@ test "routing table applies ENR updates atomically and ignores stale endpoints" 
     try std.testing.expectEqual(@as(u64, 3), updated.record.sequence);
 }
 
+test "routing table refreshes authenticated resident and pending endpoints independently of ENR revision" {
+    for ([_]bool{ false, true }) |pending| {
+        var table: RoutingTable = undefined;
+        try table.init(std.testing.allocator, @splat(0));
+        defer table.deinit(std.testing.allocator);
+        if (pending) for (0..RoutingTable.bucket_size) |index| {
+            const id = nodeAtDistance(256, @intCast(index + 1));
+            const ip = address4(10, @intCast(index + 1), 0, 1, 9000);
+            const record = fakeRecord(id, ip, 1);
+            _ = try table.upsertVerified(&.{ .node_id = id, .address = ip }, &record, 0);
+        };
+        const id = nodeAtDistance(256, 17);
+        const ip4 = address4(192, 0, 2, 1, 9000);
+        const ip6 = address6(.{ 0x20, 1, 0x0d, 0xb8 } ++ .{0} ** 11 ++ .{1}, 9001);
+        var record = fakeRecord(id, ip4, 2);
+        record.ip6 = ip6.ip6.octets;
+        record.udp6 = ip6.port();
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &record, 1);
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip6 }, &record, 2);
+        const refreshed = if (pending) table.pending[RoutingTable.bucket_count - 1].?.entry else table.get(&id).?;
+        try std.testing.expectEqualDeep(ip6, refreshed.peer.address);
+        try std.testing.expectEqualDeep(record, refreshed.record);
+        try std.testing.expectEqual(@as(u64, 2), refreshed.last_verified_ms);
+
+        var older = record;
+        older.sequence = 1;
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &older, 3);
+        const retained = if (pending) table.pending[RoutingTable.bucket_count - 1].?.entry else table.get(&id).?;
+        try std.testing.expectEqualDeep(ip4, retained.peer.address);
+        try std.testing.expectEqualDeep(record, retained.record);
+
+        var newer = record;
+        newer.sequence = 3;
+        newer.ip4 = null;
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip6 }, &newer, 4);
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &record, 5);
+        older.sequence = 3;
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &older, 6);
+        if (pending) {
+            const incumbent = table.revalidationTarget().?;
+            _ = try table.resolveRevalidation(&incumbent.peer.node_id, false, 7);
+        }
+        const current = table.get(&id).?;
+        try std.testing.expectEqualDeep(ip6, current.peer.address);
+        try std.testing.expectEqualDeep(newer, current.record);
+        try std.testing.expectEqual(@as(u64, 6), current.last_verified_ms);
+        var closest: [1]RoutingTable.Entry = undefined;
+        try std.testing.expectEqualDeep(ip6, table.closest(&id, &closest)[0].peer.address);
+        var cursor: usize = 0;
+        var found = false;
+        for (0..RoutingTable.bucket_size) |_| {
+            const probe = table.maintenanceTarget(&cursor, 100, 1) orelse break;
+            if (!std.mem.eql(u8, &id, &probe.peer.node_id)) continue;
+            try std.testing.expectEqualDeep(ip6, probe.peer.address);
+            found = true;
+            break;
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "routing table preflights endpoint refresh quotas before changing entries or replacements" {
+    var table: RoutingTable = undefined;
+    try table.init(std.testing.allocator, @splat(0));
+    defer table.deinit(std.testing.allocator);
+    const subject_id = nodeAtDistance(256, 1);
+    const pending_id = nodeAtDistance(256, 17);
+    const ip6 = address6(.{ 0x20, 1, 0x0d, 0xb8 } ++ .{0} ** 11 ++ .{1}, 9001);
+    var subject_record = fakeRecord(subject_id, address4(10, 1, 0, 1, 9000), 1);
+    subject_record.ip6 = ip6.ip6.octets;
+    subject_record.udp6 = ip6.port();
+    _ = try table.upsertVerified(&.{ .node_id = subject_id, .address = subject_record.endpoint().? }, &subject_record, 1);
+    for (1..RoutingTable.bucket_size) |index| {
+        const id = nodeAtDistance(256, @intCast(index + 1));
+        var ip = if (index <= RoutingTable.bucket_subnet_limit) ip6 else address4(10, @intCast(index + 1), 0, 1, 9000);
+        if (ip == .ip6) ip.ip6.octets[15] = @intCast(index + 1);
+        const record = fakeRecord(id, ip, 1);
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip }, &record, 1);
+    }
+    var pending_record = fakeRecord(pending_id, address4(10, 17, 0, 1, 9000), 1);
+    pending_record.ip6 = ip6.ip6.octets;
+    pending_record.udp6 = ip6.port();
+    _ = try table.upsertVerified(&.{ .node_id = pending_id, .address = pending_record.endpoint().? }, &pending_record, 1);
+    const subject_before = table.get(&subject_id).?;
+    const pending_before = table.pending[RoutingTable.bucket_count - 1].?;
+    for ([_]*const enr.Record{ &subject_record, &pending_record }) |record| {
+        try std.testing.expectError(error.AddressLimit, table.upsertVerified(&.{ .node_id = record.node_id, .address = ip6 }, record, 2));
+        try std.testing.expectEqualDeep(subject_before, table.get(&subject_id).?);
+        try std.testing.expectEqualDeep(pending_before, table.pending[RoutingTable.bucket_count - 1].?);
+        try std.testing.expectEqualDeep(subject_id, table.revalidationTarget().?.peer.node_id);
+    }
+}
+
 test "routing table applies subnet limits to IPv6 prefixes" {
     const local_id = [_]u8{0} ** 32;
     var table: RoutingTable = undefined;
@@ -466,6 +559,9 @@ test "relay policy does not cross special address scopes" {
     try std.testing.expect(RoutingTable.relayAllowed(private6, other_private6));
     try std.testing.expect(!RoutingTable.relayAllowed(private, private6));
     try std.testing.expect(!RoutingTable.relayAllowed(public6, multicast6));
+    const mapped_private = address6(.{0} ** 10 ++ .{ 0xff, 0xff, 10, 0, 0, 1 }, 9000);
+    try std.testing.expect(!RoutingTable.relayAllowed(private6, mapped_private));
+    try std.testing.expect(!RoutingTable.relayAllowed(mapped_private, private6));
 }
 
 test "routing maintenance selects quiet peers fairly and protects recent traffic from eviction" {

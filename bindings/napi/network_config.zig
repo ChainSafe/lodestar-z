@@ -117,7 +117,11 @@ pub fn endpoint(value: Value) !std.Io.net.IpAddress {
     const port: u16 = @intCast(try integer(try get(value, "port"), 65535));
     return switch (family) {
         4 => .{ .ip4 = .{ .bytes = try fixed(4, try get(value, "address")), .port = port } },
-        6 => .{ .ip6 = .{ .bytes = try fixed(16, try get(value, "address")), .port = port } },
+        6 => blk: {
+            const octets = try fixed(16, try get(value, "address"));
+            if (n.Address.isIp4Mapped(octets)) return error.InvalidNetworkConfig;
+            break :blk .{ .ip6 = .{ .bytes = octets, .port = port } };
+        },
         else => error.InvalidNetworkConfig,
     };
 }
@@ -347,6 +351,7 @@ pub fn parseEndpoints(ad: Value) !?n.network_core.AdvertisementEndpoints {
         inline for (.{ "ip4", "ip6" }) |key| {
             if (try ad.hasNamedProperty(key)) @field(result, key) = try fixed(if (std.mem.eql(u8, key, "ip4")) 4 else 16, try get(ad, key));
         }
+        if (result.ip6) |ip| if (n.Address.isIp4Mapped(ip)) return error.InvalidNetworkConfig;
         inline for (.{ "udp", "udp6", "quic", "quic6" }) |key| {
             if (try ad.hasNamedProperty(key)) {
                 const port = try integer(try get(ad, key), 65535);

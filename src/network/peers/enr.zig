@@ -51,7 +51,7 @@ pub fn decode(record: *const Record, context: *const types.ForkContext) Error!Ca
         }
     };
     if (record.ip6) |ip| if (quic6) |port| {
-        if (port != 0 and !std.mem.allEqual(u8, &ip, 0)) {
+        if (port != 0 and !std.mem.allEqual(u8, &ip, 0) and !types.Address.isIp4Mapped(ip)) {
             result.addresses[result.address_count] = .{ .ip6 = .{ .octets = ip, .port = @intCast(port) } };
             result.address_count += 1;
         }
@@ -92,6 +92,7 @@ pub const LocalAdvertisement = struct {
 /// The trusted caller enforces scheduling: once Fulu is scheduled, supply cgc and nfd, using
 /// zero nfd when no later fork is scheduled. ForkContext alone does not describe that schedule.
 pub fn build(key: *const d.identity.crypto.KeyPair, sequence: u64, local: *const LocalAdvertisement, context: *const types.ForkContext) Error!Record {
+    if (local.ip6) |ip| if (types.Address.isIp4Mapped(ip)) return error.InvalidField;
     var eth2: [16]u8 = undefined;
     @memcpy(eth2[0..4], &local.fork.digest);
     @memcpy(eth2[4..8], &local.fork.next_version);

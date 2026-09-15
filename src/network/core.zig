@@ -350,6 +350,11 @@ pub const Core = struct {
                     self.dial_queue.disconnected(&snapshot.identity, snapshot.connected_at_ms, reason, now.mono_ms);
                 }
             },
+            .path_changed => |changed| {
+                if (self.control.peerFor(changed.conn)) |peer| {
+                    _ = self.catalog.updateEndpoint(peer, changed.conn, &changed.peer);
+                }
+            },
             else => {},
         }
     }

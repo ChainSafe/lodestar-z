@@ -1,11 +1,13 @@
 export type NetworkFork = "phase0" | "altair" | "bellatrix" | "capella" | "deneb" | "electra" | "fulu" | "gloas";
 
+/** IPv4 uses four address bytes; IPv6 uses sixteen and excludes IPv4-mapped addresses. */
 export type IpEndpoint =
   | {family: 4; address: Uint8Array; port: number}
   | {family: 6; address: Uint8Array; port: number};
 
 export interface AdvertisedEndpoints {
   ip4?: Uint8Array;
+  /** Sixteen IPv6 address bytes; IPv4-mapped addresses are invalid. */
   ip6?: Uint8Array;
   udp?: number;
   udp6?: number;

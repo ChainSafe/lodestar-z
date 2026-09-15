@@ -167,7 +167,7 @@ pub const Record = struct {
             result[0] = .{ .ip4 = .{ .octets = ip, .port = port } };
         };
         if (self.ip6) |ip| if (self.udp6 orelse self.udp) |port| {
-            result[1] = .{ .ip6 = .{ .octets = ip, .port = port } };
+            if (!types.Address.isIp4Mapped(ip)) result[1] = .{ .ip6 = .{ .octets = ip, .port = port } };
         };
         return result;
     }
