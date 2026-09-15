@@ -1,5 +1,6 @@
 const std = @import("std");
 const BitList = @import("bit_list.zig").BitList;
+const unlimited = @import("bit_list.zig").unlimited;
 
 test "BitList finite limits include zero and reject growth before allocating" {
     inline for (.{ 0, 17 }) |limit| {
@@ -15,13 +16,12 @@ test "BitList finite limits include zero and reject growth before allocating" {
         try std.testing.expectEqual(limit, bits.bit_len);
         try std.testing.expect(!failing.has_induced_failure);
         try std.testing.expectError(error.OutOfRange, bits.get(limit));
-        try std.testing.expectError(error.OutOfRange, bits.setAssumeCapacity(limit, true));
     }
 }
 
 test "BitList shrink and regrow clears discarded bits across byte boundaries" {
     const allocator = std.testing.allocator;
-    inline for (.{ BitList(.{ .limit = 258 }), BitList(.{ .limit = null }) }) |Bits| {
+    inline for (.{ BitList(.{ .limit = 258 }), BitList(.{ .limit = unlimited }) }) |Bits| {
         for ([_]usize{ 0, 1, 7, 8, 9, 255, 256, 257 }) |retained| {
             var bits = try Bits.fromBoolSlice(allocator, &([_]bool{true} ** 257));
             defer bits.deinit(allocator);
@@ -41,7 +41,7 @@ test "BitList shrink and regrow clears discarded bits across byte boundaries" {
 }
 
 test "memory_safety: BitList rejects an unrepresentable length before allocating" {
-    inline for (.{ BitList(.{ .limit = std.math.maxInt(usize) }), BitList(.{ .limit = null }) }) |Bits| {
+    inline for (.{ BitList(.{ .limit = std.math.maxInt(usize) }), BitList(.{ .limit = unlimited }) }) |Bits| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
         const allocator = failing.allocator();
         var bits = Bits.empty;
@@ -51,13 +51,12 @@ test "memory_safety: BitList rejects an unrepresentable length before allocating
         try std.testing.expectEqual(0, bits.bit_len);
         try std.testing.expectEqual(0, bits.data.items.len);
         try std.testing.expect(!failing.has_induced_failure);
-        try std.testing.expectError(error.OutOfRange, bits.setAssumeCapacity(0, true));
         try std.testing.expectError(error.OutOfMemory, Bits.fromBitLen(allocator, std.math.maxInt(usize)));
     }
 }
 
 test "memory_safety: BitList failed growth preserves its value" {
-    inline for (.{ BitList(.{ .limit = 257 }), BitList(.{ .limit = null }) }) |Bits| {
+    inline for (.{ BitList(.{ .limit = 257 }), BitList(.{ .limit = unlimited }) }) |Bits| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
         const allocator = failing.allocator();
         var bits = try Bits.fromBoolSlice(allocator, &.{ true, false, true });
@@ -71,13 +70,13 @@ test "memory_safety: BitList failed growth preserves its value" {
         try std.testing.expectEqualSlices(u8, &.{0b101}, bits.data.items);
 
         try bits.set(allocator, 1, true);
-        try bits.setAssumeCapacity(0, false);
+        bits.setAssumeCapacity(0, false);
         try std.testing.expectEqualSlices(u8, &.{0b110}, bits.data.items);
     }
 }
 
 test "BitList - sanity with bools" {
-    inline for (.{ BitList(.{ .limit = 16 }), BitList(.{ .limit = null }) }) |Bits| {
+    inline for (.{ BitList(.{ .limit = 16 }), BitList(.{ .limit = unlimited }) }) |Bits| {
         const allocator = std.testing.allocator;
         const expected_bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true };
         const expected_true_bit_indexes = [_]usize{ 0, 2, 3, 5, 7, 8, 10, 11 };
@@ -105,7 +104,7 @@ test "BitList - sanity with bools" {
 }
 
 test "BitList - intersectValues" {
-    inline for (.{ BitList(.{ .limit = 16 }), BitList(.{ .limit = null }) }) |Bits| {
+    inline for (.{ BitList(.{ .limit = 16 }), BitList(.{ .limit = unlimited }) }) |Bits| {
         const TestCase = struct { expected: []const u8, bit_len: usize };
         const test_cases = [_]TestCase{
             .{ .expected = &[_]u8{}, .bit_len = 16 },
@@ -120,7 +119,7 @@ test "BitList - intersectValues" {
             var b: Bits = try Bits.fromBitLen(allocator, tc.bit_len);
             defer b.deinit(allocator);
 
-            for (tc.expected) |i| try b.setAssumeCapacity(i, true);
+            for (tc.expected) |i| b.setAssumeCapacity(i, true);
 
             var values = try std.ArrayList(u8).initCapacity(allocator, tc.bit_len);
             defer values.deinit(allocator);

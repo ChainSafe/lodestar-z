@@ -1,5 +1,6 @@
 const std = @import("std");
 const BitList = @import("bit_array").BitList;
+const unlimited = @import("bit_array").unlimited;
 const expectEqualRootsAlloc = @import("test_utils.zig").expectEqualRootsAlloc;
 const expectEqualSerializedAlloc = @import("test_utils.zig").expectEqualSerializedAlloc;
 const TypeKind = @import("type_kind.zig").TypeKind;
@@ -21,7 +22,7 @@ pub fn ProgressiveBitListType() type {
         const Self = @This();
         pub const kind = TypeKind.progressive_bit_list;
         pub const Element: type = BoolType();
-        pub const Type: type = BitList(.{ .limit = null });
+        pub const Type: type = BitList(.{ .limit = unlimited });
         pub const min_size: usize = 1;
         pub const max_size: usize = std.math.maxInt(usize);
 

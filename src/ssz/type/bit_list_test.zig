@@ -14,7 +14,7 @@ test "BitListType - sanity" {
     var b: Bits.Type = try Bits.Type.fromBitLen(allocator, 30);
     defer b.deinit(allocator);
 
-    try b.setAssumeCapacity(2, true);
+    b.setAssumeCapacity(2, true);
 
     const b_buf = try allocator.alloc(u8, Bits.serializedSize(&b));
     defer allocator.free(b_buf);
@@ -366,7 +366,7 @@ test "memory_safety: BitListType tree reads need only output capacity" {
         var value = List.default_value;
         defer List.deinit(allocator, &value);
         try value.resize(allocator, len);
-        for (0..len) |i| try value.setAssumeCapacity(i, i % 3 == 0);
+        for (0..len) |i| value.setAssumeCapacity(i, i % 3 == 0);
         const node = try List.tree.fromValue(&pool, &value);
         defer pool.unref(node);
         const before = node.getRoot(&pool).*;

@@ -19,7 +19,7 @@ test "SSZ bit schemas use the standalone packed value types" {
 
     try testing.expect(List.Type == bit_array.BitList(.{ .limit = 17 }));
     try testing.expect(Vector.Type == bit_array.BitVector(17));
-    try testing.expect(Progressive.Type == bit_array.BitList(.{ .limit = null }));
+    try testing.expect(Progressive.Type == bit_array.BitList(.{ .limit = bit_array.unlimited }));
     try testing.expect(ssz.isBitListType(List));
     try testing.expect(!ssz.isBitListType(Progressive));
     try testing.expect(ssz.isBitVectorType(Vector));

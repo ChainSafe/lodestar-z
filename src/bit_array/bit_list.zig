@@ -1,7 +1,9 @@
 const std = @import("std");
 
+pub const unlimited: ?usize = null;
+
 pub const BitListOptions = struct {
-    /// Maximum logical length in bits; null imposes no limit beyond usize.
+    /// Maximum logical length in bits; unlimited imposes no limit beyond usize.
     limit: ?usize,
 };
 
@@ -132,7 +134,7 @@ pub fn BitList(comptime options: BitListOptions) type {
             if (bit_index + 1 > self.bit_len) {
                 try self.resize(allocator, bit_index + 1);
             }
-            try self.setAssumeCapacity(bit_index, bit);
+            self.setAssumeCapacity(bit_index, bit);
         }
 
         pub fn resize(self: *@This(), allocator: std.mem.Allocator, bit_len: usize) !void {
@@ -159,10 +161,8 @@ pub fn BitList(comptime options: BitListOptions) type {
         }
 
         /// Requires bit_index below bit_len; does not grow or allocate.
-        pub fn setAssumeCapacity(self: *@This(), bit_index: usize, bit: bool) !void {
-            if (bit_index >= self.bit_len) {
-                return error.OutOfRange;
-            }
+        pub fn setAssumeCapacity(self: *@This(), bit_index: usize, bit: bool) void {
+            std.debug.assert(bit_index < self.bit_len);
 
             const byte_index = bit_index / 8;
             const offset_in_byte: u3 = @intCast(bit_index % 8);
