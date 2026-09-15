@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.2.0](https://github.com/ChainSafe/lodestar-z/compare/v1.1.0...v1.2.0) (2026-09-15)
+
+
+### Features
+
+* partial validator monitor ([#475](https://github.com/ChainSafe/lodestar-z/issues/475)) ([2c595d3](https://github.com/ChainSafe/lodestar-z/commit/2c595d330101b6b32ab811de179f315c85443003))
+
+
+### Bug Fixes
+
+* **bindings:** return sync committee index maps ([#691](https://github.com/ChainSafe/lodestar-z/issues/691)) ([2f1a177](https://github.com/ChainSafe/lodestar-z/commit/2f1a177a10171c1a9f5cead09f7ebb2d3b9aa7db))
+* **stf:** clean up failed Altair participation translation ([#695](https://github.com/ChainSafe/lodestar-z/issues/695)) ([d8c06af](https://github.com/ChainSafe/lodestar-z/commit/d8c06af27fa2bf87fec37554089ffd0762051b38))
+* **types:** correct Electra blinded attester slashing limit ([#698](https://github.com/ChainSafe/lodestar-z/issues/698)) ([15d3347](https://github.com/ChainSafe/lodestar-z/commit/15d33475436f9a3f05509702803b913e0b627827))
+
+
+### Performance Improvements
+
+* bound progressive builder scratch ([#687](https://github.com/ChainSafe/lodestar-z/issues/687)) ([52a9736](https://github.com/ChainSafe/lodestar-z/commit/52a97361212e64f1a0ebb58fc645ed74b50ada07))
+* stream bitlist tree reads ([#679](https://github.com/ChainSafe/lodestar-z/issues/679)) ([02d61c2](https://github.com/ChainSafe/lodestar-z/commit/02d61c2b9c9ca7361ea852b8f5458854f8522197))
+* stream compact proof generation ([#683](https://github.com/ChainSafe/lodestar-z/issues/683)) ([57022b4](https://github.com/ChainSafe/lodestar-z/commit/57022b4bdd6a2c054d3eed2343b16e1e05596272))
+
+
+### Documentation
+
+* retire security implementation map ([#696](https://github.com/ChainSafe/lodestar-z/issues/696)) ([f3e8ad1](https://github.com/ChainSafe/lodestar-z/commit/f3e8ad13264af6dfc047fe4a46d1cbfcf12eac8f))
+
 ## [1.1.0](https://github.com/ChainSafe/lodestar-z/compare/v1.0.0...v1.1.0) (2026-09-11)
 
 
