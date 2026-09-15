@@ -230,7 +230,9 @@ pub fn stateTransition(
                     if (comptime (bt == .blinded and f.lt(.bellatrix)) or (bt == .blinded and f.gte(.gloas))) {
                         return error.InvalidBlockTypeForFork;
                     } else {
-                        try processBlock(
+                        var local_diagnostics: Diagnostics = .{};
+                        const diagnostics = opts.diagnostics orelse &local_diagnostics;
+                        processBlock(
                             f,
                             allocator,
                             io,
@@ -242,8 +244,13 @@ pub fn stateTransition(
                             bt,
                             block.castToFork(bt, f),
                             opts.block_external_data,
-                            .{ .verify_signature = opts.verify_signatures, .diagnostics = opts.diagnostics },
-                        );
+                            .{ .verify_signature = opts.verify_signatures, .diagnostics = diagnostics },
+                        ) catch |err| {
+                            if (diagnostics.detail) |*detail| {
+                                std.log.warn("Block processing failed at slot {d}: {f}", .{ block_slot, detail });
+                            }
+                            return err;
+                        };
                     }
                 },
             }
