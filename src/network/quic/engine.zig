@@ -18,7 +18,6 @@ pub const ShutdownDirection = api.ShutdownDirection;
 pub const CloseReason = api.CloseReason;
 pub const Read = api.Read;
 pub const Address = api.Address;
-pub const Stats = api.Stats;
 pub const Sent = api.Sent;
 pub const Error = api.Error;
 pub const StreamError = api.StreamError;
@@ -314,24 +313,6 @@ pub const Engine = struct {
         assert(slot.state != .free);
         assert(slot.generation == conn.generation);
         return slot.direction;
-    }
-
-    pub fn connectionStats(self: *const Engine, conn: Handle) ?Stats {
-        const slot = self.liveView(conn) orelse return null;
-        assert(slot.state != .free);
-        if (slot.conn == null) return null;
-        return slot.stats();
-    }
-
-    pub fn connectionAgeMs(self: *const Engine, conn: Handle, now: Now) ?u64 {
-        const slot = self.liveView(conn) orelse return null;
-        assert(slot.state != .free);
-        assert(slot.conn != null);
-        return now.mono_ms -| slot.created_ms;
-    }
-
-    pub fn findByPeerId(self: *const Engine, id: *const peer_id.PeerId) ?Handle {
-        return self.registry.findPeer(id);
     }
 
     pub fn openStream(self: *Engine, conn: Handle) StreamError!StreamHandle {
@@ -781,7 +762,8 @@ pub const Engine = struct {
                 self.registry.dialing -= 1;
             }
             if (slot.handshake.peer_id) |id| {
-                self.registry.indexPeer(index, id);
+                assert(slot.peer_id == null);
+                slot.peer_id = id;
                 if (slot.expected_peer_id != null and !slot.expected_peer_id.?.eql(&id)) {
                     slot.deferClose(.peer_id_mismatch, types.app_error_peer_id_mismatch);
                 } else {

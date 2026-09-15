@@ -60,34 +60,6 @@ test "engine counts only inbound handshakes against the permit bound" {
     try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
 }
 
-test "engine finds a connection by peer id until its slot is released" {
-    var pair: Pair = .{};
-    try pair.init(.{}, .{});
-    defer pair.deinit();
-    const handles = try connectPair(&pair);
-
-    const server_id = pair.server_ctx.local_peer_id;
-    const client_id = pair.client_ctx.local_peer_id;
-    try std.testing.expectEqual(handles.client, pair.client.findByPeerId(&server_id).?);
-    try std.testing.expectEqual(handles.server, pair.server.findByPeerId(&client_id).?);
-    try std.testing.expect(pair.client.findByPeerId(&client_id) == null);
-    try std.testing.expect(pair.server.findByPeerId(&server_id) == null);
-
-    try std.testing.expect(pair.client.close(handles.client, 0));
-    try pair.pump();
-
-    var storage: [8]Event = undefined;
-    var drains: usize = 0;
-    while (drains < 2) : (drains += 1) {
-        _ = pair.events(&pair.client, &storage);
-        _ = pair.events(&pair.server, &storage);
-    }
-    try std.testing.expectEqual(@as(usize, 0), pair.client.activeIndices().len);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
-    try std.testing.expect(pair.client.findByPeerId(&server_id) == null);
-    try std.testing.expect(pair.server.findByPeerId(&client_id) == null);
-}
-
 test "engine reconnects with the same TLS contexts" {
     var pair: Pair = .{};
     try pair.init(.{}, .{});
@@ -132,9 +104,6 @@ test "engine reports connection metadata through handles" {
     try std.testing.expect(pair.client.peerAddress(handles.client).?.eql(server_address));
     try std.testing.expect(pair.server.peerAddress(handles.server).?.eql(client_address));
 
-    pair.advance(250);
-    const age = pair.client.connectionAgeMs(handles.client, pair.now).?;
-    try std.testing.expectEqual(@as(u64, 250), age);
     try std.testing.expectEqual(pair.client.memoryPlan().connection_window_bytes / 2, pair.client.memoryPlan().stream_window_bytes);
 
     const stale = engine_mod.Handle{
@@ -143,7 +112,6 @@ test "engine reports connection metadata through handles" {
     };
     try std.testing.expect(pair.client.direction(stale) == null);
     try std.testing.expect(pair.client.peerAddress(stale) == null);
-    try std.testing.expect(pair.client.connectionAgeMs(stale, pair.now) == null);
 }
 
 test "engine receive windows stay within the configured budget" {
@@ -163,29 +131,6 @@ test "engine receive windows stay within the configured budget" {
     defer standard.deinit();
     try std.testing.expectEqual(@as(u64, 4 * 1_024 * 1_024), standard.memoryPlan().connection_window_bytes);
     try std.testing.expectEqual(@as(u64, 2 * 1_024 * 1_024), standard.memoryPlan().stream_window_bytes);
-}
-
-test "engine reports connection stats for live handles only" {
-    var pair: Pair = .{};
-    try pair.init(.{}, .{});
-    defer pair.deinit();
-    const handles = try connectPair(&pair);
-
-    const stats = pair.client.connectionStats(handles.client) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(stats.sent > 0);
-    try std.testing.expect(stats.recv > 0);
-    try std.testing.expect(stats.sent_bytes > 0);
-    try std.testing.expect(stats.recv_bytes > 0);
-    try std.testing.expectEqual(@as(u64, 0), stats.lost);
-    try std.testing.expect(stats.rtt_ms <= 1_000);
-    try std.testing.expect(stats.min_rtt_ms <= stats.rtt_ms);
-    try std.testing.expect(stats.cwnd > 0);
-
-    const stale = engine_mod.Handle{
-        .index = handles.client.index,
-        .generation = handles.client.generation +% 1,
-    };
-    try std.testing.expect(pair.client.connectionStats(stale) == null);
 }
 
 test "engine captures TLS key material per connection only when keylog is enabled" {

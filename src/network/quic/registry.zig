@@ -1,9 +1,6 @@
 const std = @import("std");
 const binding = @import("binding.zig");
-const api = @import("api.zig");
-const peer_id = @import("../wire/peer_id.zig");
 const connection = @import("connection.zig");
-const peer_index = @import("peer_index.zig");
 const route_table = @import("route_table.zig");
 const tls = @import("../tls/context.zig");
 const assert = std.debug.assert;
@@ -21,8 +18,6 @@ pub const Registry = struct {
     positions: []u16,
     activity: []bool,
     keylog_arena: []u8,
-    peers: peer_index.PeerIndex,
-    seed: u64,
     active_len: u16 = 0,
     handshaking: u16 = 0,
     dialing: u16 = 0,
@@ -55,9 +50,6 @@ pub const Registry = struct {
         const keylog_arena = try allocator.alloc(u8, keylog_len);
         errdefer allocator.free(keylog_arena);
 
-        var peers = try peer_index.PeerIndex.init(allocator, slots_max);
-        errdefer peers.deinit(allocator);
-
         const positions = try allocator.alloc(u16, slots_max);
         errdefer allocator.free(positions);
         for (positions, 0..) |*entry, index| entry.* = @intCast(index);
@@ -70,10 +62,8 @@ pub const Registry = struct {
             .active = active,
             .activity = activity,
             .keylog_arena = keylog_arena,
-            .peers = peers,
             .positions = positions,
             .route_keys = route_keys,
-            .seed = seed,
         };
     }
 
@@ -81,7 +71,6 @@ pub const Registry = struct {
         for (self.slots) |*slot| if (slot.state != .free) {
             slot.release();
         };
-        self.peers.deinit(allocator);
         allocator.free(self.keylog_arena);
         allocator.free(self.activity);
         allocator.free(self.active);
@@ -122,7 +111,6 @@ pub const Registry = struct {
         assert(index < self.slots.len);
         const slot = &self.slots[index];
         assert(slot.state != .free);
-        if (slot.peer_id) |id| self.peers.remove(peer_index.keyOf(self.seed, &id), index);
         self.removeRoutesFor(index);
         slot.release();
         self.unclaim(index);
@@ -135,31 +123,6 @@ pub const Registry = struct {
         assert(self.keylog_arena.len == tls.keylog_capacity * self.slots.len);
         const start = tls.keylog_capacity * @as(usize, index);
         return self.keylog_arena[start..][0..tls.keylog_capacity];
-    }
-
-    pub fn indexPeer(self: *Registry, index: u16, id: peer_id.PeerId) void {
-        const slot = &self.slots[index];
-        assert(slot.state == .established);
-        assert(slot.peer_id == null);
-        slot.peer_id = id;
-        self.peers.insert(.{
-            .key = peer_index.keyOf(self.seed, &id),
-            .index = index,
-            .generation = slot.generation,
-            .used = true,
-        });
-    }
-
-    pub fn findPeer(self: *const Registry, id: *const peer_id.PeerId) ?api.Handle {
-        var candidates = self.peers.candidates(peer_index.keyOf(self.seed, id));
-        while (candidates.next()) |entry| {
-            assert(entry.index < self.slots.len);
-            const slot = &self.slots[entry.index];
-            if (slot.generation != entry.generation or slot.state == .free) continue;
-            const stored = slot.peer_id orelse continue;
-            if (stored.eql(id)) return .{ .index = entry.index, .generation = entry.generation };
-        }
-        return null;
     }
 
     pub fn findRoute(self: *const Registry, cid: *const binding.Cid) ?u16 {
