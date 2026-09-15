@@ -1173,3 +1173,42 @@ test "getRoot preserves shared branches and mixed cached payload roots" {
     try std.testing.expectEqual(@as(usize, 1), calls);
     try std.testing.expect(!failing.has_induced_failure);
 }
+
+test "editChunkedLeaf invalidates computed roots without allocating" {
+    const Writer = struct {
+        fn write(chunk: *[32]u8, _: usize, value: *const u256) void {
+            std.mem.writeInt(u256, chunk, value.*, .little);
+        }
+    };
+    const allocator = std.testing.allocator;
+    var counter = std.testing.FailingAllocator.init(allocator, .{});
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = counter.allocator(), .pool_size = 3 });
+    defer pool.deinit();
+
+    const node = try pool.createChunkedLeafEmpty(0);
+    defer pool.unref(node);
+    const original_hash = node.getRoot(&pool).*;
+    const allocations_before = counter.alloc_index;
+    try node.editChunkedLeaf(&pool, ChunkedLeaf.K - 1, ChunkedLeaf.K, u256, 0, &std.math.maxInt(u256), Writer.write);
+    try std.testing.expectEqual(allocations_before, counter.alloc_index);
+    try std.testing.expectEqual(ChunkedLeaf.K, try node.getChunkedLeafLen(&pool));
+    const first_hash = node.getRoot(&pool).*;
+    try std.testing.expect(!std.mem.eql(u8, &original_hash, &first_hash));
+
+    try node.editChunkedLeaf(&pool, 0, ChunkedLeaf.K, u256, 0, &42, Writer.write);
+    try std.testing.expectEqual(allocations_before, counter.alloc_index);
+    try std.testing.expect(!std.mem.eql(u8, &first_hash, node.getRoot(&pool)));
+
+    var expected_chunks: [ChunkedLeaf.K][32]u8 align(64) = @splat(@splat(0));
+    expected_chunks[0][0] = 42;
+    expected_chunks[ChunkedLeaf.K - 1] = @splat(255);
+    const expected = try pool.createChunkedLeaf(&expected_chunks, ChunkedLeaf.K);
+    defer pool.unref(expected);
+    try std.testing.expectEqualSlices(u8, expected.getRoot(&pool), node.getRoot(&pool));
+
+    const leaf = try pool.createLeafFromUint(7);
+    defer pool.unref(leaf);
+    const leaf_hash = leaf.getRoot(&pool).*;
+    try std.testing.expectError(error.InvalidNode, leaf.editChunkedLeaf(&pool, 0, 1, u256, 0, &42, Writer.write));
+    try std.testing.expectEqualSlices(u8, &leaf_hash, leaf.getRoot(&pool));
+}
