@@ -201,8 +201,8 @@ test "core native immutable metadata response survives local update during pendi
         try setup.step(0);
         for (setup.server.control.responses) |response| if (response.request) |request| {
             const slot = setup.server.service.reqresp.inboundSlot(request).?;
-            if (slot.protocol != .metadata_v1) continue;
-            try std.testing.expect(slot.io.writing);
+            if (slot.lifecycle.protocol != .metadata_v1) continue;
+            try std.testing.expect(slot.lifecycle.io.writing);
             const changed: t.Metadata = .{ .seq_number = 5, .attnets = @splat(9) };
             try setup.server.updateMetadata(&changed);
             pending = true;
@@ -280,7 +280,7 @@ test "core native control distinguishes RPC errors timeouts and local retries" {
             if (operation.protocol != .status_v1) continue;
             const service = &setup.client.service.reqresp;
             const slot = service.outboundSlot(request).?;
-            service.fail(slot, request.index, case.failure, &setup.pair.client);
+            slot.lifecycle.fail(service, request.index, case.failure, .{ .outbound = slot.phase }, &setup.pair.client);
             injected = true;
             break;
         };

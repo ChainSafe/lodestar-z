@@ -64,13 +64,13 @@ test "incoming response allocation stays borrowed through real quota withholding
     };
     const cell = withheld.?;
     const native = &pair.server.reqresp.inbound[cell.handle.index];
-    try std.testing.expectEqual(native.pending_ssz.ptr, cell.response.ptr);
+    try std.testing.expectEqual(native.lifecycle.io.payload.ptr, cell.response.ptr);
     try std.testing.expectEqual(@as(usize, 4000), table.snapshot().responseBytes);
     const deadline = native.withheld_since_ms.? + 1000;
     pair.pair.advance(deadline - pair.pair.now.mono_ms - 1);
     try pair.pumpOnce();
     try std.testing.expectEqual(@as(usize, 1), pair.server.reqresp.resourceSnapshot().withheld_chunks);
-    try std.testing.expectEqual(native.pending_ssz.ptr, cell.response.ptr);
+    try std.testing.expectEqual(native.lifecycle.io.payload.ptr, cell.response.ptr);
     pair.pair.advance(1);
     var terminal_seen = false;
     for (0..10) |_| {

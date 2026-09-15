@@ -11,6 +11,8 @@ const limits = @import("../quic/limits.zig");
 const negotiate = @import("../negotiate.zig");
 const Client = @import("client.zig").Client;
 const Server = @import("server.zig").Server;
+const Lifecycle = @import("lifecycle.zig").Lifecycle;
+const RequestIO = @import("request_io.zig").RequestIO;
 const routing = @import("../router.zig");
 const types = @import("../types.zig");
 
@@ -279,19 +281,19 @@ pub const ReqResp = struct {
             .over_limit_backlog = self.over_limit_len,
         };
         for (self.outbound) |*slot| {
-            if (slot.state != .free) result.outbound_occupied += 1;
-            if (slot.pending_event != null) result.pending_events += 1;
-            if (slot.terminal != null) result.pending_terminals += 1;
-            if (slot.chunk_held) result.held_chunks += 1;
+            if (slot.lifecycle.occupied()) result.outbound_occupied += 1;
+            if (slot.lifecycle.pendingEvent() != null) result.pending_events += 1;
+            if (slot.lifecycle.terminalEvent() != null) result.pending_terminals += 1;
+            if (slot.lifecycle.notification == .borrowed_chunk) result.held_chunks += 1;
         }
         for (self.inbound) |*slot| {
-            if (slot.state != .free) result.inbound_occupied += 1;
-            if (slot.pending_event != null) result.pending_events += 1;
-            if (slot.terminal != null) result.pending_terminals += 1;
-            if (slot.withheld_since_ms) |since| {
+            if (slot.lifecycle.occupied()) result.inbound_occupied += 1;
+            if (slot.lifecycle.pendingEvent() != null) result.pending_events += 1;
+            if (slot.lifecycle.terminalEvent() != null) result.pending_terminals += 1;
+            if (slot.lifecycle.running()) if (slot.withheld_since_ms) |since| {
                 result.withheld_chunks += 1;
                 result.oldest_withheld_age_ms = @max(result.oldest_withheld_age_ms orelse 0, self.last_now_ms -| since);
-            }
+            };
         }
         return result;
     }
@@ -363,8 +365,8 @@ pub const ReqResp = struct {
         const arena = try allocator.alloc(u8, total * (scratch_length + read_buffer_length));
         errdefer allocator.free(arena);
         var cursor: usize = 0;
-        for (outbound) |*slot| cursor = assignBuffers(slot, arena, cursor);
-        for (inbound) |*slot| cursor = assignBuffers(slot, arena, cursor);
+        for (outbound) |*slot| cursor = assignBuffers(&slot.lifecycle.io, arena, cursor);
+        for (inbound) |*slot| cursor = assignBuffers(&slot.lifecycle.io, arena, cursor);
         assert(cursor == arena.len);
 
         var buckets = try limiter_mod.Limiter.init(
@@ -420,11 +422,11 @@ pub const ReqResp = struct {
     pub fn active(self: *const ReqResp) struct { outbound: u16, inbound: u16 } {
         var out: u16 = 0;
         for (self.outbound) |*slot| {
-            if (slot.active()) out += 1;
+            if (slot.lifecycle.active()) out += 1;
         }
         var in: u16 = 0;
         for (self.inbound) |*slot| {
-            if (slot.active()) in += 1;
+            if (slot.lifecycle.active()) in += 1;
         }
         assert(out <= self.outbound.len);
         assert(in <= self.inbound.len);
@@ -505,30 +507,25 @@ pub const ReqResp = struct {
 
     /// The returned bytes remain valid until the pump after terminal delivery.
     pub fn errorMessage(self: *const ReqResp, handle: RequestHandle) []const u8 {
-        return if (handle.direction == .outbound)
-            messageFor(self.outbound, handle)
-        else
-            messageFor(self.inbound, handle);
-    }
-
-    fn messageFor(slots: anytype, handle: RequestHandle) []const u8 {
-        if (handle.index >= slots.len) return &.{};
-        const slot = &slots[handle.index];
-        if (slot.generation != handle.generation or slot.state == .free) return &.{};
-        assert(slot.error_len <= codec.error_message_max);
-        return slot.error_message[0..slot.error_len];
+        const lifecycle: *const Lifecycle = switch (handle.direction) {
+            .outbound => if (handle.index < self.outbound.len) &self.outbound[handle.index].lifecycle else return &.{},
+            .inbound => if (handle.index < self.inbound.len) &self.inbound[handle.index].lifecycle else return &.{},
+        };
+        if (lifecycle.generation != handle.generation or !lifecycle.occupied()) return &.{};
+        assert(lifecycle.error_len <= codec.error_message_max);
+        return lifecycle.error_message[0..lifecycle.error_len];
     }
 
     /// Forward each full-generation handle drained from Driver activity before querying wakeups.
     pub fn connectionActivity(self: *ReqResp, conn: Handle) void {
         for (self.outbound) |*slot| {
-            if (slot.active() and slot.terminal == null and std.meta.eql(slot.conn, conn)) {
-                slot.needs_service = true;
+            if (slot.lifecycle.running() and std.meta.eql(slot.lifecycle.conn, conn)) {
+                slot.lifecycle.needs_service = true;
             }
         }
         for (self.inbound) |*slot| {
-            if (slot.active() and slot.terminal == null and std.meta.eql(slot.conn, conn)) {
-                slot.needs_service = true;
+            if (slot.lifecycle.running() and std.meta.eql(slot.lifecycle.conn, conn)) {
+                slot.lifecycle.needs_service = true;
             }
         }
     }
@@ -538,30 +535,30 @@ pub const ReqResp = struct {
         assert(now.mono_ms >= self.last_now_ms);
         self.last_now_ms = now.mono_ms;
         for (self.inbound, 0..) |*slot, index| {
-            if (!slot.active() or slot.terminal != null or slot.protocol != .goodbye_v1 or !std.meta.eql(slot.conn, conn)) continue;
-            if (slot.state != .receiving_request and (slot.pending_event == null or slot.pending_event.? != .request)) continue;
-            if (slot.state == .receiving_request and slot.pending_event == null) Server.readRequest(self, engine, slot, @intCast(index), now);
-            if (slot.pending_event) |event| if (event == .request) {
+            if (!slot.lifecycle.running() or slot.lifecycle.protocol != .goodbye_v1 or !std.meta.eql(slot.lifecycle.conn, conn)) continue;
+            if (slot.state != .receiving_request and (slot.lifecycle.pendingEvent() == null or slot.lifecycle.pendingEvent().? != .request)) continue;
+            if (slot.state == .receiving_request and slot.lifecycle.pendingEvent() == null) Server.readRequest(self, engine, slot, @intCast(index), now);
+            if (slot.lifecycle.pendingEvent()) |event| if (event == .request) {
                 assert(event.request.bytes.len == 8);
                 self.counters.goodbyes_recovered_on_close +|= 1;
-                slot.pending_event = null;
+                slot.lifecycle.notification = .none;
                 slot.state = .serving;
                 return std.mem.readInt(u64, event.request.bytes[0..8], .little);
             };
             self.counters.goodbyes_incomplete_on_close +|= 1;
-            std.log.scoped(.network_reqresp_errors).debug("goodbye_incomplete_on_close request={d}:{d} connection={d}:{d} stream={d} buffered_bytes={d} decoded_bytes={d} decoder_phase={s} fin={any} detail={s}", .{ index, slot.generation, conn.index, conn.generation, slot.stream.id, slot.io.buffered_end - slot.io.buffered_start, if (slot.io.decoding) slot.io.decoder.written else 0, if (slot.io.decoding) @tagName(slot.io.decoder.phase) else "cleared", slot.io.fin_seen, slot.io.failure_detail });
+            std.log.scoped(.network_reqresp_errors).debug("goodbye_incomplete_on_close request={d}:{d} connection={d}:{d} stream={d} buffered_bytes={d} decoded_bytes={d} decoder_phase={s} fin={any} detail={s}", .{ index, slot.lifecycle.generation, conn.index, conn.generation, slot.lifecycle.stream.id, slot.lifecycle.io.buffered_end - slot.lifecycle.io.buffered_start, if (slot.lifecycle.io.decoding) slot.lifecycle.io.decoder.written else 0, if (slot.lifecycle.io.decoding) @tagName(slot.lifecycle.io.decoder.phase) else "cleared", slot.lifecycle.io.fin_seen, slot.lifecycle.io.failure_detail });
         }
         return null;
     }
 
     pub fn connectionClosed(self: *ReqResp, conn: Handle) void {
         for (self.outbound, 0..) |*slot, position| {
-            if (!slot.active() or !std.meta.eql(slot.conn, conn)) continue;
-            self.fail(slot, @intCast(position), .connection_closed, null);
+            if (!slot.lifecycle.active() or !std.meta.eql(slot.lifecycle.conn, conn)) continue;
+            slot.lifecycle.fail(self, @intCast(position), .connection_closed, .{ .outbound = slot.phase }, null);
         }
         for (self.inbound, 0..) |*slot, position| {
-            if (!slot.active() or !std.meta.eql(slot.conn, conn)) continue;
-            self.fail(slot, @intCast(position), .connection_closed, null);
+            if (!slot.lifecycle.active() or !std.meta.eql(slot.lifecycle.conn, conn)) continue;
+            slot.lifecycle.fail(self, @intCast(position), .connection_closed, .{ .inbound = slot.state }, null);
         }
     }
 
@@ -595,30 +592,22 @@ pub const ReqResp = struct {
         }
         var due: ?u64 = null;
         for (self.outbound) |*slot| {
-            const capacity = if (slot.protocol.isControl())
+            const capacity = if (slot.lifecycle.protocol.isControl())
                 capacities.control
             else
                 capacities.application;
-            if (slot.needs_service or slot.close_pending or slot.state == .reported or
-                (capacity > 0 and (slot.pending_event != null or slot.terminal != null)))
-            {
-                return now.mono_ms;
-            }
+            if (slot.lifecycle.wakeup(capacity)) return now.mono_ms;
             if (slot.deadline(self)) |deadline| due = earlier(due, deadline);
         }
         for (self.inbound) |*slot| {
-            const capacity = if (slot.protocol.isControl())
+            const capacity = if (slot.lifecycle.protocol.isControl())
                 capacities.control
             else
                 capacities.application;
-            if (slot.needs_service or slot.close_pending or slot.state == .reported or
-                (capacity > 0 and (slot.pending_event != null or slot.terminal != null)))
-            {
-                return now.mono_ms;
-            }
+            if (slot.lifecycle.wakeup(capacity)) return now.mono_ms;
             if (slot.deadline(self)) |deadline| due = earlier(due, deadline);
-            if (slot.state == .withheld) {
-                if (self.limiter.nextToken(slot.conn, slot.protocol, now.mono_ms)) |eligible| {
+            if (slot.lifecycle.running() and slot.state == .withheld) {
+                if (self.limiter.nextToken(slot.lifecycle.conn, slot.lifecycle.protocol, now.mono_ms)) |eligible| {
                     due = earlier(due, eligible);
                 } else return now.mono_ms;
             }
@@ -647,8 +636,10 @@ pub const ReqResp = struct {
 
     pub fn availableInboundFor(self: *ReqResp, which: Protocol) ?u16 {
         const start: usize = if (which.isControl()) 0 else self.options.inbound_control_reserved;
-        const offset = claim(self.inbound[start..]) orelse return null;
-        return @intCast(start + offset);
+        for (self.inbound[start..], start..) |*slot, index| {
+            if (slot.lifecycle.available()) return @intCast(index);
+        }
+        return null;
     }
 
     pub fn availableOutboundFor(self: *ReqResp, which: Protocol) ?u16 {
@@ -656,51 +647,52 @@ pub const ReqResp = struct {
         if (!which.isControl() and reserved > 0) {
             var ordinary: usize = 0;
             for (self.outbound) |*slot| {
-                if (slot.state != .free and !slot.protocol.isControl()) ordinary += 1;
+                if (slot.lifecycle.occupied() and !slot.lifecycle.protocol.isControl()) ordinary += 1;
             }
             if (ordinary >= self.outbound.len - reserved) return null;
         }
-        return claim(self.outbound);
+        for (self.outbound, 0..) |*slot, index| {
+            if (slot.lifecycle.available()) return @intCast(index);
+        }
+        return null;
     }
 
     /// Latches one terminal result. Call cleanupPending before the next Router pump.
     pub fn cancel(self: *ReqResp, handle: RequestHandle) bool {
         if (handle.direction == .outbound) {
             const slot = self.outboundSlot(handle) orelse return false;
-            if (slot.terminal != null) return false;
-            self.fail(slot, handle.index, .cancelled, null);
+            if (slot.lifecycle.terminalEvent() != null) return false;
+            slot.lifecycle.fail(self, handle.index, .cancelled, .{ .outbound = slot.phase }, null);
         } else {
             const slot = self.inboundSlot(handle) orelse return false;
-            if (slot.terminal != null) return false;
-            self.fail(slot, handle.index, .cancelled, null);
+            if (slot.lifecycle.terminalEvent() != null) return false;
+            slot.lifecycle.fail(self, handle.index, .cancelled, .{ .inbound = slot.state }, null);
         }
         return true;
     }
 
     pub fn cleanupPending(self: *ReqResp, engine: *Engine, router: *routing.Router) void {
-        self.cleanup(engine, router, self.outbound, false);
-        self.cleanup(engine, router, self.inbound, false);
+        self.cleanup(engine, router, false);
     }
 
     pub fn cancelApplications(self: *ReqResp, engine: *Engine, router: *routing.Router) void {
-        for (self.outbound, 0..) |*slot, index| if (slot.active() and !slot.protocol.isControl()) {
-            _ = self.cancel(slot.handle(@intCast(index)));
+        for (self.outbound, 0..) |*slot, index| if (slot.lifecycle.active() and !slot.lifecycle.protocol.isControl()) {
+            _ = self.cancel(slot.lifecycle.handle(@intCast(index)));
         };
-        for (self.inbound, 0..) |*slot, index| if (slot.active() and !slot.protocol.isControl()) {
-            _ = self.cancel(slot.handle(@intCast(index)));
+        for (self.inbound, 0..) |*slot, index| if (slot.lifecycle.active() and !slot.lifecycle.protocol.isControl()) {
+            _ = self.cancel(slot.lifecycle.handle(@intCast(index)));
         };
         self.cleanupPending(engine, router);
     }
 
     pub fn shutdown(self: *ReqResp, engine: *Engine, router: *routing.Router) void {
-        for (self.outbound, 0..) |*slot, index| if (slot.active()) {
-            _ = self.cancel(slot.handle(@intCast(index)));
+        for (self.outbound, 0..) |*slot, index| if (slot.lifecycle.active()) {
+            _ = self.cancel(slot.lifecycle.handle(@intCast(index)));
         };
-        for (self.inbound, 0..) |*slot, index| if (slot.active()) {
-            _ = self.cancel(slot.handle(@intCast(index)));
+        for (self.inbound, 0..) |*slot, index| if (slot.lifecycle.active()) {
+            _ = self.cancel(slot.lifecycle.handle(@intCast(index)));
         };
-        self.cleanup(engine, router, self.outbound, false);
-        self.cleanup(engine, router, self.inbound, false);
+        self.cleanup(engine, router, false);
     }
 
     pub fn pump(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now, outputs: Outputs) OutputCounts {
@@ -714,8 +706,7 @@ pub const ReqResp = struct {
     fn advance(self: *ReqResp, engine: *Engine, router: *routing.Router, now: Now) void {
         assert(now.mono_ms >= self.last_now_ms or self.last_now_ms == 0);
         self.last_now_ms = now.mono_ms;
-        self.cleanup(engine, router, self.outbound, true);
-        self.cleanup(engine, router, self.inbound, true);
+        self.cleanup(engine, router, true);
         const total = self.outbound.len + self.inbound.len;
         if (self.scan_remaining == 0) self.scan_remaining = total;
         const steps = @min(self.scan_remaining, self.options.work_per_pump_max);
@@ -725,18 +716,17 @@ pub const ReqResp = struct {
             self.work_cursor = (position + 1) % total;
             if (position < self.outbound.len) {
                 const slot = &self.outbound[position];
-                slot.needs_service = false;
-                if (slot.active()) slot.advance(self, engine, @intCast(position), now);
+                slot.lifecycle.needs_service = false;
+                if (slot.lifecycle.active()) slot.advance(self, engine, @intCast(position), now);
             } else {
                 const index = position - self.outbound.len;
                 const slot = &self.inbound[index];
-                slot.needs_service = false;
-                if (slot.active()) slot.advance(self, engine, @intCast(index), now);
+                slot.lifecycle.needs_service = false;
+                if (slot.lifecycle.active()) slot.advance(self, engine, @intCast(index), now);
             }
         }
         // Cleanup also covers terminal transitions made during this turn.
-        self.cleanup(engine, router, self.outbound, false);
-        self.cleanup(engine, router, self.inbound, false);
+        self.cleanup(engine, router, false);
     }
 
     fn drain(self: *ReqResp, now: Now, events: []Event, control: bool, cursor: *usize) usize {
@@ -747,9 +737,9 @@ pub const ReqResp = struct {
             const position = cursor.*;
             cursor.* = (position + 1) % (total + 1);
             const event = if (position < self.outbound.len)
-                deliverMatching(&self.outbound[position], now, control)
+                self.outbound[position].lifecycle.deliver(control)
             else if (position < total)
-                deliverMatching(&self.inbound[position - self.outbound.len], now, control)
+                self.inbound[position - self.outbound.len].deliver(control, now)
             else
                 self.takeOverLimit(control);
             if (event) |ready| {
@@ -758,11 +748,6 @@ pub const ReqResp = struct {
             }
         }
         return count;
-    }
-
-    fn deliverMatching(slot: anytype, now: Now, control: bool) ?Event {
-        if (slot.protocol.isControl() != control) return null;
-        return deliver(slot, now);
     }
 
     fn takeOverLimit(self: *ReqResp, control: bool) ?Event {
@@ -784,126 +769,15 @@ pub const ReqResp = struct {
         return null;
     }
 
-    fn cleanup(
-        self: *ReqResp,
-        engine: *Engine,
-        router: *routing.Router,
-        slots: anytype,
-        recycle: bool,
-    ) void {
-        _ = self;
-        for (slots) |*slot| {
-            if (slot.close_pending) {
-                if (comptime @TypeOf(slot.*) == Client) {
-                    if (slot.negotiation_owned) {
-                        router.cancel(engine, slot.stream);
-                        slot.negotiation_owned = false;
-                    } else engine.closeStream(slot.stream, slot.close_code);
-                } else engine.closeStream(slot.stream, slot.close_code);
-                slot.close_pending = false;
-            }
-            if (recycle and slot.state == .reported) {
-                slot.state = .free;
-                slot.io.sink = &.{};
-                slot.terminal = null;
-            }
-        }
-    }
-
-    fn deliver(slot: anytype, now: Now) ?Event {
-        if (slot.pending_event) |event| {
-            slot.pending_event = null;
-            slot.delivered(event, now);
-            return event;
-        }
-        if (slot.terminal) |event| {
-            if (slot.state == .reported) return null;
-            slot.state = .reported;
-            return event;
-        }
-        return null;
-    }
-
-    pub fn complete(
-        self: *ReqResp,
-        slot: anytype,
-        index: u16,
-        event: Event,
-        engine: ?*Engine,
-    ) void {
-        if (slot.terminal != null) return;
-        const counts = &self.protocol_counters[@intFromEnum(slot.protocol)];
-        const duration_ms = self.last_now_ms -| slot.started_ms;
-        if (event != .failed) std.log.scoped(.network_reqresp).debug("request_completed direction={s} request={d}:{d} connection={d}:{d} method={s} chunks={d} elapsed_ms={d}", .{ if (@TypeOf(slot) == *Client) "outbound" else "inbound", index, slot.generation, slot.conn.index, slot.conn.generation, @tagName(slot.protocol), slot.chunks, duration_ms });
-        if (@TypeOf(slot) == *Client) counts.outgoing_time.observe(duration_ms) else counts.incoming_time.observe(duration_ms);
-        slot.terminal = event;
-        slot.state = .terminal;
-        slot.clear();
-        slot.close_pending = true;
-        if (engine) |live| {
-            live.closeStream(slot.stream, slot.close_code);
-            slot.close_pending = false;
-        }
-    }
-
-    pub fn fail(self: *ReqResp, slot: anytype, index: u16, reason: Failure, engine: ?*Engine) void {
-        if (slot.terminal != null) return;
-        if (reason == .cancelled) {
-            const counters = &self.protocol_counters[@intFromEnum(slot.protocol)];
-            if (@TypeOf(slot) == *Client) counters.outgoing_cancelled +|= 1 else counters.incoming_cancelled +|= 1;
-            std.log.scoped(.network_reqresp).debug("request_cancelled direction={s} request={d}:{d} connection={d}:{d} method={s} chunks={d} elapsed_ms={d}", .{ if (@TypeOf(slot) == *Client) "outbound" else "inbound", index, slot.generation, slot.conn.index, slot.conn.generation, @tagName(slot.protocol), slot.chunks, self.last_now_ms -| slot.started_ms });
-        }
-        const detail: []const u8 = switch (reason) {
-            .invalid_response => |err| @errorName(err),
-            .invalid_request => |err| @errorName(err),
-            .negotiation_failed => |failure| @tagName(failure),
-            else => slot.io.failure_detail,
-        };
-        const peer_code: u16 = if (reason == .peer_error) reason.peer_error.code else 0;
-        if (reason != .cancelled) std.log.scoped(.network_reqresp_errors).debug("request_failed direction={s} request={d}:{d} connection={d}:{d} method={s} phase={s} reason={s} detail={s} peer_code={d} chunks={d} elapsed_ms={d}", .{ if (@TypeOf(slot) == *Client) "outbound" else "inbound", index, slot.generation, slot.conn.index, slot.conn.generation, @tagName(slot.protocol), if (@TypeOf(slot) == *Client) @tagName(slot.requestPhase()) else @tagName(slot.state), @tagName(reason), detail, peer_code, slot.chunks, self.last_now_ms -| slot.started_ms });
-        if (reason != .cancelled) self.counters.failures += 1;
-        const counters = &self.protocol_counters[@intFromEnum(slot.protocol)];
-        if (reason != .cancelled) {
-            if (@TypeOf(slot) == *Client) {
-                counters.outgoing_errors +|= 1;
-                self.outgoing_error_reasons[@intFromEnum(metrics.ErrorReason.fromFailure(reason, slot.requestPhase()))] +|= 1;
-            } else counters.incoming_errors +|= 1;
-        }
-        slot.close_code = switch (reason) {
-            .timeout => constants.app_error_timeout,
-            .invalid_response,
-            .too_many_chunks,
-            .unknown_context,
-            => constants.app_error_invalid_response,
-            else => types.app_error_normal,
-        };
-        self.complete(
-            slot,
-            index,
-            .{ .failed = .{ .request = slot.handle(index), .reason = reason, .phase = if (@TypeOf(slot) == *Client) slot.requestPhase() else null } },
-            engine,
-        );
-    }
-
-    pub fn failStream(
-        self: *ReqResp,
-        slot: anytype,
-        index: u16,
-        err: engine_mod.StreamError,
-        engine: *Engine,
-    ) void {
-        slot.io.failure_detail = @errorName(err);
-        const reason: Failure = switch (err) {
-            error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
-            else => .transport,
-        };
-        self.fail(slot, index, reason, engine);
+    fn cleanup(self: *ReqResp, engine: *Engine, router: *routing.Router, recycle: bool) void {
+        for (self.outbound) |*slot| slot.lifecycle.cleanup(engine, router, recycle);
+        for (self.inbound) |*slot| slot.lifecycle.cleanup(engine, router, recycle);
     }
 
     pub fn servingSlot(self: *ReqResp, handle: RequestHandle) RespondError!*Server {
         if (handle.direction != .inbound) return error.StaleHandle;
         const slot = self.inboundSlot(handle) orelse return error.StaleHandle;
-        if (slot.state != .serving) return error.Busy;
+        if (!slot.lifecycle.running() or slot.lifecycle.waitingHost() or slot.state != .serving) return error.Busy;
         return slot;
     }
 
@@ -911,31 +785,22 @@ pub const ReqResp = struct {
         const slots = self.outbound;
         if (handle.index >= slots.len) return null;
         const slot = &slots[handle.index];
-        if (slot.generation != handle.generation or !slot.active()) return null;
+        if (slot.lifecycle.generation != handle.generation or !slot.lifecycle.active()) return null;
         return slot;
     }
     pub fn inboundSlot(self: *ReqResp, handle: RequestHandle) ?*Server {
         const slots = self.inbound;
         if (handle.index >= slots.len) return null;
         const slot = &slots[handle.index];
-        if (slot.generation != handle.generation or !slot.active()) return null;
+        if (slot.lifecycle.generation != handle.generation or !slot.lifecycle.active()) return null;
         return slot;
-    }
-
-    fn claim(slots: anytype) ?u16 {
-        for (slots, 0..) |*slot, position| {
-            if (slot.state == .free and slot.generation < std.math.maxInt(u32)) return @intCast(
-                position,
-            );
-        }
-        return null;
     }
 
     pub fn outboundCount(self: *const ReqResp, conn: Handle, which: Protocol) u8 {
         var count: u8 = 0;
         for (self.outbound) |*slot| {
-            if (!slot.active() or slot.protocol != which) continue;
-            if (!std.meta.eql(slot.conn, conn)) continue;
+            if (!slot.lifecycle.active() or slot.lifecycle.protocol != which) continue;
+            if (!std.meta.eql(slot.lifecycle.conn, conn)) continue;
             count +|= 1;
         }
         return count;
@@ -944,8 +809,8 @@ pub const ReqResp = struct {
     pub fn outboundApplicationCount(self: *const ReqResp, conn: Handle) u16 {
         var count: u16 = 0;
         for (self.outbound) |*slot| {
-            if (slot.state == .free or slot.protocol.isControl()) continue;
-            if (std.meta.eql(slot.conn, conn)) count += 1;
+            if (!slot.lifecycle.occupied() or slot.lifecycle.protocol.isControl()) continue;
+            if (std.meta.eql(slot.lifecycle.conn, conn)) count += 1;
         }
         return count;
     }
@@ -953,8 +818,8 @@ pub const ReqResp = struct {
     pub fn inboundApplicationCount(self: *const ReqResp, conn: Handle) u16 {
         var count: u16 = 0;
         for (self.inbound) |*slot| {
-            if (slot.state == .free or slot.protocol.isControl()) continue;
-            if (std.meta.eql(slot.conn, conn)) count += 1;
+            if (!slot.lifecycle.occupied() or slot.lifecycle.protocol.isControl()) continue;
+            if (std.meta.eql(slot.lifecycle.conn, conn)) count += 1;
         }
         return count;
     }
@@ -962,8 +827,8 @@ pub const ReqResp = struct {
     pub fn inboundCount(self: *const ReqResp, conn: Handle, which: ?Protocol) u8 {
         var count: u8 = 0;
         for (self.inbound) |*slot| {
-            if (!slot.active() or !std.meta.eql(slot.conn, conn)) continue;
-            if (which) |wanted| if (slot.protocol != wanted) continue;
+            if (!slot.lifecycle.active() or !std.meta.eql(slot.lifecycle.conn, conn)) continue;
+            if (which) |wanted| if (slot.lifecycle.protocol != wanted) continue;
             count +|= 1;
         }
         return count;
@@ -992,9 +857,9 @@ pub const ReqResp = struct {
     }
 };
 
-fn assignBuffers(slot: anytype, arena: []u8, cursor: usize) usize {
-    slot.io.scratch = arena[cursor..][0..scratch_length];
-    slot.io.read_buffer = arena[cursor + scratch_length ..][0..read_buffer_length];
+fn assignBuffers(io: *RequestIO, arena: []u8, cursor: usize) usize {
+    io.scratch = arena[cursor..][0..scratch_length];
+    io.read_buffer = arena[cursor + scratch_length ..][0..read_buffer_length];
     return cursor + scratch_length + read_buffer_length;
 }
 
@@ -1013,11 +878,11 @@ test "reqresp typed reserved sinks keep full control waves and exclude bulk" {
     for (0..4) |i| {
         const index = requests.availableInboundFor(.ping_v1).?;
         try std.testing.expectEqual(@as(u16, @intCast(i)), index);
-        requests.inbound[index].state = .receiving_request;
-        requests.inbound[index].protocol = .ping_v1;
+        requests.inbound[index].lifecycle.completion = .active;
+        requests.inbound[index].lifecycle.protocol = .ping_v1;
     }
     try std.testing.expectEqual(@as(?u16, null), requests.availableInboundFor(.ping_v1));
-    requests.inbound[0].state = .free;
+    requests.inbound[0].lifecycle.completion = .free;
     try std.testing.expectEqual(@as(?u16, null), requests.availableInboundFor(.blocks_by_range_v2));
     try std.testing.expectEqual(@as(?u16, 0), requests.availableInboundFor(.ping_v1));
 }

@@ -27,7 +27,7 @@ test "core records a buffered Goodbye before transport cancellation and preserve
         var ready = false;
         for (0..40) |_| {
             try setup.step(0);
-            for (setup.server.service.reqresp.inbound) |slot| if (slot.state == .receiving_request and slot.protocol == .goodbye_v1) {
+            for (setup.server.service.reqresp.inbound) |slot| if (slot.lifecycle.running() and slot.state == .receiving_request and slot.lifecycle.protocol == .goodbye_v1) {
                 ready = true;
             };
             if (ready) break;
@@ -336,7 +336,7 @@ test "core control native Fulu serves older schemas but old Status cannot establ
             if (protocol == .goodbye_v1) {
                 for (setup.server.control.responses) |response| if (response.request) |inbound| {
                     const owner = setup.server.service.reqresp.inboundSlot(inbound).?;
-                    if (owner.protocol != .goodbye_v1 or !owner.io.writing) continue;
+                    if (owner.lifecycle.protocol != .goodbye_v1 or !owner.lifecycle.io.writing) continue;
                     try std.testing.expectEqualSlices(u8, &goodbye_reply, response.bytes[0..8]);
                     goodbye_writer = true;
                 };
@@ -633,8 +633,8 @@ test "core native immutable Status writer survives local update" {
         try setup.step(0);
         for (setup.server.control.responses) |response| if (response.request) |request| {
             const slot = setup.server.service.reqresp.inboundSlot(request).?;
-            if (slot.protocol != .status_v1) continue;
-            try std.testing.expect(slot.io.writing);
+            if (slot.lifecycle.protocol != .status_v1) continue;
+            try std.testing.expect(slot.lifecycle.io.writing);
             try setup.server.updateStatus(&.{ .head_slot = 80 });
             pending = true;
             break;
@@ -1040,7 +1040,7 @@ fn expectQuiescentGoodbye(setup: *Setup, admitted: u64) !void {
         try std.testing.expectEqual(@as(u64, 0), setup.client.service.gossipsub.inner.counters.messages_received);
         try std.testing.expectEqual(admitted, setup.client.service.reqresp.counters.admitted);
         for (setup.client.service.reqresp.inbound) |slot| {
-            if (slot.state != .free and !slot.protocol.isControl()) try std.testing.expect(slot.pending_event == null);
+            if (slot.lifecycle.occupied() and !slot.lifecycle.protocol.isControl()) try std.testing.expect(slot.lifecycle.pendingEvent() == null);
         }
         var control: [8]rr.Event = undefined;
         const counts = setup.server.service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), &.{}, setup.pair.now, .{ .application = &.{}, .control = &control, .gossipsub = &.{} });
@@ -1083,7 +1083,7 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
         }
     } else {
         for (setup.client.service.reqresp.inbound) |slot| {
-            if (slot.state != .free and slot.protocol == .blocks_by_root_v2 and (slot.state == .receiving_request or mode == .borrowed) and slot.io.decoder.isDone()) held = true;
+            if (slot.lifecycle.running() and slot.lifecycle.protocol == .blocks_by_root_v2 and (slot.state == .receiving_request or mode == .borrowed) and slot.lifecycle.io.decoder.isDone()) held = true;
         }
     }
     try std.testing.expect(held);

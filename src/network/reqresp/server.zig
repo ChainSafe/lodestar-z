@@ -2,15 +2,12 @@ const std = @import("std");
 const codec = @import("codec.zig");
 const constants = @import("constants.zig");
 const reqresp = @import("reqresp.zig");
-const RequestIO = @import("request_io.zig").RequestIO;
 const engine_mod = @import("../quic/engine.zig");
 const types = @import("../types.zig");
 const assert = std.debug.assert;
 const Engine = engine_mod.Engine;
-const Handle = engine_mod.Handle;
 const StreamHandle = engine_mod.StreamHandle;
 const protocol = @import("protocol.zig");
-const Protocol = protocol.Protocol;
 const Now = types.Now;
 const routing = @import("../router.zig");
 const AcceptError = reqresp.AcceptError;
@@ -22,83 +19,46 @@ const Event = reqresp.Event;
 const Failure = reqresp.Failure;
 const reads_per_pump_max = reqresp.reads_per_pump_max;
 
-pub const State = enum {
-    free,
-    receiving_request,
-    serving,
-    writing_chunk,
-    chunk_sent,
-    withheld,
-    finishing,
-    terminal,
-    reported,
-};
+pub const State = enum { receiving_request, serving, writing_chunk, withheld, finishing };
 
 pub const Server = struct {
-    pending_ssz: []const u8 = &.{},
+    lifecycle: @import("lifecycle.zig").Lifecycle = .{ .direction = .inbound },
     pending_context: ?[constants.context_bytes_length]u8 = null,
     pending_result: u8 = constants.result_success,
     close_after_write: bool = false,
     withheld_since_ms: ?u64 = null,
-    state: State = .free,
-    generation: u32 = 0,
-    conn: Handle = undefined,
-    stream: StreamHandle = undefined,
-    protocol: Protocol = .status_v1,
-    progress_ms: u64 = 0,
-    started_ms: u64 = 0,
-    needs_service: bool = false,
-    timeout_ms: u64 = 0,
-    chunks: u32 = 0,
-    chunks_max: u32 = 1,
+    state: State = .receiving_request,
     request_fork: @import("config").ForkSeq = .phase0,
-    io: RequestIO = .{},
-    error_message: [codec.error_message_max]u8 = undefined,
-    error_len: u16 = 0,
-    pending_event: ?Event = null,
-    terminal: ?Event = null,
-    after_event: State = .free,
-    close_pending: bool = false,
-    close_code: u64 = types.app_error_normal,
 
-    pub fn delivered(self: *Server, event: Event, now: Now) void {
-        _ = event;
-        if (self.terminal != null) return;
-        self.state = self.after_event;
-        if (self.state == .finishing) {
-            self.progress_ms = now.mono_ms;
-            self.needs_service = true;
+    pub fn deliver(self: *Server, control: bool, now: Now) ?Event {
+        const lifecycle = &self.lifecycle;
+        const event = lifecycle.deliver(control) orelse return null;
+        if (lifecycle.running() and self.state == .finishing) {
+            lifecycle.progress_ms = now.mono_ms;
+            lifecycle.needs_service = true;
         }
-    }
-
-    pub fn clear(self: *Server) void {
-        self.io.clear();
-        self.needs_service = false;
-        self.pending_ssz = &.{};
-        self.pending_context = null;
-        self.withheld_since_ms = null;
-        if (self.pending_event) |event| if (event == .request) {
-            self.pending_event = null;
-        };
+        return event;
     }
 
     fn waitingHost(self: *const Server) bool {
-        return self.pending_event != null or self.state == .serving or self.state == .chunk_sent;
+        return self.lifecycle.waitingHost() or self.state == .serving;
     }
 
     pub fn deadline(self: *const Server, ctx: *const ReqResp) ?u64 {
-        if (!self.active() or self.terminal != null) return null;
+        const lifecycle = &self.lifecycle;
+        if (!lifecycle.running()) return null;
         const duration = if (self.waitingHost())
             ctx.options.host_timeout_ms
         else if (self.state == .withheld)
             ctx.options.quota_timeout_ms
         else
-            self.timeout_ms;
-        return self.progress_ms +| duration;
+            lifecycle.timeout_ms;
+        return lifecycle.progress_ms +| duration;
     }
 
     pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, index: u16, now: Now) void {
-        if (self.terminal != null) return;
+        const lifecycle = &self.lifecycle;
+        if (!lifecycle.running()) return;
         if (self.deadline(ctx)) |due| if (now.mono_ms >= due) {
             const reason: Failure = if (self.waitingHost())
                 .host_timeout
@@ -107,114 +67,107 @@ pub const Server = struct {
             else
                 .timeout;
             if (reason == .timeout) ctx.counters.timeouts += 1;
-            ctx.fail(self, index, reason, engine);
+            lifecycle.fail(ctx, index, reason, .{ .inbound = self.state }, engine);
             return;
         };
-        if (self.pending_event != null) return;
+        if (lifecycle.waitingHost()) return;
         switch (self.state) {
-            .serving, .chunk_sent, .terminal => {},
+            .serving => {},
             .receiving_request => readRequest(ctx, engine, self, index, now),
             .withheld => {
-                if (!ctx.limiter.matches(self.conn)) {
-                    ctx.fail(self, index, .connection_closed, engine);
+                if (!ctx.limiter.matches(lifecycle.conn)) {
+                    lifecycle.fail(ctx, index, .connection_closed, .{ .inbound = self.state }, engine);
                     return;
                 }
                 retryWithheld(ctx, self, now);
             },
             .writing_chunk => writeChunk(ctx, engine, self, index, now),
             .finishing => finishStream(ctx, engine, self, index, now),
-            .free, .reported => unreachable,
         }
     }
 
-    pub fn active(self: *const Server) bool {
-        return self.state != .free and self.state != .reported;
-    }
-
-    pub fn handle(self: *const Server, index: u16) RequestHandle {
-        return .{ .index = index, .generation = self.generation, .direction = .inbound };
-    }
-
     pub fn readRequest(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: Now) void {
+        const lifecycle = &slot.lifecycle;
         var reads: u32 = 0;
         while (reads < reads_per_pump_max) : (reads += 1) {
-            const input = slot.io.read(engine, slot.stream) catch |err| {
-                owner.failStream(slot, index, err, engine);
+            const input = lifecycle.io.read(engine, lifecycle.stream) catch |err| {
+                lifecycle.failStream(owner, index, err, .{ .inbound = slot.state }, engine);
                 return;
             };
             if (input.reset) {
-                owner.fail(slot, index, .stream_closed, engine);
+                lifecycle.fail(owner, index, .stream_closed, .{ .inbound = slot.state }, engine);
                 return;
             }
-            if (input.progressed) slot.progress_ms = now.mono_ms;
+            if (input.progressed) lifecycle.progress_ms = now.mono_ms;
             if (input.bytes.len == 0 and !input.fin) return;
             if (input.bytes.len > 0) {
-                if (!slot.io.decoding or slot.io.decoder.isDone()) {
+                if (!lifecycle.io.decoding or lifecycle.io.decoder.isDone()) {
                     Server.rejectRequest(owner, slot, now);
                     return;
                 }
-                _ = slot.io.feed(input.bytes) catch {
+                _ = lifecycle.io.feed(input.bytes) catch {
                     Server.rejectRequest(owner, slot, now);
                     return;
                 };
-                if (slot.io.buffered_start < slot.io.buffered_end) {
+                if (lifecycle.io.buffered_start < lifecycle.io.buffered_end) {
                     Server.rejectRequest(owner, slot, now);
                     return;
                 }
             }
             // Goodbye only closes this authenticated peer's connection. Handle its complete
             // bounded frame before FIN, which can race the peer's connection shutdown.
-            if (input.fin or (slot.protocol == .goodbye_v1 and slot.io.decoding and slot.io.decoder.isDone())) {
-                slot.io.fin_seen = input.fin;
-                const finished = !slot.io.decoding or slot.io.decoder.isDone();
+            if (input.fin or (lifecycle.protocol == .goodbye_v1 and lifecycle.io.decoding and lifecycle.io.decoder.isDone())) {
+                lifecycle.io.fin_seen = input.fin;
+                const finished = !lifecycle.io.decoding or lifecycle.io.decoder.isDone();
                 if (!finished) {
                     Server.rejectRequest(owner, slot, now);
                     return;
                 }
-                const payload: []const u8 = if (slot.io.decoding)
-                    slot.io.decoder.payload()
+                const payload: []const u8 = if (lifecycle.io.decoding)
+                    lifecycle.io.decoder.payload()
                 else
                     &.{};
                 if (owner.admission) |*admission| {
                     owner.counters.inspected +|= 1;
-                    const inspected = admission.policy.inspect(slot.protocol, payload, slot.request_fork) catch {
+                    const inspected = admission.policy.inspect(lifecycle.protocol, payload, slot.request_fork) catch {
                         owner.counters.malformed +|= 1;
                         _ = takeAdmission(owner, engine, slot, 1, now);
                         Server.rejectRequest(owner, slot, now);
                         return;
                     };
-                    slot.chunks_max = inspected.chunks_max;
+                    lifecycle.chunks_max = inspected.chunks_max;
                     if (!takeAdmission(owner, engine, slot, inspected.charged_cost, now)) {
                         reject(owner, slot, constants.result_server_error, "rate limited", now);
                         return;
                     }
                     owner.counters.admitted +|= 1;
                 } else {
-                    slot.chunks_max = protocol.requestChunkLimit(slot.protocol, payload) catch {
+                    lifecycle.chunks_max = protocol.requestChunkLimit(lifecycle.protocol, payload) catch {
                         Server.rejectRequest(owner, slot, now);
                         return;
                     };
                 }
-                slot.pending_event = .{ .request = .{
-                    .request = slot.handle(index),
-                    .peer = slot.conn,
-                    .protocol = slot.protocol,
+                lifecycle.queue(.{ .request = .{
+                    .request = lifecycle.handle(index),
+                    .peer = lifecycle.conn,
+                    .protocol = lifecycle.protocol,
                     .bytes = payload,
-                } };
-                slot.after_event = .serving;
+                } });
+                slot.state = .serving;
                 return;
             }
         }
-        slot.needs_service = true;
+        lifecycle.needs_service = true;
     }
 
-    pub fn rejectRequest(owner: *ReqResp, slot: *Server, now: Now) void {
+    fn rejectRequest(owner: *ReqResp, slot: *Server, now: Now) void {
         reject(owner, slot, constants.result_invalid_request, "invalid request", now);
     }
 
     fn takeAdmission(owner: *ReqResp, engine: *Engine, slot: *Server, cost: u128, now: Now) bool {
-        const identity = engine.peerId(slot.conn) orelse return false;
-        const decision = owner.admission.?.limiter.take(&identity, slot.protocol, cost, slot.request_fork, now.mono_ms);
+        const lifecycle = &slot.lifecycle;
+        const identity = engine.peerId(lifecycle.conn) orelse return false;
+        const decision = owner.admission.?.limiter.take(&identity, lifecycle.protocol, cost, slot.request_fork, now.mono_ms);
         switch (decision) {
             .allowed => {
                 owner.counters.charged_work +|= cost;
@@ -224,29 +177,30 @@ pub const Server = struct {
             .global_quota => owner.counters.aggregate_refusals +|= 1,
             .identity_capacity => owner.counters.identity_capacity_refusals +|= 1,
         }
-        owner.protocol_counters[@intFromEnum(slot.protocol)].rate_limited +|= 1;
-        std.log.scoped(.network_reqresp_errors).debug("request_admission_refused connection={d}:{d} method={s} reason={s} cost={d}", .{ slot.conn.index, slot.conn.generation, @tagName(slot.protocol), @tagName(decision), cost });
+        owner.protocol_counters[@intFromEnum(lifecycle.protocol)].rate_limited +|= 1;
+        std.log.scoped(.network_reqresp_errors).debug("request_admission_refused connection={d}:{d} method={s} reason={s} cost={d}", .{ lifecycle.conn.index, lifecycle.conn.generation, @tagName(lifecycle.protocol), @tagName(decision), cost });
         return false;
     }
 
     fn reject(owner: *ReqResp, slot: *Server, code: u8, message: []const u8, now: Now) void {
-        assert(message.len <= slot.error_message.len);
-        @memcpy(slot.error_message[0..message.len], message);
-        slot.error_len = @intCast(message.len);
-        slot.io.decoding = false;
+        const lifecycle = &slot.lifecycle;
+        assert(message.len <= lifecycle.error_message.len);
+        @memcpy(lifecycle.error_message[0..message.len], message);
+        lifecycle.error_len = @intCast(message.len);
+        lifecycle.io.decoding = false;
         slot.state = .serving;
         Server.queueChunk(
             owner,
             slot,
             code,
             null,
-            slot.error_message[0..message.len],
+            lifecycle.error_message[0..message.len],
             true,
             now,
         );
     }
 
-    pub fn queueChunk(
+    fn queueChunk(
         owner: *ReqResp,
         slot: *Server,
         result: u8,
@@ -255,14 +209,15 @@ pub const Server = struct {
         close_after: bool,
         now: Now,
     ) void {
+        const lifecycle = &slot.lifecycle;
         assert(slot.state == .serving);
-        assert(slot.io.outbox.idle());
-        slot.pending_ssz = ssz;
+        assert(lifecycle.io.outbox.idle());
+        lifecycle.io.payload = ssz;
         slot.pending_context = context;
         slot.pending_result = result;
         slot.close_after_write = close_after;
-        slot.progress_ms = now.mono_ms;
-        if (owner.limiter.take(slot.conn, slot.protocol, 1, now.mono_ms)) {
+        lifecycle.progress_ms = now.mono_ms;
+        if (owner.limiter.take(lifecycle.conn, lifecycle.protocol, 1, now.mono_ms)) {
             Server.beginWrite(slot);
         } else {
             slot.state = .withheld;
@@ -271,89 +226,92 @@ pub const Server = struct {
         }
     }
 
-    pub fn beginWrite(slot: *Server) void {
-        slot.needs_service = true;
-        slot.io.writer = codec.ChunkWriter.initChunk(
+    fn beginWrite(slot: *Server) void {
+        const lifecycle = &slot.lifecycle;
+        lifecycle.needs_service = true;
+        lifecycle.io.writer = codec.ChunkWriter.initChunk(
             slot.pending_result,
             slot.pending_context,
-            slot.pending_ssz,
+            lifecycle.io.payload,
         );
-        slot.io.writing = true;
+        lifecycle.io.writing = true;
         slot.state = .writing_chunk;
     }
 
-    pub fn retryWithheld(owner: *ReqResp, slot: *Server, now: Now) void {
+    fn retryWithheld(owner: *ReqResp, slot: *Server, now: Now) void {
+        const lifecycle = &slot.lifecycle;
         assert(slot.state == .withheld);
-        if (!owner.limiter.take(slot.conn, slot.protocol, 1, now.mono_ms)) return;
+        if (!owner.limiter.take(lifecycle.conn, lifecycle.protocol, 1, now.mono_ms)) return;
         const since = slot.withheld_since_ms orelse now.mono_ms;
         owner.counters.withheld_ms_total += now.mono_ms -| since;
         slot.withheld_since_ms = null;
-        slot.progress_ms = now.mono_ms;
+        lifecycle.progress_ms = now.mono_ms;
         Server.beginWrite(slot);
     }
 
-    pub fn writeChunk(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: Now) void {
-        const flushed = slot.io.flush(engine, slot.stream, false) catch |err| {
-            slot.io.failure_detail = @errorName(err);
+    fn writeChunk(owner: *ReqResp, engine: *Engine, slot: *Server, index: u16, now: Now) void {
+        const lifecycle = &slot.lifecycle;
+        const flushed = lifecycle.io.flush(engine, lifecycle.stream, false) catch |err| {
+            lifecycle.io.failure_detail = @errorName(err);
             const reason: Failure = switch (err) {
                 error.StaleHandle, error.UnknownStream, error.StreamStopped => .stream_closed,
                 else => .transport,
             };
-            owner.fail(slot, index, reason, engine);
+            lifecycle.fail(owner, index, reason, .{ .inbound = slot.state }, engine);
             return;
         };
-        if (flushed.progressed) slot.progress_ms = now.mono_ms;
+        if (flushed.progressed) lifecycle.progress_ms = now.mono_ms;
         if (!flushed.done) {
-            if (slot.io.outbox.idle()) slot.needs_service = true;
+            if (lifecycle.io.outbox.idle()) lifecycle.needs_service = true;
             return;
         }
         if (slot.pending_result == constants.result_success) {
-            slot.chunks += 1;
+            lifecycle.chunks += 1;
             owner.counters.chunks_sent += 1;
         }
-        slot.pending_ssz = &.{};
-        slot.io.writer = undefined;
+        lifecycle.io.payload = &.{};
+        lifecycle.io.writer = undefined;
         if (slot.close_after_write) {
-            slot.io.outbox.queue("", true);
+            lifecycle.io.outbox.queue("", true);
             slot.state = .finishing;
-            slot.needs_service = true;
-            slot.progress_ms = now.mono_ms;
+            lifecycle.needs_service = true;
+            lifecycle.progress_ms = now.mono_ms;
             return;
         }
-        slot.state = .chunk_sent;
-        slot.progress_ms = now.mono_ms;
-        slot.pending_event = .{ .chunk_sent = .{
-            .request = slot.handle(index),
-            .chunks = slot.chunks,
-        } };
-        slot.after_event = .serving;
+        slot.state = .serving;
+        lifecycle.progress_ms = now.mono_ms;
+        lifecycle.queue(.{ .chunk_sent = .{
+            .request = lifecycle.handle(index),
+            .chunks = lifecycle.chunks,
+        } });
     }
 
-    pub fn finishStream(
+    fn finishStream(
         owner: *ReqResp,
         engine: *Engine,
         slot: *Server,
         index: u16,
         now: Now,
     ) void {
+        const lifecycle = &slot.lifecycle;
         assert(slot.state == .finishing);
-        const flushed = slot.io.outbox.pump(engine, slot.stream) catch |err| stopped: {
-            if (err != error.StreamStopped or slot.chunks == 0 or slot.io.outbox.offset != slot.io.outbox.bytes.len) {
-                owner.failStream(slot, index, err, engine);
+        const flushed = lifecycle.io.outbox.pump(engine, lifecycle.stream) catch |err| stopped: {
+            if (err != error.StreamStopped or lifecycle.chunks == 0 or lifecycle.io.outbox.offset != lifecycle.io.outbox.bytes.len) {
+                lifecycle.failStream(owner, index, err, .{ .inbound = slot.state }, engine);
                 return;
             }
-            owner.protocol_counters[@intFromEnum(slot.protocol)].response_finish_stops +|= 1;
-            std.log.scoped(.network_reqresp).debug("response_finish_stopped request={d}:{d} connection={d}:{d} stream={d} method={s} chunks={d}", .{ index, slot.generation, slot.conn.index, slot.conn.generation, slot.stream.id, @tagName(slot.protocol), slot.chunks });
-            slot.io.outbox = .{};
+            owner.protocol_counters[@intFromEnum(lifecycle.protocol)].response_finish_stops +|= 1;
+            std.log.scoped(.network_reqresp).debug("response_finish_stopped request={d}:{d} connection={d}:{d} stream={d} method={s} chunks={d}", .{ index, lifecycle.generation, lifecycle.conn.index, lifecycle.conn.generation, lifecycle.stream.id, @tagName(lifecycle.protocol), lifecycle.chunks });
+            lifecycle.io.outbox = .{};
             break :stopped true;
         };
         if (!flushed) return;
-        slot.progress_ms = now.mono_ms;
+        lifecycle.progress_ms = now.mono_ms;
         owner.counters.requests_served += 1;
-        owner.complete(
-            slot,
+        lifecycle.complete(
+            owner,
             index,
-            .{ .served = .{ .request = slot.handle(index), .chunks = slot.chunks } },
+            .{ .served = .{ .request = lifecycle.handle(index), .chunks = lifecycle.chunks } },
             null,
         );
     }
@@ -388,39 +346,42 @@ pub const Server = struct {
             owner.pushOverLimit(.{ .peer = stream.conn, .protocol = which });
         }
         slot.* = .{
-            .state = .receiving_request,
             .request_fork = owner.request_fork,
-            .generation = slot.generation + 1,
-            .conn = stream.conn,
-            .stream = stream,
-            .protocol = which,
-            .progress_ms = now.mono_ms,
-            .started_ms = now.mono_ms,
-            .timeout_ms = owner.options.progress_timeout_ms,
-            .io = .{
-                .sink = request_sink,
-                .scratch = slot.io.scratch,
-                .read_buffer = slot.io.read_buffer,
-                .buffered_end = ready.leftover.len,
-                .fin_seen = ready.fin,
+            .lifecycle = .{
+                .completion = .active,
+                .direction = .inbound,
+                .generation = slot.lifecycle.generation + 1,
+                .conn = stream.conn,
+                .stream = stream,
+                .protocol = which,
+                .progress_ms = now.mono_ms,
+                .started_ms = now.mono_ms,
+                .timeout_ms = owner.options.progress_timeout_ms,
+                .io = .{
+                    .sink = request_sink,
+                    .scratch = slot.lifecycle.io.scratch,
+                    .read_buffer = slot.lifecycle.io.read_buffer,
+                    .buffered_end = ready.leftover.len,
+                    .fin_seen = ready.fin,
+                },
             },
         };
-        assert(ready.leftover.len <= slot.io.read_buffer.len);
-        @memcpy(slot.io.read_buffer[0..ready.leftover.len], ready.leftover);
+        assert(ready.leftover.len <= slot.lifecycle.io.read_buffer.len);
+        @memcpy(slot.lifecycle.io.read_buffer[0..ready.leftover.len], ready.leftover);
         if (bounds.request_max > 0) {
-            slot.io.decoder = codec.Decoder.initRequest(
+            slot.lifecycle.io.decoder = codec.Decoder.initRequest(
                 .{ .min = bounds.request_min, .max = bounds.request_max },
                 request_sink,
-                slot.io.scratch,
+                slot.lifecycle.io.scratch,
             );
-            slot.io.decoding = true;
+            slot.lifecycle.io.decoding = true;
         }
         owner.limiter.bind(stream.conn, now.mono_ms);
         owner.protocol_counters[@intFromEnum(which)].incoming +|= 1;
-        std.log.scoped(.network_reqresp).debug("request_started direction=inbound request={d}:{d} connection={d}:{d} stream={d} method={s}", .{ index, slot.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which) });
-        slot.needs_service = true;
-        assert(slot.active());
-        return slot.handle(index);
+        std.log.scoped(.network_reqresp).debug("request_started direction=inbound request={d}:{d} connection={d}:{d} stream={d} method={s}", .{ index, slot.lifecycle.generation, stream.conn.index, stream.conn.generation, stream.id, @tagName(which) });
+        slot.lifecycle.needs_service = true;
+        assert(slot.lifecycle.active());
+        return slot.lifecycle.handle(index);
     }
 
     pub fn respond(
@@ -431,15 +392,16 @@ pub const Server = struct {
         now: Now,
     ) RespondError!void {
         const slot = try owner.servingSlot(request_handle);
-        const bounds = slot.protocol.info();
-        if (slot.chunks >= slot.chunks_max) return error.TooManyChunks;
+        const lifecycle = &slot.lifecycle;
+        const bounds = lifecycle.protocol.info();
+        if (lifecycle.chunks >= lifecycle.chunks_max) return error.TooManyChunks;
         var response = codec.Bounds{ .min = bounds.response_min, .max = bounds.response_max };
         var digest: ?[constants.context_bytes_length]u8 = null;
         if (bounds.context_bytes) {
             const selected = context orelse return error.UnknownFork;
             const known = owner.forkFor(selected.digest) orelse return error.UnknownFork;
             if (known != selected.fork) return error.UnknownFork;
-            response = slot.protocol.responseBounds(known) catch return error.InvalidContext;
+            response = lifecycle.protocol.responseBounds(known) catch return error.InvalidContext;
             digest = selected.digest;
         }
         if (!bounds.context_bytes and context != null) return error.InvalidContext;
@@ -459,25 +421,25 @@ pub const Server = struct {
             return error.InvalidError;
         }
         const slot = try owner.servingSlot(request_handle);
-        @memcpy(slot.error_message[0..message.len], message);
-        slot.error_len = @intCast(message.len);
-        Server.queueChunk(owner, slot, code, null, slot.error_message[0..message.len], true, now);
+        const lifecycle = &slot.lifecycle;
+        @memcpy(lifecycle.error_message[0..message.len], message);
+        lifecycle.error_len = @intCast(message.len);
+        Server.queueChunk(owner, slot, code, null, lifecycle.error_message[0..message.len], true, now);
     }
 
     pub fn finish(owner: *ReqResp, request_handle: RequestHandle, now: Now) bool {
         if (request_handle.direction != .inbound) return false;
         const slot = owner.inboundSlot(request_handle) orelse return false;
+        const lifecycle = &slot.lifecycle;
+        if (!lifecycle.running()) return false;
+        if (lifecycle.pendingEvent()) |event| if (event == .request) return false;
         switch (slot.state) {
-            .serving, .chunk_sent => {
-                if (!slot.io.outbox.idle()) return false;
-                slot.io.outbox.queue("", true);
-                slot.needs_service = true;
-                if (slot.pending_event != null) {
-                    slot.after_event = .finishing;
-                } else {
-                    slot.state = .finishing;
-                }
-                slot.progress_ms = now.mono_ms;
+            .serving => {
+                if (!lifecycle.io.outbox.idle()) return false;
+                lifecycle.io.outbox.queue("", true);
+                lifecycle.needs_service = true;
+                slot.state = .finishing;
+                lifecycle.progress_ms = now.mono_ms;
             },
             .writing_chunk, .withheld => {
                 if (slot.close_after_write) return false;
