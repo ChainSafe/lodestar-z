@@ -257,7 +257,7 @@ test "memory_safety: variable progressive list tree.toValue preserves out on OOM
     try std.testing.expect(saw_success);
 }
 
-test "fixed progressive tree serialization streams without temporary values" {
+test "fixed progressive tree serialization streams without temporary allocations" {
     const allocator = std.testing.allocator;
     const Pair = FixedContainerType(struct { a: UintType(64), b: UintType(64) });
     inline for (.{ UintType(8), UintType(64), BoolType(), Pair }) |Element| {

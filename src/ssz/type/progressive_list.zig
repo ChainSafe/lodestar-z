@@ -39,9 +39,14 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
         }
 
         pub fn chunkCount(value: *const Type) usize {
+            return chunkCountForLength(value.items.len);
+        }
+
+        fn chunkCountForLength(len: usize) usize {
             if (comptime isBasicType(Element)) {
-                return (Element.fixed_size * value.items.len + 31) / 32;
-            } else return value.items.len;
+                const items_per_chunk = 32 / Element.fixed_size;
+                return len / items_per_chunk + @intFromBool(len % items_per_chunk != 0);
+            } else return len;
         }
 
         pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
@@ -143,10 +148,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 const len = try length(data);
 
-                const chunk_count = if (comptime isBasicType(Element))
-                    (Element.fixed_size * len + 31) / 32
-                else
-                    len;
+                const chunk_count = chunkCountForLength(len);
                 const chunks = try allocator.alloc([32]u8, chunk_count);
                 defer allocator.free(chunks);
 
@@ -235,10 +237,7 @@ pub fn FixedProgressiveListType(comptime ST: type) type {
                 const len = try length(node, pool);
                 const size = try std.math.mul(usize, len, Element.fixed_size);
                 if (out.len < size) return error.InvalidSize;
-                const chunk_count = if (comptime isBasicType(Element))
-                    size / 32 + @intFromBool(size % 32 != 0)
-                else
-                    len;
+                const chunk_count = chunkCountForLength(len);
                 var it = try progressive.NodeIterator.init(pool, try node.getLeft(pool), chunk_count);
                 var offset: usize = 0;
                 while (try it.next()) |chunk| {
