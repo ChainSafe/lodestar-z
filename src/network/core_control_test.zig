@@ -105,7 +105,7 @@ test "core stale metadata finishes one refresh while periodic Status and later c
         try std.testing.expectEqual(started + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         try setup.server.updateMetadata(&.{ .seq_number = reply_sequence });
         for (0..80) |_| try setup.step(0);
-        try std.testing.expect(!row.metadata_pending);
+        try std.testing.expect(row.metadata_due_ms == null);
         try std.testing.expectEqual(@as(u64, 10), setup.client.catalog.get(peer).?.metadata.?.seq_number);
         setup.pair.advance(1000);
         for (0..80) |_| try setup.step(0);
@@ -120,9 +120,9 @@ test "core stale metadata finishes one refresh while periodic Status and later c
         for (0..80) |_| try setup.step(0);
         try std.testing.expectEqual(started + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         try std.testing.expectEqual(@as(u64, 12), setup.client.catalog.get(peer).?.metadata.?.seq_number);
-        row.metadata_pending = true;
+        row.metadata_due_ms = setup.pair.now.mono_ms;
         row.ping_due_ms = setup.pair.now.mono_ms;
-        row.status_due_ms = setup.pair.now.mono_ms;
+        row.status_due_ms = setup.pair.now.mono_ms - 1;
         setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
         try std.testing.expectEqual(statuses + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
         try std.testing.expectEqual(started + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
@@ -695,7 +695,7 @@ test "core control irrelevant metadata cannot create an ineligible wakeup" {
     const conn = snapshots[0].connection.?;
     try std.testing.expect(setup.client.catalog.invalidateStatus(peer, conn));
     const row = &setup.client.control.schedules[peer.index];
-    row.metadata_pending = true;
+    row.metadata_due_ms = setup.pair.now.mono_ms;
     row.status_due_ms = setup.pair.now.mono_ms + 100;
     row.ping_due_ms = setup.pair.now.mono_ms + 200;
     const started = setup.client.control.counters.started;
