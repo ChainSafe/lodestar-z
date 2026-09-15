@@ -1,5 +1,5 @@
 //! secp256k1 primitives for the v4 identity scheme. Signing is deterministic per RFC 6979 and
-//! produces low-S signatures, so every message has exactly one valid encoding.
+//! produces reproducible low-S signatures without the high-S malleable counterpart.
 
 const std = @import("std");
 

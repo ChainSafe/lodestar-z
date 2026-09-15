@@ -156,12 +156,27 @@ pub const Discovery = struct {
             self.resource_retry_ms = now_ms +| self.options.local_retry_ms;
         };
         const progress = try self.driver.stepUntil(io, &self.storage.expiries, @min(wake_ms, self.nextWakeup(now_ms).?));
-        const consumed = self.consume(&progress, self.storage.expiries[0..progress.calls_expired], out);
+        var consumed = self.consume(&progress, self.storage.expiries[0..progress.calls_expired], out);
+        if (progress.event == .request and progress.event.request.message == .talk_request) {
+            const incoming = progress.event.request;
+            const response: d.wire.message.Message = .{ .talk_response = .{
+                .request_id = incoming.message.talk_request.request_id,
+                .response = &.{},
+            } };
+            self.driver.sendResponse(io, incoming.peer, &response) catch |err| {
+                if (consumed.failure == null) {
+                    consumed.failure = err;
+                    consumed.failure_stage = .process;
+                }
+                self.counters.processing_failures +|= 1;
+            };
+        }
         return .{ .candidates = consumed.candidates, .started = result.started, .expired = consumed.expired, .rejected = consumed.rejected, .dropped = consumed.dropped, .unowned = consumed.unowned, .failure = result.failure orelse consumed.failure, .failure_stage = if (result.failure != null) .coordinator else consumed.failure_stage };
     }
 
     /// Supports hosts that drive the borrowed Driver themselves. Consume every result exactly
-    /// once before another Driver step, including results containing failure. No slice escapes.
+    /// once before another Driver step, including results containing failure. The host answers
+    /// TALK requests itself; step supplies the unsupported-protocol response. No slice escapes.
     pub fn consume(self: *Discovery, progress: *const d.Driver.StepResult, expiries: []const d.CallTable.Expired, out: []adapter.Candidate) Result {
         std.debug.assert(expiries.len == progress.calls_expired and expiries.len <= d.CallTable.capacity_max);
         var result = Result{ .failure = progress.failure, .failure_stage = progress.failure_stage };

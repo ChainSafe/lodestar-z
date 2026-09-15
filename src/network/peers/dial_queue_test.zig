@@ -296,7 +296,7 @@ fn discovered(tag: u8, sync: u8) !@import("enr.zig").Candidate {
     const pair = try @import("../wire/keys.zig").KeyPair.fromSecretKey(&secret);
     const key = pair.publicKey();
     const peer = t.PeerId.fromPublicKey(&key);
-    return .{ .peer = peer, .node_id = try @import("custody.zig").nodeId(&peer), .sequence = 1, .addresses = .{ address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = sync, .custody_group_count = null };
+    return .{ .peer = peer, .node_id = try @import("custody.zig").nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = sync, .custody_group_count = null };
 }
 
 test "peer dial discovered refresh replaces addresses preserves lease history and manual authority" {
@@ -418,6 +418,51 @@ test "peer dial confirmed equal ENR refresh renews provisional hint freshness wi
     var conflicting = candidate;
     conflicting.syncnets = 2;
     try std.testing.expectError(error.StaleRecord, q.enqueueDiscovered(&conflicting, &.{}, &wanted, 300_001));
+}
+
+test "peer dial equal ENR merges authorized endpoint observations without changing owners or backoff" {
+    const d = @import("discv5");
+    const adapter = @import("enr.zig");
+    const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{1}));
+    const record = try adapter.build(&key, 7, &.{
+        .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 },
+        .ip4 = .{ 10, 1, 0, 1 },
+        .quic = 9001,
+        .ip6 = .{ 0x20, 0x01, 0x0d, 0xb8 } ++ .{0} ** 11 ++ .{1},
+        .quic6 = 9002,
+    }, &.{});
+    const dual = try adapter.decode(&record, &.{});
+    var public = dual;
+    public.addresses = .{ dual.addresses[1], .unspecified };
+    public.address_count = 1;
+    const public_source: t.Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 1 }, .port = 9000 } };
+    try std.testing.expect(!@import("discovery.zig").relayAllowed(public_source, dual.addresses[0]));
+    try std.testing.expect(@import("discovery.zig").relayAllowed(public_source, public.addresses[0]));
+
+    for (0..4) |mode| {
+        var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+        defer q.deinit(a);
+        try q.enqueueDiscovered(if (mode == 0) &public else &dual, &.{}, &.{}, 0);
+        if (mode >= 2) try q.enqueue(&dual.peer, &.{address}, mode == 3, 0);
+        q.rows[0].failures = 3;
+        q.rows[0].eligible_at_ms = 5000;
+        if (mode == 1) q.rows[0].address_index = 1;
+        var intents: [1]mod.DialIntent = undefined;
+        try std.testing.expectEqual(@as(usize, 1), q.poll(5000, &intents));
+        try std.testing.expect(q.dialStarted(intents[0].token, .{ .index = 1, .generation = 2 }));
+        @memset(q.rows[0].addresses[q.rows[0].address_count..], .unspecified);
+        var expected = q.rows[0];
+        try q.enqueueDiscovered(if (mode == 0) &dual else &public, &.{}, &.{}, 6000);
+        expected.hints_at_ms = 6000;
+        if (mode == 0) {
+            expected.addresses = .{ dual.addresses[1], dual.addresses[0] };
+            expected.address_count = 2;
+        }
+        try std.testing.expectEqualDeep(expected, q.rows[0]);
+        try q.enqueueDiscovered(&public, &.{}, &.{}, 7000);
+        expected.hints_at_ms = 7000;
+        try std.testing.expectEqualDeep(expected, q.rows[0]);
+    }
 }
 
 test "peer dial review group shrink invalidates all hints while preserving owners and authority" {

@@ -19,6 +19,7 @@ const stable_connection_ms: u64 = 300_000;
 pub const Hints = struct {
     node_id: [32]u8,
     sequence: u64,
+    record_hash: [32]u8,
     fork: enr.ForkId,
     next_fork_digest: ?[4]u8,
     attnets: ?[8]u8,
@@ -188,7 +189,7 @@ pub const DialQueue = struct {
     pub fn enqueueDiscovered(self: *DialQueue, candidate: *const enr.Candidate, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) !void {
         try context.validate();
         if (candidate.address_count == 0 or candidate.address_count > 2) return error.InvalidCandidate;
-        const hints: Hints = .{ .node_id = candidate.node_id, .sequence = candidate.sequence, .fork = candidate.fork, .next_fork_digest = candidate.next_fork_digest, .attnets = candidate.attnets, .syncnets = candidate.syncnets, .custody_group_count = candidate.custody_group_count };
+        const hints: Hints = .{ .node_id = candidate.node_id, .sequence = candidate.sequence, .record_hash = candidate.record_hash, .fork = candidate.fork, .next_fork_digest = candidate.next_fork_digest, .attnets = candidate.attnets, .syncnets = candidate.syncnets, .custody_group_count = candidate.custody_group_count };
         if (!hints.validFor(context)) return error.InvalidCandidate;
         for (candidate.addresses[0..candidate.address_count]) |address| if (address.port() == 0) return error.InvalidCandidate;
         const node_id = custody.nodeId(&candidate.peer) catch return error.InvalidCandidate;
@@ -207,10 +208,7 @@ pub const DialQueue = struct {
                     if (candidate.sequence < previous.sequence) return error.StaleRecord;
                     if (candidate.sequence == previous.sequence) {
                         if (!std.meta.eql(previous, hints)) return error.StaleRecord;
-                        if (row.automatic) {
-                            if (row.address_count != incoming.address_count) return error.StaleRecord;
-                            for (row.addresses[0..row.address_count], incoming.addresses[0..incoming.address_count]) |known, address| if (!known.eql(address)) return error.StaleRecord;
-                        }
+                        if (row.automatic) try mergeAddresses(row, candidate);
                         row.hints_at_ms = now_ms;
                         return;
                     }
@@ -247,6 +245,24 @@ pub const DialQueue = struct {
             row.addresses[row.address_count] = address;
             row.address_count += 1;
         }
+    }
+    fn mergeAddresses(row: *Row, candidate: *const enr.Candidate) error{StaleRecord}!void {
+        var addresses = row.addresses;
+        var count = row.address_count;
+        for (candidate.addresses[0..candidate.address_count]) |address| {
+            var found = false;
+            for (addresses[0..count]) |known| {
+                if (std.meta.activeTag(known) != std.meta.activeTag(address)) continue;
+                if (!known.eql(address)) return error.StaleRecord;
+                found = true;
+            }
+            if (found) continue;
+            if (count == addresses.len) return error.StaleRecord;
+            addresses[count] = address;
+            count += 1;
+        }
+        row.addresses = addresses;
+        row.address_count = count;
     }
     fn resetCustody(row: *Row, context: *const t.ForkContext) void {
         const hints = row.hints orelse return;

@@ -4,6 +4,29 @@ const enr = @import("enr.zig");
 const handshake = @import("handshake.zig");
 const types = @import("../types.zig");
 
+test "ENR content hash identifies signed fields independently of signature nonce" {
+    const key = try crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{1}));
+    const original = try enr.Record.create(&key, 7, .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9000 } });
+    const digest = try original.contentHash();
+    var signature = try key.signPrehashed(digest, @splat(1));
+    const scalar = std.crypto.ecc.Secp256k1.scalar;
+    if (std.mem.readInt(u256, &signature.s, .big) > scalar.field_order / 2) {
+        signature.s = try scalar.neg(signature.s, .big);
+    }
+    var outer = @import("../wire/rlp.zig").Reader.init(original.slice());
+    var fields = try outer.readList();
+    const old_signature = try fields.readBytes();
+    const offset = @intFromPtr(old_signature.ptr) - @intFromPtr(original.bytes[0..].ptr);
+    const signature_bytes = signature.toBytes();
+    try std.testing.expect(!std.mem.eql(u8, old_signature, &signature_bytes));
+    var encoded = original.bytes;
+    @memcpy(encoded[offset..][0..signature_bytes.len], &signature_bytes);
+    const resigned = try enr.Record.init(encoded[0..original.length]);
+    try std.testing.expectEqual(digest, try resigned.contentHash());
+    const updated = try enr.Record.create(&key, 8, original.endpoint().?);
+    try std.testing.expect(!std.mem.eql(u8, &digest, &try updated.contentHash()));
+}
+
 test "official ECDH and handshake key derivation vectors" {
     const secret = hexBytes(
         32,

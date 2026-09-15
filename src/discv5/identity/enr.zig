@@ -139,6 +139,15 @@ pub const Record = struct {
         return self.bytes[0..self.length];
     }
 
+    pub fn contentHash(self: *const Record) Error![32]u8 {
+        var outer = rlp.Reader.init(self.slice());
+        var fields = try outer.readList();
+        _ = try fields.readBytes();
+        var digest: [32]u8 = undefined;
+        hashSignedPayload(fields.data[fields.position..], &digest);
+        return digest;
+    }
+
     /// Prefers the IPv4 endpoint. An IPv6 record uses `udp6` and falls back to `udp`, as the
     /// spec allows.
     pub fn endpoint(self: *const Record) ?types.Address {
