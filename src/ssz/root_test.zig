@@ -11,6 +11,21 @@ const ssz = @import("root.zig");
 const types = ssz.types;
 const HasherData = ssz.HasherData;
 
+test "SSZ bit schemas use the standalone packed value types" {
+    const bit_array = @import("bit_array");
+    const List = ssz.BitListType(17);
+    const Vector = ssz.BitVectorType(17);
+    const Progressive = ssz.ProgressiveBitListType();
+
+    try testing.expect(List.Type == bit_array.BitList(.{ .limit = 17 }));
+    try testing.expect(Vector.Type == bit_array.BitVector(17));
+    try testing.expect(Progressive.Type == bit_array.BitList(.{ .limit = bit_array.unlimited }));
+    try testing.expect(ssz.isBitListType(List));
+    try testing.expect(!ssz.isBitListType(Progressive));
+    try testing.expect(ssz.isBitVectorType(Vector));
+    try testing.expect(ssz.isProgressiveBitListType(Progressive));
+}
+
 test "redundant SSZ helper APIs are not exposed" {
     try testing.expect(!@hasDecl(types, "isProgressiveListType"));
     try testing.expect(!@hasDecl(types, "isCompatibleUnionType"));
