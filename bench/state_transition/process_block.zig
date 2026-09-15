@@ -82,6 +82,7 @@ fn ProcessWithdrawalsBench(comptime fork: ForkSeq) type {
                 state,
                 withdrawals_result,
                 payload_withdrawals_root,
+                null,
             ) catch unreachable;
         }
     };
@@ -343,6 +344,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                     state,
                     withdrawals_result,
                     payload_withdrawals_root,
+                    null,
                 ) catch unreachable;
                 recordSegment(.withdrawals, @as(u64, @intCast(time.since(io, withdrawals_start).nanoseconds)));
             }
