@@ -117,6 +117,7 @@ fn initCachedState(
 // -------------------------
 // Class Methods
 // -------------------------
+/// Requires state bytes with trusted provenance; SSZ decoding does not authenticate them.
 pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     const state = try allocator.create(AnyBeaconState);
     errdefer allocator.destroy(state);
