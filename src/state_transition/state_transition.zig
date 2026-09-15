@@ -1,4 +1,5 @@
 const std = @import("std");
+const Diagnostics = @import("diagnostics").Diagnostics;
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const metrics = @import("metrics.zig");
@@ -153,6 +154,7 @@ pub fn processSlots(
 }
 
 pub const TransitionOpts = struct {
+    diagnostics: ?*Diagnostics = null,
     verify_state_root: bool = true,
     verify_proposer: bool = true,
     /// NOTE: verifying BLS signatures is expensive - make sure to turn this off for tests.
@@ -240,7 +242,7 @@ pub fn stateTransition(
                             bt,
                             block.castToFork(bt, f),
                             opts.block_external_data,
-                            .{ .verify_signature = opts.verify_signatures },
+                            .{ .verify_signature = opts.verify_signatures, .diagnostics = opts.diagnostics },
                         );
                     }
                 },
