@@ -196,6 +196,7 @@ export type VoluntaryExitValidity =
   | "invalid_signature";
 
 export declare class BeaconStateView {
+  /** Requires state bytes with trusted provenance; SSZ decoding does not authenticate them. */
   static createFromBytes(bytes: Uint8Array): BeaconStateView;
 
   release(): void;
@@ -344,11 +345,7 @@ export declare class BeaconStateView {
     processedValidatorSweepCount: number;
   };
 
-  /**
-   * On phase0, callers must serialize this call with other `processSlots()`,
-   * `stateTransition()`, and phase0 `computeUnrealizedCheckpoints()` calls across
-   * all views and workers, and exclude `deinitReusedEpochTransitionCache()`.
-   */
+  /** On phase0, serialize this call with other STF operations and cache teardown across workers. */
   computeUnrealizedCheckpoints(): {
     justifiedCheckpoint: Checkpoint;
     finalizedCheckpoint: Checkpoint;
@@ -383,17 +380,9 @@ export declare class BeaconStateView {
   hashTreeRoot(): Uint8Array;
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
-  /**
-   * Callers must serialize this call with other `processSlots()`,
-   * `stateTransition()`, and phase0 `computeUnrealizedCheckpoints()` calls across
-   * all views and workers, and exclude `deinitReusedEpochTransitionCache()`.
-   */
+  /** Serialize this call with other STF operations and cache teardown across workers. */
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
-  /**
-   * Callers must serialize this call with other `processSlots()`,
-   * `stateTransition()`, and phase0 `computeUnrealizedCheckpoints()` calls across
-   * all views and workers, and exclude `deinitReusedEpochTransitionCache()`.
-   */
+  /** Serialize this call with other STF operations and cache teardown across workers. */
   stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
@@ -402,12 +391,7 @@ declare const bindings: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
   stateTransition: {
-    /**
-     * Free the process-wide epoch cache.
-     * Callers must wait for all `processSlots()`, `stateTransition()`, and phase0
-     * `computeUnrealizedCheckpoints()` calls across all views and workers to finish,
-     * then prevent new calls until teardown returns.
-     */
+    /** Callers must exclude STF operations across all workers until teardown returns. */
     deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
