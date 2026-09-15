@@ -21,7 +21,6 @@ pub const header_max: usize = 1 + constants.context_bytes_length + constants.var
 const frame_type_compressed: u8 = 0x00;
 const frame_type_uncompressed: u8 = 0x01;
 const frame_type_identifier: u8 = 0xff;
-const frame_type_padding: u8 = 0xfe;
 const frame_type_skippable_first: u8 = 0x80;
 const crc_mask_delta: u32 = 0xa282_ead8;
 
@@ -249,6 +248,13 @@ pub const Decoder = struct {
         const frame_type = self.header[0];
         const frame_length: usize = @as(usize, self.header[1]) | (@as(usize, self.header[2]) << 8) |
             (@as(usize, self.header[3]) << 16);
+        if (frame_type == frame_type_identifier) {
+            if (!std.mem.eql(u8, self.header[0..frame_header_length], identifier[0..frame_header_length])) {
+                return error.BadIdentifier;
+            }
+            self.phase = .identifier;
+            return;
+        }
         self.header_len = 0;
         if (isDataFrame(frame_type)) {
             if (frame_length < checksum_length or frame_length > frame_body_max) {
@@ -259,9 +265,7 @@ pub const Decoder = struct {
             {
                 return error.FrameTooLarge;
             }
-        } else if (frame_type == frame_type_identifier or frame_type == frame_type_padding or
-            frame_type >= frame_type_skippable_first)
-        {
+        } else if (frame_type >= frame_type_skippable_first) {
             if (frame_length > frame_body_max) return error.FrameTooLarge;
         } else {
             return error.BadFrameType;
