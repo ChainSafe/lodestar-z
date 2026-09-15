@@ -196,7 +196,7 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
     var len: usize = 0;
     if (action == .fail) {
         status = @intCast(cfg.integer(status_value, 255) catch return rejectInput(runtime.env, .invalid_error));
-        if (status == 0) return rejectInput(runtime.env, .invalid_error);
+        if (!@import("network").reqresp.constants.isErrorResult(status)) return rejectInput(runtime.env, .invalid_error);
         len = viewLength(message_value, message.len) catch return rejectInput(runtime.env, .invalid_error);
         try cfg.bytes(message_value, message[0..len]);
     }

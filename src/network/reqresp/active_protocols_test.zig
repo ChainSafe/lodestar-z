@@ -71,7 +71,7 @@ test "reqresp active new methods enforce request ceilings through real exchanges
                         chunks += 1;
                         try std.testing.expectEqual(@as(?config.ForkSeq, .fulu), chunk.fork);
                         try std.testing.expectEqualSlices(u8, payload[0..case[3]], chunk.bytes);
-                        try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now));
+                        try std.testing.expect(setup.client.reqresp.consume(chunk.request));
                     },
                     .done => |terminal| {
                         try std.testing.expect(!done);

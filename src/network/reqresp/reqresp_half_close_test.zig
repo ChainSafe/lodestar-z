@@ -60,7 +60,7 @@ fn expectDone(pair: *Pair, request: Request, expected: []const u8) !void {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, expected, chunk.bytes);
                 chunks += 1;
-                try std.testing.expect(pair.client.reqresp.consume(chunk.request, pair.pair.now));
+                try std.testing.expect(pair.client.reqresp.consume(chunk.request));
             },
             .done => |event_done| {
                 try std.testing.expectEqual(@as(u32, 1), event_done.chunks);
@@ -305,20 +305,20 @@ test "reqresp half close still reports peer errors malformed responses and respo
     }
 }
 
-test "reqresp half close without a response retains progress and absolute deadlines" {
-    for ([_]bool{ false, true }) |absolute| {
+test "reqresp half close without a response retains the absolute response deadline" {
+    for ([_]u64{ 100, 10_000 }) |duration| {
         var pair: Pair = .{};
-        try pair.init(.{ .outbound_max = 1, .inbound_max = 1, .progress_timeout_ms = 100 }, .{});
+        try pair.init(.{ .outbound_max = 1, .inbound_max = 1 }, .{});
         defer pair.deinit();
         var sink: [25]u8 = undefined;
-        const request = try negotiate(&pair, .metadata_v3, &.{}, &sink, if (absolute)
-            .{ .absolute_timeouts = .{ .negotiation_ms = 200, .request_ms = 300, .response_ms = 100 } }
+        const request = try negotiate(&pair, .metadata_v3, &.{}, &sink, if (duration == 100)
+            .{ .absolute_timeouts = .{ .response_ms = duration } }
         else
             .{});
         pair.pair.server.shutdown(request.remote, .read, 0);
         for (0..4) |_| try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
         try std.testing.expectEqual(.response, pair.client.reqresp.outbound[request.handle.index].phase);
-        pair.pair.advance(99);
+        pair.pair.advance(duration - 1);
         try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
         pair.pair.advance(1);
         try expectFailure(&pair, .timeout);
@@ -369,7 +369,7 @@ test "reqresp half close preserves context and successive response chunks" {
                     try std.testing.expectEqual(.deneb, chunk.fork.?);
                     try std.testing.expectEqualSlices(u8, &block, chunk.bytes);
                     chunks += 1;
-                    try std.testing.expect(pair.client.reqresp.consume(chunk.request, pair.pair.now));
+                    try std.testing.expect(pair.client.reqresp.consume(chunk.request));
                 },
                 .failed => return error.TestUnexpectedResult,
                 else => {},

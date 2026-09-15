@@ -80,6 +80,7 @@ pub const Options = struct {
     inbound_per_peer_max: u8 = constants.inbound_per_peer_max_default,
     /// Zero disables the cap; retained application owners count until canonical recycling.
     inbound_application_per_peer_max: u8 = 0,
+    /// Inbound wire progress; outbound requests use their absolute phase deadlines.
     progress_timeout_ms: u64 = constants.progress_timeout_ms_default,
     forks: []const ForkEntry,
     request_fork: config.ForkSeq = .phase0,
@@ -106,17 +107,16 @@ const Settings = struct {
 };
 
 pub const AbsoluteTimeouts = struct {
-    negotiation_ms: u64,
-    request_ms: u64,
-    response_ms: u64,
+    negotiation_ms: u64 = 5_000,
+    request_ms: u64 = 5_000,
+    response_ms: u64 = 10_000,
 };
 
 pub const RequestPhase = enum { negotiation, request, response };
 
 pub const RequestOptions = struct {
     expected_chunks: ?u32 = null,
-    progress_timeout_ms: ?u64 = null,
-    absolute_timeouts: ?AbsoluteTimeouts = null,
+    absolute_timeouts: AbsoluteTimeouts = .{},
 };
 
 pub const RequestHandle = struct {
@@ -501,8 +501,8 @@ pub const ReqResp = struct {
         return Server.finish(self, handle, now);
     }
 
-    pub fn consume(self: *ReqResp, handle: RequestHandle, now: Now) bool {
-        return Client.consume(self, handle, now);
+    pub fn consume(self: *ReqResp, handle: RequestHandle) bool {
+        return Client.consume(self, handle);
     }
 
     /// The returned bytes remain valid until the pump after terminal delivery.
@@ -597,7 +597,7 @@ pub const ReqResp = struct {
             else
                 capacities.application;
             if (slot.lifecycle.wakeup(capacity)) return now.mono_ms;
-            if (slot.deadline(self)) |deadline| due = earlier(due, deadline);
+            if (slot.deadline()) |deadline| due = earlier(due, deadline);
         }
         for (self.inbound) |*slot| {
             const capacity = if (slot.lifecycle.protocol.isControl())

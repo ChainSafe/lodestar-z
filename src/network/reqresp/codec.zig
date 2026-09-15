@@ -159,9 +159,7 @@ pub const Decoder = struct {
                 self.result_byte = code;
                 if (code == constants.result_success) {
                     self.phase = if (self.expect_context) .context else .varint;
-                } else if (code > constants.result_resource_unavailable and
-                    code <= constants.result_reserved_max)
-                {
+                } else if (!constants.isErrorResult(code)) {
                     return error.ReservedResult;
                 } else {
                     self.bounds = error_bounds;

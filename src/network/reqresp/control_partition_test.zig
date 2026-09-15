@@ -154,7 +154,7 @@ test "reqresp service retains request and chunk bytes through control progress" 
         for (output[0..received.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping_bytes, chunk.bytes);
-                try std.testing.expect(client.reqresp.consume(chunk.request, pair.now));
+                try std.testing.expect(client.reqresp.consume(chunk.request));
                 got_pong = true;
             },
             .failed => return error.TestUnexpectedResult,
@@ -194,7 +194,7 @@ test "reqresp service retains request and chunk bytes through control progress" 
     try std.testing.expect(client.reqresp.outbound[app.index].lifecycle.pendingEvent() != null);
     try std.testing.expectEqualSlices(u8, &block, sink[0..block.len]);
     try std.testing.expectEqual(
-        pair.now.mono_ms + 60_000,
+        pair.now.mono_ms + 10_000,
         client.reqresp.nextWakeup(pair.now, .{ .application = 0, .control = 1 }),
     );
     try std.testing.expectEqual(

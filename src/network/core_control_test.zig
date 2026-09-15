@@ -261,7 +261,7 @@ fn previousStatus(setup: *Setup) !void {
         for (out[0..count.control]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualDeep(handle, chunk.request);
-                try std.testing.expect(setup.client.service.reqresp.consume(handle, setup.pair.now));
+                try std.testing.expect(setup.client.service.reqresp.consume(handle));
             },
             .done => {
                 done = true;
@@ -354,7 +354,7 @@ test "core control native Fulu serves older schemas but old Status cannot establ
                     if (protocol == .goodbye_v1) {
                         try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, chunk.bytes[0..8], .little));
                     }
-                    try std.testing.expect(setup.client.service.reqresp.consume(request, setup.pair.now));
+                    try std.testing.expect(setup.client.service.reqresp.consume(request));
                     chunks += 1;
                 },
                 .done => terminal = true,
@@ -449,7 +449,7 @@ test "core native application response borrows survive same turn hard close" {
         if (client.application == 1 and output[0] == .chunk) {
             try std.testing.expectEqualDeep(request, output[0].chunk.request);
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
-            try std.testing.expect(setup.client.service.reqresp.consume(request, setup.pair.now));
+            try std.testing.expect(setup.client.service.reqresp.consume(request));
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
             received = true;
             break;
@@ -798,7 +798,7 @@ test "core control capabilities pre-Fulu Metadata3 serves configured custody cou
                 try std.testing.expectEqualDeep(request, chunk.request);
                 const metadata = try wire.decodeMetadata(.metadata_v3, chunk.bytes, local.fork);
                 try std.testing.expectEqual(local.metadata.custody_group_count, metadata.custody_group_count);
-                try std.testing.expect(setup.client.service.reqresp.consume(request, setup.pair.now));
+                try std.testing.expect(setup.client.service.reqresp.consume(request));
                 received = true;
             },
             .done => done = true,
@@ -996,7 +996,7 @@ test "core native application response borrows survive immediate public close" {
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
             try std.testing.expect(setup.client.closePeer(&setup.pair.client, peer, snapshots[0].connection.?, setup.pair.now));
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
-            try std.testing.expect(setup.client.service.reqresp.consume(request, setup.pair.now));
+            try std.testing.expect(setup.client.service.reqresp.consume(request));
             try std.testing.expectEqualSlices(u8, &response, output[0].chunk.bytes);
             received = true;
             break;
@@ -1194,4 +1194,63 @@ test "peer lifecycle metrics count retired schedules once across connection gene
     control.cancelConnection(&setup.client.service, &setup.pair.client, peer, replacement);
     try std.testing.expectEqualSlices(u64, &.{ 1, 1 }, &control.counters.events.connected);
     try std.testing.expectEqualSlices(u64, &.{ 1, 1 }, &control.counters.events.disconnected);
+}
+
+test "core control response deadline survives continuous peer progress" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..80) |_| try setup.step(0);
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
+    const peer = snapshots[0].peer;
+    const conn = snapshots[0].connection.?;
+    try std.testing.expect(setup.client.reStatusPeer(peer, conn, setup.pair.now));
+    setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+    var request: ?rr.RequestHandle = null;
+    for (setup.client.control.operations) |op| if (op.request != null and op.protocol == .status_v1) {
+        request = op.request;
+    };
+    const handle = request orelse return error.TestUnexpectedResult;
+    var remote_stream: ?Engine.StreamHandle = null;
+    for (0..80) |_| {
+        try setup.pair.pump();
+        var transport: [32]Engine.Event = undefined;
+        var activity: [4]Engine.Handle = undefined;
+        const activity_count = setup.pair.server.takeActivity(&activity);
+        var incoming: [16]rr.Event = undefined;
+        const counts = setup.server.service.process(&setup.pair.server, setup.pair.events(&setup.pair.server, &transport), activity[0..activity_count], setup.pair.now, .{ .control = &incoming });
+        for (incoming[0..counts.control]) |event| if (event == .request and event.request.protocol == .status_v1) {
+            remote_stream = setup.server.service.reqresp.inbound[event.request.request.index].lifecycle.stream;
+        };
+        const client_activity = setup.pair.client.takeActivity(&activity);
+        _ = setup.client.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &transport), activity[0..client_activity], setup.pair.now, 100, &.{}, &.{}, &.{});
+        if (remote_stream != null) break;
+    }
+    const stream = remote_stream orelse return error.TestUnexpectedResult;
+    const client = &setup.client.service.reqresp.outbound[handle.index];
+    try std.testing.expectEqual(.response, client.phase);
+    const due = client.deadline().?;
+    try std.testing.expectEqual(@as(u64, 10_000), due - setup.pair.now.mono_ms);
+    var payload: [wire.status_size_max]u8 = undefined;
+    const length = try wire.encodeStatus(.status_v1, &setup.server.local.status, &payload);
+    var storage: [rr.codec.frame_scratch_max]u8 = undefined;
+    const encoded = try rr.codec.encodeChunk(0, null, payload[0..length], &storage);
+    try std.testing.expect(encoded.len > 9);
+    const timeouts = setup.client.service.reqresp.counters.timeouts;
+    for (0..9) |i| {
+        setup.pair.now.mono_ms = due - 90 + i * 10;
+        try std.testing.expectEqual(@as(usize, 1), try setup.pair.server.write(stream, encoded[i .. i + 1], false));
+        try setup.pair.pump();
+        var transport: [32]Engine.Event = undefined;
+        _ = setup.client.process(&setup.pair.client, setup.pair.events(&setup.pair.client, &transport), &.{conn}, setup.pair.now, 100, &.{}, &.{}, &.{});
+        try std.testing.expectEqual(@as(?u64, due), client.deadline());
+        try std.testing.expectEqual(timeouts, setup.client.service.reqresp.counters.timeouts);
+    }
+    setup.pair.now.mono_ms = due;
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(timeouts + 1, setup.client.service.reqresp.counters.timeouts);
+    for (setup.client.control.operations) |op| if (op.request) |active| {
+        try std.testing.expect(!std.meta.eql(handle, active));
+    };
 }

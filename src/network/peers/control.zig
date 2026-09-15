@@ -14,7 +14,7 @@ pub const Options = struct {
     status_interval_ms: u64 = 300_000,
     ping_inbound_ms: u64 = 15_000,
     ping_outbound_ms: u64 = 20_000,
-    progress_timeout_ms: u64 = 10_000,
+    status_transition_grace_ms: u64 = 10_000,
     local_retry_ms: u64 = 1_000,
 };
 const Operation = struct {
@@ -100,7 +100,7 @@ pub const Control = struct {
             options.status_interval_ms,
             options.ping_inbound_ms,
             options.ping_outbound_ms,
-            options.progress_timeout_ms,
+            options.status_transition_grace_ms,
             options.local_retry_ms,
         };
         for (timers) |timer| if (timer == 0 or timer > 86_400_000) return error.InvalidOptions;
@@ -247,7 +247,7 @@ pub const Control = struct {
             if (row.closing != null or !catalog.invalidateStatus(peer, row.conn)) continue;
             row.previous_digest = previous.digest;
             row.previous_protocol = wire.statusProtocol(previous);
-            row.transition_until_ms = now.mono_ms +| self.options.progress_timeout_ms;
+            row.transition_until_ms = now.mono_ms +| self.options.status_transition_grace_ms;
             row.status_due_ms = now.mono_ms;
             row.retry_ms = 0;
             row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
@@ -315,7 +315,7 @@ pub const Control = struct {
                 protocol,
                 op.bytes[0..len],
                 &op.sink,
-                .{ .progress_timeout_ms = self.options.progress_timeout_ms },
+                .{},
                 now,
             ) catch return false;
             op.peer = row.peer.?;
@@ -618,7 +618,7 @@ pub const Control = struct {
             switch (event) {
                 .chunk => |chunk| {
                     if (matched) self.acceptChunk(catalog, op, chunk.bytes, local, now, slot);
-                    _ = service.reqresp.consume(request, now);
+                    _ = service.reqresp.consume(request);
                     op.received = true;
                 },
                 .done, .failed => {

@@ -25,25 +25,17 @@ const reads_per_pump_max = reqresp.reads_per_pump_max;
 pub const Client = struct {
     lifecycle: @import("lifecycle.zig").Lifecycle = .{},
     phase: reqresp.RequestPhase = .negotiation,
-    absolute_timeouts: ?reqresp.AbsoluteTimeouts = null,
+    absolute_timeouts: reqresp.AbsoluteTimeouts = .{},
     phase_deadline_ms: u64 = 0,
 
-    pub fn deadline(self: *const Client, ctx: *const ReqResp) ?u64 {
-        const lifecycle = &self.lifecycle;
-        if (!lifecycle.running()) return null;
-        if (self.absolute_timeouts != null) return self.phase_deadline_ms;
-        if (self.phase == .negotiation) return null;
-        const duration = if (lifecycle.waitingHost())
-            ctx.options.host_timeout_ms
-        else
-            lifecycle.timeout_ms;
-        return lifecycle.progress_ms +| duration;
+    pub fn deadline(self: *const Client) ?u64 {
+        return if (self.lifecycle.running()) self.phase_deadline_ms else null;
     }
 
     pub fn advance(self: *Client, ctx: *ReqResp, engine: *Engine, index: u16, now: Now) void {
         const lifecycle = &self.lifecycle;
         if (!lifecycle.running()) return;
-        if (self.deadline(ctx)) |due| if (now.mono_ms >= due) {
+        if (self.deadline()) |due| if (now.mono_ms >= due) {
             const reason: Failure = if (lifecycle.waitingHost())
                 .host_timeout
             else
@@ -56,7 +48,7 @@ pub const Client = struct {
         switch (self.phase) {
             .negotiation => {},
             .request => sendRequest(ctx, engine, self, index, now),
-            .response => readResponse(ctx, engine, self, index, now),
+            .response => readResponse(ctx, engine, self, index),
         }
     }
 
@@ -79,7 +71,6 @@ pub const Client = struct {
             }, .{ .outbound = slot.phase }, engine);
             return;
         };
-        if (flushed.progressed) lifecycle.progress_ms = now.mono_ms;
         if (!flushed.done) {
             if (lifecycle.io.outbox.idle()) lifecycle.needs_service = true;
             return;
@@ -87,8 +78,7 @@ pub const Client = struct {
         lifecycle.io.payload = &.{};
         lifecycle.io.writer = undefined;
         slot.phase = .response;
-        if (slot.absolute_timeouts) |policy| slot.phase_deadline_ms = now.mono_ms +| policy.response_ms;
-        lifecycle.progress_ms = now.mono_ms;
+        slot.phase_deadline_ms = now.mono_ms +| slot.absolute_timeouts.response_ms;
         slot.resetResponseDecoder();
         // Native response bytes may already be readable after this turn consumed activity.
         lifecycle.needs_service = true;
@@ -99,7 +89,6 @@ pub const Client = struct {
         engine: *Engine,
         slot: *Client,
         index: u16,
-        now: Now,
     ) void {
         const lifecycle = &slot.lifecycle;
         var reads: u32 = 0;
@@ -112,7 +101,6 @@ pub const Client = struct {
                 lifecycle.fail(owner, index, .stream_closed, .{ .outbound = slot.phase }, engine);
                 return;
             }
-            if (input.progressed) lifecycle.progress_ms = now.mono_ms;
             if (input.bytes.len == 0 and !input.fin) return;
             if (input.bytes.len > 0) {
                 const done = lifecycle.io.feed(input.bytes) catch |err| {
@@ -135,7 +123,7 @@ pub const Client = struct {
                     };
                 }
                 if (done) {
-                    Client.completeChunk(owner, engine, slot, index, now);
+                    Client.completeChunk(owner, engine, slot, index);
                     return;
                 }
             }
@@ -161,7 +149,6 @@ pub const Client = struct {
         engine: *Engine,
         slot: *Client,
         index: u16,
-        now: Now,
     ) void {
         const lifecycle = &slot.lifecycle;
         assert(lifecycle.io.decoder.isDone());
@@ -187,7 +174,6 @@ pub const Client = struct {
             };
         }
         lifecycle.chunks += 1;
-        lifecycle.progress_ms = now.mono_ms;
         owner.counters.chunks_received += 1;
         lifecycle.queue(.{ .chunk = .{
             .request = lifecycle.handle(index),
@@ -221,13 +207,9 @@ pub const Client = struct {
         const bounds = which.info();
         try owner.attach(engine);
         if (conn.index >= owner.options.peers) return error.InvalidCapacity;
-        if (request_options.progress_timeout_ms == 0) return error.InvalidRequestOptions;
-        if (request_options.absolute_timeouts) |policy| {
-            if (request_options.progress_timeout_ms != null) return error.InvalidRequestOptions;
-            inline for (.{ "negotiation_ms", "request_ms", "response_ms" }) |field| {
-                const duration = @field(policy, field);
-                if (duration == 0 or duration > 60_000) return error.InvalidRequestOptions;
-            }
+        inline for (.{ "negotiation_ms", "request_ms", "response_ms" }) |field| {
+            const duration = @field(request_options.absolute_timeouts, field);
+            if (duration == 0 or duration > 60_000) return error.InvalidRequestOptions;
         }
         if (request_ssz.len > bounds.request_max) return error.RequestTooLarge;
         if (request_ssz.len < bounds.request_min) return error.RequestTooSmall;
@@ -246,11 +228,7 @@ pub const Client = struct {
             return error.TooManyRequests;
         const index = owner.availableOutboundFor(which) orelse return error.SlotsExhausted;
         const slot = &owner.outbound[index];
-        const opened = if (request_options.absolute_timeouts) |policy|
-            router.beginReqRespTimed(engine, conn, which, now, policy.negotiation_ms)
-        else
-            router.beginOutbound(engine, conn, .{ .reqresp = which }, now);
-        const stream = opened catch |err| {
+        const stream = router.beginReqRespTimed(engine, conn, which, now, request_options.absolute_timeouts.negotiation_ms) catch |err| {
             return switch (err) {
                 error.NegotiationTableFull => error.NegotiationTableFull,
                 error.ProtocolDisabled => error.ProtocolDisabled,
@@ -260,7 +238,7 @@ pub const Client = struct {
         };
         slot.* = .{
             .absolute_timeouts = request_options.absolute_timeouts,
-            .phase_deadline_ms = if (request_options.absolute_timeouts) |policy| now.mono_ms +| policy.negotiation_ms else 0,
+            .phase_deadline_ms = now.mono_ms +| request_options.absolute_timeouts.negotiation_ms,
             .lifecycle = .{
                 .completion = .active,
                 .stream_owner = .router,
@@ -268,9 +246,7 @@ pub const Client = struct {
                 .conn = conn,
                 .stream = stream,
                 .protocol = which,
-                .progress_ms = now.mono_ms,
                 .started_ms = now.mono_ms,
-                .timeout_ms = request_options.progress_timeout_ms orelse owner.options.progress_timeout_ms,
                 .io = .{ .payload = request_ssz, .sink = sink, .scratch = slot.lifecycle.io.scratch, .read_buffer = slot.lifecycle.io.read_buffer },
                 .chunks_max = chunks_max,
             },
@@ -303,16 +279,15 @@ pub const Client = struct {
                     lifecycle.io.buffered_end = ready.leftover.len;
                     lifecycle.io.fin_seen = ready.fin;
                     slot.phase = .request;
-                    if (slot.absolute_timeouts) |policy| slot.phase_deadline_ms = now.mono_ms +| policy.request_ms;
+                    slot.phase_deadline_ms = now.mono_ms +| slot.absolute_timeouts.request_ms;
                     lifecycle.needs_service = true;
-                    lifecycle.progress_ms = now.mono_ms;
                     lifecycle.io.writer = codec.ChunkWriter.initRequest(lifecycle.io.payload);
                     lifecycle.io.writing = lifecycle.protocol.info().request_max > 0;
                     if (!lifecycle.io.writing) lifecycle.io.outbox.queue("", true);
                 },
                 .rejected => lifecycle.fail(owner, index, .negotiation_rejected, .{ .outbound = slot.phase }, null),
                 .failed => |failure| {
-                    lifecycle.fail(owner, index, if (failure == .timeout and slot.absolute_timeouts != null) .timeout else .{ .negotiation_failed = failure }, .{ .outbound = slot.phase }, null);
+                    lifecycle.fail(owner, index, if (failure == .timeout) .timeout else .{ .negotiation_failed = failure }, .{ .outbound = slot.phase }, null);
                 },
             }
             return true;
@@ -320,7 +295,7 @@ pub const Client = struct {
         return false;
     }
 
-    pub fn consume(owner: *ReqResp, request_handle: RequestHandle, now: Now) bool {
+    pub fn consume(owner: *ReqResp, request_handle: RequestHandle) bool {
         if (request_handle.direction != .outbound) return false;
         const slot = owner.outboundSlot(request_handle) orelse return false;
         const lifecycle = &slot.lifecycle;
@@ -333,7 +308,6 @@ pub const Client = struct {
             return true;
         }
         lifecycle.needs_service = true;
-        lifecycle.progress_ms = now.mono_ms;
         slot.resetResponseDecoder();
         return true;
     }

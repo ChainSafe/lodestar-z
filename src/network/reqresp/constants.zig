@@ -23,6 +23,10 @@ pub const app_error_timeout: u64 = 16;
 pub const app_error_invalid_response: u64 = 17;
 pub const app_error_over_limit: u64 = 18;
 
+pub fn isErrorResult(code: u8) bool {
+    return (code >= result_invalid_request and code <= result_resource_unavailable) or code > result_reserved_max;
+}
+
 pub fn maxEncodedLength(uncompressed: usize) usize {
     std.debug.assert(uncompressed <= MAX_PAYLOAD_SIZE);
     return 32 + uncompressed + uncompressed / 6;
