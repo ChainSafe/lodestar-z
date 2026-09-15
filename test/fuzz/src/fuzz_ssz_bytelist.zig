@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const fuzz_options = @import("fuzz_options");
 const ssz = @import("ssz");
 
 const selector_count: u32 = 3;
@@ -25,12 +26,14 @@ pub export fn zig_fuzz_test(
     buf: [*]const u8,
     len: usize,
 ) callconv(.c) void {
-    // Precondition: need at least selector + 1 byte of data.
-    if (len < 2) return;
+    if (len > fuzz_options.max_input_len) return;
+    if (len < 1) return;
 
     var fixed_buffer_allocator =
         std.heap.FixedBufferAllocator.init(&fuzz_buf);
-    const allocator = fixed_buffer_allocator.allocator();
+    var tracking = std.testing.FailingAllocator.init(fixed_buffer_allocator.allocator(), .{});
+    defer assert(tracking.allocated_bytes == tracking.freed_bytes);
+    const allocator = tracking.allocator();
 
     const selector = buf[0];
     const data = buf[1..len];
@@ -60,15 +63,22 @@ fn fuzzByteList(
     allocator: std.mem.Allocator,
     data: []const u8,
 ) void {
+    const valid = data.len <= ByteListT.limit;
     var value: ByteListT.Type = ByteListT.Type.empty;
+    defer ByteListT.deinit(allocator, &value);
     ByteListT.deserializeFromBytes(
         allocator,
         data,
         &value,
-    ) catch return;
-
-    // Postcondition: deserialized length within limit.
-    assert(value.items.len <= ByteListT.limit);
+    ) catch |err| {
+        assert(!valid);
+        switch (@as(anyerror, err)) {
+            error.invalidLength => return,
+            else => panicUnexpected("deserializing bytelist", err),
+        }
+    };
+    assert(valid);
+    assert(std.mem.eql(u8, value.items, data));
     // Postcondition: round-trip size must match input.
     const serialized_size = ByteListT.serializedSize(&value);
     assert(serialized_size == data.len);
@@ -77,11 +87,24 @@ fn fuzzByteList(
     const output = allocator.alloc(
         u8,
         serialized_size,
-    ) catch return;
+    ) catch |err| panicUnexpected("allocating bytelist output", err);
+    defer allocator.free(output);
     const written = ByteListT.serializeIntoBytes(
         &value,
         output,
     );
     assert(written == serialized_size);
     assert(std.mem.eql(u8, output, data));
+}
+
+test "bytelist decoder checks empty and maximum lengths" {
+    var input = [_]u8{0xa5} ** 1026;
+    for ([_]usize{ 32, 256, 1024 }, 0..) |limit, selector| {
+        input[0] = @intCast(selector);
+        for ([_]usize{ 0, 1, limit, limit + 1 }) |len| zig_fuzz_test(&input, len + 1);
+    }
+}
+
+fn panicUnexpected(comptime context: []const u8, err: anyerror) noreturn {
+    std.debug.panic("{s}: {s}", .{ context, @errorName(err) });
 }
