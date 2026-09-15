@@ -79,6 +79,7 @@ pub const Negotiator = struct {
     allocator: std.mem.Allocator,
     entries: []Entry,
     outbound_control_reserved: u16 = 0,
+    delivery_cursor: usize = 0,
 
     pub fn validateOptions(options: Options) Error!void {
         const negotiations_max = options.negotiations_max;
@@ -201,7 +202,10 @@ pub const Negotiator = struct {
         outcomes: []Outcome,
     ) usize {
         var count: usize = 0;
-        for (self.entries) |*entry| {
+        const start = self.delivery_cursor;
+        for (0..self.entries.len) |offset| {
+            const index = (start + offset) % self.entries.len;
+            const entry = &self.entries[index];
             if (entry.state == .reported) {
                 entry.state = .free;
                 continue;
@@ -219,12 +223,13 @@ pub const Negotiator = struct {
                 .direction = direction(entry),
                 .protocol_id = switch (entry.role) {
                     .dialer => |dialer| dialer.protocol,
-                    .listener => |listener| if (entry.selected) |index| listener.supported[index] else "",
+                    .listener => |listener| if (entry.selected) |selected| listener.supported[selected] else "",
                 },
                 .result = entry.pending_result,
             };
             count += 1;
             entry.state = .reported;
+            self.delivery_cursor = (index + 1) % self.entries.len;
         }
         assert(count <= outcomes.len);
         return count;

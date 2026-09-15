@@ -8,6 +8,38 @@ fn options(agent: []const u8) service.Options {
     return .{ .automatic_gossip_admission = false, .reqresp = .{ .forks = &.{} }, .gossipsub = .{ .random_seed = 1 }, .identify = .{ .agent = agent, .inbound_max = 1, .outbound_max = 1 } };
 }
 
+test "identify delivers retained completions before recycled lower slots" {
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    var router = try @import("../router.zig").Router.init(std.testing.allocator, .{ .identify = true });
+    defer router.deinit();
+    var handler = try identify.Handler.init(std.testing.allocator, .{ .outbound_max = 4 });
+    defer handler.deinit();
+    const conn: engine.Handle = .{ .index = 0, .generation = 1 };
+    for (handler.outbound, 0..) |*slot, index| {
+        const peer: @import("../peers/types.zig").PeerRef = .{ .index = @intCast(index), .generation = 1 };
+        slot.* = .{ .stream = .{ .conn = conn, .id = index * 4, .slot = @intCast(index) }, .peer = peer, .phase = .terminal, .result = .{ .peer = peer, .conn = conn, .outcome = .{ .success = .{} } } };
+    }
+    try std.testing.expectEqual(@as(usize, 0), handler.pump(&router, &pair.client, pair.now, &.{}));
+    var out: [1]identify.Result = undefined;
+    for (0..4) |index| {
+        try std.testing.expectEqual(@as(usize, 1), handler.pump(&router, &pair.client, pair.now, &out));
+        try std.testing.expectEqual(index, out[0].peer.index);
+        try std.testing.expectEqual(@as(u64, 1), out[0].peer.generation);
+        if (index == 3) break;
+        const peer: @import("../peers/types.zig").PeerRef = .{ .index = @intCast(index), .generation = 2 };
+        handler.outbound[index] = .{ .stream = .{ .conn = conn, .id = (index + 4) * 4, .slot = @intCast(index) }, .peer = peer, .phase = .terminal, .result = .{ .peer = peer, .conn = conn, .outcome = .{ .failed = .timeout } } };
+    }
+    var remaining: [4]identify.Result = undefined;
+    try std.testing.expectEqual(@as(usize, 3), handler.pump(&router, &pair.client, pair.now, &remaining));
+    for (remaining[0..3]) |result| {
+        try std.testing.expectEqual(@as(u64, 2), result.peer.generation);
+        try std.testing.expectEqual(identify.Failure.timeout, result.outcome.failed);
+    }
+    try std.testing.expect(handler.nextWakeup(pair.now, 1) == null);
+}
+
 test "identify service completes both directions with zero application output and retains pressured results" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});

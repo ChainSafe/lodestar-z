@@ -202,6 +202,31 @@ test "negotiator expires with no outcome capacity and reports later" {
     try std.testing.expectEqual(negotiate.Failure.timeout, out[0].result.failed);
 }
 
+test "negotiator delivers retained outcomes before recycled lower slots" {
+    var setup: Setup = .{};
+    try setup.init(5);
+    defer setup.deinit();
+    var initial: [5]engine_mod.StreamHandle = undefined;
+    for (&initial) |*stream| stream.* = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{});
+    setup.pair.advance(negotiate.negotiate_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 0), setup.dialer.pump(&setup.pair.client, setup.pair.now, &.{}));
+    var out: [1]Outcome = undefined;
+    for (initial, 0..) |stream, index| {
+        if (index >= 2) {
+            const replacement = try setup.dialer.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{});
+            setup.dialer.streamClosed(&setup.pair.client, replacement);
+        }
+        try std.testing.expectEqual(@as(usize, 1), setup.dialer.pump(&setup.pair.client, setup.pair.now, &out));
+        try std.testing.expectEqual(stream, out[0].stream);
+        try std.testing.expectEqual(negotiate.Failure.timeout, out[0].result.failed);
+    }
+    var remaining: [5]Outcome = undefined;
+    try std.testing.expectEqual(@as(usize, 3), setup.dialer.pump(&setup.pair.client, setup.pair.now, &remaining));
+    for (remaining[0..3]) |outcome| try std.testing.expectEqual(negotiate.Failure.stream_closed, outcome.result.failed);
+    try std.testing.expectEqual(@as(usize, 0), setup.dialer.pump(&setup.pair.client, setup.pair.now, &remaining));
+    try std.testing.expect(setup.dialer.nextWakeup(setup.pair.now, 1) == null);
+}
+
 test "negotiator connection teardown invalidates an undelivered ready outcome" {
     var setup: Setup = .{};
     try setup.init(1);
