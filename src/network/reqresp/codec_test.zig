@@ -258,6 +258,54 @@ test "codec empty SSZ leaves no trailing Snappy identifier" {
     try std.testing.expectEqualSlices(u8, &.{ 1, 0 }, response);
 }
 
+test "codec validates repeated stream identifiers at every byte boundary" {
+    const frame = phase0_metadata_chunk[codec.identifier.len..].*;
+    const bytes = [_]u8{32} ++ codec.identifier ++ frame ++ codec.identifier ++ frame;
+    var sink: [32]u8 = undefined;
+    var scratch: [codec.frame_scratch_max]u8 = undefined;
+    const repeated = 1 + codec.identifier.len + frame.len;
+
+    for (0..bytes.len + 1) |split| {
+        var decoder = Decoder.initRequest(.{ .min = 32, .max = 32 }, &sink, &scratch);
+        const first = try decoder.feed(bytes[0..split]);
+        try std.testing.expectEqual(split, first.consumed);
+        const second = try decoder.feed(bytes[split..]);
+        try std.testing.expectEqual(bytes.len - split, second.consumed);
+        try std.testing.expect(second.done);
+        try std.testing.expectEqual(@as(u64, 9), std.mem.readInt(u64, sink[0..8], .little));
+        try std.testing.expectEqual(@as(u64, 9), std.mem.readInt(u64, sink[16..24], .little));
+    }
+
+    for (1..codec.identifier.len) |changed| {
+        var malformed = bytes;
+        malformed[repeated + changed] ^= 1;
+        for (1..codec.identifier.len + 1) |piece| {
+            var decoder = Decoder.initRequest(.{ .min = 32, .max = 32 }, &sink, &scratch);
+            try std.testing.expectError(error.BadIdentifier, decodeAll(&decoder, &malformed, piece));
+        }
+    }
+
+    for (0..codec.identifier.len) |end| {
+        var decoder = Decoder.initRequest(.{ .min = 32, .max = 32 }, &sink, &scratch);
+        const partial = bytes[0 .. repeated + end];
+        const progress = try decoder.feed(partial);
+        try std.testing.expectEqual(partial.len, progress.consumed);
+        try std.testing.expect(!progress.done);
+    }
+}
+
+test "codec skips padding and reserved skippable frames between data frames" {
+    const frame = ping_chunk[codec.identifier.len..].*;
+    var sink: [16]u8 = undefined;
+    var scratch: [codec.frame_scratch_max]u8 = undefined;
+    for ([_]u8{ 0x80, 0xfd, 0xfe }) |kind| {
+        const bytes = [_]u8{16} ++ codec.identifier ++ frame ++ [_]u8{ kind, 2, 0, 0, 0xaa, 0xbb } ++ frame;
+        var decoder = Decoder.initRequest(.{ .min = 16, .max = 16 }, &sink, &scratch);
+        _ = try decodeAll(&decoder, &bytes, 1);
+        try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, sink[8..16], .little));
+    }
+}
+
 test "codec independent response enumerates context prefix and both frame splits" {
     // The independent JS CRC32C/Snappy codec encoded two 65-byte frames and a 130-byte declaration.
     const wire = @embedFile("testdata/independent-two-frames.bin");
