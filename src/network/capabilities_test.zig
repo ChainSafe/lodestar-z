@@ -15,6 +15,40 @@ test "capabilities value set owns independent directional membership" {
     try std.testing.expect(!active.receive.contains(.{ .meshsub = .v1_0 }));
 }
 
+test "capabilities iteration snapshots sparse membership and stays exhausted" {
+    var set: capabilities.Set = .initEmpty();
+    var empty = set.iterator();
+    try std.testing.expectEqual(null, empty.next());
+    set.insert(.identify);
+    set.insert(.{ .meshsub = .v1_2 });
+    set.insert(.{ .reqresp = .ping_v1 });
+    var iterator = set.iterator();
+    set.insert(.{ .reqresp = .status_v1 });
+    for ([_]routing.Protocol{ .{ .reqresp = .ping_v1 }, .{ .meshsub = .v1_2 }, .identify }) |expected| {
+        try std.testing.expectEqualDeep(expected, iterator.next().?);
+    }
+    try std.testing.expectEqual(null, iterator.next());
+    try std.testing.expectEqual(null, iterator.next());
+    try std.testing.expectEqual(4, set.count());
+    try std.testing.expectEqual(null, empty.next());
+}
+
+test "capabilities iteration returns every protocol exactly once" {
+    var set: capabilities.Set = .initEmpty();
+    for (std.enums.values(rr.Protocol)) |which| set.insert(.{ .reqresp = which });
+    for (std.enums.values(@import("gossipsub/sessions.zig").Version)) |version| set.insert(.{ .meshsub = version });
+    set.insert(.identify);
+    var iterator = set.iterator();
+    var seen: capabilities.Set = .initEmpty();
+    for (0..capabilities.protocol_count) |_| {
+        const protocol = iterator.next().?;
+        try std.testing.expect(!seen.contains(protocol));
+        seen.insert(protocol);
+    }
+    try std.testing.expectEqual(null, iterator.next());
+    try std.testing.expectEqualDeep(set, seen);
+}
+
 test "capabilities fork sets match every implemented host protocol in both directions" {
     const common = [_]rr.Protocol{ .goodbye_v1, .ping_v1, .metadata_v3, .blocks_by_range_v2, .blocks_by_root_v2 };
     const light_client = [_]rr.Protocol{ .light_client_bootstrap_v1, .light_client_updates_by_range_v1, .light_client_finality_update_v1, .light_client_optimistic_update_v1 };

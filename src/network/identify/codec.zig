@@ -64,27 +64,16 @@ pub const Local = struct {
     pub fn encode(self: *const Local, receive: Set, out: []u8) Error![]const u8 {
         var size = pb.bytesFieldSize(1, self.public_key.len) + pb.bytesFieldSize(5, self.protocol_version.len) + pb.bytesFieldSize(6, self.agent.len);
         for (self.addresses[0..self.address_count]) |address| size += pb.bytesFieldSize(2, address.len);
-        const reqresp = @import("../reqresp/protocol.zig").Protocol;
-        for (std.enums.values(reqresp)) |which| if (receive.contains(.{ .reqresp = which })) {
-            size += pb.bytesFieldSize(3, which.id().len);
-        };
-        for (std.enums.values(@import("../gossipsub/sessions.zig").Version)) |version| {
-            const protocol: routing.Protocol = .{ .meshsub = version };
-            if (receive.contains(protocol)) size += pb.bytesFieldSize(3, protocol.id().len);
-        }
-        if (receive.contains(.identify)) size += pb.bytesFieldSize(3, @as(routing.Protocol, .identify).id().len);
+        var protocols = receive.iterator();
+        while (protocols.next()) |protocol| size += pb.bytesFieldSize(3, protocol.id().len);
         if (size > frame_max) return error.FrameLimit;
         if (out.len < pb.varintLen(size) + size) return error.BufferTooSmall;
         var writer = pb.Writer.init(out);
         writer.varint(size);
         writer.bytesField(1, &self.public_key);
         for (self.addresses[0..self.address_count]) |address| writer.bytesField(2, address.bytes[0..address.len]);
-        for (std.enums.values(reqresp)) |which| if (receive.contains(.{ .reqresp = which })) writer.bytesField(3, which.id());
-        for (std.enums.values(@import("../gossipsub/sessions.zig").Version)) |version| {
-            const protocol: routing.Protocol = .{ .meshsub = version };
-            if (receive.contains(protocol)) writer.bytesField(3, protocol.id());
-        }
-        if (receive.contains(.identify)) writer.bytesField(3, @as(routing.Protocol, .identify).id());
+        protocols = receive.iterator();
+        while (protocols.next()) |protocol| writer.bytesField(3, protocol.id());
         writer.bytesField(5, self.protocol_version.slice());
         writer.bytesField(6, self.agent.slice());
         std.debug.assert(writer.len == pb.varintLen(size) + size);
