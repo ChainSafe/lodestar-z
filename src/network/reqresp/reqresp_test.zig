@@ -37,7 +37,7 @@ fn drainClient(setup: *Pair, expected: []const u8, exchange: *Exchange) !void {
         .chunk => |chunk| {
             try std.testing.expectEqualSlices(u8, expected, chunk.bytes);
             exchange.chunks += 1;
-            try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now));
+            try std.testing.expect(setup.client.reqresp.consume(chunk.request));
         },
         .done => |finished| {
             exchange.done = true;
@@ -150,7 +150,7 @@ test "reqresp completes ping and metadata round trips" {
                     try std.testing.expectEqualSlices(u8, &metadata_reply, chunk.bytes);
                     metadatas.chunks += 1;
                 }
-                try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now));
+                try std.testing.expect(setup.client.reqresp.consume(chunk.request));
             },
             .done => |finished| {
                 if (finished.chunks == 1 and pings.chunks == 1 and !pings.done) pings.done = true else metadatas.done = true;
@@ -216,7 +216,7 @@ test "reqresp streams blocks by range chunks with fork context" {
                 try std.testing.expectEqual(@as(?@import("config").ForkSeq, .deneb), chunk.fork);
                 try std.testing.expectEqualSlices(u8, &blocks[received], chunk.bytes);
                 received += 1;
-                try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now));
+                try std.testing.expect(setup.client.reqresp.consume(chunk.request));
             },
             .done => |finished| {
                 try std.testing.expectEqual(@as(u32, 3), finished.chunks);
@@ -259,7 +259,7 @@ test "reqresp rejects undersized sinks and stale handles" {
         setup.pair.now,
     ));
     const stale = reqresp.RequestHandle{ .index = 0, .generation = 99, .direction = .outbound };
-    try std.testing.expect(!setup.client.reqresp.consume(stale, setup.pair.now));
+    try std.testing.expect(!setup.client.reqresp.consume(stale));
     try std.testing.expect(!setup.server.reqresp.finish(.{ .index = 0, .generation = 99, .direction = .inbound }, setup.pair.now));
     try std.testing.expectEqual(@as(usize, 0), setup.client.reqresp.errorMessage(stale).len);
     try std.testing.expectEqual(@as(u16, 0), setup.client.reqresp.active().outbound);

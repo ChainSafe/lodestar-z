@@ -67,12 +67,13 @@ fn waitForRequest(setup: *Pair) !void {
 
 test "reqresp fails a request whose peer stops making progress" {
     var setup: Pair = .{};
-    try setup.init(.{ .progress_timeout_ms = 2_000 }, .{ .progress_timeout_ms = 2_000, .host_timeout_ms = 2_000 });
+    try setup.init(.{}, .{ .progress_timeout_ms = 2_000, .host_timeout_ms = 2_000 });
     defer setup.deinit();
 
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
     var request_storage_1: [ct.phase0.Status.fixed_size]u8 = undefined;
-    _ = try requestStatus(&setup, &request_storage_1, &sink);
+    request_storage_1 = statusBytes(5);
+    _ = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .status_v1, &request_storage_1, &sink, .{ .absolute_timeouts = .{ .response_ms = 2000 } }, setup.pair.now);
     try waitForRequest(&setup);
 
     setup.pair.advance(1_000);
@@ -98,6 +99,35 @@ test "reqresp fails a request whose peer stops making progress" {
     try std.testing.expectEqual(@as(u64, 1), counts.outgoing_time.count);
     try std.testing.expect(counts.outgoing_time.sum_ms >= 2500);
     try std.testing.expectEqual(@as(u64, 1), setup.client.reqresp.outgoing_error_reasons[@intFromEnum(reqresp.metrics.ErrorReason.REQUEST_ERROR_RESP_TIMEOUT)]);
+}
+
+test "reqresp rejects reserved error results before changing a serving response" {
+    for ([_]u8{ 1, 3, 128, 255 }) |valid| {
+        var setup: Pair = .{};
+        try setup.init(.{}, .{});
+        defer setup.deinit();
+        var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
+        var request: [ct.phase0.Status.fixed_size]u8 = undefined;
+        _ = try requestStatus(&setup, &request, &sink);
+        try waitForRequest(&setup);
+        const server = &setup.server.reqresp.inbound[0];
+        const handle = server.lifecycle.handle(0);
+        for ([_]u8{ 0, 4, 5, 127 }) |invalid| {
+            try std.testing.expectError(error.InvalidError, setup.server.reqresp.respondError(handle, invalid, "reserved", setup.pair.now));
+            try std.testing.expectEqual(.serving, server.state);
+            try std.testing.expectEqual(@as(u16, 0), server.lifecycle.error_len);
+            try std.testing.expect(server.lifecycle.io.outbox.idle());
+        }
+        try setup.server.reqresp.respondError(handle, valid, "valid", setup.pair.now);
+        var failure: ?reqresp.Failure = null;
+        for (0..30) |_| {
+            try setup.pumpOnce();
+            failure = firstFailure(setup.clientEvents());
+            if (failure != null) break;
+        }
+        try std.testing.expectEqual(valid, failure.?.peer_error.code);
+        try std.testing.expectEqual(@as(u16, 5), failure.?.peer_error.message_len);
+    }
 }
 
 test "reqresp delivers error chunks with the peer's code and message" {
@@ -149,7 +179,8 @@ test "reqresp delivers error chunks with the peer's code and message" {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
-                try setup.server.reqresp.respondError(incoming.request, 5, "", setup.pair.now);
+                const stream = setup.server.reqresp.inbound[incoming.request.index].lifecycle.stream;
+                try std.testing.expectEqual(@as(usize, 1), try setup.pair.server.write(stream, &.{5}, true));
             },
             else => {},
         };
@@ -185,7 +216,7 @@ test "reqresp finishes after the last allowed chunk without waiting for the peer
             else => {},
         };
         for (setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now)),
+            .chunk => |chunk| try std.testing.expect(setup.client.reqresp.consume(chunk.request)),
             .done => |finished| {
                 try std.testing.expectEqual(@as(u32, 1), finished.chunks);
                 done = true;
@@ -322,7 +353,7 @@ test "reqresp withholds chunks while the peer's bucket is empty" {
             else => {},
         };
         for (setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now)),
+            .chunk => |chunk| try std.testing.expect(setup.client.reqresp.consume(chunk.request)),
             .done => completed += 1,
             .failed => return error.TestUnexpectedResult,
             else => {},
@@ -346,7 +377,7 @@ test "reqresp withholds chunks while the peer's bucket is empty" {
     while (rounds < 20 and completed < 2) : (rounds += 1) {
         try setup.pumpOnce();
         for (setup.clientEvents()) |event| switch (event) {
-            .chunk => |chunk| try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now)),
+            .chunk => |chunk| try std.testing.expect(setup.client.reqresp.consume(chunk.request)),
             .done => completed += 1,
             .failed => return error.TestUnexpectedResult,
             else => {},
@@ -407,7 +438,7 @@ test "reqresp holds the next chunk until the host consumes the previous one" {
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(usize, 0), setup.clientEvents().len);
     }
-    try std.testing.expect(setup.client.reqresp.consume(held.?, setup.pair.now));
+    try std.testing.expect(setup.client.reqresp.consume(held.?));
     var done = false;
     rounds = 0;
     while (rounds < 20 and !done) : (rounds += 1) {
@@ -416,7 +447,7 @@ test "reqresp holds the next chunk until the host consumes the previous one" {
             .chunk => |chunk| {
                 chunks += 1;
                 try std.testing.expectEqualSlices(u8, &blocks[1], chunk.bytes);
-                try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now));
+                try std.testing.expect(setup.client.reqresp.consume(chunk.request));
             },
             .done => |finished| {
                 try std.testing.expectEqual(@as(u32, 2), finished.chunks);
@@ -558,7 +589,7 @@ fn expectSingleChunk(setup: *Pair, comptime reply: RawReply, expected: []const u
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, expected, chunk.bytes);
-                try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now));
+                try std.testing.expect(setup.client.reqresp.consume(chunk.request));
             },
             .done => |finished| {
                 try std.testing.expectEqual(@as(u32, 1), finished.chunks);
@@ -656,7 +687,7 @@ test "reqresp retires a consumed terminal stream without FIN or event space" {
         };
         for (pair.clientEvents()) |event| switch (event) {
             .chunk => |r| {
-                consumed = pair.client.reqresp.consume(r.request, pair.pair.now);
+                consumed = pair.client.reqresp.consume(r.request);
             },
             else => {},
         };
@@ -717,80 +748,6 @@ test "reqresp retains all 256 bytes of a peer error" {
         };
     }
     return error.TestUnexpectedResult;
-}
-
-test "reqresp blocked outbound writes expire without refreshing progress" {
-    var setup: Pair = .{};
-    try setup.init(.{ .progress_timeout_ms = 2_000 }, .{});
-    defer setup.deinit();
-    _ = setup.client.reqresp.pump(&setup.pair.client, &setup.client.router, setup.pair.now, .{ .control = &.{} }).control;
-    const request = [_]u8{0} ** 8;
-    var sink: [8]u8 = undefined;
-    const handle = try setup.client.reqresp.request(
-        &setup.pair.client,
-        &setup.client.router,
-        setup.handles.client,
-        .ping_v1,
-        &request,
-        &sink,
-        .{},
-        setup.pair.now,
-    );
-    var negotiated = false;
-    for (0..50) |_| {
-        try setup.pair.pump();
-        var storage: [16]engine_mod.Event = undefined;
-        for (setup.pair.events(&setup.pair.server, &storage)) |event| switch (event) {
-            .stream_opened => |stream| try setup.server.router.negotiator.acceptInbound(
-                stream,
-                &protocol.ids,
-                setup.pair.now,
-            ),
-            else => {},
-        };
-        var outcomes: [8]negotiate.Outcome = undefined;
-        const listened = setup.server.router.pump(&setup.pair.server, setup.pair.now, &outcomes);
-        for (outcomes[0..listened]) |outcome| try std.testing.expect(outcome.result == .ready);
-        const dialed = setup.client.router.pump(&setup.pair.client, setup.pair.now, &outcomes);
-        for (outcomes[0..dialed]) |outcome| {
-            try std.testing.expect(outcome.result == .ready);
-            negotiated = setup.client.reqresp.negotiated(outcome, setup.pair.now);
-        }
-        if (negotiated) break;
-    }
-    try std.testing.expect(negotiated);
-    const stream = setup.client.reqresp.outbound[handle.index].lifecycle.stream;
-    const padding = [_]u8{0} ** 65536;
-    var blocked = false;
-    for (0..1024) |_| {
-        _ = setup.pair.client.write(stream, &padding, false) catch |err| switch (err) {
-            error.WouldBlock => {
-                blocked = true;
-                break;
-            },
-            else => return err,
-        };
-    }
-    try std.testing.expect(blocked);
-    const progress_ms = setup.client.reqresp.outbound[handle.index].lifecycle.progress_ms;
-    var events: [8]Event = undefined;
-    for (0..3) |_| {
-        setup.pair.advance(500);
-        try std.testing.expectEqual(
-            @as(usize, 0),
-            setup.client.reqresp.pump(&setup.pair.client, &setup.client.router, setup.pair.now, .{ .control = &events }).control,
-        );
-        try std.testing.expectEqual(progress_ms, setup.client.reqresp.outbound[handle.index].lifecycle.progress_ms);
-    }
-    setup.pair.advance(500);
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        setup.client.reqresp.pump(&setup.pair.client, &setup.client.router, setup.pair.now, .{ .control = &events }).control,
-    );
-    try std.testing.expect(events[0].failed.reason == .timeout);
-    try std.testing.expect(
-        !setup.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id),
-    );
 }
 
 test "reqresp preserves pending chunk and reports connection closure without output space" {
@@ -946,7 +903,7 @@ test "reqresp caller cardinality rejects invalid bounds before opening a stream"
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
     const options = [_]reqresp.RequestOptions{
-        .{ .expected_chunks = 2 }, .{ .progress_timeout_ms = 0 },
+        .{ .expected_chunks = 2 }, .{ .absolute_timeouts = .{ .response_ms = 0 } },
     };
     for (options) |invalid| {
         try std.testing.expectError(error.InvalidRequestOptions, setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .ping_v1, &bytes, &sink, invalid, setup.pair.now));
@@ -955,7 +912,7 @@ test "reqresp caller cardinality rejects invalid bounds before opening a stream"
     try std.testing.expectEqual(@as(u64, 0), setup.client.reqresp.counters.requests_sent);
 }
 
-test "reqresp narrowed chunks retire without FIN and held chunks use host deadline" {
+test "reqresp narrowed chunks retire without FIN after a host pause" {
     var setup: Pair = .{};
     try setup.init(.{ .progress_timeout_ms = 1000 }, .{});
     defer setup.deinit();
@@ -981,7 +938,7 @@ test "reqresp narrowed chunks retire without FIN and held chunks use host deadli
     setup.pair.advance(2000);
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), setup.client.reqresp.pump(&setup.pair.client, &setup.client.router, setup.pair.now, .{ .application = &events }).application);
-    try std.testing.expect(setup.client.reqresp.consume(handle, setup.pair.now));
+    try std.testing.expect(setup.client.reqresp.consume(handle));
     _ = setup.client.reqresp.pump(&setup.pair.client, &setup.client.router, setup.pair.now, .{ .application = &.{} }).application;
     const stream = setup.client.reqresp.outbound[handle.index].lifecycle.stream;
     try std.testing.expect(!setup.pair.client.registry.slots[stream.conn.index].table.matches(stream.slot, stream.id));
@@ -1236,7 +1193,7 @@ test "reqresp host consume retains buffered work behind a partial cursor" {
     try std.testing.expectEqualSlices(u8, &first, events[0].chunk.bytes);
     setup.client.reqresp.options.work_per_pump_max = 1;
     _ = setup.client.reqresp.pump(&setup.pair.client, &setup.client.router, setup.pair.now, .{ .application = &.{} }).application;
-    try std.testing.expect(setup.client.reqresp.consume(handle, setup.pair.now));
+    try std.testing.expect(setup.client.reqresp.consume(handle));
     var received = false;
     for (0..3) |_| {
         const due = setup.client.reqresp.nextWakeup(setup.pair.now, .{ .application = 1 });
@@ -1413,7 +1370,7 @@ test "reqresp partial beacon scans preserve host waits and elapsed deadlines" {
     _ = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .ping_v1, &bytes, &sink, .{}, setup.pair.now);
     try waitForRequest(&setup);
     const incoming = setup.serverEvents()[0].request.request;
-    const due = setup.server.reqresp.inbound[incoming.index].lifecycle.progress_ms + 2000;
+    const due = setup.server.reqresp.inbound[incoming.index].progress_ms + 2000;
     for (0..4) |_| {
         _ = setup.server.reqresp.pump(&setup.pair.server, &setup.server.router, setup.pair.now, .{ .control = &.{} }).control;
         try std.testing.expectEqual(@as(?u64, due), setup.server.reqresp.nextWakeup(setup.pair.now, .{ .control = 1 }));
@@ -1516,7 +1473,7 @@ test "reqresp explicit BPO context validates without consuming the serving slot"
                         try std.testing.expectEqual(selected.fork, chunk.fork.?);
                         try std.testing.expectEqualSlices(u8, &block, chunk.bytes);
                         chunks += 1;
-                        try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now));
+                        try std.testing.expect(setup.client.reqresp.consume(chunk.request));
                     },
                     .done => done = true,
                     .failed => return error.TestUnexpectedResult,
@@ -1605,7 +1562,7 @@ test "reqresp absolute response deadline captures the live phase" {
         .absolute_timeouts = .{ .negotiation_ms = 5_000, .request_ms = 5_000, .response_ms = 100 },
     }, setup.pair.now);
     try waitForRequest(&setup);
-    const due = setup.client.reqresp.outbound[handle.index].deadline(&setup.client.reqresp).?;
+    const due = setup.client.reqresp.outbound[handle.index].deadline().?;
     setup.pair.now.mono_ms = due - 1;
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 0), setup.client.reqresp.pump(&setup.pair.client, &setup.client.router, setup.pair.now, .{ .control = &events }).control);
@@ -1668,7 +1625,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
         };
     }
     try std.testing.expect(blocked);
-    const progress_ms = setup.client.reqresp.outbound[handle.index].lifecycle.progress_ms;
+    const deadline_ms = setup.client.reqresp.outbound[handle.index].deadline();
     var events: [8]Event = undefined;
     for (0..3) |_| {
         setup.pair.advance(500);
@@ -1676,7 +1633,7 @@ test "reqresp absolute request phase expires under real stream backpressure" {
             @as(usize, 0),
             setup.client.reqresp.pump(&setup.pair.client, &setup.client.router, setup.pair.now, .{ .control = &events }).control,
         );
-        try std.testing.expectEqual(progress_ms, setup.client.reqresp.outbound[handle.index].lifecycle.progress_ms);
+        try std.testing.expectEqual(deadline_ms, setup.client.reqresp.outbound[handle.index].deadline());
     }
     setup.pair.advance(500);
     try std.testing.expectEqual(
@@ -1728,7 +1685,6 @@ test "reqresp absolute policies validate all durations before stream admission" 
             try std.testing.expectError(error.InvalidRequestOptions, setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .status_v1, &request, &sink, .{ .absolute_timeouts = policy }, setup.pair.now));
         }
     }
-    try std.testing.expectError(error.InvalidRequestOptions, setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .status_v1, &request, &sink, .{ .absolute_timeouts = .{ .negotiation_ms = 1, .request_ms = 1, .response_ms = 1 }, .progress_timeout_ms = 1 }, setup.pair.now));
     try std.testing.expectEqual(@as(u64, 0), setup.client.reqresp.counters.requests_sent);
     try std.testing.expectEqual(@as(usize, 0), setup.client.router.negotiator.active());
 }
@@ -1753,10 +1709,10 @@ test "reqresp absolute response includes paused host time without renewing at ch
             if (held) break;
         }
         try std.testing.expect(held);
-        const due = setup.client.reqresp.outbound[handle.index].deadline(&setup.client.reqresp).?;
+        const due = setup.client.reqresp.outbound[handle.index].deadline().?;
         setup.pair.now.mono_ms = due - 1;
-        if (consume) try std.testing.expect(setup.client.reqresp.consume(handle, setup.pair.now));
-        try std.testing.expectEqual(@as(?u64, due), setup.client.reqresp.outbound[handle.index].deadline(&setup.client.reqresp));
+        if (consume) try std.testing.expect(setup.client.reqresp.consume(handle));
+        try std.testing.expectEqual(@as(?u64, due), setup.client.reqresp.outbound[handle.index].deadline());
         var events: [1]Event = undefined;
         try std.testing.expectEqual(@as(usize, 0), setup.client.reqresp.pump(&setup.pair.client, &setup.client.router, setup.pair.now, .{ .application = &events }).application);
         setup.pair.now.mono_ms = due;
@@ -1766,17 +1722,17 @@ test "reqresp absolute response includes paused host time without renewing at ch
     }
 }
 
-test "reqresp absolute response expires despite continuous wire progress while legacy renews" {
-    for ([_]bool{ false, true }) |absolute| {
+test "reqresp absolute response expires despite continuous wire progress" {
+    for ([_]u64{ 100, 10_000 }) |duration| {
         var setup: Pair = .{};
-        try setup.init(.{ .progress_timeout_ms = 100 }, .{});
+        try setup.init(.{}, .{});
         defer setup.deinit();
         const request = statusBytes(5);
         var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
-        const options: reqresp.RequestOptions = if (absolute) .{ .absolute_timeouts = .{ .negotiation_ms = 5000, .request_ms = 5000, .response_ms = 100 } } else .{};
+        const options: reqresp.RequestOptions = if (duration == 100) .{ .absolute_timeouts = .{ .response_ms = duration } } else .{};
         const handle = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .status_v1, &request, &sink, options, setup.pair.now);
         try waitForRequest(&setup);
-        const due = setup.client.reqresp.outbound[handle.index].deadline(&setup.client.reqresp).?;
+        const due = setup.client.reqresp.outbound[handle.index].deadline().?;
         const stream = setup.server.reqresp.inbound[0].lifecycle.stream;
         var wire: [codec.frame_scratch_max]u8 = undefined;
         const encoded = try codec.encodeChunk(0, null, &request, &wire);
@@ -1788,18 +1744,13 @@ test "reqresp absolute response expires despite continuous wire progress while l
             try setup.pair.pump();
             setup.client.reqresp.connectionActivity(setup.handles.client);
             try std.testing.expectEqual(@as(usize, 0), setup.client.reqresp.pump(&setup.pair.client, &setup.client.router, setup.pair.now, .{ .control = &events }).control);
-            if (absolute) try std.testing.expectEqual(@as(?u64, due), setup.client.reqresp.outbound[handle.index].deadline(&setup.client.reqresp));
+            try std.testing.expectEqual(@as(?u64, due), setup.client.reqresp.outbound[handle.index].deadline());
         }
         setup.pair.now.mono_ms = due;
         const count = setup.client.reqresp.pump(&setup.pair.client, &setup.client.router, setup.pair.now, .{ .control = &events }).control;
-        if (absolute) {
-            try std.testing.expectEqual(@as(usize, 1), count);
-            try std.testing.expectEqual(.timeout, events[0].failed.reason);
-            try std.testing.expectEqual(.response, events[0].failed.phase.?);
-        } else {
-            try std.testing.expectEqual(@as(usize, 0), count);
-            try std.testing.expect(setup.client.reqresp.outbound[handle.index].deadline(&setup.client.reqresp).? > due);
-        }
+        try std.testing.expectEqual(@as(usize, 1), count);
+        try std.testing.expectEqual(.timeout, events[0].failed.reason);
+        try std.testing.expectEqual(.response, events[0].failed.phase.?);
     }
 }
 

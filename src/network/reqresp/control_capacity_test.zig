@@ -508,7 +508,7 @@ test "reqresp control capacity retains peer and global response quotas" {
         const received = client.process(&pair.client, pair.events(&pair.client, &transport), activity[0..client_active], pair.now, .{ .application = &.{}, .control = &output });
         for (output[0..received.control]) |event| if (event == .chunk) {
             try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
-            try std.testing.expect(client.reqresp.consume(event.chunk.request, pair.now));
+            try std.testing.expect(client.reqresp.consume(event.chunk.request));
             chunks_received += 1;
         };
         const server_active = pair.server.takeActivity(&activity);

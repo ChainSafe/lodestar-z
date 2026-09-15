@@ -563,6 +563,7 @@ export interface NativeIncomingRequest {
   readonly closed: Promise<void>;
   respond(data: Uint8Array, context: NativeForkEntry | null): Promise<void>;
   finish(): Promise<void>;
+  /** Accepts standard error codes 1–3 or custom codes 128–255, with at most 256 message bytes. */
   fail(status: number, message: Uint8Array): Promise<void>;
   /** Applies cancellation at the owner's next servicing opportunity; intervening native completion remains authoritative. */
   cancel(): Promise<void>;

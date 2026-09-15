@@ -199,7 +199,7 @@ pub fn submit(runtime: *Runtime, token: Token, now: n.Now) !void {
     table.releasePayload(cell);
     runtime.pingLocked();
 }
-pub fn flags(runtime: *Runtime, now: n.Now) void {
+pub fn flags(runtime: *Runtime) void {
     runtime.lock();
     defer runtime.unlock();
     if (runtime.requests) |*table| for (table.cells) |*cell| {
@@ -211,7 +211,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) void {
             cell.consume = false;
             cell.chunk = null;
             cell.delivered = false;
-            if (cell.native) |handle| _ = runtime.heavy.?.core.consume(handle, now);
+            if (cell.native) |handle| _ = runtime.heavy.?.core.consume(handle);
         }
         table.releasePayload(cell);
         if (cell.terminal != null and (cell.pull != null or cell.retiring)) runtime.pingLocked();

@@ -40,7 +40,7 @@ fn roundTrip(setup: *Pair, seed: u8) !void {
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &reply, chunk.bytes);
-                try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now));
+                try std.testing.expect(setup.client.reqresp.consume(chunk.request));
             },
             .done => done = true,
             .failed => return error.TestUnexpectedResult,
@@ -117,16 +117,16 @@ test "service fails in-flight requests when the connection closes" {
     try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
 }
 
-test "service control wakeup includes earlier Router negotiation after application quiescence" {
+test "service control wakeup includes negotiation after application quiescence" {
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
     defer setup.deinit();
     setup.client.quiesceApplications();
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
-    const handle = try setup.client.request(&setup.pair.client, setup.handles.client, .ping_v1, &bytes, &sink, .{ .progress_timeout_ms = 60_000 }, setup.pair.now);
+    const handle = try setup.client.request(&setup.pair.client, setup.handles.client, .ping_v1, &bytes, &sink, .{ .absolute_timeouts = .{ .response_ms = 60_000 } }, setup.pair.now);
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &.{} }).control;
-    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms + 10_000), setup.client.nextWakeup(setup.pair.now, .{ .control = 0 }));
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms + 5_000), setup.client.nextWakeup(setup.pair.now, .{ .control = 0 }));
     try std.testing.expect(setup.client.reqresp.cancel(handle));
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &.{} }).control;
     try std.testing.expectEqual(@as(?u64, null), setup.client.nextWakeup(setup.pair.now, .{ .control = 0 }));

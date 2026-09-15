@@ -231,7 +231,7 @@ const Session = struct {
         switch (event) {
             .chunk => |chunk| {
                 try self.onChunk(chunk.bytes, chunk.fork);
-                _ = self.svc.reqresp.consume(chunk.request, self.now);
+                _ = self.svc.reqresp.consume(chunk.request);
             },
             .done => |done| try self.advance(done.chunks),
             .failed => |failed| try self.onFailure(failed.request, failed.reason),

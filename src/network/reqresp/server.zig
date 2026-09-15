@@ -23,6 +23,7 @@ pub const State = enum { receiving_request, serving, writing_chunk, withheld, fi
 
 pub const Server = struct {
     lifecycle: @import("lifecycle.zig").Lifecycle = .{ .direction = .inbound },
+    progress_ms: u64 = 0,
     pending_context: ?[constants.context_bytes_length]u8 = null,
     pending_result: u8 = constants.result_success,
     close_after_write: bool = false,
@@ -34,7 +35,7 @@ pub const Server = struct {
         const lifecycle = &self.lifecycle;
         const event = lifecycle.deliver(control) orelse return null;
         if (lifecycle.running() and self.state == .finishing) {
-            lifecycle.progress_ms = now.mono_ms;
+            self.progress_ms = now.mono_ms;
             lifecycle.needs_service = true;
         }
         return event;
@@ -52,8 +53,8 @@ pub const Server = struct {
         else if (self.state == .withheld)
             ctx.options.quota_timeout_ms
         else
-            lifecycle.timeout_ms;
-        return lifecycle.progress_ms +| duration;
+            ctx.options.progress_timeout_ms;
+        return self.progress_ms +| duration;
     }
 
     pub fn advance(self: *Server, ctx: *ReqResp, engine: *Engine, index: u16, now: Now) void {
@@ -98,7 +99,7 @@ pub const Server = struct {
                 lifecycle.fail(owner, index, .stream_closed, .{ .inbound = slot.state }, engine);
                 return;
             }
-            if (input.progressed) lifecycle.progress_ms = now.mono_ms;
+            if (input.progressed) slot.progress_ms = now.mono_ms;
             if (input.bytes.len == 0 and !input.fin) return;
             if (input.bytes.len > 0) {
                 if (!lifecycle.io.decoding or lifecycle.io.decoder.isDone()) {
@@ -216,7 +217,7 @@ pub const Server = struct {
         slot.pending_context = context;
         slot.pending_result = result;
         slot.close_after_write = close_after;
-        lifecycle.progress_ms = now.mono_ms;
+        slot.progress_ms = now.mono_ms;
         if (owner.limiter.take(lifecycle.conn, lifecycle.protocol, 1, now.mono_ms)) {
             Server.beginWrite(slot);
         } else {
@@ -245,7 +246,7 @@ pub const Server = struct {
         const since = slot.withheld_since_ms orelse now.mono_ms;
         owner.counters.withheld_ms_total += now.mono_ms -| since;
         slot.withheld_since_ms = null;
-        lifecycle.progress_ms = now.mono_ms;
+        slot.progress_ms = now.mono_ms;
         Server.beginWrite(slot);
     }
 
@@ -260,7 +261,7 @@ pub const Server = struct {
             lifecycle.fail(owner, index, reason, .{ .inbound = slot.state }, engine);
             return;
         };
-        if (flushed.progressed) lifecycle.progress_ms = now.mono_ms;
+        if (flushed.progressed) slot.progress_ms = now.mono_ms;
         if (!flushed.done) {
             if (lifecycle.io.outbox.idle()) lifecycle.needs_service = true;
             return;
@@ -275,11 +276,11 @@ pub const Server = struct {
             lifecycle.io.outbox.queue("", true);
             slot.state = .finishing;
             lifecycle.needs_service = true;
-            lifecycle.progress_ms = now.mono_ms;
+            slot.progress_ms = now.mono_ms;
             return;
         }
         slot.state = .serving;
-        lifecycle.progress_ms = now.mono_ms;
+        slot.progress_ms = now.mono_ms;
         lifecycle.queue(.{ .chunk_sent = .{
             .request = lifecycle.handle(index),
             .chunks = lifecycle.chunks,
@@ -306,7 +307,7 @@ pub const Server = struct {
             break :stopped true;
         };
         if (!flushed) return;
-        lifecycle.progress_ms = now.mono_ms;
+        slot.progress_ms = now.mono_ms;
         owner.counters.requests_served += 1;
         lifecycle.complete(
             owner,
@@ -347,6 +348,7 @@ pub const Server = struct {
         }
         slot.* = .{
             .request_fork = owner.request_fork,
+            .progress_ms = now.mono_ms,
             .lifecycle = .{
                 .completion = .active,
                 .direction = .inbound,
@@ -354,9 +356,7 @@ pub const Server = struct {
                 .conn = stream.conn,
                 .stream = stream,
                 .protocol = which,
-                .progress_ms = now.mono_ms,
                 .started_ms = now.mono_ms,
-                .timeout_ms = owner.options.progress_timeout_ms,
                 .io = .{
                     .sink = request_sink,
                     .scratch = slot.lifecycle.io.scratch,
@@ -417,7 +417,7 @@ pub const Server = struct {
         message: []const u8,
         now: Now,
     ) RespondError!void {
-        if (code == constants.result_success or message.len > codec.error_message_max) {
+        if (!constants.isErrorResult(code) or message.len > codec.error_message_max) {
             return error.InvalidError;
         }
         const slot = try owner.servingSlot(request_handle);
@@ -439,7 +439,7 @@ pub const Server = struct {
                 lifecycle.io.outbox.queue("", true);
                 lifecycle.needs_service = true;
                 slot.state = .finishing;
-                lifecycle.progress_ms = now.mono_ms;
+                slot.progress_ms = now.mono_ms;
             },
             .writing_chunk, .withheld => {
                 if (slot.close_after_write) return false;

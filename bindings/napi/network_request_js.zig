@@ -36,7 +36,7 @@ fn tokenFor(runtime: *Runtime, value: Value) !requests.Token {
     return .{ .index = @intCast(index), .generation = generation };
 }
 fn optionsFor(value: Value) !n.reqresp.RequestOptions {
-    var result_options: n.reqresp.RequestOptions = .{ .absolute_timeouts = .{ .negotiation_ms = 5000, .request_ms = 5000, .response_ms = 10000 } };
+    var result_options: n.reqresp.RequestOptions = .{};
     if (try value.typeof() == .undefined) return result_options;
     try cfg.object(value, &.{ "expectedChunks", "negotiationTimeoutMs", "requestTimeoutMs", "responseTimeoutMs" });
     const expected = try cfg.get(value, "expectedChunks");
@@ -46,7 +46,7 @@ fn optionsFor(value: Value) !n.reqresp.RequestOptions {
         if (try duration.typeof() != .undefined) {
             const ms = try cfg.integer(duration, 60000);
             if (ms == 0) return error.InvalidNetworkInteger;
-            @field(result_options.absolute_timeouts.?, names[1]) = ms;
+            @field(result_options.absolute_timeouts, names[1]) = ms;
         }
     }
     return result_options;

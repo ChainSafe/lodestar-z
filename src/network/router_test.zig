@@ -52,7 +52,7 @@ test "router composes simultaneous ping and meshsub on one connection" {
         for (request_events[0..client_count]) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &ping, chunk.bytes);
-                try std.testing.expect(client.reqresp.consume(chunk.request, pair.now));
+                try std.testing.expect(client.reqresp.consume(chunk.request));
                 pong = true;
             },
             else => {},
@@ -303,7 +303,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
         const count = client.process(&pair.client, pair.events(&pair.client, &transport), activity[0..active_client], pair.now, .{ .control = &requests }).control;
         for (requests[0..count]) |event| if (event == .chunk) {
             try std.testing.expectEqualSlices(u8, &ping, event.chunk.bytes);
-            try std.testing.expect(client.reqresp.consume(event.chunk.request, pair.now));
+            try std.testing.expect(client.reqresp.consume(event.chunk.request));
             pong = true;
         };
         const active_server = pair.server.takeActivity(&activity);
@@ -494,7 +494,7 @@ test "router capabilities activation preserves negotiated response context and c
                 try std.testing.expectEqual(@as(?@import("config").ForkSeq, .phase0), chunk.fork);
                 try std.testing.expectEqualSlices(u8, &payload, chunk.bytes);
                 chunks += 1;
-                try std.testing.expect(setup.client.reqresp.consume(chunk.request, setup.pair.now));
+                try std.testing.expect(setup.client.reqresp.consume(chunk.request));
             },
             .done => done = true,
             .failed => return error.TestUnexpectedResult,

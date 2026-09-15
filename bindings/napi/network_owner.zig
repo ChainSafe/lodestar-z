@@ -154,7 +154,7 @@ fn serve(self: *Runtime) !void {
             continue;
         }
         try gossip_mod.flags(self, io);
-        requests_mod.flags(self, timestamp);
+        requests_mod.flags(self);
         _ = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, false);
         try incoming_mod.flags(self, timestamp);
         const terminal_accepted = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, true);

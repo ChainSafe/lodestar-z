@@ -105,7 +105,7 @@ test("incoming copied metadata and acknowledged multiple contexts preserve wire 
   }
 }, 15000);
 
-test.each([1, 2, 3, 139])("incoming error status %s preserves exact encoded bytes", async (status) => {
+test.each([1, 2, 3, 128, 139, 255])("incoming error status %s preserves exact encoded bytes", async (status) => {
   const pair = await incomingPair();
   try {
     const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
@@ -159,7 +159,7 @@ test("incoming input validation rolls back before a later valid response", async
     const pending = stream.next();
     void pending.catch(() => undefined);
     const incoming = await takeIncoming(pair.right);
-    for (const status of [0, -1, 256, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    for (const status of [0, -1, 4, 5, 127, 256, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
       await expect(incoming.fail(status, new Uint8Array())).rejects.toMatchObject({
         code: "NetworkIncomingRejected",
         reason: "invalid_error",

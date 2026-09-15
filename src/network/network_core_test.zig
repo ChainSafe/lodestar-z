@@ -231,7 +231,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
             .chunk => |value| {
                 try std.testing.expectEqual(t.ForkSeq.fulu, value.fork.?);
                 try std.testing.expectEqualSlices(u8, &response, value.bytes);
-                try std.testing.expect(a.consume(value.request, tick));
+                try std.testing.expect(a.consume(value.request));
                 chunks += 1;
             },
             .done => done += 1,
