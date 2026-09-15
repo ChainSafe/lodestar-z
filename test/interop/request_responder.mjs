@@ -29,10 +29,7 @@ const gossipService = gossipsub({
 const secret = new Uint8Array(32);
 secret[31] = 62;
 const blockProtocol = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
-let scenario = "chunks";
-let digest = Buffer.from([1, 2, 3, 4]);
-let length = 4000;
-let count = 2;
+let scenario = {count: 2, digest: Buffer.from([1, 2, 3, 4]), kind: "chunks", length: 4000};
 let requests = 0;
 let active = 0;
 let lastRequest = "";
@@ -48,7 +45,7 @@ const node = await createLibp2p({
   transports: [quic()],
 });
 const status = Buffer.alloc(84);
-status.set(digest);
+status.set(scenario.digest);
 status.writeBigUInt64LE(100n, 76);
 async function respondControl(stream) {
   try {
@@ -94,7 +91,7 @@ await node.handle(
       lastRequest = request.bytes.toString("hex");
       assert(request.bytes.length <= 4096);
       const selected = scenario;
-      if (selected === "hold") {
+      if (selected.kind === "hold") {
         assert(held.size < 8);
         held.add(stream);
         const timer = setTimeout(() => {
@@ -112,18 +109,18 @@ await node.handle(
         );
         return;
       }
-      if (selected === "peer-error") {
+      if (selected.kind === "peer-error") {
         await sendFragments(
           stream,
           Buffer.concat([Buffer.from([3]), encodePayload(Buffer.from([0, 0xff, 0xc3, 0x28, 0x80]))]),
           AbortSignal.timeout(5000)
         );
-      } else if (selected !== "empty") {
-        for (let i = 0; i < count; i++) {
-          const bytes = selected === "hoodi" ? await readFile(process.argv[3]) : payload(length, 71 + i);
+      } else if (selected.kind !== "empty") {
+        for (let i = 0; i < selected.count; i++) {
+          const bytes = selected.kind === "hoodi" ? await readFile(process.argv[3]) : payload(selected.length, 71 + i);
           await sendFragments(
             stream,
-            Buffer.concat([Buffer.from([0]), digest, encodePayload(bytes)]),
+            Buffer.concat([Buffer.from([0]), selected.digest, encodePayload(bytes)]),
             AbortSignal.timeout(10000)
           );
         }
@@ -185,14 +182,17 @@ for await (const line of boundedLines(process.stdin)) {
         })),
       };
     } else if (command.op === "scenario") {
-      assert(["chunks", "empty", "peer-error", "hold", "hoodi"].includes(command.scenario));
-      scenario = command.scenario;
-      length = command.length ?? 4000;
-      count = command.count ?? 2;
-      assert(Number.isInteger(length) && length >= 0 && length <= 10 * 1024 * 1024);
-      assert(Number.isInteger(count) && count >= 0 && count <= 4);
-      digest = Buffer.from(command.digest ?? "01020304", "hex");
-      assert.equal(digest.length, 4);
+      const candidate = {
+        count: command.count ?? 2,
+        digest: Buffer.from(command.digest ?? "01020304", "hex"),
+        kind: command.scenario,
+        length: command.length ?? 4000,
+      };
+      assert(["chunks", "empty", "peer-error", "hold", "hoodi"].includes(candidate.kind));
+      assert(Number.isInteger(candidate.length) && candidate.length >= 0 && candidate.length <= 10 * 1024 * 1024);
+      assert(Number.isInteger(candidate.count) && candidate.count >= 0 && candidate.count <= 4);
+      assert.equal(candidate.digest.length, 4);
+      scenario = candidate;
     } else if (command.op === "stats") response = {active, control, lastRequest, requests};
     else if (command.op === "ping") {
       command.address ??= multiaddr(Buffer.from(command.addressBytes, "hex")).toString();
