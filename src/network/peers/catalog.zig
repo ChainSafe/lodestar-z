@@ -317,6 +317,16 @@ pub const Catalog = struct {
         return true;
     }
 
+    pub fn updateEndpoint(self: *Catalog, ref: t.PeerRef, conn: t.Handle, endpoint: *const t.Address) bool {
+        const row = self.connectedRow(ref, conn) orelse return false;
+        if (row.closing_reason != null) return false;
+        if (row.endpoint.eql(endpoint.*)) return true;
+        row.endpoint = endpoint.*;
+        self.revision +|= 1;
+        if (row.published) row.pending_update = true;
+        return true;
+    }
+
     pub fn updateMetadata(
         self: *Catalog,
         ref: t.PeerRef,

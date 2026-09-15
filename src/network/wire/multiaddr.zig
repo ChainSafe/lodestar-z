@@ -19,6 +19,7 @@ pub const Multiaddr = struct {
     peer: ?peer_id.PeerId = null,
 
     pub fn encode(self: *const Multiaddr, out: []u8) Error![]u8 {
+        if (self.address == .ip6 and address_mod.Address.isIp4Mapped(self.address.ip6.octets)) return error.InvalidMultiaddr;
         var cursor: usize = 0;
         switch (self.address) {
             .ip4 => |ip| {
@@ -53,6 +54,7 @@ pub const Multiaddr = struct {
             } },
             else => return error.InvalidMultiaddr,
         };
+        if (address == .ip6 and address_mod.Address.isIp4Mapped(address.ip6.octets)) return error.InvalidMultiaddr;
         if (try takeVarint(bytes, &cursor) != code_udp) return error.InvalidMultiaddr;
         const port = std.mem.readInt(u16, (try take(bytes, &cursor, 2))[0..2], .big);
         switch (address) {
@@ -70,6 +72,7 @@ pub const Multiaddr = struct {
     }
 
     pub fn toText(self: *const Multiaddr, out: *[text_length_max]u8) Error![]const u8 {
+        if (self.address == .ip6 and address_mod.Address.isIp4Mapped(self.address.ip6.octets)) return error.InvalidMultiaddr;
         var cursor: usize = 0;
         switch (self.address) {
             .ip4 => |ip| {
@@ -129,6 +132,7 @@ pub const Multiaddr = struct {
         } else if (std.mem.eql(u8, family, "ip6")) blk: {
             const parsed = std.Io.net.IpAddress.parseIp6(host, port) catch
                 return error.InvalidMultiaddr;
+            if (address_mod.Address.isIp4Mapped(parsed.ip6.bytes)) return error.InvalidMultiaddr;
             break :blk .{ .ip6 = .{ .octets = parsed.ip6.bytes, .port = port } };
         } else return error.InvalidMultiaddr;
 

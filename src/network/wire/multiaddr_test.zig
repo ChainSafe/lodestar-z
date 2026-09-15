@@ -39,6 +39,20 @@ test "multiaddr encodes ip6 without peer id" {
     try std.testing.expectEqualStrings(ip6_text, try decoded.toText(&text));
 }
 
+test "multiaddr rejects mapped IPv6 in both representations" {
+    const mapped = [_]u8{0} ** 10 ++ [_]u8{ 0xff, 0xff, 127, 0, 0, 1 };
+    const binary = [_]u8{0x29} ++ mapped ++ [_]u8{ 0x91, 0x02, 0x23, 0x28, 0xcd, 0x03 };
+    try std.testing.expectError(error.InvalidMultiaddr, multiaddr.Multiaddr.decode(&binary));
+    for ([_][]const u8{ "/ip6/::ffff:127.0.0.1/udp/9000/quic-v1", "/ip6/0:0:0:0:0:ffff:7f00:1/udp/9000/quic-v1" }) |text| {
+        try std.testing.expectError(error.InvalidMultiaddr, multiaddr.Multiaddr.parse(text));
+    }
+    const address: multiaddr.Multiaddr = .{ .address = .{ .ip6 = .{ .octets = mapped, .port = 9000 } } };
+    var encoded: [multiaddr.binary_length_max]u8 = undefined;
+    var text: [multiaddr.text_length_max]u8 = undefined;
+    try std.testing.expectError(error.InvalidMultiaddr, address.encode(&encoded));
+    try std.testing.expectError(error.InvalidMultiaddr, address.toText(&text));
+}
+
 test "multiaddr rejects unsupported shapes" {
     try std.testing.expectError(error.InvalidMultiaddr, multiaddr.Multiaddr.parse("/ip4/1.2.3.4/tcp/1/quic-v1"));
     try std.testing.expectError(error.InvalidMultiaddr, multiaddr.Multiaddr.parse("/ip4/1.2.3.4/udp/1/quic"));

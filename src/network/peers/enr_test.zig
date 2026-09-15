@@ -50,6 +50,36 @@ fn advertisement() adapter.LocalAdvertisement {
     };
 }
 
+test "peer ENR mapped IPv6 projection preserves signed content and IPv4 fallback" {
+    const key = try signingKey();
+    var local = advertisement();
+    const mapped = [_]u8{0} ** 10 ++ [_]u8{ 0xff, 0xff, 127, 0, 0, 2 };
+    const original = try adapter.build(&key, 7, &local, &context);
+    local.ip6 = mapped;
+    local.udp6 = 9100;
+    local.quic6 = 9101;
+    try std.testing.expectError(error.InvalidField, adapter.build(&key, 7, &local, &context));
+    const fields = [_]d.identity.enr.Field{
+        .{ .key = "eth2", .value = .{ .raw = (try original.field("eth2")).? } },
+        .{ .key = "id", .value = .{ .bytes = "v4" } },
+        .{ .key = "ip", .value = .{ .bytes = &local.ip4.? } },
+        .{ .key = "ip6", .value = .{ .bytes = &mapped } },
+        .{ .key = "quic", .value = .{ .uint = local.quic.? } },
+        .{ .key = "quic6", .value = .{ .uint = local.quic6.? } },
+        .{ .key = "secp256k1", .value = .{ .bytes = &original.public_key } },
+        .{ .key = "udp", .value = .{ .uint = local.udp.? } },
+        .{ .key = "udp6", .value = .{ .uint = local.udp6.? } },
+    };
+    const record = try d.identity.enr.Record.createFields(&key, 7, &fields);
+    const candidate = try adapter.decode(&record, &context);
+    try std.testing.expectEqual(@as(u8, 1), candidate.address_count);
+    try std.testing.expectEqualDeep(types.Address{ .ip4 = .{ .octets = local.ip4.?, .port = local.quic.? } }, candidate.addresses[0]);
+    try std.testing.expectEqual(try record.contentHash(), candidate.record_hash);
+    try std.testing.expectEqualSlices(u8, &mapped, (try record.fieldBytes("ip6")).?);
+    const no_fallback = try d.identity.enr.Record.createFields(&key, 7, &(fields[0..2].* ++ fields[3..].*));
+    try std.testing.expectEqual(@as(u8, 0), (try adapter.decode(&no_fallback, &context)).address_count);
+}
+
 test "peer ENR builder matches independent bytes and refuses invalid local preparation" {
     const key = try signingKey();
     var local = advertisement();

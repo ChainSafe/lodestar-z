@@ -21,15 +21,20 @@ pub const Address = union(enum) {
     }
 
     pub fn isUsable(self: Address) bool {
+        if (self == .ip6 and isIp4Mapped(self.ip6.octets)) return false;
         return switch (self) {
             inline else => |value| value.port != 0 and !std.mem.allEqual(u8, &value.octets, 0),
         };
     }
 
+    pub fn isIp4Mapped(ip: [16]u8) bool {
+        return std.mem.allEqual(u8, ip[0..10], 0) and ip[10] == 0xff and ip[11] == 0xff;
+    }
+
     pub fn fromNetwork(address: std.Io.net.IpAddress) Address {
         return switch (address) {
             .ip4 => |ip| .{ .ip4 = .{ .octets = ip.bytes, .port = ip.port } },
-            .ip6 => |ip| if (std.mem.allEqual(u8, ip.bytes[0..10], 0) and ip.bytes[10] == 0xff and ip.bytes[11] == 0xff)
+            .ip6 => |ip| if (isIp4Mapped(ip.bytes))
                 .{ .ip4 = .{ .octets = ip.bytes[12..16].*, .port = ip.port } }
             else
                 .{ .ip6 = .{ .octets = ip.bytes, .port = ip.port, .interface = ip.interface.index } },

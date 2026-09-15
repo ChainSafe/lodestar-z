@@ -75,6 +75,40 @@ test "peer catalog zero output closes native ownership and pins terminal until o
     try std.testing.expectEqual(.closed, std.meta.activeTag(out[0]));
     try std.testing.expectEqual(ref, admit(&c, &remote, replacement, .outbound, 2).admitted.peer);
 }
+
+test "peer catalog endpoint observations preserve publication and connection generations" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
+    const initial: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4001 } };
+    const rebound: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4002 } };
+    var out: [1]t.Event = undefined;
+    try std.testing.expect(c.updateEndpoint(ref, first, &initial));
+    try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&out));
+    try std.testing.expect(c.updateStatus(ref, first, &.{}, 0));
+    try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&out));
+    try std.testing.expectEqual(initial, out[0].ready.endpoint);
+
+    try std.testing.expect(c.updateEndpoint(ref, first, &rebound));
+    try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&.{}));
+    try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&out));
+    try std.testing.expectEqual(rebound, out[0].updated.endpoint);
+    const revision = c.revision;
+    try std.testing.expect(c.updateEndpoint(ref, first, &rebound));
+    try std.testing.expectEqual(revision, c.revision);
+    try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&out));
+
+    const admitted = admit(&c, &remote, replacement, .outbound, 1).admitted;
+    try std.testing.expectEqual(first, admitted.displaced.?);
+    try std.testing.expect(c.updateEndpoint(ref, replacement, &initial));
+    try std.testing.expect(!c.updateEndpoint(ref, first, &rebound));
+    try std.testing.expect(!c.updateEndpoint(.{ .index = ref.index, .generation = ref.generation + 1 }, replacement, &rebound));
+    try std.testing.expectEqual(initial, c.get(ref).?.endpoint);
+    try std.testing.expect(c.markUnavailable(ref, replacement, .host));
+    try std.testing.expect(!c.updateEndpoint(ref, replacement, &rebound));
+    try std.testing.expect(c.disconnect(ref, replacement, .host, 2));
+    try std.testing.expect(!c.updateEndpoint(ref, replacement, &rebound));
+}
 test "peer catalog banned retention and outbound reserve reject pressure" {
     var options = opts;
     options.outbound_reserve = 1;
