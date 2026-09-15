@@ -80,7 +80,7 @@ pub const Options = struct {
     inbound_per_peer_max: u8 = constants.inbound_per_peer_max_default,
     /// Zero disables the cap; retained application owners count until canonical recycling.
     inbound_application_per_peer_max: u8 = 0,
-    /// Inbound wire progress; outbound requests use their absolute phase deadlines.
+    /// Complete inbound request transfer, then response write progress. Outbound phases have absolute deadlines.
     progress_timeout_ms: u64 = constants.progress_timeout_ms_default,
     forks: []const ForkEntry,
     request_fork: config.ForkSeq = .phase0,
@@ -203,6 +203,7 @@ pub const Counters = struct {
     identity_capacity_refusals: u64 = 0,
     requests_sent: u64 = 0,
     requests_served: u64 = 0,
+    error_responses_sent: u64 = 0,
     chunks_received: u64 = 0,
     chunks_sent: u64 = 0,
     withheld_chunks: u64 = 0,

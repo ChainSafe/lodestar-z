@@ -500,6 +500,9 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing_time.observe(100);
     snapshot.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing_time.observe(300);
     snapshot.requests.withheld_ms_total = 1500;
+    snapshot.requests.error_responses_sent = 3;
+    snapshot.requests.malformed = 2;
+    snapshot.requests.timeouts = 7;
     snapshot.peer_work.candidate_syncs = 2;
     snapshot.peer_work.candidate_rows = 32;
     snapshot.peer_work.candidate_lookup_rows = 8;
@@ -537,6 +540,9 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     try std.testing.expect(std.mem.indexOf(u8, output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_bucket{method=\"status\",le=\"0.1\"} 1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "beacon_reqresp_outgoing_request_roundtrip_time_seconds_count{method=\"status\"} 2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_withheld_seconds_total 1.5\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_error_responses_sent_total 3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_malformed_total 2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_timeouts_total 7\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "_total_total") == null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_discovery_dial_time_seconds_bucket{status=\"error\",le=\"0.1\"} 1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_discovery_candidate_idle_seconds 1.5\n") != null);

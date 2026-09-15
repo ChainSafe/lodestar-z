@@ -44,4 +44,5 @@ test {
     _ = @import("reqresp_test.zig");
     _ = @import("reqresp_failures_test.zig");
     _ = @import("reqresp_half_close_test.zig");
+    _ = @import("reqresp_terminal_test.zig");
 }

@@ -87,12 +87,23 @@ test("ReleaseSafe debug logs correlate real requests without draining request da
     const rejectedIncoming = await takeIncoming(pair.right);
     await rejectedIncoming.fail(2, new TextEncoder().encode("untrusted response text\nsecret"));
     await rejected;
+    await rejectedIncoming.closed;
     const failures = drain(pair.left).filter((r) => r.scope === "network_reqresp_errors");
-    expect(failures.some((r) => r.message.startsWith("request_failed "))).toBe(true);
-    expect(failures.some((r) => r.message.includes("reason=peer_error detail=none peer_code=2"))).toBe(true);
-    expect(failures.every((r) => !r.message.includes("untrusted response text") && !r.message.includes("secret"))).toBe(
-      true
+    const failure = failures.find(
+      (r) => r.message.startsWith("request_failed ") && r.message.includes("reason=peer_error ")
     );
+    expect(failure?.message).toContain("detail=none ");
+    expect(failure?.message).toContain("peer_code=2 ");
+    const responses = drain(pair.right).filter((r) => r.message.includes("method=blocks_by_root_v2"));
+    const errorResponses = responses.filter((r) => r.message.startsWith("request_error_response "));
+    expect(errorResponses).toHaveLength(1);
+    expect(errorResponses[0].message).toContain("code=2 ");
+    expect(responses.some((r) => r.message.startsWith("request_completed "))).toBe(false);
+    expect(
+      [...failures, ...responses].every(
+        (r) => !r.message.includes("untrusted response text") && !r.message.includes("secret")
+      )
+    ).toBe(true);
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
   }

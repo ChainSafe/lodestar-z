@@ -20,6 +20,7 @@ const Failure = reqresp.Failure;
 const reads_per_pump_max = reqresp.reads_per_pump_max;
 
 pub const State = enum { receiving_request, serving, writing_chunk, withheld, finishing };
+pub const Rejection = codec.Error || @import("request_policy.zig").InspectError;
 
 pub const Server = struct {
     lifecycle: @import("lifecycle.zig").Lifecycle = .{ .direction = .inbound },
@@ -30,6 +31,7 @@ pub const Server = struct {
     withheld_since_ms: ?u64 = null,
     state: State = .receiving_request,
     request_fork: @import("config").ForkSeq = .phase0,
+    rejection: ?Rejection = null,
 
     pub fn deliver(self: *Server, control: bool, now: Now) ?Event {
         const lifecycle = &self.lifecycle;
@@ -48,6 +50,7 @@ pub const Server = struct {
     pub fn deadline(self: *const Server, ctx: *const ReqResp) ?u64 {
         const lifecycle = &self.lifecycle;
         if (!lifecycle.running()) return null;
+        if (self.state == .receiving_request) return lifecycle.started_ms +| ctx.options.progress_timeout_ms;
         const duration = if (self.waitingHost())
             ctx.options.host_timeout_ms
         else if (self.state == .withheld)
@@ -67,7 +70,6 @@ pub const Server = struct {
                 .quota_timeout
             else
                 .timeout;
-            if (reason == .timeout) ctx.counters.timeouts += 1;
             lifecycle.fail(ctx, index, reason, .{ .inbound = self.state }, engine);
             return;
         };
@@ -103,15 +105,15 @@ pub const Server = struct {
             if (input.bytes.len == 0 and !input.fin) return;
             if (input.bytes.len > 0) {
                 if (!lifecycle.io.decoding or lifecycle.io.decoder.isDone()) {
-                    Server.rejectRequest(owner, slot, now);
+                    Server.rejectRequest(owner, slot, error.TooManyBytes, now);
                     return;
                 }
-                _ = lifecycle.io.feed(input.bytes) catch {
-                    Server.rejectRequest(owner, slot, now);
+                _ = lifecycle.io.feed(input.bytes) catch |err| {
+                    Server.rejectRequest(owner, slot, err, now);
                     return;
                 };
                 if (lifecycle.io.buffered_start < lifecycle.io.buffered_end) {
-                    Server.rejectRequest(owner, slot, now);
+                    Server.rejectRequest(owner, slot, error.TooManyBytes, now);
                     return;
                 }
             }
@@ -121,7 +123,7 @@ pub const Server = struct {
                 lifecycle.io.fin_seen = input.fin;
                 const finished = !lifecycle.io.decoding or lifecycle.io.decoder.isDone();
                 if (!finished) {
-                    Server.rejectRequest(owner, slot, now);
+                    Server.rejectRequest(owner, slot, error.Truncated, now);
                     return;
                 }
                 const payload: []const u8 = if (lifecycle.io.decoding)
@@ -130,10 +132,9 @@ pub const Server = struct {
                     &.{};
                 if (owner.admission) |*admission| {
                     owner.counters.inspected +|= 1;
-                    const inspected = admission.policy.inspect(lifecycle.protocol, payload, slot.request_fork) catch {
-                        owner.counters.malformed +|= 1;
+                    const inspected = admission.policy.inspect(lifecycle.protocol, payload, slot.request_fork) catch |err| {
                         _ = takeAdmission(owner, engine, slot, 1, now);
-                        Server.rejectRequest(owner, slot, now);
+                        Server.rejectRequest(owner, slot, err, now);
                         return;
                     };
                     lifecycle.chunks_max = inspected.chunks_max;
@@ -143,8 +144,8 @@ pub const Server = struct {
                     }
                     owner.counters.admitted +|= 1;
                 } else {
-                    lifecycle.chunks_max = protocol.requestChunkLimit(lifecycle.protocol, payload) catch {
-                        Server.rejectRequest(owner, slot, now);
+                    lifecycle.chunks_max = protocol.requestChunkLimit(lifecycle.protocol, payload) catch |err| {
+                        Server.rejectRequest(owner, slot, err, now);
                         return;
                     };
                 }
@@ -161,7 +162,9 @@ pub const Server = struct {
         lifecycle.needs_service = true;
     }
 
-    fn rejectRequest(owner: *ReqResp, slot: *Server, now: Now) void {
+    fn rejectRequest(owner: *ReqResp, slot: *Server, reason: Rejection, now: Now) void {
+        assert(slot.rejection == null);
+        slot.rejection = reason;
         reject(owner, slot, constants.result_invalid_request, "invalid request", now);
     }
 
@@ -308,7 +311,6 @@ pub const Server = struct {
         };
         if (!flushed) return;
         slot.progress_ms = now.mono_ms;
-        owner.counters.requests_served += 1;
         lifecycle.complete(
             owner,
             index,
