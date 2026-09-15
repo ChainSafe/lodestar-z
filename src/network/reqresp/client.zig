@@ -40,7 +40,6 @@ pub const Client = struct {
                 .host_timeout
             else
                 .timeout;
-            if (reason == .timeout) ctx.counters.timeouts += 1;
             lifecycle.fail(ctx, index, reason, .{ .outbound = self.phase }, engine);
             return;
         };

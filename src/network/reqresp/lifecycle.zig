@@ -122,7 +122,15 @@ pub const Lifecycle = struct {
         assert(event == .done or event == .served or event == .failed);
         const counts = &owner.protocol_counters[@intFromEnum(self.protocol)];
         const duration_ms = owner.last_now_ms -| self.started_ms;
-        if (event != .failed) std.log.scoped(.network_reqresp).debug("request_completed direction={s} request={d}:{d} connection={d}:{d} method={s} chunks={d} elapsed_ms={d}", .{ @tagName(self.direction), index, self.generation, self.conn.index, self.conn.generation, @tagName(self.protocol), self.chunks, duration_ms });
+        const server = if (self.direction == .inbound) &owner.inbound[index] else null;
+        if (server) |slot| if (slot.rejection != null) {
+            owner.counters.malformed +|= 1;
+        };
+        if (event == .served) owner.counters.requests_served +|= 1;
+        if (event == .served and server.?.pending_result != constants.result_success) {
+            owner.counters.error_responses_sent +|= 1;
+            std.log.scoped(.network_reqresp_errors).debug("request_error_response request={d}:{d} connection={d}:{d} method={s} code={d} detail={s} chunks={d} elapsed_ms={d}", .{ index, self.generation, self.conn.index, self.conn.generation, @tagName(self.protocol), server.?.pending_result, if (server.?.rejection) |err| @errorName(err) else "", self.chunks, duration_ms });
+        } else if (event != .failed) std.log.scoped(.network_reqresp).debug("request_completed direction={s} request={d}:{d} connection={d}:{d} method={s} chunks={d} elapsed_ms={d}", .{ @tagName(self.direction), index, self.generation, self.conn.index, self.conn.generation, @tagName(self.protocol), self.chunks, duration_ms });
         if (self.direction == .outbound) counts.outgoing_time.observe(duration_ms) else counts.incoming_time.observe(duration_ms);
         self.completion = .{ .terminal = event };
         self.io.clear();
@@ -144,6 +152,7 @@ pub const Lifecycle = struct {
 
     pub fn fail(self: *Lifecycle, owner: *reqresp.ReqResp, index: u16, reason: Failure, phase: FailurePhase, engine: ?*Engine) void {
         if (!self.running()) return;
+        if (reason == .timeout) owner.counters.timeouts +|= 1;
         assert((self.direction == .outbound) == (phase == .outbound));
         const request_phase: ?reqresp.RequestPhase = if (phase == .outbound) phase.outbound else null;
         const phase_name = switch (phase) {
@@ -152,9 +161,10 @@ pub const Lifecycle = struct {
         };
         const counts = &owner.protocol_counters[@intFromEnum(self.protocol)];
         const duration_ms = owner.last_now_ms -| self.started_ms;
+        const request_detail = if (self.direction == .inbound) owner.inbound[index].rejection else null;
         if (reason == .cancelled) {
             if (self.direction == .outbound) counts.outgoing_cancelled +|= 1 else counts.incoming_cancelled +|= 1;
-            std.log.scoped(.network_reqresp).debug("request_cancelled direction={s} request={d}:{d} connection={d}:{d} method={s} chunks={d} elapsed_ms={d}", .{ @tagName(self.direction), index, self.generation, self.conn.index, self.conn.generation, @tagName(self.protocol), self.chunks, duration_ms });
+            std.log.scoped(.network_reqresp).debug("request_cancelled direction={s} request={d}:{d} connection={d}:{d} method={s} request_detail={s} chunks={d} elapsed_ms={d}", .{ @tagName(self.direction), index, self.generation, self.conn.index, self.conn.generation, @tagName(self.protocol), if (request_detail) |err| @errorName(err) else "", self.chunks, duration_ms });
         } else {
             const detail: []const u8 = switch (reason) {
                 .invalid_response => |err| @errorName(err),
@@ -163,7 +173,7 @@ pub const Lifecycle = struct {
                 else => self.io.failure_detail,
             };
             const peer_code: u16 = if (reason == .peer_error) reason.peer_error.code else 0;
-            std.log.scoped(.network_reqresp_errors).debug("request_failed direction={s} request={d}:{d} connection={d}:{d} method={s} phase={s} reason={s} detail={s} peer_code={d} chunks={d} elapsed_ms={d}", .{ @tagName(self.direction), index, self.generation, self.conn.index, self.conn.generation, @tagName(self.protocol), phase_name, @tagName(reason), detail, peer_code, self.chunks, duration_ms });
+            std.log.scoped(.network_reqresp_errors).debug("request_failed direction={s} request={d}:{d} connection={d}:{d} method={s} phase={s} reason={s} detail={s} request_detail={s} peer_code={d} chunks={d} elapsed_ms={d}", .{ @tagName(self.direction), index, self.generation, self.conn.index, self.conn.generation, @tagName(self.protocol), phase_name, @tagName(reason), detail, if (request_detail) |err| @errorName(err) else "", peer_code, self.chunks, duration_ms });
             owner.counters.failures += 1;
             if (self.direction == .outbound) {
                 counts.outgoing_errors +|= 1;
