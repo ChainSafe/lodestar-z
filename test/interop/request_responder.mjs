@@ -3,6 +3,7 @@ import {readFile} from "node:fs/promises";
 import {boundedLines} from "./bounded_lines.mjs";
 import {encodePayload, messageId, payload, readPayload, sendFragments, summary} from "./codec.mjs";
 import {readEmptyRequest} from "./managed_control.mjs";
+import {uint64} from "./managed_wire.mjs";
 import {stockPackages} from "./stock_packages.mjs";
 
 const {load, version, responseDecoder} = stockPackages(process.argv[2]);
@@ -59,8 +60,9 @@ async function respondControl(stream) {
       bytes = status;
     } else if (protocol.includes("/ping/")) {
       control.ping++;
-      bytes = Buffer.alloc(8);
-      bytes.writeBigUInt64LE(metadataSequence);
+      bytes = uint64(metadataSequence);
+    } else if (protocol.includes("/goodbye/")) {
+      bytes = uint64(1n);
     } else if (protocol.includes("/metadata/3/")) {
       bytes = Buffer.alloc(25);
       bytes.writeBigUInt64LE(metadataSequence);
@@ -68,7 +70,7 @@ async function respondControl(stream) {
     } else if (metadata) {
       bytes = Buffer.alloc(17);
       bytes.writeBigUInt64LE(metadataSequence);
-    } else bytes = Buffer.alloc(0);
+    } else throw Error("unknown control protocol");
     await sendFragments(stream, Buffer.concat([Buffer.from([0]), encodePayload(bytes)]), AbortSignal.timeout(5000));
     await stream.close({signal: AbortSignal.timeout(5000)});
   } catch (error) {

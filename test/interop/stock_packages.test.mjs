@@ -106,6 +106,7 @@ for (const mode of ["", "gossip"]) {
           ["metadata/2", 17],
           ["metadata/3", 25],
           ["ping/1", 8],
+          ["goodbye/1", 8],
         ]) {
           const signal = AbortSignal.timeout(5000);
           const stream = await client.dialProtocol(
@@ -116,7 +117,7 @@ for (const mode of ["", "gossip"]) {
           const abort = () => stream.abort(signal.reason);
           signal.addEventListener("abort", abort, {once: true});
           try {
-            if (method === "ping/1") {
+            if (method === "ping/1" || method === "goodbye/1") {
               const request = Buffer.alloc(8);
               request.writeBigUInt64LE(99n);
               await sendFragments(stream, encodePayload(request), signal);

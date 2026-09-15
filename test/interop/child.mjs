@@ -3,8 +3,9 @@ import {spawn} from "node:child_process";
 import {access, stat} from "node:fs/promises";
 import {relative, resolve} from "node:path";
 import {setTimeout as delay} from "node:timers/promises";
+import {fileURLToPath} from "node:url";
 
-const root = resolve(new URL("../..", import.meta.url).pathname);
+const root = fileURLToPath(new URL("../..", import.meta.url));
 const lineMax = 65536;
 const linesMax = 1024;
 const stderrMax = 16 * 1024 * 1024;
