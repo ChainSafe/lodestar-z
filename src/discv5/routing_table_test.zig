@@ -8,6 +8,38 @@ const address4 = test_support.address4;
 const address6 = test_support.address6;
 const fakeRecord = test_support.fakeRecord;
 
+test "routing table serves local ENR when either signed endpoint is relay eligible" {
+    const private4 = address4(10, 1, 0, 1, 9000);
+    const public4 = address4(192, 0, 2, 1, 9000);
+    const public6 = address6(.{ 0x20, 0x01, 0x0d, 0xb8 } ++ .{0} ** 11 ++ .{1}, 9000);
+    const private6 = address6(.{0xfd} ++ .{0} ** 14 ++ .{1}, 9000);
+    const local_id: types.NodeId = @splat(0);
+    var table: RoutingTable = undefined;
+    try table.init(std.testing.allocator, local_id);
+    defer table.deinit(std.testing.allocator);
+
+    var record = fakeRecord(local_id, private4, 1);
+    record.ip6 = public6.ip6.octets;
+    record.udp6 = public6.port();
+    var out: [1]enr.Record = undefined;
+    for ([_]types.Address{ public4, public6, private4 }) |requester| {
+        const found = try table.findNodes(&record, requester, &.{0}, &out);
+        try std.testing.expectEqual(@as(usize, 1), found.len);
+        try std.testing.expectEqualDeep(record, found[0]);
+    }
+    record.ip6 = private6.ip6.octets;
+    for ([_]types.Address{ public4, public6 }) |requester| {
+        try std.testing.expectEqual(@as(usize, 0), (try table.findNodes(&record, requester, &.{0}, &out)).len);
+    }
+    try std.testing.expectEqual(@as(usize, 1), (try table.findNodes(&record, private6, &.{0}, &out)).len);
+    record.ip6 = public6.ip6.octets;
+    record.udp6 = 0;
+    try std.testing.expectEqual(@as(usize, 0), (try table.findNodes(&record, public6, &.{0}, &out)).len);
+    record.udp6 = null;
+    try std.testing.expectEqual(@as(usize, 1), (try table.findNodes(&record, public6, &.{0}, &out)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try table.findNodes(&record, public6, &.{0}, out[0..0])).len);
+}
+
 test "routing table revalidates the least recent entry before replacement" {
     const local_id = [_]u8{0} ** 32;
     var table: RoutingTable = undefined;

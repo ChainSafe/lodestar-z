@@ -444,8 +444,10 @@ fn sameSubnet(left: types.Address, right: types.Address) bool {
 
 fn recordRelayAllowed(record: *const enr.Record, requester: ?types.Address) bool {
     const source = requester orelse return true;
-    const address = record.endpoint() orelse return false;
-    return relayAllowed(source, address);
+    for (record.endpoints()) |candidate| if (candidate) |address| {
+        if (address.isUsable() and relayAllowed(source, address)) return true;
+    };
+    return false;
 }
 
 /// A public candidate may be relayed by anyone. A candidate in a special scope may be relayed

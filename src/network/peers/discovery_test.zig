@@ -5,6 +5,84 @@ const discovery = @import("discovery.zig");
 const types = @import("types.zig");
 const context = types.ForkContext{ .digest = .{ 1, 2, 3, 4 } };
 
+test "peer discovery answers unknown TALK protocols without demand or candidate output" {
+    var requester: Node = undefined;
+    try requester.init(31, 9031);
+    defer requester.deinit();
+    var responder: Node = undefined;
+    try responder.init(32, 9032);
+    defer responder.deinit();
+    const now = try d.Driver.monotonicMilliseconds(std.testing.io);
+    var controller = try discovery.Discovery.init(std.testing.allocator, &responder.driver, &context, &.{}, now, .{});
+    defer controller.deinit();
+    var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
+    for ([_][]const u8{ "portal/test", "" }, 0..) |protocol, index| {
+        const request_id = try d.wire.message.RequestId.init(&.{@intCast(index + 1)});
+        const request: d.wire.message.Message = .{ .talk_request = .{
+            .request_id = request_id,
+            .protocol = protocol,
+            .request = "unsupported application data",
+        } };
+        const handle = try requester.driver.startCall(std.testing.io, .{
+            .node_id = responder.engine.localRecord().node_id,
+            .address = responder.udp.localAddress(),
+        }, responder.engine.localRecord(), &request);
+        var completed = false;
+        for (0..100) |_| {
+            const tick = try d.Driver.monotonicMilliseconds(std.testing.io);
+            const result = try controller.step(std.testing.io, tick, tick, &.{});
+            if (result.failure) |err| return err;
+            try std.testing.expectEqual(@as(usize, 0), result.candidates);
+            const received = try requester.driver.stepUntil(std.testing.io, &expiries, tick);
+            if (received.failure) |err| return err;
+            if (received.event == .response) {
+                const response = received.event.response.matched;
+                try std.testing.expectEqual(handle, response.handle);
+                try std.testing.expect(response.terminal);
+                try std.testing.expectEqualDeep(request_id, response.response.talk_response.request_id);
+                try std.testing.expectEqual(@as(usize, 0), response.response.talk_response.response.len);
+                completed = true;
+                break;
+            }
+        }
+        try std.testing.expect(completed);
+        try std.testing.expectEqual(@as(usize, 0), requester.engine.calls.count());
+    }
+}
+
+test "peer discovery TALK send failure preserves call expiry progress" {
+    var requester: Node = undefined;
+    try requester.init(33, 9033);
+    defer requester.deinit();
+    var responder: Node = undefined;
+    try responder.init(34, 9034);
+    defer responder.deinit();
+    const now = try d.Driver.monotonicMilliseconds(std.testing.io);
+    const from: d.types.Endpoint = .{ .node_id = requester.engine.localRecord().node_id, .address = requester.udp.localAddress() };
+    const to: d.types.Endpoint = .{ .node_id = responder.engine.localRecord().node_id, .address = responder.udp.localAddress() };
+    const session: d.SessionStore.Session = .{ .read_key = @splat(7), .write_key = @splat(7) };
+    requester.engine.channel.sessions.install(to, &session, now);
+    responder.engine.channel.sessions.install(from, &session, now);
+    var controller = try discovery.Discovery.init(std.testing.allocator, &responder.driver, &context, &.{}, now, .{});
+    defer controller.deinit();
+    const request: d.wire.message.Message = .{ .talk_request = .{
+        .request_id = try d.wire.message.RequestId.init(&.{1}),
+        .protocol = "unknown",
+        .request = &.{},
+    } };
+    _ = try requester.driver.startCall(std.testing.io, to, responder.engine.localRecord(), &request);
+    const expired = try responder.engine.calls.begin(from, &requester.engine.localRecord().public_key, &request, now, d.wire.constants.ordinary_plaintext_size_max);
+    var host: SendFailure = .{ .now_ms = now, .receive_real = true };
+    const result = try controller.step(host.io(), now, now, &.{});
+    try std.testing.expectEqual(error.DestinationUnreachable, result.failure.?);
+    try std.testing.expectEqual(d.Driver.FailureStage.process, result.failure_stage);
+    try std.testing.expectEqual(@as(usize, 1), host.sends);
+    try std.testing.expectEqual(@as(u16, 1), result.unowned);
+    try std.testing.expect(responder.engine.calls.endpoint(expired) == null);
+    try std.testing.expectEqual(@as(u64, 1), controller.counters.processing_failures);
+    try std.testing.expectEqual(@as(u64, 1), controller.counters.query_timeouts);
+}
+
 test "peer discovery publishes signed referrals before their discovery endpoint responds" {
     try referralCase(null);
 }
@@ -372,6 +450,7 @@ test "peer discovery no QUIC nodes remain confirmed but produce no dial candidat
 const SendFailure = struct {
     now_ms: u64,
     sends: usize = 0,
+    receive_real: bool = false,
     fn io(self: *SendFailure) std.Io {
         const vtable = comptime blk: {
             var value = std.Io.failing.vtable.*;
@@ -386,7 +465,9 @@ const SendFailure = struct {
     fn random(_: ?*anyopaque, buffer: []u8) std.Io.RandomSecureError!void {
         return std.Io.randomSecure(std.testing.io, buffer);
     }
-    fn receive(_: ?*anyopaque, _: *std.Io.Batch, _: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+    fn receive(context_ptr: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+        const self: *SendFailure = @ptrCast(@alignCast(context_ptr.?));
+        if (self.receive_real) return std.testing.io.vtable.batchAwaitConcurrent(std.testing.io.userdata, batch, timeout);
         return error.ConcurrencyUnavailable;
     }
     fn currentTime(context_ptr: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {

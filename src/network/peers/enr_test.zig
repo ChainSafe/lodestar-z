@@ -102,7 +102,37 @@ fn changedRecord(name: []const u8, replacement: ?d.identity.enr.Field.Value) !d.
         fields[count] = .{ .key = field_name, .value = value };
         count += 1;
     }
+    if (std.mem.eql(u8, name, "x-test")) {
+        fields[count] = .{ .key = name, .value = replacement.? };
+        count += 1;
+    }
     return d.identity.enr.Record.createFields(&key, 8, fields[0..count]);
+}
+
+test "peer ENR canonical fingerprint rejects equal sequence changes outside dial hints" {
+    const key = try signingKey();
+    const original = try adapter.build(&key, 8, &advertisement(), &context);
+    const candidate = try adapter.decode(&original, &context);
+    const Queue = @import("dial_queue.zig").DialQueue;
+    var queue = try Queue.init(std.testing.allocator, .{ .capacity = 1, .concurrent_max = 1, .seed = 1 });
+    defer queue.deinit(std.testing.allocator);
+    try queue.enqueueDiscovered(&candidate, &context, &.{}, 0);
+    @memset(queue.rows[0].addresses[queue.rows[0].address_count..], .unspecified);
+    const before = queue.rows[0];
+    for ([_]struct { name: []const u8, value: d.identity.enr.Field.Value }{
+        .{ .name = "udp", .value = .{ .uint = 9002 } },
+        .{ .name = "x-test", .value = .{ .bytes = "extra signed content" } },
+    }) |change| {
+        const changed = try changedRecord(change.name, change.value);
+        const conflicting = try adapter.decode(&changed, &context);
+        try std.testing.expectEqual(candidate.sequence, conflicting.sequence);
+        try std.testing.expectEqualDeep(candidate.addresses, conflicting.addresses);
+        try std.testing.expect(!std.mem.eql(u8, &candidate.record_hash, &conflicting.record_hash));
+        try std.testing.expectError(error.StaleRecord, queue.enqueueDiscovered(&conflicting, &context, &.{}, 100));
+        try std.testing.expectEqualDeep(before, queue.rows[0]);
+    }
+    try queue.enqueueDiscovered(&candidate, &context, &.{}, 200);
+    try std.testing.expectEqual(@as(u64, 200), queue.rows[0].hints_at_ms);
 }
 
 test "peer ENR strict known optional field shapes integer bounds and missing mandatory field" {
