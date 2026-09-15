@@ -344,6 +344,11 @@ export declare class BeaconStateView {
     processedValidatorSweepCount: number;
   };
 
+  /**
+   * On phase0, callers must serialize this call with other `processSlots()`,
+   * `stateTransition()`, and phase0 `computeUnrealizedCheckpoints()` calls across
+   * all views and workers, and exclude `deinitReusedEpochTransitionCache()`.
+   */
   computeUnrealizedCheckpoints(): {
     justifiedCheckpoint: Checkpoint;
     finalizedCheckpoint: Checkpoint;
@@ -378,7 +383,17 @@ export declare class BeaconStateView {
   hashTreeRoot(): Uint8Array;
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
+  /**
+   * Callers must serialize this call with other `processSlots()`,
+   * `stateTransition()`, and phase0 `computeUnrealizedCheckpoints()` calls across
+   * all views and workers, and exclude `deinitReusedEpochTransitionCache()`.
+   */
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
+  /**
+   * Callers must serialize this call with other `processSlots()`,
+   * `stateTransition()`, and phase0 `computeUnrealizedCheckpoints()` calls across
+   * all views and workers, and exclude `deinitReusedEpochTransitionCache()`.
+   */
   stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
@@ -387,6 +402,12 @@ declare const bindings: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
   stateTransition: {
+    /**
+     * Free the process-wide epoch cache.
+     * Callers must wait for all `processSlots()`, `stateTransition()`, and phase0
+     * `computeUnrealizedCheckpoints()` calls across all views and workers to finish,
+     * then prevent new calls until teardown returns.
+     */
     deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
