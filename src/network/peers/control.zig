@@ -46,7 +46,7 @@ const Schedule = struct {
     status_due_ms: u64 = 0,
     ping_due_ms: u64 = 0,
     retry_ms: u64 = 0,
-    metadata_pending: bool = false,
+    metadata_due_ms: ?u64 = null,
     closing: ?struct { reason: t.DisconnectReason, deadline_ms: u64, sent: bool = false } = null,
 };
 pub const Control = struct {
@@ -234,12 +234,12 @@ pub const Control = struct {
     pub fn reStatusPeer(self: *Control, peer: t.PeerRef, conn: t.Handle, now: Now) bool {
         const row = self.schedule(peer, conn) orelse return false;
         if (row.closing != null) return false;
-        row.status_due_ms = now.mono_ms;
+        row.status_due_ms = @min(row.status_due_ms, now.mono_ms);
         return true;
     }
     pub fn reStatusPeers(self: *Control, now: Now) void {
         for (self.schedules) |*row| if (row.peer != null) {
-            row.status_due_ms = now.mono_ms;
+            row.status_due_ms = @min(row.status_due_ms, now.mono_ms);
         };
     }
     pub fn forkUpdated(self: *Control, service: *Service, catalog: *Catalog, previous: t.ForkContext, now: Now) void {
@@ -250,7 +250,7 @@ pub const Control = struct {
             row.transition_until_ms = now.mono_ms +| self.options.progress_timeout_ms;
             row.status_due_ms = now.mono_ms;
             row.retry_ms = 0;
-            row.metadata_pending = true;
+            row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
             for (self.operations) |*op| if (op.request) |request| {
                 if (!std.meta.eql(op.peer, peer) or !std.meta.eql(op.conn, row.conn)) continue;
                 op.cancelled = true;
@@ -466,7 +466,7 @@ pub const Control = struct {
         }
         if (!catalog.updateStatus(peer, conn, &status, now.mono_ms)) return;
         row.status_due_ms = now.mono_ms +| self.options.status_interval_ms;
-        if (catalog.get(peer).?.metadata == null) row.metadata_pending = true;
+        if (catalog.get(peer).?.metadata == null) row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
     }
     fn sequence(
         self: *Control,
@@ -486,7 +486,7 @@ pub const Control = struct {
                 return;
             }
         }
-        row.metadata_pending = true;
+        row.metadata_due_ms = row.metadata_due_ms orelse now.mono_ms;
     }
     pub fn events(
         self: *Control,
@@ -669,7 +669,7 @@ pub const Control = struct {
                     return;
                 };
                 _ = catalog.updateMetadata(op.peer, op.conn, &metadata, now.mono_ms);
-                row.metadata_pending = false;
+                row.metadata_due_ms = null;
             },
             else => {},
         }
@@ -740,16 +740,33 @@ fn decide(row: *const Schedule, relevant: bool, active_request: bool, now: u64) 
         if (row.identify_enabled and row.identify_state == .pending) decision.wake(row.identify_retry_ms, now);
     }
     if (active_request) return decision;
-    const request_due = if (relevant and row.metadata_pending) 0 else @min(row.status_due_ms, row.ping_due_ms);
+    const metadata_due = if (relevant) row.metadata_due_ms else null;
+    const refresh_due = metadata_due orelse row.ping_due_ms;
+    const request_due = @min(row.status_due_ms, refresh_due);
     decision.wake(@max(request_due, row.retry_ms), now);
-    if (now < row.retry_ms) return decision;
-    decision.request = if (now >= row.status_due_ms)
+    if (now < row.retry_ms or now < request_due) return decision;
+    decision.request = if (row.status_due_ms < refresh_due)
         .status
-    else if (relevant and row.metadata_pending)
+    else if (metadata_due != null)
         .metadata
-    else if (now >= row.ping_due_ms)
-        .ping
     else
-        null;
+        .ping;
     return decision;
+}
+
+test "control repeated Status intent preserves the first due time" {
+    var control = try Control.init(std.testing.allocator, .{ .operations_max = 1 }, 2, 1);
+    defer control.deinit(std.testing.allocator);
+    const first: t.PeerRef = .{ .index = 0, .generation = 1 };
+    const second: t.PeerRef = .{ .index = 1, .generation = 1 };
+    const first_conn: t.Handle = .{ .index = 0, .generation = 1 };
+    const second_conn: t.Handle = .{ .index = 1, .generation = 1 };
+    control.connected(first, first_conn, .outbound, .{ .mono_ms = 10, .unix_s = 0 });
+    control.connected(second, second_conn, .inbound, .{ .mono_ms = 10, .unix_s = 0 });
+    for ([_]u64{ 20, 30, 40 }) |now| {
+        control.reStatusPeers(.{ .mono_ms = now, .unix_s = 0 });
+        try std.testing.expect(control.reStatusPeer(second, second_conn, .{ .mono_ms = now, .unix_s = 0 }));
+        try std.testing.expectEqual(@as(u64, 10), control.schedules[0].status_due_ms);
+        try std.testing.expectEqual(@as(u64, 20), control.schedules[1].status_due_ms);
+    }
 }
