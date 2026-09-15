@@ -369,20 +369,6 @@ pub const DialQueue = struct {
         };
         return false;
     }
-    pub fn remove(self: *DialQueue, peer: *const t.PeerId) bool {
-        for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
-            if (row.attempt) return false;
-            row.occupied = false;
-            return true;
-        };
-        return false;
-    }
-    pub fn connection(self: *DialQueue, peer: *const t.PeerId, connected: bool, now_ms: u64) void {
-        for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
-            setConnection(row, connected, now_ms);
-            return;
-        };
-    }
     fn setConnection(row: *Row, connected: bool, now_ms: u64) void {
         row.connected = connected;
         if (row.conn != null) return;
@@ -487,11 +473,6 @@ pub const DialQueue = struct {
             return;
         }
         self.counters.sync_lookup_rows +|= self.rows.len;
-    }
-    pub fn deferPeer(self: *DialQueue, peer: *const t.PeerId, eligible_at_ms: u64) void {
-        for (self.rows) |*row| if (row.occupied and row.peer.eql(peer)) {
-            row.eligible_at_ms = @max(row.eligible_at_ms, eligible_at_ms);
-        };
     }
     fn rowFor(self: *DialQueue, token: Token) ?*Row {
         if (token.index >= self.rows.len) return null;
