@@ -61,6 +61,11 @@ const weight_denominator: f64 = @floatFromInt(c.WEIGHT_DENOMINATOR);
 pub const proposer_weight_factor: f64 = proposer_weight / (weight_denominator - proposer_weight);
 
 pub const EpochCache = struct {
+    const ProposersDeferred = union(enum) {
+        seed: [32]u8,
+        indexes: [preset.SLOTS_PER_EPOCH]ValidatorIndex,
+    };
+
     allocator: Allocator,
 
     config: *const BeaconConfig,
@@ -76,8 +81,9 @@ pub const EpochCache = struct {
     /// in [EIP-7917](https://eips.ethereum.org/EIPS/eip-7917).
     ///
     /// Thus, post-Fulu, this is populated from proposer lookahead, but
-    /// is null pre-Fulu.
-    proposers_next_epoch: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex,
+    /// pre-Fulu, it stores the seed until queried, then caches the computed indexes.
+    /// It is null pre-Fulu when there are no active validators for the next epoch.
+    proposers_next_epoch: ?ProposersDeferred,
 
     /// Epoch decision roots to look up correct shuffling from the Shuffling Cache
     previous_decision_root: [32]u8,
@@ -297,7 +303,7 @@ pub const EpochCache = struct {
 
         const fork_seq = config.forkSeqAtEpoch(current_epoch);
         var proposers = [_]ValidatorIndex{0} ** preset.SLOTS_PER_EPOCH;
-        var next_proposers: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex = null;
+        var next_proposers: ?ProposersDeferred = null;
 
         // Post-Fulu (EIP-7917): proposer_lookahead is the source of truth for proposers.
         // Both current and next epoch proposers are read from it directly.
@@ -305,15 +311,15 @@ pub const EpochCache = struct {
             switch (fork_seq) {
                 inline else => |f| {
                     var proposer_lookahead = try state.castToFork(f).proposerLookahead();
-                    next_proposers = undefined;
+                    next_proposers = .{ .indexes = undefined };
                     for (0..preset.SLOTS_PER_EPOCH) |i| {
                         proposers[i] = @intCast(try proposer_lookahead.get(i));
-                        next_proposers.?[i] = @intCast(try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i));
+                        next_proposers.?.indexes[i] = @intCast(try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i));
                     }
                 },
             }
         }
-        // Pre-Fulu: compute current and next epoch proposers
+        // Pre-Fulu: compute current proposers and retain the next epoch seed.
         else {
             if (current_shuffling_rc.get().active_indices.len > 0) {
                 var current_proposer_seed: [32]u8 = undefined;
@@ -343,19 +349,7 @@ pub const EpochCache = struct {
                         &next_proposer_seed,
                     ),
                 }
-                next_proposers = undefined;
-                const next_fork_seq = config.forkSeqAtEpoch(next_epoch);
-                switch (next_fork_seq) {
-                    inline else => |f| try computeProposers(
-                        f,
-                        allocator,
-                        next_proposer_seed,
-                        next_epoch,
-                        next_shuffling_rc.get().active_indices,
-                        effective_balance_increments,
-                        &next_proposers.?,
-                    ),
-                }
+                next_proposers = .{ .seed = next_proposer_seed };
             }
         }
 
@@ -616,10 +610,10 @@ pub const EpochCache = struct {
                     // field which we already processed in `processProposerLookahead`.
                     // Proposers are to be computed pre-fulu to be cached within `self`.
                     var proposer_lookahead = try fork_state.proposerLookahead();
-                    self.proposers_next_epoch = undefined;
+                    self.proposers_next_epoch = .{ .indexes = undefined };
                     for (0..preset.SLOTS_PER_EPOCH) |i| {
                         self.proposers[i] = @intCast(try proposer_lookahead.get(i));
-                        self.proposers_next_epoch.?[i] = @intCast(try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i));
+                        self.proposers_next_epoch.?.indexes[i] = @intCast(try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i));
                     }
                 } else {
                     var upcoming_proposer_seed: [32]u8 = undefined;
@@ -643,19 +637,7 @@ pub const EpochCache = struct {
                     if (next_epoch_indices.len > 0) {
                         var next_proposer_seed: [32]u8 = undefined;
                         try getSeed(fork, fork_state, self.epoch + 1, c.DOMAIN_BEACON_PROPOSER, &next_proposer_seed);
-                        self.proposers_next_epoch = undefined;
-                        const next_fork_seq = self.config.forkSeqAtEpoch(self.epoch + 1);
-                        switch (next_fork_seq) {
-                            inline else => |f| try computeProposers(
-                                f,
-                                self.allocator,
-                                next_proposer_seed,
-                                self.epoch + 1,
-                                next_epoch_indices,
-                                self.effective_balance_increments.get(),
-                                &self.proposers_next_epoch.?,
-                            ),
-                        }
+                        self.proposers_next_epoch = .{ .seed = next_proposer_seed };
                     } else {
                         self.proposers_next_epoch = null;
                     }
@@ -700,12 +682,12 @@ pub const EpochCache = struct {
     /// Gets the beacon proposer for a slot.
     ///
     /// Slot should be either part of the current or next epoch.
-    pub fn getBeaconProposer(self: *const EpochCache, slot: Slot) !ValidatorIndex {
+    pub fn getBeaconProposer(self: *EpochCache, slot: Slot) !ValidatorIndex {
         const epoch = computeEpochAtSlot(slot);
         if (epoch == self.epoch)
             return self.proposers[slot % preset.SLOTS_PER_EPOCH];
         if (epoch == self.epoch + 1) {
-            if (self.proposers_next_epoch) |next_proposers|
+            if (try self.getBeaconProposersNextEpoch()) |next_proposers|
                 return next_proposers[slot % preset.SLOTS_PER_EPOCH];
 
             // if this is somehow empty at epoch + 1, we return a
@@ -714,6 +696,30 @@ pub const EpochCache = struct {
         }
 
         return error.EpochTooFar;
+    }
+
+    /// Borrows indexes until this cache advances to another epoch or is destroyed.
+    pub fn getBeaconProposersNextEpoch(self: *EpochCache) !?*const [preset.SLOTS_PER_EPOCH]ValidatorIndex {
+        const next_proposers = if (self.proposers_next_epoch) |*value| value else return null;
+        switch (next_proposers.*) {
+            .seed => |seed| {
+                var indexes: [preset.SLOTS_PER_EPOCH]ValidatorIndex = undefined;
+                switch (self.config.forkSeqAtEpoch(self.epoch + 1)) {
+                    inline else => |fork| try computeProposers(
+                        fork,
+                        self.allocator,
+                        seed,
+                        self.epoch + 1,
+                        self.next_shuffling.get().active_indices,
+                        self.effective_balance_increments.get(),
+                        &indexes,
+                    ),
+                }
+                next_proposers.* = .{ .indexes = indexes };
+            },
+            .indexes => {},
+        }
+        return &next_proposers.indexes;
     }
 
     /// consumer takes ownership of the returned indexed attestation

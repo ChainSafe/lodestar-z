@@ -2,7 +2,7 @@ const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const BeaconState = @import("fork_types").BeaconState;
 
-pub fn getBeaconProposer(comptime fork: ForkSeq, epoch_cache: *const EpochCache, state: *BeaconState(fork), slot: u64) !u64 {
+pub fn getBeaconProposer(comptime fork: ForkSeq, epoch_cache: *EpochCache, state: *BeaconState(fork), slot: u64) !u64 {
     const preset_import = @import("preset").preset;
     const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 

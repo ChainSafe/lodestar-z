@@ -16,7 +16,7 @@ pub fn processAttestationPhase0(
     allocator: Allocator,
     io: std.Io,
     config: *const BeaconConfig,
-    epoch_cache: *const EpochCache,
+    epoch_cache: *EpochCache,
     state: *BeaconState(.phase0),
     attestation: *const ForkTypes(.phase0).Attestation.Type,
     verify_signature: bool,
