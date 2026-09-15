@@ -81,6 +81,54 @@ test "core local head and metadata updates preserve periodic status scheduling" 
     try std.testing.expect(setup.client.control.schedules[peer.index].status_due_ms > due);
 }
 
+test "core stale metadata finishes one refresh while periodic Status and later changes progress" {
+    for ([_]u64{ 9, 10 }) |reply_sequence| {
+        var setup: Setup = .{};
+        try setup.init(&.{ .metadata = .{ .seq_number = 10 } });
+        defer setup.deinit();
+        for (0..80) |_| try setup.step(0);
+        var snapshots: [4]t.Snapshot = undefined;
+        try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
+        const peer = snapshots[0].peer;
+        const row = &setup.client.control.schedules[peer.index];
+        const started = setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing;
+        const statuses = setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing;
+        row.status_due_ms = setup.pair.now.mono_ms + 2000;
+        try std.testing.expectEqual(@as(usize, 1), setup.server.snapshots(&snapshots));
+        const remote = snapshots[0].peer;
+        try setup.server.updateMetadata(&.{ .seq_number = 11 });
+        setup.server.control.schedules[remote.index].ping_due_ms = setup.pair.now.mono_ms;
+        for (0..80) |_| {
+            try setup.step(0);
+            if (setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing > started) break;
+        }
+        try std.testing.expectEqual(started + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
+        try setup.server.updateMetadata(&.{ .seq_number = reply_sequence });
+        for (0..80) |_| try setup.step(0);
+        try std.testing.expect(!row.metadata_pending);
+        try std.testing.expectEqual(@as(u64, 10), setup.client.catalog.get(peer).?.metadata.?.seq_number);
+        setup.pair.advance(1000);
+        for (0..80) |_| try setup.step(0);
+        try std.testing.expectEqual(started + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
+        setup.pair.advance(1000);
+        for (0..80) |_| try setup.step(0);
+        try std.testing.expectEqual(statuses + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
+        try std.testing.expectEqual(started + 1, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
+        setup.pair.advance(rr.Protocol.metadata_v1.info().quota_period_ms);
+        try setup.server.updateMetadata(&.{ .seq_number = 12 });
+        setup.client.control.schedules[peer.index].ping_due_ms = setup.pair.now.mono_ms;
+        for (0..80) |_| try setup.step(0);
+        try std.testing.expectEqual(started + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
+        try std.testing.expectEqual(@as(u64, 12), setup.client.catalog.get(peer).?.metadata.?.seq_number);
+        row.metadata_pending = true;
+        row.ping_due_ms = setup.pair.now.mono_ms;
+        row.status_due_ms = setup.pair.now.mono_ms;
+        setup.client.control.maintain(&setup.client.service, &setup.client.catalog, &setup.pair.client, &setup.client.local, setup.pair.now);
+        try std.testing.expectEqual(statuses + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
+        try std.testing.expectEqual(started + 2, setup.client.service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
+    }
+}
+
 test "core native stalled fork transition only wakes for eligible work" {
     var setup: Setup = .{};
     try setup.init(&.{});
