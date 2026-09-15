@@ -188,7 +188,7 @@ test "memory_safety: variable progressive list byte deserialization preserves ou
         defer List.deinit(failing.allocator(), &out);
         var sentinel: ?Bits.Type = try Bits.Type.fromBitLen(failing.allocator(), 5);
         errdefer if (sentinel) |*value| value.deinit(failing.allocator());
-        try sentinel.?.setAssumeCapacity(4, true);
+        sentinel.?.setAssumeCapacity(4, true);
         try out.append(failing.allocator(), sentinel.?);
         sentinel = null;
 
@@ -237,7 +237,7 @@ test "memory_safety: variable progressive list tree.toValue preserves out on OOM
         defer List.deinit(failing.allocator(), &out);
         var sentinel: ?Bits.Type = try Bits.Type.fromBitLen(failing.allocator(), 5);
         errdefer if (sentinel) |*value| value.deinit(failing.allocator());
-        try sentinel.?.setAssumeCapacity(4, true);
+        sentinel.?.setAssumeCapacity(4, true);
         try out.append(failing.allocator(), sentinel.?);
         sentinel = null;
 
