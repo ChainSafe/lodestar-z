@@ -141,6 +141,7 @@ fn getReusedEpochTransitionCache(allocator: Allocator, io: std.Io, validator_cou
     return _reused_cache.?;
 }
 
+/// Callers must exclude cache initialization and use until teardown returns.
 pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
     _reused_lock.lockUncancelable(io);
     defer _reused_lock.unlock(io);
@@ -153,6 +154,9 @@ pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
     }
 }
 
+/// Borrows process-global buffers. Callers must serialize cache lifetimes from
+/// `init` through `deinit` and exclude `deinitReusedEpochTransitionCache` throughout.
+/// The internal lock protects acquisition and resizing, not the borrowed lifetime.
 pub const EpochTransitionCache = struct {
     prev_epoch: Epoch,
     current_epoch: Epoch,
