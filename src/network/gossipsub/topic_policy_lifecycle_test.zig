@@ -59,6 +59,51 @@ test "topic policy remembers real inactive subscriptions without event pressure 
     try std.testing.expect(!pair.server.gossipsub.inner.overlay.namespace.?.subscribed(0, 0));
 }
 
+test "gossip accepted mesh membership does not invent a declared subscription across retirement" {
+    var config = options(&.{boundary()});
+    config.observe_subscriptions = false;
+    var g = try Gossipsub.init(std.testing.allocator, config);
+    defer g.deinit();
+    try std.testing.expect(g.subscribe(name));
+    const topic = g.overlay.findTopic(name).?;
+    const grafted = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const declared = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+    const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };
+    support.control(&g, grafted.index, .{ .graft = name }, now);
+    support.control(&g, declared.index, .{ .subscription = .{ .topic = name, .subscribe = true } }, now);
+    const ns = &g.overlay.namespace.?;
+    try std.testing.expect(g.overlay.inMesh(topic, grafted.index));
+    try std.testing.expect(!g.overlay.subscribers(topic).isSet(grafted.index));
+    try std.testing.expect(!ns.subscribed(grafted.index, 0));
+    try std.testing.expect(ns.subscribed(declared.index, 0));
+    var context = g.overlayContext(now.mono_ms);
+    g.overlay.maintain(&context, topic);
+    try std.testing.expect(g.overlay.inMesh(topic, grafted.index));
+    try std.testing.expect(g.overlay.publicationRecipients(&context, topic, false).isSet(grafted.index));
+    try std.testing.expect(!g.overlay.publicationRecipients(&context, topic, true).isSet(grafted.index));
+    support.control(&g, grafted.index, .{ .subscription = .{ .topic = name, .subscribe = false } }, now);
+    try std.testing.expect(!g.overlay.inMesh(topic, grafted.index));
+    g.overlay.maintain(&context, topic);
+    try std.testing.expect(!g.overlay.inMesh(topic, grafted.index));
+    try std.testing.expect(!g.overlay.gossipRecipients(&context, topic, 1).isSet(grafted.index));
+    try std.testing.expect(g.unsubscribe(name));
+    try std.testing.expect(!g.overlay.maintainFanout(&context, topic, true).isSet(grafted.index));
+    for ([_]@import("sessions.zig").SessionRef{ grafted, declared }) |peer| g.cancelWrites(peer);
+    g.last_now_ms = 1 + @max(g.options.retained_score_ms, @import("constants.zig").prune_backoff_ms, @import("constants.zig").fanout_ttl_ms);
+    context = g.overlayContext(g.last_now_ms);
+    _ = g.overlay.maintainFanout(&context, topic, false);
+    const pins = g.messages.topicPins();
+    g.overlay.reclaimTopic(&context, &pins, topic);
+    try std.testing.expect(!g.overlay.rows[topic].active);
+    try std.testing.expect(g.subscribe(name));
+    const replacement = g.overlay.findTopic(name).?;
+    try std.testing.expect(!g.overlay.subscribers(replacement).isSet(grafted.index));
+    try std.testing.expect(g.overlay.subscribers(replacement).isSet(declared.index));
+    g.overlay.maintain(&context, replacement);
+    try std.testing.expect(!g.overlay.inMesh(replacement, grafted.index));
+    try std.testing.expect(g.overlay.inMesh(replacement, declared.index));
+}
+
 test "topic policy incoming lengths precede decode work arena store and validation admission" {
     var g = try Gossipsub.init(std.testing.allocator, options(&.{boundary()}));
     defer g.deinit();

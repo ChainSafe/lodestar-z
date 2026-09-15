@@ -490,11 +490,10 @@ test "gossipsub legal maximum IWANT response uses actual IO without mesh publish
     var rng = std.Random.DefaultPrng.init(73);
     rng.random().bytes(payload);
     const destination = setup.client.gossipsub.inner.sessions.findPeer(setup.handles.client).?;
-    const topic_index = setup.client.gossipsub.inner.overlay.findTopic(test_topic).?;
-    setup.client.gossipsub.inner.overlay.setSubscription(&setup.client.gossipsub.inner.overlayContext(setup.client.gossipsub.inner.last_now_ms), topic_index, destination, false);
+    _ = setup.client.gossipsub.inner.overlay.peerSubscription(&setup.client.gossipsub.inner.overlayContext(setup.client.gossipsub.inner.last_now_ms), destination, test_topic, false);
     const result = try setup.client.gossipsub.inner.publish(test_topic, payload, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), result.queued);
-    setup.client.gossipsub.inner.overlay.setSubscription(&setup.client.gossipsub.inner.overlayContext(setup.client.gossipsub.inner.last_now_ms), topic_index, destination, true);
+    _ = setup.client.gossipsub.inner.overlay.peerSubscription(&setup.client.gossipsub.inner.overlayContext(setup.client.gossipsub.inner.last_now_ms), destination, test_topic, true);
     const id = topic_mod.validMessageId(test_topic, payload, .{});
     const pb = @import("protobuf.zig");
     var buf: [64]u8 = undefined;

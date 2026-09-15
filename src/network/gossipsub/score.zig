@@ -182,12 +182,6 @@ pub const PeerScore = struct {
         counters.in_mesh = false;
     }
 
-    /// A first-seen valid message from `peer` on `topic`: rewards first delivery
-    /// and counts toward the mesh delivery rate.
-    pub fn deliver(self: *PeerScore, peer: u16, topic: u16) void {
-        self.deliverEligible(peer, topic, self.tc(peer, topic).in_mesh);
-    }
-
     pub fn deliverEligible(self: *PeerScore, peer: u16, topic: u16, mesh_eligible: bool) void {
         const counters = self.tc(peer, topic);
         const params = self.topic_params[topic];
@@ -198,13 +192,6 @@ pub const PeerScore = struct {
     pub fn creditMesh(self: *PeerScore, peer: u16, topic: u16) void {
         const counters = self.tc(peer, topic);
         counters.mesh_deliveries = @min(counters.mesh_deliveries + 1, self.topic_params[topic].mesh_delivery_cap);
-    }
-
-    /// A duplicate from a mesh peer still counts toward its mesh delivery rate.
-    pub fn duplicate(self: *PeerScore, peer: u16, topic: u16) void {
-        const counters = self.tc(peer, topic);
-        const cap = self.topic_params[topic].mesh_delivery_cap;
-        if (counters.in_mesh) counters.mesh_deliveries = @min(counters.mesh_deliveries + 1, cap);
     }
 
     pub fn invalid(self: *PeerScore, peer: u16, topic: u16) void {
@@ -504,8 +491,8 @@ test "score rewards deliveries and punishes invalid messages" {
     defer score.deinit(std.testing.allocator);
 
     score.graft(1, 0, 0);
-    score.deliver(1, 0);
-    score.deliver(1, 0);
+    score.deliverEligible(1, 0, true);
+    score.deliverEligible(1, 0, true);
     try std.testing.expect(score.score(1, 1_000, 0) > 0);
 
     score.invalid(2, 0);
@@ -523,7 +510,7 @@ test "score crosses the graylist threshold on repeated invalid messages" {
 test "score decays counters toward zero over intervals" {
     var score = try testScores(std.testing.allocator, .{}, peer_capacity);
     defer score.deinit(std.testing.allocator);
-    score.deliver(1, 0);
+    score.deliverEligible(1, 0, false);
     const before = score.score(1, 0, 0);
     score.refresh(0); // primes last_decay
     var now: u64 = 0;
@@ -558,7 +545,7 @@ test "gossip policy duplicate graft preserves activation" {
 test "gossip policy active decay accounts for the complete bounded time gap" {
     var score = try testScores(std.testing.allocator, .{ .topic = .{ .first_delivery_decay = 0.99 } }, peer_capacity);
     defer score.deinit(std.testing.allocator);
-    score.deliver(0, 0);
+    score.deliverEligible(0, 0, false);
     score.refresh(1);
     score.refresh(1 + 100 * score.params.decay_interval_ms);
     try std.testing.expectApproxEqAbs(@as(f64, 0.3660323412732292), score.score(0, 1, 0), 0.0000000001);
@@ -575,8 +562,8 @@ test "gossip policy independent topic decay and frozen offline counters" {
     defer score.deinit(std.testing.allocator);
     try score.configureTopic(0, .{ .first_delivery_weight = 2, .first_delivery_decay = 0.5 });
     try score.configureTopic(1, .{ .first_delivery_weight = 4, .first_delivery_decay = 0.25 });
-    score.deliver(0, 0);
-    score.deliver(0, 1);
+    score.deliverEligible(0, 0, false);
+    score.deliverEligible(0, 1, false);
     score.refresh(0);
     score.refresh(10);
     try std.testing.expectEqual(@as(f64, 2), score.score(0, 10, 0));
@@ -677,7 +664,7 @@ test "score cache mutation IP topic and heartbeat decay boundaries remain exact"
     var ip_count: u16 = 0;
     var score = try testScores(std.testing.allocator, .{ .ip_colocation_weight = -5, .decay_interval_ms = 10, .topic = .{ .first_delivery_decay = 0.5 } }, 2);
     defer score.deinit(std.testing.allocator);
-    score.deliver(0, 0);
+    score.deliverEligible(0, 0, false);
     score.refresh(0);
     try std.testing.expectEqual(@as(f64, 1), score.score(0, 0, ip_count));
     try std.testing.expectEqual(@as(?u64, null), score.nextChange(0));
@@ -697,7 +684,7 @@ test "score cache mutation IP topic and heartbeat decay boundaries remain exact"
     try std.testing.expectEqual(@as(f64, -19.5), score.score(0, 11, ip_count));
     try std.testing.expect(score.setAppScore(0, 7));
     try std.testing.expectEqual(@as(f64, -12.5), score.score(0, 11, ip_count));
-    score.deliver(0, 0);
+    score.deliverEligible(0, 0, false);
     try std.testing.expectEqual(@as(f64, -11.5), score.score(0, 11, ip_count));
     try score.configureTopic(0, .{ .first_delivery_weight = 2, .first_delivery_decay = 0.5 });
     try std.testing.expectEqual(@as(f64, -10), score.score(0, 11, ip_count));
@@ -809,7 +796,7 @@ test "score retirement invalidates primed totals with identical parameters" {
     var score = try testScores(std.testing.allocator, .{}, 2);
     defer score.deinit(std.testing.allocator);
     score.refresh(0);
-    score.deliver(0, 0);
+    score.deliverEligible(0, 0, false);
     score.invalid(1, 0);
     for ([_]f64{ 1, -100 }, 0..) |expected, peer| {
         try std.testing.expectEqual(expected, score.score(@intCast(peer), 1, 0));
@@ -839,7 +826,7 @@ test "metrics score snapshots preserve cache state and match policy evaluation" 
     defer scores.deinit(std.testing.allocator);
     scores.graft(0, 0, 0);
     _ = scores.score(0, 1000, 0);
-    scores.deliver(0, 0);
+    scores.deliverEligible(0, 0, true);
     const cached = scores.rows[0].cached;
     const calculations = scores.calculations;
     const visits = scores.topic_visits;
@@ -868,7 +855,7 @@ test "metrics score weights use policy thresholds and snapshots do not count as 
     }, 1);
     defer scores.deinit(std.testing.allocator);
     scores.graft(0, 0, 0);
-    scores.deliver(0, 0);
+    scores.deliverEligible(0, 0, true);
     scores.invalid(0, 0);
     scores.tc(0, 0).mesh_failures = 1;
     scores.penalize(0, 3);
@@ -895,7 +882,7 @@ test "metrics score weights use policy thresholds and snapshots do not count as 
     _ = scores.snapshotWeights(0, 2000, ip_count, &details);
     try std.testing.expectEqualDeep(TopicWeights{}, details.topics[0]);
     scores.topic_params[0].first_delivery_weight = 100;
-    scores.deliver(0, 0);
+    scores.deliverEligible(0, 0, false);
     const capped = scores.snapshotWeights(0, 2000, ip_count, &details);
     try std.testing.expectEqual(@as(f64, 100), details.topics[0].p2);
     try std.testing.expectEqual(@as(f64, 10) + details.global.p6, capped);
