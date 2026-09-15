@@ -230,8 +230,8 @@ pub fn stateTransition(
                     if (comptime (bt == .blinded and f.lt(.bellatrix)) or (bt == .blinded and f.gte(.gloas))) {
                         return error.InvalidBlockTypeForFork;
                     } else {
-                        var local_diagnostics: Diagnostics = .{};
-                        const diagnostics = opts.diagnostics orelse &local_diagnostics;
+                        var block_diagnostics: Diagnostics = .{};
+                        const diagnostics = opts.diagnostics orelse &block_diagnostics;
                         processBlock(
                             f,
                             allocator,
