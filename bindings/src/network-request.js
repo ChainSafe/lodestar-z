@@ -1,5 +1,9 @@
 const finalizers = new FinalizationRegistry(({route, handle}) => {
-  try { route.deref()?.requestRetire(handle, true); } catch {}
+  try {
+    route.deref()?.requestRetire(handle, true);
+  } catch {
+    // Runtime teardown may have already retired this handle.
+  }
 });
 
 function failure(code) {
@@ -16,10 +20,12 @@ export class NativeRequest {
   constructor(native, handle) {
     this.#route = new WeakRef(native);
     this.#handle = handle;
-    finalizers.register(this, {route: this.#route, handle}, this);
+    finalizers.register(this, {handle, route: this.#route}, this);
   }
 
-  [Symbol.asyncIterator]() { return this; }
+  [Symbol.asyncIterator]() {
+    return this;
+  }
 
   next() {
     if (this.#done) return Promise.resolve({done: true, value: undefined});
@@ -31,8 +37,11 @@ export class NativeRequest {
     }
     this.#busy = true;
     let pending;
-    try { pending = native.requestPull(this.#handle); }
-    catch (error) { pending = Promise.reject(error); }
+    try {
+      pending = native.requestPull(this.#handle);
+    } catch (error) {
+      pending = Promise.reject(error);
+    }
     return pending.then(
       (result) => {
         this.#busy = false;
@@ -58,8 +67,11 @@ export class NativeRequest {
     if (this.#done) pending = Promise.resolve();
     else {
       this.#complete();
-      try { pending = Promise.resolve(this.#route.deref()?.requestRetire(this.#handle, false)); }
-      catch (error) { pending = Promise.reject(error); }
+      try {
+        pending = Promise.resolve(this.#route.deref()?.requestRetire(this.#handle, false));
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
     }
     this.#retirement = pending.then(() => {
       if (throwing) throw value;
@@ -68,6 +80,10 @@ export class NativeRequest {
     return this.#retirement;
   }
 
-  return() { return this.#retire(false); }
-  throw(value) { return this.#retire(true, value); }
+  return() {
+    return this.#retire(false);
+  }
+  throw(value) {
+    return this.#retire(true, value);
+  }
 }
