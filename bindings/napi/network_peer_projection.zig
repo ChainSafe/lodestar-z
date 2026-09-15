@@ -78,12 +78,10 @@ fn identify(env: napi.Env, value: *const n.identify.Metadata) !Value {
     try put(object, "protocolVersion", if (value.protocol_version) |*version| try env.createStringUtf8(version.slice()) else try env.getNull());
     const protocols = try env.createArrayWithLength(value.protocols.count());
     var index: usize = 0;
-    for (0..n.capabilities.protocol_count) |i| {
-        const protocol: n.router.Protocol = if (i < n.reqresp.Protocol.count) .{ .reqresp = @enumFromInt(i) } else if (i == n.capabilities.protocol_count - 1) .identify else .{ .meshsub = @enumFromInt(i - n.reqresp.Protocol.count) };
-        if (value.protocols.contains(protocol)) {
-            try element(protocols, index, try env.createStringUtf8(protocol.id()));
-            index += 1;
-        }
+    var supported = value.protocols.iterator();
+    while (supported.next()) |protocol| {
+        try element(protocols, index, try env.createStringUtf8(protocol.id()));
+        index += 1;
     }
     try put(object, "protocols", protocols);
     return object;

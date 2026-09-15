@@ -4,7 +4,7 @@ const reqresp = @import("reqresp/protocol.zig");
 const ForkSeq = @import("config").ForkSeq;
 const Version = @import("gossipsub/sessions.zig").Version;
 
-pub const protocol_count = reqresp.Protocol.count + 4;
+pub const protocol_count = reqresp.Protocol.count + std.enums.values(Version).len + 1;
 const Bits = std.meta.Int(.unsigned, protocol_count);
 
 pub const Set = struct {
@@ -26,9 +26,26 @@ pub const Set = struct {
         return @popCount(self.bits);
     }
 
+    pub fn iterator(self: Set) Iterator {
+        return .{ .remaining = self.bits };
+    }
+
+    pub const Iterator = struct {
+        remaining: Bits,
+
+        pub fn next(self: *Iterator) ?routing.Protocol {
+            if (self.remaining == 0) return null;
+            const index = @ctz(self.remaining);
+            self.remaining &= self.remaining - 1;
+            if (index < reqresp.Protocol.count) return .{ .reqresp = @enumFromInt(index) };
+            if (index == protocol_count - 1) return .identify;
+            return .{ .meshsub = @enumFromInt(index - reqresp.Protocol.count) };
+        }
+    };
+
     fn bit(protocol: routing.Protocol) Bits {
         const index: std.math.Log2Int(Bits) = @intCast(switch (protocol) {
-            .identify => reqresp.Protocol.count + 3,
+            .identify => protocol_count - 1,
             .reqresp => |which| @as(u8, @intFromEnum(which)),
             .meshsub => |version| reqresp.Protocol.count + @intFromEnum(version),
         });
