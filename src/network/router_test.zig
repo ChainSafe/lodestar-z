@@ -255,7 +255,7 @@ test "router composed service retains native activity behind a partial reqresp s
     try std.testing.expectEqual(@as(usize, 1), client.reqresp.work_cursor);
     var wire: [rr.codec.frame_scratch_max]u8 = undefined;
     const encoded = try rr.codec.encodeChunk(0, null, &ping, &wire);
-    const stream = server.reqresp.inbound[incoming.?.index].stream;
+    const stream = server.reqresp.inbound[incoming.?.index].lifecycle.stream;
     try std.testing.expectEqual(encoded.len, try pair.server.write(stream, encoded, false));
     try pair.pump();
     const active = pair.client.takeActivity(&activity);
@@ -473,9 +473,9 @@ test "router capabilities activation preserves negotiated response context and c
                 setup.server.router.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
                 setup.client.reqresp.setRequestFork(.fulu);
                 setup.server.reqresp.setRequestFork(.fulu);
-                try std.testing.expectEqual(129, setup.client.reqresp.outbound[handle.index].chunks_max);
+                try std.testing.expectEqual(129, setup.client.reqresp.outbound[handle.index].lifecycle.chunks_max);
                 const owner = &setup.server.reqresp.inbound[incoming.request.index];
-                try std.testing.expectEqual(129, owner.chunks_max);
+                try std.testing.expectEqual(129, owner.lifecycle.chunks_max);
                 try std.testing.expectEqual(@import("config").ForkSeq.phase0, owner.request_fork);
                 activated = true;
             },

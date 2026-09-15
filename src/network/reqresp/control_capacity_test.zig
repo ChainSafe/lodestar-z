@@ -301,7 +301,7 @@ test "reqresp control capacity raw and service inbound admission select the same
     try std.testing.expect(status.index != first.index and status.index != second.index);
     try std.testing.expectEqual(
         server.reqresp.inboundSink(status.index).ptr,
-        server.reqresp.inbound[status.index].io.sink.ptr,
+        server.reqresp.inbound[status.index].lifecycle.io.sink.ptr,
     );
 }
 
@@ -560,7 +560,7 @@ test "reqresp reserved physical sinks admit full native control wave and recycle
     for ([_]protocol.Protocol{ .status_v1, .ping_v1, .metadata_v3, .goodbye_v1 }, 0..) |which, i| {
         wave[i] = (server.reqresp.accept(&pair.server, try inboundStream(&pair, handles.client), .{ .protocol = .{ .reqresp = which }, .leftover = &.{}, .fin = false }, pair.now) catch null).?;
         try std.testing.expectEqual(@as(u16, @intCast(i)), wave[i].index);
-        try std.testing.expectEqual(server.reqresp.inboundSink(wave[i].index).ptr, server.reqresp.inbound[wave[i].index].io.sink.ptr);
+        try std.testing.expectEqual(server.reqresp.inboundSink(wave[i].index).ptr, server.reqresp.inbound[wave[i].index].lifecycle.io.sink.ptr);
         try std.testing.expect(server.reqresp.inboundSink(wave[i].index).len >= which.info().request_max);
     }
     try std.testing.expect(server.reqresp.cancel(wave[0]));

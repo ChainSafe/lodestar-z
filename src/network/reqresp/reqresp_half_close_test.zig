@@ -27,10 +27,10 @@ fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []
             .ready => remote = outcome.stream,
             else => return error.TestUnexpectedResult,
         };
-        if (remote != null and pair.client.reqresp.outbound[handle.index].state == .sending_request) break;
+        if (remote != null and pair.client.reqresp.outbound[handle.index].phase == .request) break;
     }
     try std.testing.expect(remote != null);
-    try std.testing.expectEqual(.sending_request, pair.client.reqresp.outbound[handle.index].state);
+    try std.testing.expectEqual(.request, pair.client.reqresp.outbound[handle.index].phase);
     return .{ .handle = handle, .remote = remote.? };
 }
 
@@ -67,7 +67,7 @@ fn expectDone(pair: *Pair, request: Request, expected: []const u8) !void {
                 done = true;
             },
             .failed => |failed| {
-                std.debug.print("unexpected failure {any} detail={s}\n", .{ failed, pair.client.reqresp.outbound[request.handle.index].io.failure_detail });
+                std.debug.print("unexpected failure {any} detail={s}\n", .{ failed, pair.client.reqresp.outbound[request.handle.index].lifecycle.io.failure_detail });
                 return error.TestUnexpectedResult;
             },
             else => {},
@@ -79,8 +79,8 @@ fn expectDone(pair: *Pair, request: Request, expected: []const u8) !void {
     pair.client.reqresp.cleanupPending(&pair.pair.client, &pair.client.router);
     try std.testing.expect(pair.client.reqresp.outboundSlot(request.handle) == null);
     try std.testing.expect(!pair.pair.client.registry.slots[pair.handles.client.index].table.matches(
-        pair.client.reqresp.outbound[request.handle.index].stream.slot,
-        pair.client.reqresp.outbound[request.handle.index].stream.id,
+        pair.client.reqresp.outbound[request.handle.index].lifecycle.stream.slot,
+        pair.client.reqresp.outbound[request.handle.index].lifecycle.stream.id,
     ));
 }
 
@@ -112,7 +112,7 @@ test "reqresp recovers only complete Goodbye bytes retained by a closed authenti
         var wire: [128]u8 = undefined;
         const encoded = try codec.encodeRequest(&payload, &wire);
         const bytes = encoded[0 .. encoded.len - @intFromBool(truncated)];
-        try std.testing.expectEqual(bytes.len, try pair.pair.client.write(pair.client.reqresp.outbound[request.handle.index].stream, bytes, true));
+        try std.testing.expectEqual(bytes.len, try pair.pair.client.write(pair.client.reqresp.outbound[request.handle.index].lifecycle.stream, bytes, true));
         try pair.pair.pump();
         try std.testing.expect(pair.pair.client.close(pair.handles.client, 0));
         try pair.pair.pump();
@@ -150,7 +150,7 @@ test "reqresp response FIN stops complete written chunks but do not hide an empt
             if (incoming != null and (!send_chunk or sent)) break;
         }
         try std.testing.expect(incoming != null);
-        const stream = pair.client.reqresp.outbound[request.index].stream;
+        const stream = pair.client.reqresp.outbound[request.index].lifecycle.stream;
         pair.pair.client.shutdown(stream, .read, 0);
         try pair.pair.pump();
         try std.testing.expect(pair.server.reqresp.finish(incoming.?, pair.pair.now));
@@ -190,7 +190,7 @@ test "reqresp dispatches a complete Goodbye before FIN and keeps other request f
         var sink: [8]u8 = undefined;
         const request = try negotiate(&pair, method, &payload, &sink, .{});
         _ = try pair.server.reqresp.accept(&pair.pair.server, request.remote, .{ .protocol = .{ .reqresp = method }, .leftover = &.{}, .fin = false }, pair.pair.now);
-        const local = pair.client.reqresp.outbound[request.handle.index].stream;
+        const local = pair.client.reqresp.outbound[request.handle.index].lifecycle.stream;
         var wire: [128]u8 = undefined;
         const encoded = try codec.encodeRequest(&payload, &wire);
         var len = encoded.len;
@@ -246,7 +246,7 @@ test "reqresp half close preserves early metadata and nonempty request responses
                 if (buffered) {
                     try pair.pair.pump();
                     const slot = &pair.client.reqresp.outbound[request.handle.index];
-                    const input = try slot.io.read(&pair.pair.client, slot.stream);
+                    const input = try slot.lifecycle.io.read(&pair.pair.client, slot.lifecycle.stream);
                     try std.testing.expect(input.bytes.len > 0 and input.fin);
                 }
                 try expectDone(&pair, request, response);
@@ -266,9 +266,9 @@ test "reqresp half close accepts a later response and releases the request buffe
     pair.pair.server.shutdown(request.remote, .read, 0);
     for (0..4) |_| try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
     const slot = &pair.client.reqresp.outbound[request.handle.index];
-    try std.testing.expectEqual(.awaiting, slot.state);
-    try std.testing.expectEqual(@as(usize, 0), slot.request_ssz.len);
-    try std.testing.expect(!slot.io.writing and slot.io.outbox.idle());
+    try std.testing.expectEqual(.response, slot.phase);
+    try std.testing.expectEqual(@as(usize, 0), slot.lifecycle.io.payload.len);
+    try std.testing.expect(!slot.lifecycle.io.writing and slot.lifecycle.io.outbox.idle());
     pair.pair.advance(100);
     try reply(&pair, request, 0, &bytes, true);
     try expectDone(&pair, request, &bytes);
@@ -317,7 +317,7 @@ test "reqresp half close without a response retains progress and absolute deadli
             .{});
         pair.pair.server.shutdown(request.remote, .read, 0);
         for (0..4) |_| try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
-        try std.testing.expectEqual(.awaiting, pair.client.reqresp.outbound[request.handle.index].state);
+        try std.testing.expectEqual(.response, pair.client.reqresp.outbound[request.handle.index].phase);
         pair.pair.advance(99);
         try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
         pair.pair.advance(1);
@@ -399,7 +399,7 @@ test "reqresp half close does not hide a retired stream without response EOF" {
     defer pair.deinit();
     var sink: [25]u8 = undefined;
     const request = try negotiate(&pair, .metadata_v3, &.{}, &sink, .{});
-    pair.pair.client.closeStream(pair.client.reqresp.outbound[request.handle.index].stream, 0);
+    pair.pair.client.closeStream(pair.client.reqresp.outbound[request.handle.index].lifecycle.stream, 0);
     try expectFailure(&pair, .stream_closed);
     try std.testing.expectEqual(@as(u64, 0), pair.client.reqresp.protocol_counters[@intFromEnum(protocol.Protocol.metadata_v3)].request_write_stops);
 }

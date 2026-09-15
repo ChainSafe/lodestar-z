@@ -151,7 +151,7 @@ test "service preserves drained native activity across a partial request sweep" 
         if (incoming != null) break;
     }
     try std.testing.expect(incoming != null);
-    const stream = setup.server.reqresp.inbound[incoming.?.index].stream;
+    const stream = setup.server.reqresp.inbound[incoming.?.index].lifecycle.stream;
     setup.client.reqresp.options.work_per_pump_max = 1;
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &.{} }).control;
     const codec = @import("codec.zig");

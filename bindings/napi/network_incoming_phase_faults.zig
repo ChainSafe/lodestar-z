@@ -127,10 +127,10 @@ pub fn terminalBarrier(runtime: *Runtime, accepted: bool) !?TerminalProof {
         return null;
     };
     const native = runtime.heavy.?.core.core.service.reqresp.inboundSlot(cell.handle).?;
-    std.debug.assert(native.terminal == null and native.chunks == cell.chunks);
+    std.debug.assert(native.lifecycle.running() and native.lifecycle.chunks == cell.chunks);
     if (accepted) std.debug.assert(native.state == .finishing or (native.state == .writing_chunk and native.close_after_write)) else std.debug.assert(native.state == .serving);
     std.Io.Threaded.mutexLock(&mutex);
-    snapshot = .{ .terminalBefore = !accepted, .terminalAccepted = accepted, .nativeFinishing = native.state == .finishing, .nativeErrorWriting = native.state == .writing_chunk and native.close_after_write, .nativeTerminal = native.terminal != null, .chunks = native.chunks };
+    snapshot = .{ .terminalBefore = !accepted, .terminalAccepted = accepted, .nativeFinishing = native.state == .finishing, .nativeErrorWriting = native.state == .writing_chunk and native.close_after_write, .nativeTerminal = native.lifecycle.terminalEvent() != null, .chunks = native.lifecycle.chunks };
     std.Io.Threaded.mutexUnlock(&mutex);
     const proof: TerminalProof = .{ .session = runtime.diag.session, .handle = cell.handle };
     runtime.unlock();
@@ -167,13 +167,13 @@ pub fn afterStep(runtime: *Runtime, proof: *const TerminalProof, events: []const
         std.debug.assert(!snapshot.stepObserved);
         snapshot.stepObserved = true;
         if (native) |slot| {
-            std.debug.assert(slot.terminal == null);
+            std.debug.assert(slot.lifecycle.running());
             snapshot.stepFinishing = slot.state == .finishing;
             snapshot.stepWriting = slot.state == .writing_chunk;
             snapshot.stepCloseAfterWrite = slot.close_after_write;
             snapshot.stepErrorStatus = slot.pending_result;
             snapshot.stepNativeState = @intFromEnum(slot.state);
-            snapshot.stepChunks = slot.chunks;
+            snapshot.stepChunks = slot.lifecycle.chunks;
         } else {
             std.debug.assert(events.len <= 32);
             for (events) |event| if (event == .served and std.meta.eql(event.served.request, cell.handle)) {

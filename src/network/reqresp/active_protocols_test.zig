@@ -162,8 +162,8 @@ test "reqresp active hostile coalesced context rejects before sink writes with o
                 try setup.pumpOnce();
                 for (setup.serverEvents()) |event| if (event == .request) {
                     const slot = &setup.server.reqresp.inbound[event.request.request.index];
-                    stream = slot.stream;
-                    if (split > 0) try std.testing.expectEqual(split, try setup.pair.server.write(slot.stream, bytes[0..split], false));
+                    stream = slot.lifecycle.stream;
+                    if (split > 0) try std.testing.expectEqual(split, try setup.pair.server.write(slot.lifecycle.stream, bytes[0..split], false));
                 };
                 for (setup.clientEvents()) |event| switch (event) {
                     .failed => |failure| {
@@ -212,7 +212,7 @@ test "reqresp active zero ceiling rejects malicious success and permits remote e
             try setup.pumpOnce();
             for (setup.serverEvents()) |event| if (event == .request) {
                 const slot = &setup.server.reqresp.inbound[event.request.request.index];
-                try std.testing.expectEqual(chunk.len, try setup.pair.server.write(slot.stream, chunk, true));
+                try std.testing.expectEqual(chunk.len, try setup.pair.server.write(slot.lifecycle.stream, chunk, true));
             };
             for (setup.clientEvents()) |event| switch (event) {
                 .failed => |failure| {
@@ -417,19 +417,19 @@ test "reqresp request admission outbound validation ceiling and owner fork snaps
     try std.testing.expectError(error.InvalidRequestOptions, request(&setup, .blocks_by_root_v2, &roots, sink, .{ .expected_chunks = 130 }));
     const handle = try request(&setup, .blocks_by_root_v2, &roots, sink, .{});
     setup.client.reqresp.setRequestFork(.fulu);
-    try std.testing.expectEqual(@as(u32, 129), setup.client.reqresp.outbound[handle.index].chunks_max);
+    try std.testing.expectEqual(@as(u32, 129), setup.client.reqresp.outbound[handle.index].lifecycle.chunks_max);
     var accepted = false;
     var completed = false;
     for (0..60) |_| {
         try setup.pumpOnce();
-        for (setup.server.reqresp.inbound) |*slot| if (slot.state == .receiving_request) {
+        for (setup.server.reqresp.inbound) |*slot| if (slot.lifecycle.running() and slot.state == .receiving_request) {
             accepted = true;
             try std.testing.expectEqual(config.ForkSeq.phase0, slot.request_fork);
             setup.server.reqresp.setRequestFork(.fulu);
         };
         for (setup.serverEvents()) |event| if (event == .request) {
             try std.testing.expect(accepted);
-            try std.testing.expectEqual(@as(u32, 129), setup.server.reqresp.inbound[event.request.request.index].chunks_max);
+            try std.testing.expectEqual(@as(u32, 129), setup.server.reqresp.inbound[event.request.request.index].lifecycle.chunks_max);
             try std.testing.expect(setup.server.reqresp.finish(event.request.request, setup.pair.now));
         };
         if (setup.clientEvents().len > 0 and setup.clientEvents()[0] == .done) {

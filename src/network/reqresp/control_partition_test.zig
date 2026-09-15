@@ -191,7 +191,7 @@ test "reqresp service retains request and chunk bytes through control progress" 
             if (event == .chunk_sent) _ = server.reqresp.finish(event.chunk_sent.request, pair.now);
         }
     }
-    try std.testing.expect(client.reqresp.outbound[app.index].pending_event != null);
+    try std.testing.expect(client.reqresp.outbound[app.index].lifecycle.pendingEvent() != null);
     try std.testing.expectEqualSlices(u8, &block, sink[0..block.len]);
     try std.testing.expectEqual(
         pair.now.mono_ms + 60_000,

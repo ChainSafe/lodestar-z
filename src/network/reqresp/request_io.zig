@@ -4,6 +4,7 @@ const codec = @import("codec.zig");
 const stream_io = @import("../stream_io.zig");
 
 pub const RequestIO = struct {
+    payload: []const u8 = &.{},
     sink: []u8 = &.{},
     scratch: []u8 = &.{},
     read_buffer: []u8 = &.{},
@@ -73,6 +74,7 @@ pub const RequestIO = struct {
     }
 
     pub fn clear(self: *RequestIO) void {
+        self.payload = &.{};
         self.buffered_start = 0;
         self.buffered_end = 0;
         self.decoding = false;

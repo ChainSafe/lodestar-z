@@ -54,11 +54,11 @@ pub fn turnLocked(runtime: *Runtime, now: @import("network").Now) void {
         for (runtime.incoming.?.cells) |*cell| {
             if (cell.state != .response_native) continue;
             const native = &runtime.heavy.?.core.core.service.reqresp.inbound[cell.handle.index];
-            std.debug.assert(std.meta.eql(native.handle(cell.handle.index), cell.handle));
+            std.debug.assert(std.meta.eql(native.lifecycle.handle(cell.handle.index), cell.handle));
             var value = capture(runtime, cell);
-            value.nativeBorrowed = native.pending_ssz.ptr == cell.response.ptr and native.pending_ssz.len == cell.response.len;
-            value.writing = native.state == .writing_chunk;
-            value.withheld = native.state == .withheld;
+            value.nativeBorrowed = native.lifecycle.io.payload.ptr == cell.response.ptr and native.lifecycle.io.payload.len == cell.response.len;
+            value.writing = native.lifecycle.running() and native.state == .writing_chunk;
+            value.withheld = native.lifecycle.running() and native.state == .withheld;
             publish(&value);
         }
     }

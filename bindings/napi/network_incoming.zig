@@ -196,7 +196,7 @@ fn failure(reason: rr.Failure) !Failure {
 pub fn awaitingTerminal(owner: *rr.ReqResp, handle: rr.RequestHandle, err: anyerror) bool {
     if (err != error.Busy or handle.direction != .inbound) return false;
     const slot = owner.inboundSlot(handle) orelse return false;
-    return slot.terminal != null;
+    return slot.lifecycle.terminalEvent() != null;
 }
 pub fn flags(runtime: *Runtime, now: n.Now) !void {
     runtime.lock();

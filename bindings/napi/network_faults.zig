@@ -212,11 +212,11 @@ pub fn requestBarrier(runtime: *Runtime, token: requests.Token, stage: Scenario)
         const service = &runtime.heavy.?.core.core.service;
         std.debug.assert(handle.direction == .outbound and handle.index < service.reqresp.outbound.len);
         const client = &service.reqresp.outbound[handle.index];
-        std.debug.assert(std.meta.eql(client.handle(handle.index), handle));
-        std.debug.assert(client.state == .negotiating and client.negotiation_owned);
-        snapshot.phase = client.requestPhase();
+        std.debug.assert(std.meta.eql(client.lifecycle.handle(handle.index), handle));
+        std.debug.assert(client.lifecycle.running() and client.phase == .negotiation and client.lifecycle.stream_owner == .router);
+        snapshot.phase = client.phase;
         for (service.router.negotiator.entries) |entry| {
-            if (entry.state == .negotiating and std.meta.eql(entry.stream, client.stream)) snapshot.negotiatorMatched = true;
+            if (entry.state == .negotiating and std.meta.eql(entry.stream, client.lifecycle.stream)) snapshot.negotiatorMatched = true;
         }
         std.debug.assert(snapshot.phase == .negotiation and snapshot.negotiatorMatched);
     }
