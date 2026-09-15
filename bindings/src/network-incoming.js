@@ -1,5 +1,9 @@
 const finalizers = new FinalizationRegistry(({route, handle}) => {
-  try { route.deref()?.incomingTerminal(handle, 2, undefined, undefined); } catch {}
+  try {
+    route.deref()?.incomingTerminal(handle, 2, undefined, undefined);
+  } catch {
+    // Runtime teardown may have already retired this handle.
+  }
 });
 
 function failure(code) {
@@ -28,15 +32,18 @@ export class NativeIncoming {
         finalizers.unregister(incoming);
       }
     });
-    finalizers.register(this, {route: this.#route, handle: this.#handle}, this);
+    finalizers.register(this, {handle: this.#handle, route: this.#route}, this);
   }
 
   respond(data, context) {
     if (this.#done || this.#terminal) return Promise.reject(failure("NetworkIncomingClosed"));
     const native = this.#route.deref();
     if (!native) return Promise.reject(failure("NetworkClosed"));
-    try { return native.incomingRespond(this.#handle, data, context); }
-    catch (error) { return Promise.reject(error); }
+    try {
+      return native.incomingRespond(this.#handle, data, context);
+    } catch (error) {
+      return Promise.reject(error);
+    }
   }
 
   #end(action, status, message) {
@@ -51,7 +58,13 @@ export class NativeIncoming {
     }
   }
 
-  finish() { return this.#end(0); }
-  fail(status, message) { return this.#end(1, status, message); }
-  cancel() { return this.#end(2); }
+  finish() {
+    return this.#end(0);
+  }
+  fail(status, message) {
+    return this.#end(1, status, message);
+  }
+  cancel() {
+    return this.#end(2);
+  }
 }
