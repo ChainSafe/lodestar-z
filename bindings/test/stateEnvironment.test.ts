@@ -87,7 +87,7 @@ describe("state environment ownership", () => {
     bindings.metrics.init();
     bindings.metrics.registerLocalValidator(1);
     const metrics = bindings.metrics.scrapeMetrics();
-    const expectedRoot = state.processSlots(state.slot + 1).hashTreeRoot();
+    const expectedRoot = state.processSlots(state.slot + 33).hashTreeRoot();
     const beforeWorker = bindings.metrics.scrapeMetrics();
     expect(beforeWorker).toMatch(/validator_monitor_prev_epoch_on_chain_balance [1-9]\d*/);
     const root = await runWorker<Uint8Array>(`
@@ -96,14 +96,14 @@ describe("state environment ownership", () => {
       bindings.metrics.registerLocalValidator(2);
       bindings.metrics.registerLocalValidator(3);
       const state = bindings.BeaconStateView.createFromBytes(ssz.fulu.BeaconState.serialize(createStfState()));
-      const root = state.processSlots(state.slot + 1).hashTreeRoot();
+      const root = state.processSlots(state.slot + 33).hashTreeRoot();
       bindings.config.set({...stfConfig, FULU_FORK_EPOCH: Infinity}, new Uint8Array(32).fill(1));
       parentPort.postMessage(root);
     `);
     expect(root).toEqual(expectedRoot);
     expect(bindings.metrics.scrapeMetrics()).toBe(beforeWorker);
     expect(state.getVoluntaryExitValidity(signedExit(), true)).toBe("valid");
-    expect(state.processSlots(state.slot + 1).hashTreeRoot()).toEqual(expectedRoot);
+    expect(state.processSlots(state.slot + 33).hashTreeRoot()).toEqual(expectedRoot);
     expect(metrics).toContain("stfn_epoch_transition");
     bindings.metrics.unregisterLocalValidator(1);
   });
