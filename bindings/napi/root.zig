@@ -1,3 +1,5 @@
+//! Load only one addon version per process; class instances cannot cross versions.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const js = @import("zapi:zapi").js;
