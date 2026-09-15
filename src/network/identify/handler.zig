@@ -50,6 +50,7 @@ pub const Handler = struct {
     address_count: u8 = 0,
     local: ?codec.Local = null,
     stopped: bool = false,
+    delivery_cursor: usize = 0,
 
     pub fn validate(options: Options) InitError!void {
         if (options.inbound_max == 0 or options.inbound_max > 64 or options.outbound_max == 0 or options.outbound_max > 64) return error.InvalidLimits;
@@ -217,7 +218,11 @@ pub const Handler = struct {
             }
         };
         var count: usize = 0;
-        for (self.outbound) |*slot| if (slot.stream) |stream| {
+        const start_index = self.delivery_cursor;
+        for (0..self.outbound.len) |offset| {
+            const index = (start_index + offset) % self.outbound.len;
+            const slot = &self.outbound[index];
+            const stream = slot.stream orelse continue;
             if (slot.phase != .terminal and now.mono_ms >= slot.deadline) {
                 router.cancel(engine, stream);
                 finish(slot, engine, .{ .failed = .timeout });
@@ -267,8 +272,9 @@ pub const Handler = struct {
                 out[count] = slot.result;
                 count += 1;
                 slot.* = .{};
+                self.delivery_cursor = (index + 1) % self.outbound.len;
             }
-        };
+        }
         return count;
     }
 
