@@ -89,9 +89,6 @@ test "process sync aggregate - sanity" {
 }
 
 test "process sync aggregate - proposer penalty floors at zero" {
-    // The proposer sits in the sync committee (often at several positions, since the fixture has
-    // fewer validators than SYNC_COMMITTEE_SIZE). When it does not participate it is penalised once
-    // per position, and the running balance must floor at zero rather than underflow.
     const allocator = std.testing.allocator;
 
     const Case = struct { name: []const u8, start_balance_factor: u64, participate: bool };
@@ -102,10 +99,7 @@ test "process sync aggregate - proposer penalty floors at zero" {
         .{ .name = "mixed participation", .start_balance_factor = 0, .participate = true },
     };
 
-    // Whether any case actually placed the proposer in the sync committee. With a small
-    // SYNC_COMMITTEE_SIZE (the minimal preset uses 32 for 256 validators) the proposer may be
-    // absent, which makes the penalty path unreachable for this fixture.
-    var exercised = false;
+    var penalty_path_exercised = false;
 
     for (cases) |case| {
         var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 180_000 });
@@ -127,11 +121,10 @@ test "process sync aggregate - proposer penalty floors at zero" {
         for (committee_indices, 0..) |index, i| {
             if (index != proposer_index) continue;
             proposer_positions += 1;
-            // In the mixed case let the proposer participate at its first position only.
             if (case.participate and proposer_positions == 1) try sync_aggregate.sync_committee_bits.set(i, true);
         }
         if (proposer_positions == 0) continue;
-        exercised = true;
+        penalty_path_exercised = true;
 
         const penalty = epoch_cache.sync_participant_reward;
         var balances = try fork_state.balances();
@@ -152,16 +145,14 @@ test "process sync aggregate - proposer penalty floors at zero" {
         var updated = try fork_state.balances();
         const final_balance = try updated.get(proposer_index);
         if (case.start_balance_factor >= proposer_positions and !case.participate) {
-            // Enough balance to absorb every penalty, so no clamping happened.
             try std.testing.expectEqual(
                 (case.start_balance_factor - proposer_positions) * penalty,
                 final_balance,
             );
         } else if (!case.participate) {
-            // Clamped: the balance cannot go below zero.
             try std.testing.expectEqual(@as(u64, 0), final_balance);
         }
     }
 
-    if (!exercised) return error.SkipZigTest;
+    if (!penalty_path_exercised) return error.SkipZigTest;
 }

@@ -19,8 +19,6 @@ test "memory_safety: initValidatorIndices should release cloned indices on init 
 }
 
 test "phase0 sync-committee lookups return an error instead of aborting" {
-    // The N-API surface exposes these accessors, so a pre-Altair state must produce a catchable
-    // error rather than panicking the host process.
     var cache = SyncCommitteeCache.initEmpty();
     try std.testing.expectError(
         SyncCommitteeCache.Error.SyncCommitteeNotAvailable,

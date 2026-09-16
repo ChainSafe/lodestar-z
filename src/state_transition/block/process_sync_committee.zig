@@ -102,9 +102,6 @@ pub fn processSyncAggregate(
         } else {
             // Negative rewards for non participants
             if (index == proposer_index) {
-                // Saturating: proposer_balance is unsigned, so `@max(0, a - b)` cannot implement the
-                // zero floor - the subtraction is evaluated first and underflows. This mirrors the
-                // floor decreaseBalance applies to every other committee member.
                 proposer_balance = proposer_balance -| sync_participant_reward;
             } else {
                 try decreaseBalance(fork, state, index, sync_participant_reward);

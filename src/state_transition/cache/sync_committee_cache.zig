@@ -20,9 +20,6 @@ pub const SyncCommitteeCache = union(enum) {
     phase0: void,
     altair: *SyncCommitteeCacheAltair,
 
-    /// Returned when a pre-Altair cache is asked for sync-committee data. Phase0 states have no
-    /// sync committee, and this is reachable from the N-API surface, so it must stay an error the
-    /// host can catch rather than aborting the process.
     pub const Error = error{SyncCommitteeNotAvailable};
 
     pub fn getValidatorIndices(self: *const SyncCommitteeCache) Error![]ValidatorIndex {
