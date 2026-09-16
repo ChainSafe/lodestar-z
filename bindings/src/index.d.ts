@@ -147,7 +147,7 @@ interface ProposerRewards {
 
 interface SyncCommitteeCache {
   validatorIndices: Uint32Array;
-  validatorIndexMap: Map<number, number[]>;
+  validatorIndexMap: Map<number, Uint32Array>;
 }
 
 interface EpochShuffling {
