@@ -1,11 +1,15 @@
 //! Tests for `weak_subjectivity.zig`.
 
+const active_preset = @import("preset").active_preset;
 const std = @import("std");
 const validator = @import("./utils/validator.zig");
 const computeWeakSubjectivityPeriodFromConstituentsElectra = @import("weak_subjectivity.zig").computeWeakSubjectivityPeriodFromConstituentsElectra;
 const computeWeakSubjectivityPeriodFromConstituentsPhase0 = @import("weak_subjectivity.zig").computeWeakSubjectivityPeriodFromConstituentsPhase0;
 
 test "computeWeakSubjectivityPeriodFromConstituentsPhase0 - mainnet table" {
+    // The reference table is computed with mainnet preset constants, so it is only
+    // meaningful under that preset even though it pins the mainnet chain config.
+    if (active_preset != .mainnet) return error.SkipZigTest;
     // Ported from packages/state-transition/test/unit/util/weakSubjectivity.test.ts
     const config = &@import("config").mainnet.config;
     const min_delay = config.chain.MIN_VALIDATOR_WITHDRAWABILITY_DELAY;
@@ -40,6 +44,9 @@ test "computeWeakSubjectivityPeriodFromConstituentsPhase0 - mainnet table" {
 }
 
 test "computeWeakSubjectivityPeriodFromConstituentsElectra - mainnet table" {
+    // The reference table is computed with mainnet preset constants, so it is only
+    // meaningful under that preset even though it pins the mainnet chain config.
+    if (active_preset != .mainnet) return error.SkipZigTest;
     // Ported from packages/state-transition/test/unit/util/weakSubjectivity.test.ts
     // Values from https://github.com/ethereum/consensus-specs/blob/8ebb5e80862641287d7e8db2bbf69fa31612640b/specs/electra/weak-subjectivity.md#weak-subjectivity-period
     const config = &@import("config").mainnet.config;
