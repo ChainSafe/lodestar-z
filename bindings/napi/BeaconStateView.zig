@@ -978,10 +978,12 @@ pub fn getSyncCommitteesWitness(self: *const BeaconStateView) !js_types.SyncComm
 }
 
 /// Get a single Merkle proof  for a node at the given generalized index.
-pub fn getSingleProof(self: *const BeaconStateView, gindex_arg: js.Number) !js.Array {
+pub fn getSingleProof(self: *const BeaconStateView, gindex_arg: js.BigInt) !js.Array {
     const env = js.env();
     const cached_state = try self.requireState();
-    const gindex: u64 = @intCast(try gindex_arg.toI64());
+    var lossless = false;
+    const gindex = try gindex_arg.toU64(&lossless);
+    if (!lossless) return error.InvalidGindex;
 
     var proof = cached_state.state.getSingleProof(allocator, gindex) catch {
         return throwNullAs(js.Array, "STATE_ERROR", "Failed to get single proof");
