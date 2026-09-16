@@ -139,6 +139,54 @@ pub fn merkleizeChunks(allocator: std.mem.Allocator, chunks: [][32]u8, out: *[32
     }
 }
 
+/// Visits progressive content chunks in order. Exhaustion validates the right-spine terminator.
+pub const NodeIterator = struct {
+    pool: *Node.Pool,
+    spine: Node.Id,
+    remaining: usize,
+    subtree_remaining: usize = 0,
+    subtree_index: usize = 0,
+    iterator: Node.DepthIterator = undefined,
+
+    pub fn init(pool: *Node.Pool, root: Node.Id, count: usize) !NodeIterator {
+        const max_subtrees = @min((@import("hashing").max_depth - 1) / 3, (@bitSizeOf(usize) - 1) / 2) + 1;
+        const max_chunks = comptime blk: {
+            var total: usize = 0;
+            for (0..max_subtrees) |i| total += @as(usize, 1) << @intCast(2 * i);
+            break :blk total;
+        };
+        if (count > max_chunks) return error.InvalidSubtreeLength;
+        return .{ .pool = pool, .spine = root, .remaining = count };
+    }
+
+    pub fn next(self: *NodeIterator) !?Node.Id {
+        if (self.remaining == 0) {
+            if (!std.mem.eql(u8, self.spine.getRoot(self.pool), &@as([32]u8, @splat(0)))) {
+                return error.InvalidTerminatorNode;
+            }
+            return null;
+        }
+        if (self.subtree_remaining == 0) {
+            const subtree_depth: Depth = @intCast(2 * self.subtree_index);
+            const subtree_length = @as(usize, 1) << @intCast(subtree_depth);
+            const subtree_root = if (@intFromEnum(self.spine) == 0)
+                @as(Node.Id, @enumFromInt(subtree_depth))
+            else blk: {
+                const left = try self.spine.getLeft(self.pool);
+                self.spine = try self.spine.getRight(self.pool);
+                break :blk left;
+            };
+            self.iterator = Node.DepthIterator.init(self.pool, subtree_root, subtree_depth, 0);
+            self.subtree_remaining = @min(subtree_length, self.remaining);
+            self.subtree_index += 1;
+        }
+        const node = try self.iterator.next();
+        self.subtree_remaining -= 1;
+        self.remaining -= 1;
+        return node;
+    }
+};
+
 pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
     const subtree_count = subtreeIndex(out.len);
     var n = root;
