@@ -1489,8 +1489,58 @@ pub fn withParentPayloadApplied(_: *const BeaconStateView, _: js.Value) !BeaconS
 
 // --- API-only methods (used by beacon-node rewards endpoints) ---
 
-pub fn computeBlockRewards(_: *const BeaconStateView, _: js.Value, _: ?js.Value) !js.Value {
-    return throwNotImpl(js.Value, "computeBlockRewards not implemented");
+pub fn computeBlockRewards(
+    self: *const BeaconStateView,
+    signed_block_bytes: js.Uint8Array,
+    is_blinded: js.Boolean,
+    proposer_rewards: ?js.Value,
+) !js_types.BlockRewards {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const bytes = try signed_block_bytes.toSlice();
+
+    const block_type: BlockType = if (try is_blinded.toBool()) .blinded else .full;
+    const signed_block = try AnySignedBeaconBlock.deserialize(
+        allocator,
+        block_type,
+        cached_state.state.forkSeq(),
+        bytes,
+    );
+    defer signed_block.deinit(allocator);
+
+    const cached = try parseProposerRewards(proposer_rewards);
+    const rewards = try st.computeBlockRewardsAny(
+        allocator,
+        js.io(),
+        cached_state,
+        signed_block.beaconBlock(),
+        cached,
+    );
+
+    const obj = try env.createObject();
+    try obj.setNamedProperty("proposerIndex", try env.createInt64(@intCast(rewards.proposer_index)));
+    try obj.setNamedProperty("total", try env.createInt64(@intCast(rewards.total)));
+    try obj.setNamedProperty("attestations", try env.createInt64(@intCast(rewards.attestations)));
+    try obj.setNamedProperty("syncAggregate", try env.createInt64(@intCast(rewards.sync_aggregate)));
+    try obj.setNamedProperty("proposerSlashings", try env.createInt64(@intCast(rewards.proposer_slashings)));
+    try obj.setNamedProperty("attesterSlashings", try env.createInt64(@intCast(rewards.attester_slashings)));
+    return .{ .val = obj };
+}
+
+fn parseProposerRewards(value: ?js.Value) !?st.ProposerRewards {
+    const raw = (value orelse return null).toValue();
+    if (try raw.typeof() != .object) return null;
+    return st.ProposerRewards{
+        .attestations = try optionalU64(raw, "attestations"),
+        .sync_aggregate = try optionalU64(raw, "syncAggregate"),
+        .slashing = try optionalU64(raw, "slashing"),
+    };
+}
+
+fn optionalU64(obj: napi.Value, name: [:0]const u8) !u64 {
+    if (!try obj.hasNamedProperty(name)) return 0;
+    const raw = try (try obj.getNamedProperty(name)).getValueInt64();
+    return if (raw < 0) 0 else @intCast(raw);
 }
 
 pub fn computeAttestationsRewards(_: *const BeaconStateView, _: ?js.Value) !js.Value {

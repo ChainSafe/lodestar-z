@@ -35,6 +35,15 @@ pub const SyncCommittee = js.Object(struct {
     aggregatePubkey: js.Uint8Array,
 });
 
+pub const BlockRewards = js.Object(struct {
+    proposerIndex: js.Number,
+    total: js.Number,
+    attestations: js.Number,
+    syncAggregate: js.Number,
+    proposerSlashings: js.Number,
+    attesterSlashings: js.Number,
+});
+
 pub const IndexedSyncCommittee = js.Object(struct {
     validatorIndices: js.Uint32Array,
     validatorIndexMap: js.Value,
