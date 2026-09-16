@@ -15,14 +15,14 @@ const Pair = harness.Pair;
 fn roundTrip(setup: *Pair, seed: u8) !void {
     const request_ssz = statusBytes(seed);
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
-    _ = try setup.client.request(
-        &setup.pair.client,
-        setup.handles.client,
+    _ = try setup.shared.client.request(
+        &setup.shared.pair.client,
+        setup.shared.handles.client,
         .status_v1,
         &request_ssz,
         &sink,
         .{},
-        setup.pair.now,
+        setup.shared.pair.now,
     );
     const reply = statusBytes(seed +% 1);
     var done = false;
@@ -32,15 +32,15 @@ fn roundTrip(setup: *Pair, seed: u8) !void {
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
                 try std.testing.expectEqual(Protocol.status_v1, incoming.protocol);
-                try setup.server.reqresp.respond(incoming.request, &reply, null, setup.pair.now);
+                try setup.shared.server.reqresp.respond(incoming.request, &reply, null, setup.shared.pair.now);
             },
-            .chunk_sent => |sent| try std.testing.expect(setup.server.reqresp.finish(sent.request, setup.pair.now)),
+            .chunk_sent => |sent| try std.testing.expect(setup.shared.server.reqresp.finish(sent.request, setup.shared.pair.now)),
             else => {},
         };
         for (setup.clientEvents()) |event| switch (event) {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, &reply, chunk.bytes);
-                try std.testing.expect(setup.client.reqresp.consume(chunk.request));
+                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request));
             },
             .done => done = true,
             .failed => return error.TestUnexpectedResult,
@@ -56,8 +56,8 @@ test "service round trips a status request through the collapsed host loop" {
     defer setup.deinit();
 
     try roundTrip(&setup, 5);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.reqresp.active().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
 }
 
 test "service reclaims inbound sinks across more requests than it has slots" {
@@ -69,8 +69,8 @@ test "service reclaims inbound sinks across more requests than it has slots" {
 
     var seed: u8 = 0;
     while (seed < 12) : (seed += 1) try roundTrip(&setup, seed);
-    try std.testing.expectEqual(@as(u64, 12), setup.server.reqresp.counters.requests_served);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u64, 12), setup.shared.server.reqresp.counters.requests_served);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
 }
 
 test "service fails in-flight requests when the connection closes" {
@@ -80,14 +80,14 @@ test "service fails in-flight requests when the connection closes" {
 
     const request_ssz = statusBytes(1);
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
-    _ = try setup.client.request(
-        &setup.pair.client,
-        setup.handles.client,
+    _ = try setup.shared.client.request(
+        &setup.shared.pair.client,
+        setup.shared.handles.client,
         .status_v1,
         &request_ssz,
         &sink,
         .{},
-        setup.pair.now,
+        setup.shared.pair.now,
     );
     var seen = false;
     var rounds: usize = 0;
@@ -99,7 +99,7 @@ test "service fails in-flight requests when the connection closes" {
     }
     try std.testing.expect(seen);
 
-    try std.testing.expect(setup.pair.client.close(setup.handles.client, 0));
+    try std.testing.expect(setup.shared.pair.client.close(setup.shared.handles.client, 0));
     var client_failed = false;
     var server_failed = false;
     rounds = 0;
@@ -114,24 +114,24 @@ test "service fails in-flight requests when the connection closes" {
     }
     try std.testing.expect(client_failed);
     try std.testing.expect(server_failed);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
 }
 
 test "service control wakeup includes negotiation after application quiescence" {
     var setup: Pair = .{};
     try setup.init(.{ .outbound_max = 4, .inbound_max = 4 }, .{ .outbound_max = 4, .inbound_max = 4 });
     defer setup.deinit();
-    setup.client.quiesceApplications();
+    setup.shared.client.quiesceApplications();
     const bytes = [_]u8{0} ** 8;
     var sink: [8]u8 = undefined;
-    const handle = try setup.client.request(&setup.pair.client, setup.handles.client, .ping_v1, &bytes, &sink, .{ .absolute_timeouts = .{ .response_ms = 60_000 } }, setup.pair.now);
-    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &.{} }).control;
-    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms + 5_000), setup.client.nextWakeup(setup.pair.now, .{ .control = 0 }));
-    try std.testing.expect(setup.client.reqresp.cancel(handle));
-    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &.{} }).control;
-    try std.testing.expectEqual(@as(?u64, null), setup.client.nextWakeup(setup.pair.now, .{ .control = 0 }));
+    const handle = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{ .absolute_timeouts = .{ .response_ms = 60_000 } }, setup.shared.pair.now);
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
+    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms + 5_000), setup.shared.client.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
+    try std.testing.expect(setup.shared.client.reqresp.cancel(handle));
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
+    try std.testing.expectEqual(@as(?u64, null), setup.shared.client.nextWakeup(setup.shared.pair.now, .{ .control = 0 }));
     var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(usize, 1), setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &events }).control);
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expect(events[0].failed.reason == .cancelled);
 }
 
@@ -141,7 +141,7 @@ test "service preserves drained native activity across a partial request sweep" 
     defer setup.deinit();
     const bytes = [_]u8{9} ** 8;
     var sink: [8]u8 = undefined;
-    _ = try setup.client.request(&setup.pair.client, setup.handles.client, .ping_v1, &bytes, &sink, .{}, setup.pair.now);
+    _ = try setup.shared.client.request(&setup.shared.pair.client, setup.shared.handles.client, .ping_v1, &bytes, &sink, .{}, setup.shared.pair.now);
     var incoming: ?reqresp.RequestHandle = null;
     for (0..30) |_| {
         try setup.pumpOnce();
@@ -151,23 +151,23 @@ test "service preserves drained native activity across a partial request sweep" 
         if (incoming != null) break;
     }
     try std.testing.expect(incoming != null);
-    const stream = setup.server.reqresp.inbound[incoming.?.index].lifecycle.stream;
-    setup.client.reqresp.options.work_per_pump_max = 1;
-    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &.{} }).control;
+    const stream = setup.shared.server.reqresp.inbound[incoming.?.index].request.stream;
+    setup.shared.client.reqresp.options.work_per_pump_max = 1;
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .control = &.{} }).control;
     const codec = @import("codec.zig");
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeChunk(0, null, &bytes, &wire);
-    try std.testing.expectEqual(encoded.len, try setup.pair.server.write(stream, encoded, false));
-    try setup.pair.pump();
+    try std.testing.expectEqual(encoded.len, try setup.shared.pair.server.write(stream, encoded, false));
+    try setup.shared.pair.pump();
     var activity: [128]engine_mod.Handle = undefined;
-    const active = setup.pair.client.takeActivity(&activity);
+    const active = setup.shared.pair.client.takeActivity(&activity);
     try std.testing.expect(active > 0);
     var events: [1]Event = undefined;
-    _ = setup.client.process(&setup.pair.client, &.{}, activity[0..active], setup.pair.now, .{ .control = &events }).control;
+    _ = setup.shared.client.process(&setup.shared.pair.client, &.{}, activity[0..active], setup.shared.pair.now, .{ .control = &events }).control;
     var received = false;
     for (0..10) |_| {
-        try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.client.nextWakeup(setup.pair.now, .{ .control = 1 }));
-        const count = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .control = &events }).control;
+        try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), setup.shared.client.nextWakeup(setup.shared.pair.now, .{ .control = 1 }));
+        const count = setup.shared.client.process(&setup.shared.pair.client, &.{}, &.{}, setup.shared.pair.now, .{ .control = &events }).control;
         if (count == 1) {
             try std.testing.expectEqualSlices(u8, &bytes, events[0].chunk.bytes);
             received = true;

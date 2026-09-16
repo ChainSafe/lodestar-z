@@ -42,7 +42,7 @@ const Node = struct {
                 pending.* = null;
             }
         };
-        _ = self.core.beginPump(now, &.{});
+        _ = @import("session_io.zig").beginPump(&self.core, now, &.{});
         self.core.tick(now);
     }
 
@@ -111,8 +111,8 @@ test "gossip simulation converges after partial writes and host validation press
             try b.receive(now, step < 128 or step >= 256);
             if (step % 7 != 0) try Node.transfer(&a, &b, now, 1 + rng.random().uintLessThan(usize, 17));
             if (step % 11 != 0) try Node.transfer(&b, &a, now, 1 + rng.random().uintLessThan(usize, 13));
-            a.core.finishPump(now);
-            b.core.finishPump(now);
+            @import("session_io.zig").finishPump(&a.core, now);
+            @import("session_io.zig").finishPump(&b.core, now);
             if (step == 255) {
                 for (b.received) |received| try std.testing.expect(!received);
                 try std.testing.expect(a.core.resourceSnapshot().held_tx_retains > 0);
@@ -137,7 +137,7 @@ test "gossip simulation ignores decoded items and write receipts from a retired 
     try std.testing.expect(old.generation != node.session.generation);
     const now: Now = .{ .mono_ms = 2, .unix_s = 0 };
     try node.begin(now);
-    var turn = node.core.beginPump(now, &.{});
+    var turn = @import("session_io.zig").beginPump(&node.core, now, &.{});
     var peer = @import("turn.zig").Credits.peer(&node.core.options);
     try std.testing.expectEqual(.done, node.core.receiveItem(old, .{ .subscription = .{ .topic = name, .subscribe = true } }, &turn, &peer));
     node.core.writeCompleted(old, .{ .control = .{ .token = 1, .kind = .iwant } }, now.mono_ms);

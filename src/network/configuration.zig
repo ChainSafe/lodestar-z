@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("core.zig");
+const core = @import("managed.zig");
 const engine = @import("quic/engine.zig");
 const transport = @import("transport.zig");
 const rr = @import("reqresp/reqresp.zig");
@@ -12,6 +12,7 @@ const router = @import("router.zig");
 pub const Profile = enum { small, beacon_node };
 pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks" });
 pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "retained_capacity", "retained_outbound_reserve", "random_seed" });
+pub const IdentifyOverrides = Overrides(@import("identify/root.zig").Options, &.{});
 pub const RouterOverrides = Overrides(router.Options, &.{"outbound_control_reserved"});
 
 /// Req/resp, gossip and router fields override profile defaults; shared capacities are derived.
@@ -26,7 +27,8 @@ pub const Request = struct {
     reqresp: ReqRespOverrides = .{},
     gossip: GossipOverrides = .{},
     router: RouterOverrides = .{},
-    identify: ?@import("identify/root.zig").Options = null,
+    identify: IdentifyOverrides = .{},
+    admission_policy: ?@import("reqresp/request_policy.zig").Config = null,
     control: ?@import("peers/control.zig").Options = null,
     byte_limit: ?usize = null,
 };
@@ -66,6 +68,12 @@ pub fn resolve(request: Request) !Resolved {
         .inbound_application_per_peer_max = if (small) 4 else 8,
     };
     applyOverrides(&requests, request.reqresp);
+    if (request.admission_policy) |policy_config| {
+        if (requests.admission != null) return error.InvalidOptions;
+        requests.admission = try rr.AdmissionOptions.defaults(&policy_config, peer_options.capacity, requests.inbound_max);
+    }
+    var identify: @import("identify/root.zig").Options = .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 };
+    applyOverrides(&identify, request.identify);
     var protocols: router.Options = .{
         .negotiations_max = if (small) 32 else 256,
         .outbound_control_reserved = requests.outbound_control_reserved,
@@ -95,7 +103,7 @@ pub fn resolve(request: Request) !Resolved {
             .dial = request.dial orelse .{ .capacity = if (small) 32 else 256, .concurrent_max = @min(4, limits.dialing_max), .seed = request.seed },
             .control = request.control orelse .{ .operations_max = if (small) 4 else 16 },
             .service = .{
-                .identify = request.identify orelse .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 },
+                .identify = identify,
                 .router = protocols,
                 .reqresp = requests,
                 .gossipsub = gossip_options,
@@ -111,7 +119,7 @@ pub fn resolve(request: Request) !Resolved {
 
 pub fn validate(limits: engine.Limits, options: core.Options) !void {
     _ = try engine.Engine.validateLimits(limits);
-    try core.Core.validateOptions(options);
+    try core.validateOptions(options);
     if (options.peers.max_peers > limits.connections_max or
         options.service.reqresp.peers < limits.connections_max or
         options.dial.concurrent_max > limits.dialing_max or
@@ -265,4 +273,23 @@ test "managed configuration preserves independent transport work limits" {
     const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = limits });
     try std.testing.expectEqual(limits, resolved.work_limits);
     try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = .{ .send_per_step_max = 0 } }));
+}
+
+test "resolved admission and Identify overrides use final profile capacities" {
+    const resolved = try resolve(.{
+        .profile = .small,
+        .seed = 91,
+        .forks = &.{},
+        .reqresp = .{ .inbound_max = 256 },
+        .admission_policy = @import("reqresp/policy_fixture.zig").config(),
+        .identify = .{ .agent = "resolved-agent", .protocol_version = "resolved-version" },
+    });
+    const requests = resolved.core.service.reqresp;
+    const quotas = requests.admission.?.limits;
+    try std.testing.expectEqual(resolved.core.peers.capacity, quotas.identities);
+    try std.testing.expectEqual(@as(u32, 256), quotas.global[@intFromEnum(@import("config").ForkSeq.fulu)][@intFromEnum(@import("reqresp/protocol.zig").Protocol.ping_v1)].tokens);
+    const identify = resolved.core.service.identify.?;
+    try std.testing.expectEqual(@as(u16, 2), identify.inbound_max);
+    try std.testing.expectEqualStrings("resolved-agent", identify.agent);
+    try std.testing.expectEqualStrings("resolved-version", identify.protocol_version);
 }

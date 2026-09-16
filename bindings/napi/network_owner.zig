@@ -16,6 +16,7 @@ pub const Owner = struct {
     threaded_live: bool = false,
     core_live: bool = false,
     config: Config = undefined,
+    resolved: n.configuration.Resolved = undefined,
     core: n.NetworkCore = undefined,
     threaded: std.Io.Threaded = undefined,
     key: n.KeyPair = undefined,
@@ -41,17 +42,26 @@ pub const Owner = struct {
     }
 };
 
-pub fn initialize(self: *Runtime) !void {
-    std.debug.assert(self.thread == null and self.startup == .pending);
-    const previous_log = n.logging.bind(&self.logs);
-    defer _ = n.logging.bind(previous_log);
-    std.log.scoped(.network_runtime).info("owner_initializing", .{});
+pub fn prepareConfiguration(self: *Runtime) !void {
     self.heavy.?.threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
     self.heavy.?.threaded_live = true;
     const io = self.heavy.?.threaded.io();
     var seed: u64 = undefined;
     try faults.check(.entropy);
     try io.randomSecure(std.mem.asBytes(&seed));
+    const request = try self.heavy.?.application.buildRequest(&self.heavy.?.config, seed);
+    self.heavy.?.resolved = n.configuration.resolve(request) catch |err| switch (err) {
+        error.InvalidLimits => return error.InvalidNetworkConfig,
+        else => return err,
+    };
+}
+
+pub fn initialize(self: *Runtime) !void {
+    std.debug.assert(self.thread == null and self.startup == .pending);
+    const previous_log = n.logging.bind(&self.logs);
+    defer _ = n.logging.bind(previous_log);
+    std.log.scoped(.network_runtime).info("owner_initializing", .{});
+    const io = self.heavy.?.threaded.io();
     try faults.check(.key);
     self.heavy.?.key = try n.KeyPair.fromSecretKey(&self.heavy.?.config.secret);
 
@@ -61,11 +71,10 @@ pub fn initialize(self: *Runtime) !void {
         self.heavy.?.records[i] = try d.identity.enr.Record.init(self.heavy.?.config.bootstrap[i].bytes[0..self.heavy.?.config.bootstrap[i].len]);
     }
     try faults.check(.core);
-    try self.heavy.?.core.initManaged(allocator, io, .{
+    try self.heavy.?.core.init(allocator, io, &self.heavy.?.resolved, .{
         .wait_mode = .native_poll,
         .host = &self.heavy.?.key,
         .bind = self.heavy.?.config.bind,
-        .configuration = try self.heavy.?.application.buildRequest(&self.heavy.?.config, seed),
         .local = self.heavy.?.config.local,
         .schedule = self.heavy.?.config.schedule,
         .discovery = if (self.heavy.?.config.discovery_bind) |bind| .{ .bind = bind, .sequence = self.heavy.?.config.discovery_sequence, .advertisement = self.heavy.?.config.advertisement, .bootstrap = self.heavy.?.records[0..self.heavy.?.config.bootstrap_count] } else null,
@@ -155,7 +164,7 @@ fn serve(self: *Runtime) !void {
         const sequence = try self.advanceSequence();
         const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs, .gossipsub = &self.heavy.?.gossip_outputs }, commands.waitLimit(self, timestamp));
         self.lock();
-        self.reports.sync(&self.heavy.?.core.core.catalog);
+        self.reports.sync(&self.heavy.?.core.peer_manager.catalog);
         self.unlock();
         @import("network_gossip_faults.zig").afterStep(self);
         if (terminal_accepted) |proof| @import("network_incoming_phase_faults.zig").afterStep(self, &proof, self.heavy.?.application_outputs[0..result.counts.application]);
@@ -168,7 +177,7 @@ fn serve(self: *Runtime) !void {
 }
 fn publishReady(self: *Runtime) !void {
     if (comptime faults.enabled) {
-        if (self.test_scenario == .gossip) faults.captureGossip(self.heavy.?.core.core.service.gossipsub.inner, &self.heavy.?.core.core.local.fork);
+        if (self.test_scenario == .gossip) faults.captureGossip(self.heavy.?.core.service.gossipsub, &self.heavy.?.core.peer_manager.local.fork);
     }
     const identity = try self.heavy.?.readIdentity();
     try startupBarrier(self, .before_ready);
@@ -210,7 +219,7 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
     self.lock();
     if (metrics) |*value| self.metrics = value.*;
     if (timestamp.mono_ms >= self.health_log_due_ms) {
-        const active_requests = self.heavy.?.core.core.service.reqresp.active();
+        const active_requests = self.heavy.?.core.service.reqresp.active();
         std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.metrics.config.target, active_requests.outbound, active_requests.inbound, self.metrics.totals.runtime.dial_started, self.metrics.totals.runtime.dial_deferred, self.metrics.live.discovery_peers, self.metrics.totals.gossip_counts.local_pressure_resets, self.metrics.totals.udp.received_bytes, self.metrics.totals.udp.sent_bytes });
         self.health_log_due_ms = timestamp.mono_ms +| 30000;
     }

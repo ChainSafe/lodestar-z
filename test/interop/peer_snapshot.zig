@@ -4,7 +4,7 @@ const Peer = @import("network_peer.zig").Peer;
 
 pub fn emit(peer: *Peer, id: u32) !void {
     const reqresp = peer.service.reqresp.active();
-    const gossip = peer.service.gossipsub.inner.resourceSnapshot();
+    const gossip = peer.service.gossipsub.resourceSnapshot();
     const transport = peer.transport.engine.counters;
     var streams: usize = 0;
     for (peer.transport.engine.activeIndices()) |index| {
@@ -18,7 +18,7 @@ pub fn emit(peer: *Peer, id: u32) !void {
     }
     var has_inbound = false;
     var outbound_version: ?[]const u8 = null;
-    for (peer.service.gossipsub.inner.sessions.rows) |entry| {
+    for (peer.service.gossipsub.sessions.rows) |entry| {
         if (!entry.active) continue;
         if (entry.in_stream != null) has_inbound = true;
         if (entry.outbound == .live) outbound_version = @tagName(entry.outbound.live.version);
@@ -34,13 +34,13 @@ pub fn emit(peer: *Peer, id: u32) !void {
         .negotiations = negotiations,
         .hasInboundStream = has_inbound,
         .outboundVersion = outbound_version,
-        .rpcsReceived = peer.service.gossipsub.inner.counters.rpcs_received,
-        .duplicates = peer.service.gossipsub.inner.counters.duplicates,
+        .rpcsReceived = peer.service.gossipsub.counters.rpcs_received,
+        .duplicates = peer.service.gossipsub.counters.duplicates,
         .steps = peer.steps,
         .connectionIndex = if (peer.conn) |conn| @as(?u16, conn.index) else null,
         .connectionDirection = if (peer.conn) |conn| if (peer.transport.engine.direction(conn)) |direction| @as(?[]const u8, @tagName(direction)) else null else null,
         .connectionGeneration = if (peer.conn) |conn| @as(?u32, conn.generation) else null,
-        .malformedRpcs = peer.service.gossipsub.inner.counters.malformed_rpcs,
+        .malformedRpcs = peer.service.gossipsub.counters.malformed_rpcs,
         .droppedUnroutable = transport.dropped_unroutable,
         .droppedFull = transport.dropped_full,
         .recvErrors = transport.recv_errors,

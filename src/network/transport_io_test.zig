@@ -1,3 +1,4 @@
+const FaultIo = @import("udp").testing.FaultIo;
 const std = @import("std");
 const constants = @import("constants.zig");
 const transport_mod = @import("transport.zig");
@@ -379,17 +380,17 @@ test "transport startup allocation failure releases transferred engine and TLS o
 }
 
 test "transport requires startup seed entropy but no entropy for later dial and receive" {
-    var vtable = std.testing.io.vtable.*;
-    vtable.randomSecure = StartupEntropyFault.random;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    StartupEntropyFault.calls = 0;
+    var faults: FaultIo = .{ .entropy = .{ .at = 2 } };
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    const io = faults.io();
     const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{41}));
     var refused: @import("transport.zig").Transport = .{};
     try std.testing.expectError(error.EntropyUnavailable, refused.init(std.testing.allocator, io, .{
         .host = &key,
         .bind = .{ .ip4 = .loopback(0) },
     }));
-    try std.testing.expectEqual(@as(u8, 2), StartupEntropyFault.calls);
+    try std.testing.expectEqual(@as(usize, 2), faults.entropy_calls);
 
     var node: Node = .{};
     try node.init(41);
@@ -403,20 +404,8 @@ test "transport requires startup seed entropy but no entropy for later dial and 
     const received = try support.step(&node.transport, io, &events, &.{}, .{ .wait_max_ms = 10 });
     try std.testing.expect(received.datagrams_received > 0);
     try std.testing.expect(received.datagrams_accepted > 0);
-    try std.testing.expectEqual(@as(u8, 2), StartupEntropyFault.calls);
+    try std.testing.expectEqual(@as(usize, 2), faults.entropy_calls);
 }
-
-const StartupEntropyFault = struct {
-    threadlocal var calls: u8 = 0;
-
-    fn random(userdata: ?*anyopaque, bytes: []u8) std.Io.RandomSecureError!void {
-        calls += 1;
-        if (calls == 1 and bytes.len == 8) {
-            return std.testing.io.vtable.randomSecure(userdata, bytes);
-        }
-        return error.EntropyUnavailable;
-    }
-};
 
 test "transport next wakeup includes retained output with nanosecond precision" {
     var node: Node = .{};
@@ -616,10 +605,10 @@ test "transport progress failure retains real send receive work and exactly one 
     const failed = try node.transport.engine.dial(&destination, node.transport.peerId(), now);
     node.transport.engine.failSend(failed.index);
     try sink.sockets.primary().send(std.testing.io, &node.transport.udp.sockets.primary().address, "invalid");
-    var vtable = std.testing.io.vtable.*;
-    vtable.batchAwaitConcurrent = ProgressFault.receive;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    ProgressFault.calls = 0;
+    var faults: FaultIo = .{ .receive = .{ .at = 2 } };
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    const io = faults.io();
     var events: [4]engine_mod.Event = undefined;
     var activity: [4]engine_mod.Handle = undefined;
     const result = node.transport.step(io, &events, &activity, .{ .wait_max_ms = 0 });
@@ -641,9 +630,10 @@ test "transport progress early clock failure does not begin or publish a turn" {
     const now = try transport_mod.currentTime(std.testing.io);
     const failed = try node.transport.engine.dial(&support.server_address, node.transport.peerId(), now);
     node.transport.engine.failSend(failed.index);
-    var vtable = std.testing.io.vtable.*;
-    vtable.now = ProgressFault.clock;
-    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var faults: FaultIo = .{ .clock = .{} };
+    faults.init(std.testing.io);
+    defer faults.deinit();
+    const io = faults.io();
     var events: [4]engine_mod.Event = undefined;
     const result = node.transport.step(io, &events, &.{}, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(error.ClockOutOfRange, result.failure.?);
@@ -655,18 +645,6 @@ test "transport progress early clock failure does not begin or publish a turn" {
     try std.testing.expectEqual(@as(usize, 1), next.progress.events);
     try std.testing.expectEqual(failed, events[0].closed.conn);
 }
-
-const ProgressFault = struct {
-    threadlocal var calls: u8 = 0;
-    fn receive(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
-        calls += 1;
-        if (calls == 2) return error.Canceled;
-        return std.testing.io.vtable.batchAwaitConcurrent(userdata, batch, timeout);
-    }
-    fn clock(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
-        return .{ .nanoseconds = -1 };
-    }
-};
 
 test "transport progress counts received datagram when the following clock read fails" {
     var node: Node = .{};

@@ -156,7 +156,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             else => {},
         };
         if (!subscribed and beacon_block.len > 0) {
-            _ = service.gossipsub.inner.subscribe(beacon_block);
+            _ = service.gossipsub.subscribe(beacon_block);
             subscribed = true;
         }
         const transport_events = events[0..result.events];
@@ -167,7 +167,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 printBlock(allocator, m.bytes, fork) catch |err| {
                     std.debug.print("decode failed: {s}\n", .{@errorName(err)});
                 };
-                _ = service.gossipsub.inner.report(m.handle, .ignore, result.now);
+                _ = service.gossipsub.report(m.handle, .ignore, result.now);
                 received += 1;
             },
             .subscription_change => |change| {

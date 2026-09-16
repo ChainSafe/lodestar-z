@@ -27,7 +27,7 @@ fn publish(value: *const Snapshot) void {
     std.Io.Threaded.mutexUnlock(&mutex);
 }
 fn capture(runtime: *const Runtime, cell: *const incoming.Cell) Snapshot {
-    return .{ .nativeOwned = cell.native, .copying = cell.copying, .quiescent = runtime.quiescent, .acknowledged = cell.ack != null and cell.ack.? == .sent, .requestBytes = cell.input.len, .responseBytes = cell.response.len, .reservedBytes = cell.reservation, .nativeInbound = if (runtime.heavy) |heavy| heavy.core.core.service.reqresp.active().inbound else 0 };
+    return .{ .nativeOwned = cell.native, .copying = cell.copying, .quiescent = runtime.quiescent, .acknowledged = cell.ack != null and cell.ack.? == .sent, .requestBytes = cell.input.len, .responseBytes = cell.response.len, .reservedBytes = cell.reservation, .nativeInbound = if (runtime.heavy) |heavy| heavy.core.service.reqresp.active().inbound else 0 };
 }
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     if (comptime !faults.enabled) return;
@@ -53,12 +53,12 @@ pub fn turnLocked(runtime: *Runtime, now: @import("network").Now) void {
     if (runtime.test_scenario == .incoming_observe) {
         for (runtime.incoming.?.cells) |*cell| {
             if (cell.state != .response_native) continue;
-            const native = &runtime.heavy.?.core.core.service.reqresp.inbound[cell.handle.index];
-            std.debug.assert(std.meta.eql(native.lifecycle.handle(cell.handle.index), cell.handle));
+            const native = &runtime.heavy.?.core.service.reqresp.inbound[cell.handle.index];
+            std.debug.assert(std.meta.eql(native.request.handle(cell.handle.index), cell.handle));
             var value = capture(runtime, cell);
-            value.nativeBorrowed = native.lifecycle.io.payload.ptr == cell.response.ptr and native.lifecycle.io.payload.len == cell.response.len;
-            value.writing = native.lifecycle.running() and native.state == .writing_chunk;
-            value.withheld = native.lifecycle.running() and native.state == .withheld;
+            value.nativeBorrowed = native.request.io.payload.ptr == cell.response.ptr and native.request.io.payload.len == cell.response.len;
+            value.writing = native.request.running() and native.state == .writing_chunk;
+            value.withheld = native.request.running() and native.state == .withheld;
             publish(&value);
         }
     }
@@ -71,7 +71,7 @@ pub fn turnLocked(runtime: *Runtime, now: @import("network").Now) void {
         runtime.test_scenario = .none;
         runtime.pingLocked();
     } else {
-        const value: Snapshot = .{ .nativeInbound = runtime.heavy.?.core.core.service.reqresp.active().inbound };
+        const value: Snapshot = .{ .nativeInbound = runtime.heavy.?.core.service.reqresp.active().inbound };
         publish(&value);
     }
 }

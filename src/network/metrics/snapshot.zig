@@ -113,7 +113,7 @@ pub const Totals = struct {
     udp: @import("../udp.zig").Counters = .{},
     outgoing_error_reasons: [rr.reqresp.metrics.error_reason_count]u64 = @splat(0),
     validation_time: topic_metrics.ValidationTime = .{},
-    peer_work: @import("../core.zig").Core.Counters = .{},
+    peer_work: @import("../peer_manager.zig").PeerManager.Counters = .{},
     connections: engine.ConnectionCounters = .{},
     dial_time: [2]@import("../peers/dial_queue.zig").DialTime = @splat(.{}),
     lookup_time: discovery_metrics.LookupTime = .{},
@@ -150,16 +150,16 @@ pub const Snapshot = struct {
     pub fn collect(self: *Snapshot, owner: *const network.NetworkCore, now_ms: u64) void {
         self.* = .{ .sampled_ms = now_ms, .live = .{ .running = true } };
         self.collectOwner(owner);
-        self.collectPeers(&owner.core, now_ms);
+        self.collectPeers(owner, now_ms);
         self.collectDiscovery(owner, now_ms);
     }
 
     fn collectOwner(self: *Snapshot, owner: *const network.NetworkCore) void {
-        const core = &owner.core;
-        const g = core.service.gossipsub.inner;
+        const core = &owner.peer_manager;
+        const g = owner.service.gossipsub;
         self.totals.runtime = owner.counters;
         self.totals.transport = owner.transport.engine.counters;
-        self.totals.negotiations = core.service.router.counters;
+        self.totals.negotiations = owner.service.router.counters;
         self.totals.connections = owner.transport.engine.connection_metrics;
         const transport_resources = owner.transport.engine.resourceSnapshot();
         self.config.transport_capacity = transport_resources.capacity;
@@ -172,11 +172,11 @@ pub const Snapshot = struct {
             @field(self.live.dial_resources, field.name) = @field(dial_resources, field.name);
         }
         self.totals.dial_time = core.dial_queue.durations;
-        self.totals.requests = core.service.reqresp.counters;
+        self.totals.requests = owner.service.reqresp.counters;
         self.totals.udp = owner.transport.udp.counters;
-        self.totals.outgoing_error_reasons = core.service.reqresp.outgoing_error_reasons;
+        self.totals.outgoing_error_reasons = owner.service.reqresp.outgoing_error_reasons;
         self.totals.validation_time = g.validation_time;
-        self.totals.protocols = core.service.reqresp.protocol_counters;
+        self.totals.protocols = owner.service.reqresp.protocol_counters;
         self.totals.gossip_counts = g.counters;
         self.totals.gossip_topics = g.topic_metrics;
         self.totals.gossip_rpc = g.rpc_metrics;
@@ -223,8 +223,9 @@ pub const Snapshot = struct {
         }
     }
 
-    fn collectPeers(self: *Snapshot, core: *const @import("../core.zig").Core, now_ms: u64) void {
-        const g = core.service.gossipsub.inner;
+    fn collectPeers(self: *Snapshot, owner: *const network.NetworkCore, now_ms: u64) void {
+        const core = &owner.peer_manager;
+        const g = owner.service.gossipsub;
         self.config.target = core.catalog.options.target_peers;
         self.live.peer_policy.collect(&core.selection, &core.demand, core.current_slot, core.local.fork.custody_groups);
         for (core.control.schedules) |*schedule| {
@@ -243,7 +244,7 @@ pub const Snapshot = struct {
         var mesh_peers = gossip.sessions.PeerSet.initEmpty();
         var meshes: [score_metrics.kind_count]gossip.sessions.PeerSet = @splat(.initEmpty());
         var score_kinds: score_metrics.TopicKinds = @splat(null);
-        self.collectTopics(core, &mesh_peers, &meshes, &score_kinds);
+        self.collectTopics(owner, &mesh_peers, &meshes, &score_kinds);
         for (g.sessions.rows, 0..) |*row, index| {
             if (!row.active) continue;
             var breakdown: gossip.score.Breakdown = undefined;
@@ -262,12 +263,13 @@ pub const Snapshot = struct {
 
     fn collectTopics(
         self: *Snapshot,
-        core: *const @import("../core.zig").Core,
+        owner: *const network.NetworkCore,
         mesh_peers: *gossip.sessions.PeerSet,
         meshes: *[score_metrics.kind_count]gossip.sessions.PeerSet,
         score_kinds: *score_metrics.TopicKinds,
     ) void {
-        const g = core.service.gossipsub.inner;
+        const core = &owner.peer_manager;
+        const g = owner.service.gossipsub;
         for (&g.overlay.rows, 0..) |*row, topic_index| {
             if (!row.active) continue;
             mesh_peers.setUnion(row.mesh);
@@ -307,12 +309,12 @@ pub const Snapshot = struct {
             self.totals.discovery_counts = discovery.coordinator.counters;
             self.totals.discovery_rejections = discovery.coordinator.rejections;
             self.config.discovery_enabled = true;
-            self.live.discovery_sessions = discovery.engine.channel.sessions.sessionCount();
-            self.live.discovery_peers = discovery.engine.peerCount();
+            self.live.discovery_sessions = discovery.transport.engine.channel.sessions.sessionCount();
+            self.live.discovery_peers = discovery.transport.engine.peerCount();
             self.live.discovery_lookups = @intFromBool(discovery.coordinator.lookup != null);
             self.totals.lookup_time = discovery.coordinator.lookup_time;
             self.totals.lookup_finishes = discovery.coordinator.lookup_finishes;
-            self.live.discovery_pending_revalidations = discovery.engine.routing.pendingCount();
+            self.live.discovery_pending_revalidations = discovery.transport.engine.routing.pendingCount();
             self.live.discovery_waiting_queries = if (discovery.coordinator.lookup) |*lookup|
                 lookup.waitingCount()
             else

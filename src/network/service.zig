@@ -17,7 +17,7 @@ pub const Options = struct {
 pub const Outputs = struct { application: []reqresp_mod.Event = &.{}, control: []reqresp_mod.Event = &.{}, gossipsub: []gossip_mod.Event = &.{}, identify: []identify_mod.Result = &.{} };
 pub const OutputCounts = struct { application: usize, control: usize, gossipsub: usize, identify: usize };
 pub const Capacities = struct { application: usize = 0, control: usize = 0, gossipsub: usize = 0, identify: usize = 0 };
-pub const InitError = routing.Error || reqresp_mod.reqresp.InitError || @import("gossipsub/session_driver.zig").InitError || identify_mod.handler.InitError;
+pub const InitError = routing.Error || reqresp_mod.reqresp.InitError || gossip_mod.gossipsub.InitError || identify_mod.handler.InitError;
 
 pub const Service = struct {
     identify: ?identify_mod.Handler,
@@ -25,7 +25,7 @@ pub const Service = struct {
     applications: enum { active, quiescing, closed } = .active,
     router: routing.Router,
     reqresp: reqresp_mod.ReqResp,
-    gossipsub: gossip_mod.Driver,
+    gossipsub: *gossip_mod.Gossipsub,
 
     pub fn validateOptions(options: Options) InitError!void {
         if (!options.router.reqresp or !options.router.meshsub) return error.InvalidLimits;
@@ -45,7 +45,9 @@ pub const Service = struct {
         errdefer router.deinit();
         var reqresp = try reqresp_mod.ReqResp.init(allocator, options.reqresp);
         errdefer reqresp.deinit();
-        var gossipsub = try gossip_mod.Driver.init(allocator, options.gossipsub);
+        const gossipsub = try allocator.create(gossip_mod.Gossipsub);
+        errdefer allocator.destroy(gossipsub);
+        gossipsub.* = try gossip_mod.Gossipsub.init(allocator, options.gossipsub);
         errdefer gossipsub.deinit();
         const identify = if (options.identify) |value| try identify_mod.Handler.init(allocator, value) else null;
         return .{
@@ -57,12 +59,32 @@ pub const Service = struct {
         };
     }
 
+    pub fn shutdown(self: *Service, engine: *engine_mod.Engine) void {
+        if (self.identify) |*identify| identify.shutdown(&self.router, engine);
+        self.reqresp.shutdown(engine, &self.router);
+        self.gossipsub.shutdown(&self.router, engine);
+        self.router.negotiator.shutdown(engine);
+        self.applications = .closed;
+    }
+
     pub fn deinit(self: *Service) void {
         if (self.identify) |*identify| identify.deinit();
+        const allocator = self.gossipsub.allocator;
         self.gossipsub.deinit();
+        allocator.destroy(self.gossipsub);
         self.reqresp.deinit();
         self.router.deinit();
         self.* = undefined;
+    }
+
+    pub fn allocatedBytes(self: *const Service) usize {
+        const request_memory = self.reqresp.memoryPlan();
+        const gossip_plan = self.gossipsub.memoryPlan();
+        const negotiation = @TypeOf(self.router.negotiator.entries[0]);
+        return request_memory.total_bytes - request_memory.facade_bytes +
+            gossip_plan.total_bytes +
+            self.router.negotiator.entries.len * @sizeOf(negotiation) +
+            if (self.identify) |*identify| identify.allocatedBytes() else @as(usize, 0);
     }
 
     pub fn request(
@@ -100,7 +122,7 @@ pub const Service = struct {
         return due;
     }
 
-    /// Forward Driver activity separately from lifecycle events.
+    /// Forward transport activity separately from lifecycle events.
     /// The activity batch must not exceed the Engine connection capacity.
     /// Handles retain full transport generations, including connections without a gossip owner.
     pub fn process(self: *Service, engine: *engine_mod.Engine, events: []const engine_mod.Event, activity: []const engine_mod.Handle, now: types.Now, outputs: Outputs) OutputCounts {

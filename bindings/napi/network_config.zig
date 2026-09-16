@@ -239,9 +239,6 @@ fn parseGossip(value: Value, out: *Config) !void {
     params.opportunistic_graft_threshold = try number(try get(score, "opportunisticGraftThreshold"));
     try parseTopicParams(try get(score, "defaultTopic"), &params.topic);
     out.gossip.score_params = params;
-    var gossip_options = out.gossip;
-    gossip_options.topic_policy = if (out.topic_boundary_count == 0) null else out.topic_boundaries[0..out.topic_boundary_count];
-    _ = n.configuration.resolve(.{ .profile = out.profile, .seed = 1, .forks = out.forks[0..out.fork_count], .gossip = gossip_options }) catch return error.InvalidNetworkConfig;
 }
 
 pub fn completeObject(value: Value, comptime names: []const []const u8) !void {

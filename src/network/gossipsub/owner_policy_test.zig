@@ -93,31 +93,31 @@ test "gossip policy combined transport calls respect one shared peer allowance" 
     try setup.init();
     defer setup.deinit();
     for (0..20) |_| try setup.pumpOnce();
-    const peer = setup.client.gossipsub.inner.sessions.findPeer(setup.handles.client).?;
-    setup.client.gossipsub.inner.options.calls_per_peer = 1;
+    const peer = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
+    setup.shared.client.gossipsub.options.calls_per_peer = 1;
     var events: [1]Event = undefined;
     for ([_]usize{ 8, 1 }) |global| {
-        setup.client.gossipsub.inner.options.calls_per_pump = global;
+        setup.shared.client.gossipsub.options.calls_per_pump = global;
         var read_turns: usize = 0;
         var write_turns: usize = 0;
         for (0..8) |_| {
-            try std.testing.expect(setup.client.gossipsub.inner.sessions.rows[peer].io.tx.inject(&.{0}, setup.pair.now.mono_ms));
-            setup.client.gossipsub.inner.sessions.connectionActivity(setup.handles.client);
-            const turn = @import("test_support.zig").pumpTurn(setup.client.gossipsub.inner, &setup.pair.client, setup.pair.now, &events);
+            try std.testing.expect(setup.shared.client.gossipsub.sessions.rows[peer].io.tx.inject(&.{0}, setup.shared.pair.now.mono_ms));
+            setup.shared.client.gossipsub.sessions.connectionActivity(setup.shared.handles.client);
+            const turn = @import("test_support.zig").pumpTurn(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now, &events);
             const calls = global - turn.budget.calls;
             try std.testing.expect(calls <= 1);
             if (calls > 0) {
-                if (turn.budget.output < setup.client.gossipsub.inner.options.output_per_pump) write_turns += 1 else read_turns += 1;
+                if (turn.budget.output < setup.shared.client.gossipsub.options.output_per_pump) write_turns += 1 else read_turns += 1;
             }
         }
         try std.testing.expect(read_turns > 0 and write_turns > 0);
         for (0..32) |_| {
-            if (@import("test_support.zig").driver(setup.client.gossipsub.inner).nextIoWakeup(setup.pair.now, events.len).? > setup.pair.now.mono_ms) break;
-            const turn = @import("test_support.zig").pumpTurn(setup.client.gossipsub.inner, &setup.pair.client, setup.pair.now, &events);
+            if (@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now, events.len).? > setup.shared.pair.now.mono_ms) break;
+            const turn = @import("test_support.zig").pumpTurn(setup.shared.client.gossipsub, &setup.shared.pair.client, setup.shared.pair.now, &events);
             try std.testing.expect(global - turn.budget.calls <= 1);
         }
-        try std.testing.expect(!setup.client.gossipsub.inner.sessions.rows[peer].io.tx.pending());
-        try std.testing.expect(@import("test_support.zig").driver(setup.client.gossipsub.inner).nextIoWakeup(setup.pair.now, events.len).? > setup.pair.now.mono_ms);
+        try std.testing.expect(!setup.shared.client.gossipsub.sessions.rows[peer].io.tx.pending());
+        try std.testing.expect(@import("session_io.zig").nextIoWakeup(setup.shared.client.gossipsub, setup.shared.pair.now, events.len).? > setup.shared.pair.now.mono_ms);
     }
 }
 
@@ -136,7 +136,7 @@ test "gossip policy sent promise survives reconnect without token rearming" {
     const next = g.addPeer(.{ .index = 0, .generation = 2 }, &metadata, now).admitted;
     g.recovery.controlSent(g.sessions.rows[next.index].conn, 9, g.options.iwant_followup_ms, 2000);
     try std.testing.expectEqual(@as(?u64, 3010), g.recovery.batches[0].expiry);
-    g.finishPump(.{ .mono_ms = 3010, .unix_s = 0 });
+    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 3010, .unix_s = 0 });
     try std.testing.expectEqual(@as(u64, 1), g.counters.broken_promises);
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[ref.index].pins);
 }
@@ -266,7 +266,7 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     _ = try g.publish(first_name, "first", start);
     _ = try g.publish(second_name, "second", start);
     support.heartbeat(&g, start);
-    g.finishPump(start);
+    @import("session_io.zig").finishPump(&g, start);
     try std.testing.expectEqual(@as(usize, 1), g.cycle.cursor);
     const retained = g.overlay.fanoutMembers(second).findFirstSet().?;
     var advertised: u16 = 0;
@@ -280,18 +280,18 @@ test "gossip policy review I4 heartbeat fanout and advertisements share one snap
     g.opportunistic_at = 2;
     support.heartbeat(&g, .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expect(!g.cycle.opportunistic);
-    g.finishPump(.{ .mono_ms = 2, .unix_s = 0 });
+    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 2, .unix_s = 0 });
     try std.testing.expect(g.overlay.fanoutMembers(second).isSet(retained));
     try std.testing.expectEqual(@as(usize, 8), g.overlay.fanoutMembers(second).count());
     try std.testing.expectEqual(@as(usize, 1), g.sessions.rows[advertised].io.tx.control.count);
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[retained].io.tx.control.count);
-    g.finishPump(.{ .mono_ms = 3, .unix_s = 0 });
+    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 3, .unix_s = 0 });
     try std.testing.expect(!g.cycle.isActive());
     for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store);
     g.last_now_ms = 701;
     support.heartbeat(&g, .{ .mono_ms = 701, .unix_s = 0 });
-    g.finishPump(.{ .mono_ms = 701, .unix_s = 0 });
-    g.finishPump(.{ .mono_ms = 702, .unix_s = 0 });
+    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 701, .unix_s = 0 });
+    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 702, .unix_s = 0 });
     try std.testing.expect(!g.overlay.fanoutMembers(second).isSet(retained));
     try std.testing.expectEqual(@as(usize, 7), g.overlay.fanoutMembers(second).count());
     try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[advertised].io.tx.control.count);
@@ -452,10 +452,10 @@ test "publication subscribed fanout expires through owner maintenance" {
     _ = try g.publish(name, "fanout expiry", .{ .mono_ms = 0, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
     support.heartbeat(&g, .{ .mono_ms = 59_999, .unix_s = 0 });
-    g.finishPump(.{ .mono_ms = 59_999, .unix_s = 0 });
+    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 59_999, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 1), g.overlay.fanoutMembers(t).count());
     support.heartbeat(&g, .{ .mono_ms = 60_000, .unix_s = 0 });
-    g.finishPump(.{ .mono_ms = 60_000, .unix_s = 0 });
+    @import("session_io.zig").finishPump(&g, .{ .mono_ms = 60_000, .unix_s = 0 });
     try std.testing.expectEqual(@as(usize, 0), g.overlay.fanoutMembers(t).count());
     _ = g.overlay.peerSubscription(&g.overlayContext(g.last_now_ms), p.index, name, false);
     g.sessions.rows[p.index].io.tx.cancelStream(&g.messages.store);
@@ -478,7 +478,7 @@ test "local intent reclaimed history answers actual IWANT with original wire top
         .connected_capacity = 2,
         .retained_capacity = 4,
         .retained_outbound_reserve = 1,
-        .topic_policy = &.{@import("topic_policy_test.zig").full(.{ 1, 2, 3, 4 })},
+        .topic_policy = &.{@import("topic_fixture.zig").full(.{ 1, 2, 3, 4 })},
     });
     defer g.deinit();
     const workspace = try std.testing.allocator.create(local_intent.Workspace);
@@ -541,7 +541,7 @@ test "gossip advertisements sample the whole burst independently for each recipi
     g.overlay.rows[t].fanout = .initEmpty();
     const context = g.overlayContext(1);
     g.cycle.begin(context.sessions, context.peers, context.now, false);
-    g.finishPump(.{ .mono_ms = context.now, .unix_s = 0 });
+    @import("session_io.zig").finishPump(&g, .{ .mono_ms = context.now, .unix_s = 0 });
     const first = g.sessions.rows[0].io.tx.segment(&g.messages.store);
     const second = g.sessions.rows[1].io.tx.segment(&g.messages.store);
     try std.testing.expect(first.len > 0 and second.len > 0);

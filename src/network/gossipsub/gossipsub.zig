@@ -1,3 +1,4 @@
+const session_io = @import("session_io.zig");
 const std = @import("std");
 const snappy = @import("snappy");
 const constants = @import("constants.zig");
@@ -88,6 +89,7 @@ pub const ResourceSnapshot = struct {
 };
 
 pub const Gossipsub = struct {
+    open_cursor: usize = 0,
     allocator: Allocator,
     options: Options,
     memory: MemoryPlan,
@@ -106,6 +108,24 @@ pub const Gossipsub = struct {
     topic_metrics: @import("metrics.zig").Topics = .{},
     rpc_metrics: @import("metrics.zig").Rpc = .{},
     validation_time: @import("metrics.zig").ValidationTime = .{},
+
+    pub const Admission = session_io.Admission;
+    pub const Delivery = session_io.Delivery;
+    pub const shutdown = session_io.shutdown;
+    pub const admitted = session_io.admitted;
+    pub const deliveryStatus = session_io.deliveryStatus;
+    pub const deliveryAvailable = session_io.deliveryAvailable;
+    pub const peerConnected = session_io.peerConnected;
+    pub const transportEvents = session_io.transportEvents;
+    pub const retireConnection = session_io.retireConnection;
+    pub const negotiationResult = session_io.negotiationResult;
+    pub const connectionActivity = session_io.connectionActivity;
+    pub const nextWakeup = session_io.nextWakeup;
+    pub const pump = session_io.pump;
+
+    pub fn deliveryRevision(self: *const Gossipsub) u64 {
+        return self.sessions.delivery_revision;
+    }
 
     pub const Counters = struct {
         heartbeats_skipped: u64 = 0,
@@ -266,13 +286,13 @@ pub const Gossipsub = struct {
         }
         const handle = self.sessions.addPeer(conn) orelse return .capacity;
         if (self.overlay.namespace) |*ns| ns.clearPeer(handle.index);
-        const admitted = self.peers.admit(conn, metadata, now.mono_ms);
-        if (admitted != .admitted) {
+        const admission_result = self.peers.admit(conn, metadata, now.mono_ms);
+        if (admission_result != .admitted) {
             self.sessions.removePeer(handle.index);
-            return if (admitted == .duplicate) .duplicate else .capacity;
+            return if (admission_result == .duplicate) .duplicate else .capacity;
         }
-        if (admitted.admitted.penalty_evicted) self.counters.retained_penalty_evictions += 1;
-        const ref = admitted.admitted.peer;
+        if (admission_result.admitted.penalty_evicted) self.counters.retained_penalty_evictions += 1;
+        const ref = admission_result.admitted.peer;
         self.sessions.rows[handle.index].logical = ref;
         return .{ .admitted = handle };
     }
@@ -414,14 +434,6 @@ pub const Gossipsub = struct {
 
     // Pump -------------------------------------------------------------------
 
-    /// Begins a serialized owner turn and ends the preceding event borrows.
-    pub fn beginPump(self: *Gossipsub, now: Now, events: []Event) Turn {
-        self.last_now_ms = now.mono_ms;
-        self.messages.expire(&self.peers, now.mono_ms);
-        if (self.messages.takeReleased()) self.wakeStorage();
-        return Turn.init(&self.options, now, events, self.decompressed, self.msg_scratch);
-    }
-
     pub fn tick(self: *Gossipsub, now: Now) void {
         if (self.heartbeat_at == 0) {
             self.heartbeat_at = now.mono_ms +| self.options.heartbeat_interval_ms;
@@ -430,20 +442,6 @@ pub const Gossipsub = struct {
             self.heartbeat_at = now.mono_ms +| self.options.heartbeat_interval_ms;
             self.wakeStorage();
         }
-    }
-
-    pub fn finishPump(self: *Gossipsub, now: Now) void {
-        self.maintainTopics(now);
-        self.expirePromises(now.mono_ms);
-        if (self.messages.takeReleased()) self.wakeStorage();
-    }
-
-    pub fn nextWakeup(self: *const Gossipsub, now: Now) u64 {
-        if (self.cycle.isActive()) return now.mono_ms;
-        var deadline = if (self.heartbeat_at == 0) now.mono_ms else self.heartbeat_at;
-        if (self.messages.nextDeadline()) |d| deadline = @min(deadline, d);
-        if (self.recovery.nextExpiry()) |expiry| deadline = @min(deadline, expiry);
-        return @max(now.mono_ms, deadline);
     }
 
     pub fn receiveItem(self: *Gossipsub, session: sessions_mod.SessionRef, item: protobuf.Item, turn: *Turn, peer: *Credits) Progress {
@@ -564,7 +562,7 @@ pub const Gossipsub = struct {
         self.cycle.begin(self.sessions, &self.peers, now.mono_ms, opportunistic);
     }
 
-    fn maintainTopics(self: *Gossipsub, now: Now) void {
+    pub fn maintainTopics(self: *Gossipsub, now: Now) void {
         var serviced: usize = 0;
         for (0..constants.topics_cap) |_| {
             const index = self.cycle.next() orelse break;
@@ -637,7 +635,7 @@ pub const Gossipsub = struct {
         self.recovery.controlSent(self.sessions.rows[peer].conn, token, self.options.iwant_followup_ms, now_ms);
     }
 
-    fn expirePromises(self: *Gossipsub, now_ms: u64) void {
+    pub fn expirePromises(self: *Gossipsub, now_ms: u64) void {
         self.counters.broken_promises += self.recovery.expire(&self.peers, now_ms);
     }
 

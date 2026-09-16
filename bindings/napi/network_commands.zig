@@ -28,7 +28,7 @@ pub const Cell = struct {
     deadline: u64 = 0,
     identity: @import("network_runtime.zig").Identity = undefined,
     count: usize = 0,
-    counts: n.Core.PeerCounts = undefined,
+    counts: n.PeerManager.PeerCounts = undefined,
     publication: n.gossipsub.Gossipsub.PublishOutcome = .{},
 };
 pub const Table = struct {
@@ -197,7 +197,7 @@ pub fn executeCommands(self: *Runtime, timestamp: n.Now) !void {
             if (self.stop and self.table.cells[i].input.command != .publishGossip) self.table.cells[i].failure = self.startup_error orelse error.NetworkClosed;
             cell.state = .terminal;
         }
-        self.reports.sync(&self.heavy.?.core.core.catalog);
+        self.reports.sync(&self.heavy.?.core.peer_manager.catalog);
         if (cell.state == .terminal) self.pingLocked();
         self.unlock();
     }
@@ -242,12 +242,12 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             operation.count = try core.completeSnapshots(self.stores.?.snapshots[store.?]);
             operation.counts = core.peerCounts();
         },
-        .getGossipDiagnostics => try n.gossipsub.diagnostics.capture(core.core.service.gossipsub.inner, input.diagnostics_cursor, timestamp, &self.stores.?.gossip_diagnostics[store.?]),
+        .getGossipDiagnostics => try n.gossipsub.diagnostics.capture(core.service.gossipsub, input.diagnostics_cursor, timestamp, &self.stores.?.gossip_diagnostics[store.?]),
         .getDirectPeers => operation.count = try core.directPeers(&self.stores.?.direct[store.?]),
         .removeDirectPeer => operation.boolean = core.removeDirectPeer(&input.peer),
         .addDirectPeer => try core.addDirectPeer(&input.peer, input.addresses[0..input.address_count], timestamp),
         .connect => {
-            if (core.core.catalog.find(&input.peer)) |peer| if (core.core.catalog.get(peer).?.connection != null) return;
+            if (core.peer_manager.catalog.find(&input.peer)) |peer| if (core.peer_manager.catalog.get(peer).?.connection != null) return;
             operation.deadline = timestamp.mono_ms +| input.timeout_ms;
             try core.connectUntil(&input.peer, input.addresses[0..input.address_count], timestamp, operation.deadline);
             self.lock();
@@ -263,12 +263,12 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
                 cell.state = .terminal;
             }
             self.unlock();
-            if (core.core.catalog.find(&input.peer)) |peer| {
-                if (core.core.catalog.get(peer).?.connection) |handle| _ = core.closePeer(peer, handle, timestamp);
+            if (core.peer_manager.catalog.find(&input.peer)) |peer| {
+                if (core.peer_manager.catalog.get(peer).?.connection) |handle| _ = core.closePeer(peer, handle, timestamp);
             }
         },
         .reStatusPeers => for (self.stores.?.targets[store.?][0..input.target_count]) |*identity| {
-            if (core.core.catalog.find(identity)) |peer| if (core.core.catalog.get(peer).?.connection) |handle| {
+            if (core.peer_manager.catalog.find(identity)) |peer| if (core.peer_manager.catalog.get(peer).?.connection) |handle| {
                 _ = core.reStatusPeer(peer, handle, timestamp);
             };
         },

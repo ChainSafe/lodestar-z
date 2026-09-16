@@ -1,4 +1,4 @@
-//! The Driver is the synchronous host loop. Each step handles at most one datagram, sends
+//! The Transport is the synchronous host loop. Each step handles at most one datagram, sends
 //! without a queue, and does expiry work on every poll, so progress never depends on inbound
 //! traffic.
 
@@ -7,13 +7,13 @@ const CallTable = @import("CallTable.zig");
 const Engine = @import("Engine.zig");
 const ResponsePlan = @import("ResponsePlan.zig");
 const enr = @import("identity/enr.zig");
-const Udp = @import("Udp.zig");
+const sockets_mod = @import("udp");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const message = @import("wire/message.zig");
 
-pub const Error = Engine.Error || Udp.ReceiveTimeoutError ||
-    Udp.SendError || std.Io.RandomSecureError || error{
+pub const Error = Engine.Error || sockets_mod.DatagramError ||
+    sockets_mod.SendError || std.Io.RandomSecureError || error{
     ClockOutOfRange,
     DestinationUnreachable,
     InvalidPollInterval,
@@ -54,33 +54,42 @@ pub const SendContext = struct {
     entropy: Engine.StartEntropy,
 };
 
-const Driver = @This();
+const Transport = @This();
 
-core: *Engine,
-udp: *Udp,
+engine: Engine,
+sockets: sockets_mod.Sockets,
 config: Config,
 scratch: Engine.Scratch = .{},
 response: ResponsePlan = .{},
 output: [constants.packet_size_max]u8 = undefined,
 receive_buffer: [constants.packet_size_max]u8 = undefined,
 
-pub fn init(core: *Engine, adapter: *Udp) Driver {
-    return .{ .core = core, .udp = adapter, .config = .{} };
+pub const Options = struct {
+    engine: Engine.Config = .{},
+    poll_interval_ms: u32 = 100,
+};
+
+/// Takes ownership of bound sockets on success. Initialize at the final address.
+pub fn init(self: *Transport, allocator: std.mem.Allocator, sockets: sockets_mod.Sockets, key: @import("identity/crypto.zig").KeyPair, record: enr.Record, options: Options) !void {
+    if (options.poll_interval_ms == 0) return error.InvalidPollInterval;
+    self.* = .{ .engine = undefined, .sockets = sockets, .config = .{ .poll_interval_ms = options.poll_interval_ms } };
+    try self.engine.initWithConfig(allocator, key, record, options.engine);
 }
 
-pub fn initWithConfig(
-    core: *Engine,
-    adapter: *Udp,
-    config: Config,
-) Error!Driver {
-    if (config.poll_interval_ms == 0) return error.InvalidPollInterval;
-    return .{ .core = core, .udp = adapter, .config = config };
+pub fn deinit(self: *Transport, allocator: std.mem.Allocator, io: std.Io) void {
+    self.engine.deinit(allocator);
+    self.sockets.close(io);
+    self.* = undefined;
+}
+
+pub fn localAddress(self: *const Transport) types.Address {
+    return types.Address.fromNetwork(self.sockets.primary().address);
 }
 
 /// Encodes and sends one request immediately. A failed send cancels the call, so no unsent
 /// request lingers.
 pub fn startCall(
-    self: *Driver,
+    self: *Transport,
     io: std.Io,
     peer: types.Endpoint,
     record: *const enr.Record,
@@ -88,7 +97,7 @@ pub fn startCall(
 ) Error!CallTable.Handle {
     var context = try sendContext(io);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&context.entropy));
-    const started = try self.core.startCall(
+    const started = try self.engine.startCall(
         &self.output,
         peer,
         record,
@@ -97,7 +106,7 @@ pub fn startCall(
         &context.entropy,
     );
     self.transmit(io, peer.address, self.output[0..started.packet_length]) catch |err| {
-        const cancelled = self.core.cancelCall(started.handle);
+        const cancelled = self.engine.cancelCall(started.handle);
         std.debug.assert(cancelled);
         return err;
     };
@@ -105,14 +114,14 @@ pub fn startCall(
 }
 
 pub fn sendResponse(
-    self: *Driver,
+    self: *Transport,
     io: std.Io,
     peer: types.Endpoint,
     response: *const message.Message,
 ) Error!void {
     var context = try sendContext(io);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&context.entropy));
-    const packet_length = try self.core.sendResponse(
+    const packet_length = try self.engine.sendResponse(
         &self.output,
         peer,
         response,
@@ -124,12 +133,12 @@ pub fn sendResponse(
 
 /// Failures tied to the destination collapse into `DestinationUnreachable`.
 pub fn transmit(
-    self: *const Driver,
+    self: *const Transport,
     io: std.Io,
     destination: types.Address,
     bytes: []const u8,
 ) Error!void {
-    return self.udp.send(io, destination, bytes) catch |err| {
+    return self.sockets.sendTo(io, destination, bytes, constants.packet_size_max) catch |err| {
         std.log.scoped(.network_discovery).debug("discovery_send_failed endpoint={any} bytes={d} reason={s}", .{ destination, bytes.len, @errorName(err) });
         return switch (err) {
             error.AccessDenied,
@@ -146,9 +155,9 @@ pub fn transmit(
 
 /// Runs one poll. It expires state, waits up to the poll interval
 /// for one datagram, processes it, and drains any standard response. The returned event
-/// borrows driver scratch and stays valid until the next step.
+/// borrows transport scratch and stays valid until the next step.
 pub fn step(
-    self: *Driver,
+    self: *Transport,
     io: std.Io,
     expired_calls: []CallTable.Expired,
 ) Error!StepResult {
@@ -158,7 +167,7 @@ pub fn step(
 /// Preserves events and expiries alongside local faults. The host must consume progress before
 /// handling `failure`. `wake_ms` can shorten the wait for host-owned maintenance or shutdown.
 pub fn stepUntil(
-    self: *Driver,
+    self: *Transport,
     io: std.Io,
     expired_calls: []CallTable.Expired,
     wake_ms: u64,
@@ -172,7 +181,7 @@ pub fn stepUntil(
 }
 
 fn runStep(
-    self: *Driver,
+    self: *Transport,
     io: std.Io,
     expired_calls: []CallTable.Expired,
     wake_ms: u64,
@@ -191,14 +200,14 @@ fn runStep(
 }
 
 fn advance(
-    self: *Driver,
+    self: *Transport,
     io: std.Io,
     expired_calls: []CallTable.Expired,
     result: *StepResult,
 ) Error!void {
     result.now_ms = try monotonicMilliseconds(io);
     const available = expired_calls[result.calls_expired..];
-    const expired = self.core.tick(result.now_ms, available);
+    const expired = self.engine.tick(result.now_ms, available);
     result.calls_expired += expired.calls;
     result.progress.challenges_expired += expired.challenges;
     result.progress.sessions_expired += expired.sessions;
@@ -210,14 +219,14 @@ fn recordFailure(result: *StepResult, err: Error, stage: FailureStage) void {
     result.failure_stage = stage;
 }
 
-fn receiveDatagram(self: *Driver, io: std.Io, wake_ms: u64, result: *StepResult) Error!?Udp.Datagram {
-    const deadline_ms = @min(wake_ms, self.core.nextDeadlineMs() orelse wake_ms);
+fn receiveDatagram(self: *Transport, io: std.Io, wake_ms: u64, result: *StepResult) Error!?sockets_mod.Datagram {
+    const deadline_ms = @min(wake_ms, self.engine.nextDeadlineMs() orelse wake_ms);
     const wait_ms = @min(self.config.poll_interval_ms, deadline_ms -| result.now_ms);
     const timeout = std.Io.Timeout{ .duration = .{
         .raw = .fromMilliseconds(wait_ms),
         .clock = .awake,
     } };
-    return self.udp.receiveTimeout(io, &self.receive_buffer, timeout) catch |err| switch (err) {
+    return self.sockets.receiveDatagram(io, &self.receive_buffer, timeout) catch |err| switch (err) {
         error.Timeout => null,
         error.DatagramTooLarge => blk: {
             result.datagram = .{ .rejected = .oversized_datagram };
@@ -228,14 +237,14 @@ fn receiveDatagram(self: *Driver, io: std.Io, wake_ms: u64, result: *StepResult)
 }
 
 fn processDatagram(
-    self: *Driver,
+    self: *Transport,
     io: std.Io,
-    datagram: Udp.Datagram,
+    datagram: sockets_mod.Datagram,
     result: *StepResult,
 ) Error!void {
     var entropy = try receiveEntropy(io);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
-    const accepted = switch (try self.core.receive(
+    const accepted = switch (try self.engine.receive(
         &self.output,
         datagram.bytes,
         datagram.from,
@@ -257,7 +266,7 @@ fn processDatagram(
 }
 
 fn handleEvent(
-    self: *Driver,
+    self: *Transport,
     io: std.Io,
     event: Engine.Event,
     result: *StepResult,
@@ -270,11 +279,11 @@ fn handleEvent(
         .talk_request => return event,
         .ping, .find_node => {},
     }
-    try self.core.prepareStandardResponse(&request, &self.response);
+    try self.engine.prepareStandardResponse(&request, &self.response);
     while (result.progress.standard_responses < types.findnode_response_packets_max) {
         var entropy = try startEntropy(io);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
-        const packet_length = try self.core.sendNextStandardResponse(
+        const packet_length = try self.engine.sendNextStandardResponse(
             &self.output,
             &self.response,
             result.now_ms,
@@ -316,5 +325,5 @@ fn receiveEntropy(io: std.Io) std.Io.RandomSecureError!Engine.ReceiveEntropy {
 }
 
 comptime {
-    std.debug.assert(@sizeOf(Driver) <= 32 * 1_024);
+    std.debug.assert(@sizeOf(Transport) <= 32 * 1_024);
 }

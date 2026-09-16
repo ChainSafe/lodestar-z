@@ -14,8 +14,6 @@ pub const sessions = @import("sessions.zig");
 pub const frame = @import("frame.zig");
 pub const score = @import("score.zig");
 pub const gossipsub = @import("gossipsub.zig");
-pub const session_driver = @import("session_driver.zig");
-pub const Driver = session_driver.Driver;
 
 pub const Gossipsub = gossipsub.Gossipsub;
 pub const Options = gossipsub.Options;
@@ -53,7 +51,6 @@ test {
     _ = frame;
     _ = score;
     _ = gossipsub;
-    _ = session_driver;
     _ = @import("gossipsub_test.zig");
     _ = @import("publication_test.zig");
     _ = @import("service_test.zig");

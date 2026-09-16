@@ -20,34 +20,35 @@ pub fn main(init: std.process.Init) !void {
     if (address != .ip4 or address.ip4.octets[0] != 127) return error.NonLoopbackEndpoint;
     const peer = discv5.types.Endpoint{ .node_id = remote.node_id, .address = address };
 
-    var udp = try discv5.Udp.bind(io, .{ .ip4 = .loopback(0) });
-    defer udp.close(io);
+    const sockets = try discv5.sockets.Sockets.bind(io, .{ .ip4 = .loopback(0) });
+    var sockets_owned = true;
+    errdefer if (sockets_owned) sockets.close(io);
     var key = try discv5.identity.crypto.keyPairFromSecret(&([_]u8{0x11} ** 32));
     defer std.crypto.secureZero(u8, std.mem.asBytes(&key));
-    const local = try discv5.identity.enr.Record.create(&key, 1, udp.localAddress());
-    var core: discv5.Engine = undefined;
-    try core.initWithConfig(allocator, key, local, .{
+    const local = try discv5.identity.enr.Record.create(&key, 1, discv5.types.Address.fromNetwork(sockets.primary().address));
+    var driver: discv5.Transport = undefined;
+    try driver.init(allocator, sockets, key, local, .{ .poll_interval_ms = 25, .engine = .{
         .session_capacity = 4,
         .challenge_capacity = 4,
         .call_capacity = call_capacity,
         .request_timeout_ms = 2_000,
         .challenge_timeout_ms = 2_000,
         .session_idle_timeout_ms = 60_000,
-    });
-    defer core.deinit(allocator);
-    var driver = try discv5.Driver.initWithConfig(&core, &udp, .{ .poll_interval_ms = 25 });
+    } });
+    sockets_owned = false;
+    defer driver.deinit(allocator, io);
     try printRecord(io, &local);
 
-    const deadline_ms = (try discv5.Driver.monotonicMilliseconds(io)) + duration_ms;
+    const deadline_ms = (try discv5.Transport.monotonicMilliseconds(io)) + duration_ms;
     var phase: Phase = .waiting;
     var pending: ?discv5.CallTable.Handle = null;
     defer if (pending) |handle| {
-        _ = core.cancelCall(handle);
+        _ = driver.engine.cancelCall(handle);
     };
     var served: usize = 0;
     var expired: [call_capacity]discv5.CallTable.Expired = undefined;
     for (0..steps_max) |_| {
-        if (try discv5.Driver.monotonicMilliseconds(io) >= deadline_ms)
+        if (try discv5.Transport.monotonicMilliseconds(io) >= deadline_ms)
             return error.InteropTimedOut;
         if (phase == .waiting and (zig_first or served >= 2)) {
             const ping = discv5.wire.message.Message{ .ping = .{

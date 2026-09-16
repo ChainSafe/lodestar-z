@@ -1,0 +1,149 @@
+const std = @import("std");
+const support = @import("test_support.zig");
+const managed = @import("managed.zig");
+const t = @import("peers/types.zig");
+const Engine = @import("quic/engine.zig");
+const rr = @import("reqresp/root.zig");
+const gossip = @import("gossipsub/root.zig");
+
+pub fn options() managed.Options {
+    const gc = @import("gossipsub/constants.zig");
+    return .{
+        .peers = .{
+            .capacity = 4,
+            .outbound_reserve = 1,
+            .max_peers = 3,
+            .target_peers = 2,
+            .min_outbound = 1,
+        },
+        .service = .{
+            .router = .{ .negotiations_max = 24, .outbound_control_reserved = 8 },
+            .reqresp = .{
+                .policy = @import("reqresp/policy_fixture.zig").config(),
+                .peers = 4,
+                .outbound_max = 16,
+                .inbound_max = 16,
+                .outbound_control_reserved = 8,
+                .inbound_control_reserved = 8,
+                .outbound_per_peer_max = 8,
+                .inbound_per_peer_max = 16,
+                .inbound_application_per_peer_max = 8,
+                .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }},
+            },
+            .gossipsub = .{
+                .random_seed = 1,
+                .seen_capacity = 16,
+                .mcache_capacity = 8,
+                .validation_capacity = 2,
+                .mcache_arena_bytes = gc.maxCompressedLen(gc.MAX_PAYLOAD_SIZE) + 4096,
+                .decompressed_arena_bytes = gc.MAX_PAYLOAD_SIZE + 256,
+                .large_pool_count = 1,
+                .body_buffer_bytes = 256,
+                .control_bytes = 512,
+                .critical_bytes = 512,
+            },
+        },
+        .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 7 },
+        .control = .{ .operations_max = 2 },
+    };
+}
+
+pub const Setup = struct {
+    pair: support.Pair = .{},
+    client: managed.PeerManager = undefined,
+    client_service: @import("service.zig").Service = undefined,
+    server: managed.PeerManager = undefined,
+    server_service: @import("service.zig").Service = undefined,
+    client_events: [1]t.Event = undefined,
+    server_events: [1]t.Event = undefined,
+    pub fn init(self: *Setup, local: *const t.LocalState) !void {
+        try self.initDirection(local, false);
+    }
+    pub fn initDirection(self: *Setup, local: *const t.LocalState, reverse: bool) !void {
+        try self.initOwners(local);
+        errdefer self.deinit();
+        if (reverse) {
+            _ = try self.pair.server.dial(
+                &support.client_address,
+                self.pair.client_ctx.local_peer_id,
+                self.pair.now,
+            );
+        } else _ = try self.pair.dial();
+    }
+    pub fn initOwners(self: *Setup, local: *const t.LocalState) !void {
+        try self.initOwnersWithOptions(local, options());
+    }
+    pub fn initOwnersWithOptions(
+        self: *Setup,
+        local: *const t.LocalState,
+        opts: managed.Options,
+    ) !void {
+        const limits: Engine.Limits = .{
+            .connections_max = 4,
+            .handshaking_max = 4,
+            .handshaking_per_source_max = 4,
+            .dialing_max = 2,
+        };
+        try self.pair.init(limits, limits);
+        errdefer self.pair.deinit();
+        self.client_service = try @import("service.zig").Service.init(std.testing.allocator, managed.serviceOptions(opts, local));
+        errdefer self.client_service.deinit();
+        self.client = try managed.PeerManager.init(
+            std.testing.allocator,
+            &self.pair.client_ctx.local_peer_id,
+            local,
+            managed.peerOptions(opts),
+            &self.client_service,
+        );
+        errdefer self.client.deinit();
+        self.server_service = try @import("service.zig").Service.init(std.testing.allocator, managed.serviceOptions(opts, local));
+        errdefer self.server_service.deinit();
+        self.server = try managed.PeerManager.init(
+            std.testing.allocator,
+            &self.pair.server_ctx.local_peer_id,
+            local,
+            managed.peerOptions(opts),
+            &self.server_service,
+        );
+    }
+    pub fn deinit(self: *Setup) void {
+        managed.shutdown(&self.client, &self.client_service, &self.pair.client, self.pair.now);
+        managed.shutdown(&self.server, &self.server_service, &self.pair.server, self.pair.now);
+        self.server_service.deinit();
+        self.server.deinit();
+        self.client_service.deinit();
+        self.client.deinit();
+        self.pair.deinit();
+    }
+    pub fn step(self: *Setup, capacity: usize) !void {
+        try self.pair.pump();
+        var events: [32]Engine.Event = undefined;
+        var activity: [4]Engine.Handle = undefined;
+        var count = self.pair.server.takeActivity(&activity);
+        _ = managed.process(
+            &self.server,
+            &self.server_service,
+            &self.pair.server,
+            self.pair.events(&self.pair.server, &events),
+            activity[0..count],
+            self.pair.now,
+            100,
+            self.server_events[0..capacity],
+            &.{},
+            &.{},
+        );
+        count = self.pair.client.takeActivity(&activity);
+        _ = managed.process(
+            &self.client,
+            &self.client_service,
+            &self.pair.client,
+            self.pair.events(&self.pair.client, &events),
+            activity[0..count],
+            self.pair.now,
+            100,
+            self.client_events[0..capacity],
+            &.{},
+            &.{},
+        );
+    }
+};

@@ -13,7 +13,7 @@ const bootstrap_steps_max: usize = 4_096;
 const call_capacity: usize = 64;
 const crawl_duration_seconds_default: u16 = 60;
 const crawl_duration_seconds_max: u16 = 300;
-const driver_steps_max: usize = 12_000;
+const transport_steps_max: usize = 12_000;
 const key_generation_attempts_max: usize = 16;
 const lookup_concurrency: usize = 16;
 const lookup_total_max: usize = 64;
@@ -97,16 +97,17 @@ pub fn main(init: std.process.Init) !void {
         bootnode_start = 5;
     }
     if (args.len - bootnode_start > bootstrap_capacity) return error.TooManyBootnodes;
-    const started_ms = try discv5.Driver.monotonicMilliseconds(io);
+    const started_ms = try discv5.Transport.monotonicMilliseconds(io);
     const duration_ms = @as(u64, duration_seconds) * std.time.ms_per_s;
     const deadline_ms = std.math.add(u64, started_ms, duration_ms) catch
         return error.ClockOutOfRange;
 
     const bind_address = try net.IpAddress.parseLiteral(args[1]);
-    const advertised_address = discv5.Udp.fromNetwork(try net.IpAddress.parseLiteral(args[2]));
-    var udp = try discv5.Udp.bind(io, .single(bind_address));
-    defer udp.close(io);
-    const bound_address = udp.localAddress();
+    const advertised_address = discv5.types.Address.fromNetwork(try net.IpAddress.parseLiteral(args[2]));
+    const sockets = try discv5.sockets.Sockets.bind(io, .single(bind_address));
+    var sockets_owned = true;
+    errdefer if (sockets_owned) sockets.close(io);
+    const bound_address = discv5.types.Address.fromNetwork(sockets.primary().address);
     if (std.meta.activeTag(bound_address) != std.meta.activeTag(advertised_address))
         return error.AdvertisedAddressFamilyMismatch;
     if (bound_address.port() != advertised_address.port())
@@ -119,26 +120,22 @@ pub fn main(init: std.process.Init) !void {
         1,
         advertised_address,
     );
-    var core: discv5.Engine = undefined;
-    try core.initWithConfig(allocator, key_pair, local_record, .{
+    var transport: discv5.Transport = undefined;
+    try transport.init(allocator, sockets, key_pair, local_record, .{ .poll_interval_ms = poll_interval_ms, .engine = .{
         .session_capacity = 256,
         .challenge_capacity = 1024,
         .call_capacity = call_capacity,
         .request_timeout_ms = 1_000,
         .challenge_timeout_ms = 1_000,
         .session_idle_timeout_ms = 86_400_000,
-    });
-    defer core.deinit(allocator);
-    var transport = try discv5.Driver.initWithConfig(
-        &core,
-        &udp,
-        .{ .poll_interval_ms = poll_interval_ms },
-    );
+    } });
+    sockets_owned = false;
+    defer transport.deinit(allocator, io);
 
     var bootstraps: [bootstrap_capacity]Bootstrap = undefined;
     const bootstraps_slice = try parseBootstraps(
         args[bootnode_start..],
-        udp.sockets.mode(),
+        sockets.mode(),
         &bootstraps,
     );
     var records = try RecordSet.init(allocator);
@@ -150,26 +147,26 @@ pub fn main(init: std.process.Init) !void {
         &records,
         deadline_ms,
     );
-    if (core.peerCount() == 0) return error.NoReachableBootnodes;
+    if (transport.engine.peerCount() == 0) return error.NoReachableBootnodes;
 
     std.debug.print(
         "node bound on {any}, authenticated {d}/{d} bootnodes\n",
-        .{ udp.localAddress(), authenticated, bootstraps_slice.len },
+        .{ discv5.types.Address.fromNetwork(sockets.primary().address), authenticated, bootstraps_slice.len },
     );
     var maintenance_bootstraps: [bootstrap_capacity]discv5.identity.enr.Record = undefined;
     for (bootstraps_slice, maintenance_bootstraps[0..bootstraps_slice.len]) |bootstrap, *record| record.* = bootstrap.record;
     try crawl(io, allocator, &transport, &records, maintenance_bootstraps[0..bootstraps_slice.len], deadline_ms);
-    const elapsed_ms = (try discv5.Driver.monotonicMilliseconds(io)) - started_ms;
+    const elapsed_ms = (try discv5.Transport.monotonicMilliseconds(io)) - started_ms;
     std.debug.print(
         "collected {d} validated peer records from {d} routing entries in {d} ms\n",
-        .{ records.count, core.peerCount(), elapsed_ms },
+        .{ records.count, transport.engine.peerCount(), elapsed_ms },
     );
     for (records.records[0..records.count]) |*record| printRecord(record);
 }
 
 fn parseBootstraps(
     encoded: []const [:0]const u8,
-    ip_mode: discv5.Udp.Mode,
+    ip_mode: discv5.types.Mode,
     storage: *[bootstrap_capacity]Bootstrap,
 ) ![]Bootstrap {
     var count: usize = 0;
@@ -193,24 +190,24 @@ fn parseBootstraps(
 
 fn authenticateBootstraps(
     io: std.Io,
-    transport: *discv5.Driver,
+    transport: *discv5.Transport,
     bootstraps: []Bootstrap,
     records: *RecordSet,
     deadline_ms: u64,
 ) !usize {
     defer for (bootstraps) |*bootstrap| {
-        if (bootstrap.handle) |handle| _ = transport.core.cancelCall(handle);
+        if (bootstrap.handle) |handle| _ = transport.engine.cancelCall(handle);
         bootstrap.handle = null;
     };
     var pending: usize = 0;
     for (bootstraps, 0..) |*bootstrap, index| {
         const request = discv5.wire.message.Message{ .ping = .{
             .request_id = requestId(index + 1),
-            .enr_sequence = transport.core.localRecord().sequence,
+            .enr_sequence = transport.engine.localRecord().sequence,
         } };
         bootstrap.handle = try transport.startCall(
             io,
-            endpoint(&bootstrap.record, transport.udp.sockets.mode()),
+            endpoint(&bootstrap.record, transport.sockets.mode()),
             &bootstrap.record,
             &request,
         );
@@ -220,7 +217,7 @@ fn authenticateBootstraps(
     var expired: [call_capacity]discv5.CallTable.Expired = undefined;
     for (0..bootstrap_steps_max) |_| {
         if (pending == 0) break;
-        if (try discv5.Driver.monotonicMilliseconds(io) >= deadline_ms) break;
+        if (try discv5.Transport.monotonicMilliseconds(io) >= deadline_ms) break;
         const result = try transport.stepUntil(io, &expired, deadline_ms);
         for (expired[0..result.calls_expired]) |item| {
             if (findBootstrap(bootstraps, item.handle)) |bootstrap| {
@@ -239,7 +236,7 @@ fn authenticateBootstraps(
                 if (findBootstrap(bootstraps, response.matched.handle)) |bootstrap| {
                     bootstrap.handle = null;
                     pending -= 1;
-                    if (transport.core.confirmPeer(&response.peer, &bootstrap.record, result.now_ms)) |_| {
+                    if (transport.engine.confirmPeer(&response.peer, &bootstrap.record, result.now_ms)) |_| {
                         bootstrap.authenticated = true;
                         _ = records.add(&bootstrap.record);
                     } else |_| {}
@@ -254,7 +251,7 @@ fn authenticateBootstraps(
     for (bootstraps) |*bootstrap| {
         if (bootstrap.authenticated) authenticated += 1;
         if (bootstrap.handle) |handle| {
-            _ = transport.core.cancelCall(handle);
+            _ = transport.engine.cancelCall(handle);
             bootstrap.handle = null;
         }
     }
@@ -264,7 +261,7 @@ fn authenticateBootstraps(
 fn crawl(
     io: std.Io,
     allocator: std.mem.Allocator,
-    transport: *discv5.Driver,
+    transport: *discv5.Transport,
     records: *RecordSet,
     bootstrap_records: []const discv5.identity.enr.Record,
     deadline_ms: u64,
@@ -272,53 +269,53 @@ fn crawl(
     const candidates = try allocator.alloc(discv5.Lookup.Candidates, lookup_concurrency + 1);
     defer allocator.free(candidates);
     var maintenance: discv5.Maintenance = undefined;
-    try maintenance.init(&candidates[lookup_concurrency], bootstrap_records, try discv5.Driver.monotonicMilliseconds(io), .{
+    try maintenance.init(&candidates[lookup_concurrency], bootstrap_records, try discv5.Transport.monotonicMilliseconds(io), .{
         .probe_interval_ms = 10_000,
         .stale_after_ms = 15_000,
         .refresh_interval_ms = 15_000,
         .bootstrap_interval_ms = 15_000,
         .discovery_stall_ms = 15_000,
-    }, transport.udp.sockets.mode());
-    defer maintenance.cancel(transport.core);
-    var cursor: discv5.lookup_driver.Cursor = .{};
+    }, transport.sockets.mode());
+    defer maintenance.cancel(&transport.engine);
+    var cursor: discv5.lookup_batch.Cursor = .{};
     var statistics: CrawlStatistics = .{};
     var slots = [_]LookupSlot{.{}} ** lookup_concurrency;
-    defer for (&slots) |*slot| slot.cancel(transport.core);
+    defer for (&slots) |*slot| slot.cancel(&transport.engine);
     var expired: [call_capacity]discv5.CallTable.Expired = undefined;
     var operations: [lookup_concurrency]*discv5.Lookup = undefined;
     var launched: usize = 0;
     var completed: usize = 0;
     var rejections = std.EnumArray(discv5.types.RejectReason, u32).initFill(0);
 
-    for (0..driver_steps_max) |_| {
-        if (try discv5.Driver.monotonicMilliseconds(io) >= deadline_ms) break;
+    for (0..transport_steps_max) |_| {
+        if (try discv5.Transport.monotonicMilliseconds(io) >= deadline_ms) break;
         try startMaintenance(io, transport, &maintenance);
         try startLookups(io, transport, &slots, candidates[0..lookup_concurrency], &launched);
 
         const active = activeLookups(&slots, &operations);
-        const result = try discv5.lookup_driver.step(transport, io, active, &cursor, &expired);
-        switch (result.driver.datagram) {
+        const result = try discv5.lookup_batch.step(transport, io, active, &cursor, &expired);
+        switch (result.transport.datagram) {
             .rejected => |reason| rejections.getPtr(reason).* += 1,
             .timeout, .accepted => {},
         }
-        for (expired[0..result.driver.calls_expired]) |item| {
-            _ = maintenance.onFailure(transport.core, item.handle, result.driver.now_ms, .expired);
+        for (expired[0..result.transport.calls_expired]) |item| {
+            _ = maintenance.onFailure(&transport.engine, item.handle, result.transport.now_ms, .expired);
         }
-        _ = try maintenance.onEvent(transport.core, &result.driver.event, result.driver.now_ms);
-        if (result.driver.event == .response) {
-            for (result.driver.event.response.node_records) |*record| _ = records.add(record);
+        _ = try maintenance.onEvent(&transport.engine, &result.transport.event, result.transport.now_ms);
+        if (result.transport.event == .response) {
+            for (result.transport.event.response.node_records) |*record| _ = records.add(record);
         }
         statistics.failures += result.progress.failures;
-        completed += finishLookups(transport.core, &slots, &statistics);
+        completed += finishLookups(&transport.engine, &slots, &statistics);
         if (result.failure) |err| return err;
         if (completed == lookup_total_max and activeLookups(&slots, &operations).len == 0) break;
         if (records.count == record_capacity) break;
     }
 
     for (&slots) |*slot| {
-        if (slot.active) slot.operation.cancel(transport.core);
+        if (slot.active) slot.operation.cancel(&transport.engine);
     }
-    completed += finishLookups(transport.core, &slots, &statistics);
+    completed += finishLookups(&transport.engine, &slots, &statistics);
 
     std.debug.print("lookups launched={d} terminal={d}\n", .{ launched, completed });
     std.debug.print("lookup_queries={d} lookup_failures={d} capacity_drops={d} candidate_bytes={d}\n", .{
@@ -338,16 +335,9 @@ const CrawlStatistics = struct {
     finished: std.EnumArray(discv5.Lookup.FinishReason, u16) = .initFill(0),
 };
 
-fn startMaintenance(io: std.Io, transport: *discv5.Driver, maintenance: *discv5.Maintenance) !void {
-    var context = try discv5.Driver.sendContext(io);
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&context.entropy));
-    var output: [discv5.wire.constants.packet_size_max]u8 = undefined;
-    const started = try maintenance.startNext(transport.core, &output, try discv5.Driver.requestId(io), context.now_ms, &context.entropy) orelse return;
-    transport.transmit(io, started.peer.address, output[0..started.call.packet_length]) catch |err| {
-        const consumed = maintenance.onFailure(transport.core, started.call.handle, context.now_ms, .local);
-        std.debug.assert(consumed);
-        if (err != error.DestinationUnreachable) return err;
-    };
+fn startMaintenance(io: std.Io, transport: *discv5.Transport, maintenance: *discv5.Maintenance) !void {
+    const result = try discv5.lookup_io.startMaintenance(transport, io, maintenance, try discv5.Transport.monotonicMilliseconds(io));
+    if (result.failure) |err| if (err != error.DestinationUnreachable) return err;
 }
 
 fn printRejections(rejections: *const std.EnumArray(discv5.types.RejectReason, u32)) void {
@@ -362,12 +352,12 @@ fn printRejections(rejections: *const std.EnumArray(discv5.types.RejectReason, u
 
 fn startLookups(
     io: std.Io,
-    transport: *discv5.Driver,
+    transport: *discv5.Transport,
     slots: *[lookup_concurrency]LookupSlot,
     candidates: []discv5.Lookup.Candidates,
     launched: *usize,
 ) !void {
-    const core = transport.core;
+    const core = &transport.engine;
     for (slots, candidates) |*slot, *storage| {
         if (slot.active or launched.* == lookup_total_max) continue;
         var target: discv5.types.NodeId = undefined;
@@ -375,7 +365,7 @@ fn startLookups(
         var seeds_buffer: [discv5.Lookup.result_max]discv5.RoutingTable.Entry = undefined;
         const seeds = core.closestNodes(&target, &seeds_buffer);
         if (seeds.len == 0) return;
-        try slot.operation.init(storage, core.localRecord().node_id, target, seeds, transport.udp.sockets.mode());
+        try slot.operation.init(storage, core.localRecord().node_id, target, seeds, transport.sockets.mode());
         slot.active = true;
         launched.* += 1;
     }
@@ -423,7 +413,7 @@ fn findBootstrap(
     return null;
 }
 
-fn endpoint(record: *const discv5.identity.enr.Record, ip_mode: discv5.Udp.Mode) discv5.types.Endpoint {
+fn endpoint(record: *const discv5.identity.enr.Record, ip_mode: discv5.types.Mode) discv5.types.Endpoint {
     return .{ .node_id = record.node_id, .address = record.endpointFor(ip_mode).? };
 }
 
@@ -458,8 +448,8 @@ fn printRecord(record: *const discv5.identity.enr.Record) void {
 
 comptime {
     std.debug.assert(bootstrap_capacity <= call_capacity);
-    std.debug.assert(driver_steps_max <= std.math.maxInt(u32));
-    std.debug.assert(lookup_concurrency <= discv5.lookup_driver.operations_max);
+    std.debug.assert(transport_steps_max <= std.math.maxInt(u32));
+    std.debug.assert(lookup_concurrency <= discv5.lookup_batch.operations_max);
     std.debug.assert((lookup_concurrency + 1) * discv5.Lookup.parallelism + 1 <= call_capacity);
     std.debug.assert(record_capacity <= std.math.maxInt(u16));
     std.debug.assert(record_capacity >= discv5.RoutingTable.table_capacity);

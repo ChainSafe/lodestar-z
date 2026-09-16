@@ -126,11 +126,11 @@ pub fn terminalBarrier(runtime: *Runtime, accepted: bool) !?TerminalProof {
         runtime.unlock();
         return null;
     };
-    const native = runtime.heavy.?.core.core.service.reqresp.inboundSlot(cell.handle).?;
-    std.debug.assert(native.lifecycle.running() and native.lifecycle.chunks == cell.chunks);
+    const native = runtime.heavy.?.core.service.reqresp.inboundSlot(cell.handle).?;
+    std.debug.assert(native.request.running() and native.request.chunks == cell.chunks);
     if (accepted) std.debug.assert(native.state == .finishing or (native.state == .writing_chunk and native.close_after_write)) else std.debug.assert(native.state == .serving);
     std.Io.Threaded.mutexLock(&mutex);
-    snapshot = .{ .terminalBefore = !accepted, .terminalAccepted = accepted, .nativeFinishing = native.state == .finishing, .nativeErrorWriting = native.state == .writing_chunk and native.close_after_write, .nativeTerminal = native.lifecycle.terminalEvent() != null, .chunks = native.lifecycle.chunks };
+    snapshot = .{ .terminalBefore = !accepted, .terminalAccepted = accepted, .nativeFinishing = native.state == .finishing, .nativeErrorWriting = native.state == .writing_chunk and native.close_after_write, .nativeTerminal = native.request.terminalEvent() != null, .chunks = native.request.chunks };
     std.Io.Threaded.mutexUnlock(&mutex);
     const proof: TerminalProof = .{ .session = runtime.diag.session, .handle = cell.handle };
     runtime.unlock();
@@ -161,19 +161,19 @@ pub fn afterStep(runtime: *Runtime, proof: *const TerminalProof, events: []const
     for (runtime.incoming.?.cells) |*cell| {
         if (!cell.native or !std.meta.eql(cell.handle, proof.handle)) continue;
         std.debug.assert(cell.action == .cancel);
-        const native = runtime.heavy.?.core.core.service.reqresp.inboundSlot(cell.handle);
+        const native = runtime.heavy.?.core.service.reqresp.inboundSlot(cell.handle);
         std.Io.Threaded.mutexLock(&mutex);
         defer std.Io.Threaded.mutexUnlock(&mutex);
         std.debug.assert(!snapshot.stepObserved);
         snapshot.stepObserved = true;
         if (native) |slot| {
-            std.debug.assert(slot.lifecycle.running());
+            std.debug.assert(slot.request.running());
             snapshot.stepFinishing = slot.state == .finishing;
             snapshot.stepWriting = slot.state == .writing_chunk;
             snapshot.stepCloseAfterWrite = slot.close_after_write;
             snapshot.stepErrorStatus = slot.pending_result;
             snapshot.stepNativeState = @intFromEnum(slot.state);
-            snapshot.stepChunks = slot.lifecycle.chunks;
+            snapshot.stepChunks = slot.request.chunks;
         } else {
             std.debug.assert(events.len <= 32);
             for (events) |event| if (event == .served and std.meta.eql(event.served.request, cell.handle)) {

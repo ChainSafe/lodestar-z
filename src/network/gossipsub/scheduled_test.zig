@@ -37,7 +37,7 @@ const Simulation = struct {
                 .body_buffer_bytes = 64,
             } });
             initialized += 1;
-            try std.testing.expect(node.gossipsub.inner.subscribe(name));
+            try std.testing.expect(node.gossipsub.subscribe(name));
         }
         const connected = try support.connectPair(&self.pair);
         self.connections = .{ connected.client, connected.server };
@@ -68,7 +68,7 @@ const Simulation = struct {
         var work = false;
         for (&self.pending) |*entry| if (entry.*) |pending| {
             if (pending.due <= now.mono_ms) {
-                try std.testing.expectEqualDeep(gossip.ReportOutcome{ .applied = .accept }, self.nodes[1].gossipsub.inner.report(pending.handle, .accept, now));
+                try std.testing.expectEqualDeep(gossip.ReportOutcome{ .applied = .accept }, self.nodes[1].gossipsub.report(pending.handle, .accept, now));
                 entry.* = null;
                 work = true;
             }
@@ -85,7 +85,7 @@ const Simulation = struct {
             work = true;
             var output: [16]gossip.Event = undefined;
             const count = node.process(quic, incoming, activity[0..active], now, .{ .gossipsub = output[0..self.capacity(i)] }).gossipsub;
-            const resources = node.gossipsub.inner.resourceSnapshot();
+            const resources = node.gossipsub.resourceSnapshot();
             try std.testing.expectEqual(resources.delivery_descriptors_capacity, resources.delivery_descriptors_available + resources.queued_descriptors);
             try std.testing.expectEqual(resources.queued_descriptors, resources.held_tx_retains);
             try std.testing.expect(resources.delivery_descriptors_available >= resources.delivery_descriptors_reserved);
@@ -133,7 +133,7 @@ test "gossip scheduler converges through pressure loss stream replacement and se
         try sim.until(start + 400);
         sim.host_ready = false;
         for (0..4) |id| {
-            const published = try sim.nodes[0].gossipsub.inner.publish(name, &.{@intCast(id)}, sim.pair.now);
+            const published = try sim.nodes[0].gossipsub.publish(name, &.{@intCast(id)}, sim.pair.now);
             try std.testing.expectEqual(@as(u16, 1), published.queued);
         }
         try sim.until(start + 600);
@@ -141,28 +141,28 @@ test "gossip scheduler converges through pressure loss stream replacement and se
         sim.host_ready = true;
         sim.pair.drop_to_server = true;
         try sim.until(start + 800);
-        const receiver = sim.nodes[1].gossipsub.inner.sessions;
+        const receiver = sim.nodes[1].gossipsub.sessions;
         const index = receiver.findPeer(sim.connections[1]).?;
         const old_stream = receiver.rows[index].in_stream.?;
         sim.pair.server.closeStream(old_stream, 0);
         try sim.until(start + 1000);
         sim.pair.drop_to_server = false;
-        try std.testing.expect(sim.nodes[1].gossipsub.inner.unsubscribe(name));
+        try std.testing.expect(sim.nodes[1].gossipsub.unsubscribe(name));
         try sim.until(start + 1100);
-        try std.testing.expect(sim.nodes[1].gossipsub.inner.subscribe(name));
-        const sender = sim.nodes[0].gossipsub.inner.sessions;
+        try std.testing.expect(sim.nodes[1].gossipsub.subscribe(name));
+        const sender = sim.nodes[0].gossipsub.sessions;
         const sender_index = sender.findPeer(sim.connections[0]).?;
-        const attempts = sim.nodes[0].gossipsub.inner.counters.negotiation_started;
+        const attempts = sim.nodes[0].gossipsub.counters.negotiation_started;
         try std.testing.expect(sender.rows[sender_index].outbound == .none);
-        sim.nodes[1].gossipsub.resetOutbound(&sim.pair.server, index);
+        @import("session_io.zig").resetOutbound(sim.nodes[1].gossipsub, &sim.pair.server, index);
         const offered = try sim.nodes[1].router.beginMeshsub(&sim.pair.server, sim.connections[1], sim.pair.now);
         receiver.setOutbound(index, .{ .negotiating = offered });
         try sim.until(start + 2400);
-        try std.testing.expectEqual(attempts + 1, sim.nodes[0].gossipsub.inner.counters.negotiation_started);
+        try std.testing.expectEqual(attempts + 1, sim.nodes[0].gossipsub.counters.negotiation_started);
         try std.testing.expect(!std.meta.eql(old_stream, receiver.rows[index].in_stream.?));
         for (sim.received[0..4]) |received| try std.testing.expect(received);
 
-        const core = sim.nodes[0].gossipsub.inner;
+        const core = sim.nodes[0].gossipsub;
         const prior = core.sessions.ref(core.sessions.findPeer(sim.connections[0]).?);
         sim.nodes[0].gossipsub.shutdown(&sim.nodes[0].router, &sim.pair.client);
         try std.testing.expectEqual(@as(usize, 0), core.resourceSnapshot().held_tx_retains);
@@ -174,7 +174,7 @@ test "gossip scheduler converges through pressure loss stream replacement and se
         try std.testing.expectEqual(sent, core.rpc_metrics.sent_frames);
         try sim.until(start + 3600);
         for (4..8) |id| {
-            const published = try sim.nodes[0].gossipsub.inner.publish(name, &.{@intCast(id)}, sim.pair.now);
+            const published = try sim.nodes[0].gossipsub.publish(name, &.{@intCast(id)}, sim.pair.now);
             try std.testing.expectEqual(@as(u16, 1), published.queued);
         }
         try sim.until(start + 4200);

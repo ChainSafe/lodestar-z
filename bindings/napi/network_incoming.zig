@@ -196,7 +196,7 @@ fn failure(reason: rr.Failure) !Failure {
 pub fn awaitingTerminal(owner: *rr.ReqResp, handle: rr.RequestHandle, err: anyerror) bool {
     if (err != error.Busy or handle.direction != .inbound) return false;
     const slot = owner.inboundSlot(handle) orelse return false;
-    return slot.lifecycle.terminalEvent() != null;
+    return slot.request.terminalEvent() != null;
 }
 pub fn flags(runtime: *Runtime, now: n.Now) !void {
     runtime.lock();
@@ -216,7 +216,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
         if (cell.state == .response_queued and submissions < 4) {
             submissions += 1;
             core.respond(cell.handle, cell.response, cell.context, now) catch |err| {
-                if (awaitingTerminal(&core.core.service.reqresp, cell.handle, err)) continue;
+                if (awaitingTerminal(&core.service.reqresp, cell.handle, err)) continue;
                 cell.ack = .{ .rejected = try rejection(err) };
                 table.releaseResponse(cell);
                 cell.state = .serving;
@@ -232,7 +232,7 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
             },
             .fail => {
                 core.respondError(cell.handle, cell.error_status, cell.error_message[0..cell.error_len], now) catch |err| {
-                    if (awaitingTerminal(&core.core.service.reqresp, cell.handle, err)) continue;
+                    if (awaitingTerminal(&core.service.reqresp, cell.handle, err)) continue;
                     return err;
                 };
                 cell.action = .submitted;
