@@ -1,6 +1,8 @@
 const std = @import("std");
 const d = @import("discv5");
-const core_mod = @import("core.zig");
+const managed = @import("managed.zig");
+const manager = @import("peer_manager.zig");
+const service_mod = @import("service.zig");
 const transport_mod = @import("transport.zig");
 const engine = @import("quic/engine.zig");
 const t = @import("peers/types.zig");
@@ -46,7 +48,7 @@ pub const DiscoveryOptions = struct {
 };
 pub const Options = struct {
     transport: transport_mod.Options,
-    core: core_mod.Options,
+    core: managed.Options,
     local: t.LocalState,
     schedule: ForkSchedule,
     discovery: ?DiscoveryOptions = null,
@@ -62,6 +64,15 @@ pub const ManagedOptions = struct {
     schedule: ForkSchedule = .{},
     discovery: ?DiscoveryOptions = null,
 };
+pub const Startup = struct {
+    wait_mode: wait.Mode = .portable,
+    keylog_path: ?[]const u8 = null,
+    host: *const @import("wire/keys.zig").KeyPair,
+    bind: @import("udp.zig").Bindings,
+    local: t.LocalState,
+    schedule: ForkSchedule = .{},
+    discovery: ?DiscoveryOptions = null,
+};
 pub const Outputs = struct {
     peers: []t.Event = &.{},
     application: []rr.Event = &.{},
@@ -69,7 +80,7 @@ pub const Outputs = struct {
 };
 pub const OperationalError = transport_mod.StepError || transport_mod.DialError || peers.discovery.Error || wait.Error;
 pub const Result = struct {
-    counts: core_mod.Counts = .{ .peers = 0, .application = 0, .gossipsub = 0 },
+    counts: managed.Counts = .{ .peers = 0, .application = 0, .gossipsub = 0 },
     transport: transport_mod.StepResult,
     readiness: wait.Result = .{},
     discovery: peers.discovery.Result = .{},
@@ -102,13 +113,14 @@ pub const Diagnostics = struct {
     runtime: Counters,
     transport: engine.Counters,
     transport_resources: engine.Engine.Resources,
-    core: core_mod.Core.Diagnostics,
+    core: manager.PeerManager.Diagnostics,
 };
 pub const MemoryPlan = struct {
     inline_bytes: usize = @sizeOf(NetworkCore),
     allocated_bytes: usize = 0,
     transport_bytes: usize = 0,
-    core_bytes: usize = 0,
+    peer_bytes: usize = 0,
+    service_bytes: usize = 0,
     scratch_bytes: usize = 0,
     local_intent_bytes: usize = 0,
     discovery_bytes: usize = 0,
@@ -116,32 +128,28 @@ pub const MemoryPlan = struct {
 };
 
 const DiscoveryOwners = struct {
-    udp: d.Udp,
-    engine: d.Engine,
-    driver: d.Driver,
+    transport: d.Transport,
     coordinator: peers.Discovery,
     endpoints: AdvertisementEndpoints,
 
     fn init(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io, options: DiscoveryOptions, host: *const @import("wire/keys.zig").KeyPair, local: *const t.LocalState, schedule: ForkSchedule, quic: [2]?t.Address, now: Now) !void {
-        self.udp = try d.Udp.bind(io, options.bind);
-        errdefer self.udp.close(io);
-        self.endpoints = options.advertisement orelse try defaultEndpoints(quic, &self.udp.sockets);
+        const sockets = try @import("udp").Sockets.bind(io, options.bind);
+        errdefer sockets.close(io);
+        self.endpoints = options.advertisement orelse try defaultEndpoints(quic, &sockets);
         try validateEndpoints(self.endpoints);
-        try validateEndpointFamilies(self.endpoints, quic, &self.udp.sockets);
+        try validateEndpointFamilies(self.endpoints, quic, &sockets);
         const advertisement = advertisementFor(local, schedule, self.endpoints);
         const record = try peers.enr.build(&host.inner, options.sequence, &advertisement, &local.fork);
         try peers.enr.requireIdentity(&record, &t.PeerId.fromPublicKey(&host.publicKey()));
-        try self.engine.initWithConfig(allocator, host.inner, record, options.engine);
-        errdefer self.engine.deinit(allocator);
-        self.driver = try d.Driver.initWithConfig(&self.engine, &self.udp, .{ .poll_interval_ms = poll_wait_max_ms });
+        try self.transport.init(allocator, sockets, host.inner, record, .{ .engine = options.engine, .poll_interval_ms = poll_wait_max_ms });
+        errdefer self.transport.engine.deinit(allocator);
         var coordinator_options = options.coordinator;
         coordinator_options.quic_mode = if (quic[0] == null) .ip6 else if (quic[1] == null) .ip4 else .dual;
-        self.coordinator = try peers.Discovery.init(allocator, &self.driver, &local.fork, options.bootstrap, now.mono_ms, coordinator_options);
+        self.coordinator = try peers.Discovery.init(allocator, &self.transport, &local.fork, options.bootstrap, now.mono_ms, coordinator_options);
     }
     fn deinit(self: *DiscoveryOwners, allocator: std.mem.Allocator, io: std.Io) void {
         self.coordinator.deinit();
-        self.engine.deinit(allocator);
-        self.udp.close(io);
+        self.transport.deinit(allocator, io);
     }
 };
 
@@ -151,7 +159,8 @@ pub const NetworkCore = struct {
     memory: MemoryPlan,
     allocator: std.mem.Allocator,
     transport: transport_mod.Transport,
-    core: core_mod.Core,
+    peer_manager: manager.PeerManager,
+    service: service_mod.Service,
     discovery: ?*DiscoveryOwners,
     native_events: []engine.Event,
     native_event_count: usize = 0,
@@ -164,9 +173,15 @@ pub const NetworkCore = struct {
     wait_mode: wait.Mode,
     host_wake: ?i32 = null,
 
-    pub fn init(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, options: Options) !void {
+    pub fn initRaw(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, options: Options) !void {
+        const resolved: @import("configuration.zig").Resolved = .{ .limits = options.transport.limits, .work_limits = options.transport.work_limits, .core = options.core, .byte_limit = options.byte_limit orelse std.math.maxInt(usize) };
+        try self.init(backing, io, &resolved, .{ .host = options.transport.host, .bind = options.transport.bind, .keylog_path = options.transport.keylog_path, .local = options.local, .schedule = options.schedule, .discovery = options.discovery, .wait_mode = options.wait_mode });
+    }
+
+    pub fn init(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, resolved: *const @import("configuration.zig").Resolved, startup: Startup) !void {
+        try @import("configuration.zig").validate(resolved.limits, resolved.core);
+        const options: Options = .{ .transport = .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .keylog_path = startup.keylog_path }, .core = resolved.core, .byte_limit = resolved.byte_limit, .local = startup.local, .schedule = startup.schedule, .discovery = startup.discovery, .wait_mode = startup.wait_mode };
         if (options.wait_mode == .native_poll and !wait.supported) return error.UnsupportedWait;
-        try @import("configuration.zig").validate(options.transport.limits, options.core);
         var local: t.LocalState = undefined;
         try peers.control_wire.copyLocal(&local, &options.local);
         try validateSchedule(&local, options.schedule);
@@ -186,10 +201,13 @@ pub const NetworkCore = struct {
         try self.transport.init(allocator, io, options.transport);
         errdefer self.transport.deinit(io);
         self.memory = .{ .transport_bytes = self.reservations.bytes, .transport = self.transport.memoryPlan() };
-        self.core = try core_mod.Core.init(allocator, &self.transport.peerId(), &local, options.core);
-        errdefer self.core.deinit();
-        if (self.core.service.identify) |*identify| identify.bind(&self.transport.engine);
-        self.memory.core_bytes = self.core.memoryPlan().allocated_bytes;
+        self.service = try service_mod.Service.init(allocator, managed.serviceOptions(options.core, &local));
+        errdefer self.service.deinit();
+        self.peer_manager = try manager.PeerManager.init(allocator, &self.transport.peerId(), &local, managed.peerOptions(options.core), &self.service);
+        errdefer self.peer_manager.deinit();
+        if (self.service.identify) |*identify| identify.bind(&self.transport.engine);
+        self.memory.peer_bytes = self.peer_manager.memoryPlan().allocated_bytes;
+        self.memory.service_bytes = self.service.allocatedBytes();
         const event_capacity = @as(usize, options.transport.limits.connections_max) *
             @import("quic/limits.zig").events_per_connection;
         self.native_events = try allocator.alloc(engine.Event, event_capacity);
@@ -212,25 +230,17 @@ pub const NetworkCore = struct {
             owned.deinit(allocator, io);
             allocator.destroy(owned);
         };
-        const identify_local = try self.prepareIdentifyLocal(self.advertisementEndpoints(), self.core.service.router.capabilities());
-        if (self.core.service.identify) |*identify| identify.local = identify_local;
+        const identify_local = try self.prepareIdentifyLocal(self.advertisementEndpoints(), self.service.router.capabilities());
+        if (self.service.identify) |*identify| identify.local = identify_local;
         self.memory.discovery_bytes = self.reservations.bytes - before_discovery;
         self.memory.allocated_bytes = self.reservations.bytes;
-        std.debug.assert(self.memory.allocated_bytes == self.memory.transport_bytes + self.memory.core_bytes + self.memory.scratch_bytes + self.memory.local_intent_bytes + self.memory.discovery_bytes);
+        std.debug.assert(self.memory.allocated_bytes == self.memory.transport_bytes + self.memory.peer_bytes + self.memory.service_bytes + self.memory.scratch_bytes + self.memory.local_intent_bytes + self.memory.discovery_bytes);
         self.initialized = true;
     }
 
     pub fn initManaged(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, options: ManagedOptions) !void {
         const resolved = try @import("configuration.zig").resolve(options.configuration);
-        try self.init(backing, io, .{
-            .transport = .{ .host = options.host, .bind = options.bind, .limits = resolved.limits, .work_limits = resolved.work_limits },
-            .core = resolved.core,
-            .local = options.local,
-            .schedule = options.schedule,
-            .discovery = options.discovery,
-            .byte_limit = resolved.byte_limit,
-            .wait_mode = options.wait_mode,
-        });
+        try self.init(backing, io, &resolved, .{ .host = options.host, .bind = options.bind, .local = options.local, .schedule = options.schedule, .discovery = options.discovery, .wait_mode = options.wait_mode });
     }
 
     pub fn deinit(self: *NetworkCore, io: std.Io) void {
@@ -241,7 +251,8 @@ pub const NetworkCore = struct {
             self.allocator.destroy(owned);
         }
         self.allocator.destroy(self.local_intent_workspace);
-        self.core.deinit();
+        self.service.deinit();
+        self.peer_manager.deinit();
         self.allocator.free(self.activity);
         self.allocator.free(self.native_events);
         self.transport.deinit(io);
@@ -251,7 +262,7 @@ pub const NetworkCore = struct {
     pub fn shutdown(self: *NetworkCore, now: Now) void {
         self.host_wake = null;
         self.last_now = now;
-        self.core.shutdown(&self.transport.engine, now);
+        managed.shutdown(&self.peer_manager, &self.service, &self.transport.engine, now);
         if (self.discovery) |owned| owned.coordinator.cancel();
         // Include handshakes not yet admitted to the catalog.
         for (self.transport.engine.registry.slots, 0..) |slot, index| {
@@ -260,7 +271,7 @@ pub const NetworkCore = struct {
         }
     }
     pub fn isClosed(self: *const NetworkCore) bool {
-        return self.core.stopped and self.transport.engine.registry.active_len == 0;
+        return self.peer_manager.stopped and self.transport.engine.registry.active_len == 0;
     }
     pub fn peerId(self: *const NetworkCore) t.PeerId {
         return self.transport.peerId();
@@ -272,72 +283,72 @@ pub const NetworkCore = struct {
         return self.transport.localMultiaddr();
     }
     pub fn localRecord(self: *const NetworkCore) ?*const d.identity.enr.Record {
-        return if (self.discovery) |owned| owned.engine.localRecord() else null;
+        return if (self.discovery) |owned| owned.transport.engine.localRecord() else null;
     }
     pub fn advertisementEndpoints(self: *const NetworkCore) ?AdvertisementEndpoints {
         return if (self.discovery) |owned| owned.endpoints else null;
     }
     pub fn localState(self: *const NetworkCore) t.LocalState {
-        return self.core.local;
+        return self.peer_manager.local;
     }
     pub fn futureForkHint(self: *const NetworkCore, identity: *const t.PeerId, now: Now) ?FutureForkHint {
-        const hints = self.core.candidateHints(identity, now) orelse return null;
+        const hints = self.peer_manager.candidateHints(identity, now) orelse return null;
         return .{ .record_sequence = hints.sequence, .fork = hints.fork, .next_digest = hints.next_fork_digest, .compatible = compatibleHint(hints.fork, hints.next_fork_digest, self.schedule) };
     }
     /// Copied bounded observations. Does not advance time, policy, scores or event borrows.
     pub fn diagnostics(self: *const NetworkCore) Diagnostics {
-        return .{ .runtime = self.counters, .transport = self.transport.engine.counters, .transport_resources = self.transport.engine.resourceSnapshot(), .core = self.core.diagnostics() };
+        return .{ .runtime = self.counters, .transport = self.transport.engine.counters, .transport_resources = self.transport.engine.resourceSnapshot(), .core = self.peer_manager.diagnostics(&self.service) };
     }
     pub fn memoryPlan(self: *const NetworkCore) MemoryPlan {
         std.debug.assert(self.reservations.bytes == self.memory.allocated_bytes);
         return self.memory;
     }
     pub fn setDemand(self: *NetworkCore, demand: *const t.Demand) !void {
-        try self.core.setDemand(demand);
+        try self.peer_manager.setDemand(demand);
     }
     /// Returns the coverage evaluated by the last owner reconciliation.
     pub fn coverageDeficits(self: *const NetworkCore) peers.policy.Deficits {
-        return self.core.coverageDeficits();
+        return self.peer_manager.coverageDeficits();
     }
-    pub fn peerCounts(self: *const NetworkCore) core_mod.Core.PeerCounts {
-        return self.core.peerCounts();
+    pub fn peerCounts(self: *const NetworkCore) manager.PeerManager.PeerCounts {
+        return self.peer_manager.peerCounts();
     }
     pub fn connect(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now) !void {
-        try self.core.connect(identity, addresses, now);
+        try self.peer_manager.connect(identity, addresses, now);
     }
     pub fn connectUntil(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now, deadline_ms: u64) !void {
-        try self.core.connectUntil(identity, addresses, now, deadline_ms);
+        try self.peer_manager.connectUntil(identity, addresses, now, deadline_ms);
     }
     pub fn cancelConnect(self: *NetworkCore, identity: *const t.PeerId, now: Now) void {
-        self.core.cancelConnect(&self.transport.engine, identity, now);
+        self.peer_manager.cancelConnect(&self.transport.engine, identity, now);
     }
     pub fn addDirectPeer(self: *NetworkCore, identity: *const t.PeerId, addresses: []const t.Address, now: Now) !void {
-        try self.core.addDirectPeer(identity, addresses, now);
+        try self.peer_manager.addDirectPeer(&self.service, identity, addresses, now);
     }
     pub fn removeDirectPeer(self: *NetworkCore, identity: *const t.PeerId) bool {
-        return self.core.removeDirectPeer(identity);
+        return self.peer_manager.removeDirectPeer(&self.service, identity);
     }
     pub fn directPeers(self: *const NetworkCore, out: []t.PeerId) error{OutputTooSmall}!usize {
-        return self.core.directPeers(out);
+        return self.peer_manager.directPeers(out);
     }
     pub fn closePeer(self: *NetworkCore, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
-        return self.core.closePeer(&self.transport.engine, peer, connection, now);
+        return self.peer_manager.closePeer(&self.service, &self.transport.engine, peer, connection, now);
     }
     pub fn reStatusPeer(self: *NetworkCore, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
-        return self.core.reStatusPeer(peer, connection, now);
+        return self.peer_manager.reStatusPeer(peer, connection, now);
     }
     pub fn disconnect(self: *NetworkCore, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
-        return self.core.disconnect(peer, reason, now);
+        return self.peer_manager.disconnect(peer, reason, now);
     }
     pub fn reportPeer(self: *NetworkCore, peer: t.PeerRef, action: t.PeerAction, now: Now) ?t.ReputationDecision {
-        return self.core.reportPeer(peer, action, now);
+        return self.peer_manager.reportPeer(peer, action, now);
     }
     pub fn reStatusPeers(self: *NetworkCore, now: Now) void {
-        self.core.reStatusPeers(now);
+        self.peer_manager.reStatusPeers(now);
     }
     pub fn updateStatus(self: *NetworkCore, status: *const t.Status, _: Now) !void {
-        if (self.core.stopped) return error.Stopped;
-        try self.core.updateStatus(status);
+        if (self.peer_manager.stopped) return error.Stopped;
+        try self.peer_manager.updateStatus(status);
     }
     pub fn updateMetadata(self: *NetworkCore, metadata: *const t.Metadata, now: Now) !void {
         var local = self.localState();
@@ -345,31 +356,31 @@ pub const NetworkCore = struct {
         _ = try self.updateLocal(&local, self.schedule, now);
     }
     pub fn sendReqRespRequest(self: *NetworkCore, peer: t.PeerRef, protocol: rr.Protocol, request: []const u8, sink: []u8, options: rr.RequestOptions, now: Now) !rr.RequestHandle {
-        const snapshot = self.core.catalog.get(peer) orelse return error.StalePeer;
+        const snapshot = self.peer_manager.catalog.get(peer) orelse return error.StalePeer;
         const conn = snapshot.connection orelse return error.Disconnected;
-        return self.core.sendReqRespRequest(&self.transport.engine, conn, protocol, request, sink, options, now);
+        return managed.sendReqRespRequest(&self.peer_manager, &self.service, &self.transport.engine, conn, protocol, request, sink, options, now);
     }
     pub fn consume(self: *NetworkCore, request: rr.RequestHandle) bool {
-        return self.core.service.reqresp.consume(request);
+        return self.service.reqresp.consume(request);
     }
     pub fn respond(self: *NetworkCore, request: rr.RequestHandle, bytes: []const u8, context: ?rr.ForkEntry, now: Now) !void {
-        try self.core.service.reqresp.respond(request, bytes, context, now);
+        try self.service.reqresp.respond(request, bytes, context, now);
     }
     pub fn respondError(self: *NetworkCore, request: rr.RequestHandle, code: u8, message: []const u8, now: Now) !void {
-        try self.core.service.reqresp.respondError(request, code, message, now);
+        try self.service.reqresp.respondError(request, code, message, now);
     }
     pub fn finish(self: *NetworkCore, request: rr.RequestHandle, now: Now) bool {
-        return self.core.service.reqresp.finish(request, now);
+        return self.service.reqresp.finish(request, now);
     }
     pub fn cancel(self: *NetworkCore, request: rr.RequestHandle) bool {
-        return self.core.service.reqresp.cancel(request);
+        return self.service.reqresp.cancel(request);
     }
     pub fn errorMessage(self: *const NetworkCore, request: rr.RequestHandle) []const u8 {
-        return self.core.service.reqresp.errorMessage(request);
+        return self.service.reqresp.errorMessage(request);
     }
     /// Copies topic bytes and scalar policy without publishing or invalidating event borrows.
     pub fn configureTopic(self: *NetworkCore, topic: []const u8, params: *const gossip.score.TopicParams) (gossip.Gossipsub.ConfigureTopicError || error{Stopped})!void {
-        try self.core.configureTopic(topic, params);
+        try managed.configureTopic(&self.peer_manager, &self.service, topic, params);
     }
 
     pub fn publishGossip(self: *NetworkCore, topic: []const u8, bytes: []const u8, now: Now) !gossip.Gossipsub.PublishOutcome {
@@ -377,30 +388,30 @@ pub const NetworkCore = struct {
     }
 
     pub fn publishGossipWithOptions(self: *NetworkCore, topic: []const u8, bytes: []const u8, options: gossip.Gossipsub.PublishOptions, now: Now) !gossip.Gossipsub.PublishOutcome {
-        return self.core.publishGossipWithOptions(topic, bytes, options, now);
+        return managed.publishGossipWithOptions(&self.peer_manager, &self.service, topic, bytes, options, now);
     }
     pub fn subscribe(self: *NetworkCore, topic: []const u8) bool {
-        return self.core.subscribe(topic);
+        return managed.subscribe(&self.peer_manager, &self.service, topic);
     }
     pub fn unsubscribe(self: *NetworkCore, topic: []const u8) bool {
-        return self.core.unsubscribe(topic);
+        return managed.unsubscribe(&self.peer_manager, &self.service, topic);
     }
     pub fn reportValidation(self: *NetworkCore, handle: gossip.ValidationHandle, verdict: gossip.Verdict, now: Now) gossip.ReportOutcome {
-        return self.core.service.gossipsub.inner.report(handle, verdict, now);
+        return self.service.gossipsub.report(handle, verdict, now);
     }
     /// Borrows the last step's authenticated transport events until the next step.
     pub fn transportEvents(self: *const NetworkCore) []const engine.Event {
         return self.native_events[0..self.native_event_count];
     }
     pub fn completeSnapshots(self: *const NetworkCore, out: []t.Snapshot) error{OutputTooSmall}!usize {
-        if (out.len < self.core.catalog.rows.len) return error.OutputTooSmall;
-        return self.core.snapshots(out);
+        if (out.len < self.peer_manager.catalog.rows.len) return error.OutputTooSmall;
+        return self.peer_manager.snapshots(out);
     }
     pub fn beginGracefulClose(self: *NetworkCore, now: Now) void {
-        self.core.beginGracefulClose(now);
+        managed.beginGracefulClose(&self.peer_manager, &self.service, now);
     }
     pub fn snapshots(self: *const NetworkCore, out: []t.Snapshot) usize {
-        return self.core.snapshots(out);
+        return self.peer_manager.snapshots(out);
     }
 
     /// Caller sequence input is ignored on updates; only changed metadata advances its counter.
@@ -413,12 +424,12 @@ pub const NetworkCore = struct {
             .local = desired.*,
             .schedule = schedule,
             .endpoints = endpoints,
-            .capabilities = self.core.service.router.capabilities(),
+            .capabilities = self.service.router.capabilities(),
         }, now);
     }
 
     fn prepareIdentifyLocal(self: *const NetworkCore, endpoints: ?AdvertisementEndpoints, capabilities: @import("capabilities.zig").Directional) !?@import("identify/root.zig").Local {
-        const identify = if (self.core.service.identify) |*value| value else return null;
+        const identify = if (self.service.identify) |*value| value else return null;
         var local = identify.local.?;
         if (endpoints) |announced| {
             var addresses: [2]t.Address = undefined;
@@ -449,24 +460,24 @@ pub const NetworkCore = struct {
     };
 
     fn prepareLocal(self: *const NetworkCore, update: *const LocalUpdate) !PreparedLocal {
-        if (self.core.stopped) return error.Stopped;
+        if (self.peer_manager.stopped) return error.Stopped;
         const schedule = update.schedule;
         const endpoints = update.endpoints;
         const capabilities = update.capabilities;
-        try self.core.service.router.validateCapabilities(capabilities);
+        try self.service.router.validateCapabilities(capabilities);
         if ((endpoints == null) != (self.discovery == null)) return error.InvalidAdvertisement;
         if (endpoints) |value| {
             try validateEndpoints(value);
-            try validateEndpointFamilies(value, self.transport.udp.localAddresses(), &self.discovery.?.udp.sockets);
+            try validateEndpointFamilies(value, self.transport.udp.localAddresses(), &self.discovery.?.transport.sockets);
         }
         var local = update.local;
-        local.metadata.seq_number = self.core.local.metadata.seq_number;
+        local.metadata.seq_number = self.peer_manager.local.metadata.seq_number;
         try peers.control_wire.copyLocal(&local, &local);
         try validateSchedule(&local, schedule);
-        const request = &self.core.service.reqresp;
+        const request = &self.service.reqresp;
         try validateForkTable(request.forks[0..request.fork_count], &local.fork);
         const identify_local = try self.prepareIdentifyLocal(endpoints, capabilities);
-        const metadata_changed = !std.meta.eql(local.metadata, self.core.local.metadata);
+        const metadata_changed = !std.meta.eql(local.metadata, self.peer_manager.local.metadata);
         if (metadata_changed) local.metadata.seq_number = try peers.enr.nextSequence(local.metadata.seq_number);
         var prepared: PreparedLocal = .{
             .local = local,
@@ -474,22 +485,22 @@ pub const NetworkCore = struct {
             .endpoints = endpoints,
             .capabilities = capabilities,
             .identify = identify_local,
-            .changed = !(std.meta.eql(local, self.core.local) and std.meta.eql(schedule, self.schedule) and
-                std.meta.eql(endpoints, self.advertisementEndpoints()) and std.meta.eql(capabilities, self.core.service.router.capabilities())),
+            .changed = !(std.meta.eql(local, self.peer_manager.local) and std.meta.eql(schedule, self.schedule) and
+                std.meta.eql(endpoints, self.advertisementEndpoints()) and std.meta.eql(capabilities, self.service.router.capabilities())),
         };
         if (prepared.changed) if (self.discovery) |owned| {
             const advertisement = advertisementFor(&local, schedule, endpoints.?);
-            const previous = advertisementFor(&self.core.local, self.schedule, owned.endpoints);
+            const previous = advertisementFor(&self.peer_manager.local, self.schedule, owned.endpoints);
             if (!std.meta.eql(advertisement, previous)) {
-                const sequence = try peers.enr.nextSequence(owned.engine.localRecord().sequence);
-                prepared.record = try peers.enr.build(&owned.engine.channel.local_key, sequence, &advertisement, &local.fork);
+                const sequence = try peers.enr.nextSequence(owned.transport.engine.localRecord().sequence);
+                prepared.record = try peers.enr.build(&owned.transport.engine.channel.local_key, sequence, &advertisement, &local.fork);
             }
         };
         return prepared;
     }
 
     fn publishLocal(self: *NetworkCore, prepared: *const PreparedLocal) !void {
-        if (prepared.record) |*record| try self.discovery.?.engine.updateLocalRecord(record);
+        if (prepared.record) |*record| try self.discovery.?.transport.engine.updateLocalRecord(record);
     }
 
     fn commitLocal(self: *NetworkCore, prepared: *const PreparedLocal, now: Now) void {
@@ -498,9 +509,9 @@ pub const NetworkCore = struct {
             owned.endpoints = prepared.endpoints.?;
             owned.coordinator.updateFork(&prepared.local.fork) catch unreachable;
         }
-        if (self.core.service.identify) |*identify| identify.local = prepared.identify;
-        self.core.service.router.setCapabilities(prepared.capabilities);
-        self.core.commitLocal(&prepared.local, now);
+        if (self.service.identify) |*identify| identify.local = prepared.identify;
+        self.service.router.setCapabilities(prepared.capabilities);
+        self.peer_manager.commitLocal(&self.service, &prepared.local, now);
         self.schedule = prepared.schedule;
     }
 
@@ -517,14 +528,14 @@ pub const NetworkCore = struct {
     pub fn applyIntent(self: *NetworkCore, intent: *const LocalIntent, now: Now) !bool {
         const prepared = try self.prepareLocal(&intent.update);
         const demand = intent.demand;
-        try demand.validate(&prepared.local.fork, self.core.catalog.options.max_peers);
-        const topics_changed = try self.core.service.gossipsub.inner.prepareSubscriptions(intent.subscriptions, self.local_intent_workspace, now);
-        const demand_changed = !std.meta.eql(demand, self.core.demand);
+        try demand.validate(&prepared.local.fork, self.peer_manager.catalog.options.max_peers);
+        const topics_changed = try self.service.gossipsub.prepareSubscriptions(intent.subscriptions, self.local_intent_workspace, now);
+        const demand_changed = !std.meta.eql(demand, self.peer_manager.demand);
         if (!prepared.changed and !topics_changed and !demand_changed) return false;
         try self.publishLocal(&prepared);
         if (prepared.changed) self.commitLocal(&prepared, now);
-        if (topics_changed) self.core.service.gossipsub.inner.commitSubscriptions(self.local_intent_workspace);
-        if (demand_changed) self.core.commitDemand(&demand);
+        if (topics_changed) self.service.gossipsub.commitSubscriptions(self.local_intent_workspace);
+        if (demand_changed) self.peer_manager.commitDemand(&demand);
         std.log.scoped(.network_core).debug("intent_applied local_changed={any} topics_changed={any} demand_changed={any} subscriptions={d} fork={s} digest={x}", .{ prepared.changed, topics_changed, demand_changed, intent.subscriptions.len, @tagName(prepared.local.fork.fork), prepared.local.fork.digest });
         return true;
     }
@@ -534,21 +545,21 @@ pub const NetworkCore = struct {
     /// Shutdown/deinit detach without draining or closing caller storage.
     pub fn setHostWake(self: *NetworkCore, descriptor: ?i32) error{ UnsupportedWait, InvalidWakeSource, Stopped }!void {
         if (descriptor) |fd| {
-            if (self.core.stopped) return error.Stopped;
+            if (self.peer_manager.stopped) return error.Stopped;
             if (self.wait_mode != .native_poll or !wait.supported) return error.UnsupportedWait;
             if (comptime wait.supported) {
                 if (fd < 0) return error.InvalidWakeSource;
                 for (self.transport.udp.sockets.handles()) |socket| if (socket == fd) return error.InvalidWakeSource;
-                if (self.discovery) |owned| for (owned.udp.sockets.handles()) |socket| if (socket == fd) return error.InvalidWakeSource;
+                if (self.discovery) |owned| for (owned.transport.sockets.handles()) |socket| if (socket == fd) return error.InvalidWakeSource;
             }
         }
         self.host_wake = descriptor;
     }
 
     pub fn nextWakeup(self: *NetworkCore, now: Now, outputs: Outputs) ?u64 {
-        var due = self.core.nextWakeup(now, outputs.peers.len, outputs.application.len, outputs.gossipsub.len, 4);
+        var due = managed.nextWakeup(&self.peer_manager, &self.service, now, outputs.peers.len, outputs.application.len, outputs.gossipsub.len, 4);
         if (self.transport.nextTimeoutMs(now)) |relative| due = earlier(due, now.mono_ms +| relative);
-        if (!self.core.quiescing) if (self.discovery) |owned| if (owned.coordinator.nextWakeup(now.mono_ms)) |deadline| {
+        if (!self.peer_manager.quiescing) if (self.discovery) |owned| if (owned.coordinator.nextWakeup(now.mono_ms)) |deadline| {
             due = earlier(due, deadline);
         };
         return due;
@@ -560,13 +571,13 @@ pub const NetworkCore = struct {
         self.last_now = now;
         var result: Result = .{ .transport = .{ .now = now } };
         const due = self.nextWakeup(now, outputs);
-        const bounded_wait: u32 = if (self.core.stopped) 0 else @intCast(@min(max_wait_ms, (due orelse std.math.maxInt(u64)) -| now.mono_ms));
+        const bounded_wait: u32 = if (self.peer_manager.stopped) 0 else @intCast(@min(max_wait_ms, (due orelse std.math.maxInt(u64)) -| now.mono_ms));
         var receive_wait = @min(bounded_wait, poll_wait_max_ms);
         if (self.wait_mode == .native_poll) {
             if (comptime wait.supported) {
                 result.readiness = wait.poll(io, .{
                     .quic = self.transport.udp.sockets.handles(),
-                    .discovery = if (!self.core.quiescing and self.discovery != null) self.discovery.?.udp.sockets.handles() else .{ null, null },
+                    .discovery = if (!self.peer_manager.quiescing and self.discovery != null) self.discovery.?.transport.sockets.handles() else .{ null, null },
                     .host = self.host_wake,
                 }, bounded_wait);
             } else result.readiness.failure = error.UnsupportedWait;
@@ -583,19 +594,19 @@ pub const NetworkCore = struct {
         if (progress.failure != null) self.counters.transport_failures +|= 1;
         const tick: Now = if (progress.progress.now.mono_ms >= now.mono_ms) progress.progress.now else now;
         self.last_now = tick;
-        result.counts = self.core.process(&self.transport.engine, self.native_events[0..result.transport.events], self.activity[0..result.transport.activity], tick, current_slot, outputs.peers, outputs.application, outputs.gossipsub);
-        if (!self.core.stopped and !self.core.quiescing) {
+        result.counts = managed.process(&self.peer_manager, &self.service, &self.transport.engine, self.native_events[0..result.transport.events], self.activity[0..result.transport.activity], tick, current_slot, outputs.peers, outputs.application, outputs.gossipsub);
+        if (!self.peer_manager.stopped and !self.peer_manager.quiescing) {
             // Expiry and this turn's coverage selection already ran, without a second protocol pump.
             if (self.discovery) |owned| {
-                const need = self.core.discoveryNeed();
+                const need = self.peer_manager.discoveryNeed();
                 owned.coordinator.request(need.query(tick.mono_ms +| 1_000), tick.mono_ms) catch unreachable;
-                var candidates: [core_mod.candidates_per_turn]peers.enr.Candidate = undefined;
+                var candidates: [managed.candidates_per_turn]peers.enr.Candidate = undefined;
                 result.discovery = owned.coordinator.step(io, tick.mono_ms, tick.mono_ms, &candidates) catch |err| .{ .failure = err };
                 for (candidates[0..result.discovery.candidates]) |*candidate| {
                     self.counters.discovered +|= 1;
                     if (!futureCompatible(candidate, self.schedule)) self.counters.future_fork_mismatches +|= 1;
                 }
-                const intake = self.core.discoveredBatch(candidates[0..result.discovery.candidates], tick);
+                const intake = self.peer_manager.discoveredBatch(&self.service, candidates[0..result.discovery.candidates], tick);
                 self.counters.candidates_refused +|= intake.refused;
                 if (result.discovery.candidates > 0) std.log.scoped(.network_discovery).debug("candidates_received count={d} refused={d}", .{ result.discovery.candidates, intake.refused });
                 if (result.discovery.failure) |err| {
@@ -604,24 +615,24 @@ pub const NetworkCore = struct {
                     result.failure = result.failure orelse err;
                 }
             }
-            var intents: [core_mod.dials_per_turn]core_mod.DialIntent = undefined;
+            var intents: [managed.dials_per_turn]managed.DialIntent = undefined;
             const room = self.transport.engine.limits.dialing_max -| self.transport.engine.registry.dialing;
-            const count = self.core.dialIntents(&self.transport.engine, tick, intents[0..@min(room, intents.len)]);
+            const count = self.peer_manager.dialIntents(&self.service, &self.transport.engine, tick, intents[0..@min(room, intents.len)]);
             for (intents[0..count]) |intent| {
                 const handle = self.transport.dialPeer(io, intent.address, intent.peer) catch |err| {
                     if (err == error.DestinationUnreachable) {
                         std.log.scoped(.network_core).debug("dial_failed peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
-                        std.debug.assert(self.core.dialFailed(intent.token, tick));
+                        std.debug.assert(self.peer_manager.dialFailed(intent.token, tick));
                         result.dial_failed += 1;
                     } else {
                         std.log.scoped(.network_core).debug("dial_deferred peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
-                        std.debug.assert(self.core.dialDeferred(intent.token, tick));
+                        std.debug.assert(self.peer_manager.dialDeferred(intent.token, tick));
                         result.dial_deferred += 1;
                         result.failure = result.failure orelse err;
                     }
                     continue;
                 };
-                std.debug.assert(self.core.dialStarted(intent.token, handle));
+                std.debug.assert(self.peer_manager.dialStarted(intent.token, handle));
                 std.log.scoped(.network_core).debug("dial_started peer={f} endpoint={any} connection={d}:{d}", .{ @import("logging.zig").peer(&intent.peer), intent.address, handle.index, handle.generation });
                 result.dial_started += 1;
             }

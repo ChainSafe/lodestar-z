@@ -21,10 +21,6 @@ pub fn addPeer(g: *gossip.Gossipsub, conn: engine.Handle, version: sessions_mod.
     return peer;
 }
 
-pub fn driver(g: *gossip.Gossipsub) @import("session_driver.zig").Driver {
-    return .{ .inner = g };
-}
-
 pub fn pump(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now, events: []gossip.Event) usize {
     return pumpTurn(g, transport, now, events).count;
 }
@@ -32,9 +28,8 @@ pub fn pump(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../ty
 pub fn pumpTurn(g: *gossip.Gossipsub, transport: *engine.Engine, now: @import("../types.zig").Now, events: []gossip.Event) @import("turn.zig").Turn {
     var router = @import("../router.zig").Router.init(std.testing.allocator, .{ .negotiations_max = 1, .reqresp = false }) catch @panic("test router allocation failed");
     defer router.deinit();
-    const io = driver(g);
-    var turn = g.beginPump(now, events);
-    io.runTurn(&router, transport, &turn);
+    var turn = @import("session_io.zig").beginPump(g, now, events);
+    @import("session_io.zig").runTurn(g, &router, transport, &turn);
     return turn;
 }
 
@@ -43,7 +38,7 @@ pub fn processRpc(g: *gossip.Gossipsub, index: u16, now: @import("../types.zig")
     turn.count = count.*;
     var peer = @import("turn.zig").Credits.peer(&g.options);
     peer.items = items.*;
-    const result = try driver(g).processRpc(index, &turn, &peer);
+    const result = try @import("session_io.zig").processRpc(g, index, &turn, &peer);
     count.* = turn.count;
     items.* = peer.items;
     return result == .done;

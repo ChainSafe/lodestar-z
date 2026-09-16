@@ -5,9 +5,7 @@ const ForkSeq = @import("config").ForkSeq;
 const Protocol = @import("protocol.zig").Protocol;
 const limiter = @import("limiter.zig");
 
-pub fn quotas(tokens: u32, period: u64) a.ByFork {
-    return @splat(@as(limiter.Quotas, @splat(.{ .tokens = tokens, .period_ms = period })));
-}
+const quotas = @import("admission_fixture.zig").quotas;
 const first: PeerId = .{ .bytes = @splat(1) };
 const second: PeerId = .{ .bytes = @splat(2) };
 const third: PeerId = .{ .bytes = @splat(3) };

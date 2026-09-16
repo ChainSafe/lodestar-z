@@ -15,28 +15,21 @@ pub const Config = struct {
     capabilities: n.capabilities.Directional,
 
     pub fn buildRequest(self: *const Config, common: *const cfg.Config, seed: u64) !n.configuration.Request {
-        var base = try n.configuration.resolve(.{ .profile = common.profile, .seed = seed, .forks = common.forks[0..common.fork_count] });
         const r = &self.resources;
         if (r.nativeBudgetBytes <= @sizeOf(n.NetworkCore)) return error.NetworkNativeBudgetExceeded;
-        base.limits.connections_max = r.connectionCapacity;
-        base.limits.handshaking_max = r.handshakingCapacity;
-        base.limits.dialing_max = r.dialingCapacity;
-        base.limits.receive_budget_bytes = r.receiveBudgetBytes;
         var gossip_options = common.gossip;
         gossip_options.ip_allowlist = common.allowlist[0..common.allowlist_count];
         gossip_options.topic_policy = common.topic_boundaries[0..common.topic_boundary_count];
-        base.core.service.identify.?.agent = self.agent[0..self.agent_len];
-        base.core.service.identify.?.protocol_version = self.version[0..self.version_len];
         return .{
             .profile = common.profile,
             .seed = seed,
             .forks = common.forks[0..common.fork_count],
-            .limits = base.limits,
+            .limits = .{ .connections_max = r.connectionCapacity, .handshaking_max = r.handshakingCapacity, .dialing_max = r.dialingCapacity, .receive_budget_bytes = r.receiveBudgetBytes },
             .peers = .{ .capacity = r.peerCapacity, .target_peers = r.targetPeers, .max_peers = r.maxPeers, .min_outbound = r.minOutbound, .outbound_reserve = r.outboundReserve },
-            .reqresp = .{ .admission = try n.reqresp.reqresp.AdmissionOptions.defaults(&self.request, r.peerCapacity, base.core.service.reqresp.inbound_max) },
+            .admission_policy = self.request,
             .gossip = gossip_options,
             .router = .{ .identify = true, .capabilities = self.capabilities },
-            .identify = base.core.service.identify,
+            .identify = .{ .agent = self.agent[0..self.agent_len], .protocol_version = self.version[0..self.version_len] },
             .byte_limit = r.nativeBudgetBytes - @sizeOf(n.NetworkCore),
         };
     }

@@ -196,14 +196,14 @@ pub fn requestBarrier(runtime: *Runtime, token: requests.Token, stage: Scenario)
     } else {
         std.debug.assert(cell.state == .native and cell.native != null);
         const handle = cell.native.?;
-        const service = &runtime.heavy.?.core.core.service;
+        const service = &runtime.heavy.?.core.service;
         std.debug.assert(handle.direction == .outbound and handle.index < service.reqresp.outbound.len);
         const client = &service.reqresp.outbound[handle.index];
-        std.debug.assert(std.meta.eql(client.lifecycle.handle(handle.index), handle));
-        std.debug.assert(client.lifecycle.running() and client.phase == .negotiation and client.lifecycle.stream_owner == .router);
+        std.debug.assert(std.meta.eql(client.request.handle(handle.index), handle));
+        std.debug.assert(client.request.running() and client.phase == .negotiation and client.request.stream_owner == .router);
         snapshot.phase = client.phase;
         for (service.router.negotiator.entries) |entry| {
-            if (entry.state == .negotiating and std.meta.eql(entry.stream, client.lifecycle.stream)) snapshot.negotiatorMatched = true;
+            if (entry.state == .negotiating and std.meta.eql(entry.stream, client.request.stream)) snapshot.negotiatorMatched = true;
         }
         std.debug.assert(snapshot.phase == .negotiation and snapshot.negotiatorMatched);
     }

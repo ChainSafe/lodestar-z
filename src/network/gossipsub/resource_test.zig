@@ -27,7 +27,7 @@ test "gossip validation finishes without allocation while shared deliveries are 
     const len = try @import("snappy").raw.compress("valid message", &compressed);
     const now: @import("../types.zig").Now = .{ .mono_ms = 1, .unix_s = 0 };
     var events: [1]gossip.Event = undefined;
-    var turn = g.beginPump(now, &events);
+    var turn = @import("session_io.zig").beginPump(&g, now, &events);
     var credits = @import("turn.zig").Credits.peer(&g.options);
     try std.testing.expectEqual(.done, g.receiveItem(g.sessions.ref(0), .{ .message = .{ .topic = name, .data = compressed[0..len] } }, &turn, &credits));
     try std.testing.expectEqual(@as(usize, 1), turn.count);
@@ -77,7 +77,7 @@ test "gossip optional subscription observations do not consume validation event 
     defer g.deinit();
     try std.testing.expect(g.subscribe(name));
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    var turn = g.beginPump(.{ .mono_ms = 1, .unix_s = 0 }, &.{});
+    var turn = @import("session_io.zig").beginPump(&g, .{ .mono_ms = 1, .unix_s = 0 }, &.{});
     var credits = @import("turn.zig").Credits.peer(&g.options);
     try std.testing.expectEqual(.done, g.receiveItem(peer, .{ .subscription = .{ .topic = name, .subscribe = true } }, &turn, &credits));
     try std.testing.expectEqual(@as(usize, 0), turn.used);

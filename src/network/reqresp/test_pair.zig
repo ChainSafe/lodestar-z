@@ -3,8 +3,6 @@ const ct = @import("consensus_types");
 const reqresp = @import("reqresp.zig");
 const protocol = @import("protocol.zig");
 const engine_mod = @import("../quic/engine.zig");
-const Service = @import("../service.zig").Service;
-const support = @import("../test_support.zig");
 const multistream = @import("../wire/multistream.zig");
 const Event = reqresp.Event;
 
@@ -24,10 +22,7 @@ pub const Overrides = struct {
 };
 
 pub const Pair = struct {
-    pair: support.Pair = .{},
-    client: Service = undefined,
-    server: Service = undefined,
-    handles: struct { client: engine_mod.Handle, server: engine_mod.Handle } = undefined,
+    shared: @import("../service_test_support.zig").ServicePair = .{},
     forks: [2]reqresp.ForkEntry = .{
         .{ .digest = deneb_digest, .fork = .deneb },
         .{ .digest = fulu_digest, .fork = .fulu },
@@ -39,14 +34,11 @@ pub const Pair = struct {
     server_event_capacity: usize = 16,
 
     pub fn init(self: *Pair, client: Overrides, server: Overrides) !void {
-        try self.pair.init(.{}, .{});
-        errdefer self.pair.deinit();
-        self.client = try Service.init(std.testing.allocator, .{ .reqresp = options(client, &self.forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 }, .automatic_gossip_admission = false });
-        errdefer self.client.deinit();
-        self.server = try Service.init(std.testing.allocator, .{ .reqresp = options(server, &self.forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 }, .automatic_gossip_admission = false });
-        errdefer self.server.deinit();
-        const handles = try support.connectPair(&self.pair);
-        self.handles = .{ .client = handles.client, .server = handles.server };
+        try self.shared.init(serviceOptions(client, &self.forks), serviceOptions(server, &self.forks));
+    }
+
+    fn serviceOptions(overrides: Overrides, forks: []const reqresp.ForkEntry) @import("../service.zig").Options {
+        return .{ .reqresp = options(overrides, forks), .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .random_seed = 1, .connected_capacity = 4, .retained_capacity = 8, .retained_outbound_reserve = 1, .seen_capacity = 128, .mcache_capacity = 16, .validation_capacity = 8 }, .automatic_gossip_admission = false };
     }
 
     fn options(overrides: Overrides, forks: []const reqresp.ForkEntry) reqresp.Options {
@@ -67,40 +59,23 @@ pub const Pair = struct {
     }
 
     pub fn deinit(self: *Pair) void {
-        self.client.reqresp.shutdown(&self.pair.client, &self.client.router);
-        self.server.reqresp.shutdown(&self.pair.server, &self.server.router);
-        self.server.deinit();
-        self.client.deinit();
-        self.pair.deinit();
+        self.shared.deinit();
     }
 
     pub fn pumpOnce(self: *Pair) !void {
-        try self.pair.pump();
-        var events: [16]engine_mod.Event = undefined;
-        var activity: [128]engine_mod.Handle = undefined;
-        const server_activity = self.pair.server.takeActivity(&activity);
-        const server_counts = self.server.process(&self.pair.server, self.pair.events(&self.pair.server, &events), activity[0..server_activity], self.pair.now, .{
-            .application = self.server_events[0..self.server_event_capacity],
-            .control = self.server_events[16..][0..self.server_event_capacity],
-        });
-        std.mem.copyForwards(Event, self.server_events[server_counts.application..], self.server_events[16..][0..server_counts.control]);
-        self.server_count = server_counts.application + server_counts.control;
-        const client_activity = self.pair.client.takeActivity(&activity);
-        const client_counts = self.client.process(&self.pair.client, self.pair.events(&self.pair.client, &events), activity[0..client_activity], self.pair.now, .{
-            .application = self.client_events[0..16],
-            .control = self.client_events[16..],
-        });
-        std.mem.copyForwards(Event, self.client_events[client_counts.application..], self.client_events[16..][0..client_counts.control]);
-        self.client_count = client_counts.application + client_counts.control;
-        try self.pair.pump();
+        const counts = try self.shared.step(.{ .application = self.client_events[0..16], .control = self.client_events[16..] }, .{ .application = self.server_events[0..self.server_event_capacity], .control = self.server_events[16..][0..self.server_event_capacity] });
+        std.mem.copyForwards(Event, self.server_events[counts.server.application..], self.server_events[16..][0..counts.server.control]);
+        self.server_count = counts.server.application + counts.server.control;
+        std.mem.copyForwards(Event, self.client_events[counts.client.application..], self.client_events[16..][0..counts.client.control]);
+        self.client_count = counts.client.application + counts.client.control;
     }
 
     pub fn openRaw(self: *Pair, which: protocol.Protocol) !engine_mod.StreamHandle {
-        const stream = try self.pair.client.openStream(self.handles.client);
+        const stream = try self.shared.pair.client.openStream(self.shared.handles.client);
         var dialer = try multistream.Dialer.init(which.id());
         var bytes: [2 * multistream.message_length_max]u8 = undefined;
         const proposal = try dialer.initialWrite(&bytes);
-        try std.testing.expectEqual(proposal.len, try self.pair.client.write(stream, proposal, false));
+        try std.testing.expectEqual(proposal.len, try self.shared.pair.client.write(stream, proposal, false));
         return stream;
     }
 
@@ -110,7 +85,7 @@ pub const Pair = struct {
         var buffered: usize = 0;
         for (0..20) |_| {
             try self.pumpOnce();
-            const read = try self.pair.client.read(stream, bytes[buffered..]);
+            const read = try self.shared.pair.client.read(stream, bytes[buffered..]);
             buffered += read.len;
             const outcome = try dialer.feed(bytes[0..buffered]);
             std.mem.copyForwards(u8, &bytes, bytes[outcome.consumed..buffered]);

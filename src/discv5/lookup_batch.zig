@@ -1,15 +1,13 @@
-//! The lookup driver advances a caller-owned set of lookups through the synchronous driver, one
-//! step at a time.
+//! Advances a bounded batch of caller-owned lookups through Transport, one step at a time.
 
 const std = @import("std");
 const CallTable = @import("CallTable.zig");
-const Driver = @import("Driver.zig");
+const Transport = @import("Transport.zig");
 const Lookup = @import("Lookup.zig");
-const constants = @import("wire/constants.zig");
 
 pub const operations_max: usize = CallTable.capacity_max / Lookup.parallelism;
 
-pub const Error = Driver.Error || Lookup.Error || error{TooManyLookups};
+pub const Error = Transport.Error || Lookup.Error || error{TooManyLookups};
 
 pub const Progress = struct {
     started: u16 = 0,
@@ -22,8 +20,8 @@ pub const Cursor = struct {
 };
 
 pub const StepResult = struct {
-    driver: Driver.StepResult = .{},
-    /// The index into `operations` of the lookup that consumed `driver.event`, if any.
+    transport: Transport.StepResult = .{},
+    /// The index into `operations` of the lookup that consumed `transport.event`, if any.
     consumed: ?u16 = null,
     progress: Progress = .{},
     failure: ?Error = null,
@@ -32,7 +30,7 @@ pub const StepResult = struct {
 /// Borrows `operations` for this call only. Pass every lookup that still has waiting calls and
 /// retain the cursor across steps to rotate priority when calls contend for limited capacity.
 pub fn step(
-    transport: *Driver,
+    transport: *Transport,
     io: std.Io,
     operations: []const *Lookup,
     cursor: *Cursor,
@@ -46,7 +44,7 @@ pub fn step(
     refill(transport, io, operations, first, &result) catch |err| {
         result.failure = err;
     };
-    result.driver = transport.step(io, expired_calls) catch |err| {
+    result.transport = transport.step(io, expired_calls) catch |err| {
         result.failure = result.failure orelse err;
         return result;
     };
@@ -54,7 +52,7 @@ pub fn step(
     consumeEvent(transport, operations, &result) catch |err| {
         result.failure = result.failure orelse err;
     };
-    result.failure = result.failure orelse result.driver.failure;
+    result.failure = result.failure orelse result.transport.failure;
     if (result.failure == null) {
         refill(transport, io, operations, first, &result) catch |err| {
             result.failure = err;
@@ -64,7 +62,7 @@ pub fn step(
 }
 
 fn refill(
-    transport: *Driver,
+    transport: *Transport,
     io: std.Io,
     operations: []const *Lookup,
     first: usize,
@@ -97,64 +95,53 @@ fn refill(
 }
 
 fn startCall(
-    transport: *Driver,
+    transport: *Transport,
     io: std.Io,
     operation: *Lookup,
     progress: *Progress,
 ) Error!bool {
-    var context = try Driver.sendContext(io);
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&context.entropy));
-    const request_id = try Driver.requestId(io);
-    var out: [constants.packet_size_max]u8 = undefined;
-    const started = try operation.startNext(
-        transport.core,
-        &out,
-        request_id,
-        context.now_ms,
-        &context.entropy,
-    ) orelse return false;
-    transport.transmit(io, started.peer.address, out[0..started.call.packet_length]) catch |err| {
-        operation.onFailure(transport.core, started.call.handle) catch unreachable;
+    const result = try @import("lookup_io.zig").startLookup(transport, io, operation, try Transport.monotonicMilliseconds(io));
+    if (result.failure) |err| {
         progress.failures += 1;
         return err;
-    };
-    return true;
+    }
+    return result.started;
 }
 
 fn consumeExpiries(
-    transport: *Driver,
+    transport: *Transport,
     operations: []const *Lookup,
     expired_calls: []CallTable.Expired,
     result: *StepResult,
 ) void {
     var retained: usize = 0;
-    for (expired_calls[0..result.driver.calls_expired]) |item| {
+    for (expired_calls[0..result.transport.calls_expired]) |item| {
         if (owner(operations, item.handle)) |index| {
-            operations[index].onFailure(transport.core, item.handle) catch unreachable;
+            operations[index].onFailure(&transport.engine, item.handle) catch unreachable;
             result.progress.failures += 1;
             continue;
         }
         expired_calls[retained] = item;
         retained += 1;
     }
-    result.driver.calls_expired = retained;
+    result.transport.calls_expired = retained;
 }
 
 fn consumeEvent(
-    transport: *Driver,
+    transport: *Transport,
     operations: []const *Lookup,
     result: *StepResult,
 ) Lookup.Error!void {
-    switch (result.driver.event) {
+    switch (result.transport.event) {
         .response => |response| {
             const index = owner(operations, response.matched.handle) orelse return;
-            try operations[index].onResponse(transport.core, &response, result.driver.now_ms);
+            try operations[index].onResponse(&transport.engine, &response, result.transport.now_ms);
             result.consumed = @intCast(index);
             result.progress.responses += 1;
         },
         .failed => |failed| {
             const index = owner(operations, failed.handle) orelse return;
-            try operations[index].onFailure(transport.core, failed.handle);
+            try operations[index].onFailure(&transport.engine, failed.handle);
             result.consumed = @intCast(index);
             result.progress.failures += 1;
         },
@@ -172,5 +159,5 @@ fn owner(operations: []const *Lookup, handle: CallTable.Handle) ?usize {
 comptime {
     std.debug.assert(operations_max == 85);
     std.debug.assert(operations_max * Lookup.parallelism * 2 <= std.math.maxInt(u16));
-    std.debug.assert(@sizeOf(StepResult) <= @sizeOf(Driver.StepResult) + 16);
+    std.debug.assert(@sizeOf(StepResult) <= @sizeOf(Transport.StepResult) + 16);
 }

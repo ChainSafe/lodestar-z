@@ -1,3 +1,4 @@
+pub const testing = if (@import("builtin").is_test) @import("test_io.zig") else struct {};
 const std = @import("std");
 const net = std.Io.net;
 const assert = std.debug.assert;

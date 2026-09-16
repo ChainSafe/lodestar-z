@@ -10,37 +10,37 @@ const Pair = harness.Pair;
 const Request = struct { handle: rr.RequestHandle, remote: engine.StreamHandle };
 
 fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []u8, options: rr.RequestOptions) !Request {
-    const handle = try pair.client.reqresp.request(&pair.pair.client, &pair.client.router, pair.handles.client, method, bytes, sink, options, pair.pair.now);
+    const handle = try pair.shared.client.reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, method, bytes, sink, options, pair.shared.pair.now);
     var remote: ?engine.StreamHandle = null;
     for (0..10) |_| {
-        try pair.pair.pump();
+        try pair.shared.pair.pump();
         var events: [16]engine.Event = undefined;
-        for (pair.pair.events(&pair.pair.server, &events)) |event| switch (event) {
-            .stream_opened => |stream| try pair.server.router.negotiator.acceptInbound(stream, pair.pair.now),
+        for (pair.shared.pair.events(&pair.shared.pair.server, &events)) |event| switch (event) {
+            .stream_opened => |stream| try pair.shared.server.router.negotiator.acceptInbound(stream, pair.shared.pair.now),
             else => {},
         };
         var outcomes: [8]router.Outcome = undefined;
-        const clients = pair.client.router.pump(&pair.pair.client, pair.pair.now, &outcomes);
-        for (outcomes[0..clients]) |outcome| try std.testing.expect(pair.client.reqresp.negotiated(outcome, pair.pair.now));
-        const servers = pair.server.router.pump(&pair.pair.server, pair.pair.now, &outcomes);
+        const clients = pair.shared.client.router.pump(&pair.shared.pair.client, pair.shared.pair.now, &outcomes);
+        for (outcomes[0..clients]) |outcome| try std.testing.expect(pair.shared.client.reqresp.negotiated(outcome, pair.shared.pair.now));
+        const servers = pair.shared.server.router.pump(&pair.shared.pair.server, pair.shared.pair.now, &outcomes);
         for (outcomes[0..servers]) |outcome| switch (outcome.result) {
             .ready => remote = outcome.stream,
             else => return error.TestUnexpectedResult,
         };
-        if (remote != null and pair.client.reqresp.outbound[handle.index].phase == .request) break;
+        if (remote != null and pair.shared.client.reqresp.outbound[handle.index].phase == .request) break;
     }
     try std.testing.expect(remote != null);
-    try std.testing.expectEqual(.request, pair.client.reqresp.outbound[handle.index].phase);
+    try std.testing.expectEqual(.request, pair.shared.client.reqresp.outbound[handle.index].phase);
     return .{ .handle = handle, .remote = remote.? };
 }
 
 fn pump(pair: *Pair) ![]const rr.Event {
-    try pair.pair.pump();
-    pair.client.reqresp.cleanupPending(&pair.pair.client, &pair.client.router);
+    try pair.shared.pair.pump();
+    pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
     var activity: [128]engine.Handle = undefined;
-    const count = pair.pair.client.takeActivity(&activity);
-    for (activity[0..count]) |conn| pair.client.reqresp.connectionActivity(conn);
-    const counts = pair.client.reqresp.pump(&pair.pair.client, &pair.client.router, pair.pair.now, .{ .application = pair.client_events[0..16], .control = pair.client_events[16..] });
+    const count = pair.shared.pair.client.takeActivity(&activity);
+    for (activity[0..count]) |conn| pair.shared.client.reqresp.connectionActivity(conn);
+    const counts = pair.shared.client.reqresp.pump(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.pair.now, .{ .application = pair.client_events[0..16], .control = pair.client_events[16..] });
     std.mem.copyForwards(rr.Event, pair.client_events[counts.application..], pair.client_events[16..][0..counts.control]);
     pair.client_count = counts.application + counts.control;
     return pair.clientEvents();
@@ -49,7 +49,7 @@ fn pump(pair: *Pair) ![]const rr.Event {
 fn reply(pair: *Pair, request: Request, result: u8, bytes: []const u8, fin: bool) !void {
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeChunk(result, null, bytes, &wire);
-    try std.testing.expectEqual(encoded.len, try pair.pair.server.write(request.remote, encoded, fin));
+    try std.testing.expectEqual(encoded.len, try pair.shared.pair.server.write(request.remote, encoded, fin));
 }
 
 fn expectDone(pair: *Pair, request: Request, expected: []const u8) !void {
@@ -60,14 +60,14 @@ fn expectDone(pair: *Pair, request: Request, expected: []const u8) !void {
             .chunk => |chunk| {
                 try std.testing.expectEqualSlices(u8, expected, chunk.bytes);
                 chunks += 1;
-                try std.testing.expect(pair.client.reqresp.consume(chunk.request));
+                try std.testing.expect(pair.shared.client.reqresp.consume(chunk.request));
             },
             .done => |event_done| {
                 try std.testing.expectEqual(@as(u32, 1), event_done.chunks);
                 done = true;
             },
             .failed => |failed| {
-                std.debug.print("unexpected failure {any} detail={s}\n", .{ failed, pair.client.reqresp.outbound[request.handle.index].lifecycle.io.failure_detail });
+                std.debug.print("unexpected failure {any} detail={s}\n", .{ failed, pair.shared.client.reqresp.outbound[request.handle.index].request.failure_detail });
                 return error.TestUnexpectedResult;
             },
             else => {},
@@ -76,11 +76,11 @@ fn expectDone(pair: *Pair, request: Request, expected: []const u8) !void {
     }
     try std.testing.expect(done);
     try std.testing.expectEqual(@as(u32, 1), chunks);
-    pair.client.reqresp.cleanupPending(&pair.pair.client, &pair.client.router);
-    try std.testing.expect(pair.client.reqresp.outboundSlot(request.handle) == null);
-    try std.testing.expect(!pair.pair.client.registry.slots[pair.handles.client.index].table.matches(
-        pair.client.reqresp.outbound[request.handle.index].lifecycle.stream.slot,
-        pair.client.reqresp.outbound[request.handle.index].lifecycle.stream.id,
+    pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
+    try std.testing.expect(pair.shared.client.reqresp.outboundSlot(request.handle) == null);
+    try std.testing.expect(!pair.shared.pair.client.registry.slots[pair.shared.handles.client.index].table.matches(
+        pair.shared.client.reqresp.outbound[request.handle.index].request.stream.slot,
+        pair.shared.client.reqresp.outbound[request.handle.index].request.stream.id,
     ));
 }
 
@@ -101,28 +101,28 @@ fn expectFailure(pair: *Pair, expected: rr.Failure) !void {
 test "reqresp recovers only complete Goodbye bytes retained by a closed authenticated connection" {
     for ([_]bool{ false, true }) |truncated| {
         var pair: Pair = .{};
-        const quotas = @import("admission_test.zig").quotas(100, 1000);
+        const quotas = @import("admission_fixture.zig").quotas(100, 1000);
         try pair.init(.{}, .{ .admission = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } } });
         defer pair.deinit();
         var payload: [8]u8 = undefined;
         std.mem.writeInt(u64, &payload, 129, .little);
         var sink: [8]u8 = undefined;
         const request = try negotiate(&pair, .goodbye_v1, &payload, &sink, .{});
-        _ = try pair.server.reqresp.accept(&pair.pair.server, request.remote, .{ .protocol = .{ .reqresp = .goodbye_v1 }, .leftover = &.{}, .fin = false }, pair.pair.now);
+        _ = try pair.shared.server.reqresp.accept(&pair.shared.pair.server, request.remote, .{ .protocol = .{ .reqresp = .goodbye_v1 }, .leftover = &.{}, .fin = false }, pair.shared.pair.now);
         var wire: [128]u8 = undefined;
         const encoded = try codec.encodeRequest(&payload, &wire);
         const bytes = encoded[0 .. encoded.len - @intFromBool(truncated)];
-        try std.testing.expectEqual(bytes.len, try pair.pair.client.write(pair.client.reqresp.outbound[request.handle.index].lifecycle.stream, bytes, true));
-        try pair.pair.pump();
-        try std.testing.expect(pair.pair.client.close(pair.handles.client, 0));
-        try pair.pair.pump();
-        try std.testing.expectEqual(.closed, pair.pair.server.registry.slots[pair.handles.server.index].state);
-        const result = pair.server.reqresp.closingGoodbye(&pair.pair.server, pair.handles.server, pair.pair.now);
+        try std.testing.expectEqual(bytes.len, try pair.shared.pair.client.write(pair.shared.client.reqresp.outbound[request.handle.index].request.stream, bytes, true));
+        try pair.shared.pair.pump();
+        try std.testing.expect(pair.shared.pair.client.close(pair.shared.handles.client, 0));
+        try pair.shared.pair.pump();
+        try std.testing.expectEqual(.closed, pair.shared.pair.server.registry.slots[pair.shared.handles.server.index].state);
+        const result = pair.shared.server.reqresp.closingGoodbye(&pair.shared.pair.server, pair.shared.handles.server, pair.shared.pair.now);
         try std.testing.expectEqual(if (truncated) @as(?u64, null) else @as(?u64, 129), result);
-        try std.testing.expectEqual(@as(u64, @intFromBool(!truncated)), pair.server.reqresp.counters.goodbyes_recovered_on_close);
-        try std.testing.expectEqual(@as(u64, @intFromBool(truncated)), pair.server.reqresp.counters.goodbyes_incomplete_on_close);
-        try std.testing.expect(pair.server.reqresp.closingGoodbye(&pair.pair.server, pair.handles.server, pair.pair.now) == null);
-        pair.server.reqresp.connectionClosed(pair.handles.server);
+        try std.testing.expectEqual(@as(u64, @intFromBool(!truncated)), pair.shared.server.reqresp.counters.goodbyes_recovered_on_close);
+        try std.testing.expectEqual(@as(u64, @intFromBool(truncated)), pair.shared.server.reqresp.counters.goodbyes_incomplete_on_close);
+        try std.testing.expect(pair.shared.server.reqresp.closingGoodbye(&pair.shared.pair.server, pair.shared.handles.server, pair.shared.pair.now) == null);
+        pair.shared.server.reqresp.connectionClosed(pair.shared.handles.server);
     }
 }
 
@@ -133,7 +133,7 @@ test "reqresp response FIN stops complete written chunks but do not hide an empt
         defer pair.deinit();
         const payload = [_]u8{7} ** 8;
         var sink: [8]u8 = undefined;
-        const request = try pair.client.reqresp.request(&pair.pair.client, &pair.client.router, pair.handles.client, .ping_v1, &payload, &sink, .{}, pair.pair.now);
+        const request = try pair.shared.client.reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, .ping_v1, &payload, &sink, .{}, pair.shared.pair.now);
         var incoming: ?rr.RequestHandle = null;
         var sent = false;
         for (0..32) |_| {
@@ -141,7 +141,7 @@ test "reqresp response FIN stops complete written chunks but do not hide an empt
             for (pair.serverEvents()) |event| switch (event) {
                 .request => |value| {
                     incoming = value.request;
-                    if (send_chunk) try pair.server.reqresp.respond(value.request, &payload, null, pair.pair.now);
+                    if (send_chunk) try pair.shared.server.reqresp.respond(value.request, &payload, null, pair.shared.pair.now);
                 },
                 .chunk_sent => sent = true,
                 .failed => return error.TestUnexpectedResult,
@@ -150,14 +150,14 @@ test "reqresp response FIN stops complete written chunks but do not hide an empt
             if (incoming != null and (!send_chunk or sent)) break;
         }
         try std.testing.expect(incoming != null);
-        const stream = pair.client.reqresp.outbound[request.index].lifecycle.stream;
-        pair.pair.client.shutdown(stream, .read, 0);
-        try pair.pair.pump();
-        try std.testing.expect(pair.server.reqresp.finish(incoming.?, pair.pair.now));
+        const stream = pair.shared.client.reqresp.outbound[request.index].request.stream;
+        pair.shared.pair.client.shutdown(stream, .read, 0);
+        try pair.shared.pair.pump();
+        try std.testing.expect(pair.shared.server.reqresp.finish(incoming.?, pair.shared.pair.now));
         var terminal = false;
         for (0..8) |_| {
             var events: [8]rr.Event = undefined;
-            const count = pair.server.reqresp.pump(&pair.pair.server, &pair.server.router, pair.pair.now, .{ .control = &events }).control;
+            const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &events }).control;
             for (events[0..count]) |event| switch (event) {
                 .served => |value| {
                     try std.testing.expect(send_chunk);
@@ -174,7 +174,7 @@ test "reqresp response FIN stops complete written chunks but do not hide an empt
             if (terminal) break;
         }
         try std.testing.expect(terminal);
-        try std.testing.expectEqual(@as(u64, @intFromBool(send_chunk)), pair.server.reqresp.protocol_counters[@intFromEnum(protocol.Protocol.ping_v1)].response_finish_stops);
+        try std.testing.expectEqual(@as(u64, @intFromBool(send_chunk)), pair.shared.server.reqresp.protocol_counters[@intFromEnum(protocol.Protocol.ping_v1)].response_finish_stops);
     }
 }
 
@@ -189,8 +189,8 @@ test "reqresp dispatches a complete Goodbye before FIN and keeps other request f
         std.mem.writeInt(u64, &payload, 129, .little);
         var sink: [8]u8 = undefined;
         const request = try negotiate(&pair, method, &payload, &sink, .{});
-        _ = try pair.server.reqresp.accept(&pair.pair.server, request.remote, .{ .protocol = .{ .reqresp = method }, .leftover = &.{}, .fin = false }, pair.pair.now);
-        const local = pair.client.reqresp.outbound[request.handle.index].lifecycle.stream;
+        _ = try pair.shared.server.reqresp.accept(&pair.shared.pair.server, request.remote, .{ .protocol = .{ .reqresp = method }, .leftover = &.{}, .fin = false }, pair.shared.pair.now);
+        const local = pair.shared.client.reqresp.outbound[request.handle.index].request.stream;
         var wire: [128]u8 = undefined;
         const encoded = try codec.encodeRequest(&payload, &wire);
         var len = encoded.len;
@@ -199,12 +199,12 @@ test "reqresp dispatches a complete Goodbye before FIN and keeps other request f
             wire[len] = 0;
             len += 1;
         }
-        try std.testing.expectEqual(len, try pair.pair.client.write(local, wire[0..len], false));
+        try std.testing.expectEqual(len, try pair.shared.pair.client.write(local, wire[0..len], false));
         var requests: usize = 0;
         for (0..8) |_| {
-            try pair.pair.pump();
-            pair.server.reqresp.connectionActivity(pair.handles.server);
-            const count = pair.server.reqresp.pump(&pair.pair.server, &pair.server.router, pair.pair.now, .{ .control = &pair.server_events }).control;
+            try pair.shared.pair.pump();
+            pair.shared.server.reqresp.connectionActivity(pair.shared.handles.server);
+            const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &pair.server_events }).control;
             for (pair.server_events[0..count]) |event| if (event == .request) {
                 try std.testing.expectEqualSlices(u8, &payload, event.request.bytes);
                 requests += 1;
@@ -212,14 +212,14 @@ test "reqresp dispatches a complete Goodbye before FIN and keeps other request f
         }
         try std.testing.expectEqual(@as(usize, @intFromBool(case == .goodbye)), requests);
         if (case == .trailing) {
-            try std.testing.expectError(error.StreamStopped, pair.pair.client.write(local, &.{}, true));
+            try std.testing.expectError(error.StreamStopped, pair.shared.pair.client.write(local, &.{}, true));
         } else {
-            _ = try pair.pair.client.write(local, &.{}, true);
+            _ = try pair.shared.pair.client.write(local, &.{}, true);
         }
         for (0..8) |_| {
-            try pair.pair.pump();
-            pair.server.reqresp.connectionActivity(pair.handles.server);
-            const count = pair.server.reqresp.pump(&pair.pair.server, &pair.server.router, pair.pair.now, .{ .control = &pair.server_events }).control;
+            try pair.shared.pair.pump();
+            pair.shared.server.reqresp.connectionActivity(pair.shared.handles.server);
+            const count = pair.shared.server.reqresp.pump(&pair.shared.pair.server, &pair.shared.server.router, pair.shared.pair.now, .{ .control = &pair.server_events }).control;
             for (pair.server_events[0..count]) |event| if (event == .request) {
                 try std.testing.expectEqualSlices(u8, &payload, event.request.bytes);
                 requests += 1;
@@ -242,15 +242,15 @@ test "reqresp half close preserves early metadata and nonempty request responses
                 const request = try negotiate(&pair, method, bytes[0..method.info().request_min], &sink, .{});
                 const response = bytes[0..method.info().response_min];
                 try reply(&pair, request, 0, response, true);
-                if (stop) pair.pair.server.shutdown(request.remote, .read, 0);
+                if (stop) pair.shared.pair.server.shutdown(request.remote, .read, 0);
                 if (buffered) {
-                    try pair.pair.pump();
-                    const slot = &pair.client.reqresp.outbound[request.handle.index];
-                    const input = try slot.lifecycle.io.read(&pair.pair.client, slot.lifecycle.stream);
+                    try pair.shared.pair.pump();
+                    const slot = &pair.shared.client.reqresp.outbound[request.handle.index];
+                    const input = try slot.request.io.read(&pair.shared.pair.client, slot.request.stream);
                     try std.testing.expect(input.bytes.len > 0 and input.fin);
                 }
                 try expectDone(&pair, request, response);
-                try std.testing.expectEqual(@as(u64, @intFromBool(stop)), pair.client.reqresp.protocol_counters[@intFromEnum(method)].request_write_stops);
+                try std.testing.expectEqual(@as(u64, @intFromBool(stop)), pair.shared.client.reqresp.protocol_counters[@intFromEnum(method)].request_write_stops);
             }
         }
     }
@@ -263,13 +263,13 @@ test "reqresp half close accepts a later response and releases the request buffe
     const bytes = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
     const request = try negotiate(&pair, .ping_v1, &bytes, &sink, .{});
-    pair.pair.server.shutdown(request.remote, .read, 0);
+    pair.shared.pair.server.shutdown(request.remote, .read, 0);
     for (0..4) |_| try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
-    const slot = &pair.client.reqresp.outbound[request.handle.index];
+    const slot = &pair.shared.client.reqresp.outbound[request.handle.index];
     try std.testing.expectEqual(.response, slot.phase);
-    try std.testing.expectEqual(@as(usize, 0), slot.lifecycle.io.payload.len);
-    try std.testing.expect(!slot.lifecycle.io.writing and slot.lifecycle.io.outbox.idle());
-    pair.pair.advance(100);
+    try std.testing.expectEqual(@as(usize, 0), slot.request.io.payload.len);
+    try std.testing.expect(!slot.request.io.writing and slot.request.io.outbox.idle());
+    pair.shared.pair.advance(100);
     try reply(&pair, request, 0, &bytes, true);
     try expectDone(&pair, request, &bytes);
 }
@@ -292,15 +292,15 @@ test "reqresp half close still reports peer errors malformed responses and respo
                 break :value .{ .invalid_response = error.LengthOutOfBounds };
             },
             .truncated => value: {
-                _ = try pair.pair.server.write(request.remote, &.{0}, true);
+                _ = try pair.shared.pair.server.write(request.remote, &.{0}, true);
                 break :value .{ .invalid_response = error.Truncated };
             },
             .reset => value: {
-                pair.pair.server.shutdown(request.remote, .write, 7);
+                pair.shared.pair.server.shutdown(request.remote, .write, 7);
                 break :value .stream_closed;
             },
         };
-        pair.pair.server.shutdown(request.remote, .read, 0);
+        pair.shared.pair.server.shutdown(request.remote, .read, 0);
         try expectFailure(&pair, expected);
     }
 }
@@ -315,14 +315,14 @@ test "reqresp half close without a response retains the absolute response deadli
             .{ .absolute_timeouts = .{ .response_ms = duration } }
         else
             .{});
-        pair.pair.server.shutdown(request.remote, .read, 0);
+        pair.shared.pair.server.shutdown(request.remote, .read, 0);
         for (0..4) |_| try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
-        try std.testing.expectEqual(.response, pair.client.reqresp.outbound[request.handle.index].phase);
-        pair.pair.advance(duration - 1);
+        try std.testing.expectEqual(.response, pair.shared.client.reqresp.outbound[request.handle.index].phase);
+        pair.shared.pair.advance(duration - 1);
         try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
-        pair.pair.advance(1);
+        pair.shared.pair.advance(1);
         try expectFailure(&pair, .timeout);
-        try std.testing.expectEqual(@as(u64, 1), pair.client.reqresp.outgoing_error_reasons[@intFromEnum(@import("metrics.zig").ErrorReason.REQUEST_ERROR_RESP_TIMEOUT)]);
+        try std.testing.expectEqual(@as(u64, 1), pair.shared.client.reqresp.outgoing_error_reasons[@intFromEnum(@import("metrics.zig").ErrorReason.REQUEST_ERROR_RESP_TIMEOUT)]);
     }
 }
 
@@ -332,18 +332,18 @@ test "reqresp half close cancellation frees the only slot for a subsequent reque
     defer pair.deinit();
     var sink: [25]u8 = undefined;
     const first = try negotiate(&pair, .metadata_v3, &.{}, &sink, .{});
-    pair.pair.server.shutdown(first.remote, .read, 0);
+    pair.shared.pair.server.shutdown(first.remote, .read, 0);
     for (0..4) |_| try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
-    try std.testing.expect(pair.client.reqresp.cancel(first.handle));
+    try std.testing.expect(pair.shared.client.reqresp.cancel(first.handle));
     try expectFailure(&pair, .cancelled);
-    pair.client.reqresp.cleanupPending(&pair.pair.client, &pair.client.router);
+    pair.shared.client.reqresp.cleanupPending(&pair.shared.pair.client, &pair.shared.client.router);
     try std.testing.expectEqual(@as(usize, 0), (try pump(&pair)).len);
     const second = try negotiate(&pair, .metadata_v3, &.{}, &sink, .{});
     try std.testing.expectEqual(first.handle.index, second.handle.index);
     try std.testing.expect(second.handle.generation > first.handle.generation);
     const bytes = [_]u8{0} ** 25;
     try reply(&pair, second, 0, &bytes, true);
-    pair.pair.server.shutdown(second.remote, .read, 0);
+    pair.shared.pair.server.shutdown(second.remote, .read, 0);
     try expectDone(&pair, second, &bytes);
 }
 
@@ -355,21 +355,21 @@ test "reqresp half close preserves context and successive response chunks" {
     defer std.testing.allocator.free(sink);
     const roots = [_]u8{7} ** 64;
     const request = try negotiate(&pair, .blocks_by_root_v2, &roots, sink, .{});
-    pair.pair.server.shutdown(request.remote, .read, 0);
+    pair.shared.pair.server.shutdown(request.remote, .read, 0);
     const block = [_]u8{7} ** 4000;
     var wire: [codec.frame_scratch_max]u8 = undefined;
     const encoded = try codec.encodeChunk(0, harness.deneb_digest, &block, &wire);
     var chunks: u32 = 0;
     var done = false;
     for (0..2) |index| {
-        try std.testing.expectEqual(encoded.len, try pair.pair.server.write(request.remote, encoded, index == 1));
+        try std.testing.expectEqual(encoded.len, try pair.shared.pair.server.write(request.remote, encoded, index == 1));
         for (0..8) |_| {
             for (try pump(&pair)) |event| switch (event) {
                 .chunk => |chunk| {
                     try std.testing.expectEqual(.deneb, chunk.fork.?);
                     try std.testing.expectEqualSlices(u8, &block, chunk.bytes);
                     chunks += 1;
-                    try std.testing.expect(pair.client.reqresp.consume(chunk.request));
+                    try std.testing.expect(pair.shared.client.reqresp.consume(chunk.request));
                 },
                 .failed => return error.TestUnexpectedResult,
                 else => {},
@@ -390,7 +390,7 @@ test "reqresp half close preserves context and successive response chunks" {
         if (done) break;
     }
     try std.testing.expect(done);
-    try std.testing.expectEqual(@as(u64, 1), pair.client.reqresp.protocol_counters[@intFromEnum(protocol.Protocol.blocks_by_root_v2)].request_write_stops);
+    try std.testing.expectEqual(@as(u64, 1), pair.shared.client.reqresp.protocol_counters[@intFromEnum(protocol.Protocol.blocks_by_root_v2)].request_write_stops);
 }
 
 test "reqresp half close does not hide a retired stream without response EOF" {
@@ -399,7 +399,7 @@ test "reqresp half close does not hide a retired stream without response EOF" {
     defer pair.deinit();
     var sink: [25]u8 = undefined;
     const request = try negotiate(&pair, .metadata_v3, &.{}, &sink, .{});
-    pair.pair.client.closeStream(pair.client.reqresp.outbound[request.handle.index].lifecycle.stream, 0);
+    pair.shared.pair.client.closeStream(pair.shared.client.reqresp.outbound[request.handle.index].request.stream, 0);
     try expectFailure(&pair, .stream_closed);
-    try std.testing.expectEqual(@as(u64, 0), pair.client.reqresp.protocol_counters[@intFromEnum(protocol.Protocol.metadata_v3)].request_write_stops);
+    try std.testing.expectEqual(@as(u64, 0), pair.shared.client.reqresp.protocol_counters[@intFromEnum(protocol.Protocol.metadata_v3)].request_write_stops);
 }

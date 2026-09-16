@@ -149,7 +149,7 @@ test "gossip lifecycle sequence preserves ownership under pressure reconnect and
             },
             7 => {
                 support.heartbeat(&g, now);
-                g.finishPump(now);
+                @import("session_io.zig").finishPump(&g, now);
             },
             8 => for (g.sessions.rows) |*peer| peer.io.tx.cancelStream(&g.messages.store),
             else => unreachable,

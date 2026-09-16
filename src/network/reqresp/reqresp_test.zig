@@ -22,9 +22,9 @@ fn serveStatus(setup: *Pair, reply: []const u8, exchange: *Exchange) !void {
     for (setup.serverEvents()) |event| switch (event) {
         .request => |incoming| {
             exchange.request_seen = true;
-            try std.testing.expectError(error.InvalidContext, setup.server.reqresp.respond(incoming.request, reply, .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now));
-            try setup.server.reqresp.respond(incoming.request, reply, null, setup.pair.now);
-            try std.testing.expect(setup.server.reqresp.finish(incoming.request, setup.pair.now));
+            try std.testing.expectError(error.InvalidContext, setup.shared.server.reqresp.respond(incoming.request, reply, .{ .digest = deneb_digest, .fork = .deneb }, setup.shared.pair.now));
+            try setup.shared.server.reqresp.respond(incoming.request, reply, null, setup.shared.pair.now);
+            try std.testing.expect(setup.shared.server.reqresp.finish(incoming.request, setup.shared.pair.now));
         },
         .served => exchange.served = true,
         .failed => |failure| exchange.failed = failure.reason,
@@ -37,7 +37,7 @@ fn drainClient(setup: *Pair, expected: []const u8, exchange: *Exchange) !void {
         .chunk => |chunk| {
             try std.testing.expectEqualSlices(u8, expected, chunk.bytes);
             exchange.chunks += 1;
-            try std.testing.expect(setup.client.reqresp.consume(chunk.request));
+            try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request));
         },
         .done => |finished| {
             exchange.done = true;
@@ -56,15 +56,15 @@ test "reqresp rejects non-null status context then completes a status round trip
     const request_ssz = statusBytes(3);
     const reply_ssz = statusBytes(9);
     var sink: [ct.phase0.Status.fixed_size]u8 = undefined;
-    const handle = try setup.client.reqresp.request(
-        &setup.pair.client,
-        &setup.client.router,
-        setup.handles.client,
+    const handle = try setup.shared.client.reqresp.request(
+        &setup.shared.pair.client,
+        &setup.shared.client.router,
+        setup.shared.handles.client,
         .status_v1,
         &request_ssz,
         &sink,
         .{},
-        setup.pair.now,
+        setup.shared.pair.now,
     );
     try std.testing.expectEqual(engine_mod.Direction.outbound, handle.direction);
 
@@ -75,7 +75,7 @@ test "reqresp rejects non-null status context then completes a status round trip
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
                 try std.testing.expectEqual(Protocol.status_v1, incoming.protocol);
-                try std.testing.expectEqual(setup.handles.server, incoming.peer);
+                try std.testing.expectEqual(setup.shared.handles.server, incoming.peer);
                 try std.testing.expectEqualSlices(u8, &request_ssz, incoming.bytes);
             },
             else => {},
@@ -88,16 +88,16 @@ test "reqresp rejects non-null status context then completes a status round trip
     try std.testing.expect(exchange.done);
     try std.testing.expectEqual(@as(u32, 1), exchange.chunks);
     try std.testing.expect(exchange.failed == null);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.reqresp.counters.requests_sent);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing);
-    try std.testing.expectEqual(@as(u64, 1), setup.server.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming);
-    try std.testing.expectEqual(@as(u64, 1), setup.server.reqresp.counters.requests_served);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing_time.count);
-    try std.testing.expectEqual(@as(u64, 1), setup.server.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming_time.count);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.reqresp.counters.chunks_received);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.counters.requests_sent);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.requests_served);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].outgoing_time.count);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)].incoming_time.count);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.counters.chunks_received);
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u16, 0), setup.client.reqresp.active().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
 }
 
 test "reqresp completes ping and metadata round trips" {
@@ -110,13 +110,13 @@ test "reqresp completes ping and metadata round trips" {
     var ping_reply: [8]u8 = undefined;
     std.mem.writeInt(u64, &ping_reply, 42, .little);
     var ping_sink: [8]u8 = undefined;
-    _ = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .ping_v1, &ping_request, &ping_sink, .{}, setup.pair.now);
+    _ = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .ping_v1, &ping_request, &ping_sink, .{}, setup.shared.pair.now);
 
     var metadata_reply = [_]u8{0} ** 17;
     metadata_reply[0] = 8;
     metadata_reply[16] = 0x0f;
     var metadata_sink: [17]u8 = undefined;
-    _ = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .metadata_v2, &.{}, &metadata_sink, .{}, setup.pair.now);
+    _ = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .metadata_v2, &.{}, &metadata_sink, .{}, setup.shared.pair.now);
 
     var pings = Exchange{};
     var metadatas = Exchange{};
@@ -127,14 +127,14 @@ test "reqresp completes ping and metadata round trips" {
             .request => |incoming| switch (incoming.protocol) {
                 .ping_v1 => {
                     try std.testing.expectEqualSlices(u8, &ping_request, incoming.bytes);
-                    try setup.server.reqresp.respond(incoming.request, &ping_reply, null, setup.pair.now);
-                    try std.testing.expect(setup.server.reqresp.finish(incoming.request, setup.pair.now));
+                    try setup.shared.server.reqresp.respond(incoming.request, &ping_reply, null, setup.shared.pair.now);
+                    try std.testing.expect(setup.shared.server.reqresp.finish(incoming.request, setup.shared.pair.now));
                     pings.request_seen = true;
                 },
                 .metadata_v2 => {
                     try std.testing.expectEqual(@as(usize, 0), incoming.bytes.len);
-                    try setup.server.reqresp.respond(incoming.request, &metadata_reply, null, setup.pair.now);
-                    try std.testing.expect(setup.server.reqresp.finish(incoming.request, setup.pair.now));
+                    try setup.shared.server.reqresp.respond(incoming.request, &metadata_reply, null, setup.shared.pair.now);
+                    try std.testing.expect(setup.shared.server.reqresp.finish(incoming.request, setup.shared.pair.now));
                     metadatas.request_seen = true;
                 },
                 else => return error.TestUnexpectedResult,
@@ -150,7 +150,7 @@ test "reqresp completes ping and metadata round trips" {
                     try std.testing.expectEqualSlices(u8, &metadata_reply, chunk.bytes);
                     metadatas.chunks += 1;
                 }
-                try std.testing.expect(setup.client.reqresp.consume(chunk.request));
+                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request));
             },
             .done => |finished| {
                 if (finished.chunks == 1 and pings.chunks == 1 and !pings.done) pings.done = true else metadatas.done = true;
@@ -175,7 +175,7 @@ test "reqresp streams blocks by range chunks with fork context" {
     _ = ct.phase0.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_ssz);
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_range_v2.info().response_max);
     defer std.testing.allocator.free(sink);
-    _ = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .blocks_by_range_v2, &request_ssz, sink, .{}, setup.pair.now);
+    _ = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .blocks_by_range_v2, &request_ssz, sink, .{}, setup.shared.pair.now);
 
     var blocks: [3][5_000]u8 = undefined;
     for (&blocks, 0..) |*block, which| {
@@ -194,14 +194,14 @@ test "reqresp streams blocks by range chunks with fork context" {
                 try std.testing.expectEqual(Protocol.blocks_by_range_v2, incoming.protocol);
                 try std.testing.expectEqualSlices(u8, &request_ssz, incoming.bytes);
                 served_handle = incoming.request;
-                try setup.server.reqresp.respond(incoming.request, &blocks[0], .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now);
+                try setup.shared.server.reqresp.respond(incoming.request, &blocks[0], .{ .digest = deneb_digest, .fork = .deneb }, setup.shared.pair.now);
             },
             .chunk_sent => |progress| {
                 sent = progress.chunks;
                 if (sent < 3) {
-                    try setup.server.reqresp.respond(served_handle.?, &blocks[sent], .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now);
+                    try setup.shared.server.reqresp.respond(served_handle.?, &blocks[sent], .{ .digest = deneb_digest, .fork = .deneb }, setup.shared.pair.now);
                 } else {
-                    try std.testing.expect(setup.server.reqresp.finish(served_handle.?, setup.pair.now));
+                    try std.testing.expect(setup.shared.server.reqresp.finish(served_handle.?, setup.shared.pair.now));
                 }
             },
             .served => |finished| {
@@ -216,7 +216,7 @@ test "reqresp streams blocks by range chunks with fork context" {
                 try std.testing.expectEqual(@as(?@import("config").ForkSeq, .deneb), chunk.fork);
                 try std.testing.expectEqualSlices(u8, &blocks[received], chunk.bytes);
                 received += 1;
-                try std.testing.expect(setup.client.reqresp.consume(chunk.request));
+                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request));
             },
             .done => |finished| {
                 try std.testing.expectEqual(@as(u32, 3), finished.chunks);
@@ -228,7 +228,7 @@ test "reqresp streams blocks by range chunks with fork context" {
     }
     try std.testing.expect(done and served);
     try std.testing.expectEqual(@as(u32, 3), received);
-    try std.testing.expectEqual(@as(u64, 3), setup.server.reqresp.counters.chunks_sent);
+    try std.testing.expectEqual(@as(u64, 3), setup.shared.server.reqresp.counters.chunks_sent);
 }
 
 test "reqresp rejects undersized sinks and stale handles" {
@@ -238,29 +238,29 @@ test "reqresp rejects undersized sinks and stale handles" {
 
     var small: [8]u8 = undefined;
     const request_ssz = statusBytes(1);
-    try std.testing.expectError(error.SinkTooSmall, setup.client.reqresp.request(
-        &setup.pair.client,
-        &setup.client.router,
-        setup.handles.client,
+    try std.testing.expectError(error.SinkTooSmall, setup.shared.client.reqresp.request(
+        &setup.shared.pair.client,
+        &setup.shared.client.router,
+        setup.shared.handles.client,
         .status_v1,
         &request_ssz,
         &small,
         .{},
-        setup.pair.now,
+        setup.shared.pair.now,
     ));
-    try std.testing.expectError(error.RequestTooLarge, setup.client.reqresp.request(
-        &setup.pair.client,
-        &setup.client.router,
-        setup.handles.client,
+    try std.testing.expectError(error.RequestTooLarge, setup.shared.client.reqresp.request(
+        &setup.shared.pair.client,
+        &setup.shared.client.router,
+        setup.shared.handles.client,
         .ping_v1,
         &request_ssz,
         &small,
         .{},
-        setup.pair.now,
+        setup.shared.pair.now,
     ));
     const stale = reqresp.RequestHandle{ .index = 0, .generation = 99, .direction = .outbound };
-    try std.testing.expect(!setup.client.reqresp.consume(stale));
-    try std.testing.expect(!setup.server.reqresp.finish(.{ .index = 0, .generation = 99, .direction = .inbound }, setup.pair.now));
-    try std.testing.expectEqual(@as(usize, 0), setup.client.reqresp.errorMessage(stale).len);
-    try std.testing.expectEqual(@as(u16, 0), setup.client.reqresp.active().outbound);
+    try std.testing.expect(!setup.shared.client.reqresp.consume(stale));
+    try std.testing.expect(!setup.shared.server.reqresp.finish(.{ .index = 0, .generation = 99, .direction = .inbound }, setup.shared.pair.now));
+    try std.testing.expectEqual(@as(usize, 0), setup.shared.client.reqresp.errorMessage(stale).len);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
 }

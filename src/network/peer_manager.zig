@@ -5,33 +5,25 @@ const peers = @import("peers/root.zig");
 const control_mod = @import("peers/control.zig");
 const dial_mod = @import("peers/dial_queue.zig");
 const policy = peers.policy;
-const custody = peers.custody;
 const engine_mod = @import("quic/engine.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
-pub const controls_per_turn = 32;
-pub const identify_per_turn = 8;
-pub const dials_per_turn = 4;
-pub const candidates_per_turn = 16;
 
 pub const Options = struct {
     peers: t.Options = .{},
-    service: service_mod.Options,
     control: control_mod.Options = .{},
     dial: dial_mod.Options,
     metadata_freshness_ms: u64 = 60_000,
 };
 pub const DialIntent = dial_mod.DialIntent;
 pub const DialToken = dial_mod.Token;
-pub const Counts = struct { peers: usize, application: usize, gossipsub: usize };
 pub const MemoryPlan = struct {
     inline_bytes: usize,
     allocated_bytes: usize,
     catalog_bytes: usize,
     control_bytes: usize,
     dial_bytes: usize,
-    service_bytes: usize,
     scratch_bytes: usize,
     policy_bytes: usize,
 };
@@ -55,9 +47,8 @@ const SelectionRevision = struct {
     }
 };
 
-pub const Core = struct {
+pub const PeerManager = struct {
     allocator: std.mem.Allocator,
-    service: service_mod.Service,
     catalog: peers.Catalog,
     control: control_mod.Control,
     dial_queue: dial_mod.DialQueue,
@@ -113,8 +104,8 @@ pub const Core = struct {
     };
 
     /// Returns copied observations without reconciliation, score refresh or event publication.
-    pub fn diagnostics(self: *const Core) Diagnostics {
-        const g = self.service.gossipsub.inner;
+    pub fn diagnostics(self: *const PeerManager, service: *const service_mod.Service) Diagnostics {
+        const g = service.gossipsub;
         return .{
             .policy = self.counters,
             .connected = self.catalog.connectedCount(),
@@ -122,8 +113,8 @@ pub const Core = struct {
             .control = self.control.counters,
             .control_resources = self.control.resourceSnapshot(),
             .dialing = self.dial_queue.resourceSnapshot(),
-            .reqresp = self.service.reqresp.counters,
-            .reqresp_resources = self.service.reqresp.resourceSnapshot(),
+            .reqresp = service.reqresp.counters,
+            .reqresp_resources = service.reqresp.resourceSnapshot(),
             .gossip = g.counters,
             .gossip_resources = g.resourceSnapshot(),
             .score_calculations = g.peers.scores.calculations,
@@ -134,11 +125,8 @@ pub const Core = struct {
     pub fn validateOptions(options: Options) !void {
         try options.peers.validate();
         if (options.metadata_freshness_ms == 0 or options.metadata_freshness_ms > 86_400_000) return error.InvalidOptions;
-        if (options.service.reqresp.peers < options.peers.max_peers)
-            return error.InvalidOptions;
         try control_mod.Control.validateOptions(options.control);
         try dial_mod.DialQueue.validateOptions(options.dial);
-        try service_mod.Service.validateOptions(options.service);
     }
 
     pub fn init(
@@ -146,7 +134,8 @@ pub const Core = struct {
         identity: *const t.PeerId,
         local: *const t.LocalState,
         options: Options,
-    ) !Core {
+        service: *const service_mod.Service,
+    ) !PeerManager {
         var copied: t.LocalState = undefined;
         try peers.control_wire.copyLocal(&copied, local);
         try validateOptions(options);
@@ -156,7 +145,7 @@ pub const Core = struct {
             a,
             options.control,
             options.peers.capacity,
-            options.service.reqresp.inbound_max,
+            @intCast(service.reqresp.inbound.len),
         );
         errdefer control.deinit(a);
         var dial_queue = try dial_mod.DialQueue.init(a, options.dial);
@@ -165,13 +154,8 @@ pub const Core = struct {
         errdefer a.free(scratch);
         const policy_scratch = try a.alloc(policy.Input, options.peers.max_peers);
         errdefer a.free(policy_scratch);
-        var service_options = options.service;
-        service_options.automatic_gossip_admission = false;
-        service_options.reqresp.request_fork = copied.fork.fork;
-        const service = try service_mod.Service.init(a, service_options);
         return .{
             .allocator = a,
-            .service = service,
             .catalog = catalog,
             .control = control,
             .dial_queue = dial_queue,
@@ -183,9 +167,8 @@ pub const Core = struct {
             .policy_seed = options.dial.seed,
         };
     }
-    /// Call shutdown with the borrowed Engine before releasing an active Core.
-    pub fn deinit(self: *Core) void {
-        self.service.deinit();
+    /// Call managed.shutdown with Service and Engine before releasing an active PeerManager.
+    pub fn deinit(self: *PeerManager) void {
         self.allocator.free(self.policy_scratch);
         self.allocator.free(self.snapshot_scratch);
         self.dial_queue.deinit(self.allocator);
@@ -193,94 +176,25 @@ pub const Core = struct {
         self.catalog.deinit(self.allocator);
         self.* = undefined;
     }
-    pub fn memoryPlan(self: *const Core) MemoryPlan {
+    pub fn memoryPlan(self: *const PeerManager) MemoryPlan {
         const catalog = self.catalog.memoryPlan().allocated_bytes;
         const control = self.control.memoryPlan().allocated_bytes;
         const dial = self.dial_queue.memoryPlan().allocated_bytes;
-        const request = self.service.reqresp.memoryPlan();
-        const gossip_plan = self.service.gossipsub.inner.memoryPlan();
-        const negotiation = @TypeOf(self.service.router.negotiator.entries[0]);
-        const service_bytes = request.total_bytes - request.facade_bytes +
-            gossip_plan.total_bytes +
-            self.service.router.negotiator.entries.len * @sizeOf(negotiation) +
-            if (self.service.identify) |*identify| identify.allocatedBytes() else @as(usize, 0);
         const scratch = self.snapshot_scratch.len * @sizeOf(t.Snapshot);
         const policy_bytes = self.policy_scratch.len * @sizeOf(policy.Input);
         return .{
-            .inline_bytes = @sizeOf(Core),
-            .allocated_bytes = catalog + control + dial + service_bytes + scratch + policy_bytes,
+            .inline_bytes = @sizeOf(PeerManager),
+            .allocated_bytes = catalog + control + dial + scratch + policy_bytes,
             .catalog_bytes = catalog,
             .control_bytes = control,
             .dial_bytes = dial,
-            .service_bytes = service_bytes,
             .scratch_bytes = scratch,
             .policy_bytes = policy_bytes,
         };
     }
-    /// Public protocol borrows retain their Service lifetime until the next process call.
-    /// Internal closes after publication perform cleanup without a second owner recycling pass.
-    pub fn process(
-        self: *Core,
-        engine: *engine_mod.Engine,
-        events: []const engine_mod.Event,
-        activity: []const engine_mod.Handle,
-        now: Now,
-        slot: u64,
-        peer_events: []t.Event,
-        application: []rr.Event,
-        gossip_events: []gossip.Event,
-    ) Counts {
-        const per_connection = @import("quic/limits.zig").events_per_connection;
-        std.debug.assert(events.len <= @as(usize, engine.limits.connections_max) * per_connection);
-        if (self.stopped) return .{
-            .peers = self.catalog.pollEvents(peer_events),
-            .application = 0,
-            .gossipsub = 0,
-        };
-        self.current_slot = slot;
-        if (slot >= self.demand.expires_at_slot and !std.meta.eql(self.demand, t.Demand{})) {
-            self.demand = .{};
-            self.selection_revision = null;
-        }
-        if (!self.quiescing) self.dial_queue.expire(engine, now.mono_ms);
-        for (events) |event| self.transportEvent(engine, event, now);
-        var controls: [controls_per_turn]rr.Event = undefined;
-        var identify_results: [identify_per_turn]@import("identify/root.zig").Result = undefined;
-        const counts = self.service.process(engine, events, activity, now, .{ .application = application, .control = &controls, .gossipsub = gossip_events, .identify = &identify_results });
-        for ([_][]const rr.Event{ application[0..counts.application], controls[0..counts.control] }) |batch| {
-            for (batch) |event| {
-                const conn = self.service.reqresp.incompleteRequestTimeout(event) orelse continue;
-                if (self.control.peerFor(conn)) |peer| _ = self.reportPeer(peer, .low_tolerance, now);
-            }
-        }
-        self.control.identifyResults(&self.catalog, identify_results[0..counts.identify]);
-        self.control.events(
-            &self.service,
-            &self.catalog,
-            engine,
-            &self.local,
-            now,
-            slot,
-            controls[0..counts.control],
-        );
-        self.control.maintain(&self.service, &self.catalog, engine, &self.local, now);
-        if (self.quiescing) return .{ .peers = self.catalog.pollEvents(peer_events), .application = counts.application, .gossipsub = counts.gossipsub };
-        var connected_budget: u16 = custody.hashes_per_turn / 2;
-        var candidate_budget: u16 = custody.hashes_per_turn / 2;
-        const connected_pending = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &connected_budget);
-        const candidate_pending = self.dial_queue.advanceCustody(&self.local.fork, now.mono_ms, &candidate_budget);
-        self.custody_pending = connected_pending or candidate_pending;
-        self.counters.custody_hashes +|= custody.hashes_per_turn - connected_budget - candidate_budget;
-        self.reconcile(now);
-        self.updateNativeRoom(engine);
-        return .{
-            .peers = self.catalog.pollEvents(peer_events),
-            .application = counts.application,
-            .gossipsub = counts.gossipsub,
-        };
-    }
-    fn transportEvent(
-        self: *Core,
+    pub fn transportEvent(
+        self: *PeerManager,
+        service: *service_mod.Service,
         engine: *engine_mod.Engine,
         event: engine_mod.Event,
         now: Now,
@@ -305,12 +219,12 @@ pub const Core = struct {
                         if (admission.displaced) |old| {
                             self.counters.displaced +|= 1;
                             self.control.cancelConnection(
-                                &self.service,
+                                service,
                                 engine,
                                 admission.peer,
                                 old,
                             );
-                            self.service.gossipsub.retireConnection(&self.service.router, engine, old, now);
+                            service.gossipsub.retireConnection(&service.router, engine, old, now);
                             _ = engine.close(old, 0);
                         }
                         self.control.connected(admission.peer, connected.conn, direction, now);
@@ -318,9 +232,9 @@ pub const Core = struct {
                             admission.peer,
                             self.dial_queue.isDirect(&identity),
                         );
-                        const admission_result = self.service.gossipsub.peerConnected(engine, connected.conn, now);
+                        const admission_result = service.gossipsub.peerConnected(engine, connected.conn, now);
                         if (admission_result != .admitted) self.counters.gossip_refused +|= 1;
-                        if (self.dial_queue.isDirect(&identity)) self.service.gossipsub.inner.markDirect(connected.conn);
+                        if (self.dial_queue.isDirect(&identity)) service.gossipsub.markDirect(connected.conn);
                         self.dial_queue.accepted(&identity, connected.conn, now.mono_ms);
                     },
                     else => {
@@ -333,12 +247,12 @@ pub const Core = struct {
             .closed => |closed| {
                 _ = self.dial_queue.dialClosed(closed.conn, now.mono_ms);
                 if (self.control.peerFor(closed.conn)) |peer| {
-                    const goodbye = self.service.reqresp.closingGoodbye(engine, closed.conn, now);
+                    const goodbye = service.reqresp.closingGoodbye(engine, closed.conn, now);
                     if (goodbye) |code| self.control.receivedGoodbye(&self.catalog, peer, closed.conn, code, now, true);
                     const snapshot = self.catalog.get(peer).?;
                     const reason = snapshot.disconnect_reason orelse if (goodbye != null) t.DisconnectReason.remote_goodbye else .transport_closed;
                     self.control.close(
-                        &self.service,
+                        service,
                         &self.catalog,
                         engine,
                         peer,
@@ -357,7 +271,7 @@ pub const Core = struct {
             else => {},
         }
     }
-    fn refreshCandidates(self: *Core, now: Now, catalog_deadline: ?u64) void {
+    fn refreshCandidates(self: *PeerManager, now: Now, catalog_deadline: ?u64) void {
         if (self.candidates_revision == self.catalog.revision and self.catalog.revision != std.math.maxInt(u64)) return;
         self.counters.candidate_syncs +|= 1;
         self.counters.candidate_rows +|= self.catalog.rows.len;
@@ -368,18 +282,18 @@ pub const Core = struct {
     fn candidateBlocked(snapshot: *const t.Snapshot, now_ms: u64) bool {
         return snapshot.ban_until_ms > now_ms or snapshot.score <= -50 or snapshot.goodbye_until_ms > now_ms;
     }
-    fn syncCandidate(self: *Core, snapshot: *const t.Snapshot, now: Now, catalog_deadline: ?u64) void {
+    fn syncCandidate(self: *PeerManager, snapshot: *const t.Snapshot, now: Now, catalog_deadline: ?u64) void {
         const eligible_at_ms: ?u64 = if (candidateBlocked(snapshot, now.mono_ms))
             @max(catalog_deadline orelse now.mono_ms +| 1_000, snapshot.goodbye_until_ms)
         else
             null;
         self.dial_queue.synchronize(snapshot, now.mono_ms, eligible_at_ms);
     }
-    fn catalogDeadline(self: *Core, now_ms: u64) ?u64 {
+    fn catalogDeadline(self: *PeerManager, now_ms: u64) ?u64 {
         self.counters.catalog_deadline_rows +|= self.catalog.rows.len;
         return self.catalog.nextDeadline(now_ms);
     }
-    fn syncIdentity(self: *Core, identity: *const t.PeerId, now: Now) void {
+    fn syncIdentity(self: *PeerManager, identity: *const t.PeerId, now: Now) void {
         for (self.catalog.rows, 0..) |*row, index| {
             if (!row.occupied or !row.identity.eql(identity)) continue;
             self.counters.candidate_lookup_rows +|= index + 1;
@@ -393,15 +307,15 @@ pub const Core = struct {
     /// Reconciles at the supplied clock without pumping protocols or borrowing an Engine.
     /// Health only ranks removals. Once pruned, changing health alone cannot remove
     /// a retained peer while count, coverage and protection remain unchanged.
-    pub fn reconcile(self: *Core, now: Now) void {
+    pub fn reconcile(self: *PeerManager, service: *service_mod.Service, now: Now) void {
         if (self.stopped or self.quiescing) return;
         self.catalog.refresh(now.mono_ms);
         const expired = if (self.reconciliation_deadline) |due| now.mono_ms >= due else false;
         if (expired) self.candidates_revision = null;
-        if (self.policyChanged() or expired) {
-            self.refreshSelection(now);
+        if (self.policyChanged(service) or expired) {
+            self.refreshSelection(service, now);
             self.refreshDiscoveryNeed();
-            const revision = self.currentSelectionRevision();
+            const revision = self.currentSelectionRevision(service);
             self.selection_revision = if (revision.cacheable()) revision else null;
             const catalog_deadline = self.catalogDeadline(now.mono_ms);
             self.reconciliation_deadline = catalog_deadline;
@@ -414,86 +328,57 @@ pub const Core = struct {
             self.dial_queue.configureSelection(&self.selection.deficits.missing, self.selection.retained_count < self.catalog.options.target_peers or self.selection.deficits.outbound > 0, &self.local.fork, now.mono_ms);
         }
     }
-    fn currentSelectionRevision(self: *const Core) SelectionRevision {
-        return .{ .catalog = self.catalog.revision, .delivery = self.service.gossipsub.inner.sessions.delivery_revision };
+    fn currentSelectionRevision(self: *const PeerManager, service: *const service_mod.Service) SelectionRevision {
+        return .{ .catalog = self.catalog.revision, .delivery = service.gossipsub.deliveryRevision() };
     }
-    fn policyChanged(self: *const Core) bool {
-        return !std.meta.eql(self.selection_revision, self.currentSelectionRevision());
+    pub fn policyChanged(self: *const PeerManager, service: *const service_mod.Service) bool {
+        return !std.meta.eql(self.selection_revision, self.currentSelectionRevision(service));
     }
-    fn updateNativeRoom(self: *Core, engine: *const engine_mod.Engine) void {
+    pub fn updateNativeRoom(self: *PeerManager, engine: *const engine_mod.Engine) void {
         const ceiling = @min(self.catalog.options.max_peers, engine.limits.connections_max);
         self.native_dial_room = ceiling -| engine.registry.active_len;
     }
-    pub fn nextWakeup(
-        self: *Core,
-        now: Now,
-        peer_capacity: usize,
-        application_capacity: usize,
-        gossip_capacity: usize,
-        dial_capacity: usize,
-    ) ?u64 {
-        if (self.stopped) return self.peerWakeup(now, peer_capacity);
-        if (self.quiescing) {
-            var due = self.service.nextWakeup(now, .{ .application = 0, .control = controls_per_turn, .gossipsub = 0, .identify = identify_per_turn });
-            for ([_]?u64{ self.control.nextWakeup(&self.catalog, now), self.peerWakeup(now, peer_capacity) }) |next| if (next) |deadline| {
-                due = @min(due orelse deadline, deadline);
-            };
-            return due;
-        }
-        var due = self.service.nextWakeup(now, .{ .application = application_capacity, .control = controls_per_turn, .gossipsub = gossip_capacity, .identify = identify_per_turn });
-        for ([_]?u64{
-            self.control.nextWakeup(&self.catalog, now),
-            self.dial_queue.nextWakeup(now.mono_ms, @min(dial_capacity, self.dialRoom())),
-            if (self.policyChanged() or self.dial_queue.selection_dirty) now.mono_ms else null,
-            self.reconciliation_deadline,
-            self.dial_queue.selection_deadline,
-            if (self.custody_pending) now.mono_ms +| 1 else null,
-            self.peerWakeup(now, peer_capacity),
-        }) |next| {
-            if (next) |value| due = @min(due orelse value, value);
-        }
-        return due;
-    }
-    fn peerWakeup(self: *const Core, now: Now, capacity: usize) ?u64 {
+
+    pub fn peerWakeup(self: *const PeerManager, now: Now, capacity: usize) ?u64 {
         if (capacity == 0) return null;
         if (self.catalog.eventsPending()) return now.mono_ms;
         return null;
     }
-    pub fn setDemand(self: *Core, demand: *const t.Demand) !void {
+    pub fn setDemand(self: *PeerManager, demand: *const t.Demand) !void {
         if (self.stopped) return error.Stopped;
         try demand.validate(&self.local.fork, self.catalog.options.max_peers);
         if (std.meta.eql(self.demand, demand.*)) return;
         self.commitDemand(demand);
     }
     /// Requires demand validated against the local fork before publication.
-    pub fn commitDemand(self: *Core, demand: *const t.Demand) void {
+    pub fn commitDemand(self: *PeerManager, demand: *const t.Demand) void {
         self.demand = demand.*;
         self.selection_revision = null;
     }
     /// Returns the last completed policy evaluation, shared with discoveryNeed.
     /// Call reconcile with an explicit clock to include pending input changes.
-    pub fn coverageDeficits(self: *const Core) policy.Deficits {
+    pub fn coverageDeficits(self: *const PeerManager) policy.Deficits {
         return self.selection.deficits;
     }
-    pub fn candidateHints(self: *const Core, identity: *const t.PeerId, now: Now) ?dial_mod.Hints {
+    pub fn candidateHints(self: *const PeerManager, identity: *const t.PeerId, now: Now) ?dial_mod.Hints {
         return self.dial_queue.candidateHints(identity, now.mono_ms);
     }
     /// Returns the same completed evaluation as coverageDeficits without advancing policy.
     /// The host must schedule the next process slot turn for demand expiry.
-    pub fn discoveryNeed(self: *const Core) DiscoveryNeed {
+    pub fn discoveryNeed(self: *const PeerManager) DiscoveryNeed {
         return self.discovery_need;
     }
     /// Requires Discovery.step output or equivalent authenticated-source scope authorization.
-    pub fn discovered(self: *Core, candidate: *const peers.enr.Candidate, now: Now) !void {
+    pub fn discovered(self: *PeerManager, service: *service_mod.Service, candidate: *const peers.enr.Candidate, now: Now) !void {
         if (self.stopped) return error.Stopped;
-        self.reconcile(now);
+        self.reconcile(service, now);
         try self.enqueueDiscovered(candidate, now);
     }
     pub const DiscoveryIntake = struct { accepted: u16 = 0, refused: u16 = 0 };
     /// Each candidate has the same authenticated-source precondition as discovered.
-    pub fn discoveredBatch(self: *Core, candidates: []const peers.enr.Candidate, now: Now) DiscoveryIntake {
+    pub fn discoveredBatch(self: *PeerManager, service: *service_mod.Service, candidates: []const peers.enr.Candidate, now: Now) DiscoveryIntake {
         std.debug.assert(candidates.len <= 16);
-        self.reconcile(now);
+        self.reconcile(service, now);
         var result: DiscoveryIntake = .{};
         for (candidates) |*candidate| {
             self.enqueueDiscovered(candidate, now) catch {
@@ -504,13 +389,13 @@ pub const Core = struct {
         }
         return result;
     }
-    fn enqueueDiscovered(self: *Core, candidate: *const peers.enr.Candidate, now: Now) !void {
+    fn enqueueDiscovered(self: *PeerManager, candidate: *const peers.enr.Candidate, now: Now) !void {
         if (self.stopped) return error.Stopped;
         if (candidate.peer.eql(&self.local_identity)) return error.SelfDial;
         try self.dial_queue.enqueueDiscovered(candidate, &self.local.fork, &self.selection.deficits.missing, now.mono_ms);
         self.syncIdentity(&candidate.peer, now);
     }
-    fn refreshSelection(self: *Core, now: Now) void {
+    fn refreshSelection(self: *PeerManager, service: *service_mod.Service, now: Now) void {
         self.counters.selections +|= 1;
         self.counters.selection_rows +|= self.catalog.rows.len;
         self.metadata_deadline = null;
@@ -522,13 +407,13 @@ pub const Core = struct {
             std.debug.assert(input_count < self.policy_scratch.len);
             const input = &self.policy_scratch[input_count];
             input_count += 1;
-            input.* = .{ .peer = snapshot.peer, .direct = snapshot.direct, .outbound = snapshot.direction == .outbound, .relevant = snapshot.relevant, .score = snapshot.score + (self.gossipScore(snapshot.peer, now) orelse 0) };
+            input.* = .{ .peer = snapshot.peer, .direct = snapshot.direct, .outbound = snapshot.direction == .outbound, .relevant = snapshot.relevant, .score = snapshot.score + (self.gossipScore(service, snapshot.peer, now) orelse 0) };
             if (snapshot.ban_until_ms > now.mono_ms or snapshot.score <= -50) input.reject = .banned;
             if (snapshot.status) |status| {
                 if (!std.mem.eql(u8, &status.fork_digest, &self.local.fork.digest)) input.reject = .incompatible_fork;
                 if (self.local.fork.fork.gte(.fulu) and status.earliest_available_slot == null) input.reject = .missing_availability;
             }
-            const delivery = self.service.gossipsub.deliveryStatus(conn);
+            const delivery = service.gossipsub.deliveryStatus(conn);
             if (delivery == .unavailable) {
                 input.outbound = false;
                 if (snapshot.relevant and !snapshot.direct and input.reject == null) input.reject = .gossip_unavailable;
@@ -550,7 +435,7 @@ pub const Core = struct {
             if (self.disconnect(input.peer, reason, now)) self.counters.policy_disconnects +|= 1;
         };
     }
-    fn refreshDiscoveryNeed(self: *Core) void {
+    fn refreshDiscoveryNeed(self: *PeerManager) void {
         self.discovery_need = .{};
         if (self.selection.dial_budget == 0) return;
         self.discovery_need.general = self.catalog.relevantCount() < self.catalog.options.target_peers or
@@ -560,51 +445,51 @@ pub const Core = struct {
         self.discovery_need.syncnets = self.selection.deficits.missing.syncnets;
         self.discovery_need.custody = self.selection.deficits.groups > 0;
     }
-    fn dialRoom(self: *const Core) u16 {
+    pub fn dialRoom(self: *const PeerManager) u16 {
         const attempts = self.dial_queue.attempts();
         const budget = @min(self.catalog.options.max_peers -| self.selection.retained_count, @max(self.selection.dial_budget, self.dial_queue.hostDemand()));
         return @min(self.native_dial_room -| attempts.unstarted, budget -| attempts.total);
     }
-    pub fn updateStatus(self: *Core, status: *const t.Status) !void {
+    pub fn updateStatus(self: *PeerManager, status: *const t.Status) !void {
         var local = self.local;
         local.status = status.*;
         try peers.control_wire.copyLocal(&self.local, &local);
         self.selection_revision = null;
     }
-    pub fn updateMetadata(self: *Core, metadata: *const t.Metadata) !void {
+    pub fn updateMetadata(self: *PeerManager, metadata: *const t.Metadata) !void {
         var local = self.local;
         local.metadata = metadata.*;
         try peers.control_wire.copyLocal(&self.local, &local);
         self.selection_revision = null;
     }
-    pub fn updateFork(self: *Core, local: *const t.LocalState, now: Now) !void {
+    pub fn updateFork(self: *PeerManager, service: *service_mod.Service, local: *const t.LocalState, now: Now) !void {
         var copied: t.LocalState = undefined;
         try peers.control_wire.copyLocal(&copied, local);
-        self.commitLocal(&copied, now);
+        self.commitLocal(service, &copied, now);
     }
 
     /// The caller must validate the complete local state before committing it.
-    pub fn commitLocal(self: *Core, local: *const t.LocalState, now: Now) void {
+    pub fn commitLocal(self: *PeerManager, service: *service_mod.Service, local: *const t.LocalState, now: Now) void {
         if (!std.meta.eql(self.local.fork, local.fork)) {
-            self.control.forkUpdated(&self.service, &self.catalog, self.local.fork, now);
+            self.control.forkUpdated(service, &self.catalog, self.local.fork, now);
         }
         self.local = local.*;
-        self.service.reqresp.setRequestFork(local.fork.fork);
+        service.reqresp.setRequestFork(local.fork.fork);
         for (self.local.fork.custody_groups..128) |index| self.demand.group_targets[index] = 0;
         var budget: u16 = 0;
         _ = self.catalog.advanceCustody(&self.local.fork, now.mono_ms, self.metadata_freshness_ms, &budget);
         _ = self.dial_queue.advanceCustody(&self.local.fork, now.mono_ms, &budget);
         self.selection_revision = null;
     }
-    pub fn reStatusPeer(self: *Core, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
+    pub fn reStatusPeer(self: *PeerManager, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
         if (self.stopped) return false;
         return self.control.reStatusPeer(peer, connection, now);
     }
-    pub fn reStatusPeers(self: *Core, now: Now) void {
+    pub fn reStatusPeers(self: *PeerManager, now: Now) void {
         self.control.reStatusPeers(now);
     }
     pub fn reportPeer(
-        self: *Core,
+        self: *PeerManager,
         peer: t.PeerRef,
         action: t.PeerAction,
         now: Now,
@@ -619,26 +504,27 @@ pub const Core = struct {
         return decision;
     }
     pub fn connect(
-        self: *Core,
+        self: *PeerManager,
         identity: *const t.PeerId,
         addresses: []const t.Address,
         now: Now,
     ) !void {
         return self.connectUntil(identity, addresses, now, now.mono_ms +| dial_mod.connect_timeout_ms);
     }
-    pub fn connectUntil(self: *Core, identity: *const t.PeerId, addresses: []const t.Address, now: Now, deadline_ms: u64) !void {
+    pub fn connectUntil(self: *PeerManager, identity: *const t.PeerId, addresses: []const t.Address, now: Now, deadline_ms: u64) !void {
         if (self.stopped) return error.Stopped;
         if (identity.eql(&self.local_identity)) return error.SelfDial;
         try self.dial_queue.enqueueUntil(identity, addresses, false, now.mono_ms, deadline_ms);
         self.syncIdentity(identity, now);
         self.selection_revision = null;
     }
-    pub fn cancelConnect(self: *Core, engine: *engine_mod.Engine, identity: *const t.PeerId, now: Now) void {
+    pub fn cancelConnect(self: *PeerManager, engine: *engine_mod.Engine, identity: *const t.PeerId, now: Now) void {
         self.dial_queue.cancelConnect(engine, identity, now.mono_ms);
         self.selection_revision = null;
     }
     pub fn addDirectPeer(
-        self: *Core,
+        self: *PeerManager,
+        service: *service_mod.Service,
         identity: *const t.PeerId,
         addresses: []const t.Address,
         now: Now,
@@ -650,30 +536,30 @@ pub const Core = struct {
         self.selection_revision = null;
         if (self.catalog.find(identity)) |peer| {
             _ = self.catalog.setDirect(peer, true);
-            if (self.catalog.get(peer).?.connection) |conn| self.service.gossipsub.inner.markDirect(conn);
+            if (self.catalog.get(peer).?.connection) |conn| service.gossipsub.markDirect(conn);
         }
     }
-    pub fn directPeers(self: *const Core, out: []t.PeerId) error{OutputTooSmall}!usize {
+    pub fn directPeers(self: *const PeerManager, out: []t.PeerId) error{OutputTooSmall}!usize {
         return self.dial_queue.directPeers(out);
     }
-    pub fn removeDirectPeer(self: *Core, identity: *const t.PeerId) bool {
+    pub fn removeDirectPeer(self: *PeerManager, service: *service_mod.Service, identity: *const t.PeerId) bool {
         if (!self.dial_queue.removeDirect(identity)) return false;
         self.selection_revision = null;
-        self.service.gossipsub.inner.unmarkDirect(identity);
+        service.gossipsub.unmarkDirect(identity);
         if (self.catalog.find(identity)) |peer| _ = self.catalog.setDirect(peer, false);
         return true;
     }
-    pub fn closePeer(self: *Core, engine: *engine_mod.Engine, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
+    pub fn closePeer(self: *PeerManager, service: *service_mod.Service, engine: *engine_mod.Engine, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
         if (self.stopped) return false;
         const snapshot = self.catalog.get(peer) orelse return false;
         if (!std.meta.eql(snapshot.connection, connection)) return false;
-        self.control.close(&self.service, &self.catalog, engine, peer, connection, .host, now);
+        self.control.close(service, &self.catalog, engine, peer, connection, .host, now);
         self.dial_queue.cancelConnect(engine, &snapshot.identity, now.mono_ms);
         self.dial_queue.disconnected(&snapshot.identity, snapshot.connected_at_ms, .host, now.mono_ms);
         self.selection_revision = null;
         return true;
     }
-    pub fn disconnect(self: *Core, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
+    pub fn disconnect(self: *PeerManager, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
         const snapshot = self.catalog.get(peer) orelse return false;
         return self.control.disconnect(
             &self.catalog,
@@ -684,30 +570,31 @@ pub const Core = struct {
         );
     }
     pub fn dialIntents(
-        self: *Core,
+        self: *PeerManager,
+        service: *service_mod.Service,
         engine: *engine_mod.Engine,
         now: Now,
         out: []dial_mod.DialIntent,
     ) usize {
         if (self.stopped) return 0;
         self.dial_queue.expire(engine, now.mono_ms);
-        self.reconcile(now);
+        self.reconcile(service, now);
         self.updateNativeRoom(engine);
         return self.dial_queue.poll(now.mono_ms, out[0..@min(out.len, self.dialRoom())]);
     }
-    pub fn dialStarted(self: *Core, token: dial_mod.Token, conn: t.Handle) bool {
+    pub fn dialStarted(self: *PeerManager, token: dial_mod.Token, conn: t.Handle) bool {
         return self.dial_queue.dialStarted(token, conn);
     }
-    pub fn dialDeferred(self: *Core, token: dial_mod.Token, now: Now) bool {
+    pub fn dialDeferred(self: *PeerManager, token: dial_mod.Token, now: Now) bool {
         return self.dial_queue.dialDeferred(token, now.mono_ms);
     }
-    pub fn dialFailed(self: *Core, token: dial_mod.Token, now: Now) bool {
+    pub fn dialFailed(self: *PeerManager, token: dial_mod.Token, now: Now) bool {
         return self.dial_queue.dialFailed(token, now.mono_ms);
     }
-    pub fn snapshots(self: *const Core, out: []t.Snapshot) usize {
+    pub fn snapshots(self: *const PeerManager, out: []t.Snapshot) usize {
         return self.catalog.snapshots(out);
     }
-    pub fn peerCounts(self: *const Core) PeerCounts {
+    pub fn peerCounts(self: *const PeerManager) PeerCounts {
         var result: PeerCounts = .{ .connected = 0, .relevant = 0, .outbound_relevant = 0 };
         for (self.catalog.rows) |row| {
             if (!row.occupied or row.connection == null) continue;
@@ -718,90 +605,11 @@ pub const Core = struct {
         }
         return result;
     }
-    pub fn gossipScore(self: *Core, peer: t.PeerRef, now: Now) ?f64 {
+    pub fn gossipScore(self: *PeerManager, service: *service_mod.Service, peer: t.PeerRef, now: Now) ?f64 {
         const snapshot = self.catalog.get(peer) orelse return null;
-        return self.service.gossipsub.inner.scoreSnapshot(
+        return service.gossipsub.scoreSnapshot(
             snapshot.connection orelse return null,
             now,
         );
-    }
-    pub fn sendReqRespRequest(
-        self: *Core,
-        engine: *engine_mod.Engine,
-        conn: t.Handle,
-        protocol: rr.Protocol,
-        bytes: []const u8,
-        sink: []u8,
-        options: rr.reqresp.RequestOptions,
-        now: Now,
-    ) !rr.RequestHandle {
-        if (self.stopped or self.quiescing) return error.Stopped;
-        if (protocol.isControl()) return error.ControlProtocol;
-        return self.service.request(engine, conn, protocol, bytes, sink, options, now);
-    }
-
-    /// Copies host-calculated parameters. Preserves outstanding Service event borrows.
-    pub fn configureTopic(self: *Core, topic: []const u8, params: *const gossip.score.TopicParams) (gossip.Gossipsub.ConfigureTopicError || error{Stopped})!void {
-        if (self.stopped or self.quiescing) return error.Stopped;
-        try self.service.gossipsub.inner.configureTopic(topic, params);
-    }
-
-    pub fn publishGossip(
-        self: *Core,
-        topic: []const u8,
-        bytes: []const u8,
-        now: Now,
-    ) !gossip.Gossipsub.PublishOutcome {
-        if (self.stopped or self.quiescing) return error.Stopped;
-        return self.publishGossipWithOptions(topic, bytes, .{}, now);
-    }
-
-    pub fn publishGossipWithOptions(self: *Core, topic: []const u8, bytes: []const u8, options: gossip.Gossipsub.PublishOptions, now: Now) !gossip.Gossipsub.PublishOutcome {
-        if (self.stopped or self.quiescing) return error.Stopped;
-        return self.service.gossipsub.inner.publishWithOptions(topic, bytes, options, now);
-    }
-    pub fn subscribe(self: *Core, topic: []const u8) bool {
-        if (self.stopped or self.quiescing) return false;
-        return self.service.gossipsub.inner.subscribe(topic);
-    }
-    pub fn unsubscribe(self: *Core, topic: []const u8) bool {
-        return self.service.gossipsub.inner.unsubscribe(topic);
-    }
-
-    pub fn beginGracefulClose(self: *Core, now: Now) void {
-        if (self.stopped or self.quiescing) return;
-        self.quiescing = true;
-        self.selection = .{};
-        self.discovery_need = .{};
-        self.service.quiesceApplications();
-        var active = self.service.router.active_capabilities;
-        active.receive = .initEmpty();
-        self.service.router.setCapabilities(active);
-        for (self.catalog.rows, 0..) |row, index| {
-            if (!row.occupied or row.connection == null) continue;
-            _ = self.disconnect(.{ .index = @intCast(index), .generation = row.generation }, .shutdown, now);
-        }
-    }
-    pub fn shutdown(self: *Core, engine: *engine_mod.Engine, now: Now) void {
-        if (self.stopped) return;
-        self.stopped = true;
-        self.selection = .{};
-        self.discovery_need = .{};
-        if (self.service.identify) |*identify| identify.shutdown(&self.service.router, engine);
-        self.service.reqresp.shutdown(engine, &self.service.router);
-        self.service.router.negotiator.shutdown(engine);
-        const count = self.catalog.snapshots(self.snapshot_scratch);
-        for (self.snapshot_scratch[0..count]) |snapshot| if (snapshot.connection) |conn| {
-            self.control.close(
-                &self.service,
-                &self.catalog,
-                engine,
-                snapshot.peer,
-                conn,
-                .shutdown,
-                now,
-            );
-        };
-        self.dial_queue.shutdown(engine);
     }
 };

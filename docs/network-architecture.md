@@ -10,13 +10,15 @@ valid SSZ framing, and a positive gossip verdict are separate decisions.
 
 | Owner | Responsibility | Lifetime and dependencies |
 | --- | --- | --- |
-| `udp.Sockets` | One socket per configured family, bounded datagram I/O and provider cleanup | Owned by Transport or the discovery driver; input borrows its receive buffer |
+| `udp.Sockets` | One socket per configured family, bounded datagram I/O and provider cleanup | Owned by a QUIC or discovery Transport; input borrows its receive buffer |
 | `quic.Engine` | TLS authentication, cryptographic random generation, connection admission, protocol timers and flow control | Owns its TLS context after successful initialization and all QUIC connections/streams; consumes bytes and explicit time without socket I/O |
 | `Transport` | Engine and socket lifetime, OS clock sampling, pacing queues, buffers and bounded I/O turns | Owns startup entropy and teardown; completed progress can accompany a later local or keylog failure |
 | `Router` / `Negotiator` | Multistream selection and handler dispatch | Owns negotiation buffers until completion; handlers consume or copy leftovers before the next pump |
 | `Service` | Protocol composition and separate control/application output capacity | Owns req/resp, gossip sessions and optional Identify; does not decide consensus validity |
-| `Core` | Authenticated peer catalog, Status/Metadata, reputation, demand and dial selection | Uses Service plus the engine; identity generations differ from physical connection generations |
-| `NetworkCore` | Managed composition, discovery, local intent and I/O turns | Owns transport and Core; validates resource profiles and composes their deadlines |
+| `PeerManager` | Authenticated peer catalog, Status/Metadata, reputation, demand and dial selection | Borrows Service and Engine per operation; identity generations differ from physical connection generations |
+| `NetworkCore` | Managed composition, discovery, local intent and I/O turns | Owns Transport, PeerManager and Service as siblings, plus optional discovery; consumes a resolved construction plan and composes deadlines |
+| `discv5.Transport` | Discovery Engine, sockets, packet workspaces and bounded I/O | Takes ownership of bound sockets after the host derives its signed advertisement; returns progress alongside later failures |
+| `peers.Discovery` | Ethereum fork, subnet and custody lookup demand and candidate selection | Borrows discovery Transport; shared lookup I/O handles failed-send rollback without imposing a scheduling policy |
 | Binding owner thread | Drives NetworkCore and copies native events into bounded bridge tables | Owns all protocol mutation; JavaScript never drives a native protocol object concurrently |
 
 Shared `types.zig` defines addresses, time, connection handles and stream handles without
@@ -56,7 +58,17 @@ slot and fork state with a complete intent before using this narrow path in a ne
 5. Flush bounded sends and publish copied host events and diagnostics. Combine the next native
    deadline with host work and socket readiness before waiting.
 
-Peer inputs mark policy selection dirty. `Core.reconcile(now)` evaluates those changes and
+`managed.process` borrows PeerManager, Service and Engine for one socket-independent turn.
+Production and managed tests call this same function. It admits authenticated connections to
+peer policy before gossip admission, then calls Service exactly once. Status relevance remains
+independent of gossip admission. Control completions, custody work and reconciliation follow;
+discovery and physical dials do not start another protocol pump.
+
+Service owns one heap-allocated Gossipsub. Its public `pump` and `nextWakeup` cover both protocol
+maintenance and stream work. Internal `session_io.zig` functions borrow that same owner;
+stream opening cursors, sessions, retries and delivery revision belong to Gossipsub itself.
+
+Peer inputs mark policy selection dirty. `PeerManager.reconcile(service, now)` evaluates those changes and
 publishes coverage deficits and discovery need together. Their const getters return that last
 completed evaluation, including its peer counts and demand, without refreshing reputation,
 selecting or removing peers, publishing events, or consulting a remembered clock. Callers that
@@ -72,6 +84,23 @@ JavaScript; the callback copies data without borrowing growable native buffers. 
 and notifications are different channels. Polling, including the prepared state, is bounded
 so a failed wake write cannot strand shutdown.
 
+ReqResp owns request tables, scheduling, output fairness and completion accounting. Client
+and Server keep their distinct protocol phases and deadlines. A common request record owns
+handles, generation, notifications, terminal result and borrowed buffers. Its terminal
+transition accepts one outcome and schedules cleanup; accounting happens at that transition.
+Closing the stream, delivering the terminal event and recycling the slot are separate steps.
+A pending response chunk survives termination, and the slot recycles only on the following
+pump. RequestIO is private state for partial frame reads and writes, with no independent
+allocation or lifecycle policy.
+
+`service_test_support.ServicePair` constructs real Services over the in-memory QUIC pair.
+Each step accepts ordinary Service output slices and processes each side once; transport
+transfer and time advancement remain independently available. Protocol fixtures supply only
+their defaults and scenario helpers. Managed fixtures live in `managed_test_support.zig`,
+while policy, quota and topic fixtures live beside their subsystems. The shared UDP test I/O
+adapter scopes basic socket, clock and entropy faults and forwards unaffected operations
+through the supplied provider. Scenario-specific ordering faults remain local to their tests.
+
 ## Resource admission
 
 Startup configuration fixes connection, negotiation, request, payload, validation, delivery,
@@ -80,6 +109,13 @@ transport capacity, gossip capacities from peer policy, and router control reser
 the request owner. Socket send, receive and total-work budgets belong to Transport and are
 validated independently of engine admission limits. Independent overrides preserve profile defaults; raw module options retain
 their explicit controls. Composition validates shared limits before allocating native owners.
+The binding parses into stable owned storage, obtains its policy seed and resolves one
+`configuration.Resolved`. Bridge capacities and budgets, native construction and reported
+capacities consume that same result. Admission defaults use the final inbound capacity;
+Identify overrides preserve the selected profile. `NetworkCore.init` takes the resolved plan
+and explicit startup inputs. `initManaged` resolves once for native convenience callers;
+`initRaw` validates explicit module options before using the same construction path. Socket
+binding and signed advertisement construction still depend on the actual allocated resources.
 Allocation ledgers count requested native storage and bridge
 storage. QUIC receive-window limits and native dependency overhead are separate from the
 Zig allocation ledger, and host payload copies have their own byte budget. Engine reports its

@@ -76,7 +76,7 @@ pub const Peer = struct {
             .message => |m| {
                 self.emitted += 1;
                 try control.emit(self.allocator, .{ .event = "message", .topic = m.topic, .length = m.bytes.len, .sha256 = hash(m.bytes), .messageId = std.fmt.bytesToHex(m.id, .lower) });
-                const report = self.service.gossipsub.inner.report(m.handle, .accept, self.now);
+                const report = self.service.gossipsub.report(m.handle, .accept, self.now);
                 std.debug.assert(report == .applied);
             },
             .subscription_change => |s| try control.emit(self.allocator, .{ .event = "subscription", .topic = s.topic, .subscribed = s.subscribed }),
@@ -181,7 +181,7 @@ pub const Peer = struct {
             try self.service.router.validateCapabilities(active);
             self.service.router.setCapabilities(active);
             if (std.mem.eql(u8, c.op, "enableGossipRequest")) {
-                const sessions = self.service.gossipsub.inner.sessions;
+                const sessions = self.service.gossipsub.sessions;
                 // Restoring capabilities does not retry a previously refused outbound stream.
                 for (sessions.rows, 0..) |*session, index| {
                     if (session.active and session.outbound == .none) sessions.setOutbound(@intCast(index), .pending);
@@ -193,14 +193,14 @@ pub const Peer = struct {
             const identify = if (self.service.identify) |*value| value else return error.IdentifyDisabled;
             try identify.start(&self.service.router, &self.transport.engine, .{ .index = 0, .generation = conn.generation }, conn, self.now);
         } else if (std.mem.eql(u8, c.op, "subscribe")) {
-            if (!self.service.gossipsub.inner.subscribe(c.topic orelse topic)) return error.SubscriptionFailed;
+            if (!self.service.gossipsub.subscribe(c.topic orelse topic)) return error.SubscriptionFailed;
         } else if (std.mem.eql(u8, c.op, "publish")) {
             const size = c.size orelse 65537;
             if (size > max_payload) return error.MessageTooLarge;
             const bytes = try self.allocator.alloc(u8, size);
             defer self.allocator.free(bytes);
             generate(bytes, c.seed orelse 0x6d2b79f5);
-            const outcome = try self.service.gossipsub.inner.publish(c.topic orelse topic, bytes, self.now);
+            const outcome = try self.service.gossipsub.publish(c.topic orelse topic, bytes, self.now);
             return control.emit(self.allocator, .{ .id = c.id, .ok = true, .queued = outcome.queued, .pressured = outcome.pressured });
         } else if (std.mem.eql(u8, c.op, "request")) {
             if (self.outbound) return error.Busy;

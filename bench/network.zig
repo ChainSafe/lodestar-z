@@ -73,8 +73,8 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.destroy(a);
     try initialize(a, allocator, io, &key_a, profile);
     defer a.deinit(io);
-    std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.memoryPlan().allocated_bytes, a.memoryPlan().inline_bytes, a.core.service.gossipsub.inner.memoryPlan().total_bytes, a.reservations.allocation_calls });
-    std.debug.print("gossip_metadata_bytes={}\n", .{a.core.service.gossipsub.inner.memoryPlan().metadata_bytes});
+    std.debug.print("history_entry_bytes={} history_owner_bytes={} startup_requested_zig_bytes={} inline_bytes={} gossip_bytes={} allocation_calls={} native_allocator_os_excluded=true\n", .{ @sizeOf(network.gossipsub.mcache.HistoryEntry), @sizeOf(network.gossipsub.mcache.History), a.memoryPlan().allocated_bytes, a.memoryPlan().inline_bytes, a.service.gossipsub.memoryPlan().total_bytes, a.reservations.allocation_calls });
+    std.debug.print("gossip_metadata_bytes={}\n", .{a.service.gossipsub.memoryPlan().metadata_bytes});
     const allocations_a = a.reservations.allocation_calls;
     var samples: Samples = .{};
     for (0..turns) |i| {
@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
 fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key: *const network.KeyPair, profile: ?network.configuration.Profile) !void {
     if (profile) |selected| {
         try node.initManaged(a, io, .{ .wait_mode = .native_poll, .host = key, .bind = .{ .ip4 = .loopback(0) }, .local = .{}, .configuration = .{ .profile = selected, .seed = 7, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} } });
-    } else try node.init(a, io, options(key));
+    } else try node.initRaw(a, io, options(key));
 }
 
 fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io) !t.PeerRef {
@@ -125,11 +125,11 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io) !t.
         if (result_a.failure) |err| return err;
         const result_b = b.step(io, try network.transport.currentTime(io), 100, .{ .peers = &peer_events, .gossipsub = &gossip_events }, 1);
         if (result_b.failure) |err| return err;
-        if (a.core.service.gossipsub.inner.resourceSnapshot().remote_subscriptions > 0 and a.core.service.gossipsub.inner.peers.rows[0].direct) break;
+        if (a.service.gossipsub.resourceSnapshot().remote_subscriptions > 0 and a.service.gossipsub.peers.rows[0].direct) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     }
-    if (a.core.service.gossipsub.inner.resourceSnapshot().remote_subscriptions == 0) {
-        std.debug.print("setup a={any} b={any} gossip_a={any} gossip_b={any}\n", .{ a.peerCounts(), b.peerCounts(), a.core.service.gossipsub.inner.resourceSnapshot(), b.core.service.gossipsub.inner.resourceSnapshot() });
+    if (a.service.gossipsub.resourceSnapshot().remote_subscriptions == 0) {
+        std.debug.print("setup a={any} b={any} gossip_a={any} gossip_b={any}\n", .{ a.peerCounts(), b.peerCounts(), a.service.gossipsub.resourceSnapshot(), b.service.gossipsub.resourceSnapshot() });
         return error.SubscriptionDeadline;
     }
     return peer.?;
@@ -164,8 +164,8 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
             gossip_pressured += published.pressured;
         }
         _ = try turn(b, io, .{});
-        const sender = a.core.service.gossipsub.inner.resourceSnapshot();
-        const receiver = b.core.service.gossipsub.inner.resourceSnapshot();
+        const sender = a.service.gossipsub.resourceSnapshot();
+        const receiver = b.service.gossipsub.resourceSnapshot();
         peak_descriptors = @max(peak_descriptors, sender.queued_descriptors);
         peak_validations = @max(peak_validations, receiver.pending_validations);
         const now = try network.transport.currentTime(io);
@@ -185,7 +185,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
         };
     }
     if (!control_progress) return error.ControlDidNotProgress;
-    std.debug.print("control_status_head_slot=42 progress=true request_count=4 caller_sink_bytes={} gossip_resources={any}\n", .{ sinks.len, b.core.service.gossipsub.inner.resourceSnapshot() });
+    std.debug.print("control_status_head_slot=42 progress=true request_count=4 caller_sink_bytes={} gossip_resources={any}\n", .{ sinks.len, b.service.gossipsub.resourceSnapshot() });
     std.debug.print("managed_sender_diagnostics={any}\nmanaged_receiver_diagnostics={any}\n", .{ a.diagnostics(), b.diagnostics() });
     try drain(a, b, io, requests.len);
 }
@@ -218,8 +218,8 @@ fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected:
 }
 
 fn printReconciliation(node: *network.NetworkCore, name: []const u8) void {
-    const c = node.core.counters;
-    const score = &node.core.service.gossipsub.inner.peers.scores;
+    const c = node.peer_manager.counters;
+    const score = &node.service.gossipsub.peers.scores;
     std.debug.print("case={s} selections={} selection_rows={} candidate_syncs={} candidate_rows={} candidate_lookup_rows={} candidate_selections={} score_calculations={} score_topic_visits={}\n", .{ name, c.selections, c.selection_rows, c.candidate_syncs, c.candidate_rows, c.candidate_lookup_rows, c.candidate_selections, score.calculations, score.topic_visits });
 }
 

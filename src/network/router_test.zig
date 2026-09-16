@@ -23,12 +23,12 @@ test "router composes simultaneous ping and meshsub on one connection" {
     var server = try @import("service.zig").Service.init(std.testing.allocator, .{ .gossipsub = .{ .random_seed = 1 }, .reqresp = rr_options.reqresp });
     defer server.deinit();
     const requests = &server.reqresp;
-    const gossip = &server.gossipsub;
+    const gossip = server.gossipsub;
     const handles = try support.connectPair(&pair);
     _ = gossip.peerConnected(&pair.server, handles.server, pair.now);
     var topic_buf: [topic_mod.topic_max_len]u8 = undefined;
     const topic = topic_mod.build(.{ 1, 2, 3, 4 }, "beacon_block", &topic_buf);
-    try std.testing.expect(gossip.inner.subscribe(topic));
+    try std.testing.expect(gossip.subscribe(topic));
     const ping = [_]u8{ 42, 0, 0, 0, 0, 0, 0, 0 };
     var response: [8]u8 = undefined;
     _ = try client.request(&pair.client, handles.client, .ping_v1, &ping, &response, .{}, pair.now);
@@ -264,7 +264,7 @@ test "router composed service retains native activity behind a partial reqresp s
     try std.testing.expectEqual(@as(usize, 1), client.reqresp.work_cursor);
     var wire: [rr.codec.frame_scratch_max]u8 = undefined;
     const encoded = try rr.codec.encodeChunk(0, null, &ping, &wire);
-    const stream = server.reqresp.inbound[incoming.?.index].lifecycle.stream;
+    const stream = server.reqresp.inbound[incoming.?.index].request.stream;
     try std.testing.expectEqual(encoded.len, try pair.server.write(stream, encoded, false));
     try pair.pump();
     const active = pair.client.takeActivity(&activity);
@@ -292,14 +292,14 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     for (0..peers.capacity - peers.outbound_reserve) |i| {
         var metadata: peers.Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** @import("wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
-        const ref = server.gossipsub.inner.peers.admit(.{ .index = 0, .generation = 1 }, &metadata, pair.now.mono_ms).admitted.peer;
+        const ref = server.gossipsub.peers.admit(.{ .index = 0, .generation = 1 }, &metadata, pair.now.mono_ms).admitted.peer;
         retained[i] = ref;
-        server.gossipsub.inner.peers.retain(ref);
-        server.gossipsub.inner.peers.scores.penalize(ref.index, 20);
-        _ = server.gossipsub.inner.peers.scores.setAppScore(ref.index, -1);
-        server.gossipsub.inner.peers.disconnect(ref, pair.now.mono_ms);
+        server.gossipsub.peers.retain(ref);
+        server.gossipsub.peers.scores.penalize(ref.index, 20);
+        _ = server.gossipsub.peers.scores.setAppScore(ref.index, -1);
+        server.gossipsub.peers.disconnect(ref, pair.now.mono_ms);
     }
-    try std.testing.expectEqual(gs.Driver.Admission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
+    try std.testing.expectEqual(gs.Gossipsub.Admission.capacity, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
     try std.testing.expect(!server.gossipsub.admitted(handles.server));
     const ping = [_]u8{7} ** 8;
     var sink: [8]u8 = undefined;
@@ -329,15 +329,15 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     }
     try std.testing.expect(pong);
     try std.testing.expect(!server.gossipsub.admitted(handles.server));
-    for (retained) |ref| server.gossipsub.inner.peers.release(ref);
-    try std.testing.expectEqual(gs.Driver.Admission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
+    for (retained) |ref| server.gossipsub.peers.release(ref);
+    try std.testing.expectEqual(gs.Gossipsub.Admission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
     try std.testing.expect(server.gossipsub.admitted(handles.server));
 }
 
 test "protocol compositions expose no standalone processing on shared handlers" {
     const Shared = @import("service.zig").Service;
     const RequestHandler = @FieldType(Shared, "reqresp");
-    const GossipHandler = @FieldType(Shared, "gossipsub");
+    const GossipHandler = @typeInfo(@FieldType(Shared, "gossipsub")).pointer.child;
     try std.testing.expect(!@hasField(RequestHandler, "router"));
     try std.testing.expect(!@hasField(GossipHandler, "router"));
     try std.testing.expect(!@hasDecl(RequestHandler, "process"));
@@ -554,7 +554,7 @@ test "router capabilities activation preserves negotiated response context and c
     const ct = @import("consensus_types");
     const context: rr.ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
     var setup: harness.Pair = .{};
-    const limits = @import("reqresp/admission_test.zig").quotas(2048, 1000);
+    const limits = @import("reqresp/admission_fixture.zig").quotas(2048, 1000);
     const options: harness.Overrides = .{
         .forks = &.{context},
 
@@ -566,7 +566,7 @@ test "router capabilities activation preserves negotiated response context and c
     defer std.testing.allocator.free(sink);
     const bytes: [129 * 32]u8 = @splat(0);
     const payload: [ct.phase0.SignedBeaconBlock.min_size]u8 = @splat(0);
-    const handle = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .blocks_by_root_v2, &bytes, sink, .{}, setup.pair.now);
+    const handle = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .blocks_by_root_v2, &bytes, sink, .{}, setup.shared.pair.now);
     var activated = false;
     var done = false;
     var served = false;
@@ -575,21 +575,21 @@ test "router capabilities activation preserves negotiated response context and c
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| switch (event) {
             .request => |incoming| {
-                try setup.server.reqresp.respond(incoming.request, &payload, context, setup.pair.now);
-                setup.client.router.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
-                setup.server.router.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
-                setup.client.reqresp.setRequestFork(.fulu);
-                setup.server.reqresp.setRequestFork(.fulu);
-                try std.testing.expectEqual(129, setup.client.reqresp.outbound[handle.index].lifecycle.chunks_max);
-                const owner = &setup.server.reqresp.inbound[incoming.request.index];
-                try std.testing.expectEqual(129, owner.lifecycle.chunks_max);
+                try setup.shared.server.reqresp.respond(incoming.request, &payload, context, setup.shared.pair.now);
+                setup.shared.client.router.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
+                setup.shared.server.router.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
+                setup.shared.client.reqresp.setRequestFork(.fulu);
+                setup.shared.server.reqresp.setRequestFork(.fulu);
+                try std.testing.expectEqual(129, setup.shared.client.reqresp.outbound[handle.index].request.chunks_max);
+                const owner = &setup.shared.server.reqresp.inbound[incoming.request.index];
+                try std.testing.expectEqual(129, owner.request.chunks_max);
                 try std.testing.expectEqual(@import("config").ForkSeq.phase0, owner.request_fork);
                 activated = true;
             },
             .chunk_sent => |sent| {
                 if (sent.chunks == 1) {
-                    try setup.server.reqresp.respond(sent.request, &payload, context, setup.pair.now);
-                } else try std.testing.expect(setup.server.reqresp.finish(sent.request, setup.pair.now));
+                    try setup.shared.server.reqresp.respond(sent.request, &payload, context, setup.shared.pair.now);
+                } else try std.testing.expect(setup.shared.server.reqresp.finish(sent.request, setup.shared.pair.now));
             },
             .served => served = true,
             .failed => return error.TestUnexpectedResult,
@@ -601,7 +601,7 @@ test "router capabilities activation preserves negotiated response context and c
                 try std.testing.expectEqual(@as(?@import("config").ForkSeq, .phase0), chunk.fork);
                 try std.testing.expectEqualSlices(u8, &payload, chunk.bytes);
                 chunks += 1;
-                try std.testing.expect(setup.client.reqresp.consume(chunk.request));
+                try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request));
             },
             .done => done = true,
             .failed => return error.TestUnexpectedResult,
@@ -611,5 +611,5 @@ test "router capabilities activation preserves negotiated response context and c
     }
     try std.testing.expect(activated and done and served);
     try std.testing.expectEqual(2, chunks);
-    try std.testing.expectError(error.ProtocolDisabled, setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .blocks_by_root_v2, &bytes, sink, .{}, setup.pair.now));
+    try std.testing.expectError(error.ProtocolDisabled, setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .blocks_by_root_v2, &bytes, sink, .{}, setup.shared.pair.now));
 }

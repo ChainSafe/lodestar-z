@@ -43,6 +43,7 @@ pub fn prepare(self: *@This(), config: js.Value, callback: js.Value) !js.Value {
     runtime.heavy.?.* = .{};
     try application_cfg.parse(config.val, &runtime.heavy.?.config, &runtime.heavy.?.application);
     if (self.stopped) return error.NetworkClosed;
+    try @import("network_owner.zig").prepareConfiguration(runtime);
     try prepareApplicationStorage(runtime, &runtime.heavy.?.application);
     runtime.slot = runtime.heavy.?.config.slot;
     runtime.diag.currentSlot = runtime.slot;
@@ -84,9 +85,9 @@ pub fn prepare(self: *@This(), config: js.Value, callback: js.Value) !js.Value {
 }
 
 fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Config) !void {
-    runtime.peer_capacity = app.resources.peerCapacity;
-    runtime.max_peers = app.resources.maxPeers;
-    const resolved = try n.configuration.resolve(try app.buildRequest(&runtime.heavy.?.config, 1));
+    const resolved = &runtime.heavy.?.resolved;
+    runtime.peer_capacity = resolved.core.peers.capacity;
+    runtime.max_peers = resolved.core.peers.max_peers;
     runtime.diag.resolvedCapacities = .{
         .peerCapacity = resolved.core.peers.capacity,
         .targetPeers = resolved.core.peers.target_peers,

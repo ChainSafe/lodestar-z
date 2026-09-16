@@ -40,7 +40,7 @@ test "incoming response allocation stays borrowed through real quota withholding
     var budget: Budget = .{ .limit = 2 * (64 + rr.Protocol.blocks_by_root_v2.info().response_max) };
     var table = try Table.init(std.testing.allocator, 2, &budget);
     defer {
-        pair.server.reqresp.shutdown(&pair.pair.server, &pair.server.router);
+        pair.shared.server.reqresp.shutdown(&pair.shared.pair.server, &pair.shared.server.router);
         for (table.cells, 0..) |*cell, i| {
             if (cell.state == .free) continue;
             cell.native = false;
@@ -52,26 +52,26 @@ test "incoming response allocation stays borrowed through real quota withholding
     const response_max = rr.Protocol.blocks_by_root_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, 2 * response_max);
     defer {
-        pair.client.reqresp.shutdown(&pair.pair.client, &pair.client.router);
+        pair.shared.client.reqresp.shutdown(&pair.shared.pair.client, &pair.shared.client.router);
         std.testing.allocator.free(sinks);
     }
-    for (0..2) |i| _ = try pair.client.reqresp.request(&pair.pair.client, &pair.client.router, pair.handles.client, .blocks_by_root_v2, &query, sinks[i * response_max ..][0..response_max], .{}, pair.pair.now);
+    for (0..2) |i| _ = try pair.shared.client.reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, .blocks_by_root_v2, &query, sinks[i * response_max ..][0..response_max], .{}, pair.shared.pair.now);
     try submitWithheld(&pair, &table);
-    try std.testing.expectEqual(@as(usize, 1), pair.server.reqresp.resourceSnapshot().withheld_chunks);
+    try std.testing.expectEqual(@as(usize, 1), pair.shared.server.reqresp.resourceSnapshot().withheld_chunks);
     var withheld: ?*Cell = null;
     for (table.cells) |*cell| if (cell.response.len > 0) {
         withheld = cell;
     };
     const cell = withheld.?;
-    const native = &pair.server.reqresp.inbound[cell.handle.index];
-    try std.testing.expectEqual(native.lifecycle.io.payload.ptr, cell.response.ptr);
+    const native = &pair.shared.server.reqresp.inbound[cell.handle.index];
+    try std.testing.expectEqual(native.request.io.payload.ptr, cell.response.ptr);
     try std.testing.expectEqual(@as(usize, 4000), table.snapshot().responseBytes);
     const deadline = native.withheld_since_ms.? + 1000;
-    pair.pair.advance(deadline - pair.pair.now.mono_ms - 1);
+    pair.shared.pair.advance(deadline - pair.shared.pair.now.mono_ms - 1);
     try pair.pumpOnce();
-    try std.testing.expectEqual(@as(usize, 1), pair.server.reqresp.resourceSnapshot().withheld_chunks);
-    try std.testing.expectEqual(native.lifecycle.io.payload.ptr, cell.response.ptr);
-    pair.pair.advance(1);
+    try std.testing.expectEqual(@as(usize, 1), pair.shared.server.reqresp.resourceSnapshot().withheld_chunks);
+    try std.testing.expectEqual(native.request.io.payload.ptr, cell.response.ptr);
+    pair.shared.pair.advance(1);
     var terminal_seen = false;
     for (0..10) |_| {
         try pair.pumpOnce();
@@ -124,7 +124,7 @@ fn submitWithheld(pair: *rr.testing.Pair, table: *Table) !void {
                 cell.state = .response_native;
                 cell.response = try std.testing.allocator.alloc(u8, 4000);
                 @memset(cell.response, 71);
-                try pair.server.reqresp.respond(request.request, cell.response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.pair.now);
+                try pair.shared.server.reqresp.respond(request.request, cell.response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.shared.pair.now);
                 admitted += 1;
             },
             .chunk_sent => |sent| {
@@ -150,11 +150,11 @@ test "incoming submission recognizes a genuine native terminal awaiting output c
     defer pair.deinit();
     const sink = try std.testing.allocator.alloc(u8, rr.Protocol.blocks_by_root_v2.info().response_max);
     defer {
-        pair.client.reqresp.shutdown(&pair.pair.client, &pair.client.router);
+        pair.shared.client.reqresp.shutdown(&pair.shared.pair.client, &pair.shared.client.router);
         std.testing.allocator.free(sink);
     }
     const query = [_]u8{0} ** 32;
-    _ = try pair.client.reqresp.request(&pair.pair.client, &pair.client.router, pair.handles.client, .blocks_by_root_v2, &query, sink, .{}, pair.pair.now);
+    _ = try pair.shared.client.reqresp.request(&pair.shared.pair.client, &pair.shared.client.router, pair.shared.handles.client, .blocks_by_root_v2, &query, sink, .{}, pair.shared.pair.now);
     var handle: ?rr.RequestHandle = null;
     for (0..20) |_| {
         try pair.pumpOnce();
@@ -164,21 +164,21 @@ test "incoming submission recognizes a genuine native terminal awaiting output c
         if (handle != null) break;
     }
     const request = handle.?;
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.server.reqresp, request, error.Busy));
-    try std.testing.expect(pair.server.reqresp.cancel(request));
+    try std.testing.expect(!incoming.awaitingTerminal(&pair.shared.server.reqresp, request, error.Busy));
+    try std.testing.expect(pair.shared.server.reqresp.cancel(request));
     pair.server_event_capacity = 0;
     try pair.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), pair.serverEvents().len);
     const response = [_]u8{0} ** 4000;
-    try std.testing.expectError(error.Busy, pair.server.reqresp.respond(request, &response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.pair.now));
-    try std.testing.expect(incoming.awaitingTerminal(&pair.server.reqresp, request, error.Busy));
+    try std.testing.expectError(error.Busy, pair.shared.server.reqresp.respond(request, &response, .{ .digest = rr.testing.deneb_digest, .fork = .deneb }, pair.shared.pair.now));
+    try std.testing.expect(incoming.awaitingTerminal(&pair.shared.server.reqresp, request, error.Busy));
     var stale = request;
     stale.generation += 1;
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.server.reqresp, stale, error.Busy));
+    try std.testing.expect(!incoming.awaitingTerminal(&pair.shared.server.reqresp, stale, error.Busy));
     stale = request;
     stale.direction = .outbound;
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.server.reqresp, stale, error.Busy));
-    try std.testing.expect(!incoming.awaitingTerminal(&pair.server.reqresp, request, error.StaleHandle));
+    try std.testing.expect(!incoming.awaitingTerminal(&pair.shared.server.reqresp, stale, error.Busy));
+    try std.testing.expect(!incoming.awaitingTerminal(&pair.shared.server.reqresp, request, error.StaleHandle));
     pair.server_event_capacity = 16;
     try pair.pumpOnce();
     var terminal = false;

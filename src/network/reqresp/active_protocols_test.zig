@@ -12,7 +12,7 @@ const second: reqresp.ForkEntry = .{ .digest = .{ 5, 6, 7, 8 }, .fork = .fulu };
 const phase0: reqresp.ForkEntry = .{ .digest = .{ 9, 10, 11, 12 }, .fork = .phase0 };
 
 fn request(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u8, sink: []u8, options: reqresp.RequestOptions) !reqresp.RequestHandle {
-    return setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, which, bytes, sink, options, setup.pair.now);
+    return setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, which, bytes, sink, options, setup.shared.pair.now);
 }
 
 test "reqresp active new methods enforce request ceilings through real exchanges and reuse" {
@@ -44,20 +44,20 @@ test "reqresp active new methods enforce request ceilings through real exchanges
                     .request => |incoming| {
                         try std.testing.expectEqualSlices(u8, &bytes, incoming.bytes);
                         if (case[2] == 0) {
-                            try std.testing.expectError(error.TooManyChunks, setup.server.reqresp.respond(incoming.request, payload[0..case[3]], context, setup.pair.now));
-                            try std.testing.expect(setup.server.reqresp.finish(incoming.request, setup.pair.now));
+                            try std.testing.expectError(error.TooManyChunks, setup.shared.server.reqresp.respond(incoming.request, payload[0..case[3]], context, setup.shared.pair.now));
+                            try std.testing.expect(setup.shared.server.reqresp.finish(incoming.request, setup.shared.pair.now));
                         } else {
-                            try std.testing.expectError(error.UnknownFork, setup.server.reqresp.respond(incoming.request, payload[0..case[3]], .{ .digest = context.digest, .fork = .deneb }, setup.pair.now));
-                            if (case[0] != .blocks_by_head_v1) try std.testing.expectError(error.InvalidContext, setup.server.reqresp.respond(incoming.request, payload[0..case[3]], phase0, setup.pair.now));
-                            try std.testing.expectError(error.ChunkTooSmall, setup.server.reqresp.respond(incoming.request, payload[0 .. case[3] - 1], context, setup.pair.now));
-                            try setup.server.reqresp.respond(incoming.request, payload[0..case[3]], context, setup.pair.now);
+                            try std.testing.expectError(error.UnknownFork, setup.shared.server.reqresp.respond(incoming.request, payload[0..case[3]], .{ .digest = context.digest, .fork = .deneb }, setup.shared.pair.now));
+                            if (case[0] != .blocks_by_head_v1) try std.testing.expectError(error.InvalidContext, setup.shared.server.reqresp.respond(incoming.request, payload[0..case[3]], phase0, setup.shared.pair.now));
+                            try std.testing.expectError(error.ChunkTooSmall, setup.shared.server.reqresp.respond(incoming.request, payload[0 .. case[3] - 1], context, setup.shared.pair.now));
+                            try setup.shared.server.reqresp.respond(incoming.request, payload[0..case[3]], context, setup.shared.pair.now);
                         }
                     },
                     .chunk_sent => |sent| {
                         if (sent.chunks == case[2]) {
-                            try std.testing.expectError(error.TooManyChunks, setup.server.reqresp.respond(sent.request, payload[0..case[3]], context, setup.pair.now));
-                            try std.testing.expect(setup.server.reqresp.finish(sent.request, setup.pair.now));
-                        } else try setup.server.reqresp.respond(sent.request, payload[0..case[3]], context, setup.pair.now);
+                            try std.testing.expectError(error.TooManyChunks, setup.shared.server.reqresp.respond(sent.request, payload[0..case[3]], context, setup.shared.pair.now));
+                            try std.testing.expect(setup.shared.server.reqresp.finish(sent.request, setup.shared.pair.now));
+                        } else try setup.shared.server.reqresp.respond(sent.request, payload[0..case[3]], context, setup.shared.pair.now);
                     },
                     .served => |terminal| {
                         try std.testing.expectEqual(@as(u32, case[2]), terminal.chunks);
@@ -71,7 +71,7 @@ test "reqresp active new methods enforce request ceilings through real exchanges
                         chunks += 1;
                         try std.testing.expectEqual(@as(?config.ForkSeq, .fulu), chunk.fork);
                         try std.testing.expectEqualSlices(u8, payload[0..case[3]], chunk.bytes);
-                        try std.testing.expect(setup.client.reqresp.consume(chunk.request));
+                        try std.testing.expect(setup.shared.client.reqresp.consume(chunk.request));
                     },
                     .done => |terminal| {
                         try std.testing.expect(!done);
@@ -86,8 +86,8 @@ test "reqresp active new methods enforce request ceilings through real exchanges
             try std.testing.expect(done and served);
             try std.testing.expectEqual(@as(u32, case[2]), chunks);
             try setup.pumpOnce();
-            try std.testing.expectEqual(@as(u16, 0), setup.client.reqresp.active().outbound);
-            try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
+            try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
+            try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
         }
     }
 }
@@ -161,9 +161,9 @@ test "reqresp active hostile coalesced context rejects before sink writes with o
             for (0..40) |_| {
                 try setup.pumpOnce();
                 for (setup.serverEvents()) |event| if (event == .request) {
-                    const slot = &setup.server.reqresp.inbound[event.request.request.index];
-                    stream = slot.lifecycle.stream;
-                    if (split > 0) try std.testing.expectEqual(split, try setup.pair.server.write(slot.lifecycle.stream, bytes[0..split], false));
+                    const slot = &setup.shared.server.reqresp.inbound[event.request.request.index];
+                    stream = slot.request.stream;
+                    if (split > 0) try std.testing.expectEqual(split, try setup.shared.pair.server.write(slot.request.stream, bytes[0..split], false));
                 };
                 for (setup.clientEvents()) |event| switch (event) {
                     .failed => |failure| {
@@ -177,19 +177,19 @@ test "reqresp active hostile coalesced context rejects before sink writes with o
                 if (failed) break;
                 if (stream) |raw| {
                     if (!sent_suffix) {
-                        try std.testing.expectEqual(bytes.len - split, try setup.pair.server.write(raw, bytes[split..], true));
+                        try std.testing.expectEqual(bytes.len - split, try setup.shared.pair.server.write(raw, bytes[split..], true));
                         sent_suffix = true;
                     }
                 }
             }
             try std.testing.expect(failed);
             try std.testing.expect(std.mem.allEqual(u8, sink, 0xaa));
-            setup.server.reqresp.shutdown(&setup.pair.server, &setup.server.router);
+            setup.shared.server.reqresp.shutdown(&setup.shared.pair.server, &setup.shared.server.router);
             try setup.pumpOnce();
             try setup.pumpOnce();
-            try std.testing.expectEqual(@as(u16, 0), setup.client.reqresp.active().outbound);
-            try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
-            try std.testing.expectEqual(@as(u64, 1), setup.client.reqresp.counters.failures);
+            try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
+            try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+            try std.testing.expectEqual(@as(u64, 1), setup.shared.client.reqresp.counters.failures);
         }
     }
 }
@@ -211,8 +211,8 @@ test "reqresp active zero ceiling rejects malicious success and permits remote e
         for (0..40) |_| {
             try setup.pumpOnce();
             for (setup.serverEvents()) |event| if (event == .request) {
-                const slot = &setup.server.reqresp.inbound[event.request.request.index];
-                try std.testing.expectEqual(chunk.len, try setup.pair.server.write(slot.lifecycle.stream, chunk, true));
+                const slot = &setup.shared.server.reqresp.inbound[event.request.request.index];
+                try std.testing.expectEqual(chunk.len, try setup.shared.pair.server.write(slot.request.stream, chunk, true));
             };
             for (setup.clientEvents()) |event| switch (event) {
                 .failed => |failure| {
@@ -221,7 +221,7 @@ test "reqresp active zero ceiling rejects malicious success and permits remote e
                         try std.testing.expect(failure.reason == .too_many_chunks);
                     } else {
                         try std.testing.expectEqual(@as(u8, 3), failure.reason.peer_error.code);
-                        try std.testing.expectEqualStrings("unavailable", setup.client.reqresp.errorMessage(failure.request));
+                        try std.testing.expectEqualStrings("unavailable", setup.shared.client.reqresp.errorMessage(failure.request));
                     }
                     failed = true;
                 },
@@ -231,11 +231,11 @@ test "reqresp active zero ceiling rejects malicious success and permits remote e
             if (failed) break;
         }
         try std.testing.expect(failed);
-        setup.server.reqresp.shutdown(&setup.pair.server, &setup.server.router);
+        setup.shared.server.reqresp.shutdown(&setup.shared.pair.server, &setup.shared.server.router);
         try setup.pumpOnce();
         try setup.pumpOnce();
-        try std.testing.expectEqual(@as(u16, 0), setup.client.reqresp.active().outbound);
-        try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
+        try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
+        try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
     }
 }
 
@@ -254,7 +254,7 @@ test "reqresp active inbound invalid head range and no-body requests never reach
         try setup.awaitRawSelection(raw, case[0]);
         var encoded: [256]u8 = undefined;
         const bytes = if (case[0].info().request_max == 0) case[1] else try codec.encodeRequest(case[1], &encoded);
-        try std.testing.expectEqual(bytes.len, try setup.pair.client.write(raw, bytes, true));
+        try std.testing.expectEqual(bytes.len, try setup.shared.pair.client.write(raw, bytes, true));
         var sink: [codec.error_message_max]u8 = undefined;
         var scratch: [codec.frame_scratch_max]u8 = undefined;
         var decoder = codec.Decoder.initResponseWithContext(.{ .min = 0, .max = sink.len }, &sink, &scratch);
@@ -268,7 +268,7 @@ test "reqresp active inbound invalid head range and no-body requests never reach
                 else => {},
             };
             if (!decoder.isDone()) {
-                const input = try setup.pair.client.read(raw, &buffer);
+                const input = try setup.shared.pair.client.read(raw, &buffer);
                 _ = try decoder.feed(buffer[0..input.len]);
             }
             if (served and decoder.isDone()) break;
@@ -277,7 +277,7 @@ test "reqresp active inbound invalid head range and no-body requests never reach
         try std.testing.expectEqual(@as(u8, 1), decoder.result());
         try std.testing.expectEqualStrings("invalid request", decoder.payload());
         try setup.pumpOnce();
-        try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
+        try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
     }
 }
 
@@ -290,7 +290,7 @@ test "reqresp active light client traffic preserves control reserve and cancella
     const handles = try support.connectPair(&pair);
     var router = try routing.Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var owner = try reqresp.ReqResp.init(std.testing.allocator, @import("control_capacity_test.zig").reservedOptions());
+    var owner = try reqresp.ReqResp.init(std.testing.allocator, @import("control_fixture.zig").reservedOptions());
     defer owner.deinit();
     const which = protocol.Protocol.light_client_finality_update_v1;
     const capacity = protocol.Protocol.light_client_updates_by_range_v1.info().response_max;
@@ -323,7 +323,7 @@ test "reqresp active light client traffic preserves control reserve and cancella
 }
 
 const policy_fixture = @import("policy_fixture.zig").config;
-const admission_quotas = @import("admission_test.zig").quotas;
+const admission_quotas = @import("admission_fixture.zig").quotas;
 
 fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u8, allowed: bool, code: u8) !void {
     const sink = try std.testing.allocator.alloc(u8, which.info().response_max);
@@ -334,7 +334,7 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
         try setup.awaitRawSelection(stream, which);
         var wire: [codec.frame_scratch_max]u8 = undefined;
         const encoded = try codec.encodeRequest(bytes, &wire);
-        try std.testing.expectEqual(encoded.len, try setup.pair.client.write(stream, encoded, true));
+        try std.testing.expectEqual(encoded.len, try setup.shared.pair.client.write(stream, encoded, true));
         var scratch: [codec.frame_scratch_max]u8 = undefined;
         var decoder = codec.Decoder.initResponse(.{ .min = which.info().response_min, .max = which.info().response_max }, false, sink, &scratch);
         var served = false;
@@ -345,7 +345,7 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
                 if (event == .served) served = true;
             }
             if (!decoder.isDone()) {
-                const input = try setup.pair.client.read(stream, &wire);
+                const input = try setup.shared.pair.client.read(stream, &wire);
                 _ = try decoder.feed(wire[0..input.len]);
             }
             if (decoder.isDone() and served) break;
@@ -353,7 +353,7 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
         try std.testing.expect(served and decoder.isDone());
         try std.testing.expectEqual(code, decoder.result());
         try std.testing.expectEqualStrings("invalid request", decoder.payload());
-        setup.pair.client.closeStream(stream, 0);
+        setup.shared.pair.client.closeStream(stream, 0);
         try setup.pumpOnce();
         return;
     }
@@ -367,7 +367,7 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
             .request => |incoming| {
                 received += 1;
                 try std.testing.expect(allowed);
-                try std.testing.expect(setup.server.reqresp.finish(incoming.request, setup.pair.now));
+                try std.testing.expect(setup.shared.server.reqresp.finish(incoming.request, setup.shared.pair.now));
             },
             .served => served = true,
             .failed => return error.TestUnexpectedResult,
@@ -383,7 +383,7 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
                 try std.testing.expect(!allowed);
                 try std.testing.expectEqual(code, failed.reason.peer_error.code);
                 const message = if (code == 139) "rate limited" else "invalid request";
-                try std.testing.expectEqualSlices(u8, message, setup.client.reqresp.errorMessage(failed.request));
+                try std.testing.expectEqualSlices(u8, message, setup.shared.client.reqresp.errorMessage(failed.request));
                 terminal = true;
             },
             else => {},
@@ -393,8 +393,8 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
     try std.testing.expect(terminal and served);
     try std.testing.expectEqual(@as(u32, if (allowed) 1 else 0), received);
     try setup.pumpOnce();
-    try std.testing.expectEqual(@as(u16, 0), setup.client.reqresp.active().outbound);
-    try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
 }
 
 test "reqresp request admission empty success refusal malformed attempts and control independence" {
@@ -423,11 +423,11 @@ test "reqresp request admission empty success refusal malformed attempts and con
     try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], true, 0);
     try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], true, 0);
     try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], false, 139);
-    try std.testing.expectEqual(@as(u64, 14), setup.server.reqresp.counters.inspected);
-    try std.testing.expectEqual(@as(u64, 8), setup.server.reqresp.counters.admitted);
-    try std.testing.expectEqual(@as(u128, 9), setup.server.reqresp.counters.charged_work);
-    try std.testing.expectEqual(@as(u64, 5), setup.server.reqresp.counters.peer_refusals);
-    try std.testing.expectEqual(@as(u64, 2), setup.server.reqresp.counters.malformed);
+    try std.testing.expectEqual(@as(u64, 14), setup.shared.server.reqresp.counters.inspected);
+    try std.testing.expectEqual(@as(u64, 8), setup.shared.server.reqresp.counters.admitted);
+    try std.testing.expectEqual(@as(u128, 9), setup.shared.server.reqresp.counters.charged_work);
+    try std.testing.expectEqual(@as(u64, 5), setup.shared.server.reqresp.counters.peer_refusals);
+    try std.testing.expectEqual(@as(u64, 2), setup.shared.server.reqresp.counters.malformed);
 }
 
 test "reqresp request admission outbound validation ceiling and owner fork snapshot" {
@@ -442,24 +442,24 @@ test "reqresp request admission outbound validation ceiling and owner fork snaps
     defer std.testing.allocator.free(sink);
     var roots = [_]u8{0} ** (129 * 32);
     try std.testing.expectError(error.InvalidRequest, request(&setup, .blocks_by_root_v2, roots[0..1], sink, .{}));
-    try std.testing.expectEqual(@as(u16, 0), setup.client.reqresp.active().outbound);
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.client.reqresp.active().outbound);
     try std.testing.expectError(error.InvalidRequestOptions, request(&setup, .blocks_by_root_v2, &roots, sink, .{ .expected_chunks = 130 }));
     const handle = try request(&setup, .blocks_by_root_v2, &roots, sink, .{});
-    setup.client.reqresp.setRequestFork(.fulu);
-    try std.testing.expectEqual(@as(u32, 129), setup.client.reqresp.outbound[handle.index].lifecycle.chunks_max);
+    setup.shared.client.reqresp.setRequestFork(.fulu);
+    try std.testing.expectEqual(@as(u32, 129), setup.shared.client.reqresp.outbound[handle.index].request.chunks_max);
     var accepted = false;
     var completed = false;
     for (0..60) |_| {
         try setup.pumpOnce();
-        for (setup.server.reqresp.inbound) |*slot| if (slot.lifecycle.running() and slot.state == .receiving_request) {
+        for (setup.shared.server.reqresp.inbound) |*slot| if (slot.request.running() and slot.state == .receiving_request) {
             accepted = true;
             try std.testing.expectEqual(config.ForkSeq.phase0, slot.request_fork);
-            setup.server.reqresp.setRequestFork(.fulu);
+            setup.shared.server.reqresp.setRequestFork(.fulu);
         };
         for (setup.serverEvents()) |event| if (event == .request) {
             try std.testing.expect(accepted);
-            try std.testing.expectEqual(@as(u32, 129), setup.server.reqresp.inbound[event.request.request.index].lifecycle.chunks_max);
-            try std.testing.expect(setup.server.reqresp.finish(event.request.request, setup.pair.now));
+            try std.testing.expectEqual(@as(u32, 129), setup.shared.server.reqresp.inbound[event.request.request.index].request.chunks_max);
+            try std.testing.expect(setup.shared.server.reqresp.finish(event.request.request, setup.shared.pair.now));
         };
         if (setup.clientEvents().len > 0 and setup.clientEvents()[0] == .done) {
             completed = true;
@@ -495,21 +495,21 @@ test "reqresp request admission concurrent connections and reconnect retain full
     });
     defer setup.deinit();
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
-    const initial = setup.handles;
-    const second_connection = try support.connectPair(&setup.pair);
-    setup.handles = .{ .client = second_connection.client, .server = second_connection.server };
-    try std.testing.expect(!std.meta.eql(initial.server, setup.handles.server));
-    try std.testing.expect(setup.pair.server.peerId(initial.server).?.eql(&setup.pair.server.peerId(setup.handles.server).?));
+    const initial = setup.shared.handles;
+    const second_connection = try support.connectPair(&setup.shared.pair);
+    setup.shared.handles = .{ .client = second_connection.client, .server = second_connection.server };
+    try std.testing.expect(!std.meta.eql(initial.server, setup.shared.handles.server));
+    try std.testing.expect(setup.shared.pair.server.peerId(initial.server).?.eql(&setup.shared.pair.server.peerId(setup.shared.handles.server).?));
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, false, 139);
-    try std.testing.expect(setup.pair.client.close(initial.client, 0));
-    try std.testing.expect(setup.pair.client.close(setup.handles.client, 0));
+    try std.testing.expect(setup.shared.pair.client.close(initial.client, 0));
+    try std.testing.expect(setup.shared.pair.client.close(setup.shared.handles.client, 0));
     for (0..8) |_| try setup.pumpOnce();
-    const reconnected = try support.connectPair(&setup.pair);
-    setup.handles = .{ .client = reconnected.client, .server = reconnected.server };
+    const reconnected = try support.connectPair(&setup.shared.pair);
+    setup.shared.handles = .{ .client = reconnected.client, .server = reconnected.server };
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, false, 139);
-    try std.testing.expectEqual(@as(u64, 2), setup.server.reqresp.counters.admitted);
-    try std.testing.expectEqual(@as(u64, 2), setup.server.reqresp.counters.peer_refusals);
+    try std.testing.expectEqual(@as(u64, 2), setup.shared.server.reqresp.counters.admitted);
+    try std.testing.expectEqual(@as(u64, 2), setup.shared.server.reqresp.counters.peer_refusals);
 }
 
 fn changeClientIdentity(setup: *harness.Pair, seed: u8) !void {
@@ -529,12 +529,12 @@ fn changeClientIdentity(setup: *harness.Pair, seed: u8) !void {
         failed_context.deinit();
         return err;
     };
-    setup.client.reqresp.shutdown(&setup.pair.client, &setup.client.router);
-    setup.pair.client.deinit();
-    setup.pair.client = replacement;
-    setup.pair.client_ctx = ctx;
-    const connection = try support.connectPair(&setup.pair);
-    setup.handles = .{ .client = connection.client, .server = connection.server };
+    setup.shared.client.reqresp.shutdown(&setup.shared.pair.client, &setup.shared.client.router);
+    setup.shared.pair.client.deinit();
+    setup.shared.pair.client = replacement;
+    setup.shared.pair.client_ctx = ctx;
+    const connection = try support.connectPair(&setup.shared.pair);
+    setup.shared.handles = .{ .client = connection.client, .server = connection.server };
 }
 
 test "reqresp request admission distinct identity peer aggregate and retained capacity decisions" {
@@ -551,8 +551,8 @@ test "reqresp request admission distinct identity peer aggregate and retained ca
         try changeClientIdentity(&setup, 3);
         try emptyExchange(&setup, .blocks_by_root_v2, &.{}, identities == 2, 139);
         try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, false, 139);
-        try std.testing.expectEqual(@as(u64, 0), setup.server.reqresp.counters.peer_refusals);
-        try std.testing.expectEqual(@as(u64, if (identities == 1) 2 else 0), setup.server.reqresp.counters.identity_capacity_refusals);
-        try std.testing.expectEqual(@as(u64, if (identities == 2) 1 else 0), setup.server.reqresp.counters.aggregate_refusals);
+        try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.peer_refusals);
+        try std.testing.expectEqual(@as(u64, if (identities == 1) 2 else 0), setup.shared.server.reqresp.counters.identity_capacity_refusals);
+        try std.testing.expectEqual(@as(u64, if (identities == 2) 1 else 0), setup.shared.server.reqresp.counters.aggregate_refusals);
     }
 }

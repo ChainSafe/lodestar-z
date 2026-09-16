@@ -41,15 +41,7 @@ fn canonical() !void {
     for (bad) |name| try std.testing.expect(ns.lookup(name) == null);
 }
 
-pub fn full(digest: [4]u8) root.topic_policy.Boundary {
-    var boundary: root.topic_policy.Boundary = .{ .digest = digest };
-    for (&boundary.rules) |*rule| rule.* = .{ .count = 1, .ssz_min = 10, .ssz_max = 100 };
-    boundary.rules[2].count = 64;
-    boundary.rules[7].count = 4;
-    boundary.rules[11].count = 128;
-    boundary.rules[12].count = 128;
-    return boundary;
-}
+const full = @import("topic_fixture.zig").full;
 
 test "topic namespace validates descriptors before allocation" {
     const p = root.topic_policy;
@@ -90,16 +82,7 @@ test "topic namespace validates descriptors before allocation" {
     try std.testing.expect(ns.lookup("/eth2/01020304/beacon_attestation_0/ssz_snappy") == null);
 }
 
-pub fn hoodi() [5]root.topic_policy.Boundary {
-    var out: [5]root.topic_policy.Boundary = undefined;
-    const digests = [_][4]u8{ .{ 0xd2, 0xf1, 0x99, 0x7f }, .{ 0x82, 0x55, 0x6a, 0x32 }, .{ 0xe2, 0xab, 0xcc, 0xa4 }, .{ 0xae, 0x9f, 0x70, 0xa0 }, .{ 0xc6, 0xec, 0xb7, 0x6c } };
-    for (&out, digests, 0..) |*b, digest, i| {
-        b.* = full(digest);
-        b.rules[11] = if (i < 2) .{ .count = if (i == 0) 6 else 9, .ssz_min = 10, .ssz_max = 100 } else .{};
-        if (i < 2) b.rules[12] = .{};
-    }
-    return out;
-}
+const hoodi = @import("topic_fixture.zig").hoodi;
 
 test "topic namespace exact bitmap capacity clears and isolates physical rows" {
     const p = root.topic_policy;

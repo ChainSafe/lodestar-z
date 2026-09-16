@@ -5,7 +5,7 @@ const routing = @import("../router.zig");
 const support = @import("../test_support.zig");
 const service_mod = @import("../service.zig");
 const engine_mod = @import("../quic/engine.zig");
-const reservedOptions = @import("control_capacity_test.zig").reservedOptions;
+const reservedOptions = @import("control_fixture.zig").reservedOptions;
 
 test "reqresp drain retains blocked terminals across control and application partitions" {
     var pair: support.Pair = .{};
@@ -175,7 +175,7 @@ test "reqresp service retains request and chunk bytes through control progress" 
             if (event == .chunk_sent) _ = server.reqresp.finish(event.chunk_sent.request, pair.now);
         }
     }
-    try std.testing.expect(client.reqresp.outbound[app.index].lifecycle.pendingEvent() != null);
+    try std.testing.expect(client.reqresp.outbound[app.index].request.pendingEvent() != null);
     try std.testing.expectEqualSlices(u8, &block, sink[0..block.len]);
     try std.testing.expectEqual(
         pair.now.mono_ms + 10_000,

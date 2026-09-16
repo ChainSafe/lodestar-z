@@ -31,18 +31,18 @@ test "topic policy remembers real inactive subscriptions without event pressure 
     try pair.initOpts(.{ .random_seed = 1 }, options(&.{boundary()}));
     defer pair.deinit();
     pair.server_event_capacity = 0;
-    try std.testing.expect(pair.client.gossipsub.inner.subscribe(name));
-    try std.testing.expect(pair.client.gossipsub.inner.subscribe(unknown));
+    try std.testing.expect(pair.shared.client.gossipsub.subscribe(name));
+    try std.testing.expect(pair.shared.client.gossipsub.subscribe(unknown));
     for (0..20) |_| try pair.pumpOnce();
-    try std.testing.expectEqual(@as(usize, 0), live(pair.server.gossipsub.inner));
+    try std.testing.expectEqual(@as(usize, 0), live(pair.shared.server.gossipsub));
     try std.testing.expectEqual(@as(usize, 0), pair.server_count);
-    try std.testing.expectEqual(@as(u64, 0), pair.server.gossipsub.inner.counters.local_pressure_resets);
-    try pair.server.gossipsub.inner.configureTopic(name, &.{ .weight = 2 });
-    const t = pair.server.gossipsub.inner.overlay.findTopic(name).?;
-    try std.testing.expectEqual(@as(usize, 1), pair.server.gossipsub.inner.overlay.subscribers(t).count());
-    try std.testing.expect(pair.server.gossipsub.inner.subscribe(name));
+    try std.testing.expectEqual(@as(u64, 0), pair.shared.server.gossipsub.counters.local_pressure_resets);
+    try pair.shared.server.gossipsub.configureTopic(name, &.{ .weight = 2 });
+    const t = pair.shared.server.gossipsub.overlay.findTopic(name).?;
+    try std.testing.expectEqual(@as(usize, 1), pair.shared.server.gossipsub.overlay.subscribers(t).count());
+    try std.testing.expect(pair.shared.server.gossipsub.subscribe(name));
     pair.server_event_capacity = 16;
-    const result = try pair.server.gossipsub.inner.publishWithOptions(name, "0123456789", .{ .allow_zero_peers = false }, pair.pair.now);
+    const result = try pair.shared.server.gossipsub.publishWithOptions(name, "0123456789", .{ .allow_zero_peers = false }, pair.shared.pair.now);
     try std.testing.expectEqual(@as(usize, 1), result.queued);
     var delivered = false;
     for (0..20) |_| {
@@ -53,10 +53,10 @@ test "topic policy remembers real inactive subscriptions without event pressure 
         };
     }
     try std.testing.expect(delivered);
-    try std.testing.expect(pair.client.gossipsub.inner.unsubscribe(name));
+    try std.testing.expect(pair.shared.client.gossipsub.unsubscribe(name));
     for (0..20) |_| try pair.pumpOnce();
-    try std.testing.expectEqual(@as(usize, 0), pair.server.gossipsub.inner.overlay.subscribers(t).count());
-    try std.testing.expect(!pair.server.gossipsub.inner.overlay.namespace.?.subscribed(0, 0));
+    try std.testing.expectEqual(@as(usize, 0), pair.shared.server.gossipsub.overlay.subscribers(t).count());
+    try std.testing.expect(!pair.shared.server.gossipsub.overlay.namespace.?.subscribed(0, 0));
 }
 
 test "gossip accepted mesh membership does not invent a declared subscription across retirement" {
@@ -163,69 +163,69 @@ test "topic policy physical close clears bits while same connection stream repla
     var pair: Pair = .{};
     try pair.initOpts(.{ .random_seed = 1 }, options(&.{boundary()}));
     defer pair.deinit();
-    try std.testing.expect(pair.client.gossipsub.inner.subscribe(name));
+    try std.testing.expect(pair.shared.client.gossipsub.subscribe(name));
     for (0..20) |_| try pair.pumpOnce();
-    const index = pair.server.gossipsub.inner.sessions.findPeer(pair.handles.server).?;
-    const ns = &pair.server.gossipsub.inner.overlay.namespace.?;
+    const index = pair.shared.server.gossipsub.sessions.findPeer(pair.shared.handles.server).?;
+    const ns = &pair.shared.server.gossipsub.overlay.namespace.?;
     try std.testing.expect(ns.subscribed(index, 0));
-    @import("test_support.zig").driver(pair.server.gossipsub.inner).resetInbound(&pair.pair.server, index);
-    @import("test_support.zig").driver(pair.server.gossipsub.inner).resetOutbound(&pair.pair.server, index);
+    @import("session_io.zig").resetInbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
+    @import("session_io.zig").resetOutbound(pair.shared.server.gossipsub, &pair.shared.pair.server, index);
     try std.testing.expect(ns.subscribed(index, 0));
     for (0..20) |_| try pair.pumpOnce();
-    const client_index = pair.client.gossipsub.inner.sessions.findPeer(pair.handles.client).?;
-    const replacement_stream = try pair.client.router.beginOutbound(&pair.pair.client, pair.handles.client, .{ .meshsub = .v1_1 }, pair.pair.now);
-    pair.client.gossipsub.inner.sessions.setOutbound(client_index, .{ .negotiating = replacement_stream });
+    const client_index = pair.shared.client.gossipsub.sessions.findPeer(pair.shared.handles.client).?;
+    const replacement_stream = try pair.shared.client.router.beginOutbound(&pair.shared.pair.client, pair.shared.handles.client, .{ .meshsub = .v1_1 }, pair.shared.pair.now);
+    pair.shared.client.gossipsub.sessions.setOutbound(client_index, .{ .negotiating = replacement_stream });
     for (0..20) |_| try pair.pumpOnce();
-    try std.testing.expect(pair.server.gossipsub.inner.sessions.rows[index].in_stream != null);
-    try std.testing.expect(pair.server.gossipsub.inner.sessions.rows[index].outbound == .live);
+    try std.testing.expect(pair.shared.server.gossipsub.sessions.rows[index].in_stream != null);
+    try std.testing.expect(pair.shared.server.gossipsub.sessions.rows[index].outbound == .live);
     try std.testing.expect(ns.subscribed(index, 0));
-    var stale = pair.handles.server;
+    var stale = pair.shared.handles.server;
     stale.generation += 1;
-    pair.server.gossipsub.inner.connectionClosed(stale);
+    pair.shared.server.gossipsub.connectionClosed(stale);
     try std.testing.expect(ns.subscribed(index, 0));
-    const other = support.addPeer(pair.server.gossipsub.inner, .{ .index = 77, .generation = 1 }, .v1_2).?;
+    const other = support.addPeer(pair.shared.server.gossipsub, .{ .index = 77, .generation = 1 }, .v1_2).?;
     ns.setSubscription(other.index, 0, true);
-    pair.server.gossipsub.inner.connectionClosed(pair.handles.server);
+    pair.shared.server.gossipsub.connectionClosed(pair.shared.handles.server);
     try std.testing.expect(!ns.subscribed(index, 0));
     try std.testing.expect(ns.subscribed(other.index, 0));
-    const replacement = support.addPeer(pair.server.gossipsub.inner, stale, .v1_2).?;
+    const replacement = support.addPeer(pair.shared.server.gossipsub, stale, .v1_2).?;
     try std.testing.expectEqual(index, replacement.index);
     try std.testing.expect(!ns.subscribed(index, 0));
-    try std.testing.expect(pair.server.gossipsub.inner.subscribe(name));
-    const t = pair.server.gossipsub.inner.overlay.findTopic(name).?;
-    try std.testing.expect(!pair.server.gossipsub.inner.overlay.subscribers(t).isSet(index));
-    try std.testing.expect(pair.server.gossipsub.inner.overlay.subscribers(t).isSet(other.index));
+    try std.testing.expect(pair.shared.server.gossipsub.subscribe(name));
+    const t = pair.shared.server.gossipsub.overlay.findTopic(name).?;
+    try std.testing.expect(!pair.shared.server.gossipsub.overlay.subscribers(t).isSet(index));
+    try std.testing.expect(pair.shared.server.gossipsub.overlay.subscribers(t).isSet(other.index));
 }
 
 test "topic policy real wire receives only bounded SSZ and keeps borrowed payloads stable" {
     var pair: Pair = .{};
     try pair.initOpts(.{ .random_seed = 1 }, options(&.{boundary()}));
     defer pair.deinit();
-    try std.testing.expect(pair.server.gossipsub.inner.subscribe(name));
-    try std.testing.expect(pair.client.gossipsub.inner.subscribe(name));
+    try std.testing.expect(pair.shared.server.gossipsub.subscribe(name));
+    try std.testing.expect(pair.shared.client.gossipsub.subscribe(name));
     for (0..20) |_| try pair.pumpOnce();
     var seen: usize = 0;
     const payload: [21]u8 = @splat('z');
     for ([_]usize{ 9, 10, 20, 21 }) |size| {
-        const result = try pair.client.gossipsub.inner.publish(name, payload[0..size], pair.pair.now);
+        const result = try pair.shared.client.gossipsub.publish(name, payload[0..size], pair.shared.pair.now);
         try std.testing.expectEqual(@as(usize, 1), result.queued);
         for (0..20) |_| {
             try pair.pumpOnce();
             for (pair.serverEvents()) |event| if (event == .message) {
                 try std.testing.expect(size == 10 or size == 20);
                 seen += 1;
-                const entry = pair.server.gossipsub.inner.messages.validation.attribution(event.message.handle);
+                const entry = pair.shared.server.gossipsub.messages.validation.attribution(event.message.handle);
                 try std.testing.expectEqual(entry.admitted_ms, event.message.admitted_ms);
-                try std.testing.expectEqual(pair.server.gossipsub.inner.messages.validation.entries[event.message.handle.index].state.pending.deadline, event.message.deadline);
-                try std.testing.expect(event.message.identity.eql(&pair.server.gossipsub.inner.peers.rows[entry.source.index].identity));
+                try std.testing.expectEqual(pair.shared.server.gossipsub.messages.validation.entries[event.message.handle.index].state.pending.deadline, event.message.deadline);
+                try std.testing.expect(event.message.identity.eql(&pair.shared.server.gossipsub.peers.rows[entry.source.index].identity));
                 try std.testing.expectEqualSlices(u8, payload[0..size], event.message.bytes);
-                try pair.server.gossipsub.inner.configureTopic(event.message.topic, &.{ .weight = 2 });
+                try pair.shared.server.gossipsub.configureTopic(event.message.topic, &.{ .weight = 2 });
                 var local: [10]u8 = @splat('x');
                 local[0] = @intCast(size);
-                _ = try pair.server.gossipsub.inner.publish(event.message.topic, &local, pair.pair.now);
+                _ = try pair.shared.server.gossipsub.publish(event.message.topic, &local, pair.shared.pair.now);
                 try std.testing.expectEqualStrings(name, event.message.topic);
                 try std.testing.expectEqualSlices(u8, payload[0..size], event.message.bytes);
-                try std.testing.expectEqual(gossip.ReportOutcome{ .applied = .ignore }, pair.server.gossipsub.inner.report(event.message.handle, .ignore, pair.pair.now));
+                try std.testing.expectEqual(gossip.ReportOutcome{ .applied = .ignore }, pair.shared.server.gossipsub.report(event.message.handle, .ignore, pair.shared.pair.now));
             };
         }
     }
@@ -233,7 +233,7 @@ test "topic policy real wire receives only bounded SSZ and keeps borrowed payloa
 }
 
 test "topic policy all 784 names stay separate from retained live topic capacity" {
-    const boundaries = @import("topic_policy_test.zig").hoodi();
+    const boundaries = @import("topic_fixture.zig").hoodi();
     var g = try Gossipsub.init(std.testing.allocator, options(&boundaries));
     defer g.deinit();
     var buffer: [@import("topic.zig").topic_max_len]u8 = undefined;
@@ -267,7 +267,7 @@ test "topic policy all 784 names stay separate from retained live topic capacity
 test "topic policy copied startup allocation prefixes and whole owner memory reconcile" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, startup, .{});
     var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
-    var boundaries = @import("topic_policy_test.zig").hoodi();
+    var boundaries = @import("topic_fixture.zig").hoodi();
     var g = try Gossipsub.init(ledger.allocator(), options(&boundaries));
     defer g.deinit();
     const ns = &g.overlay.namespace.?;
@@ -287,7 +287,7 @@ test "topic policy copied startup allocation prefixes and whole owner memory rec
 }
 
 fn startup(a: std.mem.Allocator) !void {
-    const boundaries = @import("topic_policy_test.zig").hoodi();
+    const boundaries = @import("topic_fixture.zig").hoodi();
     var g = try Gossipsub.init(a, options(&boundaries));
     defer g.deinit();
     try std.testing.expectEqual(@as(u16, 784), g.overlay.namespace.?.topic_count);
@@ -295,7 +295,7 @@ fn startup(a: std.mem.Allocator) !void {
 
 test "topic policy remembered ordinals remain independent of retained validation generations" {
     var boundaries: [4]p.Boundary = undefined;
-    for (&boundaries, 0..) |*b, i| b.* = @import("topic_policy_test.zig").full(.{ @intCast(i + 1), 2, 3, 4 });
+    for (&boundaries, 0..) |*b, i| b.* = @import("topic_fixture.zig").full(.{ @intCast(i + 1), 2, 3, 4 });
     var g = try Gossipsub.init(std.testing.allocator, options(&boundaries));
     defer g.deinit();
     const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
