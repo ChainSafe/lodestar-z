@@ -56,6 +56,7 @@ test("failed intent does not activate or advance the clock", async () => {
   try {
     await runtime.ready;
     expect(() => runtime.getPeers()).toThrow("NetworkNotActive");
+    expect(() => runtime.updateStatus(config.local.status)).toThrow("NetworkNotActive");
     const intent = localIntent(config);
     intent.subscriptions = [{name: "/invalid", params: config.gossipPolicy.score.defaultTopic}];
     await expect(runtime.applyIntent(intent, 101n)).rejects.toThrow();
@@ -74,6 +75,127 @@ test("failed intent does not activate or advance the clock", async () => {
     expect(runtime.close()).toBe(terminal);
     await expect(terminal).resolves.toEqual({reason: "requested"});
   }
+});
+
+test("Status-only updates copy inputs and preserve advertisement and subscriptions across a head regression", async () => {
+  const config = discoveryConfig();
+  config.discovery.sequenceNumber = 18446744073709551615n;
+  config.local.metadata.sequenceNumber = 18446744073709551615n;
+  const other = applicationConfig();
+  other.identitySecretKey[31] = 2;
+  const a = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const b = createNativeNetworkApplicationRuntime(other, () => undefined);
+  try {
+    const [identity] = await Promise.all([a.ready, b.ready]);
+    const intent = localIntent(config);
+    intent.subscriptions = [
+      {name: "/eth2/01020304/beacon_block/ssz_snappy", params: config.gossipPolicy.score.defaultTopic},
+    ];
+    intent.demand.attnets[0] = 5;
+    intent.demand.expiresAtSlot = 103n;
+    await Promise.all([a.applyIntent(intent, 100n), b.applyIntent(localIntent(other), 100n)]);
+    const topics = (await a.getGossipDiagnostics()).topics;
+    const status = structuredClone(config.local.status);
+    status.headSlot = 95n;
+    status.headRoot.fill(7);
+    const updated = a.updateStatus(status);
+    status.headRoot.fill(9);
+    status.forkDigest.fill(9);
+    await updated;
+    await b.connect(identity.peerId, [identity.localEndpoint], 5000n);
+    for (const headSlot of [95n, 90n]) {
+      if (headSlot === 90n) {
+        await a.updateStatus({...config.local.status, headRoot: new Uint8Array(32).fill(7), headSlot});
+        await b.reStatusPeers([identity.peerId]);
+      }
+      let observed: Awaited<ReturnType<typeof b.getPeers>>["peers"][number]["status"] = null;
+      for (let i = 0; i < 200; i++) {
+        observed =
+          (await b.getPeers()).peers.find((peer) => peer.identity.every((byte, j) => byte === identity.peerId[j]))
+            ?.status ?? null;
+        if (observed?.headSlot === headSlot) break;
+        await delay(10);
+      }
+      expect(observed?.headSlot).toBe(headSlot);
+      expect(observed?.headRoot).toEqual(new Uint8Array(32).fill(7));
+      expect(a.diagnostics().currentSlot).toBe(100n);
+      expect((await a.getGossipDiagnostics()).topics).toEqual(topics);
+      const current = await a.getIdentity();
+      expect(current.metadata).toEqual(identity.metadata);
+      expect(current.localEnr).toEqual(identity.localEnr);
+    }
+  } finally {
+    await Promise.all([a.close(), b.close()]);
+  }
+}, 15000);
+
+test("Status-only validation uses the active fork and leaves rejected updates unpublished", async () => {
+  const config = applicationConfig();
+  config.local.fork.fork = "fulu";
+  config.local.status.earliestAvailableSlot = 0n;
+  config.requestForks = [{digest: config.local.fork.digest, fork: "fulu"}];
+  for (const direction of ["receive", "request"] as const) {
+    config.capabilities[direction] = config.capabilities[direction].map((protocol) =>
+      protocol === "/eth2/beacon_chain/req/status/1/ssz_snappy"
+        ? "/eth2/beacon_chain/req/status/2/ssz_snappy"
+        : protocol
+    );
+  }
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  try {
+    await runtime.ready;
+    const intent = localIntent(config);
+    await runtime.applyIntent(intent, 100n);
+    for (const [field, value] of [
+      ["headSlot", -1n],
+      ["headSlot", 1n << 64n],
+      ["headSlot", 100],
+      ["headRoot", new Uint8Array(31)],
+      ["forkDigest", new Uint8Array(5)],
+      ["extra", true],
+    ] as const) {
+      const invalid = structuredClone(config.local.status);
+      Reflect.set(invalid, field, value);
+      expect(() => runtime.updateStatus(invalid)).toThrow();
+    }
+    await expect(runtime.updateStatus({...config.local.status, forkDigest: new Uint8Array(4)})).rejects.toThrow(
+      "InvalidForkDigest"
+    );
+    await expect(runtime.updateStatus({...config.local.status, earliestAvailableSlot: null})).rejects.toThrow(
+      "MissingAvailability"
+    );
+    expect((await runtime.applyIntent(intent, 100n)).changed).toBe(false);
+    const first = runtime.updateStatus({...config.local.status, headSlot: 120n});
+    const second = structuredClone(intent);
+    second.update.local.status.headSlot = 80n;
+    const coordinated = runtime.applyIntent(second, 100n);
+    const last = runtime.updateStatus({...config.local.status, headSlot: 90n});
+    await Promise.all([first, coordinated, last]);
+    second.update.local.status.headSlot = 90n;
+    expect((await runtime.applyIntent(second, 100n)).changed).toBe(false);
+    expect(runtime.diagnostics().currentSlot).toBe(100n);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("reentrant close during Status copying retires its command without publication", async () => {
+  const config = applicationConfig();
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  await runtime.ready;
+  await runtime.applyIntent(localIntent(config), 100n);
+  const status = structuredClone(config.local.status);
+  Object.defineProperty(status, "headRoot", {
+    enumerable: true,
+    get() {
+      runtime.close();
+      return config.local.status.headRoot;
+    },
+  });
+  expect(() => runtime.updateStatus(status)).toThrow("NetworkClosed");
+  await runtime.closed;
+  expect(runtime.diagnostics().operationOccupied).toBe(0);
+  expect(runtime.diagnostics().currentSlot).toBe(100n);
 });
 
 test("identity metadata belongs to its owner snapshot across queued intent updates", async () => {

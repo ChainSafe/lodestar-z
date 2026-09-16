@@ -43,7 +43,6 @@ pub fn emit(peer: *Peer, id: u32) !void {
         .malformedRpcs = peer.service.gossipsub.inner.counters.malformed_rpcs,
         .droppedUnroutable = transport.dropped_unroutable,
         .droppedFull = transport.dropped_full,
-        .droppedNoEntropy = transport.dropped_no_entropy,
         .recvErrors = transport.recv_errors,
         .gossipPeers = gossip.admitted_peers,
         .remoteSubscriptions = gossip.remote_subscriptions,

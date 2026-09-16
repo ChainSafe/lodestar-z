@@ -3,7 +3,7 @@ const p = @import("policy.zig");
 const t = @import("types.zig");
 const expect = std.testing.expect;
 const equal = std.testing.expectEqual;
-const options: t.Options = .{ .capacity = 8, .outbound_reserve = 1, .target_peers = 2, .max_peers = 4, .min_outbound = 1, .engine_capacity = 4 };
+const options: t.Options = .{ .capacity = 8, .outbound_reserve = 1, .target_peers = 2, .max_peers = 4, .min_outbound = 1 };
 test "peer policy overlapping coverage updates after each removal" {
     var demand: t.Demand = .{ .attnets = 1, .syncnets = 1, .expires_at_slot = 10 };
     demand.group_targets[5] = 1;
@@ -113,7 +113,7 @@ test "peer policy explicit group targets match Hoodi sampling deficits" {
         demand.group_targets[group] = 6;
         inputs[0].coverage.groups.set(group);
     }
-    const configured: t.Options = .{ .capacity = 256, .max_peers = 256, .engine_capacity = 256, .target_peers = 1, .min_outbound = 0 };
+    const configured: t.Options = .{ .capacity = 256, .max_peers = 256, .target_peers = 1, .min_outbound = 0 };
     const result = p.select(&inputs, &demand, configured, 1);
     try equal(@as(u16, 520), result.deficits.groups);
     try equal(@as(usize, 128), result.deficits.missing.groups.count());
@@ -138,7 +138,7 @@ test "peer policy group targets validate boundaries and saturate exactly" {
     demand.group_targets[127] = 1;
     try std.testing.expectError(error.InvalidDemand, demand.validate(&.{ .custody_groups = 64 }, 256));
     demand = .{ .group_targets = @splat(256) };
-    const configured: t.Options = .{ .capacity = 256, .max_peers = 256, .engine_capacity = 256, .target_peers = 256, .min_outbound = 0 };
+    const configured: t.Options = .{ .capacity = 256, .max_peers = 256, .target_peers = 256, .min_outbound = 0 };
     try equal(@as(u16, 32768), p.select(&.{}, &demand, configured, 1).deficits.groups);
     var inputs: [256]p.Input = @splat(.{});
     for (&inputs) |*input| input.coverage.groups.setRangeValue(.{ .start = 0, .end = 128 }, true);

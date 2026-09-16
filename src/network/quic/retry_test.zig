@@ -43,7 +43,7 @@ test "QUIC Retry does not allocate a connection for unvalidated Initials" {
     var packet: [@import("../constants.zig").datagram_size_max]u8 = undefined;
     const initial = pair.sendOne(&pair.client, handle.index, &packet).?;
     var out: [packet.len]u8 = undefined;
-    const outcome = pair.server.receive(initial, &support.client_address, pair.now, pair.nextPool(), &out);
+    const outcome = pair.server.receive(initial, &support.client_address, pair.now, &out);
     try std.testing.expect(outcome == .retry);
     try std.testing.expect(outcome.retry.len <= initial.len);
     try std.testing.expectEqual(@as(usize, 0), pair.server.registry.active_len);

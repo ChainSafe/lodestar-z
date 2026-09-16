@@ -59,6 +59,12 @@ test("native std.log captures lifecycle, timestamps and isolated sessions throug
 test("ReleaseSafe debug logs correlate real requests without draining request data", async () => {
   const pair = await incomingPair();
   try {
+    const {waitFor} = await import("../../test/interop/child.mjs");
+    // Startup control requests share the bounded req/resp log quota.
+    await waitFor(async () => {
+      const snapshots = await Promise.all([pair.left.getPeers(), pair.right.getPeers()]);
+      return snapshots.every((snapshot) => snapshot.peers[0]?.status && snapshot.peers[0]?.metadata);
+    });
     pair.left.setLogLevel("debug");
     pair.right.setLogLevel("debug");
     drain(pair.left);
@@ -70,11 +76,12 @@ test("ReleaseSafe debug logs correlate real requests without draining request da
     await incoming.finish();
     expect(await pending).toEqual({done: true, value: undefined});
     for (const runtime of [pair.left, pair.right]) {
-      const records = drain(runtime).filter((r) => r.message.includes("method=blocks_by_root_v2"));
+      const allRecords = drain(runtime);
+      const records = allRecords.filter((r) => r.message.includes("method=blocks_by_root_v2"));
       const started = records.find((r) => r.message.startsWith("request_started "));
       const completed = records.find((r) => r.message.startsWith("request_completed "));
       expect(started).toBeDefined();
-      expect(completed).toBeDefined();
+      expect(completed, allRecords.map((r) => r.message).join("\n")).toBeDefined();
       expect(started?.level).toBe("debug");
       expect(started?.message.match(/request=(\d+:\d+)/)?.[1]).toBe(completed?.message.match(/request=(\d+:\d+)/)?.[1]);
       expect(started?.message.match(/connection=(\d+:\d+)/)?.[1]).toBe(

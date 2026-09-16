@@ -184,7 +184,7 @@ test "router wakeups separate negotiation work from outcome capacity" {
     try std.testing.expectEqual(@as(?u64, null), router.nextWakeup(pair.now, 1));
 }
 
-test "router ready handoff waits quietly for host outcome capacity" {
+test "router accepted selection survives capability changes behind outcome pressure" {
     const routing = @import("router.zig");
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
@@ -203,12 +203,21 @@ test "router ready handoff waits quietly for host outcome capacity" {
         _ = server.pump(&pair.server, pair.now, &.{});
         try pair.pump();
     }
+    client.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
+    server.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
     try std.testing.expectEqual(@as(?u64, null), client.nextWakeup(pair.now, 0));
     try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), client.nextWakeup(pair.now, 1));
+    try std.testing.expectEqual(@as(?u64, null), server.nextWakeup(pair.now, 0));
+    try std.testing.expectEqual(@as(?u64, pair.now.mono_ms), server.nextWakeup(pair.now, 1));
     var out: [1]routing.Outcome = undefined;
     try std.testing.expectEqual(@as(usize, 1), client.pump(&pair.client, pair.now, &out));
     try std.testing.expect(out[0].result == .ready);
+    try std.testing.expectEqual(rr.Protocol.ping_v1, out[0].result.ready.protocol.reqresp);
     client.cancel(&pair.client, out[0].stream);
+    try std.testing.expectEqual(@as(usize, 1), server.pump(&pair.server, pair.now, &out));
+    try std.testing.expect(out[0].result == .ready);
+    try std.testing.expectEqual(rr.Protocol.ping_v1, out[0].result.ready.protocol.reqresp);
+    server.cancel(&pair.server, out[0].stream);
 }
 
 test "router composed service retains native activity behind a partial reqresp sweep" {
@@ -342,15 +351,15 @@ test "router capabilities validate service limits and preserve configured prefer
     active.receive.insert(.{ .reqresp = .ping_v1 });
     active.request.insert(.{ .meshsub = .v1_0 });
     active.request.insert(.{ .meshsub = .v1_2 });
-    var versions = [_]@import("gossipsub/sessions.zig").Version{ .v1_0, .v1_2 };
+    var versions = [_]@import("gossipsub/protocol.zig").Version{ .v1_0, .v1_2 };
     var router = try routing.Router.init(std.testing.allocator, .{ .capabilities = active, .meshsub_versions = &versions });
     defer router.deinit();
     versions[0] = .v1_1;
     try std.testing.expectEqualDeep(active, router.capabilities());
-    try std.testing.expectEqualStrings("/meshsub/1.0.0", router.meshsub_candidates[0]);
-    try std.testing.expectEqualStrings("/meshsub/1.2.0", router.meshsub_candidates[1]);
+    try std.testing.expectEqualStrings("/meshsub/1.0.0", router.meshsub_candidates[0].id);
+    try std.testing.expectEqualStrings("/meshsub/1.2.0", router.meshsub_candidates[1].id);
     try std.testing.expectEqual(1, router.supported_count);
-    try std.testing.expectEqualStrings(rr.Protocol.ping_v1.id(), router.supported[0]);
+    try std.testing.expectEqualStrings(rr.Protocol.ping_v1.id(), router.supported[0].id);
     var invalid = active;
     invalid.receive.insert(.{ .meshsub = .v1_1 });
     try std.testing.expectError(error.InvalidCapabilities, router.validateCapabilities(invalid));
@@ -390,59 +399,154 @@ test "router capabilities disabled outbound preserves stream and request owners"
     try std.testing.expectEqual(negotiations, service.router.negotiator.active());
 }
 
-test "router capabilities pending inbound listener retains old offer while new listener rejects" {
+test "router capabilities changes apply before inbound protocol selection" {
+    const routing = @import("router.zig");
+    const caps = @import("capabilities.zig");
+    for ([_]bool{ false, true }) |enable| {
+        var pair: support.Pair = .{};
+        try pair.init(.{}, .{});
+        defer pair.deinit();
+        const handles = try support.connectPair(&pair);
+        var active: caps.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() };
+        if (!enable) active.receive.insert(.{ .reqresp = .ping_v1 });
+        var server = try routing.Router.init(std.testing.allocator, .{ .capabilities = active });
+        defer server.deinit();
+        const stream = try pair.client.openStream(handles.client);
+        var bytes: [256]u8 = undefined;
+        const header = try multistream.encodeMessage(multistream.header, &bytes);
+        try std.testing.expectEqual(header.len, try pair.client.write(stream, header, false));
+        try pair.pump();
+        var events: [16]engine.Event = undefined;
+        server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
+        _ = server.pump(&pair.server, pair.now, &.{});
+        _ = server.pump(&pair.server, pair.now, &.{});
+        try pair.pump();
+        const greeting = try pair.client.read(stream, &bytes);
+        const reply_header = (try multistream.decodeMessage(bytes[0..greeting.len])).?;
+        try std.testing.expectEqualStrings(multistream.header, reply_header.token);
+        try std.testing.expectEqual(greeting.len, reply_header.consumed);
+
+        active.receive = .initEmpty();
+        if (enable) active.receive.insert(.{ .reqresp = .ping_v1 });
+        server.setCapabilities(active);
+        const proposal = try multistream.encodeMessage(rr.Protocol.ping_v1.id(), &bytes);
+        try std.testing.expectEqual(proposal.len, try pair.client.write(stream, proposal, false));
+        try pair.pump();
+        var out: [1]routing.Outcome = undefined;
+        const count = server.pump(&pair.server, pair.now, &out);
+        try std.testing.expectEqual(@as(usize, if (enable) 1 else 0), count);
+        if (enable) {
+            try std.testing.expect(out[0].result == .ready);
+            try std.testing.expectEqual(rr.Protocol.ping_v1, out[0].result.ready.protocol.reqresp);
+        }
+        _ = server.pump(&pair.server, pair.now, &.{});
+        try pair.pump();
+        const response = try pair.client.read(stream, &bytes);
+        const reply = (try multistream.decodeMessage(bytes[0..response.len])).?;
+        try std.testing.expectEqualStrings(if (enable) rr.Protocol.ping_v1.id() else multistream.na, reply.token);
+        try std.testing.expectEqual(response.len, reply.consumed);
+    }
+}
+
+test "router capabilities enable a fallback after rejecting an earlier proposal" {
     const routing = @import("router.zig");
     const caps = @import("capabilities.zig");
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    var client = try routing.Router.init(std.testing.allocator, .{});
-    defer client.deinit();
     var active: caps.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() };
     active.receive.insert(.{ .reqresp = .ping_v1 });
     var server = try routing.Router.init(std.testing.allocator, .{ .capabilities = active });
     defer server.deinit();
-    for (0..2) |wave| {
-        _ = try client.beginOutbound(&pair.client, handles.client, .{ .reqresp = .ping_v1 }, pair.now);
-        var accepted = false;
-        var completed = false;
-        for (0..32) |_| {
-            var outcomes: [16]routing.Outcome = undefined;
-            const count = client.pump(&pair.client, pair.now, &outcomes);
-            for (outcomes[0..count]) |outcome| {
-                if (wave == 0) {
-                    try std.testing.expect(outcome.result == .ready);
-                    try std.testing.expectEqual(rr.Protocol.ping_v1, outcome.result.ready.protocol.reqresp);
-                } else try std.testing.expect(outcome.result == .rejected);
-                completed = true;
-            }
-            try pair.pump();
-            var events: [16]engine.Event = undefined;
-            server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
-            if (!accepted and server.negotiator.active() > 0) {
-                accepted = true;
-                if (wave == 0) {
-                    active.receive = .initEmpty();
-                    active.receive.insert(.{ .reqresp = .goodbye_v1 });
-                    try server.validateCapabilities(active);
-                    server.setCapabilities(active);
-                }
-            }
-            _ = server.pump(&pair.server, pair.now, &outcomes);
-            try pair.pump();
-            if (completed) break;
-        }
-        try std.testing.expect(accepted and completed);
-    }
-    active.receive = .initEmpty();
-    server.setCapabilities(active);
     const stream = try pair.client.openStream(handles.client);
-    try std.testing.expectEqual(1, try pair.client.write(stream, &.{0}, false));
+    const dialer = try multistream.Dialer.init("/meshsub/1.2.0");
+    var bytes: [256]u8 = undefined;
+    const hello = try dialer.initialWrite(&bytes);
+    try std.testing.expectEqual(hello.len, try pair.client.write(stream, hello, false));
     try pair.pump();
     var events: [16]engine.Event = undefined;
     server.transportEvents(&pair.server, pair.events(&pair.server, &events), pair.now);
-    try std.testing.expectEqual(0, server.negotiator.active());
+    var out: [1]routing.Outcome = undefined;
+    try std.testing.expectEqual(0, server.pump(&pair.server, pair.now, &out));
+    try std.testing.expectEqual(0, server.pump(&pair.server, pair.now, &out));
+    try pair.pump();
+    const rejected = try pair.client.read(stream, &bytes);
+    const header = (try multistream.decodeMessage(bytes[0..rejected.len])).?;
+    try std.testing.expectEqualStrings(multistream.header, header.token);
+    const refusal = (try multistream.decodeMessage(bytes[header.consumed..rejected.len])).?;
+    try std.testing.expectEqualStrings(multistream.na, refusal.token);
+    try std.testing.expectEqual(rejected.len, header.consumed + refusal.consumed);
+
+    active.receive = .initEmpty();
+    active.receive.insert(.{ .meshsub = .v1_1 });
+    server.setCapabilities(active);
+    const fallback = try multistream.encodeMessage("/meshsub/1.1.0", &bytes);
+    bytes[fallback.len] = 42;
+    try std.testing.expectEqual(fallback.len + 1, try pair.client.write(stream, bytes[0 .. fallback.len + 1], true));
+    try pair.pump();
+    try std.testing.expectEqual(1, server.pump(&pair.server, pair.now, &out));
+    try std.testing.expect(out[0].result == .ready);
+    try std.testing.expectEqual(@import("gossipsub/protocol.zig").Version.v1_1, out[0].result.ready.protocol.meshsub);
+    try std.testing.expectEqualSlices(u8, &.{42}, out[0].result.ready.leftover);
+    try std.testing.expect(out[0].result.ready.fin);
+    try pair.pump();
+    const accepted = try pair.client.read(stream, &bytes);
+    const acknowledgement = (try multistream.decodeMessage(bytes[0..accepted.len])).?;
+    try std.testing.expectEqualStrings("/meshsub/1.1.0", acknowledgement.token);
+    try std.testing.expectEqual(accepted.len, acknowledgement.consumed);
+}
+
+test "router accepted selection survives capability changes while ACK is flow controlled" {
+    const routing = @import("router.zig");
+    const caps = @import("capabilities.zig");
+    var pair: support.Pair = .{};
+    try pair.init(.{}, .{});
+    defer pair.deinit();
+    @import("quic/binding.zig").c.quiche_config_set_initial_max_stream_data_bidi_local(pair.client.config.ptr, 8);
+    const handles = try support.connectPair(&pair);
+    var active: caps.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() };
+    active.receive.insert(.{ .reqresp = .ping_v1 });
+    var server = try routing.Router.init(std.testing.allocator, .{ .capabilities = active });
+    defer server.deinit();
+    const stream = try pair.client.openStream(handles.client);
+    const dialer = try multistream.Dialer.init(rr.Protocol.ping_v1.id());
+    var bytes: [256]u8 = undefined;
+    const hello = try dialer.initialWrite(&bytes);
+    const payload = "tail";
+    @memcpy(bytes[hello.len..][0..payload.len], payload);
+    try std.testing.expectEqual(hello.len + payload.len, try pair.client.write(stream, bytes[0 .. hello.len + payload.len], true));
+    try pair.pump();
+    var event_storage: [16]engine.Event = undefined;
+    const events = pair.events(&pair.server, &event_storage);
+    const inbound = try support.expectStreamOpened(events[0], handles.server);
+    server.transportEvents(&pair.server, events, pair.now);
+    var out: [1]routing.Outcome = undefined;
+    try std.testing.expectEqual(0, server.pump(&pair.server, pair.now, &out));
+    try std.testing.expect(server.negotiator.entries[0].selected != null);
+    try std.testing.expectEqual(0, try pair.server.streamCapacity(inbound));
+    server.setCapabilities(.{ .receive = .initEmpty(), .request = .initEmpty() });
+
+    var ack: [256]u8 = undefined;
+    var ack_len: usize = 0;
+    var ready = false;
+    for (0..32) |_| {
+        try pair.pump();
+        const read = try pair.client.read(stream, ack[ack_len..]);
+        ack_len += read.len;
+        const count = server.pump(&pair.server, pair.now, &out);
+        if (count == 1) {
+            try std.testing.expect(!ready);
+            try std.testing.expect(out[0].result == .ready);
+            try std.testing.expectEqual(rr.Protocol.ping_v1, out[0].result.ready.protocol.reqresp);
+            try std.testing.expectEqualSlices(u8, payload, out[0].result.ready.leftover);
+            try std.testing.expect(out[0].result.ready.fin);
+            ready = true;
+        }
+        if (ready and ack_len == hello.len) break;
+    }
+    try std.testing.expect(ready);
+    try std.testing.expectEqualSlices(u8, hello, ack[0..ack_len]);
 }
 
 test "router capabilities activation preserves negotiated response context and captured ceiling" {

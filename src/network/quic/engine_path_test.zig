@@ -127,7 +127,6 @@ test "engine survives an undecryptable packet routed to a live slot" {
         &garbage,
         &server_address,
         pair.now,
-        pair.nextPool(),
         &response,
     );
     switch (outcome) {
@@ -154,7 +153,6 @@ test "engine routes a replayed client Initial to the existing connection" {
         replay[0..pair.first_initial_len],
         &client_address,
         pair.now,
-        pair.nextPool(),
         &response,
     );
     switch (outcome) {
@@ -206,7 +204,6 @@ test "engine feeds an unrouted short header from a known peer to its slot" {
         &reset,
         &server_address,
         pair.now,
-        pair.nextPool(),
         &response,
     );
     switch (outcome) {
@@ -228,7 +225,6 @@ test "engine feeds an unrouted short header from a known peer to its slot" {
             &reset,
             &stranger,
             pair.now,
-            pair.nextPool(),
             &response,
         ),
     );

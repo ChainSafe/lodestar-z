@@ -15,7 +15,7 @@ const Peer = struct {
     emitted: u16 = 0,
 
     pub fn pump(self: *Peer) !void {
-        self.now = try network.driver.currentTime(self.io);
+        self.now = try network.transport.currentTime(self.io);
         var events: [1]t.Event = undefined;
         const result = self.node.step(self.io, self.now, 0x08070605, .{ .peers = events[0..self.capacity] }, 1);
         if (result.failure) |err| return err;
@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
     defer a.destroy(peer);
     peer.allocator = a;
     peer.io = init.io;
-    peer.now = try network.driver.currentTime(init.io);
+    peer.now = try network.transport.currentTime(init.io);
     peer.paused = false;
     peer.quit = false;
     peer.peer = null;
@@ -120,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
             .seed = 17,
             .forks = &.{.{ .digest = local.fork.digest, .fork = fork }},
             .limits = .{ .connections_max = 4, .handshaking_max = 4, .dialing_max = 2 },
-            .peers = .{ .capacity = 4, .outbound_reserve = 1, .target_peers = 1, .max_peers = 3, .min_outbound = 0, .engine_capacity = 4 },
+            .peers = .{ .capacity = 4, .outbound_reserve = 1, .target_peers = 1, .max_peers = 3, .min_outbound = 0 },
             .control = .{ .inbound_status_grace_ms = 20, .ping_inbound_ms = 1_000, .ping_outbound_ms = 1_000 },
         },
         .local = local,

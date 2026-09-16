@@ -17,70 +17,60 @@ fn dialInitial(pair: *Pair, out: []u8) ![]u8 {
     return pair.sendOne(&pair.client, handle.index, out) orelse error.TestUnexpectedResult;
 }
 
-fn rejectPort(context: ?*anyopaque, from: *const types.Address) bool {
-    const blocked: *const u16 = @ptrCast(@alignCast(context.?));
-    return from.port() != blocked.*;
-}
-
-test "engine consults the admission predicate before opening an inbound slot" {
-    var blocked: u16 = client_address.port();
+test "engine routes existing streams and replayed Initials while source admission is full" {
     var pair: Pair = .{};
-    try pair.init(.{}, .{ .admit = rejectPort, .admit_context = @ptrCast(&blocked) });
-    defer pair.deinit();
-
-    _ = try pair.dial();
-    try pair.pump();
-    try std.testing.expect(pair.server.counters.dropped_rejected >= 1);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
-    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
-
-    blocked = 0;
-    _ = try pair.dial();
-    try pair.pump();
-    var storage: [8]Event = undefined;
-    var connected = false;
-    for (pair.events(&pair.server, &storage)) |event| {
-        if (event == .connected) connected = true;
-    }
-    try std.testing.expect(connected);
-    try std.testing.expectEqual(@as(usize, 1), pair.server.activeIndices().len);
-}
-
-fn countCalls(context: ?*anyopaque, _: *const types.Address) bool {
-    const calls: *u32 = @ptrCast(@alignCast(context.?));
-    calls.* += 1;
-    return true;
-}
-
-test "engine consults the admission predicate once per new Initial and never for routed traffic" {
-    var calls: u32 = 0;
-    var pair: Pair = .{};
-    try pair.init(.{}, .{ .admit = countCalls, .admit_context = @ptrCast(&calls) });
+    try pair.init(.{}, .{ .handshaking_per_source_max = 1 });
     defer pair.deinit();
     const handles = try connectPair(&pair);
-    try std.testing.expectEqual(@as(u32, 1), calls);
 
-    const stream = try pair.client.openStream(handles.client);
-    try std.testing.expectEqual(@as(usize, 5), try pair.client.write(stream, "hello", false));
-    try pair.pump();
-    var storage: [8]Event = undefined;
-    const inbound = try support.expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
-    var buffer: [8]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 5), (try pair.server.read(inbound, &buffer)).len);
-    try std.testing.expectEqual(@as(u32, 1), calls);
+    var packet: [constants.datagram_size_max]u8 = undefined;
+    var response: [constants.datagram_size_max]u8 = undefined;
+    const pending = pair.server.receive(
+        try dialInitial(&pair, &packet),
+        &client_address,
+        pair.now,
+        &response,
+    );
+    try std.testing.expect(pending == .accepted);
+    try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
+    try std.testing.expectEqual(@as(usize, 2), pair.server.activeIndices().len);
+
+    const random_before_refusal = pair.server.csprng;
+    try std.testing.expectEqual(engine_mod.ReceiveOutcome.dropped, pair.server.receive(
+        try dialInitial(&pair, &packet),
+        &client_address,
+        pair.now,
+        &response,
+    ));
+    try std.testing.expectEqualDeep(random_before_refusal, pair.server.csprng);
+    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_source_limit);
+    try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
+    try std.testing.expectEqual(@as(usize, 2), pair.server.activeIndices().len);
 
     var replay: [constants.datagram_size_max]u8 = undefined;
     @memcpy(replay[0..pair.first_initial_len], pair.first_initial[0..pair.first_initial_len]);
-    var response: [constants.datagram_size_max]u8 = undefined;
-    _ = pair.server.receive(
+    const routed = pair.server.receive(
         replay[0..pair.first_initial_len],
         &client_address,
         pair.now,
-        pair.nextPool(),
         &response,
     );
-    try std.testing.expectEqual(@as(u32, 1), calls);
-    try std.testing.expectEqual(@as(usize, 0), pair.client.counters.dropped_rejected);
+    try std.testing.expect(routed == .accepted);
+    try std.testing.expectEqual(handles.server, routed.accepted);
+    try std.testing.expectEqualDeep(random_before_refusal, pair.server.csprng);
+
+    const stream = try pair.client.openStream(handles.client);
+    try std.testing.expectEqual(@as(usize, 5), try pair.client.write(stream, "hello", false));
+    try std.testing.expect(try pair.transfer(&pair.client, &pair.server, client_address, false));
+    pair.server.tick(pair.now);
+    var storage: [8]Event = undefined;
+    const inbound = try support.expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);
+    var buffer: [8]u8 = undefined;
+    const received = try pair.server.read(inbound, &buffer);
+    try std.testing.expectEqualStrings("hello", buffer[0..received.len]);
+    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_source_limit);
+    try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
+    try std.testing.expectEqual(@as(usize, 2), pair.server.activeIndices().len);
 }
 
 test "engine bounds concurrent dials and outbound connections" {
@@ -135,7 +125,6 @@ test "engine drops new handshakes when the server table is full" {
         &client_address,
         pair.client_ctx.local_peer_id,
         pair.now,
-        pair.nextEntropy(),
     ));
 }
 
@@ -158,7 +147,6 @@ test "engine caps inbound handshakes per source address" {
             initial,
             &client_address,
             pair.now,
-            pair.nextPool(),
             &response,
         );
         switch (outcome) {
@@ -177,7 +165,6 @@ test "engine caps inbound handshakes per source address" {
         other,
         &elsewhere,
         pair.now,
-        pair.nextPool(),
         &response,
     );
     switch (foreign) {
@@ -187,31 +174,30 @@ test "engine caps inbound handshakes per source address" {
     try std.testing.expectEqual(limits.handshaking_per_source_max, pair.server.registry.handshaking);
 }
 
-test "engine drops an inbound Initial when the entropy pool is stale" {
+test "engine startup seeds reproducible independent connection IDs and Retry keys" {
     var pair: Pair = .{};
-    try pair.init(.{}, .{});
+    const bounded: engine_mod.Limits = .{ .connections_max = 4, .handshaking_max = 4, .outbound_max = 4 };
+    try pair.init(bounded, bounded);
     defer pair.deinit();
+    var repeated: Pair = .{};
+    try repeated.init(bounded, bounded);
+    defer repeated.deinit();
 
-    var packet: [constants.datagram_size_max]u8 = undefined;
-    const initial = try dialInitial(&pair, &packet);
+    try std.testing.expectEqualSlices(u8, &pair.client.retry_key, &repeated.client.retry_key);
+    try std.testing.expectEqual(pair.client.registry.routes.seed, repeated.client.registry.routes.seed);
+    try std.testing.expect(!std.mem.eql(u8, &pair.client.retry_key, &pair.server.retry_key));
+    try std.testing.expect(pair.client.registry.routes.seed != pair.server.registry.routes.seed);
+    try std.testing.expect(pair.client.registry.routes.seed != std.mem.readInt(u64, pair.client.retry_key[0..8], .little));
 
-    var stale = engine_mod.EntropyPool{};
-    try std.testing.expect(stale.take() == null);
-    var response: [constants.datagram_size_max]u8 = undefined;
-    try std.testing.expectEqual(
-        engine_mod.ReceiveOutcome.dropped,
-        pair.server.receive(
-            initial,
-            &client_address,
-            pair.now,
-            &stale,
-            &response,
-        ),
-    );
-    try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_no_entropy);
-    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
-
-    try std.testing.expectEqual(@as(usize, 0), pair.server.activeIndices().len);
+    const server_before = pair.server.csprng;
+    for (0..4) |_| {
+        const first = try pair.dial();
+        const second = try repeated.dial();
+        try std.testing.expect(pair.client.registry.slots[first.index].scid.eql(&repeated.client.registry.slots[second.index].scid));
+    }
+    try std.testing.expectEqualDeep(server_before, pair.server.csprng);
+    const server = try pair.server.dial(&client_address, pair.client_ctx.local_peer_id, pair.now);
+    try std.testing.expect(!pair.client.registry.slots[0].scid.eql(&pair.server.registry.slots[server.index].scid));
 }
 
 test "engine drops version negotiation packets instead of reflecting them" {
@@ -234,7 +220,6 @@ test "engine drops version negotiation packets instead of reflecting them" {
             &packet,
             &client_address,
             pair.now,
-            pair.nextPool(),
             &response,
         ),
     );
@@ -263,7 +248,6 @@ test "engine answers unsupported versions and drops unroutable packets" {
         &initial,
         &client_address,
         pair.now,
-        pair.nextPool(),
         &response,
     );
     switch (outcome) {
@@ -277,7 +261,6 @@ test "engine answers unsupported versions and drops unroutable packets" {
         &short,
         &client_address,
         pair.now,
-        pair.nextPool(),
         &response,
     ));
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_unroutable);
@@ -287,7 +270,6 @@ test "engine answers unsupported versions and drops unroutable packets" {
         &tiny,
         &client_address,
         pair.now,
-        pair.nextPool(),
         &response,
     ));
     try std.testing.expectEqual(@as(u64, 1), pair.server.counters.dropped_short_initial);
@@ -316,13 +298,18 @@ test "engine retains a live routed stream across unrelated slot churn" {
     var pair: Pair = .{};
     try pair.init(.{ .connections_max = 4, .handshaking_max = 4 }, .{});
     defer pair.deinit();
+    const before_first_dial = pair.client.csprng;
     const handles = try connectPair(&pair);
+    pair.client.csprng = before_first_dial;
     try std.testing.expectError(error.TableFull, pair.client.dial(
         &support.server_address,
         pair.server_ctx.local_peer_id,
         pair.now,
-        pair.client.registry.slots[handles.client.index].scid.bytes[0..limits.local_cid_length].*,
     ));
+    try std.testing.expectEqual(@as(u16, 1), pair.client.registry.active_len);
+    try std.testing.expectEqual(@as(u16, 1), pair.client.registry.outbound);
+    try std.testing.expectEqual(@as(u16, 0), pair.client.registry.dialing);
+    try std.testing.expectEqual(@as(usize, 1), pair.client.registry.routes.count);
     for (0..256) |_| {
         const transient = try pair.dial();
         try std.testing.expect(pair.client.abandon(transient));
@@ -338,24 +325,18 @@ test "engine retains a live routed stream across unrelated slot churn" {
     try std.testing.expect(pair.client.peerId(handles.client).?.eql(&pair.server_ctx.local_peer_id));
 }
 
-test "engine resolved memory plan reports budgeted receive windows and scheduled storage" {
+test "engine resolved memory plan reports budgeted receive windows" {
     var pair: Pair = .{};
     try pair.init(.{ .connections_max = 1024, .receive_budget_bytes = 1024 * limits.connection_window_min }, .{});
     defer pair.deinit();
     const plan = pair.client.memoryPlan();
     try std.testing.expectEqual(@as(u64, 1024 * 1024 * 1024), plan.receive_window_bytes);
-    try std.testing.expectEqual(@as(u16, 1024), plan.scheduled_datagrams);
-    try std.testing.expectEqual(@as(u64, 1024 * constants.datagram_size_max), plan.scheduled_payload_bytes);
-    try std.testing.expect(plan.scheduled_storage_bytes >= plan.scheduled_payload_bytes);
     try std.testing.expect(plan.receive_window_bytes <= plan.requested_receive_window_bytes);
 }
 
-test "engine rejects native timeout overflow and zero scheduling limits" {
+test "engine rejects native timeout overflow" {
     const invalid = [_]engine_mod.Limits{
         .{ .idle_timeout_ms = std.math.maxInt(u64) },
-        .{ .send_per_step_max = 0 },
-        .{ .receive_per_step_max = 0 },
-        .{ .work_per_step_max = 1 },
     };
     for (invalid) |options| {
         var pair: Pair = .{};
@@ -385,7 +366,7 @@ test "engine outgoing descriptor preserves native monotonic pacing timestamp" {
     defer pair.deinit();
     const before = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     const handle = try pair.dial();
-    var batch: engine_mod.SendBatch = .{};
+    var batch: @import("../transport.zig").SendBatch = .{};
     const count = support.sendBatch(&pair.client, handle.index, pair.now, &batch);
     const after = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     try std.testing.expect(count > 0);

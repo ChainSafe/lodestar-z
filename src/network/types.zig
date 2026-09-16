@@ -1,4 +1,15 @@
 pub const Address = @import("udp").Address;
+pub const Handle = struct {
+    index: u16,
+    generation: u32,
+};
+
+pub const StreamHandle = struct {
+    conn: Handle,
+    id: u64,
+    slot: u8,
+};
+
 pub const PeerRef = struct { index: u16, generation: u64 };
 
 pub const Direction = enum { inbound, outbound };

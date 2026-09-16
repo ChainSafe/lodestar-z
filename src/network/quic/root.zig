@@ -1,8 +1,6 @@
-pub const api = @import("api.zig");
 pub const binding = @import("binding.zig");
 pub const limits = @import("limits.zig");
 pub const route_table = @import("route_table.zig");
-pub const stream_iter = @import("stream_iter.zig");
 pub const engine = @import("engine.zig");
 
 test {

@@ -1,5 +1,5 @@
 pub const PeerId = @import("../wire/peer_id.zig").PeerId;
-pub const Handle = @import("../quic/api.zig").Handle;
+pub const Handle = @import("../types.zig").Handle;
 pub const Direction = @import("../types.zig").Direction;
 pub const Address = @import("../types.zig").Address;
 pub const ForkSeq = @import("config").ForkSeq;
@@ -106,12 +106,11 @@ pub const Options = struct {
     target_peers: u16 = 64,
     max_peers: u16 = 96,
     min_outbound: u16 = 16,
-    engine_capacity: u16 = 96,
 
     pub fn validate(self: Options) error{InvalidOptions}!void {
         if (self.capacity == 0 or self.capacity > 4096 or
             self.outbound_reserve >= self.capacity or self.max_peers == 0 or
-            self.max_peers > self.capacity or self.max_peers > self.engine_capacity or
+            self.max_peers > self.capacity or
             self.max_peers > 256 or self.target_peers > self.max_peers or
             self.min_outbound > self.target_peers) return error.InvalidOptions;
     }

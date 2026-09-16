@@ -147,7 +147,7 @@ test "production peer lane preserves closed generations at capacity" {
 }
 
 test "full production lane leaves catalog close pending until output resumes" {
-    var catalog = try n.peers.Catalog.init(std.testing.allocator, .{ .capacity = 2, .outbound_reserve = 0, .target_peers = 1, .max_peers = 2, .min_outbound = 0, .engine_capacity = 2 });
+    var catalog = try n.peers.Catalog.init(std.testing.allocator, .{ .capacity = 2, .outbound_reserve = 0, .target_peers = 1, .max_peers = 2, .min_outbound = 0 });
     defer catalog.deinit(std.testing.allocator);
     const local_key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     const remote_key = try n.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{2}));

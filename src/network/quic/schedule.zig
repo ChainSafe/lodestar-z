@@ -1,11 +1,10 @@
 const std = @import("std");
-const api = @import("api.zig");
 const constants = @import("../constants.zig");
 const types = @import("../types.zig");
 const assert = std.debug.assert;
 
 pub const Entry = struct {
-    handle: ?api.Handle = null,
+    handle: ?types.Handle = null,
     deadline_ns: u64 = 0,
     destination: types.Address = .unspecified,
     length: u16 = 0,
@@ -31,12 +30,12 @@ pub const Queue = struct {
         self.* = undefined;
     }
 
-    pub fn owner(self: *const Queue, index: u16) ?api.Handle {
+    pub fn owner(self: *const Queue, index: u16) ?types.Handle {
         assert(index < self.entries.len);
         return self.entries[index].handle;
     }
 
-    pub fn put(self: *Queue, handle: api.Handle, sent: types.Sent) error{Occupied}!void {
+    pub fn put(self: *Queue, handle: types.Handle, sent: types.Sent) error{Occupied}!void {
         assert(handle.index < self.entries.len);
         assert(sent.bytes.len > 0 and sent.bytes.len <= constants.datagram_size_max);
         const entry = &self.entries[handle.index];

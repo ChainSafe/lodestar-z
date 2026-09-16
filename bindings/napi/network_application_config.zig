@@ -22,22 +22,23 @@ pub const Config = struct {
         base.limits.handshaking_max = r.handshakingCapacity;
         base.limits.dialing_max = r.dialingCapacity;
         base.limits.receive_budget_bytes = r.receiveBudgetBytes;
-        base.core.peers = .{ .capacity = r.peerCapacity, .target_peers = r.targetPeers, .max_peers = r.maxPeers, .min_outbound = r.minOutbound, .outbound_reserve = r.outboundReserve, .engine_capacity = r.connectionCapacity };
-        base.core.dial.concurrent_max = @min(base.core.dial.concurrent_max, r.dialingCapacity);
-        base.core.service.reqresp.peers = r.connectionCapacity;
-        base.core.service.reqresp.admission = try n.reqresp.reqresp.AdmissionOptions.defaults(&self.request, base.core.peers.capacity, base.core.service.reqresp.inbound_max);
-        base.core.service.gossipsub = common.gossip;
-        base.core.service.gossipsub.random_seed = seed;
-        base.core.service.gossipsub.connected_capacity = r.maxPeers;
-        base.core.service.gossipsub.retained_capacity = r.peerCapacity;
-        base.core.service.gossipsub.retained_outbound_reserve = r.outboundReserve;
-        base.core.service.gossipsub.ip_allowlist = common.allowlist[0..common.allowlist_count];
-        base.core.service.gossipsub.topic_policy = common.topic_boundaries[0..common.topic_boundary_count];
-        base.core.service.router.identify = true;
-        base.core.service.router.capabilities = self.capabilities;
+        var gossip_options = common.gossip;
+        gossip_options.ip_allowlist = common.allowlist[0..common.allowlist_count];
+        gossip_options.topic_policy = common.topic_boundaries[0..common.topic_boundary_count];
         base.core.service.identify.?.agent = self.agent[0..self.agent_len];
         base.core.service.identify.?.protocol_version = self.version[0..self.version_len];
-        return .{ .profile = common.profile, .seed = seed, .forks = common.forks[0..common.fork_count], .limits = base.limits, .peers = base.core.peers, .dial = base.core.dial, .reqresp = base.core.service.reqresp, .gossip = base.core.service.gossipsub, .router = base.core.service.router, .identify = base.core.service.identify, .control = base.core.control, .byte_limit = r.nativeBudgetBytes - @sizeOf(n.NetworkCore) };
+        return .{
+            .profile = common.profile,
+            .seed = seed,
+            .forks = common.forks[0..common.fork_count],
+            .limits = base.limits,
+            .peers = .{ .capacity = r.peerCapacity, .target_peers = r.targetPeers, .max_peers = r.maxPeers, .min_outbound = r.minOutbound, .outbound_reserve = r.outboundReserve },
+            .reqresp = .{ .admission = try n.reqresp.reqresp.AdmissionOptions.defaults(&self.request, r.peerCapacity, base.core.service.reqresp.inbound_max) },
+            .gossip = gossip_options,
+            .router = .{ .identify = true, .capabilities = self.capabilities },
+            .identify = base.core.service.identify,
+            .byte_limit = r.nativeBudgetBytes - @sizeOf(n.NetworkCore),
+        };
     }
 };
 pub const Resources = struct {

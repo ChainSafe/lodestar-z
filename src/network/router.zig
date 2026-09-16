@@ -4,34 +4,11 @@ const engine_mod = @import("quic/engine.zig");
 const types = @import("types.zig");
 const reqresp = @import("reqresp/protocol.zig");
 const capability = @import("capabilities.zig");
-const Version = @import("gossipsub/sessions.zig").Version;
+const Version = @import("gossipsub/protocol.zig").Version;
 
-pub const meshsub_ids = [_][]const u8{ "/meshsub/1.2.0", "/meshsub/1.1.0", "/meshsub/1.0.0" };
-pub const Kind = enum { reqresp, meshsub, identify };
-pub const Protocol = union(Kind) {
-    reqresp: reqresp.Protocol,
-    meshsub: Version,
-    identify,
-
-    pub fn id(self: Protocol) []const u8 {
-        return switch (self) {
-            .identify => "/ipfs/id/1.0.0",
-            .reqresp => |which| which.id(),
-            .meshsub => |version| meshsub_ids[2 - @intFromEnum(version)],
-        };
-    }
-
-    pub fn fromId(id_bytes: []const u8) ?Protocol {
-        if (std.mem.eql(u8, id_bytes, "/ipfs/id/1.0.0")) return .identify;
-        if (reqresp.Protocol.fromId(id_bytes)) |which| return .{ .reqresp = which };
-        for (meshsub_ids, 0..) |id_string, index| {
-            if (std.mem.eql(u8, id_string, id_bytes)) return .{
-                .meshsub = @enumFromInt(2 - index),
-            };
-        }
-        return null;
-    }
-};
+pub const meshsub_ids = @import("gossipsub/protocol.zig").ids;
+pub const Kind = @import("protocol.zig").Kind;
+pub const Protocol = @import("protocol.zig").Protocol;
 
 /// Leftover bytes remain borrowed until the next router pump. The selected
 /// handler must copy or consume them synchronously, including a coalesced FIN.
@@ -64,13 +41,13 @@ pub const Options = struct {
 pub const Router = struct {
     counters: Counters = .{},
     negotiator: negotiate.Negotiator,
-    supported: [capability.protocol_count][]const u8 = undefined,
+    supported: [capability.protocol_count]negotiate.Protocol = undefined,
     supported_count: u8 = 0,
     available: capability.Set,
     active_capabilities: capability.Directional = .{ .receive = .initEmpty(), .request = .initEmpty() },
     meshsub_versions: [3]Version = undefined,
     meshsub_versions_count: u8,
-    meshsub_candidates: [3][]const u8 = undefined,
+    meshsub_candidates: [3]negotiate.Protocol = undefined,
     meshsub_count: u8 = 0,
 
     pub fn validateOptions(options: Options) Error!void {
@@ -136,7 +113,7 @@ pub const Router = struct {
         try validateSet(self.available, active);
     }
 
-    /// Commits a validated value without allocation; existing listeners own their prior offers.
+    /// Applies to unselected proposals; accepted streams retain their protocol.
     pub fn setCapabilities(self: *Router, active: capability.Directional) void {
         self.validateCapabilities(active) catch unreachable;
         self.active_capabilities = active;
@@ -144,23 +121,23 @@ pub const Router = struct {
         self.meshsub_count = 0;
         for (std.enums.values(reqresp.Protocol)) |which| {
             if (active.receive.contains(.{ .reqresp = which })) {
-                self.supported[self.supported_count] = which.id();
+                self.supported[self.supported_count] = descriptor(.{ .reqresp = which });
                 self.supported_count += 1;
             }
         }
         for (self.meshsub_versions[0..self.meshsub_versions_count]) |version| {
             const protocol: Protocol = .{ .meshsub = version };
             if (active.receive.contains(protocol)) {
-                self.supported[self.supported_count] = protocol.id();
+                self.supported[self.supported_count] = descriptor(protocol);
                 self.supported_count += 1;
             }
             if (active.request.contains(protocol)) {
-                self.meshsub_candidates[self.meshsub_count] = protocol.id();
+                self.meshsub_candidates[self.meshsub_count] = descriptor(protocol);
                 self.meshsub_count += 1;
             }
         }
         if (active.receive.contains(.identify)) {
-            self.supported[self.supported_count] = @as(Protocol, .identify).id();
+            self.supported[self.supported_count] = descriptor(.identify);
             self.supported_count += 1;
         }
         std.debug.assert(self.supported_count == active.receive.count());
@@ -182,7 +159,7 @@ pub const Router = struct {
         now: types.Now,
     ) Error!engine_mod.StreamHandle {
         if (!self.active_capabilities.request.contains(protocol)) return error.ProtocolDisabled;
-        return self.negotiator.beginOutbound(engine, conn, &.{protocol.id()}, now, .{
+        return self.negotiator.beginOutbound(engine, conn, &.{descriptor(protocol)}, now, .{
             .control = protocol == .reqresp and protocol.reqresp.isControl(),
         });
     }
@@ -196,7 +173,7 @@ pub const Router = struct {
         timeout_ms: u64,
     ) Error!engine_mod.StreamHandle {
         if (!self.active_capabilities.request.contains(.{ .reqresp = protocol })) return error.ProtocolDisabled;
-        return self.negotiator.beginOutbound(engine, conn, &.{protocol.id()}, now, .{ .control = protocol.isControl(), .timeout_ms = timeout_ms });
+        return self.negotiator.beginOutbound(engine, conn, &.{descriptor(.{ .reqresp = protocol })}, now, .{ .control = protocol.isControl(), .timeout_ms = timeout_ms });
     }
 
     pub fn beginMeshsub(
@@ -217,7 +194,7 @@ pub const Router = struct {
     ) void {
         for (events) |event| switch (event) {
             .stream_opened => |stream| {
-                self.negotiator.acceptInbound(stream, self.supported[0..self.supported_count], now) catch {
+                self.negotiator.acceptInbound(stream, now) catch {
                     self.counters.refused +|= 1;
                     engine.closeStream(stream, types.app_error_negotiation_failed);
                 };
@@ -237,13 +214,13 @@ pub const Router = struct {
     pub fn pump(self: *Router, engine: *engine_mod.Engine, now: types.Now, out: []Outcome) usize {
         std.debug.assert(out.len <= outcomes_per_pump);
         var raw: [outcomes_per_pump]negotiate.Outcome = undefined;
-        const count = self.negotiator.pump(engine, now, raw[0..out.len]);
+        const count = self.negotiator.pump(engine, now, self.supported[0..self.supported_count], raw[0..out.len]);
         for (raw[0..count], out[0..count]) |result, *outcome| {
             if (result.direction == .inbound and result.result == .failed) {
                 self.counters.inbound_failures[@intFromEnum(result.result.failed)] +|= 1;
                 std.log.scoped(.network_quic).debug("inbound_negotiation_failed connection={d}:{d} stream={d} reason={s}", .{ result.stream.conn.index, result.stream.conn.generation, result.stream.id, @tagName(result.result.failed) });
             }
-            const selected = Protocol.fromId(result.protocol_id);
+            const selected: ?Protocol = if (result.protocol_index) |index| Protocol.fromIndex(index) else null;
             outcome.* = .{
                 .stream = result.stream,
                 .direction = result.direction,
@@ -262,6 +239,10 @@ pub const Router = struct {
         return count;
     }
 };
+
+fn descriptor(protocol: Protocol) negotiate.Protocol {
+    return .{ .id = protocol.id(), .index = protocol.index() };
+}
 
 pub const outcomes_per_pump: usize = 16;
 

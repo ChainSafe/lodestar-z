@@ -16,7 +16,7 @@ fn negotiate(pair: *Pair, method: protocol.Protocol, bytes: []const u8, sink: []
         try pair.pair.pump();
         var events: [16]engine.Event = undefined;
         for (pair.pair.events(&pair.pair.server, &events)) |event| switch (event) {
-            .stream_opened => |stream| try pair.server.router.negotiator.acceptInbound(stream, &protocol.ids, pair.pair.now),
+            .stream_opened => |stream| try pair.server.router.negotiator.acceptInbound(stream, pair.pair.now),
             else => {},
         };
         var outcomes: [8]router.Outcome = undefined;

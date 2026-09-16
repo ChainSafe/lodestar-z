@@ -21,8 +21,6 @@ pub const client_initial_min: usize = 1_200;
 pub const receive_budget_bytes: u64 = 512 * 1_024 * 1_024;
 pub const connection_window_min: u64 = 1 * 1_024 * 1_024;
 pub const connection_window_max: u64 = 16 * 1_024 * 1_024;
-pub const send_burst_max: u32 = 256;
-pub const work_per_step_max: u16 = 4096;
 pub const timeout_ms_max: u64 = 24 * 60 * 60 * 1000;
 pub const local_cid_length: usize = 16;
 pub const initial_dcid_length_min: usize = 8;
@@ -39,7 +37,6 @@ comptime {
     std.debug.assert(connection_window_min <= connection_window_max);
     std.debug.assert(handshaking_max <= connections_max_default);
     std.debug.assert(dialing_max <= connections_max_default - handshaking_max);
-    std.debug.assert(send_burst_max % constants.send_batch_max == 0);
     std.debug.assert(connections_max_default <= connections_max_ceiling);
     std.debug.assert(streams_per_connection == 2 * peer_streams_bidi);
     std.debug.assert(receive_budget_bytes / connections_max_default >= connection_window_min);

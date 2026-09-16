@@ -65,9 +65,9 @@ fn fuzzMultistream(data: []const u8) void {
             std.debug.assert(std.mem.eql(u8, message.token, again.token));
         }
     } else |_| {}
-    var listener = wire.multistream.Listener.init(&.{"/ipfs/ping/1.0.0"});
+    var listener: wire.multistream.Listener = .{};
     var reply: [8 * wire.multistream.message_length_max]u8 = undefined;
-    _ = listener.feed(data, &reply) catch {};
+    _ = listener.feed(data, &.{.{ .id = "/ipfs/ping/1.0.0", .index = 0 }}, &reply) catch {};
     var dialer = wire.multistream.Dialer.init("/ipfs/ping/1.0.0") catch unreachable;
     _ = dialer.feed(data) catch {};
 }

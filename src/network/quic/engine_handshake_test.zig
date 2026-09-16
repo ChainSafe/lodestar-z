@@ -182,7 +182,7 @@ fn standaloneEngine(seed: u8, engine_limits: engine_mod.Limits) !Engine {
         .tls = ctx,
         .limits = engine_limits,
         .local = .{ client_address, null },
-        .seed = @splat(seed),
+        .seed = &@as([32]u8, @splat(seed)),
     });
 }
 

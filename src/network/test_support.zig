@@ -22,14 +22,12 @@ pub const Pair = struct {
     client: Engine = undefined,
     server: Engine = undefined,
     now: Now = .{ .mono_ms = 1_000, .unix_s = now_unix },
-    entropy: u64 = 0,
-    pool: engine_mod.EntropyPool = .{},
     first_initial: [constants.datagram_size_max]u8 = undefined,
     first_initial_len: usize = 0,
     drop_to_server: bool = false,
     client_source: types.Address = client_address,
     drop_to_address: ?types.Address = null,
-    batch: engine_mod.SendBatch = undefined,
+    batch: transport_mod.SendBatch = undefined,
 
     pub fn init(self: *Pair, client_limits: Limits, server_limits: Limits) !void {
         const client_key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{1}));
@@ -43,7 +41,7 @@ pub const Pair = struct {
             .tls = self.client_ctx,
             .limits = client_limits,
             .local = .{ client_address, null },
-            .seed = @splat(1),
+            .seed = &@as([32]u8, @splat(1)),
         }) catch |err| {
             self.server_ctx.deinit();
             self.client_ctx.deinit();
@@ -53,14 +51,13 @@ pub const Pair = struct {
             .tls = self.server_ctx,
             .limits = server_limits,
             .local = .{ server_address, null },
-            .seed = @splat(2),
+            .seed = &@as([32]u8, @splat(2)),
         }) catch |err| {
             self.client.deinit();
             self.server_ctx.deinit();
             return err;
         };
         self.now = .{ .mono_ms = 1_000, .unix_s = now_unix };
-        self.entropy = 0;
         self.first_initial_len = 0;
         self.drop_to_server = false;
         self.client_source = client_address;
@@ -76,24 +73,11 @@ pub const Pair = struct {
         return (engine.sendOne(index, self.now, out) orelse return null).bytes;
     }
 
-    pub fn nextEntropy(self: *Pair) [limits.local_cid_length]u8 {
-        self.entropy += 1;
-        var bytes: [limits.local_cid_length]u8 = @splat(0);
-        std.mem.writeInt(u64, bytes[0..8], self.entropy, .little);
-        return bytes;
-    }
-
-    pub fn nextPool(self: *Pair) *engine_mod.EntropyPool {
-        self.pool.fill(self.nextEntropy());
-        return &self.pool;
-    }
-
     pub fn dial(self: *Pair) !engine_mod.Handle {
         return self.client.dial(
             &server_address,
             self.server_ctx.local_peer_id,
             self.now,
-            self.nextEntropy(),
         );
     }
 
@@ -125,7 +109,7 @@ pub const Pair = struct {
         var index: u16 = 0;
         while (index < from.registry.slots.len) : (index += 1) {
             var budget: u32 = 0;
-            while (budget < limits.send_burst_max) {
+            while (budget < transport_mod.send_burst_max) {
                 const count = sendBatch(from, index, self.now, &self.batch);
                 if (count == 0) break;
                 budget += count;
@@ -143,12 +127,11 @@ pub const Pair = struct {
                         datagram,
                         &from_address,
                         self.now,
-                        self.nextPool(),
                         &response,
                     );
                     if (outcome == .retry) {
                         var reply: [constants.datagram_size_max]u8 = undefined;
-                        _ = from.receive(outcome.retry, &sent.to, self.now, self.nextPool(), &reply);
+                        _ = from.receive(outcome.retry, &sent.to, self.now, &reply);
                     }
                 }
                 if (count < constants.send_batch_max) break;
@@ -241,7 +224,7 @@ pub fn expectStreamClosed(event: Event, stream: engine_mod.StreamHandle) !?u64 {
     }
 }
 
-pub fn sendBatch(engine: *Engine, index: u16, now: Now, batch: *engine_mod.SendBatch) u8 {
+pub fn sendBatch(engine: *Engine, index: u16, now: Now, batch: *transport_mod.SendBatch) u8 {
     var count: u8 = 0;
     while (count < constants.send_batch_max) : (count += 1) {
         batch.sent[count] = engine.sendOne(index, now, &batch.buffers[count]) orelse break;
@@ -249,7 +232,7 @@ pub fn sendBatch(engine: *Engine, index: u16, now: Now, batch: *engine_mod.SendB
     return count;
 }
 
-pub fn step(transport: *transport_mod.Transport, io: std.Io, events: []Event, activity: []engine_mod.Handle, options: @import("driver.zig").StepOptions) transport_mod.StepError!@import("driver.zig").StepResult {
+pub fn step(transport: *transport_mod.Transport, io: std.Io, events: []Event, activity: []engine_mod.Handle, options: transport_mod.StepOptions) transport_mod.StepError!transport_mod.StepResult {
     const result = transport.step(io, events, activity, options);
     if (result.failure) |err| return err;
     return result.progress;

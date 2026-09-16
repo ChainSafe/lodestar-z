@@ -12,7 +12,7 @@ pub export fn zig_fuzz_init() callconv(.c) void {
         .tls = context,
         .limits = .{ .connections_max = 4, .handshaking_max = 2, .handshaking_per_source_max = 1, .dialing_max = 1 },
         .local = .{ .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 9000 } }, null },
-        .seed = @splat(1),
+        .seed = &@as([32]u8, @splat(1)),
     }) catch @panic("QUIC initialization failed");
 }
 
@@ -22,12 +22,10 @@ pub export fn zig_fuzz_test(bytes: [*]const u8, len: usize) callconv(.c) void {
     var output: [datagram.len]u8 = undefined;
     var events: [32]quic.engine.Event = undefined;
     var now: network.Now = .{ .mono_ms = 0, .unix_s = 1_800_000_000 };
-    var entropy: quic.engine.EntropyPool = .{};
     for (0..4) |i| {
         @memcpy(datagram[0..len], bytes[0..len]);
         const source: network.Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, @intCast(1 + i / 2) }, .port = @intCast(9000 + i) } };
-        entropy.fill(@splat(@intCast(i + 1)));
-        _ = engine.receive(datagram[0..len], &source, now, &entropy, &output);
+        _ = engine.receive(datagram[0..len], &source, now, &output);
         now.mono_ms += 1;
         engine.tick(now);
         _ = engine.pollEvents(&events);

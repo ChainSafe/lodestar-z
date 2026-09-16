@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("core.zig");
 const engine = @import("quic/engine.zig");
+const transport = @import("transport.zig");
 const rr = @import("reqresp/reqresp.zig");
 const gossip = @import("gossipsub/options.zig");
 const c = @import("gossipsub/constants.zig");
@@ -9,27 +10,35 @@ const dial = @import("peers/dial_queue.zig");
 const router = @import("router.zig");
 
 pub const Profile = enum { small, beacon_node };
+pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks" });
+pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "retained_capacity", "retained_outbound_reserve", "random_seed" });
+pub const RouterOverrides = Overrides(router.Options, &.{"outbound_control_reserved"});
+
+/// Req/resp, gossip and router fields override profile defaults; shared capacities are derived.
 pub const Request = struct {
     profile: Profile = .beacon_node,
     seed: u64,
     forks: []const rr.ForkEntry,
     limits: ?engine.Limits = null,
+    work_limits: transport.WorkLimits = .{},
     peers: ?peers.Options = null,
     dial: ?dial.Options = null,
-    reqresp: ?rr.Options = null,
-    gossip: ?gossip.Options = null,
-    router: ?router.Options = null,
+    reqresp: ReqRespOverrides = .{},
+    gossip: GossipOverrides = .{},
+    router: RouterOverrides = .{},
     identify: ?@import("identify/root.zig").Options = null,
     control: ?@import("peers/control.zig").Options = null,
     byte_limit: ?usize = null,
 };
 pub const Resolved = struct {
     limits: engine.Limits,
+    work_limits: transport.WorkLimits,
     core: core.Options,
     byte_limit: usize,
 };
 
 pub fn resolve(request: Request) !Resolved {
+    try request.work_limits.validate();
     const small = request.profile == .small;
     const limits: engine.Limits = request.limits orelse .{
         .connections_max = if (small) 16 else 128,
@@ -43,9 +52,25 @@ pub fn resolve(request: Request) !Resolved {
         .target_peers = if (small) 8 else 64,
         .max_peers = if (small) 12 else 96,
         .min_outbound = if (small) 2 else 16,
-        .engine_capacity = limits.connections_max,
     };
     const reserved: u16 = if (small) 2 else 8;
+    var requests: rr.Options = .{
+        .forks = request.forks,
+        .peers = limits.connections_max,
+        .outbound_max = if (small) 8 else 64,
+        .inbound_max = if (small) 8 else 64,
+        .outbound_control_reserved = reserved,
+        .inbound_control_reserved = reserved,
+        .outbound_per_peer_max = if (small) 4 else 8,
+        .inbound_per_peer_max = if (small) 8 else 16,
+        .inbound_application_per_peer_max = if (small) 4 else 8,
+    };
+    applyOverrides(&requests, request.reqresp);
+    var protocols: router.Options = .{
+        .negotiations_max = if (small) 32 else 256,
+        .outbound_control_reserved = requests.outbound_control_reserved,
+    };
+    applyOverrides(&protocols, request.router);
     var gossip_options: gossip.Options = .{
         .random_seed = request.seed,
         .connected_capacity = peer_options.max_peers,
@@ -60,8 +85,10 @@ pub fn resolve(request: Request) !Resolved {
         gossip_options.decompressed_arena_bytes = c.MAX_PAYLOAD_SIZE + @import("gossipsub/topic.zig").topic_max_len;
         gossip_options.large_pool_count = 1;
     }
+    applyOverrides(&gossip_options, request.gossip);
     const result: Resolved = .{
         .limits = limits,
+        .work_limits = request.work_limits,
         .byte_limit = request.byte_limit orelse if (small) 80 * 1024 * 1024 else 256 * 1024 * 1024,
         .core = .{
             .peers = peer_options,
@@ -69,25 +96,15 @@ pub fn resolve(request: Request) !Resolved {
             .control = request.control orelse .{ .operations_max = if (small) 4 else 16 },
             .service = .{
                 .identify = request.identify orelse .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 },
-                .router = request.router orelse .{ .negotiations_max = if (small) 32 else 256, .outbound_control_reserved = reserved },
-                .reqresp = request.reqresp orelse .{
-                    .forks = request.forks,
-                    .peers = limits.connections_max,
-                    .outbound_max = if (small) 8 else 64,
-                    .inbound_max = if (small) 8 else 64,
-                    .outbound_control_reserved = reserved,
-                    .inbound_control_reserved = reserved,
-                    .outbound_per_peer_max = if (small) 4 else 8,
-                    .inbound_per_peer_max = if (small) 8 else 16,
-                    .inbound_application_per_peer_max = if (small) 4 else 8,
-                },
-                .gossipsub = request.gossip orelse gossip_options,
+                .router = protocols,
+                .reqresp = requests,
+                .gossipsub = gossip_options,
             },
         },
     };
     try validate(result.limits, result.core);
     if (result.core.service.reqresp.outbound_control_reserved == 0 or result.core.service.reqresp.inbound_control_reserved == 0 or
-        result.core.service.gossipsub.connected_capacity < result.core.peers.max_peers or result.limits.connections_max > c.peers_cap)
+        result.limits.connections_max > c.peers_cap)
         return error.InvalidOptions;
     return result;
 }
@@ -95,15 +112,41 @@ pub fn resolve(request: Request) !Resolved {
 pub fn validate(limits: engine.Limits, options: core.Options) !void {
     _ = try engine.Engine.validateLimits(limits);
     try core.Core.validateOptions(options);
-    if (options.peers.engine_capacity != limits.connections_max or
+    if (options.peers.max_peers > limits.connections_max or
+        options.service.reqresp.peers < limits.connections_max or
         options.dial.concurrent_max > limits.dialing_max or
         options.service.router.outbound_control_reserved < options.service.reqresp.outbound_control_reserved)
         return error.InvalidOptions;
 }
 
-test "managed configuration resolves shared capacities and rejects explicit conflicts" {
+fn Overrides(comptime Options: type, comptime derived: []const []const u8) type {
+    const fields = std.meta.fields(Options);
+    var names: [fields.len - derived.len][:0]const u8 = undefined;
+    var types: [names.len]type = undefined;
+    var attrs: [names.len]std.builtin.Type.StructField.Attributes = undefined;
+    var count: usize = 0;
+    for (fields) |field| {
+        var shared = false;
+        for (derived) |name| shared = shared or std.mem.eql(u8, name, field.name);
+        if (shared) continue;
+        const optional = ?field.type;
+        names[count] = field.name;
+        types[count] = optional;
+        attrs[count] = .{ .default_value_ptr = &@as(optional, null) };
+        count += 1;
+    }
+    std.debug.assert(count == names.len);
+    return @Struct(.auto, null, &names, &types, &attrs);
+}
+
+fn applyOverrides(options: anytype, overrides: anytype) void {
+    inline for (std.meta.fields(@TypeOf(overrides))) |field| {
+        if (@field(overrides, field.name)) |value| @field(options, field.name) = value;
+    }
+}
+
+test "managed configuration resolves shared capacities from their owners" {
     const small = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
-    try std.testing.expectEqual(small.limits.connections_max, small.core.peers.engine_capacity);
     try std.testing.expectEqual(small.limits.connections_max, small.core.service.reqresp.peers);
     try std.testing.expectEqual(small.core.peers.max_peers, small.core.service.gossipsub.connected_capacity);
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .peers = .{} }));
@@ -113,13 +156,51 @@ test "managed configuration resolves shared capacities and rejects explicit conf
     try std.testing.expect(small.byte_limit < beacon.byte_limit);
 }
 
+test "managed configuration overrides preserve profile defaults and derive shared fields" {
+    const forks: []const rr.ForkEntry = &.{.{ .digest = @splat(1), .fork = .fulu }};
+    const resolved = try resolve(.{
+        .profile = .small,
+        .seed = 17,
+        .forks = forks,
+        .limits = .{ .connections_max = 8, .handshaking_max = 4, .dialing_max = 2 },
+        .peers = .{ .capacity = 24, .outbound_reserve = 3, .max_peers = 6, .target_peers = 4, .min_outbound = 1 },
+        .reqresp = .{ .outbound_control_reserved = 3, .inbound_control_reserved = 1, .work_per_pump_max = 7 },
+        .gossip = .{ .validation_capacity = 16 },
+        .router = .{ .negotiations_max = 20 },
+    });
+    const service = &resolved.core.service;
+    try std.testing.expectEqual(@as(u16, 8), service.reqresp.peers);
+    try std.testing.expectEqualSlices(rr.ForkEntry, forks, service.reqresp.forks);
+    try std.testing.expectEqual(@as(u16, 8), service.reqresp.outbound_max);
+    try std.testing.expectEqual(@as(u16, 7), service.reqresp.work_per_pump_max);
+    try std.testing.expectEqual(@as(u16, 1), service.reqresp.inbound_control_reserved);
+    try std.testing.expectEqual(@as(u16, 3), service.router.outbound_control_reserved);
+    try std.testing.expectEqual(@as(u16, 20), service.router.negotiations_max);
+    try std.testing.expectEqual(@as(u16, 6), service.gossipsub.connected_capacity);
+    try std.testing.expectEqual(@as(u16, 24), service.gossipsub.retained_capacity);
+    try std.testing.expectEqual(@as(u16, 3), service.gossipsub.retained_outbound_reserve);
+    try std.testing.expectEqual(@as(?u64, 17), service.gossipsub.random_seed);
+    try std.testing.expectEqual(@as(usize, 16), service.gossipsub.validation_capacity);
+    try std.testing.expectEqual(@as(usize, 256), service.gossipsub.mcache_capacity);
+    try std.testing.expectEqual(@as(u16, 2), resolved.core.dial.concurrent_max);
+}
+
 test "managed configuration rejects inconsistent capacity sections before owners" {
     const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
     var options = resolved.core;
+    options.service.router.outbound_control_reserved += 1;
+    try validate(resolved.limits, options);
+    options = resolved.core;
     options.service.reqresp.inbound_control_reserved = options.service.reqresp.inbound_max + 1;
     try std.testing.expectError(error.InvalidOptions, validate(resolved.limits, options));
     options = resolved.core;
     options.service.router.outbound_control_reserved = 0;
+    try std.testing.expectError(error.InvalidOptions, validate(resolved.limits, options));
+    options = resolved.core;
+    options.service.reqresp.peers = resolved.limits.connections_max - 1;
+    try std.testing.expectError(error.InvalidOptions, validate(resolved.limits, options));
+    options = resolved.core;
+    options.peers.max_peers = resolved.limits.connections_max + 1;
     try std.testing.expectError(error.InvalidOptions, validate(resolved.limits, options));
     options = resolved.core;
     options.service.gossipsub.retained_capacity = options.service.gossipsub.connected_capacity - 1;
@@ -135,30 +216,25 @@ test "managed configuration rejects inconsistent capacity sections before owners
     try std.testing.expectError(error.InvalidOptions, validate(limits, resolved.core));
 }
 
-test "managed configuration rejects zero request work from complete section" {
-    const base = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
-    var requests = base.core.service.reqresp;
-    requests.work_per_pump_max = 0;
-    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = requests }));
+test "managed configuration rejects zero request work override" {
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .work_per_pump_max = 0 } }));
 }
 
 test "managed configuration rejects zero control timer from complete section" {
     try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .control = .{ .ping_inbound_ms = 0 } }));
 }
 
-test "managed configuration validates complete router and score sections" {
-    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .router = .{ .meshsub = false, .outbound_control_reserved = 2 } }));
-    const base = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
-    var options = base.core.service.gossipsub;
-    options.score_params.decay_interval_ms = 0;
-    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .gossip = options }));
+test "managed configuration validates router and score overrides" {
+    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .router = .{ .meshsub = false } }));
+    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .gossip = .{ .score_params = .{ .decay_interval_ms = 0 } } }));
+    try std.testing.expectError(error.InvalidOptions, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .outbound_control_reserved = 0 } }));
+    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .outbound_control_reserved = 3 }, .router = .{ .negotiations_max = 2 } }));
 }
 
 test "managed runtime request admission derives retained capacity quotas and control reservation" {
     const base = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
-    var requests = base.core.service.reqresp;
-    requests.admission = try rr.AdmissionOptions.defaults(&@import("reqresp/policy_fixture.zig").config(), base.core.peers.capacity, requests.inbound_max);
-    const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = requests });
+    var admission_options = try rr.AdmissionOptions.defaults(&@import("reqresp/policy_fixture.zig").config(), base.core.peers.capacity, base.core.service.reqresp.inbound_max);
+    const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .admission = admission_options } });
     const admission = resolved.core.service.reqresp.admission.?.limits;
     try std.testing.expectEqual(resolved.core.peers.capacity, admission.identities);
     const ForkSeq = @import("config").ForkSeq;
@@ -166,17 +242,15 @@ test "managed runtime request admission derives retained capacity quotas and con
     try std.testing.expectEqual(@as(u32, 128), admission.peer[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.blocks_by_root_v2)].tokens);
     try std.testing.expectEqual(@as(u32, 1024), admission.peer[@intFromEnum(ForkSeq.phase0)][@intFromEnum(Protocol.blocks_by_root_v2)].tokens);
     try std.testing.expectEqual(@as(u32, resolved.core.service.reqresp.inbound_max), admission.global[@intFromEnum(ForkSeq.fulu)][@intFromEnum(Protocol.ping_v1)].tokens);
-    requests.admission.?.limits = admission;
-    requests.admission.?.limits.global[0][0].tokens = 0;
-    try std.testing.expectError(error.InvalidQuota, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = requests }));
+    admission_options.limits.global[0][0].tokens = 0;
+    try std.testing.expectError(error.InvalidQuota, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = .{ .admission = admission_options } }));
 }
 
 test "managed runtime request admission memory plan measures both retained profiles" {
     for ([_]Profile{ .small, .beacon_node }) |profile| {
         const base = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{} });
-        var requests = base.core.service.reqresp;
-        requests.admission = try rr.AdmissionOptions.defaults(&@import("reqresp/policy_fixture.zig").config(), base.core.peers.capacity, requests.inbound_max);
-        const resolved = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{}, .reqresp = requests });
+        const admission = try rr.AdmissionOptions.defaults(&@import("reqresp/policy_fixture.zig").config(), base.core.peers.capacity, base.core.service.reqresp.inbound_max);
+        const resolved = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{}, .reqresp = .{ .admission = admission } });
         var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
         var handler = try @import("reqresp/reqresp.zig").ReqResp.init(allocator.allocator(), resolved.core.service.reqresp);
         defer handler.deinit();
@@ -184,4 +258,11 @@ test "managed runtime request admission memory plan measures both retained profi
         try std.testing.expectEqual(allocator.allocated_bytes, plan.total_bytes - plan.facade_bytes);
         std.debug.print("request admission memory {s}: retained={d} admission={d} facade={d} slots={d} io={d} output_limiter={d} sinks={d} total={d}\n", .{ @tagName(profile), resolved.core.peers.capacity, plan.admission_bytes, plan.facade_bytes, plan.slot_bytes, plan.io_bytes, plan.limiter_bytes, plan.request_sink_bytes, plan.total_bytes });
     }
+}
+
+test "managed configuration preserves independent transport work limits" {
+    const limits: transport.WorkLimits = .{ .send_per_step_max = 3, .receive_per_step_max = 2, .work_per_step_max = 7 };
+    const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = limits });
+    try std.testing.expectEqual(limits, resolved.work_limits);
+    try std.testing.expectError(error.InvalidLimits, resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .work_limits = .{ .send_per_step_max = 0 } }));
 }

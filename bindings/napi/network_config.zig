@@ -22,7 +22,7 @@ pub const Config = struct {
     bootstrap: [bootstrap_max]struct { bytes: [enr_max]u8, len: u16 },
     bootstrap_count: u8,
     slot: u64,
-    gossip: n.gossipsub.Options,
+    gossip: n.configuration.GossipOverrides,
     allowlist: [32][16]u8,
     allowlist_count: u8,
     topic_boundaries: [topic_policy.boundary_max]topic_policy.Boundary,
@@ -201,13 +201,11 @@ pub fn parse(value: Value, out: *Config) !void {
 }
 
 fn parseGossip(value: Value, out: *Config) !void {
-    const resolved = n.configuration.resolve(.{ .profile = out.profile, .seed = 1, .forks = out.forks[0..out.fork_count] }) catch return error.InvalidNetworkConfig;
-    out.gossip = resolved.core.service.gossipsub;
-    out.gossip.observe_subscriptions = false;
+    out.gossip = .{ .observe_subscriptions = false };
     const policy = try get(value, "gossipPolicy");
     try object(policy, &.{ "phase0Digest", "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score" });
     out.gossip.iwant_followup_ms = try bigint(try get(policy, "iwantFollowupMs"));
-    out.gossip.idontwant_min_data_size = @intCast(try integer(try get(policy, "idontwantMinDataSize"), n.gossipsub.constants.GOSSIP_MAX_SIZE));
+    out.gossip.idontwant_min_data_size = @as(usize, @intCast(try integer(try get(policy, "idontwantMinDataSize"), n.gossipsub.constants.GOSSIP_MAX_SIZE)));
     out.gossip.heartbeat_interval_ms = try bigint(try get(policy, "heartbeatIntervalMs"));
     out.gossip.validation_timeout_ms = try bigint(try get(policy, "validationTimeoutMs"));
     out.gossip.validation_tombstone_ms = try bigint(try get(policy, "validationTombstoneMs"));
@@ -218,31 +216,32 @@ fn parseGossip(value: Value, out: *Config) !void {
     out.gossip.retained_score_ms = try bigint(try get(policy, "retainedScoreMs"));
     out.gossip.opportunistic_graft_interval_ms = try bigint(try get(policy, "opportunisticGraftIntervalMs"));
     const phase0 = try get(policy, "phase0Digest");
-    out.gossip.message_id_policy.phase0_digest = if (try phase0.typeof() == .null) null else try fixed(4, phase0);
+    out.gossip.message_id_policy = .{ .phase0_digest = if (try phase0.typeof() == .null) null else try fixed(4, phase0) };
     out.gossip.gossip_factor = try number(try get(policy, "gossipFactor"));
     const allowlist = try get(policy, "ipAllowlist");
     out.allowlist_count = @intCast(try array(allowlist, out.allowlist.len));
     for (0..out.allowlist_count) |i| out.allowlist[i] = try fixed(16, try allowlist.getElement(@intCast(i)));
     const score = try get(policy, "score");
     try object(score, &.{ "appWeight", "ipColocationWeight", "ipColocationThreshold", "behaviourWeight", "behaviourThreshold", "behaviourDecay", "topicCap", "decayIntervalMs", "decayToZero", "gossipThreshold", "publishThreshold", "graylistThreshold", "opportunisticGraftThreshold", "defaultTopic" });
-    out.gossip.score_params.app_weight = try number(try get(score, "appWeight"));
-    out.gossip.score_params.ip_colocation_weight = try number(try get(score, "ipColocationWeight"));
-    out.gossip.score_params.ip_colocation_threshold = @intCast(try integer(try get(score, "ipColocationThreshold"), 65535));
-    out.gossip.score_params.behaviour_weight = try number(try get(score, "behaviourWeight"));
-    out.gossip.score_params.behaviour_threshold = try number(try get(score, "behaviourThreshold"));
-    out.gossip.score_params.behaviour_decay = try number(try get(score, "behaviourDecay"));
-    out.gossip.score_params.topic_cap = try number(try get(score, "topicCap"));
-    out.gossip.score_params.decay_interval_ms = try bigint(try get(score, "decayIntervalMs"));
-    out.gossip.score_params.decay_to_zero = try number(try get(score, "decayToZero"));
-    out.gossip.score_params.gossip_threshold = try number(try get(score, "gossipThreshold"));
-    out.gossip.score_params.publish_threshold = try number(try get(score, "publishThreshold"));
-    out.gossip.score_params.graylist_threshold = try number(try get(score, "graylistThreshold"));
-    out.gossip.score_params.opportunistic_graft_threshold = try number(try get(score, "opportunisticGraftThreshold"));
-    try parseTopicParams(try get(score, "defaultTopic"), &out.gossip.score_params.topic);
-    var options = resolved.core;
-    options.service.gossipsub = out.gossip;
-    options.service.gossipsub.topic_policy = if (out.topic_boundary_count == 0) null else out.topic_boundaries[0..out.topic_boundary_count];
-    n.configuration.validate(resolved.limits, options) catch return error.InvalidNetworkConfig;
+    var params: n.gossipsub.score.Params = .{};
+    params.app_weight = try number(try get(score, "appWeight"));
+    params.ip_colocation_weight = try number(try get(score, "ipColocationWeight"));
+    params.ip_colocation_threshold = @intCast(try integer(try get(score, "ipColocationThreshold"), 65535));
+    params.behaviour_weight = try number(try get(score, "behaviourWeight"));
+    params.behaviour_threshold = try number(try get(score, "behaviourThreshold"));
+    params.behaviour_decay = try number(try get(score, "behaviourDecay"));
+    params.topic_cap = try number(try get(score, "topicCap"));
+    params.decay_interval_ms = try bigint(try get(score, "decayIntervalMs"));
+    params.decay_to_zero = try number(try get(score, "decayToZero"));
+    params.gossip_threshold = try number(try get(score, "gossipThreshold"));
+    params.publish_threshold = try number(try get(score, "publishThreshold"));
+    params.graylist_threshold = try number(try get(score, "graylistThreshold"));
+    params.opportunistic_graft_threshold = try number(try get(score, "opportunisticGraftThreshold"));
+    try parseTopicParams(try get(score, "defaultTopic"), &params.topic);
+    out.gossip.score_params = params;
+    var gossip_options = out.gossip;
+    gossip_options.topic_policy = if (out.topic_boundary_count == 0) null else out.topic_boundaries[0..out.topic_boundary_count];
+    _ = n.configuration.resolve(.{ .profile = out.profile, .seed = 1, .forks = out.forks[0..out.fork_count], .gossip = gossip_options }) catch return error.InvalidNetworkConfig;
 }
 
 pub fn completeObject(value: Value, comptime names: []const []const u8) !void {
@@ -281,16 +280,19 @@ fn parseTopicPolicy(value: Value, out: *Config) !void {
     out.topic_boundary_count = @intCast(count);
 }
 
+pub fn parseStatus(status: Value, out: *t.Status) !void {
+    try object(status, &.{ "forkDigest", "finalizedRoot", "finalizedEpoch", "headRoot", "headSlot", "earliestAvailableSlot" });
+    out.fork_digest = try fixed(4, try get(status, "forkDigest"));
+    out.finalized_root = try fixed(32, try get(status, "finalizedRoot"));
+    out.finalized_epoch = try bigint(try get(status, "finalizedEpoch"));
+    out.head_root = try fixed(32, try get(status, "headRoot"));
+    out.head_slot = try bigint(try get(status, "headSlot"));
+    out.earliest_available_slot = try optionalBigint(try get(status, "earliestAvailableSlot"));
+}
+
 pub fn parseLocal(local: Value, out: *t.LocalState) !void {
     try object(local, &.{ "status", "metadata", "fork" });
-    const status = try get(local, "status");
-    try object(status, &.{ "forkDigest", "finalizedRoot", "finalizedEpoch", "headRoot", "headSlot", "earliestAvailableSlot" });
-    out.*.status.fork_digest = try fixed(4, try get(status, "forkDigest"));
-    out.*.status.finalized_root = try fixed(32, try get(status, "finalizedRoot"));
-    out.*.status.finalized_epoch = try bigint(try get(status, "finalizedEpoch"));
-    out.*.status.head_root = try fixed(32, try get(status, "headRoot"));
-    out.*.status.head_slot = try bigint(try get(status, "headSlot"));
-    out.*.status.earliest_available_slot = try optionalBigint(try get(status, "earliestAvailableSlot"));
+    try parseStatus(try get(local, "status"), &out.status);
     const metadata = try get(local, "metadata");
     try object(metadata, &.{ "sequenceNumber", "attnets", "syncnets", "custodyGroupCount" });
     out.*.metadata.seq_number = try bigint(try get(metadata, "sequenceNumber"));

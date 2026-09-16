@@ -13,7 +13,7 @@ pub const Options = struct {
 pub const history_retention_ms: u64 = 600_000;
 pub const hint_freshness_ms: u64 = 300_000;
 pub const connect_timeout_ms: u64 = 30_000;
-pub const DialTime = @import("../metrics_histogram.zig").Histogram(&.{ 100, 500, 1000, 5000, 10000, 60000 });
+pub const DialTime = @import("../metrics/histogram.zig").Duration(&.{ 100, 500, 1000, 5000, 10000, 60000 });
 const stable_connection_ms: u64 = 300_000;
 pub const Hints = struct {
     node_id: [32]u8,

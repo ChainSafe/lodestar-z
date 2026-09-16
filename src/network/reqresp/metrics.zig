@@ -1,5 +1,5 @@
 const std = @import("std");
-const Histogram = @import("../metrics_histogram.zig").Histogram;
+const Histogram = @import("../metrics/histogram.zig").Duration;
 const rr = @import("reqresp.zig");
 
 pub const OutgoingTime = Histogram(&.{ 100, 200, 500, 1000, 5000, 10000, 15000, 60000 });

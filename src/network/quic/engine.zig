@@ -1,11 +1,9 @@
 const std = @import("std");
-const api = @import("api.zig");
 const binding = @import("binding.zig");
 const connection = @import("connection.zig");
 const constants = @import("../constants.zig");
 const limits = @import("limits.zig");
 const retry = @import("retry.zig");
-const stream_iter = @import("stream_iter.zig");
 const peer_id = @import("../wire/peer_id.zig");
 const tls = @import("../tls/context.zig");
 const types = @import("../types.zig");
@@ -13,24 +11,97 @@ const types = @import("../types.zig");
 const assert = std.debug.assert;
 const c = binding.c;
 
-pub const Now = api.Now;
-pub const Direction = api.Direction;
-pub const ShutdownDirection = api.ShutdownDirection;
-pub const CloseReason = api.CloseReason;
-pub const Read = api.Read;
-pub const Address = api.Address;
-pub const Sent = api.Sent;
-pub const Error = api.Error;
-pub const StreamError = api.StreamError;
-pub const DialError = api.DialError;
-pub const Handle = api.Handle;
-pub const StreamHandle = api.StreamHandle;
-pub const Event = api.Event;
-pub const Limits = api.Limits;
-pub const Counters = api.Counters;
-pub const SendBatch = api.SendBatch;
-pub const ReceiveOutcome = api.ReceiveOutcome;
-pub const EntropyPool = api.EntropyPool;
+pub const Now = types.Now;
+pub const Direction = types.Direction;
+pub const ShutdownDirection = types.ShutdownDirection;
+pub const CloseReason = types.CloseReason;
+pub const Read = types.Read;
+pub const Address = types.Address;
+pub const Sent = types.Sent;
+
+pub const Error = std.mem.Allocator.Error || error{InvalidLimits};
+
+pub const StreamError = error{
+    StaleHandle,
+    UnknownStream,
+    WouldBlock,
+    StreamStopped,
+    StreamLimit,
+    StreamTableFull,
+    NotEstablished,
+    Transport,
+};
+
+pub const DialError = error{
+    AddressFamilyUnsupported,
+    TableFull,
+    DialLimit,
+    OpenFailed,
+};
+
+pub const Handle = types.Handle;
+pub const StreamHandle = types.StreamHandle;
+
+pub const Event = union(enum) {
+    connected: struct { conn: Handle, peer_id: peer_id.PeerId, direction: Direction },
+    closed: struct {
+        conn: Handle,
+        peer_id: ?peer_id.PeerId,
+        direction: Direction,
+        reason: CloseReason,
+    },
+    stream_opened: StreamHandle,
+    stream_closed: struct { stream: StreamHandle, reset_code: ?u64 },
+    path_changed: struct { conn: Handle, peer: Address },
+};
+
+pub const Limits = struct {
+    connections_max: u16 = limits.connections_max_default,
+    handshaking_max: u16 = limits.handshaking_max,
+    handshaking_per_source_max: u16 = limits.handshaking_per_source_max,
+    dialing_max: u16 = limits.dialing_max,
+    outbound_max: ?u16 = null,
+    receive_budget_bytes: u64 = limits.receive_budget_bytes,
+    idle_timeout_ms: u64 = limits.idle_timeout_ms,
+    handshake_timeout_ms: u64 = limits.handshake_timeout_ms,
+    keep_alive_ms: u64 = limits.keep_alive_ms,
+    keylog: bool = false,
+};
+
+pub const Counters = struct {
+    accepted: u64 = 0,
+    dropped_unroutable: u64 = 0,
+    dropped_short_initial: u64 = 0,
+    dropped_full: u64 = 0,
+    dropped_source_limit: u64 = 0,
+    recv_errors: u64 = 0,
+    send_errors: u64 = 0,
+    stream_errors: u64 = 0,
+    version_negotiations: u64 = 0,
+    retries: u64 = 0,
+    path_changes: u64 = 0,
+};
+
+pub const ReceiveOutcome = union(enum) {
+    accepted: Handle,
+    version_negotiation: []u8,
+    retry: []u8,
+    dropped,
+};
+
+/// Configured flow-control windows, excluding native QUIC/TLS overhead.
+pub const MemoryPlan = struct {
+    requested_receive_window_bytes: u64,
+    receive_window_bytes: u64,
+    connection_window_bytes: u64,
+    stream_window_bytes: u64,
+    native_pacing_supported: bool,
+};
+
+pub const ConnectionCounters = struct {
+    established: [@typeInfo(Direction).@"enum".fields.len]u64 = @splat(0),
+    closed: [@typeInfo(Direction).@"enum".fields.len][@typeInfo(CloseReason).@"union".fields.len]u64 = @splat(@splat(0)),
+};
 
 const Stream = struct {
     slot: *connection.Slot,
@@ -42,8 +113,8 @@ pub const Options = struct {
     tls: tls.Context,
     limits: Limits = .{},
     local: [2]?Address,
-    /// Startup secret from a cryptographic random source, used to authenticate Retry tokens.
-    seed: [32]u8,
+    /// Uniform startup secret from a cryptographic random source; borrowed only during init.
+    seed: *const [std.Random.DefaultCsprng.secret_seed_length]u8,
 };
 
 pub const Engine = struct {
@@ -56,9 +127,10 @@ pub const Engine = struct {
     connection_window: u64,
     stream_window: u64,
     outbound_max: u16,
+    csprng: std.Random.DefaultCsprng,
     retry_key: [32]u8,
     counters: Counters = .{},
-    connection_metrics: @import("metrics.zig").Counters = .{},
+    connection_metrics: ConnectionCounters = .{},
     host_work_pending: bool = false,
     // Physical slot positions preserve continuation through active-list swap removal.
     event_cursor: u16 = 0,
@@ -85,9 +157,6 @@ pub const Engine = struct {
         if (wanted.handshaking_per_source_max == 0) return error.InvalidLimits;
         const minimum_receive_budget = @as(u64, wanted.connections_max) * limits.connection_window_min;
         if (wanted.receive_budget_bytes < minimum_receive_budget) return error.InvalidLimits;
-        if (wanted.send_per_step_max == 0 or wanted.send_per_step_max > limits.send_burst_max) return error.InvalidLimits;
-        if (wanted.receive_per_step_max == 0 or wanted.receive_per_step_max > constants.receive_batch_max) return error.InvalidLimits;
-        if (wanted.work_per_step_max < 2 or wanted.work_per_step_max > limits.work_per_step_max) return error.InvalidLimits;
         if (wanted.idle_timeout_ms > limits.timeout_ms_max or wanted.handshake_timeout_ms > limits.timeout_ms_max or wanted.keep_alive_ms > limits.timeout_ms_max) return error.InvalidLimits;
         if (wanted.idle_timeout_ms == 0) return error.InvalidLimits;
         if (wanted.handshake_timeout_ms == 0) return error.InvalidLimits;
@@ -120,7 +189,15 @@ pub const Engine = struct {
         ) catch return error.OutOfMemory;
         errdefer config.deinit();
 
-        var registry = try @import("registry.zig").Registry.init(allocator, wanted.connections_max, wanted.keylog, std.mem.readInt(u64, options.seed[0..8], .little));
+        var csprng = std.Random.DefaultCsprng.init(options.seed.*);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&csprng));
+        var retry_key: [32]u8 = undefined;
+        defer std.crypto.secureZero(u8, &retry_key);
+        csprng.fill(&retry_key);
+        var route_seed = csprng.random().int(u64);
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&route_seed));
+
+        var registry = try @import("registry.zig").Registry.init(allocator, wanted.connections_max, wanted.keylog, route_seed);
         errdefer registry.deinit(allocator);
 
         return .{
@@ -133,7 +210,8 @@ pub const Engine = struct {
             .connection_window = connection_window,
             .stream_window = stream_window,
             .outbound_max = outbound_max,
-            .retry_key = options.seed,
+            .csprng = csprng,
+            .retry_key = retry_key,
         };
     }
 
@@ -141,6 +219,7 @@ pub const Engine = struct {
         self.registry.deinit(self.allocator);
         self.tls.deinit();
         self.config.deinit();
+        std.crypto.secureZero(u8, std.mem.asBytes(&self.csprng));
         std.crypto.secureZero(u8, &self.retry_key);
         self.* = undefined;
     }
@@ -178,7 +257,7 @@ pub const Engine = struct {
         self.markClosed(index, .send_failed);
     }
 
-    /// Driver-only slot indices. Track their generations with sendOwner across turns.
+    /// Transport-only slot indices. Track their generations with sendOwner across turns.
     pub fn activeIndices(self: *const Engine) []const u16 {
         assert(self.registry.active.len == self.registry.slots.len);
         assert(self.registry.active_len <= self.registry.active.len);
@@ -213,16 +292,13 @@ pub const Engine = struct {
         return false;
     }
 
-    pub fn memoryPlan(self: *const Engine) api.MemoryPlan {
+    pub fn memoryPlan(self: *const Engine) MemoryPlan {
         const count = self.limits.connections_max;
         return .{
             .requested_receive_window_bytes = self.limits.receive_budget_bytes,
             .receive_window_bytes = self.connection_window * count,
             .connection_window_bytes = self.connection_window,
             .stream_window_bytes = self.stream_window,
-            .scheduled_datagrams = count,
-            .scheduled_payload_bytes = @as(u64, count) * constants.datagram_size_max,
-            .scheduled_storage_bytes = @as(u64, count) * @sizeOf(@import("schedule.zig").Entry),
             .native_pacing_supported = binding.native_pacing_supported,
         };
     }
@@ -232,7 +308,6 @@ pub const Engine = struct {
         peer: *const Address,
         expected: peer_id.PeerId,
         now: Now,
-        entropy: [limits.local_cid_length]u8,
     ) DialError!Handle {
         assert(self.registry.active_len <= self.registry.active.len);
         assert(self.registry.dialing <= self.registry.outbound);
@@ -247,7 +322,7 @@ pub const Engine = struct {
             .direction = .outbound,
             .local = local,
             .peer = peer.*,
-            .scid = entropy,
+            .scid = self.connectionId(),
             .expected_peer_id = expected,
             .now = now,
             .keylog = self.registry.keylogFor(index),
@@ -264,6 +339,12 @@ pub const Engine = struct {
         assert(self.registry.dialing <= self.limits.dialing_max);
         assert(self.registry.outbound <= self.outbound_max);
         return .{ .index = index, .generation = slot.generation };
+    }
+
+    fn connectionId(self: *Engine) [limits.local_cid_length]u8 {
+        var bytes: [limits.local_cid_length]u8 = undefined;
+        self.csprng.fill(&bytes);
+        return bytes;
     }
 
     pub fn close(self: *Engine, conn: Handle, code: u64) bool {
@@ -376,23 +457,6 @@ pub const Engine = struct {
         self.host_work_pending = true;
     }
 
-    pub const ReadableIterator = stream_iter.StreamIterator(.readable);
-    pub const WritableIterator = stream_iter.StreamIterator(.writable);
-
-    pub fn readable(self: *Engine, conn: Handle) ReadableIterator {
-        const slot = self.readableSlot(conn) catch return ReadableIterator.empty(conn);
-        assert(slot.conn != null);
-        assert(slot.generation == conn.generation);
-        return ReadableIterator.open(slot, conn);
-    }
-
-    pub fn writable(self: *Engine, conn: Handle) WritableIterator {
-        const slot = self.readableSlot(conn) catch return WritableIterator.empty(conn);
-        assert(slot.conn != null);
-        assert(slot.generation == conn.generation);
-        return WritableIterator.open(slot, conn);
-    }
-
     pub fn pollEvents(self: *Engine, events: []Event) usize {
         assert(self.registry.active_len <= self.registry.active.len);
         assert(self.event_cursor < self.registry.slots.len);
@@ -459,7 +523,6 @@ pub const Engine = struct {
         datagram: []u8,
         from: *const Address,
         now: Now,
-        entropy: *EntropyPool,
         out: []u8,
     ) ReceiveOutcome {
         assert(datagram.len <= out.len);
@@ -495,18 +558,13 @@ pub const Engine = struct {
         if (self.handshakingFromSource(from) >= self.limits.handshaking_per_source_max) {
             return drop(&self.counters.dropped_source_limit);
         }
-        if (self.limits.admit) |admit| {
-            if (!admit(self.limits.admit_context, from)) {
-                return drop(&self.counters.dropped_rejected);
-            }
-        }
         const original: ?binding.Cid = if (header.token_len != 0)
             retry.validate(&self.retry_key, from, &header.dcid, header.token[0..header.token_len], now.mono_ms, self.limits.handshake_timeout_ms) orelse return drop(&self.counters.dropped_unroutable)
         else original: {
-            if (self.registry.handshaking >= self.limits.handshaking_max / 2) return self.sendRetry(&header, from, now, entropy, out);
+            if (self.registry.handshaking >= self.limits.handshaking_max / 2) return self.sendRetry(&header, from, now, out);
             break :original @as(?binding.Cid, null);
         };
-        const scid = if (original != null) header.dcid.bytes[0..limits.local_cid_length].* else entropy.take() orelse return drop(&self.counters.dropped_no_entropy);
+        const scid = if (original != null) header.dcid.bytes[0..limits.local_cid_length].* else self.connectionId();
         const index = self.registry.claim() orelse return drop(&self.counters.dropped_full);
 
         const slot = &self.registry.slots[index];
@@ -537,8 +595,8 @@ pub const Engine = struct {
         return .{ .accepted = self.toHandle(index) };
     }
 
-    fn sendRetry(self: *Engine, header: *const binding.HeaderInfo, from: *const Address, now: Now, entropy: *EntropyPool, out: []u8) ReceiveOutcome {
-        const bytes = entropy.take() orelse return drop(&self.counters.dropped_no_entropy);
+    fn sendRetry(self: *Engine, header: *const binding.HeaderInfo, from: *const Address, now: Now, out: []u8) ReceiveOutcome {
+        const bytes = self.connectionId();
         const scid = binding.Cid.fromSlice(&bytes);
         var buffer: [retry.token_max]u8 = undefined;
         const token = retry.mint(&self.retry_key, from, &header.dcid, &scid, now.mono_ms, &buffer);

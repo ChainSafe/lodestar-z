@@ -8,7 +8,6 @@ const opts: t.Options = .{
     .target_peers = 2,
     .max_peers = 2,
     .min_outbound = 0,
-    .engine_capacity = 2,
 };
 const local = identity(
     "0025080212210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
