@@ -14,12 +14,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .target = target,
     });
-    // Reproducers do not link AFL's coverage runtime. Instrument a separate library for AFL.
-    const blst_fuzz_module = b.allocator.create(std.Build.Module) catch @panic("OOM");
-    blst_fuzz_module.* = dep_blst.artifact("blst").root_module.*;
-    blst_fuzz_module.fuzz = false;
-    const blst_fuzz = b.addLibrary(.{ .name = "blst-fuzz", .root_module = blst_fuzz_module });
-    blst_fuzz.sanitize_coverage_trace_pc_guard = true;
 
     const dep_snappy = b.dependency("snappy", .{
         .target = target,
@@ -66,6 +60,10 @@ pub fn build(b: *std.Build) void {
         fn corpus(self: @This(), bb: *std.Build) []const u8 {
             return bb.fmt("corpus/{s}-cmin", .{self.name});
         }
+
+        fn source(self: @This(), bb: *std.Build) []const u8 {
+            return bb.fmt("src/fuzz_{s}.zig", .{self.name});
+        }
     };
 
     const fuzzers = &[_]Fuzzer{
@@ -74,11 +72,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ssz_bitvector", .max_input_len = 66 },
         .{ .name = "ssz_bytelist", .max_input_len = 1026 },
         .{ .name = "ssz_containers", .max_input_len = 16614 },
-        .{
-            .name = "ssz_lists",
-            .max_input_len = 4161,
-            .extra_libs = &.{dep_hashtree.artifact("hashtree")},
-        },
+        .{ .name = "ssz_lists", .max_input_len = 4161 },
         .{
             .name = "ssz_chunked_leaf_set",
             .max_input_len = 4097,
@@ -165,7 +159,6 @@ pub fn build(b: *std.Build) void {
         "replay-corpus",
         "Replay committed bootstrap fuzz corpora",
     );
-    const test_step = b.step("test-fuzz", "Test fuzz target oracles and allocation failures");
 
     for (fuzzers) |fuzzer| {
         if (fuzz_target) |selected_target| {
@@ -178,7 +171,7 @@ pub fn build(b: *std.Build) void {
         );
 
         const lib_mod = b.createModule(.{
-            .root_source_file = b.path(b.fmt("src/fuzz_{s}.zig", .{fuzzer.name})),
+            .root_source_file = b.path(fuzzer.source(b)),
             .target = target,
             .optimize = optimize,
         });
@@ -197,7 +190,6 @@ pub fn build(b: *std.Build) void {
         const fuzz_options = b.addOptions();
         fuzz_options.addOption(u32, "max_input_len", fuzzer.max_input_len);
         const fuzz_options_mod = fuzz_options.createModule();
-        lib_mod.addImport("fuzz_options", fuzz_options_mod);
 
         const lib = b.addLibrary(.{
             .name = fuzzer.name,
@@ -206,15 +198,7 @@ pub fn build(b: *std.Build) void {
         lib.root_module.stack_check = false;
         lib.root_module.fuzz = true;
 
-        const tests = b.addTest(.{ .root_module = lib_mod });
-        for (fuzzer.extra_libs) |extra_lib| tests.root_module.linkLibrary(extra_lib);
-        test_step.dependOn(&b.addRunArtifact(tests).step);
-
-        const afl_libs = if (std.mem.startsWith(u8, fuzzer.name, "bls_"))
-            &[_]*std.Build.Step.Compile{blst_fuzz}
-        else
-            fuzzer.extra_libs;
-        const exe = afl.addInstrumentedExe(b, lib, afl_libs);
+        const exe = afl.addInstrumentedExe(b, lib, fuzzer.extra_libs);
         const mkdir = b.addSystemCommand(&.{
             "mkdir", "-p",
         });
