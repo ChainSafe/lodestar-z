@@ -68,8 +68,6 @@ test "process randao - sanity" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
-    // Read the slot from the fixture rather than recomputing it from a mainnet fork epoch; the
-    // minimal config leaves Electra unscheduled, so the two do not agree there.
     const slot = try test_state.cached_state.state.slot();
 
     const proposers = test_state.cached_state.epoch_cache.proposers;

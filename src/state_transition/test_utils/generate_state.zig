@@ -27,6 +27,10 @@ const EFFECTIVE_BALANCE_INCREMENT = 32;
 const EFFECTIVE_BALANCE = 32 * 1e9;
 const active_chain_config = if (active_preset == .mainnet) mainnet_chain_config else minimal_chain_config;
 
+fn scheduledEpochOrGenesis(fork_epoch: Epoch) Epoch {
+    return if (fork_epoch == FAR_FUTURE_EPOCH) 0 else fork_epoch;
+}
+
 /// generate, allocate BeaconState
 /// consumer has responsibility to deinit and destroy it
 pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !*AnyBeaconState {
@@ -41,14 +45,7 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
     electra_state.* = types.electra.BeaconState.default_value;
     electra_state.genesis_time = 1596546008;
     electra_state.genesis_validators_root = try hex.hexToRoot("0x8a8b3f1f1e2d3c4b5a697887766554433221100ffeeddccbbaa9988776655443");
-    // The minimal network config leaves every post-Altair fork at FAR_FUTURE_EPOCH, so deriving the
-    // slot straight from ELECTRA_FORK_EPOCH overflows. Fall back to genesis for unscheduled Electra;
-    // TestCachedBeaconState feeds this same epoch back through getConfig, so the state and the config
-    // agree either way.
-    const electra_fork_epoch: Epoch = if (chain_config.ELECTRA_FORK_EPOCH == FAR_FUTURE_EPOCH)
-        0
-    else
-        chain_config.ELECTRA_FORK_EPOCH;
+    const electra_fork_epoch = scheduledEpochOrGenesis(chain_config.ELECTRA_FORK_EPOCH);
     // set the slot to be ready for the next epoch transition
     electra_state.slot = electra_fork_epoch * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
     const current_epoch = @divFloor(electra_state.slot, preset.SLOTS_PER_EPOCH);

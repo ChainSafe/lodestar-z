@@ -143,10 +143,8 @@ fn computeCommitteeCount(active_validator_count: usize) usize {
 }
 
 test computeCommitteeCount {
-    // Two million validators saturate the per-slot cap on every preset.
     const committee_count = computeCommitteeCount(2_000_000);
     try std.testing.expectEqual(preset.MAX_COMMITTEES_PER_SLOT, committee_count);
-    // Below the cap the count scales with the active validator set.
     try std.testing.expectEqual(1, computeCommitteeCount(0));
 }
 

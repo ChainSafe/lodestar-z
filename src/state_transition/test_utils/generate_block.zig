@@ -62,15 +62,11 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *CachedBeaconSta
         .committee_bits = committee_bits,
     });
 
-    // Derive the slot-dependent fields from the pre-state instead of pinning mainnet-derived values,
-    // so the generated block is valid under every preset. The block sits one slot after the state,
-    // which crosses an epoch boundary for this fixture; getBeaconProposer handles that.
     const block_slot = (try state.slot()) + 1;
     var latest_header = try state.latestBlockHeader();
     const parent_root = try latest_header.hashTreeRoot();
 
     var execution_payload = types.electra.ExecutionPayload.default_value;
-    // Mirrors the compute_timestamp_at_slot rule enforced by processExecutionPayload.
     execution_payload.timestamp = (try state.genesisTime()) +
         block_slot * cached_state.config.chain.SECONDS_PER_SLOT;
 
