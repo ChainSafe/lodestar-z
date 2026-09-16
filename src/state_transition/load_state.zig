@@ -62,33 +62,19 @@ fn deserializeBeaconStateTreeViewWithSeedOverrides(
     seed_validators_node: Node.Id,
 ) !*StateST.TreeView {
     if (comptime out_fork.gte(.altair)) {
-        const scores_field_index = comptime StateST.getFieldIndex("inactivity_scores");
-        const scores_range = ranges[scores_field_index];
-        const inactivity_scores_bytes = state_bytes[scores_range[0]..scores_range[1]];
-        const ScoresType = comptime StateST.getFieldType("inactivity_scores");
-
-        // If the seed fork is pre-altair, there are no scores to reuse, so we fully
-        // deserialize inactivity_scores here (diff optimization only applies when seed_fork >= altair).
-        const scores_node = if (seed_fork.gte(.altair)) blk: {
-            break :blk try inactivityScoresNodeId(seed_state);
-        } else blk: {
-            const node_id = try ScoresType.tree.deserializeFromBytes(pool, inactivity_scores_bytes);
-            errdefer pool.unref(node_id);
-
-            // Retain fresh scores across container adoption and error cleanup.
-            try pool.ref(node_id);
-            break :blk node_id;
-        };
-        defer if (seed_fork.lt(.altair)) pool.unref(scores_node);
-
-        return try ssz_container.deserializeContainerOverrideFieldsWithRanges(
-            allocator,
-            pool,
-            StateST,
-            state_bytes,
-            ranges,
-            .{ .validators = seed_validators_node, .inactivity_scores = scores_node },
-        );
+        // If the seed fork is pre-altair, there are no scores to reuse, so the container
+        // deserializes inactivity_scores (diff optimization only applies when seed_fork >= altair).
+        if (seed_fork.gte(.altair)) {
+            const scores_node = try inactivityScoresNodeId(seed_state);
+            return try ssz_container.deserializeContainerOverrideFieldsWithRanges(
+                allocator,
+                pool,
+                StateST,
+                state_bytes,
+                ranges,
+                .{ .validators = seed_validators_node, .inactivity_scores = scores_node },
+            );
+        }
     }
 
     return try ssz_container.deserializeContainerOverrideFieldsWithRanges(
