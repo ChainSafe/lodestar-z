@@ -16,7 +16,7 @@ importers:
         specifier: ^2.3.11
         version: 2.3.11
       '@chainsafe/benchmark':
-        specifier: ^2.0.1
+        specifier: 2.0.1
         version: 2.0.1
       '@chainsafe/biomejs-config':
         specifier: ^1.0.0
