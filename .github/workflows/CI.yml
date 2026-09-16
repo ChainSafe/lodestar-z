@@ -60,6 +60,10 @@ jobs:
         run: |
           zig build test:persistent_merkle_tree
 
+      - name: Run binding allocator tests
+        run: |
+          zig build test:bindings_allocator
+
       - name: Run ssz tests
         run: |
           zig build test:ssz

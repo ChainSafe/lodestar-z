@@ -120,8 +120,8 @@ const ReusedEpochTransitionCache = struct {
     }
 };
 
-var _reused_cache: ?*ReusedEpochTransitionCache = null;
-var _reused_lock: std.Io.Mutex = std.Io.Mutex.init;
+threadlocal var _reused_cache: ?*ReusedEpochTransitionCache = null;
+threadlocal var _reused_lock: std.Io.Mutex = std.Io.Mutex.init;
 
 fn getReusedEpochTransitionCache(allocator: Allocator, io: std.Io, validator_count: usize) !*ReusedEpochTransitionCache {
     try _reused_lock.lock(io);
@@ -154,7 +154,7 @@ pub fn deinitReusedEpochTransitionCache(io: std.Io) void {
     }
 }
 
-/// Borrows process-global buffers. Callers must serialize cache lifetimes from
+/// Borrows thread-local buffers. Callers must serialize cache lifetimes within each thread from
 /// `init` through `deinit` and exclude `deinitReusedEpochTransitionCache` throughout.
 /// The internal lock protects acquisition and resizing, not the borrowed lifetime.
 pub const EpochTransitionCache = struct {

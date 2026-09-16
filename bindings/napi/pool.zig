@@ -1,6 +1,9 @@
 const std = @import("std");
+const napi = @import("zapi:zapi").napi;
+const js = @import("zapi:zapi").js;
 const Node = @import("persistent_merkle_tree").Node;
 const RefCount = @import("state_transition").RefCount;
+const TrackedAllocator = @import("tracked_allocator.zig");
 
 /// Backs the `PoolRc` wrapper allocation only — `Node.Pool` uses its own
 /// `InitOptions` allocators.
@@ -10,7 +13,36 @@ const pool_size_environment_variable = "LODESTAR_Z_NODE_POOL_CAPACITY";
 // Arbitrary limit to avoid excessive memory usage.
 const default_pool_size: u32 = 10_000_000;
 
-const PoolRc = RefCount(Node.Pool);
+const PoolRc = RefCount(Owner);
+
+const Owner = struct {
+    pool: Node.Pool = undefined,
+    memory: TrackedAllocator = .{ .backing = std.heap.c_allocator },
+    env: ?napi.Env,
+    reported_bytes: i64 = 0,
+
+    pub fn reportMemory(self: *Owner) void {
+        const env = self.env orelse return;
+        const node_bytes = @sizeOf(@FieldType(Node, "payload")) +
+            @sizeOf(@FieldType(Node, "root")) + @sizeOf(@FieldType(Node, "state"));
+        const bytes: i64 = @intCast(self.pool.getNodesInUse() * node_bytes + self.memory.bytes_in_use);
+        const delta = bytes - self.reported_bytes;
+        if (delta == 0) return;
+
+        // Notification can collect other views sharing this owner. Publish the ledger first.
+        self.reported_bytes = bytes;
+        _ = env.adjustExternalMemory(delta) catch {
+            self.reported_bytes -= delta;
+            return;
+        };
+    }
+
+    pub fn deinit(self: *Owner) void {
+        std.debug.assert(self.env == null);
+        self.pool.deinit();
+        std.debug.assert(self.memory.bytes_in_use == 0);
+    }
+};
 
 fn poolSizeFromEnvironment() !u32 {
     const raw = std.c.getenv(pool_size_environment_variable) orelse return default_pool_size;
@@ -26,33 +58,33 @@ fn poolSizeFromEnvironment() !u32 {
 const State = struct {
     pool_rc: ?*PoolRc = null,
 
-    pub fn init(self: *State) !void {
+    fn init(self: *State) !void {
         if (self.pool_rc != null) return;
 
         const pool_size = try poolSizeFromEnvironment();
 
-        var pool_value = try Node.Pool.init(.{ .allocator = std.heap.c_allocator, .pool_size = pool_size });
-        errdefer pool_value.deinit();
-
-        self.pool_rc = try PoolRc.init(allocator, pool_value);
+        const rc = try PoolRc.init(allocator, .{ .env = js.env() });
+        errdefer allocator.destroy(rc);
+        rc.instance.pool = try Node.Pool.init(.{
+            .allocator = rc.instance.memory.allocator(),
+            .pool_size = pool_size,
+        });
+        self.pool_rc = rc;
     }
 
     pub fn deinit(self: *State) void {
         if (self.pool_rc) |rc| {
+            // Late view finalizers must release memory without using the closing environment.
+            rc.instance.env = null;
             rc.unref();
             self.pool_rc = null;
         }
     }
 
-    pub fn pool(self: *State) *Node.Pool {
-        std.debug.assert(self.pool_rc != null);
-        return &self.pool_rc.?.instance;
-    }
-
-    pub fn poolRc(self: *State) *PoolRc {
-        std.debug.assert(self.pool_rc != null);
+    pub fn poolRc(self: *State) !*PoolRc {
+        try self.init();
         return self.pool_rc.?;
     }
 };
 
-pub var state: State = .{};
+pub threadlocal var state: State = .{};
