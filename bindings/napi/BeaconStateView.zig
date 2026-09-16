@@ -1517,14 +1517,16 @@ pub fn computeBlockRewards(
         cached,
     );
 
-    const obj = try env.createObject();
-    try obj.setNamedProperty("proposerIndex", try env.createInt64(@intCast(rewards.proposer_index)));
-    try obj.setNamedProperty("total", try env.createInt64(@intCast(rewards.total)));
-    try obj.setNamedProperty("attestations", try env.createInt64(@intCast(rewards.attestations)));
-    try obj.setNamedProperty("syncAggregate", try env.createInt64(@intCast(rewards.sync_aggregate)));
-    try obj.setNamedProperty("proposerSlashings", try env.createInt64(@intCast(rewards.proposer_slashings)));
-    try obj.setNamedProperty("attesterSlashings", try env.createInt64(@intCast(rewards.attester_slashings)));
-    return .{ .val = obj };
+    const result = js_types.BlockRewards{ .val = try env.createObject() };
+    try result.set(.{
+        .proposerIndex = js.Number.from(rewards.proposer_index),
+        .total = js.Number.from(rewards.total),
+        .attestations = js.Number.from(rewards.attestations),
+        .syncAggregate = js.Number.from(rewards.sync_aggregate),
+        .proposerSlashings = js.Number.from(rewards.proposer_slashings),
+        .attesterSlashings = js.Number.from(rewards.attester_slashings),
+    });
+    return result;
 }
 
 fn parseProposerRewards(value: ?js.Value) !?st.ProposerRewards {
