@@ -258,8 +258,6 @@ pub fn stateTransition(
     try post_state.commit();
     metrics.state_transition.process_block_commit.observe(time.durationSeconds(time.since(io, timer)));
 
-    try metrics.state_transition.onPostState(post_cached_state);
-
     // Verify state root
     if (opts.verify_state_root) {
         timer = time.start(io);
