@@ -124,11 +124,12 @@ interface CompactMultiProof {
 
 /**
  * Options to control how state transition is run.
- *
- * Note: Fields used by TS `StateTransitionOpts` but ignored by the Zig binding (e.g.
- * `executionPayloadStatus`) are silently dropped - they are declared here to pass type checks.
  */
 export interface TransitionOpts {
+  /** Execution payload verification status. Default: "valid". */
+  executionPayloadStatus?: "valid" | "invalid";
+  /** Data availability status. Default: "Available". */
+  dataAvailabilityStatus?: "Available" | "PreData" | "OutOfRange";
   /** Verify the post-state root matches the block's state root. Default: true. */
   verifyStateRoot?: boolean;
   /** Verify the proposer signature on the signed block. Default: true. */
