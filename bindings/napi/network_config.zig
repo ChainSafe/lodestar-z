@@ -106,10 +106,7 @@ pub fn fork(value: Value) !t.ForkSeq {
     if (try value.typeof() != .string) return error.InvalidNetworkConfig;
     var buf: [32]u8 = undefined;
     const name = try value.getValueStringUtf8(&buf);
-    inline for (.{ "phase0", "altair", "bellatrix", "capella", "deneb", "electra", "fulu", "gloas" }) |tag| {
-        if (std.mem.eql(u8, name, tag)) return @field(t.ForkSeq, tag);
-    }
-    return error.InvalidNetworkConfig;
+    return std.meta.stringToEnum(t.ForkSeq, name) orelse error.InvalidNetworkConfig;
 }
 pub fn endpoint(value: Value) !std.Io.net.IpAddress {
     try object(value, &.{ "family", "address", "port" });
@@ -264,11 +261,7 @@ fn parseTopicPolicy(value: Value, out: *Config) !void {
         for (fields, 0..) |field, i| result[i] = field.name;
         break :blk result;
     };
-    const env: napi.Env = .{ .env = value.env };
     for (out.topic_boundaries[0..count], 0..) |*boundary, i| {
-        var index_buffer: [2]u8 = undefined;
-        const index = try std.fmt.bufPrint(&index_buffer, "{d}", .{i});
-        if (!try value.hasOwnProperty(try env.createStringUtf8(index))) return error.InvalidNetworkConfig;
         const input = try value.getElement(@intCast(i));
         try completeObject(input, &.{ "digest", "rules" });
         boundary.digest = try fixed(4, try get(input, "digest"));

@@ -16,12 +16,56 @@ pub const Config = struct {
     column_chunks: u32,
     blob_schedule: []const BlobLimit,
     host_integer_max: ?u64 = null,
+
+    /// Borrows schedule storage until ReqResp.init copies the validated policy.
+    pub fn fromBeaconConfig(cfg: *const @import("config").BeaconConfig, storage: *[schedule_max]BlobLimit) error{InvalidPolicy}!Config {
+        const chain = &cfg.chain;
+        if (chain.BLOB_SCHEDULE.len > schedule_max - 3) return error.InvalidPolicy;
+        var count: usize = 0;
+        for ([_]u64{ chain.DENEB_FORK_EPOCH, chain.ELECTRA_FORK_EPOCH, chain.FULU_FORK_EPOCH }) |epoch| {
+            try addEpoch(storage, &count, epoch);
+        }
+        for (chain.BLOB_SCHEDULE) |entry| try addEpoch(storage, &count, entry.EPOCH);
+        std.sort.insertion(BlobLimit, storage[0..count], {}, struct {
+            fn less(_: void, a: BlobLimit, b: BlobLimit) bool {
+                return a.start_slot < b.start_slot;
+            }
+        }.less);
+        var unique: usize = 0;
+        for (0..count) |i| {
+            const slot = storage[i].start_slot;
+            if (unique > 0 and storage[unique - 1].start_slot == slot) continue;
+            const blobs = cfg.getMaxBlobsPerBlock(slot / preset.preset.SLOTS_PER_EPOCH);
+            if (blobs == 0) continue;
+            storage[unique] = .{ .start_slot = slot, .max_blobs = std.math.cast(u32, blobs) orelse return error.InvalidPolicy };
+            unique += 1;
+        }
+        const result: Config = .{
+            .deneb_start_slot = if (chain.DENEB_FORK_EPOCH == constants.FAR_FUTURE_EPOCH) null else std.math.mul(u64, chain.DENEB_FORK_EPOCH, preset.preset.SLOTS_PER_EPOCH) catch return error.InvalidPolicy,
+            .blocks_pre_deneb = constants.MAX_REQUEST_BLOCKS,
+            .blocks_deneb = constants.MAX_REQUEST_BLOCKS_DENEB,
+            .blob_identifiers_deneb = std.math.cast(u32, chain.MAX_REQUEST_BLOB_SIDECARS) orelse return error.InvalidPolicy,
+            .blob_identifiers_electra = std.math.cast(u32, chain.MAX_REQUEST_BLOB_SIDECARS_ELECTRA) orelse return error.InvalidPolicy,
+            .number_of_columns = preset.NUMBER_OF_COLUMNS,
+            .column_chunks = preset.MAX_REQUEST_DATA_COLUMN_SIDECARS,
+            .blob_schedule = storage[0..unique],
+        };
+        _ = try Policy.init(&result);
+        return result;
+    }
 };
+
+fn addEpoch(storage: *[schedule_max]BlobLimit, count: *usize, epoch: u64) error{InvalidPolicy}!void {
+    if (epoch == constants.FAR_FUTURE_EPOCH) return;
+    std.debug.assert(count.* < storage.len);
+    storage[count.*] = .{ .start_slot = std.math.mul(u64, epoch, preset.preset.SLOTS_PER_EPOCH) catch return error.InvalidPolicy, .max_blobs = 0 };
+    count.* += 1;
+}
 pub const Inspection = struct {
     charged_cost: u128,
     chunks_max: u32,
 };
-pub const InspectError = error{ MalformedSsz, InvalidRequest, HostIntegerRange, UnsupportedBounds };
+pub const InspectError = error{ PolicyRequired, MalformedSsz, InvalidRequest, HostIntegerRange, UnsupportedBounds };
 pub const schedule_max = 64;
 
 pub const Policy = struct {

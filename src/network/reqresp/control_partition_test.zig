@@ -7,7 +7,7 @@ const service_mod = @import("../service.zig");
 const engine_mod = @import("../quic/engine.zig");
 const reservedOptions = @import("control_capacity_test.zig").reservedOptions;
 
-test "reqresp drain retains blocked terminals and skips mixed over-limit head" {
+test "reqresp drain retains blocked terminals across control and application partitions" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{});
     defer pair.deinit();
@@ -84,22 +84,6 @@ test "reqresp drain retains blocked terminals and skips mixed over-limit head" {
     try std.testing.expectEqual(application_second, output[0].failed.request);
     _ = requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &.{} });
     try std.testing.expectEqual(0, requests.active().outbound);
-    requests.pushOverLimit(.{ .peer = handles.client, .protocol = .blocks_by_root_v2 });
-    requests.pushOverLimit(.{ .peer = handles.client, .protocol = .ping_v1 });
-    requests.pushOverLimit(.{ .peer = handles.client, .protocol = .blocks_by_range_v2 });
-    requests.pushOverLimit(.{ .peer = handles.client, .protocol = .metadata_v1 });
-    for ([_]protocol.Protocol{ .ping_v1, .metadata_v1 }) |which| {
-        try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &.{}, .control = &output }).control);
-        try std.testing.expectEqual(which, output[0].over_limit.protocol);
-    }
-    try std.testing.expectEqual(2, requests.over_limit_len);
-    try std.testing.expectEqual(null, requests.nextWakeup(pair.now, .{ .application = 0, .control = 1 }));
-    try std.testing.expectEqual(pair.now.mono_ms, requests.nextWakeup(pair.now, .{ .application = 1, .control = 0 }));
-    for ([_]protocol.Protocol{ .blocks_by_root_v2, .blocks_by_range_v2 }) |which| {
-        try std.testing.expectEqual(1, requests.pump(&pair.client, &router, pair.now, .{ .application = &output, .control = &.{} }).application);
-        try std.testing.expectEqual(which, output[0].over_limit.protocol);
-    }
-    try std.testing.expectEqual(0, requests.over_limit_len);
 }
 
 test "reqresp service retains request and chunk bytes through control progress" {

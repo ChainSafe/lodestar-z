@@ -18,7 +18,7 @@ pub const RequestIO = struct {
     outbox: stream_io.Outbox = .{},
     failure_detail: []const u8 = "none",
 
-    pub const Flush = struct { done: bool, progressed: bool };
+    pub const Flush = struct { done: bool };
 
     pub fn flush(
         self: *RequestIO,
@@ -32,13 +32,10 @@ pub const RequestIO = struct {
             self.outbox.queue(piece, last and fin);
             if (last) self.writing = false;
         }
-        const before = self.outbox.offset;
-        const fin_before = self.outbox.fin;
         const flushed = try self.outbox.pump(engine, stream);
-        const progressed = self.outbox.offset > before or (fin_before and !self.outbox.fin);
         const done = flushed and !self.writing;
         if (flushed) self.outbox = .{};
-        return .{ .done = done, .progressed = progressed };
+        return .{ .done = done };
     }
 
     pub const Input = struct { bytes: []const u8, fin: bool, progressed: bool, reset: bool };

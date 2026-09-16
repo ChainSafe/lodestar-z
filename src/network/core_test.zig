@@ -20,6 +20,7 @@ pub fn options() managed.Options {
         .service = .{
             .router = .{ .negotiations_max = 24, .outbound_control_reserved = 8 },
             .reqresp = .{
+                .policy = @import("reqresp/policy_fixture.zig").config(),
                 .peers = 4,
                 .outbound_max = 16,
                 .inbound_max = 16,
@@ -43,7 +44,7 @@ pub fn options() managed.Options {
                 .critical_bytes = 512,
             },
         },
-        .dial = .{ .capacity = 4, .concurrent_max = 2, .engine_dialing_max = 2, .seed = 7 },
+        .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 7 },
         .control = .{ .operations_max = 2 },
     };
 }
@@ -411,7 +412,7 @@ test "core native saturated app requests retain partitioned borrows while contro
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
     const conn = snapshots[0].connection.?;
-    const bytes = [_]u8{0} ** 24;
+    const bytes = [_]u8{0} ** 8 ++ [_]u8{1} ++ [_]u8{0} ** 15;
     const sink_size = rr.Protocol.blocks_by_range_v2.info().response_max;
     const sinks = try std.testing.allocator.alloc(u8, sink_size * 8);
     defer std.testing.allocator.free(sinks);
@@ -635,17 +636,7 @@ test "core native preserves gossip events under one output and caller validation
     try std.testing.expect(setup.client.unsubscribe(topic));
 }
 
-test "core managed defaults reserve maintenance while raw Service defaults stay unreserved" {
-    const defaults: managed.Options = .{ .dial = .{ .seed = 1 } };
-    try std.testing.expectEqual(@as(u16, 8), defaults.service.reqresp.outbound_control_reserved);
-    try std.testing.expectEqual(@as(u16, 8), defaults.service.reqresp.inbound_control_reserved);
-    try std.testing.expectEqual(@as(u16, 8), defaults.service.router.outbound_control_reserved);
-    try std.testing.expectEqual(@as(u8, 8), defaults.service.reqresp.outbound_per_peer_max);
-    try std.testing.expectEqual(@as(u8, 16), defaults.service.reqresp.inbound_per_peer_max);
-    try std.testing.expectEqual(
-        @as(u8, 8),
-        defaults.service.reqresp.inbound_application_per_peer_max,
-    );
+test "raw Service defaults stay unreserved" {
     const raw: @import("service.zig").Options = .{ .reqresp = .{ .forks = &.{} } };
     try std.testing.expectEqual(@as(u16, 0), raw.reqresp.outbound_control_reserved);
     try std.testing.expectEqual(@as(u8, 8), raw.reqresp.inbound_per_peer_max);
@@ -700,7 +691,7 @@ test "core native Goodbye immediately removes relevance and delayed Status canno
     try std.testing.expectEqual(@as(usize, 1), setup.client.catalog.pollEvents(&event));
     try std.testing.expectEqual(t.DisconnectReason.reputation, event[0].closed.reason);
     try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, &setup.client.control.counters.events.disconnected);
-    const fault = @intFromEnum(@import("peers/goodbye.zig").Reason.fault);
+    const fault = @intFromEnum(@import("peers/goodbye.zig").Reason.bad_score);
     try std.testing.expectEqual(@as(u64, 1), setup.client.control.counters.events.sent_goodbyes[fault]);
     try std.testing.expectEqual(@as(u64, 1), setup.server.control.counters.events.goodbyes[fault]);
     for (0..4) |_| try setup.step(0);
@@ -1187,10 +1178,10 @@ test "core reconciliation raw mutators deadlines and read getters invalidate onc
 
     try std.testing.expect(setup.client.service.gossipsub.inner.setPeerScore(conn, -10));
     setup.client.reconcile(clock);
-    try std.testing.expectEqual(fresh + 2, setup.client.counters.selections);
+    try std.testing.expectEqual(fresh + 1, setup.client.counters.selections);
     try std.testing.expect(setup.client.service.gossipsub.inner.setPeerScore(conn, -10));
     setup.client.reconcile(clock);
-    try std.testing.expectEqual(fresh + 2, setup.client.counters.selections);
+    try std.testing.expectEqual(fresh + 1, setup.client.counters.selections);
     _ = setup.client.reportPeer(peer, .high_tolerance, clock);
     setup.client.reconcile(clock);
     const penalized = setup.client.counters.selections;

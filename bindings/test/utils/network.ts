@@ -90,7 +90,9 @@ export function networkConfig(): NativeRuntimeConfig {
   };
 }
 
-export function discoveryConfig(): NativeApplicationConfig & {discovery: NativeDiscoveryConfig} {
+export function discoveryConfig(): NativeApplicationConfig & {
+  discovery: NativeDiscoveryConfig & {advertisement: NonNullable<NativeDiscoveryConfig["advertisement"]>};
+} {
   return {
     ...applicationConfig(),
     discovery: {

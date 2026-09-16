@@ -53,7 +53,7 @@ pub fn take(runtime: *Runtime) !Value {
     runtime.lock();
     if (!runtime.active or runtime.stop or runtime.quiescent) {
         runtime.unlock();
-        return error.NetworkClosed;
+        return runtime.env.getNull();
     }
     const table = &runtime.incoming.?;
     const token = table.oldest() orelse {
@@ -285,16 +285,7 @@ pub fn settle(env: napi.Env, runtime: *Runtime) void {
     runtime.disposeTerminalReferences();
 }
 pub fn diagnostics(env: napi.Env, value: *const incoming.Diagnostics) !Value {
-    const object = try env.createObject();
-    const Gauge = enum { capacity, occupied, queued, highWater, pendingResponses, closedPromises, reservedBytes, reservedBytesHighWater, requestBytes, responseBytes, copyingBytes };
-    const Counter = enum { requestsTaken, requestBytesCopied, responseBytesCopied, chunksWritten, bytesWritten, capacityRefusals, byteRefusals, busyResponses };
-    inline for (@typeInfo(incoming.Diagnostics).@"struct".fields) |field| {
-        const gauge = @hasField(Gauge, field.name);
-        const counter = @hasField(Counter, field.name);
-        comptime std.debug.assert(gauge != counter);
-        try put(object, field.name, if (counter) try env.createBigintUint64(@field(value, field.name)) else try env.createDouble(@floatFromInt(@field(value, field.name))));
-    }
-    return object;
+    return @import("network_js.zig").scalarFields(env, value);
 }
 
 fn rejectInput(env: napi.Env, reason: incoming.Rejection) anyerror {

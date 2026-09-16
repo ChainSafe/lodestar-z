@@ -87,20 +87,7 @@ fn selectScenario(env: napi.Env, info: napi.CallbackInfo(1)) !napi.Value {
 fn getStage(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     return env.createStringUtf8(@tagName(reached.load(.acquire)));
 }
-fn scalarFields(env: napi.Env, value: anytype) !napi.Value {
-    const fields = @typeInfo(@TypeOf(value.*)).@"struct".fields;
-    comptime std.debug.assert(fields.len <= 64);
-    const object = try env.createObject();
-    inline for (fields) |field| {
-        const copied: ?napi.Value = switch (@typeInfo(field.type)) {
-            .int => if (field.type == u64) try env.createBigintUint64(@field(value, field.name)) else try env.createDouble(@floatFromInt(@field(value, field.name))),
-            .float => try env.createDouble(@field(value, field.name)),
-            else => null,
-        };
-        if (copied) |item| try @import("network_js.zig").put(object, field.name ++ "\x00", item);
-    }
-    return object;
-}
+const scalarFields = @import("network_js.zig").scalarFields;
 const copyBytes = @import("network_js.zig").bytes;
 fn getGossip(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     std.Io.Threaded.mutexLock(&gossip_mutex);

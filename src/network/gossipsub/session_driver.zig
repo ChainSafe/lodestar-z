@@ -26,6 +26,7 @@ const Progress = @import("turn.zig").Progress;
 pub const InitError = gossipsub_mod.InitError;
 
 pub const openings_per_pump: usize = 16;
+pub const direct_retry_delay_ms: u64 = 30_000;
 
 pub const Driver = struct {
     inner: *Gossipsub,
@@ -61,7 +62,7 @@ pub const Driver = struct {
         const index = self.inner.sessions.findPeer(conn) orelse return .unavailable;
         return switch (self.inner.sessions.rows[index].outbound) {
             .none, .closing => .unavailable,
-            .pending, .negotiating => .pending,
+            .pending, .retry_at, .negotiating => .pending,
             .live => .available,
         };
     }
@@ -202,6 +203,9 @@ pub const Driver = struct {
             if (!session.active) continue;
             session.needs_service = false;
             examined += 1;
+            if (session.outbound == .retry_at and now.mono_ms >= session.outbound.retry_at) {
+                self.inner.sessions.setOutbound(index, if (self.inner.peers.rows[session.logical.index].direct) .pending else .none);
+            }
             switch (session.outbound) {
                 .live => |live| {
                     // Observe idle STOP_SENDING without a write or a host-work hint.
@@ -216,7 +220,7 @@ pub const Driver = struct {
                     if (openings == openings_per_pump) break;
                 },
                 .closing => self.retirePeer(router, engine, index),
-                .none, .negotiating => {},
+                .none, .retry_at, .negotiating => {},
             }
         }
         return self.pumpReady(router, engine, now, out);
@@ -248,7 +252,7 @@ pub const Driver = struct {
                 self.resetOutbound(engine, index);
             },
             .negotiating => |pending| if (std.meta.eql(pending, stream)) self.resetOutbound(engine, index),
-            .none, .pending, .closing => {},
+            .none, .pending, .retry_at, .closing => {},
         }
         // Read-side FIN can be reported with buffered payload. The framing owner
         // drains it before resetting; a reset is observed by its next read.
@@ -341,6 +345,13 @@ pub const Driver = struct {
             }
             if (io.unread_start < io.unread_end) {
                 if (peer.input == 0 or turn.budget.input == 0) return;
+                const logical = self.inner.sessions.rows[index].logical;
+                if (io.large_slot == null and (io.reader.declaredLen() orelse 0) > io.body.len and
+                    now.mono_ms < self.inner.peers.rows[logical.index].large_frame_denied_until)
+                {
+                    self.resetInbound(engine, index);
+                    return;
+                }
                 const body = self.inner.sessions.frameBody(io) orelse {
                     self.inner.pressure(index, .storage, now.mono_ms);
                     return;
@@ -520,6 +531,7 @@ pub const Driver = struct {
             const io = &peer.io;
             if (!self.inner.sessions.rows[i].active) continue;
             if (peer.outbound == .closing) return now.mono_ms;
+            if (peer.outbound == .retry_at) deadline = @min(deadline, peer.outbound.retry_at);
             if (self.inner.sessions.rows[i].in_stream != null and
                 ((io.rx_ready and io.blocked != .events) or (io.blocked == .events and event_capacity > 0))) return now.mono_ms;
             if (self.inner.sessions.rows[i].outStream() != null and io.tx.ready and
@@ -550,6 +562,10 @@ pub const Driver = struct {
                         self.resetInbound(engine, @intCast(index));
                     },
                     .receive_frame => {
+                        if (io.large_slot != null and io.rpc == null and io.pressure_since == null) {
+                            g.peers.penalize(peer.logical, 1);
+                            g.peers.rows[peer.logical.index].large_frame_denied_until = now_ms +| g.options.pressure_timeout_ms;
+                        }
                         if (io.pressure_since != null) g.counters.local_pressure_resets += 1 else g.counters.large_stalled += 1;
                         g.counters.receive_frame_timeouts += 1;
                         self.resetInbound(engine, @intCast(index));
@@ -557,7 +573,9 @@ pub const Driver = struct {
                     .send_queue, .send_progress => {
                         g.counters.tx_stalled += 1;
                         if (reason == .send_queue) g.counters.send_queue_timeouts += 1 else g.counters.send_progress_timeouts += 1;
+                        const retry_direct = peer.outbound == .live and g.peers.rows[peer.logical.index].direct;
                         self.resetOutbound(engine, @intCast(index));
+                        if (retry_direct) g.sessions.setOutbound(@intCast(index), .{ .retry_at = now_ms +| direct_retry_delay_ms });
                     },
                 }
             }

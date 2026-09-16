@@ -1,8 +1,8 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test} from "vitest";
-import bindings from "../src/bindings.js";
 import {createNativeNetworkApplicationRuntime} from "../src/network.js";
 import {applicationConfig} from "./utils/network.js";
+import {networkBindings as bindings} from "./utils/network-bindings.js";
 
 test.each(["resources", "requestPolicy", "identify", "capabilities", "topicPolicy"])("rejects missing %s", (field) => {
   const config = applicationConfig();

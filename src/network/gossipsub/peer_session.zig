@@ -4,7 +4,15 @@ const Handle = @import("../quic/engine.zig").Handle;
 const StreamHandle = @import("../quic/engine.zig").StreamHandle;
 const MessageId = @import("topic.zig").MessageId;
 const Version = @import("sessions.zig").Version;
-pub const Outbound = union(enum) { none, pending, negotiating: StreamHandle, live: struct { stream: StreamHandle, version: Version }, closing: StreamHandle };
+pub const Outbound = union(enum) {
+    /// No scheduled opening. New inbound stream evidence may return this to pending.
+    none,
+    pending,
+    retry_at: u64,
+    negotiating: StreamHandle,
+    live: struct { stream: StreamHandle, version: Version },
+    closing: StreamHandle,
+};
 
 pub const Session = struct {
     io: @import("peer_io.zig").PeerIo,

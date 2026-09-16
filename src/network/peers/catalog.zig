@@ -167,7 +167,7 @@ pub const Catalog = struct {
             current_reputation.decay(options.now_ms);
             if (current_reputation.banned(options.now_ms)) return .banned;
             if (options.now_ms < current_reputation.goodbye_until_ms) return .cooldown;
-            if (row.pending_close != null) return .capacity;
+            if (row.pending_close != null) return .pending;
             var displaced: ?t.Handle = null;
             if (row.connection) |current| {
                 const local_smaller = std.mem.order(u8, &local.bytes, &identity.bytes) == .lt;
@@ -185,25 +185,42 @@ pub const Catalog = struct {
             return .{ .admitted = .{ .peer = ref, .displaced = displaced, .fresh = false } };
         }
         if (self.connectedCount() >= self.options.max_peers) return .capacity;
-        const limit = self.rows.len - if (options.direction == .inbound)
+        const index = self.reclaimable(options.direction, options.now_ms) orelse return .capacity;
+        const row = &self.rows[index];
+        row.* = .{ .occupied = true, .generation = row.generation + 1, .identity = identity.* };
+        connect(row, conn, options);
+        self.revision +|= 1;
+        return .{ .admitted = .{
+            .peer = .{ .index = @intCast(index), .generation = row.generation },
+            .fresh = true,
+        } };
+    }
+
+    fn reclaimable(self: *const Catalog, direction: t.Direction, now_ms: u64) ?usize {
+        const limit = self.rows.len - if (direction == .inbound)
             @as(usize, self.options.outbound_reserve)
         else
             0;
+        var victim: ?usize = null;
+        var victim_banned = false;
+        var victim_deadline: u64 = 0;
         for (self.rows[0..limit], 0..) |*row, index| {
             if (row.connection != null or row.direct or row.pending_close != null or
                 row.pending_update or row.generation == std.math.maxInt(u64)) continue;
             var current_reputation = row.reputation;
-            current_reputation.decay(options.now_ms);
-            if (row.occupied and current_reputation.retained(options.now_ms)) continue;
-            row.* = .{ .occupied = true, .generation = row.generation + 1, .identity = identity.* };
-            connect(row, conn, options);
-            self.revision +|= 1;
-            return .{ .admitted = .{
-                .peer = .{ .index = @intCast(index), .generation = row.generation },
-                .fresh = true,
-            } };
+            current_reputation.decay(now_ms);
+            if (!row.occupied or !current_reputation.retained(now_ms)) return index;
+            const banned = current_reputation.banned(now_ms);
+            const deadline = current_reputation.nextDeadline(now_ms) orelse now_ms;
+            if (victim == null or (victim_banned and !banned) or
+                (victim_banned == banned and deadline < victim_deadline))
+            {
+                victim = index;
+                victim_banned = banned;
+                victim_deadline = deadline;
+            }
         }
-        return .capacity;
+        return victim;
     }
 
     fn connect(row: *Row, conn: t.Handle, options: *const t.AdmissionOptions) void {
@@ -336,7 +353,13 @@ pub const Catalog = struct {
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         if (row.closing_reason != null) return false;
-        if (row.metadata) |current| if (metadata.seq_number < current.seq_number) return false;
+        if (row.metadata) |current| {
+            if (metadata.seq_number < current.seq_number) return false;
+            if (std.meta.eql(current, metadata.*)) {
+                row.metadata_at_ms = now_ms;
+                return true;
+            }
+        }
         if (row.metadata == null or row.metadata.?.custody_group_count != metadata.custody_group_count) row.custody_work = null;
         self.revision +|= 1;
         row.metadata = metadata.*;
@@ -363,7 +386,7 @@ pub const Catalog = struct {
         return row.reputation.apply(action, now_ms);
     }
 
-    pub fn remoteGoodbye(
+    pub fn cooldown(
         self: *Catalog,
         ref: t.PeerRef,
         conn: t.Handle,
@@ -372,7 +395,7 @@ pub const Catalog = struct {
     ) bool {
         const row = self.connectedRow(ref, conn) orelse return false;
         self.revision +|= 1;
-        row.reputation.remoteGoodbye(now_ms, duration_ms);
+        row.reputation.cooldown(now_ms, duration_ms);
         return true;
     }
 

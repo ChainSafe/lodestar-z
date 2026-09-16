@@ -248,6 +248,7 @@ const Network = struct {
             .peer = peer,
             .record = test_support.fakeRecord(peer.node_id, peer.address, 1),
             .last_verified_ms = 0,
+            .direction = .outgoing,
         };
     }
 

@@ -285,27 +285,24 @@ test "reqresp bounds concurrent requests per protocol on both sides" {
         setup.pair.now,
     );
 
-    _ = try setup.openRaw(.blocks_by_range_v2);
-    var over_limit = false;
-    var served_first = false;
-    var rounds: usize = 0;
-    while (rounds < 40 and !(over_limit and served_first)) : (rounds += 1) {
+    var first_incoming: ?reqresp.RequestHandle = null;
+    for (0..40) |_| {
         try setup.pumpOnce();
-        for (setup.serverEvents()) |event| switch (event) {
-            .over_limit => |excess| {
-                try std.testing.expectEqual(Protocol.blocks_by_range_v2, excess.protocol);
-                over_limit = true;
-            },
-            .request => |incoming| {
-                if (incoming.protocol == .blocks_by_range_v2 and !served_first) {
-                    try std.testing.expect(setup.server.reqresp.finish(incoming.request, setup.pair.now));
-                    served_first = true;
-                }
-            },
-            else => {},
+        for (setup.serverEvents()) |event| if (event == .request and event.request.protocol == .blocks_by_range_v2) {
+            first_incoming = first_incoming orelse event.request.request;
         };
+        if (first_incoming != null and setup.server.reqresp.inboundCount(setup.handles.server, .blocks_by_range_v2) == 2) break;
     }
-    try std.testing.expect(over_limit);
+    try std.testing.expect(first_incoming != null);
+    _ = try setup.openRaw(.blocks_by_range_v2);
+    for (0..40) |_| {
+        try setup.pumpOnce();
+        if (setup.server.reqresp.protocol_counters[@intFromEnum(Protocol.blocks_by_range_v2)].rate_limited > 0) break;
+    }
+    try std.testing.expectEqual(@as(u64, 1), setup.server.reqresp.protocol_counters[@intFromEnum(Protocol.blocks_by_range_v2)].rate_limited);
+    try std.testing.expectEqual(@as(u8, 2), setup.server.reqresp.inboundCount(setup.handles.server, .blocks_by_range_v2));
+    try std.testing.expect(setup.server.reqresp.finish(first_incoming.?, setup.pair.now));
+    var rounds: usize = 0;
     var done = false;
     rounds = 0;
     while (rounds < 40 and !done) : (rounds += 1) {
@@ -859,7 +856,7 @@ test "reqresp accepts legal empty by root content" {
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
-    _ = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .blocks_by_root_v2, "", sink, .{}, setup.pair.now);
+    _ = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .blocks_by_root_v2, &.{}, sink, .{}, setup.pair.now);
     try waitForRequest(&setup);
     const incoming = setup.serverEvents()[0].request;
     try std.testing.expectEqual(@as(usize, 0), incoming.bytes.len);
@@ -921,7 +918,7 @@ test "reqresp narrowed chunks retire without FIN after a host pause" {
     const reply = try std.testing.allocator.alloc(u8, ct.deneb.SignedBeaconBlock.min_size);
     defer std.testing.allocator.free(reply);
     @memset(reply, 0);
-    const handle = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .blocks_by_root_v2, "", sink, .{ .expected_chunks = 1 }, setup.pair.now);
+    const handle = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .blocks_by_root_v2, &([_]u8{0} ** 32), sink, .{ .expected_chunks = 1 }, setup.pair.now);
     var held = false;
     for (0..30) |_| {
         try setup.pumpOnce();
@@ -1177,7 +1174,7 @@ test "reqresp host consume retains buffered work behind a partial cursor" {
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
     defer std.testing.allocator.free(sink);
-    const handle = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .blocks_by_root_v2, "", sink, .{}, setup.pair.now);
+    const handle = try setup.client.reqresp.request(&setup.pair.client, &setup.client.router, setup.handles.client, .blocks_by_root_v2, &([_]u8{0} ** 64), sink, .{}, setup.pair.now);
     try waitForRequest(&setup);
     const stream = setup.server.reqresp.inbound[setup.serverEvents()[0].request.request.index].lifecycle.stream;
     const first = [_]u8{1} ** 3000;
@@ -1500,7 +1497,7 @@ test "reqresp rejects duplicate digests before allocating" {
 test "reqresp request admission host capacity cancellation and quota error write failure retain debt" {
     var setup: Pair = .{};
     try setup.init(.{}, .{
-        .admission = .{ .policy = @import("request_policy_test.zig").fixture(), .limits = .{ .identities = 1, .peer = @import("admission_test.zig").quotas(1, 86_400_000), .global = @import("admission_test.zig").quotas(100, 86_400_000) } },
+        .admission = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{ .identities = 1, .peer = @import("admission_test.zig").quotas(1, 86_400_000), .global = @import("admission_test.zig").quotas(100, 86_400_000) } },
     });
     defer setup.deinit();
     const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_root_v2.info().response_max);
@@ -1797,4 +1794,33 @@ test "reqresp canonical cancel supersedes accepted unfinished finish and error" 
         _ = setup.server.reqresp.pump(&setup.pair.server, &setup.server.router, setup.pair.now, .{ .application = &events }).application;
         try std.testing.expect(setup.server.reqresp.inboundSlot(handle) == null);
     }
+}
+
+test "reqresp partial response writes cannot renew the chunk deadline" {
+    var setup: Pair = .{};
+    try setup.init(.{}, .{ .progress_timeout_ms = 2000 });
+    defer setup.deinit();
+    const sink = try std.testing.allocator.alloc(u8, Protocol.blocks_by_range_v2.info().response_max);
+    defer std.testing.allocator.free(sink);
+    var request: [24]u8 = undefined;
+    _ = try requestBlocks(&setup, &request, 1, sink);
+    try waitForRequest(&setup);
+    const incoming = setup.serverEvents()[0].request.request;
+    const slot = &setup.server.reqresp.inbound[incoming.index];
+    const payload = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(payload);
+    var random = std.Random.DefaultPrng.init(1);
+    random.random().bytes(payload);
+    try setup.server.reqresp.respond(incoming, payload, .{ .digest = deneb_digest, .fork = .deneb }, setup.pair.now);
+    const due = slot.deadline(&setup.server.reqresp).?;
+    const before = try setup.pair.server.streamCapacity(slot.lifecycle.stream);
+    setup.pair.advance(500);
+    _ = setup.server.reqresp.pump(&setup.pair.server, &setup.server.router, setup.pair.now, .{});
+    try std.testing.expect((try setup.pair.server.streamCapacity(slot.lifecycle.stream)) < before);
+    try std.testing.expect(slot.lifecycle.io.writing);
+    try std.testing.expectEqual(due, slot.deadline(&setup.server.reqresp).?);
+    setup.pair.advance(1500);
+    var events: [1]Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.server.reqresp.pump(&setup.pair.server, &setup.server.router, setup.pair.now, .{ .application = &events }).application);
+    try std.testing.expect(events[0].failed.reason == .timeout);
 }

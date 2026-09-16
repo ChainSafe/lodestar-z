@@ -189,6 +189,7 @@ export interface NativeRuntimeDiagnostics {
   operationOccupied: number;
   operationHighWater: number;
   operationRefusals: bigint;
+  peerReportsIgnored: bigint;
   connectCapacity: number;
   connectOccupied: number;
   intentCapacity: number;
@@ -211,6 +212,10 @@ export interface NativeRuntimeDiagnostics {
   ownerShellBytes: number;
   ownerAllocationBytes: number;
   nativeAllocationCount: number;
+  /** Configured QUIC flow-control ceilings, separate from the native allocation ledger. */
+  quicReceiveWindowBytes: bigint;
+  quicConnectionWindowBytes: bigint;
+  quicStreamWindowBytes: bigint;
   resolvedCapacities: NativeResolvedCapacities;
   connectHighWater: number;
   connectRefusals: bigint;
@@ -374,6 +379,7 @@ export interface NativeNetworkApplicationRuntime {
   addDirectPeer(peerId: Uint8Array, addresses: readonly IpEndpoint[]): Promise<void>;
   removeDirectPeer(peerId: Uint8Array): Promise<boolean>;
   getDirectPeers(): Promise<NativeDirectSnapshot>;
+  /** Accumulates penalties independently of command capacity. Ignores unknown peers and closed runtimes. */
   reportPeer(peerId: Uint8Array, action: NativePeerAction): void;
   drainPeers(maxEvents: number): NativePeerBatch;
   close(): Promise<NativeRuntimeCloseResult>;

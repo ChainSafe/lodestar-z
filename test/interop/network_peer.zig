@@ -277,9 +277,11 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const application = args.len == 2 and std.mem.eql(u8, args[1], "--application");
     const identify_enabled = application or (args.len == 2 and std.mem.eql(u8, args[1], "--identify"));
+    var blob_schedule: [network.reqresp.request_policy.schedule_max]network.reqresp.request_policy.BlobLimit = undefined;
+    const policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule);
     const peer = try a.create(Peer);
     defer a.destroy(peer);
-    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = if (identify_enabled) .{ .agent = "lodestar-z-identify" } else null, .reqresp = .{ .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
+    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = if (identify_enabled) .{ .agent = "lodestar-z-identify" } else null, .reqresp = .{ .policy = policy, .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
     defer peer.service.deinit();
     peer.sink = try a.alloc(u8, max_payload);
     defer a.free(peer.sink);

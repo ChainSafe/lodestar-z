@@ -10,19 +10,14 @@ const engine_mod = @import("quic/engine.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 const Now = @import("types.zig").Now;
+pub const controls_per_turn = 32;
+pub const identify_per_turn = 8;
+pub const dials_per_turn = 4;
+pub const candidates_per_turn = 16;
+
 pub const Options = struct {
     peers: t.Options = .{},
-    service: service_mod.Options = .{
-        .router = .{ .outbound_control_reserved = 8 },
-        .reqresp = .{
-            .forks = &.{},
-            .outbound_control_reserved = 8,
-            .inbound_control_reserved = 8,
-            .outbound_per_peer_max = 8,
-            .inbound_per_peer_max = 16,
-            .inbound_application_per_peer_max = 8,
-        },
-    },
+    service: service_mod.Options,
     control: control_mod.Options = .{},
     dial: dial_mod.Options,
     metadata_freshness_ms: u64 = 60_000,
@@ -53,11 +48,10 @@ pub const DiscoveryNeed = struct {
 };
 const SelectionRevision = struct {
     catalog: u64,
-    scores: u64,
     delivery: u64,
 
     fn cacheable(self: *const SelectionRevision) bool {
-        return self.catalog != std.math.maxInt(u64) and self.scores != std.math.maxInt(u64) and self.delivery != std.math.maxInt(u64);
+        return self.catalog != std.math.maxInt(u64) and self.delivery != std.math.maxInt(u64);
     }
 };
 
@@ -236,7 +230,7 @@ pub const Core = struct {
         application: []rr.Event,
         gossip_events: []gossip.Event,
     ) Counts {
-        const per_connection = 2 * @import("quic/limits.zig").streams_per_connection + 3;
+        const per_connection = @import("quic/limits.zig").events_per_connection;
         std.debug.assert(events.len <= @as(usize, engine.limits.connections_max) * per_connection);
         if (self.stopped) return .{
             .peers = self.catalog.pollEvents(peer_events),
@@ -248,12 +242,17 @@ pub const Core = struct {
             self.demand = .{};
             self.selection_revision = null;
         }
-        self.catalog.refresh(now.mono_ms);
         if (!self.quiescing) self.dial_queue.expire(engine, now.mono_ms);
         for (events) |event| self.transportEvent(engine, event, now);
-        var controls: [32]rr.Event = undefined;
-        var identify_results: [8]@import("identify/root.zig").Result = undefined;
+        var controls: [controls_per_turn]rr.Event = undefined;
+        var identify_results: [identify_per_turn]@import("identify/root.zig").Result = undefined;
         const counts = self.service.process(engine, events, activity, now, .{ .application = application, .control = &controls, .gossipsub = gossip_events, .identify = &identify_results });
+        for ([_][]const rr.Event{ application[0..counts.application], controls[0..counts.control] }) |batch| {
+            for (batch) |event| {
+                const conn = self.service.reqresp.incompleteRequestTimeout(event) orelse continue;
+                if (self.control.peerFor(conn)) |peer| _ = self.reportPeer(peer, .low_tolerance, now);
+            }
+        }
         self.control.identifyResults(&self.catalog, identify_results[0..counts.identify]);
         self.control.events(
             &self.service,
@@ -292,9 +291,9 @@ pub const Core = struct {
                     _ = engine.close(connected.conn, 0);
                     return;
                 }
-                const identity = engine.peerId(connected.conn) orelse return;
+                const identity = connected.peer_id;
                 const endpoint = engine.peerAddress(connected.conn) orelse return;
-                const direction = engine.direction(connected.conn) orelse return;
+                const direction = connected.direction;
                 const decision = self.catalog.admit(
                     &identity,
                     &self.local_identity,
@@ -416,7 +415,7 @@ pub const Core = struct {
         }
     }
     fn currentSelectionRevision(self: *const Core) SelectionRevision {
-        return .{ .catalog = self.catalog.revision, .scores = self.service.gossipsub.inner.peers.scores.revision, .delivery = self.service.gossipsub.inner.sessions.delivery_revision };
+        return .{ .catalog = self.catalog.revision, .delivery = self.service.gossipsub.inner.sessions.delivery_revision };
     }
     fn policyChanged(self: *const Core) bool {
         return !std.meta.eql(self.selection_revision, self.currentSelectionRevision());
@@ -435,13 +434,13 @@ pub const Core = struct {
     ) ?u64 {
         if (self.stopped) return self.peerWakeup(now, peer_capacity);
         if (self.quiescing) {
-            var due = self.service.nextWakeup(now, .{ .application = 0, .control = 32, .gossipsub = 0, .identify = 8 });
+            var due = self.service.nextWakeup(now, .{ .application = 0, .control = controls_per_turn, .gossipsub = 0, .identify = identify_per_turn });
             for ([_]?u64{ self.control.nextWakeup(&self.catalog, now), self.peerWakeup(now, peer_capacity) }) |next| if (next) |deadline| {
                 due = @min(due orelse deadline, deadline);
             };
             return due;
         }
-        var due = self.service.nextWakeup(now, .{ .application = application_capacity, .control = 32, .gossipsub = gossip_capacity, .identify = 8 });
+        var due = self.service.nextWakeup(now, .{ .application = application_capacity, .control = controls_per_turn, .gossipsub = gossip_capacity, .identify = identify_per_turn });
         for ([_]?u64{
             self.control.nextWakeup(&self.catalog, now),
             self.dial_queue.nextWakeup(now.mono_ms, @min(dial_capacity, self.dialRoom())),
@@ -695,7 +694,6 @@ pub const Core = struct {
     ) usize {
         if (self.stopped) return 0;
         self.dial_queue.expire(engine, now.mono_ms);
-        self.catalog.refresh(now.mono_ms);
         self.reconcile(now);
         self.updateNativeRoom(engine);
         return self.dial_queue.poll(now.mono_ms, out[0..@min(out.len, self.dialRoom())]);

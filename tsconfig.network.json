@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "module": "NodeNext",
+    "noEmit": true,
+    "strict": true,
+    "target": "ES2023"
+  },
+  "include": ["bindings/src/network.d.ts", "bindings/test/network*.test.ts", "bindings/test/utils/network.ts"]
+}

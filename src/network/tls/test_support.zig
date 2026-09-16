@@ -2,7 +2,7 @@ const std = @import("std");
 const cert = @import("cert.zig");
 const keys = @import("../wire/keys.zig");
 const signed_key = @import("../wire/signed_key.zig");
-const c = @import("../quic/binding.zig").c;
+const c = @import("quiche_zig:quiche");
 
 pub fn forgeHostSignature(certificate: *cert.Certificate, claimed: *const keys.PublicKey, signer: *const keys.KeyPair) !void {
     var spki: [signed_key.spki_length_max]u8 = undefined;

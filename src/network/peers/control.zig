@@ -224,6 +224,9 @@ pub const Control = struct {
         const row = self.schedule(peer, conn) orelse return false;
         if (!catalog.markUnavailable(peer, conn, reason)) return false;
         if (row.closing == null) {
+            if (reason != .shutdown and reason != .remote_goodbye) {
+                _ = catalog.cooldown(peer, conn, now.mono_ms, goodbye.cooldownMs(goodbyeReason(reason)));
+            }
             const snapshot = catalog.get(peer).?;
             const agent = client.agent(&snapshot.identify);
             std.log.scoped(.network_peers).debug("peer_disconnect_scheduled peer={f} connection={d}:{d} reason={s} grace_ms=2000 agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, @tagName(reason), std.json.fmt(agent, .{}) });
@@ -265,15 +268,16 @@ pub const Control = struct {
     }
     fn goodbyeReason(reason: t.DisconnectReason) u64 {
         return switch (reason) {
-            .host, .shutdown, .duplicate, .capacity, .remote_goodbye, .count_pruning, .gossip_unavailable => 1,
+            .host, .shutdown, .duplicate, .remote_goodbye, .gossip_unavailable => 1,
+            .capacity, .count_pruning => 129,
+            .reputation => 250,
+            .banned => 251,
             .incompatible_fork, .future_head, .finalized_mismatch, .missing_availability => 2,
             .transport_closed,
             .invalid_status,
             .invalid_metadata,
             .health_timeout,
             .health_error,
-            .reputation,
-            .banned,
             => 3,
         };
     }
@@ -412,7 +416,7 @@ pub const Control = struct {
         const snapshot = catalog.get(peer).?;
         self.counters.events.observeGoodbye(code, false, snapshot.connected_at_ms, now.mono_ms);
         std.log.scoped(.network_peers).debug("peer_goodbye_received peer={f} connection={d}:{d} code={d} reason={s} cooldown_ms={d} during_close={any} agent={f}", .{ @import("../logging.zig").peer(&snapshot.identity), conn.index, conn.generation, code, @tagName(reason), goodbye.cooldownMs(code), during_close, std.json.fmt(client.agent(&snapshot.identify), .{}) });
-        _ = catalog.remoteGoodbye(peer, conn, now.mono_ms, goodbye.cooldownMs(code));
+        _ = catalog.cooldown(peer, conn, now.mono_ms, goodbye.cooldownMs(code));
     }
 
     pub fn close(
@@ -500,7 +504,6 @@ pub const Control = struct {
     ) void {
         for (batch) |event| switch (event) {
             .request => |request| self.respond(service, catalog, local, request, now, slot),
-            .over_limit => {},
             else => self.result(service, catalog, engine, local, event, now, slot),
         };
     }

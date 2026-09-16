@@ -8,6 +8,7 @@ pub fn addInstrumentedExe(
     b: *std.Build,
     obj: *std.Build.Step.Compile,
     extra_libs: []const *std.Build.Step.Compile,
+    extra_objects: []const std.Build.LazyPath,
     extra_args: []const []const u8,
 ) std.Build.LazyPath {
     // Force the build system to produce the binary artifact even though we
@@ -32,6 +33,7 @@ pub fn addInstrumentedExe(
     for (extra_libs) |lib| {
         afl_cc.addFileArg(lib.getEmittedBin());
     }
+    for (extra_objects) |object| afl_cc.addFileArg(object);
     afl_cc.addArgs(extra_args);
     return fuzz_exe;
 }

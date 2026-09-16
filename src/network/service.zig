@@ -169,8 +169,8 @@ pub const Service = struct {
                     if (outcome.direction == .outbound) {
                         if (!self.reqresp.negotiated(outcome, now)) engine.closeStream(outcome.stream, 0);
                     } else switch (outcome.result) {
-                        .ready => |selection| _ = self.reqresp.accept(engine, outcome.stream, selection, now) catch {
-                            engine.closeStream(outcome.stream, 0);
+                        .ready => |selection| _ = self.reqresp.accept(engine, outcome.stream, selection, now) catch |err| {
+                            engine.closeStream(outcome.stream, if (err == error.TooManyRequests) @import("reqresp/constants.zig").app_error_over_limit else 0);
                         },
                         else => {},
                     }

@@ -310,7 +310,7 @@ pub const Overlay = struct {
 
     fn score(context: *const Context, peer: u16) f64 {
         const snapshot = context.snapshot orelse return context.peers.score(context.sessions.rows[peer].logical, context.now);
-        if (snapshot[peer].generation != context.sessions.peerGeneration(peer)) return -score_mod.counter_max;
+        if (snapshot[peer].generation != context.sessions.peerGeneration(peer)) return context.peers.score(context.sessions.rows[peer].logical, context.now);
         return snapshot[peer].value;
     }
 
@@ -425,7 +425,7 @@ pub const Overlay = struct {
         if (blocked) {
             context.peers.scores.penalize(row.logical.index, 1);
             context.peers.scores.penalties.graft_backoff +|= 1;
-            if (context.now -| backoff.pruned_at < c.graft_flood_threshold_ms) {
+            if (backoff.until -| context.now > c.prune_backoff_ms - c.graft_flood_threshold_ms) {
                 context.peers.scores.penalize(row.logical.index, 1);
                 context.peers.scores.penalties.graft_backoff +|= 1;
             }
@@ -494,7 +494,7 @@ pub const Overlay = struct {
 
     pub fn opportunistic(self: *Overlay, context: *const Context, topic: u16) void {
         const members = &self.rows[topic].mesh;
-        if (members.count() < c.mesh_d) return;
+        if (members.count() < 2) return;
         var ordered: [c.peers_cap]u16 = undefined;
         var n: usize = 0;
         var it = members.iterator(.{});
@@ -503,7 +503,10 @@ pub const Overlay = struct {
             n += 1;
         }
         sort(context, ordered[0..n]);
-        const median = score(context, ordered[n / 2]);
+        const median = if (n % 2 == 0)
+            (score(context, ordered[n / 2 - 1]) + score(context, ordered[n / 2])) / 2
+        else
+            score(context, ordered[n / 2]);
         if (median >= context.peers.scores.params.opportunistic_graft_threshold) return;
         n = self.candidates(context, topic, &ordered, true, 0);
         self.shuffle(ordered[0..n]);

@@ -112,6 +112,68 @@ test "gossipsub service does not retry a closed outbound stream" {
     try std.testing.expectEqual(started, setup.client.gossipsub.inner.counters.negotiation_started);
 }
 
+test "gossipsub direct send timeout retries once after a bounded delay" {
+    const driver = @import("session_driver.zig");
+    const Recovery = enum { resume_stream, negotiation_timeout, remove_direct };
+    for ([_]Recovery{ .resume_stream, .negotiation_timeout, .remove_direct }) |recovery| {
+        var setup: Pair = .{};
+        try setup.initOpts(.{ .random_seed = 1, .tx_timeout_ms = 5 }, .{ .random_seed = 1 });
+        defer setup.deinit();
+        const topic = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
+        const g = setup.client.gossipsub.inner;
+        try std.testing.expect(g.subscribe(topic));
+        try std.testing.expect(setup.server.gossipsub.inner.subscribe(topic));
+        for (0..32) |_| try setup.pumpOnce();
+        g.markDirect(setup.handles.client);
+        for (0..4) |_| try setup.pumpOnce();
+        const index = g.sessions.findPeer(setup.handles.client).?;
+        const previous = g.sessions.rows[index].outStream().?;
+        const started = g.counters.negotiation_started;
+        try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, "stalled", setup.pair.now)).queued);
+        setup.pair.advance(g.options.tx_timeout_ms);
+        for (0..4) |_| try setup.pumpOnce();
+        try std.testing.expectEqual(@as(u64, 1), g.counters.send_queue_timeouts);
+        try std.testing.expectEqual(setup.pair.now.mono_ms + driver.direct_retry_delay_ms, g.sessions.rows[index].outbound.retry_at);
+        try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[index].io.tx.data.count);
+        try std.testing.expectEqual(.pending, setup.client.gossipsub.deliveryStatus(setup.handles.client));
+        setup.pair.advance(driver.direct_retry_delay_ms - 1);
+        for (0..4) |_| try setup.pumpOnce();
+        try std.testing.expectEqual(started, g.counters.negotiation_started);
+        if (recovery == .remove_direct) g.unmarkDirect(&setup.pair.server_ctx.local_peer_id);
+        setup.pair.advance(1);
+        _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .gossipsub = &setup.client_events });
+        if (recovery == .resume_stream) {
+            for (0..32) |_| try setup.pumpOnce();
+            try std.testing.expectEqual(started + 1, g.counters.negotiation_started);
+            try std.testing.expect(g.sessions.rows[index].outStream().?.id != previous.id);
+            try std.testing.expectEqual(@as(u16, 1), (try g.publish(topic, "resumed", setup.pair.now)).queued);
+            var received = false;
+            for (0..32) |_| {
+                try setup.pumpOnce();
+                for (setup.serverEvents()) |event| if (event == .message) {
+                    try std.testing.expectEqualStrings("resumed", event.message.bytes);
+                    _ = setup.server.gossipsub.inner.report(event.message.handle, .accept, setup.pair.now);
+                    received = true;
+                };
+                if (received) break;
+            }
+            try std.testing.expect(received);
+        } else {
+            if (recovery == .negotiation_timeout) {
+                try std.testing.expectEqual(started + 1, g.counters.negotiation_started);
+                setup.pair.advance(@import("../negotiate.zig").negotiate_timeout_ms + 1);
+                _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .gossipsub = &setup.client_events });
+                try std.testing.expectEqual(@as(u64, 1), g.counters.negotiation_failed);
+            }
+            try std.testing.expect(g.sessions.rows[index].outbound == .none);
+            const final_started = g.counters.negotiation_started;
+            setup.pair.advance(driver.direct_retry_delay_ms * 2);
+            _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .gossipsub = &setup.client_events });
+            try std.testing.expectEqual(final_started, g.counters.negotiation_started);
+        }
+    }
+}
+
 fn propose(pair: *support.Pair, conn: engine_mod.Handle, version: []const u8, payload: []const u8) !engine_mod.StreamHandle {
     const stream = try pair.client.openStream(conn);
     const dialer = try @import("../wire/multistream.zig").Dialer.init(version);
@@ -349,6 +411,7 @@ test "gossipsub negotiation timeout releases resources without creating a retry 
     var setup: Pair = .{};
     try setup.init();
     defer setup.deinit();
+    setup.client.gossipsub.inner.markDirect(setup.handles.client);
     try std.testing.expect(setup.client.gossipsub.inner.subscribe("/eth2/6a95a1a9/beacon_block/ssz_snappy"));
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, .{ .gossipsub = &setup.client_events });
     setup.pair.advance(@import("../negotiate.zig").negotiate_timeout_ms + 1);

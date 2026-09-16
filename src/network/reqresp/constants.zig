@@ -17,6 +17,7 @@ pub const result_success: u8 = 0;
 pub const result_invalid_request: u8 = 1;
 pub const result_server_error: u8 = 2;
 pub const result_resource_unavailable: u8 = 3;
+pub const result_rate_limited: u8 = 139;
 pub const result_reserved_max: u8 = 127;
 
 pub const app_error_timeout: u64 = 16;

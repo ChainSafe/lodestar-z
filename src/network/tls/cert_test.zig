@@ -2,7 +2,7 @@ const std = @import("std");
 const cert = @import("cert.zig");
 const keys = @import("../wire/keys.zig");
 const signed_key = @import("../wire/signed_key.zig");
-const c = @import("../quic/binding.zig").c;
+const c = @import("quiche_zig:quiche");
 
 const now_unix: i64 = 1_700_000_000;
 
@@ -50,10 +50,12 @@ test "certificate validity window brackets the creation time" {
     defer certificate.deinit();
     var before: c.time_t = @intCast(now_unix - 7_200);
     var inside: c.time_t = @intCast(now_unix);
-    var after: c.time_t = @intCast(now_unix + 366 * 24 * 3_600);
+    var decade: c.time_t = @intCast(now_unix + 10 * 365 * 24 * 3_600);
+    var after: c.time_t = @intCast(now_unix + 101 * 365 * 24 * 3_600);
     try std.testing.expect(c.X509_cmp_time(c.X509_get0_notBefore(certificate.x509), &before) > 0);
     try std.testing.expect(c.X509_cmp_time(c.X509_get0_notBefore(certificate.x509), &inside) < 0);
     try std.testing.expect(c.X509_cmp_time(c.X509_get0_notAfter(certificate.x509), &inside) > 0);
+    try std.testing.expect(c.X509_cmp_time(c.X509_get0_notAfter(certificate.x509), &decade) > 0);
     try std.testing.expect(c.X509_cmp_time(c.X509_get0_notAfter(certificate.x509), &after) < 0);
 }
 

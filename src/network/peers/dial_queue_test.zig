@@ -162,7 +162,7 @@ test "peer dial custody diagnostics retain expired unfinished work without claim
 test "peer dial queue copies candidates rotates addresses and ignores stale leased tokens" {
     var q = try mod.DialQueue.init(
         a,
-        .{ .capacity = 2, .concurrent_max = 1, .engine_dialing_max = 1, .seed = 4 },
+        .{ .capacity = 2, .concurrent_max = 1, .seed = 4 },
     );
     defer q.deinit(a);
     var peer: t.PeerId = .{ .bytes = @splat(1) };
@@ -195,7 +195,7 @@ test "peer dial queue copies candidates rotates addresses and ignores stale leas
 test "peer dial queue bounded pressure generation exhaustion and zero output do not spin" {
     var q = try mod.DialQueue.init(
         a,
-        .{ .capacity = 2, .concurrent_max = 1, .engine_dialing_max = 1, .seed = 9 },
+        .{ .capacity = 2, .concurrent_max = 1, .seed = 9 },
     );
     defer q.deinit(a);
     const first: t.PeerId = .{ .bytes = @splat(1) };
@@ -224,7 +224,7 @@ test "peer dial queue bounded pressure generation exhaustion and zero output do 
 test "peer dial queue exponential retry remains bounded through repeated failure" {
     var q = try mod.DialQueue.init(
         a,
-        .{ .capacity = 1, .concurrent_max = 1, .engine_dialing_max = 1, .seed = 10 },
+        .{ .capacity = 1, .concurrent_max = 1, .seed = 10 },
     );
     defer q.deinit(a);
     const peer: t.PeerId = .{ .bytes = @splat(1) };
@@ -243,7 +243,7 @@ test "peer dial queue exponential retry remains bounded through repeated failure
 test "peer dial queue polling and failure without native owner preserve started handles" {
     var q = try mod.DialQueue.init(
         a,
-        .{ .capacity = 1, .concurrent_max = 1, .engine_dialing_max = 1, .seed = 4 },
+        .{ .capacity = 1, .concurrent_max = 1, .seed = 4 },
     );
     defer q.deinit(a);
     const peer: t.PeerId = .{ .bytes = @splat(1) };
@@ -270,7 +270,7 @@ test "peer dial queue polling and failure without native owner preserve started 
 }
 
 test "peer dial queue review cooldown cannot extend a lost acknowledgement lease" {
-    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .engine_dialing_max = 1, .seed = 5 });
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 5 });
     defer q.deinit(a);
     const peer: t.PeerId = .{ .bytes = @splat(1) };
     try q.enqueue(&peer, &.{address}, true, 0);
@@ -783,4 +783,46 @@ test "peer manual dial deadlines merge while direct reconnects back off" {
     }
     try std.testing.expectEqual(@as(u64, 3), q.counters.connection_backoffs);
     try std.testing.expect(q.isDirect(&peer));
+}
+
+test "peer dial simultaneous inbound success does not record the redundant outbound close as failure" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const peer: t.PeerId = .{ .bytes = @splat(1) };
+    try q.enqueue(&peer, &.{address}, true, 0);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    const outbound: t.Handle = .{ .index = 0, .generation = 1 };
+    try std.testing.expect(q.dialStarted(out[0].token, outbound));
+    q.accepted(&peer, .{ .index = 1, .generation = 1 }, 100);
+    try std.testing.expect(q.dialClosed(outbound, 200));
+    try std.testing.expectEqual(@as(u8, 0), q.rows[0].failures);
+    try std.testing.expectEqual(@as(u64, 0), q.durations[1].count);
+}
+
+test "peer explicit dial ranks above discovery coverage" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const candidate = try discovered(1, 15);
+    const manual = try discovered(2, 0);
+    try q.enqueueDiscovered(&candidate, &.{}, &.{ .syncnets = 15 }, 0);
+    try q.enqueue(&manual.peer, &.{address}, false, 0);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    try std.testing.expectEqualDeep(manual.peer, out[0].peer);
+}
+
+test "peer failed discovery candidate yields its slot after retry backoff" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const forged = try discovered(1, 15);
+    const replacement = try discovered(2, 0);
+    try q.enqueueDiscovered(&forged, &.{}, &.{ .syncnets = 15 }, 0);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    try std.testing.expect(q.dialFailed(out[0].token, 1));
+    const retry_at = q.nextWakeup(1, 1).?;
+    try q.enqueueDiscovered(&replacement, &.{}, &.{ .syncnets = 15 }, retry_at);
+    try std.testing.expectEqual(@as(usize, 1), q.poll(retry_at, &out));
+    try std.testing.expectEqualDeep(replacement.peer, out[0].peer);
 }

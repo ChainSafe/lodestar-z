@@ -465,6 +465,7 @@ fn fakeEntry(id: u8) RoutingTable.Entry {
         .peer = peer,
         .record = fakeRecord(peer.node_id, peer.address, 1),
         .last_verified_ms = 0,
+        .direction = .outgoing,
     };
 }
 
@@ -566,7 +567,7 @@ test "dual lookup chooses a relay-eligible endpoint before rejecting a signed re
         .{ .key = "udp", .value = .{ .uint = 9000 } },
         .{ .key = "udp6", .value = .{ .uint = 9000 } },
     });
-    for ([_]@import("udp").Mode{ .ip4, .ip6, .dual }) |mode| {
+    for ([_]types.Mode{ .ip4, .ip6, .dual }) |mode| {
         var core = try initEngine();
         defer core.deinit(std.testing.allocator);
         var seed = fakeEntry(1);

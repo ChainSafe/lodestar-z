@@ -14,7 +14,13 @@ it("owns a real native socket and releases it on idempotent close", async () => 
     expect(identity.peerId).toEqual(expectedPeerId);
     expect(identity.localEndpoint.port).toBeGreaterThan(0);
     expect(runtime.state).toBe("prepared");
-    expect(runtime.diagnostics().nativeRequestedBytes).toBeGreaterThan(0);
+    const diagnostics = runtime.diagnostics();
+    expect(diagnostics.nativeRequestedBytes).toBeGreaterThan(0);
+    expect(diagnostics.quicReceiveWindowBytes).toBe(
+      diagnostics.quicConnectionWindowBytes * BigInt(diagnostics.resolvedCapacities.connectionCapacity)
+    );
+    expect(diagnostics.quicStreamWindowBytes).toBeGreaterThan(0n);
+    expect(diagnostics.quicStreamWindowBytes).toBeLessThanOrEqual(diagnostics.quicConnectionWindowBytes);
     expect((await runtime.applyIntent(localIntent(config), 101n)).slot).toBe(101n);
     const closing = runtime.close();
     expect(terminal).toBe(closing);
@@ -41,6 +47,7 @@ it("copies inputs before returning and advances the clock only through intents",
   const intent = localIntent(config);
   const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   config.identitySecretKey.fill(0);
+  if (!("address" in config.bind)) throw new Error("Expected a single bind address");
   config.bind.address.fill(0);
   config.local.status.forkDigest.fill(99);
   config.local.fork.digest.fill(99);
@@ -70,6 +77,7 @@ it.each([
   [
     "fractional port",
     (c: ReturnType<typeof applicationConfig>) => {
+      if (!("port" in c.bind)) throw new Error("Expected a single bind address");
       c.bind.port = 0.5;
     },
     "InvalidNetworkInteger",
@@ -195,6 +203,14 @@ it.each(["gc", "exit", "promises"])("finishes bounded %s subprocess lifecycle", 
   expect(output).toContain(mode === "gc" ? "gc-rebound" : mode === "exit" ? "ready-exit" : "promises-settled");
 }, 15000);
 
+it("releases live requests, incoming cells and gossip batches on worker termination", () => {
+  const output = execFileSync(process.execPath, ["bindings/test/fixtures/network-worker-resources.mjs"], {
+    encoding: "utf8",
+    timeout: 20000,
+  });
+  expect(output).toContain("live-worker-resources-released");
+}, 25000);
+
 it("survives abrupt teardown of a second Node environment", async () => {
   const {Worker} = await import("node:worker_threads");
   const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
@@ -223,7 +239,7 @@ it("survives abrupt teardown of a second Node environment", async () => {
 }, 20000);
 
 it("gates raw reentrant prepare and close before config getters execute", async () => {
-  const {default: addon} = await import("../src/bindings.js");
+  const {networkBindings: addon} = await import("./utils/network-bindings.js");
   const raw = new addon.NativeNetworkRuntime();
   const config = applicationConfig();
   Object.defineProperty(config, "profile", {
@@ -282,6 +298,7 @@ it("initializes signed discovery without waiting for bootstrap reachability", as
 
 it("fails wildcard discovery advertisement omissions cleanly", async () => {
   const config = applicationConfig();
+  if (!("address" in config.bind)) throw new Error("Expected a single bind address");
   config.bind.address.fill(0);
   config.discovery = {
     advertisement: null,
@@ -329,7 +346,7 @@ it("publishes copied peer observations without repeating unread notifications", 
     const before = notifications;
     await delay(250);
     expect(notifications).toBe(before);
-    const {default: addon} = await import("../src/bindings.js");
+    const {networkBindings: addon} = await import("./utils/network-bindings.js");
     if (typeof addon.networkTestFail === "function") {
       const queued = runtime.diagnostics().peerLaneOccupied;
       addon.networkTestFail("drain_copy");

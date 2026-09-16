@@ -65,7 +65,7 @@ pub fn resolve(request: Request) !Resolved {
         .byte_limit = request.byte_limit orelse if (small) 80 * 1024 * 1024 else 256 * 1024 * 1024,
         .core = .{
             .peers = peer_options,
-            .dial = request.dial orelse .{ .capacity = if (small) 32 else 256, .concurrent_max = @min(4, limits.dialing_max), .engine_dialing_max = limits.dialing_max, .seed = request.seed },
+            .dial = request.dial orelse .{ .capacity = if (small) 32 else 256, .concurrent_max = @min(4, limits.dialing_max), .seed = request.seed },
             .control = request.control orelse .{ .operations_max = if (small) 4 else 16 },
             .service = .{
                 .identify = request.identify orelse .{ .inbound_max = if (small) 2 else 4, .outbound_max = if (small) 2 else 4 },
@@ -96,7 +96,7 @@ pub fn validate(limits: engine.Limits, options: core.Options) !void {
     _ = try engine.Engine.validateLimits(limits);
     try core.Core.validateOptions(options);
     if (options.peers.engine_capacity != limits.connections_max or
-        options.dial.engine_dialing_max != limits.dialing_max or options.dial.concurrent_max > limits.dialing_max or
+        options.dial.concurrent_max > limits.dialing_max or
         options.service.router.outbound_control_reserved < options.service.reqresp.outbound_control_reserved)
         return error.InvalidOptions;
 }
@@ -131,7 +131,7 @@ test "managed configuration rejects inconsistent capacity sections before owners
     options.service.gossipsub.connected_capacity = 0;
     try std.testing.expectError(error.InvalidLimits, validate(resolved.limits, options));
     var limits = resolved.limits;
-    limits.dialing_max += 1;
+    limits.dialing_max = resolved.core.dial.concurrent_max - 1;
     try std.testing.expectError(error.InvalidOptions, validate(limits, resolved.core));
 }
 
@@ -157,7 +157,7 @@ test "managed configuration validates complete router and score sections" {
 test "managed runtime request admission derives retained capacity quotas and control reservation" {
     const base = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{} });
     var requests = base.core.service.reqresp;
-    requests.admission = try rr.AdmissionOptions.defaults(&@import("reqresp/request_policy_test.zig").fixture(), base.core.peers.capacity, requests.inbound_max);
+    requests.admission = try rr.AdmissionOptions.defaults(&@import("reqresp/policy_fixture.zig").config(), base.core.peers.capacity, requests.inbound_max);
     const resolved = try resolve(.{ .profile = .small, .seed = 1, .forks = &.{}, .reqresp = requests });
     const admission = resolved.core.service.reqresp.admission.?.limits;
     try std.testing.expectEqual(resolved.core.peers.capacity, admission.identities);
@@ -175,7 +175,7 @@ test "managed runtime request admission memory plan measures both retained profi
     for ([_]Profile{ .small, .beacon_node }) |profile| {
         const base = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{} });
         var requests = base.core.service.reqresp;
-        requests.admission = try rr.AdmissionOptions.defaults(&@import("reqresp/request_policy_test.zig").fixture(), base.core.peers.capacity, requests.inbound_max);
+        requests.admission = try rr.AdmissionOptions.defaults(&@import("reqresp/policy_fixture.zig").config(), base.core.peers.capacity, requests.inbound_max);
         const resolved = try resolve(.{ .profile = profile, .seed = 1, .forks = &.{}, .reqresp = requests });
         var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
         var handler = try @import("reqresp/reqresp.zig").ReqResp.init(allocator.allocator(), resolved.core.service.reqresp);

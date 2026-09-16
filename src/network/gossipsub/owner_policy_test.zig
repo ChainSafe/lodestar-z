@@ -129,7 +129,7 @@ test "gossip policy sent promise survives reconnect without token rearming" {
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const first = g.addPeer(conn, &metadata, now).admitted;
     const ref = g.sessions.rows[first.index].logical;
-    g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[first.index].logical, g.sessions.rows[first.index].conn, 9);
+    g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[first.index].logical, g.sessions.rows[first.index].conn, 9, 30_000);
     g.recovery.controlSent(g.sessions.rows[first.index].conn, 9, g.options.iwant_followup_ms, 10);
     g.connectionClosed(conn);
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);

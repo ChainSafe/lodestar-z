@@ -1,7 +1,7 @@
 const cert = @import("cert.zig");
 const peer_id = @import("../wire/peer_id.zig");
 const signed_key = @import("../wire/signed_key.zig");
-const c = @import("../quic/binding.zig").c;
+const c = @import("quiche_zig:quiche");
 
 pub const Error = error{
     CertificateMalformed,
@@ -37,7 +37,7 @@ pub fn verifyX509(x509: *c.X509, now_unix: i64) Error!peer_id.PeerId {
     const signed = try extensionValue(x509);
 
     var spki: [signed_key.spki_length_max]u8 = undefined;
-    const spki_der = cert.spkiDer(key, &spki) catch return error.CertificateMalformed;
+    const spki_der = cert.spkiDer(key, &spki) catch return error.UnsupportedKeyType;
     var message: [signed_key.message_length_max]u8 = undefined;
     const to_verify = signed_key.message(spki_der, &message) catch
         return error.CertificateMalformed;

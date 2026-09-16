@@ -37,6 +37,7 @@ fn clientKind(agent: []const u8) Client {
 pub const Snapshot = struct {
     runtime: network.Counters = .{},
     transport: @import("quic/api.zig").Counters = .{},
+    negotiations: @import("router.zig").Counters = .{},
     requests: rr.Counters = .{},
     udp: @import("udp.zig").Counters = .{},
     outgoing_error_reasons: [rr.reqresp.metrics.error_reason_count]u64 = @splat(0),
@@ -97,6 +98,7 @@ pub const Snapshot = struct {
         const g = core.service.gossipsub.inner;
         self.runtime = owner.counters;
         self.transport = owner.transport.engine.counters;
+        self.negotiations = core.service.router.counters;
         self.connections = owner.transport.engine.connection_metrics;
         self.transport_resources = owner.transport.engine.resourceSnapshot();
         self.dial_resources = core.dial_queue.resourceSnapshot();
@@ -280,6 +282,9 @@ pub const Snapshot = struct {
         try scalar(w, "lodestar_native_network_running", .gauge, "Network owner is running", @intFromBool(self.running));
         try counterFields(w, "lodestar_native_network_", &self.runtime);
         try counterFields(w, "lodestar_native_quic_", &self.transport);
+        try scalar(w, "lodestar_native_negotiation_refused_total", .counter, "Inbound streams refused at negotiation capacity", self.negotiations.refused);
+        try family(w, "lodestar_native_negotiation_failed_total", .counter, "Inbound negotiation failures");
+        inline for (@typeInfo(@import("negotiate.zig").Failure).@"enum".fields) |field| try sample(w, "lodestar_native_negotiation_failed_total", "reason", field.name, self.negotiations.inbound_failures[field.value]);
         inline for (.{
             .{ "received_bytes", "Complete QUIC UDP payload bytes received, excluding truncated datagrams" },
             .{ "sent_bytes", "QUIC UDP payload bytes sent, including successful prefixes of failed batches" },
@@ -363,15 +368,22 @@ pub const Snapshot = struct {
             const prefix = "lodestar_gossip_" ++ metric[0] ++ "_peers_by_";
             inline for (.{ "type", "beacon_attestation_subnet", "sync_committee_subnet", "data_column_subnet" }) |suffix| {
                 try family(w, prefix ++ suffix ++ "_count", .gauge, "Peer memberships in active native topics; boundary is the fork digest");
-            }
-            for (self.topics[0..self.topic_count]) |*entry| {
-                const boundary = std.fmt.bytesToHex(entry.digest, .lower);
-                const value = @field(entry, metric[1]);
-                switch (entry.kind) {
-                    .beacon_attestation => try w.print(prefix ++ "beacon_attestation_subnet_count{{subnet=\"{d:0>2}\",boundary=\"{s}\"}} {d}\n", .{ entry.subnet, boundary, value }),
-                    .sync_committee => try w.print(prefix ++ "sync_committee_subnet_count{{subnet=\"{d}\",boundary=\"{s}\"}} {d}\n", .{ entry.subnet, boundary, value }),
-                    .data_column_sidecar => try w.print(prefix ++ "data_column_subnet_count{{subnet=\"{d}\",boundary=\"{s}\"}} {d}\n", .{ entry.subnet, boundary, value }),
-                    else => try w.print(prefix ++ "type_count{{type=\"{s}\",boundary=\"{s}\"}} {d}\n", .{ @tagName(entry.kind), boundary, value }),
+                for (self.topics[0..self.topic_count]) |*entry| {
+                    const entry_suffix = switch (entry.kind) {
+                        .beacon_attestation => "beacon_attestation_subnet",
+                        .sync_committee => "sync_committee_subnet",
+                        .data_column_sidecar => "data_column_subnet",
+                        else => "type",
+                    };
+                    if (!std.mem.eql(u8, suffix, entry_suffix)) continue;
+                    const boundary = std.fmt.bytesToHex(entry.digest, .lower);
+                    const value = @field(entry, metric[1]);
+                    switch (entry.kind) {
+                        .beacon_attestation => try w.print(prefix ++ "beacon_attestation_subnet_count{{subnet=\"{d:0>2}\",boundary=\"{s}\"}} {d}\n", .{ entry.subnet, boundary, value }),
+                        .sync_committee => try w.print(prefix ++ "sync_committee_subnet_count{{subnet=\"{d}\",boundary=\"{s}\"}} {d}\n", .{ entry.subnet, boundary, value }),
+                        .data_column_sidecar => try w.print(prefix ++ "data_column_subnet_count{{subnet=\"{d}\",boundary=\"{s}\"}} {d}\n", .{ entry.subnet, boundary, value }),
+                        else => try w.print(prefix ++ "type_count{{type=\"{s}\",boundary=\"{s}\"}} {d}\n", .{ @tagName(entry.kind), boundary, value }),
+                    }
                 }
             }
         }
@@ -529,6 +541,20 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     const log_stats: @import("logging.zig").Stats = .{};
     try log_stats.write(&writer);
     const output = writer.buffered();
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    var current_family: []const u8 = "";
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "# TYPE ")) {
+            current_family = line[7..std.mem.lastIndexOfScalar(u8, line, ' ').?];
+        } else if (line.len > 0 and line[0] != '#') {
+            const end = std.mem.indexOfAny(u8, line, "{ ").?;
+            const name = line[0..end];
+            try std.testing.expect(std.mem.startsWith(u8, name, current_family));
+            const suffix = name[current_family.len..];
+            try std.testing.expect(suffix.len == 0 or std.mem.eql(u8, suffix, "_bucket") or
+                std.mem.eql(u8, suffix, "_count") or std.mem.eql(u8, suffix, "_sum"));
+        }
+    }
     try std.testing.expect(std.mem.indexOf(u8, output, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_request_write_stops_total{method=\"metadata\"} 7\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_response_finish_stops_total{method=\"ping\"} 3\n") != null);

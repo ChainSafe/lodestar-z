@@ -18,8 +18,8 @@ pub const Batch = struct {
     head: u16 = none,
     count: u16 = 0,
     sample: u16 = none,
-    expiry: ?u64 = null,
-    sent_at_ms: u64 = 0,
+    expiry: u64,
+    sent_at_ms: ?u64 = null,
 };
 
 pub const Recovery = struct {
@@ -98,6 +98,10 @@ pub const Recovery = struct {
         return .{ .count = count, .capacity = capacity };
     }
 
+    pub fn resolveWork(self: *const Recovery) usize {
+        return self.len * (@sizeOf(Request) + @sizeOf(MessageId)) + self.batch_len * @sizeOf(Batch);
+    }
+
     pub fn selectionWork(ids: usize, batches: usize, requests: usize) usize {
         assert(ids <= constants.max_ihave_ids_per_heartbeat and batches <= constants.promises_cap and requests <= constants.promises_cap);
         const levels = std.math.log2_int_ceil(usize, @max(ids, 2));
@@ -122,10 +126,10 @@ pub const Recovery = struct {
     }
 
     /// Commit a nonempty subset admitted by filterPending, without intervening recovery mutation.
-    pub fn requestBatch(self: *Recovery, peers: *Peers, outbox: *@import("outbox.zig").Outbox, ids: []const MessageId, peer: PeerRef, connection: Handle, random: std.Random, now: u64) error{OutboxFull}!void {
+    pub fn requestBatch(self: *Recovery, peers: *Peers, outbox: *@import("outbox.zig").Outbox, ids: []const MessageId, peer: PeerRef, connection: Handle, random: std.Random, followup_ms: u64, now: u64) error{OutboxFull}!void {
         assert(ids.len > 0 and ids.len <= constants.gossip_ids_max and ids.len <= self.available());
         const index = self.batch_len;
-        self.addBatch(peers, ids, peer, connection, 0, random.uintLessThan(usize, ids.len));
+        self.addBatch(peers, ids, peer, connection, 0, random.uintLessThan(usize, ids.len), now +| followup_ms);
         const token = outbox.submit(&.{ .iwant = ids }, now) orelse {
             self.remove(peers, index);
             return error.OutboxFull;
@@ -133,14 +137,14 @@ pub const Recovery = struct {
         self.batches[index].token = token;
     }
 
-    pub fn add(self: *Recovery, peers: *Peers, id: MessageId, peer: PeerRef, connection: Handle, token: u64) void {
-        self.addBatch(peers, &.{id}, peer, connection, token, 0);
+    pub fn add(self: *Recovery, peers: *Peers, id: MessageId, peer: PeerRef, connection: Handle, token: u64, expiry: u64) void {
+        self.addBatch(peers, &.{id}, peer, connection, token, 0, expiry);
     }
 
-    pub fn addBatch(self: *Recovery, peers: *Peers, ids: []const MessageId, peer: PeerRef, connection: Handle, token: u64, sample: usize) void {
+    pub fn addBatch(self: *Recovery, peers: *Peers, ids: []const MessageId, peer: PeerRef, connection: Handle, token: u64, sample: usize, expiry: u64) void {
         assert(ids.len > 0 and ids.len <= constants.gossip_ids_max and ids.len <= self.available() and sample < ids.len);
         const batch = &self.batches[self.batch_len];
-        batch.* = .{ .peer = peer, .connection = connection, .token = token, .count = @intCast(ids.len) };
+        batch.* = .{ .peer = peer, .connection = connection, .token = token, .expiry = expiry, .count = @intCast(ids.len) };
         for (ids, 0..) |id, i| {
             const slot = self.free;
             assert(slot != none);
@@ -171,10 +175,10 @@ pub const Recovery = struct {
                     link = &request.next;
                     continue;
                 }
-                if (receipt) |received| if (batch.expiry != null) {
+                if (receipt) |received| if (batch.sent_at_ms) |sent_at_ms| {
                     self.metrics.resolved +|= 1;
                     self.metrics.resolved_duplicate +|= @intFromBool(received.duplicate);
-                    self.metrics.delivery.observe(received.now_ms -| batch.sent_at_ms);
+                    self.metrics.delivery.observe(received.now_ms -| sent_at_ms);
                 };
                 link.* = request.next;
                 if (batch.sample == slot) batch.sample = none;
@@ -192,7 +196,7 @@ pub const Recovery = struct {
         for (0..count) |_| {
             if (index == self.batch_len) break;
             const batch = self.batches[index];
-            if (std.meta.eql(batch.connection, connection) and (local_pressure or batch.expiry == null)) {
+            if (std.meta.eql(batch.connection, connection) and (local_pressure or batch.sent_at_ms == null)) {
                 removed += batch.count;
                 self.remove(peers, index);
             } else index += 1;
@@ -203,7 +207,7 @@ pub const Recovery = struct {
     pub fn controlSent(self: *Recovery, connection: Handle, token: u64, followup_ms: u64, now_ms: u64) void {
         assert(followup_ms > 0 and followup_ms <= 86_400_000);
         for (self.batches[0..self.batch_len]) |*batch| {
-            if (batch.expiry == null and batch.token == token and std.meta.eql(batch.connection, connection)) {
+            if (batch.sent_at_ms == null and now_ms < batch.expiry and batch.token == token and std.meta.eql(batch.connection, connection)) {
                 batch.expiry = now_ms +| followup_ms;
                 batch.sent_at_ms = now_ms;
                 self.metrics.sent +|= batch.count;
@@ -220,9 +224,9 @@ pub const Recovery = struct {
             if (index == self.batch_len) break;
             const batch = self.batches[index];
             assert(peers.matches(batch.peer));
-            if (batch.expiry != null and now_ms >= batch.expiry.?) {
+            if (now_ms >= batch.expiry) {
                 self.metrics.expired_ids +|= batch.count;
-                if (batch.sample != none) {
+                if (batch.sent_at_ms != null and batch.sample != none) {
                     broken += 1;
                     peers.penalize(batch.peer, 1);
                     peers.scores.penalties.broken_promise +|= 1;
@@ -235,9 +239,9 @@ pub const Recovery = struct {
 
     pub fn nextExpiry(self: *const Recovery) ?u64 {
         var next: ?u64 = null;
-        for (self.batches[0..self.batch_len]) |batch| if (batch.expiry) |expiry| {
-            next = @min(next orelse expiry, expiry);
-        };
+        for (self.batches[0..self.batch_len]) |batch| {
+            next = @min(next orelse batch.expiry, batch.expiry);
+        }
         return next;
     }
 
@@ -277,11 +281,11 @@ test "recovery receipts bind connection generation and token and release only ca
         .direction = .inbound,
     };
     const peer = peers.admit(connection, &metadata, 0).admitted.peer;
-    recovery.add(&peers, [_]u8{1} ** 20, peer, connection, 7);
-    recovery.add(&peers, [_]u8{2} ** 20, peer, connection, 8);
+    recovery.add(&peers, [_]u8{1} ** 20, peer, connection, 7, 30_000);
+    recovery.add(&peers, [_]u8{2} ** 20, peer, connection, 8, 30_000);
     recovery.controlSent(next_connection, 7, 3000, 10);
     recovery.controlSent(connection, 6, 3000, 10);
-    try std.testing.expect(recovery.nextExpiry() == null);
+    try std.testing.expectEqual(@as(?u64, 30_000), recovery.nextExpiry());
     try std.testing.expectEqual(@as(u64, 0), recovery.metrics.sent);
     recovery.controlSent(connection, 7, 3000, 20);
     try std.testing.expectEqual(@as(?u64, 3020), recovery.nextExpiry());
@@ -313,12 +317,12 @@ test "recovery capacity resolves every matching attribution and deinit releases 
     {
         var recovery = try Recovery.init(allocator);
         defer recovery.deinit(allocator, &peers);
-        for (0..constants.promises_cap) |_| recovery.add(&peers, [_]u8{1} ** 20, peer, connection, 7);
+        for (0..constants.promises_cap) |_| recovery.add(&peers, [_]u8{1} ** 20, peer, connection, 7, 30_000);
         try std.testing.expectEqual(@as(usize, 0), recovery.available());
         recovery.resolve(&peers, [_]u8{1} ** 20, .{ .now_ms = 100 });
         try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
         try std.testing.expectEqual(@as(u64, 0), recovery.metrics.resolved);
-        recovery.add(&peers, [_]u8{2} ** 20, peer, connection, 8);
+        recovery.add(&peers, [_]u8{2} ** 20, peer, connection, 8, 30_000);
     }
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
 }
@@ -337,8 +341,8 @@ test "recovery metrics distinguish incoming delivery from queued and locally res
     };
     const peer = peers.admit(connection, &metadata, 0).admitted.peer;
     const id = [_]u8{1} ** 20;
-    recovery.add(&peers, id, peer, connection, 1);
-    recovery.add(&peers, id, peer, connection, 2);
+    recovery.add(&peers, id, peer, connection, 1, 30_000);
+    recovery.add(&peers, id, peer, connection, 2, 30_000);
     recovery.controlSent(connection, 1, 3000, 100);
     recovery.controlSent(connection, 1, 3000, 200);
     recovery.resolve(&peers, id, .{ .now_ms = 600 });
@@ -347,10 +351,10 @@ test "recovery metrics distinguish incoming delivery from queued and locally res
     try std.testing.expectEqual(@as(u64, 1), recovery.metrics.resolved);
     try std.testing.expectEqual(@as(u64, 0), recovery.metrics.resolved_duplicate);
     try std.testing.expectEqual(@as(u128, 500), recovery.metrics.delivery.sum_ms);
-    recovery.add(&peers, id, peer, connection, 3);
+    recovery.add(&peers, id, peer, connection, 3, 30_000);
     recovery.controlSent(connection, 3, 3000, 1000);
     recovery.resolve(&peers, id, .{ .now_ms = 1100, .duplicate = true });
-    recovery.add(&peers, id, peer, connection, 4);
+    recovery.add(&peers, id, peer, connection, 4, 30_000);
     recovery.controlSent(connection, 4, 3000, 1200);
     recovery.resolve(&peers, id, null);
     try std.testing.expectEqual(@as(u64, 3), recovery.metrics.sent);
@@ -372,7 +376,7 @@ test "recovery batches pin identity once and score one randomly selected promise
     const peer = peers.admit(connection, &metadata, 0).admitted.peer;
     var ids: [constants.gossip_ids_max]MessageId = undefined;
     for (&ids, 0..) |*id, i| id.* = @splat(@intCast(i));
-    recovery.addBatch(&peers, &ids, peer, connection, 1, 64);
+    recovery.addBatch(&peers, &ids, peer, connection, 1, 64, 30_000);
     try std.testing.expectEqual(@as(u32, 1), peers.rows[peer.index].pins);
     try std.testing.expectEqual(@as(u64, 0), recovery.expire(&peers, 20000));
     recovery.controlSent(connection, 1, 3000, 20000);
@@ -380,7 +384,7 @@ test "recovery batches pin identity once and score one randomly selected promise
     try std.testing.expectEqual(@as(u64, 1), peers.scores.penalties.broken_promise);
     try std.testing.expectEqual(@as(u64, 128), recovery.metrics.expired_ids);
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
-    recovery.addBatch(&peers, &ids, peer, connection, 2, 64);
+    recovery.addBatch(&peers, &ids, peer, connection, 2, 64, 30_000);
     recovery.controlSent(connection, 2, 3000, 24000);
     recovery.resolve(&peers, ids[64], .{ .now_ms = 25000 });
     try std.testing.expectEqual(@as(usize, 127), recovery.len);

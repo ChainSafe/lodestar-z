@@ -1,6 +1,6 @@
 import {expect, test} from "vitest";
-import bindings from "../src/bindings.js";
 import type {NativeIncomingRequest} from "../src/network.js";
+import {networkBindings as bindings} from "./utils/network-bindings.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 interface PhaseSnapshot {

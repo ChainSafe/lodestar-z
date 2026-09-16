@@ -114,8 +114,6 @@ pub const MemoryPlan = struct {
     local_intent_bytes: usize = 0,
     discovery_bytes: usize = 0,
     transport_windows: @import("quic/api.zig").MemoryPlan,
-    caller_borrows_included: bool = false,
-    allocator_native_os_overhead_included: bool = false,
 };
 
 const DiscoveryOwners = struct {
@@ -194,7 +192,7 @@ pub const NetworkCore = struct {
         if (self.core.service.identify) |*identify| identify.bind(&self.transport.engine);
         self.memory.core_bytes = self.core.memoryPlan().allocated_bytes;
         const event_capacity = @as(usize, options.transport.limits.connections_max) *
-            (2 * @import("quic/limits.zig").streams_per_connection + 3);
+            @import("quic/limits.zig").events_per_connection;
         self.native_events = try allocator.alloc(engine.Event, event_capacity);
         errdefer allocator.free(self.native_events);
         self.activity = try allocator.alloc(engine.Handle, options.transport.limits.connections_max);
@@ -437,7 +435,7 @@ pub const NetworkCore = struct {
             try local.setAddresses(addresses[0..count]);
         }
         var encoded: [@import("identify/codec.zig").frame_max + 2]u8 = undefined;
-        _ = try local.encode(capabilities.receive, &encoded);
+        _ = try local.encode(capabilities.receive, null, &encoded);
         return local;
     }
 
@@ -592,7 +590,7 @@ pub const NetworkCore = struct {
             if (self.discovery) |owned| {
                 const need = self.core.discoveryNeed();
                 owned.coordinator.request(need.query(tick.mono_ms +| 1_000), tick.mono_ms) catch unreachable;
-                var candidates: [16]peers.enr.Candidate = undefined;
+                var candidates: [core_mod.candidates_per_turn]peers.enr.Candidate = undefined;
                 result.discovery = owned.coordinator.step(io, tick.mono_ms, tick.mono_ms, &candidates) catch |err| .{ .failure = err };
                 for (candidates[0..result.discovery.candidates]) |*candidate| {
                     self.counters.discovered +|= 1;
@@ -607,7 +605,7 @@ pub const NetworkCore = struct {
                     result.failure = result.failure orelse err;
                 }
             }
-            var intents: [4]core_mod.DialIntent = undefined;
+            var intents: [core_mod.dials_per_turn]core_mod.DialIntent = undefined;
             const room = self.transport.engine.limits.dialing_max -| self.transport.engine.registry.dialing;
             const count = self.core.dialIntents(&self.transport.engine, tick, intents[0..@min(room, intents.len)]);
             for (intents[0..count]) |intent| {
@@ -620,8 +618,8 @@ pub const NetworkCore = struct {
                         std.log.scoped(.network_core).debug("dial_deferred peer={f} endpoint={any} reason={s}", .{ @import("logging.zig").peer(&intent.peer), intent.address, @errorName(err) });
                         std.debug.assert(self.core.dialDeferred(intent.token, tick));
                         result.dial_deferred += 1;
+                        result.failure = result.failure orelse err;
                     }
-                    result.failure = result.failure orelse err;
                     continue;
                 };
                 std.debug.assert(self.core.dialStarted(intent.token, handle));

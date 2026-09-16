@@ -84,8 +84,20 @@ pub const Registry = struct {
     pub fn claim(self: *Registry) ?u16 {
         assert(self.active.len == self.slots.len);
         assert(self.active_len <= self.active.len);
-        if (self.active_len == self.active.len) return null;
-        const index = self.active[self.active_len];
+        var available: ?usize = null;
+        for (self.active[self.active_len..], self.active_len..) |candidate, position| {
+            if (self.slots[candidate].generation != std.math.maxInt(u32)) {
+                available = position;
+                break;
+            }
+        }
+        const position = available orelse return null;
+        const index = self.active[position];
+        const displaced = self.active[self.active_len];
+        self.active[position] = displaced;
+        self.positions[displaced] = @intCast(position);
+        self.active[self.active_len] = index;
+        self.positions[index] = self.active_len;
         assert(self.slots[index].state == .free);
         assert(self.route_keys[index].len == 0);
         self.active_len += 1;

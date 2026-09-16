@@ -8,7 +8,7 @@ const constants = @import("wire/constants.zig");
 const SessionStore = @This();
 
 pub const session_capacity_max: usize = 2_048;
-pub const challenge_capacity_max: usize = 256;
+pub const challenge_capacity_max: usize = 4096;
 pub const first_nonce_counter: u32 = 1;
 
 pub const InitError = std.mem.Allocator.Error || error{InvalidCapacity};

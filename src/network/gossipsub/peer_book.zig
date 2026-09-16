@@ -8,7 +8,7 @@ const assert = std.debug.assert;
 pub const capacity = constants.retained_peers_cap;
 pub const outbound_reserve = 32;
 pub const Ref = struct { index: u16, generation: u64 };
-pub const Backoff = struct { until: u64 = 0, pruned_at: u64 = 0, topic_generation: u64 = 0 };
+pub const Backoff = struct { until: u64 = 0, topic_generation: u64 = 0 };
 pub const Ip = [16]u8;
 pub const Metadata = struct {
     identity: PeerId,
@@ -23,7 +23,9 @@ pub const Row = struct {
     address: Ip = [_]u8{0} ** 16,
     direction: types.Direction = .inbound,
     pins: u32 = 0,
+    ip_peers: u16 = 0,
     retain_until: u64 = 0,
+    large_frame_denied_until: u64 = 0,
     disconnected_at: u64 = 0,
     negative: bool = false,
     direct: bool = false,
@@ -115,6 +117,7 @@ pub const PeerBook = struct {
         row.connection = conn;
         row.address = normalize(metadata.address);
         row.direction = metadata.direction;
+        self.addIp(index);
     }
 
     fn reclaimable(self: *const PeerBook, direction: types.Direction, now: u64) ?usize {
@@ -128,7 +131,7 @@ pub const PeerBook = struct {
                 if (reusable == null or row.disconnected_at < self.rows[reusable.?].disconnected_at) reusable = i;
             } else if (negative == null or row.disconnected_at < self.rows[negative.?].disconnected_at) negative = i;
         }
-        return reusable orelse if (direction == .outbound) negative else null;
+        return reusable orelse negative;
     }
 
     pub fn disconnect(self: *PeerBook, ref: Ref, now: u64) void {
@@ -136,6 +139,7 @@ pub const PeerBook = struct {
         const row = &self.rows[ref.index];
         assert(row.connection != null);
         self.scores.setConnected(ref.index, false, now);
+        self.removeIp(ref.index);
         row.connection = null;
         row.disconnected_at = now;
         row.retain_until = now +| self.retention_ms;
@@ -223,7 +227,6 @@ pub const PeerBook = struct {
         const entry = self.backoff(ref, topic);
         if (entry.topic_generation != generation) entry.* = .{ .topic_generation = generation };
         entry.until = @max(entry.until, now +| @min(duration_ms, 3_600_000));
-        entry.pruned_at = now;
         self.rows[ref.index].negative = true;
     }
 
@@ -233,12 +236,35 @@ pub const PeerBook = struct {
     }
 
     pub fn migrate(self: *PeerBook, conn: Handle, address: types.Address) void {
-        for (self.rows) |*row| {
+        for (self.rows, 0..) |*row, index| {
             if (row.connection) |current| if (std.meta.eql(current, conn)) {
+                self.removeIp(index);
                 row.address = normalize(address);
+                self.addIp(index);
                 return;
             };
         }
+    }
+
+    fn addIp(self: *PeerBook, index: usize) void {
+        const row = &self.rows[index];
+        assert(row.connection != null and row.ip_peers == 0);
+        for (self.rows, 0..) |*other, i| {
+            if (other.connection == null or !std.mem.eql(u8, &row.address, &other.address)) continue;
+            row.ip_peers += 1;
+            if (i != index) other.ip_peers += 1;
+        }
+    }
+
+    fn removeIp(self: *PeerBook, index: usize) void {
+        const row = &self.rows[index];
+        assert(row.connection != null and row.ip_peers > 0);
+        for (self.rows, 0..) |*other, i| {
+            if (i == index or other.connection == null or !std.mem.eql(u8, &row.address, &other.address)) continue;
+            assert(other.ip_peers > 0);
+            other.ip_peers -= 1;
+        }
+        row.ip_peers = 0;
     }
 
     pub fn ipCount(self: *const PeerBook, ref: Ref, allowlist: []const Ip) u16 {
@@ -247,11 +273,7 @@ pub const PeerBook = struct {
         const row = &self.rows[ref.index];
         if (row.connection == null) return 0;
         for (allowlist) |ip| if (std.mem.eql(u8, &ip, &row.address)) return 0;
-        var count: u16 = 0;
-        for (self.rows) |other| {
-            if (other.connection != null and std.mem.eql(u8, &row.address, &other.address)) count += 1;
-        }
-        return count;
+        return row.ip_peers;
     }
 };
 
@@ -271,7 +293,6 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
         metadata.identity.bytes = [_]u8{0} ** @import("../wire/peer_id.zig").length;
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
         if (i == capacity - outbound_reserve) {
-            try std.testing.expectEqual(Admission.capacity, peers.admit(.{ .index = 0, .generation = 1 }, &metadata, i));
             metadata.direction = .outbound;
         }
         const result = peers.admit(.{ .index = 0, .generation = 1 }, &metadata, i).admitted;
@@ -280,7 +301,11 @@ test "gossip policy peers retain identity and reserve outbound recovery under ne
     }
     metadata.identity.bytes[2] = 1;
     metadata.direction = .inbound;
-    try std.testing.expectEqual(Admission.capacity, peers.admit(.{ .index = 0, .generation = 1 }, &metadata, 1000));
+    const inbound = peers.admit(.{ .index = 0, .generation = 1 }, &metadata, 1000).admitted;
+    try std.testing.expect(inbound.penalty_evicted);
+    try std.testing.expect(inbound.peer.index < capacity - outbound_reserve);
+    peers.disconnect(inbound.peer, 1000);
+    metadata.identity.bytes[2] = 2;
     const pinned: Ref = .{ .index = 0, .generation = peers.rows[0].generation };
     peers.retain(pinned);
     metadata.direction = .outbound;
@@ -332,7 +357,7 @@ test "gossip policy identity generation exhaustion cannot revive stale reference
     try std.testing.expect(!peers.matches(first));
 }
 
-test "gossip policy review I1 live backoff prevents immediate inbound eviction" {
+test "gossip pinned backoff survives identity churn" {
     var peers = try PeerBook.init(std.testing.allocator, &.{ .retained_score_ms = 100_000 });
     defer peers.deinit(std.testing.allocator);
     var metadata: Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** @import("../wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
@@ -346,14 +371,19 @@ test "gossip policy review I1 live backoff prevents immediate inbound eviction" 
     }
     const original: Ref = .{ .index = 0, .generation = peers.rows[0].generation };
     metadata.identity.bytes[2] = 1;
-    try std.testing.expectEqual(Admission.capacity, peers.admit(connection, &metadata, 1000));
+    peers.retain(original);
+    defer peers.release(original);
+    const churn = peers.admit(connection, &metadata, 1000).admitted;
+    try std.testing.expect(churn.penalty_evicted);
+    try std.testing.expect(churn.peer.index != original.index);
+    peers.disconnect(churn.peer, 1000);
     try std.testing.expect(peers.backedOff(original, 0, 1, 1000));
     metadata.identity = peers.rows[0].identity;
     const resumed = peers.admit(connection, &metadata, 1000).admitted;
     try std.testing.expect(!resumed.fresh);
     try std.testing.expectEqual(original, resumed.peer);
     try std.testing.expect(peers.backedOff(original, 0, 1, 1000));
-    _ = peers.scores.setAppScore(resumed.peer.index, if (false) -1 else 0);
+    _ = peers.scores.setAppScore(resumed.peer.index, 0);
     peers.disconnect(resumed.peer, 1000);
     metadata.direction = .outbound;
     metadata.identity.bytes[2] = 1;
@@ -365,7 +395,7 @@ test "gossip policy review I1 live backoff prevents immediate inbound eviction" 
     }
     metadata.identity.bytes[2] = 2;
     const fallback = peers.admit(connection, &metadata, 1100).admitted;
-    try std.testing.expect(fallback.penalty_evicted);
+    try std.testing.expect(!fallback.penalty_evicted);
     try std.testing.expect(fallback.peer.index != 0);
     try std.testing.expect(peers.backedOff(original, 0, 1, 1100));
 }

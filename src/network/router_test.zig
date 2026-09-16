@@ -279,10 +279,13 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     defer server.reqresp.shutdown(&pair.server, &server.router);
     const handles = try support.connectPair(&pair);
     const peers = @import("gossipsub/peer_book.zig");
+    var retained: [peers.capacity - peers.outbound_reserve]peers.Ref = undefined;
     for (0..peers.capacity - peers.outbound_reserve) |i| {
         var metadata: peers.Metadata = .{ .identity = .{ .bytes = [_]u8{0} ** @import("wire/peer_id.zig").length }, .address = .unspecified, .direction = .inbound };
         std.mem.writeInt(u16, metadata.identity.bytes[0..2], @intCast(i), .little);
         const ref = server.gossipsub.inner.peers.admit(.{ .index = 0, .generation = 1 }, &metadata, pair.now.mono_ms).admitted.peer;
+        retained[i] = ref;
+        server.gossipsub.inner.peers.retain(ref);
         server.gossipsub.inner.peers.scores.penalize(ref.index, 20);
         _ = server.gossipsub.inner.peers.scores.setAppScore(ref.index, -1);
         server.gossipsub.inner.peers.disconnect(ref, pair.now.mono_ms);
@@ -317,7 +320,7 @@ test "router gossip capacity refusal preserves reqresp and explicit host retry" 
     }
     try std.testing.expect(pong);
     try std.testing.expect(!server.gossipsub.admitted(handles.server));
-    server.gossipsub.inner.peers.rows[0].retain_until = pair.now.mono_ms;
+    for (retained) |ref| server.gossipsub.inner.peers.release(ref);
     try std.testing.expectEqual(gs.Driver.Admission.admitted, server.gossipsub.peerConnected(&pair.server, handles.server, pair.now));
     try std.testing.expect(server.gossipsub.admitted(handles.server));
 }
@@ -451,7 +454,7 @@ test "router capabilities activation preserves negotiated response context and c
     const options: harness.Overrides = .{
         .forks = &.{context},
 
-        .admission = .{ .policy = @import("reqresp/request_policy_test.zig").fixture(), .limits = .{ .identities = 2, .peer = limits, .global = limits } },
+        .admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = limits, .global = limits } },
     };
     try setup.init(options, options);
     defer setup.deinit();

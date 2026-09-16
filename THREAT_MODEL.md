@@ -11,8 +11,11 @@ the code issue and the documentation gap.
 
 ## Scope
 
-Lodestar-z is a Zig consensus library and Node.js native addon. Its host integration owns networking,
-API exposure, checkpoint acquisition, execution-layer communication, and validator duties.
+Lodestar-z is a Zig consensus library, native QUIC/DiscV5 networking stack, and Node.js native addon.
+The native networking surface receives public peer traffic and owns transport authentication,
+protocol framing, resource admission, and peer lifecycle. Its host owns API exposure, checkpoint
+acquisition, consensus validation of received objects, execution-layer communication, and validator
+duties. Native networking does not make received consensus objects trusted.
 
 The assets protected here are:
 
@@ -48,6 +51,9 @@ are out of scope.
 
 | Boundary | Contract |
 | --- | --- |
+| Remote UDP, QUIC and TLS | Datagrams, source addresses, negotiation bytes, certificates, and authenticated streams remain hostile. Source addresses may be spoofed before return-path validation. Authentication establishes identity, not permission to exhaust shared native resources or consensus validity. |
+| DiscV5 and peer discovery | Packets and signed ENRs remain hostile. A valid signature does not prove endpoint reachability, advertised utility, or membership in an honest peer population. Discovery and inbound peers must not indefinitely lock retained admission capacity. |
+| Network owner to host | The owner copies or explicitly lends bounded data across documented lifetimes. Host backpressure and teardown must release borrows and terminate pending work without blaming peers for local resource refusal. The host supplies consensus verdicts, a cryptographically random startup seed, configuration, and clock policy. |
 | Remote input through Lodestar | Values remain hostile until the validation required by the consuming operation has completed. Reports must trace the supported or planned path into Lodestar-z. |
 | JavaScript to N-API | Runtime types, lengths, indexes, encodings, and buffer ranges are untrusted. TypeScript declarations and debug assertions are not runtime validation. |
 | Serialized input to SSZ | Decoders must enforce canonical encoding, bounds, offsets, and safe ownership. Beacon-state construction is the exception described below: its bytes have trusted provenance, but still require structural SSZ validation. |

@@ -21,7 +21,7 @@ export async function incomingPair(
   rightConfig.resources.bridgeBudgetBytes = serverBudget ?? 512 * 1024 * 1024;
   rightConfig.identitySecretKey[31] = 2;
   for (const config of [leftConfig, rightConfig]) {
-    config.requestForks.push({digest: Uint8Array.of(5, 6, 7, 8), fork: "deneb"});
+    config.requestForks = [...config.requestForks, {digest: Uint8Array.of(5, 6, 7, 8), fork: "deneb"}];
   }
   configure?.(leftConfig, rightConfig);
   let left: NativeNetworkApplicationRuntime | undefined;

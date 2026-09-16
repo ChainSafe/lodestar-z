@@ -410,7 +410,7 @@ test "core native application response borrows survive same turn hard close" {
         &setup.pair.client,
         snapshots[0].connection.?,
         .blocks_by_root_v2,
-        &.{},
+        &([_]u8{0} ** 32),
         sink,
         .{ .expected_chunks = 1 },
         setup.pair.now,
@@ -551,7 +551,7 @@ test "core native inbound application per peer cap protects control from extra r
         .blob_sidecars_by_root_v1,
         .data_column_sidecars_by_root_v1,
     };
-    const bytes: [24]u8 = @splat(0);
+    const bytes = [_]u8{0} ** 8 ++ [_]u8{1} ++ [_]u8{0} ** 15;
     for (0..9) |index| {
         const protocol = protocols[index / 2];
         _ = try setup.client.service.request(
@@ -657,6 +657,9 @@ test "core control native Goodbye maps shutdown incompatibility and fault wire r
         .{ .reason = .shutdown, .wire_reason = 1 },
         .{ .reason = .incompatible_fork, .wire_reason = 2 },
         .{ .reason = .invalid_metadata, .wire_reason = 3 },
+        .{ .reason = .count_pruning, .wire_reason = 129 },
+        .{ .reason = .reputation, .wire_reason = 250 },
+        .{ .reason = .banned, .wire_reason = 251 },
     };
     for (cases) |case| {
         var setup: Setup = .{};
@@ -963,7 +966,7 @@ test "core native application response borrows survive immediate public close" {
         &setup.pair.client,
         snapshots[0].connection.?,
         .blocks_by_root_v2,
-        &.{},
+        &([_]u8{0} ** 32),
         sink,
         .{ .expected_chunks = 1 },
         setup.pair.now,
@@ -1060,7 +1063,7 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
     var opts = @import("core_test.zig").options();
 
     const quotas = @import("reqresp/admission_test.zig").quotas(1000, 1000);
-    opts.service.reqresp.admission = .{ .policy = @import("reqresp/request_policy_test.zig").fixture(), .limits = .{ .identities = 4, .peer = quotas, .global = quotas } };
+    opts.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 4, .peer = quotas, .global = quotas } };
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();
     _ = try setup.pair.dial();
@@ -1253,4 +1256,32 @@ test "core control response deadline survives continuous peer progress" {
     for (setup.client.control.operations) |op| if (op.request) |active| {
         try std.testing.expect(!std.meta.eql(handle, active));
     };
+}
+
+test "core penalizes silent inbound request owners before host request delivery" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..50) |_| try setup.step(0);
+    var peers: [4]t.Snapshot = undefined;
+    _ = setup.client.snapshots(&peers);
+    const connection = peers[0].connection.?;
+    const multistream = @import("wire/multistream.zig");
+    var bytes: [512]u8 = undefined;
+    const header = try multistream.encodeMessage(multistream.header, &bytes);
+    const proposal = try multistream.encodeMessage(rr.Protocol.blocks_by_root_v2.id(), bytes[header.len..]);
+    for (0..2) |_| {
+        const stream = try setup.pair.client.openStream(connection);
+        try std.testing.expectEqual(header.len + proposal.len, try setup.pair.client.write(stream, bytes[0 .. header.len + proposal.len], false));
+    }
+    for (0..30) |_| try setup.step(0);
+    try std.testing.expectEqual(@as(u16, 2), setup.server.service.reqresp.active().inbound);
+    setup.pair.advance(10_000);
+    var events: [2]rr.Event = undefined;
+    const result = setup.server.process(&setup.pair.server, &.{}, &.{}, setup.pair.now, 100, &.{}, &events, &.{});
+    try std.testing.expectEqual(@as(usize, 2), result.application);
+    for (events) |event| try std.testing.expect(event == .failed and event.failed.reason == .timeout);
+    _ = setup.server.snapshots(&peers);
+    try std.testing.expectEqual(@as(f64, -20), peers[0].score);
+    try std.testing.expectEqual(t.DisconnectReason.reputation, setup.server.catalog.rows[peers[0].peer.index].closing_reason.?);
 }

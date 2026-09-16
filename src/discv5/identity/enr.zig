@@ -154,7 +154,7 @@ pub const Record = struct {
         return self.endpointFor(.dual);
     }
 
-    pub fn endpointFor(self: *const Record, mode: @import("udp").Mode) ?types.Address {
+    pub fn endpointFor(self: *const Record, mode: types.Mode) ?types.Address {
         for (self.endpoints()) |candidate| if (candidate) |address| {
             if (mode.supports(address) and address.isUsable()) return address;
         };

@@ -11,14 +11,14 @@ release. The hook never calls JavaScript. Unbound calls use Zig's default logger
 
 ## Host integration
 
-Both runtime APIs expose `setLogLevel("error" | "warn" | "info" | "debug" | "off")`
+The application runtime exposes `setLogLevel("error" | "warn" | "info" | "debug" | "off")`
 and `drainLogs(maxRecords = 32)`. The default capture level is info. Draining returns
 owned records plus cumulative dropped, suppressed and truncated counts. It does
 not consume protocol events and remains available after `close()`. An allocation
 failure leaves the batch queued for retry. Use one consumer per runtime.
 
-Lodestar's native adapter captures debug, drains up to 32 records every 250 ms
-through the standard `network/native` child logger, and flushes up to 128 records
+An external Lodestar adapter can capture debug and drain up to 32 records every 250 ms
+through a `network/native` child logger and flush up to 128 records
 after native shutdown. The existing console and file filters decide delivery.
 Enable detailed console records with:
 
@@ -27,7 +27,7 @@ Enable detailed console records with:
 ```
 
 This also makes them available through an existing systemd journal scrape. Debug
-file logging needs no separate native sink. The host attaches `nativeScope`,
+file logging needs no separate native sink. A host adapter can attach `nativeScope`,
 `nativeSession`, `nativeSequence`, `nativeTimestampMs`, `nativeMonotonicMs` and
 `nativeTruncated` as structured context. Native timestamps describe capture time;
 the outer logger timestamp describes host delivery. IDs and timestamps remain
@@ -77,10 +77,9 @@ mesh transitions have separate scopes to reduce contention with routine traffic.
 
 `getMetrics()` includes `lodestar_native_logs_{emitted,dropped,suppressed,truncated}_total`
 by scope and level, plus queue occupancy, capacity and high-water gauges. Emitted
-means enqueued, not acknowledged by the host logger. Lodestar also exports
-`lodestar_native_log_delivery_errors_total` and reports accumulated native loss at
-most once per 30 seconds when queue records are dropped or truncated. Routine debug
-suppression remains visible in metrics without producing warnings. Check these before
+means enqueued, not acknowledged by the host logger. A host adapter may expose its own delivery-error counter and periodic loss reports. Those
+adapter metrics and delivery policies are outside this repository. Routine debug suppression
+remains visible in the native counters. Check these before
 interpreting an absent event.
 
 ## Runtime investigation
@@ -92,10 +91,10 @@ with host identity and process lifetime when correlating across restarts. Follow
 `request_completed` or `request_failed`. Gossip verdicts carry message IDs and
 peer identities; mesh transitions carry topic and connection handles.
 
-The Lodestar adapter's peer REST endpoints expose the bounded native peer snapshot,
-including client agent, QUIC address, Status and metadata. Remote uint64 fields
-remain decimal strings in diagnostic JSON. Wall-clock peer timestamp fields are
-zero when unavailable; use the native log timestamps for connection timing.
+The native peer snapshot includes client agent, QUIC address, Status and metadata.
+Host REST projections are outside this repository. Preserve remote uint64 values
+when converting the snapshot to diagnostic JSON, and use native log timestamps
+for connection timing.
 
 `request_write_stopped` records QUIC request half-closure while response processing
 continues. Its `detail` distinguishes STOP_SENDING from a stream already retired
@@ -170,8 +169,8 @@ include queue occupancy and oldest age at logging time, after any intervening dr
 `gossip_io_timeout` records the connection, subscription backlog, stream availability
 and queue occupancy before a timeout retires a stream or gossip relationship.
 Subscription, receive and transmit timeouts have separate native counters.
-`gossip_negotiation_failed` and `gossip_negotiation_deferred` report negotiation
-outcomes separately from message traffic. Stream gauges distinguish admitted peers
+`gossip_negotiation_failed`, `gossip_negotiation_refused`, and
+`gossip_negotiation_cancelled` report negotiation outcomes separately from message traffic. Stream gauges distinguish admitted peers
 from established inbound and outbound gossip streams.
 
 Local request cancellation retains its terminal API outcome but increments separate
@@ -179,12 +178,12 @@ Local request cancellation retains its terminal API outcome but increments separ
 request errors. The `request_cancelled` log includes delivered chunk count.
 Negotiation timeouts use the existing `REQUEST_ERROR_DIAL_TIMEOUT` label.
 
-For the Cayman Hoodi deployment, existing Loki labels can select these records:
+For a host using these Loki labels, select records with:
 
 ```logql
-{job="beacon",instance="cayman-ax41x",network="hoodi"} |= "nativeScope="
-{job="beacon",instance="cayman-ax41x",network="hoodi"} |= "nativeScope=network_reqresp_errors"
-{job="beacon",instance="cayman-ax41x",network="hoodi"} |= "network_health"
+{job="beacon",network="hoodi"} |= "nativeScope="
+{job="beacon",network="hoodi"} |= "nativeScope=network_reqresp_errors"
+{job="beacon",network="hoodi"} |= "network_health"
 ```
 
 With JSON output, parse context according to the configured Lodestar logger
@@ -192,12 +191,12 @@ format. Peer IDs, request handles and message IDs belong in log content, never
 Prometheus or Loki index labels. Logging does not capture quiche internals,
 packet traces, successful gossip validation for every message, or payload bytes.
 
-Discovery failures include `stage=coordinator|clock|maintenance|receive|process`.
+Discovery failures include `stage=coordinator|clock|receive|process`.
 `discovery_send_failed` records the destination and packet length without payload
-bytes. `revalidation_deferred` records the local retry interval. A failed routing
-revalidation does not stop receive processing or evict its incumbent, and cannot
-retry within one second. The `lodestar_native_discovery_` counters
-`maintenance_failures_total`, `receive_failures_total`,
+bytes. `lodestar_native_discovery_pending_revalidations` measures buckets awaiting
+incumbent revalidation. A local send failure does not evict the incumbent or stop
+receive processing. Local revalidation retries are bounded and wait at least one
+second. The `lodestar_native_discovery_` counters `receive_failures_total`,
 `processing_failures_total`, and `coordinator_failures_total` distinguish failures
 from ordinary query timeouts.
 
@@ -206,3 +205,7 @@ responders that were not retained at their exact endpoint in the routing table.
 They still pass through the ordinary ENR, fork, demand and endpoint-scope checks
 before publication to the dialer. Routing-table occupancy does not establish
 whether a peer is authenticated or usable.
+
+`inbound_negotiation_failed` records connection, stream, and bounded failure reason.
+`lodestar_native_negotiation_failed_total{reason}` and
+`lodestar_native_negotiation_refused_total` cover failures before a protocol owns the stream.

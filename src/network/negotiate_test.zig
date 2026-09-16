@@ -189,6 +189,28 @@ test "negotiator falls back on the same stream to meshsub v1.1" {
     try std.testing.expect(accepted);
 }
 
+test "negotiator bounds each inbound connection and reserves outbound application and control work" {
+    var setup: Setup = .{};
+    try setup.init(1);
+    defer setup.deinit();
+    var owner = try Negotiator.init(std.testing.allocator, .{
+        .negotiations_max = 8,
+        .outbound_reserved = 3,
+        .outbound_control_reserved = 1,
+        .inbound_per_connection_max = 2,
+    });
+    defer owner.deinit();
+    for (0..5) |index| {
+        const stream: engine_mod.StreamHandle = .{ .conn = .{ .index = @intCast(index / 2), .generation = 1 }, .slot = 0, .id = index * 4 };
+        try owner.acceptInbound(stream, &supported, setup.pair.now);
+        if (index == 1) try std.testing.expectError(error.NegotiationTableFull, owner.acceptInbound(.{ .conn = stream.conn, .slot = 0, .id = 100 }, &supported, setup.pair.now));
+    }
+    try std.testing.expectError(error.NegotiationTableFull, owner.acceptInbound(.{ .conn = .{ .index = 7, .generation = 1 }, .slot = 0, .id = 0 }, &supported, setup.pair.now));
+    for (0..2) |_| _ = try owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{});
+    try std.testing.expectError(error.NegotiationTableFull, owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{}));
+    _ = try owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping}, setup.pair.now, .{ .control = true });
+}
+
 test "negotiator expires with no outcome capacity and reports later" {
     var setup: Setup = .{};
     try setup.init(1);
@@ -316,4 +338,25 @@ test "negotiator capabilities offer bounds reject before claiming a slot" {
     try std.testing.expectEqual(1, listener.active());
     try std.testing.expectError(error.InvalidLimits, listener.acceptInbound(stream, &offered, now));
     try std.testing.expectError(error.NegotiationTableFull, listener.acceptInbound(stream, &.{ping}, now));
+}
+
+test "negotiation timed entry owns exact expiry below and above the default" {
+    for ([_]u64{ 50, 20_000 }) |duration| {
+        var setup: Setup = .{};
+        try setup.init(2);
+        defer setup.deinit();
+        const pair = &setup.pair;
+        const negotiator = &setup.dialer;
+        const stream = try negotiator.beginOutbound(&pair.client, setup.handles.client, &.{ping}, pair.now, .{ .control = true, .timeout_ms = duration });
+        const due = pair.now.mono_ms + duration;
+        var outcomes: [1]Outcome = undefined;
+        try std.testing.expectEqual(@as(usize, 0), negotiator.pump(&pair.client, pair.now, &outcomes));
+        try std.testing.expectEqual(@as(?u64, due), negotiator.nextWakeup(pair.now, 1));
+        pair.now.mono_ms = due - 1;
+        try std.testing.expectEqual(@as(usize, 0), negotiator.pump(&pair.client, pair.now, &outcomes));
+        pair.now.mono_ms = due;
+        try std.testing.expectEqual(@as(usize, 1), negotiator.pump(&pair.client, pair.now, &outcomes));
+        try std.testing.expectEqual(stream, outcomes[0].stream);
+        try std.testing.expectEqual(.timeout, outcomes[0].result.failed);
+    }
 }

@@ -1,9 +1,9 @@
 import {execFileSync} from "node:child_process";
 import {setTimeout as delay} from "node:timers/promises";
 import {describe, expect, it} from "vitest";
-import bindings from "../src/bindings.js";
 import {createNativeNetworkApplicationRuntime} from "../src/network.js";
 import {applicationConfig, discoveryConfig, topicBoundary} from "./utils/network.js";
+import {networkBindings as bindings} from "./utils/network-bindings.js";
 
 async function collected() {
   for (let i = 0; i < 100; i++) {
@@ -156,6 +156,15 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
       runtime = null;
       await collected();
     }
+  });
+
+  it("joins a prepared owner after its close wake signal fails", async () => {
+    const runtime = createNativeNetworkApplicationRuntime(applicationConfig(), () => undefined);
+    await runtime.ready;
+    expect(runtime.state).toBe("prepared");
+    bindings.networkTestFail("wake_signal");
+    expect(await runtime.close()).toEqual({reason: "failed"});
+    expect(runtime.diagnostics()).toMatchObject({state: "failed", terminalErrorCode: "NetworkWakeFailed"});
   });
 
   it("keeps queued records and closes after an ordinary callback exception", () => {

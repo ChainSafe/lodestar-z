@@ -54,7 +54,7 @@ test "routing table revalidates the least recent entry before replacement" {
         const peer = types.Endpoint{ .node_id = ids[index], .address = address };
         try std.testing.expectEqual(
             RoutingTable.PutResult.inserted,
-            try table.upsertVerified(&peer, &record, @intCast(index)),
+            try table.upsertVerified(&peer, &record, @intCast(index), .outgoing),
         );
     }
     try std.testing.expectEqual(RoutingTable.bucket_size, table.count());
@@ -66,7 +66,7 @@ test "routing table revalidates the least recent entry before replacement" {
         .node_id = ids[RoutingTable.bucket_size],
         .address = candidate_address,
     };
-    const first_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 20);
+    const first_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 20, .outgoing);
     try expectPending(first_pending, &ids[0]);
     try std.testing.expectEqual(@as(usize, 1), table.pendingCount());
     const first_target = table.revalidationTarget().?;
@@ -76,12 +76,12 @@ test "routing table revalidates the least recent entry before replacement" {
     const first_peer = types.Endpoint{ .node_id = ids[0], .address = first_record.endpoint().? };
     try std.testing.expectEqual(
         RoutingTable.PutResult.refreshed,
-        try table.upsertVerified(&first_peer, &first_record, 21),
+        try table.upsertVerified(&first_peer, &first_record, 21, .outgoing),
     );
     try std.testing.expectEqual(@as(usize, 0), table.pendingCount());
     try std.testing.expect(table.revalidationTarget() == null);
 
-    const second_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 22);
+    const second_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 22, .outgoing);
     try expectPending(second_pending, &ids[1]);
     ids[RoutingTable.bucket_size + 1] = nodeAtDistance(256, 18);
     const busy_address = address4(10, 18, 0, 1, 9_018);
@@ -92,17 +92,17 @@ test "routing table revalidates the least recent entry before replacement" {
     };
     try std.testing.expectEqual(
         RoutingTable.PutResult.pending_busy,
-        try table.upsertVerified(&busy_peer, &busy_record, 23),
+        try table.upsertVerified(&busy_peer, &busy_record, 23, .outgoing),
     );
 
     try std.testing.expectEqual(
         RoutingTable.ResolveResult.retained,
         try table.resolveRevalidation(&ids[1], true, 24),
     );
-    const third_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 25);
+    const third_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 25, .outgoing);
     try expectPending(third_pending, &ids[2]);
     candidate_record.sequence = 2;
-    const updated_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 26);
+    const updated_pending = try table.upsertVerified(&candidate_peer, &candidate_record, 26, .outgoing);
     try expectPending(updated_pending, &ids[2]);
     const resolution = try table.resolveRevalidation(&ids[2], false, 27);
     switch (resolution) {
@@ -137,7 +137,7 @@ test "routing table enforces bucket and table subnet limits" {
         const address = address4(192, 0, 2, @intCast(salt), @intCast(9_000 + salt));
         var record = fakeRecord(node_id, address, 1);
         const peer = types.Endpoint{ .node_id = node_id, .address = address };
-        _ = try table.upsertVerified(&peer, &record, 1);
+        _ = try table.upsertVerified(&peer, &record, 1, .outgoing);
     }
     const rejected_id = nodeAtDistance(256, 3);
     const rejected_address = address4(192, 0, 2, 3, 9_003);
@@ -148,7 +148,7 @@ test "routing table enforces bucket and table subnet limits" {
     };
     try std.testing.expectError(
         RoutingTable.Error.AddressLimit,
-        table.upsertVerified(&rejected_peer, &rejected_record, 1),
+        table.upsertVerified(&rejected_peer, &rejected_record, 1, .outgoing),
     );
 
     var other_table: RoutingTable = undefined;
@@ -159,7 +159,7 @@ test "routing table enforces bucket and table subnet limits" {
         const address = address4(198, 51, 100, @intCast(index + 1), @intCast(10_000 + index));
         var record = fakeRecord(node_id, address, 1);
         const peer = types.Endpoint{ .node_id = node_id, .address = address };
-        _ = try other_table.upsertVerified(&peer, &record, 1);
+        _ = try other_table.upsertVerified(&peer, &record, 1, .outgoing);
     }
     const table_rejected_id = nodeAtDistance(251, 11);
     const table_rejected_address = address4(198, 51, 100, 11, 10_011);
@@ -170,7 +170,7 @@ test "routing table enforces bucket and table subnet limits" {
     };
     try std.testing.expectError(
         RoutingTable.Error.AddressLimit,
-        other_table.upsertVerified(&table_rejected_peer, &table_rejected_record, 1),
+        other_table.upsertVerified(&table_rejected_peer, &table_rejected_record, 1, .outgoing),
     );
 }
 
@@ -190,7 +190,7 @@ test "routing table compresses distances one through 240 into one bucket" {
         const peer = types.Endpoint{ .node_id = node_id, .address = address };
         try std.testing.expectEqual(
             RoutingTable.PutResult.inserted,
-            try table.upsertVerified(&peer, &record, 1),
+            try table.upsertVerified(&peer, &record, 1, .outgoing),
         );
     }
     const candidate_id = nodeAtDistance(224, 17);
@@ -201,7 +201,7 @@ test "routing table compresses distances one through 240 into one bucket" {
         .address = candidate_address,
     };
     try expectPending(
-        try table.upsertVerified(&candidate_peer, &candidate_record, 2),
+        try table.upsertVerified(&candidate_peer, &candidate_record, 2, .outgoing),
         &oldest,
     );
 }
@@ -216,14 +216,14 @@ test "routing table applies ENR updates atomically and ignores stale endpoints" 
     const original_address = address4(203, 0, 113, 1, 9_000);
     var original_record = fakeRecord(node_id, original_address, 2);
     const original_peer = types.Endpoint{ .node_id = node_id, .address = original_address };
-    _ = try table.upsertVerified(&original_peer, &original_record, 1);
+    _ = try table.upsertVerified(&original_peer, &original_record, 1, .outgoing);
 
     const stale_address = address4(198, 51, 100, 1, 9_001);
     var stale_record = fakeRecord(node_id, stale_address, 1);
     const stale_peer = types.Endpoint{ .node_id = node_id, .address = stale_address };
     try std.testing.expectEqual(
         RoutingTable.PutResult.refreshed,
-        try table.upsertVerified(&stale_peer, &stale_record, 2),
+        try table.upsertVerified(&stale_peer, &stale_record, 2, .outgoing),
     );
     try std.testing.expect(std.meta.eql(
         original_address,
@@ -233,7 +233,7 @@ test "routing table applies ENR updates atomically and ignores stale endpoints" 
     var updated_record = fakeRecord(node_id, stale_address, 3);
     try std.testing.expectEqual(
         RoutingTable.PutResult.updated,
-        try table.upsertVerified(&stale_peer, &updated_record, 3),
+        try table.upsertVerified(&stale_peer, &updated_record, 3, .outgoing),
     );
     const updated = table.get(&node_id).?;
     try std.testing.expect(std.meta.eql(stale_address, updated.peer.address));
@@ -249,7 +249,7 @@ test "routing table refreshes authenticated resident and pending endpoints indep
             const id = nodeAtDistance(256, @intCast(index + 1));
             const ip = address4(10, @intCast(index + 1), 0, 1, 9000);
             const record = fakeRecord(id, ip, 1);
-            _ = try table.upsertVerified(&.{ .node_id = id, .address = ip }, &record, 0);
+            _ = try table.upsertVerified(&.{ .node_id = id, .address = ip }, &record, 0, .outgoing);
         };
         const id = nodeAtDistance(256, 17);
         const ip4 = address4(192, 0, 2, 1, 9000);
@@ -257,8 +257,8 @@ test "routing table refreshes authenticated resident and pending endpoints indep
         var record = fakeRecord(id, ip4, 2);
         record.ip6 = ip6.ip6.octets;
         record.udp6 = ip6.port();
-        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &record, 1);
-        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip6 }, &record, 2);
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &record, 1, .outgoing);
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip6 }, &record, 2, .outgoing);
         const refreshed = if (pending) table.pending[RoutingTable.bucket_count - 1].?.entry else table.get(&id).?;
         try std.testing.expectEqualDeep(ip6, refreshed.peer.address);
         try std.testing.expectEqualDeep(record, refreshed.record);
@@ -266,7 +266,7 @@ test "routing table refreshes authenticated resident and pending endpoints indep
 
         var older = record;
         older.sequence = 1;
-        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &older, 3);
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &older, 3, .outgoing);
         const retained = if (pending) table.pending[RoutingTable.bucket_count - 1].?.entry else table.get(&id).?;
         try std.testing.expectEqualDeep(ip4, retained.peer.address);
         try std.testing.expectEqualDeep(record, retained.record);
@@ -274,10 +274,10 @@ test "routing table refreshes authenticated resident and pending endpoints indep
         var newer = record;
         newer.sequence = 3;
         newer.ip4 = null;
-        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip6 }, &newer, 4);
-        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &record, 5);
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip6 }, &newer, 4, .outgoing);
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &record, 5, .outgoing);
         older.sequence = 3;
-        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &older, 6);
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip4 }, &older, 6, .outgoing);
         if (pending) {
             const incumbent = table.revalidationTarget().?;
             _ = try table.resolveRevalidation(&incumbent.peer.node_id, false, 7);
@@ -311,22 +311,22 @@ test "routing table preflights endpoint refresh quotas before changing entries o
     var subject_record = fakeRecord(subject_id, address4(10, 1, 0, 1, 9000), 1);
     subject_record.ip6 = ip6.ip6.octets;
     subject_record.udp6 = ip6.port();
-    _ = try table.upsertVerified(&.{ .node_id = subject_id, .address = subject_record.endpoint().? }, &subject_record, 1);
+    _ = try table.upsertVerified(&.{ .node_id = subject_id, .address = subject_record.endpoint().? }, &subject_record, 1, .outgoing);
     for (1..RoutingTable.bucket_size) |index| {
         const id = nodeAtDistance(256, @intCast(index + 1));
         var ip = if (index <= RoutingTable.bucket_subnet_limit) ip6 else address4(10, @intCast(index + 1), 0, 1, 9000);
         if (ip == .ip6) ip.ip6.octets[15] = @intCast(index + 1);
         const record = fakeRecord(id, ip, 1);
-        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip }, &record, 1);
+        _ = try table.upsertVerified(&.{ .node_id = id, .address = ip }, &record, 1, .outgoing);
     }
     var pending_record = fakeRecord(pending_id, address4(10, 17, 0, 1, 9000), 1);
     pending_record.ip6 = ip6.ip6.octets;
     pending_record.udp6 = ip6.port();
-    _ = try table.upsertVerified(&.{ .node_id = pending_id, .address = pending_record.endpoint().? }, &pending_record, 1);
+    _ = try table.upsertVerified(&.{ .node_id = pending_id, .address = pending_record.endpoint().? }, &pending_record, 1, .outgoing);
     const subject_before = table.get(&subject_id).?;
     const pending_before = table.pending[RoutingTable.bucket_count - 1].?;
     for ([_]*const enr.Record{ &subject_record, &pending_record }) |record| {
-        try std.testing.expectError(error.AddressLimit, table.upsertVerified(&.{ .node_id = record.node_id, .address = ip6 }, record, 2));
+        try std.testing.expectError(error.AddressLimit, table.upsertVerified(&.{ .node_id = record.node_id, .address = ip6 }, record, 2, .outgoing));
         try std.testing.expectEqualDeep(subject_before, table.get(&subject_id).?);
         try std.testing.expectEqualDeep(pending_before, table.pending[RoutingTable.bucket_count - 1].?);
         try std.testing.expectEqualDeep(subject_id, table.revalidationTarget().?.peer.node_id);
@@ -350,7 +350,7 @@ test "routing table applies subnet limits to IPv6 prefixes" {
         } };
         var record = fakeRecord(node_id, address, 1);
         const peer = types.Endpoint{ .node_id = node_id, .address = address };
-        _ = try table.upsertVerified(&peer, &record, 1);
+        _ = try table.upsertVerified(&peer, &record, 1, .outgoing);
     }
     const rejected_id = nodeAtDistance(256, 3);
     var rejected_octets = [_]u8{0} ** 16;
@@ -367,7 +367,7 @@ test "routing table applies subnet limits to IPv6 prefixes" {
     };
     try std.testing.expectError(
         RoutingTable.Error.AddressLimit,
-        table.upsertVerified(&rejected_peer, &rejected_record, 1),
+        table.upsertVerified(&rejected_peer, &rejected_record, 1, .outgoing),
     );
 }
 
@@ -383,7 +383,7 @@ test "routing FINDNODE selection filters exact distances and caps the aggregate"
         const address = address4(10, @intCast(index + 1), 0, 1, @intCast(9_001 + index));
         var record = fakeRecord(node_id, address, 1);
         const peer = types.Endpoint{ .node_id = node_id, .address = address };
-        _ = try table.upsertVerified(&peer, &record, 1);
+        _ = try table.upsertVerified(&peer, &record, 1, .outgoing);
     }
     const distance_241_id = nodeAtDistance(241, 1);
     const distance_241_address = address4(172, 16, 1, 1, 10_001);
@@ -392,7 +392,7 @@ test "routing FINDNODE selection filters exact distances and caps the aggregate"
         .node_id = distance_241_id,
         .address = distance_241_address,
     };
-    _ = try table.upsertVerified(&distance_241_peer, &distance_241_record, 1);
+    _ = try table.upsertVerified(&distance_241_peer, &distance_241_record, 1, .outgoing);
 
     var out: [types.findnode_result_max + 4]enr.Record = undefined;
     const selected = try table.findNodes(&local_record, null, &.{ 0, 241, 241, 256 }, &out);
@@ -429,7 +429,7 @@ test "routing closest selection is sorted and bounded" {
         const address = address4(10, @intCast(index + 1), 2, 1, @intCast(12_000 + index));
         var record = fakeRecord(node_id, address, 1);
         const peer = types.Endpoint{ .node_id = node_id, .address = address };
-        _ = try table.upsertVerified(&peer, &record, 1);
+        _ = try table.upsertVerified(&peer, &record, 1, .outgoing);
     }
 
     var out: [RoutingTable.bucket_size + 4]RoutingTable.Entry = undefined;
@@ -463,12 +463,12 @@ test "routing FINDNODE does not relay special-scope addresses" {
     const private_address = address4(10, 0, 0, 1, 9_001);
     var private_record = fakeRecord(private_id, private_address, 1);
     const private_peer = types.Endpoint{ .node_id = private_id, .address = private_address };
-    _ = try table.upsertVerified(&private_peer, &private_record, 1);
+    _ = try table.upsertVerified(&private_peer, &private_record, 1, .outgoing);
     const public_id = nodeAtDistance(255, 2);
     const public_address = address4(198, 51, 100, 1, 9_002);
     var public_record = fakeRecord(public_id, public_address, 1);
     const public_peer = types.Endpoint{ .node_id = public_id, .address = public_address };
-    _ = try table.upsertVerified(&public_peer, &public_record, 1);
+    _ = try table.upsertVerified(&public_peer, &public_record, 1, .outgoing);
 
     var out: [3]enr.Record = undefined;
     const selected = try table.findNodes(
@@ -493,26 +493,26 @@ test "routing table rejects inconsistent records and unusable endpoints" {
     var peer = types.Endpoint{ .node_id = local_id, .address = address };
     try std.testing.expectError(
         RoutingTable.Error.SelfEntry,
-        table.upsertVerified(&peer, &record, 1),
+        table.upsertVerified(&peer, &record, 1, .outgoing),
     );
 
     peer.node_id = remote_id;
     record.node_id = nodeAtDistance(255, 2);
     try std.testing.expectError(
         RoutingTable.Error.InvalidRemoteRecord,
-        table.upsertVerified(&peer, &record, 1),
+        table.upsertVerified(&peer, &record, 1, .outgoing),
     );
     record.node_id = remote_id;
     peer.address = address4(203, 0, 113, 2, 9_000);
     try std.testing.expectError(
         RoutingTable.Error.InvalidRemoteRecord,
-        table.upsertVerified(&peer, &record, 1),
+        table.upsertVerified(&peer, &record, 1, .outgoing),
     );
     peer.address = address4(203, 0, 113, 1, 0);
     record.udp = 0;
     try std.testing.expectError(
         RoutingTable.Error.InvalidRemoteRecord,
-        table.upsertVerified(&peer, &record, 1),
+        table.upsertVerified(&peer, &record, 1, .outgoing),
     );
 }
 
@@ -576,14 +576,14 @@ test "routing maintenance selects quiet peers fairly and protects recent traffic
     const second_record = fakeRecord(second_id, second_address, 1);
     const first_peer = types.Endpoint{ .node_id = first_id, .address = first_address };
     const second_peer = types.Endpoint{ .node_id = second_id, .address = second_address };
-    _ = try table.upsertVerified(&first_peer, &first_record, 0);
-    _ = try table.upsertVerified(&second_peer, &second_record, 0);
+    _ = try table.upsertVerified(&first_peer, &first_record, 0, .outgoing);
+    _ = try table.upsertVerified(&second_peer, &second_record, 0, .outgoing);
     var cursor: usize = 0;
     try std.testing.expect(table.maintenanceTarget(&cursor, 99, 100) == null);
     const first = table.maintenanceTarget(&cursor, 100, 100).?;
     const second = table.maintenanceTarget(&cursor, 100, 100).?;
     try std.testing.expect(!std.mem.eql(u8, &first.peer.node_id, &second.peer.node_id));
-    _ = try table.upsertVerified(&first.peer, &first.record, 101);
+    _ = try table.upsertVerified(&first.peer, &first.record, 101, .outgoing);
     try std.testing.expect(!table.forgetPeerIfStale(&first.peer.node_id, 0));
     try std.testing.expect(table.forgetPeerIfStale(&second.peer.node_id, 0));
     try std.testing.expectEqual(@as(usize, 1), table.count());
@@ -599,7 +599,7 @@ test "routing periodic maintenance leaves pending replacements to revalidation" 
         const address = address4(10, @intCast(index + 1), 0, 1, @intCast(9_000 + index));
         const remote_record = fakeRecord(node_id, address, 1);
         const peer = types.Endpoint{ .node_id = node_id, .address = address };
-        _ = try table.upsertVerified(&peer, &remote_record, 0);
+        _ = try table.upsertVerified(&peer, &remote_record, 0, .outgoing);
     }
     const incumbent = table.revalidationTarget().?;
     var cursor: usize = 0;
@@ -608,4 +608,25 @@ test "routing periodic maintenance leaves pending replacements to revalidation" 
     try std.testing.expect(!table.forgetPeerIfStale(&incumbent.peer.node_id, 0));
     try std.testing.expectEqual(@as(usize, 1), table.pendingCount());
     try std.testing.expectEqual(RoutingTable.bucket_size, table.count());
+}
+
+test "routing table reserves half of each bucket for outgoing peers" {
+    var table: RoutingTable = undefined;
+    try table.init(std.testing.allocator, @splat(0));
+    defer table.deinit(std.testing.allocator);
+    for (0..RoutingTable.bucket_size / 2) |index| {
+        const id = nodeAtDistance(256, @intCast(index + 1));
+        const address = address4(10, @intCast(index + 1), 0, 1, 9000);
+        const record = fakeRecord(id, address, 1);
+        const peer: types.Endpoint = .{ .node_id = id, .address = address };
+        try std.testing.expectEqual(RoutingTable.PutResult.inserted, try table.upsertVerified(&peer, &record, 0, .incoming));
+        _ = try table.upsertVerified(&peer, &record, 1, .outgoing);
+        try std.testing.expectEqual(RoutingTable.Direction.incoming, table.get(&id).?.direction);
+    }
+    const id = nodeAtDistance(256, 20);
+    const address = address4(10, 20, 0, 1, 9000);
+    const record = fakeRecord(id, address, 1);
+    const peer: types.Endpoint = .{ .node_id = id, .address = address };
+    try std.testing.expectError(error.IncomingLimit, table.upsertVerified(&peer, &record, 2, .incoming));
+    try std.testing.expectEqual(RoutingTable.PutResult.inserted, try table.upsertVerified(&peer, &record, 2, .outgoing));
 }

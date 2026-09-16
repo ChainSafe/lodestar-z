@@ -61,7 +61,7 @@ pub const Client = struct {
                 lifecycle.io.outbox = .{};
                 owner.protocol_counters[@intFromEnum(lifecycle.protocol)].request_write_stops +|= 1;
                 std.log.scoped(.network_reqresp).debug("request_write_stopped request={d}:{d} connection={d}:{d} method={s} detail={s} response_fin={any} awaiting_response=true", .{ index, lifecycle.generation, lifecycle.conn.index, lifecycle.conn.generation, @tagName(lifecycle.protocol), @errorName(err), lifecycle.io.fin_seen });
-                break :stopped RequestIO.Flush{ .done = true, .progressed = false };
+                break :stopped RequestIO.Flush{ .done = true };
             }
             lifecycle.io.failure_detail = @errorName(err);
             lifecycle.fail(owner, index, switch (err) {
@@ -212,10 +212,7 @@ pub const Client = struct {
         }
         if (request_ssz.len > bounds.request_max) return error.RequestTooLarge;
         if (request_ssz.len < bounds.request_min) return error.RequestTooSmall;
-        const request_ceiling = if (owner.admission) |*admission|
-            (admission.policy.inspect(which, request_ssz, owner.request_fork) catch return error.InvalidRequest).chunks_max
-        else
-            try protocol.requestChunkLimit(which, request_ssz);
+        const request_ceiling = (owner.inspectRequest(which, request_ssz, owner.request_fork) catch return error.InvalidRequest).chunks_max;
         const chunks_max = request_options.expected_chunks orelse request_ceiling;
         if (chunks_max > request_ceiling) return error.InvalidRequestOptions;
         if (sink.len < bounds.response_max) return error.SinkTooSmall;

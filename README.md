@@ -1,6 +1,9 @@
 # lodestar-z
 
 Zig consensus modules for [Lodestar](https://github.com/chainsafe/lodestar), the TypeScript Ethereum consensus client.
+
+See the [native networking architecture](docs/network-architecture.md) for transport layers,
+ownership, host integration, and resource limits.
 Modules are implemented in Zig and exposed to Node.js through NAPI bindings.
 
 ## Installation

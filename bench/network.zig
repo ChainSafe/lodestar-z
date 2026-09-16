@@ -33,7 +33,7 @@ fn options(key: *const network.KeyPair) network.network_core.Options {
         .transport = .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 } },
         .core = .{
             .peers = .{ .capacity = 4, .outbound_reserve = 1, .max_peers = 3, .target_peers = 2, .min_outbound = 1, .engine_capacity = 4 },
-            .dial = .{ .capacity = 4, .concurrent_max = 2, .engine_dialing_max = 2, .seed = 7 },
+            .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 7 },
             .control = .{ .operations_max = 2 },
             .service = .{
                 .router = .{ .negotiations_max = 24, .outbound_control_reserved = 8 },

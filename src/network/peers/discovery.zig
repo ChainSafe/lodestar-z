@@ -60,20 +60,11 @@ pub const Result = struct {
     failure: ?Error = null,
     failure_stage: d.Driver.FailureStage = .coordinator,
 };
-pub const MemoryPlan = struct {
-    inline_bytes: usize,
-    allocated_bytes: usize,
-    lookup_candidates: usize,
-    expiry_slots: usize,
-    bootstrap_slots: usize,
-    result_records: usize,
-};
 const Storage = struct {
     foreground: d.Lookup.Candidates,
     background: d.Lookup.Candidates,
     bootstrap: [d.Maintenance.bootstrap_max]d.identity.enr.Record,
     expiries: [d.CallTable.capacity_max]d.CallTable.Expired,
-    records: [d.Lookup.result_max]d.Lookup.Confirmed,
 };
 
 pub const Discovery = struct {
@@ -96,6 +87,7 @@ pub const Discovery = struct {
     rejections: [rejection_count]u64 = @splat(0),
     lookup_started_ms: u64 = 0,
     lookup_published: u64 = 0,
+    empty_lookups: u3 = 0,
 
     pub fn init(allocator: std.mem.Allocator, driver: *d.Driver, context: *const types.ForkContext, bootstrap: []const d.identity.enr.Record, now_ms: u64, options: Options) Error!Discovery {
         try context.validate();
@@ -116,8 +108,8 @@ pub const Discovery = struct {
         self.* = undefined;
     }
 
-    pub fn memoryPlan(_: *const Discovery) MemoryPlan {
-        return .{ .inline_bytes = @sizeOf(Discovery), .allocated_bytes = @sizeOf(Storage), .lookup_candidates = 2 * d.Lookup.candidate_capacity, .expiry_slots = d.CallTable.capacity_max, .bootstrap_slots = d.Maintenance.bootstrap_max, .result_records = d.Lookup.result_max };
+    pub fn memoryPlan(_: *const Discovery) struct { inline_bytes: usize, allocated_bytes: usize } {
+        return .{ .inline_bytes = @sizeOf(Discovery), .allocated_bytes = @sizeOf(Storage) };
     }
 
     pub fn request(self: *Discovery, demand: Demand, now_ms: u64) Error!void {
@@ -197,13 +189,14 @@ pub const Discovery = struct {
         }
         self.consumeEvent(progress, out, &result);
         if (self.lookup) |*lookup| if (lookup.isFinished()) {
-            const confirmed_records = lookup.confirmedResults(&self.storage.records);
             self.counters.lookups_completed +|= 1;
             self.lookup_time.observe(progress.now_ms -| self.lookup_started_ms);
             self.lookup_finishes[@intFromEnum(lookup.finishReason().?)] +|= 1;
-            std.log.scoped(.network_discovery).debug("lookup_completed reason={s} confirmed={d} queried={d} candidates={d} published={d} elapsed_ms={d}", .{ @tagName(lookup.finishReason().?), confirmed_records.len, lookup.queries_started, lookup.candidateCount(), self.counters.candidates_published -| self.lookup_published, progress.now_ms -| self.lookup_started_ms });
+            std.log.scoped(.network_discovery).debug("lookup_completed reason={s} queried={d} candidates={d} published={d} elapsed_ms={d}", .{ @tagName(lookup.finishReason().?), lookup.queries_started, lookup.candidateCount(), self.counters.candidates_published -| self.lookup_published, progress.now_ms -| self.lookup_started_ms });
             self.lookup = null;
-            self.query_due_ms = progress.now_ms +| self.options.query_interval_ms;
+            self.empty_lookups = if (self.counters.candidates_published == self.lookup_published) @min(self.empty_lookups +| 1, 6) else 0;
+            const delay = self.options.query_interval_ms *| (@as(u64, 1) << self.empty_lookups);
+            self.query_due_ms = progress.now_ms +| delay;
         };
         return result;
     }

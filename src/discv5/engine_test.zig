@@ -462,7 +462,7 @@ test "engine configuration rejects zero retention windows" {
     var config = engineConfig();
     config.challenge_timeout_ms = 0;
     try std.testing.expectError(
-        Engine.Error.InvalidTimeout,
+        Engine.InitError.InvalidTimeout,
         node.initWithConfig(std.testing.allocator, key, local_record, config),
     );
 }

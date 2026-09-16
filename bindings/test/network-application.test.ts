@@ -1,10 +1,10 @@
 import {execFileSync} from "node:child_process";
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test} from "vitest";
-import bindings from "../src/bindings.js";
 import type {NativeNetworkApplicationRuntime, NativePeerObservation} from "../src/network.js";
 import {createNativeNetworkApplicationRuntime} from "../src/network.js";
 import {applicationConfig, discoveryConfig, localIntent} from "./utils/network.js";
+import {networkBindings as bindings} from "./utils/network-bindings.js";
 
 test("application stays prepared across the host clock fork boundary and activates fresh intent", async () => {
   const config = applicationConfig();
@@ -258,6 +258,7 @@ test("real authenticated connect, direct membership and generation-preserving im
     expect(closed).toHaveLength(1);
     expect(closed[0].connection).toEqual(before.peers[0].connection);
     expect(closed[0].peer).toEqual(before.peers[0].peer);
+    expect(closed[0].reason).toBe("host");
     expect(identityA.peerId).not.toEqual(identityB.peerId);
   } finally {
     await Promise.all([a.close(), b.close()]);
@@ -277,6 +278,35 @@ test("connect timeout retains independently wanted direct membership", async () 
     await a.addDirectPeer(identity.peerId, [identity.localEndpoint]);
     await expect(a.connect(identity.peerId, [identity.localEndpoint], 30n)).rejects.toThrow("NetworkConnectTimeout");
     expect((await a.getDirectPeers()).identities).toEqual([identity.peerId]);
+  } finally {
+    await Promise.all([a.close(), b.close()]);
+  }
+});
+
+test("peer penalties accumulate while the command lane is full", async () => {
+  const first = applicationConfig();
+  const second = applicationConfig();
+  second.identitySecretKey[31] = 2;
+  const a = createNativeNetworkApplicationRuntime(first, () => undefined);
+  const b = createNativeNetworkApplicationRuntime(second, () => undefined);
+  try {
+    const [, remote] = await Promise.all([a.ready, b.ready]);
+    await Promise.all([a.applyIntent(localIntent(first), 100n), b.applyIntent(localIntent(second), 100n)]);
+    await a.connect(remote.peerId, [remote.localEndpoint], 5000n);
+    const pending = Array.from({length: 32}, () => a.getIdentity());
+    expect(() => a.getIdentity()).toThrow("NetworkCommandFull");
+    for (let i = 0; i < 3; i++) a.reportPeer(remote.peerId, "high_tolerance");
+    await Promise.all(pending);
+    let score = 0;
+    for (let i = 0; i < 100; i++) {
+      score = (await a.getPeers()).peers[0].score;
+      if (score < -2.9) break;
+      await delay(10);
+    }
+    expect(score).toBeLessThan(-2.9);
+    expect(score).toBeGreaterThanOrEqual(-3);
+    a.reportPeer((await a.getIdentity()).peerId, "fatal");
+    expect(a.diagnostics().peerReportsIgnored).toBe(1n);
   } finally {
     await Promise.all([a.close(), b.close()]);
   }

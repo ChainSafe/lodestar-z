@@ -219,6 +219,8 @@ test "engine feeds an unrouted short header from a known peer to its slot" {
         pair.client.counters.accepted + pair.client.counters.recv_errors,
     );
 
+    try std.testing.expect(pair.client.peerId(handles.client) != null);
+    const live_before = pair.client.activeIndices().len;
     const stranger = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 9 }, .port = 4_009 } };
     try std.testing.expectEqual(
         engine_mod.ReceiveOutcome.dropped,
@@ -231,4 +233,19 @@ test "engine feeds an unrouted short header from a known peer to its slot" {
         ),
     );
     try std.testing.expectEqual(before_unroutable + 1, pair.client.counters.dropped_unroutable);
+    try std.testing.expectEqual(live_before, pair.client.activeIndices().len);
+    try std.testing.expect(pair.client.peerId(handles.client) != null);
+    var events: [8]engine_mod.Event = undefined;
+    for (events[0..pair.client.pollEvents(&events)]) |event| try std.testing.expect(event != .closed);
+}
+
+test "engine registry retires exhausted connection generations" {
+    var registry = try @import("registry.zig").Registry.init(std.testing.allocator, 2, false, 1);
+    defer registry.deinit(std.testing.allocator);
+    registry.slots[0].generation = std.math.maxInt(u32);
+    try std.testing.expectEqual(@as(?u16, 1), registry.claim());
+    registry.unclaim(1);
+    registry.slots[1].generation = std.math.maxInt(u32);
+    try std.testing.expectEqual(@as(?u16, null), registry.claim());
+    try std.testing.expectEqual(@as(u16, 0), registry.active_len);
 }

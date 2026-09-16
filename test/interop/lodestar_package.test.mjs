@@ -355,12 +355,15 @@ test("install persists and emits a structured pnpm failure record", async () => 
   const priorFiles = await collectFiles(priorRoot);
   const lockHash = await sha256(join(hostDir, "node_modules/.pnpm/lock.yaml"));
   await symlink(hostDir, join(root, "current"), "dir");
+  const hostPackage = JSON.parse(await readFile(join(hostDir, "package.json"), "utf8"));
+  hostPackage.packageManager = "pnpm@11.0.0";
+  await writeFile(join(hostDir, "package.json"), JSON.stringify(hostPackage));
   const bin = join(root, "bin");
   await mkdir(bin);
   const pnpm = join(bin, "pnpm");
   await writeFile(
     pnpm,
-    '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "10.24.0\\n"; exit 0; fi\nprintf "mutated" > node_modules/.pnpm/lock.yaml\nprintf "mutated" > node_modules/@chainsafe/lodestar-z/bindings/src/index.js\nprintf "install-out"\nprintf "install-err" >&2\nexit 23\n'
+    '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "11.0.0\\n"; exit 0; fi\nprintf "mutated" > node_modules/.pnpm/lock.yaml\nprintf "mutated" > node_modules/@chainsafe/lodestar-z/bindings/src/index.js\nprintf "install-out"\nprintf "install-err" >&2\nexit 23\n'
   );
   await chmod(pnpm, 0o755);
   const evidenceDir = join(root, "failed-install");
@@ -396,6 +399,7 @@ test("install persists and emits a structured pnpm failure record", async () => 
   assert.equal(cliFailure.commandRecord.stdout, "install-out");
   assert.equal(cliFailure.commandRecord.stderr, "install-err");
   const saved = JSON.parse(await readFile(join(evidenceDir, "install-failure.json"), "utf8"));
+  assert.equal(saved.attempts[0].kind, "pnpm11-resolved-install");
   assert.deepEqual(saved.attempts[0].command.argv, [
     "pnpm",
     "install",
@@ -403,6 +407,8 @@ test("install persists and emits a structured pnpm failure record", async () => 
     "--ignore-scripts",
     "--lockfile=false",
     "--package-import-method=copy",
+    "--no-optimistic-repeat-install",
+    "--no-prefer-frozen-lockfile",
     "--pnpmfile",
     join(evidenceDir, "lodestar-package-hook.cjs"),
   ]);

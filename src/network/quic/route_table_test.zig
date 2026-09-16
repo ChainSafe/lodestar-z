@@ -16,12 +16,14 @@ fn cidFor(value: u16) Cid {
 test "route table inserts, finds, and removes routes" {
     var table = try RouteTable.init(std.testing.allocator, 4, 0x1234);
     defer table.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 16), table.capacity());
+    try std.testing.expectEqual(@as(usize, 16), table.entries.len);
 
     const first = cidFor(1);
     const second = cidFor(2);
     try table.insert(&first, 7);
     try table.insert(&second, 7);
+    try std.testing.expectError(error.Full, table.insert(&first, 8));
+    try std.testing.expectEqual(@as(usize, 2), table.count);
     try std.testing.expectEqual(@as(?u16, 7), table.find(&first));
     try std.testing.expectEqual(@as(?u16, 7), table.find(&second));
     try std.testing.expectEqual(@as(?u16, null), table.find(&cidFor(3)));
@@ -61,7 +63,7 @@ test "route table keeps colliding routes findable across removals" {
 test "route table refuses inserts past half its capacity" {
     var table = try RouteTable.init(std.testing.allocator, 1, 5);
     defer table.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 4), table.capacity());
+    try std.testing.expectEqual(@as(usize, 4), table.entries.len);
     try table.insert(&cidFor(1), 0);
     try table.insert(&cidFor(2), 0);
     try std.testing.expectError(error.Full, table.insert(&cidFor(3), 0));
@@ -100,7 +102,7 @@ test "route table repairs clusters longer than the probe limit" {
         std.mem.writeInt(u64, raw[0..8], @intCast(nonce), .little);
         const cid = Cid.fromSlice(&raw);
         const desired: usize = if (found < 64) 0 else found - 63;
-        const bucket = std.hash.Wyhash.hash(table.seed, cid.slice()) & (table.capacity() - 1);
+        const bucket = std.hash.Wyhash.hash(table.seed, cid.slice()) & (table.entries.len - 1);
         if (bucket != desired) continue;
         cids[found] = cid;
         try table.insert(&cids[found], @intCast(found));

@@ -4,17 +4,26 @@ const c = @import("constants");
 const preset = @import("preset");
 const Protocol = @import("protocol.zig").Protocol;
 
-pub fn fixture() p.Config {
-    return .{
-        .deneb_start_slot = 0,
-        .blocks_pre_deneb = c.MAX_REQUEST_BLOCKS,
-        .blocks_deneb = c.MAX_REQUEST_BLOCKS_DENEB,
-        .blob_identifiers_deneb = 768,
-        .blob_identifiers_electra = 1152,
-        .number_of_columns = preset.NUMBER_OF_COLUMNS,
-        .column_chunks = preset.MAX_REQUEST_DATA_COLUMN_SIDECARS,
-        .blob_schedule = &.{ .{ .start_slot = 0, .max_blobs = 6 }, .{ .start_slot = 100, .max_blobs = 9 } },
+const fixture = @import("policy_fixture.zig").config;
+
+test "request policy derives ordered unique blob boundaries from chain configuration" {
+    const config = @import("config");
+    var chain = config.minimal.config.chain;
+    chain.DENEB_FORK_EPOCH = 1;
+    chain.ELECTRA_FORK_EPOCH = 2;
+    chain.FULU_FORK_EPOCH = 2;
+    chain.BLOB_SCHEDULE = &.{
+        .{ .EPOCH = 4, .MAX_BLOBS_PER_BLOCK = 15 },
+        .{ .EPOCH = 3, .MAX_BLOBS_PER_BLOCK = 12 },
     };
+    const cfg = config.BeaconConfig.init(chain, @splat(0));
+    var points: [p.schedule_max]p.BlobLimit = undefined;
+    const value = try p.Config.fromBeaconConfig(&cfg, &points);
+    try std.testing.expectEqual(@as(usize, 4), value.blob_schedule.len);
+    for (value.blob_schedule, 1..) |point, epoch| {
+        try std.testing.expectEqual(epoch * @import("preset").preset.SLOTS_PER_EPOCH, point.start_slot);
+        try std.testing.expectEqual(cfg.getMaxBlobsPerBlock(epoch), point.max_blobs);
+    }
 }
 
 fn put(bytes: []u8, at: usize, value: u64) void {

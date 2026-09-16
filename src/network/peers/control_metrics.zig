@@ -34,9 +34,11 @@ pub const Counters = struct {
 
     pub fn write(self: *const Counters, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try prom.family(w, "lodestar_peer_connected_total", .counter, "Authenticated connections admitted to the native peer manager");
-        try prom.family(w, "lodestar_peer_disconnected_total", .counter, "Admitted connections retired by the native peer manager");
         inline for (.{ "inbound", "outbound" }, 0..) |direction, index| {
             try w.print("lodestar_peer_connected_total{{direction=\"" ++ direction ++ "\",status=\"open\"}} {d}\n", .{self.connected[index]});
+        }
+        try prom.family(w, "lodestar_peer_disconnected_total", .counter, "Admitted connections retired by the native peer manager");
+        inline for (.{ "inbound", "outbound" }, 0..) |direction, index| {
             try prom.sample(w, "lodestar_peer_disconnected_total", "direction", direction, self.disconnected[index]);
         }
         inline for (.{

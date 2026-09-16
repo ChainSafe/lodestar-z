@@ -16,6 +16,8 @@ test "identify independent unknown protocol and empty agent publish only at FIN"
     try std.testing.expectEqualStrings("", result.agent.?.slice());
     try std.testing.expectEqual(@as(u8, 0), result.protocols.count());
     try std.testing.expect(result.protocol_version == null);
+    try std.testing.expectError(error.Finished, decoder.feed(&.{0}, false));
+    try std.testing.expectEqualDeep(result, decoder.result().?);
 }
 
 test "identify independent fragmented noncanonical prefix and coalesced frames" {
@@ -207,13 +209,13 @@ test "identify encoder uses canonical identity copied binary QUIC addresses and 
     var protocols: @import("../capabilities.zig").Set = .initEmpty();
     protocols.insert(.identify);
     var frame: [8194]u8 = undefined;
-    const bytes = try local.encode(protocols, &frame);
+    const bytes = try local.encode(protocols, null, &frame);
     const expected = [_]u8{ 0x0a, 37 } ++ (try peer.publicKey()).encodeProtobuf() ++ [_]u8{ 0x12, 11, 4, 127, 0, 0, 1, 0x91, 2, 0x23, 0x28, 0xcd, 3, 0x1a, 14 } ++ "/ipfs/id/1.0.0".* ++ [_]u8{ 0x2a, 10 } ++ "ipfs/0.1.0".* ++ [_]u8{ 0x32, 5 } ++ "stock".*;
     try std.testing.expectEqualSlices(u8, &expected, bytes[1..]);
     var decoder = codec.Decoder.init(&peer);
     try decoder.feed(bytes, true);
     try std.testing.expectEqualStrings("stock", decoder.result().?.agent.?.slice());
-    try std.testing.expectError(error.BufferTooSmall, local.encode(protocols, &.{}));
+    try std.testing.expectError(error.BufferTooSmall, local.encode(protocols, null, &.{}));
     const previous = local;
     try std.testing.expectError(error.InvalidAddress, local.setAddresses(&.{.{ .ip4 = .{ .octets = @splat(0), .port = 9000 } }}));
     try std.testing.expectEqualDeep(previous, local);
@@ -241,7 +243,7 @@ test "identify maximum key envelope and advertisement respect all exact local bo
     protocols.insert(.identify);
     for (std.enums.values(@import("../reqresp/protocol.zig").Protocol)) |which| protocols.insert(.{ .reqresp = which });
     for (std.enums.values(@import("../gossipsub/sessions.zig").Version)) |version| protocols.insert(.{ .meshsub = version });
-    const encoded = try local.encode(protocols, &frame);
+    const encoded = try local.encode(protocols, null, &frame);
     try std.testing.expect(encoded.len <= 8194);
     decoder = codec.Decoder.init(&peer);
     try decoder.feed(encoded, true);
@@ -249,4 +251,26 @@ test "identify maximum key envelope and advertisement respect all exact local bo
     const previous = local;
     try std.testing.expectError(error.OccurrenceLimit, local.setAddresses(&addresses));
     try std.testing.expectEqualDeep(previous, local);
+}
+
+test "identify includes the current observed QUIC endpoint" {
+    const peer = try identity();
+    const local = try codec.Local.init(&peer, "stock", "ipfs/0.1.0", &.{});
+    const endpoint: @import("../types.zig").Address = .{ .ip4 = .{ .octets = .{ 192, 0, 2, 10 }, .port = 9010 } };
+    var frame: [8194]u8 = undefined;
+    const bytes = try local.encode(.initEmpty(), endpoint, &frame);
+    var reader = @import("../wire/protobuf.zig").Reader.init(bytes);
+    _ = try reader.varint();
+    var observed: usize = 0;
+    for (0..128) |_| {
+        if (reader.atEnd()) break;
+        const tag = try reader.tag();
+        if (tag.field == 4) {
+            const value = try @import("../wire/multiaddr.zig").Multiaddr.decode(try reader.lenDelimited());
+            try std.testing.expect(value.address.eql(endpoint));
+            observed += 1;
+        } else try reader.skip(tag.wire);
+    }
+    try std.testing.expect(reader.atEnd());
+    try std.testing.expectEqual(@as(usize, 1), observed);
 }

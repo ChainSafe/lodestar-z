@@ -15,7 +15,7 @@ pub const probe_attempts_max: u8 = 2;
 pub const Error = Lookup.Error || error{ InvalidConfig, InvalidBootstrap, TooManyBootstraps };
 pub const Failure = enum { expired, local };
 pub const Config = struct {
-    probe_interval_ms: u64 = 30_000,
+    probe_interval_ms: u64 = 1_000,
     stale_after_ms: u64 = 300_000,
     refresh_interval_ms: u64 = 60_000,
     bootstrap_interval_ms: u64 = 60_000,
@@ -34,7 +34,7 @@ const Pending = struct {
 
 const Maintenance = @This();
 config: Config,
-ip_mode: @import("udp").Mode,
+ip_mode: types.Mode,
 bootstrap: []const enr.Record,
 candidates: *Lookup.Candidates,
 lookup: Lookup = undefined,
@@ -56,7 +56,7 @@ pub fn init(
     bootstrap: []const enr.Record,
     now_ms: u64,
     config: Config,
-    ip_mode: @import("udp").Mode,
+    ip_mode: types.Mode,
 ) Error!void {
     if (bootstrap.len > bootstrap_max) return Error.TooManyBootstraps;
     inline for (std.meta.fields(Config)) |field| {
@@ -216,8 +216,13 @@ pub fn onFailure(
                 _ = core.cancelCall(handle);
                 if (pending.origin == .replacement and pending.kind == .ping) {
                     if (reason == .local) {
+                        if (pending.attempts >= probe_attempts_max) {
+                            core.routing.abandonRevalidation(&pending.entry.peer.node_id);
+                            self.pending = null;
+                            self.next_start_ms = now_ms;
+                            return true;
+                        }
                         pending.handle = null;
-                        pending.attempts = 0;
                         pending.ready_ms = now_ms +| self.config.retry_interval_ms;
                         self.next_start_ms = pending.ready_ms;
                         return true;
@@ -295,6 +300,7 @@ fn selectProbe(self: *Maintenance, core: *Engine, now_ms: u64) void {
             if (core.isPeerBusy(&record.node_id)) continue;
             self.bootstrap_due_ms = now_ms +| self.config.bootstrap_interval_ms;
             self.pending = .{ .entry = .{
+                .direction = .outgoing,
                 .peer = .{ .node_id = record.node_id, .address = address },
                 .record = record,
                 .last_verified_ms = 0,

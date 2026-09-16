@@ -1,5 +1,5 @@
 const std = @import("std");
-const address_mod = @import("address.zig");
+const Address = @import("udp").Address;
 const peer_id = @import("peer_id.zig");
 const varint = @import("varint.zig");
 
@@ -15,11 +15,11 @@ const code_quic_v1: u64 = 461;
 pub const Error = error{ InvalidMultiaddr, BufferTooSmall } || peer_id.Error || varint.Error;
 
 pub const Multiaddr = struct {
-    address: address_mod.Address,
+    address: Address,
     peer: ?peer_id.PeerId = null,
 
     pub fn encode(self: *const Multiaddr, out: []u8) Error![]u8 {
-        if (self.address == .ip6 and address_mod.Address.isIp4Mapped(self.address.ip6.octets)) return error.InvalidMultiaddr;
+        if (self.address == .ip6 and Address.isIp4Mapped(self.address.ip6.octets)) return error.InvalidMultiaddr;
         var cursor: usize = 0;
         switch (self.address) {
             .ip4 => |ip| {
@@ -46,7 +46,7 @@ pub const Multiaddr = struct {
 
     pub fn decode(bytes: []const u8) Error!Multiaddr {
         var cursor: usize = 0;
-        var address: address_mod.Address = switch (try takeVarint(bytes, &cursor)) {
+        var address: Address = switch (try takeVarint(bytes, &cursor)) {
             code_ip4 => .{ .ip4 = .{ .octets = (try take(bytes, &cursor, 4))[0..4].*, .port = 0 } },
             code_ip6 => .{ .ip6 = .{
                 .octets = (try take(bytes, &cursor, 16))[0..16].*,
@@ -54,7 +54,7 @@ pub const Multiaddr = struct {
             } },
             else => return error.InvalidMultiaddr,
         };
-        if (address == .ip6 and address_mod.Address.isIp4Mapped(address.ip6.octets)) return error.InvalidMultiaddr;
+        if (address == .ip6 and Address.isIp4Mapped(address.ip6.octets)) return error.InvalidMultiaddr;
         if (try takeVarint(bytes, &cursor) != code_udp) return error.InvalidMultiaddr;
         const port = std.mem.readInt(u16, (try take(bytes, &cursor, 2))[0..2], .big);
         switch (address) {
@@ -72,7 +72,7 @@ pub const Multiaddr = struct {
     }
 
     pub fn toText(self: *const Multiaddr, out: *[text_length_max]u8) Error![]const u8 {
-        if (self.address == .ip6 and address_mod.Address.isIp4Mapped(self.address.ip6.octets)) return error.InvalidMultiaddr;
+        if (self.address == .ip6 and Address.isIp4Mapped(self.address.ip6.octets)) return error.InvalidMultiaddr;
         var cursor: usize = 0;
         switch (self.address) {
             .ip4 => |ip| {
@@ -82,19 +82,10 @@ pub const Multiaddr = struct {
                 cursor += written.len;
             },
             .ip6 => |ip| {
-                const prefix = std.fmt.bufPrint(out[cursor..], "/ip6/", .{}) catch
-                    return error.BufferTooSmall;
-                cursor += prefix.len;
-                for (0..8) |group| {
-                    const value = std.mem.readInt(u16, ip.octets[group * 2 ..][0..2], .big);
-                    const written = if (group == 0)
-                        std.fmt.bufPrint(out[cursor..], "{x}", .{value}) catch
-                            return error.BufferTooSmall
-                    else
-                        std.fmt.bufPrint(out[cursor..], ":{x}", .{value}) catch
-                            return error.BufferTooSmall;
-                    cursor += written.len;
-                }
+                const written = std.fmt.bufPrint(out[cursor..], "/ip6/{f}", .{
+                    std.Io.net.Ip6Address.Unresolved{ .bytes = ip.octets, .interface_name = null },
+                }) catch return error.BufferTooSmall;
+                cursor += written.len;
             },
         }
         const port = self.address.port();
@@ -125,14 +116,14 @@ pub const Multiaddr = struct {
         const quic_part = parts.next() orelse return error.InvalidMultiaddr;
         if (!std.mem.eql(u8, quic_part, "quic-v1")) return error.InvalidMultiaddr;
 
-        const address: address_mod.Address = if (std.mem.eql(u8, family, "ip4")) blk: {
+        const address: Address = if (std.mem.eql(u8, family, "ip4")) blk: {
             const parsed = std.Io.net.IpAddress.parseIp4(host, port) catch
                 return error.InvalidMultiaddr;
             break :blk .{ .ip4 = .{ .octets = parsed.ip4.bytes, .port = port } };
         } else if (std.mem.eql(u8, family, "ip6")) blk: {
             const parsed = std.Io.net.IpAddress.parseIp6(host, port) catch
                 return error.InvalidMultiaddr;
-            if (address_mod.Address.isIp4Mapped(parsed.ip6.bytes)) return error.InvalidMultiaddr;
+            if (Address.isIp4Mapped(parsed.ip6.bytes)) return error.InvalidMultiaddr;
             break :blk .{ .ip6 = .{ .octets = parsed.ip6.bytes, .port = port } };
         } else return error.InvalidMultiaddr;
 

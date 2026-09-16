@@ -2,7 +2,7 @@ const std = @import("std");
 const context = @import("context.zig");
 const keys = @import("../wire/keys.zig");
 const peer_id = @import("../wire/peer_id.zig");
-const c = @import("../quic/binding.zig").c;
+const c = @import("quiche_zig:quiche");
 
 test "context owns the certificate and derives the local peer id" {
     const host = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{1}));

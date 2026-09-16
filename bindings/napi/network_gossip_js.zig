@@ -184,14 +184,5 @@ pub fn publishError(env: napi.Env, err: anyerror) !Value {
     return object;
 }
 pub fn diagnostics(env: napi.Env, value: *const g.Diagnostics) !Value {
-    const object = try env.createObject();
-    const Gauge = enum { capacity, occupied, highWater, queued, pendingVerdicts, reservedBytes, reservedBytesHighWater, payloadBytes, copyingBytes, publicationBytes, publicationBytesHighWater };
-    const Counter = enum { messagesCopied, bytesCopied, capacityRefusals, byteRefusals, queuedExpired, deliveredExpired, staleReports, reportsAccepted, reportsAppliedAccept, reportsAppliedReject, reportsAppliedIgnore, reportsAlreadyResolved, reportsExpired, reportsStale, publicationCopies, publicationBytesCopied, publicationQueued, publicationPressured, publicationSelected, publicationUnavailable, publicationDuplicates };
-    inline for (@typeInfo(g.Diagnostics).@"struct".fields) |field| {
-        const gauge = @hasField(Gauge, field.name);
-        const counter = @hasField(Counter, field.name);
-        comptime std.debug.assert(gauge != counter);
-        try put(object, field.name, if (counter) try env.createBigintUint64(@field(value, field.name)) else try env.createDouble(@floatFromInt(@field(value, field.name))));
-    }
-    return object;
+    return @import("network_js.zig").scalarFields(env, value);
 }

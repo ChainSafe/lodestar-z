@@ -12,6 +12,7 @@ test {
     _ = @import("stream_table.zig");
     _ = @import("connection.zig");
     _ = @import("binding_test.zig");
+    _ = @import("retry_test.zig");
     _ = @import("stream_table_test.zig");
     _ = @import("route_table_test.zig");
     _ = @import("schedule_test.zig");

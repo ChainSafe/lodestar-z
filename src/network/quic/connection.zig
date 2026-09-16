@@ -32,6 +32,7 @@ pub const OpenParams = struct {
     local: types.Address,
     peer: types.Address,
     scid: [limits.local_cid_length]u8,
+    original_dcid: ?binding.Cid = null,
     expected_peer_id: ?peer_id.PeerId,
     now: types.Now,
     keylog: []u8 = &.{},
@@ -90,8 +91,8 @@ pub const Slot = struct {
         self.conn = c.quiche_conn_new_with_tls(
             self.scid.slice().ptr,
             self.scid.len,
-            null,
-            0,
+            if (params.original_dcid) |*original| original.slice().ptr else null,
+            if (params.original_dcid) |original| original.len else 0,
             @ptrCast(self.local_sockaddr.any()),
             self.local_sockaddr.len,
             @ptrCast(self.peer_sockaddr.any()),
@@ -114,7 +115,7 @@ pub const Slot = struct {
         if (self.conn) |conn| c.quiche_conn_free(conn);
         self.conn = null;
         self.state = .free;
-        self.generation +%= 1;
+        self.generation +|= 1;
         assert(self.conn == null);
     }
 
@@ -190,6 +191,7 @@ pub const Slot = struct {
     }
 
     pub fn deferClose(self: *Slot, reason: types.CloseReason, code: u64) void {
+        // Flush the handshake flight before quiche_close discards it, so the peer can read the application close.
         assert(self.state == .established);
         assert(self.pending_close == null);
         if (self.close_reason == null) self.close_reason = reason;

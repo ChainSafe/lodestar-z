@@ -25,6 +25,20 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const quiche_module = lodestar_z.module("network").import_table.get("quiche_zig:quiche").?;
+    const quiche_objects = [_]std.Build.LazyPath{quiche_module.link_objects.items[0].static_path};
+    std.debug.assert(quiche_module.link_objects.items.len == 1);
+    const seeds_module = b.createModule(.{
+        .root_source_file = b.path("tools/network_corpus.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    seeds_module.addImport("network", lodestar_z.module("network"));
+    seeds_module.addImport("discv5", lodestar_z.module("discv5"));
+    const seeds = b.addRunArtifact(b.addExecutable(.{ .name = "network_corpus", .root_module = seeds_module }));
+    seeds.setCwd(b.path("."));
+    b.step("network-corpus", "Generate valid QUIC TLS and DiscV5 fuzz seeds").dependOn(&seeds.step);
+
     // Tool: extract corpus seeds from spec test vectors
     {
         const extract_mod = b.createModule(.{
@@ -55,6 +69,7 @@ pub fn build(b: *std.Build) void {
         name: []const u8,
         corpus_suffix: []const u8 = "cmin",
         extra_libs: []const *std.Build.Step.Compile = &.{},
+        extra_objects: []const std.Build.LazyPath = &.{},
         extra_args: []const []const u8 = &.{},
 
         /// Returns the corpus directory path for this fuzzer.
@@ -82,7 +97,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "bls_signature", .extra_libs = &.{dep_blst.artifact("blst")} },
         .{ .name = "bls_aggregate_pk", .extra_libs = &.{dep_blst.artifact("blst")} },
         .{ .name = "bls_aggregate_sig", .extra_libs = &.{dep_blst.artifact("blst")} },
-        .{ .name = "discv5_wire" },
     };
 
     var fuzzers: std.ArrayList(Fuzzer) = .empty;
@@ -97,12 +111,14 @@ pub fn build(b: *std.Build) void {
         const link = fields.next().?;
         std.debug.assert(fields.next() == null);
         const snappy = std.mem.eql(u8, link, "snappy");
-        std.debug.assert(snappy or std.mem.eql(u8, link, "none"));
+        const quiche = std.mem.eql(u8, link, "quiche");
+        std.debug.assert(snappy or quiche or std.mem.eql(u8, link, "none"));
         fuzzers.append(b.allocator, .{
             .name = name,
             .corpus_suffix = corpus,
             .extra_libs = if (snappy) &snappy_libs else &.{},
-            .extra_args = if (snappy) &.{ "-lc++", "-lc++abi", "-lunwind" } else &.{},
+            .extra_objects = if (quiche) &quiche_objects else &.{},
+            .extra_args = if (snappy or quiche) &.{ "-lc++", "-lc++abi", "-lunwind" } else &.{},
         }) catch @panic("out of memory");
     }
     const build_network = b.step("build-network", "Build every network harness from network-targets.tsv");
@@ -141,7 +157,7 @@ pub fn build(b: *std.Build) void {
         lib.root_module.stack_check = false;
         lib.root_module.fuzz = true;
 
-        const exe = afl.addInstrumentedExe(b, lib, fuzzer.extra_libs, fuzzer.extra_args);
+        const exe = afl.addInstrumentedExe(b, lib, fuzzer.extra_libs, fuzzer.extra_objects, fuzzer.extra_args);
         const mkdir = b.addSystemCommand(&.{
             "mkdir", "-p",
         });
@@ -167,6 +183,6 @@ pub fn build(b: *std.Build) void {
             b.fmt("Build {s} AFL harness", .{fuzzer.name}),
         );
         build_step.dependOn(&install.step);
-        if (std.mem.startsWith(u8, fuzzer.name, "network_")) build_network.dependOn(&install.step);
+        if (std.mem.startsWith(u8, fuzzer.name, "network_") or std.mem.eql(u8, fuzzer.name, "discv5_wire")) build_network.dependOn(&install.step);
     }
 }

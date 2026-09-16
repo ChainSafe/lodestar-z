@@ -3,7 +3,7 @@ pub const Handle = @import("../quic/api.zig").Handle;
 pub const Direction = @import("../types.zig").Direction;
 pub const Address = @import("../types.zig").Address;
 pub const ForkSeq = @import("config").ForkSeq;
-pub const PeerRef = struct { index: u16, generation: u64 };
+pub const PeerRef = @import("../types.zig").PeerRef;
 pub const Status = struct {
     fork_digest: [4]u8 = @splat(0),
     finalized_root: [32]u8 = @splat(0),
@@ -16,6 +16,7 @@ pub const Metadata = struct {
     seq_number: u64 = 0,
     attnets: [8]u8 = @splat(0),
     syncnets: u8 = 0,
+    /// Accept smaller advertised counts as a lower bound on the peer's custody prefix.
     custody_group_count: ?u64 = null,
 };
 pub const ForkContext = struct {
@@ -93,6 +94,7 @@ pub const Event = union(enum) {
 pub const Admission = union(enum) {
     admitted: struct { peer: PeerRef, displaced: ?Handle = null, fresh: bool },
     duplicate,
+    pending,
     banned,
     cooldown,
     capacity,

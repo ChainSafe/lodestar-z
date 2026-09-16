@@ -75,6 +75,9 @@ importers:
       tsx:
         specifier: ^4.20.6
         version: 4.23.11
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
       vitest:
         specifier: ^4.0.17
         version: 4.0.17(@types/node@25.0.9)(tsx@4.23.11)(yaml@2.8.2)
@@ -2172,6 +2175,11 @@ packages:
   tunnel@0.0.6:
     resolution: {integrity: sha512-1h/Lnq9yajKY2PEbBadPXj3VxsDDu844OnaAo52UVmIzIvwwtBPIuNvkjuzBlTWpfJyUbG3ez0KSBibQkj4ojg==}
     engines: {node: '>=0.6.11 <=0.7.0 || >=0.7.3'}
+
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
 
   uint8-varint@2.0.4:
     resolution: {integrity: sha512-FwpTa7ZGA/f/EssWAb5/YV6pHgVF1fViKdW8cWaEarjB8t7NyofSWBdOTyFPaGuUG4gx3v1O3PQ8etsiOs3lcw==}
@@ -4537,6 +4545,8 @@ snapshots:
       fsevents: 2.3.3
 
   tunnel@0.0.6: {}
+
+  typescript@5.9.3: {}
 
   uint8-varint@2.0.4:
     dependencies:

@@ -77,7 +77,7 @@ queries_started: u16,
 capacity_drops: u32,
 finish_reason: ?FinishReason,
 filter: ?Filter = null,
-ip_mode: @import("udp").Mode = .dual,
+ip_mode: types.Mode = .dual,
 query_limit: u16 = candidate_capacity,
 
 /// Borrows `candidates` for the life of the lookup and allocates nothing.
@@ -87,7 +87,7 @@ pub fn init(
     local_id: types.NodeId,
     target: types.NodeId,
     seeds: []const RoutingTable.Entry,
-    ip_mode: @import("udp").Mode,
+    ip_mode: types.Mode,
 ) Error!void {
     if (seeds.len > result_max) return Error.TooManySeeds;
     self.* = .{

@@ -81,7 +81,7 @@ export function validateArchivePath(path) {
 
 function parseVerboseEntry(line) {
   const fields = line.trim().split(/\s+/);
-  if (fields.length < 6 || !/^\d+$/.test(fields[2])) fail("InvalidArchiveListing", line);
+  if (fields.length < 6 || !fields[1].includes("/") || !/^\d+$/.test(fields[2])) fail("InvalidArchiveListing", line);
   const bytes = Number(fields[2]);
   if (!Number.isSafeInteger(bytes)) fail("InvalidArchiveListing", line);
   return {bytes, type: fields[0][0]};

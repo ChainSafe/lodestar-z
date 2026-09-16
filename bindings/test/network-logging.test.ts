@@ -28,7 +28,7 @@ test("native std.log captures lifecycle, timestamps and isolated sessions throug
       [left, identities[0]],
       [right, identities[1]],
     ] as const) {
-      const {default: addon} = await import("../src/bindings.js");
+      const {networkBindings: addon} = await import("./utils/network-bindings.js");
       if (typeof addon.networkTestFail === "function") {
         addon.networkTestFail("drain_copy");
         expect(() => runtime.drainLogs()).toThrow("InjectedNetworkFailure");
@@ -127,6 +127,35 @@ test("native logging rejects malformed controls and honors off", async () => {
     await runtime.close();
   }
 });
+
+test.each([
+  "error",
+  "warn",
+  "info",
+  "debug",
+  "off",
+] as const)("native log level %s filters request traces", async (level) => {
+  const pair = await incomingPair();
+  try {
+    pair.left.setLogLevel(level);
+    drain(pair.left);
+    const request = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
+    const pending = request.next();
+    void pending.catch(() => undefined);
+    const incoming = await takeIncoming(pair.right);
+    await incoming.finish();
+    expect(await pending).toEqual({done: true, value: undefined});
+    const records = drain(pair.left);
+    expect(records.some((record) => record.message.startsWith("request_started "))).toBe(level === "debug");
+    if (level === "off") expect(records).toEqual([]);
+    else {
+      const ranks = {debug: 3, error: 0, info: 2, warn: 1};
+      expect(records.every((record) => ranks[record.level] <= ranks[level])).toBe(true);
+    }
+  } finally {
+    await Promise.all([pair.left.close(), pair.right.close()]);
+  }
+}, 15000);
 
 test("log projection cannot invoke prototype setters or reenter the drain", () => {
   expect(

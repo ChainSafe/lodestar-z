@@ -84,7 +84,13 @@ test "maintenance bounds local replacement probe retries without blocking driver
     const received = try pair.driver_a.step(std.testing.io, &expired);
     try std.testing.expectEqual(types.RejectReason.oversized_datagram, received.datagram.rejected);
     try std.testing.expect(received.failure == null);
-    try std.testing.expect((try controller.startNext(&pair.node_a, &out, try .init(&.{2}), 1_000, &test_support.sealEntropy(11))) != null);
+    const retry = (try controller.startNext(&pair.node_a, &out, try .init(&.{2}), 1_000, &test_support.sealEntropy(11))).?;
+    try std.testing.expect(controller.onFailure(&pair.node_a, retry.call.handle, 1_000, .local));
+    try std.testing.expect(controller.pending == null);
+    try std.testing.expectEqual(@as(usize, 0), pair.node_a.routing.pendingCount());
+    try std.testing.expect(pair.node_a.routing.contains(&started.peer.node_id));
+    try std.testing.expect(!pair.node_a.routing.contains(&pair.candidate_id));
+    try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
 }
 
 test "maintenance replaces an expired incumbent but preserves later authenticated liveness" {

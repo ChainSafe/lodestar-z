@@ -181,10 +181,10 @@ test "engine caps inbound handshakes per source address" {
         &response,
     );
     switch (foreign) {
-        .accepted => {},
+        .retry => {},
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(limits.handshaking_per_source_max + 1, pair.server.registry.handshaking);
+    try std.testing.expectEqual(limits.handshaking_per_source_max, pair.server.registry.handshaking);
 }
 
 test "engine drops an inbound Initial when the entropy pool is stale" {
@@ -317,6 +317,12 @@ test "engine retains a live routed stream across unrelated slot churn" {
     try pair.init(.{ .connections_max = 4, .handshaking_max = 4 }, .{});
     defer pair.deinit();
     const handles = try connectPair(&pair);
+    try std.testing.expectError(error.TableFull, pair.client.dial(
+        &support.server_address,
+        pair.server_ctx.local_peer_id,
+        pair.now,
+        pair.client.registry.slots[handles.client.index].scid.bytes[0..limits.local_cid_length].*,
+    ));
     for (0..256) |_| {
         const transient = try pair.dial();
         try std.testing.expect(pair.client.abandon(transient));

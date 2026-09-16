@@ -92,8 +92,8 @@ test "publication failed history admission retains payloads and recovery attribu
     const second_conn: @import("../quic/engine.zig").Handle = .{ .index = 1, .generation = 1 };
     const second_peer = support.addPeer(&g, second_conn, .v1_2).?;
     const second_logical = g.sessions.rows[second_peer.index].logical;
-    g.recovery.add(&g.peers, id, logical, conn, 1);
-    g.recovery.add(&g.peers, id, second_logical, second_conn, 2);
+    g.recovery.add(&g.peers, id, logical, conn, 1, 30_000);
+    g.recovery.add(&g.peers, id, second_logical, second_conn, 2, 30_000);
     g.recovery.controlSent(conn, 1, 12_000, 1);
     try std.testing.expectError(error.ResourceExhausted, g.publish(topic, "retry", .{ .mono_ms = 2, .unix_s = 0 }));
     try std.testing.expect(!g.messages.seen.contains(id, 2));

@@ -19,7 +19,6 @@ pub const Error = CallTable.Error || Channel.Error || RoutingTable.Error ||
     MissingCall,
     SessionRequired,
     UnexpectedChallenge,
-    InvalidTimeout,
 };
 
 pub const InitError = Channel.InitError || CallTable.InitError || RoutingTable.InitError || error{InvalidTimeout};
@@ -101,7 +100,7 @@ pub const ReceiveArgs = struct {
 
 pub const Config = struct {
     session_capacity: usize = 1_024,
-    challenge_capacity: usize = 64,
+    challenge_capacity: usize = 1024,
     call_capacity: usize = 64,
     request_timeout_ms: u64 = 1_000,
     challenge_timeout_ms: u64 = 1_000,
@@ -365,7 +364,7 @@ pub fn confirmPeer(
     record: *const enr.Record,
     now_ms: u64,
 ) RoutingTable.Error!RoutingTable.PutResult {
-    return self.routing.upsertVerified(peer, record, now_ms);
+    return self.routing.upsertVerified(peer, record, now_ms, .outgoing);
 }
 
 pub fn findNodes(
@@ -403,7 +402,7 @@ fn receiveAuthenticated(
         scratch,
         &authenticated.nonce,
     );
-    self.routeAuthenticated(authenticated.peer, authenticated.record, now_ms);
+    self.routeAuthenticated(authenticated.peer, authenticated.record, now_ms, if (event == .response) .outgoing else .incoming);
     return .{ .accepted = .{ .event = event } };
 }
 
@@ -550,16 +549,17 @@ fn dispatchResponse(
     } };
 }
 
-// Successfully dispatched authenticated packets count as liveness for peers already in routing.
+// Unsolicited authenticated peers may occupy at most half of a routing bucket.
 fn routeAuthenticated(
     self: *Engine,
     peer: types.Endpoint,
     supplied_record: ?enr.Record,
     now_ms: u64,
+    direction: RoutingTable.Direction,
 ) void {
     const record = supplied_record orelse
         (self.routing.get(&peer.node_id) orelse return).record;
-    _ = self.routing.upsertVerified(&peer, &record, now_ms) catch return;
+    _ = self.routing.upsertVerified(&peer, &record, now_ms, direction) catch return;
 }
 
 // This is the one place where peer-caused errors become values. Anything unmapped is a local
@@ -637,7 +637,7 @@ fn retainAcceptedNodeRecords(
 }
 
 fn deadline(now_ms: u64, timeout_ms: u64) Error!u64 {
-    if (timeout_ms == 0) return Error.InvalidTimeout;
+    std.debug.assert(timeout_ms != 0);
     return std.math.add(u64, now_ms, timeout_ms) catch Error.ClockOverflow;
 }
 

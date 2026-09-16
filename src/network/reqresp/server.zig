@@ -130,25 +130,22 @@ pub const Server = struct {
                     lifecycle.io.decoder.payload()
                 else
                     &.{};
-                if (owner.admission) |*admission| {
-                    owner.counters.inspected +|= 1;
-                    const inspected = admission.policy.inspect(lifecycle.protocol, payload, slot.request_fork) catch |err| {
-                        _ = takeAdmission(owner, engine, slot, 1, now);
+                if (owner.admission != null) owner.counters.inspected +|= 1;
+                const inspected = owner.inspectRequest(lifecycle.protocol, payload, slot.request_fork) catch |err| {
+                    if (err == error.PolicyRequired) {
+                        reject(owner, slot, constants.result_resource_unavailable, "request policy unavailable", now);
+                    } else {
+                        if (owner.admission != null) _ = takeAdmission(owner, engine, slot, 1, now);
                         Server.rejectRequest(owner, slot, err, now);
-                        return;
-                    };
-                    lifecycle.chunks_max = inspected.chunks_max;
-                    if (!takeAdmission(owner, engine, slot, inspected.charged_cost, now)) {
-                        reject(owner, slot, constants.result_server_error, "rate limited", now);
-                        return;
                     }
-                    owner.counters.admitted +|= 1;
-                } else {
-                    lifecycle.chunks_max = protocol.requestChunkLimit(lifecycle.protocol, payload) catch |err| {
-                        Server.rejectRequest(owner, slot, err, now);
-                        return;
-                    };
+                    return;
+                };
+                lifecycle.chunks_max = inspected.chunks_max;
+                if (owner.admission != null and !takeAdmission(owner, engine, slot, inspected.charged_cost, now)) {
+                    reject(owner, slot, constants.result_rate_limited, "rate limited", now);
+                    return;
                 }
+                if (owner.admission != null) owner.counters.admitted +|= 1;
                 lifecycle.queue(.{ .request = .{
                     .request = lifecycle.handle(index),
                     .peer = lifecycle.conn,
@@ -264,7 +261,6 @@ pub const Server = struct {
             lifecycle.fail(owner, index, reason, .{ .inbound = slot.state }, engine);
             return;
         };
-        if (flushed.progressed) slot.progress_ms = now.mono_ms;
         if (!flushed.done) {
             if (lifecycle.io.outbox.idle()) lifecycle.needs_service = true;
             return;
@@ -346,7 +342,8 @@ pub const Server = struct {
             owner.inboundApplicationCount(stream.conn) >= owner.options.inbound_application_per_peer_max)
             return error.PeerSlotsExhausted;
         if (owner.inboundCount(stream.conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
-            owner.pushOverLimit(.{ .peer = stream.conn, .protocol = which });
+            owner.protocol_counters[@intFromEnum(which)].rate_limited +|= 1;
+            return error.TooManyRequests;
         }
         slot.* = .{
             .request_fork = owner.request_fork,

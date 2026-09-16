@@ -49,6 +49,9 @@ src/
   bls/                     # BLS types, verification, and worker pool
   clock/                   # Slot and epoch clock
   config/                  # Runtime and network configuration
+  network/                 # QUIC, TLS, req/resp, gossipsub, and managed peers
+  discv5/                  # Discovery packets, sessions, routing, and lookups
+  udp/                     # Shared bounded datagram I/O
   consensus_types/         # Fork-specific Ethereum consensus types
   constants/               # Protocol constants
   era/                     # ERA file handling
@@ -71,7 +74,7 @@ test/
   int/                      # Integration tests
   spec/                     # Consensus, SSZ, and BLS spec tests
 examples/                   # Example programs
-scripts/                    # Zig maintenance and download tools
+scripts/                    # Maintenance, downloads, and native host packaging
 ```
 
 ## Build commands
@@ -158,6 +161,25 @@ Binding tests require a compatible `zig-out/lib/bindings.node`; rebuild it after
 code or the selected preset.
 
 ### Integration tests and benchmarks
+
+Networking changes also use targeted native, binding, and interoperability checks:
+
+```bash
+zig build test:network test:discv5 test:udp test:network_runtime -Doptimize=ReleaseSafe
+zig build test:network -Dnetwork.filters="test name"
+zig build check:network-tools -Doptimize=ReleaseSafe
+pnpm test:network-package
+pnpm test:network-interop
+pnpm test:network-managed-interop
+pnpm test:network-identify-interop
+# From test/fuzz, with AFL++ installed:
+zig build build-network -Doptimize=ReleaseSafe
+./smoke-network.sh
+```
+
+Repeat preset-dependent network and binding checks with `-Dpreset=minimal`. Fault-injection
+binding tests require `-Dnetwork_runtime_options.network_runtime_test_failures=true` and
+`LODESTAR_Z_NETWORK_TEST_FAILURES=1`; never publish that addon.
 
 ```bash
 # ERA-backed integration tests

@@ -44,13 +44,13 @@ pub const Transport = struct {
     ) InitError!void {
         var serial: [8]u8 = undefined;
         try std.Io.randomSecure(io, &serial);
-        var seed_bytes: [8]u8 = undefined;
+        var seed_bytes: [32]u8 = undefined;
         try std.Io.randomSecure(io, &seed_bytes);
         const now = try driver_mod.currentTime(io);
         target.keylog = null;
         target.keylog_offset = 0;
         if (options.keylog_path) |path| {
-            const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
+            const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false, .permissions = @enumFromInt(0o600) });
             errdefer file.close(io);
             target.keylog_offset = (try file.stat(io)).size;
             target.keylog = file;
@@ -67,7 +67,7 @@ pub const Transport = struct {
             .tls = context,
             .limits = engine_limits,
             .local = target.udp.localAddresses(),
-            .seed = std.mem.readInt(u64, &seed_bytes, .little),
+            .seed = seed_bytes,
         });
         context_owned = false;
         errdefer target.engine.deinit();

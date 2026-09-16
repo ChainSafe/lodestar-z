@@ -68,7 +68,7 @@ test "peer catalog zero output closes native ownership and pins terminal until o
     try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&.{}));
     try std.testing.expect(c.get(ref).?.connection == null);
     try std.testing.expectEqual(
-        t.Admission.capacity,
+        t.Admission.pending,
         admit(&c, &remote, replacement, .outbound, 2),
     );
     try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&out));
@@ -109,7 +109,7 @@ test "peer catalog endpoint observations preserve publication and connection gen
     try std.testing.expect(c.disconnect(ref, replacement, .host, 2));
     try std.testing.expect(!c.updateEndpoint(ref, replacement, &rebound));
 }
-test "peer catalog banned retention and outbound reserve reject pressure" {
+test "peer catalog bounds banned retention while preserving the outbound reserve" {
     var options = opts;
     options.outbound_reserve = 1;
     var c = try Catalog.init(std.testing.allocator, options);
@@ -121,13 +121,30 @@ test "peer catalog banned retention and outbound reserve reject pressure" {
     _ = c.pollEvents(&out);
     try std.testing.expectEqual(t.Admission.banned, admit(&c, &remote, replacement, .inbound, 1));
     const distinct = third;
-    try std.testing.expectEqual(
-        t.Admission.capacity,
-        admit(&c, &distinct, replacement, .inbound, 1),
-    );
-    _ = admit(&c, &distinct, replacement, .outbound, 1).admitted;
-    try std.testing.expectEqual(@as(f64, -100), c.get(ref).?.score);
+    const fresh = admit(&c, &distinct, replacement, .inbound, 1).admitted;
+    try std.testing.expect(fresh.fresh);
+    try std.testing.expectEqual(ref.index, fresh.peer.index);
+    try std.testing.expect(c.get(ref) == null);
+    const recovered = admit(&c, &remote, first, .outbound, 1).admitted;
+    try std.testing.expect(recovered.peer.index != fresh.peer.index);
 }
+test "peer catalog cooldown churn cannot exclude a fresh inbound identity" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    for ([_]t.PeerId{ remote, third }, 0..) |identity_value, index| {
+        const conn: Handle = .{ .index = @intCast(index), .generation = 1 };
+        const peer = admit(&c, &identity_value, conn, .inbound, 0).admitted.peer;
+        try std.testing.expect(c.cooldown(peer, conn, 0, 600_000));
+        try std.testing.expect(c.disconnect(peer, conn, .remote_goodbye, 0));
+    }
+    var out: [2]t.Event = undefined;
+    _ = c.pollEvents(&out);
+    try std.testing.expectEqual(t.Admission.cooldown, admit(&c, &remote, replacement, .inbound, 1));
+    var fresh = third;
+    fresh.bytes[0] ^= 1;
+    try std.testing.expect(admit(&c, &fresh, replacement, .inbound, 1) == .admitted);
+}
+
 test "peer catalog exhausted generations never wrap and allocator cleanup" {
     var c = try Catalog.init(std.testing.allocator, opts);
     defer c.deinit(std.testing.allocator);
@@ -154,7 +171,7 @@ test "peer catalog published replacement updates availability and rejects stale 
     _ = admit(&c, &remote, replacement, .outbound, 1).admitted;
     try std.testing.expect(!c.updateStatus(ref, first, &.{}, 2));
     try std.testing.expect(!c.updateMetadata(ref, first, &.{}, 2));
-    try std.testing.expect(!c.remoteGoodbye(ref, first, 2, 100));
+    try std.testing.expect(!c.cooldown(ref, first, 2, 100));
     try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&out));
     try std.testing.expect(!out[0].updated.relevant);
     try std.testing.expectEqual(replacement, out[0].updated.connection.?);
@@ -211,7 +228,6 @@ test "peer catalog negative reconnect survives while direct and pending slots re
     try std.testing.expectEqual(t.Admission.capacity, admit(&c, &other, replacement, .outbound, 0));
     var out: [1]t.Event = undefined;
     _ = c.pollEvents(&out);
-    try std.testing.expectEqual(t.Admission.capacity, admit(&c, &other, replacement, .outbound, 0));
     try std.testing.expectEqual(ref, admit(&c, &remote, replacement, .outbound, 0).admitted.peer);
     try std.testing.expectEqual(@as(f64, -5), c.get(ref).?.score);
     try std.testing.expect(c.setDirect(ref, true));
@@ -447,4 +463,23 @@ test "peer catalog sampling exhaustion never exposes custody checkpoint or retri
         try std.testing.expectEqual(@as(u16, 64), budget);
         try std.testing.expectEqual(score, c.get(ref).?.score);
     }
+}
+
+test "unchanged metadata confirms freshness without publishing or changing policy revision" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
+    try std.testing.expect(c.updateStatus(ref, first, &.{}, 0));
+    const metadata: t.Metadata = .{ .seq_number = 7 };
+    try std.testing.expect(c.updateMetadata(ref, first, &metadata, 1));
+    var events: [1]t.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&events));
+    const revision = c.revision;
+    try std.testing.expect(c.updateMetadata(ref, first, &metadata, 20));
+    try std.testing.expectEqual(revision, c.revision);
+    try std.testing.expectEqual(@as(u64, 20), c.get(ref).?.metadata_at_ms);
+    try std.testing.expectEqual(@as(usize, 0), c.pollEvents(&events));
+    try std.testing.expect(!c.updateMetadata(ref, first, &.{ .seq_number = 6 }, 21));
+    try std.testing.expect(c.updateMetadata(ref, first, &.{ .seq_number = 8 }, 22));
+    try std.testing.expectEqual(@as(usize, 1), c.pollEvents(&events));
 }

@@ -1,3 +1,4 @@
+pub const configuration = @import("configuration.zig");
 pub const metrics = @import("metrics.zig");
 pub const logging = @import("logging.zig");
 pub const identify = @import("identify/root.zig");
@@ -63,29 +64,12 @@ test {
     _ = @import("transport_test.zig");
     _ = @import("negotiate_test.zig");
     _ = @import("router_test.zig");
-}
-test {
     _ = @import("core_test.zig");
-}
-test {
     _ = @import("core_control_test.zig");
     _ = @import("network_core_test.zig");
-}
-
-test {
     _ = @import("reservations.zig");
-}
-
-pub const configuration = @import("configuration.zig");
-test {
     _ = configuration;
-}
-
-test {
     _ = @import("capabilities_test.zig");
-}
-
-test {
     _ = identify;
     _ = metrics;
     _ = logging;

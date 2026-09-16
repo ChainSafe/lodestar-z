@@ -22,7 +22,7 @@ pub const Pair = struct {
     client: Engine = undefined,
     server: Engine = undefined,
     now: Now = .{ .mono_ms = 1_000, .unix_s = now_unix },
-    entropy: u8 = 0,
+    entropy: u64 = 0,
     pool: engine_mod.EntropyPool = .{},
     first_initial: [constants.datagram_size_max]u8 = undefined,
     first_initial_len: usize = 0,
@@ -43,7 +43,7 @@ pub const Pair = struct {
             .tls = self.client_ctx,
             .limits = client_limits,
             .local = .{ client_address, null },
-            .seed = 1,
+            .seed = @splat(1),
         }) catch |err| {
             self.server_ctx.deinit();
             self.client_ctx.deinit();
@@ -53,7 +53,7 @@ pub const Pair = struct {
             .tls = self.server_ctx,
             .limits = server_limits,
             .local = .{ server_address, null },
-            .seed = 2,
+            .seed = @splat(2),
         }) catch |err| {
             self.client.deinit();
             self.server_ctx.deinit();
@@ -77,8 +77,10 @@ pub const Pair = struct {
     }
 
     pub fn nextEntropy(self: *Pair) [limits.local_cid_length]u8 {
-        self.entropy +%= 1;
-        return [_]u8{self.entropy} ** limits.local_cid_length;
+        self.entropy += 1;
+        var bytes: [limits.local_cid_length]u8 = @splat(0);
+        std.mem.writeInt(u64, bytes[0..8], self.entropy, .little);
+        return bytes;
     }
 
     pub fn nextPool(self: *Pair) *engine_mod.EntropyPool {
@@ -137,13 +139,17 @@ pub const Pair = struct {
                     if (drop) continue;
                     if (self.drop_to_address) |blocked| if (sent.to.eql(blocked)) continue;
                     var response: [constants.datagram_size_max]u8 = undefined;
-                    _ = to.receive(
+                    const outcome = to.receive(
                         datagram,
                         &from_address,
                         self.now,
                         self.nextPool(),
                         &response,
                     );
+                    if (outcome == .retry) {
+                        var reply: [constants.datagram_size_max]u8 = undefined;
+                        _ = from.receive(outcome.retry, &sent.to, self.now, self.nextPool(), &reply);
+                    }
                 }
                 if (count < constants.send_batch_max) break;
             }

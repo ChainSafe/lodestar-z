@@ -52,7 +52,8 @@
     "test:network-managed-interop": "zig build build-exe:managed_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/managed_run.mjs",
     "test:network-identify-interop": "zig build build-exe:network_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/identify_run.mjs zig-out/bin/network_interop_peer installed",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts",
-    "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --config .benchrc.yaml --defaultBranch main"
+    "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --config .benchrc.yaml --defaultBranch main",
+    "typecheck:network": "tsc -p tsconfig.network.json"
   },
   "keywords": [],
   "author": "ChainSafe Systems",
@@ -99,6 +100,7 @@
     "libp2p": "3.3.10",
     "snappy": "7.3.3",
     "tsx": "^4.20.6",
+    "typescript": "5.9.3",
     "vitest": "^4.0.17"
   }
 }

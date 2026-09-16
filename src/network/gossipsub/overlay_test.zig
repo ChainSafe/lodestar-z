@@ -27,6 +27,39 @@ const Fixture = struct {
     }
 };
 
+test "gossip heartbeat admits sessions newer than its score snapshot" {
+    var f = try Fixture.init(0);
+    defer f.g.deinit();
+    const context = f.context(2);
+    f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
+    const peer = @import("test_support.zig").addPeer(&f.g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    f.g.overlay.onGraft(&f.g.overlayContext(2), f.topic, peer.index);
+    try std.testing.expect(f.g.overlay.inMesh(f.topic, peer.index));
+    f.g.overlay.maintain(&context, f.topic);
+    try std.testing.expect(f.g.overlay.inMesh(f.topic, peer.index));
+    try std.testing.expect(!f.g.peers.backedOff(f.g.sessions.rows[peer.index].logical, f.topic, f.g.overlay.rows[f.topic].generation, 2));
+}
+
+test "gossip opportunistic graft improves a mesh below its target degree" {
+    var f = try Fixture.init(8);
+    defer f.g.deinit();
+    for (0..6) |peer| f.g.overlay.rows[f.topic].mesh.set(peer);
+    for (6..8) |peer| try std.testing.expect(f.g.peers.scores.setAppScore(@intCast(peer), 1));
+    const context = f.context(2);
+    f.g.cycle.takeSnapshot(context.sessions, context.peers, context.now);
+    f.g.overlay.opportunistic(&context, f.topic);
+    try std.testing.expectEqual(@as(usize, 8), f.g.overlay.mesh(f.topic).count());
+}
+
+test "gossip short PRUNE backoff does not count a GRAFT flood" {
+    var f = try Fixture.init(1);
+    defer f.g.deinit();
+    const context = f.context(2);
+    f.g.overlay.onPrune(&context, f.topic, 0, c.graft_flood_threshold_ms);
+    f.g.overlay.onGraft(&context, f.topic, 0);
+    try std.testing.expectEqual(@as(u64, 1), f.g.peers.scores.penalties.graft_backoff);
+}
+
 test "gossip policy mesh trimming preserves highest scores and outbound quota" {
     var f = try Fixture.init(16);
     defer f.g.deinit();

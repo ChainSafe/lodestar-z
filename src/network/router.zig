@@ -44,11 +44,17 @@ pub const Outcome = struct {
 };
 
 pub const Error = negotiate.Error || error{ InvalidCapabilities, ProtocolDisabled };
+pub const Counters = struct {
+    refused: u64 = 0,
+    inbound_failures: [std.enums.values(negotiate.Failure).len]u64 = @splat(0),
+};
 
 pub const Options = struct {
     capabilities: ?capability.Directional = null,
     negotiations_max: u16 = negotiate.negotiations_max_default,
     outbound_control_reserved: u16 = 0,
+    outbound_reserved: ?u16 = null,
+    inbound_per_connection_max: u16 = 16,
     identify: bool = false,
     reqresp: bool = true,
     meshsub: bool = true,
@@ -56,6 +62,7 @@ pub const Options = struct {
 };
 
 pub const Router = struct {
+    counters: Counters = .{},
     negotiator: negotiate.Negotiator,
     supported: [capability.protocol_count][]const u8 = undefined,
     supported_count: u8 = 0,
@@ -77,7 +84,12 @@ pub const Router = struct {
             }
         }
         if (options.capabilities) |active| try validateSet(availableFor(options), active);
-        try negotiate.Negotiator.validateOptions(.{ .negotiations_max = options.negotiations_max, .outbound_control_reserved = options.outbound_control_reserved });
+        try negotiate.Negotiator.validateOptions(.{
+            .negotiations_max = options.negotiations_max,
+            .outbound_control_reserved = options.outbound_control_reserved,
+            .outbound_reserved = options.outbound_reserved,
+            .inbound_per_connection_max = options.inbound_per_connection_max,
+        });
     }
 
     pub fn init(allocator: std.mem.Allocator, options: Options) Error!Router {
@@ -85,6 +97,8 @@ pub const Router = struct {
         var negotiator = try negotiate.Negotiator.init(allocator, .{
             .negotiations_max = options.negotiations_max,
             .outbound_control_reserved = options.outbound_control_reserved,
+            .outbound_reserved = options.outbound_reserved,
+            .inbound_per_connection_max = options.inbound_per_connection_max,
         });
         errdefer negotiator.deinit();
         var router: Router = .{
@@ -204,6 +218,7 @@ pub const Router = struct {
         for (events) |event| switch (event) {
             .stream_opened => |stream| {
                 self.negotiator.acceptInbound(stream, self.supported[0..self.supported_count], now) catch {
+                    self.counters.refused +|= 1;
                     engine.closeStream(stream, types.app_error_negotiation_failed);
                 };
             },
@@ -224,6 +239,10 @@ pub const Router = struct {
         var raw: [outcomes_per_pump]negotiate.Outcome = undefined;
         const count = self.negotiator.pump(engine, now, raw[0..out.len]);
         for (raw[0..count], out[0..count]) |result, *outcome| {
+            if (result.direction == .inbound and result.result == .failed) {
+                self.counters.inbound_failures[@intFromEnum(result.result.failed)] +|= 1;
+                std.log.scoped(.network_quic).debug("inbound_negotiation_failed connection={d}:{d} stream={d} reason={s}", .{ result.stream.conn.index, result.stream.conn.generation, result.stream.id, @tagName(result.result.failed) });
+            }
             const selected = Protocol.fromId(result.protocol_id);
             outcome.* = .{
                 .stream = result.stream,

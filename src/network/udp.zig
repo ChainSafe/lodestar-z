@@ -6,16 +6,9 @@ const net = std.Io.net;
 const sockets_mod = @import("udp");
 pub const Bindings = sockets_mod.Bindings;
 
-pub const Datagram = struct {
-    from: types.Address,
-    bytes: []u8,
-};
-
-pub const ReceiveTimeoutError = sockets_mod.ReceiveError || error{
-    DatagramTooLarge,
-};
-
-pub const SendError = net.Socket.SendError || error{DatagramTooLarge};
+pub const Datagram = sockets_mod.Datagram;
+pub const ReceiveTimeoutError = sockets_mod.DatagramError;
+pub const SendError = sockets_mod.SendError;
 
 pub const Counters = struct {
     received_bytes: u64 = 0,
@@ -55,19 +48,16 @@ pub const Udp = struct {
         buffer: *[constants.datagram_size_max]u8,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!Datagram {
-        const incoming = try self.sockets.receiveTimeout(io, buffer, timeout);
-        self.counters.received_datagrams +|= 1;
-        if (incoming.flags.trunc) {
-            std.log.scoped(.network_quic).debug("datagram_refused reason=oversize capacity={d}", .{buffer.len});
-            self.counters.truncated_datagrams +|= 1;
-            return error.DatagramTooLarge;
-        }
-        self.counters.received_bytes +|= incoming.data.len;
-        std.debug.assert(incoming.data.len <= buffer.len);
-        return .{
-            .from = fromNetwork(incoming.from),
-            .bytes = buffer[0..incoming.data.len],
+        const incoming = self.sockets.receiveDatagram(io, buffer, timeout) catch |err| {
+            if (err == error.DatagramTooLarge) {
+                self.counters.received_datagrams +|= 1;
+                self.counters.truncated_datagrams +|= 1;
+            }
+            return err;
         };
+        self.counters.received_datagrams +|= 1;
+        self.counters.received_bytes +|= incoming.bytes.len;
+        return incoming;
     }
 
     pub fn send(
@@ -77,10 +67,7 @@ pub const Udp = struct {
         bytes: []const u8,
     ) SendError!void {
         std.debug.assert(bytes.len > 0);
-        if (bytes.len > constants.datagram_size_max) return error.DatagramTooLarge;
-        const address = toNetwork(destination.*);
-        const socket = self.sockets.get(address) orelse return error.AddressFamilyUnsupported;
-        try socket.send(io, &address, bytes);
+        try self.sockets.sendTo(io, destination.*, bytes, constants.datagram_size_max);
         self.counters.sent_bytes +|= bytes.len;
         self.counters.sent_datagrams +|= 1;
     }
@@ -121,7 +108,3 @@ pub const Udp = struct {
 
 pub const fromNetwork = types.Address.fromNetwork;
 pub const toNetwork = types.Address.toNetwork;
-
-comptime {
-    std.debug.assert(@sizeOf(Udp) <= 2 * 1_024);
-}

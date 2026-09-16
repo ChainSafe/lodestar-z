@@ -86,6 +86,7 @@ pub const Counters = struct {
     send_errors: u64 = 0,
     stream_errors: u64 = 0,
     version_negotiations: u64 = 0,
+    retries: u64 = 0,
     path_changes: u64 = 0,
 };
 
@@ -98,6 +99,7 @@ pub const SendBatch = struct {
 pub const ReceiveOutcome = union(enum) {
     accepted: Handle,
     version_negotiation: []u8,
+    retry: []u8,
     dropped,
 };
 
