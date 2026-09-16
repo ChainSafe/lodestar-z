@@ -1,10 +1,10 @@
 const std = @import("std");
-const routing = @import("router.zig");
+const Protocol = @import("protocol.zig").Protocol;
 const reqresp = @import("reqresp/protocol.zig");
 const ForkSeq = @import("config").ForkSeq;
-const Version = @import("gossipsub/sessions.zig").Version;
+const Version = @import("gossipsub/protocol.zig").Version;
 
-pub const protocol_count = reqresp.Protocol.count + std.enums.values(Version).len + 1;
+pub const protocol_count = Protocol.count;
 const Bits = std.meta.Int(.unsigned, protocol_count);
 
 pub const Set = struct {
@@ -14,11 +14,11 @@ pub const Set = struct {
         return .{};
     }
 
-    pub fn insert(self: *Set, protocol: routing.Protocol) void {
+    pub fn insert(self: *Set, protocol: Protocol) void {
         self.bits |= bit(protocol);
     }
 
-    pub fn contains(self: Set, protocol: routing.Protocol) bool {
+    pub fn contains(self: Set, protocol: Protocol) bool {
         return self.bits & bit(protocol) != 0;
     }
 
@@ -33,22 +33,16 @@ pub const Set = struct {
     pub const Iterator = struct {
         remaining: Bits,
 
-        pub fn next(self: *Iterator) ?routing.Protocol {
+        pub fn next(self: *Iterator) ?Protocol {
             if (self.remaining == 0) return null;
             const index = @ctz(self.remaining);
             self.remaining &= self.remaining - 1;
-            if (index < reqresp.Protocol.count) return .{ .reqresp = @enumFromInt(index) };
-            if (index == protocol_count - 1) return .identify;
-            return .{ .meshsub = @enumFromInt(index - reqresp.Protocol.count) };
+            return Protocol.fromIndex(index);
         }
     };
 
-    fn bit(protocol: routing.Protocol) Bits {
-        const index: std.math.Log2Int(Bits) = @intCast(switch (protocol) {
-            .identify => protocol_count - 1,
-            .reqresp => |which| @as(u8, @intFromEnum(which)),
-            .meshsub => |version| reqresp.Protocol.count + @intFromEnum(version),
-        });
+    fn bit(protocol: Protocol) Bits {
+        const index: std.math.Log2Int(Bits) = @intCast(protocol.index());
         return @as(Bits, 1) << index;
     }
 };
@@ -63,7 +57,7 @@ pub fn forFork(fork: ForkSeq, serve_light_clients: bool, meshsub_versions: []con
     if (meshsub_versions.len == 0 or meshsub_versions.len > 3) return error.InvalidCapabilities;
     var common: Set = .initEmpty();
     for (meshsub_versions) |version| {
-        const protocol: routing.Protocol = .{ .meshsub = version };
+        const protocol: Protocol = .{ .meshsub = version };
         if (common.contains(protocol)) return error.InvalidCapabilities;
         common.insert(protocol);
     }

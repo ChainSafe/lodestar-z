@@ -71,26 +71,11 @@ pub const Breakdown = struct {
     global: GlobalWeights = .{},
 };
 
-pub const CacheDelta = struct {
-    pub const bounds = [_]f64{ 10, 100, 1000 };
-    buckets: [bounds.len + 1]u64 = @splat(0),
-    count: u64 = 0,
-    sum: f64 = 0,
-
-    fn observe(self: *CacheDelta, value: f64) void {
-        assert(std.math.isFinite(value) and value >= 0);
-        if (self.count == std.math.maxInt(u64)) return;
-        var index: usize = bounds.len;
-        for (bounds, 0..) |bound, i| if (value <= bound) {
-            index = i;
-            break;
-        };
-        self.buckets[index] += 1;
-        self.count += 1;
-        self.sum += value;
-        assert(std.math.isFinite(self.sum));
-    }
-};
+pub const CacheDelta = @import("../metrics/histogram.zig").Histogram(
+    f64,
+    &.{ 10, 100, 1000 },
+    .{ .nonnegative = true },
+);
 
 pub const PeerScore = struct {
     revision: u64 = 0,

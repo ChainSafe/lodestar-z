@@ -78,11 +78,7 @@ test "engine streams echo data with fin in both directions" {
     try std.testing.expectEqual(@as(usize, 4), try pair.server.write(inbound, "pong", true));
     try pair.pump();
 
-    var readable = pair.client.readable(handles.client);
-    defer readable.deinit();
-    const ready = readable.next() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(stream.id, ready.id);
-    const reply = try pair.client.read(ready, &buffer);
+    const reply = try pair.client.read(stream, &buffer);
     try std.testing.expectEqualStrings("pong", buffer[0..reply.len]);
     try std.testing.expect(reply.fin);
     try std.testing.expectError(error.UnknownStream, pair.client.read(stream, &buffer));
@@ -321,16 +317,10 @@ test "engine reports a blocked stream and recovers capacity after a pump" {
     }
     try std.testing.expect(blocked);
 
-    var while_blocked = pair.client.writable(handles.client);
-    try std.testing.expect(while_blocked.next() == null);
-    while_blocked.deinit();
+    try std.testing.expectEqual(@as(usize, 0), try pair.client.streamCapacity(stream));
 
     try pair.pump();
     try std.testing.expect(try pair.client.streamCapacity(stream) > 0);
-    var after_pump = pair.client.writable(handles.client);
-    defer after_pump.deinit();
-    const ready = after_pump.next() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(stream.id, ready.id);
 
     var storage: [8]Event = undefined;
     const inbound = try expectStreamOpened(pair.events(&pair.server, &storage)[0], handles.server);

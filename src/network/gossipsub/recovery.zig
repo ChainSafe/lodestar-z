@@ -350,7 +350,7 @@ test "recovery metrics distinguish incoming delivery from queued and locally res
     try std.testing.expectEqual(@as(u64, 1), recovery.metrics.sent);
     try std.testing.expectEqual(@as(u64, 1), recovery.metrics.resolved);
     try std.testing.expectEqual(@as(u64, 0), recovery.metrics.resolved_duplicate);
-    try std.testing.expectEqual(@as(u128, 500), recovery.metrics.delivery.sum_ms);
+    try std.testing.expectEqual(@as(u128, 500), recovery.metrics.delivery.sum);
     recovery.add(&peers, id, peer, connection, 3, 30_000);
     recovery.controlSent(connection, 3, 3000, 1000);
     recovery.resolve(&peers, id, .{ .now_ms = 1100, .duplicate = true });
@@ -361,7 +361,7 @@ test "recovery metrics distinguish incoming delivery from queued and locally res
     try std.testing.expectEqual(@as(u64, 2), recovery.metrics.resolved);
     try std.testing.expectEqual(@as(u64, 1), recovery.metrics.resolved_duplicate);
     try std.testing.expectEqual(@as(u64, 2), recovery.metrics.delivery.count);
-    try std.testing.expectEqual(@as(u128, 600), recovery.metrics.delivery.sum_ms);
+    try std.testing.expectEqual(@as(u128, 600), recovery.metrics.delivery.sum);
     try std.testing.expectEqual(@as(u32, 0), peers.rows[peer.index].pins);
 }
 

@@ -1,13 +1,12 @@
 const std = @import("std");
 const support = @import("test_support.zig");
-const driver_mod = @import("driver.zig");
 const engine_mod = @import("quic/engine.zig");
 const keys = @import("wire/keys.zig");
 const multiaddr = @import("wire/multiaddr.zig");
 const transport_mod = @import("transport.zig");
 
 const Transport = transport_mod.Transport;
-const step_options = driver_mod.StepOptions{ .wait_max_ms = 10 };
+const step_options = transport_mod.StepOptions{ .wait_max_ms = 10 };
 const payload_len = 64 * 1024;
 
 fn initTransport(target: *Transport, seed: u8) !void {
@@ -151,8 +150,8 @@ test "transport keylog failure preserves completed lifecycle delivery" {
         var remote: Transport = .{};
         try initTransport(&remote, 30);
         defer remote.deinit(std.testing.io);
-        const now = try driver_mod.currentTime(std.testing.io);
-        const handle = try node.engine.dial(&remote.localAddress(), remote.peerId(), now, @splat(1));
+        const now = try transport_mod.currentTime(std.testing.io);
+        const handle = try node.engine.dial(&remote.localAddress(), remote.peerId(), now);
         try std.testing.expect(node.engine.close(handle, 0));
         try std.testing.expect(node.engine.registry.slots[handle.index].handshake.appendKeylog("test material"));
         var vtable = std.testing.io.vtable.*;
@@ -241,4 +240,40 @@ test "dual-stack transport authenticates both families through one connection bu
         try std.testing.expectError(error.DestinationUnreachable, peer4.dialPeer(std.testing.io, addresses[1].?, hub.peerId()));
         if (!inbound) try std.testing.expectError(error.DialLimit, hub.dialPeer(std.testing.io, peer4.localAddress(), peer4.peerId()));
     }
+}
+
+test "transport validates socket work limits before startup allocation" {
+    const key = try keys.KeyPair.fromSecretKey(&([_]u8{0} ** 31 ++ [_]u8{27}));
+    const invalid = [_]transport_mod.WorkLimits{
+        .{ .send_per_step_max = 0 },
+        .{ .send_per_step_max = transport_mod.send_burst_max + 1 },
+        .{ .receive_per_step_max = 0 },
+        .{ .receive_per_step_max = @import("constants.zig").receive_batch_max + 1 },
+        .{ .work_per_step_max = 1 },
+        .{ .work_per_step_max = transport_mod.work_per_step_ceiling + 1 },
+    };
+    for (invalid) |work_limits| {
+        var target: Transport = .{};
+        try std.testing.expectError(error.InvalidLimits, target.init(std.testing.failing_allocator, std.testing.io, .{
+            .host = &key,
+            .bind = .{ .ip4 = .loopback(0) },
+            .work_limits = work_limits,
+        }));
+    }
+    try (transport_mod.WorkLimits{ .send_per_step_max = 1, .receive_per_step_max = 1, .work_per_step_max = 2 }).validate();
+    try (transport_mod.WorkLimits{ .work_per_step_max = transport_mod.work_per_step_ceiling }).validate();
+}
+
+test "transport memory plan accounts for its pacing queue and send batch" {
+    var node: Transport = .{};
+    try initTransport(&node, 28);
+    defer node.deinit(std.testing.io);
+    const plan = node.memoryPlan();
+    try std.testing.expectEqual(node.engine.memoryPlan(), plan.engine);
+    try std.testing.expectEqual(node.engine.limits.connections_max, plan.scheduled_datagrams);
+    try std.testing.expectEqual(@as(u64, node.pending.entries.len * @import("constants.zig").datagram_size_max), plan.scheduled_payload_bytes);
+    try std.testing.expectEqual(@as(u64, std.mem.sliceAsBytes(node.pending.entries).len), plan.scheduled_storage_bytes);
+    try std.testing.expect(plan.scheduled_storage_bytes >= plan.scheduled_payload_bytes);
+    try std.testing.expectEqual(node.batch.buffers.len, plan.ready_batch_datagrams);
+    try std.testing.expectEqual(@sizeOf(@TypeOf(node.batch)), plan.ready_batch_storage_bytes);
 }

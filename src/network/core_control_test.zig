@@ -862,7 +862,7 @@ test "identify replacement generation starts a fresh query and rejects stale com
     options.service.identify = .{ .agent = "first", .inbound_max = 1, .outbound_max = 1 };
     try setup.initOwnersWithOptions(&.{}, options);
     defer setup.deinit();
-    _ = try setup.pair.server.dial(&@import("test_support.zig").client_address, setup.pair.client_ctx.local_peer_id, setup.pair.now, setup.pair.nextEntropy());
+    _ = try setup.pair.server.dial(&@import("test_support.zig").client_address, setup.pair.client_ctx.local_peer_id, setup.pair.now);
     for (0..100) |_| try setup.step(1);
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);

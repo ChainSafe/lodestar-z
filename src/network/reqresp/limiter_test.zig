@@ -68,14 +68,14 @@ test "limiter joint quotas reject atomically and generation reuse resets only pe
     global[@intFromEnum(Protocol.ping_v1)].tokens = 1;
     var buckets = try Limiter.init(std.testing.allocator, 2, quotas, global);
     defer buckets.deinit(std.testing.allocator);
-    const a = @import("../quic/api.zig").Handle{ .index = 0, .generation = 1 };
-    const b = @import("../quic/api.zig").Handle{ .index = 1, .generation = 1 };
+    const a = @import("../types.zig").Handle{ .index = 0, .generation = 1 };
+    const b = @import("../types.zig").Handle{ .index = 1, .generation = 1 };
     buckets.bind(a, 0);
     buckets.bind(b, 0);
     try std.testing.expect(buckets.take(a, .ping_v1, 1, 0));
     try std.testing.expect(!buckets.take(b, .ping_v1, 1, 0));
     try std.testing.expectEqual(@as(u32, 2), credit(&buckets, b, .ping_v1, 0));
-    const reused = @import("../quic/api.zig").Handle{ .index = 0, .generation = 2 };
+    const reused = @import("../types.zig").Handle{ .index = 0, .generation = 2 };
     buckets.bind(reused, 0);
     try std.testing.expect(!buckets.take(a, .ping_v1, 1, 0));
     try std.testing.expectEqual(@as(u32, 2), credit(&buckets, reused, .ping_v1, 0));
@@ -109,8 +109,8 @@ test "limiter peer rejection preserves aggregate credit and wide refill saturate
     aggregate[0].tokens = 2;
     var buckets = try Limiter.init(std.testing.allocator, 2, quotas, aggregate);
     defer buckets.deinit(std.testing.allocator);
-    const a = @import("../quic/api.zig").Handle{ .index = 0, .generation = 1 };
-    const b = @import("../quic/api.zig").Handle{ .index = 1, .generation = 1 };
+    const a = @import("../types.zig").Handle{ .index = 0, .generation = 1 };
+    const b = @import("../types.zig").Handle{ .index = 1, .generation = 1 };
     buckets.bind(a, 0);
     buckets.bind(b, 0);
     try std.testing.expect(buckets.take(a, .status_v1, 1, 0));
@@ -147,7 +147,7 @@ test "reqresp default aggregate admits one control wave and keeps bulk limits" {
     try std.testing.expectEqual(explicit, overridden.limiter.global_quotas);
 }
 
-fn credit(buckets: *Limiter, peer: @import("../quic/api.zig").Handle, which: Protocol, now_ms: u64) u32 {
+fn credit(buckets: *Limiter, peer: @import("../types.zig").Handle, which: Protocol, now_ms: u64) u32 {
     _ = buckets.nextToken(peer, which, now_ms);
     std.debug.assert(buckets.matches(peer));
     return buckets.buckets[@as(usize, peer.index) * Protocol.count + @intFromEnum(which)].tokens;

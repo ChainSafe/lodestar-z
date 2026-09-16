@@ -277,8 +277,10 @@ pub fn getMetrics(self: *@This()) !js.String {
     const buffer = try r.allocator.alloc(u8, metrics.text_capacity);
     defer r.allocator.free(buffer);
     var writer: std.Io.Writer = .fixed(buffer);
-    snapshot.write(&writer) catch return error.NetworkMetricsCapacity;
-    logs.write(&writer) catch return error.NetworkMetricsCapacity;
+    metrics.write(&snapshot, &logs, &writer) catch |err| switch (err) {
+        error.WriteFailed, error.MetricCapacity => return error.NetworkMetricsCapacity,
+        error.DuplicateMetric => return error.NetworkMetricsSchema,
+    };
     return js.String.from(writer.buffered());
 }
 
@@ -333,6 +335,7 @@ fn submit(self: *@This(), comptime command: commands.Command, args: []const Valu
             operation.input.slot = try cfg.bigint(args[1]);
             try application_cfg.parseIntent(args[0], &runtime.stores.?.intents[store.?], runtime.max_peers);
         },
+        .updateStatus => try cfg.parseStatus(args[0], &operation.input.status),
         .getIdentity, .getPeers, .getDirectPeers => {},
         .getGossipDiagnostics => operation.input.diagnostics_cursor = @intCast(try cfg.integer(args[0], 512)),
         .reStatusPeers => {
@@ -361,6 +364,9 @@ fn submit(self: *@This(), comptime command: commands.Command, args: []const Valu
 }
 pub fn applyIntent(self: *@This(), intent: js.Value, slot: js.Value) !js.Value {
     return self.submit(.applyIntent, &.{ intent.val, slot.val });
+}
+pub fn updateStatus(self: *@This(), status: js.Value) !js.Value {
+    return self.submit(.updateStatus, &.{status.val});
 }
 pub fn getIdentity(self: *@This()) !js.Value {
     return self.submit(.getIdentity, &.{});

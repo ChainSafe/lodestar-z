@@ -523,7 +523,7 @@ fn changeClientIdentity(setup: *harness.Pair, seed: u8) !void {
         .tls = ctx,
         .limits = .{},
         .local = .{ support.client_address, null },
-        .seed = @splat(seed),
+        .seed = &@as([32]u8, @splat(seed)),
     }) catch |err| {
         var failed_context = ctx;
         failed_context.deinit();

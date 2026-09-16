@@ -42,16 +42,16 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("memory={any}\n", .{node.memoryPlan()});
     var events: [1]network.peers.types.Event = undefined;
     for (0..if (count == 0) 1 else turns_max) |_| {
-        const now = try network.driver.currentTime(init.io);
+        const now = try network.transport.currentTime(init.io);
         const result = node.step(init.io, now, 100, .{ .peers = &events }, 5);
         if (result.failure) |err| return err;
         for (events[0..result.counts.peers]) |event| std.debug.print("peer={s}\n", .{@tagName(event)});
         if (node.peerCounts().relevant > 0) break;
     }
     std.debug.print("diagnostics={any}\n", .{node.diagnostics()});
-    node.shutdown(try network.driver.currentTime(init.io));
+    node.shutdown(try network.transport.currentTime(init.io));
     for (0..100) |_| {
-        _ = node.step(init.io, try network.driver.currentTime(init.io), 100, .{}, 0);
+        _ = node.step(init.io, try network.transport.currentTime(init.io), 100, .{}, 0);
         if (node.isClosed()) break;
     }
     if (!node.isClosed()) return error.ShutdownIncomplete;

@@ -1,8 +1,8 @@
 const std = @import("std");
-const score = @import("gossipsub/score.zig");
-const policy = @import("gossipsub/topic_policy.zig");
-const constants = @import("gossipsub/constants.zig");
-const prom = @import("metrics_prometheus.zig");
+const score = @import("../gossipsub/score.zig");
+const policy = @import("../gossipsub/topic_policy.zig");
+const constants = @import("../gossipsub/constants.zig");
+const prom = @import("registry.zig");
 
 pub const kind_count = policy.kind_count + 1;
 pub const TopicKinds = [constants.topics_cap]?u8;
@@ -34,10 +34,6 @@ pub const Snapshot = struct {
     weights: [kind_count][topic_fields.len]Range = @splat(@splat(.{})),
     global: [global_fields.len]Range = @splat(.{}),
     mesh_scores: [kind_count]Range = @splat(.{}),
-    calls: u64 = 0,
-    runs: u64 = 0,
-    cache_delta: score.CacheDelta = .{},
-    penalties: score.Penalties = .{},
     graylist: u16 = 0,
     publish: u16 = 0,
     gossip: u16 = 0,
@@ -67,37 +63,49 @@ pub const Snapshot = struct {
         inline for (global_fields, 0..) |field, p| self.global[p].observe(@field(details.global, field.name));
     }
 
-    pub fn write(self: *const Snapshot, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn write(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
         inline for (.{ "min", "max", "avg" }) |stat| {
             const value = if (comptime std.mem.eql(u8, stat, "avg")) self.average() else @field(self.values, stat);
-            try prom.scalar(w, "gossipsub_score_" ++ stat, .gauge, "Connected gossip peer scores", value);
-            try prom.family(w, "gossipsub_score_weights_" ++ stat, .gauge, "Per-peer score components after component weights, before topic weight and topic cap; topics of the same kind are summed per peer");
+            try w.scalar(.{
+                .name = "gossipsub_score_" ++ stat,
+                .kind = .gauge,
+                .help = "Connected gossip peer scores",
+            }, value);
+            const weights = try w.family(.{
+                .name = "gossipsub_score_weights_" ++ stat,
+                .kind = .gauge,
+                .help = "Per-peer score components after component weights, before topic weight and topic cap; topics of the same kind are summed per peer",
+                .labels = &.{ "topic", "p" },
+            });
             for (&self.weights, 0..) |*ranges, kind| {
                 inline for (topic_fields, 0..) |field, p| {
                     const component = if (comptime std.mem.eql(u8, stat, "avg")) ranges[p].average() else @field(ranges[p], stat);
-                    try w.print("gossipsub_score_weights_" ++ stat ++ "{{topic=\"{s}\",p=\"{s}\"}} {d}\n", .{ kindName(kind), field.name, component });
+                    try weights.sample(.{ kindName(kind), field.name }, component);
                 }
             }
             inline for (global_fields, 0..) |field, p| {
                 const component = if (comptime std.mem.eql(u8, stat, "avg")) self.global[p].average() else @field(self.global[p], stat);
-                try w.print("gossipsub_score_weights_" ++ stat ++ "{{topic=\"\",p=\"{s}\"}} {d}\n", .{ field.name, component });
+                try weights.sample(.{ "", field.name }, component);
             }
-            try prom.family(w, "gossipsub_score_per_mesh_" ++ stat, .gauge, "Scores of distinct connected peers in meshes of each topic kind");
+            const meshes = try w.family(.{
+                .name = "gossipsub_score_per_mesh_" ++ stat,
+                .kind = .gauge,
+                .help = "Scores of distinct connected peers in meshes of each topic kind",
+                .labels = &.{"topic"},
+            });
             for (&self.mesh_scores, 0..) |*range, kind| {
                 const value_mesh = if (comptime std.mem.eql(u8, stat, "avg")) range.average() else @field(range, stat);
-                try prom.sample(w, "gossipsub_score_per_mesh_" ++ stat, "topic", kindName(kind), value_mesh);
+                try meshes.sample(.{kindName(kind)}, value_mesh);
             }
         }
-        try prom.family(w, "gossipsub_peers_by_score_threshold_count", .gauge, "Connected gossip peers at or above configured thresholds");
+        const thresholds = try w.family(.{
+            .name = "gossipsub_peers_by_score_threshold_count",
+            .kind = .gauge,
+            .help = "Connected gossip peers at or above configured thresholds",
+            .labels = &.{"threshold"},
+        });
         inline for (.{ "graylist", "publish", "gossip", "mesh" }) |threshold|
-            try prom.sample(w, "gossipsub_peers_by_score_threshold_count", "threshold", threshold, @field(self, threshold));
-        try prom.scalar(w, "gossipsub_score_fn_calls_total", .counter, "Policy score calls, excluding telemetry snapshots", self.calls);
-        try prom.scalar(w, "gossipsub_score_fn_runs_total", .counter, "Policy score calculations that did not use the cache", self.runs);
-        try prom.family(w, "gossipsub_score_cache_delta", .histogram, "Absolute change from the previous cached score for the same peer identity");
-        try prom.histogram(w, "gossipsub_score_cache_delta", null, "", &self.cache_delta);
-        try prom.family(w, "gossipsub_scoring_penalties_total", .counter, "Score penalty events; message deficits count retained mesh-failure penalties on prune");
-        inline for (std.meta.fields(score.Penalties)) |field|
-            try prom.sample(w, "gossipsub_scoring_penalties_total", "penalty", field.name, @field(self.penalties, field.name));
+            try thresholds.sample(.{threshold}, @field(self, threshold));
     }
 };
 
@@ -140,7 +148,44 @@ test "metrics score weights sum subnet contributions before averaging peers" {
     try std.testing.expectEqual(@as(f64, -4), values.global[2].average());
     var bytes: [32768]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&bytes);
-    try values.write(&writer);
+    var encoder: prom.Encoder = .{ .writer = &writer };
+    try values.write(&encoder);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gossipsub_score_weights_avg{topic=\"beacon_attestation\",p=\"p2\"} 3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gossipsub_score_weights_avg{topic=\"\",p=\"p7\"} -4\n") != null);
 }
+
+pub const Totals = struct {
+    calls: u64 = 0,
+    runs: u64 = 0,
+    cache_delta: score.CacheDelta = .{},
+    penalties: score.Penalties = .{},
+
+    pub fn write(self: *const Totals, w: *prom.Encoder) prom.Error!void {
+        try w.scalar(.{
+            .name = "gossipsub_score_fn_calls_total",
+            .kind = .counter,
+            .help = "Policy score calls, excluding telemetry snapshots",
+        }, self.calls);
+        try w.scalar(.{
+            .name = "gossipsub_score_fn_runs_total",
+            .kind = .counter,
+            .help = "Policy score calculations that did not use the cache",
+        }, self.runs);
+        const cache_delta = try w.histograms(.{
+            .name = "gossipsub_score_cache_delta",
+            .kind = .histogram,
+            .help = "Absolute change from the previous cached score for the same peer identity",
+            .labels = &.{},
+            .unit = .scalar,
+        }, @TypeOf(self.cache_delta));
+        try cache_delta.histogram(.{}, &self.cache_delta);
+        const penalties = try w.family(.{
+            .name = "gossipsub_scoring_penalties_total",
+            .kind = .counter,
+            .help = "Score penalty events; message deficits count retained mesh-failure penalties on prune",
+            .labels = &.{"penalty"},
+        });
+        inline for (std.meta.fields(score.Penalties)) |field|
+            try penalties.sample(.{field.name}, @field(self.penalties, field.name));
+    }
+};

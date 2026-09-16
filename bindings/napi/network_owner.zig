@@ -77,9 +77,9 @@ pub fn initialize(self: *Runtime) !void {
     const plan = self.heavy.?.core.memoryPlan();
     self.diag.nativeRequestedBytes = plan.inline_bytes + plan.allocated_bytes;
     self.diag.nativeAllocationCount = self.heavy.?.core.reservations.allocation_calls;
-    self.diag.quicReceiveWindowBytes = plan.transport_windows.receive_window_bytes;
-    self.diag.quicConnectionWindowBytes = plan.transport_windows.connection_window_bytes;
-    self.diag.quicStreamWindowBytes = plan.transport_windows.stream_window_bytes;
+    self.diag.quicReceiveWindowBytes = plan.transport.engine.receive_window_bytes;
+    self.diag.quicConnectionWindowBytes = plan.transport.engine.connection_window_bytes;
+    self.diag.quicStreamWindowBytes = plan.transport.engine.stream_window_bytes;
 }
 pub fn run(self: *Runtime) void {
     defer self.release();
@@ -211,7 +211,7 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
     if (metrics) |*value| self.metrics = value.*;
     if (timestamp.mono_ms >= self.health_log_due_ms) {
         const active_requests = self.heavy.?.core.core.service.reqresp.active();
-        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.metrics.target, active_requests.outbound, active_requests.inbound, self.metrics.runtime.dial_started, self.metrics.runtime.dial_deferred, self.metrics.discovery_peers, self.metrics.gossip_counts.local_pressure_resets, self.metrics.udp.received_bytes, self.metrics.udp.sent_bytes });
+        std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.metrics.config.target, active_requests.outbound, active_requests.inbound, self.metrics.totals.runtime.dial_started, self.metrics.totals.runtime.dial_deferred, self.metrics.live.discovery_peers, self.metrics.totals.gossip_counts.local_pressure_resets, self.metrics.totals.udp.received_bytes, self.metrics.totals.udp.sent_bytes });
         self.health_log_due_ms = timestamp.mono_ms +| 30000;
     }
     if (self.lane) |lane| {

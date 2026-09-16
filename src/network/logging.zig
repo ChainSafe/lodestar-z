@@ -1,5 +1,5 @@
 const std = @import("std");
-const prom = @import("metrics_prometheus.zig");
+const prom = @import("metrics/registry.zig");
 
 pub const Scope = enum { network_runtime, network_core, network_quic, network_peers, network_reqresp, network_reqresp_errors, network_gossip, network_mesh, network_discovery, network_bridge, network_gossip_errors };
 pub const capacity = 128;
@@ -45,15 +45,32 @@ pub const Stats = struct {
         return result;
     }
 
-    pub fn write(self: *const Stats, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try prom.scalar(writer, "lodestar_native_logs_queued", .gauge, "Native log records awaiting host delivery", self.queued);
-        try prom.scalar(writer, "lodestar_native_logs_capacity", .gauge, "Native log queue capacity", capacity);
-        try prom.scalar(writer, "lodestar_native_logs_high_water", .gauge, "Maximum native log queue occupancy", self.high_water);
+    pub fn write(self: *const Stats, writer: *prom.Encoder) prom.Error!void {
+        try writer.scalar(.{
+            .name = "lodestar_native_logs_queued",
+            .kind = .gauge,
+            .help = "Native log records awaiting host delivery",
+        }, self.queued);
+        try writer.scalar(.{
+            .name = "lodestar_native_logs_capacity",
+            .kind = .gauge,
+            .help = "Native log queue capacity",
+        }, capacity);
+        try writer.scalar(.{
+            .name = "lodestar_native_logs_high_water",
+            .kind = .gauge,
+            .help = "Maximum native log queue occupancy",
+        }, self.high_water);
         inline for (.{ "emitted", "dropped", "suppressed", "truncated" }) |kind| {
-            try prom.family(writer, "lodestar_native_logs_" ++ kind ++ "_total", .counter, "Native log records " ++ kind ++ " by scope and level");
+            const records = try writer.family(.{
+                .name = "lodestar_native_logs_" ++ kind ++ "_total",
+                .kind = .counter,
+                .help = "Native log records " ++ kind ++ " by scope and level",
+                .labels = &.{ "scope", "level" },
+            });
             inline for (@typeInfo(Scope).@"enum".fields) |scope| {
                 inline for (@typeInfo(std.log.Level).@"enum".fields) |level| {
-                    try writer.print("lodestar_native_logs_" ++ kind ++ "_total{{scope=\"" ++ scope.name ++ "\",level=\"{s}\"}} {d}\n", .{ levelName(@enumFromInt(level.value)), @field(self.counts[scope.value][level.value], kind) });
+                    try records.sample(.{ scope.name, levelName(@enumFromInt(level.value)) }, @field(self.counts[scope.value][level.value], kind));
                 }
             }
         }

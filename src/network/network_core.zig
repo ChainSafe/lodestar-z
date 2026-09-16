@@ -2,7 +2,6 @@ const std = @import("std");
 const d = @import("discv5");
 const core_mod = @import("core.zig");
 const transport_mod = @import("transport.zig");
-const driver = @import("driver.zig");
 const engine = @import("quic/engine.zig");
 const t = @import("peers/types.zig");
 const peers = @import("peers/root.zig");
@@ -71,7 +70,7 @@ pub const Outputs = struct {
 pub const OperationalError = transport_mod.StepError || transport_mod.DialError || peers.discovery.Error || wait.Error;
 pub const Result = struct {
     counts: core_mod.Counts = .{ .peers = 0, .application = 0, .gossipsub = 0 },
-    transport: driver.StepResult,
+    transport: transport_mod.StepResult,
     readiness: wait.Result = .{},
     discovery: peers.discovery.Result = .{},
     failure: ?OperationalError = null,
@@ -113,7 +112,7 @@ pub const MemoryPlan = struct {
     scratch_bytes: usize = 0,
     local_intent_bytes: usize = 0,
     discovery_bytes: usize = 0,
-    transport_windows: @import("quic/api.zig").MemoryPlan,
+    transport: transport_mod.MemoryPlan,
 };
 
 const DiscoveryOwners = struct {
@@ -183,10 +182,10 @@ pub const NetworkCore = struct {
         self.host_wake = null;
         self.native_event_count = 0;
         self.discovery = null;
-        self.last_now = try driver.currentTime(io);
+        self.last_now = try transport_mod.currentTime(io);
         try self.transport.init(allocator, io, options.transport);
         errdefer self.transport.deinit(io);
-        self.memory = .{ .transport_bytes = self.reservations.bytes, .transport_windows = self.transport.memoryPlan() };
+        self.memory = .{ .transport_bytes = self.reservations.bytes, .transport = self.transport.memoryPlan() };
         self.core = try core_mod.Core.init(allocator, &self.transport.peerId(), &local, options.core);
         errdefer self.core.deinit();
         if (self.core.service.identify) |*identify| identify.bind(&self.transport.engine);
@@ -224,7 +223,7 @@ pub const NetworkCore = struct {
     pub fn initManaged(self: *NetworkCore, backing: std.mem.Allocator, io: std.Io, options: ManagedOptions) !void {
         const resolved = try @import("configuration.zig").resolve(options.configuration);
         try self.init(backing, io, .{
-            .transport = .{ .host = options.host, .bind = options.bind, .limits = resolved.limits },
+            .transport = .{ .host = options.host, .bind = options.bind, .limits = resolved.limits, .work_limits = resolved.work_limits },
             .core = resolved.core,
             .local = options.local,
             .schedule = options.schedule,
@@ -296,7 +295,8 @@ pub const NetworkCore = struct {
     pub fn setDemand(self: *NetworkCore, demand: *const t.Demand) !void {
         try self.core.setDemand(demand);
     }
-    pub fn coverageDeficits(self: *NetworkCore) peers.policy.Deficits {
+    /// Returns the coverage evaluated by the last owner reconciliation.
+    pub fn coverageDeficits(self: *const NetworkCore) peers.policy.Deficits {
         return self.core.coverageDeficits();
     }
     pub fn peerCounts(self: *const NetworkCore) core_mod.Core.PeerCounts {
@@ -335,10 +335,9 @@ pub const NetworkCore = struct {
     pub fn reStatusPeers(self: *NetworkCore, now: Now) void {
         self.core.reStatusPeers(now);
     }
-    pub fn updateStatus(self: *NetworkCore, status: *const t.Status, now: Now) !void {
-        var local = self.localState();
-        local.status = status.*;
-        _ = try self.updateLocal(&local, self.schedule, now);
+    pub fn updateStatus(self: *NetworkCore, status: *const t.Status, _: Now) !void {
+        if (self.core.stopped) return error.Stopped;
+        try self.core.updateStatus(status);
     }
     pub fn updateMetadata(self: *NetworkCore, metadata: *const t.Metadata, now: Now) !void {
         var local = self.localState();

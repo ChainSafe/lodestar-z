@@ -14,7 +14,7 @@ const sessions_max = 8;
 const negotiations_max = 16;
 const dial_steps_max = 2_000;
 const read_max = 256;
-const supported = [_][]const u8{ping_protocol};
+const supported = [_]negotiate.Protocol{.{ .id = ping_protocol, .index = 0 }};
 
 pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .{};
@@ -71,7 +71,7 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
                     if (session.active and std.meta.eql(session.stream.conn, closed.conn)) session.active = false;
                 }
             },
-            .stream_opened => |stream| negotiator.acceptInbound(stream, &supported, result.now) catch {
+            .stream_opened => |stream| negotiator.acceptInbound(stream, result.now) catch {
                 node.engine.closeStream(stream, 0);
             },
             .path_changed => |changed| std.debug.print("path changed port={d}\n", .{changed.peer.port()}),
@@ -82,7 +82,7 @@ fn listen(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16)
             },
         };
         if (stepped.failure) |err| return err;
-        const ready = negotiator.pump(&node.engine, result.now, &outcomes);
+        const ready = negotiator.pump(&node.engine, result.now, &supported, &outcomes);
         for (outcomes[0..ready]) |outcome| switch (outcome.result) {
             .ready => |accepted| {
                 const free = freeSession(&sessions) orelse {
@@ -163,7 +163,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
         for (events[0..result.events]) |event| switch (event) {
             .connected => |connected| {
                 printPeer("connected", &connected.peer_id);
-                stream = try negotiator.beginOutbound(&node.engine, handle, &.{ping_protocol}, result.now, .{});
+                stream = try negotiator.beginOutbound(&node.engine, handle, &supported, result.now, .{});
                 state = .negotiating;
             },
             .closed => |closed| {
@@ -176,7 +176,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, text: []const u8) !void {
         };
         if (stepped.failure) |err| return err;
         if (state == .negotiating) {
-            if (negotiator.pump(&node.engine, result.now, &outcomes) == 1) switch (outcomes[0].result) {
+            if (negotiator.pump(&node.engine, result.now, &supported, &outcomes) == 1) switch (outcomes[0].result) {
                 .ready => |accepted| {
                     if (accepted.leftover.len != 0) return error.UnexpectedData;
                     sent_at = result.now.mono_ms;

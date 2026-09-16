@@ -223,10 +223,6 @@ pub const Slot = struct {
         return .{ .transport_error = 0 };
     }
 
-    pub fn streamIndex(self: *const Slot, id: u64) ?u8 {
-        return self.table.find(id);
-    }
-
     pub fn openStream(self: *Slot) Error!OpenedStream {
         if (self.state != .established or self.close_reason != null) return error.NotEstablished;
         if (c.quiche_conn_peer_streams_left_bidi(self.conn.?) == 0) return error.StreamLimit;

@@ -2,7 +2,7 @@ const std = @import("std");
 const pb = @import("../wire/protobuf.zig");
 const keys = @import("../wire/keys.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
-const routing = @import("../router.zig");
+const Protocol = @import("../protocol.zig").Protocol;
 const Set = @import("../capabilities.zig").Set;
 const Address = @import("udp").Address;
 const multiaddr = @import("../wire/multiaddr.zig");
@@ -131,7 +131,7 @@ pub const Merge = struct {
                 3 => {
                     if (value.len > 256) return error.StringLimit;
                     if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
-                    if (routing.Protocol.fromId(value)) |protocol| self.metadata.protocols.insert(protocol);
+                    if (Protocol.fromId(value)) |protocol| self.metadata.protocols.insert(protocol);
                 },
                 5 => self.metadata.protocol_version = try .init(value),
                 6 => self.metadata.agent = try .init(value),

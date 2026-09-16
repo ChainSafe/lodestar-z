@@ -41,6 +41,9 @@ class NativeRuntime {
   applyIntent(intent, slot) {
     return this.#native.applyIntent(intent, slot);
   }
+  updateStatus(status) {
+    return this.#native.updateStatus(status);
+  }
   getIdentity() {
     return this.#native.getIdentity();
   }

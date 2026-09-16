@@ -98,7 +98,6 @@ test "engine closes on peer id mismatch" {
         &server_address,
         wrong,
         pair.now,
-        pair.nextEntropy(),
     );
     try pair.pump();
 

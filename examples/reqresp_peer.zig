@@ -393,7 +393,7 @@ fn dial(
     var control_events: [8]reqresp.Event = undefined;
     var steps: u32 = 0;
     while (steps < steps_max and !session.finished) : (steps += 1) {
-        const now = try network.driver.currentTime(io);
+        const now = try network.transport.currentTime(io);
         const due = svc.nextWakeup(now, .{ .application = rr_events.len, .control = control_events.len });
         const wait_ms: u32 = @intCast(@min(network.constants.poll_interval_ms, if (due) |deadline| deadline -| now.mono_ms else network.constants.poll_interval_ms));
         const stepped = node.step(io, &events, &activity, .{ .wait_max_ms = wait_ms });

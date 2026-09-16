@@ -135,7 +135,7 @@ test "typed reservations unwind and identities never wrap" {
 }
 
 const n = @import("network");
-pub const Command = enum { applyIntent, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, request, publishGossip };
+pub const Command = enum { applyIntent, updateStatus, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, request, publishGossip };
 pub fn storageKind(command: Command) Kind {
     return switch (command) {
         .applyIntent => .intent,
@@ -147,6 +147,7 @@ pub fn storageKind(command: Command) Kind {
 }
 pub const Input = struct {
     command: Command,
+    status: n.peers.types.Status = undefined,
     publication: []u8 = &.{},
     publication_reservation: usize = 0,
     topic: [@import("network_gossip.zig").topic_max]u8 = undefined,
@@ -235,6 +236,7 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             if (!self.stop) self.diag.state = .running;
             self.unlock();
         },
+        .updateStatus => try core.updateStatus(&input.status, timestamp),
         .getIdentity => operation.identity = try self.heavy.?.readIdentity(),
         .getPeers => {
             operation.count = try core.completeSnapshots(self.stores.?.snapshots[store.?]);

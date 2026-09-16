@@ -7,7 +7,7 @@ const address = types.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 40
 test "schedule retains immutable datagrams until their exact deadline without duplication" {
     var queue = try schedule.Queue.init(std.testing.allocator, 2);
     defer queue.deinit(std.testing.allocator);
-    const owner = @import("api.zig").Handle{ .index = 0, .generation = 9 };
+    const owner = @import("../types.zig").Handle{ .index = 0, .generation = 9 };
     var bytes = [_]u8{ 1, 2, 3 };
     try queue.put(owner, .{ .bytes = &bytes, .to = address, .transmit_at_ns = 1000001 });
     bytes[0] = 99;

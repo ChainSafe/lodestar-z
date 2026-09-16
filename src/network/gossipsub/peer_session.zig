@@ -3,7 +3,7 @@ const constants = @import("constants.zig");
 const Handle = @import("../quic/engine.zig").Handle;
 const StreamHandle = @import("../quic/engine.zig").StreamHandle;
 const MessageId = @import("topic.zig").MessageId;
-const Version = @import("sessions.zig").Version;
+const Version = @import("protocol.zig").Version;
 pub const Outbound = union(enum) {
     /// No scheduled opening. New inbound stream evidence may return this to pending.
     none,

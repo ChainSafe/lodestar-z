@@ -77,7 +77,7 @@ test "peer dial metrics count each completed attempt once and exclude local defe
     q.accepted(&peer, conn, 1250);
     q.accepted(&peer, conn, 1300);
     try std.testing.expectEqual(@as(u64, 1), q.durations[0].count);
-    try std.testing.expectEqual(@as(u128, 150), q.durations[0].sum_ms);
+    try std.testing.expectEqual(@as(u128, 150), q.durations[0].sum);
     q.disconnected(&peer, 1250, .transport_closed, 1500);
     const due = q.nextWakeup(1500, 1).?;
     try std.testing.expectEqual(@as(usize, 1), q.poll(due, &out));
@@ -86,7 +86,7 @@ test "peer dial metrics count each completed attempt once and exclude local defe
     try std.testing.expect(!q.dialClosed(conn, due + 300));
     try std.testing.expect(!q.dialFailed(out[0].token, due + 300));
     try std.testing.expectEqual(@as(u64, 1), q.durations[1].count);
-    try std.testing.expectEqual(@as(u128, 250), q.durations[1].sum_ms);
+    try std.testing.expectEqual(@as(u128, 250), q.durations[1].sum);
 }
 
 test "peer dial custody diagnostics count unfinished derivations without mutating retained coverage" {

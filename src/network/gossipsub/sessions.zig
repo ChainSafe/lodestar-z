@@ -9,7 +9,7 @@ const StreamHandle = engine_mod.StreamHandle;
 const MessageId = [constants.message_id_length]u8;
 pub const PeerSet = std.StaticBitSet(constants.peers_cap);
 
-pub const Version = enum(u8) { v1_0, v1_1, v1_2 };
+pub const Version = @import("protocol.zig").Version;
 
 pub const SessionRef = struct { index: u16, generation: u64 };
 

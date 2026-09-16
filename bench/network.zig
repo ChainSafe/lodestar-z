@@ -32,7 +32,7 @@ fn options(key: *const network.KeyPair) network.network_core.Options {
         .wait_mode = .native_poll,
         .transport = .{ .host = key, .bind = .{ .ip4 = .loopback(0) }, .limits = .{ .connections_max = 4, .handshaking_max = 4, .handshaking_per_source_max = 4, .dialing_max = 2 } },
         .core = .{
-            .peers = .{ .capacity = 4, .outbound_reserve = 1, .max_peers = 3, .target_peers = 2, .min_outbound = 1, .engine_capacity = 4 },
+            .peers = .{ .capacity = 4, .outbound_reserve = 1, .max_peers = 3, .target_peers = 2, .min_outbound = 1 },
             .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 7 },
             .control = .{ .operations_max = 2 },
             .service = .{
@@ -51,7 +51,7 @@ fn timestamp(io: std.Io) u64 {
 }
 
 fn turn(node: *network.NetworkCore, io: std.Io, outputs: network.network_core.Outputs) !network.network_core.Result {
-    const result = node.step(io, try network.driver.currentTime(io), 100, outputs, 0);
+    const result = node.step(io, try network.transport.currentTime(io), 100, outputs, 0);
     if (result.failure) |err| return err;
     return result;
 }
@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
     const allocations_a = a.reservations.allocation_calls;
     var samples: Samples = .{};
     for (0..turns) |i| {
-        const now = try network.driver.currentTime(io);
+        const now = try network.transport.currentTime(io);
         const immediate = if (a.nextWakeup(now, .{})) |deadline| deadline <= now.mono_ms else false;
         const start = timestamp(io);
         const result = try turn(a, io, .{});
@@ -104,7 +104,7 @@ fn initialize(node: *network.NetworkCore, a: std.mem.Allocator, io: std.Io, key:
 }
 
 fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io) !t.PeerRef {
-    try a.addDirectPeer(&b.peerId(), &.{b.localAddress()}, try network.driver.currentTime(io));
+    try a.addDirectPeer(&b.peerId(), &.{b.localAddress()}, try network.transport.currentTime(io));
     var rows: [4]t.Snapshot = undefined;
     var peer: ?t.PeerRef = null;
     for (0..10000) |_| {
@@ -116,14 +116,14 @@ fn connectPair(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io) !t.
         if (peer != null and b.peerCounts().relevant == 1) break;
     }
     if (peer == null) return error.ConnectionDeadline;
-    try b.addDirectPeer(&a.peerId(), &.{a.localAddress()}, try network.driver.currentTime(io));
+    try b.addDirectPeer(&a.peerId(), &.{a.localAddress()}, try network.transport.currentTime(io));
     var peer_events: [4]t.Event = undefined;
     var gossip_events: [1]network.gossipsub.Event = undefined;
     if (!a.subscribe(topic) or !b.subscribe(topic)) return error.SubscriptionRefused;
     for (0..4000) |_| {
-        const result_a = a.step(io, try network.driver.currentTime(io), 100, .{ .peers = &peer_events, .gossipsub = &gossip_events }, 1);
+        const result_a = a.step(io, try network.transport.currentTime(io), 100, .{ .peers = &peer_events, .gossipsub = &gossip_events }, 1);
         if (result_a.failure) |err| return err;
-        const result_b = b.step(io, try network.driver.currentTime(io), 100, .{ .peers = &peer_events, .gossipsub = &gossip_events }, 1);
+        const result_b = b.step(io, try network.transport.currentTime(io), 100, .{ .peers = &peer_events, .gossipsub = &gossip_events }, 1);
         if (result_b.failure) |err| return err;
         if (a.core.service.gossipsub.inner.resourceSnapshot().remote_subscriptions > 0 and a.core.service.gossipsub.inner.peers.rows[0].direct) break;
         try io.sleep(.fromMilliseconds(1), .awake);
@@ -149,17 +149,17 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
     var requests: [4]rr.RequestHandle = undefined;
     for (&requests, 0..) |*handle, i| {
         const protocol: rr.Protocol = if (i < 2) .blocks_by_range_v2 else .blocks_by_root_v2;
-        handle.* = try a.sendReqRespRequest(peer, protocol, request[0..protocol.info().request_min], sinks[i * sink_size ..][0..sink_size], .{ .expected_chunks = 1 }, try network.driver.currentTime(io));
+        handle.* = try a.sendReqRespRequest(peer, protocol, request[0..protocol.info().request_min], sinks[i * sink_size ..][0..sink_size], .{ .expected_chunks = 1 }, try network.transport.currentTime(io));
     }
     var status = b.localState().status;
     status.head_slot = 42;
-    try b.updateStatus(&status, try network.driver.currentTime(io));
-    a.reStatusPeers(try network.driver.currentTime(io));
+    try b.updateStatus(&status, try network.transport.currentTime(io));
+    a.reStatusPeers(try network.transport.currentTime(io));
     var samples: Samples = .{};
     for (0..turns) |i| {
         if (i < 256) {
             std.mem.writeInt(u64, payload[0..8], i, .little);
-            const published = try a.publishGossip(topic, &payload, try network.driver.currentTime(io));
+            const published = try a.publishGossip(topic, &payload, try network.transport.currentTime(io));
             gossip_queued += published.queued;
             gossip_pressured += published.pressured;
         }
@@ -168,7 +168,7 @@ fn pressure(a: *network.NetworkCore, b: *network.NetworkCore, sinks: []u8, io: s
         const receiver = b.core.service.gossipsub.inner.resourceSnapshot();
         peak_descriptors = @max(peak_descriptors, sender.queued_descriptors);
         peak_validations = @max(peak_validations, receiver.pending_validations);
-        const now = try network.driver.currentTime(io);
+        const now = try network.transport.currentTime(io);
         const immediate = if (a.nextWakeup(now, .{})) |deadline| deadline <= now.mono_ms else false;
         const start = timestamp(io);
         const result = try turn(a, io, .{});
@@ -199,7 +199,7 @@ fn drain(a: *network.NetworkCore, b: *network.NetworkCore, io: std.Io, expected:
         for (events[0..result.counts.application]) |event| switch (event) {
             .request => |value| {
                 received += 1;
-                try b.respondError(value.request, 3, "benchmark", try network.driver.currentTime(io));
+                try b.respondError(value.request, 3, "benchmark", try network.transport.currentTime(io));
             },
             else => {},
         };
@@ -240,7 +240,7 @@ fn idleWait(init: std.process.Init) !void {
     for (0..10000) |_| {
         const before = timestamp(io);
         if (before - start >= 1_000_000_000) break;
-        const now = try network.driver.currentTime(io);
+        const now = try network.transport.currentTime(io);
         const due = node.nextWakeup(now, .{});
         const ready = if (due) |value| value <= now.mono_ms else false;
         immediate += @intFromBool(ready);

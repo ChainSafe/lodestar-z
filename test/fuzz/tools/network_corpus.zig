@@ -30,14 +30,14 @@ pub fn main(init: std.process.Init) !void {
         .tls = context,
         .limits = .{ .connections_max = 4, .handshaking_max = 2, .dialing_max = 1 },
         .local = .{ local, null },
-        .seed = @splat(1),
+        .seed = &@as([32]u8, @splat(1)),
     }) catch |err| {
         context.deinit();
         return err;
     };
     defer engine.deinit();
     const now: network.Now = .{ .mono_ms = 0, .unix_s = 1_800_000_000 };
-    const handle = try engine.dial(&remote, context.local_peer_id, now, @splat(2));
+    const handle = try engine.dial(&remote, context.local_peer_id, now);
     const sent = engine.sendOne(handle.index, now, &buffer) orelse return error.MissingInitial;
     try write(io, "network_quic_receive", "initial", sent.bytes);
     @memcpy(buffer[1..5], &[_]u8{ 0xfa, 0xce, 0xb0, 0x0c });

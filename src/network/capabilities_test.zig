@@ -1,6 +1,6 @@
 const std = @import("std");
 const capabilities = @import("capabilities.zig");
-const routing = @import("router.zig");
+const Protocol = @import("protocol.zig").Protocol;
 const rr = @import("reqresp/protocol.zig");
 const ForkSeq = @import("config").ForkSeq;
 
@@ -24,7 +24,7 @@ test "capabilities iteration snapshots sparse membership and stays exhausted" {
     set.insert(.{ .reqresp = .ping_v1 });
     var iterator = set.iterator();
     set.insert(.{ .reqresp = .status_v1 });
-    for ([_]routing.Protocol{ .{ .reqresp = .ping_v1 }, .{ .meshsub = .v1_2 }, .identify }) |expected| {
+    for ([_]Protocol{ .{ .reqresp = .ping_v1 }, .{ .meshsub = .v1_2 }, .identify }) |expected| {
         try std.testing.expectEqualDeep(expected, iterator.next().?);
     }
     try std.testing.expectEqual(null, iterator.next());
@@ -36,13 +36,14 @@ test "capabilities iteration snapshots sparse membership and stays exhausted" {
 test "capabilities iteration returns every protocol exactly once" {
     var set: capabilities.Set = .initEmpty();
     for (std.enums.values(rr.Protocol)) |which| set.insert(.{ .reqresp = which });
-    for (std.enums.values(@import("gossipsub/sessions.zig").Version)) |version| set.insert(.{ .meshsub = version });
+    for (std.enums.values(@import("gossipsub/protocol.zig").Version)) |version| set.insert(.{ .meshsub = version });
     set.insert(.identify);
     var iterator = set.iterator();
     var seen: capabilities.Set = .initEmpty();
     for (0..capabilities.protocol_count) |_| {
         const protocol = iterator.next().?;
         try std.testing.expect(!seen.contains(protocol));
+        try std.testing.expectEqualDeep(protocol, Protocol.fromId(Protocol.fromIndex(protocol.index()).id()).?);
         seen.insert(protocol);
     }
     try std.testing.expectEqual(null, iterator.next());
@@ -77,7 +78,7 @@ test "capabilities fork sets match every implemented host protocol in both direc
                 if (serve) receive.insert(.{ .reqresp = protocol });
             };
             for (std.enums.values(rr.Protocol)) |protocol| {
-                const id: routing.Protocol = .{ .reqresp = protocol };
+                const id: Protocol = .{ .reqresp = protocol };
                 try std.testing.expectEqual(receive.contains(id), active.receive.contains(id));
                 try std.testing.expectEqual(request.contains(id), active.request.contains(id));
             }

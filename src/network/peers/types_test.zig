@@ -7,8 +7,7 @@ test "peer options reject incompatible bounds before allocation" {
         t.Options{ .capacity = 4097 },
         t.Options{ .outbound_reserve = 512 },
         t.Options{ .max_peers = 513 },
-        t.Options{ .max_peers = 257, .engine_capacity = 512 },
-        t.Options{ .engine_capacity = 95 },
+        t.Options{ .max_peers = 257 },
         t.Options{ .target_peers = 97 },
         t.Options{ .min_outbound = 65 },
     }) |options| try std.testing.expectError(error.InvalidOptions, options.validate());

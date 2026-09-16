@@ -66,12 +66,12 @@ pub const Core = struct {
     snapshot_scratch: []t.Snapshot,
     policy_scratch: []policy.Input,
     selection: policy.Result = .{},
+    discovery_need: DiscoveryNeed = .{},
     demand: t.Demand = .{},
     current_slot: u64 = 0,
     selection_revision: ?SelectionRevision = null,
     candidates_revision: ?u64 = null,
     reconciliation_deadline: ?u64 = null,
-    reconciliation_now: Now = .{ .mono_ms = 0, .unix_s = 0 },
     custody_pending: bool = false,
     metadata_deadline: ?u64 = null,
     native_dial_room: u16 = 0,
@@ -134,7 +134,7 @@ pub const Core = struct {
     pub fn validateOptions(options: Options) !void {
         try options.peers.validate();
         if (options.metadata_freshness_ms == 0 or options.metadata_freshness_ms > 86_400_000) return error.InvalidOptions;
-        if (options.service.reqresp.peers < options.peers.engine_capacity)
+        if (options.service.reqresp.peers < options.peers.max_peers)
             return error.InvalidOptions;
         try control_mod.Control.validateOptions(options.control);
         try dial_mod.DialQueue.validateOptions(options.dial);
@@ -394,13 +394,13 @@ pub const Core = struct {
     /// Health only ranks removals. Once pruned, changing health alone cannot remove
     /// a retained peer while count, coverage and protection remain unchanged.
     pub fn reconcile(self: *Core, now: Now) void {
-        if (self.stopped) return;
-        self.reconciliation_now = now;
+        if (self.stopped or self.quiescing) return;
         self.catalog.refresh(now.mono_ms);
         const expired = if (self.reconciliation_deadline) |due| now.mono_ms >= due else false;
         if (expired) self.candidates_revision = null;
         if (self.policyChanged() or expired) {
             self.refreshSelection(now);
+            self.refreshDiscoveryNeed();
             const revision = self.currentSelectionRevision();
             self.selection_revision = if (revision.cacheable()) revision else null;
             const catalog_deadline = self.catalogDeadline(now.mono_ms);
@@ -470,25 +470,18 @@ pub const Core = struct {
         self.demand = demand.*;
         self.selection_revision = null;
     }
-    /// Reconciles mutations at the last explicit reconcile/process/dial clock.
-    pub fn coverageDeficits(self: *Core) policy.Deficits {
-        self.reconcile(self.reconciliation_now);
+    /// Returns the last completed policy evaluation, shared with discoveryNeed.
+    /// Call reconcile with an explicit clock to include pending input changes.
+    pub fn coverageDeficits(self: *const Core) policy.Deficits {
         return self.selection.deficits;
     }
     pub fn candidateHints(self: *const Core, identity: *const t.PeerId, now: Now) ?dial_mod.Hints {
         return self.dial_queue.candidateHints(identity, now.mono_ms);
     }
-    /// Current need after process. The host must schedule the next slot turn for demand expiry.
-    pub fn discoveryNeed(self: *Core) DiscoveryNeed {
-        self.reconcile(self.reconciliation_now);
-        if (self.stopped) return .{};
-        var result: DiscoveryNeed = .{ .general = self.selection.dial_budget > 0 and (self.catalog.relevantCount() < self.catalog.options.target_peers or self.selection.deficits.outbound > 0) };
-        if (self.current_slot < self.demand.expires_at_slot and self.selection.dial_budget > 0) {
-            std.mem.writeInt(u64, &result.attnets, self.selection.deficits.missing.attnets, .little);
-            result.syncnets = self.selection.deficits.missing.syncnets;
-            result.custody = self.selection.deficits.groups > 0;
-        }
-        return result;
+    /// Returns the same completed evaluation as coverageDeficits without advancing policy.
+    /// The host must schedule the next process slot turn for demand expiry.
+    pub fn discoveryNeed(self: *const Core) DiscoveryNeed {
+        return self.discovery_need;
     }
     /// Requires Discovery.step output or equivalent authenticated-source scope authorization.
     pub fn discovered(self: *Core, candidate: *const peers.enr.Candidate, now: Now) !void {
@@ -557,6 +550,16 @@ pub const Core = struct {
             if (self.disconnect(input.peer, reason, now)) self.counters.policy_disconnects +|= 1;
         };
     }
+    fn refreshDiscoveryNeed(self: *Core) void {
+        self.discovery_need = .{};
+        if (self.selection.dial_budget == 0) return;
+        self.discovery_need.general = self.catalog.relevantCount() < self.catalog.options.target_peers or
+            self.selection.deficits.outbound > 0;
+        if (self.current_slot >= self.demand.expires_at_slot) return;
+        std.mem.writeInt(u64, &self.discovery_need.attnets, self.selection.deficits.missing.attnets, .little);
+        self.discovery_need.syncnets = self.selection.deficits.missing.syncnets;
+        self.discovery_need.custody = self.selection.deficits.groups > 0;
+    }
     fn dialRoom(self: *const Core) u16 {
         const attempts = self.dial_queue.attempts();
         const budget = @min(self.catalog.options.max_peers -| self.selection.retained_count, @max(self.selection.dial_budget, self.dial_queue.hostDemand()));
@@ -582,7 +585,6 @@ pub const Core = struct {
 
     /// The caller must validate the complete local state before committing it.
     pub fn commitLocal(self: *Core, local: *const t.LocalState, now: Now) void {
-        self.reconciliation_now = now;
         if (!std.meta.eql(self.local.fork, local.fork)) {
             self.control.forkUpdated(&self.service, &self.catalog, self.local.fork, now);
         }
@@ -607,7 +609,6 @@ pub const Core = struct {
         action: t.PeerAction,
         now: Now,
     ) ?t.ReputationDecision {
-        self.reconciliation_now = now;
         const decision = self.catalog.report(peer, action, now.mono_ms) orelse return null;
         self.selection_revision = null;
         if (decision != .none) _ = self.disconnect(
@@ -626,7 +627,6 @@ pub const Core = struct {
         return self.connectUntil(identity, addresses, now, now.mono_ms +| dial_mod.connect_timeout_ms);
     }
     pub fn connectUntil(self: *Core, identity: *const t.PeerId, addresses: []const t.Address, now: Now, deadline_ms: u64) !void {
-        self.reconciliation_now = now;
         if (self.stopped) return error.Stopped;
         if (identity.eql(&self.local_identity)) return error.SelfDial;
         try self.dial_queue.enqueueUntil(identity, addresses, false, now.mono_ms, deadline_ms);
@@ -643,7 +643,6 @@ pub const Core = struct {
         addresses: []const t.Address,
         now: Now,
     ) !void {
-        self.reconciliation_now = now;
         if (self.stopped) return error.Stopped;
         if (identity.eql(&self.local_identity)) return error.SelfDial;
         try self.dial_queue.enqueue(identity, addresses, true, now.mono_ms);
@@ -665,7 +664,6 @@ pub const Core = struct {
         return true;
     }
     pub fn closePeer(self: *Core, engine: *engine_mod.Engine, peer: t.PeerRef, connection: t.Handle, now: Now) bool {
-        self.reconciliation_now = now;
         if (self.stopped) return false;
         const snapshot = self.catalog.get(peer) orelse return false;
         if (!std.meta.eql(snapshot.connection, connection)) return false;
@@ -676,7 +674,6 @@ pub const Core = struct {
         return true;
     }
     pub fn disconnect(self: *Core, peer: t.PeerRef, reason: t.DisconnectReason, now: Now) bool {
-        self.reconciliation_now = now;
         const snapshot = self.catalog.get(peer) orelse return false;
         return self.control.disconnect(
             &self.catalog,
@@ -774,6 +771,8 @@ pub const Core = struct {
     pub fn beginGracefulClose(self: *Core, now: Now) void {
         if (self.stopped or self.quiescing) return;
         self.quiescing = true;
+        self.selection = .{};
+        self.discovery_need = .{};
         self.service.quiesceApplications();
         var active = self.service.router.active_capabilities;
         active.receive = .initEmpty();
@@ -786,6 +785,8 @@ pub const Core = struct {
     pub fn shutdown(self: *Core, engine: *engine_mod.Engine, now: Now) void {
         if (self.stopped) return;
         self.stopped = true;
+        self.selection = .{};
+        self.discovery_need = .{};
         if (self.service.identify) |*identify| identify.shutdown(&self.service.router, engine);
         self.service.reqresp.shutdown(engine, &self.service.router);
         self.service.router.negotiator.shutdown(engine);

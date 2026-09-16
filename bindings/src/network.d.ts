@@ -368,6 +368,8 @@ export interface NativeNetworkApplicationRuntime {
   readonly state: NativeRuntimeState;
   diagnostics(): NativeRuntimeDiagnostics;
   applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
+  /** Updates Status for the active fork; preserves clock, subscriptions, Metadata, ENR and demand. Requires activation. */
+  updateStatus(status: NetworkStatus): Promise<void>;
   getIdentity(): Promise<NativeIdentitySnapshot>;
   getGossipDiagnostics(cursor?: number): Promise<NativeGossipDiagnosticsPage>;
   getPeers(): Promise<NativePeerSnapshot>;

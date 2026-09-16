@@ -27,7 +27,7 @@ pub fn defaultQuotas() Quotas {
     return out;
 }
 
-const Handle = @import("../quic/api.zig").Handle;
+const Handle = @import("../types.zig").Handle;
 pub const InitError = error{ InvalidOptions, InvalidQuota } || std.mem.Allocator.Error;
 
 pub const Limiter = struct {

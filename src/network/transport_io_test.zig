@@ -1,8 +1,7 @@
 const std = @import("std");
 const constants = @import("constants.zig");
-const driver_mod = @import("driver.zig");
+const transport_mod = @import("transport.zig");
 const engine_mod = @import("quic/engine.zig");
-const limits = @import("quic/limits.zig");
 const multistream = @import("wire/multistream.zig");
 const support = @import("test_support.zig");
 const types = @import("types.zig");
@@ -12,7 +11,7 @@ const net = std.Io.net;
 const Node = support.Node;
 
 const ping_protocol = "/ipfs/ping/1.0.0";
-const step_options = driver_mod.StepOptions{ .wait_max_ms = 10 };
+const step_options = transport_mod.StepOptions{ .wait_max_ms = 10 };
 
 fn writeSome(engine: *engine_mod.Engine, stream: engine_mod.StreamHandle, bytes: []const u8, fin: bool) !usize {
     return engine.write(stream, bytes, fin) catch |err| switch (err) {
@@ -30,7 +29,7 @@ fn stepBoth(a: *Node, b: *Node, events_a: []engine_mod.Event, events_b: []engine
     return .{ .a = ra.events, .b = rb.events };
 }
 
-test "driver bounds an idle step by the requested wait" {
+test "transport bounds an idle step by the requested wait" {
     var node: Node = .{};
     try node.init(6);
     defer node.deinit();
@@ -50,7 +49,7 @@ test "driver bounds an idle step by the requested wait" {
     try std.testing.expectEqual(@as(u32, 0), floored.datagrams_received);
 }
 
-test "driver reports activity for the connections that received datagrams" {
+test "transport reports activity for the connections that received datagrams" {
     var client: Node = .{};
     try client.init(7);
     defer client.deinit();
@@ -107,7 +106,7 @@ test "driver reports activity for the connections that received datagrams" {
     try std.testing.expect(quiet);
 }
 
-test "driver counts a hostile oversized datagram and keeps stepping" {
+test "transport counts a hostile oversized datagram and keeps stepping" {
     var node: Node = .{};
     try node.init(3);
     defer node.deinit();
@@ -138,7 +137,7 @@ test "driver counts a hostile oversized datagram and keeps stepping" {
     try std.testing.expectEqual(@as(u32, 0), after.datagrams_accepted);
 }
 
-test "driver keeps batching past a counted receive error" {
+test "transport keeps batching past a counted receive error" {
     var node: Node = .{};
     try node.init(5);
     defer node.deinit();
@@ -160,7 +159,7 @@ test "driver keeps batching past a counted receive error" {
     try std.testing.expectEqual(@as(u32, 0), result.datagrams_accepted);
 }
 
-test "driver surfaces a send failure to an unreachable destination" {
+test "transport surfaces a send failure to an unreachable destination" {
     var node: Node = .{};
     try node.init(4);
     defer node.deinit();
@@ -169,12 +168,11 @@ test "driver surfaces a send failure to an unreachable destination" {
         .octets = @splat(255),
         .port = 4_001,
     } };
-    const now = try driver_mod.currentTime(std.testing.io);
+    const now = try transport_mod.currentTime(std.testing.io);
     _ = try node.transport.engine.dial(
         &unreachable_peer,
         node.transport.peerId(),
         now,
-        [_]u8{7} ** limits.local_cid_length,
     );
 
     var events: [4]engine_mod.Event = undefined;
@@ -200,7 +198,7 @@ test "driver surfaces a send failure to an unreachable destination" {
     );
 }
 
-test "driver completes a libp2p ping over loopback sockets" {
+test "transport completes a libp2p ping over loopback sockets" {
     var client: Node = .{};
     try client.init(1);
     defer client.deinit();
@@ -235,7 +233,7 @@ test "driver completes a libp2p ping over loopback sockets" {
     const hello_bytes = try dialer.initialWrite(&hello);
     try std.testing.expectEqual(hello_bytes.len, try writeSome(&client.transport.engine, stream, hello_bytes, false));
 
-    var listener = multistream.Listener.init(&.{ping_protocol});
+    var listener: multistream.Listener = .{};
     var inbound: ?engine_mod.StreamHandle = null;
     var negotiated = false;
     var accepted = false;
@@ -254,7 +252,7 @@ test "driver completes a libp2p ping over loopback sockets" {
             var cursor: usize = 0;
             if (read.len > 0 and !negotiated) {
                 var reply: [multistream.listener_write_max]u8 = undefined;
-                const outcome = try listener.feed(buffer[0..read.len], &reply);
+                const outcome = try listener.feed(buffer[0..read.len], &.{.{ .id = ping_protocol, .index = 0 }}, &reply);
                 if (outcome.write.len > 0) _ = try writeSome(&server.transport.engine, server_stream, outcome.write, false);
                 if (outcome.status == .selected) negotiated = true;
                 cursor = outcome.consumed;
@@ -290,20 +288,19 @@ test "driver completes a libp2p ping over loopback sockets" {
     try std.testing.expect(closed);
 }
 
-test "driver retains a future datagram and drops stale owner generations" {
+test "transport retains a future datagram and drops stale owner generations" {
     var node: Node = .{};
     try node.init(12);
     defer node.deinit();
-    const now = try driver_mod.currentTime(std.testing.io);
+    const now = try transport_mod.currentTime(std.testing.io);
     const handle = try node.transport.engine.dial(
         &support.server_address,
         node.transport.peerId(),
         now,
-        [_]u8{17} ** limits.local_cid_length,
     );
     var bytes = [_]u8{ 1, 2, 3 };
     const future = now.nanos() + 60 * std.time.ns_per_s;
-    try node.transport.driver.pending.put(handle, .{
+    try node.transport.pending.put(handle, .{
         .bytes = &bytes,
         .to = support.server_address,
         .transmit_at_ns = future,
@@ -313,45 +310,43 @@ test "driver retains a future datagram and drops stale owner generations" {
     for (0..3) |_| {
         const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
         try std.testing.expectEqual(@as(u32, 0), result.datagrams_sent);
-        try std.testing.expectEqual(@as(usize, 1), node.transport.driver.pending.count);
-        try std.testing.expectEqualSlices(u8, &bytes, node.transport.driver.pending.ready(handle.index, future).?.bytes);
+        try std.testing.expectEqual(@as(usize, 1), node.transport.pending.count);
+        try std.testing.expectEqualSlices(u8, &bytes, node.transport.pending.ready(handle.index, future).?.bytes);
     }
     try std.testing.expect(node.transport.engine.abandon(handle));
     const replacement = try node.transport.engine.dial(
         &support.server_address,
         node.transport.peerId(),
         now,
-        [_]u8{18} ** limits.local_cid_length,
     );
     try std.testing.expectEqual(handle.index, replacement.index);
     try std.testing.expect(handle.generation != replacement.generation);
     _ = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
-    if (node.transport.driver.pending.owner(handle.index)) |owner| {
+    if (node.transport.pending.owner(handle.index)) |owner| {
         try std.testing.expectEqual(replacement, owner);
     }
 }
 
-test "driver serves busy connections fairly under one aggregate send allowance" {
+test "transport serves busy connections fairly under one aggregate send allowance" {
     var node: Node = .{};
     try node.init(13);
     defer node.deinit();
-    node.transport.engine.limits.send_per_step_max = 1;
-    node.transport.engine.limits.work_per_step_max = 4;
+    node.transport.work_limits.send_per_step_max = 1;
+    node.transport.work_limits.work_per_step_max = 4;
     const loopback = net.IpAddress{ .ip4 = .loopback(0) };
     var receive_buffer: [constants.datagram_size_max]u8 = undefined;
     var sink = try udp_mod.Udp.bind(std.testing.io, .single(loopback));
     defer sink.close(std.testing.io);
     const destination = sink.localAddress();
-    const now = try driver_mod.currentTime(std.testing.io);
+    const now = try transport_mod.currentTime(std.testing.io);
     for (0..3) |index| {
         const handle = try node.transport.engine.dial(
             &destination,
             node.transport.peerId(),
             now,
-            [_]u8{@intCast(30 + index)} ** limits.local_cid_length,
         );
         var bytes = [_]u8{@intCast(index + 1)};
-        try node.transport.driver.pending.put(handle, .{ .bytes = &bytes, .to = destination, .transmit_at_ns = now.nanos() });
+        try node.transport.pending.put(handle, .{ .bytes = &bytes, .to = destination, .transmit_at_ns = now.nanos() });
     }
     var events: [8]engine_mod.Event = undefined;
     var activity: [8]engine_mod.Handle = undefined;
@@ -364,7 +359,7 @@ test "driver serves busy connections fairly under one aggregate send allowance" 
         const datagram = try sink.receiveTimeout(std.testing.io, &receive_buffer, .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .awake } });
         try std.testing.expectEqualSlices(u8, &.{@intCast(index + 1)}, datagram.bytes);
     }
-    try std.testing.expectEqual(@as(usize, 0), node.transport.driver.pending.count);
+    try std.testing.expectEqual(@as(usize, 0), node.transport.pending.count);
 }
 
 fn allocateTransport(allocator: std.mem.Allocator) !void {
@@ -379,25 +374,64 @@ fn allocateTransport(allocator: std.mem.Allocator) !void {
     defer transport.deinit(std.testing.io);
 }
 
-test "driver startup allocation failure releases transferred engine and TLS ownership" {
+test "transport startup allocation failure releases transferred engine and TLS ownership" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocateTransport, .{});
 }
 
-test "driver next wakeup includes retained output with nanosecond precision" {
+test "transport requires startup seed entropy but no entropy for later dial and receive" {
+    var vtable = std.testing.io.vtable.*;
+    vtable.randomSecure = StartupEntropyFault.random;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    StartupEntropyFault.calls = 0;
+    const key = try @import("wire/keys.zig").KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{41}));
+    var refused: @import("transport.zig").Transport = .{};
+    try std.testing.expectError(error.EntropyUnavailable, refused.init(std.testing.allocator, io, .{
+        .host = &key,
+        .bind = .{ .ip4 = .loopback(0) },
+    }));
+    try std.testing.expectEqual(@as(u8, 2), StartupEntropyFault.calls);
+
+    var node: Node = .{};
+    try node.init(41);
+    defer node.deinit();
+    var remote: Node = .{};
+    try remote.init(42);
+    defer remote.deinit();
+    _ = try node.transport.dialPeer(io, remote.transport.localAddress(), remote.transport.peerId());
+    _ = try remote.transport.dialPeer(io, node.transport.localAddress(), node.transport.peerId());
+    var events: [4]engine_mod.Event = undefined;
+    const received = try support.step(&node.transport, io, &events, &.{}, .{ .wait_max_ms = 10 });
+    try std.testing.expect(received.datagrams_received > 0);
+    try std.testing.expect(received.datagrams_accepted > 0);
+    try std.testing.expectEqual(@as(u8, 2), StartupEntropyFault.calls);
+}
+
+const StartupEntropyFault = struct {
+    threadlocal var calls: u8 = 0;
+
+    fn random(userdata: ?*anyopaque, bytes: []u8) std.Io.RandomSecureError!void {
+        calls += 1;
+        if (calls == 1 and bytes.len == 8) {
+            return std.testing.io.vtable.randomSecure(userdata, bytes);
+        }
+        return error.EntropyUnavailable;
+    }
+};
+
+test "transport next wakeup includes retained output with nanosecond precision" {
     var node: Node = .{};
     try node.init(15);
     defer node.deinit();
-    var now = try driver_mod.currentTime(std.testing.io);
+    var now = try transport_mod.currentTime(std.testing.io);
     const handle = try node.transport.engine.dial(
         &support.server_address,
         node.transport.peerId(),
         now,
-        [_]u8{44} ** limits.local_cid_length,
     );
     const drained = try support.step(&node.transport, std.testing.io, &.{}, &.{}, .{ .wait_max_ms = 0 });
     now = drained.now;
     var bytes = [_]u8{1};
-    try node.transport.driver.pending.put(handle, .{
+    try node.transport.pending.put(handle, .{
         .bytes = &bytes,
         .to = support.server_address,
         .transmit_at_ns = now.nanos() + 17,
@@ -407,12 +441,12 @@ test "driver next wakeup includes retained output with nanosecond precision" {
     try std.testing.expectEqual(@as(?u64, 0), node.transport.nextTimeoutMs(now));
 }
 
-test "driver isolates a failing destination from a healthy ready batch owner" {
+test "transport isolates a failing destination from a healthy ready batch owner" {
     var node: Node = .{};
     try node.init(16);
     defer node.deinit();
-    node.transport.engine.limits.send_per_step_max = 2;
-    node.transport.engine.limits.work_per_step_max = 8;
+    node.transport.work_limits.send_per_step_max = 2;
+    node.transport.work_limits.work_per_step_max = 8;
     var receive_buffer: [constants.datagram_size_max]u8 = undefined;
     var sink = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sink.close(std.testing.io);
@@ -421,22 +455,20 @@ test "driver isolates a failing destination from a healthy ready batch owner" {
         .octets = @splat(255),
         .port = 4001,
     } };
-    const now = try driver_mod.currentTime(std.testing.io);
+    const now = try transport_mod.currentTime(std.testing.io);
     const healthy = try node.transport.engine.dial(
         &healthy_address,
         node.transport.peerId(),
         now,
-        [_]u8{51} ** limits.local_cid_length,
     );
     const failing = try node.transport.engine.dial(
         &failing_address,
         node.transport.peerId(),
         now,
-        [_]u8{52} ** limits.local_cid_length,
     );
     var payload = [_]u8{ 1, 2, 3 };
-    try node.transport.driver.pending.put(healthy, .{ .bytes = &payload, .to = healthy_address });
-    try node.transport.driver.pending.put(failing, .{ .bytes = &payload, .to = failing_address });
+    try node.transport.pending.put(healthy, .{ .bytes = &payload, .to = healthy_address });
+    try node.transport.pending.put(failing, .{ .bytes = &payload, .to = failing_address });
     var events: [4]engine_mod.Event = undefined;
     var activity: [4]engine_mod.Handle = undefined;
     const result = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
@@ -456,11 +488,11 @@ test "driver isolates a failing destination from a healthy ready batch owner" {
     try std.testing.expectError(error.Timeout, sink.receiveTimeout(std.testing.io, &receive_buffer, .{ .duration = .{ .raw = .zero, .clock = .awake } }));
 }
 
-test "driver reports receive work exhaustion without active connections" {
+test "transport reports receive work exhaustion without active connections" {
     var node: Node = .{};
     try node.init(17);
     defer node.deinit();
-    node.transport.engine.limits.work_per_step_max = 2;
+    node.transport.work_limits.work_per_step_max = 2;
     var source = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer source.close(std.testing.io);
     const destination = node.transport.localAddress();
@@ -481,21 +513,20 @@ test "driver reports receive work exhaustion without active connections" {
     try std.testing.expectEqual(@as(?u64, null), node.transport.nextTimeoutMs(drained.now));
 }
 
-test "driver finishes a quiet connection scan across small work limited turns" {
+test "transport finishes a quiet connection scan across small work limited turns" {
     var node: Node = .{};
     try node.init(18);
     defer node.deinit();
-    node.transport.engine.limits.work_per_step_max = 2;
+    node.transport.work_limits.work_per_step_max = 2;
     var sink = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sink.close(std.testing.io);
     const destination = sink.localAddress();
-    const now = try driver_mod.currentTime(std.testing.io);
-    for (0..3) |index| {
+    const now = try transport_mod.currentTime(std.testing.io);
+    for (0..3) |_| {
         _ = try node.transport.engine.dial(
             &destination,
             node.transport.peerId(),
             now,
-            [_]u8{@intCast(60 + index)} ** limits.local_cid_length,
         );
     }
     var events: [4]engine_mod.Event = undefined;
@@ -531,7 +562,7 @@ fn quietConnectedNodes(client: *Node, server: *Node) !void {
     return error.TestUnexpectedResult;
 }
 
-test "driver restarts a completed quiet scan after host writes and reads" {
+test "transport restarts a completed quiet scan after host writes and reads" {
     var client: Node = .{};
     try client.init(19);
     defer client.deinit();
@@ -553,7 +584,7 @@ test "driver restarts a completed quiet scan after host writes and reads" {
     const stream = try client.transport.engine.openStream(handle);
     try quietConnectedNodes(&client, &server);
     try std.testing.expectEqual(@as(usize, 6), try client.transport.engine.write(stream, "credit", false));
-    const write_now = try driver_mod.currentTime(std.testing.io);
+    const write_now = try transport_mod.currentTime(std.testing.io);
     try std.testing.expectEqual(@as(?u64, 0), client.transport.nextTimeoutMs(write_now));
     var inbound: ?engine_mod.StreamHandle = null;
     for (0..100) |_| {
@@ -568,21 +599,21 @@ test "driver restarts a completed quiet scan after host writes and reads" {
     var bytes: [6]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 6), (try server.transport.engine.read(inbound.?, &bytes)).len);
     try std.testing.expectEqualStrings("credit", &bytes);
-    const read_now = try driver_mod.currentTime(std.testing.io);
+    const read_now = try transport_mod.currentTime(std.testing.io);
     try std.testing.expectEqual(@as(?u64, 0), server.transport.nextTimeoutMs(read_now));
     try quietConnectedNodes(&client, &server);
 }
 
-test "driver progress failure retains real send receive work and exactly one lifecycle batch" {
+test "transport progress failure retains real send receive work and exactly one lifecycle batch" {
     var node: Node = .{};
     try node.init(36);
     defer node.deinit();
     var sink = try udp_mod.Udp.bind(std.testing.io, .{ .ip4 = .loopback(0) });
     defer sink.close(std.testing.io);
     const destination = sink.localAddress();
-    const now = try driver_mod.currentTime(std.testing.io);
-    _ = try node.transport.engine.dial(&destination, node.transport.peerId(), now, @splat(36));
-    const failed = try node.transport.engine.dial(&destination, node.transport.peerId(), now, @splat(37));
+    const now = try transport_mod.currentTime(std.testing.io);
+    _ = try node.transport.engine.dial(&destination, node.transport.peerId(), now);
+    const failed = try node.transport.engine.dial(&destination, node.transport.peerId(), now);
     node.transport.engine.failSend(failed.index);
     try sink.sockets.primary().send(std.testing.io, &node.transport.udp.sockets.primary().address, "invalid");
     var vtable = std.testing.io.vtable.*;
@@ -598,17 +629,17 @@ test "driver progress failure retains real send receive work and exactly one lif
     try std.testing.expect(result.progress.work_processed > 0);
     try std.testing.expectEqual(@as(usize, 1), result.progress.events);
     try std.testing.expectEqual(failed, events[0].closed.conn);
-    try std.testing.expectEqual(@as(u8, 0), node.transport.driver.batch_len);
+    try std.testing.expectEqual(@as(u8, 0), node.transport.batch_len);
     const next = try support.step(&node.transport, std.testing.io, &events, &activity, .{ .wait_max_ms = 0 });
     try std.testing.expectEqual(@as(usize, 0), next.events);
 }
 
-test "driver progress early clock failure does not begin or publish a turn" {
+test "transport progress early clock failure does not begin or publish a turn" {
     var node: Node = .{};
     try node.init(39);
     defer node.deinit();
-    const now = try driver_mod.currentTime(std.testing.io);
-    const failed = try node.transport.engine.dial(&support.server_address, node.transport.peerId(), now, @splat(39));
+    const now = try transport_mod.currentTime(std.testing.io);
+    const failed = try node.transport.engine.dial(&support.server_address, node.transport.peerId(), now);
     node.transport.engine.failSend(failed.index);
     var vtable = std.testing.io.vtable.*;
     vtable.now = ProgressFault.clock;
@@ -637,7 +668,7 @@ const ProgressFault = struct {
     }
 };
 
-test "driver progress counts received datagram when the following clock read fails" {
+test "transport progress counts received datagram when the following clock read fails" {
     var node: Node = .{};
     try node.init(40);
     defer node.deinit();

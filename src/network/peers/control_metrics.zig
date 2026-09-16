@@ -1,7 +1,7 @@
 const std = @import("std");
 const t = @import("types.zig");
 const goodbye = @import("goodbye.zig");
-const prom = @import("../metrics_prometheus.zig");
+const prom = @import("../metrics/registry.zig");
 const long_connection_ms = 24 * 60 * 60 * 1000;
 
 pub const Relevance = enum { relevant, invalid_status, incompatible_fork, future_head, finalized_mismatch, missing_availability };
@@ -32,27 +32,47 @@ pub const Counters = struct {
         self.relevance[@intFromEnum(result)] +|= 1;
     }
 
-    pub fn write(self: *const Counters, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try prom.family(w, "lodestar_peer_connected_total", .counter, "Authenticated connections admitted to the native peer manager");
+    pub fn write(self: *const Counters, w: *prom.Encoder) prom.Error!void {
+        const connected = try w.family(.{
+            .name = "lodestar_peer_connected_total",
+            .kind = .counter,
+            .help = "Authenticated connections admitted to the native peer manager",
+            .labels = &.{ "direction", "status" },
+        });
         inline for (.{ "inbound", "outbound" }, 0..) |direction, index| {
-            try w.print("lodestar_peer_connected_total{{direction=\"" ++ direction ++ "\",status=\"open\"}} {d}\n", .{self.connected[index]});
+            try connected.sample(.{ direction, "open" }, self.connected[index]);
         }
-        try prom.family(w, "lodestar_peer_disconnected_total", .counter, "Admitted connections retired by the native peer manager");
+        const disconnected = try w.family(.{
+            .name = "lodestar_peer_disconnected_total",
+            .kind = .counter,
+            .help = "Admitted connections retired by the native peer manager",
+            .labels = &.{"direction"},
+        });
         inline for (.{ "inbound", "outbound" }, 0..) |direction, index| {
-            try prom.sample(w, "lodestar_peer_disconnected_total", "direction", direction, self.disconnected[index]);
+            try disconnected.sample(.{direction}, self.disconnected[index]);
         }
         inline for (.{
             .{ "lodestar_peer_goodbye_received_total", "goodbyes", "Decoded peer Goodbye requests" },
             .{ "lodestar_peer_goodbye_sent_total", "sent_goodbyes", "Local Goodbye requests admitted to the request engine" },
             .{ "lodestar_peer_long_connection_disconnect_total", "long_goodbyes", "Sent or received Goodbyes on connections older than 24 hours" },
         }) |metric| {
-            try prom.family(w, metric[0], .counter, metric[2]);
+            const goodbyes = try w.family(.{
+                .name = metric[0],
+                .kind = .counter,
+                .help = metric[2],
+                .labels = &.{"reason"},
+            });
             inline for (@typeInfo(goodbye.Reason).@"enum".fields) |field|
-                try prom.sample(w, metric[0], "reason", goodbyeLabel(@enumFromInt(field.value)), @field(self, metric[1])[field.value]);
+                try goodbyes.sample(.{goodbyeLabel(@enumFromInt(field.value))}, @field(self, metric[1])[field.value]);
         }
-        try prom.family(w, "lodestar_peer_relevance_check_total", .counter, "Native Status evaluations, excluding obsolete fork transition responses");
+        const relevance = try w.family(.{
+            .name = "lodestar_peer_relevance_check_total",
+            .kind = .counter,
+            .help = "Native Status evaluations, excluding obsolete fork transition responses",
+            .labels = &.{"result"},
+        });
         inline for (@typeInfo(Relevance).@"enum".fields) |field|
-            try prom.sample(w, "lodestar_peer_relevance_check_total", "result", relevanceLabel(@enumFromInt(field.value)), self.relevance[field.value]);
+            try relevance.sample(.{relevanceLabel(@enumFromInt(field.value))}, self.relevance[field.value]);
     }
 };
 
@@ -92,7 +112,8 @@ test "peer event metrics bound unknown reasons and count long Goodbye boundaries
     try std.testing.expectEqual(@as(u64, 1), counters.goodbyes[@intFromEnum(goodbye.Reason.unknown)]);
     var buffer: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try counters.write(&writer);
+    var encoder: prom.Encoder = .{ .writer = &writer };
+    try counters.write(&encoder);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "lodestar_peer_goodbye_sent_total{reason=\"Client has too many peers\"} 1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "lodestar_peer_relevance_check_total{result=\"IRRELEVANT_PEER_DIFFERENT_CLOCKS\"} 1\n") != null);
 }

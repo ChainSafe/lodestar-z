@@ -15,7 +15,6 @@ pub fn options() managed.Options {
             .max_peers = 3,
             .target_peers = 2,
             .min_outbound = 1,
-            .engine_capacity = 4,
         },
         .service = .{
             .router = .{ .negotiations_max = 24, .outbound_control_reserved = 8 },
@@ -66,7 +65,6 @@ pub const Setup = struct {
                 &support.client_address,
                 self.pair.client_ctx.local_peer_id,
                 self.pair.now,
-                self.pair.nextEntropy(),
             );
         } else _ = try self.pair.dial();
     }
@@ -737,7 +735,6 @@ test "core native leased dial retires uncompleted handshake and rejects late ack
         &intent.address,
         intent.peer,
         setup.pair.now,
-        setup.pair.nextEntropy(),
     );
     try std.testing.expect(setup.client.dialStarted(intent.token, conn));
     setup.pair.advance(10_000);
@@ -768,7 +765,6 @@ test "core native dial expiry closes authenticated attempt before connected even
             &intent.address,
             intent.peer,
             setup.pair.now,
-            setup.pair.nextEntropy(),
         );
         try std.testing.expect(setup.client.dialStarted(intent.token, conn));
         try setup.pair.pump();
@@ -799,7 +795,7 @@ test "core competing one-shot attempt expires during selected peer ban cooldown"
     const token = intents[0].token;
     const attempt = try setup.pair.dial();
     try std.testing.expect(setup.client.dialStarted(token, attempt));
-    _ = try setup.pair.server.dial(&support.client_address, setup.pair.client_ctx.local_peer_id, setup.pair.now, setup.pair.nextEntropy());
+    _ = try setup.pair.server.dial(&support.client_address, setup.pair.client_ctx.local_peer_id, setup.pair.now);
     try setup.pair.pump();
     try std.testing.expect(setup.pair.client.peerId(attempt) != null);
     var transport: [32]Engine.Event = undefined;
@@ -867,6 +863,11 @@ test "core coverage demand copies expires at host slot and keeps general discove
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 1), setup.client.discoveryNeed().syncnets);
     try std.testing.expect(setup.client.discoveryNeed().general);
+    setup.pair.advance(60_000);
+    setup.client.reconcile(setup.pair.now);
+    try std.testing.expectEqual(@as(u64, 100), setup.client.current_slot);
+    try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(@as(u8, 1), setup.client.discoveryNeed().syncnets);
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 101, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(@as(u8, 0), setup.client.discoveryNeed().syncnets);
@@ -893,6 +894,7 @@ test "core coverage authenticated custody differs from gossip delivery and inval
     const index = setup.client.service.gossipsub.inner.sessions.findPeer(connection).?;
     setup.client.service.gossipsub.resetOutbound(&setup.pair.client, index);
     try std.testing.expect(!setup.client.service.gossipsub.deliveryAvailable(connection));
+    setup.client.reconcile(setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
@@ -915,7 +917,7 @@ test "core coverage physical closing capacity blocks new leased intents" {
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(setup.client.disconnect(snapshots[0].peer, .host, setup.pair.now));
-    for (0..2) |_| _ = try setup.pair.client.dial(&support.server_address, setup.pair.server_ctx.local_peer_id, setup.pair.now, setup.pair.nextEntropy());
+    for (0..2) |_| _ = try setup.pair.client.dial(&support.server_address, setup.pair.server_ctx.local_peer_id, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 3), setup.pair.client.registry.active_len);
     var secret: [32]u8 = @splat(0);
     secret[31] = 17;
@@ -1136,7 +1138,119 @@ test "core reconciliation scans retained deadlines once and accounts for candida
     try std.testing.expectEqual(due, core.dial_queue.rows[candidates].eligible_at_ms);
 }
 
-test "core reconciliation raw mutators deadlines and read getters invalidate once" {
+test "core reconciliation reads preserve completed demand and catalog evaluation" {
+    var setup: Setup = .{};
+    var opts = options();
+    opts.peers.target_peers = 1;
+    opts.peers.min_outbound = 0;
+    const local: t.LocalState = .{ .fork = .{ .fork = .fulu }, .status = .{ .earliest_available_slot = 0 }, .metadata = .{ .custody_group_count = 1 } };
+    try setup.initOwnersWithOptions(&local, opts);
+    defer setup.deinit();
+    const view: *const managed.Core = &setup.client;
+    try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+    try std.testing.expectEqualDeep(managed.DiscoveryNeed{}, view.discoveryNeed());
+    var demand: t.Demand = .{ .attnets = 0x81, .syncnets = 1, .expires_at_slot = 200 };
+    demand.group_targets[0] = 1;
+    try setup.client.setDemand(&demand);
+    _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+    const deficits = view.coverageDeficits();
+    const need = view.discoveryNeed();
+    try std.testing.expectEqual(@as(u16, 2), deficits.attestation);
+    try std.testing.expectEqual(@as(u16, 1), deficits.sync);
+    try std.testing.expectEqual(@as(u16, 1), deficits.groups);
+    try std.testing.expect(need.general and need.custody);
+    try std.testing.expectEqual(@as(u8, 0x81), need.attnets[0]);
+    try std.testing.expectEqual(@as(u8, 1), need.syncnets);
+
+    try setup.client.setDemand(&.{});
+    try std.testing.expectEqual(setup.pair.now.mono_ms, setup.client.nextWakeup(setup.pair.now, 0, 0, 0, 0).?);
+    const dirty = view.diagnostics();
+    for (0..8) |_| {
+        try std.testing.expectEqualDeep(deficits, view.coverageDeficits());
+        try std.testing.expectEqualDeep(need, view.discoveryNeed());
+    }
+    try std.testing.expectEqualDeep(dirty, view.diagnostics());
+    setup.client.reconcile(setup.pair.now);
+    try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+    try std.testing.expectEqualDeep(managed.DiscoveryNeed{ .general = true }, view.discoveryNeed());
+
+    const identity = setup.pair.server_ctx.local_peer_id;
+    const conn: t.Handle = .{ .index = 0, .generation = 1 };
+    const peer = setup.client.catalog.admit(&identity, &view.local_identity, conn, &.{ .direction = .outbound, .endpoint = support.server_address, .now_ms = setup.pair.now.mono_ms }).admitted.peer;
+    try std.testing.expect(setup.client.catalog.updateStatus(peer, conn, &local.status, setup.pair.now.mono_ms));
+    try std.testing.expect(setup.client.catalog.setDirect(peer, true));
+    try std.testing.expectEqual(setup.pair.now.mono_ms, setup.client.nextWakeup(setup.pair.now, 0, 0, 0, 0).?);
+    try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+    try std.testing.expectEqualDeep(managed.DiscoveryNeed{ .general = true }, view.discoveryNeed());
+    setup.client.reconcile(setup.pair.now);
+    try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+    try std.testing.expectEqualDeep(managed.DiscoveryNeed{}, view.discoveryNeed());
+}
+
+test "core reconciliation reads do not decay reputation or schedule peer removal" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..60) |_| try setup.step(1);
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
+    const snapshot = snapshots[0];
+    const view: *const managed.Core = &setup.client;
+    const deficits = view.coverageDeficits();
+    const need = view.discoveryNeed();
+    try std.testing.expectEqual(.none, setup.client.reportPeer(snapshot.peer, .high_tolerance, setup.pair.now).?);
+    setup.pair.advance(100);
+    try setup.client.addDirectPeer(&snapshot.identity, &.{support.server_address}, setup.pair.now);
+    const incompatible: t.Status = .{ .fork_digest = @splat(1) };
+    try std.testing.expect(setup.client.catalog.updateStatus(snapshot.peer, snapshot.connection.?, &incompatible, setup.pair.now.mono_ms));
+    var events: [4]t.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.catalog.pollEvents(&events));
+    const dirty = view.catalog.get(snapshot.peer).?;
+    const diagnostics = view.diagnostics();
+    const dial_counters = view.dial_queue.counters;
+    for (0..8) |_| {
+        try std.testing.expectEqualDeep(deficits, view.coverageDeficits());
+        try std.testing.expectEqualDeep(need, view.discoveryNeed());
+    }
+    try std.testing.expectEqualDeep(dirty, view.catalog.get(snapshot.peer).?);
+    try std.testing.expectEqualDeep(diagnostics, view.diagnostics());
+    try std.testing.expectEqualDeep(dial_counters, view.dial_queue.counters);
+    try std.testing.expect(!view.catalog.eventsPending());
+    setup.client.reconcile(setup.pair.now);
+    const evaluated = view.catalog.get(snapshot.peer).?;
+    try std.testing.expect(evaluated.score > dirty.score);
+    try std.testing.expectEqual(t.DisconnectReason.incompatible_fork, evaluated.disconnect_reason.?);
+    try std.testing.expectEqual(@as(u16, 1), view.coverageDeficits().outbound);
+    try std.testing.expect(view.discoveryNeed().general);
+    try std.testing.expect(view.catalog.eventsPending());
+}
+
+test "core reconciliation clears policy observations at quiescence and shutdown" {
+    for ([_]bool{ false, true }) |graceful| {
+        var setup: Setup = .{};
+        try setup.initOwners(&.{});
+        defer setup.deinit();
+        try setup.client.setDemand(&.{ .syncnets = 1, .expires_at_slot = 200 });
+        _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
+        try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
+        try std.testing.expect(setup.client.discoveryNeed().general);
+        if (graceful) {
+            setup.client.beginGracefulClose(setup.pair.now);
+        } else setup.client.shutdown(&setup.pair.client, setup.pair.now);
+        const view: *const managed.Core = &setup.client;
+        const diagnostics = view.diagnostics();
+        setup.pair.advance(60_000);
+        setup.client.reconcile(setup.pair.now);
+        try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+        try std.testing.expectEqualDeep(managed.DiscoveryNeed{}, view.discoveryNeed());
+        try std.testing.expectEqualDeep(diagnostics, view.diagnostics());
+        _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 200, &.{}, &.{}, &.{});
+        try std.testing.expectEqualDeep(@import("peers/policy.zig").Deficits{}, view.coverageDeficits());
+        try std.testing.expectEqualDeep(managed.DiscoveryNeed{}, view.discoveryNeed());
+    }
+}
+
+test "core reconciliation raw mutators and deadlines invalidate once" {
     var setup: Setup = .{};
     const local: t.LocalState = .{ .fork = .{ .fork = .altair }, .metadata = .{ .syncnets = 1 } };
     try setup.init(&local);
@@ -1157,6 +1271,7 @@ test "core reconciliation raw mutators deadlines and read getters invalidate onc
     }
     try std.testing.expectEqual(before, setup.client.counters.selections);
     try std.testing.expect(setup.client.catalog.updateMetadata(peer, conn, &.{ .seq_number = 10, .syncnets = 0 }, setup.pair.now.mono_ms));
+    setup.client.reconcile(setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(before + 1, setup.client.counters.selections);
     try std.testing.expect(setup.client.catalog.updateMetadata(peer, conn, &.{ .seq_number = 11, .syncnets = 1 }, setup.pair.now.mono_ms));
@@ -1168,9 +1283,12 @@ test "core reconciliation raw mutators deadlines and read getters invalidate onc
     setup.client.reconcile(clock);
     const fresh = setup.client.counters.selections;
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(@as(u8, 0), setup.client.discoveryNeed().syncnets);
+    try std.testing.expectEqual(deadline, setup.client.reconciliation_deadline.?);
     clock.mono_ms = deadline;
     setup.client.reconcile(clock);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().sync);
+    try std.testing.expectEqual(@as(u8, 1), setup.client.discoveryNeed().syncnets);
     try std.testing.expectEqual(fresh + 1, setup.client.counters.selections);
     clock.mono_ms += 1;
     setup.client.reconcile(clock);
@@ -1192,16 +1310,17 @@ test "core reconciliation raw mutators deadlines and read getters invalidate onc
     try std.testing.expectEqual(penalized, setup.client.counters.selections);
 
     try setup.client.addDirectPeer(&snapshots[0].identity, &.{support.server_address}, clock);
-    _ = setup.client.coverageDeficits();
+    setup.client.reconcile(clock);
     try std.testing.expectEqual(penalized + 1, setup.client.counters.selections);
     _ = setup.client.removeDirectPeer(&snapshots[0].identity);
-    _ = setup.client.coverageDeficits();
+    setup.client.reconcile(clock);
     try std.testing.expectEqual(penalized + 2, setup.client.counters.selections);
     try setup.client.setDemand(&.{});
+    setup.client.reconcile(clock);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
     try std.testing.expectEqual(penalized + 3, setup.client.counters.selections);
     try setup.client.setDemand(&.{});
-    _ = setup.client.coverageDeficits();
+    setup.client.reconcile(clock);
     try std.testing.expectEqual(penalized + 3, setup.client.counters.selections);
     try std.testing.expect(setup.client.disconnect(peer, .host, clock));
     setup.client.reconcile(clock);
@@ -1326,7 +1445,7 @@ test "core native immediate close preserves direct membership and rejects stale 
         setup.pair.advance(60_000);
         var intents: [1]@import("peers/dial_queue.zig").DialIntent = undefined;
         try std.testing.expectEqual(@as(usize, 1), setup.client.dialIntents(&setup.pair.client, setup.pair.now, &intents));
-        const replacement = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now, setup.pair.nextEntropy());
+        const replacement = try setup.pair.client.dial(&intents[0].address, intents[0].peer, setup.pair.now);
         try std.testing.expect(setup.client.dialStarted(intents[0].token, replacement));
         for (0..60) |_| try setup.step(1);
         try std.testing.expectEqual(@as(u16, 1), setup.client.peerCounts().relevant);
@@ -1388,7 +1507,7 @@ test "core native public close cancels overlapping attempts and preserves bounde
     const token = intents[0].token;
     const attempt = try setup.pair.dial();
     try std.testing.expect(setup.client.dialStarted(token, attempt));
-    _ = try setup.pair.server.dial(&support.client_address, setup.pair.client_ctx.local_peer_id, setup.pair.now, setup.pair.nextEntropy());
+    _ = try setup.pair.server.dial(&support.client_address, setup.pair.client_ctx.local_peer_id, setup.pair.now);
     try setup.pair.pump();
     try std.testing.expect(setup.pair.client.peerId(attempt) != null);
     var transport: [32]Engine.Event = undefined;
@@ -1448,6 +1567,7 @@ test "core sampling delivery follows real outbound stream retirement replacement
         demand.group_targets[i] = 1;
     };
     try setup.client.setDemand(&demand);
+    setup.client.reconcile(setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     const handler = &setup.client.service.gossipsub;
     const index = handler.inner.sessions.findPeer(snapshot.connection.?).?;
@@ -1455,9 +1575,11 @@ test "core sampling delivery follows real outbound stream retirement replacement
     setup.pair.client.closeStream(old_stream, 0);
     handler.transportEvents(&setup.client.service.router, &setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);
     try std.testing.expect(!handler.deliveryAvailable(snapshot.connection.?));
+    setup.client.reconcile(setup.pair.now);
     try std.testing.expectEqual(@as(u16, 8), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(snapshot.custody_groups, setup.client.catalog.get(snapshot.peer).?.custody_groups);
     handler.negotiationResult(&setup.pair.client, .{ .stream = old_stream, .direction = .outbound, .owner = .meshsub, .result = .{ .ready = .{ .protocol = .{ .meshsub = .v1_2 }, .leftover = &.{}, .fin = false } } }, setup.pair.now);
+    setup.client.reconcile(setup.pair.now);
     try std.testing.expectEqual(@as(u16, 8), setup.client.coverageDeficits().groups);
     for (0..16) |_| try setup.step(1);
     setup.pair.advance(60_000);
@@ -1471,6 +1593,7 @@ test "core sampling delivery follows real outbound stream retirement replacement
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     handler.transportEvents(&setup.client.service.router, &setup.pair.client, &.{.{ .stream_closed = .{ .stream = old_stream, .reset_code = 0 } }}, setup.pair.now);
     try std.testing.expect(handler.deliveryAvailable(replacement.connection.?));
+    setup.client.reconcile(setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().groups);
     try std.testing.expectEqual(snapshot.custody_groups, setup.client.catalog.get(snapshot.peer).?.custody_groups);
     setup.client.shutdown(&setup.pair.client, setup.pair.now);
@@ -1492,10 +1615,13 @@ test "core sampling demand rejects atomically trims fork bound and expires exclu
     demand.group_targets[1] = setup.client.catalog.options.max_peers + 1;
     try std.testing.expectError(error.InvalidDemand, setup.client.setDemand(&demand));
     try std.testing.expectEqualDeep(before, setup.client.demand);
+    setup.client.reconcile(setup.pair.now);
     try std.testing.expectEqual(@as(u16, 4), setup.client.coverageDeficits().groups);
     local.fork.custody_groups = 64;
     try setup.client.updateFork(&local, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.demand.group_targets[127]);
+    try std.testing.expectEqual(@as(u16, 4), setup.client.coverageDeficits().groups);
+    setup.client.reconcile(setup.pair.now);
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);
     _ = setup.client.process(&setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u16, 1), setup.client.coverageDeficits().groups);

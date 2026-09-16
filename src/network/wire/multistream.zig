@@ -1,6 +1,7 @@
 const std = @import("std");
 pub const protocol_id_length_max: usize = 128;
 pub const proposals_max: u8 = 4;
+pub const supported_max: usize = 64;
 const varint = @import("varint.zig");
 
 pub const header = "/multistream/1.0.0";
@@ -8,7 +9,13 @@ pub const na = "na";
 pub const message_length_max = 2 + protocol_id_length_max + 1;
 pub const listener_write_max = 4 * message_length_max;
 
-pub const Error = error{ Malformed, TooLong, BufferTooSmall } || varint.Error;
+pub const Error = error{ Malformed, TooLong, TooManyProtocols, BufferTooSmall } || varint.Error;
+
+pub const Protocol = struct {
+    id: []const u8,
+    /// Stable caller identity, independent of position in the current offer list.
+    index: u8,
+};
 
 pub const Message = struct {
     token: []const u8,
@@ -86,7 +93,7 @@ pub const Dialer = struct {
 
 pub const ListenerStatus = union(enum) {
     pending,
-    selected: usize,
+    selected: u8,
     failed,
 };
 
@@ -97,15 +104,11 @@ pub const ListenerOutcome = struct {
 };
 
 pub const Listener = struct {
-    supported: []const []const u8,
     header_seen: bool = false,
     proposals: u8 = 0,
 
-    pub fn init(supported: []const []const u8) Listener {
-        return .{ .supported = supported };
-    }
-
-    pub fn feed(self: *Listener, bytes: []const u8, out: []u8) Error!ListenerOutcome {
+    pub fn feed(self: *Listener, bytes: []const u8, supported: []const Protocol, out: []u8) Error!ListenerOutcome {
+        if (supported.len > supported_max) return error.TooManyProtocols;
         var consumed: usize = 0;
         var written: usize = 0;
         while (consumed < bytes.len) {
@@ -121,13 +124,13 @@ pub const Listener = struct {
                 return .{ .consumed = consumed, .write = out[0..written], .status = .failed };
             }
             self.proposals += 1;
-            for (self.supported, 0..) |protocol, index| {
-                if (!std.mem.eql(u8, message.token, protocol)) continue;
-                written += (try encodeMessage(protocol, out[written..])).len;
+            for (supported) |protocol| {
+                if (!std.mem.eql(u8, message.token, protocol.id)) continue;
+                written += (try encodeMessage(protocol.id, out[written..])).len;
                 return .{
                     .consumed = consumed,
                     .write = out[0..written],
-                    .status = .{ .selected = index },
+                    .status = .{ .selected = protocol.index },
                 };
             }
             written += (try encodeMessage(na, out[written..])).len;

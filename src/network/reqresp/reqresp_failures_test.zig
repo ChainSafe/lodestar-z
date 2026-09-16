@@ -97,7 +97,7 @@ test "reqresp fails a request whose peer stops making progress" {
     try std.testing.expectEqual(@as(u16, 0), setup.server.reqresp.active().inbound);
     const counts = &setup.client.reqresp.protocol_counters[@intFromEnum(Protocol.status_v1)];
     try std.testing.expectEqual(@as(u64, 1), counts.outgoing_time.count);
-    try std.testing.expect(counts.outgoing_time.sum_ms >= 2500);
+    try std.testing.expect(counts.outgoing_time.sum >= 2500);
     try std.testing.expectEqual(@as(u64, 1), setup.client.reqresp.outgoing_error_reasons[@intFromEnum(reqresp.metrics.ErrorReason.REQUEST_ERROR_RESP_TIMEOUT)]);
 }
 
@@ -550,7 +550,7 @@ fn pumpRawServer(setup: *Pair, comptime reply: RawReply) !usize {
     const now = setup.pair.now;
     var storage: [16]engine_mod.Event = undefined;
     for (setup.pair.events(&setup.pair.server, &storage)) |event| switch (event) {
-        .stream_opened => |stream| try setup.server.router.negotiator.acceptInbound(stream, &protocol.ids, now),
+        .stream_opened => |stream| try setup.server.router.negotiator.acceptInbound(stream, now),
         else => {},
     };
     var leftover: usize = 0;
@@ -1400,7 +1400,7 @@ test "reqresp request write preserves already readable native response" {
         try setup.pair.pump();
         var native_events: [16]engine_mod.Event = undefined;
         for (setup.pair.events(&setup.pair.server, &native_events)) |event| switch (event) {
-            .stream_opened => |stream| try setup.server.router.negotiator.acceptInbound(stream, &protocol.ids, setup.pair.now),
+            .stream_opened => |stream| try setup.server.router.negotiator.acceptInbound(stream, setup.pair.now),
             else => {},
         };
         var outcomes: [8]negotiate.Outcome = undefined;
@@ -1593,7 +1593,6 @@ test "reqresp absolute request phase expires under real stream backpressure" {
         for (setup.pair.events(&setup.pair.server, &storage)) |event| switch (event) {
             .stream_opened => |stream| try setup.server.router.negotiator.acceptInbound(
                 stream,
-                &protocol.ids,
                 setup.pair.now,
             ),
             else => {},

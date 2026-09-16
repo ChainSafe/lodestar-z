@@ -24,7 +24,7 @@ pub const Counters = struct {
     processing_failures: u64 = 0,
     coordinator_failures: u64 = 0,
 };
-pub const LookupTime = @import("../metrics_histogram.zig").Histogram(&.{ 1000, 5000, 10000, 30000, 60000, 120000 });
+pub const LookupTime = @import("../metrics/histogram.zig").Duration(&.{ 1000, 5000, 10000, 30000, 60000, 120000 });
 pub const Options = struct {
     quic_mode: d.Udp.Mode = .dual,
     query_interval_ms: u64 = 1_000,

@@ -7,7 +7,7 @@ test "engine notifications deliver a later close during sustained earlier stream
     try pair.init(.{}, .{});
     defer pair.deinit();
     const handles = try support.connectPair(&pair);
-    const victim = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now, pair.nextEntropy());
+    const victim = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now);
     pair.server.failSend(victim.index);
     var one: [1]engine.Event = undefined;
     var delivered = false;
@@ -46,7 +46,7 @@ test "engine notifications deliver later native activity during sustained earlie
     var newcomer: support.Pair = .{};
     try newcomer.init(.{}, .{});
     defer newcomer.deinit();
-    newcomer.entropy = 100;
+    newcomer.client.csprng = std.Random.DefaultCsprng.init(@splat(3));
     const pending_dial = try newcomer.dial();
     var bytes: [1452]u8 = undefined;
     const initial = newcomer.client.sendOne(pending_dial.index, newcomer.now, &bytes).?;
@@ -54,7 +54,7 @@ test "engine notifications deliver later native activity during sustained earlie
     @memcpy(saved_initial[0..initial.bytes.len], initial.bytes);
     const source = engine.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4003 } };
     var response: [1452]u8 = undefined;
-    const victim = pair.server.receive(bytes[0..initial.bytes.len], &source, pair.now, pair.nextPool(), &response).accepted;
+    const victim = pair.server.receive(bytes[0..initial.bytes.len], &source, pair.now, &response).accepted;
     try std.testing.expect(victim.index != handles.server.index);
     pair.drop_to_address = source;
     const stream = try pair.client.openStream(handles.client);
@@ -75,7 +75,7 @@ test "engine notifications deliver later native activity during sustained earlie
     try std.testing.expect(pair.server.abandon(victim));
     _ = pair.server.takeActivity(&activity);
     try std.testing.expect(!pair.server.activityPending());
-    const replacement = pair.server.receive(saved_initial[0..initial.bytes.len], &source, pair.now, pair.nextPool(), &response).accepted;
+    const replacement = pair.server.receive(saved_initial[0..initial.bytes.len], &source, pair.now, &response).accepted;
     try std.testing.expectEqual(victim.index, replacement.index);
     try std.testing.expect(victim.generation != replacement.generation);
     try std.testing.expectEqual(@as(usize, 1), pair.server.takeActivity(&activity));
@@ -138,7 +138,7 @@ test "engine notifications preserve generations through active swaps retirement 
     _ = try support.connectPair(&pair);
     var owners: [3]engine.Handle = undefined;
     for (&owners) |*owner| {
-        owner.* = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now, pair.nextEntropy());
+        owner.* = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now);
         pair.server.failSend(owner.index);
     }
     var one: [1]engine.Event = undefined;
@@ -148,7 +148,7 @@ test "engine notifications preserve generations through active swaps retirement 
     _ = try support.expectClosed(one[0], owners[0], .outbound, null);
     pair.server.releaseReported();
     try std.testing.expectEqual(owners[2].index, pair.server.registry.active[1]);
-    const replacement = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now, pair.nextEntropy());
+    const replacement = try pair.server.dial(&support.client_address, pair.client_ctx.local_peer_id, pair.now);
     try std.testing.expectEqual(owners[0].index, replacement.index);
     try std.testing.expect(replacement.generation != owners[0].generation);
     pair.server.failSend(replacement.index);
