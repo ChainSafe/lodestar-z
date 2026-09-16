@@ -1,7 +1,7 @@
 import {expect, it} from "vitest";
-import bindings from "../src/bindings.js";
 import {type NativeRuntimeConfig, createNativeNetworkApplicationRuntime} from "../src/network.js";
 import {applicationConfig, discoveryConfig, topicBoundary} from "./utils/network.js";
+import {networkBindings as bindings} from "./utils/network-bindings.js";
 
 const cases: readonly [string, (config: NativeRuntimeConfig) => void, string][] = [
   [

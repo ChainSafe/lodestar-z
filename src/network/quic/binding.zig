@@ -218,6 +218,7 @@ pub const HeaderInfo = struct {
     packet_type: PacketType,
     scid: Cid,
     dcid: Cid,
+    token: [token_length_max]u8,
     token_len: usize,
 };
 
@@ -253,6 +254,7 @@ pub fn headerInfo(datagram: []const u8) Error!HeaderInfo {
         .packet_type = @enumFromInt(packet_type),
         .scid = Cid.fromSlice(scid[0..scid_len]),
         .dcid = Cid.fromSlice(dcid[0..dcid_len]),
+        .token = token,
         .token_len = token_len,
     };
 }

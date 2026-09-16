@@ -24,7 +24,7 @@ test "peer reputation fatal clamps and goodbye has separate deadline" {
     _ = state.apply(.fatal, 100);
     _ = state.apply(.fatal, 100);
     try std.testing.expectEqual(@as(f64, -100), state.score);
-    state.remoteGoodbye(200, 500);
+    state.cooldown(200, 500);
     try std.testing.expectEqual(@as(u64, 700), state.goodbye_until_ms);
     try std.testing.expectEqual(@as(u64, 1_800_100), state.ban_until_ms);
     try std.testing.expect(state.retained(700));

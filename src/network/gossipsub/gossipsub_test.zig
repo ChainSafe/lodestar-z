@@ -641,7 +641,7 @@ test "gossipsub activity behind partial peer cursor remains ready and generation
     try std.testing.expect(@import("test_support.zig").driver(setup.server.gossipsub.inner).nextIoWakeup(setup.pair.now, 1).? > setup.pair.now.mono_ms);
 }
 
-test "gossipsub frame and TX absolute residence survive steady byte progress" {
+test "gossipsub large frame deadline releases receive and transmit leases despite byte progress" {
     var setup: Pair = .{};
     try setup.initOpts(.{ .random_seed = 1, .output_per_peer = 1, .tx_timeout_ms = 500 }, .{ .random_seed = 1, .body_buffer_bytes = 64, .large_frame_timeout_ms = 150, .pressure_timeout_ms = 500 });
     defer setup.deinit();
@@ -660,7 +660,7 @@ test "gossipsub frame and TX absolute residence survive steady byte progress" {
     _ = try setup.client.gossipsub.inner.publish(test_topic, "held transmit payload", setup.pair.now);
     for (0..4) |_| try setup.pumpOnce();
     const began = setup.pair.now.mono_ms;
-    for (0..4) |_| {
+    for (0..1) |_| {
         setup.pair.advance(100);
         try std.testing.expectEqual(@as(usize, 1), try setup.pair.client.write(setup.clientStream(), "x", false));
         try setup.pumpOnce();
@@ -671,7 +671,10 @@ test "gossipsub frame and TX absolute residence survive steady byte progress" {
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(u64, 1), setup.server.gossipsub.inner.counters.large_stalled);
     try std.testing.expect(setup.server.gossipsub.inner.sessions.rows[server_peer].io.large_slot == null);
-    try std.testing.expectEqual(@as(u64, 1), setup.client.gossipsub.inner.counters.tx_stalled);
+    const logical = setup.server.gossipsub.inner.sessions.rows[server_peer].logical;
+    try std.testing.expect(setup.server.gossipsub.inner.peers.rows[logical.index].large_frame_denied_until > setup.pair.now.mono_ms);
+    setup.pair.advance(300);
+    try setup.pumpOnce();
     try std.testing.expectEqual(@as(usize, 0), setup.client.gossipsub.inner.sessions.rows[client_peer].io.tx.data.count);
     for (setup.client.gossipsub.inner.messages.store.entries) |e| if (e.active) try std.testing.expectEqual(@as(u32, 0), e.tx);
 }

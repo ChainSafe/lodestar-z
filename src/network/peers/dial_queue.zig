@@ -8,7 +8,6 @@ pub const DialIntent = struct { token: Token, peer: t.PeerId, address: t.Address
 pub const Options = struct {
     capacity: u16 = 256,
     concurrent_max: u16 = 4,
-    engine_dialing_max: u16 = 16,
     seed: u64,
 };
 pub const history_retention_ms: u64 = 600_000;
@@ -105,8 +104,7 @@ pub const DialQueue = struct {
 
     pub fn validateOptions(options: Options) error{InvalidOptions}!void {
         if (options.capacity == 0 or options.capacity > 4096 or options.concurrent_max == 0 or
-            options.concurrent_max > 4 or options.concurrent_max > options.engine_dialing_max or
-            options.concurrent_max > options.capacity) return error.InvalidOptions;
+            options.concurrent_max > 4 or options.concurrent_max > options.capacity) return error.InvalidOptions;
     }
 
     pub fn init(a: std.mem.Allocator, options: Options) !DialQueue {
@@ -225,9 +223,8 @@ pub const DialQueue = struct {
                 continue;
             }
             if (!row.automatic or row.direct or row.connected or row.attempt or row.conn != null or now_ms < row.eligible_at_ms) continue;
-            if (row.failures != 0 and now_ms < row.history_until_ms) continue;
-            const usefulness = policy.utility(&coverage(row, context, now_ms), wanted);
-            if (incoming_utility < usefulness or (incoming_utility == usefulness and now_ms < row.history_until_ms)) continue;
+            const usefulness: u16 = if (row.failures != 0) 0 else policy.utility(&coverage(row, context, now_ms), wanted);
+            if (incoming_utility < usefulness or (row.failures == 0 and incoming_utility == usefulness and now_ms < row.history_until_ms)) continue;
             if (victim == null or usefulness < victim_utility or (usefulness == victim_utility and row.history_until_ms < victim.?.history_until_ms)) {
                 victim = row;
                 victim_utility = usefulness;
@@ -502,9 +499,10 @@ pub const DialQueue = struct {
     }
     fn failed(self: *DialQueue, row: *Row, now_ms: u64) void {
         std.debug.assert(row.attempt);
-        self.durations[1].observe(now_ms -| row.attempt_started_ms);
         row.attempt = false;
         row.conn = null;
+        if (row.connected) return;
+        self.durations[1].observe(now_ms -| row.attempt_started_ms);
         row.failures = @min(row.failures +| 1, 7);
         const base: u64 = @min(@as(u64, 1_000) << @intCast(row.failures - 1), 60_000);
         const jitter = self.random.random().int(u16) % 1_001;
@@ -561,7 +559,8 @@ pub const DialQueue = struct {
                 const index = (self.cursor + offset) % self.rows.len;
                 const row = &self.rows[index];
                 if (!row.occupied or !hasDialIntent(row, now_ms) or row.connected or row.attempt or now_ms < row.eligible_at_ms or row.generation == std.math.maxInt(u64)) continue;
-                if (best == null or row.direct and !self.rows[best.?].direct or (row.direct == self.rows[best.?].direct and row.priority > self.rows[best.?].priority)) best = index;
+                if (best == null or dialTier(row, now_ms) > dialTier(&self.rows[best.?], now_ms) or
+                    (dialTier(row, now_ms) == dialTier(&self.rows[best.?], now_ms) and row.priority > self.rows[best.?].priority)) best = index;
             }
             const index = best orelse break;
             self.cursor = (index + 1) % self.rows.len;
@@ -579,6 +578,9 @@ pub const DialQueue = struct {
             active += 1;
         }
         return count;
+    }
+    fn dialTier(row: *const Row, now_ms: u64) u8 {
+        return if (row.direct) 2 else if (now_ms < row.manual_until_ms) 1 else 0;
     }
     pub fn nextWakeup(self: *const DialQueue, now_ms: u64, output_capacity: usize) ?u64 {
         var active: usize = 0;

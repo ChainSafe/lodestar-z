@@ -19,6 +19,49 @@ const support = @import("test_support.zig");
 const receiveForTest = support.receiveMessage;
 const testMessage = support.message;
 
+test "gossip graylist drops an RPC before decoding or admitting messages" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const conn: Handle = .{ .index = 0, .generation = 1 };
+    const session = support.addPeer(&g, conn, .v1_2).?;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    try std.testing.expect(g.setPeerScore(conn, g.options.score_params.graylist_threshold - 1));
+    var encoded: [256]u8 = undefined;
+    var compressed: [64]u8 = undefined;
+    const len = try snappy.raw.compress("payload", &compressed);
+    var writer = protobuf.Writer.init(&encoded);
+    protobuf.writeMessage(&writer, compressed[0..len], name);
+    g.sessions.rows[session.index].io.startRpc(writer.written());
+    var events: [1]Event = undefined;
+    var count: usize = 0;
+    var items = g.options.items_per_peer;
+    try std.testing.expect(try support.processRpc(&g, session.index, .{ .mono_ms = 1, .unix_s = 0 }, &events, &count, &items));
+    try std.testing.expectEqual(@as(usize, 0), count);
+    try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.graylist_dropped);
+    try std.testing.expectEqual(@as(u64, 0), g.counters.messages_received);
+    try std.testing.expectEqual(@as(u64, 0), g.topic_metrics.get(name).prevalidation);
+}
+
+test "gossip IWANT processes at most 5000 IDs in a single RPC" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const session = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const count = constants.max_iwant_ids_per_rpc + 1;
+    const encoded = try std.testing.allocator.alloc(u8, protobuf.iwantRpcSize(count, constants.message_id_length));
+    defer std.testing.allocator.free(encoded);
+    var writer = protobuf.Writer.init(encoded);
+    protobuf.beginIwantRpc(&writer, count, constants.message_id_length);
+    const id: MessageId = @splat(0xab);
+    for (0..count) |_| protobuf.writeIwantId(&writer, &id);
+    g.sessions.rows[session.index].io.startRpc(writer.written());
+    var emitted: usize = 0;
+    var items = g.options.items_per_peer;
+    try std.testing.expect(try support.processRpc(&g, session.index, .{ .mono_ms = 1, .unix_s = 0 }, &.{}, &emitted, &items));
+    try std.testing.expectEqual(@as(u64, constants.max_iwant_ids_per_rpc), g.rpc_metrics.iwant_unknown);
+    try std.testing.expectEqual(@as(usize, 0), emitted);
+}
+
 test "gossip turn separates credit exhaustion from host pressure and preserves event borrows" {
     var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .work_per_pump = 1, .decompress_per_peer_bytes = 1 });
     defer g.deinit();
@@ -209,15 +252,15 @@ test "gossipsub IWANT promises commit on queue and start at completed control tr
     g.sessions.rows[peer.index].io.tx.cancelStream(&g.messages.store);
     support.control(&g, peer.index, .{ .ihave = .{ .topic = topic, .body = w.written() } }, .{ .mono_ms = 2, .unix_s = 1 });
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
-    g.finishPump(.{ .mono_ms = 10_000, .unix_s = 0 });
+    g.finishPump(.{ .mono_ms = 1_000, .unix_s = 0 });
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
     const io = &g.sessions.rows[peer.index].io;
     const first = io.tx.segment(&g.messages.store);
     _ = io.tx.advance(&g.messages.store, 1);
-    try std.testing.expect(g.recovery.batches[0].expiry == null);
+    try std.testing.expectEqual(@as(u64, 3_002), g.recovery.batches[0].expiry);
     const token = io.tx.advance(&g.messages.store, first.len - 1).?.control.token;
-    g.recovery.controlSent(g.sessions.rows[peer.index].conn, token, g.options.iwant_followup_ms, 10_000);
-    try std.testing.expectEqual(@as(?u64, 13_000), g.recovery.batches[0].expiry);
+    g.recovery.controlSent(g.sessions.rows[peer.index].conn, token, g.options.iwant_followup_ms, 1_000);
+    try std.testing.expectEqual(@as(u64, 4_000), g.recovery.batches[0].expiry);
     var empty: [0]Event = .{};
     try std.testing.expectEqual(@as(?usize, null), try testMessage(&g, peer.index, "held behind host pressure", 11_000, &empty));
     g.finishPump(.{ .mono_ms = 14_000, .unix_s = 0 });
@@ -445,7 +488,7 @@ test "gossip independent RPC enumerates every receive split through admission" {
     var g = try Gossipsub.init(std.testing.allocator, .{
         .random_seed = 1,
         .mcache_capacity = 2,
-        .validation_capacity = 2,
+        .validation_capacity = 4,
         .seen_capacity = 2,
         .seen_ttl_ms = 1,
         .validation_tombstone_ms = 1,
@@ -553,8 +596,8 @@ test "recovery owner clear releases sent and unsent attribution pins" {
     const conn: Handle = .{ .index = 0, .generation = 1 };
     const peer = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const ref = g.sessions.rows[peer.index].logical;
-    g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[peer.index].logical, g.sessions.rows[peer.index].conn, 1);
-    g.recovery.add(&g.peers, [_]u8{2} ** 20, g.sessions.rows[peer.index].logical, g.sessions.rows[peer.index].conn, 2);
+    g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[peer.index].logical, g.sessions.rows[peer.index].conn, 1, 30_000);
+    g.recovery.add(&g.peers, [_]u8{2} ** 20, g.sessions.rows[peer.index].logical, g.sessions.rows[peer.index].conn, 2, 30_000);
     g.recovery.controlSent(g.sessions.rows[peer.index].conn, 1, g.options.iwant_followup_ms, 10);
     try std.testing.expectEqual(@as(u32, 2), g.peers.rows[ref.index].pins);
     g.recovery.clear(&g.peers);
@@ -571,13 +614,13 @@ test "gossipsub configured IWANT receipt starts twelve second deadline once" {
     const p = @import("test_support.zig").addPeer(&g, conn, .v1_2).?;
     const io = &g.sessions.rows[p.index].io;
     const token = io.tx.injectFrame("control", false, null, 1).?;
-    g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[p.index].logical, conn, token);
+    g.recovery.add(&g.peers, [_]u8{1} ** 20, g.sessions.rows[p.index].logical, conn, token, 30_000);
     g.recovery.controlSent(.{ .index = 0, .generation = 2 }, token, 12_000, 5);
     g.recovery.controlSent(g.sessions.rows[p.index].conn, token + 1, g.options.iwant_followup_ms, 5);
-    try std.testing.expect(g.recovery.nextExpiry() == null);
+    try std.testing.expectEqual(@as(?u64, 30_000), g.recovery.nextExpiry());
     _ = io.tx.segment(&g.messages.store);
     try std.testing.expect(io.tx.advance(&g.messages.store, 1) == null);
-    try std.testing.expect(g.recovery.nextExpiry() == null);
+    try std.testing.expectEqual(@as(?u64, 30_000), g.recovery.nextExpiry());
     try std.testing.expectEqual(@as(u64, 0), g.recovery.metrics.sent);
     g.writeCompleted(g.sessions.ref(p.index), io.tx.advance(&g.messages.store, 6).?, 100);
     g.recovery.controlSent(g.sessions.rows[p.index].conn, token, g.options.iwant_followup_ms, 200);
@@ -828,4 +871,38 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
     try std.testing.expect(turn.large_used);
     try std.testing.expectEqual(@as(u16, 2), io.ihave_recv);
     try std.testing.expectEqual(@as(usize, 1), g.recovery.len);
+}
+
+test "gossip pending validation quota preserves room for another peer and refunds completed work" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = 4 });
+    defer g.deinit();
+    const first = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    const second = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+    try std.testing.expect(g.subscribe("/eth2/01020304/beacon_block/ssz_snappy"));
+    var events: [1]Event = undefined;
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "first", 1, &events));
+    const held = events[0].message.handle;
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "second", 2, &events));
+    try std.testing.expectEqual(@as(?usize, null), try testMessage(&g, first.index, "third", 3, &events));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, second.index, "other peer", 4, &events));
+    try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(held, .ignore, .{ .mono_ms = 5, .unix_s = 0 }));
+    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "third", 6, &events));
+}
+
+test "gossip unsent IWANT expiry refunds recovery slots without blaming the peer" {
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
+    defer g.deinit();
+    const conn: Handle = .{ .index = 0, .generation = 1 };
+    const peer = support.addPeer(&g, conn, .v1_2).?;
+    const logical = g.sessions.rows[peer.index].logical;
+    const capacity = g.recovery.available();
+    g.recovery.add(&g.peers, @splat(1), logical, conn, 1, 100);
+    try std.testing.expectEqual(@as(u32, 1), g.peers.rows[logical.index].pins);
+    g.recovery.controlSent(conn, 1, 3000, 100);
+    try std.testing.expectEqual(@as(u64, 0), g.recovery.metrics.sent);
+    g.finishPump(.{ .mono_ms = 100, .unix_s = 0 });
+    try std.testing.expectEqual(capacity, g.recovery.available());
+    try std.testing.expectEqual(@as(u32, 0), g.peers.rows[logical.index].pins);
+    try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
+    try std.testing.expectEqual(@as(?u64, null), g.recovery.nextExpiry());
 }

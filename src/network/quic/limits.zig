@@ -45,3 +45,5 @@ comptime {
     std.debug.assert(receive_budget_bytes / connections_max_default >= connection_window_min);
     std.debug.assert(receive_budget_bytes / connections_max_default <= connection_window_max);
 }
+
+pub const events_per_connection: usize = 2 * streams_per_connection + 3;

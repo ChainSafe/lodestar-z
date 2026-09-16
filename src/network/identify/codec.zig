@@ -4,7 +4,7 @@ const keys = @import("../wire/keys.zig");
 const PeerId = @import("../wire/peer_id.zig").PeerId;
 const routing = @import("../router.zig");
 const Set = @import("../capabilities.zig").Set;
-const Address = @import("../wire/address.zig").Address;
+const Address = @import("udp").Address;
 const multiaddr = @import("../wire/multiaddr.zig");
 
 pub const frame_max = 8192;
@@ -61,8 +61,14 @@ pub const Local = struct {
         self.address_count = @intCast(addresses.len);
     }
 
-    pub fn encode(self: *const Local, receive: Set, out: []u8) Error![]const u8 {
+    pub fn encode(self: *const Local, receive: Set, observed: ?Address, out: []u8) Error![]const u8 {
+        var observed_storage: [multiaddr.binary_length_max]u8 = undefined;
+        const observed_bytes: ?[]const u8 = if (observed) |address|
+            (multiaddr.Multiaddr{ .address = address }).encode(&observed_storage) catch return error.InvalidAddress
+        else
+            null;
         var size = pb.bytesFieldSize(1, self.public_key.len) + pb.bytesFieldSize(5, self.protocol_version.len) + pb.bytesFieldSize(6, self.agent.len);
+        if (observed_bytes) |bytes| size += pb.bytesFieldSize(4, bytes.len);
         for (self.addresses[0..self.address_count]) |address| size += pb.bytesFieldSize(2, address.len);
         var protocols = receive.iterator();
         while (protocols.next()) |protocol| size += pb.bytesFieldSize(3, protocol.id().len);
@@ -74,6 +80,7 @@ pub const Local = struct {
         for (self.addresses[0..self.address_count]) |address| writer.bytesField(2, address.bytes[0..address.len]);
         protocols = receive.iterator();
         while (protocols.next()) |protocol| writer.bytesField(3, protocol.id());
+        if (observed_bytes) |bytes| writer.bytesField(4, bytes);
         writer.bytesField(5, self.protocol_version.slice());
         writer.bytesField(6, self.agent.slice());
         std.debug.assert(writer.len == pb.varintLen(size) + size);
@@ -181,8 +188,8 @@ pub const Decoder = struct {
     }
 
     pub fn feed(self: *Decoder, bytes: []const u8, fin: bool) Error!void {
-        errdefer self.failed = true;
         if (self.finished or self.failed) return error.Finished;
+        errdefer self.failed = true;
         if (bytes.len > aggregate_max + 10 * frames_max) return error.FrameLimit;
         var pos: usize = 0;
         while (pos < bytes.len) {

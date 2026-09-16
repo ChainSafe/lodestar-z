@@ -200,7 +200,7 @@ fn applicationAndFork(a: *runtime.NetworkCore, b: *runtime.NetworkCore) !void {
     var handles: [4]rr.RequestHandle = undefined;
     for (&handles, 0..) |*handle, i| {
         const protocol: rr.Protocol = if (i < 2) .blocks_by_range_v2 else .blocks_by_root_v2;
-        handle.* = try a.sendReqRespRequest(peer_a.?, protocol, request[0..protocol.info().request_min], sinks[i * sink_size ..][0..sink_size], .{ .expected_chunks = 1 }, now);
+        handle.* = try a.sendReqRespRequest(peer_a.?, protocol, if (i < 2) &request else &([_]u8{0} ** 32), sinks[i * sink_size ..][0..sink_size], .{ .expected_chunks = 1 }, now);
     }
     try std.testing.expectError(error.TooManyRequests, a.sendReqRespRequest(peer_a.?, .blocks_by_range_v2, &request, sinks[0..sink_size], .{}, now));
     a.reStatusPeers(now);
@@ -290,7 +290,7 @@ test "managed runtime every allocation prefix cleans up and memory plan counts o
         .call_capacity = 8,
     } };
 
-    opts.core.service.reqresp.admission = .{ .policy = @import("reqresp/request_policy_test.zig").fixture(), .limits = .{
+    opts.core.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{
         .identities = opts.core.peers.capacity,
         .peer = @import("reqresp/admission_test.zig").quotas(100, 1000),
         .global = @import("reqresp/admission_test.zig").quotas(1000, 1000),
@@ -476,7 +476,7 @@ test "managed runtime unreachable destination backs off and rotates to its alter
     vtable.netSend = unreachableSend;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     const refused = node.step(io, now, 0, .{}, 0);
-    try std.testing.expectEqual(error.DestinationUnreachable, refused.failure.?);
+    try std.testing.expect(refused.failure == null);
     try std.testing.expectEqual(@as(u8, 1), refused.dial_failed);
     try std.testing.expectEqual(@as(u8, 0), refused.dial_deferred);
     const row = &node.core.dial_queue.rows[0];
@@ -603,7 +603,23 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
         var node: runtime.NetworkCore = undefined;
         try node.initManaged(ledger.allocator(), std.testing.io, opts);
         const measured = ledger.bytes;
-        try std.testing.expectEqual(measured, node.memoryPlan().allocated_bytes);
+        const plan = node.memoryPlan();
+        const core_plan = node.core.memoryPlan();
+        const kib = 1024;
+        const mib = 1024 * kib;
+        const ceilings = if (profile == .small)
+            .{ .total = 60 * mib, .service = 59 * mib, .transport = 90 * kib, .scratch = 400 * kib, .catalog = 56 * kib, .control = 11 * kib, .dial = 14 * kib }
+        else
+            .{ .total = 210 * mib, .service = 200 * mib, .transport = 720 * kib, .scratch = 3200 * kib, .catalog = 448 * kib, .control = 80 * kib, .dial = 112 * kib };
+        try std.testing.expectEqual(measured, plan.allocated_bytes);
+        try std.testing.expect(measured <= ceilings.total);
+        try std.testing.expect(core_plan.service_bytes <= ceilings.service);
+        try std.testing.expect(plan.transport_bytes <= ceilings.transport);
+        try std.testing.expect(plan.scratch_bytes <= ceilings.scratch);
+        try std.testing.expect(core_plan.catalog_bytes <= ceilings.catalog);
+        try std.testing.expect(core_plan.control_bytes <= ceilings.control);
+        try std.testing.expect(core_plan.dial_bytes <= ceilings.dial);
+        try std.testing.expectEqual(@as(u64, if (profile == .small) 64 * mib else 512 * mib), plan.transport_windows.receive_window_bytes);
         try std.testing.expect(measured <= node.reservations.byte_limit.?);
         node.deinit(std.testing.io);
         try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
@@ -1041,7 +1057,7 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     opts.local.metadata.custody_group_count = 1;
     const quotas = @import("reqresp/admission_test.zig").quotas(2048, 1000);
 
-    opts.core.service.reqresp.admission = .{ .policy = @import("reqresp/request_policy_test.zig").fixture(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } };
+    opts.core.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } };
     opts.core.service.router.capabilities = try caps.forFork(.phase0, true, &.{ .v1_2, .v1_1 });
     opts.core.service.reqresp.forks = &.{
         .{ .digest = @splat(0), .fork = .phase0 },
@@ -1376,6 +1392,60 @@ const IntentPair = struct {
         return .{ .a = a, .b = b };
     }
 };
+
+test "managed runtime metrics aggregate subnets and count distinct mesh peers" {
+    const full = @import("gossipsub/topic_policy_test.zig").full;
+    const key_a = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{51}));
+    const key_b = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{52}));
+    const pair = try std.testing.allocator.create(IntentPair);
+    defer std.testing.allocator.destroy(pair);
+    var opts = options(&key_a);
+    opts.core.service.gossipsub.topic_policy = &.{full(@splat(0))};
+    try pair.a.init(std.testing.allocator, std.testing.io, opts);
+    defer pair.a.deinit(std.testing.io);
+    opts.transport.host = &key_b;
+    try pair.b.init(std.testing.allocator, std.testing.io, opts);
+    defer pair.b.deinit(std.testing.io);
+    var a_intent = intentFor(&pair.a);
+    a_intent.subscriptions = &.{
+        .{ .name = "/eth2/00000000/beacon_block/ssz_snappy", .params = .{} },
+        .{ .name = "/eth2/00000000/blob_sidecar_0/ssz_snappy", .params = .{} },
+        .{ .name = "/eth2/00000000/blob_sidecar_1/ssz_snappy", .params = .{} },
+    };
+    var b_intent = intentFor(&pair.b);
+    b_intent.subscriptions = a_intent.subscriptions;
+    try std.testing.expect(try pair.a.applyIntent(&a_intent, pair.a.last_now));
+    try std.testing.expect(try pair.b.applyIntent(&b_intent, pair.b.last_now));
+    try pair.a.connect(&pair.b.peerId(), &.{pair.b.localAddress()}, pair.a.last_now);
+    var snapshot: @import("metrics.zig").Snapshot = .{};
+    const start = pair.a.last_now.mono_ms;
+    var mesh_count: usize = 0;
+    for (0..3000) |_| {
+        _ = try pair.pump();
+        if (pair.a.last_now.mono_ms - start > 10_000) break;
+        snapshot.collect(&pair.a, pair.a.last_now.mono_ms);
+        mesh_count = 0;
+        for (snapshot.topics[0..snapshot.topic_count]) |entry| mesh_count += entry.mesh;
+        if (mesh_count == 3) break;
+    }
+    try std.testing.expectEqual(@as(usize, 3), mesh_count);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.peers);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.topic_count);
+    try std.testing.expectEqual(@as(u16, 1), snapshot.scores.values.count);
+    var clients: usize = 0;
+    for (snapshot.mesh_clients) |count| clients += count;
+    try std.testing.expectEqual(@as(usize, 1), clients);
+    for (snapshot.topics[0..snapshot.topic_count]) |entry| {
+        const expected: usize = if (entry.kind == .blob_sidecar) 2 else 1;
+        try std.testing.expectEqual(expected, entry.mesh);
+        try std.testing.expectEqual(expected, entry.subscribers);
+        try std.testing.expectEqual(@as(u16, 1), snapshot.scores.mesh_scores[@intFromEnum(entry.kind)].count);
+    }
+    snapshot.stop();
+    try std.testing.expectEqual(@as(usize, 0), snapshot.peers);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.topic_count);
+    for (snapshot.mesh_clients) |count| try std.testing.expectEqual(@as(usize, 0), count);
+}
 
 test "managed runtime local intent fork BPO announcements remembered peer and event borrows" {
     const full = @import("gossipsub/topic_policy_test.zig").full;

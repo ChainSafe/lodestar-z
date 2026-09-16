@@ -63,8 +63,8 @@ async function connected() {
     const info = await peer.command("ready");
     const config = applicationConfig();
     config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-    config.requestForks.push({digest: Uint8Array.of(5, 6, 7, 8), fork: "electra"});
-    config.requestForks.push({digest: Uint8Array.of(9, 10, 11, 12), fork: "fulu"});
+    config.requestForks = [...config.requestForks, {digest: Uint8Array.of(5, 6, 7, 8), fork: "electra"}];
+    config.requestForks = [...config.requestForks, {digest: Uint8Array.of(9, 10, 11, 12), fork: "fulu"}];
     runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
     await runtime.ready;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
@@ -497,7 +497,7 @@ test.skipIf(!HOST || !HOODI)(
 );
 
 test("native bridge validates full handles and stale retirement", async () => {
-  const {default: bindings} = await import("../src/bindings.js");
+  const {networkBindings: bindings} = await import("./utils/network-bindings.js");
   const config = applicationConfig();
   config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
   const native = new bindings.NativeNetworkRuntime();
@@ -521,7 +521,7 @@ test("native bridge validates full handles and stale retirement", async () => {
 test.skipIf(!HOST || process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")(
   "a fault after final chunk allocation releases its pin and native sink",
   async () => {
-    const {default: bindings} = await import("../src/bindings.js");
+    const {networkBindings: bindings} = await import("./utils/network-bindings.js");
     const {runtime, peer, id} = await connected();
     try {
       bindings.networkTestFail("operation_copy");
@@ -576,7 +576,7 @@ test.skipIf(!NATIVE_PEER)(
     const peer = new Child("request-native", NATIVE_PEER ?? "", ["--application"]);
     const config = applicationConfig();
     config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
-    config.requestForks.push({digest: Uint8Array.of(1, 0, 0, 0), fork: "deneb"});
+    config.requestForks = [...config.requestForks, {digest: Uint8Array.of(1, 0, 0, 0), fork: "deneb"}];
     const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
     try {
       const remote = await peer.command("listen");
@@ -603,7 +603,7 @@ stockTest(
   "direct native calls allow exactly one pending pull",
   async () => {
     const {runtime, peer, id, config} = await connected();
-    const {default: bindings} = await import("../src/bindings.js");
+    const {networkBindings: bindings} = await import("./utils/network-bindings.js");
     const native = new bindings.NativeNetworkRuntime();
     let closed: Promise<unknown> | undefined;
     try {
@@ -645,7 +645,7 @@ stockTest(
 async function connectedNative(scenario?: string) {
   if (!HOST) throw Error("LODESTAR_Z_NETWORK_STOCK_HOST is required");
   const {Child} = await import("../../test/interop/child.mjs");
-  const {default: bindings} = await import("../src/bindings.js");
+  const {networkBindings: bindings} = await import("./utils/network-bindings.js");
   const peer = new Child("request-phase-stock", process.execPath, ["test/interop/request_responder.mjs", HOST]);
   let native: InstanceType<typeof bindings.NativeNetworkRuntime> | undefined;
   let closed: Promise<unknown> | undefined;
@@ -673,7 +673,7 @@ async function connectedNative(scenario?: string) {
       [{address: Uint8Array.of(127, 0, 0, 1), family: 4, port: Number(remote.address.split("/")[4])}],
       5000n
     );
-    return {bindings, id, native, peer, stop};
+    return {bindings, closed, id, native, peer, stop};
   } catch (error) {
     await stop();
     throw error;
@@ -759,7 +759,7 @@ phaseTest.each([
 phaseTest.each([false, true])(
   "physical close overlaps a pinned final JS destination (copy fault: %s)",
   async (failCopy) => {
-    const {bindings, native, peer, id, stop} = await connectedNative("request_copy_close");
+    const {bindings, closed, native, peer, id, stop} = await connectedNative("request_copy_close");
     try {
       const {payload} = await import("../../test/interop/codec.mjs");
       await peer.command("scenario", {count: 1, scenario: "chunks"});
@@ -770,6 +770,7 @@ phaseTest.each([false, true])(
       else {
         const first = await pull;
         expect(first).toMatchObject({done: false, value: {fork: "deneb", protocol: BLOCKS}});
+        if (first.done) throw new Error("Expected a response chunk");
         expect(first.value.data).toEqual(Uint8Array.from(payload(4000, 71)));
       }
       expect(bindings.networkTestStage()).toBe("request_copy_closed");
@@ -798,6 +799,8 @@ phaseTest.each([false, true])(
         reservedBytes: 0,
         sinkBytes: 0,
       });
+      await closed;
+      expect(native.diagnostics().requests.occupied).toBe(failCopy ? 0 : 1);
       if (!failCopy) await expect(native.requestPull(handle)).rejects.toMatchObject({code: "NetworkClosed"});
       await stop();
       const {waitFor} = await import("../../test/interop/child.mjs");

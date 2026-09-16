@@ -1,7 +1,7 @@
 # AFL++ Fuzzer for lodestar-z
 
 This directory contains [AFL++](https://aflplus.plus/) fuzzing harnesses
-for SSZ deserialization in lodestar-z.
+for SSZ, BLS, and native network boundaries in lodestar-z.
 
 ## Fuzz Targets
 
@@ -30,6 +30,23 @@ which SSZ type to test within the target. See source files for the mapping.
 | `bls_aggregate_sig` | `fuzz-bls_aggregate_sig` | Aggregate multiple `Signature`s, with and without randomness |
 
 BLS inputs are raw bytes interpreted directly as compressed point encodings.
+
+### Network and discovery
+
+`network-targets.tsv` is the target, corpus, input-bound, and link inventory. It includes
+wire codecs, req/resp, gossip, gossip lifecycles, managed peers, Identify, topic policy,
+raw QUIC receive, TLS certificate verification, and DiscV5 message/packet/ENR parsing.
+
+```sh
+zig build network-corpus -Doptimize=ReleaseSafe  # regenerate QUIC, TLS, and DiscV5 seeds
+zig build build-network -Doptimize=ReleaseSafe
+./smoke-network.sh
+```
+
+The new certificate and QUIC seeds use a fixed validation time and test-only identity.
+Certificate creation draws a fresh ephemeral TLS key, so regeneration need not be byte-identical.
+The QUIC harness checks bounded state and cleanup; native dependency code is linked from the
+pinned quiche archive and does not gain AFL instrumentation from the Zig harness build.
 
 ## Prerequisites
 
@@ -193,7 +210,7 @@ rename the output files to replace colons with underscores before committing:
 1. Create `src/fuzz_<name>.zig` exporting `zig_fuzz_init` and
    `zig_fuzz_test` with `callconv(.c)`.
 2. For network targets, add one row to `network-targets.tsv`: target name, corpus suffix,
-   maximum input bytes, and native linkage (`none` or `snappy`). Build, smoke, campaign, and
+   maximum input bytes, and native linkage (`none`, `snappy`, or `quiche`). Build, smoke, campaign, and
    crash replay read this inventory. `zig build build-network -Doptimize=ReleaseSafe` builds
    every network target used by `./smoke-network.sh`.
    For other targets, add the name to `base_fuzzers` in `build.zig`. If the target links

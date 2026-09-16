@@ -174,6 +174,8 @@ jobs:
         run: |
           pnpm install --frozen-lockfile --ignore-scripts
           node --test test/interop/stock_packages.test.mjs
+      - name: Check network declarations and tests
+        run: pnpm typecheck:network
       - name: Build instrumented bindings and independent native peer
         run: |
           zig build test:reqresp_peer_bounds -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}

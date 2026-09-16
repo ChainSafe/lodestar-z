@@ -4,6 +4,7 @@ const binding = @import("binding.zig");
 const connection = @import("connection.zig");
 const constants = @import("../constants.zig");
 const limits = @import("limits.zig");
+const retry = @import("retry.zig");
 const stream_iter = @import("stream_iter.zig");
 const peer_id = @import("../wire/peer_id.zig");
 const tls = @import("../tls/context.zig");
@@ -41,7 +42,8 @@ pub const Options = struct {
     tls: tls.Context,
     limits: Limits = .{},
     local: [2]?Address,
-    seed: u64,
+    /// Startup secret from a cryptographic random source, used to authenticate Retry tokens.
+    seed: [32]u8,
 };
 
 pub const Engine = struct {
@@ -54,6 +56,7 @@ pub const Engine = struct {
     connection_window: u64,
     stream_window: u64,
     outbound_max: u16,
+    retry_key: [32]u8,
     counters: Counters = .{},
     connection_metrics: @import("metrics.zig").Counters = .{},
     host_work_pending: bool = false,
@@ -117,7 +120,7 @@ pub const Engine = struct {
         ) catch return error.OutOfMemory;
         errdefer config.deinit();
 
-        var registry = try @import("registry.zig").Registry.init(allocator, wanted.connections_max, wanted.keylog, options.seed);
+        var registry = try @import("registry.zig").Registry.init(allocator, wanted.connections_max, wanted.keylog, std.mem.readInt(u64, options.seed[0..8], .little));
         errdefer registry.deinit(allocator);
 
         return .{
@@ -130,6 +133,7 @@ pub const Engine = struct {
             .connection_window = connection_window,
             .stream_window = stream_window,
             .outbound_max = outbound_max,
+            .retry_key = options.seed,
         };
     }
 
@@ -137,6 +141,7 @@ pub const Engine = struct {
         self.registry.deinit(self.allocator);
         self.tls.deinit();
         self.config.deinit();
+        std.crypto.secureZero(u8, &self.retry_key);
         self.* = undefined;
     }
 
@@ -173,6 +178,7 @@ pub const Engine = struct {
         self.markClosed(index, .send_failed);
     }
 
+    /// Driver-only slot indices. Track their generations with sendOwner across turns.
     pub fn activeIndices(self: *const Engine) []const u16 {
         assert(self.registry.active.len == self.registry.slots.len);
         assert(self.registry.active_len <= self.registry.active.len);
@@ -273,22 +279,17 @@ pub const Engine = struct {
         const slot = self.readableSlot(conn) catch return false;
         switch (slot.state) {
             .handshaking => {
-                if (slot.close_event == .pending) return false;
-                if (slot.direction == .inbound) {
-                    self.registry.handshaking -= 1;
-                } else {
-                    assert(self.registry.dialing > 0);
+                self.leaveHandshaking(slot);
+                if (slot.direction == .outbound) {
                     assert(self.registry.outbound > 0);
-                    self.registry.dialing -= 1;
                     self.registry.outbound -= 1;
                 }
             },
-            .closed => if (slot.close_event == .none) return false,
+            .closed => {},
             else => return false,
         }
         assert(conn.index < self.registry.slots.len);
         assert(self.registry.active_len > 0);
-        self.registry.removeRoutesFor(conn.index);
         self.registry.retire(conn.index);
         self.host_work_pending = true;
         return true;
@@ -499,12 +500,19 @@ pub const Engine = struct {
                 return drop(&self.counters.dropped_rejected);
             }
         }
-        const scid = entropy.take() orelse return drop(&self.counters.dropped_no_entropy);
+        const original: ?binding.Cid = if (header.token_len != 0)
+            retry.validate(&self.retry_key, from, &header.dcid, header.token[0..header.token_len], now.mono_ms, self.limits.handshake_timeout_ms) orelse return drop(&self.counters.dropped_unroutable)
+        else original: {
+            if (self.registry.handshaking >= self.limits.handshaking_max / 2) return self.sendRetry(&header, from, now, entropy, out);
+            break :original @as(?binding.Cid, null);
+        };
+        const scid = if (original != null) header.dcid.bytes[0..limits.local_cid_length].* else entropy.take() orelse return drop(&self.counters.dropped_no_entropy);
         const index = self.registry.claim() orelse return drop(&self.counters.dropped_full);
 
         const slot = &self.registry.slots[index];
         slot.open(&self.tls, &self.config, .{
             .direction = .inbound,
+            .original_dcid = original,
             .local = local,
             .peer = from.*,
             .scid = scid,
@@ -519,8 +527,7 @@ pub const Engine = struct {
             self.registry.retire(index);
             return drop(&self.counters.dropped_full);
         };
-        self.registry.addRoute(&header.dcid, index) catch {
-            self.registry.removeRoutesFor(index);
+        if (!slot.scid.eql(&header.dcid)) self.registry.addRoute(&header.dcid, index) catch {
             self.registry.retire(index);
             return drop(&self.counters.dropped_full);
         };
@@ -528,6 +535,16 @@ pub const Engine = struct {
         assert(self.registry.handshaking <= self.limits.handshaking_max);
         self.feed(index, datagram, from);
         return .{ .accepted = self.toHandle(index) };
+    }
+
+    fn sendRetry(self: *Engine, header: *const binding.HeaderInfo, from: *const Address, now: Now, entropy: *EntropyPool, out: []u8) ReceiveOutcome {
+        const bytes = entropy.take() orelse return drop(&self.counters.dropped_no_entropy);
+        const scid = binding.Cid.fromSlice(&bytes);
+        var buffer: [retry.token_max]u8 = undefined;
+        const token = retry.mint(&self.retry_key, from, &header.dcid, &scid, now.mono_ms, &buffer);
+        const length = (binding.check(c.quiche_retry(header.scid.slice().ptr, header.scid.len, header.dcid.slice().ptr, header.dcid.len, scid.slice().ptr, scid.len, token.ptr, token.len, header.version, out.ptr, out.len)) catch return drop(&self.counters.dropped_unroutable)) orelse return drop(&self.counters.dropped_unroutable);
+        self.counters.retries +|= 1;
+        return .{ .retry = out[0..length] };
     }
 
     fn negotiateVersion(
@@ -751,16 +768,22 @@ pub const Engine = struct {
         self.registry.activity[index] = true;
     }
 
+    fn leaveHandshaking(self: *Engine, slot: *const connection.Slot) void {
+        assert(slot.state == .handshaking);
+        if (slot.direction == .inbound) {
+            assert(self.registry.handshaking > 0);
+            self.registry.handshaking -= 1;
+        } else {
+            assert(self.registry.dialing > 0);
+            self.registry.dialing -= 1;
+        }
+    }
+
     fn refresh(self: *Engine, index: u16) void {
         const slot = &self.registry.slots[index];
         if (slot.state == .handshaking and slot.isEstablished()) {
+            self.leaveHandshaking(slot);
             slot.state = .established;
-            if (slot.direction == .inbound) {
-                self.registry.handshaking -= 1;
-            } else {
-                assert(self.registry.dialing > 0);
-                self.registry.dialing -= 1;
-            }
             if (slot.handshake.peer_id) |id| {
                 assert(slot.peer_id == null);
                 slot.peer_id = id;
@@ -797,12 +820,7 @@ pub const Engine = struct {
             slot.discoverPeerStreams();
         }
         if (slot.state == .handshaking) {
-            if (slot.direction == .inbound) {
-                self.registry.handshaking -= 1;
-            } else {
-                assert(self.registry.dialing > 0);
-                self.registry.dialing -= 1;
-            }
+            self.leaveHandshaking(slot);
         }
         if (slot.direction == .outbound) {
             assert(self.registry.outbound > 0);
@@ -834,7 +852,7 @@ pub const Engine = struct {
         for (self.registry.active[0..self.registry.active_len]) |index| {
             const slot = &self.registry.slots[index];
             if (slot.state != .handshaking or slot.direction != .inbound) continue;
-            if (slot.peer.sameHost(from.*)) count += 1;
+            if (slot.peer.sameSourceGroup(from.*)) count += 1;
         }
         assert(count <= self.registry.handshaking);
         return count;

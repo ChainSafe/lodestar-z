@@ -58,26 +58,26 @@ test "protocol info sizes follow the consensus types" {
 
 test "reqresp active head request bounds count before admission" {
     var bytes = [_]u8{0} ** 40;
-    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.blocks_by_head_v1, &bytes));
+    try std.testing.expectError(error.InvalidRequest, chunkLimit(.blocks_by_head_v1, &bytes));
     for ([_]u64{ 1, 128, 129, std.math.maxInt(u64) }) |count| {
         std.mem.writeInt(u64, bytes[32..40], count, .little);
-        try std.testing.expectEqual(@as(u32, @intCast(@min(count, 128))), try protocol.requestChunkLimit(.blocks_by_head_v1, &bytes));
+        try std.testing.expectEqual(@as(u32, @intCast(@min(count, 128))), try chunkLimit(.blocks_by_head_v1, &bytes));
     }
-    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.blocks_by_head_v1, bytes[0..39]));
-    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.blocks_by_head_v1, &([_]u8{0} ** 41)));
+    try std.testing.expectError(error.InvalidRequest, chunkLimit(.blocks_by_head_v1, bytes[0..39]));
+    try std.testing.expectError(error.InvalidRequest, chunkLimit(.blocks_by_head_v1, &([_]u8{0} ** 41)));
 }
 
 test "reqresp active light client range allows an exact empty stream" {
     var bytes = [_]u8{0} ** 16;
     for ([_]u64{ 0, 1, 128, 129, std.math.maxInt(u64) }) |count| {
         std.mem.writeInt(u64, bytes[8..16], count, .little);
-        try std.testing.expectEqual(@as(u32, @intCast(@min(count, 128))), try protocol.requestChunkLimit(.light_client_updates_by_range_v1, &bytes));
+        try std.testing.expectEqual(@as(u32, @intCast(@min(count, 128))), try chunkLimit(.light_client_updates_by_range_v1, &bytes));
     }
     std.mem.writeInt(u64, bytes[0..8], std.math.maxInt(u64), .little);
     std.mem.writeInt(u64, bytes[8..16], 1, .little);
-    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.light_client_updates_by_range_v1, &bytes));
-    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.light_client_updates_by_range_v1, bytes[0..15]));
-    try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(.light_client_updates_by_range_v1, &([_]u8{0} ** 17)));
+    try std.testing.expectError(error.InvalidRequest, chunkLimit(.light_client_updates_by_range_v1, &bytes));
+    try std.testing.expectError(error.InvalidRequest, chunkLimit(.light_client_updates_by_range_v1, bytes[0..15]));
+    try std.testing.expectError(error.InvalidRequest, chunkLimit(.light_client_updates_by_range_v1, &([_]u8{0} ** 17)));
 }
 
 test "reqresp active literal ids shapes and application partition" {
@@ -99,8 +99,13 @@ test "reqresp active literal ids shapes and application partition" {
         try std.testing.expectEqual(@as(u32, case[3]), which.info().quota_tokens);
         try std.testing.expectEqual(@as(u64, case[4]), which.info().quota_period_ms);
         if (case[2] == 0) {
-            try std.testing.expectEqual(@as(u32, 1), try protocol.requestChunkLimit(which, ""));
-            try std.testing.expectError(error.InvalidRequest, protocol.requestChunkLimit(which, "\x00"));
+            try std.testing.expectEqual(@as(u32, 1), try chunkLimit(which, ""));
+            try std.testing.expectError(error.InvalidRequest, chunkLimit(which, "\x00"));
         }
     }
+}
+
+fn chunkLimit(which: Protocol, bytes: []const u8) error{InvalidRequest}!u32 {
+    const policy = @import("request_policy.zig").Policy.init(&@import("policy_fixture.zig").config()) catch unreachable;
+    return (policy.inspect(which, bytes, .fulu) catch return error.InvalidRequest).chunks_max;
 }

@@ -42,15 +42,10 @@ pub const RouteTable = struct {
         self.* = undefined;
     }
 
-    pub fn capacity(self: *const RouteTable) usize {
-        assert(std.math.isPowerOfTwo(self.entries.len));
-        assert(self.count <= self.entries.len);
-        return self.entries.len;
-    }
-
     pub fn insert(self: *RouteTable, cid: *const Cid, index: u16) Error!void {
         assert(cid.len > 0);
         assert(cid.len <= limits.cid_length_max);
+        if (self.find(cid) != null) return error.Full;
         if (self.count >= self.entries.len / 2) return error.Full;
         const mask = self.entries.len - 1;
         var cursor = self.bucket(cid);
@@ -143,8 +138,3 @@ pub const RouteTable = struct {
         return @as(usize, @truncate(hashed)) & mask;
     }
 };
-
-comptime {
-    assert(std.math.isPowerOfTwo(probe_max));
-    assert(routes_per_slot == 2);
-}

@@ -77,23 +77,9 @@ pub fn initialize(self: *Runtime) !void {
     const plan = self.heavy.?.core.memoryPlan();
     self.diag.nativeRequestedBytes = plan.inline_bytes + plan.allocated_bytes;
     self.diag.nativeAllocationCount = self.heavy.?.core.reservations.allocation_calls;
-    const core = &self.heavy.?.core.core;
-    const limits = self.heavy.?.core.transport.engine.limits;
-    self.diag.resolvedCapacities = .{
-        .peerCapacity = core.catalog.options.capacity,
-        .targetPeers = core.catalog.options.target_peers,
-        .maxPeers = core.catalog.options.max_peers,
-        .minOutbound = core.catalog.options.min_outbound,
-        .outboundReserve = core.catalog.options.outbound_reserve,
-        .connectionCapacity = limits.connections_max,
-        .handshakingCapacity = limits.handshaking_max,
-        .dialingCapacity = limits.dialing_max,
-        .requestPeerCapacity = core.service.reqresp.options.peers,
-        .admissionIdentityCapacity = if (core.service.reqresp.admission) |*admission| admission.limiter.options.identities else 0,
-        .gossipConnectedCapacity = core.service.gossipsub.inner.options.connected_capacity,
-        .gossipRetainedCapacity = core.service.gossipsub.inner.options.retained_capacity,
-        .dialEngineCapacity = core.dial_queue.options.engine_dialing_max,
-    };
+    self.diag.quicReceiveWindowBytes = plan.transport_windows.receive_window_bytes;
+    self.diag.quicConnectionWindowBytes = plan.transport_windows.connection_window_bytes;
+    self.diag.quicStreamWindowBytes = plan.transport_windows.stream_window_bytes;
 }
 pub fn run(self: *Runtime) void {
     defer self.release();
@@ -128,7 +114,16 @@ fn serve(self: *Runtime) !void {
                 self.heavy.?.core.beginGracefulClose(timestamp);
             }
             if (timestamp.mono_ms >= self.closing_deadline.? or self.heavy.?.core.peerCounts().connected == 0) break;
-        } else try commands.executeCommands(self, timestamp);
+        } else {
+            for (0..32) |_| {
+                self.lock();
+                const report = self.reports.next();
+                self.unlock();
+                const item = report orelse break;
+                _ = self.heavy.?.core.reportPeer(item.peer, item.action, timestamp);
+            }
+            try commands.executeCommands(self, timestamp);
+        }
         self.lock();
         self.wake.?.drain() catch {
             self.stop = true;
@@ -148,8 +143,7 @@ fn serve(self: *Runtime) !void {
         if (stopped) break;
         if (!active) {
             var fd = std.c.pollfd{ .fd = self.wake.?.read_fd, .events = std.c.POLL.IN, .revents = 0 };
-            if (commands.waitLimit(self, timestamp) == 0) continue;
-            const rc = std.c.poll(@ptrCast(&fd), 1, -1);
+            const rc = std.c.poll(@ptrCast(&fd), 1, @intCast(commands.waitLimit(self, timestamp)));
             if (rc < 0 and std.c.errno(rc) != .INTR) return error.NetworkWakeFailed;
             continue;
         }
@@ -160,6 +154,9 @@ fn serve(self: *Runtime) !void {
         const terminal_accepted = try @import("network_incoming_phase_faults.zig").terminalBarrier(self, true);
         const sequence = try self.advanceSequence();
         const result = self.heavy.?.core.step(io, timestamp, slot, .{ .peers = self.heavy.?.outputs[0..@min(peer_room, self.heavy.?.outputs.len)], .application = &self.heavy.?.application_outputs, .gossipsub = &self.heavy.?.gossip_outputs }, commands.waitLimit(self, timestamp));
+        self.lock();
+        self.reports.sync(&self.heavy.?.core.core.catalog);
+        self.unlock();
         @import("network_gossip_faults.zig").afterStep(self);
         if (terminal_accepted) |proof| @import("network_incoming_phase_faults.zig").afterStep(self, &proof, self.heavy.?.application_outputs[0..result.counts.application]);
         try requests_mod.capture(self, self.heavy.?.application_outputs[0..result.counts.application], timestamp);

@@ -16,6 +16,7 @@ pub const InitError = std.mem.Allocator.Error;
 
 pub const Error = error{
     AddressLimit,
+    IncomingLimit,
     InvalidDistance,
     InvalidRecord,
     InvalidRemoteRecord,
@@ -24,7 +25,10 @@ pub const Error = error{
     TooManyDistances,
 };
 
+pub const Direction = enum { incoming, outgoing };
+
 pub const Entry = struct {
+    direction: Direction,
     peer: types.Endpoint,
     record: enr.Record,
     last_verified_ms: u64,
@@ -160,6 +164,7 @@ pub fn upsertVerified(
     peer: *const types.Endpoint,
     record: *const enr.Record,
     now_ms: u64,
+    direction: Direction,
 ) Error!PutResult {
     try validateEntry(&self.local_id, peer, record);
     const index = bucketIndex(types.logDistance(&self.local_id, &peer.node_id));
@@ -182,11 +187,16 @@ pub fn upsertVerified(
         return .{ .pending = candidate.replace_id };
     }
 
+    if (direction == .incoming) {
+        var incoming: usize = 0;
+        for (self.bucketEntries(index)) |entry| incoming += @intFromBool(entry.direction == .incoming);
+        if (incoming >= bucket_size / 2) return error.IncomingLimit;
+    }
     try self.requireAddressCapacity(index, peer.address, &peer.node_id);
     const bucket_length: usize = self.counts[index];
     if (bucket_length < bucket_size) {
         const offset = bucketOffset(index) + bucket_length;
-        self.entries[offset] = makeEntry(peer, record, now_ms);
+        self.entries[offset] = makeEntry(peer, record, now_ms, direction);
         self.counts[index] += 1;
         self.total += 1;
         std.debug.assert(self.total <= table_capacity);
@@ -195,14 +205,19 @@ pub fn upsertVerified(
 
     const oldest = self.entries[bucketOffset(index)].peer.node_id;
     self.pending[index] = .{
-        .entry = makeEntry(peer, record, now_ms),
+        .entry = makeEntry(peer, record, now_ms, direction),
         .replace_id = oldest,
     };
     return .{ .pending = oldest };
 }
 
-/// Settles the pending candidate for `node_id`. An alive incumbent becomes the most recent
-/// entry, and a dead one is replaced.
+pub fn abandonRevalidation(self: *RoutingTable, node_id: *const types.NodeId) void {
+    const index = bucketIndex(types.logDistance(&self.local_id, node_id));
+    const candidate = self.pending[index] orelse return;
+    if (std.mem.eql(u8, &candidate.replace_id, node_id)) self.pending[index] = null;
+}
+
+/// An alive incumbent becomes the most recent entry; a dead one is replaced.
 pub fn resolveRevalidation(
     self: *RoutingTable,
     node_id: *const types.NodeId,
@@ -386,8 +401,10 @@ fn makeEntry(
     peer: *const types.Endpoint,
     record: *const enr.Record,
     now_ms: u64,
+    direction: Direction,
 ) Entry {
     return .{
+        .direction = direction,
         .peer = peer.*,
         .record = record.*,
         .last_verified_ms = now_ms,

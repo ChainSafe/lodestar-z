@@ -87,6 +87,21 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     runtime.peer_capacity = app.resources.peerCapacity;
     runtime.max_peers = app.resources.maxPeers;
     const resolved = try n.configuration.resolve(try app.buildRequest(&runtime.heavy.?.config, 1));
+    runtime.diag.resolvedCapacities = .{
+        .peerCapacity = resolved.core.peers.capacity,
+        .targetPeers = resolved.core.peers.target_peers,
+        .maxPeers = resolved.core.peers.max_peers,
+        .minOutbound = resolved.core.peers.min_outbound,
+        .outboundReserve = resolved.core.peers.outbound_reserve,
+        .connectionCapacity = resolved.limits.connections_max,
+        .handshakingCapacity = resolved.limits.handshaking_max,
+        .dialingCapacity = resolved.limits.dialing_max,
+        .requestPeerCapacity = resolved.core.service.reqresp.peers,
+        .admissionIdentityCapacity = resolved.core.service.reqresp.admission.?.limits.identities,
+        .gossipConnectedCapacity = resolved.core.service.gossipsub.connected_capacity,
+        .gossipRetainedCapacity = resolved.core.service.gossipsub.retained_capacity,
+        .dialEngineCapacity = resolved.limits.dialing_max,
+    };
     const limits = resolved.core.service.reqresp;
     const request_capacity: usize = @min(32, limits.outbound_max - limits.outbound_control_reserved);
     const incoming_capacity: usize = @min(32, limits.inbound_max - limits.inbound_control_reserved);
@@ -135,7 +150,6 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
     runtime.lock();
     runtime.notification_pending = false;
     const alive = runtime.env_alive;
-    const unref_notify = alive and runtime.notify_live and !runtime.stop and runtime.startup == .ready and runtime.table.occupied == 0 and !runtime.requestObligations();
     const startup = runtime.startup;
     const startup_error = runtime.startup_error;
     const session = runtime.diag.session;
@@ -143,7 +157,6 @@ fn onNotify(env: napi.Env, callback: Value, runtime: *Runtime, _: *void) void {
     if (startup == .ready) ready_identity = runtime.identity;
     runtime.unlock();
     if (!alive) return;
-    if (unref_notify) runtime.notify.unref(env) catch {};
     if (!runtime.ready_settled and startup != .pending) {
         runtime.ready_settled = true;
         if (startup == .ready) {
@@ -182,13 +195,19 @@ fn copyStartup(env: napi.Env, value: *const r.Identity, session: u64) !Value {
     try faults.check(.startup_copy);
     return identity(env, value, session);
 }
-fn settleClose(_: napi.Env, runtime: *Runtime) void {
+fn settleClose(env: napi.Env, runtime: *Runtime) void {
     runtime.lock();
     const done = runtime.quiescent;
-    const reason = runtime.reason;
     runtime.unlock();
     if (!done or runtime.close_settled) return;
     runtime.join();
+    // The owner can quiesce after this callback's earlier result drains.
+    settleOperations(env, runtime);
+    request_js.settle(env, runtime);
+    incoming_js.settle(env, runtime);
+    runtime.lock();
+    const reason = runtime.reason;
+    runtime.unlock();
     runtime.removeHook();
     const value = copyClose(runtime, reason) catch copyClose(runtime, reason) catch runtime.close_results[2].?.getValue() catch unreachable;
     runtime.close_settled = true;
@@ -204,7 +223,10 @@ fn owner(self: *@This()) !*Runtime {
 }
 
 pub fn getState(self: *@This()) !js.Value {
-    const state = (try self.owner()).snapshot().state;
+    const runtime = try self.owner();
+    runtime.lock();
+    const state = runtime.diag.state;
+    runtime.unlock();
     return .{ .val = try js.env().createStringUtf8(@tagName(state)) };
 }
 pub fn close(self: *@This()) void {
@@ -270,20 +292,10 @@ pub fn setLogLevel(self: *@This(), level: js.Value) !void {
 
 pub fn diagnostics(self: *@This()) !js.Value {
     const snapshot = (try self.owner()).snapshot();
-    const object = try js.env().createObject();
+    const object = try @import("network_js.zig").scalarFields(js.env(), &snapshot);
     try put(object, "state", try text(@tagName(snapshot.state)));
     try put(object, "terminalErrorCode", if (snapshot.terminal_error) |err| try text(@errorName(err)) else try js.env().getNull());
-    inline for (.{ "session", "currentSlot", "ownerTurns", "lastMonotonicMs", "operationalFailures" }) |name| {
-        try put(object, name, try js.env().createBigintUint64(@field(snapshot, name)));
-    }
-    inline for (.{ "peerCount", "readyPeerCount", "nativeRequestedBytes", "bridgeRequestedBytes" }) |name| {
-        try put(object, name, try js.env().createDouble(@floatFromInt(@field(snapshot, name))));
-    }
-    inline for (.{ "operationRefusals", "ownerSequence", "connectRefusals", "intentRefusals", "snapshotRefusals", "targetListRefusals" }) |name| try put(object, name, try js.env().createBigintUint64(@field(snapshot, name)));
-    inline for (.{ "operationCapacity", "operationOccupied", "operationHighWater", "connectCapacity", "connectOccupied", "intentCapacity", "intentOccupied", "snapshotCapacity", "snapshotOccupied", "targetListCapacity", "targetListOccupied", "preparingPins", "copyingPins", "peerLaneCapacity", "peerLaneOccupied", "peerLaneHighWater", "liveNativeRequestedBytes", "liveBridgeRequestedBytes", "operationBytes", "typedStoreBytes", "peerLaneBytes", "ownerShellBytes", "ownerAllocationBytes", "nativeAllocationCount", "connectHighWater", "intentHighWater", "snapshotHighWater", "targetListHighWater" }) |name| try put(object, name, try js.env().createDouble(@floatFromInt(@field(snapshot, name))));
-    const resolved = try js.env().createObject();
-    inline for (@typeInfo(r.ResolvedCapacities).@"struct".fields) |field| try put(resolved, field.name, try js.env().createUint32(@field(snapshot.resolvedCapacities, field.name)));
-    try put(object, "resolvedCapacities", resolved);
+    try put(object, "resolvedCapacities", try @import("network_js.zig").scalarFields(js.env(), &snapshot.resolvedCapacities));
     try put(object, "requests", try request_js.diagnostics(js.env(), &snapshot.requests));
     try put(object, "gossip", try gossip_js.diagnostics(js.env(), &snapshot.gossip));
     try put(object, "incoming", try incoming_js.diagnostics(js.env(), &snapshot.incoming));
@@ -337,15 +349,10 @@ fn submit(self: *@This(), comptime command: commands.Command, args: []const Valu
                 operation.input.timeout_ms = try cfg.bigint(args[2]);
                 if (operation.input.timeout_ms == 0 or operation.input.timeout_ms > 60_000) return error.InvalidNetworkInteger;
             }
-            if (command == .reportPeer) {
-                var buffer: [32]u8 = undefined;
-                const len = try application_cfg.text(args[1], &buffer);
-                operation.input.action = std.meta.stringToEnum(n.peers.types.PeerAction, buffer[0..len]) orelse return error.InvalidNetworkConfig;
-            }
         },
     }
     const env = js.env();
-    if (command != .reportPeer) operation.deferred = try env.createPromise();
+    operation.deferred = try env.createPromise();
     errdefer if (operation.deferred) |deferred| deferred.resolve(env.getUndefined() catch unreachable) catch unreachable;
     const result = if (operation.deferred) |deferred| deferred.getPromise() else try env.getUndefined();
     try runtime.queueCommand(token);
@@ -383,7 +390,19 @@ pub fn getDirectPeers(self: *@This()) !js.Value {
     return self.submit(.getDirectPeers, &.{});
 }
 pub fn reportPeer(self: *@This(), peer: js.Value, action: js.Value) !js.Value {
-    return self.submit(.reportPeer, &.{ peer.val, action.val });
+    const runtime = try self.owner();
+    const reported_peer = try peerId(peer.val);
+    var buffer: [32]u8 = undefined;
+    const length = try application_cfg.text(action.val, &buffer);
+    const parsed = std.meta.stringToEnum(n.peers.types.PeerAction, buffer[0..length]) orelse return error.InvalidNetworkConfig;
+    const result = try js.env().getUndefined();
+    runtime.lock();
+    defer runtime.unlock();
+    if (!runtime.stop and !runtime.quiescent) {
+        runtime.reports.add(&reported_peer, parsed);
+        runtime.signalLocked();
+    }
+    return .{ .val = result };
 }
 
 fn settleOperations(env: napi.Env, runtime: *Runtime) void {

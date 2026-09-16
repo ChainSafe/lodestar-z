@@ -1,5 +1,6 @@
 import {randomBytes} from "node:crypto";
-import {mkdir, realpath, rename, rm, stat, writeFile} from "node:fs/promises";
+import {mkdir, mkdtemp, realpath, rename, rm, stat, writeFile} from "node:fs/promises";
+import {tmpdir} from "node:os";
 import {basename, dirname, join, relative, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {isDeepStrictEqual} from "node:util";
@@ -237,19 +238,10 @@ function declaresPackage(packageJson) {
   );
 }
 
-async function resolutionParents(hostDir, manifests) {
+async function resolutionParents(manifests) {
   const parents = [];
   for (const manifest of manifests) {
     if (declaresPackage(await readJson(manifest, manifest))) parents.push(manifest);
-  }
-  const compiled = [
-    join(hostDir, "packages/beacon-node/lib/chain/bls/multithread/worker.js"),
-    join(hostDir, "packages/state-transition/lib/cache/epochCache.js"),
-  ];
-  const actualHost = await exists(join(hostDir, "packages/beacon-node/package.json"));
-  for (const path of compiled) {
-    if (await exists(path)) parents.push(path);
-    else if (actualHost) fail("MissingCompiledHostConsumer", path);
   }
   return [...new Set(parents)];
 }
@@ -269,8 +261,7 @@ async function packageRootForResolved(resolvedUrl) {
   fail("ResolvedPackageRootMissing", resolvedUrl);
 }
 
-async function resolveFromParents(hostDir, parents, exports, {load}) {
-  const scriptPath = join(hostDir, `.lodestar-package-resolve-${process.pid}-${randomBytes(8).toString("hex")}.mjs`);
+async function resolveFromParents(hostDir, parents, exports) {
   const specifiers = Object.keys(exports).map((subpath) =>
     subpath === "." ? "@chainsafe/lodestar-z" : `@chainsafe/lodestar-z/${subpath.slice(2)}`
   );
@@ -291,16 +282,18 @@ for (const parent of parents) {
     }
   }
 }
-if (${JSON.stringify(load)}) {
-  for (const specifier of specifiers) {
-    const module = await import(specifier);
-    result.exports[specifier] = Object.keys(module).sort();
-  }
+for (const specifier of specifiers) {
+  const resolved = result.resolutions.find((row) => row.specifier === specifier && row.error === undefined)?.resolved;
+  if (!resolved) continue;
+  const module = await import(resolved);
+  result.exports[specifier] = Object.keys(module).sort();
 }
 process.stdout.write(JSON.stringify(result));
 `;
-  await writeFile(scriptPath, source, {flag: "wx"});
+  const directory = await mkdtemp(join(tmpdir(), "lodestar-package-resolve-"));
+  const scriptPath = join(directory, "resolve.mjs");
   try {
+    await writeFile(scriptPath, source, {flag: "wx"});
     const command = await runCommand(process.execPath, ["--experimental-import-meta-resolve", scriptPath], hostDir, {
       allowFailure: true,
     });
@@ -313,16 +306,16 @@ process.stdout.write(JSON.stringify(result));
     }
     return {command, ...result};
   } finally {
-    await rm(scriptPath, {force: true});
+    await rm(directory, {force: true, recursive: true});
   }
 }
 
-async function verifyInstalled(hostDir, manifestPath) {
-  const archiveState = await verifyManifestArchive(manifestPath, runCommand);
+async function verifyInstalled(hostDir, manifestPath, verifiedArchive) {
+  const archiveState = verifiedArchive ?? (await verifyManifestArchive(manifestPath, runCommand));
   const manifests = await hostManifestPaths(hostDir);
-  const parents = await resolutionParents(hostDir, manifests);
+  const parents = await resolutionParents(manifests);
   if (parents.length === 0) fail("NoHostPackageConsumers");
-  const resolved = await resolveFromParents(hostDir, parents, archiveState.inspected.packageJson.exports, {load: true});
+  const resolved = await resolveFromParents(hostDir, parents, archiveState.inspected.packageJson.exports);
   const failures = resolved.resolutions.filter((row) => row.error !== undefined);
   if (failures.length !== 0) fail("HostResolutionFailed", JSON.stringify(failures));
   const networkExports = resolved.exports["@chainsafe/lodestar-z/network"] ?? [];
@@ -534,7 +527,7 @@ module.exports = {hooks: {readPackage(pkg) {
   let afterGraph;
   let verification;
   try {
-    verification = await verifyInstalled(hostDir, manifestPath);
+    verification = await verifyInstalled(hostDir, manifestPath, archiveState);
     afterFiles = await snapshotPaths([...immutablePaths, internalLock]);
     assertSameInventory(
       beforeFiles.slice(0, immutablePaths.length),

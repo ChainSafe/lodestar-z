@@ -2,7 +2,6 @@
 //! prefix and shifts the payload back once the length is known, so nothing is encoded twice.
 
 const std = @import("std");
-const constants = @import("constants.zig");
 
 pub const Error = error{
     BufferTooSmall,
@@ -22,6 +21,7 @@ pub const Writer = struct {
     length: usize = 0,
 
     pub fn init(buffer: []u8) Writer {
+        std.debug.assert(buffer.len <= std.math.maxInt(u16));
         return .{ .buffer = buffer };
     }
 
@@ -94,7 +94,7 @@ pub const Writer = struct {
     }
 
     fn ensureUnused(self: *const Writer, count: usize) Error!void {
-        if (self.length > self.buffer.len) return Error.BufferTooSmall;
+        std.debug.assert(self.length <= self.buffer.len);
         if (count > self.buffer.len - self.length) return Error.BufferTooSmall;
     }
 };
@@ -240,9 +240,4 @@ fn readLength(bytes: []const u8) Error!usize {
         value = std.math.add(usize, value, @as(usize, byte)) catch return Error.Overflow;
     }
     return value;
-}
-
-test {
-    std.debug.assert(list_prefix_reserve == 3);
-    std.debug.assert(constants.packet_size_max < 65_536);
 }

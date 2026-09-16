@@ -92,6 +92,8 @@ test "handshake authdata and optional ENR round-trip" {
     try std.testing.expectEqual(signature, decoded.form.handshake.id_signature.*);
     try std.testing.expectEqual(ephemeral_key, decoded.form.handshake.ephemeral_key.*);
     try std.testing.expectEqualSlices(u8, &enr, decoded.form.handshake.enr.?);
+    raw[constants.masking_iv_size + constants.static_header_size + constants.node_id_size] ^= 1;
+    try std.testing.expectError(error.InvalidAuthdata, packet.decode(encoded, &recipient_id, &decode_scratch));
 }
 
 test "authentication failure does not publish plaintext" {

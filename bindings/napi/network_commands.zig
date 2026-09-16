@@ -135,7 +135,7 @@ test "typed reservations unwind and identities never wrap" {
 }
 
 const n = @import("network");
-pub const Command = enum { applyIntent, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, reportPeer, request, publishGossip };
+pub const Command = enum { applyIntent, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, request, publishGossip };
 pub fn storageKind(command: Command) Kind {
     return switch (command) {
         .applyIntent => .intent,
@@ -160,7 +160,6 @@ pub const Input = struct {
     timeout_ms: u64 = 0,
     target_count: u16 = 0,
     diagnostics_cursor: u16 = 0,
-    action: n.peers.types.PeerAction = .high_tolerance,
 };
 
 const Runtime = @import("network_runtime.zig").Runtime;
@@ -197,6 +196,7 @@ pub fn executeCommands(self: *Runtime, timestamp: n.Now) !void {
             if (self.stop and self.table.cells[i].input.command != .publishGossip) self.table.cells[i].failure = self.startup_error orelse error.NetworkClosed;
             cell.state = .terminal;
         }
+        self.reports.sync(&self.heavy.?.core.core.catalog);
         if (cell.state == .terminal) self.pingLocked();
         self.unlock();
     }
@@ -252,24 +252,17 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             self.table.cells[index].state = .waiting;
             self.unlock();
         },
-        .disconnect, .reportPeer => {
-            if (input.command == .disconnect) {
-                core.cancelConnect(&input.peer, timestamp);
-                self.lock();
-                for (&self.table.cells, 0..) |*cell, i| {
-                    if (cell.state != .waiting or !self.table.cells[i].input.peer.eql(&input.peer)) continue;
-                    self.table.cells[i].failure = error.NetworkConnectCancelled;
-                    cell.state = .terminal;
-                }
-                self.unlock();
+        .disconnect => {
+            core.cancelConnect(&input.peer, timestamp);
+            self.lock();
+            for (&self.table.cells, 0..) |*cell, i| {
+                if (cell.state != .waiting or !self.table.cells[i].input.peer.eql(&input.peer)) continue;
+                self.table.cells[i].failure = error.NetworkConnectCancelled;
+                cell.state = .terminal;
             }
+            self.unlock();
             if (core.core.catalog.find(&input.peer)) |peer| {
-                const row = core.core.catalog.get(peer).?;
-                if (input.command == .reportPeer) {
-                    _ = core.reportPeer(peer, input.action, timestamp);
-                } else if (row.connection) |handle| {
-                    _ = core.closePeer(peer, handle, timestamp);
-                }
+                if (core.core.catalog.get(peer).?.connection) |handle| _ = core.closePeer(peer, handle, timestamp);
             }
         },
         .reStatusPeers => for (self.stores.?.targets[store.?][0..input.target_count]) |*identity| {
@@ -307,6 +300,7 @@ pub fn latchConnects(table: *Table, events: []const n.Event, timestamp: n.Now) b
 pub fn waitLimit(self: *Runtime, timestamp: n.Now) u32 {
     self.lock();
     defer self.unlock();
+    if (self.reports.pending != 0) return 0;
     var limit: u64 = 100;
     for (&self.table.cells, 0..) |*cell, i| {
         if (cell.state == .queued) return 0;

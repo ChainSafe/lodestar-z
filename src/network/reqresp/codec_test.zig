@@ -231,6 +231,22 @@ test "codec decodes errors without touching the small success sink" {
     }
 }
 
+test "codec rejects malformed compressed payload boundaries" {
+    const cases = [_]struct { frame: []const u8, expected: codec.Error }{
+        .{ .frame = &.{ 0, 6, 0, 0, 0, 0, 0, 0, 1, 0xff }, .expected = error.InvalidCompressed },
+        .{ .frame = &.{ 0, 7, 0, 0, 0, 0, 0, 0, 0x81, 0x80, 0x04 }, .expected = error.FrameTooLarge },
+        .{ .frame = &.{ 0, 5, 0, 0, 0, 0, 0, 0, 2 }, .expected = error.TooManyBytes },
+        .{ .frame = &.{ 0, 3, 0, 0 }, .expected = error.BadFrameLength },
+    };
+    var scratch: [codec.frame_scratch_max]u8 = undefined;
+    var sink: [1]u8 = undefined;
+    for (cases) |case| {
+        var decoder = Decoder.initRequest(.{ .min = 1, .max = 1 }, &sink, &scratch);
+        _ = try decoder.feed(&([_]u8{1} ++ codec.identifier));
+        try std.testing.expectError(case.expected, decoder.feed(case.frame));
+    }
+}
+
 test "codec bounds errors separately from successful ping payloads" {
     var sink: [8]u8 = undefined;
     var scratch: [codec.frame_scratch_max]u8 = undefined;

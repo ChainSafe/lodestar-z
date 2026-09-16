@@ -74,6 +74,7 @@ pub const Diagnostics = struct {
     operationOccupied: u8 = 0,
     operationHighWater: u8 = 0,
     operationRefusals: u64 = 0,
+    peerReportsIgnored: u64 = 0,
     connectCapacity: u8 = 16,
     connectOccupied: u8 = 0,
     connectHighWater: u8 = 0,
@@ -105,6 +106,9 @@ pub const Diagnostics = struct {
     ownerAllocationBytes: usize = @sizeOf(Owner),
     nativeRequestedBytes: usize = 0,
     nativeAllocationCount: usize = 0,
+    quicReceiveWindowBytes: u64 = 0,
+    quicConnectionWindowBytes: u64 = 0,
+    quicStreamWindowBytes: u64 = 0,
     resolvedCapacities: ResolvedCapacities = .{},
     requests: requests_mod.Diagnostics = .{},
     incoming: incoming_mod.Diagnostics = .{},
@@ -155,11 +159,12 @@ pub const Runtime = struct {
     stores: ?*Stores = null,
     lane: ?*projection.Lane = null,
     table: commands.Table = .{},
+    reports: @import("network_peer_reports.zig").Table = .{},
     requests: ?requests_mod.Table = null,
     incoming: ?incoming_mod.Table = null,
     gossip: ?gossip_mod.Table = null,
     payload_budget: @import("network_budget.zig").Budget = .{},
-    test_incoming_deadline: u64 = 0,
+    test_incoming_deadline: if (faults.enabled) u64 else void = if (faults.enabled) 0 else {},
     test_gossip_held: if (faults.enabled) bool else void = if (faults.enabled) false else {},
     test_gossip_expiry: if (faults.enabled) ?gossip_mod.Token else void = if (faults.enabled) null else {},
     peer_capacity: u16 = 0,
@@ -228,8 +233,6 @@ pub const Runtime = struct {
                 heavy.core.shutdown(@import("network_owner.zig").now(heavy.threaded.io()));
                 self.metrics.collect(&heavy.core, self.diag.lastMonotonicMs);
                 self.metrics.stop();
-                incoming_mod.closeLocked(self);
-                gossip_mod.closeLocked(self);
                 heavy.core.deinit(heavy.threaded.io());
             }
             if (heavy.threaded_live) heavy.threaded.deinit();
@@ -289,6 +292,7 @@ pub const Runtime = struct {
         result.operationOccupied = self.table.occupied;
         result.operationHighWater = self.table.high_water;
         result.operationRefusals = self.table.refusals;
+        result.peerReportsIgnored = self.reports.ignored;
         result.connectHighWater = self.table.kind_high_water[@intFromEnum(commands.Kind.connect)];
         result.connectRefusals = self.table.kind_refusals[@intFromEnum(commands.Kind.connect)];
         result.intentHighWater = self.table.kind_high_water[@intFromEnum(commands.Kind.intent)];
@@ -540,6 +544,7 @@ pub const Runtime = struct {
 test {
     _ = commands;
     _ = projection;
+    _ = @import("network_peer_reports.zig");
 }
 
 test "application typed store allocation prefixes release all requested bytes" {

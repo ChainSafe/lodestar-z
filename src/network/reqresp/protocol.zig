@@ -269,6 +269,7 @@ comptime {
     assert(Protocol.count == 18);
     for (table) |bounds| {
         assert(bounds.request_min <= bounds.request_max);
+        assert(bounds.request_max <= constants.MAX_PAYLOAD_SIZE);
         assert(bounds.response_min <= bounds.response_max);
         assert(bounds.response_max <= constants.MAX_PAYLOAD_SIZE);
         assert(bounds.chunks_max >= 1);
@@ -280,24 +281,4 @@ comptime {
         assert(candidate.len <= id_length_max);
     }
     assert(requestMaxAll() >= ct.deneb.BlobIdentifiers.max_size);
-}
-
-pub fn requestChunkLimit(which: Protocol, bytes: []const u8) error{InvalidRequest}!u32 {
-    const info = which.info();
-    if (bytes.len < info.request_min or bytes.len > info.request_max) return error.InvalidRequest;
-    switch (which) {
-        .blocks_by_head_v1 => {
-            const raw_count = std.mem.readInt(u64, bytes[32..40], .little);
-            if (raw_count == 0) return error.InvalidRequest;
-            return @intCast(@min(raw_count, consensus.MAX_REQUEST_BLOCKS_DENEB));
-        },
-        .light_client_updates_by_range_v1 => {
-            const start = std.mem.readInt(u64, bytes[0..8], .little);
-            const raw_count = std.mem.readInt(u64, bytes[8..16], .little);
-            const effective = @min(raw_count, consensus.MAX_REQUEST_LIGHT_CLIENT_UPDATES);
-            _ = std.math.add(u64, start, effective) catch return error.InvalidRequest;
-            return @intCast(effective);
-        },
-        else => return info.chunks_max,
-    }
 }

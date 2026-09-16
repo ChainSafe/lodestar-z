@@ -128,7 +128,7 @@ pub const PeerIo = struct {
         if (self.pressure_since) |since| result.values[@intFromEnum(TimeoutReason.receive_pressure)] = since +| options.pressure_timeout_ms;
         if (self.frame_since) |since| {
             result.values[@intFromEnum(TimeoutReason.receive_frame)] = if (self.pressure_since == null)
-                @min(since +| options.pressure_timeout_ms, self.progress_ms +| options.large_frame_timeout_ms)
+                @min(since +| (if (self.large_slot != null) options.large_frame_timeout_ms else options.pressure_timeout_ms), self.progress_ms +| options.large_frame_timeout_ms)
             else
                 since +| options.pressure_timeout_ms;
         }

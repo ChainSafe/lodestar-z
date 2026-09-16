@@ -1,10 +1,11 @@
 const std = @import("std");
-const constants = @import("constants.zig");
+pub const protocol_id_length_max: usize = 128;
+pub const proposals_max: u8 = 4;
 const varint = @import("varint.zig");
 
 pub const header = "/multistream/1.0.0";
 pub const na = "na";
-pub const message_length_max = 2 + constants.protocol_id_length_max + 1;
+pub const message_length_max = 2 + protocol_id_length_max + 1;
 pub const listener_write_max = 4 * message_length_max;
 
 pub const Error = error{ Malformed, TooLong, BufferTooSmall } || varint.Error;
@@ -15,7 +16,7 @@ pub const Message = struct {
 };
 
 pub fn encodeMessage(token: []const u8, out: []u8) Error![]u8 {
-    if (token.len > constants.protocol_id_length_max) return error.TooLong;
+    if (token.len > protocol_id_length_max) return error.TooLong;
     const length = token.len + 1;
     const prefix_length = varint.encodedLength(length);
     if (out.len < prefix_length + length) return error.BufferTooSmall;
@@ -31,7 +32,7 @@ pub fn decodeMessage(bytes: []const u8) Error!?Message {
         error.Overflow => return error.Malformed,
     };
     if (prefix.value == 0) return error.Malformed;
-    if (prefix.value > constants.protocol_id_length_max + 1) return error.TooLong;
+    if (prefix.value > protocol_id_length_max + 1) return error.TooLong;
     const length: usize = @intCast(prefix.value);
     if (bytes.len - prefix.length < length) return null;
     const line = bytes[prefix.length..][0..length];
@@ -51,7 +52,7 @@ pub const Dialer = struct {
     header_seen: bool = false,
 
     pub fn init(protocol: []const u8) Error!Dialer {
-        if (protocol.len > constants.protocol_id_length_max) return error.TooLong;
+        if (protocol.len > protocol_id_length_max) return error.TooLong;
         return .{ .protocol = protocol };
     }
 
@@ -116,7 +117,7 @@ pub const Listener = struct {
                 written += (try encodeMessage(header, out[written..])).len;
                 continue;
             }
-            if (self.proposals == constants.multistream_proposals_max) {
+            if (self.proposals == proposals_max) {
                 return .{ .consumed = consumed, .write = out[0..written], .status = .failed };
             }
             self.proposals += 1;

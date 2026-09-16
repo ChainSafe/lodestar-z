@@ -64,7 +64,7 @@ pub const State = struct {
         return deadline;
     }
 
-    pub fn remoteGoodbye(self: *State, now_ms: u64, duration_ms: u64) void {
+    pub fn cooldown(self: *State, now_ms: u64, duration_ms: u64) void {
         self.goodbye_until_ms = @max(self.goodbye_until_ms, now_ms +| duration_ms);
     }
 };

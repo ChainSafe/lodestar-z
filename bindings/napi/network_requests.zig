@@ -228,7 +228,7 @@ pub fn capture(runtime: *Runtime, events: []const rr.Event, now: n.Now) !void {
                 if (runtime.incoming == null) try core.respondError(incoming.request, 2, "application handlers unavailable", now);
                 continue;
             },
-            .chunk_sent, .served, .over_limit => continue,
+            .chunk_sent, .served => continue,
             else => {},
         }
         const handle = switch (event) {

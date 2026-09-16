@@ -102,6 +102,35 @@ test "NODES enforces the bounded ENR count" {
     try std.testing.expectError(message.Error.InvalidMessage, nodes.encode(&encoded));
 }
 
+test "message decoder rejects invalid PONG endpoints and excessive NODES records" {
+    var encoded: [128]u8 = undefined;
+    var scratch: message.DecodeScratch = .{};
+    for ([_]struct { ip: []const u8, port: u64 }{
+        .{ .ip = &.{ 127, 0, 0, 1, 1 }, .port = 9000 },
+        .{ .ip = &.{ 127, 0, 0, 1 }, .port = 65_536 },
+    }) |case| {
+        encoded[0] = 2;
+        var writer = rlp.Writer.init(encoded[1..]);
+        const outer = try writer.beginList();
+        try writer.writeBytes(&.{1});
+        try writer.writeUint(1);
+        try writer.writeBytes(case.ip);
+        try writer.writeUint(case.port);
+        writer.finishList(outer);
+        try std.testing.expectError(error.InvalidMessage, message.Message.decode(encoded[0 .. 1 + writer.bytes().len], &scratch));
+    }
+    encoded[0] = 4;
+    var writer = rlp.Writer.init(encoded[1..]);
+    const outer = try writer.beginList();
+    try writer.writeBytes(&.{1});
+    try writer.writeUint(1);
+    const records = try writer.beginList();
+    for (0..types.findnode_result_max + 1) |_| try writer.writeBytes(&.{});
+    writer.finishList(records);
+    writer.finishList(outer);
+    try std.testing.expectError(error.InvalidMessage, message.Message.decode(encoded[0 .. 1 + writer.bytes().len], &scratch));
+}
+
 test "FINDNODE decoding publishes each distance once" {
     const request_id = try message.RequestId.init(&.{0x01});
     const find_node = message.Message{ .find_node = .{

@@ -80,6 +80,9 @@ test "UDP retains packets arriving between readiness probes and blocking receive
         fn wait(userdata: ?*anyopaque, batch: *std.Io.Batch, deadline: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
             const operation = batch.storage[batch.submitted.head.toIndex()].submission.operation.net_receive;
             if (operation.flags.peek and !fired.swap(true, .acq_rel)) {
+                // The first arrival can finish the other waiter and cancel this injector.
+                const protection = std.testing.io.swapCancelProtection(.blocked);
+                defer _ = std.testing.io.swapCancelProtection(protection);
                 for (targets) |target| target.?.send(std.testing.io, &target.?.address, "arrival") catch unreachable;
             }
             return std.testing.io.vtable.batchAwaitConcurrent(userdata, batch, deadline);

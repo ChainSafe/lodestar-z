@@ -1,4 +1,5 @@
 const std = @import("std");
+const varint_mod = @import("varint.zig");
 
 const assert = std.debug.assert;
 
@@ -72,16 +73,7 @@ pub const Reader = struct {
     }
 };
 
-pub fn varintLen(value: u64) usize {
-    var len: usize = 1;
-    var rest = value >> 7;
-    for (0..9) |_| {
-        if (rest == 0) break;
-        len += 1;
-        rest >>= 7;
-    }
-    return len;
-}
+pub const varintLen = varint_mod.encodedLength;
 
 /// An append-only writer over a caller-provided buffer; never allocates and
 /// asserts the buffer is large enough (callers size it from the `*Size` helpers).
@@ -98,20 +90,8 @@ pub const Writer = struct {
     }
 
     pub fn varint(self: *Writer, value: u64) void {
-        var rest = value;
-        for (0..10) |_| {
-            assert(self.len < self.buf.len);
-            const byte: u8 = @intCast(rest & 0x7f);
-            rest >>= 7;
-            if (rest != 0) {
-                self.buf[self.len] = byte | 0x80;
-                self.len += 1;
-            } else {
-                self.buf[self.len] = byte;
-                self.len += 1;
-                return;
-            }
-        }
+        assert(varintLen(value) <= self.buf.len - self.len);
+        self.len += (varint_mod.encode(value, self.buf[self.len..]) catch unreachable).len;
     }
 
     pub fn tag(self: *Writer, field: u32, wire: u3) void {

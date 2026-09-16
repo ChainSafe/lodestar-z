@@ -100,7 +100,10 @@ pub const Messages = struct {
         const fast = try a.alloc(FastEntry, layout.fingerprints);
         errdefer a.free(fast);
         @memset(fast, .{});
-        const pending = try validation.Validation.init(a, layout.validations, options.validation_timeout_ms, options.validation_tombstone_ms);
+        var pending = try validation.Validation.init(a, layout.validations, options.validation_timeout_ms, options.validation_tombstone_ms);
+        seen.index.seed = options.random_seed.?;
+        history.index.seed = options.random_seed.? ^ 1;
+        pending.index.seed = options.random_seed.? ^ 2;
         return .{ .store = store, .history = history, .seen = seen, .validation = pending, .gossip_ids = gossip_ids, .fast = fast };
     }
 
@@ -250,6 +253,8 @@ pub const Messages = struct {
     }
 
     fn admitReceived(self: *Messages, context: *const Context, workspace: *const Workspace, source: *const Source, topic: u16, msg: protobuf.Message, id: topic_mod.MessageId, written: usize, now: u64) Received {
+        const peer_limit = @max(1, @min(128, self.validation.entries.len / 2));
+        if (self.validation.pending_per_peer[source.peer.index] >= peer_limit) return .{ .blocked = .storage };
         var reservation = self.validation.reserve(id) orelse return .{ .blocked = .storage };
         defer reservation.cancel();
         const message = self.history.admitPayload(&self.store, id, msg.topic, msg.data) orelse return .{ .blocked = .storage };

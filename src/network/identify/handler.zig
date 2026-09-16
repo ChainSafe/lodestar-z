@@ -3,7 +3,7 @@ const codec = @import("codec.zig");
 const routing = @import("../router.zig");
 const engine_mod = @import("../quic/engine.zig");
 const types = @import("../types.zig");
-const PeerRef = @import("../peers/types.zig").PeerRef;
+const PeerRef = types.PeerRef;
 const Outbox = @import("../stream_io.zig").Outbox;
 
 pub const Options = struct {
@@ -179,7 +179,7 @@ pub const Handler = struct {
         self.bind(engine);
         for (self.inbound) |*slot| if (slot.stream == null) {
             slot.* = .{ .stream = outcome.stream, .deadline = now.mono_ms +| deadline_ms, .ready = true };
-            const bytes = self.local.?.encode(router.capabilities().receive, &slot.bytes) catch {
+            const bytes = self.local.?.encode(router.capabilities().receive, engine.peerAddress(outcome.stream.conn), &slot.bytes) catch {
                 engine.closeStream(outcome.stream, types.app_error_normal);
                 slot.* = .{};
                 return;
@@ -224,7 +224,7 @@ pub const Handler = struct {
             const slot = &self.outbound[index];
             const stream = slot.stream orelse continue;
             if (slot.phase != .terminal and now.mono_ms >= slot.deadline) {
-                router.cancel(engine, stream);
+                if (slot.phase == .negotiating) router.cancel(engine, stream);
                 finish(slot, engine, .{ .failed = .timeout });
             }
             if (slot.phase == .reading and slot.ready) {
@@ -303,7 +303,7 @@ pub const Handler = struct {
         };
         for (self.outbound) |*slot| if (slot.stream) |stream| {
             if (slot.phase != .terminal) {
-                router.cancel(engine, stream);
+                if (slot.phase == .negotiating) router.cancel(engine, stream);
                 finish(slot, engine, .{ .failed = .shutdown });
             }
         };

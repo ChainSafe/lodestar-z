@@ -9,9 +9,11 @@ pub const Counters = struct {
 
     pub fn write(self: *const Counters, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try prom.family(w, "lodestar_native_quic_connections_established_total", .counter, "QUIC connections with authenticated expected identities by direction");
-        try prom.family(w, "lodestar_native_quic_connections_closed_total", .counter, "QUIC closes including pre-admission failures; wire error codes share bounded reason labels");
         inline for (@typeInfo(types.Direction).@"enum".fields) |direction| {
             try prom.sample(w, "lodestar_native_quic_connections_established_total", "direction", direction.name, self.established[direction.value]);
+        }
+        try prom.family(w, "lodestar_native_quic_connections_closed_total", .counter, "QUIC closes including pre-admission failures; wire error codes share bounded reason labels");
+        inline for (@typeInfo(types.Direction).@"enum".fields) |direction| {
             inline for (@typeInfo(types.CloseReason).@"union".fields, 0..) |reason, index| {
                 try w.print("lodestar_native_quic_connections_closed_total{{direction=\"" ++ direction.name ++
                     "\",reason=\"" ++ reason.name ++ "\"}} {d}\n", .{self.closed[direction.value][index]});

@@ -59,6 +59,7 @@ pub const Pair = struct {
             .forks = overrides.forks orelse forks,
             .quotas = overrides.quotas,
             .request_fork = overrides.request_fork,
+            .policy = if (overrides.admission == null) @import("policy_fixture.zig").config() else null,
             .admission = overrides.admission,
             .host_timeout_ms = overrides.host_timeout_ms,
             .quota_timeout_ms = overrides.quota_timeout_ms,

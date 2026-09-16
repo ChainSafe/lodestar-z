@@ -29,6 +29,7 @@ pub const Error = error{
     LengthOutOfBounds,
     BadIdentifier,
     BadFrameType,
+    BadFrameLength,
     FrameTooLarge,
     BadChecksum,
     TooManyCompressedBytes,
@@ -255,7 +256,8 @@ pub const Decoder = struct {
         }
         self.header_len = 0;
         if (isDataFrame(frame_type)) {
-            if (frame_length < checksum_length or frame_length > frame_body_max) {
+            if (frame_length < checksum_length) return error.BadFrameLength;
+            if (frame_length > frame_body_max) {
                 return error.FrameTooLarge;
             }
             if (frame_type == frame_type_uncompressed and

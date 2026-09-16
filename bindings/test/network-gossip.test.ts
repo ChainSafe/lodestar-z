@@ -18,8 +18,8 @@ test("gossip drain and stale verdict on an activated application", async () => {
 });
 
 import {setTimeout as delay} from "node:timers/promises";
-import bindings from "../src/bindings.js";
 import type {NativeGossipMessage, NativeNetworkApplicationRuntime} from "../src/network.js";
+import {networkBindings as bindings} from "./utils/network-bindings.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
 const TOPIC = "/eth2/01020304/beacon_block/ssz_snappy";
@@ -83,7 +83,9 @@ test("gossip lifecycle, strict representations and canonical publication refusal
     expect(runtime.reportGossip({...handle, session: handle.session + 1n}, "ignore")).toBe(false);
     expect(runtime.reportGossip({...handle, index: Number.MAX_SAFE_INTEGER}, "ignore")).toBe(false);
     expect(() => runtime.publishGossip(TOPIC, new Uint8Array(10), {flood: 0} as unknown as {flood: boolean})).toThrow();
-    expect(() => runtime.publishGossip(TOPIC, new Uint8Array(10), {unknown: true} as {flood: boolean})).toThrow();
+    expect(() =>
+      runtime.publishGossip(TOPIC, new Uint8Array(10), {unknown: true} as unknown as {flood: boolean})
+    ).toThrow();
     expect(() => runtime.publishGossip(TOPIC, new Uint16Array(10) as unknown as Uint8Array)).toThrow();
     const detached = new Uint8Array(10);
     structuredClone(detached, {transfer: [detached.buffer]});
@@ -419,7 +421,10 @@ for (const hoodi of [false, true]) {
         config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
         config.topicPolicy[0].rules.beacon_block.sszMax = 10 * 1024 * 1024;
         const secondTopic = "/eth2/05060708/beacon_block/ssz_snappy";
-        config.topicPolicy.push({...structuredClone(config.topicPolicy[0]), digest: Uint8Array.of(5, 6, 7, 8)});
+        config.topicPolicy = [
+          ...config.topicPolicy,
+          {...structuredClone(config.topicPolicy[0]), digest: Uint8Array.of(5, 6, 7, 8)},
+        ];
         runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
         const identity = await runtime.ready;
         const intent = localIntent(config);
@@ -470,12 +475,12 @@ for (const hoodi of [false, true]) {
         }
         if (!hoodi) {
           for (let i = 0; i < 64; i++) await peer.command("gossipPublish", {length: 64, seed: 900 + i, topic: TOPIC});
-          for (let i = 0; i < 1000 && runtime.diagnostics().gossip.queued !== 64; i++) await delay(5);
+          for (let i = 0; i < 1000 && runtime.diagnostics().gossip.queued !== 32; i++) await delay(5);
           expect(runtime.diagnostics().gossip).toMatchObject({
-            occupied: 64,
-            payloadBytes: 4096,
-            queued: 64,
-            reservedBytes: 8192,
+            occupied: 32,
+            payloadBytes: 2048,
+            queued: 32,
+            reservedBytes: 4096,
           });
         }
         expect(
@@ -483,7 +488,7 @@ for (const hoodi of [false, true]) {
         ).toMatchObject({length: 8});
         if (!hoodi) {
           const batch = runtime.drainGossip();
-          expect(batch.messages).toHaveLength(64);
+          expect(batch.messages).toHaveLength(32);
           expect(batch.more).toBe(false);
           for (const message of batch.messages) expect(runtime.reportGossip(message.handle, "ignore")).toBe(true);
         }
@@ -730,3 +735,57 @@ test("gossip diagnostics validate cursors and share bounded snapshot admission",
   }
   expect(() => runtime.getGossipDiagnostics()).toThrow("NetworkClosed");
 });
+
+test("gossip diagnostics paginate retained peers and peer drains expose remaining events", async () => {
+  const config = applicationConfig();
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  const identities = new Set<string>();
+  try {
+    await runtime.ready;
+    await runtime.applyIntent(localIntent(config), config.initialSlot);
+    for (let i = 0; i < 9; i++) {
+      const remoteConfig = applicationConfig();
+      remoteConfig.identitySecretKey[31] = 70 + i;
+      const remote = createNativeNetworkApplicationRuntime(remoteConfig, () => undefined);
+      try {
+        const identity = await remote.ready;
+        identities.add(Buffer.from(identity.peerId).toString("hex"));
+        await remote.applyIntent(localIntent(remoteConfig), remoteConfig.initialSlot);
+        await runtime.connect(identity.peerId, [identity.localEndpoint], 5000n);
+        await vi.waitFor(
+          async () => {
+            const page = await remote.getGossipDiagnostics();
+            expect(page.peers).toHaveLength(1);
+            expect(page.peers[0].outboundReady).toBe(true);
+          },
+          {timeout: 5000}
+        );
+        await runtime.disconnect(identity.peerId);
+      } finally {
+        await remote.close();
+      }
+    }
+    const first = await runtime.getGossipDiagnostics();
+    expect(first.peers).toHaveLength(8);
+    expect(first.nextCursor).not.toBeNull();
+    const second = await runtime.getGossipDiagnostics(first.nextCursor ?? 0);
+    expect(second.peers).toHaveLength(1);
+    expect(second.nextCursor).toBeNull();
+    expect(second.ownerSequence).toBeGreaterThanOrEqual(first.ownerSequence);
+    expect(
+      new Set([...first.peers, ...second.peers].map((peer) => Buffer.from(peer.identity).toString("hex")))
+    ).toEqual(identities);
+    expect([...first.peers, ...second.peers].every((peer) => !peer.connected)).toBe(true);
+    const batch = runtime.drainPeers(1);
+    expect(batch.events).toHaveLength(1);
+    expect(batch.more).toBe(true);
+    const remaining = runtime.drainPeers(64);
+    expect(remaining.events.length).toBeGreaterThan(0);
+    expect(remaining.more).toBe(false);
+    expect(remaining.events.filter((event) => event.type === "closed").every((event) => event.reason === "host")).toBe(
+      true
+    );
+  } finally {
+    await runtime.close();
+  }
+}, 45000);

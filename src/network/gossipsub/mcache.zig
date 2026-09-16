@@ -11,11 +11,6 @@ pub fn indexCapacity(capacity: usize) usize {
     return std.math.ceilPowerOfTwo(usize, @max(capacity * 2, 2)) catch unreachable;
 }
 
-fn hashId(id: MessageId) usize {
-    // Stored IDs are computed SHA-256 truncations. Remote query IDs still use bounded probing.
-    return std.mem.readInt(u64, id[0..8], .little);
-}
-
 /// Borrows stable keys from MessageId values or records with an `id` field.
 /// Remove membership before overwriting a key. Backward-shift deletion can only
 /// reduce displacement, so the insertion high-water bound also bounds misses.
@@ -26,6 +21,7 @@ pub fn IdIndex(comptime Entry: type) type {
         entries: []Entry,
         mask: usize,
         probe_limit: usize = 0,
+        seed: u64 = 0,
 
         pub fn init(allocator: Allocator, entries: []Entry) Allocator.Error!Self {
             const table_len = indexCapacity(entries.len);
@@ -48,8 +44,12 @@ pub fn IdIndex(comptime Entry: type) type {
             return &self.entries[entry].id;
         }
 
+        fn hash(self: *const Self, id: MessageId) usize {
+            return @truncate(std.hash.Wyhash.hash(self.seed, &id));
+        }
+
         pub fn find(self: *const Self, id: MessageId) ?u32 {
-            var pos = hashId(id) & self.mask;
+            var pos = self.hash(id) & self.mask;
             for (0..self.probe_limit) |_| {
                 if (self.slots[pos] == empty_slot) return null;
                 if (std.mem.eql(u8, self.key(self.slots[pos]), &id)) return self.slots[pos];
@@ -60,7 +60,7 @@ pub fn IdIndex(comptime Entry: type) type {
 
         pub fn insert(self: *Self, id: MessageId, entry: u32) void {
             assert(entry < self.entries.len and std.mem.eql(u8, self.key(entry), &id));
-            var pos = hashId(id) & self.mask;
+            var pos = self.hash(id) & self.mask;
             for (0..self.slots.len) |distance| {
                 if (self.slots[pos] == empty_slot) {
                     self.slots[pos] = entry;
@@ -73,7 +73,7 @@ pub fn IdIndex(comptime Entry: type) type {
         }
 
         pub fn remove(self: *Self, id: MessageId) void {
-            var pos = hashId(id) & self.mask;
+            var pos = self.hash(id) & self.mask;
             var found = false;
             for (0..self.probe_limit) |_| {
                 if (self.slots[pos] == empty_slot) return;
@@ -91,7 +91,7 @@ pub fn IdIndex(comptime Entry: type) type {
                     self.slots[hole] = empty_slot;
                     return;
                 }
-                const home = hashId(self.key(self.slots[pos]).*) & self.mask;
+                const home = self.hash(self.key(self.slots[pos]).*) & self.mask;
                 if ((pos -% home) & self.mask >= (pos -% hole) & self.mask) {
                     self.slots[hole] = self.slots[pos];
                     hole = pos;
@@ -178,7 +178,7 @@ pub const SeenCache = struct {
 };
 
 const storage = @import("message_store.zig");
-const PeerRef = @import("validation.zig").PeerRef;
+const PeerRef = @import("peer_book.zig").Ref;
 pub const HistoryEntry = struct {
     next: u32 = empty_slot,
     prev: u32 = empty_slot,
@@ -418,13 +418,18 @@ test "gossip ID index bounds sparse misses and repairs wrapped collision cluster
     defer index.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), index.probe_limit);
     try std.testing.expect(index.find(@splat(0)) == null);
-    for (&ids, 0..) |*id, i| {
-        id.* = @splat(0);
-        id[0] = 127;
-        id[19] = @intCast(i);
-        index.insert(id.*, @intCast(i));
-        try std.testing.expectEqual(i + 1, index.probe_limit);
+    var count: usize = 0;
+    for (0..65_536) |candidate| {
+        var id: MessageId = @splat(0);
+        std.mem.writeInt(u64, id[0..8], candidate, .little);
+        if (index.hash(id) & index.mask != index.mask) continue;
+        ids[count] = id;
+        index.insert(id, @intCast(count));
+        count += 1;
+        try std.testing.expectEqual(count, index.probe_limit);
+        if (count == ids.len) break;
     }
+    try std.testing.expectEqual(ids.len, count);
     var present = std.StaticBitSet(64).initFull();
     for ([_]usize{ 0, 32, 63, 1, 31, 62 }) |removed| {
         index.remove(ids[removed]);

@@ -23,7 +23,6 @@ pub const Config = struct {
         base.limits.dialing_max = r.dialingCapacity;
         base.limits.receive_budget_bytes = r.receiveBudgetBytes;
         base.core.peers = .{ .capacity = r.peerCapacity, .target_peers = r.targetPeers, .max_peers = r.maxPeers, .min_outbound = r.minOutbound, .outbound_reserve = r.outboundReserve, .engine_capacity = r.connectionCapacity };
-        base.core.dial.engine_dialing_max = r.dialingCapacity;
         base.core.dial.concurrent_max = @min(base.core.dial.concurrent_max, r.dialingCapacity);
         base.core.service.reqresp.peers = r.connectionCapacity;
         base.core.service.reqresp.admission = try n.reqresp.reqresp.AdmissionOptions.defaults(&self.request, base.core.peers.capacity, base.core.service.reqresp.inbound_max);

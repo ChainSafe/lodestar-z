@@ -237,7 +237,7 @@ const Session = struct {
             .failed => |failed| try self.onFailure(failed.request, failed.reason),
             .request => |req| try self.serve(req.request, req.protocol, req.bytes),
             .chunk_sent => |sent| _ = self.svc.reqresp.finish(sent.request, self.now),
-            .served, .over_limit => {},
+            .served => {},
         }
     }
 
@@ -364,9 +364,11 @@ fn dial(
     defer allocator.free(sink);
 
     var table: [forks_max]reqresp.ForkEntry = undefined;
+    var blob_schedule: [reqresp.request_policy.schedule_max]reqresp.request_policy.BlobLimit = undefined;
     var gossip_seed: u64 = undefined;
     io.random(std.mem.asBytes(&gossip_seed));
     var svc = try network.Service.init(allocator, .{ .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = gossip_seed }, .reqresp = .{
+        .policy = try reqresp.request_policy.Config.fromBeaconConfig(options.network.config, &blob_schedule),
         .forks = forkTable(options.network.config, &table),
         .inbound_max = inbound_max,
         .inbound_per_peer_max = inbound_max,

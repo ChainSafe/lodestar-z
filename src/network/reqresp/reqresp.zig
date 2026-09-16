@@ -25,7 +25,6 @@ const Now = types.Now;
 
 pub const read_buffer_length: usize = 16 * 1024;
 pub const reads_per_pump_max: u32 = 8;
-pub const over_limit_queue_max: usize = 8;
 pub const scratch_length: usize = codec.frame_scratch_max;
 /// Two maintenance and two gossip streams remain outside the application allowance.
 pub const outbound_stream_headroom: u8 = 4;
@@ -65,7 +64,6 @@ pub const AdmissionOptions = struct {
 };
 
 const Admission = struct {
-    policy: request_policy.Policy,
     limiter: admission_mod.Limiter,
 };
 
@@ -80,10 +78,12 @@ pub const Options = struct {
     inbound_per_peer_max: u8 = constants.inbound_per_peer_max_default,
     /// Zero disables the cap; retained application owners count until canonical recycling.
     inbound_application_per_peer_max: u8 = 0,
-    /// Complete inbound request transfer, then response write progress. Outbound phases have absolute deadlines.
+    /// Complete inbound request transfer and each response chunk within this duration.
     progress_timeout_ms: u64 = constants.progress_timeout_ms_default,
     forks: []const ForkEntry,
     request_fork: config.ForkSeq = .phase0,
+    /// Required for application requests when admission is disabled.
+    policy: ?request_policy.Config = null,
     admission: ?AdmissionOptions = null,
     quotas: ?limiter_mod.Quotas = null,
     /// Defaults reserve one inbound-capacity control wave; bulk quotas stay per protocol.
@@ -149,7 +149,6 @@ pub const Event = union(enum) {
     request: struct { request: RequestHandle, peer: Handle, protocol: Protocol, bytes: []const u8 },
     chunk_sent: struct { request: RequestHandle, chunks: u32 },
     served: struct { request: RequestHandle, chunks: u32 },
-    over_limit: struct { peer: Handle, protocol: Protocol },
 };
 
 pub const Outputs = struct { application: []Event = &.{}, control: []Event = &.{} };
@@ -174,6 +173,7 @@ pub const RequestError = error{
 };
 
 pub const AcceptError = error{
+    TooManyRequests,
     InvalidCapacity,
     StaleHandle,
     InvalidHandoff,
@@ -210,19 +210,12 @@ pub const Counters = struct {
     withheld_ms_total: u64 = 0,
     failures: u64 = 0,
     timeouts: u64 = 0,
-    over_limit: u64 = 0,
-    over_limit_dropped: u64 = 0,
     goodbyes_recovered_on_close: u64 = 0,
     goodbyes_incomplete_on_close: u64 = 0,
 };
 
 pub const metrics = @import("metrics.zig");
 pub const ProtocolCounters = metrics.ProtocolCounters;
-
-const OverLimit = struct {
-    peer: Handle,
-    protocol: Protocol,
-};
 
 pub const MemoryPlan = struct {
     facade_bytes: usize,
@@ -242,11 +235,9 @@ pub const ReqResp = struct {
     arena: []u8,
     request_sinks: []u8,
     limiter: limiter_mod.Limiter,
+    policy: ?request_policy.Policy,
     admission: ?Admission,
     request_fork: config.ForkSeq,
-    over_limit: [over_limit_queue_max]OverLimit = undefined,
-    over_limit_head: u8 = 0,
-    over_limit_len: u8 = 0,
     last_now_ms: u64 = 0,
     counters: Counters = .{},
     protocol_counters: [Protocol.count]ProtocolCounters = @splat(.{}),
@@ -270,7 +261,6 @@ pub const ReqResp = struct {
         held_chunks: usize = 0,
         withheld_chunks: usize = 0,
         oldest_withheld_age_ms: ?u64 = null,
-        over_limit_backlog: usize = 0,
     };
 
     pub fn resourceSnapshot(self: *const ReqResp) Resources {
@@ -279,7 +269,6 @@ pub const ReqResp = struct {
             .inbound_capacity = self.inbound.len,
             .outbound_control_reserved = self.options.outbound_control_reserved,
             .inbound_control_reserved = self.options.inbound_control_reserved,
-            .over_limit_backlog = self.over_limit_len,
         };
         for (self.outbound) |*slot| {
             if (slot.lifecycle.occupied()) result.outbound_occupied += 1;
@@ -299,11 +288,19 @@ pub const ReqResp = struct {
         return result;
     }
 
+    pub fn inspectRequest(self: *const ReqResp, which: Protocol, bytes: []const u8, fork: config.ForkSeq) request_policy.InspectError!request_policy.Inspection {
+        if (self.policy) |*policy| return policy.inspect(which, bytes, fork);
+        if (!which.isControl()) return error.PolicyRequired;
+        const bounds = which.info();
+        if (bytes.len < bounds.request_min or bytes.len > bounds.request_max) return error.MalformedSsz;
+        return .{ .charged_cost = 1, .chunks_max = bounds.chunks_max };
+    }
+
     pub fn validateOptions(options: Options) InitError!struct { peer: limiter_mod.Quotas, global: limiter_mod.Quotas } {
         if (options.admission) |*admission| {
             _ = try request_policy.Policy.init(&admission.policy);
             try admission_mod.Limiter.validate(&admission.limits);
-        }
+        } else if (options.policy) |*policy| _ = try request_policy.Policy.init(policy);
         if (options.outbound_max == 0 or options.outbound_max > constants.slots_ceiling) {
             return error.InvalidOptions;
         }
@@ -344,8 +341,9 @@ pub const ReqResp = struct {
 
     pub fn init(allocator: std.mem.Allocator, options: Options) InitError!ReqResp {
         const quotas = try validateOptions(options);
+        const policy_config = if (options.admission) |value| value.policy else options.policy;
+        const policy = if (policy_config) |*value| try request_policy.Policy.init(value) else null;
         var admission: ?Admission = if (options.admission) |*value| .{
-            .policy = try request_policy.Policy.init(&value.policy),
             .limiter = try admission_mod.Limiter.init(allocator, value.limits),
         } else null;
         errdefer if (admission) |*owner| owner.limiter.deinit(allocator);
@@ -397,6 +395,7 @@ pub const ReqResp = struct {
             .arena = arena,
             .request_sinks = request_sinks,
             .limiter = buckets,
+            .policy = policy,
             .admission = admission,
             .request_fork = options.request_fork,
             .fork_count = @intCast(options.forks.len),
@@ -563,6 +562,16 @@ pub const ReqResp = struct {
         }
     }
 
+    /// Valid until the pump following terminal delivery recycles the request slot.
+    pub fn incompleteRequestTimeout(self: *const ReqResp, event: Event) ?Handle {
+        if (event != .failed or event.failed.reason != .timeout) return null;
+        const handle = event.failed.request;
+        if (handle.direction != .inbound or handle.index >= self.inbound.len) return null;
+        const slot = &self.inbound[handle.index];
+        if (slot.lifecycle.generation != handle.generation or slot.state != .receiving_request) return null;
+        return slot.lifecycle.conn;
+    }
+
     /// Includes reqresp-owned storage. Caller response sinks and Router storage are separate.
     pub fn memoryPlan(self: *const ReqResp) MemoryPlan {
         const slot_bytes = self.outbound.len * @sizeOf(Client) + self.inbound.len * @sizeOf(Server);
@@ -583,14 +592,6 @@ pub const ReqResp = struct {
     /// Monotonic milliseconds; zero capacity suppresses event-only wakeups.
     /// Router negotiation and transport deadlines remain separate.
     pub fn nextWakeup(self: *ReqResp, now: Now, capacities: Capacities) ?u64 {
-        for (0..self.over_limit_len) |offset| {
-            const item = self.over_limit[(self.over_limit_head + offset) % over_limit_queue_max];
-            const capacity = if (item.protocol.isControl())
-                capacities.control
-            else
-                capacities.application;
-            if (capacity > 0) return now.mono_ms;
-        }
         var due: ?u64 = null;
         for (self.outbound) |*slot| {
             const capacity = if (slot.lifecycle.protocol.isControl())
@@ -733,41 +734,20 @@ pub const ReqResp = struct {
     fn drain(self: *ReqResp, now: Now, events: []Event, control: bool, cursor: *usize) usize {
         const total = self.outbound.len + self.inbound.len;
         var count: usize = 0;
-        for (0..total + 1) |_| {
+        for (0..total) |_| {
             if (count == events.len) break;
             const position = cursor.*;
-            cursor.* = (position + 1) % (total + 1);
+            cursor.* = (position + 1) % total;
             const event = if (position < self.outbound.len)
                 self.outbound[position].lifecycle.deliver(control)
-            else if (position < total)
-                self.inbound[position - self.outbound.len].deliver(control, now)
             else
-                self.takeOverLimit(control);
+                self.inbound[position - self.outbound.len].deliver(control, now);
             if (event) |ready| {
                 events[count] = ready;
                 count += 1;
             }
         }
         return count;
-    }
-
-    fn takeOverLimit(self: *ReqResp, control: bool) ?Event {
-        for (0..self.over_limit_len) |offset| {
-            const index = (self.over_limit_head + offset) % over_limit_queue_max;
-            const item = self.over_limit[index];
-            if (item.protocol.isControl() != control) continue;
-            if (offset == 0) {
-                self.over_limit_head = @intCast((self.over_limit_head + 1) % over_limit_queue_max);
-            } else {
-                for (offset..self.over_limit_len - 1) |next| {
-                    self.over_limit[(self.over_limit_head + next) % over_limit_queue_max] =
-                        self.over_limit[(self.over_limit_head + next + 1) % over_limit_queue_max];
-                }
-            }
-            self.over_limit_len -= 1;
-            return .{ .over_limit = .{ .peer = item.peer, .protocol = item.protocol } };
-        }
-        return null;
     }
 
     fn cleanup(self: *ReqResp, engine: *Engine, router: *routing.Router, recycle: bool) void {
@@ -829,22 +809,10 @@ pub const ReqResp = struct {
         var count: u8 = 0;
         for (self.inbound) |*slot| {
             if (!slot.lifecycle.active() or !std.meta.eql(slot.lifecycle.conn, conn)) continue;
-            if (which) |wanted| if (slot.lifecycle.protocol != wanted) continue;
+            if (which) |wanted| if (!slot.lifecycle.running() or slot.lifecycle.protocol != wanted) continue;
             count +|= 1;
         }
         return count;
-    }
-
-    pub fn pushOverLimit(self: *ReqResp, item: OverLimit) void {
-        std.log.scoped(.network_reqresp_errors).debug("request_rate_limited connection={d}:{d} method={s}", .{ item.peer.index, item.peer.generation, @tagName(item.protocol) });
-        self.counters.over_limit += 1;
-        if (self.over_limit_len == over_limit_queue_max) {
-            self.counters.over_limit_dropped += 1;
-            return;
-        }
-        const tail = (self.over_limit_head + self.over_limit_len) % over_limit_queue_max;
-        self.over_limit[tail] = item;
-        self.over_limit_len += 1;
     }
 
     pub fn forkFor(

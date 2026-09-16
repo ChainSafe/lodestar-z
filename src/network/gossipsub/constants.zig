@@ -81,6 +81,7 @@ pub const promises_cap: usize = 8_192;
 pub const gossip_ids_max: usize = 128;
 
 comptime {
+    std.debug.assert(graft_flood_threshold_ms <= prune_backoff_ms);
     std.debug.assert(mesh_d_low <= mesh_d);
     std.debug.assert(mesh_d <= mesh_d_high);
     std.debug.assert(mesh_d_out <= mesh_d_low);

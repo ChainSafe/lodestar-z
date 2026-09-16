@@ -122,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
     var core: discv5.Engine = undefined;
     try core.initWithConfig(allocator, key_pair, local_record, .{
         .session_capacity = 256,
-        .challenge_capacity = 64,
+        .challenge_capacity = 1024,
         .call_capacity = call_capacity,
         .request_timeout_ms = 1_000,
         .challenge_timeout_ms = 1_000,

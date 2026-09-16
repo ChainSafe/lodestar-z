@@ -4,7 +4,7 @@ const peer_id = @import("peer_id.zig");
 
 const spec_peer_id = "16Uiu2HAkutTMoTzDw1tCvSRtu6YoixJwS46S1ZFxW8hSx9fWHiPs";
 const ip4_text = "/ip4/127.0.0.1/udp/4001/quic-v1/p2p/" ++ spec_peer_id;
-const ip6_text = "/ip6/0:0:0:0:0:0:0:1/udp/9000/quic-v1";
+const ip6_text = "/ip6/::1/udp/9000/quic-v1";
 
 test "multiaddr encodes ip4 with peer id" {
     const parsed = try multiaddr.Multiaddr.parse(ip4_text);

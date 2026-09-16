@@ -147,3 +147,16 @@ test "frame reader rejects an overlong varint" {
     var body: [8]u8 = undefined;
     try std.testing.expectError(error.VarintTooLong, reader.feed(&([_]u8{0x80} ** 11), &body));
 }
+
+test "frame reader accepts an empty frame and rejects an oversized declaration" {
+    var reader: Reader = .{};
+    var body: [1]u8 = undefined;
+    const empty = try reader.feed(&.{0}, &body);
+    try std.testing.expectEqual(@as(usize, 1), empty.consumed);
+    try std.testing.expectEqual(@as(usize, 0), empty.frame.?.len);
+    try std.testing.expect(reader.declaredLen() == null);
+    var prefix: [10]u8 = undefined;
+    var writer = protobuf.Writer.init(&prefix);
+    writer.varint(constants.GOSSIP_MAX_SIZE + 1);
+    try std.testing.expectError(error.FrameTooLarge, reader.feed(writer.written(), &body));
+}

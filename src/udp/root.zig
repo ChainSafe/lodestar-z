@@ -30,6 +30,9 @@ pub const Bindings = union(enum) {
 
 pub const BindError = net.IpAddress.BindError;
 pub const ReceiveError = net.Socket.ReceiveTimeoutError;
+pub const DatagramError = ReceiveError || error{DatagramTooLarge};
+pub const SendError = net.Socket.SendError || error{DatagramTooLarge};
+pub const Datagram = struct { from: Address, bytes: []u8 };
 
 /// Owns at most one socket per configured address family. The caller serializes
 /// receives and close, and does not receive directly from the owned sockets.
@@ -115,6 +118,20 @@ pub const Sockets = struct {
             };
         }
         return null;
+    }
+
+    pub fn receiveDatagram(self: *Sockets, io: std.Io, buffer: []u8, timeout: std.Io.Timeout) DatagramError!Datagram {
+        const incoming = try self.receiveTimeout(io, buffer, timeout);
+        if (incoming.flags.trunc) return error.DatagramTooLarge;
+        assert(incoming.data.len <= buffer.len);
+        return .{ .from = Address.fromNetwork(incoming.from), .bytes = buffer[0..incoming.data.len] };
+    }
+
+    pub fn sendTo(self: *const Sockets, io: std.Io, destination: Address, bytes: []const u8, payload_max: usize) SendError!void {
+        if (bytes.len > payload_max) return error.DatagramTooLarge;
+        const address = destination.toNetwork();
+        const socket = self.get(address) orelse return error.AddressFamilyUnsupported;
+        try socket.send(io, &address, bytes);
     }
 };
 

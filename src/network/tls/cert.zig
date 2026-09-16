@@ -1,13 +1,13 @@
 const std = @import("std");
 const keys = @import("../wire/keys.zig");
 const signed_key = @import("../wire/signed_key.zig");
-const c = @import("../quic/binding.zig").c;
+const c = @import("quiche_zig:quiche");
 
 pub const extension_oid = "1.3.6.1.4.1.53594.1.1";
 pub const der_length_max = 1_024;
 
 const not_before_offset_s: i64 = -3_600;
-const not_after_offset_s: i64 = 365 * 24 * 3_600;
+const not_after_offset_s: i64 = 100 * 365 * 24 * 3_600;
 
 pub const Error = error{ OpenSslFailed, SignFailed, EncodeFailed } || signed_key.Error ||
     keys.Error;

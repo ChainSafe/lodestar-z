@@ -151,10 +151,7 @@ pub const Driver = struct {
         engine.releaseReported();
         const active_count = engine.activeIndices().len;
         const host_work = engine.takeHostWork();
-        if (host_work or self.scan_connections != active_count or self.idle_connections >= active_count) {
-            self.idle_connections = 0;
-        }
-        self.scan_connections = active_count;
+        if (host_work or self.idle_connections >= active_count) self.idle_connections = 0;
         for (self.pending.entries, 0..) |*entry, index| {
             if (entry.handle) |owner| {
                 const current = engine.sendOwner(owner.index);
@@ -182,16 +179,17 @@ pub const Driver = struct {
             };
             result.datagrams_received += 1;
             result.now = try currentTime(io);
-            switch (engine.receive(admitted.bytes, &admitted.from, result.now, &self.pool, &self.output)) {
+            const outcome = engine.receive(admitted.bytes, &admitted.from, result.now, &self.pool, &self.output);
+            switch (outcome) {
                 .accepted => {
                     result.datagrams_accepted += 1;
                     self.idle_connections = 0;
                 },
-                .version_negotiation => |bytes| {
+                .version_negotiation, .retry => |bytes| {
                     if (turn.canSend()) {
                         turn.recordSend();
                         send(io, udp, &admitted.from, bytes) catch {};
-                        result.version_negotiations += 1;
+                        if (outcome == .version_negotiation) result.version_negotiations += 1;
                     }
                 },
                 .dropped => result.datagrams_dropped += 1,

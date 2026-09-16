@@ -248,7 +248,7 @@ interface IncomingFaults {
   };
 }
 async function faults() {
-  const {default: bindings} = await import("../src/bindings.js");
+  const {networkBindings: bindings} = await import("./utils/network-bindings.js");
   return bindings as unknown as IncomingFaults;
 }
 
@@ -332,7 +332,7 @@ stock(
       await peer.command("ready");
       const config = applicationConfig();
       config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-      config.requestForks.push({digest: Uint8Array.of(5, 6, 7, 8), fork: "deneb"});
+      config.requestForks = [...config.requestForks, {digest: Uint8Array.of(5, 6, 7, 8), fork: "deneb"}];
       runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
       const identity = await runtime.ready;
       await runtime.applyIntent(localIntent(config), config.initialSlot);
@@ -551,7 +551,7 @@ interface DirectIncomingBridge {
 }
 
 test("incoming tokens isolate sessions and replacement generations", async () => {
-  const {default: exports} = await import("../src/bindings.js");
+  const {networkBindings: exports} = await import("./utils/network-bindings.js");
   const {NativeNetworkRuntime} = exports as unknown as {NativeNetworkRuntime: new () => DirectIncomingBridge};
   const config = applicationConfig();
   config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;

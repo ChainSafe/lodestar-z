@@ -1,6 +1,5 @@
-const address = @import("wire/address.zig");
-
-pub const Address = address.Address;
+pub const Address = @import("udp").Address;
+pub const PeerRef = struct { index: u16, generation: u64 };
 
 pub const Direction = enum { inbound, outbound };
 pub const ShutdownDirection = enum { read, write };

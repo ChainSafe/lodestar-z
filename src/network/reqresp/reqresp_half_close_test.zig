@@ -102,7 +102,7 @@ test "reqresp recovers only complete Goodbye bytes retained by a closed authenti
     for ([_]bool{ false, true }) |truncated| {
         var pair: Pair = .{};
         const quotas = @import("admission_test.zig").quotas(100, 1000);
-        try pair.init(.{}, .{ .admission = .{ .policy = @import("request_policy_test.zig").fixture(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } } });
+        try pair.init(.{}, .{ .admission = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } } });
         defer pair.deinit();
         var payload: [8]u8 = undefined;
         std.mem.writeInt(u64, &payload, 129, .little);

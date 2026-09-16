@@ -5,7 +5,7 @@ const routing = @import("../router.zig");
 const support = @import("../test_support.zig");
 
 pub fn reservedOptions() rr.Options {
-    var options: rr.Options = .{ .outbound_max = 4, .inbound_max = 4, .forks = &.{} };
+    var options: rr.Options = .{ .policy = @import("policy_fixture.zig").config(), .outbound_max = 4, .inbound_max = 4, .forks = &.{} };
     options.outbound_control_reserved = 2;
     options.inbound_control_reserved = 2;
     return options;
@@ -41,7 +41,7 @@ test "reqresp control capacity protects outbound slots and retains terminal owne
         &router,
         handles.client,
         .blocks_by_range_v2,
-        &([_]u8{0} ** 24),
+        &([_]u8{0} ** 8 ++ [_]u8{1} ++ [_]u8{0} ** 15),
         sinks[size..][0..size],
         .{},
         pair.now,
@@ -157,7 +157,7 @@ test "reqresp control capacity bounds application requests per peer across proto
     const handles = try support.connectPair(&pair);
     var router = try routing.Router.init(std.testing.allocator, .{});
     defer router.deinit();
-    var options: rr.Options = .{ .outbound_max = 4, .inbound_max = 4, .forks = &.{} };
+    var options: rr.Options = .{ .policy = @import("policy_fixture.zig").config(), .outbound_max = 4, .inbound_max = 4, .forks = &.{} };
     options.outbound_per_peer_max = 2;
     var requests = try rr.ReqResp.init(std.testing.allocator, options);
     defer requests.deinit();
@@ -182,7 +182,7 @@ test "reqresp control capacity bounds application requests per peer across proto
         &router,
         handles.client,
         .blocks_by_range_v2,
-        &([_]u8{0} ** 24),
+        &([_]u8{0} ** 8 ++ [_]u8{1} ++ [_]u8{0} ** 15),
         sinks[size..][0..size],
         .{},
         pair.now,
@@ -357,7 +357,7 @@ test "reqresp control capacity zero defaults retain all ordinary slots and admis
     const handles = try support.connectPair(&pair);
     var requests = try rr.ReqResp.init(
         std.testing.allocator,
-        .{ .outbound_max = 4, .inbound_max = 4, .forks = &.{} },
+        .{ .outbound_max = 4, .inbound_max = 4, .forks = &.{}, .policy = @import("policy_fixture.zig").config() },
     );
     defer requests.deinit();
     var router = try routing.Router.init(std.testing.allocator, .{ .negotiations_max = 4 });
@@ -404,7 +404,7 @@ test "reqresp control capacity zero defaults retain all ordinary slots and admis
             &router,
             handles.client,
             .blocks_by_range_v2,
-            &([_]u8{0} ** 24),
+            &([_]u8{0} ** 8 ++ [_]u8{1} ++ [_]u8{0} ** 15),
             sinks[index * size ..][0..size],
             .{},
             pair.now,

@@ -16,7 +16,7 @@ pub export fn zig_fuzz_test(input: [*]const u8, len: usize) callconv(.c) void {
     const a = arena.allocator();
     var peers = Peers.init(a, &.{ .retained_score_ms = 20, .retained_capacity = 4, .retained_outbound_reserve = 1 }) catch unreachable;
     defer peers.deinit(a);
-    const options: @import("network").gossipsub.Options = .{ .mcache_capacity = 4, .validation_capacity = 2, .seen_capacity = 8, .retained_capacity = 4, .mcache_arena_bytes = 12288, .validation_timeout_ms = 10, .validation_tombstone_ms = 20 };
+    const options: @import("network").gossipsub.Options = .{ .random_seed = 1, .mcache_capacity = 4, .validation_capacity = 2, .seen_capacity = 8, .retained_capacity = 4, .mcache_arena_bytes = 12288, .validation_timeout_ms = 10, .validation_tombstone_ms = 20 };
     var messages = Messages.init(a, &options) catch unreachable;
     defer messages.deinit(a, &peers);
     const source = peers.admit(.{ .index = 0, .generation = 1 }, &.{ .identity = .{ .bytes = @splat(1) }, .address = .unspecified, .direction = .inbound }, 0).admitted.peer;

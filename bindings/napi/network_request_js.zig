@@ -282,10 +282,5 @@ pub fn settle(env: napi.Env, runtime: *Runtime) void {
     runtime.disposeTerminalReferences();
 }
 pub fn diagnostics(env: napi.Env, value: *const requests.Diagnostics) !Value {
-    const object = try env.createObject();
-    inline for (@typeInfo(requests.Diagnostics).@"struct".fields) |field| {
-        const counter = std.mem.eql(u8, field.name, "chunksCopied") or std.mem.eql(u8, field.name, "bytesCopied") or std.mem.eql(u8, field.name, "requestFull") or std.mem.eql(u8, field.name, "commandFull") or std.mem.eql(u8, field.name, "bridgeFull") or std.mem.eql(u8, field.name, "busyPulls");
-        try put(object, field.name, if (counter) try env.createBigintUint64(@field(value, field.name)) else try env.createDouble(@floatFromInt(@field(value, field.name))));
-    }
-    return object;
+    return @import("network_js.zig").scalarFields(env, value);
 }

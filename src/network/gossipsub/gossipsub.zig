@@ -27,8 +27,6 @@ pub const Options = @import("options.zig").Options;
 pub const InitError = Allocator.Error || error{InvalidLimits} || topic_policy.Error;
 
 /// Advertised protocol ids, newest first; the negotiator settles the version.
-pub const meshsub_ids = @import("../router.zig").meshsub_ids;
-
 pub const MessageId = topic_mod.MessageId;
 
 pub const Verdict = validation_mod.Verdict;
@@ -110,6 +108,7 @@ pub const Gossipsub = struct {
     validation_time: @import("metrics.zig").ValidationTime = .{},
 
     pub const Counters = struct {
+        heartbeats_skipped: u64 = 0,
         retained_penalty_evictions: u64 = 0,
         messages_received: u64 = 0,
         messages_published: u64 = 0,
@@ -393,7 +392,6 @@ pub const Gossipsub = struct {
             if (source) |p| {
                 if (std.meta.eql(p, self.logical(index)) or self.sessions.suppresses(index, id, now_ms)) continue;
             }
-            if (!self.peers.rows[self.logical(index).index].direct and self.peerScore(index, now_ms) < self.options.score_params.publish_threshold) continue;
             result.selected += 1;
             if (self.sessions.rows[index].outStream() == null) {
                 result.unavailable += 1;
@@ -557,7 +555,10 @@ pub const Gossipsub = struct {
     fn heartbeat(self: *Gossipsub, now: Now) void {
         for (self.sessions.rows) |*peer| peer.io.resetHeartbeat();
         self.peers.refresh(now.mono_ms);
-        if (self.cycle.isActive()) return;
+        if (self.cycle.isActive()) {
+            self.counters.heartbeats_skipped +|= 1;
+            return;
+        }
         const opportunistic = self.opportunistic_at != 0 and now.mono_ms >= self.opportunistic_at;
         if (self.opportunistic_at == 0 or opportunistic) self.opportunistic_at = now.mono_ms +| self.options.opportunistic_graft_interval_ms;
         self.cycle.begin(self.sessions, &self.peers, now.mono_ms, opportunistic);
@@ -693,7 +694,13 @@ pub const Gossipsub = struct {
         const context = self.messageContext();
         const workspace = turn.workspace(peer);
         const source: @import("messages.zig").Source = .{ .peer = self.logical(index), .session = self.sessions.ref(index), .connection = self.sessions.rows[index].conn };
-        switch (self.messages.receive(&context, &workspace, &source, msg, now.mono_ms)) {
+        const result = self.messages.receive(&context, &workspace, &source, msg, now.mono_ms);
+        if (result == .duplicate or result == .admitted) {
+            const work = self.recovery.resolveWork();
+            turn.budget.work -|= work;
+            peer.work -|= work;
+        }
+        switch (result) {
             .ignored => return .done,
             .invalid => |reason| {
                 self.rpc_metrics.invalid_messages[@intFromEnum(reason)] +|= 1;
@@ -800,7 +807,7 @@ pub const Gossipsub = struct {
             std.mem.swap(MessageId, &candidates[i], &candidates[chosen]);
         }
         metrics.ihave_unseen +|= requested;
-        self.recovery.requestBatch(&self.peers, &io.tx, candidates[0..requested], self.logical(index), self.sessions.rows[index].conn, self.overlay.rng.random(), now.mono_ms) catch {
+        self.recovery.requestBatch(&self.peers, &io.tx, candidates[0..requested], self.logical(index), self.sessions.rows[index].conn, self.overlay.rng.random(), self.options.iwant_followup_ms, now.mono_ms) catch {
             self.counters.send_dropped += 1;
             return;
         };
@@ -817,6 +824,10 @@ pub const Gossipsub = struct {
             examined += 1;
             if (id_bytes.len != constants.message_id_length) continue;
             const id: MessageId = id_bytes[0..constants.message_id_length].*;
+            if (!self.messages.hasPayload(id)) {
+                self.rpc_metrics.iwant_unknown +|= 1;
+                continue;
+            }
             if (self.sessions.suppresses(index, id, self.last_now_ms)) continue;
             switch (self.messages.serve(&self.sessions.rows[index].io.tx, self.logical(index), id, self.options.tx_peer_bytes, self.last_now_ms)) {
                 .unknown => self.rpc_metrics.iwant_unknown +|= 1,
@@ -859,7 +870,6 @@ pub const Gossipsub = struct {
 
     fn onGraft(self: *Gossipsub, index: u16, topic_str: []const u8, now: Now) void {
         const topic = self.overlay.findTopic(topic_str) orelse return;
-        _ = self.peerScore(index, now.mono_ms);
         const context = self.overlayContext(now.mono_ms);
         self.overlay.onGraft(&context, topic, index);
     }
