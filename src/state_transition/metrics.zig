@@ -2,8 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const m = @import("metrics");
 
-const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
-
 /// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
 pub var state_transition = m.initializeNoop(Metrics);
 
@@ -11,11 +9,6 @@ pub var state_transition = m.initializeNoop(Metrics);
 ///
 /// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
 pub var validator_monitor = m.initializeNoop(ValidatorMonitorMetrics);
-
-pub const StateCloneSource = enum {
-    state_transition,
-    process_slots,
-};
 
 pub const StateHashTreeRootSource = enum {
     state_transition,
@@ -82,9 +75,6 @@ const Metrics = struct {
     const CountGauge = m.Gauge(u64);
     const PreStateClonedCount = m.Histogram(u32, &.{ 1, 2, 5, 10, 50, 250 });
     const ProposerRewardsGauge = m.GaugeVec(u64, ProposerRewardLabel);
-
-    //TODO: no-op for now; We need to check for populated nodes like in lodestar-ts
-    pub fn onPostState(_: *Metrics, _: *CachedBeaconState) !void {}
 
     /// Deinitializes all `HistogramVec` and `GaugeVec` metrics for state transition.
     pub fn deinit(self: *Metrics) void {
