@@ -471,11 +471,20 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
         }
 
         pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
-            for (value, 0..) |element, i| {
-                try Element.hashTreeRoot(allocator, &element, &chunks[i]);
+            if (comptime chunk_count <= 64) {
+                var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+                for (value, 0..) |*element, i| {
+                    try Element.hashTreeRoot(allocator, element, &chunks[i]);
+                }
+                return merkleize(@ptrCast(&chunks), chunk_depth, out);
             }
-            try merkleize(@ptrCast(&chunks), chunk_depth, out);
+            var accumulator = @import("hashing").MerkleAccumulator.init(chunk_depth);
+            for (value) |*element| {
+                var chunk: [32]u8 = undefined;
+                try Element.hashTreeRoot(allocator, element, &chunk);
+                try accumulator.append(&chunk);
+            }
+            try accumulator.finish(out);
         }
 
         /// The caller initializes `out` with `default_value`; this uses `cloneInto`'s contract.
@@ -548,15 +557,27 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
             }
 
             pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
-                var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+                if (comptime chunk_count <= 64) {
+                    var chunks = [_][32]u8{[_]u8{0} ** 32} ** ((chunk_count + 1) / 2 * 2);
+                    var elements = try VariableElementIterator(Self).init(data);
+                    var i: usize = 0;
+                    while (try elements.next()) |element_bytes| : (i += 1) {
+                        try Element.serialized.hashTreeRoot(allocator, element_bytes, &chunks[i]);
+                    }
+                    std.debug.assert(i == length);
+
+                    return merkleize(@ptrCast(&chunks), chunk_depth, out);
+                }
+                var accumulator = @import("hashing").MerkleAccumulator.init(chunk_depth);
                 var elements = try VariableElementIterator(Self).init(data);
                 var i: usize = 0;
                 while (try elements.next()) |element_bytes| : (i += 1) {
-                    try Element.serialized.hashTreeRoot(allocator, element_bytes, &chunks[i]);
+                    var chunk: [32]u8 = undefined;
+                    try Element.serialized.hashTreeRoot(allocator, element_bytes, &chunk);
+                    try accumulator.append(&chunk);
                 }
                 std.debug.assert(i == length);
-
-                try merkleize(@ptrCast(&chunks), chunk_depth, out);
+                try accumulator.finish(out);
             }
         };
 

@@ -1,241 +1,20 @@
 const std = @import("std");
+const BitList = @import("bit_array").BitList;
 const TypeKind = @import("type_kind.zig").TypeKind;
 const BoolType = @import("bool.zig").BoolType;
 const hexToBytes = @import("hex").hexToBytes;
 const bytesToHex = @import("hex").bytesToHex;
 const hexByteLen = @import("hex").hexByteLen;
 const hexLenFromBytes = @import("hex").hexLenFromBytes;
-const merkleize = @import("hashing").merkleize;
+const MerkleAccumulator = @import("hashing").MerkleAccumulator;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const getZeroHash = @import("hashing").getZeroHash;
 const Node = @import("persistent_merkle_tree").Node;
 const BitListTreeView = @import("../tree_view/root.zig").BitListTreeView;
 
-pub fn BitList(comptime limit: comptime_int) type {
-    return struct {
-        data: std.ArrayListUnmanaged(u8),
-        bit_len: usize,
-
-        pub const empty: @This() = .{
-            .data = std.ArrayListUnmanaged(u8).empty,
-            .bit_len = 0,
-        };
-
-        pub fn equals(self: *const @This(), other: *const @This()) bool {
-            return self.bit_len == other.bit_len and std.mem.eql(u8, self.data.items, other.data.items);
-        }
-
-        pub fn fromBitLen(allocator: std.mem.Allocator, bit_len: usize) !@This() {
-            if (bit_len > limit) {
-                return error.tooLarge;
-            }
-
-            const byte_len = std.math.divCeil(usize, bit_len, 8) catch unreachable;
-
-            var data = try std.ArrayListUnmanaged(u8).initCapacity(allocator, byte_len);
-            data.appendNTimesAssumeCapacity(0, byte_len);
-            return @This(){
-                .data = data,
-                .bit_len = bit_len,
-            };
-        }
-
-        pub fn fromBoolSlice(allocator: std.mem.Allocator, bools: []const bool) !@This() {
-            var bl = try @This().fromBitLen(allocator, bools.len);
-            for (bools, 0..) |bit, i| {
-                try bl.set(allocator, i, bit);
-            }
-            return bl;
-        }
-
-        pub fn toBoolSlice(self: *const @This(), out: *[]bool) !void {
-            if (out.len != self.bit_len) {
-                return error.InvalidSize;
-            }
-            for (0..self.bit_len) |i| {
-                out.*[i] = self.get(i) catch unreachable;
-            }
-        }
-
-        pub fn getTrueBitIndexes(self: *const @This(), out: []usize) !usize {
-            if (out.len < self.bit_len) {
-                return error.InvalidSize;
-            }
-
-            const full_byte_len = self.bit_len / 8;
-            const remainder_bits = self.bit_len % 8;
-            var true_bit_count: usize = 0;
-
-            for (0..full_byte_len) |i_byte| {
-                var b = self.data.items[i_byte];
-                while (b != 0) {
-                    const lsb: u8 = @ctz(b);
-                    const bit_index = i_byte * 8 + lsb;
-                    out[true_bit_count] = bit_index;
-                    true_bit_count += 1;
-                    b &= b - 1;
-                }
-            }
-            if (remainder_bits <= 0) return true_bit_count;
-            const tail_mask: u8 = (@as(u8, 1) << @intCast(remainder_bits)) - 1;
-            var b = self.data.items[full_byte_len] & tail_mask;
-
-            while (b != 0) {
-                const lsb: u8 = @ctz(b);
-                const bit_index = full_byte_len * 8 + lsb;
-                out[true_bit_count] = bit_index;
-                true_bit_count += 1;
-                b &= b - 1;
-            }
-
-            return true_bit_count;
-        }
-
-        pub fn getSingleTrueBit(self: *const @This()) ?usize {
-            var found_index: ?usize = null;
-
-            for (self.data.items, 0..) |byte, i_byte| {
-                var b = byte;
-                while (b != 0) {
-                    if (found_index != null) {
-                        return null; // more than one true bit found
-                    }
-                    const lsb: usize = @as(u8, @ctz(b));
-                    const bit_index = i_byte * 8 + lsb;
-                    found_index = bit_index;
-
-                    b &= b - 1;
-                }
-            }
-            return found_index;
-        }
-
-        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-            self.data.deinit(allocator);
-        }
-
-        pub fn get(self: *const @This(), bit_index: usize) !bool {
-            if (bit_index >= self.bit_len) {
-                return error.OutOfRange;
-            }
-
-            const byte_idx = bit_index / 8;
-            const offset_in_byte: u3 = @intCast(bit_index % 8);
-            const mask = @as(u8, 1) << offset_in_byte;
-            return (self.data.items[byte_idx] & mask) == mask;
-        }
-
-        pub fn set(self: *@This(), allocator: std.mem.Allocator, bit_index: usize, bit: bool) !void {
-            if (bit_index >= limit) {
-                return error.tooLarge;
-            }
-            if (bit_index + 1 > self.bit_len) {
-                try self.resize(allocator, bit_index + 1);
-            }
-            try self.setAssumeCapacity(bit_index, bit);
-        }
-
-        pub fn resize(self: *@This(), allocator: std.mem.Allocator, bit_len: usize) !void {
-            if (bit_len > limit) {
-                return error.tooLarge;
-            }
-
-            const old_byte_len = std.math.divCeil(usize, self.bit_len, 8) catch unreachable;
-            const byte_len = std.math.divCeil(usize, bit_len, 8) catch unreachable;
-            try self.data.resize(allocator, byte_len);
-            // zero out additionally allocated bytes
-            if (old_byte_len < byte_len) {
-                @memset(self.data.items[old_byte_len..], 0);
-            } else {
-                // In the case of old_byte_len >= byte_len, we need to manually zero out the
-                // trailing bits after the last bit
-                const remainder_bits = bit_len % 8;
-                if (remainder_bits != 0) {
-                    const mask: u8 = (@as(u8, 1) << @intCast(remainder_bits)) - 1;
-                    self.data.items[byte_len - 1] &= mask;
-                }
-            }
-            self.bit_len = bit_len;
-        }
-
-        /// Set bit value at index `bit_index`
-        pub fn setAssumeCapacity(self: *@This(), bit_index: usize, bit: bool) !void {
-            if (bit_index >= self.bit_len) {
-                return error.OutOfRange;
-            }
-
-            const byte_index = bit_index / 8;
-            const offset_in_byte: u3 = @intCast(bit_index % 8);
-            const mask = @as(u8, 1) << offset_in_byte;
-            var byte = self.data.items[byte_index];
-            if (bit) {
-                // For bit in byte, 1,0 OR 1 = 1
-                // byte 100110
-                // mask 010000
-                // res  110110
-                byte |= mask;
-                self.data.items[byte_index] = byte;
-            } else {
-                // For bit in byte, 1,0 OR 1 = 0
-                if ((byte & mask) == mask) {
-                    // byte 110110
-                    // mask 010000
-                    // res  100110
-                    byte ^= mask;
-                    self.data.items[byte_index] = byte;
-                } else {
-                    // Ok, bit is already 0
-                }
-            }
-        }
-
-        /// Allocates and returns an `ArrayList` of indices where the bit at the index of `self` is set to `true`.
-        ///
-        /// Caller must call `deinit` on the returned list
-        pub fn intersectValues(
-            self: *const @This(),
-            comptime T: type,
-            allocator: std.mem.Allocator,
-            values: []const T,
-        ) !std.ArrayList(T) {
-            if (values.len != self.bit_len) return error.InvalidSize;
-
-            var indices = try std.ArrayList(T).initCapacity(allocator, self.bit_len);
-            const full_byte_len = self.bit_len / 8;
-            const remainder_bits = self.bit_len % 8;
-            for (0..full_byte_len) |i_byte| {
-                var b = self.data.items[i_byte];
-                // Kernighan's algorithm to count the set bits instead of going through 0..8 for every byte
-                while (b != 0) {
-                    const lsb: u8 = @ctz(b); // Get the index of least significant bit
-                    const bit_index = i_byte * 8 + lsb;
-                    indices.appendAssumeCapacity(values[bit_index]);
-                    // The `b - 1` flips the bits starting from `lsb` index
-                    // And `&` will reset the last bit at `lsb` index
-                    b &= b - 1;
-                }
-            }
-            if (remainder_bits <= 0) return indices;
-            const tail_mask: u8 = (@as(u8, 1) << @intCast(remainder_bits)) - 1;
-            var b = self.data.items[full_byte_len] & tail_mask;
-            // Kernighan's algorithm to count the set bits instead of going through 0..8 for every byte
-            while (b != 0) {
-                const lsb: u8 = @ctz(b); // Get the index of least significant bit
-                const bit_index = full_byte_len * 8 + lsb;
-                indices.appendAssumeCapacity(values[bit_index]);
-                // The `b - 1` flips the bits starting from `lab` index
-                // And `&` will reset the last bit at `lsb` index
-                b &= b - 1;
-            }
-
-            return indices;
-        }
-    };
-}
-
 pub fn isBitListType(ST: type) bool {
-    return ST.kind == .list and ST.Element.kind == .bool and ST.Type == BitList(ST.limit);
+    return ST.kind == .list and ST.Element.kind == .bool and ST.Type == BitList(.{ .limit = ST.limit });
 }
 
 pub fn BitListType(comptime _limit: comptime_int) type {
@@ -248,7 +27,7 @@ pub fn BitListType(comptime _limit: comptime_int) type {
         pub const kind = TypeKind.list;
         pub const Element: type = BoolType();
         pub const limit: usize = _limit;
-        pub const Type: type = BitList(limit);
+        pub const Type: type = BitList(.{ .limit = limit });
         pub const TreeView: type = BitListTreeView(@This());
         pub const min_size: usize = 1;
         pub const max_size: usize = std.math.divCeil(usize, limit + 1, 8) catch unreachable;
@@ -275,14 +54,23 @@ pub fn BitListType(comptime _limit: comptime_int) type {
             return (value.bit_len + 255) / 256;
         }
 
-        pub fn hashTreeRoot(allocator: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
-            const chunks = try allocator.alloc([32]u8, (chunkCount(value) + 1) / 2 * 2);
-            defer allocator.free(chunks);
+        pub fn hashTreeRoot(_: std.mem.Allocator, value: *const Type, out: *[32]u8) !void {
+            const data = value.data.items;
+            std.debug.assert(value.bit_len <= limit);
+            std.debug.assert(data.len == (std.math.divCeil(usize, value.bit_len, 8) catch unreachable));
 
-            @memset(chunks, [_]u8{0} ** 32);
-            @memcpy(@as([]u8, @ptrCast(chunks))[0..value.data.items.len], value.data.items);
-
-            try merkleize(@ptrCast(chunks), chunk_depth, out);
+            const full_chunk_count = data.len / 32;
+            var accumulator = MerkleAccumulator.init(chunk_depth);
+            for (0..full_chunk_count) |i| {
+                try accumulator.append(data[i * 32 ..][0..32]);
+            }
+            const tail = data[full_chunk_count * 32 ..];
+            if (tail.len != 0) {
+                var chunk: [32]u8 = @splat(0);
+                @memcpy(chunk[0..tail.len], tail);
+                try accumulator.append(&chunk);
+            }
+            try accumulator.finish(out);
             mixInLength(value.bit_len, out);
         }
 
@@ -394,23 +182,25 @@ pub fn BitListType(comptime _limit: comptime_int) type {
                 return (try parse(data)).bit_len;
             }
 
-            pub fn hashTreeRoot(allocator: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
+            pub fn hashTreeRoot(_: std.mem.Allocator, data: []const u8, out: *[32]u8) !void {
                 const parsed = try parse(data);
-                const chunk_count = (parsed.bit_len + 255) / 256;
-                const chunks = try allocator.alloc([32]u8, (chunk_count + 1) / 2 * 2);
-                defer allocator.free(chunks);
-
-                @memset(chunks, [_]u8{0} ** 32);
-                if (parsed.bit_len % 8 == 0) {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0 .. data.len - 1], data[0 .. data.len - 1]);
-                } else {
-                    @memcpy(@as([]u8, @ptrCast(chunks))[0..data.len], data);
-                    // remove padding bit
-                    @as([]u8, @ptrCast(chunks))[data.len - 1] ^=
-                        @as(u8, 1) << parsed.padding_bit_index;
+                // A 32-byte final chunk can still contain the delimiter.
+                const full_chunk_count = parsed.bit_len / 256;
+                var accumulator = MerkleAccumulator.init(chunk_depth);
+                for (0..full_chunk_count) |i| {
+                    try accumulator.append(data[i * 32 ..][0..32]);
                 }
-
-                try merkleize(@ptrCast(chunks), chunk_depth, out);
+                const tail_bit_len = parsed.bit_len % 256;
+                if (tail_bit_len != 0) {
+                    var chunk: [32]u8 = @splat(0);
+                    const tail_byte_len = (tail_bit_len + 7) / 8;
+                    @memcpy(chunk[0..tail_byte_len], data[full_chunk_count * 32 ..][0..tail_byte_len]);
+                    if (tail_bit_len % 8 != 0) {
+                        chunk[tail_byte_len - 1] ^= @as(u8, 1) << parsed.padding_bit_index;
+                    }
+                    try accumulator.append(&chunk);
+                }
+                try accumulator.finish(out);
                 mixInLength(parsed.bit_len, out);
             }
         };
@@ -486,31 +276,15 @@ pub fn BitListType(comptime _limit: comptime_int) type {
 
             pub fn toValue(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type) !void {
                 const bit_len = try length(node, pool);
-                const chunk_count = (bit_len + 255) / 256;
-                if (chunk_count == 0) {
-                    try out.resize(allocator, 0);
-                    return;
-                }
-
-                const byte_length = (bit_len + 7) / 8;
-
-                const nodes = try allocator.alloc(Node.Id, chunk_count);
-                defer allocator.free(nodes);
-
-                try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
-
                 try out.resize(allocator, bit_len);
+                const chunk_count = (bit_len + 255) / 256;
+                const byte_length = out.data.items.len;
+                var it = Node.DepthIterator.init(pool, node, chunk_depth + 1, 0);
                 for (0..chunk_count) |i| {
-                    const start_idx = i * 32;
-                    const remaining_bytes = byte_length - start_idx;
-
-                    // Determine how many bytes to copy for this chunk
-                    const bytes_to_copy = @min(remaining_bytes, 32);
-
-                    // Copy data if there are bytes to copy
-                    if (bytes_to_copy > 0) {
-                        @memcpy(out.data.items[start_idx..][0..bytes_to_copy], nodes[i].getRoot(pool)[0..bytes_to_copy]);
-                    }
+                    const start = i * 32;
+                    const len = @min(32, byte_length - start);
+                    const chunk = try it.next();
+                    @memcpy(out.data.items[start..][0..len], chunk.getRoot(pool)[0..len]);
                 }
             }
 
