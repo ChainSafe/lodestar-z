@@ -20,16 +20,21 @@ pub const SyncCommitteeCache = union(enum) {
     phase0: void,
     altair: *SyncCommitteeCacheAltair,
 
-    pub fn getValidatorIndices(self: *const SyncCommitteeCache) []ValidatorIndex {
+    /// Returned when a pre-Altair cache is asked for sync-committee data. Phase0 states have no
+    /// sync committee, and this is reachable from the N-API surface, so it must stay an error the
+    /// host can catch rather than aborting the process.
+    pub const Error = error{SyncCommitteeNotAvailable};
+
+    pub fn getValidatorIndices(self: *const SyncCommitteeCache) Error![]ValidatorIndex {
         return switch (self.*) {
-            .phase0 => @panic("phase0 does not have sync_committee"),
+            .phase0 => Error.SyncCommitteeNotAvailable,
             .altair => |sync_committee| sync_committee.validator_indices,
         };
     }
 
-    pub fn getValidatorIndexMap(self: *const SyncCommitteeCache) *const SyncComitteeValidatorIndexMap {
+    pub fn getValidatorIndexMap(self: *const SyncCommitteeCache) Error!*const SyncComitteeValidatorIndexMap {
         return switch (self.*) {
-            .phase0 => @panic("phase0 does not have sync_committee"),
+            .phase0 => Error.SyncCommitteeNotAvailable,
             .altair => |sync_committee| sync_committee.validator_index_map,
         };
     }
@@ -133,7 +138,7 @@ test "initSyncCommittee - sanity" {
     try std.testing.expectEqualSlices(
         ValidatorIndex,
         &[_]ValidatorIndex{0} ** preset.SYNC_COMMITTEE_SIZE,
-        cache.getValidatorIndices(),
+        try cache.getValidatorIndices(),
     );
 }
 

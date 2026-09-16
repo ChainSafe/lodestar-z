@@ -39,8 +39,8 @@ test "memory_safety: setSyncCommitteesIndexed should release each cache once on 
 
         failing_allocator.fail_index = std.math.maxInt(usize);
         try epoch_cache.setSyncCommitteesIndexed(&indices);
-        try std.testing.expectEqualSlices(ValidatorIndex, &indices, epoch_cache.current_sync_committee_indexed.get().getValidatorIndices());
-        try std.testing.expectEqualSlices(ValidatorIndex, &indices, epoch_cache.next_sync_committee_indexed.get().getValidatorIndices());
+        try std.testing.expectEqualSlices(ValidatorIndex, &indices, try epoch_cache.current_sync_committee_indexed.get().getValidatorIndices());
+        try std.testing.expectEqualSlices(ValidatorIndex, &indices, try epoch_cache.next_sync_committee_indexed.get().getValidatorIndices());
     }
 }
 
@@ -87,12 +87,12 @@ test "memory_safety: setSyncCommitteesIndexed should preserve caches on every OO
             try std.testing.expectEqualSlices(
                 ValidatorIndex,
                 input,
-                epoch_cache.current_sync_committee_indexed.get().getValidatorIndices(),
+                try epoch_cache.current_sync_committee_indexed.get().getValidatorIndices(),
             );
             try std.testing.expectEqualSlices(
                 ValidatorIndex,
                 input,
-                epoch_cache.next_sync_committee_indexed.get().getValidatorIndices(),
+                try epoch_cache.next_sync_committee_indexed.get().getValidatorIndices(),
             );
         }
     }.run, .{ &indices, &accounting, &saw_oom });
@@ -116,9 +116,9 @@ test "memory_safety: rotateSyncCommitteeIndexed should preserve shared caches on
     const pre_cache = test_state.cached_state.epoch_cache;
     const old_current = pre_cache.current_sync_committee_indexed;
     const old_next = pre_cache.next_sync_committee_indexed;
-    const current_indices = try allocator.dupe(ValidatorIndex, old_current.get().getValidatorIndices());
+    const current_indices = try allocator.dupe(ValidatorIndex, try old_current.get().getValidatorIndices());
     defer allocator.free(current_indices);
-    const next_indices = try allocator.dupe(ValidatorIndex, old_next.get().getValidatorIndices());
+    const next_indices = try allocator.dupe(ValidatorIndex, try old_next.get().getValidatorIndices());
     defer allocator.free(next_indices);
 
     // Fail the initial allocation and the RC allocation after the raw cache is complete.
@@ -137,11 +137,11 @@ test "memory_safety: rotateSyncCommitteeIndexed should preserve shared caches on
             failing_allocator.fail_index = std.math.maxInt(usize);
             try candidate.rotateSyncCommitteeIndexed(failing_allocator.allocator(), &indices);
             try std.testing.expectEqual(old_next, candidate.current_sync_committee_indexed);
-            try std.testing.expectEqualSlices(ValidatorIndex, &indices, candidate.next_sync_committee_indexed.get().getValidatorIndices());
+            try std.testing.expectEqualSlices(ValidatorIndex, &indices, try candidate.next_sync_committee_indexed.get().getValidatorIndices());
         }
         try std.testing.expectEqual(failing_allocator.allocated_bytes, failing_allocator.freed_bytes);
-        try std.testing.expectEqualSlices(ValidatorIndex, current_indices, pre_cache.current_sync_committee_indexed.get().getValidatorIndices());
-        try std.testing.expectEqualSlices(ValidatorIndex, next_indices, pre_cache.next_sync_committee_indexed.get().getValidatorIndices());
+        try std.testing.expectEqualSlices(ValidatorIndex, current_indices, try pre_cache.current_sync_committee_indexed.get().getValidatorIndices());
+        try std.testing.expectEqualSlices(ValidatorIndex, next_indices, try pre_cache.next_sync_committee_indexed.get().getValidatorIndices());
     }
 }
 
