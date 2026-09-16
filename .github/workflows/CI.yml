@@ -70,6 +70,9 @@ jobs:
       - name: Run bounded_array tests
         run: |
           zig build test:bounded_array
+      - name: Run bit_array tests
+        run: |
+          zig build test:bit_array
       - name: Run cpu_count tests
         run: |
           zig build test:cpu_count
