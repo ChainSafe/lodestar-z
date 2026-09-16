@@ -371,7 +371,7 @@ test "BitList hashing streams chunk and batch boundaries without allocation" {
     }) |len| {
         var value = try Bits.Type.fromBitLen(allocator, len);
         defer value.deinit(allocator);
-        for (0..len) |i| value.setAssumeCapacity(i, i % 3 == 0);
+        for (0..len) |i| try value.setAssumeCapacity(i, i % 3 == 0);
         const node = try Bits.tree.fromValue(&pool, &value);
         defer pool.unref(node);
         const bytes = try allocator.alloc(u8, Bits.serializedSize(&value));
