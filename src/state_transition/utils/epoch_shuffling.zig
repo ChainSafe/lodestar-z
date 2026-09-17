@@ -144,7 +144,8 @@ fn computeCommitteeCount(active_validator_count: usize) usize {
 
 test computeCommitteeCount {
     const committee_count = computeCommitteeCount(2_000_000);
-    try std.testing.expectEqual(64, committee_count);
+    try std.testing.expectEqual(preset.MAX_COMMITTEES_PER_SLOT, committee_count);
+    try std.testing.expectEqual(1, computeCommitteeCount(0));
 }
 
 /// Calculate the decision root for a given epoch.

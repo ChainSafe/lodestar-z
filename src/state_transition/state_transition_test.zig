@@ -58,6 +58,7 @@ test "state transition - electra block" {
             test_state.cached_state,
             signed_beacon_block,
             tc.transition_opt,
+            null,
         );
         if (tc.expect_error) {
             if (res) |_| {
@@ -101,7 +102,7 @@ test "state transition - a rejected block leaves the pre-state unchanged" {
     // and mutates a clone, then discards it on error — so the original state must come out
     // untouched: same root, same slot. (This is the invariant behind the "mutate then reject"
     // findings; the mutations only ever land on the thrown-away clone.)
-    const res = stateTransition(allocator, std.testing.io, test_state.cached_state, signed_beacon_block, .{});
+    const res = stateTransition(allocator, std.testing.io, test_state.cached_state, signed_beacon_block, .{}, null);
     if (res) |post| {
         post.deinit();
         allocator.destroy(post);
@@ -167,6 +168,7 @@ test "state transition - records per-block and per-epoch metrics" {
         test_state.cached_state,
         signed_beacon_block,
         .{ .verify_signatures = false, .verify_proposer = false, .verify_state_root = false },
+        null,
     );
     defer {
         post_state.deinit();

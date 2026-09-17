@@ -147,7 +147,7 @@ interface ProposerRewards {
 
 interface SyncCommitteeCache {
   validatorIndices: Uint32Array;
-  validatorIndexMap: Map<number, number[]>;
+  validatorIndexMap: Map<number, Uint32Array>;
 }
 
 interface EpochShuffling {
@@ -196,6 +196,7 @@ export type VoluntaryExitValidity =
   | "invalid_signature";
 
 export declare class BeaconStateView {
+  /** Requires state bytes with trusted provenance; SSZ decoding does not authenticate them. */
   static createFromBytes(bytes: Uint8Array): BeaconStateView;
 
   release(): void;
@@ -344,6 +345,7 @@ export declare class BeaconStateView {
     processedValidatorSweepCount: number;
   };
 
+  /** On phase0, serialize this call with other STF operations and cache teardown across workers. */
   computeUnrealizedCheckpoints(): {
     justifiedCheckpoint: Checkpoint;
     finalizedCheckpoint: Checkpoint;
@@ -378,7 +380,9 @@ export declare class BeaconStateView {
   hashTreeRoot(): Uint8Array;
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
+  /** Serialize this call with other STF operations and cache teardown across workers. */
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
+  /** Serialize this call with other STF operations and cache teardown across workers. */
   stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
@@ -387,11 +391,14 @@ declare const bindings: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
   stateTransition: {
+    /** Callers must exclude STF operations across all workers until teardown returns. */
     deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
     init: () => void;
     scrapeMetrics: () => string;
+    registerLocalValidator: (index: number) => void;
+    unregisterLocalValidator: (index: number) => void;
   };
   BeaconStateView: typeof BeaconStateView;
 };

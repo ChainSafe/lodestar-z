@@ -140,6 +140,9 @@
         .time = .{
             .root_source_file = "src/time.zig",
         },
+        .bit_array = .{
+            .root_source_file = "src/bit_array/root.zig",
+        },
         .bounded_array = .{
             .root_source_file = "src/bounded_array.zig",
         },
@@ -167,7 +170,7 @@
         },
         .ssz = .{
             .root_source_file = "src/ssz/root.zig",
-            .imports = .{ .build_options, .hex, .hashing, .persistent_merkle_tree, .testing_allocators },
+            .imports = .{ .build_options, .bit_array, .hex, .hashing, .persistent_merkle_tree, .testing_allocators },
         },
         .consensus_types = .{
             .root_source_file = "src/consensus_types/root.zig",
@@ -380,6 +383,7 @@
         // Per-module unit tests (mirror the old auto-generated `test:<module>` steps).
         .constants = .{ .root_module = .constants },
         .hex = .{ .root_module = .hex },
+        .bit_array = .{ .root_module = .bit_array },
         .bounded_array = .{ .root_module = .bounded_array },
         .cpu_count = .{ .root_module = .cpu_count },
         .hashing = .{ .root_module = .hashing },

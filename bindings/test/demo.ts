@@ -123,7 +123,7 @@ printDuration("pendingDeposits", () => state.pendingDeposits);
 printDuration("pendingPartialWithdrawals", () => state.pendingPartialWithdrawals);
 printDuration("pendingConsolidations", () => state.pendingConsolidations);
 printDuration("proposerLookahead", () => state.proposerLookahead);
-printDuration("getSingleProof(169)", () => state.getSingleProof(169));
+printDuration("getSingleProof(169n)", () => state.getSingleProof(169n));
 const invalidVoluntaryExit = {
   message: {epoch: 0, validatorIndex: 0},
   signature: new Uint8Array(96),

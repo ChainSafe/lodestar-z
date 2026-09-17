@@ -14,7 +14,7 @@ test "BitListType - sanity" {
     var b: Bits.Type = try Bits.Type.fromBitLen(allocator, 30);
     defer b.deinit(allocator);
 
-    try b.setAssumeCapacity(2, true);
+    b.setAssumeCapacity(2, true);
 
     const b_buf = try allocator.alloc(u8, Bits.serializedSize(&b));
     defer allocator.free(b_buf);
@@ -23,61 +23,6 @@ test "BitListType - sanity" {
     try Bits.deserializeFromBytes(allocator, b_buf, &b);
 
     try std.testing.expect(try b.get(0) == false);
-}
-
-test "BitListType - sanity with bools" {
-    const allocator = std.testing.allocator;
-    const Bits = BitListType(16);
-    const expected_bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true };
-    const expected_true_bit_indexes = [_]usize{ 0, 2, 3, 5, 7, 8, 10, 11 };
-    var b: Bits.Type = try Bits.Type.fromBoolSlice(allocator, &expected_bools);
-    defer b.deinit(allocator);
-
-    var actual_bools = try allocator.alloc(bool, expected_bools.len);
-    defer allocator.free(actual_bools);
-    try b.toBoolSlice(&actual_bools);
-
-    try std.testing.expectEqualSlices(bool, &expected_bools, actual_bools);
-    try std.testing.expect(try b.get(0) == true);
-
-    var true_bit_indexes: [Bits.limit]usize = undefined;
-    const true_bit_count = try b.getTrueBitIndexes(true_bit_indexes[0..]);
-
-    try std.testing.expectEqualSlices(usize, &expected_true_bit_indexes, true_bit_indexes[0..true_bit_count]);
-
-    const expected_single_bool = [_]bool{ false, false, false, false, false, true, false, false, false, false, false, false };
-    var b_single_bool: Bits.Type = try Bits.Type.fromBoolSlice(allocator, &expected_single_bool);
-    defer b_single_bool.deinit(allocator);
-
-    try std.testing.expectEqual(b_single_bool.getSingleTrueBit(), 5);
-}
-
-test "BitListType - intersectValues" {
-    const TestCase = struct { expected: []const u8, bit_len: usize };
-    const test_cases = [_]TestCase{
-        .{ .expected = &[_]u8{}, .bit_len = 16 },
-        .{ .expected = &[_]u8{3}, .bit_len = 16 },
-        .{ .expected = &[_]u8{ 0, 5, 6, 10, 14 }, .bit_len = 16 },
-        .{ .expected = &[_]u8{ 0, 5, 6, 10, 14 }, .bit_len = 15 },
-    };
-
-    const allocator = std.testing.allocator;
-    const Bits = BitListType(16);
-
-    for (test_cases) |tc| {
-        var b: Bits.Type = try Bits.Type.fromBitLen(allocator, tc.bit_len);
-        defer b.deinit(allocator);
-
-        for (tc.expected) |i| try b.setAssumeCapacity(i, true);
-
-        var values = try std.ArrayList(u8).initCapacity(allocator, tc.bit_len);
-        defer values.deinit(allocator);
-        for (0..tc.bit_len) |i| values.appendAssumeCapacity(@intCast(i));
-
-        var actual = try b.intersectValues(u8, allocator, values.items);
-        defer actual.deinit(allocator);
-        try std.testing.expectEqualSlices(u8, tc.expected, actual.items);
-    }
 }
 
 test "clone" {
@@ -96,34 +41,6 @@ test "clone" {
     try std.testing.expect(std.mem.eql(u8, b.data.items, cloned.data.items));
     try expectEqualRootsAlloc(Bits, allocator, b, cloned);
     try expectEqualSerializedAlloc(Bits, allocator, b, cloned);
-}
-
-test "BitList resize and set should enforce length bounds" {
-    const allocator = std.testing.allocator;
-
-    const Bits = BitListType(16);
-    // First byte: 1, 0, 1, 1, 0, 1, 0, 1 = 173
-    // Second byte: 1, 0, 1, 1, 1, 0, 1, 1 = 221
-    const bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true, true, false, true, true };
-    var b: Bits.Type = try Bits.Type.fromBoolSlice(allocator, &bools);
-    defer b.deinit(allocator);
-
-    try std.testing.expect(b.data.items.len == 2);
-    try std.testing.expect(b.data.items[0] == 173);
-    try std.testing.expect(b.data.items[1] == 221);
-
-    // Resize to 5 bits. Now it should only have one byte,
-    // with the last 3 bits in the byte being wiped out.
-    // First byte: 1, 0, 1, 1, 0, 0, 0, 0 = 13
-    try b.resize(allocator, 5);
-
-    try std.testing.expect(b.data.items.len == 1);
-    try std.testing.expect(b.data.items[0] == 13);
-
-    try std.testing.expectError(
-        error.tooLarge,
-        b.set(allocator, std.math.maxInt(usize), true),
-    );
 }
 
 // Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/bitList/valid.test.ts#L44-L69
@@ -405,5 +322,103 @@ test "BitListType - tree.zeros" {
         try Bits257.hashTreeRoot(allocator, &value, &expected_root);
 
         try std.testing.expectEqualSlices(u8, &expected_root, tree_node.getRoot(&pool));
+    }
+}
+
+test "memory_safety: BitList JSON rejection frees scratch once" {
+    const Bits = BitListType(8);
+    const cases = .{
+        .{ "\"0xzz\"", error.InvalidCharacter },
+        .{ "\"0x00\"", error.noPaddingBit },
+        .{ "\"0x8002\"", error.tooLarge },
+        .{ "\"0x000001\"", error.invalidLength },
+    };
+    inline for (cases) |case| {
+        var scanner = std.json.Scanner.initCompleteInput(std.testing.allocator, case[0]);
+        defer scanner.deinit();
+        var out = Bits.default_value;
+        defer Bits.deinit(std.testing.allocator, &out);
+        try std.testing.expectError(case[1], Bits.deserializeFromJson(std.testing.allocator, &scanner, &out));
+    }
+}
+
+test "memory_safety: BitList JSON allocation failures release scratch" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const Bits = BitListType(8);
+            var scanner = std.json.Scanner.initCompleteInput(std.testing.allocator, "\"0xff01\"");
+            defer scanner.deinit();
+            var out = Bits.default_value;
+            defer Bits.deinit(allocator, &out);
+            try Bits.deserializeFromJson(allocator, &scanner, &out);
+            try std.testing.expectEqual(@as(usize, 8), out.bit_len);
+            try std.testing.expectEqualSlices(u8, &.{0xff}, out.data.items);
+        }
+    }.run, .{});
+}
+
+test "BitList hashing streams chunk and batch boundaries without allocation" {
+    const allocator = std.testing.allocator;
+    const Bits = BitListType(65 * 256 + 7);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
+    defer pool.deinit();
+    for ([_]usize{
+        0,        1,            7,        8,            9,
+        247,      248,          249,      255,          256,
+        257,      511,          512,      513,          63 * 256 - 1,
+        63 * 256, 64 * 256 - 1, 64 * 256, 64 * 256 + 1, 65 * 256 - 1,
+        65 * 256, Bits.limit,
+    }) |len| {
+        var value = try Bits.Type.fromBitLen(allocator, len);
+        defer value.deinit(allocator);
+        for (0..len) |i| value.setAssumeCapacity(i, i % 3 == 0);
+        const node = try Bits.tree.fromValue(&pool, &value);
+        defer pool.unref(node);
+        const bytes = try allocator.alloc(u8, Bits.serializedSize(&value));
+        defer allocator.free(bytes);
+        _ = Bits.serializeIntoBytes(&value, bytes);
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        var root: [32]u8 = undefined;
+        try Bits.hashTreeRoot(failing.allocator(), &value, &root);
+        try std.testing.expectEqualSlices(u8, node.getRoot(&pool), &root);
+        try Bits.serialized.hashTreeRoot(failing.allocator(), bytes, &root);
+        try std.testing.expectEqualSlices(u8, node.getRoot(&pool), &root);
+    }
+    var root: [32]u8 = undefined;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.InvalidSize, Bits.serialized.hashTreeRoot(failing.allocator(), &.{}, &root));
+    try std.testing.expectError(error.noPaddingBit, Bits.serialized.hashTreeRoot(failing.allocator(), &.{0}, &root));
+    const Small = BitListType(1);
+    try std.testing.expectError(error.tooLarge, Small.serialized.hashTreeRoot(failing.allocator(), &.{4}, &root));
+}
+
+test "memory_safety: BitListType tree reads need only output capacity" {
+    const allocator = std.testing.allocator;
+    const List = BitListType(1025);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
+    defer pool.deinit();
+    for ([_]usize{ 0, 1, 7, 8, 31, 32, 33, 255, 256, 257, List.limit }) |len| {
+        var value = List.default_value;
+        defer List.deinit(allocator, &value);
+        try value.resize(allocator, len);
+        for (0..len) |i| value.setAssumeCapacity(i, i % 3 == 0);
+        const node = try List.tree.fromValue(&pool, &value);
+        defer pool.unref(node);
+        const before = node.getRoot(&pool).*;
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        var out = List.default_value;
+        defer List.deinit(failing.allocator(), &out);
+        try out.resize(failing.allocator(), List.limit);
+        failing.fail_index = failing.alloc_index;
+        failing.resize_fail_index = failing.resize_index;
+        try List.tree.toValue(failing.allocator(), node, &pool, &out);
+        try std.testing.expect(List.equals(&value, &out));
+        try std.testing.expectEqualSlices(u8, &before, node.getRoot(&pool));
+        const zero = try List.tree.zeros(&pool, len);
+        defer pool.unref(zero);
+        try List.tree.toValue(failing.allocator(), zero, &pool, &out);
+        var root: [32]u8 = undefined;
+        try List.hashTreeRoot(allocator, &out, &root);
+        try std.testing.expectEqualSlices(u8, zero.getRoot(&pool), &root);
     }
 }
