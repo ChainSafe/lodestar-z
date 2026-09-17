@@ -343,6 +343,12 @@
                 .imports = .{ .state_transition, .fork_types, .config, .persistent_merkle_tree, .time },
             },
         },
+        .bench_locality_decay = .{
+            .root_module = .{
+                .root_source_file = "bench/state_transition/locality_decay.zig",
+                .imports = .{ .state_transition, .fork_types, .consensus_types, .config, .persistent_merkle_tree, .time },
+            },
+        },
         .bench_fork_choice_compute_deltas = .{
             .root_module = .{
                 .root_source_file = "bench/fork_choice/compute_deltas.zig",
