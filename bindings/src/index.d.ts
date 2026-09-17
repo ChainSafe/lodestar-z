@@ -410,6 +410,7 @@ declare const bindings: {
   metrics: {
     init: () => void;
     scrapeMetrics: () => string;
+    scrapeStateTransitionMetrics: () => string;
     registerLocalValidator: (index: number) => void;
     unregisterLocalValidator: (index: number) => void;
   };

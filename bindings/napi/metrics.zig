@@ -48,6 +48,18 @@ pub fn scrapeMetrics() !js.String {
     return js.String.from(aw.written());
 }
 
+/// JS: metrics.scrapeStateTransitionMetrics() → string
+///
+/// Like `scrapeMetrics` but without the `validator_monitor_*` metrics, for
+/// consumers that keep their own validator monitor registry.
+pub fn scrapeStateTransitionMetrics() !js.String {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+
+    try state_transition.metrics.writeStateTransition(&aw.writer);
+    return js.String.from(aw.written());
+}
+
 pub fn deinit() void {
     if (!initialized) return;
     state_transition.metrics.deinit();

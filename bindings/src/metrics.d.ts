@@ -1,8 +1,11 @@
 /** Initialize native state-transition metrics. */
 export declare function init(): void;
 
-/** Scrape native state-transition metrics in Prometheus text format. */
+/** Scrape all native metrics in Prometheus text format. */
 export declare function scrapeMetrics(): string;
+
+/** Scrape only native state-transition metrics in Prometheus text format. */
+export declare function scrapeStateTransitionMetrics(): string;
 
 /**
  * Register a validator index with the native validator monitor. Metrics

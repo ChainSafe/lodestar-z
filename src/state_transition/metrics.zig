@@ -262,9 +262,15 @@ pub fn observeEpochTransitionStep(
     );
 }
 
+/// Writes only the state transition metrics to `writer`, leaving out the
+/// validator monitor metrics.
+pub fn writeStateTransition(writer: *std.Io.Writer) !void {
+    try m.write(&state_transition, writer);
+}
+
 /// Writes all metrics to `writer`.
 pub fn write(writer: *std.Io.Writer) !void {
-    try m.write(&state_transition, writer);
+    try writeStateTransition(writer);
     try m.write(&validator_monitor, writer);
 }
 
