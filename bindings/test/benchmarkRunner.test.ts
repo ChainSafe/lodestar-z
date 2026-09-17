@@ -4,6 +4,7 @@ import {existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from "node
 import {tmpdir} from "node:os";
 import {join, resolve} from "node:path";
 import {setTimeout as delay} from "node:timers/promises";
+import {fileURLToPath} from "node:url";
 import {afterEach, describe, expect, it} from "vitest";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -54,6 +55,48 @@ afterEach(() => {
 });
 
 describe("benchmark process isolation", () => {
+  it("supports isolation through the upstream public CLI without a local adapter", () => {
+    const {dir, history} = fixture();
+    const files = ["a", "b"].map((name) => {
+      const file = join(dir, `${name}.test.ts`);
+      writeFileSync(
+        file,
+        `import {bench} from "@chainsafe/benchmark";
+if (globalThis.upstreamLoaded) throw Error("shared process");
+globalThis.upstreamLoaded = true;
+console.log("UPSTREAM_PID=" + process.pid);
+bench({id: "${name}", fn: () => {}});`
+      );
+      return file;
+    });
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        fileURLToPath(import.meta.resolve("@chainsafe/benchmark/cli")),
+        ...files,
+        "--isolate",
+        "--local",
+        history,
+        "--defaultBranch",
+        "main",
+        "--skipPostComment",
+        "--maxWarmUpMs",
+        "0",
+        "--maxWarmUpRuns",
+        "0",
+        "--minRuns",
+        "1",
+        "--maxRuns",
+        "1",
+      ],
+      {cwd: root, encoding: "utf8", env: {...process.env, GITHUB_ACTIONS: "false"}, timeout: 30000}
+    );
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    const pids = [...result.stdout.matchAll(/UPSTREAM_PID=(\d+)/g)].map((match) => match[1]);
+    expect(new Set(pids).size, result.stdout + result.stderr).toBe(2);
+  });
   it("uses a fresh default history namespace", () => {
     const {dir} = fixture();
     const file = join(dir, "one.test.ts");
@@ -75,7 +118,17 @@ await new Promise(() => {});`
     );
     const parent = spawn(
       process.execPath,
-      ["--import", "tsx", "scripts/benchmark.mjs", file, "--defaultBranch", "main", "--local", history],
+      [
+        "--import",
+        "tsx",
+        fileURLToPath(import.meta.resolve("@chainsafe/benchmark/cli")),
+        file,
+        "--isolate",
+        "--defaultBranch",
+        "main",
+        "--local",
+        history,
+      ],
       {cwd: root, stdio: "ignore"}
     );
     let workerPid: number | undefined;

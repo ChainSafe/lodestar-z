@@ -7,7 +7,7 @@
     "@chainsafe/biomejs-config/esm"
   ],
   "files": {
-    "includes": ["bindings/**/*.ts", "scripts/benchmark*.mjs"]
+    "includes": ["bindings/**/*.ts"]
   },
   "vcs": {
     "defaultBranch": "main"
