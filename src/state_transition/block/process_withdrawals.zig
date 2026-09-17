@@ -216,7 +216,7 @@ pub fn getExpectedWithdrawals(
 }
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 
-test "process withdrawals should count every swept validator including the one filling the payload" {
+test "getExpectedWithdrawals counts swept validators without rebuilding validators tree" {
     const allocator = std.testing.allocator;
     const validator_count = 256;
     const pool_size = 180_000;
@@ -235,6 +235,9 @@ test "process withdrawals should count every swept validator including the one f
             try validator.set("withdrawable_epoch", 0);
         }
 
+        try state.commit();
+        const validators_root_before = validators.getRoot();
+
         var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
         var withdrawals_result = WithdrawalsResult{
             .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
@@ -249,6 +252,9 @@ test "process withdrawals should count every swept validator including the one f
             &withdrawals_result,
             &withdrawal_balances,
         );
+        try state.commit();
+        try std.testing.expectEqual(validators_root_before, validators.getRoot());
+
         const expected_sampled = if (withdrawal_count == preset.MAX_WITHDRAWALS_PER_PAYLOAD)
             withdrawal_count + 1
         else
