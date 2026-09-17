@@ -78,7 +78,7 @@ pub fn processPendingDeposits(
 
         if (try isValidatorKnown(fork, state, validator_index)) {
             var validators = try state.validators();
-            var validator = try validators.get(validator_index.?);
+            var validator = try validators.getReadonly(validator_index.?);
             is_validator_exited = try validator.get("exit_epoch") < c.FAR_FUTURE_EPOCH;
             is_validator_withdrawn = try validator.get("withdrawable_epoch") < next_epoch;
         }

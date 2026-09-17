@@ -156,7 +156,7 @@ pub fn getExpectedWithdrawals(
         // Get next validator in turn
         const validator_index = (next_withdrawal_validator_index + n) % validators_count;
         n += 1;
-        var validator = try validators.get(validator_index);
+        var validator = try validators.getReadonly(validator_index);
         const withdraw_balance: u64 = @intCast(withdrawal_balances.get(validator_index) orelse 0);
         const val_balance = try balances.get(validator_index);
         const balance = if (comptime fork.gte(.electra))
