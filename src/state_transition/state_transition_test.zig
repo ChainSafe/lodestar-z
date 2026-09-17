@@ -259,7 +259,7 @@ test "proposer rewards should count sync positions without participant rewards" 
     const state = cached.state.castToFork(.electra);
     const epoch_cache = cached.epoch_cache;
     const proposer = try cached.getBeaconProposer(try state.slot());
-    const indices = epoch_cache.current_sync_committee_indexed.get().getValidatorIndices();
+    const indices = try epoch_cache.current_sync_committee_indexed.get().getValidatorIndices();
     var proposer_positions: u64 = 0;
     var aggregate = types.electra.SyncAggregate.default_value;
     for (0..preset.SYNC_COMMITTEE_SIZE) |index| {

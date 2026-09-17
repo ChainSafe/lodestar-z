@@ -12,8 +12,20 @@ test "memory_safety: initValidatorIndices should release cloned indices on init 
             errdefer failed.* = true;
             var cache = try SyncCommitteeCache.initValidatorIndices(allocator, input);
             defer cache.deinit();
-            try std.testing.expectEqualSlices(ValidatorIndex, input, cache.getValidatorIndices());
+            try std.testing.expectEqualSlices(ValidatorIndex, input, try cache.getValidatorIndices());
         }
     }.run, .{ &indices, &saw_oom });
     try std.testing.expect(saw_oom);
+}
+
+test "phase0 sync-committee lookups return an error instead of aborting" {
+    var cache = SyncCommitteeCache.initEmpty();
+    try std.testing.expectError(
+        SyncCommitteeCache.Error.SyncCommitteeNotAvailable,
+        cache.getValidatorIndices(),
+    );
+    try std.testing.expectError(
+        SyncCommitteeCache.Error.SyncCommitteeNotAvailable,
+        cache.getValidatorIndexMap(),
+    );
 }

@@ -625,13 +625,20 @@ pub fn getIndexedSyncCommittee(self: *const BeaconStateView, slot_arg: js.Number
 
 fn indexedSyncCommitteeToNapi(sync_committee: anytype) !js_types.IndexedSyncCommittee {
     const env = js.env();
+    const validator_indices = sync_committee.getValidatorIndices() catch {
+        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for pre-Altair state");
+    };
+    const validator_index_map = sync_committee.getValidatorIndexMap() catch {
+        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for pre-Altair state");
+    };
+
     const obj = try env.createObject();
     try obj.setNamedProperty(
         "validatorIndices",
         try numberSliceToNapiValue(
             env,
             u64,
-            sync_committee.getValidatorIndices(),
+            validator_indices,
             .{ .typed_array = .uint32 },
         ),
     );
@@ -641,7 +648,7 @@ fn indexedSyncCommitteeToNapi(sync_committee: anytype) !js_types.IndexedSyncComm
     const map = try env.newInstance(map_ctor, .{});
     const set_fn = try map.getNamedProperty("set");
 
-    var iterator = sync_committee.getValidatorIndexMap().iterator();
+    var iterator = validator_index_map.iterator();
     while (iterator.next()) |entry| {
         const key = try env.createInt64(@intCast(entry.key_ptr.*));
         const positions = try numberSliceToNapiValue(
