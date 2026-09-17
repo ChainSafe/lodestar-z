@@ -161,7 +161,8 @@ await new Promise(() => {});`
     const result = run([file], history);
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stdout + result.stderr).toContain("Performance regression");
-  });
+    // Two CLI runs each have a 30s subprocess deadline; allow both on busy CI runners.
+  }, 65000);
 
   it("collects each file in a fresh process and persists all results together", () => {
     const {dir, history} = fixture();
