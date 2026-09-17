@@ -28,8 +28,6 @@ pub const BlockRewards = struct {
     attester_slashings: u64,
 };
 
-pub const Error = error{BlockAttestationRewardUnsupportedFork};
-
 fn whistleblowerRewardQuotient(comptime fork: ForkSeq) u64 {
     return if (comptime fork.gte(.electra))
         preset.WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA
@@ -108,7 +106,7 @@ fn computeAttestationsReward(
     pre_state: *CachedBeaconState,
     body: *const fork_types.BeaconBlockBody(block_type, fork),
 ) !u64 {
-    if (comptime !fork.gte(.altair)) return Error.BlockAttestationRewardUnsupportedFork;
+    if (comptime !fork.gte(.altair)) return error.BlockAttestationRewardUnsupportedFork;
 
     var scratch = try pre_state.clone(allocator, .{ .transfer_cache = false });
     defer {
@@ -148,26 +146,6 @@ fn computeSyncAggregateReward(
     return participants * pre_state.epoch_cache.sync_proposer_reward;
 }
 
-fn forkOf(comptime tag: @typeInfo(AnyBeaconBlock).@"union".tag_type.?) ForkSeq {
-    return switch (tag) {
-        .phase0 => .phase0,
-        .altair => .altair,
-        .full_bellatrix, .blinded_bellatrix => .bellatrix,
-        .full_capella, .blinded_capella => .capella,
-        .full_deneb, .blinded_deneb => .deneb,
-        .full_electra, .blinded_electra => .electra,
-        .full_fulu, .blinded_fulu => .fulu,
-        .full_gloas => .gloas,
-    };
-}
-
-fn blockTypeOf(comptime tag: @typeInfo(AnyBeaconBlock).@"union".tag_type.?) BlockType {
-    return switch (tag) {
-        .blinded_bellatrix, .blinded_capella, .blinded_deneb, .blinded_electra, .blinded_fulu => .blinded,
-        else => .full,
-    };
-}
-
 pub fn computeBlockRewardsAny(
     allocator: Allocator,
     io: std.Io,
@@ -175,12 +153,12 @@ pub fn computeBlockRewardsAny(
     block: AnyBeaconBlock,
     cached: ?ProposerRewards,
 ) !BlockRewards {
-    return switch (block) {
-        inline else => |inner, tag| blk: {
-            const fork = comptime forkOf(tag);
-            const block_type = comptime blockTypeOf(tag);
-            const wrapped = fork_types.BeaconBlock(block_type, fork){ .inner = inner.* };
-            break :blk try computeBlockRewards(fork, block_type, allocator, io, pre_state, &wrapped, cached);
+    return switch (block.forkSeq()) {
+        inline else => |f| switch (block.blockType()) {
+            inline else => |bt| if (comptime (bt == .blinded and f.lt(.bellatrix)) or (bt == .blinded and f.gte(.gloas)))
+                error.InvalidBlockTypeForFork
+            else
+                try computeBlockRewards(f, bt, allocator, io, pre_state, block.castToFork(bt, f), cached),
         },
     };
 }

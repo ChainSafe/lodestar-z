@@ -6,6 +6,8 @@ const types = @import("consensus_types");
 const computeBlockRewards = @import("block_rewards.zig").computeBlockRewards;
 const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 const BeaconBlock = @import("fork_types").BeaconBlock;
+const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
+const computeBlockRewardsAny = @import("block_rewards.zig").computeBlockRewardsAny;
 
 fn clearParticipation(state: *TestCachedBeaconState) !void {
     var current = try state.cached_state.state.currentEpochParticipation();
@@ -120,4 +122,41 @@ test "computeBlockRewards - slashing rewards" {
     try std.testing.expectEqual(expected, rewards.proposer_slashings);
     try std.testing.expectEqual(expected, rewards.attester_slashings);
     try std.testing.expectEqual(2 + expected * 2, rewards.total);
+}
+
+test "computeBlockRewardsAny - dispatches to the block's fork" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 180_000 });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var signed_block = types.electra.SignedBeaconBlock.default_value;
+    try generateElectraBlock(allocator, test_state.cached_state, &signed_block);
+    defer types.electra.SignedBeaconBlock.deinit(allocator, &signed_block);
+
+    const any_signed = AnySignedBeaconBlock{ .full_electra = &signed_block };
+    const cached = ProposerRewards{ .attestations = 5, .sync_aggregate = 7 };
+
+    const via_any = try computeBlockRewardsAny(
+        allocator,
+        std.testing.io,
+        test_state.cached_state,
+        any_signed.beaconBlock(),
+        cached,
+    );
+
+    const fork_block = BeaconBlock(.full, .electra){ .inner = signed_block.message };
+    const direct = try computeBlockRewards(
+        .electra,
+        .full,
+        allocator,
+        std.testing.io,
+        test_state.cached_state,
+        &fork_block,
+        cached,
+    );
+
+    try std.testing.expectEqual(direct, via_any);
 }
