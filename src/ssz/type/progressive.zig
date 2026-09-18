@@ -166,7 +166,7 @@ pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
     }
 }
 
-pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, nodes: *const [node_count]Node.Id) !Node.Id {
+pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, nodes: *[node_count]Node.Id) !Node.Id {
     const subtree_count = comptime subtreeIndex(node_count);
     var n: Node.Id = @enumFromInt(0);
     errdefer pool.unref(n);
@@ -189,7 +189,7 @@ pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, no
         const l = comptime subtree_starts[subtree_i];
         const st_length = comptime @min(subtreeLength(subtree_i), node_count - l);
 
-        const subtree_root = try Node.fillWithContents(pool, @constCast(nodes[l..][0..st_length]), st_depth);
+        const subtree_root = try Node.fillWithContents(pool, nodes[l..][0..st_length], st_depth);
         n = try pool.createBranch(subtree_root, n);
     }
 
