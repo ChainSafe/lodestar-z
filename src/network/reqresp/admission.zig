@@ -84,3 +84,7 @@ fn next(previous: u128, cost: u128, quota: limiter.Quota, now_ns: u128) ?u128 {
     const result = @max(now_ns, previous) + charge_ns;
     return if (result <= now_ns + period_ns) result else null;
 }
+
+test {
+    _ = @import("admission_test.zig");
+}

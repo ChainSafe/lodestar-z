@@ -726,3 +726,7 @@ fn defaultEndpoints(quic: [2]?t.Address, udp: *const @import("udp").Sockets) err
     };
     return endpoints;
 }
+
+test {
+    _ = @import("network_core_test.zig");
+}

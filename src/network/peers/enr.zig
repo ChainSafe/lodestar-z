@@ -132,3 +132,7 @@ pub fn requireIdentity(record: *const Record, peer: *const types.PeerId) Error!v
     const public_key = try keys.PublicKey.fromBytes(&record.public_key);
     if (!types.PeerId.fromPublicKey(&public_key).eql(peer)) return error.IdentityMismatch;
 }
+
+test {
+    _ = @import("enr_test.zig");
+}

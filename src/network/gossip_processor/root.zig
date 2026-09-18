@@ -563,5 +563,5 @@ pub const GossipProcessor = struct {
 
 test {
     _ = metadata_mod;
-    _ = @import("test.zig");
+    _ = @import("root_test.zig");
 }

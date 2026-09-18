@@ -83,12 +83,9 @@ fn ProcessInactivityUpdatesBench(comptime fork: ForkSeq) type {
 fn ProcessRewardsAndPenaltiesBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
-        io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
-            const validator_count = BenchState.cloned_cached_state.state.validatorsCount() catch unreachable;
-            cache.syncRewardPenaltyLengths(self.io, validator_count) catch unreachable;
 
             state_transition.processRewardsAndPenalties(
                 fork,
@@ -135,7 +132,7 @@ fn ProcessSlashingsBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.epoch_cache,
                 BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
-                true,
+                false,
             ) catch unreachable;
         }
     };
@@ -394,9 +391,6 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.state,
             ) catch unreachable;
             defer cache.deinit(allocator);
-
-            const validator_count = BenchState.cloned_cached_state.state.validatorsCount() catch unreachable;
-            cache.syncRewardPenaltyLengths(self.io, validator_count) catch unreachable;
 
             state_transition.processEpoch(
                 fork,
@@ -742,7 +736,6 @@ fn runBenchmark(
 
     try bench.addParam("rewards_and_penalties", &ProcessRewardsAndPenaltiesBench(fork){
         .epoch_transition_cache = &epoch_transition_cache,
-        .io = io,
     }, .{ .hooks = hooks });
 
     try bench.addParam("registry_updates", &ProcessRegistryUpdatesBench(fork){

@@ -138,3 +138,7 @@ pub const Listener = struct {
         return .{ .consumed = consumed, .write = out[0..written], .status = .pending };
     }
 };
+
+test {
+    _ = @import("multistream_test.zig");
+}

@@ -2,7 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const ssz = @import("ssz");
-const hex = @import("hex");
 const Slot = types.primitive.Slot.Type;
 const preset = @import("preset").preset;
 const state_transition = @import("../root.zig");
@@ -63,15 +62,19 @@ pub fn generateElectraBlock(allocator: Allocator, cached_state: *CachedBeaconSta
         .committee_bits = committee_bits,
     });
 
+    const block_slot = (try state.slot()) + 1;
+    var latest_header = try state.latestBlockHeader();
+    const parent_root = try latest_header.hashTreeRoot();
+
     var execution_payload = types.electra.ExecutionPayload.default_value;
-    execution_payload.timestamp = 1737111896;
+    execution_payload.timestamp = (try state.genesisTime()) +
+        block_slot * cached_state.config.chain.SECONDS_PER_SLOT;
 
     out.* = .{
         .message = .{
-            .slot = (try state.slot()) + 1,
-            // value is generated after running real state transition int test
-            .proposer_index = 41,
-            .parent_root = try hex.hexToRoot("0x4e647394b6f96c1cd44938483ddf14d89b35d3f67586a59cbfd410a56efbb2b1"),
+            .slot = block_slot,
+            .proposer_index = try cached_state.epoch_cache.getBeaconProposer(block_slot),
+            .parent_root = parent_root.*,
             // this could be computed later
             .state_root = [_]u8{0} ** 32,
             .body = .{

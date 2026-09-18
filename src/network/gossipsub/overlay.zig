@@ -638,3 +638,7 @@ test "gossip policy review I3 shuffle budget holds at empty singleton and capaci
     mesh.shuffle(&ordered);
     try std.testing.expectEqualSlices(u16, &.{ 6, 7, 2, 0, 5, 1, 3, 4 }, &ordered);
 }
+
+test {
+    _ = @import("overlay_test.zig");
+}

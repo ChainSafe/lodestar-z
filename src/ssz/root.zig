@@ -12,11 +12,9 @@ pub const BoolType = types.BoolType;
 pub const UintType = types.UintType;
 
 pub const BitListType = types.BitListType;
-pub const BitList = types.BitList;
 pub const isBitListType = types.isBitListType;
 
 pub const BitVectorType = types.BitVectorType;
-pub const BitVector = types.BitVector;
 pub const isBitVectorType = types.isBitVectorType;
 
 pub const ByteListType = types.ByteListType;
@@ -45,7 +43,6 @@ pub const VariableProgressiveListType = types.VariableProgressiveListType;
 
 // Progressive bit list
 pub const ProgressiveBitListType = types.ProgressiveBitListType;
-pub const ProgressiveBitList = types.ProgressiveBitList;
 pub const isProgressiveBitListType = types.isProgressiveBitListType;
 
 // Compatible union
@@ -65,13 +62,10 @@ pub const ListBasicTreeView = tree_view.ListBasicTreeView;
 pub const ListCompositeTreeView = tree_view.ListCompositeTreeView;
 pub const CloneOpts = @import("tree_view/utils/clone_opts.zig").CloneOpts;
 
-test "redundant SSZ helper APIs are not exposed" {
-    try testing.expect(!@hasDecl(types, "isProgressiveListType"));
-    try testing.expect(!@hasDecl(types, "isCompatibleUnionType"));
-    try testing.expect(!@hasDecl(HasherData, "getAllocator"));
-}
-
 test {
-    _ = @import("memory_safety_test.zig");
+    _ = types;
+    _ = tree_view;
+    _ = hasher;
+    _ = @import("root_test.zig");
     testing.refAllDecls(@This());
 }

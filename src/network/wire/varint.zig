@@ -49,3 +49,7 @@ pub fn decode(bytes: []const u8) Error!Decoded {
     }
     return error.Overflow;
 }
+
+test {
+    _ = @import("varint_test.zig");
+}

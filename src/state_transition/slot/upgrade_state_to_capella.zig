@@ -65,7 +65,8 @@ pub fn upgradeStateToCapella(
     try bellatrix_state.latestExecutionPayloadHeader(allocator, &bellatrix_latest_execution_payload_header);
     defer ct.bellatrix.ExecutionPayloadHeader.deinit(allocator, &bellatrix_latest_execution_payload_header);
 
-    try ct.bellatrix.ExecutionPayloadHeader.clone(
+    try ct.bellatrix.ExecutionPayloadHeader.cloneInto(
+        ct.capella.ExecutionPayloadHeader,
         allocator,
         &bellatrix_latest_execution_payload_header,
         &new_latest_execution_payload_header,

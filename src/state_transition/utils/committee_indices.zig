@@ -1,108 +1,11 @@
 const std = @import("std");
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const builtin = @import("builtin");
-const native_endian = builtin.target.cpu.arch.endian();
 const Allocator = std.mem.Allocator;
+const swap_or_not_shuffle = @import("swap_or_not_shuffle");
 
-/// a Zig implementation of https://github.com/ChainSafe/swap-or-not-shuffle/pull/5
-const ComputeShuffledIndex = struct {
-
-    // this ComputeShuffledIndex is always init() and deinit() inside consumer's function so use arena allocator here
-    // to improve performance and simplify deinit()
-    arena: std.heap.ArenaAllocator,
-    pivot_by_index: []?u64,
-    source_by_position_by_index: []std.AutoHashMap(u64, [32]u8),
-    // 32 bytes seed + 1 byte i
-    pivot_buffer: [33]u8,
-    // 32 bytes seed + 1 byte i + 4 bytes positionDiv
-    source_buffer: [37]u8,
-    index_count: u64,
-    rounds: u64,
-
-    pub fn init(parent_allocator: Allocator, seed: *const [32]u8, index_count: u64, rounds: u64) !@This() {
-        if (index_count == 0) {
-            return error.InvalidIndexCount;
-        }
-
-        if (rounds == 0) {
-            return error.InvalidRounds;
-        }
-
-        var arena = std.heap.ArenaAllocator.init(parent_allocator);
-        const allocator = arena.allocator();
-
-        const pivot_by_index = try allocator.alloc(?u64, @intCast(rounds));
-        @memset(pivot_by_index, null);
-
-        const source_by_position_by_index = try allocator.alloc(std.AutoHashMap(u64, [32]u8), @intCast(rounds));
-        for (source_by_position_by_index) |*item| {
-            item.* = std.AutoHashMap(u64, [32]u8).init(allocator);
-            try item.*.ensureTotalCapacity(256);
-        }
-
-        var pivot_buffer: [33]u8 = [_]u8{0} ** 33;
-        var source_buffer: [37]u8 = [_]u8{0} ** 37;
-        @memcpy(pivot_buffer[0..32], seed);
-        @memcpy(source_buffer[0..32], seed);
-
-        return .{
-            .arena = arena,
-            .pivot_by_index = pivot_by_index,
-            .source_by_position_by_index = source_by_position_by_index,
-            .pivot_buffer = pivot_buffer,
-            .source_buffer = source_buffer,
-            .index_count = index_count,
-            .rounds = rounds,
-        };
-    }
-
-    pub fn deinit(self: *@This()) void {
-        // pivot_by_index is deinit() by arena allocator
-        // source_by_position_by_index is deinit() by arena allocator
-        // this needs to be the last step
-        self.arena.deinit();
-    }
-
-    pub fn get(self: *@This(), index: u64) !u64 {
-        var permuted = index;
-
-        for (0..self.rounds) |i| {
-            var pivot = self.pivot_by_index[@intCast(i)];
-            if (pivot == null) {
-                self.pivot_buffer[32] = @intCast(i % 256);
-                var digest = [_]u8{0} ** 32;
-                Sha256.hash(self.pivot_buffer[0..], digest[0..], .{});
-                const value = std.mem.readInt(u64, digest[0..8], .little);
-                const _pivot: u64 = @intCast(value % self.index_count);
-                self.pivot_by_index[@intCast(i)] = _pivot;
-                pivot = _pivot;
-            }
-
-            const flip = (pivot.? + self.index_count - permuted) % self.index_count;
-            const position = @max(permuted, flip);
-            const position_div: u32 = @intCast(position / 256);
-
-            var source_by_position = self.source_by_position_by_index[@intCast(i)];
-            const source = source_by_position.getOrPutAssumeCapacity(position_div);
-            if (!source.found_existing) {
-                self.source_buffer[32] = @intCast(i % 256);
-                std.mem.writeInt(u32, self.source_buffer[32 + 1 ..][0..4], position_div, .little);
-
-                Sha256.hash(
-                    self.source_buffer[0..],
-                    source.value_ptr,
-                    .{},
-                );
-            }
-
-            const byte = source.value_ptr[@intCast(position % 256 / 8)];
-            const bit = (byte >> @intCast(position % 8)) & 1;
-            permuted = if (bit == 1) flip else permuted;
-        }
-
-        return permuted;
-    }
-};
+const ACTIVE_INDICES_LENGTH_MAX: usize = std.math.maxInt(u32);
+// The active-index bound keeps shuffled positions in u32; validator indices remain u64.
+const ComputeShuffledIndex = swap_or_not_shuffle.ComputeShuffledIndex;
 
 pub fn computeProposerIndex(
     allocator: Allocator,
@@ -177,6 +80,16 @@ fn getCommitteeIndices(
     };
     const max_effective_balance_increment: u64 = max_effective_balance / effective_balance_increment;
 
+    if (active_indices.len == 0) {
+        return error.InvalidIndexCount;
+    }
+    if (rounds == 0) {
+        return error.InvalidRounds;
+    }
+    if (active_indices.len > ACTIVE_INDICES_LENGTH_MAX) {
+        return error.InvalidIndexCount;
+    }
+
     var compute_shuffled_index = try ComputeShuffledIndex.init(
         allocator,
         seed,
@@ -199,7 +112,7 @@ fn getCommitteeIndices(
         const index: u64 = @intCast(i % active_indices.len);
         const shuffled_index = try shuffled_result.getOrPut(index);
         if (!shuffled_index.found_existing) {
-            const _shuffled_index = try compute_shuffled_index.get(index);
+            const _shuffled_index = try compute_shuffled_index.get(@intCast(index));
             shuffled_index.value_ptr.* = _shuffled_index;
         }
         const candidate_index = active_indices[@intCast(shuffled_index.value_ptr.*)];

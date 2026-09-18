@@ -80,3 +80,7 @@ pub fn insertClosest(
     out[position] = item;
     return new_length;
 }
+
+test {
+    _ = @import("types_test.zig");
+}

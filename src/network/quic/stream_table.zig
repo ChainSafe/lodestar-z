@@ -155,3 +155,7 @@ pub const StreamTable = struct {
         return null;
     }
 };
+
+test {
+    _ = @import("stream_table_test.zig");
+}

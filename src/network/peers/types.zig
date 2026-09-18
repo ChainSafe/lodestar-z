@@ -155,3 +155,7 @@ pub const Demand = struct {
         }
     }
 };
+
+test {
+    _ = @import("types_test.zig");
+}

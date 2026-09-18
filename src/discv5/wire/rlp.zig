@@ -241,3 +241,7 @@ fn readLength(bytes: []const u8) Error!usize {
     }
     return value;
 }
+
+test {
+    _ = @import("rlp_test.zig");
+}

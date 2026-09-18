@@ -37,3 +37,7 @@ pub const Workspace = struct {
 };
 
 pub const Error = error{ TopicCapacity, DuplicateTopic, InvalidTopic, InvalidLimits, TopicPolicyRequired };
+
+test {
+    _ = @import("local_intent_test.zig");
+}

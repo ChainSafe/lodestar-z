@@ -161,3 +161,7 @@ comptime {
     std.debug.assert(operations_max * Lookup.parallelism * 2 <= std.math.maxInt(u16));
     std.debug.assert(@sizeOf(StepResult) <= @sizeOf(Transport.StepResult) + 16);
 }
+
+test {
+    _ = @import("lookup_batch_test.zig");
+}

@@ -710,3 +710,7 @@ test "CompatibleUnion - rejects options with incompatible Merkleization" {
         .{ 2, Circle },
     }));
 }
+
+test {
+    _ = @import("compatible_union_test.zig");
+}

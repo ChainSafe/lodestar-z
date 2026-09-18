@@ -20,8 +20,8 @@ const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 ///   * false (default) — one chunk per leaf, navigated by Node.Id.
 ///   * true — chunked_leaf-leaf navigation: the bottom `ChunkedLeaf.k_log2` levels of the
 ///     tree are folded into a single ChunkedLeaf Node, addressed at `chunked_leaf_depth =
-///     chunk_depth - ChunkedLeaf.k_log2`. get/set/getAllInto read and CoW-write
-///     chunk bytes through `Id.getChunkedLeafChunks` / `Id.setChunkedLeafChunk`.
+///     chunk_depth - ChunkedLeaf.k_log2`. Reads borrow chunk bytes through
+///     `Id.getChunkedLeafChunks`; writes use `TreeViewState.editChunkedLeaf`.
 pub fn BasicPackedChunks(
     comptime ST: type,
     comptime chunk_depth: Depth,
@@ -104,8 +104,6 @@ pub fn BasicPackedChunks(
             try self.state.setChildNode(gindex, new_node);
         }
 
-        /// `set` for chunked_leaf layouts. CoW-writes one element into the
-        /// boundary ChunkedLeaf via one of three ownership paths.
         fn setChunkedLeaf(self: *Self, index: usize, value: Element, container_len: usize) !void {
             const chunk_idx = index / items_per_chunk;
             const chunked_leaf_idx = chunk_idx / ChunkedLeaf.K;
@@ -113,75 +111,22 @@ pub fn BasicPackedChunks(
             const intra_chunk_u16: u16 = @intCast(intra_chunk);
             const gindex = Gindex.fromDepth(chunked_leaf_depth, chunked_leaf_idx);
 
-            // Valid chunk count of the target ChunkedLeaf, derived from the
-            // container length — authoritative, not inferred from the write
-            // position. `index` is in range, so this is always >= intra_chunk + 1.
+            // The container length determines valid chunks, including those beyond this write.
             const total_chunks = (container_len + items_per_chunk - 1) / items_per_chunk;
             const chunked_leaf_len: u16 = @intCast(@min(
                 @as(usize, ChunkedLeaf.K),
                 total_chunks - chunked_leaf_idx * @as(usize, ChunkedLeaf.K),
             ));
 
-            const existing_id = try self.state.getChildNode(gindex);
-            const state_col = self.state.pool.nodes.items(.state);
-            const existing_kind = state_col[@intFromEnum(existing_id)].kind();
-
-            // Path 1: navigation landed on a zero sentinel (sparse tree).
-            // Materialize a fresh zero-filled chunked_leaf and mutate it in place
-            // (rc=0 ⇒ exclusively owned by us). Then setChildNode publishes
-            // it to the cache and `changed` set.
-            if (existing_kind == .zero) {
-                var fresh_id_opt: ?Node.Id = try self.state.pool.createChunkedLeafEmpty(chunked_leaf_len);
-                errdefer if (fresh_id_opt) |id| self.state.pool.unref(id);
-
-                const fresh_id = fresh_id_opt.?;
-                const fresh_storage = try fresh_id.getChunkedLeafPtr(self.state.pool);
-                ST.Element.tree.fromValuePackedIntoChunk(&fresh_storage.chunks[intra_chunk], index, &value);
-                self.state.pool.nodes.items(.root)[@intFromEnum(fresh_id)] = Node.lazy_sentinel;
-                try self.state.setChildNode(gindex, fresh_id);
-                fresh_id_opt = null;
-                return;
-            }
-
-            // Path 2: existing chunked_leaf is `transient` — exclusively owned by
-            // this TreeView (rc==0, only the children_nodes cache holds it).
-            // This is the steady state after the first write produces a
-            // CoW chunked_leaf. Mutate in place: byte-write into the heap chunks,
-            // accumulate dirty bits, invalidate the cached chunked_leaf root.
-            // The gindex was already added to `changed` by the prior
-            // setChildNode call that produced this transient chunked_leaf, so we
-            // do NOT call setChildNode again (which would unref-then-store
-            // the same Id and free our chunked_leaf).
-            if (state_col[@intFromEnum(existing_id)].refCount() == 0) {
-                // Path 2 owner invariant: rc=0 transient was registered by
-                // a prior Path 1/3 in this commit cycle (which added gindex
-                // to `changed`). If this assertion fires, the rc state
-                // machine has drifted.
-                std.debug.assert(existing_kind == .chunked_leaf);
-                std.debug.assert(self.state.changed.contains(gindex));
-                const storage = try existing_id.getChunkedLeafPtr(self.state.pool);
-                ST.Element.tree.fromValuePackedIntoChunk(&storage.chunks[intra_chunk], index, &value);
-                storage.len = chunked_leaf_len;
-                self.state.pool.nodes.items(.root)[@intFromEnum(existing_id)] = Node.lazy_sentinel;
-                return;
-            }
-
-            // Path 3: shared chunked_leaf (rc >= 1 — owned by the persistent tree).
-            // Must CoW: produce a fresh chunked_leaf via setChunkedLeafChunk and publish
-            // it. From this point onward subsequent writes hit Path 2.
-            std.debug.assert(existing_kind == .chunked_leaf);
-            const existing_chunks = try existing_id.getChunkedLeafChunks(self.state.pool);
-            var new_chunk: [32]u8 = existing_chunks[intra_chunk];
-            ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
-
-            // Owned by us (rc=0) until setChildNode publishes it; reclaim on OOM.
-            var new_id_opt: ?Node.Id = try existing_id.setChunkedLeafChunk(self.state.pool, intra_chunk_u16, &new_chunk);
-            errdefer if (new_id_opt) |id| self.state.pool.unref(id);
-
-            const new_chunked_leaf_id = new_id_opt.?;
-            (try new_chunked_leaf_id.getChunkedLeafPtr(self.state.pool)).len = chunked_leaf_len;
-            try self.state.setChildNode(gindex, new_chunked_leaf_id);
-            new_id_opt = null;
+            try self.state.editChunkedLeaf(
+                gindex,
+                intra_chunk_u16,
+                chunked_leaf_len,
+                Element,
+                index,
+                &value,
+                ST.Element.tree.fromValuePackedIntoChunk,
+            );
         }
 
         pub fn getAll(

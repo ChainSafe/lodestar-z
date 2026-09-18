@@ -688,3 +688,8 @@ test "unsolicited NODES fails before record validation" {
         core.dispatchResponse(peer, response, null, 0, &scratch, &([_]u8{0} ** constants.nonce_size)),
     );
 }
+
+test {
+    _ = @import("engine_schedule_test.zig");
+    _ = @import("engine_test.zig");
+}

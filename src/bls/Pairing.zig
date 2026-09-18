@@ -132,20 +132,6 @@ pub fn asFp12(self: *Self) *c.blst_fp12 {
     return c.blst_pairing_as_fp12(self.ctx);
 }
 
-test "init Pairing" {
-    var buffer: [sizeOf()]u8 align(buf_align) = undefined;
-
-    const dst = "destination";
-    _ = @This().init(&buffer, true, dst);
-}
-
-test "sizeOf Pairing" {
-    try std.testing.expectEqual(
-        c.blst_pairing_sizeof(),
-        @This().sizeOf(),
-    );
-}
-
 const std = @import("std");
 const c = @import("root.zig").c;
 const BlstError = @import("error.zig").BlstError;
@@ -154,3 +140,7 @@ const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
 const SigningRoot = blst.SigningRoot;
+
+test {
+    _ = @import("pairing_test.zig");
+}

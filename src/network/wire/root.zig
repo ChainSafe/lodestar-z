@@ -13,11 +13,11 @@ test {
     _ = multiaddr;
     _ = signed_key;
     _ = multistream;
-    _ = @import("varint_test.zig");
-    _ = @import("multistream_test.zig");
-    _ = @import("keys_test.zig");
-    _ = @import("peer_id_test.zig");
-    _ = @import("multiaddr_test.zig");
-    _ = @import("signed_key_test.zig");
-    _ = @import("protobuf_test.zig");
+    _ = @import("varint.zig");
+    _ = @import("multistream.zig");
+    _ = @import("keys.zig");
+    _ = @import("peer_id.zig");
+    _ = @import("multiaddr.zig");
+    _ = @import("signed_key.zig");
+    _ = @import("protobuf.zig");
 }

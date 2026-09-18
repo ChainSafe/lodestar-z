@@ -402,3 +402,7 @@ comptime {
     assert(negotiations_max_default <= negotiations_max_ceiling);
     assert(2 * multistream.message_length_max <= outbox_capacity);
 }
+
+test {
+    _ = @import("negotiate_test.zig");
+}

@@ -1,6 +1,6 @@
 {
   "name": "@chainsafe/lodestar-z",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Lodestar-z NAPI bindings",
   "files": [
     "bindings/src/",
@@ -52,7 +52,7 @@
     "test:network-managed-interop": "zig build build-exe:managed_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/managed_run.mjs",
     "test:network-identify-interop": "zig build build-exe:network_interop_peer -Doptimize=ReleaseSafe && node --max-old-space-size=256 test/interop/identify_run.mjs zig-out/bin/network_interop_peer installed",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts",
-    "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --config .benchrc.yaml --defaultBranch main",
+    "benchmark": "NODE_OPTIONS='--import tsx' benchmark 'bindings/perf/**/*.test.ts' --isolate --config .benchrc.yaml --defaultBranch main",
     "typecheck:network": "tsc -p tsconfig.network.json"
   },
   "keywords": [],
@@ -80,7 +80,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.11",
-    "@chainsafe/benchmark": "^2.0.1",
+    "@chainsafe/benchmark": "2.1.0",
     "@chainsafe/biomejs-config": "^1.0.0",
     "@chainsafe/fast-crc32c": "4.2.0",
     "@chainsafe/libp2p-quic": "2.1.3",

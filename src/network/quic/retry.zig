@@ -54,3 +54,7 @@ fn authenticate(key: *const [32]u8, from: *const Address, scid: *const binding.C
     mac.final(&result);
     return result;
 }
+
+test {
+    _ = @import("retry_test.zig");
+}

@@ -147,3 +147,7 @@ fn refill(bucket: *Bucket, quota: Quota, now_ms: u64) void {
     assert(bucket.tokens <= quota.tokens);
     assert(bucket.refilled_ms <= now_ms);
 }
+
+test {
+    _ = @import("limiter_test.zig");
+}

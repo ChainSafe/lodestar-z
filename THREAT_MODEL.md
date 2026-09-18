@@ -1,8 +1,7 @@
 # Lodestar-z threat model
 
 This document defines the security assumptions that materially affect how findings in Lodestar-z
-are classified. Current integration details live in the
-[implementation map](docs/security/IMPLEMENTATION_MAP.md).
+are classified.
 
 This model is not an allowlist. Reviewers should first surface candidate violations, then use these
 assumptions to determine reachability and severity. A finding may be downgraded only when the
@@ -16,6 +15,9 @@ The native networking surface receives public peer traffic and owns transport au
 protocol framing, resource admission, and peer lifecycle. Its host owns API exposure, checkpoint
 acquisition, consensus validation of received objects, execution-layer communication, and validator
 duties. Native networking does not make received consensus objects trusted.
+
+The supported Node.js integration loads one version of `@chainsafe/lodestar-z` per process. Passing
+native class instances between addon versions is unsupported.
 
 The assets protected here are:
 
@@ -126,8 +128,8 @@ not publication of the rejected state.
 ## Classifying findings
 
 A report should identify the least-privileged attacker, the supported or planned call path, the
-trusted precondition under review, the violated objective, and the concrete effect. Uncertain
-reachability should be stated rather than assumed away.
+trusted precondition under review, the violated objective, and the concrete effect. Verify
+integration status against the current or planned call path. State uncertain reachability explicitly.
 
 | Classification | Meaning |
 | --- | --- |
@@ -144,6 +146,7 @@ excuse a crash, cumulative leak, or unbounded queue.
 
 ## Maintenance
 
-Change this file only when a trust assumption or security objective changes. Update the
-[implementation map](docs/security/IMPLEMENTATION_MAP.md) when integration status, call paths,
-shared-state behavior, or file locations change.
+Change this file only when a security objective, trust assumption, trust boundary, or supported
+caller obligation changes. Keep enduring API preconditions beside the owning declaration or module.
+Routine fixes, optimizations, and file moves that preserve these contracts require no
+security-documentation update.

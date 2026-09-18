@@ -292,3 +292,7 @@ comptime {
     std.debug.assert(@sizeOf(ChallengeEntry) <= 208);
     std.debug.assert(@sizeOf(SessionStore) <= 48);
 }
+
+test {
+    _ = @import("session_store_test.zig");
+}

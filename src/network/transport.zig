@@ -506,3 +506,8 @@ test "transport zero wait remains an actual nonblocking timeout" {
     try std.testing.expectEqual(@as(i96, 0), timeout.duration.raw.nanoseconds);
     try std.testing.expectEqual(@as(i96, 0), receiveTimeout(5, 0).duration.raw.nanoseconds);
 }
+
+test {
+    _ = @import("transport_io_test.zig");
+    _ = @import("transport_test.zig");
+}

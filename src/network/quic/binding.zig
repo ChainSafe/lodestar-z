@@ -266,3 +266,7 @@ pub fn transmitDeadline(info: *const c.quiche_send_info) u64 {
     const seconds: u64 = @intCast(info.at.tv_sec);
     return seconds *| std.time.ns_per_s +| @as(u64, @intCast(info.at.tv_nsec));
 }
+
+test {
+    _ = @import("binding_test.zig");
+}

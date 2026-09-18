@@ -121,3 +121,7 @@ pub fn remainingMs(deadline_ns: u64, now_ns: u64) u64 {
     const delta = deadline_ns -| now_ns;
     return delta / std.time.ns_per_ms + @intFromBool(delta % std.time.ns_per_ms != 0);
 }
+
+test {
+    _ = @import("schedule_test.zig");
+}

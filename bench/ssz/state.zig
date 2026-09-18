@@ -74,6 +74,8 @@ const HashState = struct {
     state: *BeaconState.Type,
     pub fn run(self: *HashState, allocator: std.mem.Allocator) void {
         var scratch = ssz.Hasher(BeaconState).init(allocator) catch unreachable;
+        defer scratch.deinit(allocator);
+
         var out: [32]u8 = undefined;
         ssz.Hasher(BeaconState).hash(&scratch, self.state, &out) catch unreachable;
     }
@@ -145,6 +147,8 @@ pub fn main(init: std.process.Init) !void {
     try bench.addParam("hash state", &hash_state, .{});
 
     var scratch = ssz.Hasher(BeaconState).init(allocator) catch unreachable;
+    defer scratch.deinit(allocator);
+
     var root: [32]u8 = undefined;
     ssz.Hasher(BeaconState).hash(&scratch, state, &root) catch unreachable;
 

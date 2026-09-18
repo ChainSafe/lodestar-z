@@ -84,3 +84,7 @@ pub const State = struct {
         self.redial_until_ms = @max(self.redial_until_ms, now_ms +| duration_ms);
     }
 };
+
+test {
+    _ = @import("reputation_test.zig");
+}

@@ -285,3 +285,7 @@ fn scheduleNext(self: *Maintenance, now_ms: u64) void {
 comptime {
     std.debug.assert(@sizeOf(Maintenance) <= 1_024);
 }
+
+test {
+    _ = @import("maintenance_test.zig");
+}

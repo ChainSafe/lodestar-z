@@ -168,3 +168,7 @@ pub fn relevance(
         return .finalized_mismatch;
     return null;
 }
+
+test {
+    _ = @import("control_wire_test.zig");
+}

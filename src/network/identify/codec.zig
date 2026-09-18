@@ -229,3 +229,7 @@ pub const Decoder = struct {
         return if (self.finished and !self.failed) self.merge.metadata else null;
     }
 };
+
+test {
+    _ = @import("codec_test.zig");
+}

@@ -10,6 +10,7 @@ const Epoch = types.primitive.Epoch.Type;
 const ElectraBeaconState = types.electra.BeaconState.Type;
 const BLSPubkey = types.primitive.BLSPubkey.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+const FAR_FUTURE_EPOCH = @import("constants").FAR_FUTURE_EPOCH;
 const preset = @import("preset").preset;
 const active_preset = @import("preset").active_preset;
 const BeaconConfig = @import("config").BeaconConfig;
@@ -26,6 +27,10 @@ const EFFECTIVE_BALANCE_INCREMENT = 32;
 const EFFECTIVE_BALANCE = 32 * 1e9;
 const active_chain_config = if (active_preset == .mainnet) mainnet_chain_config else minimal_chain_config;
 
+fn scheduledEpochOrGenesis(fork_epoch: Epoch) Epoch {
+    return if (fork_epoch == FAR_FUTURE_EPOCH) 0 else fork_epoch;
+}
+
 /// generate, allocate BeaconState
 /// consumer has responsibility to deinit and destroy it
 pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !*AnyBeaconState {
@@ -40,15 +45,16 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
     electra_state.* = types.electra.BeaconState.default_value;
     electra_state.genesis_time = 1596546008;
     electra_state.genesis_validators_root = try hex.hexToRoot("0x8a8b3f1f1e2d3c4b5a697887766554433221100ffeeddccbbaa9988776655443");
+    const electra_fork_epoch = scheduledEpochOrGenesis(chain_config.ELECTRA_FORK_EPOCH);
     // set the slot to be ready for the next epoch transition
-    electra_state.slot = chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
+    electra_state.slot = electra_fork_epoch * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
     const current_epoch = @divFloor(electra_state.slot, preset.SLOTS_PER_EPOCH);
     var version: [4]u8 = undefined;
     _ = try hex.hexToBytes(&version, "0x00000001");
     electra_state.fork = .{
         .previous_version = version,
         .current_version = version,
-        .epoch = chain_config.ELECTRA_FORK_EPOCH,
+        .epoch = electra_fork_epoch,
     };
     electra_state.latest_block_header = .{
         .slot = electra_state.slot - 1,

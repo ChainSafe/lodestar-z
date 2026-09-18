@@ -71,3 +71,7 @@ fn element(bytes: []const u8, cursor: *usize, tag: u8) Error![]const u8 {
     cursor.* += length;
     return slice;
 }
+
+test {
+    _ = @import("signed_key_test.zig");
+}

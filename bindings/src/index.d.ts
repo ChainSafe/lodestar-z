@@ -93,6 +93,17 @@ export enum ForkName {
   gloas = "gloas",
 }
 
+export enum ForkSeq {
+  phase0 = 0,
+  altair = 1,
+  bellatrix = 2,
+  capella = 3,
+  deneb = 4,
+  electra = 5,
+  fulu = 6,
+  gloas = 7,
+}
+
 interface SyncCommittee {
   pubkeys: Uint8Array[];
   aggregatePubkey: Uint8Array;
@@ -132,6 +143,15 @@ interface ProposerRewards {
   attestations: number;
   syncAggregate: number;
   slashing: number;
+}
+
+interface BlockRewards {
+  proposerIndex: number;
+  total: number;
+  attestations: number;
+  syncAggregate: number;
+  proposerSlashings: number;
+  attesterSlashings: number;
 }
 
 interface SyncCommitteeCache {
@@ -185,11 +205,14 @@ export type VoluntaryExitValidity =
   | "invalid_signature";
 
 export declare class BeaconStateView {
+  /** Requires state bytes with trusted provenance; SSZ decoding does not authenticate them. */
   static createFromBytes(bytes: Uint8Array): BeaconStateView;
 
+  release(): void;
   slot: number;
   fork: Fork;
   forkName: ForkName;
+  forkSeq: ForkSeq;
   epoch: number;
   genesisTime: number;
   genesisValidatorsRoot: Uint8Array;
@@ -293,7 +316,11 @@ export declare class BeaconStateView {
   proposerRewards: ProposerRewards;
   // biome-ignore lint/suspicious/noExplicitAny: stub
   // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
-  computeBlockRewards(block: any, proposerRewards?: any): Promise<any>;
+  computeBlockRewards(
+    signedBlockBytes: Uint8Array,
+    isBlinded: boolean,
+    proposerRewards?: ProposerRewards
+  ): BlockRewards;
   // biome-ignore lint/suspicious/noExplicitAny: stub
   // TODO(bing): This is stubbed and untyped until we implement the beacon node rewards endpoints
   computeAttestationsRewards(validatorIds?: (number | string)[]): Promise<any>;
@@ -331,6 +358,7 @@ export declare class BeaconStateView {
     processedValidatorSweepCount: number;
   };
 
+  /** On phase0, serialize this call with other STF operations and cache teardown across workers. */
   computeUnrealizedCheckpoints(): {
     justifiedCheckpoint: Checkpoint;
     finalizedCheckpoint: Checkpoint;
@@ -365,23 +393,25 @@ export declare class BeaconStateView {
   hashTreeRoot(): Uint8Array;
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
+  /** Serialize this call with other STF operations and cache teardown across workers. */
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
-  stateTransition(signedBlockBytes: Uint8Array, options?: TransitionOpts): BeaconStateView;
+  /** Serialize this call with other STF operations and cache teardown across workers. */
+  stateTransition(signedBlockBytes: Uint8Array, isBlinded: boolean, options?: TransitionOpts): BeaconStateView;
 }
 
 declare const bindings: {
-  pool: {
-    ensureCapacity: (capacity: number) => void;
-  };
   config: {
     set: (chainConfig: object, genesisValidatorsRoot: Uint8Array) => void;
   };
   stateTransition: {
+    /** Callers must exclude STF operations across all workers until teardown returns. */
     deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
     init: () => void;
     scrapeMetrics: () => string;
+    registerLocalValidator: (index: number) => void;
+    unregisterLocalValidator: (index: number) => void;
   };
   BeaconStateView: typeof BeaconStateView;
 };

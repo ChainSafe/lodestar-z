@@ -95,7 +95,7 @@ pub const CachedBeaconState = struct {
             .epoch_cache = cloned_epoch_cache,
             .slashings_cache = slashings_cache,
             .state = state,
-            .proposer_rewards = self.proposer_rewards,
+            .proposer_rewards = .{},
             .created_with_transfer_cache = opts.transfer_cache,
         };
 
@@ -185,7 +185,7 @@ pub const CachedBeaconState = struct {
 
 test "CachedBeaconState.clone() epoch cache isolation" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
+    const pool_size = 180_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 

@@ -506,3 +506,8 @@ fn challengeData(decoded: *const packet.Packet) [constants.whoareyou_packet_size
 comptime {
     std.debug.assert(@sizeOf(Channel) <= 896);
 }
+
+test {
+    _ = @import("channel_schedule_test.zig");
+    _ = @import("channel_test.zig");
+}

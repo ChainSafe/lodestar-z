@@ -480,3 +480,7 @@ comptime {
     std.debug.assert(@sizeOf(Entry) <= 2_304);
     std.debug.assert(@sizeOf(CallTable) <= 48);
 }
+
+test {
+    _ = @import("call_table_test.zig");
+}

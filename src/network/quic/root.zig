@@ -9,15 +9,9 @@ test {
     _ = engine;
     _ = @import("stream_table.zig");
     _ = @import("connection.zig");
-    _ = @import("binding_test.zig");
-    _ = @import("retry_test.zig");
-    _ = @import("stream_table_test.zig");
-    _ = @import("route_table_test.zig");
-    _ = @import("schedule_test.zig");
-    _ = @import("engine_handshake_test.zig");
-    _ = @import("engine_stream_test.zig");
-    _ = @import("engine_close_test.zig");
-    _ = @import("engine_notifications_test.zig");
-    _ = @import("engine_admission_test.zig");
-    _ = @import("engine_path_test.zig");
+    _ = @import("binding.zig");
+    _ = @import("retry.zig");
+    _ = @import("route_table.zig");
+    _ = @import("schedule.zig");
+    _ = @import("engine.zig");
 }

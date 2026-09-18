@@ -108,3 +108,7 @@ pub const Udp = struct {
 
 pub const fromNetwork = types.Address.fromNetwork;
 pub const toNetwork = types.Address.toNetwork;
+
+test {
+    _ = @import("udp_test.zig");
+}

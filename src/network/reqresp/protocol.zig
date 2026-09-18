@@ -292,3 +292,7 @@ comptime {
     }
     assert(requestMaxAll() >= ct.deneb.BlobIdentifier.fixed_size * constants.blob_identifiers_capacity);
 }
+
+test {
+    _ = @import("protocol_test.zig");
+}

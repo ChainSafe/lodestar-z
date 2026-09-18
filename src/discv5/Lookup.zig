@@ -453,3 +453,7 @@ comptime {
     std.debug.assert(@sizeOf(Candidate) <= 512);
     std.debug.assert(@sizeOf(Lookup) <= 128);
 }
+
+test {
+    _ = @import("lookup_test.zig");
+}

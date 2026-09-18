@@ -27,22 +27,15 @@ pub const ForkEntry = reqresp.ForkEntry;
 pub const Counters = reqresp.Counters;
 
 test {
-    _ = @import("admission_test.zig");
-    _ = @import("request_policy_test.zig");
+    _ = @import("admission.zig");
+    _ = @import("request_policy.zig");
     _ = codec;
     _ = constants;
     _ = limiter;
     _ = protocol;
     _ = reqresp;
-    _ = @import("control_capacity_test.zig");
-    _ = @import("control_partition_test.zig");
-    _ = @import("codec_test.zig");
-    _ = @import("active_protocols_test.zig");
-    _ = @import("service_test.zig");
-    _ = @import("limiter_test.zig");
-    _ = @import("protocol_test.zig");
-    _ = @import("reqresp_test.zig");
-    _ = @import("reqresp_failures_test.zig");
-    _ = @import("reqresp_half_close_test.zig");
-    _ = @import("reqresp_terminal_test.zig");
+    _ = @import("reqresp.zig");
+    _ = @import("codec.zig");
+    _ = @import("limiter.zig");
+    _ = @import("protocol.zig");
 }

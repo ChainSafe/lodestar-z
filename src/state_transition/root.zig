@@ -6,6 +6,7 @@ pub const processSlots = @import("state_transition.zig").processSlots;
 pub const TransitionOpts = @import("state_transition.zig").TransitionOpts;
 
 pub const metrics = @import("metrics.zig");
+pub const ValidatorMonitor = @import("ValidatorMonitor.zig");
 
 pub const RefCount = @import("./utils/ref_count.zig").RefCount;
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
@@ -33,6 +34,10 @@ pub const processRegistryUpdates = @import("./epoch/process_registry_updates.zig
 pub const processSlashings = @import("./epoch/process_slashings.zig").processSlashings;
 pub const processRewardsAndPenalties = @import("./epoch/process_rewards_and_penalties.zig").processRewardsAndPenalties;
 pub const getRewardsAndPenalties = @import("./epoch/process_rewards_and_penalties.zig").getRewardsAndPenalties;
+pub const ProposerRewards = @import("./cache/state_cache.zig").ProposerRewards;
+pub const computeBlockRewards = @import("./rewards/block_rewards.zig").computeBlockRewards;
+pub const computeBlockRewardsAny = @import("./rewards/block_rewards.zig").computeBlockRewardsAny;
+pub const BlockRewards = @import("./rewards/block_rewards.zig").BlockRewards;
 pub const processEth1DataReset = @import("./epoch/process_eth1_data_reset.zig").processEth1DataReset;
 pub const processPendingDeposits = @import("./epoch/process_pending_deposits.zig").processPendingDeposits;
 pub const processPendingConsolidations = @import("./epoch/process_pending_consolidations.zig").processPendingConsolidations;
@@ -121,9 +126,6 @@ const weak_subjectivity = @import("weak_subjectivity.zig");
 pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatestWeakSubjectivityCheckpointEpoch;
 
 test {
-    _ = @import("memory_safety_test.zig");
-    _ = @import("./cache/pubkey_cache_test.zig");
-    _ = @import("./cache/pkix_test.zig");
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
     testing.refAllDecls(state_transition);

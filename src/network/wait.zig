@@ -48,3 +48,7 @@ pub fn poll(io: std.Io, sources: Sources, timeout_ms: u32) Result {
     };
     return result;
 }
+
+test {
+    _ = @import("wait_test.zig");
+}

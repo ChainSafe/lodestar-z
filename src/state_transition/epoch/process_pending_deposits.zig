@@ -78,7 +78,7 @@ pub fn processPendingDeposits(
 
         if (try isValidatorKnown(fork, state, validator_index)) {
             var validators = try state.validators();
-            var validator = try validators.get(validator_index.?);
+            var validator = try validators.getReadonly(validator_index.?);
             is_validator_exited = try validator.get("exit_epoch") < c.FAR_FUTURE_EPOCH;
             is_validator_withdrawn = try validator.get("withdrawable_epoch") < next_epoch;
         }
@@ -173,7 +173,7 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 
 test "processPendingDeposits - sanity" {
     const allocator = std.testing.allocator;
-    const pool_size = 10_000 * 5;
+    const pool_size = 200_000;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
