@@ -1,5 +1,50 @@
 # Changelog
 
+## [1.2.0](https://github.com/ChainSafe/lodestar-z/compare/v1.1.0...v1.2.0) (2026-09-18)
+
+
+### Features
+
+* **bindings:** implement computeBlockRewards ([#709](https://github.com/ChainSafe/lodestar-z/issues/709)) ([1ec864e](https://github.com/ChainSafe/lodestar-z/commit/1ec864e52ee6c33c67d146c6a75e897c2009cd9a))
+* partial validator monitor ([#475](https://github.com/ChainSafe/lodestar-z/issues/475)) ([2c595d3](https://github.com/ChainSafe/lodestar-z/commit/2c595d330101b6b32ab811de179f315c85443003))
+
+
+### Bug Fixes
+
+* accept bigint proof indices ([#699](https://github.com/ChainSafe/lodestar-z/issues/699)) ([0a528a4](https://github.com/ChainSafe/lodestar-z/commit/0a528a444f72dbda978b03224032b69b45c19393))
+* **bindings:** declare sync-committee index map values as Uint32Array ([#706](https://github.com/ChainSafe/lodestar-z/issues/706)) ([175c080](https://github.com/ChainSafe/lodestar-z/commit/175c080834ecab77a0005077b0812ddb21185832))
+* **bindings:** return sync committee index maps ([#691](https://github.com/ChainSafe/lodestar-z/issues/691)) ([2f1a177](https://github.com/ChainSafe/lodestar-z/commit/2f1a177a10171c1a9f5cead09f7ebb2d3b9aa7db))
+* **bindings:** return sync committee positions as arrays ([#714](https://github.com/ChainSafe/lodestar-z/issues/714)) ([1696068](https://github.com/ChainSafe/lodestar-z/commit/1696068087567885e33c977de534721abe589506))
+* clean up inactivity scores ([#702](https://github.com/ChainSafe/lodestar-z/issues/702)) ([fca5032](https://github.com/ChainSafe/lodestar-z/commit/fca5032ff3116a407331bee31e72a57e49ee83bd))
+* isolate binding benchmark suites in separate processes ([#708](https://github.com/ChainSafe/lodestar-z/issues/708)) ([0915ae7](https://github.com/ChainSafe/lodestar-z/commit/0915ae7d9a1c86ae02ce8c5eef4787a08ba6c3c9))
+* **state-transition:** use getReadonly for read-only validator access ([#712](https://github.com/ChainSafe/lodestar-z/issues/712)) ([daebcf1](https://github.com/ChainSafe/lodestar-z/commit/daebcf1beff537a0c9f39819362a31be57dccf6d))
+* **stf:** clean up failed Altair participation translation ([#695](https://github.com/ChainSafe/lodestar-z/issues/695)) ([d8c06af](https://github.com/ChainSafe/lodestar-z/commit/d8c06af27fa2bf87fec37554089ffd0762051b38))
+* **stf:** floor the sync-aggregate proposer penalty and guard phase0 lookups ([#705](https://github.com/ChainSafe/lodestar-z/issues/705)) ([407c60d](https://github.com/ChainSafe/lodestar-z/commit/407c60d39f7146d3cfa352736b2d10e7840693b1))
+* **types:** correct Electra blinded attester slashing limit ([#698](https://github.com/ChainSafe/lodestar-z/issues/698)) ([15d3347](https://github.com/ChainSafe/lodestar-z/commit/15d33475436f9a3f05509702803b913e0b627827))
+
+
+### Performance Improvements
+
+* bound bitlist hashing workspace ([#678](https://github.com/ChainSafe/lodestar-z/issues/678)) ([0ece146](https://github.com/ChainSafe/lodestar-z/commit/0ece14665dcae47082092e55989e77891d3bdc96))
+* bound progressive builder scratch ([#687](https://github.com/ChainSafe/lodestar-z/issues/687)) ([52a9736](https://github.com/ChainSafe/lodestar-z/commit/52a97361212e64f1a0ebb58fc645ed74b50ada07))
+* bound progressive merkleization workspace ([#685](https://github.com/ChainSafe/lodestar-z/issues/685)) ([c243df8](https://github.com/ChainSafe/lodestar-z/commit/c243df8df330dd52d1b4dac016eefa1f6e3127f4))
+* stream bitlist tree reads ([#679](https://github.com/ChainSafe/lodestar-z/issues/679)) ([02d61c2](https://github.com/ChainSafe/lodestar-z/commit/02d61c2b9c9ca7361ea852b8f5458854f8522197))
+* stream compact proof generation ([#683](https://github.com/ChainSafe/lodestar-z/issues/683)) ([57022b4](https://github.com/ChainSafe/lodestar-z/commit/57022b4bdd6a2c054d3eed2343b16e1e05596272))
+* stream progressive tree serialization ([#686](https://github.com/ChainSafe/lodestar-z/issues/686)) ([0f63529](https://github.com/ChainSafe/lodestar-z/commit/0f6352928bdf776384a03acd42afc0eb3cb23eff))
+
+
+### Code Refactoring
+
+* bound variable vector hashing ([#682](https://github.com/ChainSafe/lodestar-z/issues/682)) ([3da79f3](https://github.com/ChainSafe/lodestar-z/commit/3da79f3ef34a8a229092ccf284eff03bc7baf9bf))
+* extract bit array module ([#693](https://github.com/ChainSafe/lodestar-z/issues/693)) ([f81415c](https://github.com/ChainSafe/lodestar-z/commit/f81415c9f1e53c1e9861b31263c756fdbf947139))
+* **ssz:** centralize chunked-leaf mutation bookkeeping ([#690](https://github.com/ChainSafe/lodestar-z/issues/690)) ([9c478c7](https://github.com/ChainSafe/lodestar-z/commit/9c478c7ce5a63691fe1d90b73e128cf5d9d1318e))
+* **stf:** retire the no-op post-state metrics hook ([#707](https://github.com/ChainSafe/lodestar-z/issues/707)) ([0300a13](https://github.com/ChainSafe/lodestar-z/commit/0300a138480fcd21f4cd56ea9b3bb5bc293b36e3))
+
+
+### Documentation
+
+* retire security implementation map ([#696](https://github.com/ChainSafe/lodestar-z/issues/696)) ([f3e8ad1](https://github.com/ChainSafe/lodestar-z/commit/f3e8ad13264af6dfc047fe4a46d1cbfcf12eac8f))
+
 ## [1.1.0](https://github.com/ChainSafe/lodestar-z/compare/v1.0.0...v1.1.0) (2026-09-11)
 
 
