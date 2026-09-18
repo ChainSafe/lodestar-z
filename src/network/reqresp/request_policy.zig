@@ -8,6 +8,7 @@ const limiter = @import("limiter.zig");
 pub const BlobLimit = struct { start_slot: u64, max_blobs: u32 };
 pub const Config = struct {
     deneb_start_slot: ?u64,
+    fulu_start_slot: ?u64 = null,
     blocks_pre_deneb: u32,
     blocks_deneb: u32,
     blob_identifiers_deneb: u32,
@@ -16,16 +17,15 @@ pub const Config = struct {
     column_chunks: u32,
     blob_schedule: []const BlobLimit,
     host_integer_max: ?u64 = null,
+    max_payload_size: usize = @import("constants.zig").MAX_PAYLOAD_SIZE,
 
     /// Borrows schedule storage until ReqResp.init copies the validated policy.
     pub fn fromBeaconConfig(cfg: *const @import("config").BeaconConfig, storage: *[schedule_max]BlobLimit) error{InvalidPolicy}!Config {
         const chain = &cfg.chain;
-        if (chain.BLOB_SCHEDULE.len > schedule_max - 3) return error.InvalidPolicy;
         var count: usize = 0;
-        for ([_]u64{ chain.DENEB_FORK_EPOCH, chain.ELECTRA_FORK_EPOCH, chain.FULU_FORK_EPOCH }) |epoch| {
-            try addEpoch(storage, &count, epoch);
+        for ([_]u64{ chain.DENEB_FORK_EPOCH, chain.ELECTRA_FORK_EPOCH }) |epoch| {
+            if (epoch < chain.FULU_FORK_EPOCH) try addEpoch(storage, &count, epoch);
         }
-        for (chain.BLOB_SCHEDULE) |entry| try addEpoch(storage, &count, entry.EPOCH);
         std.sort.insertion(BlobLimit, storage[0..count], {}, struct {
             fn less(_: void, a: BlobLimit, b: BlobLimit) bool {
                 return a.start_slot < b.start_slot;
@@ -42,13 +42,15 @@ pub const Config = struct {
         }
         const result: Config = .{
             .deneb_start_slot = if (chain.DENEB_FORK_EPOCH == constants.FAR_FUTURE_EPOCH) null else std.math.mul(u64, chain.DENEB_FORK_EPOCH, preset.preset.SLOTS_PER_EPOCH) catch return error.InvalidPolicy,
-            .blocks_pre_deneb = constants.MAX_REQUEST_BLOCKS,
-            .blocks_deneb = constants.MAX_REQUEST_BLOCKS_DENEB,
+            .fulu_start_slot = if (chain.FULU_FORK_EPOCH == constants.FAR_FUTURE_EPOCH) null else std.math.mul(u64, chain.FULU_FORK_EPOCH, preset.preset.SLOTS_PER_EPOCH) catch return error.InvalidPolicy,
+            .blocks_pre_deneb = std.math.cast(u32, chain.MAX_REQUEST_BLOCKS) orelse return error.InvalidPolicy,
+            .blocks_deneb = std.math.cast(u32, chain.MAX_REQUEST_BLOCKS_DENEB) orelse return error.InvalidPolicy,
             .blob_identifiers_deneb = std.math.cast(u32, chain.MAX_REQUEST_BLOB_SIDECARS) orelse return error.InvalidPolicy,
             .blob_identifiers_electra = std.math.cast(u32, chain.MAX_REQUEST_BLOB_SIDECARS_ELECTRA) orelse return error.InvalidPolicy,
             .number_of_columns = preset.NUMBER_OF_COLUMNS,
-            .column_chunks = preset.MAX_REQUEST_DATA_COLUMN_SIDECARS,
+            .column_chunks = std.math.cast(u32, chain.MAX_REQUEST_DATA_COLUMN_SIDECARS) orelse return error.InvalidPolicy,
             .blob_schedule = storage[0..unique],
+            .max_payload_size = std.math.cast(usize, chain.MAX_PAYLOAD_SIZE) orelse return error.InvalidPolicy,
         };
         _ = try Policy.init(&result);
         return result;
@@ -74,18 +76,20 @@ pub const Policy = struct {
     point_count: u8,
 
     pub fn init(config: *const Config) error{InvalidPolicy}!Policy {
-        if (config.blocks_pre_deneb == 0 or config.blocks_pre_deneb > constants.MAX_REQUEST_BLOCKS or
+        if (config.max_payload_size < @import("protocol.zig").payloadMaxControl() or config.max_payload_size > @import("constants.zig").MAX_PAYLOAD_SIZE or
+            config.blocks_pre_deneb == 0 or config.blocks_pre_deneb > constants.MAX_REQUEST_BLOCKS or
             config.blocks_deneb == 0 or config.blocks_deneb > constants.MAX_REQUEST_BLOCKS_DENEB or
-            config.blob_identifiers_deneb == 0 or config.blob_identifiers_deneb > constants.MAX_REQUEST_BLOB_SIDECARS_LIMIT or
-            config.blob_identifiers_electra == 0 or config.blob_identifiers_electra > constants.MAX_REQUEST_BLOB_SIDECARS_LIMIT or
+            config.blob_identifiers_deneb == 0 or config.blob_identifiers_deneb > @import("constants.zig").blob_identifiers_capacity or
+            config.blob_identifiers_electra == 0 or config.blob_identifiers_electra > @import("constants.zig").blob_identifiers_capacity or
             config.number_of_columns != preset.NUMBER_OF_COLUMNS or
             config.column_chunks == 0 or config.column_chunks > preset.MAX_REQUEST_DATA_COLUMN_SIDECARS or
             config.blob_schedule.len > schedule_max) return error.InvalidPolicy;
         if (config.deneb_start_slot) |start| {
-            if (config.blob_schedule.len == 0 or config.blob_schedule[0].start_slot != start) return error.InvalidPolicy;
+            if (start < (config.fulu_start_slot orelse std.math.maxInt(u64)) and
+                (config.blob_schedule.len == 0 or config.blob_schedule[0].start_slot != start)) return error.InvalidPolicy;
         } else if (config.blob_schedule.len != 0) return error.InvalidPolicy;
         for (config.blob_schedule, 0..) |point, i| {
-            if (point.max_blobs == 0 or @as(u64, point.max_blobs) * config.blocks_deneb > constants.MAX_REQUEST_BLOB_SIDECARS_LIMIT)
+            if (point.max_blobs == 0 or point.max_blobs > preset.preset.MAX_BLOB_COMMITMENTS_PER_BLOCK)
                 return error.InvalidPolicy;
             if (i > 0 and point.start_slot <= config.blob_schedule[i - 1].start_slot) return error.InvalidPolicy;
         }
@@ -93,6 +97,28 @@ pub const Policy = struct {
         @memcpy(result.points[0..result.point_count], config.blob_schedule);
         result.config.blob_schedule = &.{};
         return result;
+    }
+
+    pub fn requestBounds(self: *const Policy, which: Protocol, fork: ForkSeq) @import("protocol.zig").Info {
+        var result = which.info();
+        result.response_max = @min(result.response_max, self.config.max_payload_size);
+        switch (which) {
+            .blocks_by_root_v2 => result.request_max = @as(usize, self.blocks(fork)) * 32,
+            .blob_sidecars_by_root_v1 => result.request_max = @as(usize, self.blobs(fork)) * @import("consensus_types").deneb.BlobIdentifier.fixed_size,
+            .data_column_sidecars_by_root_v1 => result.request_max = @as(usize, self.config.blocks_deneb) * (40 + @as(usize, self.config.number_of_columns) * 8),
+            else => {},
+        }
+        result.request_max = @min(result.request_max, self.config.max_payload_size);
+        if (which == .blob_sidecars_by_root_v1 or which == .blob_sidecars_by_range_v1) result.chunks_max = self.blobs(fork);
+        return result;
+    }
+
+    pub fn requestMax(self: *const Policy) usize {
+        var maximum: usize = 0;
+        for (std.enums.values(Protocol)) |which| {
+            for (std.enums.values(ForkSeq)) |fork| maximum = @max(maximum, self.requestBounds(which, fork).request_max);
+        }
+        return maximum;
     }
 
     pub fn defaultQuotas(self: *const Policy, fork: ForkSeq) limiter.Quotas {
@@ -108,7 +134,7 @@ pub const Policy = struct {
     }
 
     pub fn inspect(self: *const Policy, which: Protocol, bytes: []const u8, request_fork: ForkSeq) InspectError!Inspection {
-        const bounds = which.info();
+        const bounds = self.requestBounds(which, request_fork);
         if (bytes.len < bounds.request_min or bytes.len > bounds.request_max) return error.MalformedSsz;
         var cost: u128 = 1;
         var ceiling: u128 = bounds.chunks_max;
@@ -134,9 +160,10 @@ pub const Policy = struct {
                     for (self.points[0..self.point_count], 0..) |point, i| {
                         const next = if (i + 1 < self.point_count) self.points[i + 1].start_slot else end;
                         const left = @max(start, point.start_slot);
-                        const right = @min(end, next);
+                        const right = @min(end, next, self.config.fulu_start_slot orelse end);
                         if (right > left) ceiling += @as(u128, right - left) * point.max_blobs;
                     }
+                    ceiling = @min(ceiling, self.blobs(request_fork));
                 } else if (which == .data_column_sidecars_by_range_v1) {
                     if (offset(bytes, 16) != 20) return error.MalformedSsz;
                     const occurrences = try self.columns(bytes[20..]);

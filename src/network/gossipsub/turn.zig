@@ -1,6 +1,6 @@
 const Options = @import("options.zig").Options;
 
-pub const Progress = enum { done, credits, events, storage };
+pub const Progress = enum { done, credits, events };
 
 pub const Credits = struct {
     input: usize,
@@ -8,6 +8,7 @@ pub const Credits = struct {
     items: usize,
     calls: usize,
     work: usize,
+    copy: usize,
     fields: usize,
 
     pub fn peer(options: *const Options) Credits {
@@ -17,6 +18,7 @@ pub const Credits = struct {
             .items = options.items_per_peer,
             .calls = options.calls_per_peer,
             .work = options.decompress_per_peer_bytes,
+            .copy = options.decompress_per_peer_bytes,
             .fields = options.fields_per_peer,
         };
     }
@@ -31,6 +33,7 @@ pub const Turn = struct {
     used: usize = 0,
     scratch: []u8,
     large_used: bool = false,
+    large_copy_used: bool = false,
 
     pub fn init(options: *const Options, now: @import("../types.zig").Now, events: []@import("gossipsub.zig").Event, arena: []u8, scratch: []u8) Turn {
         return .{
@@ -41,12 +44,26 @@ pub const Turn = struct {
                 .items = options.items_per_pump,
                 .calls = options.calls_per_pump,
                 .work = options.work_per_pump,
+                .copy = options.work_per_pump,
                 .fields = options.fields_per_pump,
             },
             .events = events,
             .arena = arena,
             .scratch = scratch,
         };
+    }
+
+    pub fn chargeCopy(self: *Turn, peer: *Credits, options: *const Options, bytes: usize) bool {
+        if (bytes <= self.budget.copy and bytes <= peer.copy) {
+            self.budget.copy -= bytes;
+            peer.copy -= bytes;
+            return true;
+        }
+        if (!self.large_copy_used and bytes > @min(options.work_per_pump, options.decompress_per_peer_bytes)) {
+            self.large_copy_used = true;
+            return true;
+        }
+        return false;
     }
 
     pub fn workspace(self: *Turn, peer: *Credits) Workspace {

@@ -4,8 +4,15 @@ import {boundedLines} from "./bounded_lines.mjs";
 import {encodePayload, messageId, payload, readPayload, sendFragments, summary} from "./codec.mjs";
 import {readEmptyRequest} from "./managed_control.mjs";
 import {uint64} from "./managed_wire.mjs";
+import {testChain} from "./network_chain.mjs";
 import {stockPackages} from "./stock_packages.mjs";
 
+const forkContexts = testChain.forkBoundariesAscendingEpochOrder
+  .filter((boundary, index, all) => boundary.epoch !== Infinity && boundary.epoch !== all[index + 1]?.epoch)
+  .map((boundary) => ({
+    digest: Buffer.from(testChain.forkBoundary2ForkDigest(boundary)).toString("hex"),
+    fork: boundary.fork,
+  }));
 const {load, version, responseDecoder} = stockPackages(process.argv[2]);
 const {createLibp2p} = await load("libp2p");
 const {quic} = await load("@chainsafe/libp2p-quic");
@@ -30,7 +37,7 @@ const gossipService = gossipsub({
 const secret = new Uint8Array(32);
 secret[31] = 62;
 const blockProtocol = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
-let scenario = {count: 2, digest: Buffer.from([1, 2, 3, 4]), kind: "chunks", length: 4000};
+let scenario = {count: 2, digest: Buffer.from(forkContexts[0].digest, "hex"), kind: "chunks", length: 4000};
 let requests = 0;
 let active = 0;
 let lastRequest = "";
@@ -186,7 +193,7 @@ for await (const line of boundedLines(process.stdin)) {
     } else if (command.op === "scenario") {
       const candidate = {
         count: command.count ?? 2,
-        digest: Buffer.from(command.digest ?? "01020304", "hex"),
+        digest: Buffer.from(command.digest ?? forkContexts[0].digest, "hex"),
         kind: command.scenario,
         length: command.length ?? 4000,
       };
@@ -227,9 +234,10 @@ for await (const line of boundedLines(process.stdin)) {
             config: {
               forkDigest2ForkBoundary(bytes) {
                 const digest = Buffer.from(bytes).toString("hex");
-                assert(["01020304", "05060708"].includes(digest));
+                const boundary = forkContexts.find((boundary) => boundary.digest === digest);
+                assert(boundary);
                 contexts.push(digest);
-                return {fork: "deneb"};
+                return {fork: boundary.fork};
               },
             },
             type: 1,

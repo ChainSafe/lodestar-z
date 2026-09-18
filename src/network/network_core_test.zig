@@ -26,6 +26,100 @@ fn options(key: *const keys.KeyPair) runtime.Options {
     return result;
 }
 
+const MaintenancePeers = struct {
+    nodes: []runtime.NetworkCore,
+
+    fn init() !MaintenancePeers {
+        const nodes = try std.testing.allocator.alloc(runtime.NetworkCore, 4);
+        errdefer std.testing.allocator.free(nodes);
+        var initialized: usize = 0;
+        errdefer for (nodes[0..initialized]) |*node| node.deinit(std.testing.io);
+        for (nodes, 0..) |*node, index| {
+            const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{@as(u8, @intCast(80 + index))}));
+            var opts = options(&key);
+            opts.core.peers.target_peers = 3;
+            opts.core.control.starts_per_turn_max = 1;
+            opts.core.service.reqresp.outbound_max = 5;
+            opts.core.service.reqresp.outbound_control_reserved = 3;
+            opts.core.service.reqresp.outbound_per_peer_max = 2;
+            opts.core.service.router = .{ .negotiations_max = 16, .outbound_control_reserved = 3, .outbound_reserved = 8 };
+            try node.initRaw(std.testing.allocator, std.testing.io, opts);
+            initialized += 1;
+        }
+        const hub = &nodes[0];
+        errdefer |err| std.debug.print("maintenance bootstrap failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), hub.peer_manager.control.resourceSnapshot(), hub.service.reqresp.active() });
+        for (nodes[1..]) |*remote| try hub.connect(&remote.peerId(), &.{remote.localAddress()}, hub.last_now);
+        for (0..3000) |_| {
+            try step(&.{ &nodes[0], &nodes[1], &nodes[2], &nodes[3] });
+            if (hub.peerCounts().relevant != 3 or hub.peer_manager.control.resourceSnapshot().operations != 0) continue;
+            var snapshots: [4]t.Snapshot = undefined;
+            const count = hub.snapshots(&snapshots);
+            var metadata = true;
+            for (snapshots[0..count]) |snapshot| metadata = metadata and snapshot.metadata != null;
+            var retired = true;
+            for (hub.service.reqresp.outbound) |slot| retired = retired and !slot.request.occupied();
+            for (hub.service.router.negotiator.entries) |entry| retired = retired and entry.state == .free;
+            if (metadata and retired) return .{ .nodes = nodes };
+        }
+        return error.TestUnexpectedResult;
+    }
+
+    fn deinit(self: *MaintenancePeers) void {
+        for (self.nodes) |*node| node.deinit(std.testing.io);
+        std.testing.allocator.free(self.nodes);
+    }
+
+    fn step(nodes: []const *runtime.NetworkCore) !void {
+        for (nodes) |node| {
+            const now = try @import("transport.zig").currentTime(std.testing.io);
+            const result = node.step(std.testing.io, now, 100, .{}, 1);
+            if (result.failure) |err| return err;
+        }
+    }
+};
+
+test "managed maintenance isolates slow peers and full application capacity" {
+    const rr = @import("reqresp/root.zig");
+    var fixture = try MaintenancePeers.init();
+    defer fixture.deinit();
+    const hub = &fixture.nodes[0];
+    errdefer |err| std.debug.print("maintenance isolation failed: {t}, peers={any}, operations={any}, requests={any}\n", .{ err, hub.peerCounts(), hub.peer_manager.control.resourceSnapshot(), hub.service.reqresp.active() });
+    const healthy = &fixture.nodes[3];
+    const slow = hub.peer_manager.catalog.find(&fixture.nodes[1].peerId()).?;
+    const healthy_peer = hub.peer_manager.catalog.find(&healthy.peerId()).?;
+    const conn = hub.peer_manager.catalog.get(slow).?.connection.?;
+    const size = rr.Protocol.blocks_by_root_v2.info().response_max;
+    const sinks = try std.testing.allocator.alloc(u8, 2 * size);
+    defer {
+        hub.service.reqresp.shutdown(&hub.transport.engine, &hub.service.router);
+        std.testing.allocator.free(sinks);
+    }
+    const calls = hub.reservations.allocation_calls;
+    for (0..2) |index| _ = try hub.sendReqRespRequest(slow, .blocks_by_root_v2, &([_]u8{1} ** 32), sinks[index * size ..][0..size], .{}, hub.last_now);
+    for (0..11) |_| _ = try hub.service.router.beginMeshsub(&hub.transport.engine, conn, hub.last_now);
+    try std.testing.expectError(error.NegotiationTableFull, hub.service.router.beginMeshsub(&hub.transport.engine, conn, hub.last_now));
+    var status = healthy.localState().status;
+    status.head_slot = 42;
+    try healthy.updateStatus(&status, healthy.last_now);
+    hub.reStatusPeers(hub.last_now);
+    const control = &hub.peer_manager.control;
+    const started = control.counters.started;
+    for (0..3) |turn| {
+        control.maintain(&hub.service, &hub.peer_manager.catalog, &hub.transport.engine, &hub.peer_manager.local, hub.last_now);
+        try std.testing.expectEqual(started + turn + 1, control.counters.started);
+    }
+    try std.testing.expectEqual(@as(usize, 3), control.resourceSnapshot().operations);
+    for (0..1000) |_| {
+        try MaintenancePeers.step(&.{ hub, healthy });
+        const snapshot = hub.peer_manager.catalog.get(healthy_peer).?;
+        if (snapshot.status.?.head_slot == 42 and control.resourceSnapshot().operations == 2) break;
+    }
+    try std.testing.expectEqual(@as(u64, 42), hub.peer_manager.catalog.get(healthy_peer).?.status.?.head_slot);
+    try std.testing.expectEqual(@as(usize, 2), control.resourceSnapshot().operations);
+    try std.testing.expectEqual(@as(u16, 2), hub.service.reqresp.outboundApplicationCount(conn));
+    try std.testing.expectEqual(calls, hub.reservations.allocation_calls);
+}
+
 test "managed runtime validates capacities and current application fork before allocation" {
     const key = try keys.KeyPair.fromSecretKey(&(.{0} ** 31 ++ .{1}));
     var node: runtime.NetworkCore = undefined;
@@ -593,15 +687,17 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
         };
         var node: runtime.NetworkCore = undefined;
         try node.initManaged(ledger.allocator(), std.testing.io, opts);
+        var initialized = true;
+        defer if (initialized) node.deinit(std.testing.io);
         const measured = ledger.bytes;
         const plan = node.memoryPlan();
         const core_plan = node.peer_manager.memoryPlan();
         const kib = 1024;
         const mib = 1024 * kib;
         const ceilings = if (profile == .small)
-            .{ .total = 60 * mib, .service = 59 * mib, .transport = 90 * kib, .scratch = 400 * kib, .catalog = 56 * kib, .control = 11 * kib, .dial = 14 * kib }
+            .{ .total = 72 * mib, .service = 71 * mib, .transport = 90 * kib, .scratch = 400 * kib, .catalog = 56 * kib, .control = 13 * kib, .dial = 14 * kib }
         else
-            .{ .total = 210 * mib, .service = 200 * mib, .transport = 720 * kib, .scratch = 3200 * kib, .catalog = 448 * kib, .control = 80 * kib, .dial = 112 * kib };
+            .{ .total = 232 * mib, .service = 222 * mib, .transport = 720 * kib, .scratch = 3200 * kib, .catalog = 448 * kib, .control = 100 * kib, .dial = 112 * kib };
         try std.testing.expectEqual(measured, plan.allocated_bytes);
         try std.testing.expect(measured <= ceilings.total);
         try std.testing.expect(plan.service_bytes <= ceilings.service);
@@ -613,13 +709,16 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
         try std.testing.expectEqual(@as(u64, if (profile == .small) 64 * mib else 512 * mib), plan.transport.engine.receive_window_bytes);
         try std.testing.expect(measured <= node.reservations.byte_limit.?);
         node.deinit(std.testing.io);
+        initialized = false;
         try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
         opts.configuration.byte_limit = measured - 1;
         try std.testing.expectError(error.OutOfMemory, node.initManaged(ledger.allocator(), std.testing.io, opts));
         try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
         opts.configuration.byte_limit = measured;
         try node.initManaged(ledger.allocator(), std.testing.io, opts);
+        initialized = true;
         node.deinit(std.testing.io);
+        initialized = false;
         try std.testing.expectEqual(@as(usize, 0), ledger.bytes);
     }
 }

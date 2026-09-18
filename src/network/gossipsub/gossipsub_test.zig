@@ -474,7 +474,7 @@ test "gossipsub legal maximum and above two MiB publish use actual resumable IO"
         }
         try std.testing.expect(received);
         try std.testing.expectEqual(@as(u64, 0), setup.shared.client.gossipsub.counters.send_dropped);
-        try std.testing.expectEqual(setup.shared.server.gossipsub.sessions.receive_pool.count, setup.shared.server.gossipsub.sessions.receive_pool.available());
+        try std.testing.expectEqual(setup.shared.server.gossipsub.sessions.receive_pool.next.len, setup.shared.server.gossipsub.sessions.receive_pool.free_pages);
     }
 }
 
@@ -641,20 +641,21 @@ test "gossipsub activity behind partial peer cursor remains ready and generation
     try std.testing.expect(@import("session_io.zig").nextIoWakeup(setup.shared.server.gossipsub, setup.shared.pair.now, 1).? > setup.shared.pair.now.mono_ms);
 }
 
-test "gossipsub large frame deadline releases receive and transmit leases despite byte progress" {
+test "gossipsub large frame deadline releases receive pages despite byte progress" {
     var setup: Pair = .{};
     try setup.initOpts(.{ .random_seed = 1, .output_per_peer = 1, .tx_timeout_ms = 500 }, .{ .random_seed = 1, .body_buffer_bytes = 64, .large_frame_timeout_ms = 150, .pressure_timeout_ms = 500 });
     defer setup.deinit();
     for (0..16) |_| try setup.pumpOnce();
     const server_peer = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
     const client_peer = setup.shared.client.gossipsub.sessions.findPeer(setup.shared.handles.client).?;
-    var prefix: [8]u8 = undefined;
+    var prefix: [128]u8 = undefined;
     var w = @import("protobuf.zig").Writer.init(&prefix);
     w.varint(65536);
-    w.bytes("x");
+    w.bytes(&([_]u8{'x'} ** 65));
     try std.testing.expectEqual(w.len, try setup.shared.pair.client.write(setup.clientStream(), w.written(), false));
     for (0..4) |_| try setup.pumpOnce();
-    try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.large_slot != null);
+    try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.reader.declaredLen() != null);
+    try std.testing.expectEqual(@as(u32, 1), setup.shared.server.gossipsub.sessions.rows[server_peer].io.overflow.pages);
     try std.testing.expect(setup.shared.client.gossipsub.subscribe(test_topic));
     setup.shared.client.gossipsub.overlay.rows[setup.shared.client.gossipsub.overlay.findTopic(test_topic).?].mesh.set(client_peer);
     _ = try setup.shared.client.gossipsub.publish(test_topic, "held transmit payload", setup.shared.pair.now);
@@ -664,13 +665,13 @@ test "gossipsub large frame deadline releases receive and transmit leases despit
         setup.shared.pair.advance(100);
         try std.testing.expectEqual(@as(usize, 1), try setup.shared.pair.client.write(setup.clientStream(), "x", false));
         try setup.pumpOnce();
-        try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.large_slot != null);
+        try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.reader.declaredLen() != null);
         try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.progress_ms > began);
     }
     setup.shared.pair.advance(100);
     try setup.pumpOnce();
     try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.counters.large_stalled);
-    try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.large_slot == null);
+    try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[server_peer].io.overflow.pages == 0);
     const logical = setup.shared.server.gossipsub.sessions.rows[server_peer].logical;
     try std.testing.expect(setup.shared.server.gossipsub.peers.rows[logical.index].large_frame_denied_until > setup.shared.pair.now.mono_ms);
     setup.shared.pair.advance(300);
@@ -679,12 +680,53 @@ test "gossipsub large frame deadline releases receive and transmit leases despit
     for (setup.shared.client.gossipsub.messages.store.entries) |e| if (e.active) try std.testing.expectEqual(@as(u32, 0), e.tx);
 }
 
-test "gossipsub pinned payload pressure resumes held large frame after host report" {
+test "gossipsub completed frame expiry releases pages without blaming the peer" {
+    var setup: Pair = .{};
+    try setup.initOpts(.{ .random_seed = 1 }, .{
+        .random_seed = 1,
+        .body_buffer_bytes = 64,
+        .items_per_peer = 1,
+        .large_frame_timeout_ms = 50,
+        .pressure_timeout_ms = 100,
+    });
+    defer setup.deinit();
+    try connectMesh(&setup);
+    const g = setup.shared.server.gossipsub;
+    const index = g.sessions.findPeer(setup.shared.handles.server).?;
+    const peer = &g.sessions.rows[index];
+    const before = g.peers.score(peer.logical, setup.shared.pair.now.mono_ms);
+    var body: [256]u8 = undefined;
+    var writer = @import("protobuf.zig").Writer.init(&body);
+    writer.bytesField(9, &([_]u8{0} ** 100));
+    writer.bytesField(9, "remaining field");
+    var frame: [260]u8 = undefined;
+    const wire = @import("frame.zig").writeFrame(&frame, writer.written());
+    try std.testing.expectEqual(wire.len, try setup.shared.pair.client.write(setup.clientStream(), wire, false));
+    for (0..16) |_| {
+        try setup.pumpOnce();
+        if (peer.io.rpc != null) break;
+    }
+    try std.testing.expect(peer.io.rpc != null and peer.io.pressure_since == null);
+    try std.testing.expectEqual(@as(u32, 1), peer.io.overflow.pages);
+    const began = peer.io.frame_since.?;
+    try std.testing.expectEqual(@as(?u64, began + 100), peer.io.deadlines(&g.options).values[@intFromEnum(@import("peer_io.zig").TimeoutReason.receive_frame)]);
+    g.recovery.add(&g.peers, @splat(1), peer.logical, peer.conn, 1, began + 1000);
+    setup.shared.pair.advance(100);
+    try setup.pumpOnce();
+    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.promises_cancelled_pressure);
+    try std.testing.expectEqual(@as(u64, 0), g.counters.large_stalled);
+    try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
+    try std.testing.expectEqual(before, g.peers.score(peer.logical, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(u64, 0), g.peers.rows[peer.logical.index].large_frame_denied_until);
+    try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
+    try std.testing.expect(peer.in_stream == null and peer.outStream() != null);
+}
+
+test "gossipsub pinned payload pressure drops the publication and releases receive pages" {
     const constants = @import("constants.zig");
     var setup: Pair = .{};
-    try setup.initOpts(.{
-        .random_seed = 1,
-    }, .{ .random_seed = 1, .mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + 4096, .large_pool_count = 1 });
+    try setup.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1, .mcache_arena_bytes = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + 4096 });
     defer setup.deinit();
     try connectMesh(&setup);
     const payload = try std.testing.allocator.alloc(u8, constants.MAX_PAYLOAD_SIZE);
@@ -701,20 +743,25 @@ test "gossipsub pinned payload pressure resumes held large frame after host repo
         if (handle != null) break;
     }
     try std.testing.expect(handle != null);
+    const refused_id = @import("topic.zig").validMessageId(test_topic, payload[0 .. 3 * 1024 * 1024], .{});
     _ = try setup.shared.client.gossipsub.publish(test_topic, payload[0 .. 3 * 1024 * 1024], setup.shared.pair.now);
-    const peer = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
+    const g = setup.shared.server.gossipsub;
+    const peer = g.sessions.findPeer(setup.shared.handles.server).?;
     for (0..2000) |_| {
         try setup.pumpOnce();
-        if (setup.shared.server.gossipsub.sessions.rows[peer].io.blocked == .storage) break;
+        if (g.counters.message_capacity_refusals != 0) break;
     }
-    try std.testing.expectEqual(.storage, setup.shared.server.gossipsub.sessions.rows[peer].io.blocked);
-    try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[peer].io.large_slot != null);
-    try std.testing.expect(@import("session_io.zig").nextIoWakeup(setup.shared.server.gossipsub, setup.shared.pair.now, 16).? > setup.shared.pair.now.mono_ms);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.gossipsub.counters.messages_received);
-    _ = setup.shared.server.gossipsub.report(handle.?, .ignore, setup.shared.pair.now);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), @import("session_io.zig").nextIoWakeup(setup.shared.server.gossipsub, setup.shared.pair.now, 16));
+    try std.testing.expectEqual(@as(u64, 1), g.counters.message_capacity_refusals);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.messages_received);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.rows[peer].io.overflow.pages);
+    try std.testing.expect(g.sessions.rows[peer].io.rpc == null);
+    try std.testing.expect(!g.messages.wasSeen(refused_id, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(u64, 0), g.counters.local_pressure_resets);
+    _ = g.report(handle.?, .ignore, setup.shared.pair.now);
+    payload[0] ^= 1;
+    _ = try setup.shared.client.gossipsub.publish(test_topic, payload[0 .. 3 * 1024 * 1024], setup.shared.pair.now);
     var received = false;
-    for (0..20) |_| {
+    for (0..2000) |_| {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| if (event == .message) {
             try std.testing.expectEqualSlices(u8, payload[0 .. 3 * 1024 * 1024], event.message.bytes);
@@ -723,8 +770,6 @@ test "gossipsub pinned payload pressure resumes held large frame after host repo
         if (received) break;
     }
     try std.testing.expect(received);
-    try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[peer].io.large_slot == null);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.gossipsub.counters.local_pressure_resets);
 }
 
 test "gossipsub native write credit behind cursor resumes and blocked writes quiesce" {
@@ -801,40 +846,37 @@ test "gossipsub healthy continuous frame turnover does not expire a nonempty que
     try std.testing.expect(setup.shared.client.gossipsub.sessions.outStream(index) != null);
 }
 
-test "gossipsub temporary frame pool pressure preserves prefix unread bytes and resumes" {
+test "gossipsub receive page exhaustion resets only the requesting stream without blame" {
     var setup: Pair = .{};
-    try setup.initOpts(.{
-        .random_seed = 1,
-    }, .{ .random_seed = 1, .large_pool_count = 1, .body_buffer_bytes = 1024 });
+    try setup.initOpts(.{ .random_seed = 1 }, .{ .random_seed = 1, .body_buffer_bytes = 1024 });
     defer setup.deinit();
     try connectMesh(&setup);
-    const owner_conn: engine_mod.Handle = .{ .index = 77, .generation = 1 };
-    const owner = @import("test_support.zig").addPeer(setup.shared.server.gossipsub, owner_conn, .v1_2).?;
-    setup.shared.server.gossipsub.sessions.rows[owner.index].io.large_slot = setup.shared.server.gossipsub.sessions.receive_pool.claim().?;
+    const g = setup.shared.server.gossipsub;
+    var held: [3]@import("receive_pool.zig").Chain = @splat(.{});
+    defer for (&held) |*chain| g.sessions.receive_pool.release(chain);
+    for (0..g.sessions.receive_pool.next.len) |i| {
+        const chain = &held[i % held.len];
+        _ = g.sessions.receive_pool.writable(chain).?;
+        chain.len += @import("receive_pool.zig").page_bytes;
+    }
+    const peer = g.sessions.findPeer(setup.shared.handles.server).?;
+    const logical = g.sessions.rows[peer].logical;
+    const before = g.peers.score(logical, setup.shared.pair.now.mono_ms);
     var payload: [65536]u8 = undefined;
     var rng = std.Random.DefaultPrng.init(113);
     rng.random().bytes(&payload);
     _ = try setup.shared.client.gossipsub.publish(test_topic, &payload, setup.shared.pair.now);
-    const peer = setup.shared.server.gossipsub.sessions.findPeer(setup.shared.handles.server).?;
     for (0..64) |_| {
         try setup.pumpOnce();
-        if (setup.shared.server.gossipsub.sessions.rows[peer].io.blocked == .storage) break;
+        if (g.counters.receive_capacity_refusals != 0) break;
     }
-    try std.testing.expectEqual(.storage, setup.shared.server.gossipsub.sessions.rows[peer].io.blocked);
-    try std.testing.expect(setup.shared.server.gossipsub.sessions.rows[peer].io.reader.declaredLen() != null);
-    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.gossipsub.counters.messages_received);
-    try std.testing.expect(@import("session_io.zig").nextIoWakeup(setup.shared.server.gossipsub, setup.shared.pair.now, 16).? > setup.shared.pair.now.mono_ms);
-    setup.shared.server.gossipsub.connectionClosed(owner_conn);
-    try std.testing.expectEqual(@as(?u64, setup.shared.pair.now.mono_ms), @import("session_io.zig").nextIoWakeup(setup.shared.server.gossipsub, setup.shared.pair.now, 16));
-    var received = false;
-    for (0..64) |_| {
-        try setup.pumpOnce();
-        for (setup.serverEvents()) |event| if (event == .message) {
-            try std.testing.expectEqualSlices(u8, &payload, event.message.bytes);
-            received = true;
-        };
-        if (received) break;
-    }
-    try std.testing.expect(received);
-    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.gossipsub.sessions.receive_pool.available());
+    try std.testing.expectEqual(@as(u64, 1), g.counters.receive_capacity_refusals);
+    try std.testing.expectEqual(@as(u64, 1), g.counters.local_pressure_resets);
+    try std.testing.expectEqual(@as(u64, 0), g.counters.malformed_rpcs);
+    try std.testing.expectEqual(before, g.peers.score(logical, setup.shared.pair.now.mono_ms));
+    try std.testing.expectEqual(@as(u64, 0), g.peers.rows[logical.index].large_frame_denied_until);
+    try std.testing.expect(g.sessions.rows[peer].in_stream == null);
+    try std.testing.expect(g.sessions.rows[peer].outStream() != null);
+    try std.testing.expect(g.sessions.rows[peer].io.reader.declaredLen() == null);
+    try std.testing.expectEqual(@as(usize, 0), g.sessions.receive_pool.free_pages);
 }

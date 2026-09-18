@@ -80,6 +80,7 @@ pub const Snapshot = struct {
     score_at_ms: u64 = 0,
     ban_until_ms: u64,
     goodbye_until_ms: u64,
+    redial_until_ms: u64 = 0,
 };
 pub const Event = union(enum) {
     ready: Snapshot,

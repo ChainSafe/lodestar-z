@@ -144,6 +144,24 @@ test "peer catalog cooldown churn cannot exclude a fresh inbound identity" {
     try std.testing.expect(admit(&c, &fresh, replacement, .inbound, 1) == .admitted);
 }
 
+test "peer catalog local pruning permits healthy reconnection during redial backoff" {
+    var c = try Catalog.init(std.testing.allocator, opts);
+    defer c.deinit(std.testing.allocator);
+    const ref = admit(&c, &remote, first, .inbound, 0).admitted.peer;
+    try std.testing.expect(c.deferRedial(ref, first, 0, 300_000));
+    try std.testing.expect(c.disconnect(ref, first, .count_pruning, 0));
+    var out: [1]t.Event = undefined;
+    _ = c.pollEvents(&out);
+    try std.testing.expectEqual(@as(u64, 300_000), c.get(ref).?.redial_until_ms);
+    try std.testing.expect(admit(&c, &remote, replacement, .inbound, 1) == .admitted);
+    try std.testing.expectEqual(@as(f64, 0), c.get(ref).?.score);
+    try std.testing.expect(!c.deferRedial(ref, first, 1, 300_000));
+    try std.testing.expect(c.cooldown(ref, replacement, 1, 600_000));
+    try std.testing.expect(c.disconnect(ref, replacement, .remote_goodbye, 1));
+    _ = c.pollEvents(&out);
+    try std.testing.expectEqual(t.Admission.cooldown, admit(&c, &remote, first, .inbound, 2));
+}
+
 test "peer catalog exhausted generations never wrap and allocator cleanup" {
     var c = try Catalog.init(std.testing.allocator, opts);
     defer c.deinit(std.testing.allocator);

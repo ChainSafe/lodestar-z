@@ -30,6 +30,24 @@ test "paired engines recover a session and complete one call without queues" {
     try pair.directSessionTimeout();
 }
 
+test "engine reports source admission pressure without a local failure" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    const sealed = try pair.node_a.channel.seal(&pair.a_to_b, pair.peerB(), "ping", &sealEntropy(0x10), 0);
+    var source = pair.address_a;
+    for (0..@import("admission.zig").source_quota.burst) |i| {
+        source.ip4.port = @intCast(9_000 + i);
+        const outcome = try pair.node_b.receive(&pair.b_to_a, pair.a_to_b[0..sealed.packet_length], source, receiveArgs(0, 0x30), &pair.scratch_b);
+        try std.testing.expectEqual(@as(u16, 63), outcome.accepted.packet_length);
+    }
+    source.ip4.port += 1;
+    const limited = try pair.node_b.receive(&pair.b_to_a, pair.a_to_b[0..sealed.packet_length], source, receiveArgs(249, 0x30), &pair.scratch_b);
+    try std.testing.expectEqual(types.RejectReason.admission_limited, limited.rejected);
+    const recovered = try pair.node_b.receive(&pair.b_to_a, pair.a_to_b[0..sealed.packet_length], source, receiveArgs(250, 0x30), &pair.scratch_b);
+    try std.testing.expectEqual(@as(u16, 63), recovered.accepted.packet_length);
+}
+
 const Pair = struct {
     address_a: types.Address,
     address_b: types.Address,
@@ -124,21 +142,6 @@ const Pair = struct {
     }
 
     fn authenticate(self: *Pair, handshake_length: u16) !Engine.AuthenticatedRequest {
-        var corrupted = self.a_to_b;
-        corrupted[handshake_length - 1] ^= 1;
-        const corrupted_outcome = try self.node_b.receive(
-            &self.b_to_a,
-            corrupted[0..handshake_length],
-            self.address_a,
-            receiveArgs(4, 0x50),
-            &self.scratch_b,
-        );
-        try std.testing.expectEqual(
-            types.RejectReason.invalid_handshake,
-            corrupted_outcome.rejected,
-        );
-        try std.testing.expectEqual(@as(usize, 0), self.node_b.channel.sessions.sessionCount());
-        try std.testing.expectEqual(@as(usize, 1), self.node_b.channel.sessions.challengeCount());
         const authenticated = try self.node_b.receive(
             &self.b_to_a,
             self.a_to_b[0..handshake_length],

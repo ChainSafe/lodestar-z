@@ -116,7 +116,7 @@ test "crossed cold handshakes and delayed replies authenticate in every bounded 
     try std.testing.expectEqual(@as(usize, 20), schedules);
 }
 
-test "invalid crossed handshake preserves both read generations and its challenge" {
+test "invalid crossed handshake preserves both read generations and consumes its challenge" {
     var pair: Pair = undefined;
     try pair.init();
     defer pair.deinit();
@@ -131,12 +131,12 @@ test "invalid crossed handshake preserves both read generations and its challeng
     pair.handshakes[0].bytes[pair.handshakes[0].length - 1] ^= 1;
     const invalid = pair.nodes[1].receive(pair.handshakes[0].slice(), pair.peer(0).address, 4, &pair.scratch);
     try std.testing.expectEqual(types.RejectReason.invalid_handshake, invalid.rejected);
-    try std.testing.expectEqual(@as(usize, 1), pair.nodes[1].sessions.challengeCount());
+    try std.testing.expectEqual(@as(usize, 0), pair.nodes[1].sessions.challengeCount());
     try std.testing.expectEqual(current_key, pair.nodes[1].sessions.readKey(pair.peer(0)).?);
     try std.testing.expectEqual(alternate_key, pair.nodes[1].sessions.alternateReadKey(pair.peer(0)).?);
     pair.handshakes[0].bytes[pair.handshakes[0].length - 1] ^= 1;
-    try pair.advance(0, 1, 5);
-    try pair.advance(0, 2, 6);
+    const rejected = pair.nodes[1].receive(pair.handshakes[0].slice(), pair.peer(0).address, 5, &pair.scratch);
+    try std.testing.expectEqual(types.RejectReason.unexpected_handshake, rejected.rejected);
     try pair.advance(1, 1, 7);
     try pair.advance(1, 2, 8);
     const replay = pair.nodes[0].receive(pair.handshakes[1].slice(), pair.peer(1).address, 9, &pair.scratch);

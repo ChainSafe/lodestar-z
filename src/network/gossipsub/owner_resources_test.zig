@@ -16,14 +16,14 @@ const testMessage = support.message;
 
 test "gossipsub rejects incompatible memory plans and cleans partial startup allocations" {
     const a = std.testing.allocator;
-    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .large_message_bytes = 65536 }));
+    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .receive_arena_bytes = 65536 }));
     try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .decompressed_arena_bytes = 4096 }));
-    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .large_pool_count = 256 }));
+    try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .receive_arena_bytes = 1024 * 1024 * 1024 + 4096 }));
     try std.testing.expectError(error.InvalidLimits, Gossipsub.init(a, .{ .random_seed = 1, .fields_per_pump = 1 }));
     try std.testing.checkAllAllocationFailures(a, testStartup, .{});
 }
 fn testStartup(a: Allocator) !void {
-    var g = try Gossipsub.init(a, .{ .random_seed = 1, .seen_capacity = 1, .mcache_capacity = 1, .validation_capacity = 1, .body_buffer_bytes = 1, .control_bytes = 1, .critical_bytes = 32 + topic_mod.topic_max_len, .large_pool_count = 1 });
+    var g = try Gossipsub.init(a, .{ .random_seed = 1, .seen_capacity = 1, .mcache_capacity = 1, .validation_capacity = 1, .body_buffer_bytes = 1, .control_bytes = 1, .critical_bytes = 32 + topic_mod.topic_max_len });
     defer g.deinit();
     const plan = g.memoryPlan();
     try std.testing.expectEqual(@as(usize, 4096), plan.page_bytes);

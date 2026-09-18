@@ -9,6 +9,7 @@ pub const distance_max: u16 = 256;
 pub const distance_count: usize = distance_max + 1;
 pub const findnode_result_max: usize = 16;
 pub const findnode_response_packets_max: u8 = 16;
+pub const bootstrap_max: usize = 16;
 
 /// Returns the log2 XOR distance, which is 0 for equal IDs and 256 when the top bits differ.
 pub fn logDistance(left: *const NodeId, right: *const NodeId) u16 {
@@ -43,8 +44,7 @@ pub const Endpoint = struct {
     address: Address,
 };
 
-/// The reason a datagram was not acted on. Every arm is caused by the peer, never by the local
-/// node.
+/// Why a datagram was not acted on. Admission pressure does not establish peer misconduct.
 pub const RejectReason = enum {
     oversized_datagram,
     malformed_packet,
@@ -57,6 +57,7 @@ pub const RejectReason = enum {
     unsolicited_response,
     invalid_response,
     duplicate_response,
+    admission_limited,
 };
 
 /// Keeps `out[0..length]` ordered by XOR distance to `target`, dropping the farthest when full.

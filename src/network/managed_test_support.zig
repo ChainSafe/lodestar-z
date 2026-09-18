@@ -37,14 +37,13 @@ pub fn options() managed.Options {
                 .validation_capacity = 2,
                 .mcache_arena_bytes = gc.maxCompressedLen(gc.MAX_PAYLOAD_SIZE) + 4096,
                 .decompressed_arena_bytes = gc.MAX_PAYLOAD_SIZE + 256,
-                .large_pool_count = 1,
+                .receive_arena_bytes = std.mem.alignForward(usize, gc.GOSSIP_MAX_SIZE, 4096),
                 .body_buffer_bytes = 256,
                 .control_bytes = 512,
                 .critical_bytes = 512,
             },
         },
         .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 7 },
-        .control = .{ .operations_max = 2 },
     };
 }
 

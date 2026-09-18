@@ -25,6 +25,7 @@ const Topic = struct {
 };
 
 pub const GossipCapacity = struct {
+    receive_page_capacity: usize = 0,
     connected_capacity: usize = 0,
     retained_capacity: usize = 0,
     validation_capacity: usize = 0,
@@ -32,6 +33,7 @@ pub const GossipCapacity = struct {
 };
 
 pub const GossipHighWater = struct {
+    receive_pages_high_water: usize = 0,
     data_bytes_per_row_high_water: usize = 0,
     data_descriptors_per_row_high_water: usize = 0,
     control_bytes_per_row_high_water: usize = 0,
@@ -41,6 +43,7 @@ pub const GossipHighWater = struct {
 };
 
 pub const GossipResources = struct {
+    receive_pages: usize = 0,
     control_frames: usize = 0,
     control_bytes: usize = 0,
     critical_frames: usize = 0,
@@ -93,6 +96,7 @@ pub const Live = struct {
     discovery_lookups: usize = 0,
     running: bool = false,
     transport_resources: struct { active: usize = 0, handshaking: usize = 0, dialing: usize = 0, outbound: usize = 0 } = .{},
+    request_inbound_phases: [rr.reqresp.metrics.inbound_phase_count]usize = @splat(0),
     dial_resources: struct { occupied: usize = 0, attempts: usize = 0, connected: usize = 0, automatic: usize = 0, custody_incomplete: usize = 0 } = .{},
 };
 
@@ -135,6 +139,7 @@ pub const Totals = struct {
     dial: @import("../peers/dial_queue.zig").DialQueue.Counters = .{},
     discovery_counts: discovery_metrics.Counters = .{},
     discovery_rejections: [discovery_metrics.rejection_count]u64 = @splat(0),
+    discovery_admission: @import("discv5").admission.Counts = @splat(@splat(0)),
     gossip_queue_drops: [outbox.drop_reason_count]u64 = @splat(0),
     scores: score_metrics.Totals = .{},
 };
@@ -173,6 +178,7 @@ pub const Snapshot = struct {
         }
         self.totals.dial_time = core.dial_queue.durations;
         self.totals.requests = owner.service.reqresp.counters;
+        self.live.request_inbound_phases = owner.service.reqresp.resourceSnapshot().inbound_phases;
         self.totals.udp = owner.transport.udp.counters;
         self.totals.outgoing_error_reasons = owner.service.reqresp.outgoing_error_reasons;
         self.totals.validation_time = g.validation_time;
@@ -308,6 +314,7 @@ pub const Snapshot = struct {
         if (owner.discovery) |discovery| {
             self.totals.discovery_counts = discovery.coordinator.counters;
             self.totals.discovery_rejections = discovery.coordinator.rejections;
+            self.totals.discovery_admission = discovery.transport.engine.channel.admission.counts;
             self.config.discovery_enabled = true;
             self.live.discovery_sessions = discovery.transport.engine.channel.sessions.sessionCount();
             self.live.discovery_peers = discovery.transport.engine.peerCount();
@@ -342,6 +349,11 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.config.dial_capacity = 4096;
     snapshot.totals.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing = 4;
     snapshot.totals.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing = 5;
+    const refused_reason = @intFromEnum(rr.reqresp.metrics.AdmissionRefusal.server_capacity);
+    snapshot.totals.protocols[@intFromEnum(rr.Protocol.status_v1)].admission_refusals[refused_reason] = 2;
+    snapshot.totals.protocols[@intFromEnum(rr.Protocol.status_v2)].admission_refusals[refused_reason] = 3;
+    snapshot.live.request_inbound_phases[@intFromEnum(rr.reqresp.metrics.InboundPhase.receiving_request)] = 7;
+    snapshot.live.request_inbound_phases[@intFromEnum(rr.reqresp.metrics.InboundPhase.waiting_host)] = 2;
     snapshot.totals.protocols[@intFromEnum(rr.Protocol.metadata_v3)].request_write_stops = 7;
     snapshot.totals.protocols[@intFromEnum(rr.Protocol.ping_v1)].response_finish_stops = 3;
     snapshot.totals.runtime.dial_started = std.math.maxInt(u64);
@@ -370,6 +382,8 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.totals.peer_events.goodbyes[@intFromEnum(goodbye.Reason.too_many_peers)] = 11;
     snapshot.totals.gossip_queue_drops[@intFromEnum(outbox.DropReason.data_bytes)] = 17;
     snapshot.totals.discovery_rejections[@intFromEnum(discovery_metrics.Rejection.incompatible_fork)] = 19;
+    const discovery_admission = @import("discv5").admission;
+    snapshot.totals.discovery_admission[@intFromEnum(discovery_admission.Stage.handshake)][@intFromEnum(discovery_admission.Outcome.source_limit)] = 23;
     snapshot.live.peer_policy.group_count = 128;
     snapshot.live.peer_policy.wanted = .{ .attnets = std.math.maxInt(u64), .syncnets = 15 };
     snapshot.live.topic_count = snapshot.live.topics.len;
@@ -395,6 +409,9 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
         }
     }
     try std.testing.expect(std.mem.indexOf(u8, output, "beacon_reqresp_outgoing_requests_total{method=\"status\"} 9\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_admission_refusals_total{method=\"status\",reason=\"server_capacity\"} 5\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_inbound_occupied{phase=\"receiving_request\"} 7\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_inbound_occupied{phase=\"waiting_host\"} 2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_request_write_stops_total{method=\"metadata\"} 7\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_reqresp_response_finish_stops_total{method=\"ping\"} 3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_discovery_total_dial_attempts 18446744073709551615\n") != null);
@@ -415,6 +432,7 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_goodbyes_total{reason=\"too_many_peers\"} 11\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_gossip_queue_drops_total{reason=\"data_bytes\"} 17\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_discovery_candidate_rejections_total{reason=\"incompatible_fork\"} 19\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_discovery_admission_total{stage=\"handshake\",outcome=\"source_limit\"} 23\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_processing_total{operation=\"candidate_syncs\"} 2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_processing_total{operation=\"candidate_rows\"} 32\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_processing_total{operation=\"candidate_lookup_rows\"} 8\n") != null);
@@ -423,6 +441,8 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, output, "lodestar_native_peer_processing_total{operation="));
     snapshot.live.gossip_recent = 7;
     snapshot.stop();
+    try std.testing.expectEqual(@as([rr.reqresp.metrics.inbound_phase_count]usize, @splat(0)), snapshot.live.request_inbound_phases);
+    try std.testing.expectEqual(@as(u64, 2), snapshot.totals.protocols[@intFromEnum(rr.Protocol.status_v1)].admission_refusals[refused_reason]);
     try std.testing.expectEqual(@as(usize, 0), snapshot.live.gossip_recent);
     try std.testing.expectEqual(@as(usize, 0), snapshot.live.topic_count);
     try std.testing.expectEqual(std.math.maxInt(u64), snapshot.totals.runtime.dial_started);

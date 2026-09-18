@@ -29,7 +29,7 @@ fn allocationPrefix(allocator: std.mem.Allocator) !void {
     defer table.deinit();
     const token = try table.reserve(10);
     defer table.retire(token);
-    table.install(token, try table.backing.dupe(u8, "0123456789"));
+    table.install(token, "0123456789");
 }
 
 test "gossip batch bounds, rollback and expiry keep pins until full completion" {
@@ -40,10 +40,10 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
     defer std.testing.allocator.free(data);
     @memset(data, 7);
     const first = try table.reserve(data.len);
-    table.install(first, try table.backing.dupe(u8, data));
+    table.install(first, data);
     table.get(first).?.deadline = 100;
     const second = try table.reserve(7 * 1024 * 1024);
-    table.install(second, try table.backing.dupe(u8, data[0 .. 7 * 1024 * 1024]));
+    table.install(second, data[0 .. 7 * 1024 * 1024]);
     table.get(second).?.deadline = 100;
     var batch = table.claim(99);
     try std.testing.expectEqual(@as(usize, 1), batch.len);
@@ -56,7 +56,7 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
     try std.testing.expectEqual(@as(u64, 2), table.diag.queuedExpired);
     for (0..65) |_| {
         const token = try table.reserve(1);
-        table.install(token, try table.backing.dupe(u8, "x"));
+        table.install(token, "x");
         table.get(token).?.deadline = 200;
     }
     batch = table.claim(101);
@@ -86,7 +86,7 @@ test "gossip flags remain independent of full command capacity and reject stale 
     var handles: [64]g.Token = undefined;
     for (&handles) |*token| {
         token.* = try table.reserve(1);
-        table.install(token.*, try table.backing.dupe(u8, "x"));
+        table.install(token.*, "x");
         table.get(token.*).?.deadline = 100;
     }
     try std.testing.expectError(error.NetworkGossipFull, table.reserve(1));
@@ -101,7 +101,7 @@ test "gossip flags remain independent of full command capacity and reject stale 
     table.expire(100);
     try std.testing.expectEqual(@as(u64, 100), table.waitLimit(100, 100));
     const replacement = try table.reserve(1);
-    table.install(replacement, try table.backing.dupe(u8, "y"));
+    table.install(replacement, "y");
     table.get(replacement).?.deadline = 200;
     try std.testing.expect(!table.report(handles[0], .accept, 101));
     table.close();

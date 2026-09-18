@@ -1,4 +1,4 @@
-//! Starts one DiscV5 node, authenticates configured bootnodes, and runs a bounded set of
+//! Starts one DiscV5 node, seeds configured bootnodes, and runs a bounded set of
 //! concurrent random lookups.
 //!
 //! zig build run:discv5_crawl -- 0.0.0.0:9000 203.0.113.10:9000
@@ -8,8 +8,7 @@ const std = @import("std");
 const discv5 = @import("discv5");
 
 const net = std.Io.net;
-const bootstrap_capacity: usize = discv5.Maintenance.bootstrap_max;
-const bootstrap_steps_max: usize = 4_096;
+const bootstrap_capacity: usize = discv5.types.bootstrap_max;
 const call_capacity: usize = 64;
 const crawl_duration_seconds_default: u16 = 60;
 const crawl_duration_seconds_max: u16 = 300;
@@ -19,12 +18,6 @@ const lookup_concurrency: usize = 16;
 const lookup_total_max: usize = 64;
 const poll_interval_ms: u32 = 25;
 const record_capacity: usize = 8_192;
-
-const Bootstrap = struct {
-    record: discv5.identity.enr.Record,
-    handle: ?discv5.CallTable.Handle = null,
-    authenticated: bool = false,
-};
 
 const LookupSlot = struct {
     operation: discv5.Lookup = undefined,
@@ -132,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
     sockets_owned = false;
     defer transport.deinit(allocator, io);
 
-    var bootstraps: [bootstrap_capacity]Bootstrap = undefined;
+    var bootstraps: [bootstrap_capacity]discv5.identity.enr.Record = undefined;
     const bootstraps_slice = try parseBootstraps(
         args[bootnode_start..],
         sockets.mode(),
@@ -140,22 +133,19 @@ pub fn main(init: std.process.Init) !void {
     );
     var records = try RecordSet.init(allocator);
     defer records.deinit(allocator);
-    const authenticated = try authenticateBootstraps(
-        io,
-        &transport,
-        bootstraps_slice,
-        &records,
-        deadline_ms,
-    );
-    if (transport.engine.peerCount() == 0) return error.NoReachableBootnodes;
-
+    for (bootstraps_slice) |*record| {
+        _ = transport.engine.routing.addKnown(&endpoint(record, sockets.mode()), record) catch |err| switch (err) {
+            error.AddressLimit, error.SelfEntry => continue,
+            else => return err,
+        };
+        _ = records.add(record);
+    }
+    if (transport.engine.peerCount() == 0) return error.NoUsableBootnodes;
     std.debug.print(
-        "node bound on {any}, authenticated {d}/{d} bootnodes\n",
-        .{ discv5.types.Address.fromNetwork(sockets.primary().address), authenticated, bootstraps_slice.len },
+        "node bound on {any}, seeded {d} bootnodes\n",
+        .{ discv5.types.Address.fromNetwork(sockets.primary().address), transport.engine.peerCount() },
     );
-    var maintenance_bootstraps: [bootstrap_capacity]discv5.identity.enr.Record = undefined;
-    for (bootstraps_slice, maintenance_bootstraps[0..bootstraps_slice.len]) |bootstrap, *record| record.* = bootstrap.record;
-    try crawl(io, allocator, &transport, &records, maintenance_bootstraps[0..bootstraps_slice.len], deadline_ms);
+    try crawl(io, allocator, &transport, &records, deadline_ms);
     const elapsed_ms = (try discv5.Transport.monotonicMilliseconds(io)) - started_ms;
     std.debug.print(
         "collected {d} validated peer records from {d} routing entries in {d} ms\n",
@@ -167,8 +157,8 @@ pub fn main(init: std.process.Init) !void {
 fn parseBootstraps(
     encoded: []const [:0]const u8,
     ip_mode: discv5.types.Mode,
-    storage: *[bootstrap_capacity]Bootstrap,
-) ![]Bootstrap {
+    storage: *[bootstrap_capacity]discv5.identity.enr.Record,
+) ![]discv5.identity.enr.Record {
     var count: usize = 0;
     for (encoded) |text| {
         const record = try discv5.identity.enr.Record.initText(text);
@@ -176,86 +166,16 @@ fn parseBootstraps(
         _ = record.endpointFor(ip_mode) orelse continue;
         var duplicate = false;
         for (storage[0..count]) |*stored| {
-            if (!std.mem.eql(u8, &stored.record.node_id, &record.node_id)) continue;
+            if (!std.mem.eql(u8, &stored.node_id, &record.node_id)) continue;
             duplicate = true;
             break;
         }
         if (duplicate) continue;
-        storage[count] = .{ .record = record };
+        storage[count] = record;
         count += 1;
     }
     if (count == 0) return error.NoBootnodes;
     return storage[0..count];
-}
-
-fn authenticateBootstraps(
-    io: std.Io,
-    transport: *discv5.Transport,
-    bootstraps: []Bootstrap,
-    records: *RecordSet,
-    deadline_ms: u64,
-) !usize {
-    defer for (bootstraps) |*bootstrap| {
-        if (bootstrap.handle) |handle| _ = transport.engine.cancelCall(handle);
-        bootstrap.handle = null;
-    };
-    var pending: usize = 0;
-    for (bootstraps, 0..) |*bootstrap, index| {
-        const request = discv5.wire.message.Message{ .ping = .{
-            .request_id = requestId(index + 1),
-            .enr_sequence = transport.engine.localRecord().sequence,
-        } };
-        bootstrap.handle = try transport.startCall(
-            io,
-            endpoint(&bootstrap.record, transport.sockets.mode()),
-            &bootstrap.record,
-            &request,
-        );
-        pending += 1;
-    }
-
-    var expired: [call_capacity]discv5.CallTable.Expired = undefined;
-    for (0..bootstrap_steps_max) |_| {
-        if (pending == 0) break;
-        if (try discv5.Transport.monotonicMilliseconds(io) >= deadline_ms) break;
-        const result = try transport.stepUntil(io, &expired, deadline_ms);
-        for (expired[0..result.calls_expired]) |item| {
-            if (findBootstrap(bootstraps, item.handle)) |bootstrap| {
-                bootstrap.handle = null;
-                pending -= 1;
-            }
-        }
-        switch (result.event) {
-            .failed => |failed| {
-                if (findBootstrap(bootstraps, failed.handle)) |bootstrap| {
-                    bootstrap.handle = null;
-                    pending -= 1;
-                }
-            },
-            .response => |response| {
-                if (findBootstrap(bootstraps, response.matched.handle)) |bootstrap| {
-                    bootstrap.handle = null;
-                    pending -= 1;
-                    if (transport.engine.confirmPeer(&response.peer, &bootstrap.record, result.now_ms)) |_| {
-                        bootstrap.authenticated = true;
-                        _ = records.add(&bootstrap.record);
-                    } else |_| {}
-                }
-            },
-            else => {},
-        }
-        if (result.failure) |err| return err;
-    }
-
-    var authenticated: usize = 0;
-    for (bootstraps) |*bootstrap| {
-        if (bootstrap.authenticated) authenticated += 1;
-        if (bootstrap.handle) |handle| {
-            _ = transport.engine.cancelCall(handle);
-            bootstrap.handle = null;
-        }
-    }
-    return authenticated;
 }
 
 fn crawl(
@@ -263,18 +183,14 @@ fn crawl(
     allocator: std.mem.Allocator,
     transport: *discv5.Transport,
     records: *RecordSet,
-    bootstrap_records: []const discv5.identity.enr.Record,
     deadline_ms: u64,
 ) !void {
-    const candidates = try allocator.alloc(discv5.Lookup.Candidates, lookup_concurrency + 1);
+    const candidates = try allocator.alloc(discv5.Lookup.Candidates, lookup_concurrency);
     defer allocator.free(candidates);
     var maintenance: discv5.Maintenance = undefined;
-    try maintenance.init(&candidates[lookup_concurrency], bootstrap_records, try discv5.Transport.monotonicMilliseconds(io), .{
+    try maintenance.init(try discv5.Transport.monotonicMilliseconds(io), .{
         .probe_interval_ms = 10_000,
         .stale_after_ms = 15_000,
-        .refresh_interval_ms = 15_000,
-        .bootstrap_interval_ms = 15_000,
-        .discovery_stall_ms = 15_000,
     }, transport.sockets.mode());
     defer maintenance.cancel(&transport.engine);
     var cursor: discv5.lookup_batch.Cursor = .{};
@@ -402,25 +318,8 @@ fn finishLookups(
     return completed;
 }
 
-fn findBootstrap(
-    bootstraps: []Bootstrap,
-    handle: discv5.CallTable.Handle,
-) ?*Bootstrap {
-    for (bootstraps) |*bootstrap| {
-        const stored = bootstrap.handle orelse continue;
-        if (std.meta.eql(stored, handle)) return bootstrap;
-    }
-    return null;
-}
-
 fn endpoint(record: *const discv5.identity.enr.Record, ip_mode: discv5.types.Mode) discv5.types.Endpoint {
     return .{ .node_id = record.node_id, .address = record.endpointFor(ip_mode).? };
-}
-
-fn requestId(value: usize) discv5.wire.message.RequestId {
-    var encoded: [8]u8 = undefined;
-    std.mem.writeInt(u64, &encoded, @intCast(value), .big);
-    return discv5.wire.message.RequestId.init(&encoded) catch unreachable;
 }
 
 fn randomKeyPair(io: std.Io) !discv5.identity.crypto.KeyPair {
@@ -447,10 +346,9 @@ fn printRecord(record: *const discv5.identity.enr.Record) void {
 }
 
 comptime {
-    std.debug.assert(bootstrap_capacity <= call_capacity);
     std.debug.assert(transport_steps_max <= std.math.maxInt(u32));
     std.debug.assert(lookup_concurrency <= discv5.lookup_batch.operations_max);
-    std.debug.assert((lookup_concurrency + 1) * discv5.Lookup.parallelism + 1 <= call_capacity);
+    std.debug.assert(lookup_concurrency * discv5.Lookup.parallelism + 1 <= call_capacity);
     std.debug.assert(record_capacity <= std.math.maxInt(u16));
     std.debug.assert(record_capacity >= discv5.RoutingTable.table_capacity);
 }

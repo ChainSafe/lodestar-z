@@ -9,7 +9,7 @@ const Now = @import("../types.zig").Now;
 const client = @import("client.zig");
 const goodbye = @import("goodbye.zig");
 pub const Options = struct {
-    operations_max: u16 = 16,
+    starts_per_turn_max: u16 = 8,
     inbound_status_grace_ms: u64 = 15_000,
     status_interval_ms: u64 = 300_000,
     ping_inbound_ms: u64 = 15_000,
@@ -93,7 +93,7 @@ pub const Control = struct {
     }
 
     pub fn validateOptions(options: Options) error{InvalidOptions}!void {
-        if (options.operations_max == 0 or options.operations_max > 1024)
+        if (options.starts_per_turn_max == 0 or options.starts_per_turn_max > 256)
             return error.InvalidOptions;
         const timers = [_]u64{
             options.inbound_status_grace_ms,
@@ -110,10 +110,13 @@ pub const Control = struct {
         a: std.mem.Allocator,
         options: Options,
         peer_capacity: u16,
+        connected_capacity: u16,
         inbound_capacity: u16,
     ) !Control {
         try validateOptions(options);
-        const operations = try a.alloc(Operation, options.operations_max);
+        if (connected_capacity == 0 or connected_capacity > peer_capacity or connected_capacity > 256)
+            return error.InvalidOptions;
+        const operations = try a.alloc(Operation, connected_capacity);
         errdefer a.free(operations);
         const responses = try a.alloc(Response, inbound_capacity);
         errdefer a.free(responses);
@@ -224,7 +227,9 @@ pub const Control = struct {
         const row = self.schedule(peer, conn) orelse return false;
         if (!catalog.markUnavailable(peer, conn, reason)) return false;
         if (row.closing == null) {
-            if (reason != .shutdown and reason != .remote_goodbye) {
+            if (reason == .capacity or reason == .count_pruning) {
+                _ = catalog.deferRedial(peer, conn, now.mono_ms, goodbye.cooldownMs(129));
+            } else if (reason != .shutdown and reason != .remote_goodbye) {
                 _ = catalog.cooldown(peer, conn, now.mono_ms, goodbye.cooldownMs(goodbyeReason(reason)));
             }
             const snapshot = catalog.get(peer).?;
@@ -261,9 +266,9 @@ pub const Control = struct {
             };
         };
     }
-    fn active(self: *const Control, peer: t.PeerRef, conn: t.Handle) bool {
-        for (self.operations) |op| if (op.request != null and !op.cancelled and
-            std.meta.eql(op.peer, peer) and std.meta.eql(op.conn, conn)) return true;
+    fn active(self: *const Control, peer: t.PeerRef) bool {
+        // A replacement catalog owner waits for the retired request's terminal delivery.
+        for (self.operations) |op| if (op.request != null and op.peer.index == peer.index) return true;
         return false;
     }
     fn goodbyeReason(reason: t.DisconnectReason) u64 {
@@ -281,6 +286,8 @@ pub const Control = struct {
             => 3,
         };
     }
+    const Start = enum { started, retiring, deferred };
+
     fn start(
         self: *Control,
         service: *Service,
@@ -289,7 +296,7 @@ pub const Control = struct {
         protocol: rr.Protocol,
         local: *const t.LocalState,
         now: Now,
-    ) bool {
+    ) Start {
         for (self.operations) |*op| {
             if (op.request != null) continue;
             const len = switch (protocol) {
@@ -297,7 +304,7 @@ pub const Control = struct {
                     protocol,
                     &local.status,
                     &op.bytes,
-                ) catch return false,
+                ) catch return .deferred,
                 .ping_v1, .goodbye_v1 => blk: {
                     std.mem.writeInt(
                         u64,
@@ -321,7 +328,10 @@ pub const Control = struct {
                 &op.sink,
                 .{},
                 now,
-            ) catch return false;
+            ) catch |err| return switch (err) {
+                error.SlotsExhausted, error.NegotiationTableFull => .retiring,
+                else => .deferred,
+            };
             op.peer = row.peer.?;
             op.conn = row.conn;
             op.protocol = protocol;
@@ -329,9 +339,9 @@ pub const Control = struct {
             op.received = false;
             op.request = request;
             self.counters.started +|= 1;
-            return true;
+            return .started;
         }
-        return false;
+        return .retiring;
     }
     pub fn maintain(
         self: *Control,
@@ -342,40 +352,47 @@ pub const Control = struct {
         now: Now,
     ) void {
         const start_index = self.cursor;
-        self.cursor = (self.cursor + 1) % self.schedules.len;
+        var starts_remaining = self.options.starts_per_turn_max;
         for (0..self.schedules.len) |offset| {
             const index = (start_index + offset) % self.schedules.len;
             const row = &self.schedules[index];
             const peer = row.peer orelse continue;
             const snapshot = catalog.get(peer) orelse continue;
             if (!std.meta.eql(snapshot.connection, row.conn)) continue;
-            const decision = decide(row, snapshot.relevant, self.active(peer, row.conn), now.mono_ms);
+            const decision = decide(row, snapshot.relevant, self.active(peer), now.mono_ms);
             if (decision.close) {
                 self.close(service, catalog, engine, peer, row.conn, row.closing.?.reason, now);
                 continue;
             }
             row.identify_enabled = service.identify != null;
-            if (snapshot.relevant and row.closing == null and row.identify_enabled and row.identify_state == .pending and now.mono_ms >= row.identify_retry_ms) {
+            if (starts_remaining > 0 and snapshot.relevant and row.closing == null and row.identify_enabled and row.identify_state == .pending and now.mono_ms >= row.identify_retry_ms) {
+                starts_remaining -= 1;
+                self.cursor = (index + 1) % self.schedules.len;
                 self.startIdentify(service, engine, row, now);
             }
             const action = decision.request orelse continue;
+            if (starts_remaining == 0) continue;
+            starts_remaining -= 1;
+            self.cursor = (index + 1) % self.schedules.len;
             const protocol: rr.Protocol = switch (action) {
                 .status => wire.statusProtocol(local.fork),
                 .metadata => wire.metadataProtocol(local.fork),
                 .ping => .ping_v1,
                 .goodbye => .goodbye_v1,
             };
-            if (action == .goodbye) {
-                row.closing.?.sent = self.start(service, engine, row, protocol, local, now);
-                if (row.closing.?.sent) self.counters.events.observeGoodbye(goodbyeReason(row.closing.?.reason), true, snapshot.connected_at_ms, now.mono_ms);
-                row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
-                continue;
-            }
-            if (self.start(service, engine, row, protocol, local, now)) {
-                row.retry_ms = 0;
-            } else {
-                self.counters.deferred +|= 1;
-                row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
+            switch (self.start(service, engine, row, protocol, local, now)) {
+                .started => {
+                    row.retry_ms = 0;
+                    if (action == .goodbye) {
+                        row.closing.?.sent = true;
+                        self.counters.events.observeGoodbye(goodbyeReason(row.closing.?.reason), true, snapshot.connected_at_ms, now.mono_ms);
+                    }
+                },
+                .retiring => self.counters.deferred +|= 1,
+                .deferred => {
+                    self.counters.deferred +|= 1;
+                    row.retry_ms = now.mono_ms +| self.options.local_retry_ms;
+                },
             }
         }
     }
@@ -709,7 +726,7 @@ pub const Control = struct {
             const peer = row.peer orelse continue;
             const snapshot = catalog.get(peer) orelse continue;
             if (!std.meta.eql(snapshot.connection, row.conn)) continue;
-            const decision = decide(row, snapshot.relevant, self.active(peer, row.conn), now.mono_ms);
+            const decision = decide(row, snapshot.relevant, self.active(peer), now.mono_ms);
             if (decision.deadline_ms) |next| due = @min(due orelse next, next);
         }
         return due;
@@ -758,7 +775,7 @@ fn decide(row: *const Schedule, relevant: bool, active_request: bool, now: u64) 
 }
 
 test "control repeated Status intent preserves the first due time" {
-    var control = try Control.init(std.testing.allocator, .{ .operations_max = 1 }, 2, 1);
+    var control = try Control.init(std.testing.allocator, .{}, 2, 2, 1);
     defer control.deinit(std.testing.allocator);
     const first: t.PeerRef = .{ .index = 0, .generation = 1 };
     const second: t.PeerRef = .{ .index = 1, .generation = 1 };

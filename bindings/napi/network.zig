@@ -106,15 +106,18 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const limits = resolved.core.service.reqresp;
     const request_capacity: usize = @min(32, limits.outbound_max - limits.outbound_control_reserved);
     const incoming_capacity: usize = @min(32, limits.inbound_max - limits.inbound_control_reserved);
-    const gossip_capacity: usize = @min(1024, resolved.core.service.gossipsub.validation_capacity);
-    const bridge = gossip_capacity * @sizeOf(gossip.Cell) + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
+    const gossip_options = &resolved.core.service.gossipsub;
+    const gossip_capacity = gossip_options.validation_capacity;
+    const gossip_bytes = if (gossip_options.processor_limits) |work_limits| n.gossip_processor.limits_mod.bytes(&work_limits) else gossip_options.mcache_arena_bytes;
+    const gossip_backing = gossip.Table.backingBytes(gossip_capacity, gossip_bytes);
+    const bridge = gossip_backing + incoming_capacity * @sizeOf(incoming.Cell) + request_capacity * @sizeOf(requests.Cell) + @sizeOf(Runtime) + @sizeOf(r.Owner) - @sizeOf(n.NetworkCore) + r.Stores.bytes(runtime.peer_capacity) + @sizeOf(projection.Lane);
     if (bridge > app.resources.bridgeBudgetBytes) return error.NetworkBridgeBudgetExceeded;
     runtime.requests = try requests.Table.init(r.allocator, request_capacity, &runtime.payload_budget);
     runtime.payload_budget.limit = app.resources.bridgeBudgetBytes - bridge;
     try faults.check(.incoming_table);
     runtime.incoming = try incoming.Table.init(r.allocator, incoming_capacity, &runtime.payload_budget);
     try faults.check(.gossip_table);
-    runtime.gossip = try gossip.Table.init(r.allocator, gossip_capacity, &runtime.payload_budget);
+    runtime.gossip = try gossip.Table.initPlanned(r.allocator, gossip_capacity, gossip_bytes, &runtime.payload_budget, gossip_options.processor_limits);
     runtime.stores = try r.Stores.create(r.allocator, runtime.peer_capacity);
     try faults.check(.application_lane);
     runtime.lane = try r.allocator.create(projection.Lane);
@@ -531,12 +534,29 @@ pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, stat
     return .{ .val = try incoming_js.terminal(try self.owner(), handle.val, action.val, status.val, message.val) };
 }
 
-pub fn drainGossip(self: *@This()) !js.Value {
-    return .{ .val = try gossip_js.drain(try self.owner()) };
+pub fn drainGossip(self: *@This(), options: js.Value) !js.Value {
+    return .{ .val = try gossip_js.drain(try self.owner(), options.val) };
 }
 pub fn reportGossip(self: *@This(), handle: js.Value, verdict: js.Value) !js.Value {
     return .{ .val = try gossip_js.report(try self.owner(), handle.val, verdict.val) };
 }
 pub fn publishGossip(self: *@This(), topic: js.Value, data: js.Value, options: js.Value) !js.Value {
     return .{ .val = try gossip_js.publish(try self.owner(), topic.val, data.val, options.val) };
+}
+
+pub fn drainGossipChecks(self: *@This()) !js.Value {
+    return .{ .val = try gossip_js.checks(try self.owner()) };
+}
+pub fn classifyGossip(self: *@This(), handle: js.Value, available: js.Value) !js.Value {
+    return .{ .val = try gossip_js.classify(try self.owner(), handle.val, available.val) };
+}
+pub fn notifyGossipBlock(self: *@This(), root: js.Value) !js.Value {
+    return .{ .val = try gossip_js.notifyBlock(try self.owner(), root.val) };
+}
+pub fn dropQueuedGossip(self: *@This()) !js.Value {
+    return .{ .val = try gossip_js.dropQueued(try self.owner()) };
+}
+
+pub fn trackGossipSearch(self: *@This(), root: js.Value, peer: js.Value) !js.Value {
+    return .{ .val = try gossip_js.trackSearch(try self.owner(), root.val, peer.val) };
 }

@@ -3,22 +3,24 @@ import {setTimeout as delay} from "node:timers/promises";
 import {expect, test} from "vitest";
 import type {NativeNetworkApplicationRuntime, NativePeerObservation} from "../src/network.js";
 import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, discoveryConfig, localIntent} from "./utils/network.js";
+import {
+  applicationConfig,
+  configureChain,
+  discoveryConfig,
+  localIntent,
+  testChain,
+  topicName,
+} from "./utils/network.js";
 import {networkBindings as bindings} from "./utils/network-bindings.js";
 
 test("application stays prepared across the host clock fork boundary and activates fresh intent", async () => {
   const config = applicationConfig();
   const boundarySlot = 128n;
   const slotsPerEpoch = process.env.LODESTAR_PRESET === "minimal" ? 8n : 32n;
-  const nextDigest = Uint8Array.of(5, 6, 7, 8);
   config.initialSlot = boundarySlot - 1n;
   config.local.status.headSlot = config.initialSlot;
-  config.forkSchedule.nextEpoch = boundarySlot / slotsPerEpoch;
-  config.forkSchedule.nextDigest = nextDigest;
-  config.forkSchedule.nextVersion = Uint8Array.of(5, 0, 0, 0);
-  config.requestForks = [...config.requestForks, {digest: nextDigest, fork: "electra"}];
-  config.topicPolicy = [...config.topicPolicy, {...structuredClone(config.topicPolicy[0]), digest: nextDigest}];
   config.discovery = discoveryConfig().discovery;
+  configureChain({ELECTRA_FORK_EPOCH: Number(boundarySlot / slotsPerEpoch)});
   const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   try {
     const identity = await runtime.ready;
@@ -27,16 +29,11 @@ test("application stays prepared across the host clock fork boundary and activat
     await delay(40);
     hostSlot = boundarySlot;
     const slot = hostSlot;
-    expect(slot).toBeGreaterThanOrEqual(config.forkSchedule.nextEpoch * slotsPerEpoch);
+    expect(slot).toBeGreaterThanOrEqual(boundarySlot);
     expect(runtime.state).toBe("prepared");
     expect(runtime.diagnostics().ownerTurns).toBe(0n);
     expect(runtime.diagnostics().currentSlot).toBe(config.initialSlot);
     const fresh = localIntent(config);
-    fresh.update.local.fork.fork = "electra";
-    fresh.update.local.fork.digest = nextDigest;
-    fresh.update.local.status.forkDigest = nextDigest;
-    fresh.update.local.status.headSlot = slot;
-    fresh.update.schedule = applicationConfig().forkSchedule;
     fresh.demand.expiresAtSlot = slot + 100n;
     const result = await runtime.applyIntent(fresh, slot);
     expect(result).toMatchObject({changed: true, slot});
@@ -44,6 +41,40 @@ test("application stays prepared across the host clock fork boundary and activat
     expect(runtime.diagnostics().currentSlot).toBe(slot);
     expect((await runtime.getIdentity()).localEnr).not.toEqual(identity.localEnr);
     expect((await runtime.applyIntent(fresh, slot)).changed).toBe(false);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("owned chain plan follows Fulu and BPO with Lodestar topics and fixed native storage", async () => {
+  const config = discoveryConfig();
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  try {
+    let identity = await runtime.ready;
+    const before = runtime.diagnostics();
+    configureChain({BLOB_SCHEDULE: [], ELECTRA_FORK_EPOCH: Infinity, FULU_FORK_EPOCH: Infinity});
+    const epochs = [testChain.FULU_FORK_EPOCH, testChain.BLOB_SCHEDULE[0].EPOCH];
+    for (const [i, epoch] of epochs.entries()) {
+      const slot = BigInt(epoch * (process.env.LODESTAR_PRESET === "minimal" ? 8 : 32));
+      const intent = localIntent(config);
+      intent.update.local.status.headSlot = 1n;
+      intent.update.local.status.earliestAvailableSlot = 0n;
+      intent.update.local.metadata.custodyGroupCount = 8n;
+      intent.demand.expiresAtSlot = slot + 100n;
+      intent.subscriptions = ["beacon_block", "data_column_sidecar_0"].map((kind) => ({
+        name: topicName(kind, i + 2),
+        params: config.gossipPolicy.score.defaultTopic,
+      }));
+      await runtime.applyIntent(intent, slot);
+      const current = await runtime.getIdentity();
+      expect(current.localEnr).not.toEqual(identity.localEnr);
+      expect(runtime.diagnostics()).toMatchObject({
+        currentSlot: slot,
+        liveNativeRequestedBytes: before.liveNativeRequestedBytes,
+        nativeAllocationCount: before.nativeAllocationCount,
+      });
+      identity = current;
+    }
   } finally {
     await runtime.close();
   }
@@ -88,9 +119,7 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
   try {
     const [identity] = await Promise.all([a.ready, b.ready]);
     const intent = localIntent(config);
-    intent.subscriptions = [
-      {name: "/eth2/01020304/beacon_block/ssz_snappy", params: config.gossipPolicy.score.defaultTopic},
-    ];
+    intent.subscriptions = [{name: topicName(), params: config.gossipPolicy.score.defaultTopic}];
     intent.demand.attnets[0] = 5;
     intent.demand.expiresAtSlot = 103n;
     await Promise.all([a.applyIntent(intent, 100n), b.applyIntent(localIntent(other), 100n)]);
@@ -100,7 +129,6 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
     status.headRoot.fill(7);
     const updated = a.updateStatus(status);
     status.headRoot.fill(9);
-    status.forkDigest.fill(9);
     await updated;
     await b.connect(identity.peerId, [identity.localEndpoint], 5000n);
     for (const headSlot of [95n, 90n]) {
@@ -131,16 +159,8 @@ test("Status-only updates copy inputs and preserve advertisement and subscriptio
 
 test("Status-only validation uses the active fork and leaves rejected updates unpublished", async () => {
   const config = applicationConfig();
-  config.local.fork.fork = "fulu";
+  configureChain({ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0});
   config.local.status.earliestAvailableSlot = 0n;
-  config.requestForks = [{digest: config.local.fork.digest, fork: "fulu"}];
-  for (const direction of ["receive", "request"] as const) {
-    config.capabilities[direction] = config.capabilities[direction].map((protocol) =>
-      protocol === "/eth2/beacon_chain/req/status/1/ssz_snappy"
-        ? "/eth2/beacon_chain/req/status/2/ssz_snappy"
-        : protocol
-    );
-  }
   const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   try {
     await runtime.ready;
@@ -158,9 +178,6 @@ test("Status-only validation uses the active fork and leaves rejected updates un
       Reflect.set(invalid, field, value);
       expect(() => runtime.updateStatus(invalid)).toThrow();
     }
-    await expect(runtime.updateStatus({...config.local.status, forkDigest: new Uint8Array(4)})).rejects.toThrow(
-      "InvalidForkDigest"
-    );
     await expect(runtime.updateStatus({...config.local.status, earliestAvailableSlot: null})).rejects.toThrow(
       "MissingAvailability"
     );
@@ -316,7 +333,7 @@ test("actual 200/210 resources resolve and publish complete capacity", async () 
   const config = applicationConfig();
   config.profile = "beaconNode";
   config.resources = {
-    bridgeBudgetBytes: 16 * 1024 * 1024,
+    bridgeBudgetBytes: 80 * 1024 * 1024,
     connectionCapacity: 256,
     dialingCapacity: 16,
     handshakingCapacity: 32,
@@ -371,6 +388,8 @@ test("real authenticated connect, direct membership and generation-preserving im
     const before = await a.getPeers();
     expect(before.counts.connected).toBe(1);
     expect(before.peers[0].connection).not.toBeNull();
+    expect(before.peers[0].redialUntilMs).toBe(0n);
+    expect(before.peers[0].goodbyeUntilMs).toBe(0n);
     await a.disconnect(identityB.peerId);
     expect((await a.getDirectPeers()).identities).toEqual([identityB.peerId]);
     expect(await a.removeDirectPeer(identityB.peerId)).toBe(true);

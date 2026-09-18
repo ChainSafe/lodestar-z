@@ -64,6 +64,18 @@ pub const Server = struct {
         return self.request.waitingHost() or self.state == .serving;
     }
 
+    pub fn occupancy(self: *const Server) ?reqresp.metrics.InboundPhase {
+        if (!self.request.occupied()) return null;
+        if (!self.request.running()) return .terminal;
+        if (self.waitingHost()) return .waiting_host;
+        return switch (self.state) {
+            .receiving_request => .receiving_request,
+            .withheld => .withheld,
+            .writing_chunk, .finishing => .writing_response,
+            .serving => unreachable,
+        };
+    }
+
     pub fn deadline(self: *const Server, ctx: *const ReqResp) ?u64 {
         const request = &self.request;
         if (!request.running()) return null;
@@ -195,8 +207,12 @@ pub const Server = struct {
             .global_quota => owner.counters.aggregate_refusals +|= 1,
             .identity_capacity => owner.counters.identity_capacity_refusals +|= 1,
         }
-        owner.protocol_counters[@intFromEnum(request.protocol)].rate_limited +|= 1;
-        std.log.scoped(.network_reqresp_errors).debug("request_admission_refused connection={d}:{d} method={s} reason={s} cost={d}", .{ request.conn.index, request.conn.generation, @tagName(request.protocol), @tagName(decision), cost });
+        owner.recordAdmissionRefusal(request.stream, request.protocol, switch (decision) {
+            .allowed => unreachable,
+            .peer_quota => .peer_quota,
+            .global_quota => .global_quota,
+            .identity_capacity => .identity_capacity,
+        }, cost);
         return false;
     }
 
@@ -347,19 +363,27 @@ pub const Server = struct {
             .reqresp => |which| which,
             else => return error.UnknownProtocol,
         };
-        const bounds = which.info();
+        const bounds = owner.requestBounds(which);
         if (owner.inboundCount(stream.conn, null) >= owner.options.inbound_per_peer_max) {
+            owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
             return error.PeerSlotsExhausted;
         }
-        const index = owner.availableInboundFor(which) orelse return error.SlotsExhausted;
+        const index = owner.availableInboundFor(which) orelse {
+            owner.recordAdmissionRefusal(stream, which, .server_capacity, 0);
+            return error.SlotsExhausted;
+        };
         const slot = &owner.inbound[index];
+        if (ready.leftover.len > slot.request.io.read_buffer.len) return error.InvalidHandoff;
         const request_sink = owner.inboundSink(index);
         assert(request_sink.len >= bounds.request_max);
         if (!which.isControl() and owner.options.inbound_application_per_peer_max > 0 and
             owner.inboundApplicationCount(stream.conn) >= owner.options.inbound_application_per_peer_max)
+        {
+            owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
             return error.PeerSlotsExhausted;
+        }
         if (owner.inboundCount(stream.conn, which) >= constants.MAX_CONCURRENT_REQUESTS) {
-            owner.protocol_counters[@intFromEnum(which)].rate_limited +|= 1;
+            owner.recordAdmissionRefusal(stream, which, .protocol_concurrency, 0);
             return error.TooManyRequests;
         }
         slot.* = .{
@@ -409,7 +433,7 @@ pub const Server = struct {
     ) RespondError!void {
         const slot = try owner.servingSlot(request_handle);
         const request = &slot.request;
-        const bounds = request.protocol.info();
+        const bounds = owner.requestBounds(request.protocol);
         if (request.chunks >= request.chunks_max) return error.TooManyChunks;
         var response = codec.Bounds{ .min = bounds.response_min, .max = bounds.response_max };
         var digest: ?[constants.context_bytes_length]u8 = null;
@@ -417,7 +441,7 @@ pub const Server = struct {
             const selected = context orelse return error.UnknownFork;
             const known = owner.forkFor(selected.digest) orelse return error.UnknownFork;
             if (known != selected.fork) return error.UnknownFork;
-            response = request.protocol.responseBounds(known) catch return error.InvalidContext;
+            response = owner.responseBounds(request.protocol, known) catch return error.InvalidContext;
             digest = selected.digest;
         }
         if (!bounds.context_bytes and context != null) return error.InvalidContext;

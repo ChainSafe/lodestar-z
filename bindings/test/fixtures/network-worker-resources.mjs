@@ -4,9 +4,9 @@ import {once} from "node:events";
 import {setTimeout as delay} from "node:timers/promises";
 import {isMainThread, parentPort, Worker} from "node:worker_threads";
 import {createNativeNetworkApplicationRuntime} from "../../src/network.js";
-import {applicationConfig, localIntent} from "../utils/network.ts";
+import {applicationConfig, localIntent, topicName} from "../utils/network.ts";
 
-const topic = "/eth2/01020304/beacon_block/ssz_snappy";
+const topic = topicName();
 const blocks = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
 async function until(read) {
   for (let i = 0; i < 1000; i++) {
@@ -31,7 +31,10 @@ if (!isMainThread) {
   const outgoing = runtime.request(remote.peerId, blocks, new Uint8Array(32));
   const pending = outgoing.next().catch(() => undefined);
   const incoming = await until(() => runtime.takeIncomingRequest());
-  await until(() => runtime.diagnostics().gossip.queued > 0);
+  await until(() => {
+    for (const check of runtime.drainGossipChecks()) runtime.classifyGossip(check.handle, false);
+    return runtime.diagnostics().gossip.queued > 0;
+  });
   const batch = runtime.drainGossip();
   assert.equal(batch.messages.length, 1);
   parentPort.postMessage({port: identity.localEndpoint.port, diagnostics: runtime.diagnostics()});
@@ -50,7 +53,9 @@ if (!isMainThread) {
     await until(async () => (await runtime.getGossipDiagnostics()).peers.some((peer) => peer.outboundReady));
     await until(async () => {
       try {
-        await runtime.publishGossip(topic, new Uint8Array(10).fill(7), {allowZeroPeers: false});
+        const payload = new Uint8Array(4000);
+        new DataView(payload.buffer).setBigUint64(100, config.initialSlot, true);
+        await runtime.publishGossip(topic, payload, {allowZeroPeers: false});
         return true;
       } catch (error) {
         if (error.reason === "no_peers_subscribed_to_topic") return false;

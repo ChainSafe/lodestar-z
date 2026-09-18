@@ -5,6 +5,7 @@ const constants = @import("constants.zig");
 const assert = std.debug.assert;
 
 pub const page_bytes: usize = 4096;
+pub const inline_bytes: usize = 512;
 comptime {
     assert(topic.topic_max_len < 128);
 }
@@ -12,12 +13,15 @@ pub const none: u32 = std.math.maxInt(u32);
 pub const Handle = struct { index: u32, generation: u64 };
 pub const Cursor = struct { page: u32, offset: u32 = 0, remaining: u32 };
 pub const Entry = struct {
+    kind: topic.Kind = .beacon_block,
+    retention_charged: bool = false,
     generation: u64 = 0,
     active: bool = false,
     provisional: bool = false,
     validation: bool = false,
     history: bool = false,
     tx: u32 = 0,
+    inline_data: [inline_bytes]u8 = undefined,
     first: u32 = none,
     len: u32 = 0,
     id: topic.MessageId = undefined,
@@ -57,7 +61,11 @@ pub const Store = struct {
     used_entries: usize = 0,
     retired_entries: usize = 0,
     entry_cursor: usize = 0,
-    released: bool = false,
+    limits: ?@import("../gossip_processor/limits.zig").Limits = null,
+    used_by_kind: [@import("../gossip_processor/limits.zig").kind_count]usize = @splat(0),
+    entries_by_kind: [@import("../gossip_processor/limits.zig").kind_count]usize = @splat(0),
+    retained_entries_by_kind: [@import("../gossip_processor/limits.zig").kind_count]usize = @splat(0),
+    retained_by_kind: [@import("../gossip_processor/limits.zig").kind_count]usize = @splat(0),
 
     pub fn metadataBytes(capacity: usize, byte_capacity: usize) usize {
         return capacity * @sizeOf(Entry) + byte_capacity / page_bytes * @sizeOf(u32);
@@ -98,18 +106,35 @@ pub const Store = struct {
 
     pub fn pagesFor(len: usize) usize {
         assert(len <= constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE));
-        return (len + page_bytes - 1) / page_bytes;
+        return if (len <= inline_bytes) 0 else (len + page_bytes - 1) / page_bytes;
     }
 
+    pub fn kindRoom(self: *const Store, kind: topic.Kind, len: usize) bool {
+        const limits = self.limits orelse return true;
+        const k = @intFromEnum(kind);
+        const pages = pagesFor(len);
+        const capacity = limits[k].bytes / page_bytes;
+        const pending = self.used_by_kind[k] - self.retained_by_kind[k];
+        return pending <= capacity and pages <= capacity - pending and self.entries_by_kind[k] - self.retained_entries_by_kind[k] < limits[k].items;
+    }
+    pub fn canRetain(self: *const Store, handle: Handle) bool {
+        const limits = self.limits orelse return true;
+        const entry = self.get(handle).?;
+        if (entry.retention_charged) return true;
+        const k = @intFromEnum(entry.kind);
+        return pagesFor(entry.len) <= limits[k].bytes / page_bytes - self.retained_by_kind[k] and self.retained_entries_by_kind[k] < limits[k].items;
+    }
     pub fn put(self: *Store, id: topic.MessageId, name: []const u8, data: []const u8) ?Handle {
         assert(name.len <= topic.topic_max_len);
-        if (!self.canReserve(data.len)) return null;
+        const kind = if (topic.parseCanonical(name)) |canonical| canonical.name.kind else .beacon_block;
+        if (!self.canReserve(data.len) or !self.kindRoom(kind, data.len)) return null;
         for (0..self.entries.len) |_| {
             const index = self.entry_cursor;
             self.entry_cursor = (index + 1) % self.entries.len;
             const entry = &self.entries[index];
             if (entry.active or entry.generation == std.math.maxInt(u64)) continue;
             entry.* = .{
+                .kind = kind,
                 .generation = entry.generation + 1,
                 .active = true,
                 .provisional = true,
@@ -118,6 +143,7 @@ pub const Store = struct {
                 .topic_len = @intCast(name.len),
             };
             entry.prefix_len = @intCast(encodePrefix(&entry.prefix, &entry.trailer, data.len, name).prefix);
+            if (data.len <= inline_bytes) @memcpy(entry.inline_data[0..data.len], data);
             var link = &entry.first;
             var offset: usize = 0;
             for (0..pagesFor(data.len)) |_| {
@@ -133,6 +159,8 @@ pub const Store = struct {
             }
             link.* = none;
             self.used_entries += 1;
+            self.used_by_kind[@intFromEnum(kind)] += pagesFor(data.len);
+            self.entries_by_kind[@intFromEnum(kind)] += 1;
             return .{ .index = @intCast(index), .generation = entry.generation };
         }
         return null;
@@ -147,6 +175,10 @@ pub const Store = struct {
         const entry = self.get(handle).?;
         assert(!entry.provisional and at.remaining <= entry.len);
         if (at.remaining == 0) return &.{};
+        if (entry.len <= inline_bytes) {
+            assert(at.page == none and at.offset <= entry.len and at.remaining <= entry.len - at.offset);
+            return entry.inline_data[at.offset..][0..at.remaining];
+        }
         assert(at.page < self.next.len and at.offset < page_bytes);
         const len = @min(at.remaining, page_bytes - at.offset);
         return self.bytes[@as(usize, at.page) * page_bytes + at.offset ..][0..len];
@@ -181,7 +213,12 @@ pub const Store = struct {
     }
     pub fn retainHistory(self: *Store, h: Handle) void {
         const e = self.mutable(h);
-        assert(!e.history);
+        assert(!e.history and self.canRetain(h));
+        if (!e.retention_charged) {
+            self.retained_by_kind[@intFromEnum(e.kind)] += pagesFor(e.len);
+            self.retained_entries_by_kind[@intFromEnum(e.kind)] += 1;
+            e.retention_charged = true;
+        }
         e.history = true;
     }
     pub fn releaseHistory(self: *Store, h: Handle) void {
@@ -218,8 +255,13 @@ pub const Store = struct {
             page = next;
         }
         assert(page == none);
+        self.used_by_kind[@intFromEnum(e.kind)] -= pagesFor(e.len);
+        self.entries_by_kind[@intFromEnum(e.kind)] -= 1;
+        if (e.retention_charged) {
+            self.retained_by_kind[@intFromEnum(e.kind)] -= pagesFor(e.len);
+            self.retained_entries_by_kind[@intFromEnum(e.kind)] -= 1;
+        }
         e.active = false;
-        self.released = true;
         self.used_entries -= 1;
         if (e.generation == std.math.maxInt(u64)) self.retired_entries += 1;
     }
@@ -249,9 +291,9 @@ test "gossip store independent retains pages and stale handles" {
     try std.testing.expectEqual(@as(usize, 0), store.used_entries);
 }
 
-test "gossip store small messages use four KiB and roll back allocation failures" {
+test "gossip store small messages use startup inline storage and roll back allocation failures" {
     const a = std.testing.allocator;
-    var store = try Store.init(a, 2048, 2048 * page_bytes);
+    var store = try Store.init(a, 2048, page_bytes);
     defer store.deinit(a);
     for (0..2048) |i| {
         var id = [_]u8{0} ** 20;
@@ -260,11 +302,68 @@ test "gossip store small messages use four KiB and roll back allocation failures
         store.retainValidation(h);
         store.seal(h);
     }
-    try std.testing.expectEqual(@as(usize, 0), store.free_pages);
+    try std.testing.expectEqual(@as(usize, 1), store.free_pages);
     try std.testing.expectEqual(@as(usize, 2048), store.used_entries);
     try std.testing.checkAllAllocationFailures(a, allocationProbe, .{});
 }
 fn allocationProbe(a: std.mem.Allocator) !void {
     var store = try Store.init(a, 8, 8 * page_bytes);
     defer store.deinit(a);
+}
+
+test "gossip retained pages and inline descriptors preserve fresh capacity by kind" {
+    const limits_mod = @import("../gossip_processor/limits.zig");
+    const limits: limits_mod.Limits = @splat(.{ .items = 4, .bytes = page_bytes });
+    var store = try Store.init(std.testing.allocator, 2 * limits_mod.items(&limits), 2 * limits_mod.bytes(&limits));
+    defer store.deinit(std.testing.allocator);
+    store.limits = limits;
+    const name = "/eth2/01020304/beacon_attestation_0/ssz_snappy";
+    var retained: [4]Handle = undefined;
+    for (&retained) |*handle| {
+        handle.* = store.put(@splat(1), name, "small").?;
+        store.retainHistory(handle.*);
+        store.seal(handle.*);
+        store.retainTx(handle.*);
+        store.releaseHistory(handle.*);
+    }
+    var pending: [4]Handle = undefined;
+    for (&pending) |*handle| {
+        handle.* = store.put(@splat(2), name, "fresh").?;
+        store.retainValidation(handle.*);
+        store.seal(handle.*);
+        try std.testing.expect(!store.canRetain(handle.*));
+    }
+    try std.testing.expect(store.put(@splat(3), name, "over") == null);
+    const block = store.put(@splat(4), "/eth2/01020304/beacon_block/ssz_snappy", "block").?;
+    store.seal(block);
+    for (retained) |handle| store.releaseTx(handle);
+    for (pending) |handle| store.releaseValidation(handle);
+    try std.testing.expectEqual(@as(usize, 0), store.used_entries);
+    try std.testing.expectEqual(store.next.len, store.free_pages);
+}
+
+test "gossip retained page allowance cannot consume pending or other kind pages" {
+    const limits_mod = @import("../gossip_processor/limits.zig");
+    const limits: limits_mod.Limits = @splat(.{ .items = 4, .bytes = page_bytes });
+    var store = try Store.init(std.testing.allocator, 2 * limits_mod.items(&limits), 2 * limits_mod.bytes(&limits));
+    defer store.deinit(std.testing.allocator);
+    store.limits = limits;
+    const name = "/eth2/01020304/beacon_attestation_0/ssz_snappy";
+    const payload: [inline_bytes + 1]u8 = @splat(9);
+    const retained = store.put(@splat(1), name, &payload).?;
+    store.retainHistory(retained);
+    store.seal(retained);
+    store.retainTx(retained);
+    store.releaseHistory(retained);
+    const pending = store.put(@splat(2), name, &payload).?;
+    store.retainValidation(pending);
+    store.seal(pending);
+    try std.testing.expect(!store.canRetain(pending));
+    try std.testing.expect(store.put(@splat(3), name, &payload) == null);
+    const block = store.put(@splat(4), "/eth2/01020304/beacon_block/ssz_snappy", &payload).?;
+    store.seal(block);
+    store.releaseTx(retained);
+    try std.testing.expect(store.canRetain(pending));
+    store.releaseValidation(pending);
+    try std.testing.expectEqual(store.next.len, store.free_pages);
 }

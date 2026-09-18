@@ -1,0 +1,160 @@
+const std = @import("std");
+const config = @import("config");
+const ct = @import("consensus_types");
+const preset = @import("preset");
+const constants = @import("constants");
+const topics = @import("gossipsub/topic_policy.zig");
+const policy = @import("reqresp/request_policy.zig");
+const core = @import("network_core.zig");
+const peers = @import("peers/types.zig");
+const capabilities = @import("capabilities.zig");
+
+pub const boundary_max = topics.boundary_max;
+pub const Boundary = struct { epoch: u64, fork: config.ForkSeq, digest: [4]u8, version: [4]u8 };
+
+/// Startup-derived network data. No slice or pointer borrows the source BeaconConfig.
+pub const Plan = struct {
+    boundaries: [boundary_max]Boundary = undefined,
+    boundary_count: u8 = 0,
+    forks: [boundary_max]@import("reqresp/root.zig").ForkEntry = undefined,
+    topics: [boundary_max]topics.Boundary = undefined,
+    supported_count: u8 = 0,
+    policy: policy.Policy,
+    phase0_digest: ?[4]u8 = null,
+    fulu_scheduled: bool,
+    custody_groups: u16,
+    sampling_groups: u16,
+    serve_light_clients: bool,
+
+    pub fn init(cfg: *const config.BeaconConfig, serve_light_clients: bool) !Plan {
+        const chain = &cfg.chain;
+        if (chain.PRESET_BASE != preset.active_preset or chain.BLOB_SCHEDULE.len > boundary_max - config.ForkSeq.count or
+            chain.MAX_PAYLOAD_SIZE == 0 or chain.MAX_PAYLOAD_SIZE > @import("gossipsub/constants.zig").MAX_PAYLOAD_SIZE or
+            chain.NUMBER_OF_CUSTODY_GROUPS == 0 or chain.NUMBER_OF_CUSTODY_GROUPS > preset.NUMBER_OF_CUSTODY_GROUPS or
+            chain.SAMPLES_PER_SLOT == 0 or chain.SAMPLES_PER_SLOT > chain.NUMBER_OF_CUSTODY_GROUPS)
+            return error.InvalidNetworkChain;
+        var epochs: [boundary_max]u64 = undefined;
+        var count: usize = 0;
+        for (cfg.forks_ascending_epoch_order, 0..) |fork, i| {
+            if (i > 0 and fork.epoch < cfg.forks_ascending_epoch_order[i - 1].epoch) return error.InvalidNetworkChain;
+            if (fork.epoch == constants.FAR_FUTURE_EPOCH) continue;
+            epochs[count] = fork.epoch;
+            count += 1;
+        }
+        for (chain.BLOB_SCHEDULE, 0..) |entry, i| {
+            if (entry.MAX_BLOBS_PER_BLOCK == 0 or entry.MAX_BLOBS_PER_BLOCK > preset.preset.MAX_BLOB_COMMITMENTS_PER_BLOCK or
+                (i > 0 and entry.EPOCH <= chain.BLOB_SCHEDULE[i - 1].EPOCH)) return error.InvalidNetworkChain;
+            if (entry.EPOCH < chain.FULU_FORK_EPOCH or entry.EPOCH >= chain.GLOAS_FORK_EPOCH) continue;
+            epochs[count] = entry.EPOCH;
+            count += 1;
+        }
+        std.sort.insertion(u64, epochs[0..count], {}, std.sort.asc(u64));
+        var blob_storage: [policy.schedule_max]policy.BlobLimit = undefined;
+        var request = try policy.Config.fromBeaconConfig(cfg, &blob_storage);
+        request.host_integer_max = 9007199254740991;
+        var result: Plan = .{
+            .policy = try policy.Policy.init(&request),
+            .fulu_scheduled = chain.FULU_FORK_EPOCH != constants.FAR_FUTURE_EPOCH,
+            .custody_groups = @intCast(chain.NUMBER_OF_CUSTODY_GROUPS),
+            .sampling_groups = @intCast(chain.SAMPLES_PER_SLOT),
+            .serve_light_clients = serve_light_clients,
+        };
+        for (epochs[0..count]) |epoch| {
+            if (result.boundary_count > 0 and result.boundaries[result.boundary_count - 1].epoch == epoch) continue;
+            _ = std.math.mul(u64, epoch, preset.preset.SLOTS_PER_EPOCH) catch return error.InvalidNetworkChain;
+            const fork = cfg.forkInfoAtEpoch(epoch);
+            const digest = config.fork_digest.computeForkDigest(cfg, epoch);
+            result.boundaries[result.boundary_count] = .{ .epoch = epoch, .fork = fork.fork_seq, .version = fork.version, .digest = digest };
+            result.boundary_count += 1;
+            if (fork.fork_seq.gte(.gloas)) continue;
+            for (result.forks[0..result.supported_count]) |prior| {
+                if (std.mem.eql(u8, &prior.digest, &digest)) return error.InvalidNetworkChain;
+            }
+            result.forks[result.supported_count] = .{ .fork = fork.fork_seq, .digest = digest };
+            result.topics[result.supported_count] = try topicBoundary(chain, fork.fork_seq, digest);
+            result.supported_count += 1;
+            if (fork.fork_seq == .phase0) result.phase0_digest = digest;
+        }
+        if (result.supported_count == 0) return error.UnsupportedNetworkFork;
+        _ = try topics.validate(result.topics[0..result.supported_count]);
+        return result;
+    }
+
+    pub fn requestPolicy(self: *const Plan) policy.Config {
+        var result = self.policy.config;
+        result.blob_schedule = self.policy.points[0..self.policy.point_count];
+        return result;
+    }
+
+    pub fn update(self: *const Plan, local: peers.LocalState, endpoints: ?core.AdvertisementEndpoints, slot: u64) !core.LocalUpdate {
+        const epoch = slot / preset.preset.SLOTS_PER_EPOCH;
+        var index: usize = 0;
+        for (self.boundaries[0..self.boundary_count], 0..) |boundary, i| {
+            if (boundary.epoch > epoch) break;
+            index = i;
+        }
+        const current = self.boundaries[index];
+        if (current.fork.gte(.gloas)) return error.UnsupportedNetworkFork;
+        var result: core.LocalUpdate = .{
+            .local = local,
+            .endpoints = endpoints,
+            .schedule = .{ .fulu_scheduled = self.fulu_scheduled, .next_version = current.version },
+            .capabilities = capabilities.withIdentify(try capabilities.forFork(current.fork, self.serve_light_clients, &.{ .v1_2, .v1_1, .v1_0 })),
+        };
+        result.local.fork = .{
+            .fork = current.fork,
+            .digest = current.digest,
+            .custody_groups = self.custody_groups,
+            .minimum_sampling_groups = if (current.fork.gte(.fulu)) self.sampling_groups else 0,
+        };
+        result.local.status.fork_digest = current.digest;
+        if (index + 1 < self.boundary_count) {
+            const next = self.boundaries[index + 1];
+            result.schedule.next_version = next.version;
+            result.schedule.next_epoch = next.epoch;
+            result.schedule.next_digest = next.digest;
+        }
+        if (self.fulu_scheduled and result.local.metadata.custody_group_count == null) return error.MissingCustodyAdvertisement;
+        try @import("peers/control_wire.zig").copyLocal(&result.local, &result.local);
+        return result;
+    }
+};
+
+fn rule(comptime T: type, count: u64, payload_max: u64) !topics.Rule {
+    if (count == 0 or count > std.math.maxInt(u16)) return error.InvalidNetworkChain;
+    const minimum = if (@hasDecl(T, "fixed_size")) T.fixed_size else T.min_size;
+    const maximum = @min(if (@hasDecl(T, "fixed_size")) T.fixed_size else T.max_size, payload_max);
+    if (minimum > maximum) return error.InvalidNetworkChain;
+    return .{ .count = @intCast(count), .ssz_min = minimum, .ssz_max = @intCast(maximum) };
+}
+
+fn topicBoundary(chain: *const config.ChainConfig, fork: config.ForkSeq, digest: [4]u8) !topics.Boundary {
+    var result: topics.Boundary = .{ .digest = digest };
+    const max = chain.MAX_PAYLOAD_SIZE;
+    const r = &result.rules;
+    r[@intFromEnum(topics.Kind.proposer_slashing)] = try rule(ct.phase0.ProposerSlashing, 1, max);
+    r[@intFromEnum(topics.Kind.voluntary_exit)] = try rule(ct.phase0.SignedVoluntaryExit, 1, max);
+    switch (fork) {
+        .gloas => return error.UnsupportedNetworkFork,
+        inline else => |selected| {
+            const types = @field(ct, @tagName(selected));
+            r[@intFromEnum(topics.Kind.beacon_block)] = try rule(types.SignedBeaconBlock, 1, max);
+            r[@intFromEnum(topics.Kind.beacon_aggregate_and_proof)] = try rule(types.SignedAggregateAndProof, 1, max);
+            r[@intFromEnum(topics.Kind.beacon_attestation)] = try rule(if (comptime selected.gte(.electra)) types.SingleAttestation else types.Attestation, constants.ATTESTATION_SUBNET_COUNT, max);
+            r[@intFromEnum(topics.Kind.attester_slashing)] = try rule(types.AttesterSlashing, 1, max);
+            if (comptime selected.gte(.altair)) {
+                r[@intFromEnum(topics.Kind.sync_committee_contribution_and_proof)] = try rule(ct.altair.SignedContributionAndProof, 1, max);
+                r[@intFromEnum(topics.Kind.sync_committee)] = try rule(ct.altair.SyncCommitteeMessage, constants.SYNC_COMMITTEE_SUBNET_COUNT, max);
+                r[@intFromEnum(topics.Kind.light_client_finality_update)] = try rule(types.LightClientFinalityUpdate, 1, max);
+                r[@intFromEnum(topics.Kind.light_client_optimistic_update)] = try rule(types.LightClientOptimisticUpdate, 1, max);
+            }
+            if (comptime selected.gte(.capella)) r[@intFromEnum(topics.Kind.bls_to_execution_change)] = try rule(ct.capella.SignedBLSToExecutionChange, 1, max);
+            if (comptime selected.gte(.fulu)) {
+                r[@intFromEnum(topics.Kind.data_column_sidecar)] = try rule(types.DataColumnSidecar, chain.DATA_COLUMN_SIDECAR_SUBNET_COUNT, max);
+            } else if (comptime selected.gte(.deneb)) {
+                r[@intFromEnum(topics.Kind.blob_sidecar)] = try rule(ct.deneb.BlobSidecar, if (selected.gte(.electra)) chain.BLOB_SIDECAR_SUBNET_COUNT_ELECTRA else chain.BLOB_SIDECAR_SUBNET_COUNT, max);
+            }
+        },
+    }
+    return result;
+}

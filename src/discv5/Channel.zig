@@ -10,12 +10,14 @@ const SessionStore = @import("SessionStore.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const packet = @import("wire/packet.zig");
+const Admission = @import("admission.zig").Admission;
 
 pub const Error = crypto.Error || enr.Error || packet.Error || SessionStore.Error || error{
     InvalidLocalRecord,
     MissingSession,
     RequestTooLargeForHandshake,
     StaleLocalRecord,
+    AdmissionLimited,
 };
 
 pub const InitError = SessionStore.InitError || error{ InvalidLocalRecord, InvalidTimeout };
@@ -118,6 +120,7 @@ local_key: crypto.KeyPair,
 local_record: enr.Record,
 config: Config,
 sessions: SessionStore,
+admission: Admission,
 
 pub fn init(
     self: *Channel,
@@ -132,12 +135,15 @@ pub fn init(
     if (config.challenge_timeout_ms == 0 or config.session_idle_timeout_ms == 0)
         return InitError.InvalidTimeout;
     try self.sessions.init(allocator, config.session_capacity, config.challenge_capacity);
+    errdefer self.sessions.deinit(allocator);
+    self.admission = try Admission.init(allocator);
     self.local_key = local_key;
     self.local_record = local_record;
     self.config = config;
 }
 
 pub fn deinit(self: *Channel, allocator: std.mem.Allocator) void {
+    self.admission.deinit(allocator);
     self.sessions.deinit(allocator);
     std.crypto.secureZero(u8, std.mem.asBytes(&self.local_key));
     self.* = undefined;
@@ -244,8 +250,8 @@ pub fn receive(
 }
 
 /// Sends a WHOAREYOU for the packet that carried `request_nonce`. Returns null when a challenge
-/// for `peer` is already pending. `known` sets the ENR sequence to ask for and the key to verify
-/// the handshake against.
+/// for `peer` is already pending. AdmissionLimited leaves no new challenge. `known` sets the
+/// ENR sequence to ask for and the key to verify the handshake against.
 pub fn challenge(
     self: *Channel,
     out: []u8,
@@ -255,6 +261,9 @@ pub fn challenge(
     entropy: *const ChallengeEntropy,
     now_ms: u64,
 ) Error!?u16 {
+    if (self.liveChallenge(peer, now_ms) != null) return null;
+    if (out.len < constants.whoareyou_packet_size) return Error.BufferTooSmall;
+    if (!self.admission.allow(.challenge, &peer.address, now_ms)) return Error.AdmissionLimited;
     var challenge_data: [constants.whoareyou_packet_size]u8 = undefined;
     const encoded = try packet.encodeWhoareyou(out, .{
         .masking_iv = &entropy.masking_iv,
@@ -263,7 +272,8 @@ pub fn challenge(
         .id_nonce = &entropy.id_nonce,
         .enr_sequence = if (known) |identity| identity.sequence else 0,
     }, &challenge_data);
-    if (!self.sessions.putChallenge(peer, &challenge_data, known, now_ms)) return null;
+    const inserted = self.sessions.putChallenge(peer, &challenge_data, known, now_ms);
+    std.debug.assert(inserted);
     return @intCast(encoded.len);
 }
 
@@ -379,8 +389,11 @@ fn receiveHandshake(
     now_ms: u64,
     scratch: *Scratch,
 ) Inbound {
-    const stored = self.sessions.getChallenge(peer) orelse
+    const stored = self.liveChallenge(peer, now_ms) orelse
         return rejected(.unexpected_handshake);
+    if (!self.admission.allow(.handshake, &peer.address, now_ms)) return rejected(.admission_limited);
+    // Consume before any cryptography so failure cannot reuse the same verification allowance.
+    self.sessions.removeChallenge(peer);
     const identity = selectIdentity(authdata.enr, stored.known, &peer.node_id) catch |err|
         return rejected(switch (err) {
             IdentityError.MissingIdentity => .invalid_handshake,
@@ -409,13 +422,21 @@ fn receiveHandshake(
     };
     defer std.crypto.secureZero(u8, std.mem.asBytes(&active));
     self.sessions.install(peer, &active, now_ms);
-    self.sessions.removeChallenge(peer);
     return .{ .authenticated = .{
         .peer = peer,
         .nonce = decoded.static_header.nonce,
         .plaintext = plaintext,
         .record = identity.update,
     } };
+}
+
+fn liveChallenge(self: *Channel, peer: types.Endpoint, now_ms: u64) ?SessionStore.Challenge {
+    const stored = self.sessions.getChallenge(peer) orelse return null;
+    if (now_ms >= stored.sent_at_ms +| self.config.challenge_timeout_ms) {
+        self.sessions.removeChallenge(peer);
+        return null;
+    }
+    return stored;
 }
 
 fn encodeOrdinary(

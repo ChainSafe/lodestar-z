@@ -53,6 +53,8 @@ test "engine counts only inbound handshakes against the permit bound" {
 
     try std.testing.expect(try pair.transfer(&pair.client, &pair.server, client_address, false));
     try std.testing.expectEqual(@as(u16, 0), pair.client.registry.handshaking);
+    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
+    try std.testing.expect(try pair.transfer(&pair.client, &pair.server, client_address, false));
     try std.testing.expectEqual(@as(u16, 1), pair.server.registry.handshaking);
 
     try pair.pump();

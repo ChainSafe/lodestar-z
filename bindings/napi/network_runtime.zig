@@ -339,7 +339,7 @@ pub const Runtime = struct {
         if (self.gossip) |*gossip| {
             result.gossip = gossip.snapshot();
             for (gossip.cells) |cell| result.copyingPins += @intFromBool(cell.state == .copying);
-            result.liveBridgeRequestedBytes += gossip.cells.len * @sizeOf(gossip_mod.Cell) + result.gossip.payloadBytes + result.gossip.publicationBytes;
+            result.liveBridgeRequestedBytes += gossip_mod.Table.backingBytes(gossip.cells.len, gossip.store.bytes.len) + result.gossip.publicationBytes;
         }
         return result;
     }

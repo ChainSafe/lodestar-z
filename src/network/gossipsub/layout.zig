@@ -37,8 +37,7 @@ pub const Layout = struct {
     payload_entries: usize,
     payload_bytes: usize,
     deliveries: usize,
-    receive_frames: usize,
-    receive_frame_bytes: usize,
+    receive_arena_bytes: usize,
     session_buffer_bytes: usize,
     output_bytes: usize,
     namespace_bytes: usize,
@@ -51,11 +50,10 @@ pub const Layout = struct {
             .seen = options.seen_capacity,
             .validations = options.validation_capacity,
             .fingerprints = 4 * options.validation_capacity,
-            .payload_entries = options.mcache_capacity + options.validation_capacity,
+            .payload_entries = @max(options.mcache_capacity, if (options.processor_limits != null) options.validation_capacity else 0) + options.validation_capacity,
             .payload_bytes = options.mcache_arena_bytes / storage.page_bytes * storage.page_bytes,
             .deliveries = delivery.Pool.capacity(options.connected_capacity, options.validation_capacity),
-            .receive_frames = options.large_pool_count,
-            .receive_frame_bytes = options.large_message_bytes,
+            .receive_arena_bytes = options.receive_arena_bytes,
             .session_buffer_bytes = @import("peer_io.zig").PeerIo.bufferBytes(options),
             .output_bytes = options.decompressed_arena_bytes,
             .namespace_bytes = if (options.topic_policy) |boundaries| policy.Namespace.backingBytes(boundaries, options.connected_capacity) else 0,
@@ -70,7 +68,7 @@ pub const Layout = struct {
             peers.PeerBook.backingBytes(self.retained) +
             @import("messages.zig").Messages.metadataBytes(self) +
             @import("recovery.zig").Recovery.backingBytes() + self.namespace_bytes;
-        const frames = self.receive_frames * self.receive_frame_bytes;
+        const frames = self.receive_arena_bytes + constants.GOSSIP_MAX_SIZE;
         const buffers = self.sessions * self.session_buffer_bytes;
         return .{
             .retained_bytes = self.payload_bytes,
@@ -81,7 +79,7 @@ pub const Layout = struct {
             .data_descriptors_per_peer = delivery.per_peer_limit,
             .data_descriptors_total = self.deliveries,
             .data_descriptors_reserved_per_peer = delivery.per_peer_reserve,
-            .legal_atomic_work_bytes = @max(
+            .legal_atomic_work_bytes = constants.GOSSIP_MAX_SIZE + @max(
                 2 * constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE) + 2 * constants.MAX_PAYLOAD_SIZE,
                 @import("gossipsub.zig").Gossipsub.ihaveWorkBound(constants.GOSSIP_MAX_SIZE, self.seen + validation.Validation.attributionCapacity(self.validations), constants.promises_cap, constants.promises_cap),
             ),

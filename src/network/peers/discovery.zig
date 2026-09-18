@@ -1,11 +1,11 @@
-//! One foreground walk and canonical DiscV5 maintenance share a borrowed Transport. Keep the
+//! One demand-driven walk and DiscV5 liveness probes share a borrowed Transport. Keep the
 //! Transport at a stable address, serialize entry, and cancel before its teardown.
 const std = @import("std");
 const d = @import("discv5");
 const adapter = @import("enr.zig");
 const types = @import("types.zig");
 
-pub const Error = d.Transport.Error || d.Maintenance.Error || adapter.Error || std.mem.Allocator.Error || error{ Stopped, InvalidOptions, InvalidDemand };
+pub const Error = d.Transport.Error || d.Maintenance.Error || d.Lookup.Error || adapter.Error || std.mem.Allocator.Error || error{ Stopped, InvalidOptions, InvalidDemand, InvalidBootstrap, TooManyBootstraps };
 pub const queries_max = 128;
 pub const Rejection = enum { missing_eth2, incompatible_fork, invalid_enr, no_quic, endpoint_family, endpoint_scope, demand, output_capacity };
 pub const rejection_count = @typeInfo(Rejection).@"enum".fields.len;
@@ -61,9 +61,7 @@ pub const Result = struct {
     failure_stage: d.Transport.FailureStage = .coordinator,
 };
 const Storage = struct {
-    foreground: d.Lookup.Candidates,
-    background: d.Lookup.Candidates,
-    bootstrap: [d.Maintenance.bootstrap_max]d.identity.enr.Record,
+    candidates: d.Lookup.Candidates,
     expiries: [d.CallTable.capacity_max]d.CallTable.Expired,
 };
 
@@ -92,13 +90,25 @@ pub const Discovery = struct {
     pub fn init(allocator: std.mem.Allocator, transport: *d.Transport, context: *const types.ForkContext, bootstrap: []const d.identity.enr.Record, now_ms: u64, options: Options) Error!Discovery {
         try context.validate();
         if (options.query_interval_ms == 0 or options.query_interval_ms > 86_400_000 or options.local_retry_ms == 0 or options.local_retry_ms > 86_400_000) return error.InvalidOptions;
-        if (bootstrap.len > d.Maintenance.bootstrap_max) return error.TooManyBootstraps;
+        if (bootstrap.len > d.types.bootstrap_max) return error.TooManyBootstraps;
+        var records: [d.types.bootstrap_max]d.identity.enr.Record = undefined;
+        for (bootstrap, records[0..bootstrap.len]) |*record, *copy| {
+            copy.* = try d.identity.enr.Record.init(record.slice());
+            if (copy.endpoint() == null) return error.InvalidBootstrap;
+        }
+        var maintenance: d.Maintenance = undefined;
+        try maintenance.init(now_ms, options.maintenance, transport.sockets.mode());
         const storage = try allocator.create(Storage);
         errdefer allocator.destroy(storage);
 
-        for (bootstrap, 0..) |*record, index| storage.bootstrap[index] = try d.identity.enr.Record.init(record.slice());
-        var maintenance: d.Maintenance = undefined;
-        try maintenance.init(&storage.background, storage.bootstrap[0..bootstrap.len], now_ms, options.maintenance, transport.sockets.mode());
+        for (records[0..bootstrap.len]) |*record| {
+            const address = record.endpointFor(transport.sockets.mode()) orelse continue;
+            const peer: d.types.Endpoint = .{ .node_id = record.node_id, .address = address };
+            _ = transport.engine.routing.addKnown(&peer, record) catch |err| switch (err) {
+                error.AddressLimit, error.SelfEntry => continue,
+                else => unreachable,
+            };
+        }
         return .{ .allocator = allocator, .transport = transport, .storage = storage, .maintenance = maintenance, .context = context.*, .options = options, .query_due_ms = now_ms };
     }
 
@@ -219,7 +229,7 @@ pub const Discovery = struct {
             var seeds: [d.Lookup.result_max]d.RoutingTable.Entry = undefined;
             const closest = self.transport.engine.closestNodes(&target, &seeds);
             var lookup: d.Lookup = undefined;
-            try lookup.init(&self.storage.foreground, self.transport.engine.localRecord().node_id, target, closest, self.transport.sockets.mode());
+            try lookup.init(&self.storage.candidates, self.transport.engine.localRecord().node_id, target, closest, self.transport.sockets.mode());
             lookup.filter = .{ .context = &self.context, .matches = matchesNetwork };
             lookup.query_limit = queries_max;
             self.lookup = lookup;

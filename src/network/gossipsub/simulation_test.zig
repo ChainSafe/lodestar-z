@@ -64,7 +64,7 @@ const Node = struct {
             .subscription_change => {},
         };
         if (done) {
-            if (self.core.sessions.finishFrame(io)) self.core.wakeStorage();
+            _ = self.core.sessions.finishFrame(io);
         }
     }
 
@@ -79,9 +79,12 @@ const Node = struct {
         @memcpy(rx.unread[0..take], segment[0..take]);
         rx.unread_start = 0;
         rx.unread_end = take;
-        const body = target.core.sessions.frameBody(rx) orelse return error.TestUnexpectedResult;
-        const result = try rx.feedUnread(body, take, now.mono_ms);
-        try std.testing.expectEqual(take, result.consumed);
+        for (0..take + 1) |_| {
+            if (rx.unread_start == rx.unread_end) break;
+            const result = try rx.feedUnread(&target.core.sessions.receive_pool, rx.unread_end - rx.unread_start, now.mono_ms);
+            try std.testing.expect(result.consumed > 0);
+        }
+        try std.testing.expectEqual(take, rx.unread_start);
         if (tx.tx.advance(&source.core.messages.store, take)) |completion| source.core.writeCompleted(source.session, completion, now.mono_ms);
         rx.unread_start = 0;
         rx.unread_end = 0;

@@ -4,6 +4,7 @@
 //! shared UDP sockets and bounded packet I/O. Lookup and Maintenance own discovery policy.
 
 pub const CallTable = @import("CallTable.zig");
+pub const admission = @import("admission.zig");
 pub const Channel = @import("Channel.zig");
 pub const sockets = @import("udp");
 pub const Transport = @import("Transport.zig");
@@ -20,6 +21,7 @@ pub const types = @import("types.zig");
 pub const wire = @import("wire/root.zig");
 
 test {
+    _ = admission;
     _ = CallTable;
     _ = Channel;
     _ = Transport;

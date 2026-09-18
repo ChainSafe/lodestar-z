@@ -37,7 +37,10 @@ const version = process.argv[2] === "v11" ? "v11" : "v12";
 const protocols = version === "v11" ? ["/meshsub/1.1.0"] : ["/meshsub/1.2.0", "/meshsub/1.1.0"];
 const phase0 = new Set([TOPIC]);
 const rawMode = process.argv[3] === "raw-gossip";
-const managed = process.argv[3] === "managed" ? new ManagedControl() : null;
+const managed =
+  process.argv[3] === "managed"
+    ? new ManagedControl(process.argv[4] ? Buffer.from(process.argv[4], "hex") : undefined)
+    : null;
 let rawGossip;
 let partialStream;
 let partialTerminal = null;

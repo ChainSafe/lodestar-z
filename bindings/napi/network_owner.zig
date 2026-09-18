@@ -20,7 +20,7 @@ pub const Owner = struct {
     core: n.NetworkCore = undefined,
     threaded: std.Io.Threaded = undefined,
     key: n.KeyPair = undefined,
-    records: [d.Maintenance.bootstrap_max]d.identity.enr.Record = undefined,
+    records: [d.types.bootstrap_max]d.identity.enr.Record = undefined,
     outputs: [32]n.peers.Event = undefined,
     application_outputs: [32]n.reqresp.Event = undefined,
     gossip_outputs: [32]n.gossipsub.Event = undefined,
@@ -141,7 +141,7 @@ fn serve(self: *Runtime) !void {
         };
         if (self.readable_rearm) {
             self.readable_rearm = false;
-            if (!self.stop and ((self.lane != null and self.lane.?.len > 0) or (self.incoming != null and self.incoming.?.oldest() != null) or (self.gossip != null and self.gossip.?.oldest() != null))) self.pingLocked();
+            if (!self.stop and ((self.lane != null and self.lane.?.len > 0) or (self.incoming != null and self.incoming.?.oldest() != null) or (self.gossip != null and self.gossip.?.hasWork()))) self.pingLocked();
         }
         const slot = self.slot;
         self.diag.currentSlot = slot;

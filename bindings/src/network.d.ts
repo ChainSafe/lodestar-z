@@ -31,24 +31,11 @@ export interface NetworkMetadata {
   custodyGroupCount: bigint | null;
 }
 
-export interface NativeForkContext {
-  fork: NetworkFork;
-  digest: Uint8Array;
-  custodyGroups: number;
-  minimumSamplingGroups: number;
-}
+export type NetworkStatusUpdate = Omit<NetworkStatus, "forkDigest">;
 
 export interface NativeLocalState {
-  status: NetworkStatus;
+  status: NetworkStatusUpdate;
   metadata: NetworkMetadata;
-  fork: NativeForkContext;
-}
-
-export interface NativeForkSchedule {
-  fuluScheduled: boolean;
-  nextVersion: Uint8Array;
-  nextEpoch: bigint;
-  nextDigest: Uint8Array;
 }
 
 export interface NativeForkEntry {
@@ -101,8 +88,14 @@ export interface NativeGlobalScoreParams {
   defaultTopic: NativeTopicScoreParams;
 }
 
+export interface NativeGossipProcessorLimit {
+  items: number;
+  bytes: number;
+}
+
 export interface NativeGossipStartupPolicy {
-  phase0Digest: Uint8Array | null;
+  /** Fixed limits in NativeTopicKind declaration order. */
+  processor?: readonly NativeGossipProcessorLimit[];
   heartbeatIntervalMs: bigint;
   iwantFollowupMs: bigint;
   idontwantMinDataSize: number;
@@ -151,13 +144,9 @@ export interface NativeRuntimeConfig {
   /** IPv6 socket options use OS defaults; listener addresses and ports must not overlap. */
   bind: IpEndpoint | readonly IpEndpoint[];
   local: NativeLocalState;
-  forkSchedule: NativeForkSchedule;
-  requestForks: readonly NativeForkEntry[];
   discovery: NativeDiscoveryConfig | null;
   initialSlot: bigint;
   gossipPolicy: NativeGossipStartupPolicy;
-  /** Immutable copied chain namespace. Null explicitly selects generic raw topic behavior. */
-  topicPolicy: readonly NativeTopicBoundary[] | null;
 }
 
 export interface NativeIdentity {
@@ -269,29 +258,11 @@ export interface NativeResources {
   bridgeBudgetBytes: number;
 }
 
-export interface NativeRequestPolicy {
-  denebStartSlot: bigint | null;
-  blocksPreDeneb: number;
-  blocksDeneb: number;
-  blobIdentifiersDeneb: number;
-  blobIdentifiersElectra: number;
-  numberOfColumns: number;
-  columnChunks: number;
-  blobSchedule: readonly {startSlot: bigint; maxBlobs: number}[];
-  hostIntegerMax: bigint | null;
-}
-
-export interface NativeCapabilities {
-  receive: readonly NativeProtocolId[];
-  request: readonly NativeProtocolId[];
-}
-
+/** Configure the shared BeaconConfig before constructing a network runtime. */
 export interface NativeApplicationConfig extends NativeRuntimeConfig {
-  topicPolicy: readonly NativeTopicBoundary[];
   resources: NativeResources;
-  requestPolicy: NativeRequestPolicy;
   identify: {agentVersion: string; protocolVersion: string};
-  capabilities: NativeCapabilities;
+  serveLightClients: boolean;
 }
 
 export interface NativeDemand {
@@ -306,9 +277,7 @@ export interface NativeDemand {
 export interface NativeLocalIntent {
   update: {
     local: NativeLocalState;
-    schedule: NativeForkSchedule;
     endpoints: AdvertisedEndpoints | null;
-    capabilities: NativeCapabilities;
   };
   demand: NativeDemand;
   subscriptions: readonly {name: string; params: NativeTopicScoreParams}[];
@@ -350,7 +319,15 @@ export interface NativeNetworkApplicationRuntime {
   /** Prometheus text from an owner snapshot refreshed at most once per second. Counters survive close. */
   getMetrics(): string;
   readonly closed: Promise<NativeRuntimeCloseResult>;
-  drainGossip(): NativeGossipBatch;
+  /** Copies work within host credits, up to 64 messages/16 MiB. Processor plans also apply kind and ordinary scheduling gates. */
+  drainGossip(demand?: {items: number; bytes: number; ordinary: boolean; kind?: NativeTopicKind}): NativeGossipBatch;
+  /** Returns up to 64 metadata-only dependency checks. Answer each with classifyGossip. */
+  drainGossipChecks(): NativeGossipDependencyCheck[];
+  classifyGossip(handle: NativeGossipHandle, available: boolean): boolean;
+  notifyGossipBlock(root: Uint8Array): void;
+  dropQueuedGossip(): void;
+  trackGossipSearch(root: Uint8Array, peer: Uint8Array | null): boolean;
+  /** Completes host execution even when false means the protocol verdict has already expired. */
   reportGossip(handle: NativeGossipHandle, verdict: NativeGossipVerdict): boolean;
   publishGossip(
     topic: string,
@@ -369,7 +346,7 @@ export interface NativeNetworkApplicationRuntime {
   diagnostics(): NativeRuntimeDiagnostics;
   applyIntent(intent: NativeLocalIntent, slot: bigint): Promise<NativeIntentResult>;
   /** Updates Status for the active fork; preserves clock, subscriptions, Metadata, ENR and demand. Requires activation. */
-  updateStatus(status: NetworkStatus): Promise<void>;
+  updateStatus(status: NetworkStatusUpdate): Promise<void>;
   getIdentity(): Promise<NativeIdentitySnapshot>;
   getGossipDiagnostics(cursor?: number): Promise<NativeGossipDiagnosticsPage>;
   getPeers(): Promise<NativePeerSnapshot>;
@@ -387,6 +364,7 @@ export interface NativeNetworkApplicationRuntime {
   close(): Promise<NativeRuntimeCloseResult>;
 }
 
+/** Call bindings.config.set(chain, genesisValidatorsRoot) first. Construction synchronously copies a derived network plan. */
 export function createNativeNetworkApplicationRuntime(
   config: NativeApplicationConfig,
   onReadable: () => void
@@ -466,6 +444,7 @@ export interface NativePeerState {
   scoreAtMs: bigint;
   banUntilMs: bigint;
   goodbyeUntilMs: bigint;
+  redialUntilMs: bigint;
 }
 export type NativePeerObservation =
   | {type: "ready" | "updated"; state: NativePeerState; ownerSequence: bigint}
@@ -635,7 +614,16 @@ export interface NativeGossipHandle {
   generation: bigint;
 }
 export type NativeGossipVerdict = "accept" | "reject" | "ignore";
+export interface NativeGossipDependencyCheck {
+  handle: NativeGossipHandle;
+  root: Uint8Array;
+  slot: bigint;
+  peerId: Uint8Array;
+  topic: string;
+}
 export interface NativeGossipMessage {
+  attestationData: string | null;
+  slot: bigint | null;
   handle: NativeGossipHandle;
   peerId: Uint8Array;
   connection: NativeConnection;
@@ -645,6 +633,7 @@ export interface NativeGossipMessage {
   receivedAtUnixMs: number;
 }
 export interface NativeGossipBatch {
+  grouped: boolean;
   messages: NativeGossipMessage[];
   more: boolean;
 }
@@ -662,6 +651,13 @@ export interface NativeGossipPublishResult {
 }
 
 export interface NativeGossipDiagnostics {
+  waiting: number;
+  checking: number;
+  executing: number;
+  fixedPayloadBytes: number;
+  dependencyRefusals: bigint;
+  kindRefusals: bigint;
+  slotRefusals: bigint;
   capacity: number;
   occupied: number;
   highWater: number;

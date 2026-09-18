@@ -1,3 +1,6 @@
+pub const gossip_processor = @import("gossip_processor/root.zig");
+pub const byte_budget = @import("byte_budget.zig");
+pub const chain = @import("chain.zig");
 pub const configuration = @import("configuration.zig");
 pub const metrics = @import("metrics/snapshot.zig");
 pub const logging = @import("logging.zig");
@@ -44,6 +47,8 @@ pub const Multiaddr = wire.multiaddr.Multiaddr;
 pub const KeyPair = wire.keys.KeyPair;
 
 test {
+    _ = @import("chain_test.zig");
+    _ = gossip_processor;
     _ = peers;
     _ = constants;
     _ = types;

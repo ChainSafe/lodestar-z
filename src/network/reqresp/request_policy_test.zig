@@ -6,7 +6,7 @@ const Protocol = @import("protocol.zig").Protocol;
 
 const fixture = @import("policy_fixture.zig").config;
 
-test "request policy derives ordered unique blob boundaries from chain configuration" {
+test "request policy derives historical blob boundaries independently of BPO" {
     const config = @import("config");
     var chain = config.minimal.config.chain;
     chain.DENEB_FORK_EPOCH = 1;
@@ -19,7 +19,7 @@ test "request policy derives ordered unique blob boundaries from chain configura
     const cfg = config.BeaconConfig.init(chain, @splat(0));
     var points: [p.schedule_max]p.BlobLimit = undefined;
     const value = try p.Config.fromBeaconConfig(&cfg, &points);
-    try std.testing.expectEqual(@as(usize, 4), value.blob_schedule.len);
+    try std.testing.expectEqual(@as(usize, 1), value.blob_schedule.len);
     for (value.blob_schedule, 1..) |point, epoch| {
         try std.testing.expectEqual(epoch * @import("preset").preset.SLOTS_PER_EPOCH, point.start_slot);
         try std.testing.expectEqual(cfg.getMaxBlobsPerBlock(epoch), point.max_blobs);
@@ -207,7 +207,9 @@ test "reqresp request admission policy configured limits and full preset column 
     _ = try p.Policy.init(&cfg);
     points[0].max_blobs = 0;
     try std.testing.expectError(error.InvalidPolicy, p.Policy.init(&cfg));
-    points[0].max_blobs = c.MAX_REQUEST_BLOB_SIDECARS_LIMIT / c.MAX_REQUEST_BLOCKS_DENEB + 1;
+    points[0].max_blobs = 33;
+    _ = try p.Policy.init(&cfg);
+    points[0].max_blobs = preset.preset.MAX_BLOB_COMMITMENTS_PER_BLOCK + 1;
     try std.testing.expectError(error.InvalidPolicy, p.Policy.init(&cfg));
     cfg = fixture();
     cfg.column_chunks = 1;

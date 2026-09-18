@@ -77,8 +77,23 @@ class NativeRuntime {
   drainPeers(maxEvents) {
     return this.#native.drainPeers(maxEvents);
   }
-  drainGossip() {
-    return this.#native.drainGossip();
+  drainGossip(options) {
+    return this.#native.drainGossip(options);
+  }
+  drainGossipChecks() {
+    return this.#native.drainGossipChecks();
+  }
+  classifyGossip(handle, available) {
+    return this.#native.classifyGossip(handle, available);
+  }
+  notifyGossipBlock(root) {
+    return this.#native.notifyGossipBlock(root);
+  }
+  trackGossipSearch(root, peer) {
+    return this.#native.trackGossipSearch(root, peer);
+  }
+  dropQueuedGossip() {
+    return this.#native.dropQueuedGossip();
   }
   reportGossip(handle, verdict) {
     return this.#native.reportGossip(handle, verdict);

@@ -143,67 +143,132 @@ pub const Item = union(enum) {
     idontwant: IdList,
 };
 
-/// Streams the top-level RPC fields, descending transparently into the control
-/// submessage, so the engine processes a flat sequence of items without
-/// materializing the whole RPC.
-pub const RpcReader = struct {
-    top: Reader,
-    control: ?Reader = null,
+const receive = @import("receive_pool.zig");
 
-    pub fn init(data: []const u8) RpcReader {
-        return .{ .top = Reader.init(data) };
+const FrameCursor = struct {
+    cursor: receive.Cursor,
+    end: usize,
+
+    fn varint(self: *FrameCursor, view: *const receive.View) Error!u64 {
+        var result: u64 = 0;
+        for (0..10) |i| {
+            if (self.cursor.pos == self.end) return error.Truncated;
+            const byte = view.segment(self.cursor)[0];
+            view.advance(&self.cursor, 1);
+            if (i == 9 and byte > 1) return error.Overflow;
+            result |= @as(u64, byte & 0x7f) << @as(u6, @intCast(i * 7));
+            if (byte & 0x80 == 0) return result;
+        }
+        return error.Overflow;
     }
 
-    pub const Step = union(enum) { item: Item, skipped, end, deferred };
+    fn range(self: *FrameCursor, view: *const receive.View, len: usize) Error!receive.Range {
+        if (len > self.end - self.cursor.pos) return error.Truncated;
+        const result: receive.Range = .{ .start = self.cursor, .len = len };
+        view.advance(&self.cursor, len);
+        return result;
+    }
+};
+
+/// Only cursors and ranges survive a processing turn. Decoded items borrow the caller's workspace.
+pub const RpcReader = struct {
+    view: receive.View,
+    top: FrameCursor,
+    control: ?FrameCursor = null,
+
+    pub fn init(data: []const u8) RpcReader {
+        return initView(receive.View.contiguous(data));
+    }
+
+    pub fn initView(view: receive.View) RpcReader {
+        return .{ .view = view, .top = .{ .cursor = view.begin(), .end = view.len } };
+    }
+
+    pub const ItemRange = struct {
+        kind: std.meta.Tag(Item),
+        bytes: receive.Range,
+
+        pub fn fieldCost(self: *const ItemRange) usize {
+            return bodyFieldCost(self.bytes.len);
+        }
+    };
+
+    fn bodyFieldCost(len: usize) usize {
+        return 1 + @as(usize, @min(len, 8192)) * 2;
+    }
+    pub const Step = union(enum) { item: ItemRange, skipped, end, deferred };
 
     pub fn step(self: *RpcReader, fields: *usize) Error!Step {
         if (fields.* == 0) return .deferred;
         const nested = self.control != null;
-        var reader = if (self.control) |control| control else self.top;
-        if (reader.atEnd()) {
+        var reader = self.control orelse self.top;
+        if (reader.cursor.pos == reader.end) {
             if (nested) {
                 self.control = null;
                 return .skipped;
             }
             return .end;
         }
-        // Top/control cursors resume after every field; nested schema readers enforce their own cap.
-        reader.fields = 0;
-        const t = try reader.tag();
-        const body = if (t.wire == wire_len) try reader.lenDelimited() else blk: {
-            try reader.skip(t.wire);
+        const raw = try reader.varint(&self.view);
+        const field = raw >> 3;
+        const wire: u3 = @intCast(raw & 7);
+        const body = if (wire == wire_len) blk: {
+            const len = try reader.varint(&self.view);
+            if (len > reader.end - reader.cursor.pos) return error.Truncated;
+            break :blk try reader.range(&self.view, @intCast(len));
+        } else blk: {
+            switch (wire) {
+                wire_varint => _ = try reader.varint(&self.view),
+                wire_i64 => _ = try reader.range(&self.view, 8),
+                wire_i32 => _ = try reader.range(&self.view, 4),
+                else => return error.BadWireType,
+            }
             break :blk null;
         };
-        const known = if (nested) t.field >= 1 and t.field <= 5 else t.field == 1 or t.field == 2;
-        const cost = 1 + if (known and body != null) @as(usize, @min(body.?.len, 8192)) * 2 else @as(usize, 0);
+        const known = if (nested) field >= 1 and field <= 5 else field == 1 or field == 2;
+        const cost = if (known and body != null) bodyFieldCost(body.?.len) else 1;
         if (cost > fields.*) return .deferred;
         fields.* -= cost;
         if (nested) self.control = reader else self.top = reader;
         const bytes = body orelse return .skipped;
-        if (nested) return switch (t.field) {
-            1 => .{ .item = .{ .ihave = .{ .topic = try topicOf(bytes, 1), .body = bytes } } },
-            2 => .{ .item = .{ .iwant = .{ .body = bytes } } },
-            3 => .{ .item = .{ .graft = try topicOf(bytes, 1) } },
-            4 => .{ .item = .{ .prune = try Prune.decode(bytes) } },
-            5 => .{ .item = .{ .idontwant = .{ .body = bytes } } },
-            else => .skipped,
+        if (!nested and field == 3) {
+            self.control = .{ .cursor = bytes.start, .end = bytes.start.pos + bytes.len };
+            return .skipped;
+        }
+        const kind: std.meta.Tag(Item) = if (nested) switch (field) {
+            1 => .ihave,
+            2 => .iwant,
+            3 => .graft,
+            4 => .prune,
+            5 => .idontwant,
+            else => return .skipped,
+        } else switch (field) {
+            1 => .subscription,
+            2 => .message,
+            else => return .skipped,
         };
-        return switch (t.field) {
-            1 => .{ .item = .{ .subscription = try SubOpts.decode(bytes) } },
-            2 => .{ .item = .{ .message = try Message.decode(bytes) } },
-            3 => blk: {
-                self.control = Reader.init(bytes);
-                break :blk .skipped;
-            },
-            else => .skipped,
+        return .{ .item = .{ .kind = kind, .bytes = bytes } };
+    }
+
+    pub fn decode(self: *const RpcReader, item: ItemRange, scratch: []u8) Error!Item {
+        const bytes = self.view.materialize(item.bytes, scratch);
+        return switch (item.kind) {
+            .subscription => .{ .subscription = try SubOpts.decode(bytes) },
+            .message => .{ .message = try Message.decode(bytes) },
+            .ihave => .{ .ihave = .{ .topic = try topicOf(bytes, 1), .body = bytes } },
+            .iwant => .{ .iwant = .{ .body = bytes } },
+            .graft => .{ .graft = try topicOf(bytes, 1) },
+            .prune => .{ .prune = try Prune.decode(bytes) },
+            .idontwant => .{ .idontwant = .{ .body = bytes } },
         };
     }
 
     pub fn next(self: *RpcReader) Error!?Item {
+        std.debug.assert(self.view.len == self.view.prefix.len);
         var budget: usize = std.math.maxInt(usize);
-        for (0..self.top.data.len + 2) |_| {
+        for (0..self.view.len + 2) |_| {
             switch (try self.step(&budget)) {
-                .item => |item| return item,
+                .item => |item| return try self.decode(item, &.{}),
                 .end => return null,
                 .skipped => {},
                 .deferred => unreachable,
@@ -520,10 +585,10 @@ test "gossip protobuf rejects excessive nested field visits and preserves deferr
     var rpc = RpcReader.init(w.written());
     var fields: usize = 1;
     try std.testing.expectEqual(RpcReader.Step.deferred, try rpc.step(&fields));
-    try std.testing.expectEqual(@as(usize, 0), rpc.top.pos);
+    try std.testing.expectEqual(@as(usize, 0), rpc.top.cursor.pos);
     fields = 16385;
     const result = try rpc.step(&fields);
-    try std.testing.expectEqualStrings("data", result.item.message.data);
+    try std.testing.expectEqualStrings("data", (try rpc.decode(result.item, &.{})).message.data);
 }
 
 test "protobuf rejects overflowing tenth varint byte" {

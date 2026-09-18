@@ -1,25 +1,21 @@
+import {testChain} from "../../../test/interop/network_chain.mjs";
+export {testChain};
+
+import {type ChainConfig, createBeaconConfig} from "@lodestar/config";
+import bindings from "../../src/index.js";
 import type {
   NativeApplicationConfig,
   NativeDiscoveryConfig,
   NativeLocalIntent,
-  NativeProtocolId,
   NativeRuntimeConfig,
-  NativeTopicBoundary,
 } from "../../src/network.js";
 
 export function networkConfig(): NativeRuntimeConfig {
-  const digest = Uint8Array.of(1, 2, 3, 4);
   const key = new Uint8Array(32);
   key[31] = 1;
   return {
     bind: {address: Uint8Array.of(127, 0, 0, 1), family: 4, port: 0},
     discovery: null,
-    forkSchedule: {
-      fuluScheduled: false,
-      nextDigest: new Uint8Array(4),
-      nextEpoch: 18446744073709551615n,
-      nextVersion: new Uint8Array(4),
-    },
     gossipPolicy: {
       gossipFactor: 0.25,
       heartbeatIntervalMs: 1000n,
@@ -28,7 +24,6 @@ export function networkConfig(): NativeRuntimeConfig {
       iwantFollowupMs: 12000n,
       largeFrameTimeoutMs: 30000n,
       opportunisticGraftIntervalMs: 60000n,
-      phase0Digest: null,
       pressureTimeoutMs: 30000n,
       retainedScoreMs: 38400000n,
       score: {
@@ -73,20 +68,16 @@ export function networkConfig(): NativeRuntimeConfig {
     identitySecretKey: key,
     initialSlot: 100n,
     local: {
-      fork: {custodyGroups: 1, digest: digest.slice(), fork: "deneb", minimumSamplingGroups: 0},
-      metadata: {attnets: new Uint8Array(8), custodyGroupCount: null, sequenceNumber: 1n, syncnets: 0},
+      metadata: {attnets: new Uint8Array(8), custodyGroupCount: 1n, sequenceNumber: 1n, syncnets: 0},
       status: {
         earliestAvailableSlot: null,
         finalizedEpoch: 0n,
         finalizedRoot: new Uint8Array(32),
-        forkDigest: digest.slice(),
         headRoot: new Uint8Array(32),
         headSlot: 100n,
       },
     },
     profile: "small",
-    requestForks: [{digest: digest.slice(), fork: "deneb"}],
-    topicPolicy: null,
   };
 }
 
@@ -104,72 +95,26 @@ export function discoveryConfig(): NativeApplicationConfig & {
   };
 }
 
-export function topicBoundary(): NativeTopicBoundary {
-  const disabled = () => ({count: 0, sszMax: 0, sszMin: 0});
-  return {
-    digest: Uint8Array.of(1, 2, 3, 4),
-    // biome-ignore-start lint/style/useNamingConvention: The namespace uses canonical protocol kind names.
-    rules: {
-      attester_slashing: disabled(),
-      beacon_aggregate_and_proof: disabled(),
-      beacon_attestation: {count: 64, sszMax: 131304, sszMin: 228},
-      beacon_block: {count: 1, sszMax: 20, sszMin: 10},
-      blob_sidecar: disabled(),
-      bls_to_execution_change: disabled(),
-      data_column_sidecar: disabled(),
-      light_client_finality_update: disabled(),
-      light_client_optimistic_update: disabled(),
-      proposer_slashing: disabled(),
-      sync_committee: disabled(),
-      sync_committee_contribution_and_proof: disabled(),
-      voluntary_exit: disabled(),
-    },
-    // biome-ignore-end lint/style/useNamingConvention: Canonical protocol names end here.
-  };
+export function configureChain(overrides: Partial<ChainConfig> = {}) {
+  const chain = createBeaconConfig({...testChain, ...overrides}, testChain.genesisValidatorsRoot);
+  bindings.config.set(chain, chain.genesisValidatorsRoot);
+  return chain;
+}
+
+export const requestForks = testChain.forkBoundariesAscendingEpochOrder
+  .filter((boundary, index, all) => boundary.epoch !== Infinity && boundary.epoch !== all[index + 1]?.epoch)
+  .map((boundary) => ({digest: testChain.forkBoundary2ForkDigest(boundary), fork: boundary.fork}));
+
+export function topicName(kind = "beacon_block", boundary = 0): string {
+  return `/eth2/${Buffer.from(requestForks[boundary].digest).toString("hex")}/${kind}/ssz_snappy`;
 }
 
 export function applicationConfig(): NativeApplicationConfig {
   const config = networkConfig();
-  config.local.metadata.custodyGroupCount = 1n;
-  const protocols: NativeProtocolId[] = [
-    "/ipfs/id/1.0.0",
-    "/meshsub/1.2.0",
-    "/meshsub/1.1.0",
-    "/meshsub/1.0.0",
-    "/eth2/beacon_chain/req/ping/1/ssz_snappy",
-    "/eth2/beacon_chain/req/goodbye/1/ssz_snappy",
-    "/eth2/beacon_chain/req/metadata/2/ssz_snappy",
-    "/eth2/beacon_chain/req/metadata/3/ssz_snappy",
-    "/eth2/beacon_chain/req/status/1/ssz_snappy",
-    "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy",
-    "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
-    "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy",
-    "/eth2/beacon_chain/req/blob_sidecars_by_root/1/ssz_snappy",
-  ];
+  configureChain();
   return {
     ...config,
-    capabilities: {
-      receive: protocols,
-      request: [
-        ...protocols,
-        "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy",
-        "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy",
-        "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy",
-        "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy",
-      ],
-    },
     identify: {agentVersion: "lodestar-z/application-test", protocolVersion: "eth2/1.0.0"},
-    requestPolicy: {
-      blobIdentifiersDeneb: 768,
-      blobIdentifiersElectra: 1152,
-      blobSchedule: [{maxBlobs: 6, startSlot: 0n}],
-      blocksDeneb: 128,
-      blocksPreDeneb: 1024,
-      columnChunks: 16384,
-      denebStartSlot: 0n,
-      hostIntegerMax: 9007199254740991n,
-      numberOfColumns: 128,
-    },
     resources: {
       bridgeBudgetBytes: 16 * 1024 * 1024,
       connectionCapacity: 16,
@@ -183,7 +128,7 @@ export function applicationConfig(): NativeApplicationConfig {
       receiveBudgetBytes: 64 * 1024 * 1024,
       targetPeers: 8,
     },
-    topicPolicy: [topicBoundary()],
+    serveLightClients: false,
   };
 }
 
@@ -199,10 +144,8 @@ export function localIntent(config: NativeApplicationConfig): NativeLocalIntent 
     },
     subscriptions: [],
     update: {
-      capabilities: structuredClone(config.capabilities),
       endpoints: config.discovery?.advertisement ?? null,
       local: structuredClone(config.local),
-      schedule: structuredClone(config.forkSchedule),
     },
   };
 }

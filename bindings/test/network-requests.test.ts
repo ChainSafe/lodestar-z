@@ -1,6 +1,6 @@
 import {expect, test} from "vitest";
 import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, localIntent} from "./utils/network.js";
+import {applicationConfig, localIntent, requestForks} from "./utils/network.js";
 
 test("application request rejects control protocols at the exported boundary", async () => {
   const config = applicationConfig();
@@ -63,8 +63,6 @@ async function connected() {
     const info = await peer.command("ready");
     const config = applicationConfig();
     config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-    config.requestForks = [...config.requestForks, {digest: Uint8Array.of(5, 6, 7, 8), fork: "electra"}];
-    config.requestForks = [...config.requestForks, {digest: Uint8Array.of(9, 10, 11, 12), fork: "fulu"}];
     runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
     await runtime.ready;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
@@ -263,8 +261,8 @@ stockTest(
     try {
       const {payload, summary} = await import("../../test/interop/codec.mjs");
       for (const [digest, fork, length] of [
-        ["05060708", "electra", 4000],
-        ["01020304", "deneb", 10 * 1024 * 1024],
+        [Buffer.from(requestForks[1].digest).toString("hex"), "electra", 4000],
+        [Buffer.from(requestForks[0].digest).toString("hex"), "deneb", 10 * 1024 * 1024],
       ] as const) {
         await peer.command("scenario", {count: 1, digest, length, scenario: "chunks"});
         const stream = runtime.request(id, BLOCKS, new Uint8Array(32), {responseTimeoutMs: 60000});
@@ -284,7 +282,7 @@ stockTest(
 stockTest(
   "accepted local refusals preserve canonical policy and capacity reasons",
   async () => {
-    const {runtime, peer, id, config} = await connected();
+    const {runtime, peer, id} = await connected();
     try {
       const {waitFor} = await import("../../test/interop/child.mjs");
       await waitFor(async () => (await runtime.getPeers()).counts.relevant === 1);
@@ -297,16 +295,6 @@ stockTest(
         code: "NetworkRequestRejected",
         reason: "invalid_request",
       });
-      const intent = localIntent(config);
-      intent.update.capabilities.request = intent.update.capabilities.request.filter((protocol) => protocol !== BLOCKS);
-      const update = runtime.applyIntent(intent, config.initialSlot);
-      const disabled = runtime.request(id, BLOCKS, new Uint8Array(32));
-      await update;
-      await expect(disabled.next()).rejects.toMatchObject({
-        code: "NetworkRequestRejected",
-        reason: "protocol_disabled",
-      });
-      await runtime.applyIntent(localIntent(config), config.initialSlot);
       await peer.command("scenario", {scenario: "hold"});
       const streams = Array.from({length: 6}, () => runtime.request(id, BLOCKS, new Uint8Array(32)));
       expect(() => runtime.request(id, BLOCKS, new Uint8Array(32))).toThrow("NetworkRequestFull");
@@ -482,7 +470,11 @@ test.skipIf(!HOST || !HOODI)(
     try {
       const {readFile} = await import("node:fs/promises");
       const {summary} = await import("../../test/interop/codec.mjs");
-      await peer.command("scenario", {count: 1, digest: "090a0b0c", scenario: "hoodi"});
+      await peer.command("scenario", {
+        count: 1,
+        digest: Buffer.from(requestForks[2].digest).toString("hex"),
+        scenario: "hoodi",
+      });
       const stream = runtime.request(id, BLOCKS, new Uint8Array(32));
       const response = await stream.next();
       expect(response.value.fork).toBe("fulu");
@@ -576,7 +568,6 @@ test.skipIf(!NATIVE_PEER)(
     const peer = new Child("request-native", NATIVE_PEER ?? "", ["--application"]);
     const config = applicationConfig();
     config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
-    config.requestForks = [...config.requestForks, {digest: Uint8Array.of(1, 0, 0, 0), fork: "deneb"}];
     const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
     try {
       const remote = await peer.command("listen");

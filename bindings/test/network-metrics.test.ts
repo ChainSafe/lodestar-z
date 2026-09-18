@@ -36,6 +36,26 @@ test("metrics are available through startup and remain readable after close", as
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     await vi.waitFor(() => expect(samples(runtime.getMetrics()).get("lodestar_native_network_running")).toBe(1));
     const metrics = samples(runtime.getMetrics());
+    for (const stage of ["challenge", "handshake"]) {
+      for (const outcome of ["allowed", "source_limit", "global_limit", "source_capacity"]) {
+        expect(metrics.get(`lodestar_native_discovery_admission_total{stage="${stage}",outcome="${outcome}"}`)).toBe(0);
+      }
+    }
+    for (const reason of [
+      "server_capacity",
+      "peer_capacity",
+      "protocol_concurrency",
+      "peer_quota",
+      "global_quota",
+      "identity_capacity",
+    ]) {
+      expect(metrics.get(`lodestar_native_reqresp_admission_refusals_total{method="status",reason="${reason}"}`)).toBe(
+        0
+      );
+    }
+    for (const phase of ["receiving_request", "waiting_host", "writing_response", "withheld", "terminal"]) {
+      expect(metrics.get(`lodestar_native_reqresp_inbound_occupied{phase="${phase}"}`)).toBe(0);
+    }
     for (const name of [
       "lodestar_native_quic_connections_capacity",
       "lodestar_native_dial_capacity",

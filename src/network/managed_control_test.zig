@@ -6,6 +6,54 @@ const wire = @import("peers/control_wire.zig");
 const rr = @import("reqresp/root.zig");
 const Engine = @import("quic/engine.zig");
 
+test "managed local pruning records automatic redial backoff separately from peer faults" {
+    var setup: Setup = .{};
+    try setup.init(&.{});
+    defer setup.deinit();
+    for (0..60) |_| try setup.step(1);
+    var snapshots: [4]t.Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, 1), setup.client.snapshots(&snapshots));
+    const peer = snapshots[0].peer;
+    try std.testing.expect(setup.client.disconnect(peer, .count_pruning, setup.pair.now));
+    const pruned = setup.client.catalog.get(peer).?;
+    try std.testing.expectEqual(setup.pair.now.mono_ms + 300_000, pruned.redial_until_ms);
+    try std.testing.expectEqual(@as(u64, 0), pruned.goodbye_until_ms);
+    try std.testing.expectEqual(@as(f64, 0), pruned.score);
+    try std.testing.expectEqual(t.DisconnectReason.count_pruning, pruned.disconnect_reason.?);
+    try std.testing.expectEqual(t.ReputationDecision.ban, setup.client.reportPeer(peer, .fatal, setup.pair.now).?);
+    try std.testing.expect(setup.client.catalog.get(peer).?.ban_until_ms > pruned.redial_until_ms);
+}
+
+test "managed admission evaluation expires without protocol progress" {
+    var setup: Setup = .{};
+    var opts = @import("managed_test_support.zig").options();
+    opts.peers.target_peers = 0;
+    opts.peers.min_outbound = 0;
+    try setup.initOwnersWithOptions(&.{}, opts);
+    defer setup.deinit();
+    _ = try setup.pair.dial();
+    var snapshots: [4]t.Snapshot = undefined;
+    var count: usize = 0;
+    for (0..60) |_| {
+        try setup.step(0);
+        count = setup.client.snapshots(&snapshots);
+        if (count > 0) break;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expect(!snapshots[0].relevant);
+    const peer = snapshots[0].peer;
+    const grace = snapshots[0].connected_at_ms + setup.client.control.options.inbound_status_grace_ms;
+    try std.testing.expectEqual(@as(u16, 1), setup.client.selection.retained_count);
+    try std.testing.expectEqual(grace, setup.client.selection_deadline.?);
+    setup.pair.advance(grace - setup.pair.now.mono_ms - 1);
+    setup.client.reconcile(&setup.client_service, setup.pair.now);
+    try std.testing.expect(setup.client.catalog.get(peer).?.disconnect_reason == null);
+    setup.pair.advance(1);
+    setup.client.reconcile(&setup.client_service, setup.pair.now);
+    try std.testing.expectEqual(@as(u16, 0), setup.client.selection.retained_count);
+    try std.testing.expectEqual(t.DisconnectReason.count_pruning, setup.client.catalog.get(peer).?.disconnect_reason.?);
+}
+
 test "managed records a buffered Goodbye before transport cancellation and preserves selected local reasons" {
     const multistream = @import("wire/multistream.zig");
     const codec = @import("reqresp/codec.zig");
@@ -740,10 +788,13 @@ test "managed control does not schedule gossip admission alongside active reques
     try std.testing.expect(setup.client.catalog.get(peer).?.connection == null);
 }
 
-test "managed control cancelled canonical requests retain buffers through local retry" {
+test "managed control cancelled canonical requests retain buffers until local retirement" {
     var setup: Setup = .{};
     var opts = @import("managed_test_support.zig").options();
-    opts.control.operations_max = 1;
+    opts.peers.max_peers = 1;
+    opts.peers.target_peers = 1;
+    opts.peers.min_outbound = 0;
+    opts.service.reqresp.outbound_control_reserved = 1;
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();
     _ = try setup.pair.dial();
@@ -769,12 +820,12 @@ test "managed control cancelled canonical requests retain buffers through local 
     try std.testing.expectEqual(request, op.request.?);
     try std.testing.expectEqualSlices(u8, bytes[0..84], op.bytes[0..84]);
     try std.testing.expectEqual(started, setup.client.control.counters.started);
-    try std.testing.expectEqual(deferred + 1, setup.client.control.counters.deferred);
-    try std.testing.expectEqual(setup.pair.now.mono_ms + 1000, setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now).?);
+    try std.testing.expectEqual(deferred, setup.client.control.counters.deferred);
+    try std.testing.expectEqual(@as(?u64, null), setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now));
     const grace = setup.client.control.schedules[peer.index].transition_until_ms;
     _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     try std.testing.expect(op.request == null);
-    setup.pair.advance(1000);
+    try std.testing.expectEqual(@as(?u64, setup.pair.now.mono_ms), setup.client.control.nextWakeup(&setup.client.catalog, setup.pair.now));
     _ = managed.process(&setup.client, &setup.client_service, &setup.pair.client, &.{}, &.{}, setup.pair.now, 100, &.{}, &.{}, &.{});
     try std.testing.expect(op.request != null);
     try std.testing.expect(!std.meta.eql(request, op.request.?));

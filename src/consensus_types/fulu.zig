@@ -179,7 +179,6 @@ pub const ErrorMessage = phase0.ErrorMessage;
 pub const MetaDataV2 = altair.MetaDataV2;
 pub const BeaconBlockRootsDeneb = deneb.BeaconBlockRootsDeneb;
 pub const BlobSidecarsByRangeRequest = deneb.BlobSidecarsByRangeRequest;
-pub const BlobIdentifiers = deneb.BlobIdentifiers;
 
 pub const StatusV2 = ssz.FixedContainerType(struct {
     fork_digest: p.ForkDigest,

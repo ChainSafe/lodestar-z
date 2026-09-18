@@ -107,7 +107,7 @@ test "peer dial custody diagnostics count unfinished derivations without mutatin
     q.rows[3].custody_work.?.hashes = custody.hashes_max;
     try std.testing.expectError(error.WorkLimit, q.rows[3].custody_work.?.step(1));
     q.configureSelection(&wanted, false, &.{}, 0);
-    for ([_]u16{ 0, 1, 128, 0 }, q.rows) |priority, row| {
+    for ([_]u16{ 0, 1, 1, 0 }, q.rows) |priority, row| {
         try std.testing.expectEqual(priority, row.priority);
     }
 
@@ -124,7 +124,7 @@ test "peer dial custody diagnostics count unfinished derivations without mutatin
     try std.testing.expectEqual(@as(usize, 1), snapshot.custody_incomplete);
     for (0..4) |_| {
         try std.testing.expectEqualDeep(snapshot, q.resourceSnapshot());
-        for (works, q.rows, [_]u16{ 0, 1, 128, 0 }) |work, row, priority| {
+        for (works, q.rows, [_]u16{ 0, 1, 1, 0 }) |work, row, priority| {
             try std.testing.expectEqualDeep(work, row.custody_work.?);
             try std.testing.expectEqual(priority, row.priority);
             try std.testing.expectEqual(priority > 0, row.selected);
@@ -294,6 +294,68 @@ fn discovered(tag: u8, sync: u8) !@import("enr.zig").Candidate {
     const key = pair.publicKey();
     const peer = t.PeerId.fromPublicKey(&key);
     return .{ .peer = peer, .node_id = try @import("custody.zig").nodeId(&peer), .sequence = 1, .record_hash = @splat(0), .addresses = .{ address, .unspecified }, .address_count = 1, .fork = .{ .digest = @splat(0), .next_version = @splat(0), .next_epoch = 0 }, .next_fork_digest = null, .attnets = null, .syncnets = sync, .custody_group_count = null };
+}
+
+test "peer discovery matches rotate without rewarding additional advertised coverage" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const narrow = try discovered(1, 1);
+    var broad = try discovered(2, 15);
+    broad.attnets = @splat(255);
+    broad.custody_group_count = 128;
+    const wanted: t.Coverage = .{ .syncnets = 15, .attnets = std.math.maxInt(u64) };
+    try q.enqueueDiscovered(&narrow, &.{}, &wanted, 0);
+    try q.enqueueDiscovered(&broad, &.{}, &wanted, 0);
+    q.configureSelection(&wanted, false, &.{}, 0);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    try std.testing.expect(out[0].peer.eql(&narrow.peer));
+    try std.testing.expect(q.dialDeferred(out[0].token, 0));
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    try std.testing.expect(out[0].peer.eql(&broad.peer));
+    try std.testing.expect(q.dialDeferred(out[0].token, 0));
+    try std.testing.expectEqual(@as(usize, 1), q.poll(1_000, &out));
+    try std.testing.expect(out[0].peer.eql(&narrow.peer));
+}
+
+test "peer discovery breadth cannot evict an untried candidate matching current demand" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const narrow = try discovered(1, 1);
+    var broad = try discovered(2, 15);
+    broad.attnets = @splat(255);
+    const wanted: t.Coverage = .{ .syncnets = 15, .attnets = std.math.maxInt(u64) };
+    try q.enqueueDiscovered(&narrow, &.{}, &wanted, 0);
+    try std.testing.expectError(error.Capacity, q.enqueueDiscovered(&broad, &.{}, &wanted, 1));
+    try std.testing.expect(q.rows[0].peer.eql(&narrow.peer));
+    try q.enqueueDiscovered(&broad, &.{}, &wanted, mod.hint_freshness_ms);
+    try std.testing.expect(q.rows[0].peer.eql(&broad.peer));
+}
+
+test "peer pruning defers automatic redial without blocking explicit intent or recording failures" {
+    for ([_]bool{ false, true }) |explicit| {
+        var q = try mod.DialQueue.init(a, .{ .capacity = 1, .concurrent_max = 1, .seed = 4 });
+        defer q.deinit(a);
+        const candidate = try discovered(1, 1);
+        try q.enqueueDiscovered(&candidate, &.{}, &.{ .syncnets = 1 }, 0);
+        const conn: t.Handle = .{ .index = 0, .generation = 1 };
+        q.accepted(&candidate.peer, conn, 0);
+        var snapshot = peerSnapshot(&candidate.peer, null);
+        snapshot.disconnect_reason = .count_pruning;
+        snapshot.redial_until_ms = 300_000;
+        q.synchronize(&snapshot, 2_000, null);
+        try std.testing.expectEqual(@as(u8, 0), q.rows[0].failures);
+        try std.testing.expectEqual(@as(u64, 0), q.counters.connection_backoffs);
+        try std.testing.expectEqual(@as(u64, 300_000), q.nextWakeup(2_000, 1).?);
+        var out: [1]mod.DialIntent = undefined;
+        try std.testing.expectEqual(@as(usize, 0), q.poll(299_999, &out));
+        if (explicit) {
+            try q.enqueue(&candidate.peer, &.{address}, false, 299_999);
+            try std.testing.expectEqual(@as(usize, 1), q.poll(299_999, &out));
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), q.poll(300_000, &out));
+        }
+    }
 }
 
 test "peer dial discovered refresh replaces addresses preserves lease history and manual authority" {
@@ -472,7 +534,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     wanted.groups.set(0);
     try q.enqueueDiscovered(&candidate, &.{}, &wanted, 0);
     q.configureSelection(&wanted, false, &.{}, 0);
-    try std.testing.expectEqual(@as(u16, 3), q.rows[0].priority);
+    try std.testing.expectEqual(@as(u16, 1), q.rows[0].priority);
     var out: [1]mod.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
     try std.testing.expect(q.dialFailed(out[0].token, 1));
@@ -496,7 +558,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     candidate.custody_group_count = 64;
     try q.enqueueDiscovered(&candidate, &context, &wanted, eligible);
     q.configureSelection(&wanted, false, &context, eligible);
-    try std.testing.expectEqual(@as(u16, 3), q.rows[0].priority);
+    try std.testing.expectEqual(@as(u16, 1), q.rows[0].priority);
     try std.testing.expectEqual(@as(usize, 1), q.poll(eligible, &out));
     const token = out[0].token;
     const conn: t.Handle = .{ .index = 2, .generation = 99 };
@@ -574,7 +636,7 @@ test "peer dial review custody-only full table recovers at fixed horizon with bo
     try std.testing.expect(!pending);
     try std.testing.expect(q.rows[0].custody_work.?.hashes <= 4096);
     q.configureSelection(&wanted, false, &.{}, 600_000);
-    try std.testing.expectEqual(@as(u16, 127), q.rows[0].priority);
+    try std.testing.expectEqual(@as(u16, 1), q.rows[0].priority);
     try std.testing.expectEqual(@as(usize, 1), q.poll(600_000, &out));
     try std.testing.expect(out[0].peer.eql(&scarce.peer));
     try std.testing.expectEqual(reservation, q.memoryPlan().allocated_bytes);
@@ -732,7 +794,7 @@ test "peer dial actual custody gives no utility for connected sampling only grou
     try std.testing.expectEqual(@as(u16, 4), @import("policy.zig").utility(&.{ .groups = derived.sampling }, &wanted));
     wanted.groups = derived.custody;
     q.configureSelection(&wanted, false, &context, 0);
-    try std.testing.expectEqual(@as(u16, 4), q.rows[0].priority);
+    try std.testing.expectEqual(@as(u16, 1), q.rows[0].priority);
     try std.testing.expect(q.rows[0].selected);
 }
 

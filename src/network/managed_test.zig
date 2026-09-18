@@ -1168,7 +1168,7 @@ test "managed reconciliation raw mutators and deadlines invalidate once" {
     try std.testing.expect(setup.client.catalog.updateMetadata(peer, conn, &.{ .seq_number = 11, .syncnets = 1 }, setup.pair.now.mono_ms));
     setup.client.reconcile(&setup.client_service, setup.pair.now);
     try std.testing.expectEqual(@as(u16, 0), setup.client.coverageDeficits().sync);
-    const deadline = setup.client.metadata_deadline.?;
+    const deadline = setup.client.selection_deadline.?;
     var clock = setup.pair.now;
     clock.mono_ms = deadline - 1;
     setup.client.reconcile(&setup.client_service, clock);

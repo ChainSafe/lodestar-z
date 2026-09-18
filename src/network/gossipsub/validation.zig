@@ -47,11 +47,12 @@ pub const Validation = struct {
     cursor: usize = 0,
     timeout_ms: u64,
     tombstone_ms: u64,
-    released: bool = false,
+    pending_per_peer_kind: [@import("peer_book.zig").capacity][@import("../gossip_processor/limits.zig").kind_count]u16 = @splat(@splat(0)),
+    pending_per_kind: [@import("../gossip_processor/limits.zig").kind_count]usize = @splat(0),
     pending_per_peer: [@import("peer_book.zig").capacity]u16 = @splat(0),
 
     pub fn init(a: std.mem.Allocator, capacity: usize, timeout_ms: u64, tombstone_ms: u64) !Validation {
-        if (capacity == 0 or capacity > 8192 or timeout_ms == 0 or tombstone_ms == 0) return error.InvalidLimits;
+        if (capacity == 0 or capacity > 65535 or timeout_ms == 0 or tombstone_ms == 0) return error.InvalidLimits;
         const entries = try a.alloc(Entry, capacity);
         errdefer a.free(entries);
         @memset(entries, .{});
@@ -72,6 +73,8 @@ pub const Validation = struct {
 
     pub fn clear(self: *Validation, store: *storage.Store, peers: *Peers) void {
         @memset(&self.pending_per_peer, 0);
+        @memset(&self.pending_per_peer_kind, @splat(0));
+        @memset(&self.pending_per_kind, 0);
         for (self.entries) |*entry| {
             assert(!entry.reserved);
             if (entry.state == .pending) store.releaseValidation(entry.state.pending.message);
@@ -132,6 +135,8 @@ pub const Validation = struct {
             const handle: Handle = .{ .index = self.index, .generation = entry.generation + 1 };
             peers.retain(source);
             owner.pending_per_peer[source.index] += 1;
+            owner.pending_per_kind[@intFromEnum(store.get(message).?.kind)] += 1;
+            owner.pending_per_peer_kind[source.index][@intFromEnum(store.get(message).?.kind)] += 1;
             record.* = .{ .handle = handle, .state = .pending, .id = id, .source = source, .topic = topic, .admitted_ms = now, .pinned = true };
             owner.index.insert(id, self.record);
             entry.* = .{ .generation = handle.generation, .state = .{ .pending = .{ .message = message, .delivery = self.record, .deadline = now +| owner.timeout_ms } } };
@@ -223,11 +228,12 @@ pub const Validation = struct {
         const record = &self.recent[pending.delivery];
         assert(self.pending_per_peer[record.source.index] > 0);
         self.pending_per_peer[record.source.index] -= 1;
+        self.pending_per_kind[@intFromEnum(store.get(pending.message).?.kind)] -= 1;
+        self.pending_per_peer_kind[record.source.index][@intFromEnum(store.get(pending.message).?.kind)] -= 1;
         record.state = .resolved;
         record.verdict = verdict;
         record.until = now +| self.tombstone_ms;
         e.state = .{ .resolved = record.until };
-        self.released = true;
         store.releaseValidation(pending.message);
     }
 
@@ -247,12 +253,13 @@ pub const Validation = struct {
         const record = &self.recent[pending.delivery];
         assert(self.pending_per_peer[record.source.index] > 0);
         self.pending_per_peer[record.source.index] -= 1;
+        self.pending_per_kind[@intFromEnum(store.get(pending.message).?.kind)] -= 1;
+        self.pending_per_peer_kind[record.source.index][@intFromEnum(store.get(pending.message).?.kind)] -= 1;
         std.log.scoped(.network_gossip).debug("validation_expired message_id={x} topic_index={d} generation={d} elapsed_ms={d}", .{ record.id, record.topic.index, e.generation, now -| record.admitted_ms });
         self.index.remove(record.id);
         releaseAttribution(record, peers);
         record.state = .free;
         e.state = .{ .expired = pending.deadline +| self.tombstone_ms };
-        self.released = true;
         store.releaseValidation(pending.message);
     }
 

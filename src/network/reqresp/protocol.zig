@@ -176,13 +176,13 @@ fn entry(comptime protocol: Protocol) Info {
         .blob_sidecars_by_range_v1 => chunked(
             ct.deneb.BlobSidecarsByRangeRequest.fixed_size,
             ct.deneb.BlobSidecarsByRangeRequest.fixed_size,
-            consensus.MAX_REQUEST_BLOB_SIDECARS_LIMIT,
+            constants.blob_identifiers_capacity,
             768,
         ),
         .blob_sidecars_by_root_v1 => chunked(
             0,
-            ct.deneb.BlobIdentifiers.max_size,
-            consensus.MAX_REQUEST_BLOB_SIDECARS_LIMIT,
+            ct.deneb.BlobIdentifier.fixed_size * constants.blob_identifiers_capacity,
+            constants.blob_identifiers_capacity,
             768,
         ),
         .data_column_sidecars_by_range_v1 => chunked(
@@ -265,6 +265,16 @@ pub fn requestMaxControl() usize {
     return longest;
 }
 
+pub fn payloadMaxControl() usize {
+    comptime var longest: usize = 0;
+    inline for (table, 0..) |bounds, index| {
+        if (comptime @as(Protocol, @enumFromInt(index)).isControl()) {
+            longest = @max(longest, bounds.request_max, bounds.response_max);
+        }
+    }
+    return longest;
+}
+
 comptime {
     assert(Protocol.count == 18);
     for (table) |bounds| {
@@ -280,5 +290,5 @@ comptime {
         for (ids[0..index]) |earlier| assert(!std.mem.eql(u8, candidate, earlier));
         assert(candidate.len <= id_length_max);
     }
-    assert(requestMaxAll() >= ct.deneb.BlobIdentifiers.max_size);
+    assert(requestMaxAll() >= ct.deneb.BlobIdentifier.fixed_size * constants.blob_identifiers_capacity);
 }

@@ -64,7 +64,7 @@ pub const PeerManager = struct {
     candidates_revision: ?u64 = null,
     reconciliation_deadline: ?u64 = null,
     custody_pending: bool = false,
-    metadata_deadline: ?u64 = null,
+    selection_deadline: ?u64 = null,
     native_dial_room: u16 = 0,
     metadata_freshness_ms: u64,
     policy_seed: u64,
@@ -139,12 +139,16 @@ pub const PeerManager = struct {
         var copied: t.LocalState = undefined;
         try peers.control_wire.copyLocal(&copied, local);
         try validateOptions(options);
+        if (service.reqresp.options.outbound_control_reserved < options.peers.max_peers or
+            service.router.negotiator.outbound_control_reserved < options.peers.max_peers)
+            return error.InvalidOptions;
         var catalog = try peers.Catalog.init(a, options.peers);
         errdefer catalog.deinit(a);
         var control = try control_mod.Control.init(
             a,
             options.control,
             options.peers.capacity,
+            options.peers.max_peers,
             @intCast(service.reqresp.inbound.len),
         );
         errdefer control.deinit(a);
@@ -319,7 +323,7 @@ pub const PeerManager = struct {
             self.selection_revision = if (revision.cacheable()) revision else null;
             const catalog_deadline = self.catalogDeadline(now.mono_ms);
             self.reconciliation_deadline = catalog_deadline;
-            if (self.metadata_deadline) |due| self.reconciliation_deadline = @min(self.reconciliation_deadline orelse due, due);
+            if (self.selection_deadline) |due| self.reconciliation_deadline = @min(self.reconciliation_deadline orelse due, due);
             self.dial_queue.selection_dirty = true;
             self.refreshCandidates(now, catalog_deadline);
         }
@@ -398,7 +402,7 @@ pub const PeerManager = struct {
     fn refreshSelection(self: *PeerManager, service: *service_mod.Service, now: Now) void {
         self.counters.selections +|= 1;
         self.counters.selection_rows +|= self.catalog.rows.len;
-        self.metadata_deadline = null;
+        self.selection_deadline = null;
         const count = self.catalog.snapshots(self.snapshot_scratch);
         var input_count: usize = 0;
         for (self.snapshot_scratch[0..count]) |*snapshot| {
@@ -407,33 +411,65 @@ pub const PeerManager = struct {
             std.debug.assert(input_count < self.policy_scratch.len);
             const input = &self.policy_scratch[input_count];
             input_count += 1;
-            input.* = .{ .peer = snapshot.peer, .direct = snapshot.direct, .outbound = snapshot.direction == .outbound, .relevant = snapshot.relevant, .score = snapshot.score + (self.gossipScore(service, snapshot.peer, now) orelse 0) };
-            if (snapshot.ban_until_ms > now.mono_ms or snapshot.score <= -50) input.reject = .banned;
-            if (snapshot.status) |status| {
-                if (!std.mem.eql(u8, &status.fork_digest, &self.local.fork.digest)) input.reject = .incompatible_fork;
-                if (self.local.fork.fork.gte(.fulu) and status.earliest_available_slot == null) input.reject = .missing_availability;
-            }
-            const delivery = service.gossipsub.deliveryStatus(conn);
-            if (delivery == .unavailable) {
-                input.outbound = false;
-                if (snapshot.relevant and !snapshot.direct and input.reject == null) input.reject = .gossip_unavailable;
-            }
-            if (!snapshot.relevant or input.reject != null) continue;
-            const metadata = snapshot.metadata orelse continue;
-            peers.control_wire.validateMetadata(&metadata, self.local.fork) catch continue;
-            const deadline = snapshot.metadata_at_ms +| self.metadata_freshness_ms;
-            if (now.mono_ms >= deadline) continue;
-            self.metadata_deadline = @min(self.metadata_deadline orelse deadline, deadline);
-            if (delivery == .available) {
-                input.coverage.attnets = std.mem.readInt(u64, &metadata.attnets, .little);
-                input.coverage.syncnets = @intCast(metadata.syncnets);
-                input.coverage.groups = snapshot.sampling_groups orelse .initEmpty();
+            input.* = self.selectionInput(service, snapshot, conn, now);
+            const grace = snapshot.connected_at_ms +| self.control.options.inbound_status_grace_ms;
+            if (!input.ready and input.reject == null and now.mono_ms < grace) {
+                input.evaluating = true;
+                self.selection_deadline = @min(self.selection_deadline orelse grace, grace);
             }
         }
         self.selection = policy.select(self.policy_scratch[0..input_count], &self.demand, self.catalog.options, self.policy_seed);
         for (self.policy_scratch[0..input_count], 0..) |input, i| if (self.selection.reasons[i]) |reason| {
             if (self.disconnect(input.peer, reason, now)) self.counters.policy_disconnects +|= 1;
         };
+    }
+
+    fn selectionInput(
+        self: *PeerManager,
+        service: *service_mod.Service,
+        snapshot: *const t.Snapshot,
+        conn: t.Handle,
+        now: Now,
+    ) policy.Input {
+        var input: policy.Input = .{
+            .peer = snapshot.peer,
+            .direct = snapshot.direct,
+            .outbound = snapshot.direction == .outbound,
+            .relevant = snapshot.relevant,
+            .ready = false,
+            .score = peers.reputation.selectionScore(
+                snapshot.score,
+                self.gossipScore(service, snapshot.peer, now) orelse 0,
+                service.gossipsub.options.score_params.graylist_threshold,
+            ),
+        };
+        if (snapshot.ban_until_ms > now.mono_ms or snapshot.score <= peers.reputation.ban_score)
+            input.reject = .banned;
+        if (snapshot.status) |status| {
+            if (!std.mem.eql(u8, &status.fork_digest, &self.local.fork.digest))
+                input.reject = .incompatible_fork;
+            if (self.local.fork.fork.gte(.fulu) and status.earliest_available_slot == null)
+                input.reject = .missing_availability;
+        }
+        const delivery = service.gossipsub.deliveryStatus(conn);
+        if (delivery == .unavailable) {
+            input.outbound = false;
+            if (snapshot.relevant and !snapshot.direct and input.reject == null)
+                input.reject = .gossip_unavailable;
+        }
+        if (!snapshot.relevant or input.reject != null) return input;
+        const metadata = snapshot.metadata orelse return input;
+        peers.control_wire.validateMetadata(&metadata, self.local.fork) catch return input;
+        const deadline = snapshot.metadata_at_ms +| self.metadata_freshness_ms;
+        if (now.mono_ms >= deadline) return input;
+        self.selection_deadline = @min(self.selection_deadline orelse deadline, deadline);
+        if (delivery == .available) {
+            input.ready = !self.local.fork.fork.gte(.fulu) or snapshot.sampling_groups != null;
+            input.coverage.attnets = std.mem.readInt(u64, &metadata.attnets, .little);
+            input.coverage.syncnets = @intCast(metadata.syncnets);
+            input.coverage.groups = snapshot.sampling_groups orelse .initEmpty();
+        }
+        return input;
     }
     fn refreshDiscoveryNeed(self: *PeerManager) void {
         self.discovery_need = .{};

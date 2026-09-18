@@ -1,6 +1,6 @@
 import {expect, test, vi} from "vitest";
 import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, localIntent} from "./utils/network.js";
+import {applicationConfig, localIntent, requestForks, topicName} from "./utils/network.js";
 
 test("gossip drain and stale verdict on an activated application", async () => {
   const config = applicationConfig();
@@ -8,7 +8,7 @@ test("gossip drain and stale verdict on an activated application", async () => {
   try {
     await runtime.ready;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
-    expect(runtime.drainGossip()).toEqual({messages: [], more: false});
+    expect(runtime.drainGossip()).toEqual({grouped: false, messages: [], more: false});
     expect(runtime.reportGossip({generation: 1n, index: 0, session: runtime.diagnostics().session}, "ignore")).toBe(
       false
     );
@@ -22,7 +22,7 @@ import type {NativeGossipMessage, NativeNetworkApplicationRuntime} from "../src/
 import {networkBindings as bindings} from "./utils/network-bindings.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
-const TOPIC = "/eth2/01020304/beacon_block/ssz_snappy";
+const TOPIC = topicName();
 
 async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<NativeGossipMessage> {
   for (let i = 0; i < 1000; i++) {
@@ -36,9 +36,8 @@ async function nextGossip(runtime: NativeNetworkApplicationRuntime): Promise<Nat
   throw Error("Gossip delivery deadline");
 }
 async function gossipPair(timeoutMs = 30000n, budget?: number, beforeServer?: () => void) {
-  const pair = await incomingPair(beforeServer, budget, undefined, (left, right) => {
+  const pair = await incomingPair(beforeServer, budget, undefined, (_left, right) => {
     right.gossipPolicy.validationTimeoutMs = timeoutMs;
-    for (const config of [left, right]) config.topicPolicy[0].rules.beacon_block.sszMax = 10 * 1024 * 1024;
   });
   try {
     for (const [runtime, config] of [
@@ -68,7 +67,7 @@ test("gossip lifecycle, strict representations and canonical publication refusal
   try {
     await runtime.ready;
     expect(() => runtime.drainGossip()).toThrow("NetworkNotActive");
-    expect(() => runtime.publishGossip(TOPIC, new Uint8Array(10))).toThrow("NetworkNotActive");
+    expect(() => runtime.publishGossip(TOPIC, new Uint8Array(4000))).toThrow("NetworkNotActive");
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     for (const malformed of [
       {...handle, session: 0n},
@@ -82,15 +81,17 @@ test("gossip lifecycle, strict representations and canonical publication refusal
     expect(() => runtime.reportGossip(handle, "ACCEPT" as "accept")).toThrow();
     expect(runtime.reportGossip({...handle, session: handle.session + 1n}, "ignore")).toBe(false);
     expect(runtime.reportGossip({...handle, index: Number.MAX_SAFE_INTEGER}, "ignore")).toBe(false);
-    expect(() => runtime.publishGossip(TOPIC, new Uint8Array(10), {flood: 0} as unknown as {flood: boolean})).toThrow();
     expect(() =>
-      runtime.publishGossip(TOPIC, new Uint8Array(10), {unknown: true} as unknown as {flood: boolean})
+      runtime.publishGossip(TOPIC, new Uint8Array(4000), {flood: 0} as unknown as {flood: boolean})
+    ).toThrow();
+    expect(() =>
+      runtime.publishGossip(TOPIC, new Uint8Array(4000), {unknown: true} as unknown as {flood: boolean})
     ).toThrow();
     expect(() => runtime.publishGossip(TOPIC, new Uint16Array(10) as unknown as Uint8Array)).toThrow();
-    const detached = new Uint8Array(10);
+    const detached = new Uint8Array(4000);
     structuredClone(detached, {transfer: [detached.buffer]});
     expect(() => runtime.publishGossip(TOPIC, detached)).toThrow();
-    await expect(runtime.publishGossip("/invalid", new Uint8Array(10))).rejects.toMatchObject({
+    await expect(runtime.publishGossip("/invalid", new Uint8Array(4000))).rejects.toMatchObject({
       code: "NetworkGossipPublishFailed",
       reason: "unknown_topic",
     });
@@ -98,26 +99,23 @@ test("gossip lifecycle, strict representations and canonical publication refusal
       code: "NetworkGossipPublishFailed",
       reason: "payload_too_small",
     });
-    await expect(runtime.publishGossip(TOPIC, new Uint8Array(21))).rejects.toMatchObject({
-      code: "NetworkGossipPublishFailed",
-      reason: "payload_too_large",
-    });
-    await expect(runtime.publishGossip(TOPIC, new Uint8Array(10), {allowZeroPeers: false})).rejects.toMatchObject({
+    expect(() => runtime.publishGossip(TOPIC, new Uint8Array(10 * 1024 * 1024 + 1))).toThrow("PayloadTooLarge");
+    await expect(runtime.publishGossip(TOPIC, new Uint8Array(4000), {allowZeroPeers: false})).rejects.toMatchObject({
       code: "NetworkGossipPublishFailed",
       reason: "no_peers_subscribed_to_topic",
     });
     expect(
-      await runtime.publishGossip(TOPIC, new Uint8Array(10), {
+      await runtime.publishGossip(TOPIC, new Uint8Array(4000), {
         allowZeroPeers: true,
         flood: false,
         ignoreDuplicate: false,
       })
     ).toEqual({duplicate: false, pressured: 0, queued: 0, selected: 0, unavailable: 0});
-    await expect(runtime.publishGossip(TOPIC, new Uint8Array(10), {ignoreDuplicate: false})).rejects.toMatchObject({
+    await expect(runtime.publishGossip(TOPIC, new Uint8Array(4000), {ignoreDuplicate: false})).rejects.toMatchObject({
       code: "NetworkGossipPublishFailed",
       reason: "duplicate",
     });
-    expect(await runtime.publishGossip(TOPIC, new Uint8Array(10), {ignoreDuplicate: true})).toEqual({
+    expect(await runtime.publishGossip(TOPIC, new Uint8Array(4000), {ignoreDuplicate: true})).toEqual({
       duplicate: true,
       pressured: 0,
       queued: 0,
@@ -127,9 +125,9 @@ test("gossip lifecycle, strict representations and canonical publication refusal
   } finally {
     await runtime.close();
   }
-  expect(runtime.drainGossip()).toEqual({messages: [], more: false});
+  expect(runtime.drainGossip()).toEqual({grouped: false, messages: [], more: false});
   expect(runtime.reportGossip(handle, "ignore")).toBe(false);
-  expect(() => runtime.publishGossip(TOPIC, new Uint8Array(10))).toThrow("NetworkClosed");
+  expect(() => runtime.publishGossip(TOPIC, new Uint8Array(4000))).toThrow("NetworkClosed");
   expect(runtime.diagnostics().gossip).toMatchObject({
     capacity: 64,
     occupied: 0,
@@ -147,7 +145,7 @@ test.each([
 ] as const)("real gossip %s preserves wire identity and exact-once verdict admission", async (verdict) => {
   const pair = await gossipPair();
   try {
-    const input = new Uint8Array(10).fill(7);
+    const input = new Uint8Array(4000).fill(7);
     const before = Date.now();
     const published = pair.left.publishGossip(TOPIC, input, {allowZeroPeers: false});
     input.fill(99);
@@ -170,17 +168,17 @@ test.each([
           /gossipsub_msg_publish_bytes_total\{topic="beacon_block"\} [1-9][0-9]*\n/
         );
         expect(pair.left.getMetrics()).toContain(
-          'lodestar_gossip_topic_peers_by_type_count{type="beacon_block",boundary="01020304"} 1\n'
+          `lodestar_gossip_topic_peers_by_type_count{type="beacon_block",boundary="${Buffer.from(requestForks[0].digest).toString("hex")}"} 1\n`
         );
       },
       {timeout: 5000}
     );
     expect(message.topic).toBe(TOPIC);
-    expect(message.data).toEqual(new Uint8Array(10).fill(7));
+    expect(message.data).toEqual(new Uint8Array(4000).fill(7));
     expect(message.peerId).toEqual(pair.identity.peerId);
     expect(message.connection).toEqual((await pair.right.getPeers()).peers[0].connection);
     const {messageId} = await import("../../test/interop/codec.mjs");
-    expect(Buffer.from(message.id)).toEqual(messageId(TOPIC, new Uint8Array(10).fill(7)));
+    expect(Buffer.from(message.id)).toEqual(messageId(TOPIC, new Uint8Array(4000).fill(7)));
     expect(message.receivedAtUnixMs).toBeGreaterThanOrEqual(before);
     expect(message.receivedAtUnixMs).toBeLessThan(Date.now());
     expect(Number.isSafeInteger(message.receivedAtUnixMs)).toBe(true);
@@ -232,7 +230,7 @@ test.each([
       reportsAccepted: 1n,
       reservedBytes: 0,
       [counter[verdict]]: 1n,
-      bytesCopied: 10n,
+      bytesCopied: 4000n,
       messagesCopied: 1n,
     });
   } finally {
@@ -248,10 +246,10 @@ test.each([
 test("gossip payload credit retires on close while descriptors remain held", async () => {
   const pair = await gossipPair();
   try {
-    await pair.left.publishGossip(TOPIC, new Uint8Array(10).fill(2), {allowZeroPeers: false});
+    await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(2), {allowZeroPeers: false});
     const message = await nextGossip(pair.right);
     await pair.right.close();
-    expect(message.data).toEqual(new Uint8Array(10).fill(2));
+    expect(message.data).toEqual(new Uint8Array(4000).fill(2));
     expect(pair.right.reportGossip(message.handle, "accept")).toBe(false);
     const diagnostics = pair.right.diagnostics();
     expect(diagnostics.liveNativeRequestedBytes).toBe(0);
@@ -272,16 +270,16 @@ test.skipIf(!faultApi.networkTestFail)(
   async () => {
     const pair = await gossipPair();
     try {
-      await pair.left.publishGossip(TOPIC, new Uint8Array(10).fill(3), {allowZeroPeers: false});
+      await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(3), {allowZeroPeers: false});
       for (let i = 0; i < 1000 && pair.right.diagnostics().gossip.queued === 0; i++) await delay(5);
       faultApi.networkTestFail?.("gossip_copy");
       expect(() => pair.right.drainGossip()).toThrow("InjectedNetworkFailure");
       expect(pair.right.diagnostics().gossip).toMatchObject({
         copyingBytes: 0,
         messagesCopied: 0n,
-        payloadBytes: 10,
+        payloadBytes: 4000,
         queued: 1,
-        reservedBytes: 20,
+        reservedBytes: 8000,
       });
       const message = await nextGossip(pair.right);
       expect(pair.right.reportGossip(message.handle, "ignore")).toBe(true);
@@ -299,7 +297,7 @@ test.skipIf(!faultApi.networkTestFail)(
     try {
       faultApi.networkTestFail?.("operation_copy");
       await expect(
-        pair.left.publishGossip(TOPIC, new Uint8Array(10).fill(4), {allowZeroPeers: false})
+        pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(4), {allowZeroPeers: false})
       ).rejects.toMatchObject({code: "NetworkResultAllocationFailed"});
       await pair.left.close();
       expect(pair.left.diagnostics()).toMatchObject({
@@ -323,7 +321,9 @@ test.skipIf(!faultApi.networkTestFail)(
 );
 
 test("gossip byte refusal preserves both accepted request directions and real control progress", async () => {
-  const pair = await gossipPair(30000n, 34 * 1024 * 1024);
+  const maxPayload = 10 * 1024 * 1024;
+  const decodedArena = 32 + maxPayload + Math.floor(maxPayload / 6) + 4096;
+  const pair = await gossipPair(30000n, 34 * 1024 * 1024 + decodedArena);
   try {
     const outgoing = pair.right.request(pair.identity.peerId, BLOCKS, new Uint8Array(32));
     const outboundPull = outgoing.next();
@@ -343,8 +343,8 @@ test("gossip byte refusal preserves both accepted request directions and real co
       reservedBytes: 0,
     });
     await Promise.all([
-      inbound.respond(new Uint8Array(4000).fill(1), pair.leftConfig.requestForks[0]),
-      serving.respond(new Uint8Array(4000).fill(2), pair.rightConfig.requestForks[0]),
+      inbound.respond(new Uint8Array(4000).fill(1), requestForks[0]),
+      serving.respond(new Uint8Array(4000).fill(2), requestForks[0]),
     ]);
     expect(await outboundPull).toMatchObject({value: {data: new Uint8Array(4000).fill(1)}});
     expect(await inboundPull).toMatchObject({value: {data: new Uint8Array(4000).fill(2)}});
@@ -376,7 +376,7 @@ test.each([
 ])("native gossip expiry %s before/after delivery retires without a host report", async (delivered) => {
   const pair = await gossipPair(150n);
   try {
-    await pair.left.publishGossip(TOPIC, new Uint8Array(10).fill(5), {allowZeroPeers: false});
+    await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(5), {allowZeroPeers: false});
     let message: NativeGossipMessage | undefined;
     if (delivered) message = await nextGossip(pair.right);
     for (let i = 0; i < 1000; i++) {
@@ -391,7 +391,7 @@ test.each([
       queuedExpired: delivered ? 0n : 1n,
       reservedBytes: 0,
     });
-    expect(pair.right.drainGossip()).toEqual({messages: [], more: false});
+    expect(pair.right.drainGossip()).toEqual({grouped: false, messages: [], more: false});
     if (message) expect(pair.right.reportGossip(message.handle, "accept")).toBe(false);
   } finally {
     await Promise.all([pair.left.close(), pair.right.close()]);
@@ -419,21 +419,17 @@ for (const hoodi of [false, true]) {
         const info = await peer.command("ready");
         const config = applicationConfig();
         config.resources.bridgeBudgetBytes = 128 * 1024 * 1024;
-        config.topicPolicy[0].rules.beacon_block.sszMax = 10 * 1024 * 1024;
-        const secondTopic = "/eth2/05060708/beacon_block/ssz_snappy";
-        config.topicPolicy = [
-          ...config.topicPolicy,
-          {...structuredClone(config.topicPolicy[0]), digest: Uint8Array.of(5, 6, 7, 8)},
-        ];
+        const firstTopic = topicName("beacon_block", 2);
+        const secondTopic = topicName("beacon_block", 3);
         runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
         const identity = await runtime.ready;
         const intent = localIntent(config);
-        intent.subscriptions = [TOPIC, secondTopic].map((name) => ({
+        intent.subscriptions = [firstTopic, secondTopic].map((name) => ({
           name,
           params: config.gossipPolicy.score.defaultTopic,
         }));
         await runtime.applyIntent(intent, config.initialSlot);
-        await peer.command("gossipSubscribe", {topic: TOPIC});
+        await peer.command("gossipSubscribe", {topic: firstTopic});
         await peer.command("gossipSubscribe", {topic: secondTopic});
         const remote = Uint8Array.from(Buffer.from(info.peer, "hex"));
         const endpoint = {
@@ -448,15 +444,15 @@ for (const hoodi of [false, true]) {
           if (state.subscribers.every((entry: {count: number}) => entry.count === 1)) break;
           await delay(25);
         }
-        for (const [index, topic] of [TOPIC, secondTopic].entries()) {
-          const sent = await peer.command("gossipPublish", {length: 64, seed: 71 + index, topic});
+        for (const [index, topic] of [firstTopic, secondTopic].entries()) {
+          const sent = await peer.command("gossipPublish", {length: 4000, seed: 71 + index, topic});
           const message = await nextGossip(runtime);
           expect(message.topic).toBe(topic);
           expect(Buffer.from(message.id).toString("hex")).toBe(sent.messageId);
           expect(message.peerId).toEqual(remote);
-          expect(summary(message.data)).toEqual(summary(payload(64, 71 + index)));
+          expect(summary(message.data)).toEqual(summary(payload(4000, 71 + index)));
           expect(runtime.reportGossip(message.handle, index === 0 ? "accept" : "ignore")).toBe(true);
-          const data = payload(64, 81 + index);
+          const data = payload(4000, 81 + index);
           expect(await runtime.publishGossip(topic, data, {allowZeroPeers: false})).toMatchObject({
             queued: 1,
             selected: 1,
@@ -474,13 +470,14 @@ for (const hoodi of [false, true]) {
           });
         }
         if (!hoodi) {
-          for (let i = 0; i < 64; i++) await peer.command("gossipPublish", {length: 64, seed: 900 + i, topic: TOPIC});
+          for (let i = 0; i < 64; i++)
+            await peer.command("gossipPublish", {length: 4000, seed: 900 + i, topic: firstTopic});
           for (let i = 0; i < 1000 && runtime.diagnostics().gossip.queued !== 32; i++) await delay(5);
           expect(runtime.diagnostics().gossip).toMatchObject({
             occupied: 32,
-            payloadBytes: 2048,
+            payloadBytes: 128000,
             queued: 32,
-            reservedBytes: 4096,
+            reservedBytes: 256000,
           });
         }
         expect(
@@ -495,7 +492,7 @@ for (const hoodi of [false, true]) {
         if (hoodi && HOODI) {
           const data = await readFile(HOODI);
           expect(data.length).toBe(17569);
-          const sent = await peer.command("gossipPublish", {hoodi: true, length: data.length, topic: TOPIC});
+          const sent = await peer.command("gossipPublish", {hoodi: true, length: data.length, topic: firstTopic});
           const message = await nextGossip(runtime);
           expect(message.data).toEqual(new Uint8Array(data));
           expect(Buffer.from(message.id).toString("hex")).toBe(sent.messageId);
@@ -522,8 +519,8 @@ for (const scenario of [
         faultApi.networkTestScenario?.(scenario)
       );
       try {
-        await pair.left.publishGossip(TOPIC, new Uint8Array(10).fill(21), {allowZeroPeers: false});
-        await pair.left.publishGossip(TOPIC, new Uint8Array(10).fill(22), {allowZeroPeers: false});
+        await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(21), {allowZeroPeers: false});
+        await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(22), {allowZeroPeers: false});
         for (let i = 0; i < 1000 && pair.right.diagnostics().gossip.queued !== 2; i++) await delay(5);
         expect(pair.right.diagnostics().gossip.queued).toBe(2);
         if (scenario.includes("fail")) {
@@ -533,14 +530,17 @@ for (const scenario of [
           expect(pair.right.diagnostics().gossip.queued).toBe(scenario === "gossip_second_copy_fail" ? 2 : 0);
         } else {
           const batch = pair.right.drainGossip();
-          expect(batch.messages.map((message) => [...message.data])).toEqual([Array(10).fill(21), Array(10).fill(22)]);
+          expect(batch.messages.map((message) => [...message.data])).toEqual([
+            Array(4000).fill(21),
+            Array(4000).fill(22),
+          ]);
           expect(batch.more).toBe(false);
           for (const message of batch.messages) expect(pair.right.reportGossip(message.handle, "accept")).toBe(false);
           expect(faultApi.networkTestStage?.()).toBe(
             scenario === "gossip_copy_expire" ? "gossip_copy_expired" : "gossip_copy_closed"
           );
           expect(pair.right.diagnostics().gossip).toMatchObject({
-            bytesCopied: 20n,
+            bytesCopied: 8000n,
             copyingBytes: 0,
             messagesCopied: 2n,
             occupied: 0,
@@ -605,7 +605,7 @@ test("gossip publication rechecks a detached view and rolls back reentrant close
   try {
     await runtime.ready;
     await runtime.applyIntent(localIntent(config), config.initialSlot);
-    const data = new Uint8Array(10);
+    const data = new Uint8Array(4000);
     expect(() =>
       runtime.publishGossip(TOPIC, data, {
         get flood() {
@@ -619,7 +619,7 @@ test("gossip publication rechecks a detached view and rolls back reentrant close
       operationOccupied: 0,
     });
     expect(() =>
-      runtime.publishGossip(TOPIC, new Uint8Array(10), {
+      runtime.publishGossip(TOPIC, new Uint8Array(4000), {
         get flood() {
           void runtime.close();
           return false;
@@ -641,12 +641,12 @@ test.skipIf(!faultApi.networkTestFail)(
       await runtime.ready;
       await runtime.applyIntent(localIntent(config), config.initialSlot);
       faultApi.networkTestFail?.("gossip_publication");
-      expect(() => runtime.publishGossip(TOPIC, new Uint8Array(10))).toThrow("InjectedNetworkFailure");
+      expect(() => runtime.publishGossip(TOPIC, new Uint8Array(4000))).toThrow("InjectedNetworkFailure");
       expect(runtime.diagnostics()).toMatchObject({
         gossip: {publicationBytes: 0, publicationCopies: 0n, reservedBytes: 0},
         operationOccupied: 0,
       });
-      expect(await runtime.publishGossip(TOPIC, new Uint8Array(10))).toMatchObject({queued: 0});
+      expect(await runtime.publishGossip(TOPIC, new Uint8Array(4000))).toMatchObject({queued: 0});
     } finally {
       await runtime.close();
     }
@@ -668,7 +668,7 @@ test.skipIf(!faultApi.networkTestGossipRelease)(
   async () => {
     const pair = await gossipPair(30000n, undefined, () => faultApi.networkTestScenario?.("gossip_owner_hold"));
     try {
-      await pair.left.publishGossip(TOPIC, new Uint8Array(10).fill(45), {allowZeroPeers: false});
+      await pair.left.publishGossip(TOPIC, new Uint8Array(4000).fill(45), {allowZeroPeers: false});
       const message = await nextGossip(pair.right);
       for (let i = 0; i < 1000 && faultApi.networkTestStage?.() !== "gossip_owner_held"; i++) await delay(5);
       expect(faultApi.networkTestStage?.()).toBe("gossip_owner_held");
@@ -697,14 +697,14 @@ test("gossip session restart cannot report against a replacement cell with the s
   const first = await gossipPair();
   let old: NativeGossipMessage;
   try {
-    await first.left.publishGossip(TOPIC, new Uint8Array(10).fill(61), {allowZeroPeers: false});
+    await first.left.publishGossip(TOPIC, new Uint8Array(4000).fill(61), {allowZeroPeers: false});
     old = await nextGossip(first.right);
   } finally {
     await Promise.all([first.left.close(), first.right.close()]);
   }
   const second = await gossipPair();
   try {
-    await second.left.publishGossip(TOPIC, new Uint8Array(10).fill(62), {allowZeroPeers: false});
+    await second.left.publishGossip(TOPIC, new Uint8Array(4000).fill(62), {allowZeroPeers: false});
     const current = await nextGossip(second.right);
     expect(current.handle.index).toBe(old.handle.index);
     expect(current.handle.session).not.toBe(old.handle.session);

@@ -118,7 +118,6 @@ pub const Pair = struct {
                     const datagram = sent.bytes;
                     if (from == &self.client and self.first_initial_len == 0) {
                         @memcpy(self.first_initial[0..datagram.len], datagram);
-                        self.first_initial_len = datagram.len;
                     }
                     if (drop) continue;
                     if (self.drop_to_address) |blocked| if (sent.to.eql(blocked)) continue;
@@ -129,6 +128,9 @@ pub const Pair = struct {
                         self.now,
                         &response,
                     );
+                    if (from == &self.client and self.first_initial_len == 0 and outcome == .accepted) {
+                        self.first_initial_len = datagram.len;
+                    }
                     if (outcome == .retry) {
                         var reply: [constants.datagram_size_max]u8 = undefined;
                         _ = from.receive(outcome.retry, &sent.to, self.now, &reply);

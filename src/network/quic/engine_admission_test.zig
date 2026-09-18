@@ -17,6 +17,17 @@ fn dialInitial(pair: *Pair, out: []u8) ![]u8 {
     return pair.sendOne(&pair.client, handle.index, out) orelse error.TestUnexpectedResult;
 }
 
+fn dialValidatedInitial(pair: *Pair, out: []u8) ![]u8 {
+    const handle = try pair.dial();
+    const initial = pair.sendOne(&pair.client, handle.index, out) orelse return error.TestUnexpectedResult;
+    var response: [constants.datagram_size_max]u8 = undefined;
+    const outcome = pair.server.receive(initial, &client_address, pair.now, &response);
+    try std.testing.expect(outcome == .retry);
+    var reply: [constants.datagram_size_max]u8 = undefined;
+    _ = pair.client.receive(outcome.retry, &server_address, pair.now, &reply);
+    return pair.sendOne(&pair.client, handle.index, out) orelse error.TestUnexpectedResult;
+}
+
 test "engine routes existing streams and replayed Initials while source admission is full" {
     var pair: Pair = .{};
     try pair.init(.{}, .{ .handshaking_per_source_max = 1 });
@@ -26,7 +37,7 @@ test "engine routes existing streams and replayed Initials while source admissio
     var packet: [constants.datagram_size_max]u8 = undefined;
     var response: [constants.datagram_size_max]u8 = undefined;
     const pending = pair.server.receive(
-        try dialInitial(&pair, &packet),
+        try dialValidatedInitial(&pair, &packet),
         &client_address,
         pair.now,
         &response,
@@ -141,7 +152,10 @@ test "engine caps inbound handshakes per source address" {
     var admitted: u16 = 0;
     var attempt: u16 = 0;
     while (attempt < limits.handshaking_per_source_max + 1) : (attempt += 1) {
-        const initial = try dialInitial(&pair, &packet);
+        const initial = if (attempt < limits.handshaking_per_source_max)
+            try dialValidatedInitial(&pair, &packet)
+        else
+            try dialInitial(&pair, &packet);
         try std.testing.expect(initial.len >= limits.client_initial_min);
         const outcome = pair.server.receive(
             initial,

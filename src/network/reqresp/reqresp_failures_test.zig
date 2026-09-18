@@ -1513,7 +1513,9 @@ test "reqresp request admission host capacity cancellation and quota error write
     const first = &setup.shared.server.reqresp.inbound[0];
     const incoming = first.request.handle(0);
     try std.testing.expect(first.request.pendingEvent().? == .request);
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.resourceSnapshot().inbound_phases[@intFromEnum(reqresp.metrics.InboundPhase.waiting_host)]);
     try std.testing.expect(setup.shared.server.reqresp.cancel(incoming));
+    try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.resourceSnapshot().inbound_phases[@intFromEnum(reqresp.metrics.InboundPhase.terminal)]);
     try std.testing.expect(setup.shared.client.reqresp.cancel(outbound));
     setup.server_event_capacity = 16;
     for (0..4) |_| try setup.pumpOnce();
@@ -1529,6 +1531,7 @@ test "reqresp request admission host capacity cancellation and quota error write
         }
     }
     try std.testing.expect(refused);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.blocks_by_root_v2)].admission_refusals[@intFromEnum(reqresp.metrics.AdmissionRefusal.peer_quota)]);
     const replacement = &setup.shared.server.reqresp.inbound[0];
     try std.testing.expect(replacement.request.generation > incoming.generation);
     try std.testing.expectEqualSlices(u8, "rate limited", replacement.request.io.payload);

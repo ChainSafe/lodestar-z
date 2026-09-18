@@ -558,13 +558,9 @@ pub const Engine = struct {
         if (self.handshakingFromSource(from) >= self.limits.handshaking_per_source_max) {
             return drop(&self.counters.dropped_source_limit);
         }
-        const original: ?binding.Cid = if (header.token_len != 0)
-            retry.validate(&self.retry_key, from, &header.dcid, header.token[0..header.token_len], now.mono_ms, self.limits.handshake_timeout_ms) orelse return drop(&self.counters.dropped_unroutable)
-        else original: {
-            if (self.registry.handshaking >= self.limits.handshaking_max / 2) return self.sendRetry(&header, from, now, out);
-            break :original @as(?binding.Cid, null);
-        };
-        const scid = if (original != null) header.dcid.bytes[0..limits.local_cid_length].* else self.connectionId();
+        if (header.token_len == 0) return self.sendRetry(&header, from, now, out);
+        const original = retry.validate(&self.retry_key, from, &header.dcid, header.token[0..header.token_len], now.mono_ms, self.limits.handshake_timeout_ms) orelse return drop(&self.counters.dropped_unroutable);
+        const scid = header.dcid.bytes[0..limits.local_cid_length].*;
         const index = self.registry.claim() orelse return drop(&self.counters.dropped_full);
 
         const slot = &self.registry.slots[index];
@@ -585,10 +581,7 @@ pub const Engine = struct {
             self.registry.retire(index);
             return drop(&self.counters.dropped_full);
         };
-        if (!slot.scid.eql(&header.dcid)) self.registry.addRoute(&header.dcid, index) catch {
-            self.registry.retire(index);
-            return drop(&self.counters.dropped_full);
-        };
+        assert(slot.scid.eql(&header.dcid));
         self.registry.handshaking += 1;
         assert(self.registry.handshaking <= self.limits.handshaking_max);
         self.feed(index, datagram, from);

@@ -2,7 +2,7 @@ import {execFileSync} from "node:child_process";
 import {privateKeyFromRaw} from "@libp2p/crypto/keys";
 import {expect, it} from "vitest";
 import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, localIntent} from "./utils/network.js";
+import {applicationConfig, configureChain, localIntent, requestForks} from "./utils/network.js";
 
 it("owns a real native socket and releases it on idempotent close", async () => {
   const config = applicationConfig();
@@ -49,9 +49,7 @@ it("copies inputs before returning and advances the clock only through intents",
   config.identitySecretKey.fill(0);
   if (!("address" in config.bind)) throw new Error("Expected a single bind address");
   config.bind.address.fill(0);
-  config.local.status.forkDigest.fill(99);
-  config.local.fork.digest.fill(99);
-  config.requestForks[0].digest.fill(99);
+  config.local.status.headRoot.fill(99);
   try {
     const identity = await runtime.ready;
     expect(identity.peerId).toEqual(expected);
@@ -123,13 +121,6 @@ it.each([
       c.local.metadata.syncnets = 16;
     },
     "InvalidNetworkInteger",
-  ],
-  [
-    "duplicate fork",
-    (c: ReturnType<typeof applicationConfig>) => {
-      c.requestForks = [...c.requestForks, c.requestForks[0]];
-    },
-    "InvalidNetworkConfig",
   ],
 ] as const)("rejects %s before startup", (_name, mutate, code) => {
   const config = applicationConfig();
@@ -315,6 +306,7 @@ it("publishes copied peer observations without repeating unread notifications", 
   const {setTimeout: delay} = await import("node:timers/promises");
   const config = applicationConfig();
   config.initialSlot = 0x08070605n;
+  configureChain({BLOB_SCHEDULE: [], ELECTRA_FORK_EPOCH: Infinity, FULU_FORK_EPOCH: Infinity});
   config.local.status.headSlot = config.initialSlot;
   config.local.status.finalizedEpoch = 0x01020304n;
   config.local.status.finalizedRoot = Uint8Array.from({length: 32}, (_, i) => i);
@@ -328,7 +320,12 @@ it("publishes copied peer observations without repeating unread notifications", 
     notifications++;
     readable();
   });
-  const remote = new Child("native-runtime-peer", process.execPath, ["test/interop/libp2p_peer.mjs", "v12", "managed"]);
+  const remote = new Child("native-runtime-peer", process.execPath, [
+    "test/interop/libp2p_peer.mjs",
+    "v12",
+    "managed",
+    Buffer.from(requestForks[0].digest).toString("hex"),
+  ]);
   try {
     const identity = await runtime.ready;
     await runtime.applyIntent(localIntent(config), config.initialSlot);

@@ -1,5 +1,6 @@
 import {expect, test} from "vitest";
 import type {NativeIncomingRequest} from "../src/network.js";
+import {requestForks} from "./utils/network.js";
 import {networkBindings as bindings} from "./utils/network-bindings.js";
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
@@ -54,9 +55,7 @@ instrumented.each([
         .catch(() => undefined);
       const incoming = await takeIncoming(pair.right);
       if (fault) hooks.networkTestFail("operation_copy");
-      await expect(
-        incoming.respond(new Uint8Array(4000).fill(71), pair.rightConfig.requestForks[0])
-      ).rejects.toMatchObject({
+      await expect(incoming.respond(new Uint8Array(4000).fill(71), requestForks[0])).rejects.toMatchObject({
         code: fault ? "InjectedNetworkFailure" : "NetworkClosed",
       });
       console.log(JSON.stringify({phase, snapshot: hooks.networkTestIncomingPhase()}));
@@ -109,7 +108,7 @@ instrumented.each([
       const first = stream.next();
       void first.catch(() => undefined);
       const incoming = await takeIncoming(pair.right);
-      await incoming.respond(new Uint8Array(4000), pair.rightConfig.requestForks[0]);
+      await incoming.respond(new Uint8Array(4000), requestForks[0]);
       expect((await first).done).toBe(false);
       const pending = stream.next().catch(() => undefined);
       const closed =
@@ -198,13 +197,11 @@ async function checkReplacement(incoming: NativeIncomingRequest, session: bigint
     const read = stream.next();
     void read.catch(() => undefined);
     const next = await takeIncoming(replacement.right);
-    const ack = next.respond(new Uint8Array(4000).fill(29), replacement.rightConfig.requestForks[0]);
+    const ack = next.respond(new Uint8Array(4000).fill(29), requestForks[0]);
     expect(incoming.cancel()).toBe(incoming.closed);
-    await expect(incoming.respond(new Uint8Array(4000), replacement.rightConfig.requestForks[0])).rejects.toMatchObject(
-      {
-        code: "NetworkIncomingClosed",
-      }
-    );
+    await expect(incoming.respond(new Uint8Array(4000), requestForks[0])).rejects.toMatchObject({
+      code: "NetworkIncomingClosed",
+    });
     await ack;
     expect((await read).value?.data).toEqual(new Uint8Array(4000).fill(29));
     expect(await next.finish()).toBeUndefined();
