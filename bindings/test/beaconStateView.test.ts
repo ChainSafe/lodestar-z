@@ -18,7 +18,9 @@ function expectSyncCommitteeCache(cache: {
   expect(cache.validatorIndexMap).toBeInstanceOf(Map);
 
   const firstValidatorIndex = cache.validatorIndices[0];
-  expect(cache.validatorIndexMap.get(firstValidatorIndex)).toContain(0);
+  const firstValidatorPositions = cache.validatorIndexMap.get(firstValidatorIndex);
+  expect(Array.isArray(firstValidatorPositions)).toBe(true);
+  expect(firstValidatorPositions).toContain(0);
 }
 
 describe("BeaconStateView", () => {

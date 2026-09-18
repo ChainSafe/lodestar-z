@@ -156,7 +156,7 @@ interface BlockRewards {
 
 interface SyncCommitteeCache {
   validatorIndices: Uint32Array;
-  validatorIndexMap: Map<number, Uint32Array>;
+  validatorIndexMap: Map<number, number[]>;
 }
 
 interface EpochShuffling {
