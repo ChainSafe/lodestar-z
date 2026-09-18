@@ -112,6 +112,8 @@ bench({id: "${name}", fn: () => {}});`
     writeFileSync(
       file,
       `import {writeFileSync} from "node:fs";
+// Exercise delayed readiness as well as immediate startup.
+if (${JSON.stringify(signal)} === "SIGTERM") await new Promise((resolve) => setTimeout(resolve, 2200));
 writeFileSync(${JSON.stringify(ready)}, String(process.pid));
 setInterval(() => {}, 100);
 await new Promise(() => {});`
@@ -133,8 +135,8 @@ await new Promise(() => {});`
     );
     let workerPid: number | undefined;
     try {
-      for (let i = 0; i < 100 && !existsSync(ready); i++) await delay(20);
-      expect(existsSync(ready)).toBe(true);
+      // CLI and worker startup can exceed two seconds on shared CI runners.
+      await expect.poll(() => existsSync(ready), {interval: 20, timeout: 30000}).toBe(true);
       workerPid = Number(readFileSync(ready, "utf8"));
       const exited = once(parent, "exit");
       parent.kill(signal);
@@ -159,7 +161,7 @@ await new Promise(() => {});`
         }
       }
     }
-  });
+  }, 35000);
   it("rejects duplicate IDs across isolated files before persistence", () => {
     const {dir, history} = fixture();
     const files = ["a", "b"].map((name) => {
