@@ -237,11 +237,11 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             try current_epoch_participation.commit();
             const length = try current_epoch_participation.length();
 
-            // Clone the view to preserve any uncommitted in-memory updates while avoiding pointer aliasing
-            // between previous/current fields.
-            var current_epoch_participation_copy = try current_epoch_participation.clone(.{ .transfer_cache = true });
-            errdefer current_epoch_participation_copy.deinit();
-            try self.inner.set("previous_epoch_participation", current_epoch_participation_copy);
+            {
+                var current_epoch_participation_copy = try current_epoch_participation.clone(.{ .transfer_cache = true });
+                errdefer current_epoch_participation_copy.deinit();
+                try self.inner.set("previous_epoch_participation", current_epoch_participation_copy);
+            }
 
             const new_current_root = try ForkTypes(.altair).EpochParticipation.tree.zeros(
                 self.inner.pool,
@@ -523,4 +523,8 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             };
         }
     };
+}
+
+test {
+    _ = @import("beacon_state_test.zig");
 }

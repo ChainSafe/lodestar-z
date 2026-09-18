@@ -901,3 +901,15 @@ pub const Gossipsub = struct {
         turn.count += 1;
     }
 };
+
+test {
+    _ = @import("gossipsub_owner_messages_test.zig");
+    _ = @import("gossipsub_owner_policy_test.zig");
+    _ = @import("gossipsub_owner_resources_test.zig");
+    _ = @import("gossipsub_publication_test.zig");
+    _ = @import("gossipsub_resource_test.zig");
+    _ = @import("gossipsub_scheduled_test.zig");
+    _ = @import("gossipsub_service_test.zig");
+    _ = @import("gossipsub_simulation_test.zig");
+    _ = @import("gossipsub_test.zig");
+}

@@ -893,19 +893,13 @@ comptime {
     assert(@sizeOf(Server) <= 2 * 1024);
 }
 
-test "reqresp typed reserved sinks keep full control waves and exclude bulk" {
-    var requests = try ReqResp.init(std.testing.allocator, .{ .forks = &.{}, .inbound_max = 4, .inbound_control_reserved = 2, .inbound_per_peer_max = 4 });
-    defer requests.deinit();
-    try std.testing.expectEqual(2 * protocol_mod.requestMaxAll() + 2 * protocol_mod.requestMaxControl(), requests.request_sinks.len);
-    try std.testing.expectEqual(@as(?u16, 2), requests.availableInboundFor(.blocks_by_range_v2));
-    for (0..4) |i| {
-        const index = requests.availableInboundFor(.ping_v1).?;
-        try std.testing.expectEqual(@as(u16, @intCast(i)), index);
-        requests.inbound[index].request.completion = .active;
-        requests.inbound[index].request.protocol = .ping_v1;
-    }
-    try std.testing.expectEqual(@as(?u16, null), requests.availableInboundFor(.ping_v1));
-    requests.inbound[0].request.completion = .free;
-    try std.testing.expectEqual(@as(?u16, null), requests.availableInboundFor(.blocks_by_range_v2));
-    try std.testing.expectEqual(@as(?u16, 0), requests.availableInboundFor(.ping_v1));
+test {
+    _ = @import("reqresp_active_protocols_test.zig");
+    _ = @import("reqresp_control_capacity_test.zig");
+    _ = @import("reqresp_control_partition_test.zig");
+    _ = @import("reqresp_failures_test.zig");
+    _ = @import("reqresp_half_close_test.zig");
+    _ = @import("reqresp_service_test.zig");
+    _ = @import("reqresp_terminal_test.zig");
+    _ = @import("reqresp_test.zig");
 }

@@ -7,8 +7,7 @@ test {
     _ = message;
     _ = packet;
     _ = @import("rlp.zig");
-    _ = @import("message_test.zig");
-    _ = @import("packet_test.zig");
-    _ = @import("rlp_test.zig");
-    _ = @import("wire_vectors_test.zig");
+    _ = @import("message.zig");
+    _ = @import("packet.zig");
+    _ = @import("root_vectors_test.zig");
 }

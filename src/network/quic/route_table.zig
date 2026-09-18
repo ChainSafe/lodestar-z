@@ -138,3 +138,7 @@ pub const RouteTable = struct {
         return @as(usize, @truncate(hashed)) & mask;
     }
 };
+
+test {
+    _ = @import("route_table_test.zig");
+}

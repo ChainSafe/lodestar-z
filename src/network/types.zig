@@ -63,3 +63,7 @@ pub fn reasonFromLocalError(is_app: bool, code: u64) CloseReason {
     if (!is_app and code >= crypto_error_first and code <= crypto_error_last) return .tls_failed;
     return .{ .transport_error = code };
 }
+
+test {
+    _ = @import("types_test.zig");
+}

@@ -152,3 +152,7 @@ fn setNodes(plan: *ResponsePlan, request_id: message.RequestId, packet_count: u8
 comptime {
     std.debug.assert(@sizeOf(ResponsePlan) <= 8 * 1_024);
 }
+
+test {
+    _ = @import("response_plan_test.zig");
+}

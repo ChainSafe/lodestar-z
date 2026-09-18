@@ -217,7 +217,7 @@ pub const BlindedBeaconBlockBody = ssz.VariableContainerType(struct {
     eth1_data: Eth1Data,
     graffiti: p.Bytes32,
     proposer_slashings: ssz.FixedListType(ProposerSlashing, preset.MAX_PROPOSER_SLASHINGS, .{}),
-    attester_slashings: ssz.VariableListType(AttesterSlashing, preset.MAX_ATTESTER_SLASHINGS),
+    attester_slashings: AttesterSlashings,
     attestations: ssz.VariableListType(Attestation, preset.MAX_ATTESTATIONS_ELECTRA),
     deposits: ssz.FixedListType(Deposit, preset.MAX_DEPOSITS, .{}),
     voluntary_exits: ssz.FixedListType(SignedVoluntaryExit, preset.MAX_VOLUNTARY_EXITS, .{}),
@@ -289,3 +289,17 @@ pub const SignedBeaconBlock = ssz.VariableContainerType(struct {
     message: BeaconBlock,
     signature: p.BLSSignature,
 });
+
+test "blinded block body should have the same root as the full body" {
+    const allocator = std.testing.allocator;
+    const body = BeaconBlockBody.default_value;
+    var blinded_body = BlindedBeaconBlockBody.default_value;
+    try bellatrix.Transactions.hashTreeRoot(allocator, &body.execution_payload.transactions, &blinded_body.execution_payload_header.transactions_root);
+    try capella.Withdrawals.hashTreeRoot(allocator, &body.execution_payload.withdrawals, &blinded_body.execution_payload_header.withdrawals_root);
+
+    var full_root: [32]u8 = undefined;
+    var blinded_root: [32]u8 = undefined;
+    try BeaconBlockBody.hashTreeRoot(allocator, &body, &full_root);
+    try BlindedBeaconBlockBody.hashTreeRoot(allocator, &blinded_body, &blinded_root);
+    try std.testing.expectEqualSlices(u8, &full_root, &blinded_root);
+}

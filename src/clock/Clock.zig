@@ -481,3 +481,7 @@ fn runAutoLoop(self: *Clock) void {
     // also exits with stopped set.
     std.debug.assert(self.stopped);
 }
+
+test {
+    _ = @import("clock_test.zig");
+}

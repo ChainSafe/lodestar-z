@@ -561,3 +561,7 @@ comptime {
     std.debug.assert(bucket_subnet_limit <= bucket_size);
     std.debug.assert(table_subnet_limit <= table_capacity);
 }
+
+test {
+    _ = @import("routing_table_test.zig");
+}

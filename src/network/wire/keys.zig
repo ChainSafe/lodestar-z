@@ -87,3 +87,7 @@ fn normalizeLowS(signature: Ecdsa.Signature) Ecdsa.Signature {
     const negated = scalar.neg(signature.s, .big) catch unreachable;
     return .{ .r = signature.r, .s = negated };
 }
+
+test {
+    _ = @import("keys_test.zig");
+}

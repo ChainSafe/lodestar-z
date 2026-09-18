@@ -327,3 +327,7 @@ fn receiveEntropy(io: std.Io) std.Io.RandomSecureError!Engine.ReceiveEntropy {
 comptime {
     std.debug.assert(@sizeOf(Transport) <= 32 * 1_024);
 }
+
+test {
+    _ = @import("transport_test.zig");
+}

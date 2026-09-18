@@ -20,5 +20,4 @@ test {
     _ = config;
     _ = slot_math;
     _ = Clock;
-    _ = @import("clock_test.zig");
 }

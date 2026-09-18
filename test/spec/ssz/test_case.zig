@@ -349,6 +349,39 @@ pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !voi
     var value_actual: ST.Type = if (comptime ST.kind == .compatible_union) undefined else ST.default_value;
 
     try std.testing.expectError(error.InvalidSSZ, deserialize(ST, allocator, serialized_expected, &value_actual));
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = gpa,
+        .allocator = gpa,
+        .pool_size = 1_000_000,
+    });
+    defer pool.deinit();
+
+    try std.testing.expectError(error.InvalidSSZ, deserializeTree(ST, &pool, serialized_expected));
+}
+
+fn deserializeTree(comptime ST: type, pool: *Node.Pool, serialized: []const u8) !void {
+    const node = ST.tree.deserializeFromBytes(pool, serialized) catch |err| switch (@as(anyerror, err)) {
+        error.OutOfMemory, error.PoolExhausted, error.RefCountOverflow => return err,
+        else => return error.InvalidSSZ,
+    };
+    defer pool.unref(node);
+}
+
+test "tree invalid-case normalization preserves resource errors" {
+    var pool = try Node.Pool.init(.{
+        .page_allocator = std.testing.allocator,
+        .allocator = std.testing.failing_allocator,
+        .pool_size = 0,
+    });
+    defer pool.deinit();
+
+    try std.testing.expectError(error.PoolExhausted, deserializeTree(ssz.BoolType(), &pool, &.{1}));
+    try std.testing.expectError(error.InvalidSSZ, deserializeTree(ssz.BoolType(), &pool, &.{2}));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        deserializeTree(ssz.FixedProgressiveListType(ssz.BoolType()), &pool, &.{1}),
+    );
 }
 
 // Wrap validate with a single error type

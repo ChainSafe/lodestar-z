@@ -149,3 +149,7 @@ fn alpnSelect(
     if (result == c.OPENSSL_NPN_NEGOTIATED) return c.SSL_TLSEXT_ERR_OK;
     return c.SSL_TLSEXT_ERR_ALERT_FATAL;
 }
+
+test {
+    _ = @import("context_test.zig");
+}

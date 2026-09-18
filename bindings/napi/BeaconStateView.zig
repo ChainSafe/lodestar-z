@@ -8,6 +8,7 @@ const CachedBeaconState = st.CachedBeaconState;
 const AnyBeaconState = fork_types.AnyBeaconState;
 const AnyExecutionPayloadHeader = fork_types.AnyExecutionPayloadHeader;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const BlockType = fork_types.BlockType;
 const preset = @import("preset").preset;
 const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
@@ -16,6 +17,7 @@ const pubkey = @import("./pubkeys.zig");
 const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
+const validator_monitor = @import("./validator_monitor.zig");
 
 /// Allocator used for all BeaconStateView instances.
 var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -25,6 +27,7 @@ pub const js_meta = js.class(.{ .properties = .{
     .slot = js.prop(.{ .get = true, .set = false }),
     .fork = js.prop(.{ .get = true, .set = false }),
     .forkName = js.prop(.{ .get = true, .set = false }),
+    .forkSeq = js.prop(.{ .get = true, .set = false }),
     .epoch = js.prop(.{ .get = true, .set = false }),
     .genesisTime = js.prop(.{ .get = true, .set = false }),
     .genesisValidatorsRoot = js.prop(.{ .get = true, .set = false }),
@@ -90,6 +93,10 @@ pub fn deinit(self: *BeaconStateView) void {
     }
 }
 
+pub fn release(self: *BeaconStateView) void {
+    self.deinit();
+}
+
 fn initCachedState(
     cached_state: *CachedBeaconState,
     io: std.Io,
@@ -110,6 +117,7 @@ fn initCachedState(
 // -------------------------
 // Class Methods
 // -------------------------
+/// Requires state bytes with trusted provenance; SSZ decoding does not authenticate them.
 pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     const state = try allocator.create(AnyBeaconState);
     errdefer allocator.destroy(state);
@@ -153,6 +161,11 @@ pub fn fork(self: *const BeaconStateView) !js_types.Fork {
 pub fn forkName(self: *const BeaconStateView) !js.String {
     const cached_state = try self.requireState();
     return js.String.from(cached_state.state.forkSeq().name());
+}
+
+pub fn forkSeq(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    return js.Number.from(@intFromEnum(cached_state.state.forkSeq()));
 }
 
 pub fn epoch(self: *const BeaconStateView) !js.Number {
@@ -576,12 +589,48 @@ pub fn nextSyncCommittee(self: *const BeaconStateView) !js_types.SyncCommittee {
     return js_types.wrap(js_types.SyncCommittee, try sszValueToNapiValue(env, ct.altair.SyncCommittee, &result));
 }
 
-pub fn currentSyncCommitteeIndexed(self: *const BeaconStateView) !js_types.IndexedSyncCommitteeWithMap {
-    const env = js.env();
+pub fn currentSyncCommitteeIndexed(self: *const BeaconStateView) !js_types.IndexedSyncCommittee {
     const cached_state = try self.requireState();
     const sync_committee_cache = cached_state.epoch_cache.current_sync_committee_indexed.get();
-    const validator_indices = sync_committee_cache.getValidatorIndices();
-    const validator_index_map = sync_committee_cache.getValidatorIndexMap();
+    return indexedSyncCommitteeToNapi(sync_committee_cache);
+}
+
+pub fn syncProposerReward(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    const sync_proposer_reward = cached_state.epoch_cache.sync_proposer_reward;
+    return js.Number.from(sync_proposer_reward);
+}
+
+/// Get the indexed sync committee at a given epoch.
+pub fn getIndexedSyncCommitteeAtEpoch(self: *const BeaconStateView, epoch_arg: js.Number) !js_types.IndexedSyncCommittee {
+    const cached_state = try self.requireState();
+    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
+
+    const sync_committee = cached_state.epoch_cache.getIndexedSyncCommitteeAtEpoch(epoch_value) catch {
+        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for requested epoch");
+    };
+    return indexedSyncCommitteeToNapi(&sync_committee);
+}
+
+/// Get the indexed sync committee for a given slot (uses slot+1 offset for duty lookups).
+pub fn getIndexedSyncCommittee(self: *const BeaconStateView, slot_arg: js.Number) !js_types.IndexedSyncCommittee {
+    const cached_state = try self.requireState();
+    const slot_value: u64 = @intCast(try slot_arg.toI64());
+
+    const sync_committee = cached_state.epoch_cache.getIndexedSyncCommittee(slot_value) catch {
+        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for requested slot");
+    };
+    return indexedSyncCommitteeToNapi(&sync_committee);
+}
+
+fn indexedSyncCommitteeToNapi(sync_committee: anytype) !js_types.IndexedSyncCommittee {
+    const env = js.env();
+    const validator_indices = sync_committee.getValidatorIndices() catch {
+        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for pre-Altair state");
+    };
+    const validator_index_map = sync_committee.getValidatorIndexMap() catch {
+        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for pre-Altair state");
+    };
 
     const obj = try env.createObject();
     try obj.setNamedProperty(
@@ -601,64 +650,17 @@ pub fn currentSyncCommitteeIndexed(self: *const BeaconStateView) !js_types.Index
 
     var iterator = validator_index_map.iterator();
     while (iterator.next()) |entry| {
-        const idx = entry.key_ptr.*;
-        const positions = entry.value_ptr;
-
-        const key_value_napi = try env.createInt64(@intCast(idx));
-        const positions_napi = try numberSliceToNapiValue(
+        const key = try env.createInt64(@intCast(entry.key_ptr.*));
+        const positions = try numberSliceToNapiValue(
             env,
             u32,
-            positions.items,
-            .{ .typed_array = .uint32 },
+            entry.value_ptr.items,
+            .{},
         );
-
-        _ = try env.callFunction(set_fn, map, .{ key_value_napi, positions_napi });
+        _ = try env.callFunction(set_fn, map, .{ key, positions });
     }
 
     try obj.setNamedProperty("validatorIndexMap", map);
-    return .{ .val = obj };
-}
-
-pub fn syncProposerReward(self: *const BeaconStateView) !js.Number {
-    const cached_state = try self.requireState();
-    const sync_proposer_reward = cached_state.epoch_cache.sync_proposer_reward;
-    return js.Number.from(sync_proposer_reward);
-}
-
-/// Get the indexed sync committee at a given epoch.
-/// Returns: object with validatorIndices (Uint32Array)
-pub fn getIndexedSyncCommitteeAtEpoch(self: *const BeaconStateView, epoch_arg: js.Number) !js_types.IndexedSyncCommittee {
-    const env = js.env();
-    const cached_state = try self.requireState();
-    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
-
-    const sync_committee = cached_state.epoch_cache.getIndexedSyncCommitteeAtEpoch(epoch_value) catch {
-        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for requested epoch");
-    };
-
-    const obj = try env.createObject();
-    try obj.setNamedProperty(
-        "validatorIndices",
-        try numberSliceToNapiValue(env, u64, sync_committee.getValidatorIndices(), .{ .typed_array = .uint32 }),
-    );
-    return .{ .val = obj };
-}
-
-/// Get the indexed sync committee for a given slot (uses slot+1 offset for duty lookups).
-pub fn getIndexedSyncCommittee(self: *const BeaconStateView, slot_arg: js.Number) !js_types.IndexedSyncCommittee {
-    const env = js.env();
-    const cached_state = try self.requireState();
-    const slot_value: u64 = @intCast(try slot_arg.toI64());
-
-    const sync_committee = cached_state.epoch_cache.getIndexedSyncCommittee(slot_value) catch {
-        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for requested slot");
-    };
-
-    const obj = try env.createObject();
-    try obj.setNamedProperty(
-        "validatorIndices",
-        try numberSliceToNapiValue(env, u64, sync_committee.getValidatorIndices(), .{ .typed_array = .uint32 }),
-    );
     return .{ .val = obj };
 }
 
@@ -983,10 +985,12 @@ pub fn getSyncCommitteesWitness(self: *const BeaconStateView) !js_types.SyncComm
 }
 
 /// Get a single Merkle proof  for a node at the given generalized index.
-pub fn getSingleProof(self: *const BeaconStateView, gindex_arg: js.Number) !js.Array {
+pub fn getSingleProof(self: *const BeaconStateView, gindex_arg: js.BigInt) !js.Array {
     const env = js.env();
     const cached_state = try self.requireState();
-    const gindex: u64 = @intCast(try gindex_arg.toI64());
+    var lossless = false;
+    const gindex = try gindex_arg.toU64(&lossless);
+    if (!lossless) return error.InvalidGindex;
 
     var proof = cached_state.state.getSingleProof(allocator, gindex) catch {
         return throwNullAs(js.Array, "STATE_ERROR", "Failed to get single proof");
@@ -1290,8 +1294,16 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
         post_state.deinit();
         allocator.destroy(post_state);
     }
+    st.metrics.state_transition.pre_state_cloned_count.observe(cached_state.cloned_count);
 
-    try st.processSlots(allocator, js.io(), post_state, slot_value, .{});
+    try st.processSlots(
+        allocator,
+        js.io(),
+        post_state,
+        slot_value,
+        validator_monitor.get(),
+    );
+
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
@@ -1303,8 +1315,14 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
 ///
 /// Arguments:
 /// - arg 0: signed block bytes (Uint8Array)
-/// - arg 1: options (optional): parse `TransitionOpts`
-pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint8Array, options: ?js.Value) !BeaconStateView {
+/// - arg 1: whether the signed block is blinded (bool)
+/// - arg 2: options (optional): parse `TransitionOpts`
+pub fn stateTransition(
+    self: *const BeaconStateView,
+    signed_block_bytes: js.Uint8Array,
+    is_blinded: js.Boolean,
+    options: ?js.Value,
+) !BeaconStateView {
     const cached_state = try self.requireState();
     const opts = try @import("./transition_opts.zig").parseOptions(options);
 
@@ -1316,11 +1334,19 @@ pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint
     const block_epoch = st.computeEpochAtSlot(block_slot);
 
     const fork_seq = cached_state.config.forkSeqAtEpoch(block_epoch);
+    const block_type: BlockType = if (try is_blinded.toBool()) .blinded else .full;
 
-    const signed_block = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, bytes);
+    const signed_block = try AnySignedBeaconBlock.deserialize(allocator, block_type, fork_seq, bytes);
     defer signed_block.deinit(allocator);
 
-    const post_state = try st.stateTransition(allocator, js.io(), cached_state, signed_block, opts);
+    const post_state = try st.stateTransition(
+        allocator,
+        js.io(),
+        cached_state,
+        signed_block,
+        opts,
+        validator_monitor.get(),
+    );
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
@@ -1472,8 +1498,60 @@ pub fn withParentPayloadApplied(_: *const BeaconStateView, _: js.Value) !BeaconS
 
 // --- API-only methods (used by beacon-node rewards endpoints) ---
 
-pub fn computeBlockRewards(_: *const BeaconStateView, _: js.Value, _: ?js.Value) !js.Value {
-    return throwNotImpl(js.Value, "computeBlockRewards not implemented");
+pub fn computeBlockRewards(
+    self: *const BeaconStateView,
+    signed_block_bytes: js.Uint8Array,
+    is_blinded: js.Boolean,
+    proposer_rewards: ?js.Value,
+) !js_types.BlockRewards {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const bytes = try signed_block_bytes.toSlice();
+
+    const block_type: BlockType = if (try is_blinded.toBool()) .blinded else .full;
+    const signed_block = try AnySignedBeaconBlock.deserialize(
+        allocator,
+        block_type,
+        cached_state.state.forkSeq(),
+        bytes,
+    );
+    defer signed_block.deinit(allocator);
+
+    const cached = try parseProposerRewards(proposer_rewards);
+    const rewards = try st.computeBlockRewardsAny(
+        allocator,
+        js.io(),
+        cached_state,
+        signed_block.beaconBlock(),
+        cached,
+    );
+
+    const result = js_types.BlockRewards{ .val = try env.createObject() };
+    try result.set(.{
+        .proposerIndex = js.Number.from(rewards.proposer_index),
+        .total = js.Number.from(rewards.total),
+        .attestations = js.Number.from(rewards.attestations),
+        .syncAggregate = js.Number.from(rewards.sync_aggregate),
+        .proposerSlashings = js.Number.from(rewards.proposer_slashings),
+        .attesterSlashings = js.Number.from(rewards.attester_slashings),
+    });
+    return result;
+}
+
+fn parseProposerRewards(value: ?js.Value) !?st.ProposerRewards {
+    const raw = (value orelse return null).toValue();
+    if (try raw.typeof() != .object) return null;
+    return st.ProposerRewards{
+        .attestations = try optionalU64(raw, "attestations"),
+        .sync_aggregate = try optionalU64(raw, "syncAggregate"),
+        .slashing = try optionalU64(raw, "slashing"),
+    };
+}
+
+fn optionalU64(obj: napi.Value, name: [:0]const u8) !u64 {
+    if (!try obj.hasNamedProperty(name)) return 0;
+    const raw = try (try obj.getNamedProperty(name)).getValueInt64();
+    return if (raw < 0) 0 else @intCast(raw);
 }
 
 pub fn computeAttestationsRewards(_: *const BeaconStateView, _: ?js.Value) !js.Value {

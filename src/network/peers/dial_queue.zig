@@ -632,3 +632,7 @@ pub const DialQueue = struct {
 fn hasDialIntent(row: *const Row, now_ms: u64) bool {
     return row.direct or now_ms < row.manual_until_ms or (row.automatic and row.selected);
 }
+
+test {
+    _ = @import("dial_queue_test.zig");
+}

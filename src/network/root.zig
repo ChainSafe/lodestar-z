@@ -47,7 +47,7 @@ pub const Multiaddr = wire.multiaddr.Multiaddr;
 pub const KeyPair = wire.keys.KeyPair;
 
 test {
-    _ = @import("chain_test.zig");
+    _ = @import("chain.zig");
     _ = gossip_processor;
     _ = peers;
     _ = constants;
@@ -61,19 +61,17 @@ test {
     _ = stream_io;
     _ = reqresp;
     _ = gossipsub;
-    _ = @import("types_test.zig");
-    _ = @import("udp_test.zig");
-    _ = @import("wait_test.zig");
-    _ = @import("transport_io_test.zig");
-    _ = @import("transport_test.zig");
-    _ = @import("negotiate_test.zig");
-    _ = @import("router_test.zig");
-    _ = @import("managed_test.zig");
-    _ = @import("managed_control_test.zig");
-    _ = @import("network_core_test.zig");
+    _ = @import("types.zig");
+    _ = @import("udp.zig");
+    _ = @import("wait.zig");
+    _ = @import("transport.zig");
+    _ = @import("negotiate.zig");
+    _ = @import("router.zig");
+    _ = @import("managed.zig");
+    _ = @import("network_core.zig");
     _ = @import("reservations.zig");
     _ = configuration;
-    _ = @import("capabilities_test.zig");
+    _ = @import("capabilities.zig");
     _ = identify;
     _ = metrics;
     _ = logging;

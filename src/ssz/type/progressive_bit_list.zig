@@ -1,4 +1,6 @@
 const std = @import("std");
+const BitList = @import("bit_array").BitList;
+const unlimited = @import("bit_array").unlimited;
 const expectEqualRootsAlloc = @import("test_utils.zig").expectEqualRootsAlloc;
 const expectEqualSerializedAlloc = @import("test_utils.zig").expectEqualSerializedAlloc;
 const TypeKind = @import("type_kind.zig").TypeKind;
@@ -11,103 +13,6 @@ const mixInLength = @import("hashing").mixInLength;
 const Node = @import("persistent_merkle_tree").Node;
 const progressive = @import("progressive.zig");
 
-pub fn ProgressiveBitList() type {
-    return struct {
-        data: std.ArrayListUnmanaged(u8),
-        bit_len: usize,
-
-        pub const empty: @This() = .{
-            .data = std.ArrayListUnmanaged(u8).empty,
-            .bit_len = 0,
-        };
-
-        pub fn equals(self: *const @This(), other: *const @This()) bool {
-            return self.bit_len == other.bit_len and std.mem.eql(u8, self.data.items, other.data.items);
-        }
-
-        pub fn fromBitLen(allocator: std.mem.Allocator, bit_len: usize) !@This() {
-            const byte_len = std.math.divCeil(usize, bit_len, 8) catch unreachable;
-
-            var data = try std.ArrayListUnmanaged(u8).initCapacity(allocator, byte_len);
-            data.expandToCapacity();
-            @memset(data.items, 0);
-            return @This(){
-                .data = data,
-                .bit_len = bit_len,
-            };
-        }
-
-        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-            self.data.deinit(allocator);
-        }
-
-        pub fn get(self: *const @This(), bit_index: usize) !bool {
-            if (bit_index >= self.bit_len) {
-                return error.OutOfRange;
-            }
-
-            const byte_idx = bit_index / 8;
-            const offset_in_byte: u3 = @intCast(bit_index % 8);
-            const mask = @as(u8, 1) << offset_in_byte;
-            return (self.data.items[byte_idx] & mask) == mask;
-        }
-
-        pub fn set(self: *@This(), allocator: std.mem.Allocator, bit_index: usize, bit: bool) !void {
-            if (bit_index + 1 > self.bit_len) {
-                try self.resize(allocator, bit_index + 1);
-            }
-            try self.setAssumeCapacity(bit_index, bit);
-        }
-
-        pub fn resize(self: *@This(), allocator: std.mem.Allocator, bit_len: usize) !void {
-            const old_bit_len = self.bit_len;
-            const old_byte_len = std.math.divCeil(usize, old_bit_len, 8) catch unreachable;
-            const byte_len = std.math.divCeil(usize, bit_len, 8) catch unreachable;
-            try self.data.resize(allocator, byte_len);
-            self.bit_len = bit_len;
-            // zero out additionally allocated bytes
-            if (old_byte_len < byte_len) {
-                @memset(self.data.items[old_byte_len..], 0);
-            } else if (bit_len < old_bit_len and bit_len % 8 != 0) {
-                const retained_bits: u3 = @intCast(bit_len % 8);
-                const retained_mask = (@as(u8, 1) << retained_bits) - 1;
-                self.data.items[byte_len - 1] &= retained_mask;
-            }
-        }
-
-        /// Set bit value at index `bit_index`
-        pub fn setAssumeCapacity(self: *@This(), bit_index: usize, bit: bool) !void {
-            if (bit_index >= self.bit_len) {
-                return error.OutOfRange;
-            }
-
-            const byte_index = bit_index / 8;
-            const offset_in_byte: u3 = @intCast(bit_index % 8);
-            const mask = @as(u8, 1) << offset_in_byte;
-            var byte = self.data.items[byte_index];
-            if (bit) {
-                // For bit in byte, 1,0 OR 1 = 1
-                // byte 100110
-                // mask 010000
-                // res  110110
-                byte |= mask;
-                self.data.items[byte_index] = byte;
-            } else {
-                // For bit in byte, 1,0 OR 1 = 0
-                if ((byte & mask) == mask) {
-                    // byte 110110
-                    // mask 010000
-                    // res  100110
-                    byte ^= mask;
-                    self.data.items[byte_index] = byte;
-                } else {
-                    // Ok, bit is already 0
-                }
-            }
-        }
-    };
-}
-
 pub fn isProgressiveBitListType(ST: type) bool {
     return ST.kind == .progressive_bit_list;
 }
@@ -117,7 +22,7 @@ pub fn ProgressiveBitListType() type {
         const Self = @This();
         pub const kind = TypeKind.progressive_bit_list;
         pub const Element: type = BoolType();
-        pub const Type: type = ProgressiveBitList();
+        pub const Type: type = BitList(.{ .limit = unlimited });
         pub const min_size: usize = 1;
         pub const max_size: usize = std.math.maxInt(usize);
 
@@ -408,39 +313,6 @@ pub fn ProgressiveBitListType() type {
     };
 }
 
-test "ProgressiveBitListType - sanity" {
-    const allocator = std.testing.allocator;
-    const Bits = ProgressiveBitListType();
-    var b: Bits.Type = try Bits.Type.fromBitLen(allocator, 30);
-    defer b.deinit(allocator);
-
-    try b.setAssumeCapacity(2, true);
-
-    const b_buf = try allocator.alloc(u8, Bits.serializedSize(&b));
-    defer allocator.free(b_buf);
-
-    _ = Bits.serializeIntoBytes(&b, b_buf);
-    try Bits.deserializeFromBytes(allocator, b_buf, &b);
-
-    try std.testing.expect(try b.get(0) == false);
-    try std.testing.expect(try b.get(2) == true);
-}
-
-test "ProgressiveBitListType - shrinking clears truncated bits" {
-    const allocator = std.testing.allocator;
-    const Bits = ProgressiveBitListType();
-    var bits = try Bits.Type.fromBitLen(allocator, 8);
-    defer bits.deinit(allocator);
-
-    try bits.setAssumeCapacity(7, true);
-    try bits.resize(allocator, 1);
-
-    var serialized: [1]u8 = undefined;
-    _ = Bits.serializeIntoBytes(&bits, &serialized);
-
-    var round_trip = Bits.default_value;
-    defer round_trip.deinit(allocator);
-    try Bits.deserializeFromBytes(allocator, &serialized, &round_trip);
-
-    try std.testing.expectEqual(@as(usize, 1), round_trip.bit_len);
+test {
+    _ = @import("progressive_bit_list_test.zig");
 }

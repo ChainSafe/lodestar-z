@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
+const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
 const CloneOpts = @import("clone_opts.zig").CloneOpts;
 
 /// Common state for tree views that use runtime gindex-based child caching.
@@ -77,6 +78,47 @@ pub const TreeViewState = struct {
         }
     }
 
+    /// Stages a packed write for the next commit, copying shared leaves and reusing pending ones.
+    /// `valid_chunks` must preserve or grow the length. `write` must not retain the chunk pointer
+    /// or access the pool.
+    pub fn editChunkedLeaf(
+        self: *TreeViewState,
+        gindex: Gindex,
+        intra_chunk: u16,
+        valid_chunks: u16,
+        comptime T: type,
+        index: usize,
+        value: *const T,
+        comptime write: fn (*[32]u8, usize, *const T) void,
+    ) !void {
+        std.debug.assert(intra_chunk < valid_chunks);
+        std.debug.assert(valid_chunks <= ChunkedLeaf.K);
+        var node = try self.getChildNode(gindex);
+        const state = node.getState(self.pool);
+
+        if (state.kind() == .chunked_leaf and state.refCount() == 0) {
+            std.debug.assert(self.changed.contains(gindex));
+        } else {
+            const replacement = switch (state.kind()) {
+                .zero => blk: {
+                    std.debug.assert(node == @as(Node.Id, @enumFromInt(ChunkedLeaf.k_log2)));
+                    break :blk try self.pool.createChunkedLeafEmpty(valid_chunks);
+                },
+                .chunked_leaf => try self.pool.createChunkedLeaf(
+                    try node.getChunkedLeafChunks(self.pool),
+                    try node.getChunkedLeafLen(self.pool),
+                ),
+                else => return error.InvalidNode,
+            };
+            errdefer self.pool.unref(replacement);
+
+            try self.setChildNode(gindex, replacement);
+            node = replacement;
+        }
+
+        try node.editChunkedLeaf(self.pool, intra_chunk, valid_chunks, T, index, value, write);
+    }
+
     pub fn commitNodes(self: *TreeViewState) !void {
         if (self.changed.count() == 0) {
             return;
@@ -146,22 +188,6 @@ pub const TreeViewState = struct {
     }
 };
 
-test "getChildNode does not publish a cache entry when lookup fails" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{
-        .page_allocator = allocator,
-        .allocator = allocator,
-        .pool_size = 1,
-    });
-    defer pool.deinit();
-
-    const root = try pool.createLeaf(&([_]u8{0} ** 32));
-    var state: TreeViewState = undefined;
-    try state.init(allocator, &pool, root);
-    defer state.deinit();
-
-    // Failed leaf child navigation must not publish a cache entry.
-    const child_gindex = Gindex.fromDepth(1, 0);
-    try std.testing.expectError(error.InvalidNode, state.getChildNode(child_gindex));
-    try std.testing.expectEqual(@as(usize, 0), state.children_nodes.count());
+test {
+    _ = @import("tree_view_state_test.zig");
 }

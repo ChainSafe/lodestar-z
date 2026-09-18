@@ -86,3 +86,7 @@ fn extensionValue(x509: *c.X509) Error!signed_key.SignedKey {
         else => error.ExtensionMalformed,
     };
 }
+
+test {
+    _ = @import("verify_test.zig");
+}

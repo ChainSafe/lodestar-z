@@ -126,3 +126,8 @@ pub const Namespace = struct {
         for (0..self.connected_capacity) |peer| if (self.subscribed(@intCast(peer), ordinal)) out.set(peer);
     }
 };
+
+test {
+    _ = @import("topic_policy_lifecycle_test.zig");
+    _ = @import("topic_policy_test.zig");
+}

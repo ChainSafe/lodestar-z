@@ -98,3 +98,7 @@ fn base58Decode(text: []const u8, out: *[length]u8) error{InvalidText}![]u8 {
     for (0..bytes_len) |index| out[zeros + index] = bytes[bytes_len - 1 - index];
     return out[0 .. zeros + bytes_len];
 }
+
+test {
+    _ = @import("peer_id_test.zig");
+}

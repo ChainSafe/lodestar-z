@@ -1,7 +1,9 @@
+//! Load only one addon version per process; class instances cannot cross versions.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const js = @import("zapi:zapi").js;
-pub const pool = @import("./pool.zig");
+const pool = @import("./pool.zig");
 pub const shuffle = @import("./shuffle.zig");
 pub const config = @import("./config.zig");
 pub const metrics = @import("./metrics.zig");
@@ -81,4 +83,8 @@ comptime {
         .cleanup = cleanup,
         .register = @import("network_faults.zig").register,
     });
+}
+
+test {
+    _ = @import("network_runtime.zig");
 }

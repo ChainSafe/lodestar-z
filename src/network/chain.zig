@@ -158,3 +158,7 @@ fn topicBoundary(chain: *const config.ChainConfig, fork: config.ForkSeq, digest:
     }
     return result;
 }
+
+test {
+    _ = @import("chain_test.zig");
+}

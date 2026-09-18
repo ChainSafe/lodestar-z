@@ -66,12 +66,12 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: benchmark_data
-          key: benchmark-data-${{ github.sha }}
+          key: benchmark-data-isolated-v1-${{ github.sha }}
           restore-keys: |
-            benchmark-data-
+            benchmark-data-isolated-v1-
       - name: Run benchmarks
         run: |
-          pnpm benchmark --local
+          pnpm benchmark
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Save benchmark history
@@ -79,4 +79,4 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: benchmark_data
-          key: benchmark-data-${{ github.sha }}
+          key: benchmark-data-isolated-v1-${{ github.sha }}

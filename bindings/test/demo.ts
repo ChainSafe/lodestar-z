@@ -32,8 +32,6 @@ const hasPkix = printDuration("check for pkix file", () => {
   }
 });
 
-bindings.pool.ensureCapacity(10_000_000);
-
 const reader = await printDurationAsync("load era reader", () => era.era.EraReader.open(config, getFirstEraFilePath()));
 
 const nextReader = await printDurationAsync("load era reader", () =>
@@ -65,7 +63,7 @@ const signedBlockBytes = (await printDurationAsync("read serialized block", () =
   nextReader.readSerializedBlock(state.slot + 1)
 )) as Uint8Array;
 
-printDuration("state transition", () => state.stateTransition(signedBlockBytes));
+printDuration("state transition", () => state.stateTransition(signedBlockBytes, false));
 
 printDuration("write pkix to disk", () => pubkeyCache.save(PKIX_FILE));
 
@@ -125,7 +123,7 @@ printDuration("pendingDeposits", () => state.pendingDeposits);
 printDuration("pendingPartialWithdrawals", () => state.pendingPartialWithdrawals);
 printDuration("pendingConsolidations", () => state.pendingConsolidations);
 printDuration("proposerLookahead", () => state.proposerLookahead);
-printDuration("getSingleProof(169)", () => state.getSingleProof(169));
+printDuration("getSingleProof(169n)", () => state.getSingleProof(169n));
 const invalidVoluntaryExit = {
   message: {epoch: 0, validatorIndex: 0},
   signature: new Uint8Array(96),

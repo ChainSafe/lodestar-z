@@ -465,3 +465,7 @@ pub const Catalog = struct {
         return count;
     }
 };
+
+test {
+    _ = @import("catalog_test.zig");
+}

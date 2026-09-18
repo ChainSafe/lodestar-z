@@ -309,3 +309,8 @@ pub const Handler = struct {
         };
     }
 };
+
+test {
+    _ = @import("handler_snapshot_test.zig");
+    _ = @import("handler_test.zig");
+}

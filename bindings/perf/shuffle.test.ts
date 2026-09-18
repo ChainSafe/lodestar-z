@@ -84,7 +84,7 @@ describe("committee indices", () => {
 describe("computePtcIndices - per slot", () => {
   const {EFFECTIVE_BALANCE_INCREMENT, MAX_EFFECTIVE_BALANCE_ELECTRA, PTC_SIZE} = shuffleReference;
   for (const vc of [16_384, 250_000, 1_000_000]) {
-    const seed = new Uint8Array(crypto.randomBytes(32));
+    const seed = deterministicBenchmarkSeed(`ptc-indices:${vc}`);
     const indices = getInputArray(vc);
     const effectiveBalanceIncrements = new Uint16Array(vc).fill(32);
 
@@ -119,7 +119,7 @@ describe("computePtcIndicesForEpoch - full epoch (32 slots)", () => {
     const slotOffsets = new Uint32Array(SLOTS_PER_EPOCH + 1);
     for (let i = 0; i <= SLOTS_PER_EPOCH; i++) slotOffsets[i] = i * indicesPerSlot;
     const effectiveBalanceIncrements = new Uint16Array(vc).fill(32);
-    const epochSeed = new Uint8Array(crypto.randomBytes(32));
+    const epochSeed = deterministicBenchmarkSeed(`ptc-epoch:${vc}`);
     const startSlot = 0;
 
     const committees: Uint32Array[][] = new Array(SLOTS_PER_EPOCH);

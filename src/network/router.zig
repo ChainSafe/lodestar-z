@@ -249,3 +249,7 @@ pub const outcomes_per_pump: usize = 16;
 comptime {
     std.debug.assert(capability.protocol_count <= negotiate.supported_max);
 }
+
+test {
+    _ = @import("router_test.zig");
+}

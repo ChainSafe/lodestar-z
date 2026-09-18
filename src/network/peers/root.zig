@@ -24,15 +24,16 @@ pub const DisconnectReason = types.DisconnectReason;
 pub const Snapshot = types.Snapshot;
 pub const Event = types.Event;
 pub const Options = types.Options;
+
 test {
     _ = @import("goodbye.zig");
     _ = custody;
     _ = policy;
-    _ = @import("discovery_test.zig");
-    _ = @import("enr_test.zig");
-    _ = @import("types_test.zig");
-    _ = @import("catalog_test.zig");
-    _ = @import("reputation_test.zig");
-    _ = @import("control_wire_test.zig");
-    _ = @import("dial_queue_test.zig");
+    _ = @import("discovery.zig");
+    _ = @import("enr.zig");
+    _ = @import("types.zig");
+    _ = @import("catalog.zig");
+    _ = @import("reputation.zig");
+    _ = @import("control_wire.zig");
+    _ = @import("dial_queue.zig");
 }

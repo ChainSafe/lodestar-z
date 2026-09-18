@@ -320,38 +320,6 @@ pub fn computeForkDataRoot(current_version: Version, genesis_validators_root: Ro
     ct.phase0.ForkData.hashTreeRoot(&fork_data, out) catch unreachable;
 }
 
-test "getDomain" {
-    const root = [_]u8{0} ** 32;
-    var beacon_config = BeaconConfig.init(@import("./networks/mainnet.zig").chain_config, root);
-
-    const domain = try beacon_config.getDomain(100, DOMAIN_VOLUNTARY_EXIT, null);
-    const domain2 = try beacon_config.getDomain(100, DOMAIN_VOLUNTARY_EXIT, null);
-    try std.testing.expectEqualSlices(u8, domain, domain2);
-}
-
-test "blob parameters select latest active entry and share payload bounds" {
-    var chain = @import("networks/mainnet.zig").chain_config;
-    chain.FULU_FORK_EPOCH = 100;
-    chain.ELECTRA_FORK_EPOCH = 9;
-    chain.DENEB_FORK_EPOCH = 0;
-    chain.CAPELLA_FORK_EPOCH = 0;
-    chain.BELLATRIX_FORK_EPOCH = 0;
-    chain.ALTAIR_FORK_EPOCH = 0;
-    chain.BLOB_SCHEDULE = &.{
-        .{ .EPOCH = 200, .MAX_BLOBS_PER_BLOCK = 21 },
-        .{ .EPOCH = 150, .MAX_BLOBS_PER_BLOCK = 15 },
-    };
-    const config = BeaconConfig.init(chain, @splat(0));
-    for ([_]struct { epoch: Epoch, from: Epoch, count: u64 }{
-        .{ .epoch = 100, .from = 9, .count = 9 },
-        .{ .epoch = 149, .from = 9, .count = 9 },
-        .{ .epoch = 150, .from = 150, .count = 15 },
-        .{ .epoch = 199, .from = 150, .count = 15 },
-        .{ .epoch = 200, .from = 200, .count = 21 },
-    }) |case| {
-        const params = config.getBlobParameters(case.epoch);
-        try std.testing.expectEqual(case.from, params.epoch);
-        try std.testing.expectEqual(case.count, params.max_blobs_per_block);
-        try std.testing.expectEqual(case.count, config.getMaxBlobsPerBlock(case.epoch));
-    }
+test {
+    _ = @import("beacon_config_test.zig");
 }

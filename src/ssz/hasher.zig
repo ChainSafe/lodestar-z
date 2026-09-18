@@ -170,26 +170,6 @@ pub const HasherData = struct {
     }
 };
 
-test "Hasher should hash ordinary boolean lists as basic lists" {
-    const BooleanList = @import("type/list.zig").FixedListType(
-        @import("type/bool.zig").BoolType(),
-        64,
-        .{},
-    );
-    const allocator = std.testing.allocator;
-
-    var value = BooleanList.default_value;
-    defer BooleanList.deinit(allocator, &value);
-    try value.appendSlice(allocator, &.{ true, false, true });
-
-    var scratch = try Hasher(BooleanList).init(allocator);
-    defer scratch.deinit(allocator);
-
-    var expected: [32]u8 = undefined;
-    try BooleanList.hashTreeRoot(allocator, &value, &expected);
-
-    var actual: [32]u8 = undefined;
-    try Hasher(BooleanList).hash(&scratch, &value, &actual);
-
-    try std.testing.expectEqual(expected, actual);
+test {
+    _ = @import("hasher_test.zig");
 }

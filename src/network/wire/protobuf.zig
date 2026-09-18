@@ -127,3 +127,7 @@ pub fn bytesFieldSize(field: u32, data_len: usize) usize {
 pub fn varintFieldSize(field: u32, value: u64) usize {
     return keySize(field) + varintLen(value);
 }
+
+test {
+    _ = @import("protobuf_test.zig");
+}

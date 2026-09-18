@@ -416,3 +416,7 @@ pub fn relayAllowed(source: d.types.Address, candidate: types.Address) bool {
     };
     return d.RoutingTable.relayAllowed(source, address);
 }
+
+test {
+    _ = @import("discovery_test.zig");
+}

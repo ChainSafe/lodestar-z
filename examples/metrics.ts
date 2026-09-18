@@ -45,9 +45,6 @@ const hasPkix = (() => {
   }
 })();
 
-console.log("Initializing pool...");
-bindings.pool.ensureCapacity(10_000_000);
-
 console.log("Initializing metrics...");
 bindings.metrics.init();
 

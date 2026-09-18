@@ -161,3 +161,7 @@ fn takeVarint(bytes: []const u8, cursor: *usize) Error!u64 {
     cursor.* += decoded.length;
     return decoded.value;
 }
+
+test {
+    _ = @import("multiaddr_test.zig");
+}

@@ -88,3 +88,7 @@ pub fn withIdentify(active: Directional) Directional {
     result.request.insert(.identify);
     return result;
 }
+
+test {
+    _ = @import("capabilities_test.zig");
+}

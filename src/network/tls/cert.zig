@@ -126,3 +126,7 @@ fn addExtension(
     defer c.X509_EXTENSION_free(extension);
     if (c.X509_add_ext(x509, extension, -1) != 1) return error.OpenSslFailed;
 }
+
+test {
+    _ = @import("cert_test.zig");
+}

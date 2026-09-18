@@ -6,7 +6,7 @@ test {
     _ = cert;
     _ = verify;
     _ = context;
-    _ = @import("cert_test.zig");
-    _ = @import("verify_test.zig");
-    _ = @import("context_test.zig");
+    _ = @import("cert.zig");
+    _ = @import("verify.zig");
+    _ = @import("context.zig");
 }

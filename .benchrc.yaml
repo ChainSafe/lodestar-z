@@ -1,4 +1,5 @@
 # @chainsafe/benchmark options
+historyLocal: ./benchmark_data/isolated-v1
 threshold: 3
 maxMs: 60000
 minRuns: 10

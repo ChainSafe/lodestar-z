@@ -307,3 +307,7 @@ comptime {
     std.debug.assert(@sizeOf(Message) <= 64);
     std.debug.assert(@sizeOf(DecodeScratch) <= 3 * 1_024);
 }
+
+test {
+    _ = @import("message_test.zig");
+}

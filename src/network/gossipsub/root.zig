@@ -25,19 +25,14 @@ pub const Verdict = gossipsub.Verdict;
 pub const ResourceSnapshot = gossipsub.ResourceSnapshot;
 
 test {
-    _ = @import("owner_messages_test.zig");
-    _ = @import("owner_policy_test.zig");
-    _ = @import("owner_resources_test.zig");
-    _ = @import("resource_test.zig");
+    _ = @import("gossipsub.zig");
     _ = diagnostics;
-    _ = @import("local_intent_test.zig");
-    _ = @import("topic_policy_test.zig");
-    _ = @import("topic_policy_lifecycle_test.zig");
+    _ = @import("local_intent.zig");
+    _ = @import("topic_policy.zig");
     _ = admission;
     _ = recovery;
     _ = receive_pool;
     _ = @import("overlay.zig");
-    _ = @import("overlay_test.zig");
     _ = @import("peer_book.zig");
     _ = @import("message_store.zig");
     _ = @import("validation.zig");
@@ -51,9 +46,4 @@ test {
     _ = frame;
     _ = score;
     _ = gossipsub;
-    _ = @import("gossipsub_test.zig");
-    _ = @import("publication_test.zig");
-    _ = @import("service_test.zig");
-    _ = @import("simulation_test.zig");
-    _ = @import("scheduled_test.zig");
 }
