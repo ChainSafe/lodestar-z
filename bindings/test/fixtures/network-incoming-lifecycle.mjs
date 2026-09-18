@@ -1,3 +1,4 @@
+import {requestForks} from "../utils/network.ts";
 import assert from "node:assert/strict";
 import {setTimeout as delay} from "node:timers/promises";
 import {BLOCKS, incomingPair, takeIncoming} from "../utils/network-incoming.ts";
@@ -13,7 +14,7 @@ let pair = await incomingPair(undefined, undefined, mode === "notifier" ? () => 
 let left = pair.left;
 let right = pair.right;
 const remote = pair.remote;
-const context = pair.rightConfig.requestForks[0];
+const context = requestForks[0];
 pair = null;
 try {
   const stream = left.request(remote.peerId, BLOCKS, new Uint8Array(32));

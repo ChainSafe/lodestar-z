@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {setTimeout as delay} from "node:timers/promises";
 import {createNativeNetworkApplicationRuntime} from "../../src/network.js";
-import {applicationConfig, localIntent} from "../utils/network.ts";
+import {applicationConfig, localIntent, topicName} from "../utils/network.ts";
 
 let notifierErrors = 0;
 process.on("uncaughtException", (error) => { assert.equal(error.message, "expected gossip notifier"); notifierErrors++; });
@@ -20,7 +20,7 @@ assert(notifierErrors > 0);
 const weak = new WeakRef(runtime);
 const pending = [];
 for (let i = 0; i < 32; i++) {
-  try { pending.push(runtime.publishGossip("/eth2/01020304/beacon_block/ssz_snappy", new Uint8Array(10).fill(i))); }
+  try { pending.push(runtime.publishGossip(topicName(), new Uint8Array(4000).fill(i))); }
   catch (error) { assert.equal(error.code, "NetworkCommandFull"); }
 }
 const results = Promise.allSettled(pending);

@@ -5,6 +5,36 @@ const discovery = @import("discovery.zig");
 const types = @import("types.zig");
 const context = types.ForkContext{ .digest = .{ 1, 2, 3, 4 } };
 
+test "peer discovery seeds the configured list without claiming reachability or starting walks" {
+    var node: Node = undefined;
+    try node.init(1, 9001);
+    defer node.deinit();
+    var records: [d.types.bootstrap_max]d.identity.enr.Record = undefined;
+    for (&records, 2..) |*record, index| {
+        const scalar: u8 = @intCast(index);
+        const key = try d.identity.crypto.keyPairFromSecret(&(.{0} ** 31 ++ .{scalar}));
+        record.* = try d.identity.enr.Record.create(&key, 1, .{ .ip4 = .{ .octets = .{ 203, scalar, 1, 1 }, .port = 9000 } });
+    }
+    const now = try d.Transport.monotonicMilliseconds(std.testing.io);
+    var controller = try discovery.Discovery.init(std.testing.allocator, &node.transport, &context, &records, now, .{});
+    defer controller.deinit();
+    try std.testing.expectEqual(records.len, node.transport.engine.peerCount());
+    for (&records) |*record| {
+        const entry = node.transport.engine.peerRecord(&record.node_id).?;
+        try std.testing.expect(entry.last_verified_ms == null);
+        try std.testing.expectEqualDeep(record.*, entry.record);
+    }
+    const idle = try controller.step(std.testing.io, now, now, &.{});
+    if (idle.failure) |err| return err;
+    try std.testing.expectEqual(@as(u8, 0), idle.started);
+    try std.testing.expectEqual(@as(u64, 0), controller.counters.lookups_started);
+    var output: [1280]u8 = undefined;
+    var entropy: d.Engine.StartEntropy = undefined;
+    try std.Io.randomSecure(std.testing.io, std.mem.asBytes(&entropy));
+    try std.testing.expect((try controller.maintenance.startNext(&node.transport.engine, &output, try .init(&.{1}), now + 600_000, &entropy)) == null);
+    try std.testing.expectEqual(@as(usize, 0), node.transport.engine.calls.count());
+}
+
 test "peer discovery answers unknown TALK protocols without demand or candidate output" {
     var requester: Node = undefined;
     try requester.init(31, 9031);
@@ -115,7 +145,7 @@ fn referralCase(rejection: ?discovery.Rejection) !void {
     try controller.request(if (rejection == .demand) .{ .syncnets = 1 } else .{ .general = true }, now);
     const seed = a.transport.engine.peerRecord(&b_peer.node_id).?;
     var lookup: d.Lookup = undefined;
-    try lookup.init(&controller.storage.foreground, a.transport.engine.localRecord().node_id, c_peer.node_id, &.{seed}, .dual);
+    try lookup.init(&controller.storage.candidates, a.transport.engine.localRecord().node_id, c_peer.node_id, &.{seed}, .dual);
     controller.lookup = lookup;
     var output: [16]adapter.Candidate = undefined;
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
@@ -147,51 +177,58 @@ fn referralCase(rejection: ?discovery.Rejection) !void {
     try handoff(&found.?);
 }
 
-test "peer discovery publishes authenticated foreground and bootstrap responders outside a full routing bucket" {
-    for ([_]bool{ false, true }) |foreground| {
-        var a: Node = undefined;
-        try a.init(1, 9001);
-        defer a.deinit();
-        var b: Node = undefined;
-        try b.init(2, 9002);
-        defer b.deinit();
-        const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-        var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{ .query_interval_ms = 1, .local_retry_ms = 1 });
-        defer controller.deinit();
-        try controller.request(.{ .general = true }, now);
-        var output: [1]adapter.Candidate = undefined;
-        var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
-        var checked = false;
-        for (0..300) |_| {
-            const tick = try d.Transport.monotonicMilliseconds(std.testing.io);
-            if (foreground and controller.lookup == null) controller.query_due_ms = tick;
-            const result = try controller.step(std.testing.io, tick, tick, &output);
-            if (result.failure) |err| return err;
-            const remote = try b.transport.stepUntil(std.testing.io, &expiries, tick);
-            if (remote.failure) |err| return err;
-            const progress = try a.transport.stepUntil(std.testing.io, &expiries, tick);
-            if (progress.failure) |err| return err;
-            const selected = progress.event == .response and progress.event.response.matched.terminal and
-                (controller.lookup != null and controller.lookup.?.ownsCall(progress.event.response.matched.handle)) == foreground;
-            if (selected) try fillResponderBucket(&a.transport.engine, b.transport.engine.localRecord(), progress.now_ms);
-            const consumed = controller.consume(&progress, expiries[0..progress.calls_expired], &output);
-            if (consumed.failure) |err| return err;
-            if (selected) {
-                try std.testing.expect(a.transport.engine.peerRecord(&b.transport.engine.localRecord().node_id) == null);
-                try std.testing.expectEqual(@as(usize, 1), consumed.candidates);
-                try adapter.requireIdentity(b.transport.engine.localRecord(), &output[0].peer);
-                try std.testing.expectEqual(@as(u16, 9002), output[0].addresses[0].port());
-                try std.testing.expectEqual(@as(u64, 1), controller.counters.authenticated_not_retained);
-                checked = true;
-                break;
-            }
+test "peer discovery publishes authenticated lookup responders outside a full routing bucket" {
+    var a: Node = undefined;
+    try a.init(1, 9001);
+    defer a.deinit();
+    var b: Node = undefined;
+    try b.init(2, 9002);
+    defer b.deinit();
+    const now = try d.Transport.monotonicMilliseconds(std.testing.io);
+    try fillResponderBucket(&a.transport.engine, b.transport.engine.localRecord(), now);
+    var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{ .query_interval_ms = 1, .local_retry_ms = 1 });
+    defer controller.deinit();
+    try controller.request(.{ .general = true }, now);
+    const seed: d.RoutingTable.Entry = .{
+        .direction = .outgoing,
+        .peer = .{ .node_id = b.transport.engine.localRecord().node_id, .address = b.transport.localAddress() },
+        .record = b.transport.engine.localRecord().*,
+        .last_verified_ms = null,
+    };
+    var lookup: d.Lookup = undefined;
+    try lookup.init(&controller.storage.candidates, a.transport.engine.localRecord().node_id, seed.peer.node_id, &.{seed}, .dual);
+    controller.lookup = lookup;
+
+    var output: [1]adapter.Candidate = undefined;
+    var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
+    var checked = false;
+    for (0..300) |_| {
+        const tick = try d.Transport.monotonicMilliseconds(std.testing.io);
+        const result = try controller.step(std.testing.io, tick, tick, &output);
+        if (result.failure) |err| return err;
+        const remote = try b.transport.stepUntil(std.testing.io, &expiries, tick);
+        if (remote.failure) |err| return err;
+        const progress = try a.transport.stepUntil(std.testing.io, &expiries, tick);
+        if (progress.failure) |err| return err;
+        const selected = progress.event == .response and progress.event.response.matched.terminal and
+            (controller.lookup != null and controller.lookup.?.ownsCall(progress.event.response.matched.handle));
+        const consumed = controller.consume(&progress, expiries[0..progress.calls_expired], &output);
+        if (consumed.failure) |err| return err;
+        if (selected) {
+            try std.testing.expect(a.transport.engine.peerRecord(&b.transport.engine.localRecord().node_id) == null);
+            try std.testing.expectEqual(@as(usize, 1), consumed.candidates);
+            try adapter.requireIdentity(b.transport.engine.localRecord(), &output[0].peer);
+            try std.testing.expectEqual(@as(u16, 9002), output[0].addresses[0].port());
+            try std.testing.expectEqual(@as(u64, 1), controller.counters.authenticated_not_retained);
+            checked = true;
+            break;
         }
-        try std.testing.expect(checked);
     }
+    try std.testing.expect(checked);
 }
 
 fn fillResponderBucket(engine: *d.Engine, responder: *const d.identity.enr.Record, now_ms: u64) !void {
-    if (engine.peerRecord(&responder.node_id)) |entry| try std.testing.expect(engine.forgetPeerIfStale(&responder.node_id, entry.last_verified_ms));
+    try std.testing.expect(engine.peerRecord(&responder.node_id) == null);
     try std.testing.expect(d.types.logDistance(&engine.localRecord().node_id, &responder.node_id) > 8);
     for (1..d.RoutingTable.bucket_size + 1) |index| {
         var record = std.mem.zeroes(d.identity.enr.Record);
@@ -370,7 +407,8 @@ test "peer discovery consumes actual response and expiry alongside failure befor
     var output: [1]adapter.Candidate = undefined;
     _ = try controller.step(std.testing.io, now, now, &output);
     const active = a.transport.engine.calls.count();
-    var stale = controller.maintenance.pending.?.handle.?;
+    try std.testing.expectEqual(@as(usize, 1), active);
+    var stale = controller.storage.candidates[0].state.waiting;
     stale.generation += 1;
     const stale_result = controller.consume(&.{ .now_ms = now, .event = .{ .failed = .{ .handle = stale, .peer = .{ .node_id = b.transport.engine.localRecord().node_id, .address = b.transport.localAddress() }, .reason = error.InvalidRecord } } }, &.{}, &output);
     try std.testing.expectEqual(@as(u16, 1), stale_result.unowned);
@@ -401,6 +439,9 @@ test "peer discovery consumes actual response and expiry alongside failure befor
     _ = try a.transport.stepUntil(std.testing.io, &expiries, now);
     try adapter.requireIdentity(b.transport.engine.localRecord(), &candidate.?.peer);
     try std.testing.expectEqual(@as(u16, 9002), candidate.?.addresses[0].port());
+    const completed_ms = try d.Transport.monotonicMilliseconds(std.testing.io);
+    _ = try controller.step(std.testing.io, completed_ms, completed_ms, &.{});
+    try std.testing.expect(controller.lookup == null);
     const future = now + 60_000;
     _ = try controller.step(std.testing.io, future, now, &.{});
     try std.testing.expect(a.transport.engine.calls.count() > 0);
@@ -409,6 +450,7 @@ test "peer discovery consumes actual response and expiry alongside failure befor
     const consumed = controller.consume(&.{ .now_ms = future + 1_000, .calls_expired = expired.calls, .failure = error.DestinationUnreachable }, expiries[0..expired.calls], &.{});
     try std.testing.expectEqual(expired.calls, consumed.expired);
     try std.testing.expectEqual(error.DestinationUnreachable, consumed.failure.?);
+    try std.testing.expect(a.transport.engine.peerRecord(&b.transport.engine.localRecord().node_id) != null);
     controller.cancel();
     try std.testing.expectEqual(@as(usize, 0), a.transport.engine.calls.count());
 }
@@ -477,7 +519,7 @@ const SendFailure = struct {
     }
 };
 
-test "peer discovery failed initial send cancels call and defers maintenance retry" {
+test "peer discovery failed initial lookup send cancels call and defers retry" {
     var a: Node = undefined;
     try a.init(1, 9001);
     defer a.deinit();
@@ -487,11 +529,14 @@ test "peer discovery failed initial send cancels call and defers maintenance ret
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
     var controller = try discovery.Discovery.init(std.testing.allocator, &a.transport, &context, &.{b.transport.engine.localRecord().*}, now, .{});
     defer controller.deinit();
+    try controller.request(.{ .general = true }, now);
     var host = SendFailure{ .now_ms = now };
     const result = try controller.step(host.io(), now, now, &.{});
     try std.testing.expectEqual(error.DestinationUnreachable, result.failure.?);
     try std.testing.expectEqual(@as(usize, 1), host.sends);
     try std.testing.expectEqual(@as(usize, 0), a.transport.engine.calls.count());
+    const seed = a.transport.engine.peerRecord(&b.transport.engine.localRecord().node_id).?;
+    try std.testing.expect(seed.last_verified_ms == null);
     try std.testing.expect(controller.nextWakeup(now).? >= now + 1_000);
 }
 
@@ -629,6 +674,14 @@ test "peer discovery initialization rollback and coalesced demand retain query d
     const no_endpoint = try adapter.build(&key, 1, &.{ .fork = .{ .digest = context.digest, .next_version = @splat(0), .next_epoch = 0 } }, &context);
     try std.testing.expectError(error.InvalidBootstrap, discovery.Discovery.init(allocator, &a.transport, &context, &.{no_endpoint}, 0, .{}));
     try std.testing.expectEqual(allocation.allocated_bytes, allocation.freed_bytes);
+    const valid = try d.identity.enr.Record.create(&key, 1, .{ .ip4 = .{ .octets = .{ 203, 2, 1, 1 }, .port = 9000 } });
+    try std.testing.expectError(error.InvalidBootstrap, discovery.Discovery.init(allocator, &a.transport, &context, &.{ valid, no_endpoint }, 0, .{}));
+    try std.testing.expectEqual(@as(usize, 0), a.transport.engine.peerCount());
+    var excess: [d.types.bootstrap_max + 1]d.identity.enr.Record = undefined;
+    try std.testing.expectError(error.TooManyBootstraps, discovery.Discovery.init(allocator, &a.transport, &context, &excess, 0, .{}));
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, discovery.Discovery.init(failing.allocator(), &a.transport, &context, &.{valid}, 0, .{}));
+    try std.testing.expectEqual(@as(usize, 0), a.transport.engine.peerCount());
     var controller = try discovery.Discovery.init(allocator, &a.transport, &context, &.{}, 0, .{});
     defer controller.deinit();
     try std.testing.expectError(error.InvalidDemand, controller.request(.{ .syncnets = 0x10 }, 0));
@@ -706,8 +759,9 @@ test "dual-stack discovery confirms both families in one routing table" {
     try ipv6.initAddress(93, null, .{ .ip6 = .loopback(0) }, null);
     defer ipv6.deinit();
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
-    var controller = try discovery.Discovery.init(std.testing.allocator, &hub.transport, &context, &.{ ipv4.transport.engine.localRecord().*, ipv6.transport.engine.localRecord().* }, now, .{ .maintenance = .{ .bootstrap_interval_ms = 1, .discovery_stall_ms = 1, .retry_interval_ms = 1 } });
+    var controller = try discovery.Discovery.init(std.testing.allocator, &hub.transport, &context, &.{ ipv4.transport.engine.localRecord().*, ipv6.transport.engine.localRecord().* }, now, .{});
     defer controller.deinit();
+    try controller.request(.{ .general = true }, now);
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     for (0..400) |_| {
         const tick = try d.Transport.monotonicMilliseconds(std.testing.io);
@@ -717,10 +771,13 @@ test "dual-stack discovery confirms both families in one routing table" {
             const remote = try node.transport.stepUntil(std.testing.io, &expiries, tick);
             if (remote.failure) |err| return err;
         }
-        if (hub.transport.engine.peerCount() == 2) break;
+        if (hub.transport.engine.peerRecord(&ipv4.transport.engine.localRecord().node_id).?.last_verified_ms != null and
+            hub.transport.engine.peerRecord(&ipv6.transport.engine.localRecord().node_id).?.last_verified_ms != null) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
     try std.testing.expectEqual(@as(usize, 2), hub.transport.engine.peerCount());
+    try std.testing.expect(hub.transport.engine.peerRecord(&ipv4.transport.engine.localRecord().node_id).?.last_verified_ms != null);
+    try std.testing.expect(hub.transport.engine.peerRecord(&ipv6.transport.engine.localRecord().node_id).?.last_verified_ms != null);
     try std.testing.expect(hub.transport.engine.peerRecord(&ipv4.transport.engine.localRecord().node_id).?.peer.address == .ip4);
     try std.testing.expect(hub.transport.engine.peerRecord(&ipv6.transport.engine.localRecord().node_id).?.peer.address == .ip6);
 }
@@ -735,6 +792,7 @@ test "IPv6-only discovery bootstraps a dual-stack record over IPv6" {
     const now = try d.Transport.monotonicMilliseconds(std.testing.io);
     var controller = try discovery.Discovery.init(std.testing.allocator, &node.transport, &context, &.{seed.transport.engine.localRecord().*}, now, .{});
     defer controller.deinit();
+    try controller.request(.{ .general = true }, now);
     var expiries: [d.CallTable.capacity_max]d.CallTable.Expired = undefined;
     for (0..100) |_| {
         const tick = try d.Transport.monotonicMilliseconds(std.testing.io);
@@ -742,8 +800,9 @@ test "IPv6-only discovery bootstraps a dual-stack record over IPv6" {
         if (result.failure) |err| return err;
         const response = try seed.transport.stepUntil(std.testing.io, &expiries, tick);
         if (response.failure) |err| return err;
-        if (node.transport.engine.peerCount() == 1) break;
+        if (node.transport.engine.peerRecord(&seed.transport.engine.localRecord().node_id).?.last_verified_ms != null) break;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
     try std.testing.expect(node.transport.engine.peerRecord(&seed.transport.engine.localRecord().node_id).?.peer.address == .ip6);
+    try std.testing.expect(node.transport.engine.peerRecord(&seed.transport.engine.localRecord().node_id).?.last_verified_ms != null);
 }

@@ -256,6 +256,39 @@ test "codec bounds errors separately from successful ping payloads" {
     try std.testing.expectError(error.LengthOutOfBounds, decoder.feed(&.{ 0, 9 }));
 }
 
+test "codec compact control buffers decode successful and maximum error payloads" {
+    const rr = @import("reqresp.zig");
+    var sink: [@import("protocol.zig").payloadMaxControl()]u8 = undefined;
+    var scratch: [rr.control_scratch_length]u8 = undefined;
+    var encoded: [codec.encodedLengthMax(codec.error_message_max)]u8 = undefined;
+    var payload: [codec.error_message_max]u8 = undefined;
+    var random = std.Random.DefaultPrng.init(1);
+    random.random().bytes(&payload);
+    for ([_]usize{ 8, 16, 17, 25, 84, 92, codec.error_message_max }) |length| {
+        const is_error = length == codec.error_message_max;
+        const bytes = try codec.encodeChunk(if (is_error) 1 else 0, null, payload[0..length], &encoded);
+        for ([_]usize{ 1, 7, rr.control_read_buffer_length }) |piece| {
+            var decoder = Decoder.initResponse(.{ .min = 8, .max = sink.len }, false, &sink, &scratch);
+            try std.testing.expectEqualSlices(u8, payload[0..length], try decodeAll(&decoder, bytes, piece));
+            try std.testing.expectEqual(is_error, decoder.isError());
+        }
+    }
+}
+
+test "codec compact control buffers reject oversized frame declarations before copying" {
+    const rr = @import("reqresp.zig");
+    var sink = [_]u8{0xa5} ** 8;
+    var scratch = [_]u8{0xa5} ** rr.control_scratch_length;
+    for ([_]u8{ 0, 1, 0xfe }) |kind| {
+        var decoder = Decoder.initResponse(.{ .min = 8, .max = 8 }, false, &sink, &scratch);
+        const prefix = [_]u8{ 0, 8 } ++ codec.identifier;
+        _ = try decoder.feed(&prefix);
+        try std.testing.expectError(error.TooManyCompressedBytes, decoder.feed(&.{ kind, 0xff, 0, 0 }));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch, 0xa5));
+        try std.testing.expect(std.mem.allEqual(u8, &sink, 0xa5));
+    }
+}
+
 test "codec empty SSZ leaves no trailing Snappy identifier" {
     var encoded: [codec.frame_scratch_max]u8 = undefined;
     var scratch: [codec.frame_scratch_max]u8 = undefined;

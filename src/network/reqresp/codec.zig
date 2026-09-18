@@ -76,7 +76,7 @@ pub const Decoder = struct {
     pub fn initResponse(bounds: Bounds, context_bytes: bool, sink: []u8, scratch: []u8) Decoder {
         assert(bounds.min <= bounds.max);
         assert(sink.len >= bounds.max);
-        assert(scratch.len >= frame_scratch_max);
+        assert(scratch.len >= frameLengthMax(@min(@max(bounds.max, error_message_max), constants.frame_uncompressed_max)));
         return .{
             .phase = .result,
             .bounds = bounds,
@@ -106,7 +106,7 @@ pub const Decoder = struct {
     pub fn initRequest(bounds: Bounds, sink: []u8, scratch: []u8) Decoder {
         assert(bounds.min <= bounds.max);
         assert(sink.len >= bounds.max);
-        assert(scratch.len >= frame_scratch_max);
+        assert(scratch.len >= frameLengthMax(@min(bounds.max, constants.frame_uncompressed_max)));
         return .{
             .phase = .varint,
             .bounds = bounds,
@@ -223,11 +223,12 @@ pub const Decoder = struct {
             .frame_body => {
                 const want = self.frame_length - self.frame_filled;
                 const take = @min(want, bytes.len);
+                try self.countCompressed(take);
                 if (isDataFrame(self.frame_type)) {
+                    assert(self.frame_length <= self.scratch.len);
                     @memcpy(self.scratch[self.frame_filled..][0..take], bytes[0..take]);
                 }
                 self.frame_filled += take;
-                try self.countCompressed(take);
                 if (self.frame_filled == self.frame_length) try self.finishFrame();
                 return take;
             },
@@ -270,6 +271,10 @@ pub const Decoder = struct {
         } else {
             return error.BadFrameType;
         }
+        if (frame_length > constants.maxEncodedLength(self.length) - self.compressed_total)
+            return error.TooManyCompressedBytes;
+        if (isDataFrame(frame_type) and frame_length > self.scratch.len)
+            return error.FrameTooLarge;
         self.frame_type = frame_type;
         self.frame_length = frame_length;
         self.frame_filled = 0;

@@ -5,8 +5,7 @@ const d = @import("discv5");
 const Value = napi.Value;
 const t = n.peers.types;
 const enr_max = d.wire.constants.enr_size_max;
-const topic_policy = n.gossipsub.topic_policy;
-const bootstrap_max = d.Maintenance.bootstrap_max;
+const bootstrap_max = d.types.bootstrap_max;
 
 pub const Config = struct {
     profile: n.configuration.Profile,
@@ -14,8 +13,7 @@ pub const Config = struct {
     bind: n.udp.Bindings,
     local: t.LocalState,
     schedule: n.network_core.ForkSchedule,
-    forks: [64]n.reqresp.ForkEntry,
-    fork_count: u8,
+    chain: n.chain.Plan,
     discovery_bind: ?n.udp.Bindings,
     discovery_sequence: u64,
     advertisement: ?n.network_core.AdvertisementEndpoints,
@@ -25,8 +23,6 @@ pub const Config = struct {
     gossip: n.configuration.GossipOverrides,
     allowlist: [32][16]u8,
     allowlist_count: u8,
-    topic_boundaries: [topic_policy.boundary_max]topic_policy.Boundary,
-    topic_boundary_count: u8,
 
     pub fn wipe(self: *Config) void {
         std.crypto.secureZero(u8, &self.secret);
@@ -144,8 +140,7 @@ pub fn parse(value: Value, out: *Config) !void {
         .bind = undefined,
         .local = .{},
         .schedule = .{},
-        .forks = undefined,
-        .fork_count = 0,
+        .chain = undefined,
         .discovery_bind = null,
         .discovery_sequence = 0,
         .advertisement = null,
@@ -155,8 +150,6 @@ pub fn parse(value: Value, out: *Config) !void {
         .gossip = undefined,
         .allowlist = undefined,
         .allowlist_count = 0,
-        .topic_boundaries = undefined,
-        .topic_boundary_count = 0,
     };
     errdefer out.wipe();
     const profile = try get(value, "profile");
@@ -168,17 +161,10 @@ pub fn parse(value: Value, out: *Config) !void {
     out.bind = try bindings(try get(value, "bind"));
     out.slot = try bigint(try get(value, "initialSlot"));
     try parseLocal(try get(value, "local"), &out.local);
-    try parseSchedule(try get(value, "forkSchedule"), &out.schedule);
-    const forks = try get(value, "requestForks");
-    out.fork_count = @intCast(try array(forks, out.forks.len));
-    for (0..out.fork_count) |i| {
-        const entry = try forks.getElement(@intCast(i));
-        try object(entry, &.{ "digest", "fork" });
-        out.forks[i] = .{ .digest = try fixed(4, try get(entry, "digest")), .fork = try fork(try get(entry, "fork")) };
-        for (out.forks[0..i]) |previous| {
-            if (std.mem.eql(u8, &previous.digest, &out.forks[i].digest)) return error.InvalidNetworkConfig;
-        }
-    }
+    out.chain = try n.chain.Plan.init(&@import("config.zig").state.config, try boolean(try get(value, "serveLightClients")));
+    const update = try out.chain.update(out.local, null, out.slot);
+    out.local = update.local;
+    out.schedule = update.schedule;
     const discovery = try get(value, "discovery");
     if (try discovery.typeof() != .null) {
         try object(discovery, &.{ "bind", "sequenceNumber", "bootstrapEnrs", "advertisement" });
@@ -196,14 +182,32 @@ pub fn parse(value: Value, out: *Config) !void {
         }
         out.advertisement = try parseEndpoints(try get(discovery, "advertisement"));
     }
-    try parseTopicPolicy(try get(value, "topicPolicy"), out);
     try parseGossip(value, out);
 }
 
 fn parseGossip(value: Value, out: *Config) !void {
     out.gossip = .{ .observe_subscriptions = false };
     const policy = try get(value, "gossipPolicy");
-    try object(policy, &.{ "phase0Digest", "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score" });
+    try object(policy, &.{ "iwantFollowupMs", "idontwantMinDataSize", "heartbeatIntervalMs", "validationTimeoutMs", "validationTombstoneMs", "pressureTimeoutMs", "txTimeoutMs", "largeFrameTimeoutMs", "seenTtlMs", "retainedScoreMs", "opportunisticGraftIntervalMs", "gossipFactor", "ipAllowlist", "score", "processor" });
+    const processor = try get(policy, "processor");
+    if (try processor.typeof() != .undefined) {
+        const limits_mod = n.gossip_processor.limits_mod;
+        const count = try array(processor, limits_mod.kind_count);
+        if (count != limits_mod.kind_count) return error.InvalidGossipProcessorLimits;
+        var limits: limits_mod.Limits = undefined;
+        for (&limits, 0..) |*limit, i| {
+            const value_limit = try processor.getElement(@intCast(i));
+            try completeObject(value_limit, &.{ "items", "bytes" });
+            limit.* = .{
+                .items = @intCast(try integer(try get(value_limit, "items"), limits_mod.capacity_max)),
+                .bytes = @intCast(try integer(try get(value_limit, "bytes"), 256 * 1024 * 1024)),
+            };
+        }
+        try limits_mod.validate(&limits);
+        out.gossip.processor_limits = limits;
+        out.gossip.validation_capacity = limits_mod.items(&limits);
+        out.gossip.mcache_arena_bytes = @max(2 * limits_mod.bytes(&limits), n.gossipsub.constants.maxCompressedLen(n.gossipsub.constants.MAX_PAYLOAD_SIZE) + 4096);
+    }
     out.gossip.iwant_followup_ms = try bigint(try get(policy, "iwantFollowupMs"));
     out.gossip.idontwant_min_data_size = @as(usize, @intCast(try integer(try get(policy, "idontwantMinDataSize"), n.gossipsub.constants.GOSSIP_MAX_SIZE)));
     out.gossip.heartbeat_interval_ms = try bigint(try get(policy, "heartbeatIntervalMs"));
@@ -215,8 +219,7 @@ fn parseGossip(value: Value, out: *Config) !void {
     out.gossip.seen_ttl_ms = try bigint(try get(policy, "seenTtlMs"));
     out.gossip.retained_score_ms = try bigint(try get(policy, "retainedScoreMs"));
     out.gossip.opportunistic_graft_interval_ms = try bigint(try get(policy, "opportunisticGraftIntervalMs"));
-    const phase0 = try get(policy, "phase0Digest");
-    out.gossip.message_id_policy = .{ .phase0_digest = if (try phase0.typeof() == .null) null else try fixed(4, phase0) };
+    out.gossip.message_id_policy = .{ .phase0_digest = out.chain.phase0_digest };
     out.gossip.gossip_factor = try number(try get(policy, "gossipFactor"));
     const allowlist = try get(policy, "ipAllowlist");
     out.allowlist_count = @intCast(try array(allowlist, out.allowlist.len));
@@ -247,39 +250,9 @@ pub fn completeObject(value: Value, comptime names: []const []const u8) !void {
     if (try keys.getArrayLength() != names.len) return error.InvalidNetworkConfig;
 }
 
-fn parseTopicPolicy(value: Value, out: *Config) !void {
-    if (try value.typeof() == .null) return;
-    const count = try array(value, topic_policy.boundary_max);
-    if (count == 0) return error.InvalidNetworkConfig;
-    const fields = @typeInfo(topic_policy.Kind).@"enum".fields;
-    const names: [topic_policy.kind_count][]const u8 = comptime blk: {
-        var result: [topic_policy.kind_count][]const u8 = undefined;
-        for (fields, 0..) |field, i| result[i] = field.name;
-        break :blk result;
-    };
-    for (out.topic_boundaries[0..count], 0..) |*boundary, i| {
-        const input = try value.getElement(@intCast(i));
-        try completeObject(input, &.{ "digest", "rules" });
-        boundary.digest = try fixed(4, try get(input, "digest"));
-        const rules = try get(input, "rules");
-        try completeObject(rules, &names);
-        inline for (fields) |field| {
-            const rule = try get(rules, field.name);
-            try completeObject(rule, &.{ "count", "sszMin", "sszMax" });
-            boundary.rules[field.value] = .{
-                .count = @intCast(try integer(try get(rule, "count"), std.math.maxInt(u16))),
-                .ssz_min = @intCast(try integer(try get(rule, "sszMin"), n.gossipsub.constants.MAX_PAYLOAD_SIZE)),
-                .ssz_max = @intCast(try integer(try get(rule, "sszMax"), n.gossipsub.constants.MAX_PAYLOAD_SIZE)),
-            };
-        }
-    }
-    _ = topic_policy.validate(out.topic_boundaries[0..count]) catch return error.InvalidNetworkConfig;
-    out.topic_boundary_count = @intCast(count);
-}
-
 pub fn parseStatus(status: Value, out: *t.Status) !void {
-    try object(status, &.{ "forkDigest", "finalizedRoot", "finalizedEpoch", "headRoot", "headSlot", "earliestAvailableSlot" });
-    out.fork_digest = try fixed(4, try get(status, "forkDigest"));
+    try object(status, &.{ "finalizedRoot", "finalizedEpoch", "headRoot", "headSlot", "earliestAvailableSlot" });
+    out.fork_digest = @splat(0);
     out.finalized_root = try fixed(32, try get(status, "finalizedRoot"));
     out.finalized_epoch = try bigint(try get(status, "finalizedEpoch"));
     out.head_root = try fixed(32, try get(status, "headRoot"));
@@ -288,7 +261,7 @@ pub fn parseStatus(status: Value, out: *t.Status) !void {
 }
 
 pub fn parseLocal(local: Value, out: *t.LocalState) !void {
-    try object(local, &.{ "status", "metadata", "fork" });
+    try object(local, &.{ "status", "metadata" });
     try parseStatus(try get(local, "status"), &out.status);
     const metadata = try get(local, "metadata");
     try object(metadata, &.{ "sequenceNumber", "attnets", "syncnets", "custodyGroupCount" });
@@ -296,23 +269,7 @@ pub fn parseLocal(local: Value, out: *t.LocalState) !void {
     out.*.metadata.attnets = try fixed(8, try get(metadata, "attnets"));
     out.*.metadata.syncnets = @intCast(try integer(try get(metadata, "syncnets"), 15));
     out.*.metadata.custody_group_count = try optionalBigint(try get(metadata, "custodyGroupCount"));
-    const context = try get(local, "fork");
-    try object(context, &.{ "fork", "digest", "custodyGroups", "minimumSamplingGroups" });
-    out.*.fork.fork = try fork(try get(context, "fork"));
-    out.*.fork.digest = try fixed(4, try get(context, "digest"));
-    out.*.fork.custody_groups = @intCast(try integer(try get(context, "custodyGroups"), 128));
-    out.*.fork.minimum_sampling_groups = @intCast(try integer(try get(context, "minimumSamplingGroups"), 128));
-    out.*.fork.validate() catch return error.InvalidNetworkConfig;
-    var checked: t.LocalState = undefined;
-    n.peers.control_wire.copyLocal(&checked, &out.*) catch return error.InvalidNetworkConfig;
-}
-
-pub fn parseSchedule(schedule: Value, out: *n.network_core.ForkSchedule) !void {
-    try object(schedule, &.{ "fuluScheduled", "nextVersion", "nextEpoch", "nextDigest" });
-    out.*.fulu_scheduled = try boolean(try get(schedule, "fuluScheduled"));
-    out.*.next_version = try fixed(4, try get(schedule, "nextVersion"));
-    out.*.next_epoch = try bigint(try get(schedule, "nextEpoch"));
-    out.*.next_digest = try fixed(4, try get(schedule, "nextDigest"));
+    out.fork = .{};
 }
 
 pub fn parseTopicParams(topic: Value, out: *n.gossipsub.score.TopicParams) !void {

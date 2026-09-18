@@ -547,19 +547,19 @@ test "gossip failed admission preserves history pinned by transmit queues" {
     var handles: [2]storage.Handle = undefined;
     for (&handles, 0..) |*handle, i| {
         const id: MessageId = @splat(@intCast(i));
-        handle.* = history.admitPayload(&store, id, "topic", "x").?;
+        handle.* = history.admitPayload(&store, id, "topic", &([_]u8{1} ** (storage.inline_bytes + 1))).?;
         history.put(&store, handle.*, 0);
         store.seal(handle.*);
         store.retainTx(handle.*);
     }
     defer for (handles) |handle| store.releaseTx(handle);
     try std.testing.expectEqual(@as(usize, 2), history.count);
-    try std.testing.expect(history.admitPayload(&store, @splat(9), "topic", "x") == null);
+    try std.testing.expect(history.admitPayload(&store, @splat(9), "topic", &([_]u8{1} ** (storage.inline_bytes + 1))) == null);
     try std.testing.expectEqual(@as(usize, 2), history.count);
     try std.testing.expectEqual(@as(usize, 0), store.free_pages);
     store.releaseTx(handles[1]);
     store.retainValidation(handles[1]);
-    try std.testing.expect(history.admitPayload(&store, @splat(9), "topic", "x") == null);
+    try std.testing.expect(history.admitPayload(&store, @splat(9), "topic", &([_]u8{1} ** (storage.inline_bytes + 1))) == null);
     store.retainTx(handles[1]);
     store.releaseValidation(handles[1]);
 }

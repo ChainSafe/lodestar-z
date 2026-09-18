@@ -403,7 +403,16 @@ test "transport requires startup seed entropy but no entropy for later dial and 
     var events: [4]engine_mod.Event = undefined;
     const received = try support.step(&node.transport, io, &events, &.{}, .{ .wait_max_ms = 10 });
     try std.testing.expect(received.datagrams_received > 0);
-    try std.testing.expect(received.datagrams_accepted > 0);
+    try std.testing.expectEqual(@as(u32, 0), received.datagrams_accepted);
+    try std.testing.expectEqual(@as(u64, 1), node.transport.engine.counters.retries);
+    var accepted: u32 = 0;
+    for (0..8) |_| {
+        _ = try support.step(&remote.transport, io, &events, &.{}, .{ .wait_max_ms = 10 });
+        accepted += (try support.step(&node.transport, io, &events, &.{}, .{ .wait_max_ms = 10 })).datagrams_accepted;
+        if (node.transport.engine.registry.active_len == 2) break;
+    }
+    try std.testing.expect(accepted > 0);
+    try std.testing.expectEqual(@as(u16, 2), node.transport.engine.registry.active_len);
     try std.testing.expectEqual(@as(usize, 2), faults.entropy_calls);
 }
 

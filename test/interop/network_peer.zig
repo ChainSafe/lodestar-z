@@ -126,7 +126,7 @@ pub const Peer = struct {
                     try self.service.reqresp.respond(r.request, &ping, null, self.now);
                 } else {
                     generate(self.response[0..self.response_size], self.response_seed);
-                    try self.service.reqresp.respond(r.request, self.response[0..self.response_size], .{ .digest = .{ 1, 0, 0, 0 }, .fork = .deneb }, self.now);
+                    try self.service.reqresp.respond(r.request, self.response[0..self.response_size], .{ .digest = if (self.application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }, self.now);
                 }
             },
             .chunk => |c| {
@@ -281,7 +281,7 @@ pub fn main(init: std.process.Init) !void {
     const policy = try network.reqresp.request_policy.Config.fromBeaconConfig(&@import("config").mainnet.config, &blob_schedule);
     const peer = try a.create(Peer);
     defer a.destroy(peer);
-    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = if (identify_enabled) .{ .agent = "lodestar-z-identify" } else null, .reqresp = .{ .policy = policy, .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
+    peer.* = .{ .application = application, .allocator = a, .io = init.io, .service = try network.Service.init(a, .{ .identify = if (identify_enabled) .{ .agent = "lodestar-z-identify" } else null, .reqresp = .{ .policy = policy, .peers = 4, .outbound_max = 1, .inbound_max = if (application) 8 else 1, .inbound_per_peer_max = if (application) 8 else 1, .inbound_control_reserved = if (application) 2 else 0, .forks = &.{.{ .digest = if (application) applicationDigest() else .{ 1, 0, 0, 0 }, .fork = .deneb }}, .progress_timeout_ms = 5000, .quotas = quotas }, .router = .{ .negotiations_max = 16 }, .gossipsub = .{ .message_id_policy = .{ .phase0_digest = .{ 1, 0, 0, 0 } }, .random_seed = 0x6d2b79f5 } }), .sink = undefined, .response = undefined };
     defer peer.service.deinit();
     peer.sink = try a.alloc(u8, max_payload);
     defer a.free(peer.sink);
@@ -293,4 +293,10 @@ pub fn main(init: std.process.Init) !void {
     defer if (peer.service.identify) |*identify| identify.shutdown(&peer.service.router, &peer.transport.engine);
     defer peer.service.reqresp.shutdown(&peer.transport.engine, &peer.service.router);
     try control.run(peer);
+}
+
+fn applicationDigest() [4]u8 {
+    var root: [32]u8 = undefined;
+    @import("config").BeaconConfig.computeForkDataRoot(.{ 4, 0, 0, 0 }, @splat(0), &root);
+    return root[0..4].*;
 }

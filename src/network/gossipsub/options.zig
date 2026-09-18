@@ -16,6 +16,7 @@ pub const Options = struct {
     seen_capacity: usize = 65_536,
     mcache_capacity: usize = 8_192,
     mcache_arena_bytes: usize = 64 * 1024 * 1024,
+    processor_limits: ?@import("../gossip_processor/limits.zig").Limits = null,
     validation_capacity: usize = 1024,
     validation_timeout_ms: u64 = 30_000,
     validation_tombstone_ms: u64 = 30_000,
@@ -44,13 +45,10 @@ pub const Options = struct {
     decompressed_arena_bytes: usize = 16 * 1024 * 1024,
     /// Ordinary per-peer compressed-copy/decode/hash byte credits; one legal oversized item may use the shared allowance.
     decompress_per_peer_bytes: usize = 4 * 1024 * 1024,
-    /// Byte-progress timeout for partial receive frames and active transmit frames.
+    /// Absolute large-frame transfer timeout and receive/transmit progress timeout.
     large_frame_timeout_ms: u64 = 10_000,
     body_buffer_bytes: usize = constants.body_buffer_len,
-    /// A pool of large body buffers claimed while receiving a frame that does
-    /// not fit the per-peer buffer (blocks and data columns).
-    large_message_bytes: usize = constants.GOSSIP_MAX_SIZE,
-    large_pool_count: usize = 2,
+    receive_arena_bytes: usize = 32 * 1024 * 1024,
     seen_ttl_ms: u64 = constants.seenTtlMs(@import("preset").preset.SLOTS_PER_EPOCH, 12),
     gossip_factor: f64 = 0.25,
     retained_score_ms: u64 = 100 * @import("preset").preset.SLOTS_PER_EPOCH * 12_000,
@@ -70,13 +68,22 @@ pub fn validate(o: *const Options) (error{InvalidLimits} || @import("topic_polic
     try range(o.retained_capacity, o.connected_capacity, @import("peer_book.zig").capacity);
     try range(o.retained_outbound_reserve, 1, o.retained_capacity - 1);
     const compressed = constants.maxCompressedLen(constants.MAX_PAYLOAD_SIZE);
-    try range(o.validation_capacity, 1, 8192);
+    try range(o.validation_capacity, 1, 65535);
+    if (o.processor_limits) |limits| {
+        @import("../gossip_processor/limits.zig").validate(&limits) catch return error.InvalidLimits;
+        if (o.topic_policy) |boundaries| for (boundaries) |boundary| {
+            for (boundary.rules, limits) |rule, limit| if (rule.count > 0 and constants.maxCompressedLen(rule.ssz_max) > limit.bytes) return error.InvalidLimits;
+        };
+        if (o.validation_capacity != @import("../gossip_processor/limits.zig").items(&limits) or o.mcache_arena_bytes < 2 * @import("../gossip_processor/limits.zig").bytes(&limits)) return error.InvalidLimits;
+    }
     try range(o.seen_capacity, 1, 1_048_576);
     try range(o.mcache_capacity, 1, 65536);
     try range(o.mcache_arena_bytes, compressed + storage.page_bytes, 1024 * 1024 * 1024);
     try range(o.decompressed_arena_bytes, constants.MAX_PAYLOAD_SIZE + topic_mod.topic_max_len, 1024 * 1024 * 1024);
-    try range(o.large_message_bytes, constants.GOSSIP_MAX_SIZE, 2 * constants.GOSSIP_MAX_SIZE);
-    try range(o.large_pool_count, 1, 16);
+    const page = @import("receive_pool.zig").page_bytes;
+    const receive_min = @max(page, @import("std").mem.alignForward(usize, constants.GOSSIP_MAX_SIZE - @min(o.body_buffer_bytes, constants.GOSSIP_MAX_SIZE), page));
+    try range(o.receive_arena_bytes, receive_min, 1024 * 1024 * 1024);
+    if (o.receive_arena_bytes % page != 0) return error.InvalidLimits;
     try range(o.body_buffer_bytes, 1, constants.GOSSIP_MAX_SIZE);
     try range(o.control_bytes, 1, 65536);
     try range(o.critical_bytes, 32 + topic_mod.topic_max_len, @import("outbox.zig").critical_bytes);

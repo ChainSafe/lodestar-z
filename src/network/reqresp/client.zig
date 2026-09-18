@@ -95,7 +95,7 @@ pub const Client = struct {
         request.io.writer = undefined;
         slot.phase = .response;
         slot.phase_deadline_ms = now.mono_ms +| slot.absolute_timeouts.response_ms;
-        slot.resetResponseDecoder();
+        slot.resetResponseDecoder(owner);
         // Native response bytes may already be readable after this turn consumed activity.
         request.needs_service = true;
     }
@@ -129,7 +129,7 @@ pub const Client = struct {
                         slot.fail(owner, index, .{ .unknown_context = digest }, engine);
                         return;
                     };
-                    const bounds = request.protocol.responseBounds(fork) catch |err| {
+                    const bounds = owner.responseBounds(request.protocol, fork) catch |err| {
                         slot.fail(owner, index, .{ .invalid_response = err }, engine);
                         return;
                     };
@@ -198,10 +198,10 @@ pub const Client = struct {
         } });
     }
 
-    fn resetResponseDecoder(slot: *Client) void {
+    fn resetResponseDecoder(slot: *Client, owner: *const ReqResp) void {
         const request = &slot.request;
-        const bounds = request.protocol.info();
-        const response = codec.Bounds{ .min = bounds.response_min, .max = bounds.response_max };
+        const bounds = owner.requestBounds(request.protocol);
+        const response = codec.Bounds{ .min = if (bounds.context_bytes) 0 else bounds.response_min, .max = bounds.response_max };
         request.io.decoder = if (bounds.context_bytes)
             codec.Decoder.initResponseWithContext(response, request.io.sink, request.io.scratch)
         else
@@ -220,7 +220,7 @@ pub const Client = struct {
         request_options: RequestOptions,
         now: Now,
     ) RequestError!RequestHandle {
-        const bounds = which.info();
+        const bounds = owner.requestBounds(which);
         try owner.attach(engine);
         if (conn.index >= owner.options.peers) return error.InvalidCapacity;
         inline for (.{ "negotiation_ms", "request_ms", "response_ms" }) |field| {
@@ -321,7 +321,7 @@ pub const Client = struct {
             return true;
         }
         request.needs_service = true;
-        slot.resetResponseDecoder();
+        slot.resetResponseDecoder(owner);
         return true;
     }
 };

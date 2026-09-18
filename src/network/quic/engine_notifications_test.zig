@@ -49,11 +49,15 @@ test "engine notifications deliver later native activity during sustained earlie
     newcomer.client.csprng = std.Random.DefaultCsprng.init(@splat(3));
     const pending_dial = try newcomer.dial();
     var bytes: [1452]u8 = undefined;
+    const source = engine.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4003 } };
+    var response: [1452]u8 = undefined;
+    const tokenless = newcomer.client.sendOne(pending_dial.index, newcomer.now, &bytes).?;
+    const retry = pair.server.receive(tokenless.bytes, &source, pair.now, &response).retry;
+    var reply: [1452]u8 = undefined;
+    _ = newcomer.client.receive(retry, &support.server_address, newcomer.now, &reply);
     const initial = newcomer.client.sendOne(pending_dial.index, newcomer.now, &bytes).?;
     var saved_initial: [1452]u8 = undefined;
     @memcpy(saved_initial[0..initial.bytes.len], initial.bytes);
-    const source = engine.Address{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 4003 } };
-    var response: [1452]u8 = undefined;
     const victim = pair.server.receive(bytes[0..initial.bytes.len], &source, pair.now, &response).accepted;
     try std.testing.expect(victim.index != handles.server.index);
     pair.drop_to_address = source;

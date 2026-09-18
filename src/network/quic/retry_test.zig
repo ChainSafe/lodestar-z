@@ -26,7 +26,7 @@ test "QUIC Retry tokens bind source endpoint CIDs key and lifetime" {
     }
 }
 
-test "QUIC Retry admits an address-validated handshake under pressure" {
+test "QUIC Retry admits an address-validated handshake" {
     var pair: support.Pair = .{};
     try pair.init(.{}, .{ .handshaking_max = 1 });
     defer pair.deinit();
@@ -35,18 +35,21 @@ test "QUIC Retry admits an address-validated handshake under pressure" {
     try std.testing.expectEqual(@as(usize, 1), pair.server.registry.active_len);
 }
 
-test "QUIC Retry does not allocate a connection for unvalidated Initials" {
+test "QUIC Retry does not allocate a connection for repeated unvalidated Initials below pressure" {
     var pair: support.Pair = .{};
-    try pair.init(.{}, .{ .handshaking_max = 1 });
+    try pair.init(.{}, .{});
     defer pair.deinit();
     const handle = try pair.dial();
     var packet: [@import("../constants.zig").datagram_size_max]u8 = undefined;
     const initial = pair.sendOne(&pair.client, handle.index, &packet).?;
     var out: [packet.len]u8 = undefined;
-    const outcome = pair.server.receive(initial, &support.client_address, pair.now, &out);
-    try std.testing.expect(outcome == .retry);
-    try std.testing.expect(outcome.retry.len <= initial.len);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.registry.active_len);
-    try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
-    try std.testing.expectEqual(@as(usize, 0), pair.server.registry.routes.count);
+    for (0..4) |_| {
+        const outcome = pair.server.receive(initial, &support.client_address, pair.now, &out);
+        try std.testing.expect(outcome == .retry);
+        try std.testing.expect(outcome.retry.len <= initial.len);
+        try std.testing.expectEqual(@as(usize, 0), pair.server.registry.active_len);
+        try std.testing.expectEqual(@as(u16, 0), pair.server.registry.handshaking);
+        try std.testing.expectEqual(@as(usize, 0), pair.server.registry.routes.count);
+    }
+    try std.testing.expectEqual(@as(u64, 4), pair.server.counters.retries);
 }

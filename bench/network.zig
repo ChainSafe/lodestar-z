@@ -34,7 +34,6 @@ fn options(key: *const network.KeyPair) network.network_core.Options {
         .core = .{
             .peers = .{ .capacity = 4, .outbound_reserve = 1, .max_peers = 3, .target_peers = 2, .min_outbound = 1 },
             .dial = .{ .capacity = 4, .concurrent_max = 2, .seed = 7 },
-            .control = .{ .operations_max = 2 },
             .service = .{
                 .router = .{ .negotiations_max = 24, .outbound_control_reserved = 8 },
                 .reqresp = .{ .peers = 4, .outbound_max = 16, .inbound_max = 16, .outbound_control_reserved = 8, .inbound_control_reserved = 8, .outbound_per_peer_max = 4, .inbound_per_peer_max = 16, .inbound_application_per_peer_max = 8, .forks = &.{.{ .digest = @splat(0), .fork = .phase0 }} },

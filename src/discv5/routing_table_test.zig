@@ -8,6 +8,82 @@ const address4 = test_support.address4;
 const address6 = test_support.address6;
 const fakeRecord = test_support.fakeRecord;
 
+test "known routing contacts seed lookups but require a response for maintenance and relay" {
+    const local_id: types.NodeId = @splat(0);
+    var table: RoutingTable = undefined;
+    try table.init(std.testing.allocator, local_id);
+    defer table.deinit(std.testing.allocator);
+    const id = nodeAtDistance(256, 1);
+    const address = address4(203, 1, 1, 1, 9000);
+    const record = fakeRecord(id, address, 1);
+    const peer: types.Endpoint = .{ .node_id = id, .address = address };
+    try std.testing.expect(try table.addKnown(&peer, &record));
+    try std.testing.expect(!try table.addKnown(&peer, &record));
+    try std.testing.expect(table.get(&id).?.last_verified_ms == null);
+    var closest: [1]RoutingTable.Entry = undefined;
+    try std.testing.expectEqualDeep(peer, table.closest(&id, &closest)[0].peer);
+    var cursor: usize = 0;
+    try std.testing.expect(table.maintenanceTarget(&cursor, 1000, 1) == null);
+    const local = fakeRecord(local_id, address4(203, 2, 1, 1, 9000), 1);
+    var records: [1]enr.Record = undefined;
+    try std.testing.expectEqual(@as(usize, 0), (try table.findNodes(&local, null, &.{256}, &records)).len);
+
+    _ = try table.upsertVerified(&peer, &record, 0, .outgoing);
+    try std.testing.expectEqual(@as(?u64, 0), table.get(&id).?.last_verified_ms);
+    try std.testing.expect(!try table.addKnown(&peer, &record));
+    try std.testing.expectEqual(@as(?u64, 0), table.get(&id).?.last_verified_ms);
+    try std.testing.expectEqual(@as(usize, 1), (try table.findNodes(&local, null, &.{256}, &records)).len);
+    try std.testing.expect(table.markUnresponsive(&id, 0));
+    try std.testing.expectEqual(@as(usize, 1), table.count());
+    try std.testing.expectEqual(@as(usize, 1), table.closest(&id, &closest).len);
+    try std.testing.expect(table.maintenanceTarget(&cursor, 1000, 1) == null);
+    try std.testing.expectEqual(@as(usize, 0), (try table.findNodes(&local, null, &.{256}, &records)).len);
+    _ = try table.upsertVerified(&peer, &record, 1001, .outgoing);
+    try std.testing.expectEqual(@as(?u64, 1001), table.get(&id).?.last_verified_ms);
+    try std.testing.expect(!table.markUnresponsive(&id, 0));
+}
+
+test "known routing contacts obey capacity and precede responsive replacement incumbents" {
+    var table: RoutingTable = undefined;
+    try table.init(std.testing.allocator, @splat(0));
+    defer table.deinit(std.testing.allocator);
+    const responsive = fakeRecord(nodeAtDistance(256, 1), address4(203, 1, 1, 1, 9000), 1);
+    _ = try table.upsertVerified(&test_support.endpoint(&responsive), &responsive, 0, .outgoing);
+    for (2..RoutingTable.bucket_size + 1) |i| {
+        const record = fakeRecord(nodeAtDistance(256, @intCast(i)), address4(203, @intCast(i), 1, 1, 9000), 1);
+        try std.testing.expect(try table.addKnown(&test_support.endpoint(&record), &record));
+    }
+    const candidate = fakeRecord(nodeAtDistance(256, 33), address4(203, 33, 1, 1, 9000), 1);
+    try std.testing.expect(!try table.addKnown(&test_support.endpoint(&candidate), &candidate));
+    try std.testing.expectEqual(@as(usize, 0), table.pendingCount());
+    _ = try table.upsertVerified(&test_support.endpoint(&candidate), &candidate, 1, .outgoing);
+    const incumbent = table.revalidationTarget().?;
+    try std.testing.expect(incumbent.last_verified_ms == null);
+    _ = try table.resolveRevalidation(&incumbent.peer.node_id, false, 2);
+    try std.testing.expectEqual(@as(?u64, 0), table.get(&responsive.node_id).?.last_verified_ms);
+    try std.testing.expectEqual(@as(?u64, 1), table.get(&candidate.node_id).?.last_verified_ms);
+    try std.testing.expectEqual(RoutingTable.bucket_size, table.count());
+}
+
+test "known routing contacts consume prefix quotas and cannot replace an authenticated endpoint" {
+    var table: RoutingTable = undefined;
+    try table.init(std.testing.allocator, @splat(0));
+    defer table.deinit(std.testing.allocator);
+    for (1..3) |i| {
+        const record = fakeRecord(nodeAtDistance(256, @intCast(i)), address4(203, 1, 1, @intCast(i), 9000), 1);
+        try std.testing.expect(try table.addKnown(&test_support.endpoint(&record), &record));
+    }
+    const rejected = fakeRecord(nodeAtDistance(256, 3), address4(203, 1, 1, 3, 9000), 1);
+    try std.testing.expectError(error.AddressLimit, table.addKnown(&test_support.endpoint(&rejected), &rejected));
+    const verified = fakeRecord(nodeAtDistance(256, 1), address4(203, 1, 1, 1, 9000), 1);
+    _ = try table.upsertVerified(&test_support.endpoint(&verified), &verified, 10, .outgoing);
+    const advertised = fakeRecord(verified.node_id, address4(198, 2, 1, 1, 9000), 2);
+    try std.testing.expect(!try table.addKnown(&test_support.endpoint(&advertised), &advertised));
+    try std.testing.expectEqualDeep(test_support.endpoint(&verified), table.get(&verified.node_id).?.peer);
+    try std.testing.expectEqual(@as(u64, 1), table.get(&verified.node_id).?.record.sequence);
+    try std.testing.expectEqual(@as(?u64, 10), table.get(&verified.node_id).?.last_verified_ms);
+}
+
 test "routing table serves local ENR when either signed endpoint is relay eligible" {
     const private4 = address4(10, 1, 0, 1, 9000);
     const public4 = address4(192, 0, 2, 1, 9000);
@@ -584,10 +660,11 @@ test "routing maintenance selects quiet peers fairly and protects recent traffic
     const second = table.maintenanceTarget(&cursor, 100, 100).?;
     try std.testing.expect(!std.mem.eql(u8, &first.peer.node_id, &second.peer.node_id));
     _ = try table.upsertVerified(&first.peer, &first.record, 101, .outgoing);
-    try std.testing.expect(!table.forgetPeerIfStale(&first.peer.node_id, 0));
-    try std.testing.expect(table.forgetPeerIfStale(&second.peer.node_id, 0));
-    try std.testing.expectEqual(@as(usize, 1), table.count());
-    try std.testing.expect(!table.forgetPeerIfStale(&second.peer.node_id, 0));
+    try std.testing.expect(!table.markUnresponsive(&first.peer.node_id, 0));
+    try std.testing.expect(table.markUnresponsive(&second.peer.node_id, 0));
+    try std.testing.expectEqual(@as(usize, 2), table.count());
+    try std.testing.expect(table.get(&second.peer.node_id).?.last_verified_ms == null);
+    try std.testing.expect(!table.markUnresponsive(&second.peer.node_id, 0));
 }
 
 test "routing periodic maintenance leaves pending replacements to revalidation" {
@@ -605,7 +682,7 @@ test "routing periodic maintenance leaves pending replacements to revalidation" 
     var cursor: usize = 0;
     const periodic = table.maintenanceTarget(&cursor, 100, 100).?;
     try std.testing.expect(!std.mem.eql(u8, &incumbent.peer.node_id, &periodic.peer.node_id));
-    try std.testing.expect(!table.forgetPeerIfStale(&incumbent.peer.node_id, 0));
+    try std.testing.expect(!table.markUnresponsive(&incumbent.peer.node_id, 0));
     try std.testing.expectEqual(@as(usize, 1), table.pendingCount());
     try std.testing.expectEqual(RoutingTable.bucket_size, table.count());
 }

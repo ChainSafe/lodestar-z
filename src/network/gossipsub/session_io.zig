@@ -245,7 +245,7 @@ pub fn resetInbound(self: *Gossipsub, engine: *Engine, index: u16) void {
         engine.closeStream(stream, 0);
     }
     self.sessions.rows[index].in_stream = null;
-    if (self.sessions.resetRx(index)) self.wakeStorage();
+    _ = self.sessions.resetRx(index);
 }
 
 pub fn resetOutbound(self: *Gossipsub, engine: *Engine, index: u16) void {
@@ -322,24 +322,24 @@ fn readPeer(self: *Gossipsub, engine: *Engine, index: u16, io: *PeerIo, turn: *T
                 return;
             };
             if (done != .done) return;
-            if (self.sessions.finishFrame(io)) self.wakeStorage();
+            _ = self.sessions.finishFrame(io);
         }
         if (io.unread_start < io.unread_end) {
             if (peer.input == 0 or turn.budget.input == 0) return;
             const logical = self.sessions.rows[index].logical;
-            if (io.large_slot == null and (io.reader.declaredLen() orelse 0) > io.body.len and
+            if ((io.reader.declaredLen() orelse 0) > io.body.len and
                 now.mono_ms < self.peers.rows[logical.index].large_frame_denied_until)
             {
                 resetInbound(self, engine, index);
                 return;
             }
-            const body = self.sessions.frameBody(io) orelse {
-                self.pressure(index, .storage, now.mono_ms);
-                return;
-            };
             const take = @min(io.unread_end - io.unread_start, peer.input, turn.budget.input);
-            const result = io.feedUnread(body, take, now.mono_ms) catch {
-                self.counters.malformed_rpcs += 1;
+            const result = io.feedUnread(&self.sessions.receive_pool, take, now.mono_ms) catch |err| {
+                if (err == error.ReceiveCapacity) {
+                    self.counters.receive_capacity_refusals += 1;
+                    self.counters.local_pressure_resets += 1;
+                    self.cancelPromises(index, true);
+                } else self.counters.malformed_rpcs += 1;
                 resetInbound(self, engine, index);
                 return;
             };
@@ -476,6 +476,7 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
         if (peer.items == 0 or turn.budget.items == 0) return .credits;
         peer.items -= 1;
         turn.budget.items -= 1;
+        const pending = rpc.item != null;
         if (rpc.item == null) {
             const available = @min(turn.budget.fields, peer.fields);
             var fields = available;
@@ -485,18 +486,34 @@ pub fn processRpc(self: *Gossipsub, index: u16, turn: *Turn, peer: *Credits) pro
             switch (step) {
                 .item => |item| {
                     rpc.item = item;
-                    self.rpc_metrics.observeItem(item, &rpc.had_control);
-                    if (item == .message) self.topic_metrics.get(item.message.topic).prevalidation +|= 1;
                 },
                 .end => return .done,
                 .deferred => return .credits,
                 .skipped => continue,
             }
         }
-        const result = if (rpc.permitsItem()) self.receiveItem(self.sessions.ref(index), rpc.item.?, turn, peer) else .done;
+        if (!rpc.permitsItem()) {
+            rpc.consumeItem();
+            continue;
+        }
+        if (pending) {
+            const cost = rpc.item.?.fieldCost();
+            if (cost > @min(turn.budget.fields, peer.fields)) return .credits;
+            turn.budget.fields -= cost;
+            peer.fields -= cost;
+        }
+        const copy_bytes = rpc.reader.view.copyBytes(rpc.item.?.bytes);
+        if (!turn.chargeCopy(peer, &self.options, copy_bytes)) return .credits;
+        const item = try rpc.reader.decode(rpc.item.?, self.sessions.decode_scratch);
+        self.counters.receive_copy_bytes +|= copy_bytes;
+        if (!rpc.item_observed) {
+            self.rpc_metrics.observeItem(item, &rpc.had_control);
+            if (item == .message) self.topic_metrics.get(item.message.topic).prevalidation +|= 1;
+            rpc.item_observed = true;
+        }
+        const result = self.receiveItem(self.sessions.ref(index), item, turn, peer);
         switch (result) {
             .events => self.pressure(index, .events, now.mono_ms),
-            .storage => self.pressure(index, .storage, now.mono_ms),
             .done, .credits => {},
         }
         if (result != .done) return result;
@@ -543,11 +560,14 @@ fn expireIo(self: *Gossipsub, router: *routing.Router, engine: *Engine, now_ms: 
                     resetInbound(self, engine, @intCast(index));
                 },
                 .receive_frame => {
-                    if (io.large_slot != null and io.rpc == null and io.pressure_since == null) {
+                    if ((io.reader.declaredLen() orelse 0) > io.body.len and io.rpc == null and io.pressure_since == null) {
                         g.peers.penalize(peer.logical, 1);
                         g.peers.rows[peer.logical.index].large_frame_denied_until = now_ms +| g.options.pressure_timeout_ms;
                     }
-                    if (io.pressure_since != null) g.counters.local_pressure_resets += 1 else g.counters.large_stalled += 1;
+                    if (io.pressure_since != null or io.rpc != null) {
+                        g.counters.local_pressure_resets += 1;
+                        g.cancelPromises(@intCast(index), true);
+                    } else g.counters.large_stalled += 1;
                     g.counters.receive_frame_timeouts += 1;
                     resetInbound(self, engine, @intCast(index));
                 },
@@ -568,14 +588,12 @@ pub const Admission = enum { admitted, duplicate, capacity, unauthenticated };
 pub fn beginPump(self: *Gossipsub, now: Now, events: []Event) Turn {
     self.last_now_ms = now.mono_ms;
     self.messages.expire(&self.peers, now.mono_ms);
-    if (self.messages.takeReleased()) self.wakeStorage();
     return Turn.init(&self.options, now, events, self.decompressed, self.msg_scratch);
 }
 
 pub fn finishPump(self: *Gossipsub, now: Now) void {
     self.maintainTopics(now);
     self.expirePromises(now.mono_ms);
-    if (self.messages.takeReleased()) self.wakeStorage();
 }
 
 pub fn nextMaintenance(self: *const Gossipsub, now: Now) u64 {

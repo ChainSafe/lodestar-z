@@ -70,7 +70,6 @@ pub fn receiveMessage(g: *Gossipsub, index: u16, msg: protobuf.Message, now: Now
     const result = g.receiveItem(g.sessions.ref(index), .{ .message = msg }, &turn, &peer);
     switch (result) {
         .events => g.pressure(index, .events, now.mono_ms),
-        .storage => g.pressure(index, .storage, now.mono_ms),
         .done, .credits => {},
     }
     return if (result == .done) turn.count else null;

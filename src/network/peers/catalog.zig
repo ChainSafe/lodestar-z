@@ -138,6 +138,7 @@ pub const Catalog = struct {
             .score_at_ms = row.reputation.decay_at_ms,
             .ban_until_ms = row.reputation.ban_until_ms,
             .goodbye_until_ms = row.reputation.goodbye_until_ms,
+            .redial_until_ms = row.reputation.redial_until_ms,
         };
     }
 
@@ -406,6 +407,19 @@ pub const Catalog = struct {
             row.reputation.decay(now_ms);
             if (banned != (row.reputation.score <= -50)) self.revision +|= 1;
         }
+    }
+
+    pub fn deferRedial(
+        self: *Catalog,
+        ref: t.PeerRef,
+        conn: t.Handle,
+        now_ms: u64,
+        duration_ms: u64,
+    ) bool {
+        const row = self.connectedRow(ref, conn) orelse return false;
+        self.revision +|= 1;
+        row.reputation.deferRedial(now_ms, duration_ms);
+        return true;
     }
 
     pub fn nextDeadline(self: *const Catalog, now_ms: u64) ?u64 {

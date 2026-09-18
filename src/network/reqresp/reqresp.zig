@@ -26,6 +26,8 @@ const Now = types.Now;
 pub const read_buffer_length: usize = 16 * 1024;
 pub const reads_per_pump_max: u32 = 8;
 pub const scratch_length: usize = codec.frame_scratch_max;
+pub const control_scratch_length: usize = codec.frameLengthMax(@max(protocol_mod.payloadMaxControl(), codec.error_message_max));
+pub const control_read_buffer_length: usize = negotiate.inbox_capacity;
 /// Two maintenance and two gossip streams remain outside the application allowance.
 pub const outbound_stream_headroom: u8 = 4;
 
@@ -71,6 +73,7 @@ pub const Options = struct {
     peers: u16 = limits.connections_max_default,
     outbound_max: u16 = constants.outbound_max_default,
     inbound_max: u16 = constants.inbound_max_default,
+    /// Nonzero partitions outbound slots between control and application requests.
     outbound_control_reserved: u16 = 0,
     inbound_control_reserved: u16 = 0,
     /// Zero preserves raw admission without an aggregate application limit.
@@ -205,6 +208,7 @@ pub const ReqResp = struct {
     inbound: []Server,
     arena: []u8,
     request_sinks: []u8,
+    request_sink_size: usize,
     limiter: limiter_mod.Limiter,
     policy: ?request_policy.Policy,
     admission: ?Admission,
@@ -227,6 +231,7 @@ pub const ReqResp = struct {
         inbound_control_reserved: usize = 0,
         outbound_occupied: usize = 0,
         inbound_occupied: usize = 0,
+        inbound_phases: [metrics.inbound_phase_count]usize = @splat(0),
         pending_events: usize = 0,
         pending_terminals: usize = 0,
         held_chunks: usize = 0,
@@ -248,7 +253,10 @@ pub const ReqResp = struct {
             if (slot.request.notification == .borrowed_chunk) result.held_chunks += 1;
         }
         for (self.inbound) |*slot| {
-            if (slot.request.occupied()) result.inbound_occupied += 1;
+            if (slot.occupancy()) |phase| {
+                result.inbound_occupied += 1;
+                result.inbound_phases[@intFromEnum(phase)] += 1;
+            }
             if (slot.request.pendingEvent() != null) result.pending_events += 1;
             if (slot.request.terminalEvent() != null) result.pending_terminals += 1;
             if (slot.request.running()) if (slot.withheld_since_ms) |since| {
@@ -256,6 +264,28 @@ pub const ReqResp = struct {
                 result.oldest_withheld_age_ms = @max(result.oldest_withheld_age_ms orelse 0, self.last_now_ms -| since);
             };
         }
+        return result;
+    }
+
+    pub fn recordAdmissionRefusal(self: *ReqResp, stream: StreamHandle, which: Protocol, reason: metrics.AdmissionRefusal, cost: u128) void {
+        const reason_index = @intFromEnum(reason);
+        const counts = &self.protocol_counters[@intFromEnum(which)];
+        counts.admission_refusals[reason_index] +|= 1;
+        switch (reason) {
+            .server_capacity, .peer_capacity => {},
+            .protocol_concurrency, .peer_quota, .global_quota, .identity_capacity => counts.rate_limited +|= 1,
+        }
+        std.log.scoped(.network_reqresp_errors).debug("request_admission_refused connection={d}:{d} stream={d} method={s} reason={s} cost={d}", .{ stream.conn.index, stream.conn.generation, stream.id, @tagName(which), @tagName(reason), cost });
+    }
+
+    pub fn requestBounds(self: *const ReqResp, which: Protocol) protocol_mod.Info {
+        return if (self.policy) |*policy| policy.requestBounds(which, self.request_fork) else which.info();
+    }
+
+    pub fn responseBounds(self: *const ReqResp, which: Protocol, fork: config.ForkSeq) error{InvalidResponseContext}!codec.Bounds {
+        var result = try which.responseBounds(fork);
+        if (self.policy) |*policy| result.max = @min(result.max, policy.config.max_payload_size);
+        if (result.min > result.max) return error.InvalidResponseContext;
         return result;
     }
 
@@ -326,17 +356,20 @@ pub const ReqResp = struct {
         errdefer allocator.free(inbound);
         @memset(inbound, .{});
 
-        const request_sink_bytes = @as(usize, options.inbound_max - options.inbound_control_reserved) * protocol_mod.requestMaxAll() +
+        const request_sink_size = if (policy) |*value| value.requestMax() else protocol_mod.requestMaxAll();
+        const request_sink_bytes = @as(usize, options.inbound_max - options.inbound_control_reserved) * request_sink_size +
             @as(usize, options.inbound_control_reserved) * protocol_mod.requestMaxControl();
         const request_sinks = try allocator.alloc(u8, request_sink_bytes);
         errdefer allocator.free(request_sinks);
 
         const total = @as(usize, options.outbound_max) + options.inbound_max;
-        const arena = try allocator.alloc(u8, total * (scratch_length + read_buffer_length));
+        const controls = @as(usize, options.outbound_control_reserved) + options.inbound_control_reserved;
+        const arena = try allocator.alloc(u8, (total - controls) * (scratch_length + read_buffer_length) +
+            controls * (control_scratch_length + control_read_buffer_length));
         errdefer allocator.free(arena);
         var cursor: usize = 0;
-        for (outbound) |*slot| cursor = assignBuffers(&slot.request.io, arena, cursor);
-        for (inbound) |*slot| cursor = assignBuffers(&slot.request.io, arena, cursor);
+        for (outbound, 0..) |*slot, index| cursor = assignBuffers(&slot.request.io, arena, cursor, index < options.outbound_control_reserved);
+        for (inbound, 0..) |*slot, index| cursor = assignBuffers(&slot.request.io, arena, cursor, index < options.inbound_control_reserved);
         assert(cursor == arena.len);
 
         var buckets = try limiter_mod.Limiter.init(
@@ -365,6 +398,7 @@ pub const ReqResp = struct {
             .inbound = inbound,
             .arena = arena,
             .request_sinks = request_sinks,
+            .request_sink_size = request_sink_size,
             .limiter = buckets,
             .policy = policy,
             .admission = admission,
@@ -601,7 +635,7 @@ pub const ReqResp = struct {
         assert(index < self.inbound.len);
         const reserved = self.options.inbound_control_reserved;
         const control_size = protocol_mod.requestMaxControl();
-        const bulk_size = protocol_mod.requestMaxAll();
+        const bulk_size = self.request_sink_size;
         const offset = if (index < reserved) @as(usize, index) * control_size else @as(usize, reserved) * control_size + @as(usize, index - reserved) * bulk_size;
         const size = if (index < reserved) control_size else bulk_size;
         return self.request_sinks[offset..][0..size];
@@ -617,14 +651,9 @@ pub const ReqResp = struct {
 
     pub fn availableOutboundFor(self: *ReqResp, which: Protocol) ?u16 {
         const reserved = self.options.outbound_control_reserved;
-        if (!which.isControl() and reserved > 0) {
-            var ordinary: usize = 0;
-            for (self.outbound) |*slot| {
-                if (slot.request.occupied() and !slot.request.protocol.isControl()) ordinary += 1;
-            }
-            if (ordinary >= self.outbound.len - reserved) return null;
-        }
-        for (self.outbound, 0..) |*slot, index| {
+        const start: usize = if (which.isControl()) 0 else reserved;
+        const end: usize = if (which.isControl() and reserved > 0) reserved else self.outbound.len;
+        for (self.outbound[start..end], start..) |*slot, index| {
             if (slot.request.available()) return @intCast(index);
         }
         return null;
@@ -847,15 +876,19 @@ pub const ReqResp = struct {
     }
 };
 
-fn assignBuffers(io: *RequestIO, arena: []u8, cursor: usize) usize {
-    io.scratch = arena[cursor..][0..scratch_length];
-    io.read_buffer = arena[cursor + scratch_length ..][0..read_buffer_length];
-    return cursor + scratch_length + read_buffer_length;
+fn assignBuffers(io: *RequestIO, arena: []u8, cursor: usize, control: bool) usize {
+    const scratch = if (control) control_scratch_length else scratch_length;
+    const read_buffer = if (control) control_read_buffer_length else read_buffer_length;
+    io.scratch = arena[cursor..][0..scratch];
+    io.read_buffer = arena[cursor + scratch ..][0..read_buffer];
+    return cursor + scratch + read_buffer;
 }
 
 comptime {
     assert(read_buffer_length >= 1024);
     assert(scratch_length >= codec.frame_scratch_max);
+    assert(control_scratch_length < scratch_length);
+    assert(control_read_buffer_length >= negotiate.inbox_capacity);
     assert(@sizeOf(Client) <= 2 * 1024);
     assert(@sizeOf(Server) <= 2 * 1024);
 }

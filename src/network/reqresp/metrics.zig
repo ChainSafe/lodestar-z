@@ -36,6 +36,19 @@ pub const ErrorReason = enum {
 };
 pub const error_reason_count = @typeInfo(ErrorReason).@"enum".fields.len;
 
+pub const AdmissionRefusal = enum {
+    server_capacity,
+    peer_capacity,
+    protocol_concurrency,
+    peer_quota,
+    global_quota,
+    identity_capacity,
+};
+pub const admission_refusal_count = @typeInfo(AdmissionRefusal).@"enum".fields.len;
+
+pub const InboundPhase = enum { receiving_request, waiting_host, writing_response, withheld, terminal };
+pub const inbound_phase_count = @typeInfo(InboundPhase).@"enum".fields.len;
+
 pub const ProtocolCounters = struct {
     outgoing: u64 = 0,
     incoming: u64 = 0,
@@ -46,6 +59,7 @@ pub const ProtocolCounters = struct {
     response_finish_stops: u64 = 0,
     incoming_errors: u64 = 0,
     rate_limited: u64 = 0,
+    admission_refusals: [admission_refusal_count]u64 = @splat(0),
     outgoing_time: OutgoingTime = .{},
     incoming_time: IncomingTime = .{},
 };

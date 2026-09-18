@@ -36,9 +36,8 @@ test "maintenance retains a routing incumbent that answers through Transport" {
     defer pair.deinit();
     try pair.fillBucket();
     const now_ms = try Transport.monotonicMilliseconds(std.testing.io);
-    var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{}, now_ms, .{}, .ip4);
+    try controller.init(now_ms, .{}, .ip4);
     defer controller.cancel(&pair.transport_a.engine);
     try std.testing.expectEqual(@as(?u64, 0), controller.nextDeadlineMs(&pair.transport_a.engine));
     var out: [1_280]u8 = undefined;
@@ -61,9 +60,8 @@ test "maintenance bounds local replacement probe retries without blocking transp
     try pair.init(1_000, true);
     defer pair.deinit();
     try pair.fillBucket();
-    var candidates: Lookup.Candidates = undefined;
     var controller: Maintenance = undefined;
-    try controller.init(&candidates, &.{}, 0, .{}, .ip4);
+    try controller.init(0, .{}, .ip4);
     defer controller.cancel(&pair.transport_a.engine);
     var out: [1_280]u8 = undefined;
     const started = (try controller.startNext(&pair.transport_a.engine, &out, try .init(&.{1}), 0, &test_support.sealEntropy(10))).?;
@@ -92,9 +90,8 @@ test "maintenance replaces an expired incumbent but preserves later authenticate
         try pair.init(1, true);
         defer pair.deinit();
         try pair.fillBucket();
-        var candidates: Lookup.Candidates = undefined;
         var controller: Maintenance = undefined;
-        try controller.init(&candidates, &.{}, 0, .{}, .ip4);
+        try controller.init(0, .{}, .ip4);
         defer controller.cancel(&pair.transport_a.engine);
         var out: [1_280]u8 = undefined;
         const started = (try controller.startNext(&pair.transport_a.engine, &out, try .init(&.{1}), 0, &test_support.sealEntropy(10))).?;

@@ -80,7 +80,7 @@ pub const Accepted = struct {
     event: Event = .none,
 };
 
-/// Peer-caused conditions arrive as `rejected`. An error from `receive` is a local failure.
+/// Invalid input and admission pressure arrive as `rejected`. Errors are local failures.
 pub const Outcome = union(enum) {
     accepted: Accepted,
     rejected: types.RejectReason,
@@ -186,8 +186,8 @@ pub fn peerRecord(self: *const Engine, node_id: *const types.NodeId) ?RoutingTab
     return self.routing.get(node_id);
 }
 
-pub fn forgetPeerIfStale(self: *Engine, node_id: *const types.NodeId, verified_at_ms: u64) bool {
-    return self.routing.forgetPeerIfStale(node_id, verified_at_ms);
+pub fn markPeerUnresponsive(self: *Engine, node_id: *const types.NodeId, verified_at_ms: u64) bool {
+    return self.routing.markUnresponsive(node_id, verified_at_ms);
 }
 
 /// Encodes, seals, and registers one request. The packet in `out` is the caller's to send, and
@@ -562,10 +562,10 @@ fn routeAuthenticated(
     _ = self.routing.upsertVerified(&peer, &record, now_ms, direction) catch return;
 }
 
-// This is the one place where peer-caused errors become values. Anything unmapped is a local
-// failure.
+// Admission pressure and invalid input become values here. Unmapped errors are local failures.
 fn rejectReason(err: Error) ?types.RejectReason {
     return switch (err) {
+        Error.AdmissionLimited => .admission_limited,
         Error.InvalidMessage,
         Error.UnsupportedMessage,
         Error.InvalidEncoding,

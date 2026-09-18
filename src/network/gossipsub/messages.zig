@@ -18,6 +18,7 @@ const Validation = validation.Validation;
 const Peers = @import("peer_book.zig").PeerBook;
 
 pub const MessageEvent = struct {
+    source: ?PeerRef = null,
     handle: Handle,
     id: topic_mod.MessageId,
     peer: @import("../quic/engine.zig").Handle,
@@ -91,6 +92,7 @@ pub const Messages = struct {
         const layout = @import("layout.zig").Layout.init(options);
         var store = try storage.Store.init(a, layout.payload_entries, layout.payload_bytes);
         errdefer store.deinit(a);
+        store.limits = options.processor_limits;
         var history = try mcache.History.init(a, layout.history, layout.retained);
         errdefer history.deinit(a);
         var seen = try mcache.SeenCache.init(a, layout.seen, options.seen_ttl_ms);
@@ -183,6 +185,10 @@ pub const Messages = struct {
 
     pub fn publish(self: *Messages, id: MessageId, name: []const u8, compressed: []const u8, now: u64, epoch: u64) ?storage.Handle {
         const handle = self.history.admitPayload(&self.store, id, name, compressed) orelse return null;
+        if (!self.store.canRetain(handle)) {
+            self.store.seal(handle);
+            return null;
+        }
         self.history.put(&self.store, handle, epoch);
         self.store.seal(handle);
         std.debug.assert(self.seen.add(id, now));
@@ -253,8 +259,14 @@ pub const Messages = struct {
     }
 
     fn admitReceived(self: *Messages, context: *const Context, workspace: *const Workspace, source: *const Source, topic: u16, msg: protobuf.Message, id: topic_mod.MessageId, written: usize, now: u64) Received {
-        const peer_limit = @max(1, @min(128, self.validation.entries.len / 2));
-        if (self.validation.pending_per_peer[source.peer.index] >= peer_limit) return .{ .blocked = .storage };
+        const kind = if (topic_mod.parseCanonical(msg.topic)) |canonical| canonical.name.kind else .beacon_block;
+        if (context.options.processor_limits) |limits| {
+            if (self.validation.pending_per_kind[@intFromEnum(kind)] >= limits[@intFromEnum(kind)].items) return .{ .blocked = .storage };
+        }
+        if (!self.store.kindRoom(kind, msg.data.len)) return .{ .blocked = .storage };
+        const peer_limit = @max(1, @min(128, if (context.options.processor_limits) |limits| limits[@intFromEnum(kind)].items / 2 else self.validation.entries.len / 2));
+        const peer_pending = if (context.options.processor_limits != null) self.validation.pending_per_peer_kind[source.peer.index][@intFromEnum(kind)] else self.validation.pending_per_peer[source.peer.index];
+        if (peer_pending >= peer_limit) return .{ .blocked = .storage };
         var reservation = self.validation.reserve(id) orelse return .{ .blocked = .storage };
         defer reservation.cancel();
         const message = self.history.admitPayload(&self.store, id, msg.topic, msg.data) orelse return .{ .blocked = .storage };
@@ -267,7 +279,7 @@ pub const Messages = struct {
         _ = self.seen.add(id, now);
         const entry = self.validation.attribution(handle);
         assert(context.peers.matches(entry.source));
-        return .{ .admitted = .{ .identity = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .deadline = self.validation.entries[handle.index].state.pending.deadline, .handle = handle, .id = id, .peer = source.connection, .topic = room[written..][0..msg.topic.len], .bytes = room[0..written] } };
+        return .{ .admitted = .{ .source = source.peer, .identity = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .deadline = self.validation.entries[handle.index].state.pending.deadline, .handle = handle, .id = id, .peer = source.connection, .topic = room[written..][0..msg.topic.len], .bytes = room[0..written] } };
     }
 
     pub fn report(self: *Messages, context: *const Context, handle: Handle, verdict: Verdict, now: u64) Report {
@@ -283,7 +295,7 @@ pub const Messages = struct {
         const name = context.overlay.topicString(entry.topic.index);
         var result: Applied = .{ .verdict = verdict, .id = entry.id, .source = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .topic_bytes = undefined, .topic_len = @intCast(name.len) };
         @memcpy(result.topic_bytes[0..name.len], name);
-        if (verdict == .accept) {
+        if (verdict == .accept and self.store.canRetain(message)) {
             self.history.put(&self.store, message, context.epoch);
             if (context.overlay.subscribed(entry.topic.index)) result.forward = .{ .message = message, .source = entry.source, .topic = entry.topic };
         }
@@ -309,13 +321,6 @@ pub const Messages = struct {
 
     pub fn expire(self: *Messages, peers: *Peers, now: u64) void {
         self.validation.expire(&self.store, peers, now);
-    }
-
-    pub fn takeReleased(self: *Messages) bool {
-        const released = self.store.released or self.validation.released;
-        self.store.released = false;
-        self.validation.released = false;
-        return released;
     }
 };
 

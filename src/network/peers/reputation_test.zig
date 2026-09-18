@@ -1,6 +1,30 @@
 const std = @import("std");
 const r = @import("reputation.zig");
 const t = @import("types.zig");
+test "peer reputation normalizes gossip for selection without overriding RPC bans" {
+    try std.testing.expectEqual(@as(f64, -19), r.selectionScore(0, -16000, -16000));
+    try std.testing.expectEqual(@as(f64, -19), r.selectionScore(0, -8000, -8000));
+    try std.testing.expectEqual(@as(f64, -10), r.selectionScore(-10, 0, -16000));
+    try std.testing.expect(r.selectionScore(0, -100, -16000) > r.prune_score);
+    try std.testing.expectEqual(r.ban_score, r.selectionScore(r.ban_score, 1e6, -16000));
+    try std.testing.expectEqual(@as(f64, -10), r.selectionScore(-10, -100, 0));
+}
+
+test "peer reputation redial deadline is independent of admission and misconduct" {
+    var state: r.State = .{};
+    state.deferRedial(100, 300_000);
+    try std.testing.expectEqual(@as(u64, 0), state.goodbye_until_ms);
+    try std.testing.expectEqual(@as(f64, 0), state.score);
+    try std.testing.expect(!state.banned(100));
+    try std.testing.expect(state.retained(300_099));
+    try std.testing.expect(!state.retained(300_100));
+    try std.testing.expectEqual(@as(u64, 300_100), state.nextDeadline(100).?);
+    try std.testing.expect(state.nextDeadline(300_100) == null);
+    state.cooldown(200, 500);
+    try std.testing.expectEqual(@as(u64, 700), state.nextDeadline(200).?);
+    try std.testing.expectEqual(@as(u64, 300_100), state.nextDeadline(700).?);
+}
+
 test "peer reputation exact thresholds cooldown expiry and long gap" {
     var state: r.State = .{};
     try std.testing.expectEqual(t.ReputationDecision.none, state.apply(.low_tolerance, 0));

@@ -25,6 +25,7 @@ pub const Sessions = struct {
     delivery_revision: u64 = 0,
     io_arena: []u8,
     receive_pool: ReceivePool,
+    decode_scratch: []u8,
     deliveries: *DeliveryPool,
 
     pub fn setOutbound(self: *Sessions, index: u16, outbound: @import("peer_session.zig").Outbound) void {
@@ -40,27 +41,30 @@ pub const Sessions = struct {
         const per_peer = layout.session_buffer_bytes;
         const arena = try a.alloc(u8, rows.len * per_peer);
         errdefer a.free(arena);
-        const receive_pool = try ReceivePool.init(a, layout.receive_frames, layout.receive_frame_bytes);
+        const receive_pool = try ReceivePool.init(a, layout.receive_arena_bytes);
         errdefer {
             var pool = receive_pool;
             pool.deinit(a);
         }
+        const decode_scratch = try a.alloc(u8, constants.GOSSIP_MAX_SIZE);
+        errdefer a.free(decode_scratch);
         const deliveries = try a.create(DeliveryPool);
         errdefer a.destroy(deliveries);
         deliveries.* = try DeliveryPool.init(a, rows.len, layout.deliveries);
         for (rows, 0..) |*row, i| row.* = .{ .io = PeerIo.init(arena[i * per_peer ..][0..per_peer], options, deliveries) };
-        return .{ .rows = rows, .io_arena = arena, .receive_pool = receive_pool, .deliveries = deliveries };
+        return .{ .rows = rows, .io_arena = arena, .receive_pool = receive_pool, .decode_scratch = decode_scratch, .deliveries = deliveries };
     }
 
     pub fn metadataBytes(layout: *const @import("layout.zig").Layout) usize {
         return @as(usize, layout.sessions) * @sizeOf(Session) + @sizeOf(DeliveryPool) +
-            DeliveryPool.backingBytes(layout.deliveries);
+            DeliveryPool.backingBytes(layout.deliveries) + layout.receive_arena_bytes / @import("receive_pool.zig").page_bytes * @sizeOf(u32);
     }
 
     pub fn deinit(self: *Sessions, a: std.mem.Allocator) void {
         self.deliveries.deinit(a);
         a.destroy(self.deliveries);
         self.receive_pool.deinit(a);
+        a.free(self.decode_scratch);
         a.free(self.rows);
         a.free(self.io_arena);
     }
@@ -78,7 +82,7 @@ pub const Sessions = struct {
     pub fn removePeer(self: *Sessions, index: u16) void {
         assert(index < self.rows.len);
         if (!self.rows[index].active) return;
-        assert(self.rows[index].io.large_slot == null and self.rows[index].io.rpc == null and !self.rows[index].io.tx.pending());
+        assert(self.rows[index].io.overflow.pages == 0 and self.rows[index].io.rpc == null and !self.rows[index].io.tx.pending());
         self.setOutbound(index, .none);
         self.rows[index].active = false;
         self.rows[index].in_stream = null;
@@ -127,24 +131,12 @@ pub const Sessions = struct {
         return true;
     }
 
-    pub fn frameBody(self: *Sessions, io: *PeerIo) ?[]u8 {
-        assert(io.rpc == null);
-        if (io.large_slot) |lease| return self.receive_pool.buffer(lease);
-        const declared = io.reader.declaredLen() orelse return io.body;
-        if (declared <= io.body.len) return io.body;
-        const lease = self.receive_pool.claim() orelse return null;
-        io.large_slot = lease;
-        return self.receive_pool.buffer(lease);
-    }
-
     pub fn finishFrame(self: *Sessions, peer_io: *PeerIo) bool {
+        const released = peer_io.overflow.pages != 0;
+        peer_io.rpc = null;
+        self.receive_pool.release(&peer_io.overflow);
         peer_io.finishFrame();
-        if (peer_io.large_slot) |lease| {
-            self.receive_pool.release(lease);
-            peer_io.large_slot = null;
-            return true;
-        }
-        return false;
+        return released;
     }
 
     pub fn connectionActivity(self: *Sessions, conn: Handle) void {

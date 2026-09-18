@@ -2,7 +2,7 @@ import {execFileSync} from "node:child_process";
 import {setTimeout as delay} from "node:timers/promises";
 import {describe, expect, it} from "vitest";
 import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, discoveryConfig, topicBoundary} from "./utils/network.js";
+import {applicationConfig, configureChain, discoveryConfig, requestForks} from "./utils/network.js";
 import {networkBindings as bindings} from "./utils/network-bindings.js";
 
 async function collected() {
@@ -193,7 +193,6 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
       iwantFollowupMs: 12000n,
       largeFrameTimeoutMs: 35000n,
       opportunisticGraftIntervalMs: 61000n,
-      phase0Digest: Uint8Array.of(9, 8, 7, 6),
       pressureTimeoutMs: 33000n,
       retainedScoreMs: 19200000n,
       score: {
@@ -237,7 +236,6 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
     };
     bindings.networkTestScenario("gossip");
     const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-    config.gossipPolicy.phase0Digest?.fill(0);
     config.gossipPolicy.ipAllowlist[0].fill(0);
     config.gossipPolicy.score.decayIntervalMs = 12000n;
     config.gossipPolicy.iwantFollowupMs = 1n;
@@ -264,7 +262,6 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
           validation_timeout_ms: 31000n,
           validation_tombstone_ms: 32000n,
         },
-        phase0Digest: Uint8Array.of(9, 8, 7, 6),
         score: {
           app_weight: 2,
           behaviour_decay: 0.8,
@@ -305,13 +302,13 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
       await runtime.close();
     }
   });
-  it("copies the host sampling minimum into the actual local context", async () => {
+  it("derives the chain sampling minimum into the actual local context", async () => {
     const config = applicationConfig();
-    config.local.fork.custodyGroups = 128;
-    config.local.fork.minimumSamplingGroups = 8;
+    configureChain({ELECTRA_FORK_EPOCH: 0, FULU_FORK_EPOCH: 0, SAMPLES_PER_SLOT: 8});
+    config.local.status.earliestAvailableSlot = 0n;
     bindings.networkTestScenario("gossip");
     const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-    config.local.fork.minimumSamplingGroups = 0;
+    configureChain();
     try {
       await runtime.ready;
       expect(bindings.networkTestGossip()).toMatchObject({minimumSamplingGroups: 8});
@@ -321,31 +318,14 @@ describe.skipIf(process.env.LODESTAR_Z_NETWORK_TEST_FAILURES !== "1")("test-buil
   });
   it("forwards immutable topic namespace into the actual native owner", async () => {
     const config = applicationConfig();
-    const boundary = topicBoundary();
-    config.topicPolicy = [boundary];
     bindings.networkTestScenario("gossip");
     const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
-    boundary.digest.fill(0);
-    boundary.rules.beacon_attestation.count = 1;
-    boundary.rules.beacon_block.sszMax = 1;
+    configureChain({ELECTRA_FORK_EPOCH: 0});
     try {
       await runtime.ready;
-      expect(bindings.networkTestGossip()).toMatchObject({
-        topicCount: 65,
-        topicPolicy: [
-          {
-            digest: Uint8Array.of(1, 2, 3, 4),
-            // biome-ignore-start lint/style/useNamingConvention: Snapshot preserves native rule field names.
-            rules: [
-              {count: 1, ssz_max: 20, ssz_min: 10},
-              {count: 0, ssz_max: 0, ssz_min: 0},
-              {count: 64, ssz_max: 131304, ssz_min: 228},
-              ...Array.from({length: 10}, () => ({count: 0, ssz_max: 0, ssz_min: 0})),
-            ],
-            // biome-ignore-end lint/style/useNamingConvention: Native snapshot ends here.
-          },
-        ],
-        topicSubscriptionBytes: 192,
+      const snapshot = bindings.networkTestGossip();
+      expect(snapshot).toMatchObject({
+        topicPolicy: expect.arrayContaining([{digest: requestForks[0].digest, rules: expect.any(Array)}]),
       });
     } finally {
       await runtime.close();

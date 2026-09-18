@@ -19,7 +19,6 @@ test "req/resp fixed message sizes match the specification" {
     try std.testing.expectEqual(@as(usize, 40), deneb.BlobIdentifier.fixed_size);
     try std.testing.expectEqual(@as(usize, 32 * c.MAX_REQUEST_BLOCKS), phase0.BeaconBlockRoots.max_size);
     try std.testing.expectEqual(@as(usize, 32 * c.MAX_REQUEST_BLOCKS_DENEB), deneb.BeaconBlockRootsDeneb.max_size);
-    try std.testing.expectEqual(@as(usize, 40 * c.MAX_REQUEST_BLOB_SIDECARS_LIMIT), deneb.BlobIdentifiers.max_size);
     try std.testing.expectEqual(@as(usize, c.MAX_ERROR_MESSAGE_LENGTH), phase0.ErrorMessage.max_size);
     try std.testing.expectEqual(@as(usize, 8 * @import("preset").NUMBER_OF_COLUMNS), fulu.DataColumnIndices.max_size);
     try std.testing.expectEqual(@as(usize, 20), fulu.DataColumnSidecarsByRangeRequest.min_size);
@@ -64,17 +63,4 @@ test "req/resp metadata v3 round trips through SSZ" {
     var decoded: fulu.MetaDataV3.Type = undefined;
     try fulu.MetaDataV3.deserializeFromBytes(&bytes, &decoded);
     try std.testing.expectEqual(metadata, decoded);
-}
-
-test "req/resp blob identifiers reject one element over the limit" {
-    var bytes: [40 * (c.MAX_REQUEST_BLOB_SIDECARS_LIMIT + 1)]u8 = undefined;
-    @memset(&bytes, 1);
-    var decoded: deneb.BlobIdentifiers.Type = .empty;
-    defer decoded.deinit(std.testing.allocator);
-    try std.testing.expectError(
-        error.gtLimit,
-        deneb.BlobIdentifiers.deserializeFromBytes(std.testing.allocator, &bytes, &decoded),
-    );
-    try deneb.BlobIdentifiers.deserializeFromBytes(std.testing.allocator, bytes[0..80], &decoded);
-    try std.testing.expectEqual(@as(usize, 2), decoded.items.len);
 }

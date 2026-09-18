@@ -54,6 +54,9 @@ pub const MemoryPlan = @import("layout.zig").Plan;
 /// High waters are the largest physical-row peak since init, including previous connections.
 /// Age uses last_now_ms and original queue admission until complete send or reset.
 pub const ResourceSnapshot = struct {
+    receive_pages: usize = 0,
+    receive_page_capacity: usize = 0,
+    receive_pages_high_water: usize = 0,
     connected_capacity: usize = 0,
     retained_capacity: usize = 0,
     validation_capacity: usize = 0,
@@ -145,6 +148,9 @@ pub const Gossipsub = struct {
         local_pressure_resets: u64 = 0,
         tx_stalled: u64 = 0,
         subscription_timeouts: u64 = 0,
+        receive_capacity_refusals: u64 = 0,
+        message_capacity_refusals: u64 = 0,
+        receive_copy_bytes: u64 = 0,
         receive_pressure_timeouts: u64 = 0,
         receive_frame_timeouts: u64 = 0,
         send_queue_timeouts: u64 = 0,
@@ -317,7 +323,6 @@ pub const Gossipsub = struct {
         if (!self.sessions.matches(session)) return;
         self.sessions.rows[session.index].io.tx.cancelStream(&self.messages.store);
         self.cancelPromises(session.index, false);
-        self.wakeStorage();
     }
 
     pub fn sendSubscriptions(self: *Gossipsub, index: u16) void {
@@ -393,7 +398,6 @@ pub const Gossipsub = struct {
         } else {
             std.log.scoped(.network_gossip).debug("validation_report_refused validation={d}:{d} verdict={s} reason={s}", .{ handle.index, handle.generation, @tagName(verdict), @tagName(result) });
         }
-        self.wakeStorage();
         return result.outcome();
     }
 
@@ -440,7 +444,6 @@ pub const Gossipsub = struct {
         } else if (now.mono_ms >= self.heartbeat_at) {
             self.heartbeat(now);
             self.heartbeat_at = now.mono_ms +| self.options.heartbeat_interval_ms;
-            self.wakeStorage();
         }
     }
 
@@ -504,6 +507,9 @@ pub const Gossipsub = struct {
             .queued_descriptors = 0,
             .queued_bytes = 0,
             .held_frames = 0,
+            .receive_pages = self.sessions.receive_pool.next.len - self.sessions.receive_pool.free_pages,
+            .receive_page_capacity = self.sessions.receive_pool.next.len,
+            .receive_pages_high_water = self.sessions.receive_pool.high_water,
             .held_tx_retains = 0,
             .store_entries = self.messages.store.used_entries,
             .store_pages = self.messages.store.next.len - self.messages.store.free_pages,
@@ -541,13 +547,6 @@ pub const Gossipsub = struct {
         for (self.messages.store.entries) |entry| result.held_tx_retains += entry.tx;
         result.pending_validations = self.messages.stats().pending;
         return result;
-    }
-
-    pub fn wakeStorage(self: *Gossipsub) void {
-        for (self.sessions.rows) |*peer| if (peer.io.blocked == .storage) {
-            const io = &peer.io;
-            io.rx_ready = true;
-        };
     }
 
     fn heartbeat(self: *Gossipsub, now: Now) void {
@@ -618,7 +617,6 @@ pub const Gossipsub = struct {
         assert(self.sessions.matches(session));
         self.rpc_metrics.sent_bytes +|= written;
         if (self.sessions.rows[session.index].io.tx.advance(&self.messages.store, written)) |completion| self.writeCompleted(session, completion, now_ms);
-        if (self.messages.takeReleased()) self.wakeStorage();
     }
 
     pub fn writeCompleted(self: *Gossipsub, session: sessions_mod.SessionRef, completion: @import("outbox.zig").Completion, now_ms: u64) void {
@@ -716,7 +714,11 @@ pub const Gossipsub = struct {
                 if (reason == .work) self.counters.decompress_throttled += 1;
                 return switch (reason) {
                     .events => .events,
-                    .storage => .storage,
+                    .storage => blk: {
+                        self.counters.message_capacity_refusals += 1;
+                        self.cancelPromises(index, true);
+                        break :blk .done;
+                    },
                     .work => .credits,
                 };
             },

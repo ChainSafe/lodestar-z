@@ -227,7 +227,9 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
         },
         .applyIntent => {
             if (input.slot < self.slot) return error.ClockRegression;
-            operation.boolean = try core.applyIntent(&self.stores.?.intents[store.?].value, timestamp);
+            const intent = &self.stores.?.intents[store.?].value;
+            intent.update = try self.heavy.?.config.chain.update(intent.update.local, intent.update.endpoints, input.slot);
+            operation.boolean = try core.applyIntent(intent, timestamp);
             self.lock();
             self.slot = input.slot;
             if (!self.active) std.log.scoped(.network_runtime).info("owner_activated slot={d}", .{input.slot});
@@ -236,7 +238,11 @@ fn executeOne(self: *Runtime, index: usize, timestamp: n.Now) !void {
             if (!self.stop) self.diag.state = .running;
             self.unlock();
         },
-        .updateStatus => try core.updateStatus(&input.status, timestamp),
+        .updateStatus => {
+            var status = input.status;
+            status.fork_digest = core.localState().status.fork_digest;
+            try core.updateStatus(&status, timestamp);
+        },
         .getIdentity => operation.identity = try self.heavy.?.readIdentity(),
         .getPeers => {
             operation.count = try core.completeSnapshots(self.stores.?.snapshots[store.?]);

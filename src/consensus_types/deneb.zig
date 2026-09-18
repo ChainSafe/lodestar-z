@@ -259,5 +259,3 @@ pub const BlobSidecarsByRangeRequest = ssz.FixedContainerType(struct {
     start_slot: p.Slot,
     count: p.Uint64,
 });
-
-pub const BlobIdentifiers = ssz.FixedListType(BlobIdentifier, c.MAX_REQUEST_BLOB_SIDECARS_LIMIT, .{});

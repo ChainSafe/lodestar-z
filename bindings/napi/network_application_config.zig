@@ -2,33 +2,29 @@ const std = @import("std");
 const n = @import("network");
 const cfg = @import("network_config.zig");
 const Value = @import("zapi:zapi").napi.Value;
-const policy = n.reqresp.request_policy;
 
 pub const Config = struct {
     resources: Resources,
-    request: policy.Config,
-    blobs: [64]policy.BlobLimit,
     agent: [256]u8,
     agent_len: u16,
     version: [64]u8,
     version_len: u8,
-    capabilities: n.capabilities.Directional,
 
     pub fn buildRequest(self: *const Config, common: *const cfg.Config, seed: u64) !n.configuration.Request {
         const r = &self.resources;
         if (r.nativeBudgetBytes <= @sizeOf(n.NetworkCore)) return error.NetworkNativeBudgetExceeded;
         var gossip_options = common.gossip;
         gossip_options.ip_allowlist = common.allowlist[0..common.allowlist_count];
-        gossip_options.topic_policy = common.topic_boundaries[0..common.topic_boundary_count];
+        gossip_options.topic_policy = common.chain.topics[0..common.chain.supported_count];
         return .{
             .profile = common.profile,
             .seed = seed,
-            .forks = common.forks[0..common.fork_count],
+            .forks = common.chain.forks[0..common.chain.supported_count],
             .limits = .{ .connections_max = r.connectionCapacity, .handshaking_max = r.handshakingCapacity, .dialing_max = r.dialingCapacity, .receive_budget_bytes = r.receiveBudgetBytes },
             .peers = .{ .capacity = r.peerCapacity, .target_peers = r.targetPeers, .max_peers = r.maxPeers, .min_outbound = r.minOutbound, .outbound_reserve = r.outboundReserve },
-            .admission_policy = self.request,
+            .admission_policy = common.chain.requestPolicy(),
             .gossip = gossip_options,
-            .router = .{ .identify = true, .capabilities = self.capabilities },
+            .router = .{ .identify = true, .capabilities = (try common.chain.update(common.local, null, common.slot)).capabilities },
             .identify = .{ .agent = self.agent[0..self.agent_len], .protocol_version = self.version[0..self.version_len] },
             .byte_limit = r.nativeBudgetBytes - @sizeOf(n.NetworkCore),
         };
@@ -75,42 +71,10 @@ pub fn text(value: Value, out: []u8) !usize {
     @memcpy(out[0..len], copied);
     return len;
 }
-pub fn capabilities(value: Value) !n.capabilities.Directional {
-    try cfg.completeObject(value, &.{ "receive", "request" });
-    var result: n.capabilities.Directional = undefined;
-    inline for (.{ "receive", "request" }) |name| {
-        const list = try cfg.get(value, name);
-        const count = try cfg.array(list, n.capabilities.protocol_count);
-        var set: n.capabilities.Set = .initEmpty();
-        for (0..count) |i| {
-            var bytes: [128]u8 = undefined;
-            const len = try text(try list.getElement(@intCast(i)), &bytes);
-            const protocol = n.router.Protocol.fromId(bytes[0..len]) orelse return error.InvalidCapabilities;
-            if (set.contains(protocol)) return error.InvalidCapabilities;
-            set.insert(protocol);
-        }
-        @field(result, name) = set;
-    }
-    return result;
-}
-pub fn validateCapabilities(active: n.capabilities.Directional, local: *const n.peers.types.LocalState) !void {
-    if (local.metadata.custody_group_count == null) return error.MissingCustodyAdvertisement;
-    const required = n.capabilities.withIdentify(try n.capabilities.forFork(local.fork.fork, false, &.{ .v1_2, .v1_1, .v1_0 }));
-    inline for (.{ "receive", "request" }) |direction| {
-        const set = @field(active, direction);
-        const expected = @field(required, direction);
-        for (0..n.reqresp.Protocol.count) |i| {
-            const protocol: n.reqresp.Protocol = @enumFromInt(i);
-            if (protocol.isControl() and expected.contains(.{ .reqresp = protocol }) and !set.contains(.{ .reqresp = protocol })) return error.InvalidCapabilities;
-        }
-        if (!set.contains(.identify)) return error.InvalidCapabilities;
-    }
-}
 pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
-    try cfg.completeObject(value, &.{ "profile", "identitySecretKey", "bind", "local", "forkSchedule", "requestForks", "discovery", "initialSlot", "gossipPolicy", "topicPolicy", "resources", "requestPolicy", "identify", "capabilities" });
+    try cfg.completeObject(value, &.{ "profile", "identitySecretKey", "bind", "local", "discovery", "initialSlot", "gossipPolicy", "resources", "identify", "serveLightClients" });
     try cfg.parse(value, common);
     errdefer common.wipe();
-    if (common.topic_boundary_count == 0) return error.TopicPolicyRequired;
     const resources = try cfg.get(value, "resources");
     try cfg.completeObject(resources, &.{ "peerCapacity", "targetPeers", "maxPeers", "minOutbound", "outboundReserve", "connectionCapacity", "handshakingCapacity", "dialingCapacity", "receiveBudgetBytes", "nativeBudgetBytes", "bridgeBudgetBytes" });
     inline for (@typeInfo(Resources).@"struct".fields) |field| {
@@ -118,28 +82,10 @@ pub fn parse(value: Value, common: *cfg.Config, out: *Config) !void {
         @field(out.resources, field.name) = @intCast(try cfg.integer(try cfg.get(resources, field.name), max));
     }
     if (out.resources.nativeBudgetBytes == 0 or out.resources.bridgeBudgetBytes == 0) return error.InvalidNetworkInteger;
-    const input = try cfg.get(value, "requestPolicy");
-    try cfg.completeObject(input, &.{ "denebStartSlot", "blocksPreDeneb", "blocksDeneb", "blobIdentifiersDeneb", "blobIdentifiersElectra", "numberOfColumns", "columnChunks", "blobSchedule", "hostIntegerMax" });
-    out.request.deneb_start_slot = try cfg.optionalBigint(try cfg.get(input, "denebStartSlot"));
-    out.request.host_integer_max = try cfg.optionalBigint(try cfg.get(input, "hostIntegerMax"));
-    inline for (.{ .{ "blocksPreDeneb", "blocks_pre_deneb" }, .{ "blocksDeneb", "blocks_deneb" }, .{ "blobIdentifiersDeneb", "blob_identifiers_deneb" }, .{ "blobIdentifiersElectra", "blob_identifiers_electra" }, .{ "columnChunks", "column_chunks" }, .{ "numberOfColumns", "number_of_columns" } }) |pair| {
-        @field(out.request, pair[1]) = @intCast(try cfg.integer(try cfg.get(input, pair[0]), std.math.maxInt(@TypeOf(@field(out.request, pair[1])))));
-    }
-    const blobs = try cfg.get(input, "blobSchedule");
-    const count = try cfg.array(blobs, 64);
-    for (out.blobs[0..count], 0..) |*blob, i| {
-        const entry = try blobs.getElement(@intCast(i));
-        try cfg.completeObject(entry, &.{ "startSlot", "maxBlobs" });
-        blob.* = .{ .start_slot = try cfg.bigint(try cfg.get(entry, "startSlot")), .max_blobs = @intCast(try cfg.integer(try cfg.get(entry, "maxBlobs"), std.math.maxInt(u32))) };
-    }
-    out.request.blob_schedule = out.blobs[0..count];
-    _ = try policy.Policy.init(&out.request);
     const identify = try cfg.get(value, "identify");
     try cfg.completeObject(identify, &.{ "agentVersion", "protocolVersion" });
     out.agent_len = @intCast(try text(try cfg.get(identify, "agentVersion"), &out.agent));
     out.version_len = @intCast(try text(try cfg.get(identify, "protocolVersion"), &out.version));
-    out.capabilities = try capabilities(try cfg.get(value, "capabilities"));
-    try validateCapabilities(out.capabilities, &common.local);
 }
 
 pub const Intent = struct {
@@ -150,12 +96,11 @@ pub const Intent = struct {
 pub fn parseIntent(value: Value, out: *Intent, max_peers: u16) !void {
     try cfg.completeObject(value, &.{ "update", "demand", "subscriptions" });
     const update = try cfg.get(value, "update");
-    try cfg.completeObject(update, &.{ "local", "schedule", "endpoints", "capabilities" });
+    try cfg.completeObject(update, &.{ "local", "endpoints" });
     try cfg.parseLocal(try cfg.get(update, "local"), &out.value.update.local);
-    try cfg.parseSchedule(try cfg.get(update, "schedule"), &out.value.update.schedule);
+    out.value.update.schedule = .{};
+    out.value.update.capabilities = .{ .receive = .initEmpty(), .request = .initEmpty() };
     out.value.update.endpoints = try cfg.parseEndpoints(try cfg.get(update, "endpoints"));
-    out.value.update.capabilities = try capabilities(try cfg.get(update, "capabilities"));
-    try validateCapabilities(out.value.update.capabilities, &out.value.update.local);
     const demand = try cfg.get(value, "demand");
     try cfg.completeObject(demand, &.{ "attnets", "syncnets", "groupTargets", "attestationTarget", "syncTarget", "expiresAtSlot" });
     const attnets = try cfg.fixed(8, try cfg.get(demand, "attnets"));
@@ -167,7 +112,6 @@ pub fn parseIntent(value: Value, out: *Intent, max_peers: u16) !void {
     const targets = try cfg.get(demand, "groupTargets");
     if (try cfg.array(targets, 128) != 128) return error.InvalidDemand;
     for (&out.value.demand.group_targets, 0..) |*target, i| target.* = @intCast(try cfg.integer(try targets.getElement(@intCast(i)), max_peers));
-    try out.value.demand.validate(&out.value.update.local.fork, max_peers);
     const subscriptions = try cfg.get(value, "subscriptions");
     const count = try cfg.array(subscriptions, 512);
     for (out.subscriptions[0..count], 0..) |*subscription, i| {

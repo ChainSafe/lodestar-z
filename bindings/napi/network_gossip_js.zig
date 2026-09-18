@@ -12,7 +12,24 @@ const Runtime = r.Runtime;
 
 const put = @import("network_js.zig").put;
 const bytes = @import("network_js.zig").bytes;
-pub fn drain(runtime: *Runtime) !Value {
+pub fn drain(runtime: *Runtime, options: Value) !Value {
+    var demand: g.Table.Demand = .{};
+    if (try options.typeof() != .undefined) {
+        try cfg.object(options, &.{ "items", "bytes", "ordinary", "kind" });
+        const kind_value = try cfg.get(options, "kind");
+        var kind: ?n.gossipsub.topic.Kind = null;
+        if (try kind_value.typeof() != .undefined) {
+            var text: [64]u8 = undefined;
+            const len = try app.text(kind_value, &text);
+            kind = std.meta.stringToEnum(n.gossipsub.topic.Kind, text[0..len]) orelse return error.InvalidGossipKind;
+        }
+        demand = .{
+            .kind = kind,
+            .items = @intCast(try cfg.integer(try cfg.get(options, "items"), g.batch_max)),
+            .bytes = @intCast(try cfg.integer(try cfg.get(options, "bytes"), g.batch_bytes)),
+            .ordinary = try cfg.boolean(try cfg.get(options, "ordinary")),
+        };
+    }
     runtime.retain();
     defer runtime.release();
     runtime.lock();
@@ -25,14 +42,16 @@ pub fn drain(runtime: *Runtime) !Value {
         return error.NetworkNotActive;
     }
     const table = &runtime.gossip.?;
-    const batch = if (runtime.quiescent) g.Batch{} else table.claim(mono_ms);
+    const previous_due = table.batch_due;
+    const batch = if (runtime.quiescent) g.Batch{} else table.claimDemand(mono_ms, demand);
+    if (table.batch_due != previous_due) runtime.signalLocked();
     runtime.unlock();
     var success = false;
     var reported_more = false;
     defer {
         runtime.lock();
         table.finish(&batch, success);
-        if (runtime.quiescent) table.trim() else if (!reported_more and table.oldest() != null) {
+        if (runtime.quiescent) table.trim() else if (!reported_more and table.hasWork()) {
             runtime.readable_rearm = true;
             runtime.signalLocked();
         }
@@ -45,13 +64,14 @@ pub fn drain(runtime: *Runtime) !Value {
     }
     const object = try env.createObject();
     try put(object, "messages", array);
+    try put(object, "grouped", try env.getBoolean(batch.grouped));
     runtime.lock();
     const finished_ms = g.monotonic() catch |err| {
         runtime.unlock();
         return err;
     };
     table.expire(finished_ms);
-    const more = table.oldest() != null;
+    const more = table.hasWork();
     runtime.unlock();
     try put(object, "more", try env.getBoolean(more));
     reported_more = more;
@@ -78,8 +98,11 @@ fn descriptor(runtime: *Runtime, token: g.Token, cell: *const g.Cell, ordinal: u
     const data = try env.createTypedarray(.uint8, cell.input.len, buffer, 0);
     try @import("network_gossip_faults.zig").copy(runtime, token, ordinal);
     try faults.check(.gossip_copy);
-    @memcpy(destination[0..cell.input.len], cell.input);
+    runtime.gossip.?.copyPayload(cell, destination[0..cell.input.len]);
     try put(object, "data", data);
+    var encoded: [172]u8 = undefined;
+    try put(object, "attestationData", if (cell.metadata.group) |group| try env.createStringUtf8(std.base64.standard.Encoder.encode(&encoded, &group)) else try env.getNull());
+    try put(object, "slot", if (cell.metadata.slot) |slot| try env.createBigintUint64(slot) else try env.getNull());
     try put(object, "receivedAtUnixMs", try env.createDouble(@floatFromInt(cell.received_at)));
     return object;
 }
@@ -100,9 +123,10 @@ pub fn report(runtime: *Runtime, value: Value, verdict_value: Value) !Value {
         return err;
     };
     var accepted = false;
-    if (!runtime.quiescent and !runtime.stop and runtime.active and session == runtime.diag.session and index < 1024) {
+    if (!runtime.quiescent and !runtime.stop and runtime.active and session == runtime.diag.session and index < n.gossip_processor.limits_mod.capacity_max) {
         accepted = runtime.gossip.?.report(.{ .index = @intCast(index), .generation = generation }, verdict, mono_ms);
-        if (accepted) runtime.signalLocked();
+        runtime.readable_rearm = true;
+        runtime.signalLocked();
     } else runtime.gossip.?.diag.staleReports +|= 1;
     runtime.unlock();
     return runtime.env.getBoolean(accepted);
@@ -185,4 +209,97 @@ pub fn publishError(env: napi.Env, err: anyerror) !Value {
 }
 pub fn diagnostics(env: napi.Env, value: *const g.Diagnostics) !Value {
     return @import("network_js.zig").scalarFields(env, value);
+}
+
+pub fn checks(runtime: *Runtime) !Value {
+    runtime.retain();
+    defer runtime.release();
+    runtime.lock();
+    const now = g.monotonic() catch |err| {
+        runtime.unlock();
+        return err;
+    };
+    const table = &runtime.gossip.?;
+    const batch = if (runtime.active and !runtime.quiescent and !runtime.stop) table.claimChecks(now) else g.Batch{};
+    var cells: [g.batch_max]g.Cell = undefined;
+    for (batch.tokens[0..batch.len], 0..) |token, i| cells[i] = table.get(token).?.*;
+    runtime.unlock();
+    var success = false;
+    defer if (!success) {
+        runtime.lock();
+        table.retryChecks(&batch);
+        runtime.readable_rearm = true;
+        runtime.signalLocked();
+        runtime.unlock();
+    };
+    const env = runtime.env;
+    const array = try env.createArrayWithLength(batch.len);
+    for (batch.tokens[0..batch.len], 0..) |token, i| {
+        const cell = &cells[i];
+        const object = try env.createObject();
+        const handle = try env.createObject();
+        try put(handle, "session", try env.createBigintUint64(runtime.diag.session));
+        try put(handle, "index", try env.createUint32(token.index));
+        try put(handle, "generation", try env.createBigintUint64(token.generation));
+        try put(object, "handle", handle);
+        try put(object, "root", try bytes(env, &cell.metadata.root.?));
+        try put(object, "slot", try env.createBigintUint64(cell.metadata.slot.?));
+        try put(object, "peerId", try bytes(env, &cell.identity.bytes));
+        try put(object, "topic", try env.createStringUtf8(cell.topic[0..cell.topic_len]));
+        try element(array, i, object);
+    }
+    success = true;
+    return array;
+}
+
+pub fn classify(runtime: *Runtime, handle: Value, available: Value) !Value {
+    try cfg.completeObject(handle, &.{ "session", "index", "generation" });
+    const session = try cfg.bigint(try cfg.get(handle, "session"));
+    const index = try cfg.integer(try cfg.get(handle, "index"), 9007199254740991);
+    const generation = try cfg.bigint(try cfg.get(handle, "generation"));
+    const ready = try cfg.boolean(available);
+    if (session == 0 or generation == 0) return error.InvalidGossipHandle;
+    runtime.lock();
+    defer runtime.unlock();
+    var accepted = false;
+    if (runtime.active and !runtime.stop and !runtime.quiescent and session == runtime.diag.session and index < n.gossip_processor.limits_mod.capacity_max) {
+        runtime.gossip.?.expire(try g.monotonic());
+        accepted = runtime.gossip.?.classify(.{ .index = @intCast(index), .generation = generation }, ready);
+        if (accepted) {
+            runtime.readable_rearm = true;
+            runtime.signalLocked();
+        }
+    }
+    return runtime.env.getBoolean(accepted);
+}
+
+pub fn notifyBlock(runtime: *Runtime, value: Value) !Value {
+    const root = try cfg.fixed(32, value);
+    runtime.lock();
+    defer runtime.unlock();
+    if (!runtime.quiescent and !runtime.stop) {
+        runtime.gossip.?.notifyBlock(root);
+        runtime.readable_rearm = true;
+        runtime.signalLocked();
+    }
+    return runtime.env.getUndefined();
+}
+
+pub fn dropQueued(runtime: *Runtime) !Value {
+    runtime.lock();
+    defer runtime.unlock();
+    if (!runtime.quiescent and !runtime.stop) {
+        runtime.gossip.?.dropQueued();
+        runtime.signalLocked();
+    }
+    return runtime.env.getUndefined();
+}
+
+pub fn trackSearch(runtime: *Runtime, root_value: Value, peer_value: Value) !Value {
+    const root = try cfg.fixed(32, root_value);
+    const peer: ?n.PeerId = if (try peer_value.typeof() == .null) null else try n.PeerId.fromBytes(&(try cfg.fixed(n.wire.peer_id.length, peer_value)));
+    runtime.lock();
+    defer runtime.unlock();
+    const accepted = !runtime.quiescent and !runtime.stop and runtime.gossip.?.trackSearch(root, peer, try g.monotonic());
+    return runtime.env.getBoolean(accepted);
 }

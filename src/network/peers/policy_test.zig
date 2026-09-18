@@ -4,6 +4,81 @@ const t = @import("types.zig");
 const expect = std.testing.expect;
 const equal = std.testing.expectEqual;
 const options: t.Options = .{ .capacity = 8, .outbound_reserve = 1, .target_peers = 2, .max_peers = 4, .min_outbound = 1 };
+test "peer policy coverage cannot pin the connection ceiling with unmet demand" {
+    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 1 };
+    const inputs = [_]p.Input{
+        .{ .coverage = .{ .attnets = 1 } },
+        .{ .coverage = .{ .attnets = 2 } },
+        .{ .coverage = .{ .attnets = 4 } },
+    };
+    const result = p.select(&inputs, &.{ .attnets = 15 }, configured, 1);
+    try equal(@as(u16, 2), result.retained_count);
+    try equal(@as(u16, 1), result.dial_budget);
+    try equal(@as(u16, 1), result.deficits.outbound);
+    try equal(@as(u64, 8), result.deficits.missing.attnets & 8);
+}
+
+test "peer policy poor health precedes redundant advertised breadth" {
+    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 0 };
+    const inputs = [_]p.Input{
+        .{ .coverage = .{ .attnets = 1 } },
+        .{ .coverage = .{ .attnets = 2 } },
+        .{ .coverage = .{ .attnets = 3 }, .score = -10 },
+    };
+    const result = p.select(&inputs, &.{ .attnets = 3 }, configured, 1);
+    try expect(result.retained.isSet(0));
+    try expect(result.retained.isSet(1));
+    try expect(!result.retained.isSet(2));
+    try equal(@as(u16, 0), result.deficits.attestation);
+}
+
+test "peer policy equal target and ceiling still permits coverage replacement" {
+    const configured: t.Options = .{ .target_peers = 2, .max_peers = 2, .min_outbound = 0 };
+    const inputs = [_]p.Input{
+        .{ .coverage = .{ .attnets = 1 } },
+        .{ .coverage = .{ .attnets = 2 } },
+    };
+    const demand: t.Demand = .{ .attnets = 7 };
+    const result = p.select(&inputs, &demand, configured, 1);
+    try equal(@as(u16, 1), result.retained_count);
+    try equal(@as(u16, 1), result.dial_budget);
+    const survivor = if (result.retained.isSet(0)) inputs[0] else inputs[1];
+    const stable = p.select(&.{survivor}, &demand, configured, 1);
+    try equal(result.retained_count, stable.retained_count);
+    try equal(result.deficits, stable.deficits);
+}
+
+test "peer policy evaluates newcomers in headroom before pruning established peers" {
+    const configured: t.Options = .{ .target_peers = 2, .max_peers = 3, .min_outbound = 1 };
+    var inputs = [_]p.Input{
+        .{ .coverage = .{ .attnets = 1 }, .outbound = true },
+        .{ .coverage = .{ .attnets = 2 } },
+        .{ .ready = false, .relevant = false, .evaluating = true },
+    };
+    var result = p.select(&inputs, &.{ .attnets = 7 }, configured, 1);
+    try equal(@as(u16, 3), result.retained_count);
+    try equal(@as(u16, 0), result.dial_budget);
+    for (result.reasons) |reason| try expect(reason == null);
+    inputs[2].evaluating = false;
+    result = p.select(&inputs, &.{ .attnets = 7 }, configured, 1);
+    try equal(@as(u16, 2), result.retained_count);
+    try expect(result.retained.isSet(0));
+    try expect(result.retained.isSet(1));
+    try equal(t.DisconnectReason.count_pruning, result.reasons[2].?);
+    try equal(@as(u16, 1), result.dial_budget);
+}
+
+test "peer policy ordinary negative scores preserve scarce coverage" {
+    const configured: t.Options = .{ .target_peers = 1, .max_peers = 3, .min_outbound = 0 };
+    const inputs = [_]p.Input{
+        .{ .coverage = .{ .attnets = 1 }, .score = -0.5 },
+        .{},
+    };
+    const result = p.select(&inputs, &.{ .attnets = 1 }, configured, 1);
+    try expect(result.retained.isSet(0));
+    try equal(@as(u16, 0), result.deficits.attestation);
+}
+
 test "peer policy overlapping coverage updates after each removal" {
     var demand: t.Demand = .{ .attnets = 1, .syncnets = 1, .expires_at_slot = 10 };
     demand.group_targets[5] = 1;
@@ -72,8 +147,7 @@ test "peer policy retained set stays stable across health changes after actual p
     var configured = options;
     configured.target_peers = 1;
     const first = p.select(&original, &demand, configured, 7);
-    try equal(@as(u16, 3), first.retained_count);
-    try expect(first.retained_count > configured.target_peers);
+    try equal(configured.target_peers, first.retained_count);
     try equal(@as(u16, 0), first.deficits.outbound);
     try expect(first.reasons[3] != null);
     var retained: [4]p.Input = undefined;
@@ -148,7 +222,7 @@ test "peer policy group targets validate boundaries and saturate exactly" {
     try equal(@as(u16, 0), p.select(&inputs, &demand, configured, 1).deficits.groups);
 }
 
-test "peer policy per group protection yields to hard capacity and bans" {
+test "peer policy group targets yield to settled count while respecting bans" {
     var demand: t.Demand = .{};
     demand.group_targets[5] = 2;
     demand.group_targets[9] = 1;
@@ -158,16 +232,16 @@ test "peer policy per group protection yields to hard capacity and bans" {
     inputs[2].coverage.groups.set(5);
     inputs[3].coverage.groups.set(9);
     var configured = options;
-    configured.target_peers = 1;
+    configured.target_peers = 2;
+    configured.max_peers = 3;
     configured.min_outbound = 0;
     var result = p.select(&inputs, &demand, configured, 1);
-    try equal(@as(u16, 3), result.retained_count);
-    try equal(@as(u16, 0), result.deficits.groups);
-    try expect(result.retained.isSet(3));
-    configured.max_peers = 2;
-    result = p.select(&inputs, &demand, configured, 1);
     try equal(@as(u16, 2), result.retained_count);
     try equal(@as(u16, 1), result.deficits.groups);
+    configured.max_peers = 2;
+    result = p.select(&inputs, &demand, configured, 1);
+    try equal(@as(u16, 1), result.retained_count);
+    try equal(@as(u16, 2), result.deficits.groups);
     inputs[3].reject = .banned;
     result = p.select(&inputs, &demand, configured, 1);
     try equal(t.DisconnectReason.banned, result.reasons[3].?);

@@ -148,6 +148,18 @@ fn writeNativeCounters(self: *const Snapshot, w: *prom.Encoder) prom.Error!void 
         .help = "Authenticated discovery candidates rejected by reason",
         .labels = &.{"reason"},
     }, discovery_metrics.Rejection, &self.totals.discovery_rejections);
+    const admission = @import("discv5").admission;
+    const discovery_admission = try w.family(.{
+        .name = "lodestar_native_discovery_admission_total",
+        .kind = .counter,
+        .help = "Discovery challenge creation and handshake verification admission outcomes",
+        .labels = &.{ "stage", "outcome" },
+    });
+    inline for (std.meta.fields(admission.Stage)) |stage| {
+        inline for (std.meta.fields(admission.Outcome)) |outcome| {
+            try discovery_admission.sample(.{ stage.name, outcome.name }, self.totals.discovery_admission[stage.value][outcome.value]);
+        }
+    }
     try w.enums(.{
         .name = "lodestar_native_gossip_queue_drops_total",
         .kind = .counter,
@@ -368,7 +380,7 @@ fn writeRequests(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
         .{ "lodestar_native_reqresp_request_write_stops_total", "request_write_stops", "Peer stops of the request write direction that retain response processing" },
         .{ "lodestar_native_reqresp_response_finish_stops_total", "response_finish_stops", "Peer stops of response FIN after complete response chunks were written" },
         .{ "beacon_reqresp_incoming_requests_error_total", "incoming_errors", "Incoming requests with a terminal native failure" },
-        .{ "beacon_reqresp_rate_limiter_errors_total", "rate_limited", "Requests refused by native admission quotas or identity capacity" },
+        .{ "beacon_reqresp_rate_limiter_errors_total", "rate_limited", "Requests refused by protocol concurrency limits, decoded work quotas or identity capacity" },
     }) |metric| {
         const requests = try w.family(.{
             .name = metric[0],
@@ -385,6 +397,28 @@ fn writeRequests(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
             try requests.sample(.{method}, count);
         }
     }
+    const refusals = try w.family(.{
+        .name = "lodestar_native_reqresp_admission_refusals_total",
+        .kind = .counter,
+        .help = "Incoming request admission refusals counted once at the decision",
+        .labels = &.{ "method", "reason" },
+    });
+    for (rr.protocol.methods, 0..) |method, index| {
+        if (!firstMethod(index)) continue;
+        inline for (std.meta.fields(rr.reqresp.metrics.AdmissionRefusal)) |reason| {
+            var count: u64 = 0;
+            for (rr.protocol.methods, &self.totals.protocols) |candidate, *values| {
+                if (std.mem.eql(u8, candidate, method)) count +|= values.admission_refusals[reason.value];
+            }
+            try refusals.sample(.{ method, reason.name }, count);
+        }
+    }
+    try w.enums(.{
+        .name = "lodestar_native_reqresp_inbound_occupied",
+        .kind = .gauge,
+        .help = "Occupied incoming request slots by current phase, including terminal owners awaiting recycling",
+        .labels = &.{"phase"},
+    }, rr.reqresp.metrics.InboundPhase, &self.live.request_inbound_phases);
 }
 
 fn writeRequestTimes(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Channel = @import("Channel.zig");
+const admission = @import("admission.zig");
 const crypto = @import("identity/crypto.zig");
 const enr = @import("identity/enr.zig");
 const test_support = @import("test_support.zig");
@@ -104,10 +105,10 @@ test "handshake without a record needs an identity captured at challenge time" {
     );
     try std.testing.expectEqual(types.RejectReason.invalid_handshake, inbound.rejected);
     try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.sessionCount());
-    try std.testing.expectEqual(@as(usize, 1), pair.node_b.sessions.challengeCount());
+    try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.challengeCount());
 }
 
-test "corrupted handshake fails decryption and keeps the challenge" {
+test "corrupted handshake consumes its challenge and a fresh attempt can recover" {
     var pair: Pair = undefined;
     try pair.init();
     defer pair.deinit();
@@ -117,7 +118,7 @@ test "corrupted handshake fails decryption and keeps the challenge" {
     const corrupted = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 2, &pair.scratch);
     try std.testing.expectEqual(types.RejectReason.invalid_handshake, corrupted.rejected);
     try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.sessionCount());
-    try std.testing.expectEqual(@as(usize, 1), pair.node_b.sessions.challengeCount());
+    try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.challengeCount());
 
     pair.a_to_b[length - 1] ^= 1;
     const inbound = pair.node_b.receive(
@@ -126,8 +127,110 @@ test "corrupted handshake fails decryption and keeps the challenge" {
         3,
         &pair.scratch,
     );
-    try std.testing.expect(inbound == .authenticated);
+    try std.testing.expectEqual(types.RejectReason.unexpected_handshake, inbound.rejected);
+    const fresh = try pair.challengeAndHandshake("ping", null, 4);
+    const recovered = pair.node_b.receive(pair.a_to_b[0..fresh], pair.address_a, 5, &pair.scratch);
+    try std.testing.expect(recovered == .authenticated);
     try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.challengeCount());
+}
+
+test "invalid handshake proof receives only one verification attempt" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+
+    const length = try pair.challengeAndHandshake("ping", pair.identityA(), 1);
+    const signature_offset = constants.masking_iv_size + constants.static_header_size + constants.handshake_authdata_head_size;
+    pair.a_to_b[signature_offset] ^= 1;
+    const invalid = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 2, &pair.scratch);
+    try std.testing.expectEqual(types.RejectReason.invalid_handshake, invalid.rejected);
+    pair.a_to_b[signature_offset] ^= 1;
+    for (0..8) |_| {
+        const replay = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 3, &pair.scratch);
+        try std.testing.expectEqual(types.RejectReason.unexpected_handshake, replay.rejected);
+    }
+    try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.sessionCount());
+    try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.challengeCount());
+    try std.testing.expectEqual(@as(u64, 1), pair.node_b.admission.counts[@intFromEnum(admission.Stage.handshake)][@intFromEnum(admission.Outcome.allowed)]);
+}
+
+test "challenge admission shares source credit across ports and node identities" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+
+    var peer = pair.peerA();
+    const nonce = [_]u8{0x12} ** constants.nonce_size;
+    const entropy = challengeEntropy(0x20);
+    for (0..admission.source_quota.burst) |i| {
+        peer.node_id[0] = @intCast(i);
+        peer.address.ip4.port = @intCast(9_000 + i);
+        try std.testing.expect((try pair.node_b.challenge(&pair.b_to_a, peer, &nonce, null, &entropy, 0)) != null);
+    }
+    peer.node_id[0] += 1;
+    peer.address.ip4.port += 1;
+    try std.testing.expectError(Channel.Error.AdmissionLimited, pair.node_b.challenge(&pair.b_to_a, peer, &nonce, null, &entropy, 249));
+    try std.testing.expect((try pair.node_b.challenge(&pair.b_to_a, peer, &nonce, null, &entropy, 250)) != null);
+    try std.testing.expectEqual(@as(usize, channelConfig().challenge_capacity), pair.node_b.sessions.challengeCount());
+}
+
+test "throttled handshake retains its original deadline and can recover after refill" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+
+    for (0..admission.source_quota.burst) |_|
+        try std.testing.expect(pair.node_b.admission.allow(.handshake, &pair.address_a, 0));
+    const length = try pair.challengeAndHandshake("ping", null, 200);
+    for ([_]u64{ 200, 249 }) |now_ms| {
+        const limited = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, now_ms, &pair.scratch);
+        try std.testing.expectEqual(types.RejectReason.admission_limited, limited.rejected);
+        try std.testing.expectEqual(@as(?u64, 300), pair.node_b.nextDeadlineMs());
+        try std.testing.expectEqual(@as(usize, 1), pair.node_b.sessions.challengeCount());
+        try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.sessionCount());
+    }
+    const recovered = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 250, &pair.scratch);
+    try std.testing.expect(recovered == .authenticated);
+    try std.testing.expectEqualSlices(u8, "ping", recovered.authenticated.plaintext);
+}
+
+test "throttled challenge expires without a timer tick and cannot regain verification credit" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+
+    for (0..admission.source_quota.burst) |_|
+        try std.testing.expect(pair.node_b.admission.allow(.handshake, &pair.address_a, 0));
+    const length = try pair.challengeAndHandshake("ping", null, 1);
+    const limited = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 100, &pair.scratch);
+    try std.testing.expectEqual(types.RejectReason.admission_limited, limited.rejected);
+    try std.testing.expectEqual(@as(?u64, 101), pair.node_b.nextDeadlineMs());
+    for ([_]u64{ 101, 250 }) |now_ms| {
+        const expired = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, now_ms, &pair.scratch);
+        try std.testing.expectEqual(types.RejectReason.unexpected_handshake, expired.rejected);
+    }
+    try std.testing.expectEqual(@as(usize, 0), pair.node_b.sessions.challengeCount());
+    try std.testing.expectEqual(@as(u64, admission.source_quota.burst), pair.node_b.admission.counts[@intFromEnum(admission.Stage.handshake)][@intFromEnum(admission.Outcome.allowed)]);
+}
+
+test "established packets work while both discovery admission stages are exhausted" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+
+    const length = try pair.challengeAndHandshake("ping", null, 1);
+    const inbound = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 2, &pair.scratch);
+    try std.testing.expect(inbound == .authenticated);
+    for (0..admission.source_quota.burst - 1) |_| {
+        try std.testing.expect(pair.node_b.admission.allow(.challenge, &pair.address_a, 2));
+        try std.testing.expect(pair.node_b.admission.allow(.handshake, &pair.address_a, 2));
+    }
+    try std.testing.expect(!pair.node_b.admission.allow(.challenge, &pair.address_a, 3));
+    try std.testing.expect(!pair.node_b.admission.allow(.handshake, &pair.address_a, 3));
+    const sealed = try pair.node_a.sealEstablished(&pair.a_to_b, pair.peerB(), "still connected", &sealEntropy(0x40), 4);
+    const received = pair.node_b.receive(pair.a_to_b[0..sealed.packet_length], pair.address_a, 4, &pair.scratch);
+    try std.testing.expect(received == .authenticated);
+    try std.testing.expectEqualSlices(u8, "still connected", received.authenticated.plaintext);
 }
 
 test "a pending challenge is not reissued for the same peer" {
@@ -236,6 +339,18 @@ test "channel rejects a foreign local record and zero timeouts" {
         Channel.InitError.InvalidTimeout,
         invalid.init(std.testing.allocator, key_b, record_b, config),
     );
+}
+
+test "channel initialization releases every partially allocated resource" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocateChannel, .{});
+}
+
+fn allocateChannel(allocator: std.mem.Allocator) !void {
+    const key = try keyPair(0x11);
+    const record = try enr.Record.create(&key, 1, loopback(1, 9_001));
+    var channel: Channel = undefined;
+    try channel.init(allocator, key, record, channelConfig());
+    defer channel.deinit(allocator);
 }
 
 const Pair = struct {

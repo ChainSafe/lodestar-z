@@ -4,7 +4,7 @@ import {createNativeNetworkApplicationRuntime} from "../src/network.js";
 import {applicationConfig} from "./utils/network.js";
 import {networkBindings as bindings} from "./utils/network-bindings.js";
 
-test.each(["resources", "requestPolicy", "identify", "capabilities", "topicPolicy"])("rejects missing %s", (field) => {
+test.each(["resources", "identify", "serveLightClients"])("rejects missing %s", (field) => {
   const config = applicationConfig();
   Reflect.deleteProperty(config, field);
   expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow();
@@ -47,28 +47,13 @@ test.each([
     Reflect.set(c.resources, "extra", 1);
   },
   (c: ReturnType<typeof applicationConfig>) => {
-    c.capabilities.receive = [...c.capabilities.receive, c.capabilities.receive[0]];
-  },
-  (c: ReturnType<typeof applicationConfig>) => {
-    Reflect.set(c.capabilities, "request", ["/unsupported"]);
-  },
-  (c: ReturnType<typeof applicationConfig>) => {
-    c.capabilities.request = Array(2);
+    Reflect.set(c, "serveLightClients", 1);
   },
   (c: ReturnType<typeof applicationConfig>) => {
     c.identify.agentVersion = "x".repeat(257);
   },
   (c: ReturnType<typeof applicationConfig>) => {
     c.identify.protocolVersion = "é".repeat(33);
-  },
-  (c: ReturnType<typeof applicationConfig>) => {
-    c.requestPolicy.blobSchedule = [
-      {maxBlobs: 6, startSlot: 0n},
-      {maxBlobs: 1, startSlot: 0n},
-    ];
-  },
-  (c: ReturnType<typeof applicationConfig>) => {
-    c.requestPolicy.blobSchedule = Array(65);
   },
   (c: ReturnType<typeof applicationConfig>) => {
     c.resources.maxPeers = 257;
@@ -138,6 +123,7 @@ test("retained peer capacity matches the native gossip ceiling", async () => {
   config.resources.peerCapacity = 513;
   expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("InvalidNetworkInteger");
   config.resources.peerCapacity = 512;
+  config.resources.nativeBudgetBytes = 128 * 1024 * 1024;
   const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   try {
     await runtime.ready;

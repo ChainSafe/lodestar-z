@@ -40,8 +40,27 @@ pub fn main(init: std.process.Init) !void {
     const handle = try engine.dial(&remote, context.local_peer_id, now);
     const sent = engine.sendOne(handle.index, now, &buffer) orelse return error.MissingInitial;
     try write(io, "network_quic_receive", "initial", sent.bytes);
+
+    var server_context = try network.tls.context.Context.init(&key, now.unix_s, @splat(1));
+    var server = network.Engine.init(std.heap.page_allocator, .{
+        .tls = server_context,
+        .limits = .{ .connections_max = 4, .handshaking_max = 2, .handshaking_per_source_max = 1, .dialing_max = 1 },
+        .local = .{ remote, null },
+        .seed = &@as([32]u8, @splat(1)),
+    }) catch |err| {
+        server_context.deinit();
+        return err;
+    };
+    defer server.deinit();
+    var response: [network.constants.datagram_size_max]u8 = undefined;
+    const retried = server.receive(sent.bytes, &local, now, &response);
+    if (retried != .retry) return error.MissingRetry;
+    _ = engine.receive(retried.retry, &remote, now, &buffer);
+    const validated = engine.sendOne(handle.index, now, &buffer) orelse return error.MissingInitial;
+    try write(io, "network_quic_receive", "validated-initial", validated.bytes);
+
     @memcpy(buffer[1..5], &[_]u8{ 0xfa, 0xce, 0xb0, 0x0c });
-    try write(io, "network_quic_receive", "unknown-version", sent.bytes);
+    try write(io, "network_quic_receive", "unknown-version", validated.bytes);
     try write(io, "network_quic_receive", "short-header", &([_]u8{0x40} ++ [_]u8{0} ** 40));
 
     const message = discv5.wire.message;

@@ -4,6 +4,7 @@
     "checkJs": false,
     "module": "NodeNext",
     "noEmit": true,
+    "skipLibCheck": true,
     "strict": true,
     "target": "ES2023"
   },

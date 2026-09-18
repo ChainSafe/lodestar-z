@@ -41,25 +41,8 @@ pub const Reader = struct {
     }
 
     pub fn feed(self: *Reader, input: []const u8, body: []u8) Error!Result {
-        var pos: usize = 0;
-        if (self.declared == null) {
-            while (pos < input.len) {
-                const byte = input[pos];
-                pos += 1;
-                if (self.prefix_len == constants_varint_max) return error.VarintTooLong;
-                self.prefix[self.prefix_len] = byte;
-                self.prefix_len += 1;
-                if (byte & 0x80 == 0) {
-                    var reader = protobuf.Reader.init(self.prefix[0..self.prefix_len]);
-                    const len = reader.varint() catch return error.VarintTooLong;
-                    if (len > constants.GOSSIP_MAX_SIZE) return error.FrameTooLarge;
-                    self.declared = @intCast(len);
-                    self.filled = 0;
-                    break;
-                }
-            }
-            if (self.declared == null) return .{ .consumed = pos, .frame = null };
-        }
+        const pos = if (self.declared == null) try self.readPrefix(input) else 0;
+        if (self.declared == null) return .{ .consumed = pos, .frame = null };
         const declared = self.declared.?;
         const want = declared - self.filled;
         const take = @min(want, input.len - pos);
@@ -68,12 +51,32 @@ pub const Reader = struct {
         if (declared > body.len) return .{ .consumed = pos, .frame = null };
         @memcpy(body[self.filled..][0..take], input[pos..][0..take]);
         self.filled += take;
-        pos += take;
         if (self.filled == declared) {
             self.reset();
-            return .{ .consumed = pos, .frame = body[0..declared] };
+            return .{ .consumed = pos + take, .frame = body[0..declared] };
         }
-        return .{ .consumed = pos, .frame = null };
+        return .{ .consumed = pos + take, .frame = null };
+    }
+
+    pub fn readPrefix(self: *Reader, input: []const u8) Error!usize {
+        assert(self.declared == null);
+        var pos: usize = 0;
+        while (pos < input.len) {
+            const byte = input[pos];
+            pos += 1;
+            if (self.prefix_len == constants_varint_max) return error.VarintTooLong;
+            self.prefix[self.prefix_len] = byte;
+            self.prefix_len += 1;
+            if (byte & 0x80 == 0) {
+                var reader = protobuf.Reader.init(self.prefix[0..self.prefix_len]);
+                const len = reader.varint() catch return error.VarintTooLong;
+                if (len > constants.GOSSIP_MAX_SIZE) return error.FrameTooLarge;
+                self.declared = @intCast(len);
+                self.filled = 0;
+                break;
+            }
+        }
+        return pos;
     }
 
     fn reset(self: *Reader) void {

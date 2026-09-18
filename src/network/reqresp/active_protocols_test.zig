@@ -430,6 +430,16 @@ test "reqresp request admission empty success refusal malformed attempts and con
     try std.testing.expectEqual(@as(u64, 2), setup.shared.server.reqresp.counters.malformed);
 }
 
+test "reqresp permits an empty contextual response below its payload minimum" {
+    var policy = policy_fixture();
+    policy.max_payload_size = 256;
+    var setup: harness.Pair = .{};
+    const options: harness.Overrides = .{ .admission = .{ .policy = policy, .limits = .{ .identities = 2, .peer = admission_quotas(2, 1000), .global = admission_quotas(2, 1000) } } };
+    try setup.init(options, options);
+    defer setup.deinit();
+    try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, true, 0);
+}
+
 test "reqresp request admission outbound validation ceiling and owner fork snapshot" {
     var setup: harness.Pair = .{};
     const options: harness.Overrides = .{
@@ -467,7 +477,7 @@ test "reqresp request admission outbound validation ceiling and owner fork snaps
         }
     }
     try std.testing.expect(accepted and completed);
-    try std.testing.expectError(error.InvalidRequest, request(&setup, .blocks_by_root_v2, &roots, sink, .{}));
+    try std.testing.expectError(error.RequestTooLarge, request(&setup, .blocks_by_root_v2, &roots, sink, .{}));
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
 }
 

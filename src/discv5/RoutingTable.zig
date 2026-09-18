@@ -1,6 +1,6 @@
-//! A RoutingTable keeps Kademlia buckets ordered from least to most recently verified. A full
-//! bucket holds one pending candidate until a revalidation PING decides whether the incumbent
-//! stays.
+//! Known contacts seed lookups without claiming reachability. Responsive contacts follow them
+//! in least-to-most recently verified order. A full bucket holds one pending candidate until
+//! a revalidation PING decides whether the incumbent stays.
 
 const std = @import("std");
 const enr = @import("identity/enr.zig");
@@ -31,7 +31,7 @@ pub const Entry = struct {
     direction: Direction,
     peer: types.Endpoint,
     record: enr.Record,
-    last_verified_ms: u64,
+    last_verified_ms: ?u64,
 };
 
 pub const PutResult = union(enum) {
@@ -132,7 +132,8 @@ pub fn maintenanceTarget(
         const index = offset / bucket_size;
         if (offset % bucket_size >= self.counts[index]) continue;
         const entry = self.entries[offset];
-        if (now_ms -| entry.last_verified_ms < stale_after_ms) continue;
+        const verified_ms = entry.last_verified_ms orelse continue;
+        if (now_ms -| verified_ms < stale_after_ms) continue;
         if (self.pending[index]) |candidate| {
             if (std.mem.eql(u8, &candidate.replace_id, &entry.peer.node_id)) continue;
         }
@@ -141,8 +142,8 @@ pub fn maintenanceTarget(
     return null;
 }
 
-/// A failed probe cannot remove a peer authenticated after the probe began.
-pub fn forgetPeerIfStale(
+/// Retains an unresponsive contact for future lookups without displacing newer authentication.
+pub fn markUnresponsive(
     self: *RoutingTable,
     node_id: *const types.NodeId,
     verified_at_ms: u64,
@@ -153,7 +154,32 @@ pub fn forgetPeerIfStale(
     if (self.pending[index]) |candidate| {
         if (std.mem.eql(u8, &candidate.replace_id, node_id)) return false;
     }
-    self.removeAt(index, position);
+    const entries = self.bucketEntriesMut(index);
+    var entry = entries[position];
+    entry.last_verified_ms = null;
+    std.mem.copyBackwards(Entry, entries[1 .. position + 1], entries[0..position]);
+    entries[0] = entry;
+    return true;
+}
+
+/// Adds an operator-supplied contact for lookups. Existing entries retain their state and record.
+pub fn addKnown(self: *RoutingTable, peer: *const types.Endpoint, record: *const enr.Record) Error!bool {
+    try validateEntry(&self.local_id, peer, record);
+    const index = bucketIndex(types.logDistance(&self.local_id, &peer.node_id));
+    if (self.findInBucket(index, &peer.node_id) != null) return false;
+    if (self.pending[index]) |candidate| {
+        if (std.mem.eql(u8, &candidate.entry.peer.node_id, &peer.node_id)) return false;
+    }
+    const length = self.counts[index];
+    if (length == bucket_size) return false;
+    try self.requireAddressCapacity(index, peer.address, &peer.node_id);
+    const offset = bucketOffset(index);
+    const entries = self.entries[offset .. offset + length + 1];
+    std.mem.copyBackwards(Entry, entries[1..], entries[0..length]);
+    entries[0] = .{ .direction = .outgoing, .peer = peer.*, .record = record.*, .last_verified_ms = null };
+    self.counts[index] += 1;
+    self.total += 1;
+    std.debug.assert(self.total <= table_capacity);
     return true;
 }
 
@@ -246,7 +272,7 @@ pub fn resolveRevalidation(
     return .{ .replaced = candidate.entry.peer.node_id };
 }
 
-/// Returns records at the requested distances, most recently verified first, with the local
+/// Returns responsive records at the requested distances, most recently verified first, with the local
 /// record standing in for distance 0. The folded bucket is filtered by exact distance, and every
 /// record is filtered by relay scope against `requester`.
 pub fn findNodes(
@@ -281,6 +307,7 @@ pub fn findNodes(
         while (position > 0 and result_length < limit) {
             position -= 1;
             const entry = &entries[position];
+            if (entry.last_verified_ms == null) continue;
             if (types.logDistance(&self.local_id, &entry.peer.node_id) != distance)
                 continue;
             if (requester) |source| {

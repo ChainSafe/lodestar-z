@@ -492,8 +492,7 @@ test "gossip independent RPC enumerates every receive split through admission" {
         .seen_capacity = 2,
         .seen_ttl_ms = 1,
         .validation_tombstone_ms = 1,
-        .body_buffer_bytes = 512,
-        .large_pool_count = 1,
+        .body_buffer_bytes = 1,
     });
     defer g.deinit();
     const peer = @import("test_support.zig").addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
@@ -517,13 +516,13 @@ test "gossip independent RPC enumerates every receive split through admission" {
             try std.testing.expect(g.sessions.receiveHandoff(peer.index, fragment, false));
             for (0..wire.len + 1) |_| {
                 if (io.unread_start == io.unread_end) break;
-                const result = try io.feedUnread(io.body, io.unread_end - io.unread_start, now.mono_ms);
+                const result = try io.feedUnread(&g.sessions.receive_pool, io.unread_end - io.unread_start, now.mono_ms);
                 try std.testing.expect(result.consumed > 0);
                 consumed += result.consumed;
                 if (result.complete) {
                     try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, now, &events, &count, &items));
                     try std.testing.expect(try @import("test_support.zig").processRpc(&g, peer.index, now, &events, &count, &items));
-                    try std.testing.expect(!g.sessions.finishFrame(io));
+                    try std.testing.expect(g.sessions.finishFrame(io));
                 }
             }
         }
@@ -797,7 +796,7 @@ test "gossipsub IHAVE work preflight defers without consuming the advertisement"
         try std.testing.expect(!turn.large_used);
     }
     try std.testing.expectEqual(@as(u64, 1), g.rpc_metrics.items[@intFromEnum(std.meta.Tag(protobuf.Item).ihave)]);
-    const cost = g.ihaveWork(io.rpc.?.item.?.ihave.body.len);
+    const cost = g.ihaveWork(io.rpc.?.item.?.bytes.len);
     try std.testing.expect(cost > writer.len);
     turn.budget.work = cost;
     peer.work = cost - 1;
@@ -883,7 +882,8 @@ test "gossip pending validation quota preserves room for another peer and refund
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "first", 1, &events));
     const held = events[0].message.handle;
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "second", 2, &events));
-    try std.testing.expectEqual(@as(?usize, null), try testMessage(&g, first.index, "third", 3, &events));
+    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, first.index, "third", 3, &events));
+    try std.testing.expectEqual(@as(u64, 1), g.counters.message_capacity_refusals);
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, second.index, "other peer", 4, &events));
     try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(held, .ignore, .{ .mono_ms = 5, .unix_s = 0 }));
     try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "third", 6, &events));
@@ -905,4 +905,86 @@ test "gossip unsent IWANT expiry refunds recovery slots without blaming the peer
     try std.testing.expectEqual(@as(u32, 0), g.peers.rows[logical.index].pins);
     try std.testing.expectEqual(@as(u64, 0), g.counters.broken_promises);
     try std.testing.expectEqual(@as(?u64, null), g.recovery.nextExpiry());
+}
+
+test "gossip paged RPC cursors survive shared workspace reuse without runtime allocation" {
+    var ledger: @import("../reservations.zig").Reservations = .{ .backing = std.testing.allocator };
+    var g = try Gossipsub.init(ledger.allocator(), .{
+        .random_seed = 1,
+        .connected_capacity = 4,
+        .retained_capacity = 8,
+        .retained_outbound_reserve = 1,
+        .body_buffer_bytes = 2,
+    });
+    defer g.deinit();
+    const calls = ledger.allocation_calls;
+    ledger.byte_limit = ledger.bytes;
+    const name = "/eth2/01020304/beacon_block/ssz_snappy";
+    try std.testing.expect(g.subscribe(name));
+    for (0..4) |i| {
+        const peer = support.addPeer(&g, .{ .index = @intCast(i), .generation = 1 }, .v1_2).?;
+        try std.testing.expectEqual(i, peer.index);
+    }
+    var prefix: [8]u8 = undefined;
+    var pw = protobuf.Writer.init(&prefix);
+    pw.varint(@import("constants.zig").GOSSIP_MAX_SIZE);
+    for (0..2) |i| try feedPagedTestFrame(&g, @intCast(i), pw.written());
+    try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
+    for (0..2) |i| try feedPagedTestFrame(&g, @intCast(i), "slow");
+    try std.testing.expectEqual(g.sessions.receive_pool.next.len - 2, g.sessions.receive_pool.free_pages);
+
+    var payloads: [4][6000]u8 = undefined;
+    var rng = std.Random.DefaultPrng.init(947);
+    for (&payloads) |*payload| rng.random().bytes(payload);
+    var compressed: [8192]u8 = undefined;
+    var body: [16384]u8 = undefined;
+    var wire: [16388]u8 = undefined;
+    for (0..2) |i| {
+        var writer = protobuf.Writer.init(&body);
+        for (0..2) |j| {
+            const len = try @import("snappy").raw.compress(&payloads[i * 2 + j], &compressed);
+            protobuf.writeMessage(&writer, compressed[0..len], name);
+        }
+        try feedPagedTestFrame(&g, @intCast(i + 2), @import("frame.zig").writeFrame(&wire, writer.written()));
+        try std.testing.expect(g.sessions.rows[i + 2].io.rpc != null);
+    }
+    var events: [1]Event = undefined;
+    const now: Now = .{ .mono_ms = 2, .unix_s = 1 };
+    for (0..2) |round| {
+        for (0..2) |i| {
+            var count: usize = 0;
+            var items: usize = 128;
+            const done = try support.processRpc(&g, @intCast(i + 2), now, &events, &count, &items);
+            try std.testing.expectEqual(round == 1, done);
+            try std.testing.expectEqual(@as(usize, 1), count);
+            try std.testing.expectEqualSlices(u8, &payloads[i * 2 + round], events[0].message.bytes);
+            @memset(g.sessions.decode_scratch, 0xa5);
+            try std.testing.expectEqualSlices(u8, &payloads[i * 2 + round], events[0].message.bytes);
+            _ = g.report(events[0].message.handle, .ignore, now);
+            if (done) _ = g.sessions.finishFrame(&g.sessions.rows[i + 2].io);
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 4), g.rpc_metrics.items[@intFromEnum(std.meta.Tag(protobuf.Item).message)]);
+    for (0..2) |i| try std.testing.expect(g.sessions.resetRx(@intCast(i)));
+    try std.testing.expectEqual(g.sessions.receive_pool.next.len, g.sessions.receive_pool.free_pages);
+    try std.testing.expectEqual(calls, ledger.allocation_calls);
+}
+
+fn feedPagedTestFrame(g: *Gossipsub, index: u16, wire: []const u8) !void {
+    const io = &g.sessions.rows[index].io;
+    var offset: usize = 0;
+    for (0..wire.len + 1) |_| {
+        if (offset == wire.len) return;
+        const take = @min(io.unread.len, wire.len - offset);
+        @memcpy(io.unread[0..take], wire[offset..][0..take]);
+        io.unread_start = 0;
+        io.unread_end = take;
+        for (0..take + 1) |_| {
+            if (io.unread_start == io.unread_end) break;
+            const result = try io.feedUnread(&g.sessions.receive_pool, io.unread_end - io.unread_start, 1);
+            try std.testing.expect(result.consumed > 0);
+        }
+        offset += take;
+    }
+    unreachable;
 }

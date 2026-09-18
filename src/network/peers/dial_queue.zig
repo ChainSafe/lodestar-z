@@ -36,7 +36,7 @@ pub const Hints = struct {
 const Row = struct {
     automatic: bool = false,
     selected: bool = true,
-    priority: u16 = 0,
+    priority: u1 = 0,
     hints: ?Hints = null,
     hints_at_ms: u64 = 0,
     history_until_ms: u64 = 0,
@@ -53,6 +53,7 @@ const Row = struct {
     attempt: bool = false,
     conn: ?t.Handle = null,
     eligible_at_ms: u64 = 0,
+    redial_until_ms: u64 = 0,
     lease_expires_at_ms: u64 = 0,
     attempt_started_ms: u64 = 0,
     failures: u8 = 0,
@@ -195,11 +196,11 @@ pub const DialQueue = struct {
         var incoming: Row = .{ .occupied = true, .automatic = true, .peer = candidate.peer, .eligible_at_ms = now_ms, .history_until_ms = now_ms +| history_retention_ms, .hints = hints, .hints_at_ms = now_ms };
         copyAddresses(&incoming, candidate);
         resetCustody(&incoming, context);
-        const incoming_utility = policy.utility(&coverage(&incoming, context, now_ms), wanted);
+        const incoming_utility = matchesDemand(&incoming, context, wanted, now_ms);
         self.selection_dirty = true;
         var free: ?*Row = null;
         var victim: ?*Row = null;
-        var victim_utility: u16 = std.math.maxInt(u16);
+        var victim_utility: u1 = 1;
         for (self.rows) |*row| {
             if (row.occupied and row.peer.eql(&candidate.peer)) {
                 if (row.hints) |previous| {
@@ -223,7 +224,7 @@ pub const DialQueue = struct {
                 continue;
             }
             if (!row.automatic or row.direct or row.connected or row.attempt or row.conn != null or now_ms < row.eligible_at_ms) continue;
-            const usefulness: u16 = if (row.failures != 0) 0 else policy.utility(&coverage(row, context, now_ms), wanted);
+            const usefulness: u1 = if (row.failures != 0) 0 else matchesDemand(row, context, wanted, now_ms);
             if (incoming_utility < usefulness or (row.failures == 0 and incoming_utility == usefulness and now_ms < row.history_until_ms)) continue;
             if (victim == null or usefulness < victim_utility or (usefulness == victim_utility and row.history_until_ms < victim.?.history_until_ms)) {
                 victim = row;
@@ -284,6 +285,10 @@ pub const DialQueue = struct {
         };
         return result;
     }
+
+    fn matchesDemand(row: *const Row, context: *const t.ForkContext, wanted: *const t.Coverage, now_ms: u64) u1 {
+        return @intFromBool(policy.utility(&coverage(row, context, now_ms), wanted) > 0);
+    }
     pub fn advanceCustody(self: *DialQueue, context: *const t.ForkContext, now_ms: u64, budget: *u16) bool {
         var pending = false;
         for (0..self.rows.len) |_| {
@@ -311,7 +316,7 @@ pub const DialQueue = struct {
             if (!row.occupied) continue;
             const deadline = row.hints_at_ms +| hint_freshness_ms;
             if (row.hints != null and now_ms < deadline) self.selection_deadline = @min(self.selection_deadline orelse deadline, deadline);
-            row.priority = policy.utility(&coverage(row, context, now_ms), wanted);
+            row.priority = matchesDemand(row, context, wanted, now_ms);
             const compatible = if (row.hints) |hints| hints.validFor(context) else false;
             row.selected = compatible and (general or row.priority > 0);
         }
@@ -410,6 +415,12 @@ pub const DialQueue = struct {
     fn disconnectedRow(self: *DialQueue, row: *Row, connected_at_ms: u64, reason: t.DisconnectReason, now_ms: u64) void {
         std.debug.assert(row.connected);
         setConnection(row, false, now_ms);
+        if (reason == .capacity or reason == .count_pruning) {
+            if (row.redial_until_ms <= now_ms)
+                row.redial_until_ms = now_ms +| @import("goodbye.zig").cooldownMs(129);
+            row.history_until_ms = @max(row.history_until_ms, now_ms +| history_retention_ms);
+            return;
+        }
         const lifetime = now_ms -| connected_at_ms;
         const unhealthy = reason == .health_timeout or reason == .health_error;
         if (lifetime >= stable_connection_ms and !unhealthy) row.failures = 0;
@@ -460,6 +471,7 @@ pub const DialQueue = struct {
         for (self.rows, 0..) |*row, index| {
             if (!row.occupied or !row.peer.eql(&snapshot.identity)) continue;
             self.counters.sync_lookup_rows +|= index + 1;
+            row.redial_until_ms = @max(row.redial_until_ms, snapshot.redial_until_ms);
             if (snapshot.connection != null) {
                 if (!row.connected) setConnection(row, true, now_ms);
             } else if (row.connected) {
@@ -558,7 +570,7 @@ pub const DialQueue = struct {
             for (0..self.rows.len) |offset| {
                 const index = (self.cursor + offset) % self.rows.len;
                 const row = &self.rows[index];
-                if (!row.occupied or !hasDialIntent(row, now_ms) or row.connected or row.attempt or now_ms < row.eligible_at_ms or row.generation == std.math.maxInt(u64)) continue;
+                if (!row.occupied or !hasDialIntent(row, now_ms) or row.connected or row.attempt or now_ms < eligibleAt(row, now_ms) or row.generation == std.math.maxInt(u64)) continue;
                 if (best == null or dialTier(row, now_ms) > dialTier(&self.rows[best.?], now_ms) or
                     (dialTier(row, now_ms) == dialTier(&self.rows[best.?], now_ms) and row.priority > self.rows[best.?].priority)) best = index;
             }
@@ -582,6 +594,13 @@ pub const DialQueue = struct {
     fn dialTier(row: *const Row, now_ms: u64) u8 {
         return if (row.direct) 2 else if (now_ms < row.manual_until_ms) 1 else 0;
     }
+
+    fn eligibleAt(row: *const Row, now_ms: u64) u64 {
+        return if (dialTier(row, now_ms) == 0)
+            @max(row.eligible_at_ms, row.redial_until_ms)
+        else
+            row.eligible_at_ms;
+    }
     pub fn nextWakeup(self: *const DialQueue, now_ms: u64, output_capacity: usize) ?u64 {
         var active: usize = 0;
         for (self.rows) |row| if (row.occupied and row.attempt) {
@@ -593,7 +612,7 @@ pub const DialQueue = struct {
             if (row.manual_until_ms > now_ms) due = @min(due orelse row.manual_until_ms, row.manual_until_ms);
             if (!row.attempt and (!hasDialIntent(&row, now_ms) or output_capacity == 0 or active >= self.options.concurrent_max or
                 row.generation == std.math.maxInt(u64))) continue;
-            const deadline = if (row.attempt) row.lease_expires_at_ms else row.eligible_at_ms;
+            const deadline = if (row.attempt) row.lease_expires_at_ms else eligibleAt(&row, now_ms);
             const next = @max(now_ms, deadline);
             due = @min(due orelse next, next);
         }

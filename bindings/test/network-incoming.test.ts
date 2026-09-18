@@ -1,6 +1,6 @@
 import {expect, test} from "vitest";
 import {createNativeNetworkApplicationRuntime} from "../src/network.js";
-import {applicationConfig, localIntent} from "./utils/network.js";
+import {applicationConfig, localIntent, requestForks} from "./utils/network.js";
 
 test("incoming request take is empty on an active application", async () => {
   const config = applicationConfig();
@@ -73,7 +73,7 @@ test("incoming copied metadata and acknowledged multiple contexts preserve wire 
     incoming.connection.generation++;
     incoming.data.fill(0);
     const payload = new Uint8Array(4000).fill(31);
-    const ack = incoming.respond(payload, pair.rightConfig.requestForks[0]);
+    const ack = incoming.respond(payload, requestForks[0]);
     payload.fill(99);
     await expect(incoming.respond(payload, null)).rejects.toMatchObject({code: "NetworkIncomingBusy"});
     await expect(incoming.finish()).rejects.toMatchObject({code: "NetworkIncomingBusy"});
@@ -83,7 +83,7 @@ test("incoming copied metadata and acknowledged multiple contexts preserve wire 
       value: {data: new Uint8Array(4000).fill(31), fork: "deneb", protocol: BLOCKS},
     });
     const second = stream.next();
-    await incoming.respond(new Uint8Array(4000).fill(42), pair.rightConfig.requestForks[1]);
+    await incoming.respond(new Uint8Array(4000).fill(42), requestForks[1]);
     expect(await second).toMatchObject({done: false, value: {data: new Uint8Array(4000).fill(42)}});
     const done = stream.next();
     expect(incoming.finish()).toBe(incoming.closed);
@@ -138,9 +138,9 @@ test("incoming invalid context keeps the serving slot and empty finish reaches w
       reason: "unknown_fork",
     });
     await expect(
-      incoming.respond(new Uint8Array(4000), {digest: pair.rightConfig.requestForks[0].digest, fork: "electra"})
+      incoming.respond(new Uint8Array(4000), {digest: requestForks[0].digest, fork: "electra"})
     ).rejects.toMatchObject({code: "NetworkIncomingRejected", reason: "unknown_fork"});
-    await expect(incoming.respond(new Uint8Array(1), pair.rightConfig.requestForks[0])).rejects.toMatchObject({
+    await expect(incoming.respond(new Uint8Array(1), requestForks[0])).rejects.toMatchObject({
       code: "NetworkIncomingRejected",
       reason: "chunk_too_small",
     });
@@ -165,7 +165,7 @@ test("incoming input validation rolls back before a later valid response", async
         reason: "invalid_error",
       });
     }
-    const extraContext = {...pair.rightConfig.requestForks[0], unexpected: true};
+    const extraContext = {...requestForks[0], unexpected: true};
     await expect(incoming.respond(new Uint8Array(4000), extraContext)).rejects.toMatchObject({
       code: "InvalidNetworkConfig",
     });
@@ -179,13 +179,13 @@ test("incoming input validation rolls back before a later valid response", async
       reason: "invalid_error",
     });
     const oversized = new Uint8Array(10 * 1024 * 1024 + 1);
-    await expect(incoming.respond(oversized, pair.rightConfig.requestForks[0])).rejects.toMatchObject({
+    await expect(incoming.respond(oversized, requestForks[0])).rejects.toMatchObject({
       code: "NetworkIncomingRejected",
       reason: "chunk_too_large",
     });
     const data = new Uint8Array(4000);
     const context = {
-      digest: pair.rightConfig.requestForks[0].digest,
+      digest: requestForks[0].digest,
       get fork() {
         structuredClone(data.buffer, {transfer: [data.buffer]});
         return "deneb" as const;
@@ -197,7 +197,7 @@ test("incoming input validation rolls back before a later valid response", async
       responseBytes: 0,
       responseBytesCopied: 0n,
     });
-    await incoming.respond(new Uint8Array(4000), pair.rightConfig.requestForks[0]);
+    await incoming.respond(new Uint8Array(4000), requestForks[0]);
     expect((await pending).done).toBe(false);
     await incoming.finish();
     expect((await stream.next()).done).toBe(true);
@@ -213,9 +213,9 @@ test("incoming chunk ceiling rejects an extra response without losing finish", a
     const first = stream.next();
     void first.catch(() => undefined);
     const incoming = await takeIncoming(pair.right);
-    await incoming.respond(new Uint8Array(4000), pair.rightConfig.requestForks[0]);
+    await incoming.respond(new Uint8Array(4000), requestForks[0]);
     expect((await first).done).toBe(false);
-    await expect(incoming.respond(new Uint8Array(4000), pair.rightConfig.requestForks[0])).rejects.toMatchObject({
+    await expect(incoming.respond(new Uint8Array(4000), requestForks[0])).rejects.toMatchObject({
       code: "NetworkIncomingRejected",
       reason: "too_many_chunks",
     });
@@ -261,7 +261,7 @@ instrumented.each(["incoming_ack_close", "incoming_response_close"])(
       const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
       const pending = stream.next().catch(() => undefined);
       const incoming = await takeIncoming(pair.right);
-      const ack = incoming.respond(new Uint8Array(4000), pair.rightConfig.requestForks[0]);
+      const ack = incoming.respond(new Uint8Array(4000), requestForks[0]);
       if (scenario === "incoming_ack_close") await ack;
       else await expect(ack).rejects.toMatchObject({code: "NetworkClosed"});
       const result = await incoming.closed;
@@ -332,7 +332,6 @@ stock(
       await peer.command("ready");
       const config = applicationConfig();
       config.resources.bridgeBudgetBytes = 512 * 1024 * 1024;
-      config.requestForks = [...config.requestForks, {digest: Uint8Array.of(5, 6, 7, 8), fork: "deneb"}];
       runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
       const identity = await runtime.ready;
       await runtime.applyIntent(localIntent(config), config.initialSlot);
@@ -343,15 +342,15 @@ stock(
         if (status === 0) {
           const first = payload(4000, 18);
           const second = payload(10 * 1024 * 1024, 19);
-          await incoming.respond(first, config.requestForks[0]);
-          await incoming.respond(second, config.requestForks[1]);
+          await incoming.respond(first, requestForks[0]);
+          await incoming.respond(second, requestForks[1]);
           await incoming.finish();
           expect(await reply).toMatchObject({
             chunks: [
               {...summary(first), fork: "deneb"},
-              {...summary(second), fork: "deneb"},
+              {...summary(second), fork: "electra"},
             ],
-            contexts: ["01020304", "05060708"],
+            contexts: requestForks.slice(0, 2).map(({digest}) => Buffer.from(digest).toString("hex")),
           });
         } else {
           await incoming.fail(status, new TextEncoder().encode("limit reached"));
@@ -435,9 +434,7 @@ instrumented.each(["incoming_response", "operation_copy"])(
       } else {
         const incoming = await takeIncoming(pair.right);
         hooks.networkTestFail(stage);
-        await expect(incoming.respond(new Uint8Array(4000), pair.rightConfig.requestForks[0])).rejects.toThrow(
-          "InjectedNetworkFailure"
-        );
+        await expect(incoming.respond(new Uint8Array(4000), requestForks[0])).rejects.toThrow("InjectedNetworkFailure");
         expect(pair.right.diagnostics().incoming.pendingResponses).toBe(0);
         await incoming.finish();
       }
@@ -592,7 +589,7 @@ test("incoming tokens isolate sessions and replacement generations", async () =>
         expect(() => native.incomingTerminal(invalid, 2, undefined, undefined)).toThrow("InvalidIncomingHandle");
       expect(() => native.requestPull(handle)).toThrow();
       if (previous) {
-        const ack = native.incomingRespond(handle, new Uint8Array(4000), config.requestForks[0]);
+        const ack = native.incomingRespond(handle, new Uint8Array(4000), requestForks[0]);
         expect(handle.index).toBe(previous.index);
         expect(handle.generation).toBe(previous.generation + 1n);
         const stale = previous;
@@ -621,11 +618,11 @@ instrumented(
       const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(64), {responseTimeoutMs: 60000});
       const first = stream.next();
       const incoming = await takeIncoming(pair.right);
-      await incoming.respond(new Uint8Array(4000), pair.rightConfig.requestForks[0]);
+      await incoming.respond(new Uint8Array(4000), requestForks[0]);
       expect((await first).done).toBe(false);
       const {payload} = await import("../../test/interop/codec.mjs");
       let completed = false;
-      const pending = incoming.respond(payload(10 * 1024 * 1024, 72), pair.rightConfig.requestForks[0]).then(
+      const pending = incoming.respond(payload(10 * 1024 * 1024, 72), requestForks[0]).then(
         () => {
           completed = true;
           return "sent";

@@ -1,11 +1,20 @@
 const t = @import("types.zig");
+pub const disconnect_score: f64 = -20;
+pub const ban_score: f64 = -50;
+pub const prune_score: f64 = -2;
 pub const ban_cooldown_ms: u64 = 30 * 60 * 1000;
 pub const half_life_ms: u64 = 10 * 60 * 1000;
+
+pub fn selectionScore(rpc: f64, gossip: f64, graylist_threshold: f64) f64 {
+    if (rpc <= ban_score or graylist_threshold >= 0) return rpc;
+    return rpc + gossip * ((disconnect_score + 1) / graylist_threshold);
+}
 pub const State = struct {
     score: f64 = 0,
     decay_at_ms: u64 = 0,
     ban_until_ms: u64 = 0,
     goodbye_until_ms: u64 = 0,
+    redial_until_ms: u64 = 0,
 
     pub fn decay(self: *State, now_ms: u64) void {
         const start = @max(self.decay_at_ms, self.ban_until_ms);
@@ -30,19 +39,20 @@ pub const State = struct {
         };
         self.score = @max(-100, self.score + weight);
         self.decay_at_ms = @max(self.decay_at_ms, now_ms);
-        if (self.score <= -50) {
+        if (self.score <= ban_score) {
             self.ban_until_ms = @max(self.ban_until_ms, now_ms +| ban_cooldown_ms);
             return .ban;
         }
-        return if (self.score <= -20) .disconnect else .none;
+        return if (self.score <= disconnect_score) .disconnect else .none;
     }
 
     pub fn banned(self: *const State, now_ms: u64) bool {
-        return now_ms < self.ban_until_ms or self.score <= -50;
+        return now_ms < self.ban_until_ms or self.score <= ban_score;
     }
 
     pub fn retained(self: *const State, now_ms: u64) bool {
-        return self.score < 0 or self.banned(now_ms) or now_ms < self.goodbye_until_ms;
+        return self.score < 0 or self.banned(now_ms) or
+            now_ms < self.goodbye_until_ms or now_ms < self.redial_until_ms;
     }
 
     pub fn nextDeadline(self: *const State, now_ms: u64) ?u64 {
@@ -52,6 +62,8 @@ pub const State = struct {
             current.goodbye_until_ms
         else
             null;
+        if (now_ms < current.redial_until_ms)
+            deadline = @min(deadline orelse current.redial_until_ms, current.redial_until_ms);
         if (now_ms < current.ban_until_ms) {
             deadline = @min(deadline orelse current.ban_until_ms, current.ban_until_ms);
         } else if (current.score < 0) {
@@ -66,5 +78,9 @@ pub const State = struct {
 
     pub fn cooldown(self: *State, now_ms: u64, duration_ms: u64) void {
         self.goodbye_until_ms = @max(self.goodbye_until_ms, now_ms +| duration_ms);
+    }
+
+    pub fn deferRedial(self: *State, now_ms: u64, duration_ms: u64) void {
+        self.redial_until_ms = @max(self.redial_until_ms, now_ms +| duration_ms);
     }
 };

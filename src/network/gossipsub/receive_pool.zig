@@ -1,82 +1,167 @@
 const std = @import("std");
-
 const constants = @import("constants.zig");
+const assert = std.debug.assert;
 
-pub const Slot = u8;
+pub const page_bytes: usize = 4096;
+pub const none: u32 = std.math.maxInt(u32);
+
+pub const Chain = struct {
+    first: u32 = none,
+    last: u32 = none,
+    pages: u32 = 0,
+    len: usize = 0,
+};
 
 pub const ReceivePool = struct {
     bytes: []u8,
-    occupied: std.StaticBitSet(16) = .initEmpty(),
-    count: u8,
-    frame_bytes: usize,
+    next: []u32,
+    free: u32 = 0,
+    free_pages: usize,
+    high_water: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, count: usize, frame_bytes: usize) !ReceivePool {
-        if (count == 0 or count > 16 or frame_bytes == 0 or frame_bytes > 2 * constants.GOSSIP_MAX_SIZE) return error.InvalidLimits;
-        const bytes = try allocator.alloc(u8, count * frame_bytes);
-        return .{ .bytes = bytes, .count = @intCast(count), .frame_bytes = frame_bytes };
+    pub fn init(a: std.mem.Allocator, byte_capacity: usize) !ReceivePool {
+        if (byte_capacity < page_bytes or byte_capacity > 1024 * 1024 * 1024 or byte_capacity % page_bytes != 0) return error.InvalidLimits;
+        const count = byte_capacity / page_bytes;
+        const bytes = try a.alloc(u8, byte_capacity);
+        errdefer a.free(bytes);
+        const next = try a.alloc(u32, count);
+        errdefer a.free(next);
+        for (next, 0..) |*n, i| n.* = if (i + 1 == count) none else @intCast(i + 1);
+        return .{ .bytes = bytes, .next = next, .free_pages = count };
     }
 
-    pub fn deinit(self: *ReceivePool, allocator: std.mem.Allocator) void {
-        std.debug.assert(self.occupied.count() == 0);
-        allocator.free(self.bytes);
+    pub fn deinit(self: *ReceivePool, a: std.mem.Allocator) void {
+        assert(self.free_pages == self.next.len);
+        a.free(self.next);
+        a.free(self.bytes);
         self.* = undefined;
     }
 
-    pub fn available(self: *const ReceivePool) usize {
-        return self.count - self.occupied.count();
-    }
-
-    pub fn claim(self: *ReceivePool) ?Slot {
-        for (0..self.count) |index| {
-            if (self.occupied.isSet(index)) continue;
-            self.occupied.set(index);
-            return @intCast(index);
+    pub fn writable(self: *ReceivePool, chain: *Chain) ?[]u8 {
+        assert(chain.len <= constants.GOSSIP_MAX_SIZE);
+        assert(chain.pages == (chain.len + page_bytes - 1) / page_bytes);
+        const offset = chain.len % page_bytes;
+        if (chain.last == none or offset == 0) {
+            if (self.free == none) return null;
+            const page = self.free;
+            self.free = self.next[page];
+            self.next[page] = none;
+            if (chain.last == none) chain.first = page else self.next[chain.last] = page;
+            chain.last = page;
+            chain.pages += 1;
+            self.free_pages -= 1;
+            self.high_water = @max(self.high_water, self.next.len - self.free_pages);
         }
-        return null;
+        return self.bytes[@as(usize, chain.last) * page_bytes + offset ..][0 .. page_bytes - offset];
     }
 
-    pub fn buffer(self: *ReceivePool, slot: Slot) []u8 {
-        std.debug.assert(slot < self.count and self.occupied.isSet(slot));
-        const base = @as(usize, slot) * self.frame_bytes;
-        return self.bytes[base..][0..self.frame_bytes];
-    }
-
-    pub fn release(self: *ReceivePool, slot: Slot) void {
-        std.debug.assert(slot < self.count and self.occupied.isSet(slot));
-        self.occupied.unset(slot);
+    pub fn release(self: *ReceivePool, chain: *Chain) void {
+        var page = chain.first;
+        for (0..chain.pages) |_| {
+            assert(page != none and page < self.next.len);
+            const next = self.next[page];
+            self.next[page] = self.free;
+            self.free = page;
+            self.free_pages += 1;
+            page = next;
+        }
+        assert(page == none and self.free_pages <= self.next.len);
+        chain.* = .{};
     }
 };
 
-test "receive pool exhaustion and release reuse owned storage" {
-    var pool = try ReceivePool.init(std.testing.allocator, 1, 64);
+pub const Cursor = struct {
+    pos: usize = 0,
+    page: u32 = none,
+    offset: usize = 0,
+};
+pub const Range = struct { start: Cursor, len: usize };
+
+/// A frame borrows a private prefix and immutable overflow pages until its owner releases it.
+pub const View = struct {
+    prefix: []const u8,
+    pool: ?*const ReceivePool = null,
+    first: u32 = none,
+    len: usize,
+
+    pub fn contiguous(bytes: []const u8) View {
+        return .{ .prefix = bytes, .len = bytes.len };
+    }
+
+    pub fn begin(self: *const View) Cursor {
+        assert(self.prefix.len <= self.len and self.len <= constants.GOSSIP_MAX_SIZE);
+        return .{ .page = self.first };
+    }
+
+    pub fn segment(self: *const View, cursor: Cursor) []const u8 {
+        assert(cursor.pos <= self.len);
+        if (cursor.pos < self.prefix.len) return self.prefix[cursor.pos..];
+        if (cursor.pos == self.len) return &.{};
+        const pool = self.pool.?;
+        assert(cursor.page < pool.next.len and cursor.offset < page_bytes);
+        return pool.bytes[@as(usize, cursor.page) * page_bytes + cursor.offset ..][0..@min(page_bytes - cursor.offset, self.len - cursor.pos)];
+    }
+
+    pub fn advance(self: *const View, cursor: *Cursor, count: usize) void {
+        assert(count <= self.len - cursor.pos);
+        var remaining = count;
+        for (0..constants.GOSSIP_MAX_SIZE / page_bytes + 3) |_| {
+            if (remaining == 0) return;
+            const in_prefix = cursor.pos < self.prefix.len;
+            const take = @min(remaining, self.segment(cursor.*).len);
+            assert(take > 0);
+            cursor.pos += take;
+            remaining -= take;
+            if (!in_prefix) {
+                cursor.offset += take;
+                if (cursor.offset == page_bytes) {
+                    cursor.page = self.pool.?.next[cursor.page];
+                    cursor.offset = 0;
+                }
+            }
+        }
+        unreachable;
+    }
+
+    pub fn copyBytes(self: *const View, range: Range) usize {
+        return if (range.len <= self.segment(range.start).len) 0 else range.len;
+    }
+
+    pub fn materialize(self: *const View, range: Range, scratch: []u8) []const u8 {
+        assert(range.len <= self.len - range.start.pos);
+        const first = self.segment(range.start);
+        if (range.len <= first.len) return first[0..range.len];
+        assert(range.len <= scratch.len);
+        var cursor = range.start;
+        var copied: usize = 0;
+        for (0..constants.GOSSIP_MAX_SIZE / page_bytes + 3) |_| {
+            if (copied == range.len) return scratch[0..copied];
+            const bytes = self.segment(cursor);
+            const take = @min(bytes.len, range.len - copied);
+            @memcpy(scratch[copied..][0..take], bytes[0..take]);
+            self.advance(&cursor, take);
+            copied += take;
+        }
+        unreachable;
+    }
+};
+
+test "receive pages charge stored bytes and preserve other chains on exhaustion" {
+    var pool = try ReceivePool.init(std.testing.allocator, 2 * page_bytes);
     defer pool.deinit(std.testing.allocator);
-    const first = pool.claim().?;
-    @memset(pool.buffer(first), 7);
-    try std.testing.expect(pool.claim() == null);
-    pool.release(first);
-    const second = pool.claim().?;
-    try std.testing.expectEqual(first, second);
-    try std.testing.expect(pool.claim() == null);
-    try std.testing.expectEqual(@as(usize, 64), pool.buffer(second).len);
-    pool.release(second);
-    try std.testing.expectEqual(@as(usize, 1), pool.available());
-}
-
-fn initFailure(allocator: std.mem.Allocator) !void {
-    var pool = try ReceivePool.init(allocator, 2, 64);
-    defer pool.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 128), pool.bytes.len);
-}
-
-test "receive pool partial initialization unwinds" {
-    try std.testing.expectError(error.InvalidLimits, ReceivePool.init(std.testing.allocator, 0, 64));
-    try std.testing.expectError(error.InvalidLimits, ReceivePool.init(std.testing.allocator, 17, 64));
-    try std.testing.expectError(error.InvalidLimits, ReceivePool.init(std.testing.allocator, 1, 0));
-    try std.testing.expectError(error.InvalidLimits, ReceivePool.init(std.testing.allocator, 1, 2 * constants.GOSSIP_MAX_SIZE + 1));
-    var maximum = try ReceivePool.init(std.testing.allocator, 1, 2 * constants.GOSSIP_MAX_SIZE);
-    defer maximum.deinit(std.testing.allocator);
-    const lease = maximum.claim().?;
-    try std.testing.expectEqual(@as(usize, 2 * constants.GOSSIP_MAX_SIZE), maximum.buffer(lease).len);
-    maximum.release(lease);
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, initFailure, .{});
+    var a: Chain = .{};
+    defer pool.release(&a);
+    var b: Chain = .{};
+    defer pool.release(&b);
+    @memset(pool.writable(&a).?, 17);
+    a.len = page_bytes;
+    @memset(pool.writable(&b).?, 23);
+    b.len = 1;
+    try std.testing.expect(pool.writable(&a) == null);
+    try std.testing.expectEqual(@as(usize, page_bytes - 1), pool.writable(&b).?.len);
+    pool.release(&a);
+    var view: View = .{ .prefix = "abc", .pool = &pool, .first = b.first, .len = 4 };
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, &.{ 'a', 'b', 'c', 23 }, view.materialize(.{ .start = view.begin(), .len = 4 }, &out));
+    try std.testing.expectEqual(@as(usize, 2), pool.high_water);
 }
