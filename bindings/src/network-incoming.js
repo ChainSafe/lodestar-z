@@ -1,6 +1,7 @@
 const finalizers = new FinalizationRegistry(({route, handle}) => {
   try {
     route.deref()?.incomingTerminal(handle, 2, undefined, undefined);
+    route.deref()?.incomingRelease(handle);
   } catch {
     // Runtime teardown may have already retired this handle.
   }
@@ -15,6 +16,9 @@ export class NativeIncoming {
   #handle;
   #done = false;
   #terminal = false;
+  #retentionRegistered = false;
+  #retained = false;
+  #released = false;
 
   constructor(native, descriptor) {
     this.#route = new WeakRef(native);
@@ -30,9 +34,32 @@ export class NativeIncoming {
       if (incoming) {
         incoming.#done = true;
         finalizers.unregister(incoming);
+        incoming.#release();
       }
     });
     finalizers.register(this, {handle: this.#handle, route: this.#route}, this);
+  }
+
+  /** Retains serving capacity through completion of work that can outlive stream cancellation. */
+  retainUntil(retired) {
+    if (this.#done || this.#retentionRegistered) throw failure("NetworkIncomingRetentionInvalid");
+    this.#retentionRegistered = true;
+    this.#retained = true;
+    const release = () => {
+      this.#retained = false;
+      this.#release();
+    };
+    Promise.resolve(retired).then(release, release);
+  }
+
+  #release() {
+    if (!this.#done || this.#retained || this.#released) return;
+    this.#released = true;
+    try {
+      this.#route.deref()?.incomingRelease(this.#handle);
+    } catch {
+      // Runtime teardown also releases native serving capacity.
+    }
   }
 
   respond(data, context) {
@@ -41,6 +68,17 @@ export class NativeIncoming {
     if (!native) return Promise.reject(failure("NetworkClosed"));
     try {
       return native.incomingRespond(this.#handle, data, context);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  ready() {
+    if (this.#done || this.#terminal) return Promise.reject(failure("NetworkIncomingClosed"));
+    const native = this.#route.deref();
+    if (!native) return Promise.reject(failure("NetworkClosed"));
+    try {
+      return native.incomingReady(this.#handle);
     } catch (error) {
       return Promise.reject(error);
     }

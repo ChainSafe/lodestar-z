@@ -170,6 +170,7 @@ pub const Service = struct {
         self.router.transportEvents(engine, events, now);
         for (events) |event| switch (event) {
             .closed => |closed| self.reqresp.connectionClosed(closed.conn),
+            .stream_closed => |closed| if (closed.reset_code != null) self.reqresp.streamReset(closed.stream),
             else => {},
         };
         if (self.identify) |*identify| identify.transportEvents(engine, events);

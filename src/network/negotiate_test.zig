@@ -277,6 +277,31 @@ test "negotiator bounds each inbound connection and reserves outbound applicatio
     _ = try owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{ .control = true });
 }
 
+test "negotiator per connection reservations survive saturation and isolate outbound work" {
+    var setup: Setup = .{};
+    try setup.init(1);
+    defer setup.deinit();
+    var owner = try Negotiator.init(std.testing.allocator, .{
+        .negotiations_max = 2,
+        .outbound_control_reserved = 1,
+        .inbound_connections = 3,
+        .inbound_per_connection_max = 2,
+    });
+    defer owner.deinit();
+    for (0..3) |peer| {
+        const conn: engine_mod.Handle = .{ .index = @intCast(peer), .generation = 1 };
+        for (0..2) |i| try owner.acceptInbound(.{ .conn = conn, .slot = @intCast(i), .id = i * 4 }, setup.pair.now);
+        try std.testing.expectError(error.NegotiationTableFull, owner.acceptInbound(.{ .conn = conn, .slot = 2, .id = 8 }, setup.pair.now));
+    }
+    _ = try owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{});
+    _ = try owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{ .control = true });
+    try std.testing.expectError(error.NegotiationTableFull, owner.beginOutbound(&setup.pair.client, setup.handles.client, &.{ping_protocol}, setup.pair.now, .{}));
+    try std.testing.expectEqual(@as(usize, 8), owner.active());
+    for (0..2) |i| owner.cancel(&setup.pair.server, .{ .conn = .{ .index = 2, .generation = 1 }, .slot = @intCast(i), .id = i * 4 });
+    try owner.acceptInbound(.{ .conn = .{ .index = 2, .generation = 2 }, .slot = 0, .id = 0 }, setup.pair.now);
+    try std.testing.expectError(error.InvalidLimits, owner.acceptInbound(.{ .conn = .{ .index = 3, .generation = 1 }, .slot = 0, .id = 0 }, setup.pair.now));
+}
+
 test "negotiator expires with no outcome capacity and reports later" {
     var setup: Setup = .{};
     try setup.init(1);

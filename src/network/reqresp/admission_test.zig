@@ -11,6 +11,50 @@ const second: PeerId = .{ .bytes = @splat(2) };
 const third: PeerId = .{ .bytes = @splat(3) };
 const method: Protocol = .blocks_by_root_v2;
 
+test "reqresp request starts retain identity debt and isolate control from application churn" {
+    var owner = try a.Limiter.init(std.testing.allocator, .{ .identities = 2, .peer = quotas(10, 1000), .global = quotas(20, 1000), .starts = .{ .tokens = 2, .period_ms = 1000 } });
+    defer owner.deinit(std.testing.allocator);
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&first, false, 0));
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&first, false, 0));
+    try std.testing.expectEqual(a.Decision.peer_quota, owner.start(&first, false, 499));
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&first, true, 499));
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&second, false, 499));
+    try std.testing.expectEqual(a.Decision.identity_capacity, owner.start(&third, false, 499));
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&first, false, 500));
+    try std.testing.expectEqual(a.Decision.allowed, owner.start(&third, false, 1000));
+}
+
+test "reqresp request eligibility predicts peer and aggregate refill without charging queued work" {
+    var owner = try a.Limiter.init(std.testing.allocator, .{ .identities = 2, .peer = quotas(2, 1000), .global = quotas(2, 1000) });
+    defer owner.deinit(std.testing.allocator);
+    try std.testing.expectEqual(a.Decision.allowed, owner.take(&first, method, 2, .fulu, 0));
+    try std.testing.expectEqual(@as(?u64, 500), owner.eligibleAt(&second, method, 1, .fulu, 0));
+    try std.testing.expectEqual(@as(?u64, 500), owner.eligibleAt(&first, method, 1, .fulu, 499));
+    try std.testing.expectEqual(a.Decision.allowed, owner.take(&second, method, 1, .fulu, 500));
+    try std.testing.expectEqual(@as(?u64, 1000), owner.eligibleAt(&first, method, 1, .fulu, 500));
+    try std.testing.expectEqual(@as(u128, 2), owner.requestCost(method, 3, .fulu));
+}
+
+test "reqresp request admission can accumulate an expensive request's credit alongside small requests" {
+    var owner = try a.Limiter.init(std.testing.allocator, .{ .identities = 2, .peer = quotas(4, 1000), .global = quotas(4, 1000) });
+    defer owner.deinit(std.testing.allocator);
+    try std.testing.expectEqual(a.Decision.allowed, owner.take(&second, method, 4, .fulu, 0));
+    var paid: u128 = 0;
+    for (1..8) |tick| {
+        const now: u64 = @intCast(tick * 250);
+        if (tick % 2 == 1) {
+            const credit = owner.grant(&first, method, 4 - paid, .fulu, now);
+            try std.testing.expectEqual(@as(u128, 1), credit);
+            paid += credit;
+        } else {
+            try std.testing.expectEqual(@as(u128, 1), owner.grant(&second, method, 1, .fulu, now));
+        }
+        try std.testing.expectEqual(@as(u128, 0), owner.grant(&second, method, 1, .fulu, now));
+        try std.testing.expectEqual(@as(?u64, now + 250), owner.eligibleAt(&first, method, 1, .fulu, now));
+    }
+    try std.testing.expectEqual(@as(u128, 4), paid);
+}
+
 test "reqresp request admission identity debt expiry and bounded reclaim" {
     var owner = try a.Limiter.init(std.testing.allocator, .{ .identities = 2, .peer = quotas(2, 1000), .global = quotas(100, 1000) });
     defer owner.deinit(std.testing.allocator);

@@ -10,10 +10,10 @@ const dial = @import("peers/dial_queue.zig");
 const router = @import("router.zig");
 
 pub const Profile = enum { small, beacon_node };
-pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "outbound_control_reserved" });
+pub const ReqRespOverrides = Overrides(rr.Options, &.{ "peers", "forks", "outbound_control_reserved", "reserve_inbound_per_peer" });
 pub const GossipOverrides = Overrides(gossip.Options, &.{ "connected_capacity", "retained_capacity", "retained_outbound_reserve", "random_seed" });
 pub const IdentifyOverrides = Overrides(@import("identify/root.zig").Options, &.{});
-pub const RouterOverrides = Overrides(router.Options, &.{"outbound_control_reserved"});
+pub const RouterOverrides = Overrides(router.Options, &.{ "outbound_control_reserved", "inbound_connections" });
 
 /// Req/resp, gossip and router fields override profile defaults; shared capacities are derived.
 pub const Request = struct {
@@ -62,6 +62,7 @@ pub fn resolve(request: Request) !Resolved {
         .peers = limits.connections_max,
         .outbound_max = peer_options.max_peers + @as(u16, if (small) 6 else 56),
         .inbound_max = if (small) 8 else 64,
+        .reserve_inbound_per_peer = true,
         .outbound_control_reserved = peer_options.max_peers,
         .inbound_control_reserved = reserved,
         .outbound_per_peer_max = if (small) 4 else 8,
@@ -79,6 +80,8 @@ pub fn resolve(request: Request) !Resolved {
         .negotiations_max = peer_options.max_peers + @as(u16, if (small) 30 else 248),
         .outbound_control_reserved = requests.outbound_control_reserved,
         .outbound_reserved = peer_options.max_peers + @as(u16, if (small) 8 else 64),
+        .inbound_connections = limits.connections_max,
+        .inbound_per_connection_max = @as(u16, requests.inbound_per_peer_max) + rr.outbound_stream_headroom,
     };
     applyOverrides(&protocols, request.router);
     var gossip_options: gossip.Options = .{
@@ -99,7 +102,7 @@ pub fn resolve(request: Request) !Resolved {
     const result: Resolved = .{
         .limits = limits,
         .work_limits = request.work_limits,
-        .byte_limit = request.byte_limit orelse if (small) 80 * 1024 * 1024 else 256 * 1024 * 1024,
+        .byte_limit = request.byte_limit orelse if (small) 96 * 1024 * 1024 else 384 * 1024 * 1024,
         .core = .{
             .peers = peer_options,
             .dial = request.dial orelse .{ .capacity = if (small) 32 else 256, .concurrent_max = @min(4, limits.dialing_max), .seed = request.seed },

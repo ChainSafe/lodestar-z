@@ -73,6 +73,7 @@ pub const Options = struct {
     outbound_control_reserved: u16 = 0,
     outbound_reserved: ?u16 = null,
     inbound_per_connection_max: u16 = 16,
+    inbound_connections: u16 = 0,
 };
 
 pub const Negotiator = struct {
@@ -81,12 +82,14 @@ pub const Negotiator = struct {
     outbound_control_reserved: u16 = 0,
     outbound_reserved: u16,
     inbound_per_connection_max: u16,
+    shared_capacity: u16,
     delivery_cursor: usize = 0,
 
     pub fn validateOptions(options: Options) Error!void {
         const negotiations_max = options.negotiations_max;
         if (options.outbound_control_reserved > negotiations_max) return error.InvalidLimits;
-        if (options.inbound_per_connection_max == 0) return error.InvalidLimits;
+        if (options.inbound_per_connection_max == 0 or options.inbound_per_connection_max > @import("quic/limits.zig").peer_streams_bidi or
+            options.inbound_connections > @import("quic/limits.zig").connections_max_ceiling) return error.InvalidLimits;
         if (options.outbound_reserved) |reserved| {
             if (reserved > negotiations_max or reserved < options.outbound_control_reserved) return error.InvalidLimits;
         }
@@ -98,11 +101,12 @@ pub const Negotiator = struct {
     pub fn init(allocator: std.mem.Allocator, options: Options) Error!Negotiator {
         try validateOptions(options);
         const negotiations_max = options.negotiations_max;
-        const entries = try allocator.alloc(Entry, negotiations_max);
+        const entries = try allocator.alloc(Entry, @as(usize, negotiations_max) + @as(usize, options.inbound_connections) * options.inbound_per_connection_max);
         @memset(entries, .{});
         return .{
             .allocator = allocator,
             .entries = entries,
+            .shared_capacity = negotiations_max,
             .outbound_control_reserved = options.outbound_control_reserved,
             .outbound_reserved = options.outbound_reserved orelse @min(negotiations_max, options.outbound_control_reserved + negotiations_max / 4),
             .inbound_per_connection_max = options.inbound_per_connection_max,
@@ -166,6 +170,16 @@ pub const Negotiator = struct {
         stream: StreamHandle,
         now: types.Now,
     ) Error!void {
+        if (self.entries.len > self.shared_capacity) {
+            const first = @as(usize, self.shared_capacity) + @as(usize, stream.conn.index) * self.inbound_per_connection_max;
+            if (first >= self.entries.len) return error.InvalidLimits;
+            for (self.entries[first..][0..self.inbound_per_connection_max]) |*entry| {
+                if (entry.state != .free) continue;
+                initInbound(entry, stream, now);
+                return;
+            }
+            return error.NegotiationTableFull;
+        }
         var inbound: usize = 0;
         var connection_inbound: usize = 0;
         for (self.entries) |*entry| {
@@ -176,6 +190,10 @@ pub const Negotiator = struct {
         if (inbound >= self.entries.len - self.outbound_reserved or connection_inbound >= self.inbound_per_connection_max)
             return error.NegotiationTableFull;
         const entry = self.claim(false) orelse return error.NegotiationTableFull;
+        initInbound(entry, stream, now);
+    }
+
+    fn initInbound(entry: *Entry, stream: StreamHandle, now: types.Now) void {
         assert(entry.state == .free);
         entry.stream = stream;
         entry.started_ms = now.mono_ms;
@@ -287,12 +305,12 @@ pub const Negotiator = struct {
     fn claim(self: *Negotiator, control: bool) ?*Entry {
         if (!control and self.outbound_control_reserved > 0) {
             var ordinary: usize = 0;
-            for (self.entries) |*entry| {
+            for (self.entries[0..self.shared_capacity]) |*entry| {
                 if (entry.state != .free and !entry.control) ordinary += 1;
             }
-            if (ordinary >= self.entries.len - self.outbound_control_reserved) return null;
+            if (ordinary >= self.shared_capacity - self.outbound_control_reserved) return null;
         }
-        for (self.entries) |*entry| {
+        for (self.entries[0..self.shared_capacity]) |*entry| {
             if (entry.state == .free) return entry;
         }
         return null;

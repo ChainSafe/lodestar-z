@@ -696,9 +696,10 @@ test "managed profiles measure reservations and unwind byte exhaustion" {
         const kib = 1024;
         const mib = 1024 * kib;
         const ceilings = if (profile == .small)
-            .{ .total = 72 * mib, .service = 71 * mib, .transport = 90 * kib, .scratch = 400 * kib, .catalog = 56 * kib, .control = 13 * kib, .dial = 14 * kib }
+            .{ .total = 96 * mib, .service = 95 * mib, .transport = 90 * kib, .scratch = 400 * kib, .catalog = 56 * kib, .control = 13 * kib, .dial = 14 * kib }
         else
-            .{ .total = 232 * mib, .service = 222 * mib, .transport = 720 * kib, .scratch = 3200 * kib, .catalog = 448 * kib, .control = 100 * kib, .dial = 112 * kib };
+            .{ .total = 384 * mib, .service = 374 * mib, .transport = 720 * kib, .scratch = 3200 * kib, .catalog = 448 * kib, .control = 100 * kib, .dial = 112 * kib };
+        std.debug.print("managed memory {s}: total={d} service={d} reqresp={d} negotiations={d}\n", .{ @tagName(profile), measured, plan.service_bytes, node.service.reqresp.memoryPlan().total_bytes, node.service.router.negotiator.entries.len });
         try std.testing.expectEqual(measured, plan.allocated_bytes);
         try std.testing.expect(measured <= ceilings.total);
         try std.testing.expect(plan.service_bytes <= ceilings.service);

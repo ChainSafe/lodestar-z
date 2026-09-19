@@ -19,7 +19,7 @@ const Event = reqresp.Event;
 const Failure = reqresp.Failure;
 const reads_per_pump_max = reqresp.reads_per_pump_max;
 
-pub const State = enum { receiving_request, serving, writing_chunk, withheld, finishing };
+pub const State = enum { receiving_request, ready, serving, waiting_capacity, writing_chunk, withheld, finishing };
 pub const Rejection = codec.Error || @import("request_policy.zig").InspectError;
 
 pub const Server = struct {
@@ -32,6 +32,13 @@ pub const Server = struct {
     state: State = .receiving_request,
     request_fork: @import("config").ForkSeq = .phase0,
     rejection: ?Rejection = null,
+    receive: @import("receive_plan.zig").Buffers = .{ .sink = &.{}, .scratch = &.{}, .read = &.{} },
+    identity: @import("../wire/peer_id.zig").PeerId = undefined,
+    execution: ?u16 = null,
+    charged_cost: u128 = 1,
+    admission_paid: u128 = 0,
+    eligible_ms: u64 = 0,
+    response_reserved: bool = false,
 
     pub fn complete(self: *Server, owner: *ReqResp, index: u16, event: Event, engine: ?*Engine) void {
         owner.complete(&self.request, index, event, .{ .phase_name = @tagName(self.state), .rejection = self.rejection, .result_code = self.pending_result });
@@ -70,7 +77,8 @@ pub const Server = struct {
         if (self.waitingHost()) return .waiting_host;
         return switch (self.state) {
             .receiving_request => .receiving_request,
-            .withheld => .withheld,
+            .ready => .ready,
+            .withheld, .waiting_capacity => .withheld,
             .writing_chunk, .finishing => .writing_response,
             .serving => unreachable,
         };
@@ -80,9 +88,10 @@ pub const Server = struct {
         const request = &self.request;
         if (!request.running()) return null;
         if (self.state == .receiving_request) return request.started_ms +| ctx.options.progress_timeout_ms;
+        if (self.state == .ready) return self.progress_ms +| ctx.options.quota_timeout_ms;
         const duration = if (self.waitingHost())
             ctx.options.host_timeout_ms
-        else if (self.state == .withheld)
+        else if (self.state == .withheld or self.state == .waiting_capacity)
             ctx.options.quota_timeout_ms
         else
             ctx.options.progress_timeout_ms;
@@ -95,16 +104,25 @@ pub const Server = struct {
         if (self.deadline(ctx)) |due| if (now.mono_ms >= due) {
             const reason: Failure = if (self.waitingHost())
                 .host_timeout
-            else if (self.state == .withheld)
+            else if (self.state == .withheld or self.state == .waiting_capacity or self.state == .ready)
                 .quota_timeout
             else
                 .timeout;
             self.fail(ctx, index, reason, engine);
             return;
         };
+        if (self.state == .ready or self.state == .serving or self.state == .waiting_capacity or self.state == .withheld) {
+            _ = engine.streamCapacity(request.stream) catch |err| switch (err) {
+                error.WouldBlock => 0,
+                else => {
+                    self.failStream(ctx, index, err, engine);
+                    return;
+                },
+            };
+        }
         if (request.waitingHost()) return;
         switch (self.state) {
-            .serving => {},
+            .serving, .ready, .waiting_capacity => {},
             .receiving_request => readRequest(ctx, engine, self, index, now),
             .withheld => {
                 if (!ctx.limiter.matches(request.conn)) {
@@ -170,22 +188,46 @@ pub const Server = struct {
                     return;
                 };
                 request.chunks_max = inspected.chunks_max;
-                if (owner.admission != null and !takeAdmission(owner, engine, slot, inspected.charged_cost, now)) {
-                    reject(owner, slot, constants.result_rate_limited, "rate limited", now);
-                    return;
-                }
-                if (owner.admission != null) owner.counters.admitted +|= 1;
-                request.queue(.{ .request = .{
-                    .request = request.handle(index),
-                    .peer = request.conn,
-                    .protocol = request.protocol,
-                    .bytes = payload,
-                } });
-                slot.state = .serving;
+                slot.charged_cost = inspected.charged_cost;
+                slot.progress_ms = now.mono_ms;
+                slot.eligible_ms = now.mono_ms;
+                slot.state = .ready;
                 return;
             }
         }
         request.needs_service = true;
+    }
+
+    pub fn promote(self: *Server, owner: *ReqResp, index: u16, now: Now) bool {
+        const request = &self.request;
+        if (!request.running() or self.state != .ready or now.mono_ms < self.eligible_ms) return false;
+        const execution = owner.serving.available(&self.identity, request.protocol.isControl()) orelse return false;
+        if (owner.admission) |*admission| {
+            const cost = admission.limiter.requestCost(request.protocol, self.charged_cost, self.request_fork);
+            if (self.admission_paid < cost) {
+                const granted = admission.limiter.grant(&self.identity, request.protocol, cost - self.admission_paid, self.request_fork, now.mono_ms);
+                self.admission_paid += granted;
+                owner.counters.charged_work +|= granted;
+                if (self.admission_paid < cost) {
+                    self.eligible_ms = admission.limiter.eligibleAt(&self.identity, request.protocol, 1, self.request_fork, now.mono_ms).?;
+                    return false;
+                }
+            }
+            owner.counters.admitted +|= 1;
+        }
+        const payload: []const u8 = if (request.io.decoding) request.io.decoder.payload() else &.{};
+        request.io.decoding = false;
+        request.io.scratch = owner.serving.acquire(execution, request.handle(index), &self.identity, request.protocol.isControl());
+        self.execution = execution;
+        self.state = .serving;
+        self.progress_ms = now.mono_ms;
+        request.queue(.{ .request = .{
+            .request = request.handle(index),
+            .peer = request.conn,
+            .protocol = request.protocol,
+            .bytes = payload,
+        } });
+        return true;
     }
 
     fn rejectRequest(owner: *ReqResp, slot: *Server, reason: Rejection, now: Now) void {
@@ -251,7 +293,8 @@ pub const Server = struct {
         slot.pending_result = result;
         slot.close_after_write = close_after;
         slot.progress_ms = now.mono_ms;
-        if (owner.limiter.take(request.conn, request.protocol, 1, now.mono_ms)) {
+        if (slot.response_reserved or owner.limiter.take(request.conn, request.protocol, 1, now.mono_ms)) {
+            slot.response_reserved = false;
             Server.beginWrite(slot);
         } else {
             slot.state = .withheld;
@@ -357,25 +400,30 @@ pub const Server = struct {
     ) AcceptError!RequestHandle {
         try owner.attach(engine);
         if (stream.conn.index >= owner.options.peers) return error.InvalidCapacity;
-        if (engine.peerId(stream.conn) == null) return error.StaleHandle;
+        const identity = engine.peerId(stream.conn) orelse return error.StaleHandle;
         if (ready.leftover.len > reqresp.read_buffer_length) return error.InvalidHandoff;
         const which = switch (ready.protocol) {
             .reqresp => |which| which,
             else => return error.UnknownProtocol,
         };
         const bounds = owner.requestBounds(which);
+        if (owner.admission) |*admission| {
+            const decision = admission.limiter.start(&identity, which.isControl(), now.mono_ms);
+            if (decision != .allowed) {
+                if (decision == .identity_capacity) owner.counters.identity_capacity_refusals +|= 1 else owner.counters.peer_refusals +|= 1;
+                owner.recordAdmissionRefusal(stream, which, if (decision == .identity_capacity) .identity_capacity else .request_starts, 1);
+                return error.TooManyRequests;
+            }
+        }
         if (owner.inboundCount(stream.conn, null) >= owner.options.inbound_per_peer_max) {
             owner.recordAdmissionRefusal(stream, which, .peer_capacity, 0);
             return error.PeerSlotsExhausted;
         }
-        const index = owner.availableInboundFor(which) orelse {
+        const available = owner.availableInbound(stream.conn, which);
+        if (available == null and owner.receive_plan == null) {
             owner.recordAdmissionRefusal(stream, which, .server_capacity, 0);
             return error.SlotsExhausted;
-        };
-        const slot = &owner.inbound[index];
-        if (ready.leftover.len > slot.request.io.read_buffer.len) return error.InvalidHandoff;
-        const request_sink = owner.inboundSink(index);
-        assert(request_sink.len >= bounds.request_max);
+        }
         if (!which.isControl() and owner.options.inbound_application_per_peer_max > 0 and
             owner.inboundApplicationCount(stream.conn) >= owner.options.inbound_application_per_peer_max)
         {
@@ -386,7 +434,17 @@ pub const Server = struct {
             owner.recordAdmissionRefusal(stream, which, .protocol_concurrency, 0);
             return error.TooManyRequests;
         }
+        const index = available orelse {
+            owner.recordAdmissionRefusal(stream, which, if (owner.receive_plan != null) .peer_capacity else .server_capacity, 0);
+            return error.SlotsExhausted;
+        };
+        const slot = &owner.inbound[index];
+        if (ready.leftover.len > slot.receive.read.len) return error.InvalidHandoff;
+        const request_sink = owner.inboundSink(index);
+        assert(request_sink.len >= bounds.request_max);
         slot.* = .{
+            .receive = slot.receive,
+            .identity = identity,
             .request_fork = owner.request_fork,
             .progress_ms = now.mono_ms,
             .request = .{
@@ -399,8 +457,8 @@ pub const Server = struct {
                 .started_ms = now.mono_ms,
                 .io = .{
                     .sink = request_sink,
-                    .scratch = slot.request.io.scratch,
-                    .read_buffer = slot.request.io.read_buffer,
+                    .scratch = slot.receive.scratch,
+                    .read_buffer = slot.receive.read,
                     .buffered_end = ready.leftover.len,
                     .fin_seen = ready.fin,
                 },
@@ -448,6 +506,27 @@ pub const Server = struct {
         if (ssz.len > response.max) return error.ChunkTooLarge;
         if (ssz.len < response.min) return error.ChunkTooSmall;
         Server.queueChunk(owner, slot, constants.result_success, digest, ssz, false, now);
+    }
+
+    pub fn reserveResponse(self: *Server, owner: *ReqResp, now: Now) bool {
+        const request = &self.request;
+        if (!request.running() or request.waitingHost() or (self.state != .serving and self.state != .waiting_capacity)) return false;
+        if (self.response_reserved) return true;
+        if (owner.limiter.take(request.conn, request.protocol, 1, now.mono_ms)) {
+            self.response_reserved = true;
+            self.state = .serving;
+            self.progress_ms = now.mono_ms;
+            if (self.withheld_since_ms) |since| owner.counters.withheld_ms_total +|= now.mono_ms -| since;
+            self.withheld_since_ms = null;
+            return true;
+        }
+        if (self.state != .waiting_capacity) {
+            self.state = .waiting_capacity;
+            self.progress_ms = now.mono_ms;
+            self.withheld_since_ms = now.mono_ms;
+            owner.counters.withheld_chunks +|= 1;
+        }
+        return false;
     }
 
     pub fn respondError(

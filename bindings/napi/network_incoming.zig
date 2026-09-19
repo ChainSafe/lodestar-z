@@ -19,6 +19,8 @@ pub const Cell = struct {
     connection: n.quic.engine.Handle = undefined,
     handle: rr.RequestHandle = undefined,
     native: bool = false,
+    serving_retained: bool = false,
+    release_requested: bool = false,
     protocol: rr.Protocol = .blocks_by_root_v2,
     input: []u8 = &.{},
     response: []u8 = &.{},
@@ -28,6 +30,8 @@ pub const Cell = struct {
     exposed: bool = false,
     closed: ?napi.Deferred = null,
     pending: ?napi.Deferred = null,
+    permission: ?napi.Deferred = null,
+    permission_ready: bool = false,
     ack: ?Ack = null,
     chunks: u32 = 0,
     action: Action = .none,
@@ -41,6 +45,7 @@ pub const Diagnostics = struct {
     queued: usize = 0,
     highWater: usize = 0,
     pendingResponses: usize = 0,
+    pendingPermissions: usize = 0,
     closedPromises: usize = 0,
     reservedBytes: usize = 0,
     reservedBytesHighWater: usize = 0,
@@ -52,6 +57,7 @@ pub const Diagnostics = struct {
     responseBytesCopied: u64 = 0,
     chunksWritten: u64 = 0,
     bytesWritten: u64 = 0,
+    retiring: usize = 0,
     capacityRefusals: u64 = 0,
     byteRefusals: u64 = 0,
     busyResponses: u64 = 0,
@@ -133,7 +139,7 @@ pub const Table = struct {
     }
     pub fn retire(self: *Table, token: Token) void {
         const cell = self.get(token).?;
-        std.debug.assert(!cell.native and !cell.copying);
+        std.debug.assert(!cell.native and !cell.copying and !cell.serving_retained);
         cell.state = .terminal;
         self.releasePayload(cell);
         cell.* = .{ .generation = cell.generation };
@@ -156,8 +162,10 @@ pub const Table = struct {
         for (self.cells) |*cell| {
             if (cell.state == .free) continue;
             result.queued += @intFromBool(cell.state == .queued);
+            result.retiring += @intFromBool(!cell.native and cell.serving_retained);
             result.closedPromises += @intFromBool(cell.closed != null);
             result.pendingResponses += @intFromBool(cell.pending != null);
+            result.pendingPermissions += @intFromBool(cell.permission != null);
             result.requestBytes += cell.input.len;
             if (cell.state != .response_preparing) result.responseBytes += cell.response.len;
             if (cell.copying) result.copyingBytes += cell.input.len;
@@ -165,7 +173,7 @@ pub const Table = struct {
         return result;
     }
     pub fn obligated(self: *const Table) bool {
-        for (self.cells) |*cell| if (cell.closed != null or cell.pending != null) return true;
+        for (self.cells) |*cell| if (cell.closed != null or cell.pending != null or cell.permission != null) return true;
         return false;
     }
 };
@@ -207,11 +215,24 @@ pub fn flags(runtime: *Runtime, now: n.Now) !void {
     var submissions: usize = 0;
     for (0..table.cells.len) |offset| {
         const cell = &table.cells[(table.cursor + offset) % table.cells.len];
+        if (cell.serving_retained and cell.release_requested and !cell.native and !cell.copying and
+            cell.closed == null and cell.pending == null and cell.permission == null)
+        {
+            const released = runtime.heavy.?.core.service.reqresp.releaseServing(cell.handle);
+            std.debug.assert(released);
+            cell.serving_retained = false;
+            table.retire(.{ .index = @intCast((table.cursor + offset) % table.cells.len), .generation = cell.generation });
+            continue;
+        }
         if (!cell.native) continue;
         const core = &runtime.heavy.?.core;
         if (cell.action == .cancel or runtime.stop) {
             _ = core.cancel(cell.handle);
             continue;
+        }
+        if (cell.permission != null and !cell.permission_ready and core.service.reqresp.reserveResponse(cell.handle, now)) {
+            cell.permission_ready = true;
+            runtime.pingLocked();
         }
         if (cell.state == .response_queued and submissions < 4) {
             submissions += 1;
@@ -284,7 +305,14 @@ pub fn captureLocked(runtime: *Runtime, event: rr.Event, now: n.Now) !void {
             }
             if (cell.state != .response_preparing) cell.state = .terminal;
             table.releasePayload(cell);
-            if (!cell.exposed and !cell.copying) table.retire(.{ .index = @intCast(i), .generation = cell.generation });
+            if (!cell.exposed and !cell.copying) {
+                if (cell.serving_retained) {
+                    const released = runtime.heavy.?.core.service.reqresp.releaseServing(cell.handle);
+                    std.debug.assert(released);
+                    cell.serving_retained = false;
+                }
+                table.retire(.{ .index = @intCast(i), .generation = cell.generation });
+            }
         }
         runtime.pingLocked();
         break;
@@ -314,12 +342,16 @@ fn admitLocked(runtime: *Runtime, request: @FieldType(rr.Event, "request"), now:
     cell.connection = request.peer;
     cell.handle = request.request;
     cell.native = true;
+    const retained = core.service.reqresp.retainServing(request.request);
+    std.debug.assert(retained);
+    cell.serving_retained = true;
     runtime.pingLocked();
 }
 pub fn closeLocked(runtime: *Runtime) void {
     if (runtime.incoming) |*table| for (table.cells, 0..) |*cell, i| {
         if (cell.state == .free) continue;
         cell.native = false;
+        cell.serving_retained = false;
         if (cell.pending != null and cell.ack == null) cell.ack = .closed;
         if (cell.state != .response_preparing) cell.state = .terminal;
         table.releasePayload(cell);

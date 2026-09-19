@@ -55,6 +55,58 @@ test("incoming request take is empty on an active application", async () => {
 
 import {BLOCKS, incomingPair, takeIncoming} from "./utils/network-incoming.js";
 
+test("incoming cancellation retains execution until host work retires", async () => {
+  const pair = await incomingPair();
+  let retire: () => void = () => undefined;
+  const retired = new Promise<void>((resolve) => {
+    retire = resolve;
+  });
+  try {
+    const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
+    const pending = stream.next().catch(() => undefined);
+    const incoming = await takeIncoming(pair.right);
+    incoming.retainUntil(retired);
+    expect(() => incoming.retainUntil(retired)).toThrow("NetworkIncomingRetentionInvalid");
+    await incoming.cancel();
+    await pending;
+    expect(pair.right.diagnostics().incoming).toMatchObject({
+      occupied: 1,
+      pendingPermissions: 0,
+      pendingResponses: 0,
+      requestBytes: 0,
+      responseBytes: 0,
+      retiring: 1,
+    });
+    retire();
+    await expect.poll(() => pair.right.diagnostics().incoming.occupied).toBe(0);
+    expect(pair.right.diagnostics().incoming.retiring).toBe(0);
+  } finally {
+    retire();
+    await Promise.all([pair.left.close(), pair.right.close()]);
+  }
+}, 15000);
+
+test("incoming response permission reserves quota before payload production", async () => {
+  const pair = await incomingPair();
+  try {
+    const stream = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32));
+    const pending = stream.next();
+    void pending.catch(() => undefined);
+    const incoming = await takeIncoming(pair.right);
+    const permission = incoming.ready();
+    await expect(incoming.ready()).rejects.toMatchObject({code: "NetworkIncomingBusy"});
+    await permission;
+    expect(pair.right.diagnostics().incoming.responseBytes).toBe(0);
+    const payload = new Uint8Array(4000).fill(17);
+    await incoming.respond(payload, requestForks[0]);
+    expect(await pending).toMatchObject({done: false, value: {data: payload}});
+    await incoming.finish();
+    await expect(incoming.ready()).rejects.toMatchObject({code: "NetworkIncomingClosed"});
+  } finally {
+    await Promise.all([pair.left.close(), pair.right.close()]);
+  }
+}, 15000);
+
 test("incoming copied metadata and acknowledged multiple contexts preserve wire bytes", async () => {
   const pair = await incomingPair();
   try {
@@ -91,6 +143,7 @@ test("incoming copied metadata and acknowledged multiple contexts preserve wire 
     expect(await incoming.closed).toBeUndefined();
     expect(await done).toEqual({done: true, value: undefined});
     await expect(incoming.respond(payload, null)).rejects.toMatchObject({code: "NetworkIncomingClosed"});
+    await expect.poll(() => pair.right.diagnostics().incoming.occupied).toBe(0);
     expect(pair.right.diagnostics().incoming).toMatchObject({
       bytesWritten: 8000n,
       chunksWritten: 2n,
@@ -370,13 +423,13 @@ stock(
 );
 
 instrumented(
-  "incoming bridge cell pressure preserves native output and independent command progress",
+  "incoming retained serving pressure waits while independent commands and control make progress",
   async () => {
     const hooks = await faults();
     const pair = await incomingPair(() => hooks.networkTestScenario("incoming_hold"));
     try {
       const held = [];
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < 4; i++) {
         const pending = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32)).next();
         void pending.catch(() => undefined);
         const incoming = await takeIncoming(pair.right);
@@ -386,20 +439,27 @@ instrumented(
       }
       expect(pair.right.diagnostics().incoming).toMatchObject({
         capacity: 6,
-        closedPromises: 6,
-        occupied: 6,
+        closedPromises: 4,
+        occupied: 4,
         requestBytes: 0,
         reservedBytes: 0,
         responseBytes: 0,
       });
       await expect.poll(() => hooks.networkTestIncoming().nativeInbound).toBe(0);
-      await expect(pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32)).next()).rejects.toMatchObject({
-        peerMessage: new TextEncoder().encode("application capacity exhausted"),
-        peerStatus: 2,
-        reason: "peer_error",
-      });
+      let settled = false;
+      const waiting = pair.left.request(pair.remote.peerId, BLOCKS, new Uint8Array(32)).next();
+      void waiting.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        }
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(settled).toBe(false);
       expect(pair.right.takeIncomingRequest()).toBeNull();
-      expect(pair.right.diagnostics().incoming.capacityRefusals).toBe(1n);
+      expect(pair.right.diagnostics().incoming.capacityRefusals).toBe(0n);
       await pair.right.reStatusPeers([pair.identity.peerId]);
       expect((await pair.right.getIdentity()).peerId).toEqual(pair.remote.peerId);
       const outgoing = pair.right.request(pair.identity.peerId, BLOCKS, new Uint8Array(32)).next();
@@ -408,9 +468,11 @@ instrumented(
       hooks.networkTestIncomingRelease();
       await pair.right.getIdentity();
       expect(await Promise.all(held.map((incoming) => incoming.closed))).toEqual(
-        Array.from({length: 6}, () => undefined)
+        Array.from({length: 4}, () => undefined)
       );
-      expect(pair.right.diagnostics().incoming.occupied).toBe(0);
+      await (await takeIncoming(pair.right)).finish();
+      expect((await waiting).done).toBe(true);
+      await expect.poll(() => pair.right.diagnostics().incoming.occupied).toBe(0);
     } finally {
       hooks.networkTestIncomingRelease();
       await Promise.all([pair.left.close(), pair.right.close()]);
@@ -439,6 +501,7 @@ instrumented.each(["incoming_response", "operation_copy"])(
         await incoming.finish();
       }
       await pending;
+      await expect.poll(() => pair.right.diagnostics().incoming.occupied).toBe(0);
       expect(pair.right.diagnostics().incoming).toMatchObject({
         occupied: 0,
         requestBytes: 0,
@@ -538,6 +601,7 @@ interface DirectIncomingBridge {
   applyIntent(intent: ReturnType<typeof localIntent>, slot: bigint): Promise<unknown>;
   takeIncomingRequest(): IncomingDescriptor | null;
   incomingTerminal(handle: IncomingHandle, action: number, status?: number, message?: Uint8Array): void;
+  incomingRelease(handle: IncomingHandle): void;
   incomingRespond(
     handle: IncomingHandle,
     data: Uint8Array,
@@ -599,6 +663,17 @@ test("incoming tokens isolate sessions and replacement generations", async () =>
       }
       native.incomingTerminal(handle, 0, undefined, undefined);
       expect(await descriptor.closed).toBeUndefined();
+      native.incomingRelease(handle);
+      await expect
+        .poll(() => {
+          try {
+            native.incomingRelease(handle);
+            return null;
+          } catch (error) {
+            return error;
+          }
+        })
+        .toMatchObject({code: "NetworkIncomingClosed"});
       const done = previous ? stream.next() : pending;
       expect((await done).done).toBe(true);
       previous = handle;
@@ -650,6 +725,7 @@ instrumented(
       expect(await incoming.closed).toBeUndefined();
       expect(await pending).toMatchObject({code: "NetworkIncomingFailed", failure: "cancelled"});
       await Promise.all(commands);
+      await expect.poll(() => pair.right.diagnostics().incoming.occupied).toBe(0);
       expect(pair.right.diagnostics().incoming).toMatchObject({occupied: 0, reservedBytes: 0, responseBytes: 0});
       await stream.return?.();
     } finally {

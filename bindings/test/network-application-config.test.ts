@@ -77,7 +77,7 @@ test("rejects insufficient fixed reservations before owner spawn", () => {
   const config = applicationConfig();
   config.resources.nativeBudgetBytes = 1;
   expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("NetworkNativeBudgetExceeded");
-  config.resources.nativeBudgetBytes = 80 * 1024 * 1024;
+  config.resources.nativeBudgetBytes = 96 * 1024 * 1024;
   config.resources.bridgeBudgetBytes = 1;
   expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("NetworkBridgeBudgetExceeded");
 });

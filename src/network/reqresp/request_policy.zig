@@ -4,6 +4,7 @@ const constants = @import("constants");
 const preset = @import("preset");
 const Protocol = @import("protocol.zig").Protocol;
 const limiter = @import("limiter.zig");
+const ct = @import("consensus_types");
 
 pub const BlobLimit = struct { start_slot: u64, max_blobs: u32 };
 pub const Config = struct {
@@ -103,9 +104,10 @@ pub const Policy = struct {
         var result = which.info();
         result.response_max = @min(result.response_max, self.config.max_payload_size);
         switch (which) {
-            .blocks_by_root_v2 => result.request_max = @as(usize, self.blocks(fork)) * 32,
-            .blob_sidecars_by_root_v1 => result.request_max = @as(usize, self.blobs(fork)) * @import("consensus_types").deneb.BlobIdentifier.fixed_size,
-            .data_column_sidecars_by_root_v1 => result.request_max = @as(usize, self.config.blocks_deneb) * (40 + @as(usize, self.config.number_of_columns) * 8),
+            .blocks_by_root_v2 => result.request_max = @as(usize, self.blocks(fork)) * ct.primitive.Root.fixed_size,
+            .blob_sidecars_by_root_v1 => result.request_max = @as(usize, self.blobs(fork)) * ct.deneb.BlobIdentifier.fixed_size,
+            .data_column_sidecars_by_root_v1 => result.request_max = @as(usize, self.config.blocks_deneb) *
+                (ct.fulu.DataColumnsByRootIdentifiers.max_size / constants.MAX_REQUEST_BLOCKS_DENEB),
             else => {},
         }
         result.request_max = @min(result.request_max, self.config.max_payload_size);
@@ -115,9 +117,13 @@ pub const Policy = struct {
 
     pub fn requestMax(self: *const Policy) usize {
         var maximum: usize = 0;
-        for (std.enums.values(Protocol)) |which| {
-            for (std.enums.values(ForkSeq)) |fork| maximum = @max(maximum, self.requestBounds(which, fork).request_max);
-        }
+        for (std.enums.values(Protocol)) |which| maximum = @max(maximum, self.requestMaxFor(which));
+        return maximum;
+    }
+
+    pub fn requestMaxFor(self: *const Policy, which: Protocol) usize {
+        var maximum: usize = 0;
+        for (std.enums.values(ForkSeq)) |fork| maximum = @max(maximum, self.requestBounds(which, fork).request_max);
         return maximum;
     }
 

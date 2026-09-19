@@ -326,6 +326,7 @@ const policy_fixture = @import("policy_fixture.zig").config;
 const admission_quotas = @import("admission_fixture.zig").quotas;
 
 fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u8, allowed: bool, code: u8) !void {
+    if (!allowed and code == 139) return waitExchange(setup, which, bytes);
     const sink = try std.testing.allocator.alloc(u8, which.info().response_max);
     defer std.testing.allocator.free(sink);
     if (code == 1) {
@@ -397,7 +398,56 @@ fn emptyExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const 
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
 }
 
-test "reqresp request admission empty success refusal malformed attempts and control independence" {
+fn waitExchange(setup: *harness.Pair, which: protocol.Protocol, bytes: []const u8) !void {
+    const sink = try std.testing.allocator.alloc(u8, which.info().response_max);
+    defer std.testing.allocator.free(sink);
+    const handle = try request(setup, which, bytes, sink, .{});
+    var waiting = false;
+    for (0..50) |_| {
+        try setup.pumpOnce();
+        try std.testing.expectEqual(@as(usize, 0), setup.clientEvents().len);
+        try std.testing.expectEqual(@as(usize, 0), setup.serverEvents().len);
+        for (setup.shared.server.reqresp.inbound) |*slot| {
+            if (slot.request.running() and slot.state == .ready and slot.eligible_ms > setup.shared.pair.now.mono_ms) {
+                waiting = true;
+            }
+        }
+        if (waiting) break;
+    }
+    try std.testing.expect(waiting);
+    try std.testing.expect(setup.shared.client.reqresp.cancel(handle));
+    for (0..20) |_| {
+        try setup.pumpOnce();
+        for (setup.serverEvents()) |event| {
+            try std.testing.expectEqual(.failed, std.meta.activeTag(event));
+            try std.testing.expectEqual(reqresp.Failure.stream_closed, event.failed.reason);
+        }
+        if (setup.shared.server.reqresp.active().inbound == 0) break;
+    }
+    try setup.pumpOnce();
+    try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
+}
+
+fn refusedStart(setup: *harness.Pair, which: protocol.Protocol) !void {
+    const sink = try std.testing.allocator.alloc(u8, which.info().response_max);
+    defer std.testing.allocator.free(sink);
+    _ = try request(setup, which, &.{}, sink, .{});
+    var refused = false;
+    for (0..50) |_| {
+        try setup.pumpOnce();
+        try std.testing.expectEqual(@as(usize, 0), setup.serverEvents().len);
+        for (setup.clientEvents()) |event| {
+            try std.testing.expectEqual(.failed, std.meta.activeTag(event));
+            try std.testing.expectEqual(reqresp.Failure{ .negotiation_failed = .stream_closed }, event.failed.reason);
+            refused = true;
+        }
+        if (refused) break;
+    }
+    try std.testing.expect(refused);
+    try setup.pumpOnce();
+}
+
+test "reqresp request admission empty success quota waiting malformed attempts and control independence" {
     var setup: harness.Pair = .{};
     try setup.init(.{}, .{
         .request_fork = .fulu,
@@ -410,9 +460,9 @@ test "reqresp request admission empty success refusal malformed attempts and con
     try emptyExchange(&setup, .blocks_by_root_v2, &.{0}, false, 1);
     var bytes = [_]u8{0} ** 24;
     std.mem.writeInt(u64, bytes[8..16], 3, .little);
-    try emptyExchange(&setup, .blocks_by_range_v2, &bytes, false, 139);
-    std.mem.writeInt(u64, bytes[8..16], 1, .little);
     try emptyExchange(&setup, .blocks_by_range_v2, &bytes, true, 0);
+    std.mem.writeInt(u64, bytes[8..16], 1, .little);
+    try emptyExchange(&setup, .blocks_by_range_v2, &bytes, false, 139);
     try emptyExchange(&setup, .ping_v1, bytes[0..8], true, 0);
     const status = harness.statusBytes(1);
     try emptyExchange(&setup, .status_v1, &status, true, 0);
@@ -425,8 +475,8 @@ test "reqresp request admission empty success refusal malformed attempts and con
     try emptyExchange(&setup, .data_column_sidecars_by_range_v1, bytes[0..20], false, 139);
     try std.testing.expectEqual(@as(u64, 14), setup.shared.server.reqresp.counters.inspected);
     try std.testing.expectEqual(@as(u64, 8), setup.shared.server.reqresp.counters.admitted);
-    try std.testing.expectEqual(@as(u128, 9), setup.shared.server.reqresp.counters.charged_work);
-    try std.testing.expectEqual(@as(u64, 5), setup.shared.server.reqresp.counters.peer_refusals);
+    try std.testing.expectEqual(@as(u128, 10), setup.shared.server.reqresp.counters.charged_work);
+    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.counters.peer_refusals);
     try std.testing.expectEqual(@as(u64, 2), setup.shared.server.reqresp.counters.malformed);
 }
 
@@ -519,7 +569,7 @@ test "reqresp request admission concurrent connections and reconnect retain full
     setup.shared.handles = .{ .client = reconnected.client, .server = reconnected.server };
     try emptyExchange(&setup, .blocks_by_root_v2, &.{}, false, 139);
     try std.testing.expectEqual(@as(u64, 2), setup.shared.server.reqresp.counters.admitted);
-    try std.testing.expectEqual(@as(u64, 2), setup.shared.server.reqresp.counters.peer_refusals);
+    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.peer_refusals);
 }
 
 fn changeClientIdentity(setup: *harness.Pair, seed: u8) !void {
@@ -559,10 +609,15 @@ test "reqresp request admission distinct identity peer aggregate and retained ca
         try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
         try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, true, 0);
         try changeClientIdentity(&setup, 3);
-        try emptyExchange(&setup, .blocks_by_root_v2, &.{}, identities == 2, 139);
-        try emptyExchange(&setup, .blob_sidecars_by_root_v1, &.{}, false, 139);
+        if (identities == 1) {
+            try refusedStart(&setup, .blocks_by_root_v2);
+            try refusedStart(&setup, .blob_sidecars_by_root_v1);
+        } else {
+            try emptyExchange(&setup, .blocks_by_root_v2, &.{}, true, 0);
+            try waitExchange(&setup, .blob_sidecars_by_root_v1, &.{});
+        }
         try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.peer_refusals);
         try std.testing.expectEqual(@as(u64, if (identities == 1) 2 else 0), setup.shared.server.reqresp.counters.identity_capacity_refusals);
-        try std.testing.expectEqual(@as(u64, if (identities == 2) 1 else 0), setup.shared.server.reqresp.counters.aggregate_refusals);
+        try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.counters.aggregate_refusals);
     }
 }
