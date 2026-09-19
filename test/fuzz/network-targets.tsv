@@ -6,5 +6,5 @@ network_managed	initial	302	none
 network_identify	initial	82021	none
 network_topic_policy	initial	256	none
 network_tls	initial	4096	quiche
-network_quic_receive	initial	65527	quiche
+network_quic_receive	initial	1500	quiche
 discv5_wire	initial	1281	none

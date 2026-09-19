@@ -4,6 +4,7 @@ import {createHash} from "node:crypto";
 import {
   access,
   chmod,
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -25,6 +26,25 @@ import {collectFiles, sha256} from "../../scripts/lodestar_package_io.mjs";
 const exec = promisify(execFile);
 const tool = new URL("../../scripts/lodestar_package.mjs", import.meta.url);
 const temporaryDirectories = [];
+
+test("packed package metadata permits packing transformations and rejects unrelated changes", async () => {
+  const {assertPackedPackageJson} = await import("../../scripts/lodestar_package_archive.mjs");
+  const source = {
+    dependencies: {example: "1.2.3"},
+    name: "example",
+    packageManager: "pnpm@10.24.0",
+    scripts: {prepare: "build", test: "test"},
+    version: "1.0.0",
+  };
+  const packed = {dependencies: {example: "1.2.3"}, name: "example", scripts: {test: "test"}, version: "1.0.0"};
+  assertPackedPackageJson(source, packed);
+  assert.throws(() => assertPackedPackageJson(source, {...packed, dependencies: {example: "2.0.0"}}), {
+    code: "PackedPackageJsonMismatch",
+  });
+  assert.throws(() => assertPackedPackageJson(source, {...packed, scripts: {install: "unexpected"}}), {
+    code: "PackedPackageJsonMismatch",
+  });
+});
 
 function fixtureCommand(program, args, cwd) {
   return exec(program, args, {cwd, encoding: "utf8", timeout: 20_000});
@@ -122,7 +142,10 @@ async function fixture({extraFiles = {}, networkSource} = {}) {
   for (const [path, source] of Object.entries(extraFiles)) {
     await writeFile(join(nativeDir, path), source);
   }
-  await writeFile(join(nativeDir, "zig-out", "lib", "bindings.node"), "fixture-addon\n");
+  await copyFile(
+    new URL("../../zig-out/lib/bindings.node", import.meta.url),
+    join(nativeDir, "zig-out", "lib", "bindings.node")
+  );
   await writeFile(
     join(nativeDir, "prepare.cjs"),
     'require("node:fs").writeFileSync("prepare-ran", "yes"); process.exit(23);\n'
@@ -290,7 +313,10 @@ test("install and verify use a relocated archive without the native checkout", a
     root
   );
   assert.equal(verified.exitCode, 0, JSON.stringify(verified));
-  const result = JSON.parse(await readFile(join(evidenceDir, "install-evidence.json"), "utf8")).verification;
+  const evidence = JSON.parse(await readFile(join(evidenceDir, "install-evidence.json"), "utf8"));
+  assert.equal(evidence.activation, "activated");
+  assert.equal(JSON.parse(await readFile(join(evidenceDir, "install-prepared.json"), "utf8")).activation, "prepared");
+  const result = evidence.verification;
   assert.equal(result.archive.sha256.length, 64);
   assert.equal(result.resolutions.packageRoots.length, 1);
   assert.equal(result.installed.addon.sha256, result.manifest.addon.sha256);

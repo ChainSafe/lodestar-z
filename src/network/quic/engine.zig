@@ -80,6 +80,7 @@ pub const Counters = struct {
     version_negotiations: u64 = 0,
     retries: u64 = 0,
     path_changes: u64 = 0,
+    keylog_dropped: u64 = 0,
 };
 
 pub const ReceiveOutcome = union(enum) {
@@ -246,7 +247,20 @@ pub const Engine = struct {
         assert(out.len >= tls.keylog_capacity);
         const slot = &self.registry.slots[index];
         if (slot.state == .free) return 0;
+        self.collectKeylogDrops(index);
         return slot.takeKeylog(out);
+    }
+
+    fn collectKeylogDrops(self: *Engine, index: u16) void {
+        if (!self.limits.keylog) return;
+        const state = &self.registry.slots[index].handshake;
+        self.counters.keylog_dropped +|= state.keylog_dropped;
+        state.keylog_dropped = 0;
+    }
+
+    fn retire(self: *Engine, index: u16) void {
+        self.collectKeylogDrops(index);
+        self.registry.retire(index);
     }
 
     pub fn failSend(self: *Engine, index: u16) void {
@@ -331,7 +345,7 @@ pub const Engine = struct {
             return error.OpenFailed;
         };
         self.registry.addRoute(&slot.scid, index) catch {
-            self.registry.retire(index);
+            self.retire(index);
             return error.TableFull;
         };
         self.registry.dialing += 1;
@@ -371,7 +385,7 @@ pub const Engine = struct {
         }
         assert(conn.index < self.registry.slots.len);
         assert(self.registry.active_len > 0);
-        self.registry.retire(conn.index);
+        self.retire(conn.index);
         self.host_work_pending = true;
         return true;
     }
@@ -578,7 +592,7 @@ pub const Engine = struct {
             return drop(&self.counters.recv_errors);
         };
         self.registry.addRoute(&slot.scid, index) catch {
-            self.registry.retire(index);
+            self.retire(index);
             return drop(&self.counters.dropped_full);
         };
         assert(slot.scid.eql(&header.dcid));
@@ -699,7 +713,7 @@ pub const Engine = struct {
                 assert(slot.path_changed_pending == null);
                 assert(slot.close_event != .pending);
                 assert(slot.table.pending == 0);
-                self.registry.retire(index);
+                self.retire(index);
                 continue;
             }
             cursor += 1;

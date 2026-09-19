@@ -3,7 +3,6 @@ const ct = @import("consensus_types");
 const t = @import("types.zig");
 pub const Protocol = @import("../reqresp/protocol.zig").Protocol;
 pub const status_size_max = 92;
-pub const metadata_size_max = 25;
 pub const Error = error{
     InvalidLength,
     InvalidEncoding,

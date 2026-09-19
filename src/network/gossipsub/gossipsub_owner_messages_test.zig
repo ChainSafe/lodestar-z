@@ -873,20 +873,24 @@ test "gossipsub IHAVE maximum advertisement shares oversized allowance with data
 }
 
 test "gossip pending validation quota preserves room for another peer and refunds completed work" {
-    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = 4 });
-    defer g.deinit();
-    const first = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
-    const second = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
-    try std.testing.expect(g.subscribe("/eth2/01020304/beacon_block/ssz_snappy"));
-    var events: [1]Event = undefined;
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "first", 1, &events));
-    const held = events[0].message.handle;
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "second", 2, &events));
-    try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, first.index, "third", 3, &events));
-    try std.testing.expectEqual(@as(u64, 1), g.counters.message_capacity_refusals);
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, second.index, "other peer", 4, &events));
-    try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(held, .ignore, .{ .mono_ms = 5, .unix_s = 0 }));
-    try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "third", 6, &events));
+    for ([_]bool{ false, true }) |planned| {
+        var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .validation_capacity = if (planned) 4 * @import("../gossip_processor/limits.zig").kind_count else 4, .processor_limits = if (planned) @as(@import("../gossip_processor/limits.zig").Limits, @splat(.{ .items = 4, .bytes = 4096 })) else null });
+        defer g.deinit();
+        const first = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+        const second = support.addPeer(&g, .{ .index = 1, .generation = 1 }, .v1_2).?;
+        try std.testing.expect(g.subscribe("/eth2/01020304/beacon_block/ssz_snappy"));
+        var events: [1]Event = undefined;
+        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "first", 1, &events));
+        const held = events[0].message.handle;
+        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "second", 2, &events));
+        try std.testing.expectEqual(@as(?usize, 0), try testMessage(&g, first.index, "third", 3, &events));
+        try std.testing.expectEqual(@as(u64, 1), g.counters.message_capacity_refusals);
+        try std.testing.expectEqual(@as(u64, 1), g.messages.storage_refusals[@intFromEnum(@import("messages.zig").StorageRefusal.peer_validations)]);
+        try std.testing.expectEqual(@as(f64, 0), g.peers.score(g.sessions.rows[first.index].logical, 3));
+        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, second.index, "other peer", 4, &events));
+        try std.testing.expectEqual(ReportOutcome{ .applied = .ignore }, g.report(held, .ignore, .{ .mono_ms = 5, .unix_s = 0 }));
+        try std.testing.expectEqual(@as(?usize, 1), try testMessage(&g, first.index, "third", 6, &events));
+    }
 }
 
 test "gossip unsent IWANT expiry refunds recovery slots without blaming the peer" {

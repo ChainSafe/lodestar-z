@@ -109,6 +109,8 @@ run_round() {
 
         local extra_args=()
         if [[ -n "${NETWORK_INPUT_MAX[$target]:-}" ]]; then extra_args=(-G "${NETWORK_INPUT_MAX[$target]}"); fi
+        local dictionary="${FUZZ_DIR}/dictionaries/${target}.dict"
+        if test -f "$dictionary"; then extra_args+=(-x "$dictionary"); fi
         afl-fuzz "${extra_args[@]}" \
             -i "$input_dir" \
             -o "$output_dir" \

@@ -101,7 +101,7 @@ pub const Snapshot = struct {
         const thresholds = try w.family(.{
             .name = "gossipsub_peers_by_score_threshold_count",
             .kind = .gauge,
-            .help = "Connected gossip peers at or above configured thresholds",
+            .help = "Connected gossip peers at or above configured thresholds; mesh uses zero",
             .labels = &.{"threshold"},
         });
         inline for (.{ "graylist", "publish", "gossip", "mesh" }) |threshold|

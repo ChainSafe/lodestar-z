@@ -1123,6 +1123,7 @@ fn quiescenceRequest(mode: enum { fin, selection, borrowed }) !void {
     var opts = @import("managed_test_support.zig").options();
 
     const quotas = @import("reqresp/admission_fixture.zig").quotas(1000, 1000);
+    opts.service.reqresp.policy = null;
     opts.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 4, .peer = quotas, .global = quotas } };
     try setup.initOwnersWithOptions(&.{}, opts);
     defer setup.deinit();

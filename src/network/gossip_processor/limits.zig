@@ -30,6 +30,15 @@ pub fn bytes(limits: *const Limits) usize {
 
 pub const priority = [_]Kind{ .beacon_block, .blob_sidecar, .data_column_sidecar, .beacon_aggregate_and_proof, .voluntary_exit, .bls_to_execution_change, .beacon_attestation, .proposer_slashing, .attester_slashing, .sync_committee_contribution_and_proof, .sync_committee, .light_client_finality_update, .light_client_optimistic_update };
 
+comptime {
+    std.debug.assert(priority.len == kind_count);
+    var seen = std.StaticBitSet(kind_count).initEmpty();
+    for (priority) |kind| {
+        std.debug.assert(!seen.isSet(@intFromEnum(kind)));
+        seen.set(@intFromEnum(kind));
+    }
+}
+
 pub fn urgent(kind: Kind) bool {
     return kind == .beacon_block or kind == .blob_sidecar or kind == .data_column_sidecar;
 }

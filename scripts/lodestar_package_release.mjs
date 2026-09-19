@@ -48,6 +48,8 @@ export async function prepareRelease(source, destination, activeLink, evidenceDi
     contains(sourceRoot, active) ||
     contains(sourceRoot, evidence) ||
     contains(release, active) ||
+    contains(active, release) ||
+    contains(active, evidence) ||
     contains(evidence, active) ||
     contains(evidence, release)
   ) {
@@ -66,6 +68,7 @@ export async function prepareRelease(source, destination, activeLink, evidenceDi
 
 export async function copyRelease(release) {
   const queue = [""];
+  const links = [];
   let entries = 0;
   let bytes = 0;
   while (queue.length > 0) {
@@ -96,8 +99,16 @@ export async function copyRelease(release) {
         if (!contains(release.source, resolved)) fail("ExternalReleaseLink", source);
         const relocated = join(release.directory, relative(release.source, linked));
         await symlink(relative(dirname(target), relocated), target);
+        links.push(target);
       } else fail("ReleaseFileType", source);
     }
+  }
+  for (const link of links) {
+    const resolved = await realpath(link).catch((error) => {
+      if (error.code === "ENOENT" || error.code === "ELOOP") fail("MissingReleaseLinkTarget", link);
+      throw error;
+    });
+    if (!contains(release.directory, resolved)) fail("ExternalReleaseLink", link);
   }
   return {bytes, entries};
 }

@@ -338,7 +338,7 @@ pub fn frameLengthMax(data_len: usize) usize {
 
 pub fn encodedLengthMax(ssz_len: usize) usize {
     assert(ssz_len <= constants.MAX_PAYLOAD_SIZE);
-    const per_frame = frame_header_length + checksum_length + 32;
+    const per_frame = frame_header_length + checksum_length + @import("../constants.zig").snappy_overhead;
     return header_max + frameCount(ssz_len) * per_frame + ssz_len + ssz_len / 6;
 }
 

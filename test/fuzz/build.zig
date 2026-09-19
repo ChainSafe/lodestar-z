@@ -28,15 +28,23 @@ pub fn build(b: *std.Build) void {
     const quiche_module = lodestar_z.module("network").import_table.get("quiche_zig:quiche").?;
     const quiche_objects = [_]std.Build.LazyPath{quiche_module.link_objects.items[0].static_path};
     std.debug.assert(quiche_module.link_objects.items.len == 1);
+    const network_fixture = b.createModule(.{
+        .root_source_file = b.path("tools/network_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    network_fixture.addImport("network", lodestar_z.module("network"));
     const seeds_module = b.createModule(.{
         .root_source_file = b.path("tools/network_corpus.zig"),
         .target = target,
         .optimize = optimize,
     });
+    seeds_module.addImport("network_fixture", network_fixture);
     seeds_module.addImport("network", lodestar_z.module("network"));
     seeds_module.addImport("discv5", lodestar_z.module("discv5"));
     const seeds = b.addRunArtifact(b.addExecutable(.{ .name = "network_corpus", .root_module = seeds_module }));
     seeds.setCwd(b.path("."));
+    if (b.args) |args| seeds.addArgs(args);
     b.step("network-corpus", "Generate valid QUIC TLS and DiscV5 fuzz seeds").dependOn(&seeds.step);
 
     // Tool: extract corpus seeds from spec test vectors
@@ -71,6 +79,7 @@ pub fn build(b: *std.Build) void {
         extra_libs: []const *std.Build.Step.Compile = &.{},
         extra_objects: []const std.Build.LazyPath = &.{},
         extra_args: []const []const u8 = &.{},
+        input_max: ?u32 = null,
 
         /// Returns the corpus directory path for this fuzzer.
         /// Change the suffix to switch between -cmin and -initial.
@@ -107,7 +116,7 @@ pub fn build(b: *std.Build) void {
         var fields = std.mem.tokenizeAny(u8, row, " \t");
         const name = fields.next().?;
         const corpus = fields.next().?;
-        _ = std.fmt.parseInt(u32, fields.next().?, 10) catch @panic("invalid network fuzz input bound");
+        const input_max = std.fmt.parseInt(u32, fields.next().?, 10) catch @panic("invalid network fuzz input bound");
         const link = fields.next().?;
         std.debug.assert(fields.next() == null);
         const snappy = std.mem.eql(u8, link, "snappy");
@@ -116,6 +125,7 @@ pub fn build(b: *std.Build) void {
         fuzzers.append(b.allocator, .{
             .name = name,
             .corpus_suffix = corpus,
+            .input_max = input_max,
             .extra_libs = if (snappy) &snappy_libs else &.{},
             .extra_objects = if (quiche) &quiche_objects else &.{},
             .extra_args = if (snappy or quiche) &.{ "-lc++", "-lc++abi", "-lunwind" } else &.{},
@@ -149,6 +159,7 @@ pub fn build(b: *std.Build) void {
         );
         lib_mod.addImport("network_wire", lodestar_z.module("network_wire"));
         lib_mod.addImport("network", lodestar_z.module("network"));
+        lib_mod.addImport("network_fixture", network_fixture);
 
         const lib = b.addLibrary(.{
             .name = fuzzer.name,
@@ -164,12 +175,26 @@ pub fn build(b: *std.Build) void {
         mkdir.addDirectoryArg(
             b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
         );
-        const run = afl.addFuzzerRun(
-            b,
-            exe,
-            b.path(fuzzer.corpus(b)),
-            b.path(b.fmt("afl-out/{s}", .{fuzzer.name})),
-        );
+        const run = b.addSystemCommand(&.{b.findProgram(&.{"afl-fuzz"}, &.{}) catch @panic("afl-fuzz is required")});
+        run.addArg("-i");
+        run.addDirectoryArg(b.path(fuzzer.corpus(b)));
+        run.addArg("-o");
+        run.addDirectoryArg(b.path(b.fmt("afl-out/{s}", .{fuzzer.name})));
+        if (fuzzer.input_max) |maximum| run.addArgs(&.{ "-G", b.fmt("{d}", .{maximum}) });
+        const dictionary = b.fmt("dictionaries/{s}.dict", .{fuzzer.name});
+        const has_dictionary = found: {
+            b.build_root.handle.access(b.graph.io, dictionary, .{}) catch |err| switch (err) {
+                error.FileNotFound => break :found false,
+                else => @panic("cannot read fuzz dictionary"),
+            };
+            break :found true;
+        };
+        if (has_dictionary) {
+            run.addArg("-x");
+            run.addFileArg(b.path(dictionary));
+        }
+        run.addArg("--");
+        run.addFileArg(exe);
         run.step.dependOn(&mkdir.step);
         run_step.dependOn(&run.step);
 

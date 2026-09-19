@@ -15,6 +15,8 @@ pub const allocator = std.heap.c_allocator;
 pub const State = enum { starting, prepared, running, stopping, closed, failed };
 pub const Reason = enum { requested, startupCancelled, failed };
 pub const Notify = napi.ThreadSafeFunction(Runtime, void);
+// Shared across Node environments. Each runtime releases its instance reservation on teardown;
+// session IDs never reset and their allocation is serialized by session_mutex.
 var instances = std.atomic.Value(u32).init(0);
 var sessions: u64 = 0;
 var session_mutex: std.Io.Mutex = .init;
@@ -220,14 +222,14 @@ pub const Runtime = struct {
             table.cells = &.{};
         }
     }
-    pub fn retireStoresLocked(self: *Runtime) void {
+    fn retireStoresLocked(self: *Runtime) void {
         if (!self.quiescent or self.table.occupied != 0) return;
         if (self.stores) |stores| {
             stores.destroy();
             self.stores = null;
         }
     }
-    pub fn destroyOwner(self: *Runtime) void {
+    fn destroyOwner(self: *Runtime) void {
         if (self.heavy) |heavy| {
             if (heavy.core_live) {
                 heavy.core.shutdown(@import("network_owner.zig").now(heavy.threaded.io()));

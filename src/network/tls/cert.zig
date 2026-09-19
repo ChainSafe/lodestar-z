@@ -45,7 +45,7 @@ pub const Certificate = struct {
     }
 };
 
-pub fn encodeDer(x509: *c.X509, out: []u8) Error![]u8 {
+fn encodeDer(x509: *c.X509, out: []u8) Error![]u8 {
     const length = c.i2d_X509(x509, null);
     if (length <= 0 or length > out.len) return error.EncodeFailed;
     var cursor: [*c]u8 = out.ptr;

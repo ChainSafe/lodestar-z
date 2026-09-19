@@ -15,6 +15,51 @@ const snappy = @import("snappy");
 const support = @import("test_support.zig");
 const testMessage = support.message;
 
+test "gossip accepts a full namespace subscription transition in one RPC" {
+    const policy = @import("topic_policy.zig");
+    var boundary: policy.Boundary = .{ .digest = .{ 1, 2, 3, 4 } };
+    var topic_count: usize = 0;
+    for (std.enums.values(topic_mod.Kind)) |kind| {
+        boundary.rules[@intFromEnum(kind)] = .{ .count = kind.countMax(), .ssz_min = 1, .ssz_max = 1024 };
+        topic_count += kind.countMax();
+    }
+    var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1, .topic_policy = &.{boundary} });
+    defer g.deinit();
+    const peer = support.addPeer(&g, .{ .index = 0, .generation = 1 }, .v1_2).?;
+    var bytes: [64 * 1024]u8 = undefined;
+    var writer = protobuf.Writer.init(&bytes);
+    for ([_]bool{ true, false }) |subscribed| {
+        for (std.enums.values(topic_mod.Kind)) |kind| {
+            for (0..kind.countMax()) |subnet| {
+                var suffix_buffer: [topic_mod.name_max_len]u8 = undefined;
+                const suffix = if (kind.countMax() == 1) @tagName(kind) else try std.fmt.bufPrint(&suffix_buffer, "{s}_{d}", .{ @tagName(kind), subnet });
+                var topic: [topic_mod.topic_max_len]u8 = undefined;
+                const name = topic_mod.build(boundary.digest, suffix, &topic);
+                if (subscribed) try std.testing.expect(g.subscribe(name));
+                protobuf.writeSubscription(&writer, subscribed, name);
+            }
+        }
+    }
+    const io = &g.sessions.rows[peer.index].io;
+    io.startRpc(writer.written());
+    var received: usize = 0;
+    for (0..128) |_| {
+        var events: [16]Event = undefined;
+        var count: usize = 0;
+        var items: usize = 16;
+        const done = try support.processRpc(&g, peer.index, .{ .mono_ms = 1, .unix_s = 1 }, &events, &count, &items);
+        for (events[0..count]) |event| {
+            try std.testing.expect(event == .subscription_change);
+            try std.testing.expectEqual(received < topic_count, event.subscription_change.subscribed);
+            received += 1;
+        }
+        if (done) break;
+    }
+    try std.testing.expectEqual(2 * topic_count, received);
+    try std.testing.expectEqual(@as(usize, 0), g.resourceSnapshot().remote_subscriptions);
+    _ = g.sessions.finishFrame(io);
+}
+
 test "gossipsub IHAVE security ignores unknown and unsubscribed topics through RPC decoding" {
     var g = try Gossipsub.init(std.testing.allocator, .{ .random_seed = 1 });
     defer g.deinit();

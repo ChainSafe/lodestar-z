@@ -93,3 +93,26 @@ test("release preflight leaves template untouched when missing parent paths over
   await assert.rejects(access(f.evidence), {code: "ENOENT"});
   await assert.rejects(access(f.destination), {code: "ENOENT"});
 });
+
+test("release preflight rejects children of the activation path without creating directories", async () => {
+  const f = await fixture();
+  for (const [destination, evidence] of [
+    [join(f.active, "release"), f.evidence],
+    [f.destination, join(f.active, "evidence")],
+  ]) {
+    await assert.rejects(prepareRelease(f.source, destination, f.active, evidence), {code: "OverlappingReleasePaths"});
+  }
+  await assert.rejects(access(f.active), {code: "ENOENT"});
+  await assert.rejects(access(f.evidence), {code: "ENOENT"});
+});
+
+test("release copy rejects links to omitted or absent targets", async () => {
+  for (const target of [".git/config", "missing"]) {
+    const f = await fixture();
+    await mkdir(join(f.source, ".git"));
+    await writeFile(join(f.source, ".git/config"), "configuration");
+    await symlink(target, join(f.source, "link"));
+    const release = await prepareRelease(f.source, f.destination, f.active, f.evidence);
+    await assert.rejects(copyRelease(release), {code: "MissingReleaseLinkTarget"});
+  }
+});

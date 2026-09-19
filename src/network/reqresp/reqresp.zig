@@ -298,6 +298,7 @@ pub const ReqResp = struct {
     }
 
     pub fn validateOptions(options: Options) InitError!struct { peer: limiter_mod.Quotas, global: limiter_mod.Quotas } {
+        if (options.policy != null and options.admission != null) return error.InvalidOptions;
         if (options.admission) |*admission| {
             _ = try request_policy.Policy.init(&admission.policy);
             try admission_mod.Limiter.validate(&admission.limits);

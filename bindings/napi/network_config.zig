@@ -62,7 +62,7 @@ pub fn bigint(value: Value) !u64 {
     if (!lossless) return error.InvalidNetworkInteger;
     return result;
 }
-pub fn optionalBigint(value: Value) !?u64 {
+fn optionalBigint(value: Value) !?u64 {
     return if (try value.typeof() == .null) null else try bigint(value);
 }
 pub fn boolean(value: Value) !bool {

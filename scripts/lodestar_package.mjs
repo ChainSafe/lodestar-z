@@ -10,6 +10,7 @@ import {
   assertPackageExports,
   collectPackSources,
   inspectArchive,
+  inspectNativeExports,
   validateBuildRecord,
   verifyArchiveSources,
   verifyManifestArchive,
@@ -162,7 +163,7 @@ async function pack(nativeDir, out, buildRecordPath) {
     const sourceFilesBefore = await collectPackSources(nativeDir, packageJson);
     command = await runCommand("pnpm", packArgs, nativeDir);
     const inspected = await inspectArchive(temporaryArchive, expectedAddon, runCommand);
-    await verifyArchiveSources(nativeDir, inspected.files);
+    await verifyArchiveSources(nativeDir, inspected.files, inspected.packageJson);
     const sourceFilesAfter = await collectPackSources(nativeDir, packageJson);
     assertSameInventory(sourceFilesBefore, sourceFilesAfter, "SourceChangedDuringPack");
     if (JSON.stringify(packageJson.exports) !== JSON.stringify(inspected.packageJson.exports)) {
@@ -333,12 +334,13 @@ async function verifyInstalled(hostDir, manifestPath, verifiedArchive) {
   if (addon.bytes !== archiveState.manifest.addon.bytes || addon.sha256 !== archiveState.manifest.addon.sha256) {
     fail("InstalledAddonMismatch", JSON.stringify(addon));
   }
+  const native = await inspectNativeExports(addonPath, runCommand);
   const head = await runCommand("git", ["rev-parse", "HEAD"], hostDir, {allowFailure: true});
   return {
     archive: archiveState.manifest.archive,
     archiveExternalNamespaces: archiveState.inspected.externalNamespaces,
     host: {head: head.exitCode === 0 ? head.stdout.trim() : null},
-    installed: {addon, files: installedFiles, packageRoot},
+    installed: {addon, files: installedFiles, native, packageRoot},
     manifest: archiveState.manifest,
     manifestSha256: archiveState.manifestSha256,
     ordinaryExports: resolved.exports,
@@ -429,16 +431,19 @@ async function install(hostDir, manifestPath, evidenceDir, releaseDir, activeLin
     const copied = await copyRelease(release);
     const evidence = await installWithEvidence(release.directory, manifestPath, evidenceDir, archiveState);
     evidence.release = {...release, copied};
-    await writeFile(join(evidenceDir, "install-evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`, {flag: "wx"});
+    evidence.activation = "prepared";
+    await writeFile(join(evidenceDir, "install-prepared.json"), `${JSON.stringify(evidence, null, 2)}\n`, {flag: "wx"});
     await activateRelease(release);
     published = true;
+    evidence.activation = "activated";
+    await writeFile(join(evidenceDir, "install-evidence.json"), `${JSON.stringify(evidence, null, 2)}\n`, {flag: "wx"});
     return evidence;
   } catch (error) {
     const failurePath = join(evidenceDir, "install-failure.json");
     if (!(await exists(failurePath))) {
       await writeFile(
         failurePath,
-        `${JSON.stringify({failure: structuredError(error).error, manifestPath}, null, 2)}\n`,
+        `${JSON.stringify({activation: published ? "activated" : "failed", failure: structuredError(error).error, manifestPath}, null, 2)}\n`,
         {flag: "wx"}
       );
     }

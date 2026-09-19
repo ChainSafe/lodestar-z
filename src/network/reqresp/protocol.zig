@@ -39,10 +39,6 @@ pub const Protocol = enum(u8) {
         return ids[@intFromEnum(self)];
     }
 
-    pub fn method(self: Protocol) []const u8 {
-        return methods[@intFromEnum(self)];
-    }
-
     pub fn fromId(candidate: []const u8) ?Protocol {
         assert(ids.len == count);
         if (candidate.len > id_length_max) return null;
@@ -59,7 +55,7 @@ pub const Protocol = enum(u8) {
         };
     }
 
-    pub fn responseFamily(self: Protocol) ?response_bounds.Family {
+    fn responseFamily(self: Protocol) ?response_bounds.Family {
         return switch (self) {
             .blocks_by_range_v2, .blocks_by_root_v2, .blocks_by_head_v1 => .block,
             .blob_sidecars_by_range_v1, .blob_sidecars_by_root_v1 => .blob,

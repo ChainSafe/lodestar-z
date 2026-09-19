@@ -164,7 +164,7 @@ jobs:
   network-bindings-lifecycle:
     name: Network bindings lifecycle (${{ matrix.preset }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -189,11 +189,15 @@ jobs:
           node --test test/interop/stock_packages.test.mjs
       - name: Check network declarations and tests
         run: pnpm typecheck:network
-      - name: Build instrumented bindings and independent native peer
+      - name: Build and test the native network and bindings
         run: |
+          zig build test:network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
+          zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- baseline
+          zig build run:bench_network -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -- small
           zig build test:reqresp_peer_bounds -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
           zig build test:network_runtime -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
           zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }} -Dnetwork_runtime_options.network_runtime_test_failures=true
+          node scripts/check_network_addon.mjs zig-out/lib/bindings.node instrumented
           zig build build-exe:network_interop_peer -Doptimize=ReleaseSafe -Dpreset=${{ matrix.preset }}
       - name: Run lifecycle and loopback binding suites
         env:
@@ -533,7 +537,10 @@ jobs:
         run: |
           cd test/fuzz
           zig build build-network -Doptimize=ReleaseSafe
-          ./smoke-network.sh
+          generated=$(mktemp -d)
+          zig build network-corpus -Doptimize=ReleaseSafe -- "$generated"
+          bash ./check-network-corpus.sh "$generated"
+          NETWORK_GENERATED_CORPUS="$generated" ./smoke-network.sh
 
   bindings-test:
     name: bindings - test
@@ -562,6 +569,8 @@ jobs:
       - name: Build bindings
         run: |
           zig build build-lib:bindings -Doptimize=ReleaseSafe
+          node scripts/check_network_addon.mjs zig-out/lib/bindings.node normal
+          pnpm test:network-package
       - name: Restore era files cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -601,6 +610,8 @@ jobs:
       - name: Build release artifacts
         run: |
           pnpm zapi build-artifacts --optimize ReleaseSafe
+      - name: Install and load the packed native platform package
+        run: node scripts/check_network_package.mjs
 
   # metrics_stf depends on httpz, which is temporarily disabled for Zig 0.16 migration
   # build-examples:

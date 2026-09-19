@@ -6,13 +6,8 @@ const assert = std.debug.assert;
 
 pub const Error = error{ FrameTooLarge, VarintTooLong };
 
-/// The bytes an unsigned-varint length prefix needs for a frame of `body_len`.
-pub fn prefixLen(body_len: usize) usize {
-    return protobuf.varintLen(body_len);
-}
-
 /// Writes `body` framed with its unsigned-varint length prefix into `out` and
-/// returns the framed slice. `out` must hold `prefixLen(body.len) + body.len`.
+/// returns the framed slice. `out` must hold `protobuf.varintLen(body.len) + body.len`.
 pub fn writeFrame(out: []u8, body: []const u8) []const u8 {
     var writer = protobuf.Writer.init(out);
     writer.varint(body.len);

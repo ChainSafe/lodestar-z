@@ -65,7 +65,7 @@ fn parseArgs(args: []const [:0]const u8) !Options {
             options.blocks = try std.fmt.parseInt(u32, value, 10);
         } else return error.Usage;
     }
-    if (index != args.len) return error.Usage;
+    if (index != args.len or options.blocks == 0 or options.blocks > steps_max) return error.Usage;
     return options;
 }
 
@@ -111,13 +111,16 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     try node.init(allocator, io, .{ .host = &key, .bind = .single(bind) });
     defer node.deinit(io);
 
+    const plan = try network.chain.Plan.init(options.network.config, false);
     var gossip_seed: [8]u8 = undefined;
     try io.randomSecure(&gossip_seed);
-    var service = try Service.init(allocator, .{ .gossipsub = .{ .random_seed = std.mem.readInt(u64, &gossip_seed, .little) }, .reqresp = .{
+    var service = try Service.init(allocator, .{ .gossipsub = .{ .random_seed = std.mem.readInt(u64, &gossip_seed, .little), .topic_policy = plan.topics[0..plan.supported_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } }, .reqresp = .{
         .outbound_max = 4,
         .inbound_max = 4,
         .inbound_per_peer_max = 4,
-        .forks = &.{},
+        .forks = plan.forks[0..plan.supported_count],
+        .policy = plan.requestPolicy(),
+        .request_fork = options.network.config.forkSeqAtEpoch(currentEpoch(options.network, (try network.transport.currentTime(io)).unix_s)),
     } });
     defer service.deinit();
     defer service.reqresp.shutdown(&node.engine, &service.router);
@@ -131,9 +134,10 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     var topic_buf: [gossipsub.topic.topic_max_len]u8 = undefined;
     var beacon_block: []const u8 = &.{};
     var fork: config.ForkSeq = .fulu;
-    var received: u32 = 0;
+    var received_frames: u32 = 0;
+    var decoded_blocks: u32 = 0;
     var steps: u32 = 0;
-    while (steps < steps_max and received < options.blocks) : (steps += 1) {
+    while (steps < steps_max and decoded_blocks < options.blocks) : (steps += 1) {
         const now = try network.transport.currentTime(io);
         const due = service.nextWakeup(now, .{ .control = request_events.len, .gossipsub = gossip_events.len });
         const wait_ms: u32 = @intCast(@min(network.constants.poll_interval_ms, if (due) |deadline| deadline -| now.mono_ms else network.constants.poll_interval_ms));
@@ -156,7 +160,7 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             else => {},
         };
         if (!subscribed and beacon_block.len > 0) {
-            _ = service.gossipsub.subscribe(beacon_block);
+            if (!service.gossipsub.subscribe(beacon_block)) return error.SubscriptionRefused;
             subscribed = true;
         }
         const transport_events = events[0..result.events];
@@ -164,11 +168,13 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         try serveRequests(&service, request_events[0..counts.control], result.now);
         for (gossip_events[0..counts.gossipsub]) |event| switch (event) {
             .message => |m| {
+                received_frames += 1;
+                defer _ = service.gossipsub.report(m.handle, .ignore, result.now);
                 printBlock(allocator, m.bytes, fork) catch |err| {
                     std.debug.print("decode failed: {s}\n", .{@errorName(err)});
+                    continue;
                 };
-                _ = service.gossipsub.report(m.handle, .ignore, result.now);
-                received += 1;
+                decoded_blocks += 1;
             },
             .subscription_change => |change| {
                 std.debug.print("peer subscribed={} {s}\n", .{ change.subscribed, change.topic });
@@ -176,7 +182,8 @@ fn dial(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         };
         if (stepped.failure) |err| return err;
     }
-    if (received == 0) return error.NoBlock;
+    std.debug.print("observer received_frames={} decoded_blocks={} requested_blocks={}\n", .{ received_frames, decoded_blocks, options.blocks });
+    if (decoded_blocks < options.blocks) return error.InsufficientBlocks;
     _ = node.engine.close(conn, 0);
     if (node.step(io, &events, &activity, .{}).failure) |err| return err;
 }

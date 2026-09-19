@@ -127,6 +127,9 @@ test "transport appends TLS key material to the configured keylog file" {
     _ = try support.step(&dialer, std.testing.io, &dialer_events, &activity, .{ .wait_max_ms = 0 });
     const written = try tmp.dir.statFile(std.testing.io, "keys.log", .{});
     try std.testing.expect(written.size > 0);
+    if (@import("builtin").os.tag != .windows) {
+        try std.testing.expectEqual(@as(u32, 0o600), @intFromEnum(written.permissions) & 0o777);
+    }
     try std.testing.expectEqual(written.size, dialer.keylog_offset);
 }
 
