@@ -93,7 +93,7 @@ pub const Table = struct {
         }
         return error.NetworkCommandFull;
     }
-    pub fn nextQueued(self: *Table) ?Token {
+    fn nextQueued(self: *Table) ?Token {
         var selected: ?Token = null;
         var order: u64 = std.math.maxInt(u64);
         for (&self.cells, 0..) |*cell, i| {
@@ -136,7 +136,7 @@ test "typed reservations unwind and identities never wrap" {
 
 const n = @import("network");
 pub const Command = enum { applyIntent, updateStatus, getIdentity, getPeers, getGossipDiagnostics, connect, disconnect, reStatusPeers, addDirectPeer, removeDirectPeer, getDirectPeers, request, publishGossip };
-pub fn storageKind(command: Command) Kind {
+fn storageKind(command: Command) Kind {
     return switch (command) {
         .applyIntent => .intent,
         .getPeers, .getDirectPeers, .getGossipDiagnostics => .snapshot,

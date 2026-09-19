@@ -112,6 +112,7 @@ pub const Transport = struct {
     keylog: ?std.Io.File = null,
     keylog_offset: u64 = 0,
 
+    /// The I/O provider must honor std.Io.randomSecure's external entropy contract.
     pub fn init(
         target: *Transport,
         allocator: std.mem.Allocator,

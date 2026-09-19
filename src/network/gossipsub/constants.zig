@@ -1,12 +1,10 @@
 const std = @import("std");
 
 /// Maximum uncompressed gossip payload, shared with the req/resp domain.
-pub const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
+pub const MAX_PAYLOAD_SIZE = @import("../constants.zig").MAX_PAYLOAD_SIZE;
 
 /// Snappy's worst-case compressed length for a payload of `n` bytes.
-pub fn maxCompressedLen(n: usize) usize {
-    return 32 + n + n / 6;
-}
+pub const maxCompressedLen = @import("../constants.zig").maxCompressedLen;
 
 /// `GOSSIP_MAX_SIZE`: the bound on a whole encoded RPC frame, per the consensus
 /// p2p-interface `max_message_size()`.
@@ -51,7 +49,8 @@ pub const mcache_gossip: usize = 3;
 pub const default_idontwant_min_data_size: usize = 16 * 1024;
 
 /// Per-RPC and per-heartbeat element caps beyond `GOSSIP_MAX_SIZE`.
-pub const max_subscriptions_per_rpc: usize = 200;
+/// One frame can unsubscribe the old namespace and subscribe the new namespace.
+pub const max_subscriptions_per_rpc: usize = 2 * topics_cap;
 pub const max_publish_per_rpc: usize = 4_096;
 pub const max_control_per_rpc: usize = 4_096;
 pub const max_ihave_per_heartbeat: usize = 10;

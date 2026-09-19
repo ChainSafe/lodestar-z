@@ -10,6 +10,12 @@ for target in "${TARGETS[@]}"; do
     corpus="${FUZZ_DIR}/corpus/${target}-${NETWORK_CORPUS[$target]}"
     test -x "$bin"
     test -d "$corpus"
+    input="$(mktemp -d "/tmp/lodestar-z-corpus-${target}-XXXXXX")"
+    trap 'rm -rf "$input"' EXIT
+    cp "$corpus"/* "$input/"
+    generated="${NETWORK_GENERATED_CORPUS:-}/${target}-${NETWORK_CORPUS[$target]}"
+    if test -n "${NETWORK_GENERATED_CORPUS:-}" && test -d "$generated"; then cp "$generated"/* "$input/"; fi
+    corpus="$input"
     count=0
     for seed in "$corpus"/*; do
         test -f "$seed" || continue
@@ -19,7 +25,10 @@ for target in "${TARGETS[@]}"; do
     done
     test "$count" -gt 0
     output="$(mktemp -d "/tmp/lodestar-z-afl-${target}-XXXXXX")"
-    if ! AFL_SKIP_CPUFREQ=1 AFL_NO_UI=1 afl-fuzz -i "$corpus" -o "$output" -V 3 -G "${NETWORK_INPUT_MAX[$target]}" -- "$bin" >"$output.log" 2>&1; then
+    dictionary_args=()
+    dictionary="${FUZZ_DIR}/dictionaries/${target}.dict"
+    if test -f "$dictionary"; then dictionary_args=(-x "$dictionary"); fi
+    if ! AFL_SKIP_CPUFREQ=1 AFL_NO_UI=1 afl-fuzz "${dictionary_args[@]}" -i "$corpus" -o "$output" -V 3 -G "${NETWORK_INPUT_MAX[$target]}" -- "$bin" >"$output.log" 2>&1; then
         cat "$output.log" >&2
         exit 1
     fi
@@ -29,5 +38,7 @@ for target in "${TARGETS[@]}"; do
             exit 1
         fi
     done
+    rm -rf "$input"
+    trap - EXIT
     echo "$target: $count seeds replayed; three-second AFL smoke passed; evidence $output.log"
 done

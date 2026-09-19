@@ -238,7 +238,7 @@ pub const Overlay = struct {
         return @intCast(index);
     }
 
-    pub fn assignTopic(self: *Overlay, index: u16, copied: []const u8, generation: u64) void {
+    fn assignTopic(self: *Overlay, index: u16, copied: []const u8, generation: u64) void {
         assert(copied.len <= topic_mod.topic_max_len);
         const topic = &self.rows[index];
         assert(topic.generation == generation and generation != std.math.maxInt(u64));

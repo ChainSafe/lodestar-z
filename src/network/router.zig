@@ -6,7 +6,6 @@ const reqresp = @import("reqresp/protocol.zig");
 const capability = @import("capabilities.zig");
 const Version = @import("gossipsub/protocol.zig").Version;
 
-pub const meshsub_ids = @import("gossipsub/protocol.zig").ids;
 pub const Kind = @import("protocol.zig").Kind;
 pub const Protocol = @import("protocol.zig").Protocol;
 

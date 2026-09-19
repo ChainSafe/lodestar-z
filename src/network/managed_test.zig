@@ -166,6 +166,8 @@ test "managed native control distinguishes RPC errors timeouts and local retries
         .{ .failure = .{ .invalid_response = error.Truncated }, .reason = .health_error },
         .{ .failure = .{ .negotiation_failed = .timeout }, .reason = .health_timeout },
         .{ .failure = .host_timeout, .reason = null },
+        .{ .failure = .quota_timeout, .reason = null },
+        .{ .failure = .cancelled, .reason = null },
     }) |case| {
         var setup: Setup = .{};
         try setup.init(&.{});

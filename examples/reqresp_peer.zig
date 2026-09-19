@@ -1,6 +1,5 @@
 const std = @import("std");
 const config = @import("config");
-const constants = @import("constants");
 const ct = @import("consensus_types");
 const fork_types = @import("fork_types");
 const network = @import("network");
@@ -19,7 +18,6 @@ const MetaDataV3 = ct.fulu.MetaDataV3;
 const AnyBlock = fork_types.AnySignedBeaconBlock;
 
 const steps_max = 20_000;
-const forks_max = 16;
 const inbound_max = 2;
 const slots_per_epoch = preset.preset.SLOTS_PER_EPOCH;
 const zeros = [_]u8{0} ** StatusV2.fixed_size;
@@ -84,30 +82,16 @@ fn parseArgs(args: []const [:0]const u8) !Options {
     return options;
 }
 
-fn forkTable(cfg: *const BeaconConfig, out: []reqresp.ForkEntry) []const reqresp.ForkEntry {
-    var len: usize = 0;
-    for (cfg.forks_ascending_epoch_order) |info| len = addFork(cfg, out, len, info.epoch);
-    for (cfg.chain.BLOB_SCHEDULE) |entry| len = addFork(cfg, out, len, entry.EPOCH);
-    return out[0..len];
-}
-
-fn addFork(cfg: *const BeaconConfig, out: []reqresp.ForkEntry, len: usize, epoch: u64) usize {
-    if (epoch == constants.FAR_FUTURE_EPOCH or len == out.len) return len;
-    const digest = config.fork_digest.computeForkDigest(cfg, epoch);
-    for (out[0..len]) |entry| {
-        if (std.mem.eql(u8, &entry.digest, &digest)) return len;
-    }
-    out[len] = .{ .digest = digest, .fork = cfg.forkSeqAtEpoch(epoch) };
-    return len + 1;
-}
-
-fn currentDigest(net: *const Network, unix_s: i64) [4]u8 {
+fn currentEpoch(net: *const Network, unix_s: i64) u64 {
     const chain = net.config.chain;
     const scheduled: i64 = @intCast(chain.MIN_GENESIS_TIME + chain.GENESIS_DELAY);
     const genesis = if (net.genesis_time != 0) net.genesis_time else scheduled;
     const elapsed: u64 = if (unix_s > genesis) @intCast(unix_s - genesis) else 0;
-    const epoch = elapsed / (chain.SECONDS_PER_SLOT * slots_per_epoch);
-    return config.fork_digest.computeForkDigest(net.config, epoch);
+    return elapsed / (chain.SECONDS_PER_SLOT * slots_per_epoch);
+}
+
+fn currentDigest(net: *const Network, unix_s: i64) [4]u8 {
+    return config.fork_digest.computeForkDigest(net.config, currentEpoch(net, unix_s));
 }
 
 fn hex(bytes: anytype) [2 * bytes.len]u8 {
@@ -363,13 +347,13 @@ fn dial(
     const sink = try allocator.alloc(u8, Protocol.blocks_by_range_v2.info().response_max);
     defer allocator.free(sink);
 
-    var table: [forks_max]reqresp.ForkEntry = undefined;
-    var blob_schedule: [reqresp.request_policy.schedule_max]reqresp.request_policy.BlobLimit = undefined;
+    const plan = try network.chain.Plan.init(options.network.config, false);
     var gossip_seed: u64 = undefined;
     io.random(std.mem.asBytes(&gossip_seed));
-    var svc = try network.Service.init(allocator, .{ .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = gossip_seed }, .reqresp = .{
-        .policy = try reqresp.request_policy.Config.fromBeaconConfig(options.network.config, &blob_schedule),
-        .forks = forkTable(options.network.config, &table),
+    var svc = try network.Service.init(allocator, .{ .automatic_gossip_admission = false, .gossipsub = .{ .random_seed = gossip_seed, .topic_policy = plan.topics[0..plan.supported_count], .message_id_policy = .{ .phase0_digest = plan.phase0_digest } }, .reqresp = .{
+        .policy = plan.requestPolicy(),
+        .request_fork = options.network.config.forkSeqAtEpoch(currentEpoch(options.network, (try network.transport.currentTime(io)).unix_s)),
+        .forks = plan.forks[0..plan.supported_count],
         .inbound_max = inbound_max,
         .inbound_per_peer_max = inbound_max,
     } });

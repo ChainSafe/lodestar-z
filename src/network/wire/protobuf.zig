@@ -116,7 +116,7 @@ pub const Writer = struct {
     }
 };
 
-pub fn keySize(field: u32) usize {
+fn keySize(field: u32) usize {
     return varintLen(@as(u64, field) << 3);
 }
 

@@ -45,6 +45,7 @@ test "reqresp complete incoming transfer deadline survives partial bytes and mis
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(usize, 1), setup.serverEvents().len);
         try std.testing.expectEqual(rr.Failure.timeout, setup.serverEvents()[0].failed.reason);
+        try std.testing.expectEqual(slot.request.conn, setup.shared.server.reqresp.incompleteRequestTimeout(setup.serverEvents()[0]).?);
         try setup.pumpOnce();
         try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
     }

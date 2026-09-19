@@ -11,6 +11,8 @@ const goodbye = @import("../peers/goodbye.zig");
 const discovery_metrics = @import("../peers/discovery.zig");
 const outbox = @import("../gossipsub/outbox.zig");
 const score_metrics = @import("scores.zig");
+const control = @import("../peers/control.zig");
+const messages_mod = @import("../gossipsub/messages.zig");
 
 pub const interval_ms = 1_000;
 pub const text_capacity = 512 * 1024;
@@ -75,6 +77,40 @@ comptime {
     }
 }
 
+pub const RequestCapacity = struct {
+    outbound_capacity: usize = 0,
+    inbound_capacity: usize = 0,
+    outbound_control_reserved: usize = 0,
+    inbound_control_reserved: usize = 0,
+};
+pub const RequestResources = struct {
+    outbound_occupied: usize = 0,
+    inbound_occupied: usize = 0,
+    inbound_phases: [rr.reqresp.metrics.inbound_phase_count]usize = @splat(0),
+    pending_events: usize = 0,
+    pending_terminals: usize = 0,
+    held_chunks: usize = 0,
+    withheld_chunks: usize = 0,
+    oldest_withheld_age_ms: ?u64 = null,
+};
+pub const ControlCapacity = struct {
+    operation_capacity: usize = 0,
+    response_capacity: usize = 0,
+};
+pub const ControlResources = struct {
+    operations: usize = 0,
+    responses: usize = 0,
+    cancelled_operations: usize = 0,
+    closing: usize = 0,
+};
+comptime {
+    for (.{ .{ rr.ReqResp.Resources, RequestCapacity, RequestResources }, .{ control.Control.Resources, ControlCapacity, ControlResources } }) |group| {
+        for (std.meta.fields(group[0])) |field| {
+            std.debug.assert(@hasField(group[1], field.name) != @hasField(group[2], field.name));
+        }
+    }
+}
+
 pub const Live = struct {
     scores: score_metrics.Snapshot = .{},
     peer_policy: @import("peer_policy.zig").Snapshot = .{},
@@ -96,7 +132,8 @@ pub const Live = struct {
     discovery_lookups: usize = 0,
     running: bool = false,
     transport_resources: struct { active: usize = 0, handshaking: usize = 0, dialing: usize = 0, outbound: usize = 0 } = .{},
-    request_inbound_phases: [rr.reqresp.metrics.inbound_phase_count]usize = @splat(0),
+    request_resources: RequestResources = .{},
+    control_resources: ControlResources = .{},
     dial_resources: struct { occupied: usize = 0, attempts: usize = 0, connected: usize = 0, automatic: usize = 0, custody_incomplete: usize = 0 } = .{},
 };
 
@@ -106,6 +143,8 @@ pub const Configuration = struct {
     discovery_enabled: bool = false,
     transport_capacity: ?usize = null,
     dial_capacity: ?usize = null,
+    request_capacity: ?RequestCapacity = null,
+    control_capacity: ?ControlCapacity = null,
 };
 
 pub const Totals = struct {
@@ -133,6 +172,7 @@ pub const Totals = struct {
     gossip_fast_hits: u64 = 0,
     gossip_decoded: u64 = 0,
     gossip_delivery_evictions: u64 = 0,
+    gossip_storage_refusals: messages_mod.StorageRefusals = @splat(0),
     closed: [@typeInfo(peer_types.DisconnectReason).@"enum".fields.len]u64 = @splat(0),
     closed_by_client: [client_count][@typeInfo(peer_types.DisconnectReason).@"enum".fields.len]u64 = @splat(@splat(0)),
     peer_events: @import("../peers/control_metrics.zig").Counters = .{},
@@ -178,7 +218,9 @@ pub const Snapshot = struct {
         }
         self.totals.dial_time = core.dial_queue.durations;
         self.totals.requests = owner.service.reqresp.counters;
-        self.live.request_inbound_phases = owner.service.reqresp.resourceSnapshot().inbound_phases;
+        const request_resources = owner.service.reqresp.resourceSnapshot();
+        const control_resources = core.control.resourceSnapshot();
+        self.collectRequestResources(&request_resources, &control_resources);
         self.totals.udp = owner.transport.udp.counters;
         self.totals.outgoing_error_reasons = owner.service.reqresp.outgoing_error_reasons;
         self.totals.validation_time = g.validation_time;
@@ -193,6 +235,7 @@ pub const Snapshot = struct {
         self.totals.gossip_decoded = messages.decoded;
         self.live.gossip_recent = messages.recent;
         self.totals.gossip_delivery_evictions = messages.delivery_evictions;
+        self.totals.gossip_storage_refusals = messages.storage_refusals;
         self.live.gossip_history = messages.history;
         const resources = g.resourceSnapshot();
         self.collectGossipResources(&resources);
@@ -212,6 +255,15 @@ pub const Snapshot = struct {
         self.totals.scores.runs = g.peers.scores.calculations;
         self.totals.scores.cache_delta = g.peers.scores.cache_delta;
         self.totals.scores.penalties = g.peers.scores.penalties;
+    }
+
+    fn collectRequestResources(self: *Snapshot, requests: *const rr.ReqResp.Resources, controls: *const control.Control.Resources) void {
+        self.config.request_capacity = .{};
+        self.config.control_capacity = .{};
+        inline for (std.meta.fields(RequestCapacity)) |field| @field(self.config.request_capacity.?, field.name) = @field(requests, field.name);
+        inline for (std.meta.fields(RequestResources)) |field| @field(self.live.request_resources, field.name) = @field(requests, field.name);
+        inline for (std.meta.fields(ControlCapacity)) |field| @field(self.config.control_capacity.?, field.name) = @field(controls, field.name);
+        inline for (std.meta.fields(ControlResources)) |field| @field(self.live.control_resources, field.name) = @field(controls, field.name);
     }
 
     fn collectGossipResources(self: *Snapshot, resources: *const gossip.ResourceSnapshot) void {
@@ -347,13 +399,22 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.collectGossipResources(&resources);
     snapshot.config.transport_capacity = 1024;
     snapshot.config.dial_capacity = 4096;
+    snapshot.collectRequestResources(&.{
+        .outbound_capacity = 16,
+        .inbound_capacity = 32,
+        .held_chunks = 2,
+        .withheld_chunks = 3,
+        .oldest_withheld_age_ms = 1500,
+    }, &.{ .operation_capacity = 8, .response_capacity = 12, .operations = 4 });
+    snapshot.totals.peer_work.rejected = 7;
+    snapshot.totals.gossip_storage_refusals[@intFromEnum(messages_mod.StorageRefusal.peer_validations)] = 11;
     snapshot.totals.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing = 4;
     snapshot.totals.protocols[@intFromEnum(rr.Protocol.status_v2)].outgoing = 5;
     const refused_reason = @intFromEnum(rr.reqresp.metrics.AdmissionRefusal.server_capacity);
     snapshot.totals.protocols[@intFromEnum(rr.Protocol.status_v1)].admission_refusals[refused_reason] = 2;
     snapshot.totals.protocols[@intFromEnum(rr.Protocol.status_v2)].admission_refusals[refused_reason] = 3;
-    snapshot.live.request_inbound_phases[@intFromEnum(rr.reqresp.metrics.InboundPhase.receiving_request)] = 7;
-    snapshot.live.request_inbound_phases[@intFromEnum(rr.reqresp.metrics.InboundPhase.waiting_host)] = 2;
+    snapshot.live.request_resources.inbound_phases[@intFromEnum(rr.reqresp.metrics.InboundPhase.receiving_request)] = 7;
+    snapshot.live.request_resources.inbound_phases[@intFromEnum(rr.reqresp.metrics.InboundPhase.waiting_host)] = 2;
     snapshot.totals.protocols[@intFromEnum(rr.Protocol.metadata_v3)].request_write_stops = 7;
     snapshot.totals.protocols[@intFromEnum(rr.Protocol.ping_v1)].response_finish_stops = 3;
     snapshot.totals.runtime.dial_started = std.math.maxInt(u64);
@@ -394,6 +455,17 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     const log_stats: @import("../logging.zig").Stats = .{};
     try write(&snapshot, &log_stats, &writer);
     const output = writer.buffered();
+    for ([_][]const u8{
+        "lodestar_native_reqresp_resources_outbound_capacity 16\n",
+        "lodestar_native_reqresp_resources_inbound_capacity 32\n",
+        "lodestar_native_reqresp_resources_held_chunks 2\n",
+        "lodestar_native_reqresp_resources_withheld_chunks 3\n",
+        "lodestar_native_reqresp_resources_oldest_withheld_age_seconds 1.5\n",
+        "lodestar_native_control_operation_capacity 8\n",
+        "lodestar_native_control_operations 4\n",
+        "lodestar_native_peer_processing_total{operation=\"rejected\"} 7\n",
+        "lodestar_native_gossipsub_storage_refusals_total{reason=\"peer_validations\"} 11\n",
+    }) |expected| try std.testing.expect(std.mem.indexOf(u8, output, expected) != null);
     var lines = std.mem.splitScalar(u8, output, '\n');
     var current_family: []const u8 = "";
     while (lines.next()) |line| {
@@ -438,10 +510,10 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_processing_total{operation=\"candidate_lookup_rows\"} 8\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_processing_total{operation=\"catalog_deadline_rows\"} 64\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "lodestar_native_peer_processing_total{operation=\"dial_sync_lookup_rows\"} 96\n") != null);
-    try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, output, "lodestar_native_peer_processing_total{operation="));
+    try std.testing.expectEqual(@as(usize, 13), std.mem.count(u8, output, "lodestar_native_peer_processing_total{operation="));
     snapshot.live.gossip_recent = 7;
     snapshot.stop();
-    try std.testing.expectEqual(@as([rr.reqresp.metrics.inbound_phase_count]usize, @splat(0)), snapshot.live.request_inbound_phases);
+    try std.testing.expectEqual(@as([rr.reqresp.metrics.inbound_phase_count]usize, @splat(0)), snapshot.live.request_resources.inbound_phases);
     try std.testing.expectEqual(@as(u64, 2), snapshot.totals.protocols[@intFromEnum(rr.Protocol.status_v1)].admission_refusals[refused_reason]);
     try std.testing.expectEqual(@as(usize, 0), snapshot.live.gossip_recent);
     try std.testing.expectEqual(@as(usize, 0), snapshot.live.topic_count);

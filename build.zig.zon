@@ -354,7 +354,7 @@
         .bench_network = .{
             .root_module = .{
                 .root_source_file = "bench/network.zig",
-                .imports = .{.network},
+                .imports = .{ .network, .config, .preset },
             },
         },
         .bench_ssz_attestation = .{

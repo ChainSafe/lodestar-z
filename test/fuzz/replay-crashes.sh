@@ -24,6 +24,7 @@ fi
 
 total_crashes=0
 total_replayed=0
+total_failed=0
 
 replay_target() {
     local target=$1
@@ -72,6 +73,7 @@ replay_target() {
                 echo "PASS ${target} [${run_name}]: ${fname} (no longer crashes)"
                 total_replayed=$((total_replayed + 1))
             else
+                total_failed=$((total_failed + 1))
                 echo "FAIL ${target} [${run_name}]: ${fname} (still crashes)"
                 total_replayed=$((total_replayed + 1))
             fi
@@ -94,3 +96,5 @@ done
 
 echo ""
 echo "Replayed ${total_replayed}/${total_crashes} crash files."
+
+test "$total_failed" -eq 0

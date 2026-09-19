@@ -387,6 +387,7 @@ test "managed runtime every allocation prefix cleans up and memory plan counts o
         .call_capacity = 8,
     } };
 
+    opts.core.service.reqresp.policy = null;
     opts.core.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{
         .identities = opts.core.peers.capacity,
         .peer = @import("reqresp/admission_fixture.zig").quotas(100, 1000),
@@ -1136,6 +1137,7 @@ test "managed runtime capabilities activation commits fork BPO and copied direct
     opts.local.metadata.custody_group_count = 1;
     const quotas = @import("reqresp/admission_fixture.zig").quotas(2048, 1000);
 
+    opts.core.service.reqresp.policy = null;
     opts.core.service.reqresp.admission = .{ .policy = @import("reqresp/policy_fixture.zig").config(), .limits = .{ .identities = 2, .peer = quotas, .global = quotas } };
     opts.core.service.router.capabilities = try caps.forFork(.phase0, true, &.{ .v1_2, .v1_1 });
     opts.core.service.reqresp.forks = &.{

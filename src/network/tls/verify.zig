@@ -26,7 +26,7 @@ pub fn verifyDer(der: []const u8, now_unix: i64) Error!peer_id.PeerId {
     return verifyX509(x509, now_unix);
 }
 
-pub fn verifyX509(x509: *c.X509, now_unix: i64) Error!peer_id.PeerId {
+fn verifyX509(x509: *c.X509, now_unix: i64) Error!peer_id.PeerId {
     try checkValidity(x509, now_unix);
 
     const key = c.X509_get_pubkey(x509) orelse return error.CertificateMalformed;

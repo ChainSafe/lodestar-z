@@ -152,6 +152,15 @@ test "engine captures TLS key material per connection only when keylog is enable
     try std.testing.expectEqual(@as(usize, 0), pair.server.registry.keylog_arena.len);
     try std.testing.expectEqual(@as(usize, 0), pair.server.takeKeylog(handles.server.index, &lines));
     try std.testing.expect(pair.server.registry.slots[handles.server.index].handshake.keylog_dropped > 0);
+    try std.testing.expectEqual(@as(u64, 0), pair.server.counters.keylog_dropped);
+
+    const state = &pair.client.registry.slots[handles.client.index].handshake;
+    const oversized = [_]u8{'x'} ** tls.keylog_capacity;
+    try std.testing.expect(!state.appendKeylog(&oversized));
+    _ = pair.client.takeKeylog(handles.client.index, &lines);
+    try std.testing.expectEqual(@as(u64, 1), pair.client.counters.keylog_dropped);
+    _ = pair.client.takeKeylog(handles.client.index, &lines);
+    try std.testing.expectEqual(@as(u64, 1), pair.client.counters.keylog_dropped);
 }
 
 test "handshake state drops key lines that do not fit and counts them" {

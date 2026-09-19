@@ -961,6 +961,7 @@ test "reqresp wakeup distinguishes host and quota waits and bounds idle scans" {
     var events: [1]Event = undefined;
     try std.testing.expectEqual(@as(usize, 1), setup.shared.server.reqresp.pump(&setup.shared.pair.server, &setup.shared.server.router, setup.shared.pair.now, .{ .control = &events }).control);
     try std.testing.expect(events[0].failed.reason == .host_timeout);
+    try std.testing.expect(setup.shared.server.reqresp.incompleteRequestTimeout(events[0]) == null);
 }
 
 test "reqresp validates transport capacity and copies its fork table" {
@@ -1125,6 +1126,7 @@ test "reqresp quota delay expires as local policy and not peer timeout" {
     var expired = false;
     for (events[0..count]) |event| if (event == .failed) {
         try std.testing.expect(event.failed.reason == .quota_timeout);
+        try std.testing.expect(setup.shared.server.reqresp.incompleteRequestTimeout(event) == null);
         expired = true;
     };
     try std.testing.expect(expired);
@@ -1492,6 +1494,16 @@ test "reqresp rejects duplicate digests before allocating" {
             .forks = &.{ first, .{ .digest = first.digest, .fork = fork } },
         }));
     }
+}
+
+test "reqresp rejects competing request policies before allocating" {
+    const policy = @import("policy_fixture.zig").config();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(failing.allocator(), .{
+        .forks = &.{},
+        .policy = policy,
+        .admission = try reqresp.AdmissionOptions.defaults(&policy, 1, 1),
+    }));
 }
 
 test "reqresp request admission host capacity cancellation and quota error write failure retain debt" {

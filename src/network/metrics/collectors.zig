@@ -27,6 +27,7 @@ pub const registry = prom.Registry(Snapshot, .{
     writeRuntime,
     writeNativeCounters,
     writeGossipResources,
+    writeRequestResources,
     writePeerCloses,
     writeDiscoveryProgress,
     writeGossipTopics,
@@ -60,11 +61,11 @@ fn writePeers(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
         .labels = &.{"direction"},
     });
     for ([_][]const u8{ "inbound", "outbound" }, self.live.peer_population.directionCounts()) |direction, count| try directions.sample(.{direction}, count);
-    inline for (.{ .{ "lodestar_peers_by_client_count", "clients" }, .{ "lodestar_gossip_mesh_peers_by_client_count", "mesh_clients" } }) |metric| {
+    inline for (.{ .{ "lodestar_peers_by_client_count", "clients", "Connected peers by client" }, .{ "lodestar_gossip_mesh_peers_by_client_count", "mesh_clients", "Peers in at least one gossip mesh by client" } }) |metric| {
         const clients = try w.family(.{
             .name = metric[0],
             .kind = .gauge,
-            .help = "Connected peers by client",
+            .help = metric[2],
             .labels = &.{"client"},
         });
         inline for (std.meta.fields(Client)) |field| {
@@ -174,32 +175,40 @@ fn writeGossipResources(self: *const Snapshot, w: *prom.Encoder) prom.Error!void
         .kind = .gauge,
         .help = "Bounded outgoing data descriptors per gossip peer",
     }, outbox.data_capacity);
-    if (self.config.gossip_capacity) |*resources| try writeGossipResourceFields(resources, w);
-    if (self.totals.gossip_high_water) |*resources| try writeGossipResourceFields(resources, w);
-    if (self.live.gossip_resources) |*resources| try writeGossipResourceFields(resources, w);
+    if (self.config.gossip_capacity) |*resources| try writeResourceFields("lodestar_native_gossipsub_", "Native gossip ", resources, w);
+    if (self.totals.gossip_high_water) |*resources| try writeResourceFields("lodestar_native_gossipsub_", "Native gossip ", resources, w);
+    if (self.live.gossip_resources) |*resources| try writeResourceFields("lodestar_native_gossipsub_", "Native gossip ", resources, w);
 }
 
-fn writeGossipResourceFields(resources: anytype, w: *prom.Encoder) prom.Error!void {
+fn writeRequestResources(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+    if (self.config.request_capacity) |*resources| try writeResourceFields("lodestar_native_reqresp_resources_", "Native request resources ", resources, w);
+    try writeResourceFields("lodestar_native_reqresp_resources_", "Native request resources ", &self.live.request_resources, w);
+    if (self.config.control_capacity) |*resources| try writeResourceFields("lodestar_native_control_", "Native peer control ", resources, w);
+    try writeResourceFields("lodestar_native_control_", "Native peer control ", &self.live.control_resources, w);
+}
+
+fn writeResourceFields(comptime prefix: []const u8, comptime description: []const u8, resources: anytype, w: *prom.Encoder) prom.Error!void {
     inline for (std.meta.fields(@TypeOf(resources.*))) |field| {
+        if (comptime std.mem.eql(u8, field.name, "inbound_phases")) continue;
         if (comptime @typeInfo(field.type) == .optional) {
             if (@field(resources, field.name)) |value| {
                 if (comptime std.mem.endsWith(u8, field.name, "_ms")) {
                     try w.scalar(.{
-                        .name = "lodestar_native_gossipsub_" ++ field.name[0 .. field.name.len - 3] ++ "_seconds",
+                        .name = prefix ++ field.name[0 .. field.name.len - 3] ++ "_seconds",
                         .kind = .gauge,
-                        .help = "Native gossip " ++ field.name ++ " in seconds",
+                        .help = description ++ field.name ++ " in seconds",
                         .unit = .seconds,
                     }, @as(f64, @floatFromInt(value)) / 1000);
                 } else try w.scalar(.{
-                    .name = "lodestar_native_gossipsub_" ++ field.name,
+                    .name = prefix ++ field.name,
                     .kind = .gauge,
-                    .help = "Native gossip " ++ field.name,
+                    .help = description ++ field.name,
                 }, value);
             }
         } else try w.scalar(.{
-            .name = "lodestar_native_gossipsub_" ++ field.name,
+            .name = prefix ++ field.name,
             .kind = .gauge,
-            .help = "Native gossip " ++ field.name,
+            .help = description ++ field.name,
         }, @field(resources, field.name));
     }
 }
@@ -234,11 +243,11 @@ fn writePeerProcessing(self: *const Snapshot, w: *prom.Encoder) prom.Error!void 
     const processing = try w.family(.{
         .name = "lodestar_native_peer_processing_total",
         .kind = .counter,
-        .help = "Peer policy processing work by bounded operation",
+        .help = "Peer policy decisions and processing work by bounded operation",
         .labels = &.{"operation"},
     });
-    inline for (.{ "selections", "selection_rows", "candidate_syncs", "candidate_rows", "candidate_lookup_rows", "catalog_deadline_rows", "candidate_selections" }) |operation| {
-        try processing.sample(.{operation}, @field(self.totals.peer_work, operation));
+    inline for (std.meta.fields(@TypeOf(self.totals.peer_work))) |field| {
+        try processing.sample(.{field.name}, @field(self.totals.peer_work, field.name));
     }
     try processing.sample(.{"dial_sync_lookup_rows"}, self.totals.dial.sync_lookup_rows);
 }
@@ -418,7 +427,7 @@ fn writeRequests(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
         .kind = .gauge,
         .help = "Occupied incoming request slots by current phase, including terminal owners awaiting recycling",
         .labels = &.{"phase"},
-    }, rr.reqresp.metrics.InboundPhase, &self.live.request_inbound_phases);
+    }, rr.reqresp.metrics.InboundPhase, &self.live.request_resources.inbound_phases);
 }
 
 fn writeRequestTimes(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
@@ -476,7 +485,7 @@ fn writeScores(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
     const thresholds = try w.family(.{
         .name = "lodestar_gossip_peer_score_by_threshold_count",
         .kind = .gauge,
-        .help = "Connected gossip peers at or above configured score thresholds",
+        .help = "Connected gossip peers at or above configured score thresholds; mesh uses zero",
         .labels = &.{"threshold"},
     });
     inline for (.{ "graylist", "publish", "gossip", "mesh" }) |threshold| {
@@ -485,6 +494,12 @@ fn writeScores(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
 }
 
 fn writeGossip(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+    try w.enums(.{
+        .name = "lodestar_native_gossipsub_storage_refusals_total",
+        .kind = .counter,
+        .help = "Gossip storage admission attempts refused by bounded resource reason",
+        .labels = &.{"reason"},
+    }, @import("../gossipsub/messages.zig").StorageRefusal, &self.totals.gossip_storage_refusals);
     try self.totals.gossip_rpc.write(w);
     try w.scalar(.{
         .name = "gossipsub_fast_message_id_hits_total",

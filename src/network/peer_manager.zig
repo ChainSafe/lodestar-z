@@ -17,7 +17,6 @@ pub const Options = struct {
     metadata_freshness_ms: u64 = 60_000,
 };
 pub const DialIntent = dial_mod.DialIntent;
-pub const DialToken = dial_mod.Token;
 pub const MemoryPlan = struct {
     inline_bytes: usize,
     allocated_bytes: usize,

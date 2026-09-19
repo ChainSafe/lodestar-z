@@ -235,6 +235,17 @@ async function inspectNetworkExports(packageRoot, packageJson, runCommand) {
   return {...result, exports: assertNetworkExports(result.exports)};
 }
 
+export async function inspectNativeExports(addonPath, runCommand) {
+  const command = await runCommand(
+    process.execPath,
+    [fileURLToPath(new URL("./check_network_addon.mjs", import.meta.url)), addonPath],
+    dirname(addonPath),
+    {allowFailure: true}
+  );
+  if (command.exitCode !== 0) failCommand("NativeAddonInspectionFailed", command);
+  return JSON.parse(command.stdout);
+}
+
 export async function inspectArchive(archive, expectedAddon, runCommand, {maxSourceBytes = MAX_SOURCE_BYTES} = {}) {
   const info = await stat(archive);
   if (!info.isFile()) fail("InvalidArchive", "not a regular file");
@@ -285,13 +296,32 @@ export async function inspectArchive(archive, expectedAddon, runCommand, {maxSou
     const packageJson = await readJson(join(packageRoot, "package.json"), "archived package.json");
     assertPackageExports(packageJson);
     const network = await inspectNetworkExports(packageRoot, packageJson, runCommand);
-    return {externalNamespaces: network.externalNamespaces, files, networkExports: network.exports, packageJson};
+    const native = await inspectNativeExports(join(packageRoot, addon.path), runCommand);
+    return {
+      externalNamespaces: network.externalNamespaces,
+      files,
+      native,
+      networkExports: network.exports,
+      packageJson,
+    };
   } finally {
     await rm(extractDir, {force: true, recursive: true});
   }
 }
 
-export async function verifyArchiveSources(nativeDir, archivedFiles) {
+export function assertPackedPackageJson(source, packed) {
+  const expected = Object.fromEntries(
+    Object.entries(source).filter(([key]) => !["packageManager", "pnpm"].includes(key))
+  );
+  if (expected.scripts) {
+    const omitted = ["prepublishOnly", "prepack", "prepare", "postpack", "publish", "postpublish"];
+    expected.scripts = Object.fromEntries(Object.entries(expected.scripts).filter(([key]) => !omitted.includes(key)));
+  }
+  if (!isDeepStrictEqual(expected, packed)) fail("PackedPackageJsonMismatch");
+}
+
+export async function verifyArchiveSources(nativeDir, archivedFiles, packageJson) {
+  assertPackedPackageJson(await readJson(join(nativeDir, "package.json"), "source package.json"), packageJson);
   const before = [];
   for (const file of archivedFiles) {
     if (file.path === "package.json") continue;

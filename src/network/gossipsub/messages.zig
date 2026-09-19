@@ -30,6 +30,8 @@ pub const MessageEvent = struct {
 };
 pub const InvalidReason = enum { signed, compressed_size, ssz_size, snappy };
 pub const Received = union(enum) { ignored, invalid: InvalidReason, duplicate: topic_mod.MessageId, admitted: MessageEvent, blocked: enum { events, storage, work } };
+pub const StorageRefusal = enum { kind_validations, kind_payload, peer_validations, validation_capacity, payload_capacity };
+pub const StorageRefusals = [std.meta.fields(StorageRefusal).len]u64;
 pub const Applied = struct {
     verdict: Verdict,
     id: topic_mod.MessageId,
@@ -86,6 +88,7 @@ pub const Messages = struct {
     gossip_ids: []MessageId,
     decoded_messages: u64 = 0,
     fast_hits: u64 = 0,
+    storage_refusals: StorageRefusals = @splat(0),
     fast: []FastEntry,
 
     pub fn init(a: std.mem.Allocator, options: *const Options) !Messages {
@@ -134,10 +137,11 @@ pub const Messages = struct {
         fast_hits: u64,
         decoded: u64,
         delivery_evictions: u64,
+        storage_refusals: StorageRefusals,
     };
 
     pub fn stats(self: *const Messages) Stats {
-        var result: Stats = .{ .seen = self.seen.count, .history = self.history.count, .fast_hits = self.fast_hits, .decoded = self.decoded_messages, .delivery_evictions = self.validation.delivery_evictions };
+        var result: Stats = .{ .seen = self.seen.count, .history = self.history.count, .fast_hits = self.fast_hits, .decoded = self.decoded_messages, .delivery_evictions = self.validation.delivery_evictions, .storage_refusals = self.storage_refusals };
         for (self.validation.recent) |*entry| result.recent += @intFromBool(entry.state != .free);
         for (self.validation.entries) |*entry| result.pending += @intFromBool(entry.state == .pending);
         return result;
@@ -261,15 +265,15 @@ pub const Messages = struct {
     fn admitReceived(self: *Messages, context: *const Context, workspace: *const Workspace, source: *const Source, topic: u16, msg: protobuf.Message, id: topic_mod.MessageId, written: usize, now: u64) Received {
         const kind = if (topic_mod.parseCanonical(msg.topic)) |canonical| canonical.name.kind else .beacon_block;
         if (context.options.processor_limits) |limits| {
-            if (self.validation.pending_per_kind[@intFromEnum(kind)] >= limits[@intFromEnum(kind)].items) return .{ .blocked = .storage };
+            if (self.validation.pending_per_kind[@intFromEnum(kind)] >= limits[@intFromEnum(kind)].items) return self.refuseStorage(.kind_validations);
         }
-        if (!self.store.kindRoom(kind, msg.data.len)) return .{ .blocked = .storage };
+        if (!self.store.kindRoom(kind, msg.data.len)) return self.refuseStorage(.kind_payload);
         const peer_limit = @max(1, @min(128, if (context.options.processor_limits) |limits| limits[@intFromEnum(kind)].items / 2 else self.validation.entries.len / 2));
         const peer_pending = if (context.options.processor_limits != null) self.validation.pending_per_peer_kind[source.peer.index][@intFromEnum(kind)] else self.validation.pending_per_peer[source.peer.index];
-        if (peer_pending >= peer_limit) return .{ .blocked = .storage };
-        var reservation = self.validation.reserve(id) orelse return .{ .blocked = .storage };
+        if (peer_pending >= peer_limit) return self.refuseStorage(.peer_validations);
+        var reservation = self.validation.reserve(id) orelse return self.refuseStorage(.validation_capacity);
         defer reservation.cancel();
-        const message = self.history.admitPayload(&self.store, id, msg.topic, msg.data) orelse return .{ .blocked = .storage };
+        const message = self.history.admitPayload(&self.store, id, msg.topic, msg.data) orelse return self.refuseStorage(.payload_capacity);
         const handle = reservation.commit(&self.store, context.peers, message, source.peer, context.overlay.ref(topic), now);
         self.validation.attribution(handle).source_eligible = context.overlay.inMesh(topic, source.session.index);
         self.store.seal(message);
@@ -280,6 +284,11 @@ pub const Messages = struct {
         const entry = self.validation.attribution(handle);
         assert(context.peers.matches(entry.source));
         return .{ .admitted = .{ .source = source.peer, .identity = context.peers.rows[entry.source.index].identity, .admitted_ms = entry.admitted_ms, .deadline = self.validation.entries[handle.index].state.pending.deadline, .handle = handle, .id = id, .peer = source.connection, .topic = room[written..][0..msg.topic.len], .bytes = room[0..written] } };
+    }
+
+    fn refuseStorage(self: *Messages, reason: StorageRefusal) Received {
+        self.storage_refusals[@intFromEnum(reason)] +|= 1;
+        return .{ .blocked = .storage };
     }
 
     pub fn report(self: *Messages, context: *const Context, handle: Handle, verdict: Verdict, now: u64) Report {

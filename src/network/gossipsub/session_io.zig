@@ -257,7 +257,7 @@ pub fn resetOutbound(self: *Gossipsub, engine: *Engine, index: u16) void {
     self.cancelWrites(self.sessions.ref(index));
 }
 
-pub fn replaceInbound(
+fn replaceInbound(
     self: *Gossipsub,
     engine: *Engine,
     index: u16,
@@ -272,7 +272,7 @@ pub fn replaceInbound(
     if (self.sessions.rows[index].outbound == .none) self.sessions.setOutbound(index, .pending);
 }
 
-pub fn replaceOutbound(
+fn replaceOutbound(
     self: *Gossipsub,
     engine: *Engine,
     index: u16,
@@ -426,7 +426,7 @@ fn logIoTimeout(self: *Gossipsub, index: u16, reason: []const u8, now_ms: u64) v
     std.log.scoped(.network_gossip_errors).debug("gossip_io_timeout peer={f} connection={d}:{d} reason={s} inbound={any} outbound={any} blocked={s} subscriptions={d} data_queued={d} data_bytes={d} control_bytes={d} critical_bytes={d} oldest_ms={d}", .{ @import("../logging.zig").peer(identity), row.conn.index, row.conn.generation, reason, row.in_stream != null, row.outStream() != null, @tagName(io.blocked), io.tx.subscription_dirty.count(), io.tx.data.count, io.tx.data.bytes, io.tx.control.used, io.tx.critical.used, if (io.tx.oldest()) |oldest| now_ms -| oldest else 0 });
 }
 
-pub fn pumpReady(self: *Gossipsub, router: *routing.Router, engine: *Engine, now: Now, events: []Event) usize {
+fn pumpReady(self: *Gossipsub, router: *routing.Router, engine: *Engine, now: Now, events: []Event) usize {
     var turn = beginPump(self, now, events);
     runTurn(self, router, engine, &turn);
     return turn.count;
@@ -596,7 +596,7 @@ pub fn finishPump(self: *Gossipsub, now: Now) void {
     self.expirePromises(now.mono_ms);
 }
 
-pub fn nextMaintenance(self: *const Gossipsub, now: Now) u64 {
+fn nextMaintenance(self: *const Gossipsub, now: Now) u64 {
     if (self.cycle.isActive()) return now.mono_ms;
     var deadline = if (self.heartbeat_at == 0) now.mono_ms else self.heartbeat_at;
     if (self.messages.nextDeadline()) |d| deadline = @min(deadline, d);
