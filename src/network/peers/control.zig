@@ -537,9 +537,10 @@ pub const Control = struct {
             _ = service.reqresp.cancel(event.request);
             return;
         };
-        std.debug.assert(event.request.index < self.responses.len);
-        const response = &self.responses[event.request.index];
-        std.debug.assert(response.request == null);
+        const response = available: {
+            for (self.responses) |*candidate| if (candidate.request == null) break :available candidate;
+            unreachable;
+        };
         response.peer = peer;
         response.conn = event.peer;
         const len: usize = switch (event.protocol) {
@@ -620,8 +621,10 @@ pub const Control = struct {
             else => unreachable,
         };
         if (request.direction == .inbound) {
-            const response = &self.responses[request.index];
-            if (!std.meta.eql(response.request, request)) return;
+            const response = matching: {
+                for (self.responses) |*candidate| if (std.meta.eql(candidate.request, request)) break :matching candidate;
+                return;
+            };
             switch (event) {
                 .chunk_sent => {
                     _ = service.reqresp.finish(request, now);

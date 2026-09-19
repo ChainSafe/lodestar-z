@@ -678,7 +678,7 @@ fn allocationFailures(allocator: std.mem.Allocator) !void {
     defer service.deinit();
     const plan = service.reqresp.memoryPlan();
     try std.testing.expectEqual(plan.facade_bytes + plan.slot_bytes + plan.io_bytes +
-        plan.limiter_bytes + plan.request_sink_bytes, plan.total_bytes);
+        plan.limiter_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes, plan.total_bytes);
 }
 
 test "reqresp reserved physical sinks admit full native control wave and recycle by generation" {

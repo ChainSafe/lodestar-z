@@ -548,8 +548,12 @@ export interface NativeIncomingRequest {
   readonly connection: NativeConnection;
   readonly protocol: string;
   readonly data: Uint8Array;
-  /** Resolves once native ownership and pending responses have retired. */
+  /** Resolves once the stream and pending responses have retired. Retained host work may still be running. */
   readonly closed: Promise<void>;
+  /** Call once before serving to retain capacity until asynchronous host work actually retires. */
+  retainUntil(retired: Promise<void>): void;
+  /** Wait for response quota before producing the next chunk. Reserves one chunk's quota. */
+  ready(): Promise<void>;
   respond(data: Uint8Array, context: NativeForkEntry | null): Promise<void>;
   finish(): Promise<void>;
   /** Accepts standard error codes 1–3 or custom codes 128–255, with at most 256 message bytes. */
@@ -587,6 +591,8 @@ export type NativeIncomingError = Error &
   );
 
 export interface NativeIncomingDiagnostics {
+  retiring: number;
+  pendingPermissions: number;
   capacity: number;
   occupied: number;
   queued: number;

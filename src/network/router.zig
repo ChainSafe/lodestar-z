@@ -31,6 +31,7 @@ pub const Options = struct {
     outbound_control_reserved: u16 = 0,
     outbound_reserved: ?u16 = null,
     inbound_per_connection_max: u16 = 16,
+    inbound_connections: u16 = 0,
     identify: bool = false,
     reqresp: bool = true,
     meshsub: bool = true,
@@ -65,6 +66,7 @@ pub const Router = struct {
             .outbound_control_reserved = options.outbound_control_reserved,
             .outbound_reserved = options.outbound_reserved,
             .inbound_per_connection_max = options.inbound_per_connection_max,
+            .inbound_connections = options.inbound_connections,
         });
     }
 
@@ -75,6 +77,7 @@ pub const Router = struct {
             .outbound_control_reserved = options.outbound_control_reserved,
             .outbound_reserved = options.outbound_reserved,
             .inbound_per_connection_max = options.inbound_per_connection_max,
+            .inbound_connections = options.inbound_connections,
         });
         errdefer negotiator.deinit();
         var router: Router = .{

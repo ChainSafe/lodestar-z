@@ -641,7 +641,9 @@ test "managed native inbound application per peer cap protects control from extr
             first = first orelse output[0].request.request;
         }
     }
-    try std.testing.expectEqual(@as(usize, 8), count);
+    try std.testing.expectEqual(@as(usize, 4), count);
+    const ready = @intFromEnum(@import("reqresp/metrics.zig").InboundPhase.ready);
+    try std.testing.expectEqual(@as(usize, 4), setup.server_service.reqresp.resourceSnapshot().inbound_phases[ready]);
     _ = setup.server.snapshots(&snapshots);
     const server_conn = snapshots[0].connection.?;
     try std.testing.expect(setup.server_service.reqresp.cancel(first.?));

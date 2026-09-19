@@ -15,6 +15,8 @@ const RequestState = @import("request_state.zig").RequestState;
 const RequestIO = @import("request_io.zig").RequestIO;
 const routing = @import("../router.zig");
 const types = @import("../types.zig");
+const receive_plan = @import("receive_plan.zig");
+const serving_pool = @import("serving_pool.zig");
 
 const assert = std.debug.assert;
 const Engine = engine_mod.Engine;
@@ -53,12 +55,17 @@ pub const AdmissionOptions = struct {
         const policy = try request_policy.Policy.init(configuration);
         var quotas: admission_mod.Options = undefined;
         quotas.identities = identities;
+        quotas.starts = .{ .tokens = Protocol.count * constants.MAX_CONCURRENT_REQUESTS, .period_ms = constants.progress_timeout_ms_default };
         for (0..config.ForkSeq.count) |i| {
             quotas.peer[i] = policy.defaultQuotas(@enumFromInt(i));
-            quotas.global[i] = limiter_mod.defaultQuotas();
+            quotas.global[i] = quotas.peer[i];
             for (0..Protocol.count) |j| {
                 const which: Protocol = @enumFromInt(j);
-                if (which.isControl()) quotas.global[i][j].tokens = @max(quotas.peer[i][j].tokens, inbound_max);
+                if (which.isControl()) {
+                    quotas.global[i][j].tokens = @max(quotas.peer[i][j].tokens, inbound_max);
+                } else {
+                    quotas.global[i][j].tokens *= @max(1, @as(u32, inbound_max) / (2 * constants.MAX_CONCURRENT_REQUESTS));
+                }
             }
         }
         return .{ .policy = configuration.*, .limits = quotas };
@@ -72,14 +79,19 @@ const Admission = struct {
 pub const Options = struct {
     peers: u16 = limits.connections_max_default,
     outbound_max: u16 = constants.outbound_max_default,
+    /// Shared execution slots, including the control reserve.
     inbound_max: u16 = constants.inbound_max_default,
+    /// Back each protocol's concurrency allowance independently for every connection.
+    reserve_inbound_per_peer: bool = false,
+    /// Two concurrent sync batches can each request blocks and sidecars.
+    serving_per_peer_max: u8 = 2 * constants.MAX_CONCURRENT_REQUESTS,
     /// Nonzero partitions outbound slots between control and application requests.
     outbound_control_reserved: u16 = 0,
     inbound_control_reserved: u16 = 0,
     /// Zero preserves raw admission without an aggregate application limit.
     outbound_per_peer_max: u8 = 0,
     inbound_per_peer_max: u8 = constants.inbound_per_peer_max_default,
-    /// Zero disables the cap; retained application owners count until canonical recycling.
+    /// Concurrent application receivers per connection; zero disables the cap.
     inbound_application_per_peer_max: u8 = 0,
     /// Complete inbound request transfer and each response chunk within this duration.
     progress_timeout_ms: u64 = constants.progress_timeout_ms_default,
@@ -89,7 +101,7 @@ pub const Options = struct {
     policy: ?request_policy.Config = null,
     admission: ?AdmissionOptions = null,
     quotas: ?limiter_mod.Quotas = null,
-    /// Defaults reserve one inbound-capacity control wave; bulk quotas stay per protocol.
+    /// Defaults scale per-protocol quotas to execution capacity and reserve a control wave.
     global_quotas: ?limiter_mod.Quotas = null,
     host_timeout_ms: u64 = 60_000,
     quota_timeout_ms: u64 = 60_000,
@@ -198,6 +210,8 @@ pub const MemoryPlan = struct {
     limiter_bytes: usize,
     admission_bytes: usize = 0,
     request_sink_bytes: usize = 0,
+    serving_bytes: usize = 0,
+    scheduler_bytes: usize = 0,
     total_bytes: usize,
 };
 
@@ -209,6 +223,11 @@ pub const ReqResp = struct {
     arena: []u8,
     request_sinks: []u8,
     request_sink_size: usize,
+    receive_plan: ?receive_plan.Plan = null,
+    serving: serving_pool.Pool,
+    peer_cursors: []PeerCursor,
+    admission_cursor: [2]u16 = @splat(0),
+    admission_class: u1 = 0,
     limiter: limiter_mod.Limiter,
     policy: ?request_policy.Policy,
     admission: ?Admission,
@@ -237,6 +256,9 @@ pub const ReqResp = struct {
         held_chunks: usize = 0,
         withheld_chunks: usize = 0,
         oldest_withheld_age_ms: ?u64 = null,
+        serving_capacity: usize = 0,
+        serving_occupied: usize = 0,
+        retiring: usize = 0,
     };
 
     pub fn resourceSnapshot(self: *const ReqResp) Resources {
@@ -245,7 +267,12 @@ pub const ReqResp = struct {
             .inbound_capacity = self.inbound.len,
             .outbound_control_reserved = self.options.outbound_control_reserved,
             .inbound_control_reserved = self.options.inbound_control_reserved,
+            .serving_capacity = self.serving.entries.len,
         };
+        for (self.serving.entries) |entry| {
+            result.serving_occupied += @intFromBool(entry.request != null);
+            result.retiring += @intFromBool(entry.retiring);
+        }
         for (self.outbound) |*slot| {
             if (slot.request.occupied()) result.outbound_occupied += 1;
             if (slot.request.pendingEvent() != null) result.pending_events += 1;
@@ -273,7 +300,7 @@ pub const ReqResp = struct {
         counts.admission_refusals[reason_index] +|= 1;
         switch (reason) {
             .server_capacity, .peer_capacity => {},
-            .protocol_concurrency, .peer_quota, .global_quota, .identity_capacity => counts.rate_limited +|= 1,
+            .protocol_concurrency, .peer_quota, .global_quota, .identity_capacity, .request_starts => counts.rate_limited +|= 1,
         }
         std.log.scoped(.network_reqresp_errors).debug("request_admission_refused connection={d}:{d} stream={d} method={s} reason={s} cost={d}", .{ stream.conn.index, stream.conn.generation, stream.id, @tagName(which), @tagName(reason), cost });
     }
@@ -314,9 +341,9 @@ pub const ReqResp = struct {
         const application_max = options.outbound_max - options.outbound_control_reserved;
         if (options.outbound_per_peer_max > limits.peer_streams_bidi - outbound_stream_headroom or
             options.outbound_per_peer_max > application_max) return error.InvalidOptions;
-        if (options.inbound_per_peer_max == 0 or options.peers == 0) return error.InvalidOptions;
+        if (options.inbound_per_peer_max == 0 or options.peers == 0 or options.serving_per_peer_max == 0) return error.InvalidOptions;
         if (options.inbound_application_per_peer_max > options.inbound_per_peer_max or
-            options.inbound_application_per_peer_max > options.inbound_max - options.inbound_control_reserved)
+            (!options.reserve_inbound_per_peer and options.inbound_application_per_peer_max > options.inbound_max - options.inbound_control_reserved))
             return error.InvalidOptions;
         if (options.peers > constants.slots_ceiling) return error.InvalidOptions;
         if (options.progress_timeout_ms == 0 or options.host_timeout_ms == 0 or
@@ -333,6 +360,9 @@ pub const ReqResp = struct {
                 const quota = &global_quotas[@intFromEnum(which)];
                 quota.tokens = @max(quota.tokens, options.inbound_max);
             }
+            if (options.reserve_inbound_per_peer) for (std.enums.values(Protocol)) |which| {
+                if (!which.isControl()) global_quotas[@intFromEnum(which)].tokens = std.math.mul(u32, peer_quotas[@intFromEnum(which)].tokens, @max(1, (options.inbound_max - options.inbound_control_reserved) / options.serving_per_peer_max)) catch return error.InvalidQuota;
+            };
         }
         try limiter_mod.Limiter.validate(peer_quotas);
         try limiter_mod.Limiter.validate(global_quotas);
@@ -353,25 +383,52 @@ pub const ReqResp = struct {
         const outbound = try allocator.alloc(Client, options.outbound_max);
         errdefer allocator.free(outbound);
         @memset(outbound, .{});
-        const inbound = try allocator.alloc(Server, options.inbound_max);
+        const receive: ?receive_plan.Plan = if (options.reserve_inbound_per_peer)
+            receive_plan.Plan.init(if (policy) |*value| value else null)
+        else
+            null;
+        const inbound_count = if (receive != null) @as(usize, options.peers) * receive_plan.slots_per_peer else options.inbound_max;
+        const inbound = try allocator.alloc(Server, inbound_count);
         errdefer allocator.free(inbound);
         @memset(inbound, .{});
 
         const request_sink_size = if (policy) |*value| value.requestMax() else protocol_mod.requestMaxAll();
-        const request_sink_bytes = @as(usize, options.inbound_max - options.inbound_control_reserved) * request_sink_size +
+        const request_sink_bytes = if (receive) |*plan| @as(usize, options.peers) * plan.sink_bytes else @as(usize, options.inbound_max - options.inbound_control_reserved) * request_sink_size +
             @as(usize, options.inbound_control_reserved) * protocol_mod.requestMaxControl();
         const request_sinks = try allocator.alloc(u8, request_sink_bytes);
         errdefer allocator.free(request_sinks);
 
-        const total = @as(usize, options.outbound_max) + options.inbound_max;
-        const controls = @as(usize, options.outbound_control_reserved) + options.inbound_control_reserved;
-        const arena = try allocator.alloc(u8, (total - controls) * (scratch_length + read_buffer_length) +
-            controls * (control_scratch_length + control_read_buffer_length));
+        const outbound_bytes = @as(usize, options.outbound_max - options.outbound_control_reserved) * (scratch_length + read_buffer_length) +
+            @as(usize, options.outbound_control_reserved) * (control_scratch_length + control_read_buffer_length);
+        const inbound_bytes = if (receive) |*plan| @as(usize, options.peers) * plan.io_bytes else @as(usize, options.inbound_max - options.inbound_control_reserved) * (scratch_length + read_buffer_length) +
+            @as(usize, options.inbound_control_reserved) * (control_scratch_length + control_read_buffer_length);
+        const arena = try allocator.alloc(u8, outbound_bytes + inbound_bytes);
         errdefer allocator.free(arena);
         var cursor: usize = 0;
         for (outbound, 0..) |*slot, index| cursor = assignBuffers(&slot.request.io, arena, cursor, index < options.outbound_control_reserved);
-        for (inbound, 0..) |*slot, index| cursor = assignBuffers(&slot.request.io, arena, cursor, index < options.inbound_control_reserved);
+        for (inbound, 0..) |*slot, index| {
+            if (receive) |*plan| {
+                const buffers = plan.buffers(index, request_sinks, arena[outbound_bytes..]);
+                slot.receive = buffers;
+                cursor += buffers.scratch.len + buffers.read.len;
+            } else {
+                cursor = assignBuffers(&slot.request.io, arena, cursor, index < options.inbound_control_reserved);
+                const control = index < options.inbound_control_reserved;
+                const offset = if (control) index * protocol_mod.requestMaxControl() else @as(usize, options.inbound_control_reserved) * protocol_mod.requestMaxControl() + (index - options.inbound_control_reserved) * request_sink_size;
+                slot.receive = .{
+                    .sink = request_sinks[offset..][0..if (control) protocol_mod.requestMaxControl() else request_sink_size],
+                    .scratch = slot.request.io.scratch,
+                    .read = slot.request.io.read_buffer,
+                };
+            }
+        }
         assert(cursor == arena.len);
+
+        var serving = try serving_pool.Pool.init(allocator, options.inbound_max, if (receive != null) options.inbound_control_reserved else 0, options.serving_per_peer_max);
+        errdefer serving.deinit(allocator);
+        const peer_cursors = try allocator.alloc(PeerCursor, options.peers);
+        errdefer allocator.free(peer_cursors);
+        @memset(peer_cursors, .{});
 
         var buckets = try limiter_mod.Limiter.init(
             allocator,
@@ -400,6 +457,9 @@ pub const ReqResp = struct {
             .arena = arena,
             .request_sinks = request_sinks,
             .request_sink_size = request_sink_size,
+            .receive_plan = receive,
+            .serving = serving,
+            .peer_cursors = peer_cursors,
             .limiter = buckets,
             .policy = policy,
             .admission = admission,
@@ -414,6 +474,8 @@ pub const ReqResp = struct {
     pub fn deinit(self: *ReqResp) void {
         if (self.admission) |*owner| owner.limiter.deinit(self.allocator);
         self.limiter.deinit(self.allocator);
+        self.serving.deinit(self.allocator);
+        self.allocator.free(self.peer_cursors);
         self.allocator.free(self.request_sinks);
         self.allocator.free(self.arena);
         self.allocator.free(self.inbound);
@@ -507,6 +569,22 @@ pub const ReqResp = struct {
         return Server.finish(self, handle, now);
     }
 
+    /// Hold execution capacity until asynchronous host work actually retires.
+    pub fn retainServing(self: *ReqResp, handle: RequestHandle) bool {
+        return self.serving.retain(handle);
+    }
+
+    pub fn releaseServing(self: *ReqResp, handle: RequestHandle) bool {
+        return self.serving.release(handle);
+    }
+
+    /// Reserve one response turn before the host produces its next chunk.
+    pub fn reserveResponse(self: *ReqResp, handle: RequestHandle, now: Now) bool {
+        if (handle.direction != .inbound) return false;
+        const slot = self.inboundSlot(handle) orelse return false;
+        return slot.reserveResponse(self, now);
+    }
+
     pub fn consume(self: *ReqResp, handle: RequestHandle) bool {
         return Client.consume(self, handle);
     }
@@ -542,8 +620,15 @@ pub const ReqResp = struct {
         self.last_now_ms = now.mono_ms;
         for (self.inbound, 0..) |*slot, index| {
             if (!slot.request.running() or slot.request.protocol != .goodbye_v1 or !std.meta.eql(slot.request.conn, conn)) continue;
-            if (slot.state != .receiving_request and (slot.request.pendingEvent() == null or slot.request.pendingEvent().? != .request)) continue;
+            if (slot.state != .receiving_request and slot.state != .ready and (slot.request.pendingEvent() == null or slot.request.pendingEvent().? != .request)) continue;
             if (slot.state == .receiving_request and slot.request.pendingEvent() == null) Server.readRequest(self, engine, slot, @intCast(index), now);
+            if (slot.request.running() and slot.state == .ready) {
+                const bytes = slot.request.io.decoder.payload();
+                assert(bytes.len == @import("consensus_types").phase0.Goodbye.fixed_size);
+                self.counters.goodbyes_recovered_on_close +|= 1;
+                slot.state = .serving;
+                return std.mem.readInt(u64, bytes[0..8], .little);
+            }
             if (slot.request.pendingEvent()) |event| if (event == .request) {
                 assert(event.request.bytes.len == 8);
                 self.counters.goodbyes_recovered_on_close +|= 1;
@@ -565,6 +650,15 @@ pub const ReqResp = struct {
         for (self.inbound, 0..) |*slot, position| {
             if (!slot.request.active() or !std.meta.eql(slot.request.conn, conn)) continue;
             slot.fail(self, @intCast(position), .connection_closed, null);
+        }
+    }
+
+    pub fn streamReset(self: *ReqResp, stream: StreamHandle) void {
+        for (self.inbound, 0..) |*slot, index| {
+            if (!slot.request.running() or !std.meta.eql(slot.request.stream, stream)) continue;
+            if (slot.state == .writing_chunk or slot.state == .finishing) return;
+            slot.fail(self, @intCast(index), .stream_closed, null);
+            return;
         }
     }
 
@@ -591,7 +685,9 @@ pub const ReqResp = struct {
             .limiter_bytes = limiter_bytes,
             .admission_bytes = admission_bytes,
             .request_sink_bytes = self.request_sinks.len,
-            .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + limiter_bytes + admission_bytes + self.request_sinks.len,
+            .serving_bytes = self.serving.memoryBytes(),
+            .scheduler_bytes = self.peer_cursors.len * @sizeOf(PeerCursor),
+            .total_bytes = @sizeOf(ReqResp) + slot_bytes + self.arena.len + limiter_bytes + admission_bytes + self.request_sinks.len + self.serving.memoryBytes() + self.peer_cursors.len * @sizeOf(PeerCursor),
         };
     }
 
@@ -614,7 +710,10 @@ pub const ReqResp = struct {
                 capacities.application;
             if (slot.request.wakeup(capacity)) return now.mono_ms;
             if (slot.deadline(self)) |deadline| due = earlier(due, deadline);
-            if (slot.request.running() and slot.state == .withheld) {
+            if (slot.request.running() and slot.state == .ready and
+                self.serving.available(&slot.identity, slot.request.protocol.isControl()) != null)
+                due = earlier(due, slot.eligible_ms);
+            if (slot.request.running() and (slot.state == .withheld or slot.state == .waiting_capacity)) {
                 if (self.limiter.nextToken(slot.request.conn, slot.request.protocol, now.mono_ms)) |eligible| {
                     due = earlier(due, eligible);
                 } else return now.mono_ms;
@@ -634,12 +733,16 @@ pub const ReqResp = struct {
 
     pub fn inboundSink(self: *ReqResp, index: u16) []u8 {
         assert(index < self.inbound.len);
-        const reserved = self.options.inbound_control_reserved;
-        const control_size = protocol_mod.requestMaxControl();
-        const bulk_size = self.request_sink_size;
-        const offset = if (index < reserved) @as(usize, index) * control_size else @as(usize, reserved) * control_size + @as(usize, index - reserved) * bulk_size;
-        const size = if (index < reserved) control_size else bulk_size;
-        return self.request_sinks[offset..][0..size];
+        return self.inbound[index].receive.sink;
+    }
+
+    pub fn availableInbound(self: *ReqResp, peer: Handle, which: Protocol) ?u16 {
+        if (self.receive_plan == null) return self.availableInboundFor(which);
+        const first = receive_plan.Plan.first(peer.index, which);
+        for (self.inbound[first..][0..constants.MAX_CONCURRENT_REQUESTS], first..) |*slot, index| {
+            if (slot.request.available()) return @intCast(index);
+        }
+        return null;
     }
 
     pub fn availableInboundFor(self: *ReqResp, which: Protocol) ?u16 {
@@ -760,7 +863,7 @@ pub const ReqResp = struct {
         self.last_now_ms = now.mono_ms;
         self.cleanupPending(engine, router);
         self.recycleDelivered();
-        const total = self.outbound.len + self.inbound.len;
+        const total = self.outbound.len + if (self.receive_plan != null) self.options.peers else self.inbound.len;
         if (self.scan_remaining == 0) self.scan_remaining = total;
         const steps = @min(self.scan_remaining, self.options.work_per_pump_max);
         self.scan_remaining -= steps;
@@ -772,14 +875,64 @@ pub const ReqResp = struct {
                 slot.request.needs_service = false;
                 if (slot.request.active()) slot.advance(self, engine, @intCast(position), now);
             } else {
-                const index = position - self.outbound.len;
-                const slot = &self.inbound[index];
-                slot.request.needs_service = false;
-                if (slot.request.active()) slot.advance(self, engine, @intCast(index), now);
+                if (self.receive_plan != null) {
+                    const peer = position - self.outbound.len;
+                    const first = peer * receive_plan.slots_per_peer;
+                    const start = self.peer_cursors[peer].receive;
+                    for (0..receive_plan.slots_per_peer) |offset| {
+                        const local = (start + offset) % receive_plan.slots_per_peer;
+                        const index = first + local;
+                        const slot = &self.inbound[index];
+                        if (!slot.request.running()) continue;
+                        const due = slot.deadline(self) orelse unreachable;
+                        if (!slot.request.needs_service and due > now.mono_ms and slot.state != .withheld) continue;
+                        self.peer_cursors[peer].receive = @intCast((local + 1) % receive_plan.slots_per_peer);
+                        slot.request.needs_service = false;
+                        slot.advance(self, engine, @intCast(index), now);
+                        break;
+                    }
+                } else {
+                    const index = position - self.outbound.len;
+                    const slot = &self.inbound[index];
+                    slot.request.needs_service = false;
+                    if (slot.request.active()) slot.advance(self, engine, @intCast(index), now);
+                }
             }
         }
+        self.promoteReady(now);
         // Cleanup also covers terminal transitions made during this turn.
         self.cleanupPending(engine, router);
+    }
+
+    fn promoteReady(self: *ReqResp, now: Now) void {
+        const start = self.admission_cursor;
+        const first_class = self.admission_class;
+        var promoted: usize = 0;
+        for (0..self.options.peers) |offset| {
+            for (0..2) |class_offset| {
+                const class: u1 = @intCast((@as(usize, first_class) + class_offset) % 2);
+                const peer: u16 = @intCast((start[class] + offset) % self.options.peers);
+                const first = if (self.receive_plan != null) @as(usize, peer) * receive_plan.slots_per_peer else 0;
+                const end = if (self.receive_plan != null) first + receive_plan.slots_per_peer else self.inbound.len;
+                const local_start = self.peer_cursors[peer].admission[class];
+                for (0..end - first) |local_offset| {
+                    const local = (local_start + local_offset) % (end - first);
+                    const index = first + local;
+                    const slot = &self.inbound[index];
+                    if (!slot.request.running() or slot.request.conn.index != peer or slot.state != .ready or @intFromBool(slot.request.protocol.isControl()) != class) continue;
+                    const paid = slot.admission_paid;
+                    const admitted = slot.promote(self, @intCast(index), now);
+                    if (admitted or slot.admission_paid > paid) {
+                        promoted += 1;
+                        self.peer_cursors[peer].admission[class] = @intCast((local + 1) % (end - first));
+                        self.admission_cursor[class] = (peer + 1) % self.options.peers;
+                        self.admission_class = 1 - class;
+                        break;
+                    }
+                }
+                if (promoted == self.options.work_per_pump_max) return;
+            }
+        }
     }
 
     fn drain(self: *ReqResp, now: Now, events: []Event, control: bool, cursor: *usize) usize {
@@ -803,7 +956,13 @@ pub const ReqResp = struct {
 
     fn recycleDelivered(self: *ReqResp) void {
         for (self.outbound) |*slot| slot.request.recycleDelivered();
-        for (self.inbound) |*slot| slot.request.recycleDelivered();
+        for (self.inbound) |*slot| {
+            if (slot.request.completion == .reported) {
+                if (slot.execution) |index| self.serving.retire(index);
+                slot.execution = null;
+            }
+            slot.request.recycleDelivered();
+        }
     }
 
     pub fn servingSlot(self: *ReqResp, handle: RequestHandle) RespondError!*Server {
@@ -877,6 +1036,8 @@ pub const ReqResp = struct {
     }
 };
 
+const PeerCursor = struct { receive: u8 = 0, admission: [2]u16 = @splat(0) };
+
 fn assignBuffers(io: *RequestIO, arena: []u8, cursor: usize, control: bool) usize {
     const scratch = if (control) control_scratch_length else scratch_length;
     const read_buffer = if (control) control_read_buffer_length else read_buffer_length;
@@ -895,6 +1056,7 @@ comptime {
 }
 
 test {
+    _ = @import("reqresp_admission_lifecycle_test.zig");
     _ = @import("reqresp_active_protocols_test.zig");
     _ = @import("reqresp_control_capacity_test.zig");
     _ = @import("reqresp_control_partition_test.zig");

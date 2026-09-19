@@ -106,6 +106,12 @@ fn prepareApplicationStorage(runtime: *Runtime, app: *const application_cfg.Conf
     const limits = resolved.core.service.reqresp;
     const request_capacity: usize = @min(32, limits.outbound_max - limits.outbound_control_reserved);
     const incoming_capacity: usize = @min(32, limits.inbound_max - limits.inbound_control_reserved);
+    resolved.core.service.reqresp.inbound_max = @intCast(incoming_capacity + limits.inbound_control_reserved);
+    resolved.core.service.reqresp.admission = try n.reqresp.reqresp.AdmissionOptions.defaults(
+        &limits.admission.?.policy,
+        limits.admission.?.limits.identities,
+        resolved.core.service.reqresp.inbound_max,
+    );
     const gossip_options = &resolved.core.service.gossipsub;
     const gossip_capacity = gossip_options.validation_capacity;
     const gossip_bytes = if (gossip_options.processor_limits) |work_limits| n.gossip_processor.limits_mod.bytes(&work_limits) else gossip_options.mcache_arena_bytes;
@@ -529,6 +535,12 @@ pub fn takeIncomingRequest(self: *@This()) !js.Value {
 }
 pub fn incomingRespond(self: *@This(), handle: js.Value, data: js.Value, context: js.Value) !js.Value {
     return .{ .val = try incoming_js.respond(try self.owner(), handle.val, data.val, context.val) };
+}
+pub fn incomingRelease(self: *@This(), handle: js.Value) !js.Value {
+    return .{ .val = try incoming_js.release(try self.owner(), handle.val) };
+}
+pub fn incomingReady(self: *@This(), handle: js.Value) !js.Value {
+    return .{ .val = try incoming_js.ready(try self.owner(), handle.val) };
 }
 pub fn incomingTerminal(self: *@This(), handle: js.Value, action: js.Value, status: js.Value, message: js.Value) !js.Value {
     return .{ .val = try incoming_js.terminal(try self.owner(), handle.val, action.val, status.val, message.val) };

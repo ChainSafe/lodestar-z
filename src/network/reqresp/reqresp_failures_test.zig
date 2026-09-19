@@ -977,7 +977,7 @@ test "reqresp validates transport capacity and copies its fork table" {
     try std.testing.expectError(error.InvalidCapacity, rr.attach(&setup.shared.pair.client));
     try std.testing.expectError(error.InvalidOptions, reqresp.ReqResp.init(std.testing.allocator, .{ .peers = 1025, .forks = &.{} }));
     const plan = rr.memoryPlan();
-    try std.testing.expectEqual(plan.total_bytes, plan.facade_bytes + plan.slot_bytes + plan.io_bytes + plan.limiter_bytes + plan.request_sink_bytes);
+    try std.testing.expectEqual(plan.total_bytes, plan.facade_bytes + plan.slot_bytes + plan.io_bytes + plan.limiter_bytes + plan.request_sink_bytes + plan.serving_bytes + plan.scheduler_bytes);
     try std.testing.expect(plan.io_bytes > 0 and plan.slot_bytes > 0 and plan.limiter_bytes > 0);
 }
 
@@ -1506,7 +1506,7 @@ test "reqresp rejects competing request policies before allocating" {
     }));
 }
 
-test "reqresp request admission host capacity cancellation and quota error write failure retain debt" {
+test "reqresp request admission host capacity cancellation and queued cancellation retain debt" {
     var setup: Pair = .{};
     try setup.init(.{}, .{
         .admission = .{ .policy = @import("policy_fixture.zig").config(), .limits = .{ .identities = 1, .peer = @import("admission_fixture.zig").quotas(1, 86_400_000), .global = @import("admission_fixture.zig").quotas(100, 86_400_000) } },
@@ -1532,22 +1532,22 @@ test "reqresp request admission host capacity cancellation and quota error write
     setup.server_event_capacity = 16;
     for (0..4) |_| try setup.pumpOnce();
     try std.testing.expectEqual(@as(u16, 0), setup.shared.server.reqresp.active().inbound);
-    _ = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .blocks_by_root_v2, &.{}, sink, .{}, setup.shared.pair.now);
-    var refused = false;
+    const queued = try setup.shared.client.reqresp.request(&setup.shared.pair.client, &setup.shared.client.router, setup.shared.handles.client, .blocks_by_root_v2, &.{}, sink, .{}, setup.shared.pair.now);
+    var waiting = false;
     for (0..50) |_| {
         try setup.pumpOnce();
         for (setup.serverEvents()) |event| try std.testing.expect(event != .request);
-        if (setup.shared.server.reqresp.counters.peer_refusals == 1) {
-            refused = true;
+        if (setup.shared.server.reqresp.inbound[0].request.running() and setup.shared.server.reqresp.inbound[0].state == .ready) {
+            waiting = true;
             break;
         }
     }
-    try std.testing.expect(refused);
-    try std.testing.expectEqual(@as(u64, 1), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.blocks_by_root_v2)].admission_refusals[@intFromEnum(reqresp.metrics.AdmissionRefusal.peer_quota)]);
+    try std.testing.expect(waiting);
+    try std.testing.expectEqual(@as(u64, 0), setup.shared.server.reqresp.protocol_counters[@intFromEnum(Protocol.blocks_by_root_v2)].admission_refusals[@intFromEnum(reqresp.metrics.AdmissionRefusal.peer_quota)]);
     const replacement = &setup.shared.server.reqresp.inbound[0];
     try std.testing.expect(replacement.request.generation > incoming.generation);
-    try std.testing.expectEqualSlices(u8, "rate limited", replacement.request.io.payload);
-    setup.shared.pair.server.closeStream(replacement.request.stream, 0);
+    try std.testing.expectEqual(@as(usize, 0), replacement.request.io.payload.len);
+    try std.testing.expect(setup.shared.client.reqresp.cancel(queued));
     var failed = false;
     for (0..20) |_| {
         try setup.pumpOnce();

@@ -5,7 +5,15 @@ const Protocol = @import("protocol.zig").Protocol;
 const limiter = @import("limiter.zig");
 
 pub const ByFork = [ForkSeq.count]limiter.Quotas;
-pub const Options = struct { identities: u16, peer: ByFork, global: ByFork };
+pub const Options = struct {
+    identities: u16,
+    peer: ByFork,
+    global: ByFork,
+    starts: limiter.Quota = .{
+        .tokens = Protocol.count * @import("constants.zig").MAX_CONCURRENT_REQUESTS,
+        .period_ms = @import("constants.zig").progress_timeout_ms_default,
+    },
+};
 pub const Decision = enum { allowed, peer_quota, global_quota, identity_capacity };
 pub const InitError = error{ InvalidOptions, InvalidQuota } || std.mem.Allocator.Error;
 pub const identities_max = 4096;
@@ -16,6 +24,7 @@ const Row = struct {
     occupied: bool = false,
     debt: [Protocol.count]u128 = @splat(0),
     expires_ns: u128 = 0,
+    starts_ns: [2]u128 = @splat(0),
 };
 
 pub const Limiter = struct {
@@ -25,6 +34,7 @@ pub const Limiter = struct {
 
     pub fn validate(options: *const Options) error{ InvalidOptions, InvalidQuota }!void {
         if (options.identities == 0 or options.identities > identities_max) return error.InvalidOptions;
+        if (options.starts.tokens == 0 or options.starts.period_ms == 0 or options.starts.period_ms > 86_400_000) return error.InvalidQuota;
         for ([_]*const ByFork{ &options.peer, &options.global }) |table| {
             for (table) |quotas| for (quotas) |quota| {
                 if (quota.tokens == 0 or quota.period_ms == 0 or quota.period_ms > 86_400_000) return error.InvalidQuota;
@@ -46,6 +56,73 @@ pub const Limiter = struct {
 
     pub fn memoryPlan(self: *const Limiter) struct { allocated_bytes: usize } {
         return .{ .allocated_bytes = self.rows.len * @sizeOf(Row) };
+    }
+
+    pub fn start(self: *Limiter, identity: *const PeerId, control: bool, now_ms: u64) Decision {
+        const now_ns = @as(u128, now_ms) * ns_per_ms;
+        var reclaim: ?*Row = null;
+        var found: ?*Row = null;
+        for (self.rows) |*row| {
+            if (row.occupied and row.identity.eql(identity)) {
+                found = row;
+                break;
+            }
+            if (reclaim == null and (!row.occupied or row.expires_ns <= now_ns)) reclaim = row;
+        }
+        const row = found orelse reclaim orelse return .identity_capacity;
+        const class = @intFromBool(control);
+        const due = next(if (found != null) row.starts_ns[class] else 0, 1, self.options.starts, now_ns) orelse return .peer_quota;
+        if (found == null) row.* = .{ .identity = identity.*, .occupied = true };
+        row.starts_ns[class] = due;
+        row.expires_ns = @max(row.expires_ns, due);
+        return .allowed;
+    }
+
+    pub fn eligibleAt(self: *const Limiter, identity: *const PeerId, which: Protocol, cost: u128, fork: ForkSeq, now_ms: u64) ?u64 {
+        const index = @intFromEnum(which);
+        const peer = self.options.peer[@intFromEnum(fork)][index];
+        const global = self.options.global[@intFromEnum(fork)][index];
+        if (cost > peer.tokens or cost > global.tokens) return null;
+        var debt: u128 = 0;
+        var room = false;
+        var expires: u128 = std.math.maxInt(u128);
+        const now_ns = @as(u128, now_ms) * ns_per_ms;
+        for (self.rows) |*row| {
+            if (row.occupied and row.identity.eql(identity)) {
+                debt = row.debt[index];
+                room = true;
+                break;
+            }
+            room = room or !row.occupied or row.expires_ns <= now_ns;
+            expires = @min(expires, row.expires_ns);
+        }
+        const peer_charge = (cost * peer.period_ms * ns_per_ms + peer.tokens - 1) / peer.tokens;
+        const global_charge = (cost * global.period_ms * ns_per_ms + global.tokens - 1) / global.tokens;
+        const due = @max(if (room) 0 else expires, debt + peer_charge -| (@as(u128, peer.period_ms) * ns_per_ms), self.global[index] + global_charge -| (@as(u128, global.period_ms) * ns_per_ms));
+        return @max(now_ms, std.math.cast(u64, (due + ns_per_ms - 1) / ns_per_ms) orelse std.math.maxInt(u64));
+    }
+
+    /// Legal requests can exceed a configured burst. Response production separately
+    /// charges every chunk, so admission reserves at most one full burst.
+    pub fn requestCost(self: *const Limiter, which: Protocol, cost: u128, fork: ForkSeq) u128 {
+        const index = @intFromEnum(which);
+        return @min(cost, self.options.peer[@intFromEnum(fork)][index].tokens, self.options.global[@intFromEnum(fork)][index].tokens);
+    }
+
+    /// Ready requests accumulate credit so smaller requests cannot consume every refill.
+    pub fn grant(self: *Limiter, identity: *const PeerId, which: Protocol, remaining: u128, fork: ForkSeq, now_ms: u64) u128 {
+        const index = @intFromEnum(which);
+        const peer = self.options.peer[@intFromEnum(fork)][index];
+        const global = self.options.global[@intFromEnum(fork)][index];
+        var debt: u128 = 0;
+        for (self.rows) |*row| if (row.occupied and row.identity.eql(identity)) {
+            debt = row.debt[index];
+            break;
+        };
+        const now_ns = @as(u128, now_ms) * ns_per_ms;
+        const cost = @min(remaining, available(debt, peer, now_ns), available(self.global[index], global, now_ns));
+        if (cost == 0 or self.take(identity, which, cost, fork, now_ms) != .allowed) return 0;
+        return cost;
     }
 
     pub fn take(self: *Limiter, identity: *const PeerId, which: Protocol, cost: u128, fork: ForkSeq, now_ms: u64) Decision {
@@ -76,6 +153,12 @@ pub const Limiter = struct {
         return .allowed;
     }
 };
+
+fn available(debt: u128, quota: limiter.Quota, now_ns: u128) u128 {
+    const period = @as(u128, quota.period_ms) * ns_per_ms;
+    const room = (now_ns + period) -| @max(now_ns, debt);
+    return room * quota.tokens / period;
+}
 
 fn next(previous: u128, cost: u128, quota: limiter.Quota, now_ns: u128) ?u128 {
     std.debug.assert(cost > 0 and cost <= quota.tokens);

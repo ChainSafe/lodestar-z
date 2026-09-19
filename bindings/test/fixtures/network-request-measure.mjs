@@ -7,7 +7,7 @@ for (const profile of ["small", "beaconNode"]) {
   config.profile = profile;
   if (profile === "beaconNode") config.resources = {
     bridgeBudgetBytes: 16 * 1024 * 1024, connectionCapacity: 256, dialingCapacity: 16,
-    handshakingCapacity: 32, maxPeers: 210, minOutbound: 16, nativeBudgetBytes: 256 * 1024 * 1024,
+    handshakingCapacity: 32, maxPeers: 210, minOutbound: 16, nativeBudgetBytes: 512 * 1024 * 1024,
     outboundReserve: 32, peerCapacity: 512, receiveBudgetBytes: 512 * 1024 * 1024, targetPeers: 200,
   };
   const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);

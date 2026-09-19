@@ -70,7 +70,7 @@ pub fn take(runtime: *Runtime) !Value {
         cell.action = .cancel;
         cell.state = if (cell.native) .serving else .terminal;
         table.releasePayload(cell);
-        if (!cell.native) table.retire(token);
+        if (!cell.native and !cell.serving_retained) table.retire(token) else cell.release_requested = true;
         runtime.unlock();
         runtime.failDelivery();
     }
@@ -136,7 +136,7 @@ pub fn respond(runtime: *Runtime, value: Value, data: Value, context_value: Valu
         runtime.unlock();
         return error.NetworkIncomingClosed;
     }
-    if (cell.pending != null or cell.state != .serving) {
+    if (cell.pending != null or cell.permission != null or cell.state != .serving) {
         runtime.incoming.?.diag.busyResponses +|= 1;
         runtime.unlock();
         return error.NetworkIncomingBusy;
@@ -206,7 +206,7 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
         return err;
     };
     if (cell.native) {
-        if (action != .cancel and (cell.pending != null or cell.state == .response_preparing)) {
+        if (action != .cancel and (cell.pending != null or cell.permission != null or cell.state == .response_preparing)) {
             runtime.unlock();
             return error.NetworkIncomingBusy;
         }
@@ -221,6 +221,43 @@ pub fn terminal(runtime: *Runtime, value: Value, action_value: Value, status_val
     refNotify(runtime);
     settle(runtime.env, runtime);
     return runtime.env.getUndefined();
+}
+
+pub fn release(runtime: *Runtime, value: Value) !Value {
+    const handle = try parseHandle(runtime, value);
+    runtime.lock();
+    const cell = cellFor(runtime, handle) catch |err| {
+        runtime.unlock();
+        return err;
+    };
+    cell.release_requested = true;
+    runtime.unlock();
+    refNotify(runtime);
+    return runtime.env.getUndefined();
+}
+
+pub fn ready(runtime: *Runtime, value: Value) !Value {
+    const handle = try parseHandle(runtime, value);
+    const deferred = try runtime.env.createPromise();
+    errdefer deferred.resolve(runtime.env.getUndefined() catch unreachable) catch unreachable;
+    runtime.lock();
+    const cell = cellFor(runtime, handle) catch |err| {
+        runtime.unlock();
+        return err;
+    };
+    if (!cell.native or cell.action != .none or runtime.stop) {
+        runtime.unlock();
+        return error.NetworkIncomingClosed;
+    }
+    if (cell.permission != null or cell.pending != null or cell.state != .serving) {
+        runtime.unlock();
+        return error.NetworkIncomingBusy;
+    }
+    cell.permission = deferred;
+    cell.permission_ready = false;
+    runtime.unlock();
+    refNotify(runtime);
+    return deferred.getPromise();
 }
 fn ackError(env: napi.Env, ack: incoming.Ack) !Value {
     switch (ack) {
@@ -257,17 +294,22 @@ pub fn settle(env: napi.Env, runtime: *Runtime) void {
         }
         const pending = if (cell.ack != null) cell.pending else null;
         const closed = if (!cell.native) cell.closed else null;
-        if (pending == null and closed == null) {
+        const permission = if (cell.permission_ready or !cell.native) cell.permission else null;
+        if (pending == null and closed == null and permission == null) {
             runtime.unlock();
             continue;
         }
         cell.copying = true;
         const ack = cell.ack;
+        const permitted = cell.native and cell.permission_ready;
         runtime.unlock();
         if (pending) |deferred| {
             if (ack.? == .sent) deferred.resolve(env.getUndefined() catch unreachable) catch unreachable else deferred.reject(ackError(env, ack.?) catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
         }
         if (closed) |deferred| deferred.resolve(env.getUndefined() catch unreachable) catch unreachable;
+        if (permission) |deferred| {
+            if (permitted) deferred.resolve(env.getUndefined() catch unreachable) catch unreachable else deferred.reject(errorValue(env, "NetworkIncomingClosed") catch runtime.copy_error.?.getValue() catch unreachable) catch unreachable;
+        }
         runtime.lock();
         cell.copying = false;
         if (pending != null) {
@@ -275,8 +317,12 @@ pub fn settle(env: napi.Env, runtime: *Runtime) void {
             cell.ack = null;
         }
         if (closed != null) cell.closed = null;
+        if (permission != null) {
+            cell.permission = null;
+            cell.permission_ready = false;
+        }
         table.releasePayload(cell);
-        if (!cell.native and cell.closed == null and cell.pending == null) table.retire(.{ .index = @intCast(i), .generation = cell.generation });
+        if (!cell.native and !cell.serving_retained and cell.closed == null and cell.pending == null and cell.permission == null) table.retire(.{ .index = @intCast(i), .generation = cell.generation });
         runtime.unlock();
     }
     runtime.lock();

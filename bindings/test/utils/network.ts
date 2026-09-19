@@ -122,7 +122,7 @@ export function applicationConfig(): NativeApplicationConfig {
       handshakingCapacity: 8,
       maxPeers: 12,
       minOutbound: 2,
-      nativeBudgetBytes: 80 * 1024 * 1024,
+      nativeBudgetBytes: 96 * 1024 * 1024,
       outboundReserve: 4,
       peerCapacity: 64,
       receiveBudgetBytes: 64 * 1024 * 1024,

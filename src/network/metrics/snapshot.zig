@@ -82,6 +82,7 @@ pub const RequestCapacity = struct {
     inbound_capacity: usize = 0,
     outbound_control_reserved: usize = 0,
     inbound_control_reserved: usize = 0,
+    serving_capacity: usize = 0,
 };
 pub const RequestResources = struct {
     outbound_occupied: usize = 0,
@@ -92,6 +93,8 @@ pub const RequestResources = struct {
     held_chunks: usize = 0,
     withheld_chunks: usize = 0,
     oldest_withheld_age_ms: ?u64 = null,
+    serving_occupied: usize = 0,
+    retiring: usize = 0,
 };
 pub const ControlCapacity = struct {
     operation_capacity: usize = 0,

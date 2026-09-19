@@ -144,6 +144,7 @@ instrumented.each([
       });
       expect(completed.stepWriting || completed.stepFinishing).toBe(phase === "after" && action === "fail");
       expect(outcome).toBeUndefined();
+      await expect.poll(() => pair.right.diagnostics().incoming.occupied).toBe(0);
       expect(pair.right.diagnostics().incoming).toMatchObject({
         closedPromises: 0,
         occupied: 0,
@@ -180,7 +181,7 @@ instrumented.each(["finish", "fail"] as const)(
       hooks.networkTestIncomingRelease();
       await pair.right.getIdentity();
       expect(await closed).toBeUndefined();
-      expect(pair.right.diagnostics().incoming.occupied).toBe(0);
+      await expect.poll(() => pair.right.diagnostics().incoming.occupied).toBe(0);
     } finally {
       hooks.networkTestIncomingRelease();
       await Promise.all([pair.left.close(), pair.right.close()]);
