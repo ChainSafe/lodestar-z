@@ -100,7 +100,8 @@ pub const ReceiveArgs = struct {
 
 pub const Config = struct {
     session_capacity: usize = 1_024,
-    challenge_capacity: usize = 1024,
+    /// Ceiling; storage is derived from the challenge admission rate and timeout.
+    challenge_capacity: usize = @import("SessionStore.zig").challenge_capacity_max,
     call_capacity: usize = 64,
     request_timeout_ms: u64 = 1_000,
     challenge_timeout_ms: u64 = 1_000,
@@ -306,6 +307,25 @@ fn sendPreparedResponse(
 /// Processes one datagram. `out` receives at most one immediate reply, either a WHOAREYOU or
 /// the local handshake. Standard responses are staged separately.
 pub fn receive(
+    self: *Engine,
+    out: []u8,
+    raw: []const u8,
+    from: types.Address,
+    args: ReceiveArgs,
+    scratch: *Scratch,
+) Error!Outcome {
+    if (!self.admitDatagram(&from, args.now_ms)) return .{ .rejected = .admission_limited };
+    return self.receiveAdmitted(out, raw, from, args, scratch);
+}
+
+pub fn admitDatagram(self: *Engine, from: *const types.Address, now_ms: u64) bool {
+    const stage: @import("admission.zig").Stage = if (self.calls.expectsResponseFrom(from, now_ms)) .response else .packet;
+    return self.channel.admission.allow(stage, from, now_ms);
+}
+
+/// Requires one successful `admitDatagram` for this datagram, endpoint, and timestamp.
+/// Transport admits before obtaining entropy; other callers can use `receive` directly.
+pub fn receiveAdmitted(
     self: *Engine,
     out: []u8,
     raw: []const u8,
@@ -519,7 +539,11 @@ fn dispatchResponse(
     const handle = try self.calls.match(peer, &decoded, now_ms);
     try self.calls.checkResponseNonce(handle, nonce);
     const parsed_records = switch (decoded) {
-        .nodes => |nodes| try validateNodeRecords(nodes.enrs, scratch),
+        .nodes => |nodes| blk: {
+            if (nodes.enrs.len != 0 and !self.channel.admission.allowRecords(&peer.address, @intCast(nodes.enrs.len), now_ms))
+                return Error.AdmissionLimited;
+            break :blk try validateNodeRecords(nodes.enrs, scratch);
+        },
         else => &.{},
     };
     const match_result = try self.calls.accept(
@@ -656,7 +680,7 @@ fn validateResponse(value: *const message.Message) Error!void {
 }
 
 comptime {
-    std.debug.assert(@sizeOf(Engine) <= 1_024);
+    std.debug.assert(@sizeOf(Engine) <= 1_152);
 }
 
 test "NODES record validation rejects malformed ENRs before publication" {

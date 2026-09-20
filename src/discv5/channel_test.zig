@@ -474,6 +474,8 @@ test "channel exposes the next challenge or idle session deadline" {
     _ = pair.node_b.receive(pair.a_to_b[0..length], pair.address_a, 200, &pair.scratch);
     try std.testing.expectEqual(@as(?u64, 1_200), pair.node_b.nextDeadlineMs());
     _ = try pair.node_b.sealEstablished(&pair.b_to_a, pair.peerA(), "pong", &sealEntropy(0x50), 300);
+    try std.testing.expectEqual(@as(?u64, 1_200), pair.node_b.nextDeadlineMs());
+    try std.testing.expectEqual(@as(usize, 0), pair.node_b.expire(1_200).sessions);
     try std.testing.expectEqual(@as(?u64, 1_300), pair.node_b.nextDeadlineMs());
     try std.testing.expectEqual(@as(usize, 0), pair.node_b.expire(1_299).sessions);
     try std.testing.expectEqual(@as(usize, 1), pair.node_b.expire(1_300).sessions);

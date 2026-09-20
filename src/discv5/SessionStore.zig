@@ -54,6 +54,9 @@ const ChallengeEntry = struct {
 sessions: SessionMap,
 session_capacity: u32,
 challenges: []?ChallengeEntry,
+challenge_count: usize = 0,
+oldest_challenge_ms: ?u64 = null,
+oldest_session_ms: ?u64 = null,
 
 pub fn init(
     self: *SessionStore,
@@ -104,6 +107,7 @@ pub fn alternateReadKey(self: *const SessionStore, peer: types.Endpoint) ?[16]u8
 pub fn touch(self: *SessionStore, peer: types.Endpoint, now_ms: u64) bool {
     const stored = self.sessions.getPtr(peer) orelse return false;
     stored.last_used_ms = now_ms;
+    self.noteSessionTime(now_ms);
     return true;
 }
 
@@ -120,11 +124,13 @@ pub fn outbound(
         clearSession(stored);
         const removed = self.sessions.remove(peer);
         std.debug.assert(removed);
+        if (self.sessions.count() == 0) self.oldest_session_ms = null;
         return Error.NonceExhausted;
     };
     const nonce = makeNonce(counter, random_tail);
     stored.value.nonce_counter = counter;
     stored.last_used_ms = now_ms;
+    self.noteSessionTime(now_ms);
     return .{ .write_key = stored.value.write_key, .nonce = nonce };
 }
 
@@ -156,6 +162,7 @@ pub fn install(
             .last_used_ms = now_ms,
         });
     }
+    self.noteSessionTime(now_ms);
 }
 
 /// Stores a challenge for `peer` unless one is already pending. When the cache is full, the
@@ -169,10 +176,12 @@ pub fn putChallenge(
 ) bool {
     if (self.findChallenge(peer) != null) return false;
     const index = self.challengeIndexForInsert();
+    if (self.challenges[index] == null) self.challenge_count += 1;
     self.challenges[index] = .{
         .peer = peer,
         .value = .{ .data = data.*, .sent_at_ms = now_ms, .known = known },
     };
+    self.oldest_challenge_ms = @min(self.oldest_challenge_ms orelse now_ms, now_ms);
     return true;
 }
 
@@ -182,21 +191,32 @@ pub fn getChallenge(self: *const SessionStore, peer: types.Endpoint) ?Challenge 
 }
 
 pub fn expireChallenges(self: *SessionStore, now_ms: u64, timeout_ms: u64) usize {
+    if (!expiredAt(self.oldest_challenge_ms orelse return 0, now_ms, timeout_ms)) return 0;
     var expired: usize = 0;
+    self.oldest_challenge_ms = null;
     for (self.challenges) |*slot| {
         const stored = slot.* orelse continue;
-        if (!expiredAt(stored.value.sent_at_ms, now_ms, timeout_ms)) continue;
+        if (!expiredAt(stored.value.sent_at_ms, now_ms, timeout_ms)) {
+            self.oldest_challenge_ms = @min(self.oldest_challenge_ms orelse stored.value.sent_at_ms, stored.value.sent_at_ms);
+            continue;
+        }
         slot.* = null;
         expired += 1;
     }
+    self.challenge_count -= expired;
     return expired;
 }
 
 pub fn expireSessions(self: *SessionStore, now_ms: u64, timeout_ms: u64) usize {
+    if (!expiredAt(self.oldest_session_ms orelse return 0, now_ms, timeout_ms)) return 0;
     var expired: usize = 0;
+    self.oldest_session_ms = null;
     var iterator = self.sessions.iterator();
     while (iterator.next()) |entry| {
-        if (!expiredAt(entry.value_ptr.last_used_ms, now_ms, timeout_ms)) continue;
+        if (!expiredAt(entry.value_ptr.last_used_ms, now_ms, timeout_ms)) {
+            self.noteSessionTime(entry.value_ptr.last_used_ms);
+            continue;
+        }
         clearSession(entry.value_ptr);
         self.sessions.removeByPtr(entry.key_ptr);
         expired += 1;
@@ -204,20 +224,16 @@ pub fn expireSessions(self: *SessionStore, now_ms: u64, timeout_ms: u64) usize {
     return expired;
 }
 
+/// Cached lower bounds can wake early after a refresh or removal; expiry recomputes them.
 pub fn nextDeadlineMs(
     self: *const SessionStore,
     challenge_timeout_ms: u64,
     session_idle_timeout_ms: u64,
 ) ?u64 {
     var next: ?u64 = null;
-    for (self.challenges) |slot| {
-        const stored = slot orelse continue;
-        const deadline = stored.value.sent_at_ms +| challenge_timeout_ms;
-        next = @min(next orelse deadline, deadline);
-    }
-    var iterator = self.sessions.valueIterator();
-    while (iterator.next()) |entry| {
-        const deadline = entry.last_used_ms +| session_idle_timeout_ms;
+    if (self.oldest_challenge_ms) |oldest| next = oldest +| challenge_timeout_ms;
+    if (self.oldest_session_ms) |oldest| {
+        const deadline = oldest +| session_idle_timeout_ms;
         next = @min(next orelse deadline, deadline);
     }
     return next;
@@ -228,11 +244,7 @@ pub fn sessionCount(self: *const SessionStore) usize {
 }
 
 pub fn challengeCount(self: *const SessionStore) usize {
-    var count: usize = 0;
-    for (self.challenges) |entry| if (entry != null) {
-        count += 1;
-    };
-    return count;
+    return self.challenge_count;
 }
 
 fn findChallenge(self: *const SessionStore, peer: types.Endpoint) ?usize {
@@ -255,6 +267,12 @@ fn challengeIndexForInsert(self: *const SessionStore) usize {
 pub fn removeChallenge(self: *SessionStore, peer: types.Endpoint) void {
     const index = self.findChallenge(peer) orelse return;
     self.challenges[index] = null;
+    self.challenge_count -= 1;
+    if (self.challenge_count == 0) self.oldest_challenge_ms = null;
+}
+
+fn noteSessionTime(self: *SessionStore, now_ms: u64) void {
+    self.oldest_session_ms = @min(self.oldest_session_ms orelse now_ms, now_ms);
 }
 
 fn evictOldestSession(self: *SessionStore) void {
@@ -267,6 +285,7 @@ fn evictOldestSession(self: *SessionStore) void {
     clearSession(oldest.value_ptr);
     const removed = self.sessions.remove(key);
     std.debug.assert(removed);
+    if (self.sessions.count() == 0) self.oldest_session_ms = null;
 }
 
 pub fn makeNonce(counter: u32, random_tail: *const [8]u8) [constants.nonce_size]u8 {
@@ -290,7 +309,7 @@ fn clearSession(entry: *SessionEntry) void {
 comptime {
     std.debug.assert(@sizeOf(SessionEntry) <= 128);
     std.debug.assert(@sizeOf(ChallengeEntry) <= 208);
-    std.debug.assert(@sizeOf(SessionStore) <= 48);
+    std.debug.assert(@sizeOf(SessionStore) <= 96);
 }
 
 test {

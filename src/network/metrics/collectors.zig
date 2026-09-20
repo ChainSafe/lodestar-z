@@ -154,7 +154,7 @@ fn writeNativeCounters(self: *const Snapshot, w: *prom.Encoder) prom.Error!void 
     const discovery_admission = try w.family(.{
         .name = "lodestar_native_discovery_admission_total",
         .kind = .counter,
-        .help = "Discovery challenge creation and handshake verification admission outcomes",
+        .help = "Discovery packet, expected response, challenge, handshake and record verification admission outcomes",
         .labels = &.{ "stage", "outcome" },
     });
     inline for (std.meta.fields(admission.Stage)) |stage| {

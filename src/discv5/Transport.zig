@@ -242,9 +242,13 @@ fn processDatagram(
     datagram: sockets_mod.Datagram,
     result: *StepResult,
 ) Error!void {
+    if (!self.engine.admitDatagram(&datagram.from, result.now_ms)) {
+        result.datagram = .{ .rejected = .admission_limited };
+        return;
+    }
     var entropy = try receiveEntropy(io);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&entropy));
-    const accepted = switch (try self.engine.receive(
+    const accepted = switch (try self.engine.receiveAdmitted(
         &self.output,
         datagram.bytes,
         datagram.from,

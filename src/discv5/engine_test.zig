@@ -48,6 +48,122 @@ test "engine reports source admission pressure without a local failure" {
     try std.testing.expectEqual(@as(u16, 63), recovered.accepted.packet_length);
 }
 
+test "engine limits malformed packets before decoding or touching output" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    const limits = @import("admission.zig");
+    for (0..limits.packet_source_quota.burst) |_| {
+        const result = try pair.node_b.receive(&pair.b_to_a, &.{}, pair.address_a, receiveArgs(0, 0x30), &pair.scratch_b);
+        try std.testing.expectEqual(types.RejectReason.malformed_packet, result.rejected);
+    }
+    @memset(&pair.b_to_a, 0xaa);
+    @memset(&pair.scratch_b.channel.packet_decode.header, 0xbb);
+    const result = try pair.node_b.receive(&pair.b_to_a, &.{}, pair.address_a, receiveArgs(0, 0x30), &pair.scratch_b);
+    try std.testing.expectEqual(types.RejectReason.admission_limited, result.rejected);
+    try std.testing.expect(std.mem.allEqual(u8, &pair.b_to_a, 0xaa));
+    try std.testing.expect(std.mem.allEqual(u8, &pair.scratch_b.channel.packet_decode.header, 0xbb));
+}
+
+test "engine admits fragmented expected responses through unsolicited packet exhaustion" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    const limits = @import("admission.zig");
+    test_support.installSession(&pair.node_a, pair.peerB(), 0x55);
+    test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
+    const request = message.Message{ .find_node = .{ .request_id = try .init(&.{1}), .distances = &.{256} } };
+    const started = try pair.node_a.startCall(&pair.a_to_b, pair.peerB(), &pair.record_b, &request, 1, &sealEntropy(0x20));
+    _ = try pair.node_b.receive(&pair.b_to_a, pair.a_to_b[0..started.packet_length], pair.address_a, receiveArgs(2, 0x30), &pair.scratch_b);
+    for (0..limits.packet_global_quota.burst) |i| {
+        const from = test_support.address4(192, 0, 2, @intCast(i), 9_000);
+        const result = try pair.node_a.receive(&pair.a_to_b, &.{}, from, receiveArgs(3, 0x30), &pair.scratch_a);
+        try std.testing.expectEqual(types.RejectReason.malformed_packet, result.rejected);
+    }
+    var wrong_port = pair.address_b;
+    wrong_port.ip4.port += 1;
+    const wrong = try pair.node_a.receive(&pair.a_to_b, &.{}, wrong_port, receiveArgs(3, 0x30), &pair.scratch_a);
+    try std.testing.expectEqual(types.RejectReason.admission_limited, wrong.rejected);
+    const response = message.Message{ .nodes = .{ .request_id = request.find_node.request_id, .total = types.findnode_response_packets_max, .enrs = &.{} } };
+    for (0..types.findnode_response_packets_max) |i| {
+        const length = try pair.node_b.sendResponse(&pair.b_to_a, pair.peerA(), &response, 3, &sealEntropy(0x40));
+        const received = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..length], pair.address_b, receiveArgs(3, 0x30), &pair.scratch_a);
+        try std.testing.expectEqual(started.handle, received.accepted.event.response.matched.handle);
+        try std.testing.expectEqual(i + 1 == types.findnode_response_packets_max, received.accepted.event.response.matched.terminal);
+    }
+    try std.testing.expectEqual(@as(usize, 0), pair.node_a.calls.count());
+    const late = try pair.node_a.receive(&pair.a_to_b, &.{}, pair.address_b, receiveArgs(3, 0x30), &pair.scratch_a);
+    try std.testing.expectEqual(types.RejectReason.admission_limited, late.rejected);
+}
+
+test "established packet pressure cannot refresh a session after receive refusal" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    const limits = @import("admission.zig");
+    test_support.installSession(&pair.node_a, pair.peerB(), 0x55);
+    test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
+    const request = pair.ping(1);
+    var plaintext_buffer: [1_280]u8 = undefined;
+    const plaintext = try request.encode(&plaintext_buffer);
+    const sealed = try pair.node_a.channel.sealEstablished(&pair.a_to_b, pair.peerB(), plaintext, &sealEntropy(0x20), 0);
+    for (0..limits.packet_source_quota.burst) |_| {
+        const received = try pair.node_b.receive(&pair.b_to_a, pair.a_to_b[0..sealed.packet_length], pair.address_a, receiveArgs(0, 0x30), &pair.scratch_b);
+        try std.testing.expect(received.accepted.event == .request);
+    }
+    const refused = try pair.node_b.receive(&pair.b_to_a, pair.a_to_b[0..sealed.packet_length], pair.address_a, receiveArgs(24, 0x30), &pair.scratch_b);
+    try std.testing.expectEqual(types.RejectReason.admission_limited, refused.rejected);
+    try std.testing.expectEqual(@as(usize, 1), pair.node_b.channel.expire(1_000).sessions);
+}
+
+test "engine derives challenge storage from quotas and lifetime within the configured ceiling" {
+    const key = try keyPair(0x11);
+    const record = try enr.Record.create(&key, 1, loopback(1, 9_001));
+    for ([_]struct { config: Engine.Config, expected: usize }{
+        .{ .config = .{}, .expected = 40 },
+        .{ .config = .{ .challenge_timeout_ms = 1_001 }, .expected = 41 },
+        .{ .config = .{ .challenge_capacity = 8 }, .expected = 8 },
+    }) |case| {
+        var engine: Engine = undefined;
+        try engine.initWithConfig(std.testing.allocator, key, record, case.config);
+        defer engine.deinit(std.testing.allocator);
+        try std.testing.expectEqual(case.expected, engine.channel.sessions.challenges.len);
+    }
+}
+
+test "matched NODES consumes record credit before validation and retains the call on refusal" {
+    var pair: Pair = undefined;
+    try pair.init();
+    defer pair.deinit();
+    test_support.installSession(&pair.node_a, pair.peerB(), 0x55);
+    test_support.installSession(&pair.node_b, pair.peerA(), 0x55);
+    const request = message.Message{ .find_node = .{ .request_id = try .init(&.{1}), .distances = &.{256} } };
+    _ = try pair.node_a.startCall(&pair.a_to_b, pair.peerB(), &pair.record_b, &request, 1, &sealEntropy(0x20));
+    const response = message.Message{ .nodes = .{ .request_id = request.find_node.request_id, .total = 1, .enrs = &.{&.{0xc0}} } };
+    var plaintext_buffer: [1_280]u8 = undefined;
+    const plaintext = try response.encode(&plaintext_buffer);
+    const sealed = try pair.node_b.channel.sealEstablished(&pair.b_to_a, pair.peerA(), plaintext, &sealEntropy(0x30), 1);
+    for (0..2) |_| try std.testing.expect(pair.node_a.channel.admission.allowRecords(&pair.address_b, types.findnode_result_max, 0));
+    const refused = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..sealed.packet_length], pair.address_b, receiveArgs(2, 0x40), &pair.scratch_a);
+    try std.testing.expectEqual(types.RejectReason.admission_limited, refused.rejected);
+    try std.testing.expectEqual(@as(usize, 1), pair.node_a.calls.count());
+    const admitted = try pair.node_a.receive(&pair.a_to_b, pair.b_to_a[0..sealed.packet_length], pair.address_b, receiveArgs(40, 0x40), &pair.scratch_a);
+    try std.testing.expectEqual(types.RejectReason.invalid_record, admitted.rejected);
+}
+
+test "engine construction releases all allocations on partial failure" {
+    const key = try keyPair(0x11);
+    const record = try enr.Record.create(&key, 1, loopback(1, 9_001));
+    const Construction = struct {
+        fn run(allocator: std.mem.Allocator, local_key: *const crypto.KeyPair, local_record: *const enr.Record) !void {
+            var engine: Engine = undefined;
+            try engine.initWithConfig(allocator, local_key.*, local_record.*, engineConfig());
+            defer engine.deinit(allocator);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Construction.run, .{ &key, &record });
+}
+
 const Pair = struct {
     address_a: types.Address,
     address_b: types.Address,
