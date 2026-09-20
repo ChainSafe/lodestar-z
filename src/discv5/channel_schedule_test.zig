@@ -144,24 +144,29 @@ test "invalid crossed handshake preserves both read generations and consumes its
 }
 
 test "forged delayed packets cannot refresh either session generation" {
-    var pair: Pair = undefined;
-    try pair.init();
-    defer pair.deinit();
-    try pair.advance(0, 0, 2);
-    try pair.advance(1, 0, 3);
-    try pair.advance(0, 1, 4);
-    try pair.advance(1, 1, 5);
-    const current_key = pair.nodes[0].sessions.readKey(pair.peer(1)).?;
-    const alternate_key = pair.nodes[0].sessions.alternateReadKey(pair.peer(1)).?;
-    pair.replies[0].bytes[pair.replies[0].length - 1] ^= 1;
-    const forged = pair.nodes[0].receive(pair.replies[0].slice(), pair.peer(1).address, 100, &pair.scratch);
-    try std.testing.expect(forged == .unauthenticated);
-    try std.testing.expectEqual(@as(?u64, 1_005), pair.nodes[0].nextDeadlineMs());
-    try std.testing.expectEqual(current_key, pair.nodes[0].sessions.readKey(pair.peer(1)).?);
-    try std.testing.expectEqual(alternate_key, pair.nodes[0].sessions.alternateReadKey(pair.peer(1)).?);
-    pair.replies[0].bytes[pair.replies[0].length - 1] ^= 1;
-    try pair.advance(0, 2, 100);
-    try std.testing.expectEqual(@as(?u64, 1_100), pair.nodes[0].nextDeadlineMs());
-    try std.testing.expectEqual(current_key, pair.nodes[0].sessions.readKey(pair.peer(1)).?);
-    try std.testing.expectEqual(alternate_key, pair.nodes[0].sessions.alternateReadKey(pair.peer(1)).?);
+    for ([_]bool{ false, true }) |deliver_valid| {
+        var pair: Pair = undefined;
+        try pair.init();
+        defer pair.deinit();
+        try pair.advance(0, 0, 2);
+        try pair.advance(1, 0, 3);
+        try pair.advance(0, 1, 4);
+        try pair.advance(1, 1, 5);
+        const current_key = pair.nodes[0].sessions.readKey(pair.peer(1)).?;
+        const alternate_key = pair.nodes[0].sessions.alternateReadKey(pair.peer(1)).?;
+        const deadline_before = pair.nodes[0].nextDeadlineMs();
+        pair.replies[0].bytes[pair.replies[0].length - 1] ^= 1;
+        const forged = pair.nodes[0].receive(pair.replies[0].slice(), pair.peer(1).address, 100, &pair.scratch);
+        try std.testing.expect(forged == .unauthenticated);
+        try std.testing.expectEqual(deadline_before, pair.nodes[0].nextDeadlineMs());
+        if (deliver_valid) {
+            pair.replies[0].bytes[pair.replies[0].length - 1] ^= 1;
+            try pair.advance(0, 2, 100);
+        }
+        const expires_ms: u64 = if (deliver_valid) 1_100 else 1_005;
+        try std.testing.expectEqual(@as(usize, 0), pair.nodes[0].expire(expires_ms - 1).sessions);
+        try std.testing.expectEqual(current_key, pair.nodes[0].sessions.readKey(pair.peer(1)).?);
+        try std.testing.expectEqual(alternate_key, pair.nodes[0].sessions.alternateReadKey(pair.peer(1)).?);
+        try std.testing.expectEqual(@as(usize, 1), pair.nodes[0].expire(expires_ms).sessions);
+    }
 }

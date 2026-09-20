@@ -38,7 +38,7 @@ test("metrics are available through startup and remain readable after close", as
     const metrics = samples(runtime.getMetrics());
     expect(metrics.get("lodestar_native_gossip_expired_executing")).toBe(0);
     expect(metrics.get("lodestar_native_gossip_oldest_expired_execution_age_seconds")).toBe(0);
-    for (const stage of ["challenge", "handshake"]) {
+    for (const stage of ["challenge", "handshake", "packet", "response", "record"]) {
       for (const outcome of ["allowed", "source_limit", "global_limit", "source_capacity"]) {
         expect(metrics.get(`lodestar_native_discovery_admission_total{stage="${stage}",outcome="${outcome}"}`)).toBe(0);
       }

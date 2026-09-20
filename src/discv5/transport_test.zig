@@ -30,6 +30,35 @@ test "transport rejects invalid polling and missing expiry storage" {
     try std.testing.expectError(error.MissingExpiryStorage, instance.step(undefined, &.{}));
 }
 
+test "transport refuses exhausted packet admission before entropy or decoding" {
+    var pair: Pair = undefined;
+    try pair.init(1_000, false);
+    defer pair.deinit();
+    const limits = @import("admission.zig");
+    for (0..limits.packet_global_quota.burst) |i| {
+        const source = address4(192, 0, 2, @intCast(i), 9_000);
+        try std.testing.expect(pair.transport_a.engine.channel.admission.allow(.packet, &source, 0));
+    }
+    const Clock = struct {
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = 0 };
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    const base: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var host = @import("udp").testing.FaultIo{ .entropy = .{} };
+    host.init(base);
+    defer host.deinit();
+    try pair.transport_b.sockets.sendTo(std.testing.io, pair.transport_a.localAddress(), &([_]u8{0} ** 63), 1_280);
+    var expired: [4]CallTable.Expired = undefined;
+    const result = try pair.transport_a.step(host.io(), &expired);
+    try std.testing.expect(result.failure == null);
+    try std.testing.expectEqual(types.RejectReason.admission_limited, result.datagram.rejected);
+    try std.testing.expectEqual(@as(usize, 0), host.entropy_calls);
+    try std.testing.expectEqual(@as(usize, 0), host.send_calls);
+}
+
 test "maintenance retains a routing incumbent that answers through Transport" {
     var pair: Pair = undefined;
     try pair.init(1_000, true);

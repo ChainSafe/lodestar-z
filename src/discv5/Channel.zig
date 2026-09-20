@@ -10,7 +10,8 @@ const SessionStore = @import("SessionStore.zig");
 const types = @import("types.zig");
 const constants = @import("wire/constants.zig");
 const packet = @import("wire/packet.zig");
-const Admission = @import("admission.zig").Admission;
+const admission_mod = @import("admission.zig");
+const Admission = admission_mod.Admission;
 
 pub const Error = crypto.Error || enr.Error || packet.Error || SessionStore.Error || error{
     InvalidLocalRecord,
@@ -31,6 +32,7 @@ pub const KnownIdentity = SessionStore.KnownIdentity;
 
 pub const Config = struct {
     session_capacity: usize,
+    /// Ceiling; admission rate and challenge lifetime may require fewer entries.
     challenge_capacity: usize,
     challenge_timeout_ms: u64,
     session_idle_timeout_ms: u64,
@@ -134,12 +136,16 @@ pub fn init(
         return InitError.InvalidLocalRecord;
     if (config.challenge_timeout_ms == 0 or config.session_idle_timeout_ms == 0)
         return InitError.InvalidTimeout;
-    try self.sessions.init(allocator, config.session_capacity, config.challenge_capacity);
+    if (config.challenge_capacity == 0 or config.challenge_capacity > SessionStore.challenge_capacity_max)
+        return InitError.InvalidCapacity;
+    var resolved = config;
+    resolved.challenge_capacity = @intCast(@min(config.challenge_capacity, admission_mod.global_quota.maximumDuring(config.challenge_timeout_ms)));
+    try self.sessions.init(allocator, resolved.session_capacity, resolved.challenge_capacity);
     errdefer self.sessions.deinit(allocator);
     self.admission = try Admission.init(allocator);
     self.local_key = local_key;
     self.local_record = local_record;
-    self.config = config;
+    self.config = resolved;
 }
 
 pub fn deinit(self: *Channel, allocator: std.mem.Allocator) void {
@@ -217,6 +223,7 @@ pub fn sealEstablished(
 
 /// Classifies one datagram. This never fails, since every peer-caused problem is reported as
 /// `rejected`.
+/// Engine applies packet admission first; direct callers must bound their own input rate.
 pub fn receive(
     self: *Channel,
     raw: []const u8,

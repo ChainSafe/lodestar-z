@@ -91,6 +91,7 @@ const Entry = struct {
 
 entries: []?Entry,
 next_generations: []u64,
+next_deadline_ms: ?u64 = null,
 
 pub fn init(
     self: *CallTable,
@@ -150,6 +151,7 @@ pub fn begin(
     @memcpy(entry.request[0..request_bytes.len], request_bytes);
     self.entries[index] = entry;
     self.next_generations[index] = successor;
+    self.next_deadline_ms = @min(self.next_deadline_ms orelse deadline_ms, deadline_ms);
     return .{ .index = @intCast(index), .generation = generation };
 }
 
@@ -173,12 +175,27 @@ pub fn isPeerBusy(self: *const CallTable, node_id: *const types.NodeId) bool {
 }
 
 pub fn nextDeadlineMs(self: *const CallTable) ?u64 {
+    return self.next_deadline_ms;
+}
+
+/// Endpoint matching grants only bounded receive admission; responses still need authentication
+/// and request matching. Unsent and expired calls grant no allowance.
+pub fn expectsResponseFrom(self: *const CallTable, address: *const types.Address, now_ms: u64) bool {
+    if (self.next_deadline_ms == null) return false;
+    for (self.entries) |slot| {
+        const entry = slot orelse continue;
+        if (entry.sent and now_ms < entry.deadline_ms and entry.peer.address.eql(address.*)) return true;
+    }
+    return false;
+}
+
+fn refreshDeadline(self: *CallTable) void {
     var next: ?u64 = null;
     for (self.entries) |slot| {
         const entry = slot orelse continue;
         next = @min(next orelse entry.deadline_ms, entry.deadline_ms);
     }
-    return next;
+    self.next_deadline_ms = next;
 }
 
 /// Records the nonce the packet carried. A WHOAREYOU is matched back to its call by that nonce.
@@ -194,6 +211,7 @@ pub fn markSent(
     entry.sent_nonce = sent_nonce.*;
     entry.sent = true;
     entry.deadline_ms = deadline_ms;
+    self.refreshDeadline();
 }
 
 /// Claims the live call whose packet carried `nonce` for one handshake attempt. Returns null
@@ -276,12 +294,14 @@ pub fn cancel(self: *CallTable, handle: Handle) bool {
     const entry = self.entries[index] orelse return false;
     if (entry.generation != handle.generation) return false;
     clearEntry(&self.entries[index]);
+    self.refreshDeadline();
     return true;
 }
 
 /// Removes calls past their deadline, at most `out.len` per invocation. The rest wait for the
 /// next tick.
 pub fn expire(self: *CallTable, now_ms: u64, out: []Expired) usize {
+    if (now_ms < (self.next_deadline_ms orelse return 0)) return 0;
     var expired_count: usize = 0;
     for (self.entries, 0..) |*slot, index| {
         if (expired_count == out.len) break;
@@ -297,6 +317,7 @@ pub fn expire(self: *CallTable, now_ms: u64, out: []Expired) usize {
         expired_count += 1;
         clearEntry(slot);
     }
+    self.refreshDeadline();
     return expired_count;
 }
 
@@ -347,7 +368,10 @@ fn acceptNodes(
         },
         .accepted_nodes = accepted_nodes,
     };
-    if (terminal) clearEntry(&self.entries[index]);
+    if (terminal) {
+        clearEntry(&self.entries[index]);
+        self.refreshDeadline();
+    }
     return result;
 }
 
@@ -358,6 +382,7 @@ fn complete(
     response: Response,
 ) MatchResult {
     clearEntry(&self.entries[index]);
+    self.refreshDeadline();
     return .{ .matched = .{
         .handle = handle,
         .response = response,

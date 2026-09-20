@@ -109,14 +109,13 @@ test "lookup batch consumes expiry before reporting a transport fault" {
     try operation.init(&candidates, network.transport.engine.localRecord().node_id, [_]u8{0} ** 32, &seeds, .dual);
     defer operation.cancel(&network.transport.engine);
     var buffer: [1_280]u8 = undefined;
-    const started = (try operation.startNext(
+    _ = (try operation.startNext(
         &network.transport.engine,
         &buffer,
         try message.RequestId.init(&.{1}),
-        try Transport.monotonicMilliseconds(std.testing.io),
+        0,
         &test_support.sealEntropy(1),
     )).?;
-    network.transport.engine.calls.entries[started.call.handle.index].?.deadline_ms = 0;
     const Fault = struct {
         fn receive(_: ?*anyopaque, _: *std.Io.Batch, _: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
             return error.Canceled;

@@ -176,6 +176,8 @@ test "next deadline chooses pending work and saturates at the clock limit" {
     try std.testing.expectEqual(@as(?u64, 140), table.nextDeadlineMs(20, 100));
     const last = std.math.maxInt(u64);
     try std.testing.expect(table.touch(peer, last - 5));
+    try std.testing.expectEqual(@as(?u64, 140), table.nextDeadlineMs(20, 100));
+    try std.testing.expectEqual(@as(usize, 0), table.expireSessions(last - 1, 100));
     try std.testing.expectEqual(@as(?u64, last), table.nextDeadlineMs(20, 100));
     try std.testing.expectEqual(@as(usize, 1), table.expireSessions(last, 100));
     try std.testing.expect(table.nextDeadlineMs(20, 100) == null);

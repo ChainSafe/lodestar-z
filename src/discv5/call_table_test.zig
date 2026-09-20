@@ -155,8 +155,35 @@ test "expiry is bounded by caller output and removes exact generations" {
     try std.testing.expectEqual(@as(usize, 1), table.expire(10, &expired));
     try std.testing.expectEqual(first, expired[0].handle);
     try std.testing.expectEqual(@as(usize, 1), table.count());
+    try std.testing.expectEqual(@as(?u64, 10), table.nextDeadlineMs());
     try std.testing.expectEqual(@as(usize, 1), table.expire(10, &expired));
     try std.testing.expectEqual(@as(usize, 0), table.count());
+    try std.testing.expectEqual(@as(?u64, null), table.nextDeadlineMs());
+}
+
+test "expected endpoints and cached deadlines follow sent call lifetimes" {
+    var table: CallTable = undefined;
+    try table.init(std.testing.allocator, 2);
+    defer table.deinit(std.testing.allocator);
+    const peer = fakeEndpoint(1, 9_001);
+    const ping = pingRequest(1);
+    const handle = try begin(&table, peer, &ping, 100);
+    try std.testing.expect(!table.expectsResponseFrom(&peer.address, 0));
+    try table.markSent(handle, &([_]u8{1} ** 12), 150);
+    try std.testing.expectEqual(@as(?u64, 150), table.nextDeadlineMs());
+    try std.testing.expect(table.expectsResponseFrom(&peer.address, 149));
+    var other_port = peer.address;
+    other_port.ip4.port += 1;
+    try std.testing.expect(!table.expectsResponseFrom(&other_port, 149));
+    try std.testing.expect(!table.expectsResponseFrom(&peer.address, 150));
+
+    const second = try begin(&table, fakeEndpoint(2, 9_002), &ping, 120);
+    try std.testing.expectEqual(@as(?u64, 120), table.nextDeadlineMs());
+    try std.testing.expect(table.cancel(second));
+    try std.testing.expectEqual(@as(?u64, 150), table.nextDeadlineMs());
+    try std.testing.expect(table.cancel(handle));
+    try std.testing.expect(!table.expectsResponseFrom(&peer.address, 149));
+    try std.testing.expect(table.nextDeadlineMs() == null);
 }
 
 test "FINDNODE accepts only requested unique records and caps the exchange" {
