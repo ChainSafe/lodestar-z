@@ -124,6 +124,8 @@ pub const Live = struct {
     gossip_seen: usize = 0,
     gossip_recent: usize = 0,
     gossip_history: usize = 0,
+    gossip_expired_executing: usize = 0,
+    gossip_oldest_expired_execution_age_ms: u64 = 0,
     gossip_resources: ?GossipResources = null,
     peers: usize = 0,
     relevant: usize = 0,
@@ -423,6 +425,8 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
     snapshot.totals.runtime.dial_started = std.math.maxInt(u64);
     snapshot.config.discovery_enabled = true;
     snapshot.live.discovery_candidate_idle_ms = 1500;
+    snapshot.live.gossip_expired_executing = 3;
+    snapshot.live.gossip_oldest_expired_execution_age_ms = 1500;
     snapshot.totals.lookup_time.observe(5000);
     snapshot.totals.dial_time[1].observe(100);
     snapshot.totals.protocols[@intFromEnum(rr.Protocol.status_v1)].outgoing_time.observe(100);
@@ -468,6 +472,8 @@ test "metrics format exact counters, merge protocol versions and bound maximum o
         "lodestar_native_control_operations 4\n",
         "lodestar_native_peer_processing_total{operation=\"rejected\"} 7\n",
         "lodestar_native_gossipsub_storage_refusals_total{reason=\"peer_validations\"} 11\n",
+        "lodestar_native_gossip_expired_executing 3\n",
+        "lodestar_native_gossip_oldest_expired_execution_age_seconds 1.5\n",
     }) |expected| try std.testing.expect(std.mem.indexOf(u8, output, expected) != null);
     var lines = std.mem.splitScalar(u8, output, '\n');
     var current_family: []const u8 = "";

@@ -62,11 +62,11 @@ test "gossip batch bounds, rollback and expiry keep pins until full completion" 
     batch = table.claim(101);
     try std.testing.expectEqual(@as(usize, 64), batch.len);
     table.finish(&batch, false);
-    try std.testing.expectEqual(@as(usize, 65), table.snapshot().queued);
+    try std.testing.expectEqual(@as(usize, 65), table.snapshot(1).queued);
     batch = table.claim(102);
     table.finish(&batch, true);
     try std.testing.expect(table.oldest() != null);
-    try std.testing.expectEqual(@as(usize, 1), table.snapshot().queued);
+    try std.testing.expectEqual(@as(usize, 1), table.snapshot(1).queued);
     table.close();
     try std.testing.expectEqual(@as(usize, 0), budget.used);
 }
@@ -96,7 +96,7 @@ test "gossip flags remain independent of full command capacity and reject stale 
         try std.testing.expect(table.report(token, .accept, 2));
         try std.testing.expect(!table.report(token, .reject, 2));
     }
-    try std.testing.expectEqual(@as(usize, 64), table.snapshot().pendingVerdicts);
+    try std.testing.expectEqual(@as(usize, 64), table.snapshot(1).pendingVerdicts);
     try std.testing.expectEqual(@as(u64, 0), table.waitLimit(2, 100));
     table.expire(100);
     try std.testing.expectEqual(@as(u64, 100), table.waitLimit(100, 100));

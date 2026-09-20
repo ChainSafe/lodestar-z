@@ -303,7 +303,7 @@ pub fn setLogLevel(self: *@This(), level: js.Value) !void {
 }
 
 pub fn diagnostics(self: *@This()) !js.Value {
-    const snapshot = (try self.owner()).snapshot();
+    const snapshot = try (try self.owner()).snapshot();
     const object = try @import("network_js.zig").scalarFields(js.env(), &snapshot);
     try put(object, "state", try text(@tagName(snapshot.state)));
     try put(object, "terminalErrorCode", if (snapshot.terminal_error) |err| try text(@errorName(err)) else try js.env().getNull());

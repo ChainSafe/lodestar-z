@@ -220,7 +220,14 @@ fn publishTurn(self: *Runtime, result: *const n.network_core.Result, timestamp: 
         self.metrics_due_ms = timestamp.mono_ms +| n.metrics.interval_ms;
     }
     self.lock();
-    if (metrics) |*value| self.metrics = value.*;
+    if (metrics) |*value| {
+        if (self.gossip) |*gossip| {
+            const diagnostics = gossip.snapshot(timestamp.mono_ms);
+            value.live.gossip_expired_executing = diagnostics.expiredExecuting;
+            value.live.gossip_oldest_expired_execution_age_ms = diagnostics.oldestExpiredExecutionAgeMs;
+        }
+        self.metrics = value.*;
+    }
     if (timestamp.mono_ms >= self.health_log_due_ms) {
         const active_requests = self.heavy.?.core.service.reqresp.active();
         std.log.scoped(.network_runtime).info("network_health peers={d} relevant={d} target={d} requests_outbound={d} requests_inbound={d} dial_started={d} dial_deferred={d} discovery_peers={d} gossip_pressure_resets={d} received_bytes={d} sent_bytes={d}", .{ counts.connected, counts.relevant, self.metrics.config.target, active_requests.outbound, active_requests.inbound, self.metrics.totals.runtime.dial_started, self.metrics.totals.runtime.dial_deferred, self.metrics.live.discovery_peers, self.metrics.totals.gossip_counts.local_pressure_resets, self.metrics.totals.udp.received_bytes, self.metrics.totals.udp.sent_bytes });

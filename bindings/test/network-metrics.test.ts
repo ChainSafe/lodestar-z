@@ -36,6 +36,8 @@ test("metrics are available through startup and remain readable after close", as
     await runtime.applyIntent(localIntent(config), config.initialSlot);
     await vi.waitFor(() => expect(samples(runtime.getMetrics()).get("lodestar_native_network_running")).toBe(1));
     const metrics = samples(runtime.getMetrics());
+    expect(metrics.get("lodestar_native_gossip_expired_executing")).toBe(0);
+    expect(metrics.get("lodestar_native_gossip_oldest_expired_execution_age_seconds")).toBe(0);
     for (const stage of ["challenge", "handshake"]) {
       for (const outcome of ["allowed", "source_limit", "global_limit", "source_capacity"]) {
         expect(metrics.get(`lodestar_native_discovery_admission_total{stage="${stage}",outcome="${outcome}"}`)).toBe(0);
@@ -97,6 +99,8 @@ test("metrics are available through startup and remain readable after close", as
   }
   const closed = runtime.getMetrics();
   const closedSamples = samples(closed);
+  expect(closedSamples.get("lodestar_native_gossip_expired_executing")).toBe(0);
+  expect(closedSamples.get("lodestar_native_gossip_oldest_expired_execution_age_seconds")).toBe(0);
   for (const [name, value] of capacities) expect(closedSamples.get(name)).toBe(value);
   expect(samples(closed).get("lodestar_native_network_running")).toBe(0);
   expect(samples(closed).get("libp2p_peers")).toBe(0);
