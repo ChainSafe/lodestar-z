@@ -67,6 +67,8 @@ pub const Diagnostics = struct {
     waiting: usize = 0,
     checking: usize = 0,
     executing: usize = 0,
+    expiredExecuting: usize = 0,
+    oldestExpiredExecutionAgeMs: u64 = 0,
     dependencyRefusals: u64 = 0,
     kindRefusals: u64 = 0,
     slotRefusals: u64 = 0,
@@ -561,17 +563,23 @@ pub const GossipProcessor = struct {
         }
         return result;
     }
-    pub fn snapshot(self: *const GossipProcessor) Diagnostics {
+    pub fn snapshot(self: *const GossipProcessor, now: u64) Diagnostics {
         var result = self.diag;
         for (self.cells) |*cell| {
             result.waiting += @intFromBool(cell.state == .waiting);
             result.checking += @intFromBool(cell.state == .checking or cell.state == .needs_check);
             result.executing += @intFromBool(cell.executing);
+            if (cell.state == .delivered and now >= cell.deadline) {
+                assert(cell.executing);
+                result.expiredExecuting += 1;
+                result.oldestExpiredExecutionAgeMs = @max(result.oldestExpiredExecutionAgeMs, now - cell.deadline);
+            }
             result.queued += @intFromBool(cell.state == .queued and !cell.retired);
             result.pendingVerdicts += @intFromBool(cell.state == .verdict_pending);
             result.payloadBytes += cell.input.len;
             if (cell.state == .copying) result.copyingBytes += cell.input.len;
         }
+        assert(result.expiredExecuting <= result.executing);
         return result;
     }
 };

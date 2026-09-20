@@ -286,7 +286,7 @@ pub const Runtime = struct {
         try faults.check(.wake_signal);
         try wake.signal();
     }
-    pub fn snapshot(self: *Runtime) Diagnostics {
+    pub fn snapshot(self: *Runtime) !Diagnostics {
         self.lock();
         defer self.unlock();
         var result = self.diag;
@@ -339,7 +339,7 @@ pub const Runtime = struct {
             result.liveBridgeRequestedBytes += incoming.cells.len * @sizeOf(incoming_mod.Cell) + result.incoming.requestBytes + result.incoming.responseBytes;
         }
         if (self.gossip) |*gossip| {
-            result.gossip = gossip.snapshot();
+            result.gossip = gossip.snapshot(try gossip_mod.monotonic());
             for (gossip.cells) |cell| result.copyingPins += @intFromBool(cell.state == .copying);
             result.liveBridgeRequestedBytes += gossip_mod.Table.backingBytes(gossip.cells.len, gossip.store.bytes.len) + result.gossip.publicationBytes;
         }

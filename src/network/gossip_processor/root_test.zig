@@ -24,7 +24,7 @@ test "gossip processor isolates kinds and bounds dependency waiting" {
     try t.expectError(error.NetworkGossipFull, add(&table, .beacon_attestation, root));
     const checks = table.claimChecks(1);
     for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
-    try t.expectEqual(@as(usize, 2), table.snapshot().waiting);
+    try t.expectEqual(@as(usize, 2), table.snapshot(1).waiting);
     try t.expectEqual(@as(u64, 2), table.diag.dependencyRefusals);
     const block = try add(&table, .beacon_block, null);
     const batch = table.claimDemand(1, .{ .ordinary = false });
@@ -53,9 +53,9 @@ test "gossip processor dependency notification cannot race a negative check" {
     const batch = table.claim(2);
     table.finish(&batch, true);
     table.expire(100);
-    try t.expectEqual(@as(usize, 1), table.snapshot().executing);
+    try t.expectEqual(@as(usize, 1), table.snapshot(1).executing);
     try t.expect(!table.report(token, .accept, 101));
-    try t.expectEqual(@as(usize, 0), table.snapshot().executing);
+    try t.expectEqual(@as(usize, 0), table.snapshot(1).executing);
     try t.expectEqual(@as(usize, 0), table.diag.occupied);
 }
 
@@ -74,7 +74,7 @@ test "gossip processor copy rollback preserves paged bytes" {
     table.copyPayload(table.get(token).?, &bytes);
     try t.expectEqualSlices(u8, &payload, &bytes);
     table.finish(&batch, false);
-    try t.expectEqual(@as(usize, 0), table.snapshot().executing);
+    try t.expectEqual(@as(usize, 0), table.snapshot(1).executing);
     try t.expectEqual(p.State.queued, table.get(token).?.state);
     try t.expectEqual(@as(usize, 0), table.store.free_pages);
 }
@@ -99,7 +99,7 @@ test "gossip processor batches identical attestation data with a bounded wait" {
     try t.expectEqual(@as(usize, 2), batch.len);
     try t.expect(batch.grouped);
     table.finish(&batch, false);
-    try t.expectEqual(@as(usize, 2), table.snapshot().queued);
+    try t.expectEqual(@as(usize, 2), table.snapshot(1).queued);
 }
 
 test "gossip processor deferral leaves per-source capacity and local search deadlines" {
@@ -115,7 +115,7 @@ test "gossip processor deferral leaves per-source capacity and local search dead
     }
     const checks = table.claimChecks(1);
     for (checks.tokens[0..checks.len]) |token| try t.expect(table.classify(token, false));
-    try t.expectEqual(@as(usize, 2), table.snapshot().waiting);
+    try t.expectEqual(@as(usize, 2), table.snapshot(1).waiting);
     try t.expectEqual(@as(u64, 1), table.diag.dependencyRefusals);
     table.notifyBlock(root);
     try t.expectEqual(@as(u16, 0), table.waiting_per_peer[0][@intFromEnum(p.limits_mod.Kind.beacon_attestation)]);
@@ -158,8 +158,50 @@ test "gossip processor copied host work survives native expiry but close release
         if (close) table.close() else table.expire(100);
         try t.expectEqual(@as(usize, 1), table.diag.occupied);
         table.finish(&batch, true);
-        try t.expectEqual(@as(usize, if (close) 0 else 1), table.snapshot().executing);
+        try t.expectEqual(@as(usize, if (close) 0 else 1), table.snapshot(101).executing);
+        try t.expectEqual(@as(usize, if (close) 0 else 1), table.snapshot(101).expiredExecuting);
+        try t.expectEqual(@as(u64, if (close) 0 else 1), table.snapshot(101).oldestExpiredExecutionAgeMs);
         try t.expect(!table.report(token, .accept, 101));
         try t.expectEqual(@as(usize, 0), table.diag.occupied);
     }
+}
+
+test "gossip processor expired execution diagnostics track delivered work until actual completion" {
+    var budget: Budget = .{};
+    const limits: p.limits_mod.Limits = @splat(.{ .items = 8, .bytes = 16384 });
+    var table = try p.GossipProcessor.initPlanned(t.allocator, p.limits_mod.items(&limits), p.limits_mod.bytes(&limits), &budget, limits);
+    defer table.deinit();
+    defer table.close();
+    const first = try add(&table, .beacon_block, null);
+    table.finish(&table.claim(10), true);
+    const second = try add(&table, .beacon_block, null);
+    table.get(second).?.deadline = 125;
+    table.finish(&table.claim(20), true);
+    const reported = try add(&table, .beacon_block, null);
+    table.finish(&table.claim(21), true);
+    try t.expect(table.report(reported, .accept, 22));
+    _ = try add(&table, .beacon_block, null);
+    const copying = table.claim(23);
+    try t.expectEqual(@as(usize, 1), copying.len);
+    _ = try add(&table, .beacon_block, null);
+
+    try t.expectEqual(@as(usize, 0), table.snapshot(99).expiredExecuting);
+    try t.expectEqual(@as(usize, 1), table.snapshot(100).expiredExecuting);
+    try t.expectEqual(@as(u64, 0), table.snapshot(100).oldestExpiredExecutionAgeMs);
+    table.expire(125);
+    try t.expectEqual(@as(usize, 2), table.snapshot(125).expiredExecuting);
+    try t.expectEqual(@as(u64, 25), table.snapshot(125).oldestExpiredExecutionAgeMs);
+    try t.expectEqual(@as(usize, 2), table.snapshot(140).expiredExecuting);
+    try t.expectEqual(@as(u64, 40), table.snapshot(140).oldestExpiredExecutionAgeMs);
+
+    try t.expect(!table.report(first, .accept, 140));
+    try t.expectEqual(@as(usize, 1), table.snapshot(140).expiredExecuting);
+    try t.expectEqual(@as(u64, 15), table.snapshot(140).oldestExpiredExecutionAgeMs);
+    try t.expect(!table.report(first, .reject, 141));
+    try t.expectEqual(@as(usize, 1), table.snapshot(141).expiredExecuting);
+    table.finish(&copying, false);
+    try t.expect(!table.report(second, .reject, 150));
+    try t.expectEqual(@as(usize, 0), table.snapshot(150).expiredExecuting);
+    try t.expectEqual(@as(u64, 0), table.snapshot(150).oldestExpiredExecutionAgeMs);
+    try t.expectEqual(@as(usize, 0), table.snapshot(150).occupied);
 }

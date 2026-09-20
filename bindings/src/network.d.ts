@@ -660,6 +660,9 @@ export interface NativeGossipDiagnostics {
   waiting: number;
   checking: number;
   executing: number;
+  expiredExecuting: number;
+  /** Milliseconds past the earliest verdict deadline among delivered validations awaiting host completion; zero when none. */
+  oldestExpiredExecutionAgeMs: bigint;
   fixedPayloadBytes: number;
   dependencyRefusals: bigint;
   kindRefusals: bigint;

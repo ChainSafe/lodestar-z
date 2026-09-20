@@ -1,6 +1,10 @@
 import {setTimeout as delay} from "node:timers/promises";
 import {expect, test} from "vitest";
-import type {NativeGossipDependencyCheck, NativeNetworkApplicationRuntime} from "../src/network.js";
+import type {
+  NativeGossipDependencyCheck,
+  NativeGossipMessage,
+  NativeNetworkApplicationRuntime,
+} from "../src/network.js";
 import {createNativeNetworkApplicationRuntime} from "../src/network.js";
 import {applicationConfig, localIntent, topicName} from "./utils/network.js";
 import {incomingPair} from "./utils/network-incoming.js";
@@ -134,3 +138,67 @@ test("native processor retains dependencies, protects blocks, batches ready work
     await Promise.allSettled([pair.left.close(), pair.right.close()]);
   }
 }, 30000);
+
+test("expired validation execution remains visible until late host completion", async () => {
+  const pair = await incomingPair(undefined, undefined, undefined, (left, right) => {
+    for (const config of [left, right]) {
+      config.gossipPolicy.processor = Array.from({length: 13}, (_, kind) => ({
+        bytes: (kind === 0 || kind === 12 ? 16 : kind === 4 ? 4 : 1) * 1024 * 1024,
+        items: 8,
+      }));
+      config.gossipPolicy.validationTimeoutMs = 2000n;
+      config.resources.nativeBudgetBytes = 256 * 1024 * 1024;
+    }
+  });
+  try {
+    for (const [runtime, config] of [
+      [pair.left, pair.leftConfig],
+      [pair.right, pair.rightConfig],
+    ] as const) {
+      const intent = localIntent(config);
+      intent.subscriptions = [{name: BLOCK, params: config.gossipPolicy.score.defaultTopic}];
+      await runtime.applyIntent(intent, config.initialSlot);
+    }
+    await Promise.all([
+      pair.left.addDirectPeer(pair.remote.peerId, [pair.remote.localEndpoint]),
+      pair.right.addDirectPeer(pair.identity.peerId, [pair.identity.localEndpoint]),
+    ]);
+    await delay(1250);
+    const block = new Uint8Array(4000);
+    new DataView(block.buffer).setBigUint64(100, pair.rightConfig.initialSlot, true);
+    await pair.left.publishGossip(BLOCK, block);
+    for (const check of await checks(pair.right, 1)) expect(pair.right.classifyGossip(check.handle, true)).toBe(true);
+    let message: NativeGossipMessage | undefined;
+    for (let i = 0; i < 1000 && !message; i++) {
+      message = pair.right.drainGossip({bytes: 4096, items: 1, kind: "beacon_block", ordinary: true}).messages[0];
+      if (!message) await delay(5);
+    }
+    if (!message) throw Error("Block dispatch deadline");
+    expect(pair.right.diagnostics().gossip).toMatchObject({executing: 1, expiredExecuting: 0, payloadBytes: 0});
+    const expiredSample = "lodestar_native_gossip_expired_executing 1\n";
+    for (let i = 0; i < 1000 && !pair.right.getMetrics().includes(expiredSample); i++) await delay(5);
+    expect(pair.right.getMetrics()).toContain(expiredSample);
+    const expired = pair.right.diagnostics().gossip;
+    expect(expired).toMatchObject({executing: 1, expiredExecuting: 1, occupied: 1, payloadBytes: 0});
+    expect(expired.oldestExpiredExecutionAgeMs).toBeGreaterThanOrEqual(0n);
+    await delay(25);
+    expect(pair.right.diagnostics().gossip.oldestExpiredExecutionAgeMs).toBeGreaterThan(
+      expired.oldestExpiredExecutionAgeMs
+    );
+    expect(pair.right.reportGossip(message.handle, "accept")).toBe(false);
+    expect(pair.right.reportGossip(message.handle, "reject")).toBe(false);
+    expect(pair.right.diagnostics().gossip).toMatchObject({
+      executing: 0,
+      expiredExecuting: 0,
+      occupied: 0,
+      oldestExpiredExecutionAgeMs: 0n,
+      reportsAppliedAccept: 0n,
+      reportsAppliedReject: 0n,
+    });
+    for (let i = 0; i < 1000 && pair.right.getMetrics().includes(expiredSample); i++) await delay(5);
+    expect(pair.right.getMetrics()).toContain("lodestar_native_gossip_expired_executing 0\n");
+    expect(pair.right.getMetrics()).toContain("lodestar_native_gossip_oldest_expired_execution_age_seconds 0\n");
+  } finally {
+    await Promise.all([pair.left.close(), pair.right.close()]);
+  }
+}, 20000);

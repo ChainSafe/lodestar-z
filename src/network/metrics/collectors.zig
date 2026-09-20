@@ -17,6 +17,7 @@ pub const registry = prom.Registry(Snapshot, .{
     writeRequests,
     writeRequestTimes,
     writeGossip,
+    writeGossipExecution,
     writeScores,
     writePopulation,
     writePeerEvents,
@@ -491,6 +492,20 @@ fn writeScores(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
     inline for (.{ "graylist", "publish", "gossip", "mesh" }) |threshold| {
         try thresholds.sample(.{threshold}, @field(self.live.scores, threshold));
     }
+}
+
+fn writeGossipExecution(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
+    try w.scalar(.{
+        .name = "lodestar_native_gossip_expired_executing",
+        .kind = .gauge,
+        .help = "Delivered gossip validations still awaiting host completion after their verdict deadlines",
+    }, self.live.gossip_expired_executing);
+    try w.scalar(.{
+        .name = "lodestar_native_gossip_oldest_expired_execution_age_seconds",
+        .kind = .gauge,
+        .help = "Seconds past the earliest verdict deadline among delivered validations awaiting host completion; zero when none",
+        .unit = .seconds,
+    }, @as(f64, @floatFromInt(self.live.gossip_oldest_expired_execution_age_ms)) / 1000);
 }
 
 fn writeGossip(self: *const Snapshot, w: *prom.Encoder) prom.Error!void {
