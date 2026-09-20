@@ -43,6 +43,27 @@ fn canonical() !void {
 
 const full = @import("topic_fixture.zig").full;
 
+test "topic namespace coverage is fork exact and duplicate announcements do not dirty policy" {
+    var ns = try root.topic_policy.Namespace.init(std.testing.allocator, &.{ full(@splat(0)), full(@splat(1)) }, 2);
+    defer ns.deinit(std.testing.allocator);
+    const current = ns.lookup("/eth2/00000000/beacon_attestation_63/ssz_snappy").?.ordinal;
+    const future = ns.lookup("/eth2/01010101/sync_committee_3/ssz_snappy").?.ordinal;
+    ns.setSubscription(0, current, true);
+    ns.setSubscription(0, future, true);
+    try std.testing.expectEqual(@as(u64, 2), ns.revision);
+    for (0..100) |_| ns.setSubscription(0, current, true);
+    try std.testing.expectEqual(@as(u64, 2), ns.revision);
+    try std.testing.expectEqual(@as(u64, 1) << 63, ns.subnets(0, @splat(0)).attnets);
+    try std.testing.expectEqual(@as(u4, 0), ns.subnets(0, @splat(0)).syncnets);
+    try std.testing.expectEqual(@as(u4, 8), ns.subnets(0, @splat(1)).syncnets);
+    try std.testing.expectEqual(@as(u64, 0), ns.subnets(1, @splat(0)).attnets);
+    ns.clearPeer(0);
+    try std.testing.expectEqual(@as(u64, 3), ns.revision);
+    try std.testing.expectEqual(@as(u64, 0), ns.subnets(0, @splat(0)).attnets);
+    ns.clearPeer(0);
+    try std.testing.expectEqual(@as(u64, 3), ns.revision);
+}
+
 test "topic namespace validates descriptors before allocation" {
     const p = root.topic_policy;
     const a = std.testing.allocator;

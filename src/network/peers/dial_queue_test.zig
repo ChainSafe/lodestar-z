@@ -4,6 +4,31 @@ const t = @import("types.zig");
 const a = std.testing.allocator;
 const address: t.Address = .{ .ip4 = .{ .octets = .{ 127, 0, 0, 1 }, .port = 1234 } };
 
+test "peer discovery uses the configured custody minimum only for an absent ENR count" {
+    var q = try mod.DialQueue.init(a, .{ .capacity = 2, .concurrent_max = 1, .seed = 4 });
+    defer q.deinit(a);
+    const context: t.ForkContext = .{ .fork = .fulu, .custody_requirement = 4, .minimum_sampling_groups = 8 };
+    const wanted: t.Coverage = .{ .custody_groups = .initFull() };
+    var candidate = try discovered(1, 0);
+    try q.enqueueDiscovered(&candidate, &context, &wanted, 0);
+    try std.testing.expectEqual(@as(u64, 4), q.rows[0].custody_work.?.requested);
+    var budget: u16 = @import("custody.zig").hashes_per_turn;
+    try std.testing.expect(!q.advanceCustody(&context, 0, &budget));
+    q.configureSelection(&wanted, false, &context, 0);
+    try std.testing.expectEqual(@as(usize, 4), q.rows[0].custody_work.?.groups.count());
+    try std.testing.expectEqual(@as(u2, 2), q.rows[0].priority);
+    var out: [1]mod.DialIntent = undefined;
+    try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
+    candidate.sequence += 1;
+    candidate.custody_group_count = 0;
+    try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&candidate, &context, &wanted, 0));
+    candidate.custody_group_count = context.custody_groups + 1;
+    try std.testing.expectError(error.InvalidCandidate, q.enqueueDiscovered(&candidate, &context, &wanted, 0));
+    candidate.custody_group_count = 1;
+    try q.enqueueDiscovered(&candidate, &context, &wanted, 0);
+    try std.testing.expectEqual(@as(u64, 1), q.rows[0].custody_work.?.requested);
+}
+
 fn peerSnapshot(peer: *const t.PeerId, conn: ?t.Handle) t.Snapshot {
     return .{
         .peer = .{ .index = 0, .generation = 1 },
@@ -534,7 +559,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     wanted.groups.set(0);
     try q.enqueueDiscovered(&candidate, &.{}, &wanted, 0);
     q.configureSelection(&wanted, false, &.{}, 0);
-    try std.testing.expectEqual(@as(u16, 1), q.rows[0].priority);
+    try std.testing.expectEqual(@as(u16, 2), q.rows[0].priority);
     var out: [1]mod.DialIntent = undefined;
     try std.testing.expectEqual(@as(usize, 1), q.poll(0, &out));
     try std.testing.expect(q.dialFailed(out[0].token, 1));
@@ -558,7 +583,7 @@ test "peer dial review group shrink invalidates all hints while preserving owner
     candidate.custody_group_count = 64;
     try q.enqueueDiscovered(&candidate, &context, &wanted, eligible);
     q.configureSelection(&wanted, false, &context, eligible);
-    try std.testing.expectEqual(@as(u16, 1), q.rows[0].priority);
+    try std.testing.expectEqual(@as(u16, 2), q.rows[0].priority);
     try std.testing.expectEqual(@as(usize, 1), q.poll(eligible, &out));
     const token = out[0].token;
     const conn: t.Handle = .{ .index = 2, .generation = 99 };

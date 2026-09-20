@@ -30,6 +30,8 @@ test "network chain resolves same epoch forks BPO contexts and clock identity" {
     try std.testing.expectEqual(@as(u64, 2), genesis.schedule.next_epoch);
     const fulu = try plan.update(local, null, 3 * preset.preset.SLOTS_PER_EPOCH);
     try std.testing.expectEqual(.fulu, fulu.local.fork.fork);
+    try std.testing.expectEqual(cfg.chain.CUSTODY_REQUIREMENT, fulu.local.fork.custody_requirement);
+    try std.testing.expectEqual(@as(u16, 0), genesis.local.fork.custody_requirement);
     try std.testing.expectEqual(@as(u64, 1), fulu.local.status.head_slot);
     try std.testing.expectEqual(config.fork_digest.computeForkDigest(&cfg, 3), fulu.local.status.fork_digest);
     try std.testing.expectEqual(cfg.chain.FULU_FORK_VERSION, fulu.schedule.next_version);

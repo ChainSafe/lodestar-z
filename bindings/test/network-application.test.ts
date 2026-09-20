@@ -303,6 +303,16 @@ test("bounded typed stores refuse the third intent and unwind malformed input", 
     const invalid = localIntent(config);
     Reflect.set(invalid.demand.groupTargets, 127, 1.5);
     expect(() => runtime.applyIntent(invalid, 103n)).toThrow();
+    for (const targets of [
+      Array<number>(127).fill(0),
+      Array<number>(129).fill(0),
+      Array<number>(128).fill(1.5),
+      Array<number>(128).fill(config.resources.maxPeers + 1),
+    ]) {
+      const malformed = localIntent(config);
+      malformed.demand.custodyGroupTargets = targets;
+      expect(() => runtime.applyIntent(malformed, 103n)).toThrow();
+    }
     await runtime.applyIntent(localIntent(config), 103n);
     const pending = Array.from({length: 32}, () => runtime.getIdentity());
     expect(() => runtime.getIdentity()).toThrow("NetworkCommandFull");

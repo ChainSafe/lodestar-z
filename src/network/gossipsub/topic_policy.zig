@@ -14,6 +14,22 @@ pub const Boundary = struct { digest: [4]u8, rules: [kind_count]Rule = @splat(.{
 pub const Match = struct { ordinal: u16, rule: Rule };
 pub const Error = error{InvalidTopicPolicy};
 
+pub const Subnets = struct {
+    attnets: u64 = 0,
+    syncnets: u4 = 0,
+    columns: std.StaticBitSet(128) = .initEmpty(),
+    column_subnet_count: u16 = 0,
+
+    pub fn add(self: *Subnets, name: topic.Name) void {
+        switch (name.kind) {
+            .beacon_attestation => self.attnets |= @as(u64, 1) << @intCast(name.subnet),
+            .sync_committee => self.syncnets |= @as(u4, 1) << @intCast(name.subnet),
+            .data_column_sidecar => self.columns.set(name.subnet),
+            else => {},
+        }
+    }
+};
+
 pub fn validate(boundaries: []const Boundary) Error!u16 {
     if (boundaries.len == 0 or boundaries.len > boundary_max) return error.InvalidTopicPolicy;
     var count: u16 = 0;
@@ -39,6 +55,7 @@ pub const Namespace = struct {
     topic_count: u16,
     connected_capacity: u16,
     words_per_peer: usize,
+    revision: u64 = 0,
 
     pub fn init(a: std.mem.Allocator, input: []const Boundary, connected_capacity: u16) (std.mem.Allocator.Error || Error)!Namespace {
         const count = try validate(input);
@@ -107,7 +124,9 @@ pub const Namespace = struct {
         assert(peer < self.connected_capacity and ordinal < self.topic_count);
         const word = &self.subscriptions[@as(usize, peer) * self.words_per_peer + ordinal / 64];
         const mask = @as(u64, 1) << @as(u6, @intCast(ordinal % 64));
+        if ((word.* & mask != 0) == subscribed_value) return;
         if (subscribed_value) word.* |= mask else word.* &= ~mask;
+        self.revision +|= 1;
     }
 
     pub fn subscribed(self: *const Namespace, peer: u16, ordinal: u16) bool {
@@ -117,7 +136,28 @@ pub const Namespace = struct {
 
     pub fn clearPeer(self: *Namespace, peer: u16) void {
         assert(peer < self.connected_capacity);
-        @memset(self.subscriptions[@as(usize, peer) * self.words_per_peer ..][0..self.words_per_peer], 0);
+        const words = self.subscriptions[@as(usize, peer) * self.words_per_peer ..][0..self.words_per_peer];
+        if (std.mem.allEqual(u64, words, 0)) return;
+        @memset(words, 0);
+        self.revision +|= 1;
+    }
+
+    pub fn subnets(self: *const Namespace, peer: u16, digest: [4]u8) Subnets {
+        assert(peer < self.connected_capacity);
+        var result: Subnets = .{};
+        for (self.boundaries, self.offsets) |*boundary, *starts| {
+            if (!std.mem.eql(u8, &boundary.digest, &digest)) continue;
+            result.column_subnet_count = boundary.rules[@intFromEnum(Kind.data_column_sidecar)].count;
+            inline for (.{ Kind.beacon_attestation, Kind.sync_committee, Kind.data_column_sidecar }) |kind| {
+                const k = @intFromEnum(kind);
+                for (0..boundary.rules[k].count) |subnet| {
+                    if (self.subscribed(peer, starts[k] + @as(u16, @intCast(subnet))))
+                        result.add(.{ .kind = kind, .subnet = @intCast(subnet) });
+                }
+            }
+            break;
+        }
+        return result;
     }
 
     pub fn initializeSubscribers(self: *const Namespace, ordinal: u16, out: *PeerSet) void {

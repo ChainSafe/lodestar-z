@@ -42,6 +42,7 @@ pub const Overlay = struct {
 
     rows: [constants.topics_cap]Row = @splat(.{}),
     namespace: ?topic_policy.Namespace = null,
+    subscription_revision: u64 = 0,
 
     pub fn deinit(self: *Overlay, a: std.mem.Allocator) void {
         if (self.namespace) |*ns| ns.deinit(a);
@@ -60,6 +61,7 @@ pub const Overlay = struct {
             row.retire_after_ms = context.now +| context.options.retained_score_ms;
         }
         row.subscribed = on;
+        self.subscription_revision +|= 1;
         for (context.sessions.rows) |*peer| {
             const io = &peer.io;
             if (!peer.active or peer.outStream() == null) continue;
@@ -279,6 +281,7 @@ pub const Overlay = struct {
 
     fn applySubscription(self: *Overlay, context: *const Context, topic: u16, peer: u16, on: bool) void {
         assert(self.rows[topic].active);
+        if (self.rows[topic].subscribers.isSet(peer) != on) self.subscription_revision +|= 1;
         if (on) self.rows[topic].subscribers.set(peer) else {
             self.rows[topic].subscribers.unset(peer);
             self.leaveMesh(context, topic, peer);
@@ -288,6 +291,18 @@ pub const Overlay = struct {
 
     pub fn subscribers(self: *const Overlay, topic: u16) *const PeerSet {
         return &self.rows[topic].subscribers;
+    }
+
+    pub fn subnetSubscriptions(self: *const Overlay, peer: ?u16, digest: [4]u8) topic_policy.Subnets {
+        if (peer) |index| if (self.namespace) |*ns| return ns.subnets(index, digest);
+        var result: topic_policy.Subnets = .{};
+        for (&self.rows) |*row| {
+            if (!row.active or !(if (peer) |index| row.subscribers.isSet(index) else row.subscribed)) continue;
+            const parsed = topic_mod.parseCanonical(row.topicString()) orelse continue;
+            if (std.mem.eql(u8, &digest, &parsed.digest)) result.add(parsed.name);
+        }
+        if (self.namespace == null) result.column_subnet_count = 128;
+        return result;
     }
 
     pub fn mesh(self: *const Overlay, topic: u16) *const PeerSet {

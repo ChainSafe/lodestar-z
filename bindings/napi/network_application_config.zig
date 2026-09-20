@@ -102,7 +102,7 @@ pub fn parseIntent(value: Value, out: *Intent, max_peers: u16) !void {
     out.value.update.capabilities = .{ .receive = .initEmpty(), .request = .initEmpty() };
     out.value.update.endpoints = try cfg.parseEndpoints(try cfg.get(update, "endpoints"));
     const demand = try cfg.get(value, "demand");
-    try cfg.completeObject(demand, &.{ "attnets", "syncnets", "groupTargets", "attestationTarget", "syncTarget", "expiresAtSlot" });
+    try cfg.completeObject(demand, &.{ "attnets", "syncnets", "groupTargets", "custodyGroupTargets", "attestationTarget", "syncTarget", "expiresAtSlot" });
     const attnets = try cfg.fixed(8, try cfg.get(demand, "attnets"));
     out.value.demand.attnets = std.mem.readInt(u64, &attnets, .little);
     out.value.demand.syncnets = @intCast(try cfg.integer(try cfg.get(demand, "syncnets"), 15));
@@ -112,6 +112,9 @@ pub fn parseIntent(value: Value, out: *Intent, max_peers: u16) !void {
     const targets = try cfg.get(demand, "groupTargets");
     if (try cfg.array(targets, 128) != 128) return error.InvalidDemand;
     for (&out.value.demand.group_targets, 0..) |*target, i| target.* = @intCast(try cfg.integer(try targets.getElement(@intCast(i)), max_peers));
+    const custody_targets = try cfg.get(demand, "custodyGroupTargets");
+    if (try cfg.array(custody_targets, 128) != 128) return error.InvalidDemand;
+    for (&out.value.demand.custody_group_targets, 0..) |*target, i| target.* = @intCast(try cfg.integer(try custody_targets.getElement(@intCast(i)), max_peers));
     const subscriptions = try cfg.get(value, "subscriptions");
     const count = try cfg.array(subscriptions, 512);
     for (out.subscriptions[0..count], 0..) |*subscription, i| {
