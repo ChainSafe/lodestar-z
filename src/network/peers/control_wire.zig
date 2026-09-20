@@ -13,6 +13,7 @@ pub const Error = error{
     InvalidForkContext,
     MissingAvailability,
     InvalidForkDigest,
+    MissingCustodyAdvertisement,
 };
 
 pub fn statusProtocol(fork: t.ForkContext) Protocol {
@@ -148,6 +149,14 @@ pub fn copyLocal(out: *t.LocalState, source: *const t.LocalState) Error!void {
         if (source.metadata.custody_group_count == null) return error.InvalidCustodyCount;
     }
     out.* = source.*;
+}
+
+pub fn copyServingLocal(out: *t.LocalState, source: *const t.LocalState, receive: @import("../capabilities.zig").Set) Error!void {
+    if (receive.contains(.{ .reqresp = .metadata_v3 }) and source.metadata.custody_group_count == null)
+        return error.MissingCustodyAdvertisement;
+    if (receive.contains(.{ .reqresp = .status_v2 }) and source.status.earliest_available_slot == null)
+        return error.MissingAvailability;
+    try copyLocal(out, source);
 }
 
 pub fn relevance(

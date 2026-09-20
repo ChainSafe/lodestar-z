@@ -93,12 +93,14 @@ pub const FutureForkHint = struct {
     record_sequence: u64,
     fork: peers.enr.ForkId,
     next_digest: ?[4]u8,
-    compatible: bool,
+    /// Null means the next digest is missing and no explicit schedule mismatch was found.
+    compatible: ?bool,
 };
 pub const Counters = struct {
     discovered: u64 = 0,
     candidates_refused: u64 = 0,
     future_fork_mismatches: u64 = 0,
+    future_fork_unknown: u64 = 0,
     dial_started: u64 = 0,
     dial_deferred: u64 = 0,
     dial_failed: u64 = 0,
@@ -183,7 +185,7 @@ pub const NetworkCore = struct {
         const options: Options = .{ .transport = .{ .host = startup.host, .bind = startup.bind, .limits = resolved.limits, .work_limits = resolved.work_limits, .keylog_path = startup.keylog_path }, .core = resolved.core, .byte_limit = resolved.byte_limit, .local = startup.local, .schedule = startup.schedule, .discovery = startup.discovery, .wait_mode = startup.wait_mode };
         if (options.wait_mode == .native_poll and !wait.supported) return error.UnsupportedWait;
         var local: t.LocalState = undefined;
-        try peers.control_wire.copyLocal(&local, &options.local);
+        try peers.control_wire.copyServingLocal(&local, &options.local, @import("router.zig").Router.initialCapabilities(options.core.service.router).receive);
         try validateSchedule(&local, options.schedule);
         try validateForkTable(options.core.service.reqresp.forks, &local.fork);
         self.initialized = false;
@@ -348,7 +350,7 @@ pub const NetworkCore = struct {
     }
     pub fn updateStatus(self: *NetworkCore, status: *const t.Status, _: Now) !void {
         if (self.peer_manager.stopped) return error.Stopped;
-        try self.peer_manager.updateStatus(status);
+        try self.peer_manager.updateStatus(&self.service, status);
     }
     pub fn updateMetadata(self: *NetworkCore, metadata: *const t.Metadata, now: Now) !void {
         var local = self.localState();
@@ -472,7 +474,7 @@ pub const NetworkCore = struct {
         }
         var local = update.local;
         local.metadata.seq_number = self.peer_manager.local.metadata.seq_number;
-        try peers.control_wire.copyLocal(&local, &local);
+        try peers.control_wire.copyServingLocal(&local, &local, capabilities.receive);
         try validateSchedule(&local, schedule);
         const request = &self.service.reqresp;
         try validateForkTable(request.forks[0..request.fork_count], &local.fork);
@@ -604,7 +606,9 @@ pub const NetworkCore = struct {
                 result.discovery = owned.coordinator.step(io, tick.mono_ms, tick.mono_ms, &candidates) catch |err| .{ .failure = err };
                 for (candidates[0..result.discovery.candidates]) |*candidate| {
                     self.counters.discovered +|= 1;
-                    if (!futureCompatible(candidate, self.schedule)) self.counters.future_fork_mismatches +|= 1;
+                    if (futureCompatible(candidate, self.schedule)) |compatible| {
+                        if (!compatible) self.counters.future_fork_mismatches +|= 1;
+                    } else self.counters.future_fork_unknown +|= 1;
                 }
                 const intake = self.peer_manager.discoveredBatch(&self.service, candidates[0..result.discovery.candidates], tick);
                 self.counters.candidates_refused +|= intake.refused;
@@ -659,12 +663,12 @@ fn validateSchedule(local: *const t.LocalState, schedule: ForkSchedule) !void {
     if (schedule.next_epoch == std.math.maxInt(u64) and !std.mem.allEqual(u8, &schedule.next_digest, 0)) return error.InvalidSchedule;
     if ((schedule.fulu_scheduled or local.fork.fork.gte(.fulu)) and local.metadata.custody_group_count == null) return error.MissingCustodyAdvertisement;
 }
-pub fn futureCompatible(candidate: *const peers.enr.Candidate, schedule: ForkSchedule) bool {
+pub fn futureCompatible(candidate: *const peers.enr.Candidate, schedule: ForkSchedule) ?bool {
     return compatibleHint(candidate.fork, candidate.next_fork_digest, schedule);
 }
-fn compatibleHint(fork: peers.enr.ForkId, next_digest: ?[4]u8, schedule: ForkSchedule) bool {
+fn compatibleHint(fork: peers.enr.ForkId, next_digest: ?[4]u8, schedule: ForkSchedule) ?bool {
     if (fork.next_epoch != schedule.next_epoch or !std.mem.eql(u8, &fork.next_version, &schedule.next_version)) return false;
-    return if (next_digest) |digest| std.mem.eql(u8, &digest, &schedule.next_digest) else true;
+    return if (next_digest) |digest| std.mem.eql(u8, &digest, &schedule.next_digest) else null;
 }
 fn advertisementFor(local: *const t.LocalState, schedule: ForkSchedule, endpoints: AdvertisementEndpoints) peers.enr.LocalAdvertisement {
     return .{

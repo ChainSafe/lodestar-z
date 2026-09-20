@@ -144,7 +144,7 @@ pub const PeerManager = struct {
         service: *const service_mod.Service,
     ) !PeerManager {
         var copied: t.LocalState = undefined;
-        try peers.control_wire.copyLocal(&copied, local);
+        try peers.control_wire.copyServingLocal(&copied, local, service.router.capabilities().receive);
         try validateOptions(options);
         if (service.reqresp.options.outbound_control_reserved < options.peers.max_peers or
             service.router.negotiator.outbound_control_reserved < options.peers.max_peers)
@@ -508,21 +508,21 @@ pub const PeerManager = struct {
         const budget = @min(self.catalog.options.max_peers -| self.selection.retained_count, @max(self.selection.dial_budget, self.dial_queue.hostDemand()));
         return @min(self.native_dial_room -| attempts.unstarted, budget -| attempts.total);
     }
-    pub fn updateStatus(self: *PeerManager, status: *const t.Status) !void {
+    pub fn updateStatus(self: *PeerManager, service: *const service_mod.Service, status: *const t.Status) !void {
         var local = self.local;
         local.status = status.*;
-        try peers.control_wire.copyLocal(&self.local, &local);
+        try peers.control_wire.copyServingLocal(&self.local, &local, service.router.capabilities().receive);
         self.selection_revision = null;
     }
-    pub fn updateMetadata(self: *PeerManager, metadata: *const t.Metadata) !void {
+    pub fn updateMetadata(self: *PeerManager, service: *const service_mod.Service, metadata: *const t.Metadata) !void {
         var local = self.local;
         local.metadata = metadata.*;
-        try peers.control_wire.copyLocal(&self.local, &local);
+        try peers.control_wire.copyServingLocal(&self.local, &local, service.router.capabilities().receive);
         self.selection_revision = null;
     }
     pub fn updateFork(self: *PeerManager, service: *service_mod.Service, local: *const t.LocalState, now: Now) !void {
         var copied: t.LocalState = undefined;
-        try peers.control_wire.copyLocal(&copied, local);
+        try peers.control_wire.copyServingLocal(&copied, local, service.router.capabilities().receive);
         self.commitLocal(service, &copied, now);
     }
 

@@ -7,6 +7,7 @@ const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 
 const options = @import("managed_test_support.zig").options;
+const localState = @import("managed_test_support.zig").localState;
 const Setup = @import("managed_test_support.zig").Setup;
 
 fn subscribeServer(setup: *Setup, name: []const u8) !void {
@@ -83,13 +84,13 @@ test "managed native ping coalesces metadata and confirms unchanged freshness th
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expect(snapshots[0].metadata_at_ms > before);
     const changed: t.Metadata = .{ .seq_number = 10, .attnets = @splat(9) };
-    try setup.server.updateMetadata(&changed);
+    try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = changed }).metadata);
     setup.pair.advance(21_000);
     for (0..50) |_| try setup.step(0);
     _ = setup.client.snapshots(&snapshots);
     try std.testing.expectEqualDeep(changed, snapshots[0].metadata.?);
     const status: t.Status = .{ .head_slot = 80 };
-    try setup.server.updateStatus(&status);
+    try setup.server.updateStatus(&setup.server_service, &localState(.{ .status = status }).status);
     setup.pair.advance(300_000);
     for (0..50) |_| try setup.step(1);
     _ = setup.client.snapshots(&snapshots);
@@ -109,7 +110,7 @@ test "managed native immutable metadata response survives local update during pe
             if (slot.request.protocol != .metadata_v1) continue;
             try std.testing.expect(slot.request.io.writing);
             const changed: t.Metadata = .{ .seq_number = 5, .attnets = @splat(9) };
-            try setup.server.updateMetadata(&changed);
+            try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = changed }).metadata);
             pending = true;
             break;
         };
@@ -132,7 +133,7 @@ test "managed native wrong fork Goodbye hard closes with zero output and shutdow
     defer setup.deinit();
     try setup.server.updateFork(
         &setup.server_service,
-        &.{ .fork = .{ .digest = @splat(1) }, .status = .{ .fork_digest = @splat(1) } },
+        &localState(.{ .fork = .{ .digest = @splat(1) }, .status = .{ .fork_digest = @splat(1) } }),
         setup.pair.now,
     );
     for (0..40) |_| try setup.step(0);
@@ -211,7 +212,7 @@ fn allocationCheck(a: std.mem.Allocator) !void {
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     var service = try @import("service.zig").Service.init(a, managed.serviceOptions(options(), &.{}));
     defer service.deinit();
-    var core = try managed.PeerManager.init(a, &identity, &.{}, managed.peerOptions(options()), &service);
+    var core = try managed.PeerManager.init(a, &identity, &localState(.{}), managed.peerOptions(options()), &service);
     defer core.deinit();
     try std.testing.expect(core.memoryPlan().allocated_bytes > core.memoryPlan().control_bytes);
 }
@@ -222,7 +223,7 @@ test "managed startup allocation failure cleans every prefix and memory accounts
     const identity: t.PeerId = .{ .bytes = @splat(1) };
     var service = try @import("service.zig").Service.init(failing.allocator(), managed.serviceOptions(options(), &.{}));
     defer service.deinit();
-    var core = try managed.PeerManager.init(failing.allocator(), &identity, &.{}, managed.peerOptions(options()), &service);
+    var core = try managed.PeerManager.init(failing.allocator(), &identity, &localState(.{}), managed.peerOptions(options()), &service);
     const expected = core.memoryPlan().allocated_bytes + service.allocatedBytes();
     std.debug.print("sampling core allocation={d} prefixes={d} inline={d}\n", .{ expected, failing.alloc_index, @sizeOf(managed.PeerManager) });
     try std.testing.expectEqual(expected, failing.allocated_bytes);
@@ -547,7 +548,7 @@ test "managed native continuous reStatus cannot starve due metadata sequence con
     try setup.init(&.{});
     defer setup.deinit();
     for (0..50) |_| try setup.step(0);
-    try setup.server.updateMetadata(&.{ .seq_number = 12 });
+    try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = .{ .seq_number = 12 } }).metadata);
     setup.pair.advance(21_000);
     for (0..60) |_| {
         setup.client.reStatusPeers(setup.pair.now);

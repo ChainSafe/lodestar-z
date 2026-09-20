@@ -35,7 +35,7 @@ export type NetworkStatusUpdate = Omit<NetworkStatus, "forkDigest">;
 
 export interface NativeLocalState {
   status: NetworkStatusUpdate;
-  metadata: NetworkMetadata;
+  metadata: NetworkMetadata & {custodyGroupCount: bigint};
 }
 
 export interface NativeForkEntry {
@@ -156,7 +156,7 @@ export interface NativeIdentity {
   localEndpoints: readonly IpEndpoint[];
   localMultiaddr: Uint8Array;
   localEnr: Uint8Array | null;
-  metadata: NetworkMetadata;
+  metadata: NativeLocalState["metadata"];
 }
 
 export type NativeRuntimeState = "starting" | "prepared" | "running" | "stopping" | "closed" | "failed";
