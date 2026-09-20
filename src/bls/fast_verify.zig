@@ -26,7 +26,7 @@ pub fn verifyMultipleAggregateSignatures(
     sigs_groupcheck: bool,
 ) BlstError!bool {
     if (items.len == 0) {
-        return BlstError.VerifyFail;
+        return error.VerifyFail;
     }
 
     var pairing = Pairing.init(

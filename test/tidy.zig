@@ -2,10 +2,13 @@
 //!
 //! Run with `zig build test:tidy`.
 //!
-//! These rules guard test discovery. Zig only collects tests from files reached
+//! Most rules guard test discovery. Zig only collects tests from files reached
 //! through an analyzed `test` block, so a test file that nothing imports
 //! compiles cleanly, runs nothing, and still reports success. That failure is
 //! invisible in CI, which makes it worth a lint rather than a code review.
+//!
+//! The remaining rule guards how error values are written. Both spellings
+//! compile, so nothing but a lint keeps the rejected one out.
 //!
 //! Rules read the parsed AST rather than raw lines, so a brace or the word
 //! `test` inside a comment or string literal cannot skew them. Every rule
@@ -161,6 +164,19 @@ const Errors = struct {
     fn addStaleAllowlistEntry(errors: *Errors, path: []const u8, reason: []const u8) void {
         errors.emit("{s}: error: allowlisted but {s}\n", .{ path, reason });
     }
+
+    fn addQualifiedErrorValue(
+        errors: *Errors,
+        path: []const u8,
+        line: usize,
+        set: []const u8,
+        name: []const u8,
+    ) void {
+        errors.emit(
+            "{s}:{d}: error: `{s}.{s}` names an error through its set, write `error.{s}`\n",
+            .{ path, line, set, name, name },
+        );
+    }
 };
 
 // -------------------------------------------------------------------------
@@ -187,6 +203,14 @@ const Import = struct {
     in_test_block: bool,
 };
 
+/// One `<Set>.<Name>` reference to an error value.
+const QualifiedErrorValue = struct {
+    /// One-based line, for the diagnostic.
+    line: usize,
+    set: []const u8,
+    name: []const u8,
+};
+
 /// One analyzed file. Everything a rule needs is extracted during the single
 /// load pass, so no rule re-reads or re-parses.
 const File = struct {
@@ -197,6 +221,7 @@ const File = struct {
     /// stringified import is not mistaken for a real one.
     imports: []const Import,
     inline_tests: InlineTests,
+    qualified_error_values: []const QualifiedErrorValue,
 
     fn hasTestBlock(file: File) bool {
         return file.inline_tests.count > 0;
@@ -273,12 +298,37 @@ fn analyze(gpa: Allocator, path: []const u8, text: [:0]const u8, errors: *Errors
         });
     }
 
+    // Identified by shape: an identifier ending in `Error` (`Error` itself
+    // included) followed by a TitleCase member. Error names are TitleCase where
+    // functions are camelCase, so a call on a namespace that happens to end in
+    // `Error` is not mistaken for a value.
+    var qualified_error_values: std.ArrayList(QualifiedErrorValue) = .empty;
+    for (token_tags, 0..) |tag, index| {
+        if (tag != .identifier) continue;
+        if (index + 2 >= token_tags.len) continue;
+        if (token_tags[index + 1] != .period) continue;
+        if (token_tags[index + 2] != .identifier) continue;
+
+        const set = tree.tokenSlice(@intCast(index));
+        if (!std.mem.endsWith(u8, set, "Error")) continue;
+        const name = tree.tokenSlice(@intCast(index + 2));
+        assert(name.len > 0);
+        if (!std.ascii.isUpper(name[0])) continue;
+
+        try qualified_error_values.append(gpa, .{
+            .line = tree.tokenLocation(0, @intCast(index)).line + 1,
+            .set = try gpa.dupe(u8, set),
+            .name = try gpa.dupe(u8, name),
+        });
+    }
+
     return .{
         .path = path,
         .dir = std.fs.path.dirnamePosix(path) orelse "",
         .basename = std.fs.path.basenamePosix(path),
         .imports = imports.items,
         .inline_tests = inline_tests,
+        .qualified_error_values = qualified_error_values.items,
     };
 }
 
@@ -548,6 +598,21 @@ fn tidyInlineTests(files: []const File, scope: []const []const u8, errors: *Erro
     }
 }
 
+/// Error values are written `error.Name`, never `Set.Name`.
+///
+/// Error names are global in Zig, so a set reference resolves to the same value
+/// and the two spellings are interchangeable at every use site. Only one of them
+/// stays correct: the qualified form has to be revisited whenever the value
+/// moves between sets, and it reads as though the set, rather than the function's
+/// return type, decides which errors can arrive.
+fn tidyErrorValues(files: []const File, errors: *Errors) void {
+    for (files) |file| {
+        for (file.qualified_error_values) |value| {
+            errors.addQualifiedErrorValue(file.path, value.line, value.set, value.name);
+        }
+    }
+}
+
 /// An exemption that outlives its reason turns an allowlist into a blanket
 /// exclusion, so every entry has to still need it.
 fn tidyAllowlists(files: []const File, errors: *Errors) void {
@@ -663,12 +728,14 @@ test "tidy" {
     tidyRootTestBlocks(files, &errors);
     try tidyDeadFiles(arena, files, roots, &dead_file_scope, &errors);
     tidyInlineTests(files, &inline_test_scope, &errors);
+    tidyErrorValues(files, &errors);
     tidyAllowlists(files, &errors);
     try tidyCiCoverage(arena, zon, ci, &errors);
 
     if (errors.count > 0) {
         std.debug.print(
-            "\n{d} tidy violation(s). See AGENTS.md `Test file layout` for the rules.\n",
+            "\n{d} tidy violation(s). See AGENTS.md `Code style` and `Test file layout` " ++
+                "for the rules.\n",
             .{errors.count},
         );
         return error.Untidy;
@@ -977,6 +1044,46 @@ test "rule: stale allowlist entry" {
         fixture.output(),
         "src/cpu_count.zig: error: allowlisted but the file does not exist",
     ) != null);
+}
+
+test "rule: error values named through their set" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    const errors = fixture.start();
+
+    const files = try analyzeAll(fixture.arena(), &.{
+        .{
+            "src/demo.zig",
+            \\const Node = @import("Node.zig");
+            \\pub const DemoError = error{Bad};
+            \\
+            \\pub fn a() DemoError!void {
+            \\    return DemoError.Bad;
+            \\}
+            \\
+            \\pub fn b() Node.Error!void {
+            \\    return Node.Error.InvalidNode;
+            \\}
+            \\
+            \\pub fn c() error{Bad}!void {
+            \\    // DemoError.Bad in a comment is prose, not code.
+            \\    const text = "DemoError.Bad";
+            \\    _ = text;
+            \\    _ = Node.Error.init;
+            \\    return error.Bad;
+            \\}
+            \\
+        },
+    }, errors);
+    tidyErrorValues(files, errors);
+
+    // `Node.Error` as a return type is a type, not a value, and a lowercase
+    // member is a call rather than an error name.
+    try expectDiagnostics(fixture.output(),
+        \\src/demo.zig:5: error: `DemoError.Bad` names an error through its set, write `error.Bad`
+        \\src/demo.zig:9: error: `Error.InvalidNode` names an error through its set, write `error.InvalidNode`
+        \\
+    );
 }
 
 test "rule: a longer target name does not satisfy a shorter one" {

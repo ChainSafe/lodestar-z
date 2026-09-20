@@ -192,7 +192,7 @@ fn workerLoop(pool: *ThreadPool, io: std.Io) void {
 
 /// Submit work items to the pool and wait for all to complete.
 pub fn submitAndWait(pool: *ThreadPool, io: std.Io, items: []*WorkItem) (PoolError || std.Io.Cancelable)!void {
-    if (!try pool.queue.pushBatch(io, pool, items)) return PoolError.ShuttingDown;
+    if (!try pool.queue.pushBatch(io, pool, items)) return error.ShuttingDown;
     // NOTE: must be uncancelable — work items live on the caller's stack, so a
     // cancel here would let workers write into freed frames.
     for (items) |item| {
@@ -371,7 +371,7 @@ pub fn aggregateVerify(
     pks_validate: bool,
 ) (BlstError || PoolError || std.Io.Cancelable)!bool {
     const n_elems = pks.len;
-    if (n_elems == 0 or msgs.len != n_elems) return BlstError.VerifyFail;
+    if (n_elems == 0 or msgs.len != n_elems) return error.VerifyFail;
 
     // Single-threaded fallback
     if (n_elems <= 2 or pool.n_workers <= 1) {
@@ -431,7 +431,7 @@ fn mergeAndVerify(
     n_results: usize,
     gtsig: ?*const c.blst_fp12,
 ) BlstError!bool {
-    if (n_results == 0) return BlstError.MergeError;
+    if (n_results == 0) return error.MergeError;
 
     var acc = Pairing{ .ctx = @ptrCast(&result_bufs[0].data) };
 
@@ -464,9 +464,9 @@ pub fn aggregateWithRandomness(
     pk_out: *PublicKey,
     sig_out: *Signature,
 ) (BlstError || PoolError || std.Io.Cancelable || std.mem.Allocator.Error)!void {
-    if (pks.len == 0 or pks.len != sigs.len) return BlstError.AggrTypeMismatch;
-    if (pks.len > blst.MAX_AGGREGATE_PER_JOB) return BlstError.AggrTypeMismatch;
-    if (randomness.len < pks.len * 32) return BlstError.AggrTypeMismatch;
+    if (pks.len == 0 or pks.len != sigs.len) return error.AggrTypeMismatch;
+    if (pks.len > blst.MAX_AGGREGATE_PER_JOB) return error.AggrTypeMismatch;
+    if (randomness.len < pks.len * 32) return error.AggrTypeMismatch;
 
     if (pks_validate) for (pks) |pk| try pk.validate();
     if (sigs_groupcheck) for (sigs) |sig| try sig.validate(true);

@@ -199,6 +199,8 @@ Important requirements include:
 - Construct large objects in place where practical.
 - Keep allocation and matching cleanup together, separated from surrounding logic by blank lines.
 - Explain why a non-obvious design or safety decision is correct.
+- Name error values `error.Name`, never through their set as `Error.Name` or `MyError.Name`.
+  Declared error sets stay in signatures. `zig build test:tidy` enforces this.
 - Run `zig fmt` on every Zig change.
 ### JavaScript and TypeScript
 
