@@ -176,9 +176,9 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
         io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
+            _ = allocator;
             state_transition.processSyncAggregate(
                 fork,
-                allocator,
                 self.io,
                 BenchState.cloned_cached_state.config,
                 BenchState.cloned_cached_state.epoch_cache,
@@ -405,7 +405,6 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 const sync_start = time.start(io);
                 state_transition.processSyncAggregate(
                     fork,
-                    allocator,
                     io,
                     BenchState.cloned_cached_state.config,
                     epoch_cache,
