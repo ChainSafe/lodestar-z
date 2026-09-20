@@ -174,3 +174,26 @@ test "peer control bounded malformed input sweep preserves fixed scratch" {
     );
     try std.testing.expectError(error.InvalidProtocol, w.decodeStatus(.ping_v1, scratch[0..8]));
 }
+
+test "peer control serving prerequisites follow receive protocols before Fulu" {
+    var receive: @import("../capabilities.zig").Set = .initEmpty();
+    receive.insert(.{ .reqresp = .status_v1 });
+    receive.insert(.{ .reqresp = .metadata_v2 });
+    var source: t.LocalState = .{};
+    var copied: t.LocalState = undefined;
+    try w.copyServingLocal(&copied, &source, receive);
+    const before = copied;
+    source.status.head_slot = 42;
+    receive.insert(.{ .reqresp = .metadata_v3 });
+    try std.testing.expectError(error.MissingCustodyAdvertisement, w.copyServingLocal(&copied, &source, receive));
+    try std.testing.expectEqualDeep(before, copied);
+    source.metadata.custody_group_count = 1;
+    try w.copyServingLocal(&copied, &source, receive);
+    receive.insert(.{ .reqresp = .status_v2 });
+    try std.testing.expectError(error.MissingAvailability, w.copyServingLocal(&copied, &source, receive));
+    source.status.earliest_available_slot = 0;
+    try w.copyServingLocal(&copied, &source, receive);
+    var bytes: [w.status_size_max]u8 = undefined;
+    const len = try w.encodeStatus(.status_v2, &copied.status, &bytes);
+    try std.testing.expectEqualDeep(source.status, try w.decodeStatus(.status_v2, bytes[0..len]));
+}

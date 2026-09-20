@@ -65,7 +65,7 @@ test.each([
     c.resources.connectionCapacity = 1;
   },
   (c: ReturnType<typeof applicationConfig>) => {
-    c.local.metadata.custodyGroupCount = null;
+    Reflect.set(c.local.metadata, "custodyGroupCount", null);
   },
 ])("rejects malformed complete application configuration %#", (mutate) => {
   const config = applicationConfig();

@@ -91,7 +91,7 @@ test "network chain validates schedule and chain namespace before owner allocati
     try std.testing.expectError(error.InvalidTopicPolicy, chain.Plan.init(&cfg, false));
 }
 
-test "network chain honors configured wire limits without requiring unscheduled Fulu metadata" {
+test "network chain honors configured wire limits and requires complete metadata before unscheduled Fulu" {
     var input = fixture();
     input.FULU_FORK_EPOCH = @import("constants").FAR_FUTURE_EPOCH;
     input.GLOAS_FORK_EPOCH = @import("constants").FAR_FUTURE_EPOCH;
@@ -103,7 +103,13 @@ test "network chain honors configured wire limits without requiring unscheduled 
     input.MAX_PAYLOAD_SIZE = 1024 * 1024;
     const cfg = config.BeaconConfig.init(input, @splat(0));
     const plan = try chain.Plan.init(&cfg, false);
-    _ = try plan.update(.{}, null, 0);
+    try std.testing.expectError(error.MissingCustodyAdvertisement, plan.update(.{}, null, 0));
+    const update = try plan.update(.{ .metadata = .{ .custody_group_count = 1 } }, null, 0);
+    try std.testing.expect(update.capabilities.receive.contains(.{ .reqresp = .metadata_v3 }));
+    const wire = @import("peers/control_wire.zig");
+    var encoded: [25]u8 = undefined;
+    try std.testing.expectEqual(encoded.len, try wire.encodeMetadata(.metadata_v3, &update.local.metadata, update.local.fork, &encoded));
+    try std.testing.expectEqualDeep(update.local.metadata, try wire.decodeMetadata(.metadata_v3, &encoded, update.local.fork));
     const policy = plan.requestPolicy();
     var requests = try rr.ReqResp.init(std.testing.allocator, .{ .forks = plan.forks[0..plan.supported_count], .policy = policy });
     defer requests.deinit();

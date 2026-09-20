@@ -118,8 +118,7 @@ pub const Plan = struct {
             result.schedule.next_epoch = next.epoch;
             result.schedule.next_digest = next.digest;
         }
-        if (self.fulu_scheduled and result.local.metadata.custody_group_count == null) return error.MissingCustodyAdvertisement;
-        try @import("peers/control_wire.zig").copyLocal(&result.local, &result.local);
+        try @import("peers/control_wire.zig").copyServingLocal(&result.local, &result.local, result.capabilities.receive);
         return result;
     }
 };

@@ -260,14 +260,16 @@ it("derives the Fulu availability requirement from shared chain configuration", 
   expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("MissingAvailability");
 });
 
-it("requires custody advertisement only when Fulu is scheduled", async () => {
+it("requires custody advertisement even when Fulu is unscheduled", async () => {
   const config = applicationConfig();
-  config.local.metadata.custodyGroupCount = null;
+  Reflect.set(config.local.metadata, "custodyGroupCount", null);
   expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("MissingCustodyAdvertisement");
   configureChain({BLOB_SCHEDULE: [], FULU_FORK_EPOCH: Infinity});
+  expect(() => createNativeNetworkApplicationRuntime(config, () => undefined)).toThrow("MissingCustodyAdvertisement");
+  config.local.metadata.custodyGroupCount = 1n;
   const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
   try {
-    await runtime.ready;
+    expect((await runtime.ready).metadata.custodyGroupCount).toBe(1n);
   } finally {
     await runtime.close();
   }

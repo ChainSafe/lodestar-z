@@ -86,7 +86,7 @@ pub const Router = struct {
             .meshsub_versions_count = @intCast(options.meshsub_versions.len),
         };
         @memcpy(router.meshsub_versions[0..options.meshsub_versions.len], options.meshsub_versions);
-        router.setCapabilities(options.capabilities orelse .{ .receive = router.available, .request = router.available });
+        router.setCapabilities(initialCapabilities(options));
         return router;
     }
 
@@ -105,6 +105,11 @@ pub const Router = struct {
             available.insert(.{ .meshsub = version });
         };
         return available;
+    }
+
+    pub fn initialCapabilities(options: Options) capability.Directional {
+        const available = availableFor(options);
+        return options.capabilities orelse .{ .receive = available, .request = available };
     }
 
     fn validateSet(available: capability.Set, active: capability.Directional) error{InvalidCapabilities}!void {

@@ -6,6 +6,13 @@ const Engine = @import("quic/engine.zig");
 const rr = @import("reqresp/root.zig");
 const gossip = @import("gossipsub/root.zig");
 
+pub fn localState(overrides: t.LocalState) t.LocalState {
+    var local = overrides;
+    local.metadata.custody_group_count = local.metadata.custody_group_count orelse 1;
+    local.status.earliest_available_slot = local.status.earliest_available_slot orelse 0;
+    return local;
+}
+
 pub fn options() managed.Options {
     const gc = @import("gossipsub/constants.zig");
     return .{
@@ -74,9 +81,10 @@ pub const Setup = struct {
     }
     pub fn initOwnersWithOptions(
         self: *Setup,
-        local: *const t.LocalState,
+        overrides: *const t.LocalState,
         opts: managed.Options,
     ) !void {
+        const local = &localState(overrides.*);
         const limits: Engine.Limits = .{
             .connections_max = 4,
             .handshaking_max = 4,

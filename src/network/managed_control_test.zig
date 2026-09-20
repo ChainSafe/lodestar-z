@@ -1,5 +1,6 @@
 const managed = @import("managed.zig");
 const std = @import("std");
+const localState = @import("managed_test_support.zig").localState;
 const Setup = @import("managed_test_support.zig").Setup;
 const t = @import("peers/types.zig");
 const wire = @import("peers/control_wire.zig");
@@ -145,14 +146,14 @@ test "managed stale metadata finishes one refresh while periodic Status and late
         row.status_due_ms = setup.pair.now.mono_ms + 2000;
         try std.testing.expectEqual(@as(usize, 1), setup.server.snapshots(&snapshots));
         const remote = snapshots[0].peer;
-        try setup.server.updateMetadata(&.{ .seq_number = 11 });
+        try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = .{ .seq_number = 11 } }).metadata);
         setup.server.control.schedules[remote.index].ping_due_ms = setup.pair.now.mono_ms;
         for (0..80) |_| {
             try setup.step(0);
             if (setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing > started) break;
         }
         try std.testing.expectEqual(started + 1, setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
-        try setup.server.updateMetadata(&.{ .seq_number = reply_sequence });
+        try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = .{ .seq_number = reply_sequence } }).metadata);
         for (0..80) |_| try setup.step(0);
         try std.testing.expect(row.metadata_due_ms == null);
         try std.testing.expectEqual(@as(u64, 10), setup.client.catalog.get(peer).?.metadata.?.seq_number);
@@ -164,7 +165,7 @@ test "managed stale metadata finishes one refresh while periodic Status and late
         try std.testing.expectEqual(statuses + 1, setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.status_v1)].outgoing);
         try std.testing.expectEqual(started + 1, setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
         setup.pair.advance(rr.Protocol.metadata_v1.info().quota_period_ms);
-        try setup.server.updateMetadata(&.{ .seq_number = 12 });
+        try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = .{ .seq_number = 12 } }).metadata);
         setup.client.control.schedules[peer.index].ping_due_ms = setup.pair.now.mono_ms;
         for (0..80) |_| try setup.step(0);
         try std.testing.expectEqual(started + 2, setup.client_service.reqresp.protocol_counters[@intFromEnum(rr.Protocol.metadata_v1)].outgoing);
@@ -671,7 +672,7 @@ test "managed native older Ping sequence cannot confirm cached metadata freshnes
     var snapshots: [4]t.Snapshot = undefined;
     _ = setup.client.snapshots(&snapshots);
     const before = snapshots[0].metadata_at_ms;
-    try setup.server.updateMetadata(&.{ .seq_number = 9 });
+    try setup.server.updateMetadata(&setup.server_service, &localState(.{ .metadata = .{ .seq_number = 9 } }).metadata);
     setup.pair.advance(21_000);
     for (0..50) |_| try setup.step(0);
     _ = setup.client.snapshots(&snapshots);
@@ -692,7 +693,7 @@ test "managed native immutable Status writer survives local update" {
             const slot = setup.server_service.reqresp.inboundSlot(request).?;
             if (slot.request.protocol != .status_v1) continue;
             try std.testing.expect(slot.request.io.writing);
-            try setup.server.updateStatus(&.{ .head_slot = 80 });
+            try setup.server.updateStatus(&setup.server_service, &localState(.{ .status = .{ .head_slot = 80 } }).status);
             pending = true;
             break;
         };

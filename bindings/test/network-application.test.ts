@@ -577,6 +577,30 @@ test("identity reads the current signed ENR and copied intent ignores later inpu
   }
 });
 
+test("incomplete early metadata rejects the whole intent without publishing local state", async () => {
+  const config = applicationConfig();
+  config.discovery = discoveryConfig().discovery;
+  configureChain({BLOB_SCHEDULE: [], FULU_FORK_EPOCH: Infinity});
+  const runtime = createNativeNetworkApplicationRuntime(config, () => undefined);
+  try {
+    await runtime.ready;
+    await runtime.applyIntent(localIntent(config), 100n);
+    const before = await runtime.getIdentity();
+    const intent = localIntent(config);
+    intent.update.local.metadata.attnets[0] = 1;
+    Reflect.set(intent.update.local.metadata, "custodyGroupCount", null);
+    await expect(runtime.applyIntent(intent, 101n)).rejects.toThrow("MissingCustodyAdvertisement");
+    const after = await runtime.getIdentity();
+    expect(after.metadata).toEqual(before.metadata);
+    expect(after.localEnr).toEqual(before.localEnr);
+    expect(runtime.diagnostics().currentSlot).toBe(100n);
+    intent.update.local.metadata.custodyGroupCount = 1n;
+    expect((await runtime.applyIntent(intent, 101n)).changed).toBe(true);
+  } finally {
+    await runtime.close();
+  }
+});
+
 test("graceful physical shutdown progresses while host callbacks are stalled", async () => {
   const config = applicationConfig();
   const other = applicationConfig();
