@@ -137,6 +137,30 @@ pub fn BitVector(comptime _length: comptime_int) type {
             }
             return indices;
         }
+
+        pub fn intersectValuesInto(
+            self: *const @This(),
+            comptime T: type,
+            out: []T,
+            values: *const [length]T,
+        ) ![]T {
+            if (out.len < length) {
+                return error.InvalidSize;
+            }
+
+            var count: usize = 0;
+            for (0..byte_len) |i_byte| {
+                var b = self.data[i_byte];
+                while (b != 0) {
+                    const lsb: usize = @as(u8, @ctz(b));
+                    const bit_index = i_byte * 8 + lsb;
+                    out[count] = values[bit_index];
+                    count += 1;
+                    b &= b - 1;
+                }
+            }
+            return out[0..count];
+        }
     };
 }
 
